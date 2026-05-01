@@ -44,6 +44,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             terminal::list_local_shells,
+            terminal::open_local_shell_as_administrator,
             terminal::create_local_terminal,
             terminal::create_ssh_terminal,
             terminal::test_ssh_connection,

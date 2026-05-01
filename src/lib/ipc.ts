@@ -7,10 +7,15 @@ export interface LocalShellOption {
   path: string;
   args: string[];
   isDefault: boolean;
+  canElevate: boolean;
 }
 
 export async function listLocalShells(): Promise<LocalShellOption[]> {
   return invoke<LocalShellOption[]>("list_local_shells", {});
+}
+
+export async function openLocalShellAsAdministrator(shell?: string): Promise<void> {
+  return invoke("open_local_shell_as_administrator", { shell });
 }
 
 export async function createLocalTerminal(

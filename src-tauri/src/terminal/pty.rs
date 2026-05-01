@@ -2,6 +2,8 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::io::Read;
 #[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -20,6 +22,7 @@ pub struct LocalShellOption {
     pub path: String,
     pub args: Vec<String>,
     pub is_default: bool,
+    pub can_elevate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +42,7 @@ pub fn list_local_shells() -> Vec<LocalShellOption> {
             path: fallback.program,
             args: fallback.args,
             is_default: true,
+            can_elevate: cfg!(windows),
         });
     }
 
@@ -80,6 +84,20 @@ pub fn resolve_shell(shell: Option<String>) -> ShellLaunch {
             args: option.args,
         })
         .unwrap_or_else(fallback_shell_launch)
+}
+
+pub fn open_shell_as_administrator(shell: Option<String>) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let shell_launch = resolve_shell(shell);
+        return open_elevated_with_powershell(&shell_launch);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = shell;
+        Err("Administrator local terminals are only supported on Windows".to_string())
+    }
 }
 
 fn fallback_shell_launch() -> ShellLaunch {
@@ -178,6 +196,7 @@ fn platform_local_shells() -> Vec<LocalShellOption> {
                 path: path_to_string(path),
                 args: Vec::new(),
                 is_default: true,
+                can_elevate: false,
             }
         })
         .into_iter()
@@ -198,7 +217,59 @@ fn shell_option(
         path: path_to_string(path),
         args,
         is_default: id == default_id,
+        can_elevate: true,
     }
+}
+
+#[cfg(windows)]
+fn open_elevated_with_powershell(shell: &ShellLaunch) -> Result<(), String> {
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let launcher = find_windows_powershell().unwrap_or_else(|| PathBuf::from("powershell.exe"));
+    let script = if shell.args.is_empty() {
+        format!(
+            "Start-Process -FilePath {} -Verb RunAs",
+            quote_powershell_string(&shell.program)
+        )
+    } else {
+        let args = shell
+            .args
+            .iter()
+            .map(|arg| quote_powershell_string(arg))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "Start-Process -FilePath {} -ArgumentList @({}) -Verb RunAs",
+            quote_powershell_string(&shell.program),
+            args,
+        )
+    };
+
+    let output = std::process::Command::new(launcher)
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"])
+        .arg(script)
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("Failed to request administrator shell: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!(
+                "Administrator shell request failed with exit code {:?}",
+                output.status.code()
+            ))
+        } else {
+            Err(stderr)
+        }
+    }
+}
+
+#[cfg(windows)]
+fn quote_powershell_string(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 #[cfg(windows)]

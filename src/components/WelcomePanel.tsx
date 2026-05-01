@@ -1,6 +1,7 @@
 import {
   Terminal as TerminalIcon,
   Plus,
+  Shield,
   Upload,
   RefreshCw,
   Activity,
@@ -8,7 +9,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { parseOpenSshConfig } from "../lib/quickConnect";
-import { listLocalShells, type LocalShellOption } from "../lib/ipc";
+import { listLocalShells, openLocalShellAsAdministrator, type LocalShellOption } from "../lib/ipc";
 import { AppThemeIconButton } from "./settings/AppThemeSwitcher";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
@@ -58,6 +59,15 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
     [localShells, selectedShellId],
   );
 
+  const handleStartAsAdministrator = async () => {
+    try {
+      await openLocalShellAsAdministrator(selectedShell?.id);
+      setStatusMessage(`Requested administrator terminal for ${selectedShell?.name ?? "local shell"}`);
+    } catch (error) {
+      setStatusMessage(`Administrator terminal failed: ${String(error)}`);
+    }
+  };
+
   const handleImport = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -80,8 +90,8 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
         accept=".config,.txt,*"
         onChange={(event) => void handleImport(event)}
       />
-      <div className="flex-1 p-6 overflow-auto">
-        <div className="max-w-2xl">
+      <div className="flex-1 overflow-auto px-6 py-8 flex justify-center">
+        <div className="w-full max-w-4xl">
           <div className="flex items-center gap-3 mb-4">
             <div
               className="w-12 h-12 rounded-lg flex items-center justify-center text-white font-bold text-xl"
@@ -100,7 +110,7 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <LocalTerminalCard
               shells={localShells}
               selectedShell={selectedShell}
@@ -113,6 +123,7 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
                   selectedShell ? { id: selectedShell.id, name: selectedShell.name } : undefined,
                 );
               }}
+              onStartAsAdministrator={handleStartAsAdministrator}
             />
             <ActionCard
               icon={<Plus className="w-5 h-5" />}
@@ -188,6 +199,7 @@ function LocalTerminalCard({
   onSelectShell,
   kbd,
   onStart,
+  onStartAsAdministrator,
 }: {
   shells: LocalShellOption[];
   selectedShell?: LocalShellOption;
@@ -196,8 +208,10 @@ function LocalTerminalCard({
   onSelectShell: (id: string) => void;
   kbd: string;
   onStart: () => void;
+  onStartAsAdministrator: () => void;
 }) {
   const hasChoices = shells.length > 1;
+  const canElevate = selectedShell?.canElevate ?? false;
   const detail = selectedShell?.path ?? (
     shellStatus === "loading" ? "Detecting available shells..." : "Use the system default shell."
   );
@@ -227,10 +241,10 @@ function LocalTerminalCard({
         {selectedShell ? `Open ${selectedShell.name}.` : "Open a local shell."}
       </div>
 
-      <div className="mt-2 flex items-center gap-2">
+      <div className="mt-2 space-y-2">
         {hasChoices ? (
           <select
-            className="moba-input h-8 flex-1"
+            className="moba-input h-8 w-full"
             aria-label="Terminal shell"
             value={selectedShellId}
             title={selectedShell?.path}
@@ -244,16 +258,30 @@ function LocalTerminalCard({
           </select>
         ) : (
           <div
-            className="moba-input h-8 flex-1 flex items-center truncate"
+            className="moba-input h-8 w-full flex items-center truncate"
             title={detail}
             style={{ color: selectedShell ? "var(--moba-text)" : "var(--moba-text-muted)" }}
           >
             {selectedShell?.name ?? (shellStatus === "loading" ? "Detecting shells..." : "Default shell")}
           </div>
         )}
-        <button className="moba-btn h-8 px-3" onClick={onStart} type="button">
-          Open
-        </button>
+        <div className="flex items-center justify-end gap-2">
+          <button className="moba-btn h-8 px-3" onClick={onStart} type="button">
+            Open
+          </button>
+          {canElevate && (
+            <button
+              className="moba-btn h-8 px-3 inline-flex items-center gap-1.5"
+              onClick={onStartAsAdministrator}
+              title="Open as administrator"
+              aria-label="Open as administrator"
+              type="button"
+            >
+              <Shield className="w-3.5 h-3.5" />
+              <span>Admin</span>
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

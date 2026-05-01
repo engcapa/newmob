@@ -31,6 +31,11 @@ pub fn list_local_shells() -> Vec<pty::LocalShellOption> {
 }
 
 #[tauri::command]
+pub fn open_local_shell_as_administrator(shell: Option<String>) -> Result<(), String> {
+    pty::open_shell_as_administrator(shell)
+}
+
+#[tauri::command]
 pub async fn create_local_terminal(
     cols: u16,
     rows: u16,
