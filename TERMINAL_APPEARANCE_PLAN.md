@@ -11,6 +11,9 @@
 - [x] Let users change global terminal appearance settings from the Settings entry.
 - [x] Let per-session terminal settings reuse the same font and theme controls.
 - [x] Let the active terminal apply font size, font family, ligatures, and theme changes live.
+- [x] Keep the terminal preview at the bottom of session and global terminal settings.
+- [x] Merge cursor and other profile-backed terminal settings into the same shared UI.
+- [x] Reflect cursor style and blink settings in the preview.
 - [x] Verify every feature point with automated checks where feasible and build/type checks.
 
 ## Implementation Checklist
@@ -24,6 +27,8 @@
 - [x] Add a global Settings screen focused on terminal appearance.
 - [x] Make current terminal theme mutable and add right-click quick theme switching.
 - [x] Persist global settings to `localStorage` and keep session overrides stored in `options_json.terminalProfile`.
+- [x] Move cursor, scrollback, logging, keyword highlighting, display, clipboard, and paste settings into `TerminalAppearanceSettings`.
+- [x] Use the same full terminal profile UI in global Settings and Session Editor.
 
 ## Verification Checklist
 
@@ -33,6 +38,9 @@
 - [x] Theme gallery updates the terminal preview.
 - [x] Session Editor persists selected font, font size, theme, logging, and highlighting settings.
 - [x] Global Settings persists selected font, font size, ligatures, and theme.
+- [x] Session Editor and global Settings persist cursor style/blink through the shared UI.
+- [x] Terminal preview renders after cursor/scrollback/profile behavior controls.
+- [x] Terminal preview reflects cursor block, underline, or bar style and blink state.
 - [x] Active terminal can change theme from the context menu without remounting.
 - [x] `pnpm test` passes.
 - [x] `pnpm build` passes.
@@ -40,8 +48,8 @@
 ## Verification Results
 
 - `cargo test lists_installed_font_families` passed. This exercises the Tauri font enumeration path against the current OS and verifies non-empty, sorted, deduplicated font families.
-- `pnpm test` passed. Coverage includes OS font list rendering, Source Code Pro default selection, fallback font list behavior, theme selection, Session Editor persistence, and global Settings persistence.
-- `pnpm build` passed. This verifies TypeScript and Vite production build output.
+- `pnpm test` passed. Coverage includes OS font list rendering, Source Code Pro default selection, fallback font list behavior, theme selection, bottom preview placement, cursor preview rendering, Session Editor persistence, and global Settings persistence.
+- `pnpm build` passed. This verifies TypeScript and Vite production build output after the shared terminal settings UI refactor.
 - `cargo check` passed. This verifies the Rust command and new `font-kit` dependency compile with the Tauri backend.
 
 ## Notes

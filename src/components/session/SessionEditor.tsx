@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   X,
   Terminal as TerminalIcon,
@@ -37,7 +37,6 @@ import {
   getSessionTerminalProfile,
   loadGlobalTerminalProfile,
   parseSessionOptions,
-  type TerminalCursorStyle,
   type TerminalProfile,
 } from "../../lib/terminalProfile";
 import { TerminalAppearanceSettings } from "../terminal/TerminalAppearanceSettings";
@@ -412,13 +411,6 @@ function AdvancedSshSettings({
   );
 }
 
-const TERMINAL_CURSOR_OPTIONS: Array<{ label: string; style: TerminalCursorStyle; blink: boolean }> = [
-  { label: "Block (blink)", style: "block", blink: true },
-  { label: "Block (steady)", style: "block", blink: false },
-  { label: "Underline", style: "underline", blink: true },
-  { label: "Vertical bar", style: "bar", blink: true },
-];
-
 function TerminalSettings({
   profile,
   onProfileChange,
@@ -426,121 +418,13 @@ function TerminalSettings({
   profile: TerminalProfile;
   onProfileChange: (profile: TerminalProfile) => void;
 }) {
-  const [scrollback, setScrollback] = useState(String(profile.scrollback));
-  const [antiAlias, setAntiAlias] = useState(true);
-  const [bell, setBell] = useState("Visual flash");
-  const [backspace, setBackspace] = useState("Control-H (default)");
-  const [locale, setLocale] = useState("UTF-8");
-  const [ambigWide, setAmbigWide] = useState(true);
-  const selectedCursor = TERMINAL_CURSOR_OPTIONS.find((option) =>
-    option.style === profile.cursorStyle && option.blink === profile.cursorBlink
-  )?.label ?? "Block (blink)";
-
-  useEffect(() => {
-    setScrollback(String(profile.scrollback));
-  }, [profile.scrollback]);
-
-  const updateProfile = (patch: Partial<TerminalProfile>) => {
-    onProfileChange({ ...profile, ...patch });
-  };
-
   return (
-    <div data-testid="terminal-settings" className="grid grid-cols-12 gap-x-3 gap-y-2.5 text-[12px]">
-      <div className="col-span-12">
-        <TerminalAppearanceSettings
-          profile={profile}
-          onProfileChange={onProfileChange}
-          showCustomColors
-        />
-      </div>
-
-      <Field label="Font rendering">
-        <label className="ml-2 flex items-center gap-1.5">
-          <Checkbox checked={antiAlias} onChange={setAntiAlias} /> Anti-aliasing
-        </label>
-      </Field>
-
-      <Field label="Cursor">
-        <Select
-          value={selectedCursor}
-          options={TERMINAL_CURSOR_OPTIONS.map((option) => option.label)}
-          onChange={(value) => {
-            const option = TERMINAL_CURSOR_OPTIONS.find((item) => item.label === value);
-            if (option) updateProfile({ cursorStyle: option.style, cursorBlink: option.blink });
-          }}
-        />
-      </Field>
-
-      <Field label="Scrollback">
-        <input
-          className="moba-input w-24"
-          value={scrollback}
-          aria-label="Scrollback lines"
-          onChange={(e) => {
-            const next = e.target.value;
-            if (!/^\d*$/.test(next)) return;
-            setScrollback(next);
-            if (next) updateProfile({ scrollback: Math.min(200000, Number(next)) });
-          }}
-          onBlur={() => {
-            const parsed = Number(scrollback);
-            if (Number.isFinite(parsed) && parsed > 0) {
-              const clamped = Math.max(100, Math.min(200000, Math.round(parsed)));
-              setScrollback(String(clamped));
-              updateProfile({ scrollback: clamped });
-            } else {
-              setScrollback(String(profile.scrollback));
-            }
-          }}
-        />
-        <span className="ml-1 text-[var(--moba-text-muted)]">lines</span>
-        <label className="ml-3 flex items-center gap-1.5">
-          <Checkbox checked={profile.loggingEnabled} onChange={(value) => updateProfile({ loggingEnabled: value })} />
-          Save scrollback to log file on disconnect
-        </label>
-      </Field>
-
-      <Field label="Keyword highlighting">
-        <label className="flex items-center gap-1.5">
-          <Checkbox
-            checked={profile.syntaxMode === "keywords"}
-            onChange={(value) => updateProfile({ syntaxMode: value ? "keywords" : "default" })}
-          />
-          Enable
-        </label>
-        <button className="moba-btn ml-2" type="button" disabled title="Keyword editor is not implemented yet">Edit keywords…</button>
-        <span className="ml-2 text-[var(--moba-text-muted)]">
-          (error, warning, fail, denied, root, panic, ok)
-        </span>
-      </Field>
-
-      <Field label="Bell">
-        <Select
-          value={bell}
-          options={["None", "System sound", "Visual flash", "Custom .wav…"]}
-          onChange={setBell}
-        />
-      </Field>
-
-      <Field label="Backspace key sends">
-        <Select
-          value={backspace}
-          options={["Control-H (default)", "Control-? (DEL)"]}
-          onChange={setBackspace}
-        />
-      </Field>
-
-      <Field label="Locale & encoding">
-        <Select
-          value={locale}
-          options={["UTF-8", "ISO-8859-1", "GBK", "Shift-JIS", "EUC-KR"]}
-          onChange={setLocale}
-        />
-        <label className="ml-2 flex items-center gap-1.5">
-          <Checkbox checked={ambigWide} onChange={setAmbigWide} />
-          Treat ambiguous as wide
-        </label>
-      </Field>
+    <div data-testid="terminal-settings" className="text-[12px]">
+      <TerminalAppearanceSettings
+        profile={profile}
+        onProfileChange={onProfileChange}
+        showCustomColors
+      />
     </div>
   );
 }

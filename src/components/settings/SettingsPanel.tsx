@@ -36,7 +36,7 @@ export function SettingsPanel() {
             Reset
           </button>
         </div>
-        <TerminalAppearanceSettings profile={profile} onProfileChange={setProfile} />
+        <TerminalAppearanceSettings profile={profile} onProfileChange={setProfile} showCustomColors />
       </div>
     </div>
   );

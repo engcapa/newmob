@@ -9,7 +9,9 @@ import {
   makeCustomTerminalTheme,
   resolveTerminalTheme,
   terminalProfileThemeColors,
+  type TerminalCursorStyle,
   type TerminalProfile,
+  type TerminalRightClickBehavior,
 } from "../../lib/terminalProfile";
 import {
   makeTerminalFontFamily,
@@ -26,6 +28,21 @@ interface TerminalAppearanceSettingsProps {
   className?: string;
 }
 
+const TERMINAL_CURSOR_OPTIONS: Array<{ label: string; style: TerminalCursorStyle; blink: boolean }> = [
+  { label: "Block (blink)", style: "block", blink: true },
+  { label: "Block (steady)", style: "block", blink: false },
+  { label: "Underline (blink)", style: "underline", blink: true },
+  { label: "Underline (steady)", style: "underline", blink: false },
+  { label: "Vertical bar (blink)", style: "bar", blink: true },
+  { label: "Vertical bar (steady)", style: "bar", blink: false },
+];
+
+const RIGHT_CLICK_OPTIONS: Array<{ label: string; value: TerminalRightClickBehavior }> = [
+  { label: "Show context menu", value: "menu" },
+  { label: "Paste clipboard", value: "paste" },
+  { label: "Copy selection or paste", value: "copy-or-paste" },
+];
+
 export function TerminalAppearanceSettings({
   profile,
   onProfileChange,
@@ -40,6 +57,7 @@ export function TerminalAppearanceSettings({
   const [bg, setBg] = useState(colors.background);
   const [fg, setFg] = useState(colors.foreground);
   const [fontSizeText, setFontSizeText] = useState(String(profile.fontSize));
+  const [scrollbackText, setScrollbackText] = useState(String(profile.scrollback));
 
   useEffect(() => {
     const nextColors = terminalProfileThemeColors(profile);
@@ -50,6 +68,10 @@ export function TerminalAppearanceSettings({
   useEffect(() => {
     setFontSizeText(String(profile.fontSize));
   }, [profile.fontSize]);
+
+  useEffect(() => {
+    setScrollbackText(String(profile.scrollback));
+  }, [profile.scrollback]);
 
   const updateProfile = (patch: Partial<TerminalProfile>) => {
     onProfileChange({ ...profile, ...patch });
@@ -65,6 +87,12 @@ export function TerminalAppearanceSettings({
 
   const resolvedTheme = resolveTerminalTheme(profile.theme);
   const selectedThemeId = resolveThemeId(profile.theme);
+  const selectedCursor = TERMINAL_CURSOR_OPTIONS.find((option) =>
+    option.style === profile.cursorStyle && option.blink === profile.cursorBlink
+  )?.label ?? "Block (blink)";
+  const selectedRightClick = RIGHT_CLICK_OPTIONS.find((option) =>
+    option.value === profile.rightClickBehavior
+  )?.label ?? RIGHT_CLICK_OPTIONS[0].label;
 
   return (
     <div data-testid="terminal-appearance-settings" className={`space-y-4 ${className}`}>
@@ -200,16 +228,149 @@ export function TerminalAppearanceSettings({
         </section>
       )}
 
+      <section className="rounded-md border border-[var(--moba-divider)] bg-white/70 p-3">
+        <div className="text-[12px] font-semibold mb-2">Terminal behavior</div>
+        <div className="grid grid-cols-12 gap-x-3 gap-y-3 text-[12px]">
+          <label className="col-span-12 md:col-span-4">
+            <span className="block mb-1 text-[var(--moba-text-muted)]">Cursor</span>
+            <select
+              aria-label="Terminal cursor"
+              className="moba-input w-full"
+              value={selectedCursor}
+              onChange={(event) => {
+                const option = TERMINAL_CURSOR_OPTIONS.find((item) => item.label === event.target.value);
+                if (option) updateProfile({ cursorStyle: option.style, cursorBlink: option.blink });
+              }}
+            >
+              {TERMINAL_CURSOR_OPTIONS.map((option) => (
+                <option key={option.label}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <label className="col-span-12 md:col-span-4">
+            <span className="block mb-1 text-[var(--moba-text-muted)]">Scrollback</span>
+            <span className="flex items-center gap-2">
+              <input
+                className="moba-input w-28"
+                value={scrollbackText}
+                aria-label="Scrollback lines"
+                inputMode="numeric"
+                onChange={(event) => {
+                  const next = event.target.value;
+                  if (!/^\d*$/.test(next)) return;
+                  setScrollbackText(next);
+                  const parsed = Number(next);
+                  if (Number.isFinite(parsed) && parsed >= 100 && parsed <= 200000) {
+                    updateProfile({ scrollback: Math.round(parsed) });
+                  }
+                }}
+                onBlur={() => {
+                  const parsed = Number(scrollbackText);
+                  if (Number.isFinite(parsed) && parsed > 0) {
+                    const clamped = Math.max(100, Math.min(200000, Math.round(parsed)));
+                    setScrollbackText(String(clamped));
+                    updateProfile({ scrollback: clamped });
+                  } else {
+                    setScrollbackText(String(profile.scrollback));
+                  }
+                }}
+              />
+              <span className="text-[var(--moba-text-muted)]">lines</span>
+            </span>
+          </label>
+
+          <label className="col-span-12 md:col-span-4">
+            <span className="block mb-1 text-[var(--moba-text-muted)]">Right click</span>
+            <select
+              aria-label="Right click behavior"
+              className="moba-input w-full"
+              value={selectedRightClick}
+              onChange={(event) => {
+                const option = RIGHT_CLICK_OPTIONS.find((item) => item.label === event.target.value);
+                if (option) updateProfile({ rightClickBehavior: option.value });
+              }}
+            >
+              {RIGHT_CLICK_OPTIONS.map((option) => (
+                <option key={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+
+          <div className="col-span-12 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
+            <CheckControl
+              label="Show terminal scrollbar"
+              checked={profile.showScrollbar}
+              onChange={(checked) => updateProfile({ showScrollbar: checked })}
+            />
+            <CheckControl
+              label="Copy on select"
+              checked={profile.copyOnSelect}
+              onChange={(checked) => updateProfile({ copyOnSelect: checked })}
+            />
+            <CheckControl
+              label="Read-only terminal"
+              checked={profile.readOnly}
+              onChange={(checked) => updateProfile({ readOnly: checked })}
+            />
+            <CheckControl
+              label="Bracketed paste"
+              checked={profile.bracketedPaste}
+              onChange={(checked) => updateProfile({ bracketedPaste: checked })}
+            />
+            <CheckControl
+              label="Confirm multiline paste"
+              checked={profile.multilinePasteConfirm}
+              onChange={(checked) => updateProfile({ multilinePasteConfirm: checked })}
+            />
+            <CheckControl
+              label="Enable keyword highlighting"
+              checked={profile.syntaxMode === "keywords"}
+              onChange={(checked) => updateProfile({ syntaxMode: checked ? "keywords" : "default" })}
+            />
+            <CheckControl
+              label="Save scrollback to log file on disconnect"
+              checked={profile.loggingEnabled}
+              onChange={(checked) => updateProfile({ loggingEnabled: checked })}
+            />
+          </div>
+        </div>
+      </section>
+
       {showPreview && (
         <TerminalPreview
           background={showCustomColors ? bg : colors.background}
           foreground={showCustomColors ? fg : colors.foreground}
           fontFamily={profile.fontFamily}
           fontSize={profile.fontSize}
+          cursorStyle={profile.cursorStyle}
+          cursorBlink={profile.cursorBlink}
           theme={resolvedTheme}
         />
       )}
     </div>
+  );
+}
+
+function CheckControl({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="inline-flex items-center gap-1.5">
+      <input
+        className="moba-checkbox"
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => onChange(event.target.checked)}
+      />
+      <span>{label}</span>
+    </label>
   );
 }
 
@@ -293,14 +454,20 @@ function TerminalPreview({
   foreground,
   fontFamily,
   fontSize,
+  cursorStyle,
+  cursorBlink,
   theme,
 }: {
   background: string;
   foreground: string;
   fontFamily: string;
   fontSize: number;
+  cursorStyle: TerminalCursorStyle;
+  cursorBlink: boolean;
   theme: ReturnType<typeof resolveTerminalTheme>;
 }) {
+  const cursorColor = theme.cursor ?? foreground;
+
   return (
     <div
       data-testid="terminal-preview"
@@ -318,8 +485,55 @@ function TerminalPreview({
       <span style={{ color: theme.red ?? "#ff6b6b" }}>error</span>
       {": connect() failed (111: Connection refused)"}
       <br />
-      <span className="moba-blink">▌</span>
+      <TerminalPreviewCursor
+        color={cursorColor}
+        foreground={foreground}
+        styleName={cursorStyle}
+        blink={cursorBlink}
+      />
     </div>
+  );
+}
+
+function TerminalPreviewCursor({
+  color,
+  foreground,
+  styleName,
+  blink,
+}: {
+  color: string;
+  foreground: string;
+  styleName: TerminalCursorStyle;
+  blink: boolean;
+}) {
+  const className = blink ? "moba-blink" : "";
+
+  if (styleName === "underline") {
+    return (
+      <span
+        data-testid="terminal-preview-cursor"
+        className={`inline-block w-[0.65em] h-[1em] align-[-0.1em] ${className}`}
+        style={{ borderBottom: `2px solid ${color}` }}
+      />
+    );
+  }
+
+  if (styleName === "bar") {
+    return (
+      <span
+        data-testid="terminal-preview-cursor"
+        className={`inline-block w-[0.4em] h-[1em] align-[-0.1em] ${className}`}
+        style={{ borderLeft: `2px solid ${color}` }}
+      />
+    );
+  }
+
+  return (
+    <span
+      data-testid="terminal-preview-cursor"
+      className={`inline-block w-[0.65em] h-[1em] align-[-0.1em] ${className}`}
+      style={{ background: color, color: foreground }}
+    />
   );
 }
 

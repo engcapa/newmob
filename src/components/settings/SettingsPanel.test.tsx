@@ -36,6 +36,8 @@ describe("SettingsPanel", () => {
     await user.type(fontSize, "18");
     await user.click(screen.getByLabelText("Enable font ligatures"));
     await user.click(screen.getByRole("button", { name: "Use theme Kanagawa Wave" }));
+    await user.selectOptions(screen.getByLabelText("Terminal cursor"), "Underline (steady)");
+    await user.click(screen.getByLabelText("Enable keyword highlighting"));
 
     await waitFor(() => {
       const saved = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "{}");
@@ -43,6 +45,9 @@ describe("SettingsPanel", () => {
       expect(saved.fontSize).toBe(18);
       expect(saved.fontLigatures).toBe(true);
       expect(saved.theme).toBe("kanagawa-wave");
+      expect(saved.cursorStyle).toBe("underline");
+      expect(saved.cursorBlink).toBe(false);
+      expect(saved.syntaxMode).toBe("keywords");
     });
   });
 });

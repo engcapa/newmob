@@ -55,4 +55,26 @@ describe("TerminalAppearanceSettings", () => {
 
     expect(onProfileChange).toHaveBeenLastCalledWith(expect.objectContaining({ theme: "kanagawa-wave" }));
   });
+
+  it("renders terminal profile controls before the bottom preview", async () => {
+    renderAppearance();
+
+    await waitFor(() => expect(screen.getByLabelText("Terminal cursor")).toBeInTheDocument());
+
+    const cursor = screen.getByLabelText("Terminal cursor");
+    const preview = screen.getByTestId("terminal-preview");
+    expect(cursor.compareDocumentPosition(preview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("reflects cursor style and blink setting in the preview", async () => {
+    renderAppearance({
+      ...DEFAULT_TERMINAL_PROFILE,
+      cursorStyle: "underline",
+      cursorBlink: false,
+    });
+
+    const cursor = await screen.findByTestId("terminal-preview-cursor");
+    expect(cursor).toHaveStyle({ borderBottom: expect.stringContaining("solid") });
+    expect(cursor).not.toHaveClass("moba-blink");
+  });
 });

@@ -180,7 +180,8 @@ describe("SessionEditor SSH settings tabs", () => {
     await user.clear(scrollback);
     await user.type(scrollback, "20000");
     await user.click(screen.getByLabelText("Save scrollback to log file on disconnect"));
-    await user.click(screen.getByLabelText("Enable"));
+    await user.click(screen.getByLabelText("Enable keyword highlighting"));
+    await user.selectOptions(screen.getByLabelText("Terminal cursor"), "Vertical bar (steady)");
 
     await user.click(screen.getByRole("button", { name: "OK" }));
 
@@ -190,6 +191,8 @@ describe("SessionEditor SSH settings tabs", () => {
       scrollback: 20000,
       loggingEnabled: true,
       syntaxMode: "keywords",
+      cursorStyle: "bar",
+      cursorBlink: false,
     });
     expect(JSON.parse(savedConfig.options_json).terminalProfile.fontFamily).toContain("JetBrains Mono");
   });
