@@ -3,10 +3,13 @@
 @tailwind utilities;
 
 :root {
+  --moba-bg: #ffffff;
   --moba-chrome-bg: #f0f0f0;
   --moba-chrome-border: #c5c8cc;
   --moba-titlebar-from: #e6ecf2;
   --moba-titlebar-to: #cfd9e6;
+  --moba-menubar-bg: #f7f8fb;
+  --moba-quick-bg: #eef3f9;
   --moba-accent: #2b5d8b;
   --moba-accent-soft: #5586b5;
   --moba-tab-active: #ffffff;
@@ -14,6 +17,9 @@
   --moba-tab-border: #8ba7c6;
   --moba-sidebar-bg: #f5f6f8;
   --moba-sidebar-border: #c0c4ca;
+  --moba-panel-bg: #f7faff;
+  --moba-card-bg: #fafcff;
+  --moba-card-border: #cdd7e4;
   --moba-status-bg: #ecf1f6;
   --moba-status-text: #1f3550;
   --moba-text: #1d2330;
@@ -22,6 +28,17 @@
   --moba-hover: #eaf2fb;
   --moba-selected: #cfe2f7;
   --moba-selected-border: #6c9bd0;
+  --moba-control-hover: rgba(255, 255, 255, 0.7);
+  --moba-input-bg: #ffffff;
+  --moba-input-border: #8aa0bd;
+  --moba-button-from: #fafbfd;
+  --moba-button-to: #dbe5f1;
+  --moba-button-hover-from: #ffffff;
+  --moba-button-hover-to: #cdddef;
+  --moba-button-disabled: #e5e9ef;
+  --moba-scrollbar-track: #e8edf3;
+  --moba-scrollbar-thumb: #b6c3d4;
+  --moba-scrollbar-thumb-hover: #95a8c1;
   --moba-term-bg: #1d1f21;
   --moba-term-text: #eaeaea;
   --moba-term-prompt: #62d36f;
@@ -36,9 +53,53 @@
   -webkit-font-smoothing: antialiased;
 }
 
+html[data-app-theme="dark"] {
+  --moba-bg: #15171c;
+  --moba-chrome-bg: #1b1d23;
+  --moba-chrome-border: #383d49;
+  --moba-titlebar-from: #252936;
+  --moba-titlebar-to: #191c24;
+  --moba-menubar-bg: #191c22;
+  --moba-quick-bg: #20242d;
+  --moba-accent: #5aa2d6;
+  --moba-accent-soft: #6fb2df;
+  --moba-tab-active: #20232b;
+  --moba-tab-inactive: #181b22;
+  --moba-tab-border: #454b59;
+  --moba-sidebar-bg: #181b21;
+  --moba-sidebar-border: #3b414d;
+  --moba-panel-bg: #1c2028;
+  --moba-card-bg: #202530;
+  --moba-card-border: #3c4452;
+  --moba-status-bg: #171a20;
+  --moba-status-text: #c9d4e2;
+  --moba-text: #e3e8ef;
+  --moba-text-muted: #9aa7b7;
+  --moba-divider: #363c48;
+  --moba-hover: #2a3442;
+  --moba-selected: #263f58;
+  --moba-selected-border: #6aa3d5;
+  --moba-control-hover: rgba(91, 112, 138, 0.35);
+  --moba-input-bg: #11141a;
+  --moba-input-border: #596579;
+  --moba-button-from: #2b313c;
+  --moba-button-to: #1d222b;
+  --moba-button-hover-from: #333b49;
+  --moba-button-hover-to: #252c37;
+  --moba-button-disabled: #242933;
+  --moba-scrollbar-track: #171b22;
+  --moba-scrollbar-thumb: #3d4654;
+  --moba-scrollbar-thumb-hover: #596579;
+  --moba-link: #77b7ef;
+  --moba-ribbon-from: #222735;
+  --moba-ribbon-to: #1a1e28;
+  --moba-ribbon-border: #3e4656;
+}
+
 body {
   margin: 0;
   overflow: hidden;
+  background: var(--moba-chrome-bg);
 }
 
 #root {
@@ -72,8 +133,8 @@ body {
   border: none;
 }
 .moba-ribbon-btn:hover {
-  background: rgba(255, 255, 255, 0.6);
-  outline: 1px solid #b9cce3;
+  background: var(--moba-control-hover);
+  outline: 1px solid var(--moba-tab-border);
 }
 
 /* Vertical side tabs */
@@ -89,7 +150,7 @@ body {
   user-select: none;
 }
 .moba-side-tab[data-active="true"] {
-  background: #ffffff;
+  background: var(--moba-tab-active);
   color: var(--moba-accent);
   font-weight: 600;
   border-right: 2px solid var(--moba-accent);
@@ -103,25 +164,25 @@ body {
   font-size: 11px;
   padding: 1px 6px;
   border-radius: 9999px;
-  background: #e1ecfa;
-  color: #1e3a5f;
-  border: 1px solid #b6cce6;
+  background: var(--moba-selected);
+  color: var(--moba-text);
+  border: 1px solid var(--moba-selected-border);
 }
 
 /* Scrollbar */
 .moba-scroll-y { overflow-y: auto; }
 .moba-scroll-y::-webkit-scrollbar { width: 14px; }
-.moba-scroll-y::-webkit-scrollbar-track { background: #e8edf3; border-left: 1px solid #c5cdd6; }
-.moba-scroll-y::-webkit-scrollbar-thumb { background: #b6c3d4; border: 2px solid #e8edf3; border-radius: 2px; }
-.moba-scroll-y::-webkit-scrollbar-thumb:hover { background: #95a8c1; }
+.moba-scroll-y::-webkit-scrollbar-track { background: var(--moba-scrollbar-track); border-left: 1px solid var(--moba-divider); }
+.moba-scroll-y::-webkit-scrollbar-thumb { background: var(--moba-scrollbar-thumb); border: 2px solid var(--moba-scrollbar-track); border-radius: 2px; }
+.moba-scroll-y::-webkit-scrollbar-thumb:hover { background: var(--moba-scrollbar-thumb-hover); }
 
 /* Form inputs */
 .moba-input {
   height: 22px;
   font-size: 12px;
   padding: 0 6px;
-  border: 1px solid #8aa0bd;
-  background: #ffffff;
+  border: 1px solid var(--moba-input-border);
+  background: var(--moba-input-bg);
   color: var(--moba-text);
   border-radius: 2px;
   outline: none;
@@ -129,6 +190,11 @@ body {
 .moba-input:focus {
   border-color: var(--moba-accent);
   box-shadow: 0 0 0 2px rgba(43, 93, 139, 0.18);
+}
+.moba-input:disabled {
+  opacity: 0.62;
+  background: var(--moba-button-disabled);
+  color: var(--moba-text-muted);
 }
 
 .moba-mono {
@@ -167,7 +233,7 @@ body {
   box-shadow: 0 -2px 0 0 var(--moba-accent) inset;
 }
 .moba-tab:hover:not([data-active="true"]) {
-  background: #e3ecf6;
+  background: var(--moba-hover);
 }
 
 .moba-tree-row {
@@ -199,19 +265,19 @@ body {
   height: 26px;
   padding: 0 14px;
   font-size: 12px;
-  background: linear-gradient(to bottom, #fafbfd, #dbe5f1);
-  border: 1px solid #8ea7c4;
+  background: linear-gradient(to bottom, var(--moba-button-from), var(--moba-button-to));
+  border: 1px solid var(--moba-input-border);
   border-radius: 3px;
   cursor: pointer;
   color: var(--moba-text);
 }
-.moba-btn:hover { background: linear-gradient(to bottom, #ffffff, #cdddef); }
+.moba-btn:hover { background: linear-gradient(to bottom, var(--moba-button-hover-from), var(--moba-button-hover-to)); }
 .moba-btn:disabled {
   opacity: 0.45;
   cursor: default;
-  background: #e5e9ef;
+  background: var(--moba-button-disabled);
 }
-.moba-btn:disabled:hover { background: #e5e9ef; }
+.moba-btn:disabled:hover { background: var(--moba-button-disabled); }
 .moba-btn[data-primary="true"] {
   background: linear-gradient(to bottom, #4a87c0, #2b5d8b);
   border-color: #1f4267; color: #fff; font-weight: 600;
@@ -229,9 +295,9 @@ body {
   background: transparent;
   color: var(--moba-text);
 }
-.moba-proto-btn:hover { background: #eaf2fb; border-color: #b9cce3; }
+.moba-proto-btn:hover { background: var(--moba-hover); border-color: var(--moba-tab-border); }
 .moba-proto-btn[data-active="true"] {
-  background: #d8e7f7;
+  background: var(--moba-selected);
   border-color: var(--moba-accent-soft);
   color: var(--moba-accent);
   font-weight: 600;
@@ -240,20 +306,21 @@ body {
 .moba-section-tab {
   padding: 4px 12px;
   font-size: 12px;
-  border: 1px solid #8aa0bd;
+  border: 1px solid var(--moba-input-border);
   border-bottom: none;
-  background: #e1eaf5;
+  background: var(--moba-tab-inactive);
+  color: var(--moba-text);
   cursor: pointer;
   margin-right: -1px;
   border-top-left-radius: 4px;
   border-top-right-radius: 4px;
 }
-.moba-section-tab[data-active="true"] { background: #ffffff; font-weight: 600; }
+.moba-section-tab[data-active="true"] { background: var(--moba-tab-active); font-weight: 600; }
 
 .moba-checkbox {
   width: 13px; height: 13px;
-  border: 1px solid #6f8aac;
-  background: #fff;
+  border: 1px solid var(--moba-input-border);
+  background: var(--moba-input-bg);
   display: inline-flex; align-items: center; justify-content: center;
   vertical-align: middle;
   cursor: pointer;
@@ -262,7 +329,7 @@ body {
 }
 .moba-checkbox:checked,
 .moba-checkbox[data-checked="true"] {
-  background: #ffffff;
+  background: var(--moba-input-bg);
   color: var(--moba-accent);
 }
 .moba-checkbox:checked::after {
@@ -275,9 +342,9 @@ body {
 .moba-radio {
   width: 12px;
   height: 12px;
-  border: 1px solid #6f8aac;
+  border: 1px solid var(--moba-input-border);
   border-radius: 9999px;
-  background: #fff;
+  background: var(--moba-input-bg);
   appearance: none;
   cursor: pointer;
   flex: 0 0 auto;
@@ -349,4 +416,30 @@ body {
 .terminal-keyword-success {
   background: rgba(80, 210, 120, 0.32);
   box-shadow: inset 0 0 0 1px rgba(80, 210, 120, 0.7);
+}
+
+html[data-app-theme="dark"] .bg-white {
+  background-color: var(--moba-panel-bg) !important;
+}
+html[data-app-theme="dark"] .bg-white\/90 {
+  background-color: color-mix(in srgb, var(--moba-panel-bg) 90%, transparent) !important;
+}
+html[data-app-theme="dark"] .bg-slate-100 {
+  background-color: var(--moba-quick-bg) !important;
+}
+html[data-app-theme="dark"] .border-slate-100,
+html[data-app-theme="dark"] .border-slate-400,
+html[data-app-theme="dark"] .border-slate-500 {
+  border-color: var(--moba-divider) !important;
+}
+html[data-app-theme="dark"] .text-slate-300,
+html[data-app-theme="dark"] .text-slate-500,
+html[data-app-theme="dark"] .text-slate-600,
+html[data-app-theme="dark"] .text-slate-700 {
+  color: var(--moba-text-muted) !important;
+}
+html[data-app-theme="dark"] .hover\:bg-white\/15:hover,
+html[data-app-theme="dark"] .hover\:bg-white\/20:hover,
+html[data-app-theme="dark"] .hover\:bg-white\/70:hover {
+  background-color: var(--moba-control-hover) !important;
 }

@@ -58,7 +58,7 @@ export function TabBar() {
   return (
     <div
       className="h-8 flex items-end pl-2 pr-1 pt-1.5 gap-0"
-      style={{ background: "linear-gradient(to bottom, #d6e0ec, #c5d3e3)" }}
+      style={{ background: "linear-gradient(to bottom, var(--moba-tab-inactive), var(--moba-chrome-bg))" }}
     >
       {ctx.render}
       {tabs.map((tab) => (

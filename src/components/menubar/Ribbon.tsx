@@ -51,7 +51,7 @@ export function Ribbon({ xServerEnabled, onCommand }: RibbonProps) {
       <RibbonBtn icon={<Users className="w-6 h-6" style={{ color: "#7a3d9d" }} />} label="MultiExec" onClick={() => onCommand("multiexec")} />
       <RibbonBtn icon={<Network className="w-6 h-6" style={{ color: "#236a98" }} />} label="Tunneling" onClick={() => onCommand("tunneling")} />
       <RibbonBtn icon={<Package className="w-6 h-6" style={{ color: "#7a4f1a" }} />} label="Packages" onClick={() => onCommand("packages")} />
-      <RibbonBtn icon={<Settings className="w-6 h-6" style={{ color: "#444" }} />} label="Settings" onClick={() => onCommand("settings")} />
+      <RibbonBtn icon={<Settings className="w-6 h-6" style={{ color: "var(--moba-text-muted)" }} />} label="Settings" onClick={() => onCommand("settings")} />
       <RibbonBtn icon={<HelpCircle className="w-6 h-6" style={{ color: "#1f6db8" }} />} label="Help" onClick={() => onCommand("help")} />
       <div className="flex-1" />
       <div className="flex items-center gap-2 mr-2">
@@ -83,7 +83,7 @@ function RibbonBtn({
       type="button"
       style={
         highlight
-          ? { background: "rgba(255,255,255,0.55)", outline: "1px solid #b9cce3" }
+          ? { background: "var(--moba-control-hover)", outline: "1px solid var(--moba-tab-border)" }
           : undefined
       }
     >

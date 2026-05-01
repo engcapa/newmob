@@ -1,6 +1,7 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setAppThemeMode } from "../../lib/appTheme";
 import { SettingsPanel } from "./SettingsPanel";
 
 const ipcMocks = vi.hoisted(() => ({
@@ -12,12 +13,14 @@ vi.mock("../../lib/ipc", () => ({
 }));
 
 const STORAGE_KEY = "newmob.terminalProfile.v1";
+const APP_THEME_STORAGE_KEY = "newmob.appTheme.v1";
 
 describe("SettingsPanel", () => {
   beforeEach(() => {
     ipcMocks.listSystemFonts.mockReset();
     ipcMocks.listSystemFonts.mockResolvedValue(["Consolas", "JetBrains Mono", "Source Code Pro"]);
     window.localStorage.clear();
+    setAppThemeMode("system");
   });
 
   afterEach(() => {
@@ -49,5 +52,16 @@ describe("SettingsPanel", () => {
       expect(saved.cursorBlink).toBe(false);
       expect(saved.syntaxMode).toBe("keywords");
     });
+  });
+
+  it("persists the global application theme mode", async () => {
+    const user = userEvent.setup();
+    render(<SettingsPanel />);
+
+    await user.click(screen.getByRole("button", { name: "Dark" }));
+    expect(window.localStorage.getItem(APP_THEME_STORAGE_KEY)).toBe("dark");
+
+    await user.click(screen.getByRole("button", { name: "Follow system" }));
+    expect(window.localStorage.getItem(APP_THEME_STORAGE_KEY)).toBe("system");
   });
 });

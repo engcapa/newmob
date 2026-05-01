@@ -89,7 +89,7 @@ export function Sidebar({ onNewSession, onEditSession, onConnectSession, compact
     <div className="h-full flex">
       <div
         className="w-[26px] flex flex-col shrink-0"
-        style={{ background: "#e3e8ef", borderRight: "1px solid var(--moba-sidebar-border)" }}
+        style={{ background: "var(--moba-tab-inactive)", borderRight: "1px solid var(--moba-sidebar-border)" }}
       >
         {(["sessions", "tools", "macros", "games"] as const).map((t) => (
           <div
@@ -119,7 +119,7 @@ export function Sidebar({ onNewSession, onEditSession, onConnectSession, compact
           <IconBtn title="Move selected session to Favorites" icon={<Star className="w-3.5 h-3.5" />} onClick={handleFavorite} disabled={!selectedSession} />
           <div className="flex-1" />
           <div className="relative">
-            <Search className="w-3 h-3 absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-500" />
+            <Search className="w-3 h-3 absolute left-1.5 top-1/2 -translate-y-1/2 text-[var(--moba-text-muted)]" />
             <input
               className="moba-input pl-6 w-[140px]"
               placeholder="Search sessions…"
@@ -133,9 +133,9 @@ export function Sidebar({ onNewSession, onEditSession, onConnectSession, compact
         ) : (
           <UtilityPanel tab={activeSideTab} />
         )}
-        <div className="h-[160px] border-t flex flex-col shrink-0" style={{ borderColor: "var(--moba-sidebar-border)", background: "#fafcff" }}>
-          <div className="h-6 flex items-center px-2 text-[11px] font-semibold border-b" style={{ borderColor: "var(--moba-divider)", background: "#eaf1fa" }}>
-            <Clock className="w-3.5 h-3.5 mr-1 text-slate-600" />
+        <div className="h-[160px] border-t flex flex-col shrink-0" style={{ borderColor: "var(--moba-sidebar-border)", background: "var(--moba-panel-bg)" }}>
+          <div className="h-6 flex items-center px-2 text-[11px] font-semibold border-b" style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}>
+            <Clock className="w-3.5 h-3.5 mr-1 text-[var(--moba-text-muted)]" />
             Recent connections
             <div className="ml-auto flex items-center gap-1">
               <IconBtn title="Refresh sessions" icon={<RefreshCw className="w-3 h-3" />} onClick={() => void loadSessions()} />

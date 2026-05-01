@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { RotateCcw } from "lucide-react";
+import { appThemeModeLabel, useAppTheme } from "../../lib/appTheme";
 import {
   DEFAULT_TERMINAL_PROFILE,
   loadGlobalTerminalProfile,
@@ -7,9 +8,11 @@ import {
   type TerminalProfile,
 } from "../../lib/terminalProfile";
 import { TerminalAppearanceSettings } from "../terminal/TerminalAppearanceSettings";
+import { AppThemeSwitcher } from "./AppThemeSwitcher";
 
 export function SettingsPanel() {
   const [profile, setProfile] = useState<TerminalProfile>(() => loadGlobalTerminalProfile());
+  const { mode, resolvedTheme } = useAppTheme();
 
   useEffect(() => {
     saveGlobalTerminalProfile(profile);
@@ -22,6 +25,25 @@ export function SettingsPanel() {
       style={{ background: "var(--moba-bg)", color: "var(--moba-text)" }}
     >
       <div className="mx-auto max-w-5xl p-5">
+        <div className="mb-4">
+          <div className="text-[18px] font-semibold">Settings</div>
+          <div className="text-[12px] text-[var(--moba-text-muted)]">
+            Application appearance and terminal defaults
+          </div>
+        </div>
+
+        <section className="mb-5 rounded-md border border-[var(--moba-divider)] bg-[var(--moba-panel-bg)] p-3">
+          <div className="mb-2 flex items-center gap-3">
+            <div>
+              <div className="text-[14px] font-semibold">Application Theme</div>
+              <div className="text-[12px] text-[var(--moba-text-muted)]">
+                Current appearance: {appThemeModeLabel(mode)} ({resolvedTheme})
+              </div>
+            </div>
+          </div>
+          <AppThemeSwitcher />
+        </section>
+
         <div className="mb-4 flex items-center gap-3">
           <div>
             <div className="text-[18px] font-semibold">Terminal Appearance</div>

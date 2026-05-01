@@ -8,6 +8,7 @@ import {
   X,
 } from "lucide-react";
 import { useContextMenu } from "../ContextMenu";
+import { AppThemeIconButton } from "../settings/AppThemeSwitcher";
 import type { RibbonCommand } from "./Ribbon";
 
 interface MenuBarProps {
@@ -72,7 +73,7 @@ export function MenuBar({ activeTabClosable, onCommand }: MenuBarProps) {
   return (
     <div
       className="h-6 flex items-center text-[12px] px-2 gap-3 border-b"
-      style={{ borderColor: "var(--moba-chrome-border)", background: "#f7f8fb" }}
+      style={{ borderColor: "var(--moba-chrome-border)", background: "var(--moba-menubar-bg)" }}
     >
       {ctx.render}
       {items.map((m) => (
@@ -88,6 +89,9 @@ export function MenuBar({ activeTabClosable, onCommand }: MenuBarProps) {
           </span>
         </button>
       ))}
+      <div className="ml-auto">
+        <AppThemeIconButton />
+      </div>
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { useRef } from "react";
 import { parseOpenSshConfig } from "../lib/quickConnect";
+import { AppThemeIconButton } from "./settings/AppThemeSwitcher";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
 
@@ -40,7 +41,7 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
   };
 
   return (
-    <div className="w-full h-full flex" style={{ background: "#ffffff" }}>
+    <div className="w-full h-full flex" style={{ background: "var(--moba-bg)" }}>
       <input
         ref={fileInputRef}
         type="file"
@@ -62,6 +63,9 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
               <div className="text-[12px] text-[var(--moba-text-muted)]">
                 A cross‑platform port of the MobaXterm experience — Linux • macOS • Windows
               </div>
+            </div>
+            <div className="ml-auto">
+              <AppThemeIconButton />
             </div>
           </div>
 
@@ -99,7 +103,7 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
           <div className="mt-6 text-[12px] text-[var(--moba-text-muted)]">
             <div className="font-semibold text-[var(--moba-text)] mb-1">Tips</div>
             <ul className="list-disc pl-5 space-y-0.5">
-              <li>Use Quick connect for <span className="moba-mono px-1 bg-slate-100 border rounded">ssh user@host:22</span> or saved sessions.</li>
+              <li>Use Quick connect for <span className="moba-mono px-1 border rounded" style={{ background: "var(--moba-input-bg)", borderColor: "var(--moba-divider)" }}>ssh user@host:22</span> or saved sessions.</li>
               <li>Right‑click any session in the sidebar to connect, edit, duplicate, or delete it.</li>
               <li>Drag a session onto a folder in the tree to update its group.</li>
             </ul>
@@ -107,7 +111,7 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
         </div>
       </div>
 
-      <div className="w-[260px] border-l p-3 text-[12px]" style={{ borderColor: "var(--moba-divider)", background: "#f7faff" }}>
+      <div className="w-[260px] border-l p-3 text-[12px]" style={{ borderColor: "var(--moba-divider)", background: "var(--moba-panel-bg)" }}>
         <div className="font-semibold mb-2 flex items-center gap-1"><Activity className="w-3.5 h-3.5" /> Active connections</div>
         {activeConnections.length === 0 ? (
           <EmptyText>No active terminal tabs.</EmptyText>
@@ -155,14 +159,25 @@ function ActionCard({
   return (
     <button
       className="text-left p-3 rounded-md border hover:shadow-sm transition"
-      style={{ borderColor: "#cdd7e4", background: "#fafcff" }}
+      style={{ borderColor: "var(--moba-card-border)", background: "var(--moba-card-bg)" }}
       onClick={onClick}
       type="button"
     >
       <div className="flex items-center gap-2 mb-1">
         <span style={{ color: "var(--moba-accent)" }}>{icon}</span>
         <span className="font-semibold">{title}</span>
-        {kbd && <span className="ml-auto text-[10px] moba-mono px-1.5 py-0.5 rounded border bg-white text-slate-500">{kbd}</span>}
+        {kbd && (
+          <span
+            className="ml-auto text-[10px] moba-mono px-1.5 py-0.5 rounded border"
+            style={{
+              background: "var(--moba-input-bg)",
+              borderColor: "var(--moba-divider)",
+              color: "var(--moba-text-muted)",
+            }}
+          >
+            {kbd}
+          </span>
+        )}
       </div>
       <div className="text-[12px] text-[var(--moba-text-muted)]">{desc}</div>
     </button>

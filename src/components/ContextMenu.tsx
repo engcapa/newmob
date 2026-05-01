@@ -78,7 +78,7 @@ const MenuSurface = forwardRef<HTMLDivElement, {
   <div
     ref={ref}
     className="min-w-[220px] py-1 rounded shadow-lg border text-[12px]"
-    style={{ ...style, background: "#fff", borderColor: "var(--moba-divider)" }}
+    style={{ ...style, background: "var(--moba-panel-bg)", borderColor: "var(--moba-divider)", color: "var(--moba-text)" }}
   >
     {items.map((item, i) => (
       <MenuRow key={i} item={item} onClose={onClose} />
@@ -99,9 +99,9 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
       <span className="w-4 flex-shrink-0 text-center">{item.checked ? "✓" : item.icon}</span>
       <span className="flex-1 truncate">{item.label}</span>
       {item.shortcut && (
-        <span className="ml-6 flex-shrink-0 text-[11px] text-slate-700">{item.shortcut}</span>
+        <span className="ml-6 flex-shrink-0 text-[11px] text-[var(--moba-text-muted)]">{item.shortcut}</span>
       )}
-      {hasChildren && <ChevronRight className="w-3 h-3 text-slate-500" />}
+      {hasChildren && <ChevronRight className="w-3 h-3 text-[var(--moba-text-muted)]" />}
     </>
   );
 

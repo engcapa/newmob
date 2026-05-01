@@ -49,17 +49,17 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
     <div
       className="h-7 flex items-center gap-1 px-2 text-[12px]"
       style={{
-        background: "#eef3f9",
+        background: "var(--moba-quick-bg)",
         borderBottom: "1px solid var(--moba-divider)",
       }}
     >
-      <button className="p-0.5 hover:bg-white/70 rounded" title="Back" onClick={() => window.history.back()} type="button">
+      <button className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Back" onClick={() => window.history.back()} type="button">
         <ArrowLeft className="w-3.5 h-3.5" />
       </button>
-      <button className="p-0.5 hover:bg-white/70 rounded" title="Forward" onClick={() => window.history.forward()} type="button">
+      <button className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Forward" onClick={() => window.history.forward()} type="button">
         <ArrowRight className="w-3.5 h-3.5" />
       </button>
-      <button className="p-0.5 hover:bg-white/70 rounded" title="Home" onClick={onHome} type="button">
+      <button className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Home" onClick={onHome} type="button">
         <Home className="w-3.5 h-3.5" />
       </button>
       <span className="moba-divider-v h-4 mx-1" />
@@ -82,7 +82,7 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
         recent.map((session) => (
           <button
             key={session.id}
-            className="px-1.5 py-0.5 rounded hover:bg-white/70 underline max-w-[110px] truncate"
+            className="px-1.5 py-0.5 rounded hover:bg-[var(--moba-control-hover)] underline max-w-[110px] truncate"
             style={{ color: "var(--moba-link)" }}
             onClick={() => onConnectSession(session)}
             title={`${session.name} (${session.session_type})`}
@@ -93,7 +93,7 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
         ))
       )}
       <button
-        className="p-0.5 hover:bg-white/70 rounded disabled:opacity-50"
+        className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded disabled:opacity-50"
         title={refreshing ? "Refreshing sessions..." : "Refresh sessions"}
         onClick={() => void refreshSessions()}
         disabled={refreshing}

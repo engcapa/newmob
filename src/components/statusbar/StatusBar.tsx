@@ -3,15 +3,18 @@ import {
   Wifi,
   KeyRound,
   Eye,
+  Moon,
   Sun,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { appThemeModeLabel, useAppTheme } from "../../lib/appTheme";
 import { useAppStore } from "../../stores/appStore";
 import { useSessionStore } from "../../stores/sessionStore";
 
 export function StatusBar() {
   const { tabs, activeTabId, xServerEnabled, statusMessage } = useAppStore();
   const { sessions, selectedSessionId } = useSessionStore();
+  const { mode, resolvedTheme } = useAppTheme();
   const [online, setOnline] = useState(navigator.onLine);
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
   const selected = sessions.find((session) => session.id === selectedSessionId);
@@ -45,7 +48,8 @@ export function StatusBar() {
       <span className="truncate max-w-[260px]">{statusMessage}</span>
       <span className="moba-divider-v h-3" />
       <span className="flex items-center gap-1">
-        <Sun className="w-3 h-3" /> Theme: Classic light
+        {resolvedTheme === "dark" ? <Moon className="w-3 h-3" /> : <Sun className="w-3 h-3" />}
+        Theme: {appThemeModeLabel(mode)}
       </span>
       <span className="moba-divider-v h-3" />
       <span className="moba-mono">{activeTab?.type ?? "none"} • {tabs.filter((tab) => tab.type === "terminal").length} terminals</span>

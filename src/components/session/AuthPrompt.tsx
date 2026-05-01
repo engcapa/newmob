@@ -21,7 +21,7 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
       <form
         onSubmit={handleSubmit}
         className="w-[400px] rounded-md shadow-2xl border overflow-hidden"
-        style={{ background: "#fafcff", borderColor: "#7a8ba6" }}
+        style={{ background: "var(--moba-panel-bg)", borderColor: "var(--moba-chrome-border)", color: "var(--moba-text)" }}
       >
         <div className="h-8 flex items-center px-3"
              style={{ background: "linear-gradient(to bottom, #5895c8, #2b5d8b)", color: "white" }}>
@@ -48,15 +48,14 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
         </div>
 
         <div className="h-12 flex items-center justify-end px-3 gap-2 border-t"
-             style={{ background: "#eef3f9", borderColor: "var(--moba-divider)" }}>
+             style={{ background: "var(--moba-quick-bg)", borderColor: "var(--moba-divider)" }}>
           <button type="button" onClick={onCancel}
-                  className="h-[26px] px-4 text-[12px] rounded-sm cursor-pointer"
-                  style={{ background: "linear-gradient(to bottom, #fafbfd, #dbe5f1)", border: "1px solid #8ea7c4" }}>
+                  className="moba-btn">
             Cancel
           </button>
           <button type="submit"
-                  className="h-[26px] px-4 text-[12px] rounded-sm cursor-pointer font-semibold"
-                  style={{ background: "linear-gradient(to bottom, #4a87c0, #2b5d8b)", border: "1px solid #1f4267", color: "#fff" }}>
+                  className="moba-btn font-semibold"
+                  data-primary="true">
             Connect
           </button>
         </div>

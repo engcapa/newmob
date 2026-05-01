@@ -39,6 +39,7 @@ import {
   parseSessionOptions,
   type TerminalProfile,
 } from "../../lib/terminalProfile";
+import { AppThemeSwitcher } from "../settings/AppThemeSwitcher";
 import { TerminalAppearanceSettings } from "../terminal/TerminalAppearanceSettings";
 
 /* ------------------------------------------------------------------ */
@@ -60,7 +61,7 @@ const PROTOS: { id: Proto; icon: React.ReactNode; color: string }[] = [
   { id: "FTP",     icon: <Folder className="w-7 h-7" />,       color: "#7a4f1a" },
   { id: "SFTP",    icon: <Folder className="w-7 h-7" />,       color: "#1e6db8" },
   { id: "Serial",  icon: <Wifi className="w-7 h-7" />,         color: "#236a98" },
-  { id: "File",    icon: <FileText className="w-7 h-7" />,     color: "#444" },
+  { id: "File",    icon: <FileText className="w-7 h-7" />,     color: "var(--moba-text-muted)" },
   { id: "Shell",   icon: <TerminalIcon className="w-7 h-7" />, color: "#62d36f" },
   { id: "Browser", icon: <Globe className="w-7 h-7" />,        color: "#1e5fa8" },
   { id: "Mosh",    icon: <Server className="w-7 h-7" />,       color: "#7a3d9d" },
@@ -170,7 +171,7 @@ function Select({
           <option key={o}>{o}</option>
         ))}
       </select>
-      <ChevronDown className="w-3 h-3 absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none text-slate-500" />
+      <ChevronDown className="w-3 h-3 absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none text-[var(--moba-text-muted)]" />
     </span>
   );
 }
@@ -331,8 +332,8 @@ function AdvancedSshSettings({
                 type="button"
               >
                 {showPwd
-                  ? <EyeOff className="w-3.5 h-3.5 text-slate-500" />
-                  : <Eye className="w-3.5 h-3.5 text-slate-500" />}
+                  ? <EyeOff className="w-3.5 h-3.5 text-[var(--moba-text-muted)]" />
+                  : <Eye className="w-3.5 h-3.5 text-[var(--moba-text-muted)]" />}
               </button>
             </div>
             <button className="moba-btn" type="button" disabled title="Credential vault is not implemented yet">Save in vault</button>
@@ -658,8 +659,8 @@ function BookmarkSettings({
 
       <Field label="Session icon">
         <span
-          className="inline-flex items-center gap-1 px-2 py-1 rounded border bg-white"
-          style={{ borderColor: "#8aa0bd" }}
+          className="inline-flex items-center gap-1 px-2 py-1 rounded border"
+          style={{ borderColor: "var(--moba-input-border)", background: "var(--moba-input-bg)" }}
         >
           <TerminalIcon className="w-4 h-4" style={{ color: "#2b5d8b" }} />
           {proto.toLowerCase()}
@@ -1066,7 +1067,7 @@ export function SessionEditor({ session, defaultGroupPath = null, onClose }: Ses
     >
       <div
         className="w-[1020px] max-w-[96%] max-h-[92vh] flex flex-col rounded-[6px] shadow-2xl border overflow-hidden"
-        style={{ background: "#fafcff", borderColor: "#7a8ba6" }}
+        style={{ background: "var(--moba-panel-bg)", borderColor: "var(--moba-chrome-border)", color: "var(--moba-text)" }}
       >
         {/* Modal title bar */}
         <div
@@ -1080,7 +1081,8 @@ export function SessionEditor({ session, defaultGroupPath = null, onClose }: Ses
           <div className="text-[12px] font-semibold">
             {isEdit ? "Edit session" : "Session settings"}
           </div>
-          <div className="ml-auto flex items-center gap-2 text-[11px] opacity-90">
+          <div className="ml-auto flex items-center gap-2 text-[11px] opacity-95">
+            <AppThemeSwitcher compact />
             <button
               title="Help"
               className="hover:bg-white/15 rounded p-0.5"
@@ -1131,7 +1133,7 @@ export function SessionEditor({ session, defaultGroupPath = null, onClose }: Ses
         {needsHost && (
           <div
             className="px-4 py-3 border-b shrink-0"
-            style={{ borderColor: "var(--moba-divider)", background: "#eaf1fa" }}
+            style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}
           >
             <div
               className="text-[12px] font-semibold mb-2 flex items-center gap-2"
@@ -1184,7 +1186,10 @@ export function SessionEditor({ session, defaultGroupPath = null, onClose }: Ses
               />
               <div className="col-span-8 text-[11px] text-[var(--moba-text-muted)]">
                 Tip: append{" "}
-                <span className="moba-mono px-1 bg-white border rounded">
+                <span
+                  className="moba-mono px-1 border rounded"
+                  style={{ background: "var(--moba-input-bg)", borderColor: "var(--moba-divider)" }}
+                >
                   user@host:port
                 </span>{" "}
                 to autofill these three fields.
@@ -1207,13 +1212,13 @@ export function SessionEditor({ session, defaultGroupPath = null, onClose }: Ses
               {t.label}
             </button>
           ))}
-          <div className="flex-1 border-b" style={{ borderColor: "#8aa0bd" }} />
+          <div className="flex-1 border-b" style={{ borderColor: "var(--moba-input-border)" }} />
         </div>
 
         {/* Section body */}
         <div
           className="flex-1 min-h-0 overflow-auto px-4 py-3 border-x border-b"
-          style={{ borderColor: "#8aa0bd", background: "#ffffff" }}
+          style={{ borderColor: "var(--moba-input-border)", background: "var(--moba-bg)" }}
         >
           {activeSection === "advanced" && isSSH && (
             <AdvancedSshSettings
@@ -1263,7 +1268,7 @@ export function SessionEditor({ session, defaultGroupPath = null, onClose }: Ses
         {/* Footer */}
         <div
           className="h-12 flex items-center px-3 gap-2 border-t shrink-0"
-          style={{ background: "#eef3f9", borderColor: "var(--moba-divider)" }}
+          style={{ background: "var(--moba-quick-bg)", borderColor: "var(--moba-divider)" }}
         >
           {isSSH && needsHost && (
             <button

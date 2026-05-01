@@ -96,7 +96,7 @@ export function TerminalAppearanceSettings({
 
   return (
     <div data-testid="terminal-appearance-settings" className={`space-y-4 ${className}`}>
-      <section className="rounded-md border border-[var(--moba-divider)] bg-white/70 p-3">
+      <section className="rounded-md border border-[var(--moba-divider)] bg-[var(--moba-panel-bg)] p-3">
         <div className="grid grid-cols-12 gap-3 items-end">
           <label className="col-span-12 md:col-span-7">
             <span className="block text-[12px] font-semibold mb-1">Font</span>
@@ -175,7 +175,7 @@ export function TerminalAppearanceSettings({
         </div>
       </section>
 
-      <section className="rounded-md border border-[var(--moba-divider)] bg-white/70 p-3">
+      <section className="rounded-md border border-[var(--moba-divider)] bg-[var(--moba-panel-bg)] p-3">
         <div className="text-[12px] font-semibold mb-2">Terminal theme</div>
         <div data-testid="terminal-theme-gallery" className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2">
           {TERMINAL_THEME_DEFINITIONS.map((definition) => (
@@ -190,7 +190,7 @@ export function TerminalAppearanceSettings({
       </section>
 
       {showCustomColors && (
-        <section className="rounded-md border border-[var(--moba-divider)] bg-white/70 p-3">
+        <section className="rounded-md border border-[var(--moba-divider)] bg-[var(--moba-panel-bg)] p-3">
           <div className="grid grid-cols-12 gap-2 items-center">
             <label className="col-span-12 sm:col-span-6 flex items-center gap-2">
               <span className="w-24 text-[12px] font-semibold">Background</span>
@@ -228,7 +228,7 @@ export function TerminalAppearanceSettings({
         </section>
       )}
 
-      <section className="rounded-md border border-[var(--moba-divider)] bg-white/70 p-3">
+      <section className="rounded-md border border-[var(--moba-divider)] bg-[var(--moba-panel-bg)] p-3">
         <div className="text-[12px] font-semibold mb-2">Terminal behavior</div>
         <div className="grid grid-cols-12 gap-x-3 gap-y-3 text-[12px]">
           <label className="col-span-12 md:col-span-4">
@@ -391,7 +391,7 @@ function ThemeCard({
       type="button"
       aria-label={`Use theme ${definition.name}`}
       data-selected={selected}
-      className="h-[74px] rounded-md border bg-white text-left p-2 flex items-center gap-2 hover:bg-[var(--moba-hover)]"
+      className="h-[74px] rounded-md border bg-[var(--moba-card-bg)] text-left p-2 flex items-center gap-2 hover:bg-[var(--moba-hover)]"
       style={{ borderColor }}
       onClick={onSelect}
     >

@@ -52,6 +52,21 @@
 - `pnpm build` passed. This verifies TypeScript and Vite production build output after the shared terminal settings UI refactor.
 - `cargo check` passed. This verifies the Rust command and new `font-kit` dependency compile with the Tauri backend.
 
+## Application Theme Extension
+
+- [x] Add global application theme modes: Light, Dark, Follow system.
+- [x] Persist the selected application theme mode in `localStorage`.
+- [x] Apply the resolved application theme to the root document with `data-app-theme`.
+- [x] Listen to `prefers-color-scheme` changes when Follow system is selected.
+- [x] Add application theme controls to global Settings.
+- [x] Add quick theme switching to the Welcome screen and top menu row.
+- [x] Add compact theme switching to the Session settings title bar.
+- [x] Update main chrome variables for menu bar, ribbon, quick connect, tabs, sidebar, status bar, cards, inputs, buttons, and context menus.
+- [x] Update Session settings and Authentication popups to use theme variables in dark mode.
+- [x] Update the status bar to display the current application theme mode.
+- [x] Verify application theme persistence and quick switchers with `pnpm test`.
+- [x] Verify TypeScript and production build with `pnpm build`.
+
 ## Notes
 
 - Browser APIs generally cannot enumerate all local fonts without extra permissions. In Tauri, the stable path is to enumerate fonts in Rust and expose a command to the frontend.
