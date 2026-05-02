@@ -23,6 +23,10 @@ interface FilePanelProps {
   onPaneFiles?: (files: File[]) => void;
   onCrossPaneDrop?: (entries: FileEntry[]) => void;
   acceptCrossPane?: boolean;
+  /** Optional substring filter typed by the user (case-insensitive). */
+  filterText?: string;
+  /** Mutator wired to the filter text input. */
+  onFilterTextChange?: (next: string) => void;
 }
 
 const SUPPORTED_PREVIEW_EXT = new Set([
@@ -42,6 +46,8 @@ export function FilePanel({
   onPaneFiles,
   onCrossPaneDrop,
   acceptCrossPane,
+  filterText,
+  onFilterTextChange,
 }: FilePanelProps) {
   const session = useSftpStore((s) => s.sessions[sessionId]);
   const navigate = useSftpStore((s) => s.navigate);
@@ -63,9 +69,13 @@ export function FilePanel({
 
   const sortedEntries = useMemo<FileEntry[]>(() => {
     if (!pane) return [];
-    const entries = showHidden
+    let entries = showHidden
       ? pane.entries
       : pane.entries.filter((e) => !e.isHidden);
+    if (filterText && filterText.trim()) {
+      const needle = filterText.trim().toLowerCase();
+      entries = entries.filter((e) => e.name.toLowerCase().includes(needle));
+    }
     const dir = sortDir === "asc" ? 1 : -1;
     return [...entries].sort((a, b) => {
       if (a.fileType === "dir" && b.fileType !== "dir") return -1;
@@ -84,7 +94,7 @@ export function FilePanel({
           return a.name.localeCompare(b.name) * dir;
       }
     });
-  }, [pane, sortKey, sortDir, showHidden]);
+  }, [pane, sortKey, sortDir, showHidden, filterText]);
 
   const onHeaderClick = useCallback(
     (key: typeof sortKey) => {
@@ -214,9 +224,23 @@ export function FilePanel({
 
   return (
     <div className="flex-1 min-w-0 flex flex-col min-h-0">
-      <div className="h-6 flex items-center px-2 text-[11px] font-semibold border-b shrink-0"
+      <div className="h-6 flex items-center px-2 text-[11px] font-semibold border-b shrink-0 gap-2"
         style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}>
-        <span className="truncate">{title}</span>
+        <span className="truncate flex-1">{title}</span>
+        {onFilterTextChange && (
+          <input
+            type="search"
+            value={filterText ?? ""}
+            placeholder="Filter…"
+            onChange={(e) => onFilterTextChange(e.target.value)}
+            className="moba-input h-4 px-1 text-[11px] w-[120px]"
+            style={{
+              background: "var(--moba-bg)",
+              border: "1px solid var(--moba-divider)",
+              color: "var(--moba-text)",
+            }}
+          />
+        )}
       </div>
       <FileToolbar
         canBack={pane.historyIndex > 0}

@@ -22,6 +22,7 @@ import { isTauriRuntime } from "../lib/runtime";
 import { openSftpWindow } from "../lib/sftp";
 import { parseSessionOptions } from "../lib/terminalProfile";
 import {
+  clearDetachedHandoff,
   detachedWindowUrl,
   writeDetachedHandoff,
 } from "../components/filebrowser/SftpDetachedWindow";
@@ -61,6 +62,7 @@ export function MainLayout() {
   const [showSessionEditor, setShowSessionEditor] = useState(false);
   const [editingSession, setEditingSession] = useState<SessionConfig | undefined>();
   const [newSessionGroupPath, setNewSessionGroupPath] = useState<string | null>(null);
+  const [newSessionInitialProto, setNewSessionInitialProto] = useState<string | undefined>();
   const [pendingAuth, setPendingAuth] = useState<PendingAuth | null>(null);
   const [attachedSidebars, setAttachedSidebars] = useState<Record<string, boolean>>({});
   const [terminalCwds, setTerminalCwds] = useState<Record<string, string>>({});
@@ -71,6 +73,16 @@ export function MainLayout() {
 
   const handleTerminalCwd = useCallback((tabId: string, cwd: string) => {
     setTerminalCwds((prev) => (prev[tabId] === cwd ? prev : { ...prev, [tabId]: cwd }));
+    // Mirror the new cwd to any same-origin window (e.g. a detached SFTP
+    // popup) so its FileBrowser can follow OSC 7 even though only the
+    // main window hosts the terminal. We publish under both the raw tab
+    // id AND the `attached-${tabId}` key, because a detached window that
+    // was split off from an attached SSH sidebar uses the prefixed id as
+    // its SFTP session id and would otherwise never see these updates.
+    void import("../lib/sftpSync").then(({ broadcastCwdHint }) => {
+      broadcastCwdHint(tabId, cwd);
+      broadcastCwdHint(`attached-${tabId}`, cwd);
+    });
   }, []);
 
   const openDetachedSftp = useCallback((params: SftpTabInfo, title: string) => {
@@ -78,8 +90,11 @@ export function MainLayout() {
     if (isTauriRuntime()) {
       // Native: open a real OS window via the Rust command. The handoff
       // payload was just written to localStorage above so the new window
-      // can read it on mount.
+      // can read it on mount. If launching the OS window fails we must
+      // wipe the handoff immediately — otherwise the credentials sit on
+      // disk for the rest of the run with no one waiting to consume them.
       void openSftpWindow(params.sessionId, title).catch((err) => {
+        clearDetachedHandoff(params.sessionId);
         setStatusMessage(`Could not open SFTP window: ${err instanceof Error ? err.message : err}`);
       });
       return;
@@ -88,6 +103,10 @@ export function MainLayout() {
     const features = "width=1200,height=760,resizable=yes,scrollbars=yes";
     const handle = window.open(url, `newmob_sftp_${params.sessionId}`, features);
     if (!handle) {
+      // Pop-up blocked — clean up the credential blob right away so it
+      // doesn't linger in localStorage waiting for a window that never
+      // arrives.
+      clearDetachedHandoff(params.sessionId);
       setStatusMessage("Browser blocked the SFTP window. Allow pop-ups for this site.");
     }
   }, [setStatusMessage]);
@@ -154,6 +173,14 @@ export function MainLayout() {
   const handleNewSession = useCallback((groupPath: string | null = null) => {
     setEditingSession(undefined);
     setNewSessionGroupPath(groupPath);
+    setNewSessionInitialProto(undefined);
+    setShowSessionEditor(true);
+  }, []);
+
+  const handleNewSftpSession = useCallback(() => {
+    setEditingSession(undefined);
+    setNewSessionGroupPath(null);
+    setNewSessionInitialProto("SFTP");
     setShowSessionEditor(true);
   }, []);
 
@@ -341,6 +368,9 @@ export function MainLayout() {
       case "new-session":
         handleNewSession();
         break;
+      case "new-sftp":
+        handleNewSftpSession();
+        break;
       case "new-terminal":
         openLocalTab();
         break;
@@ -391,6 +421,7 @@ export function MainLayout() {
   }, [
     activeTab,
     handleNewSession,
+    handleNewSftpSession,
     loadSessions,
     openLocalTab,
     openPlaceholderTab,
@@ -441,6 +472,7 @@ export function MainLayout() {
               <Sidebar
                 compact={sidebarCollapsed}
                 onNewSession={handleNewSession}
+                onNewSftpSession={handleNewSftpSession}
                 onEditSession={handleEditSession}
                 onConnectSession={handleConnectSession}
               />
@@ -589,10 +621,12 @@ export function MainLayout() {
         <SessionEditor
           session={editingSession}
           defaultGroupPath={newSessionGroupPath}
+          initialProto={newSessionInitialProto}
           onClose={() => {
             setShowSessionEditor(false);
             setEditingSession(undefined);
             setNewSessionGroupPath(null);
+            setNewSessionInitialProto(undefined);
           }}
         />
       )}

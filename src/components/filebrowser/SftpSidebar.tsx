@@ -25,10 +25,12 @@ export function SftpSidebar(props: SftpSidebarProps) {
   const session = useSftpStore((s) => s.sessions[props.sessionId]);
   const ensureSession = useSftpStore((s) => s.ensureSession);
   const attach = useSftpStore((s) => s.attach);
+  const detach = useSftpStore((s) => s.detach);
   const navigate = useSftpStore((s) => s.navigate);
   const setStatus = useAppStore((s) => s.setStatusMessage);
   const controller = useSftpController(props.sessionId);
   const [downloadPrompt, setDownloadPrompt] = useState<FileEntry | null>(null);
+  const [filterText, setFilterText] = useState("");
   // Per-view toggle: when on, the sidebar follows the terminal's reported
   // cwd (OSC 7). The user can turn it off to navigate freely without being
   // pulled back to whatever the shell last printed.
@@ -48,6 +50,17 @@ export function SftpSidebar(props: SftpSidebarProps) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sessionId]);
+
+  // Free the backend SFTP channel when the sidebar is dismissed (toggled
+  // off, terminal tab closed, or replaced with a detached window). The
+  // sidebar owns its own session id, so detaching here doesn't affect the
+  // standalone tab.
+  useEffect(() => {
+    const sid = props.sessionId;
+    return () => {
+      void detach(sid);
+    };
+  }, [props.sessionId, detach]);
 
   useEffect(() => {
     if (!followCwd) return;
@@ -83,6 +96,22 @@ export function SftpSidebar(props: SftpSidebarProps) {
         },
       });
       items.push({
+        label: "Permissions…",
+        onClick: () => {
+          const current = entry.mode != null
+            ? (entry.mode & 0o777).toString(8).padStart(3, "0")
+            : "644";
+          const input = window.prompt(`Octal mode for ${entry.name}`, current);
+          if (!input) return;
+          const mode = parseInt(input, 8);
+          if (!Number.isFinite(mode)) {
+            setStatus(`Invalid mode: ${input}`);
+            return;
+          }
+          void controller.chmod(entry.path, mode, "remote");
+        },
+      });
+      items.push({
         label: "Delete",
         onClick: () => {
           if (window.confirm(`Delete remote: ${entry.name}?`)) {
@@ -93,7 +122,7 @@ export function SftpSidebar(props: SftpSidebarProps) {
       });
       return items;
     },
-    [controller, session?.local.path],
+    [controller, session?.local.path, setStatus],
   );
 
   const remoteEmptyContext = useCallback(
@@ -103,6 +132,13 @@ export function SftpSidebar(props: SftpSidebarProps) {
         onClick: () => {
           const name = window.prompt("New folder name", "new-folder");
           if (name) void controller.mkdir(session?.remote.path ?? "/", name, "remote");
+        },
+      },
+      {
+        label: "New file…",
+        onClick: () => {
+          const name = window.prompt("New file name", "new-file.txt");
+          if (name) void controller.createFile(session?.remote.path ?? "/", name, "remote");
         },
       },
     ],
@@ -184,6 +220,8 @@ export function SftpSidebar(props: SftpSidebarProps) {
           onItemContext={remoteContext}
           onEmptyContext={remoteEmptyContext}
           onPaneFiles={handleFiles}
+          filterText={filterText}
+          onFilterTextChange={setFilterText}
         />
       </div>
       <FileTransferQueue

@@ -37,6 +37,9 @@ export function FileBrowser(props: FileBrowserProps) {
   // Per-view toggle that gates the OSC 7 follow effect below; the user can
   // disable it from the banner so the panel stays where they navigate.
   const [followCwd, setFollowCwd] = useState(true);
+  // Per-pane filter strings (case-insensitive substring match).
+  const [localFilter, setLocalFilter] = useState("");
+  const [remoteFilter, setRemoteFilter] = useState("");
 
   useEffect(() => {
     ensureSession(props.sessionId);
@@ -59,11 +62,18 @@ export function FileBrowser(props: FileBrowserProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sessionId]);
 
+  // Tear down the SFTP channel when this view is the last consumer of the
+  // session: the standalone tab and detached window each own their own
+  // session id, so unmounting the view should free the backend resources
+  // (channel handle + transfer registrations) that came with attach().
+  // The attached SFTP sidebar uses a *separate* sessionId so there is no
+  // risk of pulling the rug out from under a still-mounted terminal.
   useEffect(() => {
+    const sid = props.sessionId;
     return () => {
-      // detach is owned by the highest-level component; tab close triggers detach.
+      void detach(sid);
     };
-  }, []);
+  }, [props.sessionId, detach]);
 
   // Follow the terminal's cwd (OSC 7) when running in attached mode and the
   // user hasn't disabled the per-view follow toggle.
@@ -132,6 +142,22 @@ export function FileBrowser(props: FileBrowserProps) {
         },
       });
       items.push({
+        label: "Permissions…",
+        onClick: () => {
+          const current = entry.mode != null
+            ? (entry.mode & 0o777).toString(8).padStart(3, "0")
+            : "644";
+          const input = window.prompt(`Octal mode for ${entry.name}`, current);
+          if (!input) return;
+          const mode = parseInt(input, 8);
+          if (!Number.isFinite(mode)) {
+            setStatus(`Invalid mode: ${input}`);
+            return;
+          }
+          void controller.chmod(entry.path, mode, "local");
+        },
+      });
+      items.push({
         label: "Delete",
         onClick: () => {
           if (window.confirm(`Delete ${entry.name}?`)) {
@@ -174,6 +200,22 @@ export function FileBrowser(props: FileBrowserProps) {
         },
       });
       items.push({
+        label: "Permissions…",
+        onClick: () => {
+          const current = entry.mode != null
+            ? (entry.mode & 0o777).toString(8).padStart(3, "0")
+            : "644";
+          const input = window.prompt(`Octal mode for ${entry.name}`, current);
+          if (!input) return;
+          const mode = parseInt(input, 8);
+          if (!Number.isFinite(mode)) {
+            setStatus(`Invalid mode: ${input}`);
+            return;
+          }
+          void controller.chmod(entry.path, mode, "remote");
+        },
+      });
+      items.push({
         label: "Delete",
         onClick: () => {
           if (window.confirm(`Delete remote: ${entry.name}?`)) {
@@ -196,6 +238,13 @@ export function FileBrowser(props: FileBrowserProps) {
           if (name) void controller.mkdir(session?.local.path ?? "", name, "local");
         },
       },
+      {
+        label: "New file…",
+        onClick: () => {
+          const name = window.prompt("New file name", "new-file.txt");
+          if (name) void controller.createFile(session?.local.path ?? "", name, "local");
+        },
+      },
     ],
     [controller, session?.local.path],
   );
@@ -207,6 +256,13 @@ export function FileBrowser(props: FileBrowserProps) {
         onClick: () => {
           const name = window.prompt("New folder name", "new-folder");
           if (name) void controller.mkdir(session?.remote.path ?? "/", name, "remote");
+        },
+      },
+      {
+        label: "New file…",
+        onClick: () => {
+          const name = window.prompt("New file name", "new-file.txt");
+          if (name) void controller.createFile(session?.remote.path ?? "/", name, "remote");
         },
       },
     ],
@@ -321,6 +377,8 @@ export function FileBrowser(props: FileBrowserProps) {
               onPaneFiles={handleLocalFiles}
               acceptCrossPane
               onCrossPaneDrop={handleCrossPaneToLocal}
+              filterText={localFilter}
+              onFilterTextChange={setLocalFilter}
             />
           </Panel>
           <PanelResizeHandle className="w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize" />
@@ -337,6 +395,8 @@ export function FileBrowser(props: FileBrowserProps) {
               onPaneFiles={(files) => void handleLocalFiles(files)}
               acceptCrossPane
               onCrossPaneDrop={handleCrossPaneToRemote}
+              filterText={remoteFilter}
+              onFilterTextChange={setRemoteFilter}
             />
           </Panel>
         </PanelGroup>

@@ -762,10 +762,16 @@ function BookmarkSettings({
 interface SessionEditorProps {
   session?: SessionConfig;
   defaultGroupPath?: string | null;
+  /**
+   * Pre-select the protocol when creating a *new* session (no `session`
+   * prop). Accepts a session-type string (e.g. `"SFTP"`, `"SSH"`); falls
+   * back to SSH if unrecognized. Ignored when editing an existing session.
+   */
+  initialProto?: string;
   onClose: () => void;
 }
 
-export function SessionEditor({ session, defaultGroupPath = null, onClose }: SessionEditorProps) {
+export function SessionEditor({ session, defaultGroupPath = null, initialProto, onClose }: SessionEditorProps) {
   const { addSession, updateSession, removeSession, createFolderPath, sessions, groups } = useSessionStore();
   const isEdit = !!session;
 
@@ -773,7 +779,7 @@ export function SessionEditor({ session, defaultGroupPath = null, onClose }: Ses
 
   /* --- core fields --- */
   const [proto, setProto] = useState<Proto>(
-    sessionTypeToProto(session?.session_type),
+    session ? sessionTypeToProto(session.session_type) : sessionTypeToProto(initialProto),
   );
   const [section, setSection] = useState<SectionTab>("advanced");
   const [name, setName] = useState(session?.name ?? "");

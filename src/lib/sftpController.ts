@@ -5,6 +5,7 @@ import {
   listenSftpPaused,
   listenSftpProgress,
   sftpCancelTransfer,
+  sftpChmod,
   sftpDownload,
   sftpMkdir,
   sftpOpenPath,
@@ -14,6 +15,7 @@ import {
   sftpResumeTransfer,
   sftpUpload,
   sftpUploadBytes,
+  sftpWriteFileText,
   type FileEntry,
   type FsSide,
 } from "./sftp";
@@ -313,6 +315,37 @@ export function useSftpController(sessionId: string) {
     void size;
   }, [patchTransfer, sessionId, setStatus, startTransferTracking]);
 
+  const chmod = useCallback(
+    async (path: string, mode: number, side: FsSide) => {
+      try {
+        // Backend chmod is remote-only today; surface a friendly message
+        // rather than a silent no-op when the user picks a local entry.
+        if (side === "local") {
+          setStatus("Local chmod is not implemented in this MVP.");
+          return;
+        }
+        await sftpChmod(sessionId, path, mode);
+        await refreshPane(sessionId, side);
+      } catch (err) {
+        setStatus(`chmod failed: ${err instanceof Error ? err.message : err}`);
+      }
+    },
+    [refreshPane, sessionId, setStatus],
+  );
+
+  const createFile = useCallback(
+    async (parent: string, name: string, side: FsSide) => {
+      const target = joinPath(parent, name);
+      try {
+        await sftpWriteFileText(sessionId, target, side, "");
+        await refreshPane(sessionId, side);
+      } catch (err) {
+        setStatus(`Create file failed: ${err instanceof Error ? err.message : err}`);
+      }
+    },
+    [refreshPane, sessionId, setStatus],
+  );
+
   const encodedAuth = useCallback((value: string | null): string | null => {
     if (value == null) return null;
     return encodeBase64(value);
@@ -325,6 +358,8 @@ export function useSftpController(sessionId: string) {
     mkdir,
     remove,
     rename,
+    chmod,
+    createFile,
     cancelTransfer,
     pauseTransfer,
     resumeTransfer,

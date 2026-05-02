@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { FileBrowser } from "./FileBrowser";
 import { useAppTheme } from "../../lib/appTheme";
+import { subscribeCwdHint, getLatestCwdHint } from "../../lib/sftpSync";
 
 interface DetachedSftpParams {
   sessionId: string;
@@ -13,24 +14,69 @@ interface DetachedSftpParams {
   title?: string;
 }
 
-const STORAGE_PREFIX = "newmob.sftp.detached.";
+interface HandoffEnvelope {
+  payload: DetachedSftpParams;
+  /** Wall-clock time the handoff was written (ms). */
+  createdAt: number;
+}
 
-// We use localStorage (not sessionStorage) so a Tauri WebviewWindow opened
-// for a detached SFTP view can read the handoff written by the main window;
-// sessionStorage is per-WebContents and would otherwise be empty.
-export function readDetachedHandoff(sessionId: string): DetachedSftpParams | null {
+const STORAGE_PREFIX = "newmob.sftp.detached.";
+/**
+ * Maximum age of a credential handoff before we refuse to consume it.
+ * 60 s is comfortably long enough for any realistic
+ * `window.open` / `WebviewWindowBuilder` round-trip but short enough that
+ * a stranded entry (window blocked, user cancelled, app crashed) does not
+ * leave SFTP credentials sitting in `localStorage` indefinitely.
+ */
+const HANDOFF_TTL_MS = 60_000;
+
+/**
+ * Read the credential handoff for `sessionId` and **delete it immediately**.
+ * Entries older than `HANDOFF_TTL_MS` are treated as expired and discarded
+ * to keep stale credentials from lingering on disk.
+ *
+ * We use `localStorage` instead of `sessionStorage` because Tauri's
+ * `WebviewWindow` opened for a detached SFTP view runs as a fresh
+ * WebContents — its `sessionStorage` is empty even though it shares the
+ * origin. The compensating control is the one-shot delete + TTL below.
+ */
+export function consumeDetachedHandoff(sessionId: string): DetachedSftpParams | null {
+  const key = STORAGE_PREFIX + sessionId;
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(STORAGE_PREFIX + sessionId);
-    if (!raw) return null;
-    return JSON.parse(raw) as DetachedSftpParams;
+    raw = localStorage.getItem(key);
   } catch {
     return null;
   }
+  if (!raw) return null;
+  // Always remove first so the secret is on disk for the shortest possible
+  // window even if parsing throws.
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* noop */
+  }
+  let parsed: HandoffEnvelope | DetachedSftpParams;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  // Backwards-compat: tolerate a bare params blob (older builds).
+  if ((parsed as HandoffEnvelope).createdAt === undefined) {
+    return parsed as DetachedSftpParams;
+  }
+  const env = parsed as HandoffEnvelope;
+  if (Date.now() - env.createdAt > HANDOFF_TTL_MS) {
+    return null;
+  }
+  return env.payload;
 }
 
 export function writeDetachedHandoff(params: DetachedSftpParams): void {
   try {
-    localStorage.setItem(STORAGE_PREFIX + params.sessionId, JSON.stringify(params));
+    const env: HandoffEnvelope = { payload: params, createdAt: Date.now() };
+    localStorage.setItem(STORAGE_PREFIX + params.sessionId, JSON.stringify(env));
   } catch {
     /* noop */
   }
@@ -39,6 +85,37 @@ export function writeDetachedHandoff(params: DetachedSftpParams): void {
 export function clearDetachedHandoff(sessionId: string): void {
   try {
     localStorage.removeItem(STORAGE_PREFIX + sessionId);
+  } catch {
+    /* noop */
+  }
+}
+
+/**
+ * Sweep any expired handoff entries on app start.
+ *
+ * If a window-open attempt failed midway (browser blocked the popup, user
+ * dismissed an OS prompt, etc.) the credential blob would otherwise stay
+ * in `localStorage` forever. This belt-and-braces pass keeps that from
+ * happening across restarts.
+ */
+export function sweepExpiredHandoffs(): void {
+  try {
+    const now = Date.now();
+    for (let i = localStorage.length - 1; i >= 0; i -= 1) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(STORAGE_PREFIX)) continue;
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const parsed = JSON.parse(raw);
+        if (parsed?.createdAt && now - parsed.createdAt > HANDOFF_TTL_MS) {
+          localStorage.removeItem(key);
+        }
+      } catch {
+        // Malformed entry — drop it so it doesn't stay forever.
+        localStorage.removeItem(key);
+      }
+    }
   } catch {
     /* noop */
   }
@@ -68,7 +145,13 @@ export function detectDetachedSftpRoute(): string | null {
 export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
   const { mode, resolvedTheme } = useAppTheme();
   const [params, setParams] = useState<DetachedSftpParams | null>(() =>
-    readDetachedHandoff(sessionId),
+    consumeDetachedHandoff(sessionId),
+  );
+  // Latest cwd hint broadcast by the parent window (terminal OSC 7). Lets
+  // a detached SFTP view follow the live shell `cd` even though it can't
+  // see the terminal directly.
+  const [cwdHint, setCwdHint] = useState<string | null>(() =>
+    getLatestCwdHint(sessionId),
   );
 
   useEffect(() => {
@@ -82,18 +165,17 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
     if (params) return;
     const handler = (event: StorageEvent) => {
       if (event.key === STORAGE_PREFIX + sessionId && event.newValue) {
-        try {
-          setParams(JSON.parse(event.newValue) as DetachedSftpParams);
-        } catch {
-          /* ignore */
-        }
+        // Re-consume so we delete the entry and apply TTL. Don't trust the
+        // raw `event.newValue` directly.
+        const next = consumeDetachedHandoff(sessionId);
+        if (next) setParams(next);
       }
     };
     window.addEventListener("storage", handler);
-    // Poll as a fallback for browsers/runtimes where the storage event
-    // doesn't fire reliably between windows (e.g. some Tauri webviews).
+    // Poll as a fallback for runtimes where the storage event doesn't fire
+    // reliably between webviews (e.g. some Tauri builds).
     const id = window.setInterval(() => {
-      const next = readDetachedHandoff(sessionId);
+      const next = consumeDetachedHandoff(sessionId);
       if (next) {
         setParams(next);
         window.clearInterval(id);
@@ -104,6 +186,29 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
       window.clearInterval(id);
     };
   }, [sessionId, params]);
+
+  // Subscribe to live cwd updates from the main window so the panel
+  // follows OSC 7 even though we don't host a terminal here.
+  useEffect(() => {
+    return subscribeCwdHint((sid, cwd) => {
+      if (sid === sessionId) setCwdHint(cwd);
+    });
+  }, [sessionId]);
+
+  // Belt-and-braces: if the window is closed before we ever consumed the
+  // handoff (e.g. user cancelled mid-load), wipe it from `localStorage`
+  // so the secret doesn't sit on disk waiting for a future read.
+  useEffect(() => {
+    const onUnload = () => {
+      clearDetachedHandoff(sessionId);
+    };
+    window.addEventListener("beforeunload", onUnload);
+    window.addEventListener("pagehide", onUnload);
+    return () => {
+      window.removeEventListener("beforeunload", onUnload);
+      window.removeEventListener("pagehide", onUnload);
+    };
+  }, [sessionId]);
 
   const title = useMemo(
     () => `${params?.title ?? `SFTP ${sessionId}`}`,
@@ -145,6 +250,7 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
           authMethod={params.authMethod}
           authData={params.authData}
           initialPath={params.initialPath}
+          cwdHint={cwdHint}
           detachable={false}
         />
       </div>
