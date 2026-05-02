@@ -42,10 +42,18 @@ export type TransferState =
   | "error"
   | "cancelled";
 
+export type TransferKind = "file" | "dir";
+
 export interface TransferItem {
   id: string;
   sessionId: string;
   direction: TransferDirection;
+  /**
+   * Whether the source/dest is a single file or a directory tree. Stored
+   * explicitly (rather than inferred from `size`) so retries route to the
+   * correct backend command — empty files have `size: 0` too.
+   */
+  kind: TransferKind;
   localPath: string;
   remotePath: string;
   size: number;
@@ -157,8 +165,9 @@ export async function sftpChmod(
   sessionId: string,
   path: string,
   mode: number,
+  side: FsSide,
 ): Promise<void> {
-  return invoke("sftp_chmod", { sessionId, path, mode });
+  return invoke("sftp_chmod", { sessionId, path, mode, side });
 }
 
 export async function sftpRealpath(
@@ -197,6 +206,34 @@ export async function sftpDownload(
     remotePath,
     localPath,
     openAfter,
+  });
+}
+
+export async function sftpUploadDir(
+  sessionId: string,
+  transferId: string,
+  localPath: string,
+  remotePath: string,
+): Promise<void> {
+  return invoke("sftp_upload_dir", {
+    sessionId,
+    transferId,
+    localPath,
+    remotePath,
+  });
+}
+
+export async function sftpDownloadDir(
+  sessionId: string,
+  transferId: string,
+  remotePath: string,
+  localPath: string,
+): Promise<void> {
+  return invoke("sftp_download_dir", {
+    sessionId,
+    transferId,
+    remotePath,
+    localPath,
   });
 }
 

@@ -77,6 +77,8 @@ pub fn run() {
             filebrowser::sftp_write_file_text,
             filebrowser::sftp_upload,
             filebrowser::sftp_download,
+            filebrowser::sftp_upload_dir,
+            filebrowser::sftp_download_dir,
             filebrowser::sftp_upload_bytes,
             filebrowser::sftp_download_bytes,
             filebrowser::sftp_cancel_transfer,

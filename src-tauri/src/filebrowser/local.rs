@@ -131,6 +131,42 @@ pub fn write_bytes(path: &Path, data: &[u8]) -> Result<(), String> {
         .map_err(|e| format!("write {}: {}", path.display(), e))
 }
 
+#[cfg(unix)]
+pub fn chmod(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = fs::Permissions::from_mode(mode);
+    fs::set_permissions(path, perms)
+        .map_err(|e| format!("chmod {}: {}", path.display(), e))
+}
+
+#[cfg(not(unix))]
+pub fn chmod(_path: &Path, _mode: u32) -> Result<(), String> {
+    // POSIX permission bits don't map cleanly to Windows ACLs; expose the
+    // limitation to the caller instead of silently lying about success.
+    Err("chmod is only supported on Unix-like systems".to_string())
+}
+
+/// Recursively sum the byte size of every regular file under `path`.
+/// Symlinks and special files contribute 0 bytes. Used to give folder
+/// transfers an accurate "total bytes" up front for progress reporting.
+pub fn dir_size(path: &Path) -> Result<u64, String> {
+    let mut total: u64 = 0;
+    let read = fs::read_dir(path)
+        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    for item in read {
+        let entry = item.map_err(|e| format!("read entry: {}", e))?;
+        let p = entry.path();
+        let meta = fs::symlink_metadata(&p)
+            .map_err(|e| format!("stat {}: {}", p.display(), e))?;
+        if meta.file_type().is_dir() {
+            total = total.saturating_add(dir_size(&p)?);
+        } else if meta.file_type().is_file() {
+            total = total.saturating_add(meta.len());
+        }
+    }
+    Ok(total)
+}
+
 pub fn open_path(path: &Path) -> Result<(), String> {
     let cmd: (&str, Vec<&str>);
     let path_str = path.to_string_lossy().to_string();

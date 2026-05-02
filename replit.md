@@ -109,6 +109,31 @@ queue UI. The Rust transfer worker holds an `AtomicBool + tokio::Notify`
 that the chunk loop checks every block; pause emits
 `sftp-paused-{transferId}` so the UI can flip its badge immediately.
 
+**Folder transfers** are supported in both directions
+(`sftp_upload_dir` / `sftp_download_dir`). The backend pre-walks the
+tree (`local::dir_size` / `ActiveSftp::dir_size`) to compute an accurate
+total byte count, then walks again to copy each file while a shared
+`Arc<AtomicU64>` counter aggregates progress into the existing
+`sftp-progress-{id}` event stream. Cancel and pause are checked at every
+walk iteration and inside each file's chunk loop, so suspending in the
+middle of a deep tree (or between empty subdirs) takes effect promptly.
+`mkdir_idempotent` swallows "already exists" while preserving the
+original `create_dir` error message when the path also fails to stat as
+a directory. Symlinks and special files are skipped. The transfer queue
+records an explicit `kind: "file" | "dir"` at enqueue time so retries
+route to the correct command (the previous `size === 0` heuristic
+mis-classified empty files as directories). The browser-preview stubs
+return a friendly "not available in browser preview" error for both dir
+commands. `startTransferTracking` awaits listener registration before
+returning so any synchronous completion event from the stub layer
+cannot race past the listeners.
+
+**chmod** accepts a `side: FileSide` parameter and routes `Local` →
+`local::chmod` (Unix-only via `PermissionsExt`; non-Unix returns an
+explicit error) and `Remote` → SFTP `setstat`. The browser-preview stub
+no-ops the local case because the in-memory VFS does not track POSIX
+permission bits.
+
 A small `BroadcastChannel` (`newmob.sftp.sync`, see `src/lib/sftpSync.ts`)
 mirrors the in-memory transfer queue across same-origin windows so a
 detached SFTP window and the main app see the same upload/download list.

@@ -177,10 +177,16 @@ pub async fn sftp_chmod(
     session_id: String,
     path: String,
     mode: u32,
+    side: FileSide,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let session = get_session(&state, &session_id).await?;
-    session.chmod(&path, mode).await
+    match side {
+        FileSide::Local => local::chmod(Path::new(&path), mode),
+        FileSide::Remote => {
+            let session = get_session(&state, &session_id).await?;
+            session.chmod(&path, mode).await
+        }
+    }
 }
 
 #[tauri::command]
@@ -352,6 +358,76 @@ pub async fn sftp_download(
             }
             transfer::CompletePayload::ok(Some(final_path.clone()))
         }
+        Err(e) => transfer::CompletePayload::err(e),
+    };
+    let _ = app.emit(&format!("sftp-transfer-complete-{}", transfer_id), payload);
+    result
+}
+
+#[tauri::command]
+pub async fn sftp_upload_dir(
+    session_id: String,
+    transfer_id: String,
+    local_path: String,
+    remote_path: String,
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let session = get_session(&state, &session_id).await?;
+    let handle = transfer::register(&state, &transfer_id).await;
+    let local = PathBuf::from(&local_path);
+    // Frontend (sftpController.upload) passes the full destination path; if
+    // the caller provides a trailing-separator hint, append the local dir
+    // basename so the source folder is materialised inside `remote_path`.
+    let dest = if remote_path.ends_with('/') || remote_path.is_empty() {
+        sftp::join_remote(&remote_path, file_name(&local))
+    } else {
+        remote_path.clone()
+    };
+    let app = app_handle.clone();
+    let result = session
+        .upload_dir(&local, &dest, transfer_id.clone(), handle.clone(), app.clone())
+        .await;
+    transfer::unregister(&state, &transfer_id).await;
+    let payload = match &result {
+        Ok(_) => transfer::CompletePayload::ok(Some(dest)),
+        Err(e) => transfer::CompletePayload::err(e),
+    };
+    let _ = app.emit(&format!("sftp-transfer-complete-{}", transfer_id), payload);
+    result
+}
+
+#[tauri::command]
+pub async fn sftp_download_dir(
+    session_id: String,
+    transfer_id: String,
+    remote_path: String,
+    local_path: String,
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let session = get_session(&state, &session_id).await?;
+    let handle = transfer::register(&state, &transfer_id).await;
+    let dest = {
+        let raw = PathBuf::from(&local_path);
+        let needs_basename = local_path.is_empty()
+            || local_path.ends_with('/')
+            || local_path.ends_with('\\')
+            || raw.is_dir();
+        if needs_basename {
+            raw.join(remote_basename(&remote_path))
+        } else {
+            raw
+        }
+    };
+    let app = app_handle.clone();
+    let result = session
+        .download_dir(&remote_path, &dest, transfer_id.clone(), handle.clone(), app.clone())
+        .await;
+    transfer::unregister(&state, &transfer_id).await;
+    let final_path = dest.to_string_lossy().to_string();
+    let payload = match &result {
+        Ok(_) => transfer::CompletePayload::ok(Some(final_path)),
         Err(e) => transfer::CompletePayload::err(e),
     };
     let _ = app.emit(&format!("sftp-transfer-complete-{}", transfer_id), payload);

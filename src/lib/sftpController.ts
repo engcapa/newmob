@@ -7,6 +7,7 @@ import {
   sftpCancelTransfer,
   sftpChmod,
   sftpDownload,
+  sftpDownloadDir,
   sftpMkdir,
   sftpOpenPath,
   sftpPauseTransfer,
@@ -15,6 +16,7 @@ import {
   sftpResumeTransfer,
   sftpUpload,
   sftpUploadBytes,
+  sftpUploadDir,
   sftpWriteFileText,
   type FileEntry,
   type FsSide,
@@ -37,55 +39,55 @@ export function useSftpController(sessionId: string) {
   const setTransferState = useTransferStore((s) => s.setState);
 
   const startTransferTracking = useCallback(
-    (transferId: string, refreshSide: PaneSide) => {
+    async (transferId: string, refreshSide: PaneSide) => {
+      // We must await listener registration BEFORE returning, otherwise a
+      // backend (or stub) that emits the completion event synchronously can
+      // race past the listeners and leave the queue row stuck as "queued".
       let unlistenProgress: (() => void) | null = null;
       let unlistenComplete: (() => void) | null = null;
       let unlistenPaused: (() => void) | null = null;
 
-      void listenSftpProgress(transferId, (payload) => {
-        patchTransfer(transferId, {
-          bytes: payload.bytes,
-          size: payload.total || undefined,
-          rate: payload.rate,
-          eta: payload.eta,
-          state: "running",
-        });
-      }).then((u) => {
-        unlistenProgress = u;
-      });
-
-      void listenSftpPaused(transferId, (payload) => {
-        // Backend pinged us that the worker is now suspended; mirror that
-        // into the UI so the badge flips from "running" to "paused".
-        patchTransfer(transferId, {
-          bytes: payload.bytes,
-          rate: 0,
-          eta: 0,
-          state: "paused",
-        });
-      }).then((u) => {
-        unlistenPaused = u;
-      });
-
-      void listenSftpComplete(transferId, (payload) => {
-        if (payload.success) {
-          setTransferState(transferId, "done");
-          setStatus(`Transfer complete: ${transferId}`);
-          void refreshPane(sessionId, refreshSide);
-        } else {
-          const isCancel = (payload.error || "").toLowerCase().includes("cancel");
-          setTransferState(
-            transferId,
-            isCancel ? "cancelled" : "error",
-            payload.error ?? "transfer failed",
-          );
-        }
-        unlistenProgress?.();
-        unlistenComplete?.();
-        unlistenPaused?.();
-      }).then((u) => {
-        unlistenComplete = u;
-      });
+      const [progressUnlisten, pausedUnlisten, completeUnlisten] = await Promise.all([
+        listenSftpProgress(transferId, (payload) => {
+          patchTransfer(transferId, {
+            bytes: payload.bytes,
+            size: payload.total || undefined,
+            rate: payload.rate,
+            eta: payload.eta,
+            state: "running",
+          });
+        }),
+        listenSftpPaused(transferId, (payload) => {
+          // Backend pinged us that the worker is now suspended; mirror that
+          // into the UI so the badge flips from "running" to "paused".
+          patchTransfer(transferId, {
+            bytes: payload.bytes,
+            rate: 0,
+            eta: 0,
+            state: "paused",
+          });
+        }),
+        listenSftpComplete(transferId, (payload) => {
+          if (payload.success) {
+            setTransferState(transferId, "done");
+            setStatus(`Transfer complete: ${transferId}`);
+            void refreshPane(sessionId, refreshSide);
+          } else {
+            const isCancel = (payload.error || "").toLowerCase().includes("cancel");
+            setTransferState(
+              transferId,
+              isCancel ? "cancelled" : "error",
+              payload.error ?? "transfer failed",
+            );
+          }
+          unlistenProgress?.();
+          unlistenComplete?.();
+          unlistenPaused?.();
+        }),
+      ]);
+      unlistenProgress = progressUnlisten;
+      unlistenPaused = pausedUnlisten;
+      unlistenComplete = completeUnlisten;
     },
     [patchTransfer, refreshPane, sessionId, setStatus, setTransferState],
   );
@@ -96,29 +98,36 @@ export function useSftpController(sessionId: string) {
       remoteDir: string,
       opts: TransferStartOpts = {},
     ) => {
-      if (entry.fileType === "dir") {
-        setStatus("Folder upload is not supported in this MVP.");
-        return;
-      }
+      const isDir = entry.fileType === "dir";
       const transferId = newTransferId();
       const remotePath = joinPath(remoteDir, entry.name);
       addTransfer({
         id: transferId,
         sessionId,
         direction: "upload",
+        kind: isDir ? "dir" : "file",
         localPath: entry.path,
         remotePath,
-        size: entry.size,
+        // For folders the backend pre-walks to compute the byte total and
+        // emits an initial 0/total progress frame; seed `size: 0` so the UI
+        // doesn't briefly show a misleading "directory size" reading.
+        size: isDir ? 0 : entry.size,
         bytes: 0,
         rate: 0,
         eta: 0,
         state: "queued",
         startedAt: Date.now(),
-        openAfter: opts.openAfter,
+        openAfter: isDir ? false : opts.openAfter,
       });
-      startTransferTracking(transferId, "remote");
+      // Await listener registration so any synchronous completion event from
+      // the stub layer cannot race past the listeners.
+      await startTransferTracking(transferId, "remote");
       try {
-        await sftpUpload(sessionId, transferId, entry.path, remotePath, !!opts.openAfter);
+        if (isDir) {
+          await sftpUploadDir(sessionId, transferId, entry.path, remotePath);
+        } else {
+          await sftpUpload(sessionId, transferId, entry.path, remotePath, !!opts.openAfter);
+        }
       } catch (err) {
         setStatus(`Upload failed: ${err instanceof Error ? err.message : err}`);
       }
@@ -137,6 +146,7 @@ export function useSftpController(sessionId: string) {
         id: transferId,
         sessionId,
         direction: "upload",
+        kind: "file",
         localPath: `OS:${file.name}`,
         remotePath,
         size: file.size,
@@ -146,7 +156,7 @@ export function useSftpController(sessionId: string) {
         state: "queued",
         startedAt: Date.now(),
       });
-      startTransferTracking(transferId, "remote");
+      await startTransferTracking(transferId, "remote");
       try {
         const arrayBuffer = await file.arrayBuffer();
         const bytes = new Uint8Array(arrayBuffer);
@@ -173,34 +183,38 @@ export function useSftpController(sessionId: string) {
       localDir: string,
       opts: TransferStartOpts = {},
     ) => {
-      if (entry.fileType === "dir") {
-        setStatus("Folder download is not supported in this MVP.");
-        return;
-      }
+      const isDir = entry.fileType === "dir";
       const transferId = newTransferId();
       const localPath = joinPath(localDir, entry.name);
       addTransfer({
         id: transferId,
         sessionId,
         direction: "download",
+        kind: isDir ? "dir" : "file",
         localPath,
         remotePath: entry.path,
-        size: entry.size,
+        // Same reasoning as the upload path: the backend pre-walks the remote
+        // tree to derive an accurate total before any bytes are emitted.
+        size: isDir ? 0 : entry.size,
         bytes: 0,
         rate: 0,
         eta: 0,
         state: "queued",
         startedAt: Date.now(),
-        openAfter: opts.openAfter,
+        openAfter: isDir ? false : opts.openAfter,
       });
-      startTransferTracking(transferId, "local");
+      await startTransferTracking(transferId, "local");
       try {
-        await sftpDownload(sessionId, transferId, entry.path, localPath, !!opts.openAfter);
-        if (opts.openAfter && isTauriRuntime()) {
-          try {
-            await sftpOpenPath(localPath);
-          } catch (err) {
-            setStatus(`Saved to ${localPath}, but could not open it: ${err}`);
+        if (isDir) {
+          await sftpDownloadDir(sessionId, transferId, entry.path, localPath);
+        } else {
+          await sftpDownload(sessionId, transferId, entry.path, localPath, !!opts.openAfter);
+          if (opts.openAfter && isTauriRuntime()) {
+            try {
+              await sftpOpenPath(localPath);
+            } catch (err) {
+              setStatus(`Saved to ${localPath}, but could not open it: ${err}`);
+            }
           }
         }
       } catch (err) {
@@ -283,7 +297,11 @@ export function useSftpController(sessionId: string) {
   const retryTransfer = useCallback(async (transferId: string) => {
     const item = useTransferStore.getState().byId(transferId);
     if (!item) return;
-    const { direction, remotePath, localPath, size, openAfter } = item;
+    const { direction, remotePath, localPath, kind, openAfter } = item;
+    // Use the explicit `kind` recorded at enqueue time. The previous
+    // `size === 0` heuristic mis-classified legitimate empty files as
+    // directories and routed them through the dir command.
+    const isDir = kind === "dir";
     // Reset the existing row instead of stacking duplicates so the user keeps
     // a clean history of one entry per logical file.
     patchTransfer(transferId, {
@@ -295,36 +313,37 @@ export function useSftpController(sessionId: string) {
       startedAt: Date.now(),
       finishedAt: null,
     });
-    startTransferTracking(transferId, direction === "upload" ? "remote" : "local");
+    await startTransferTracking(transferId, direction === "upload" ? "remote" : "local");
     try {
       if (direction === "upload") {
-        await sftpUpload(sessionId, transferId, localPath, remotePath, !!openAfter);
+        if (isDir) {
+          await sftpUploadDir(sessionId, transferId, localPath, remotePath);
+        } else {
+          await sftpUpload(sessionId, transferId, localPath, remotePath, !!openAfter);
+        }
       } else {
-        await sftpDownload(sessionId, transferId, remotePath, localPath, !!openAfter);
-        if (openAfter && isTauriRuntime()) {
-          try {
-            await sftpOpenPath(localPath);
-          } catch (err) {
-            setStatus(`Saved to ${localPath}, but could not open it: ${err}`);
+        if (isDir) {
+          await sftpDownloadDir(sessionId, transferId, remotePath, localPath);
+        } else {
+          await sftpDownload(sessionId, transferId, remotePath, localPath, !!openAfter);
+          if (openAfter && isTauriRuntime()) {
+            try {
+              await sftpOpenPath(localPath);
+            } catch (err) {
+              setStatus(`Saved to ${localPath}, but could not open it: ${err}`);
+            }
           }
         }
       }
     } catch (err) {
       setStatus(`Retry failed: ${err instanceof Error ? err.message : err}`);
     }
-    void size;
   }, [patchTransfer, sessionId, setStatus, startTransferTracking]);
 
   const chmod = useCallback(
     async (path: string, mode: number, side: FsSide) => {
       try {
-        // Backend chmod is remote-only today; surface a friendly message
-        // rather than a silent no-op when the user picks a local entry.
-        if (side === "local") {
-          setStatus("Local chmod is not implemented in this MVP.");
-          return;
-        }
-        await sftpChmod(sessionId, path, mode);
+        await sftpChmod(sessionId, path, mode, side);
         await refreshPane(sessionId, side);
       } catch (err) {
         setStatus(`chmod failed: ${err instanceof Error ? err.message : err}`);

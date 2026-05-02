@@ -295,12 +295,32 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       return entry as T;
     }
     case "sftp_chmod": {
+      const side = (args?.side as string) ?? "remote";
+      if (side === "local") {
+        // The browser preview's local "FS" is the in-memory VFS, which does
+        // not track POSIX permission bits. Treat chmod as a successful no-op
+        // so the UI flow matches the desktop build.
+        return undefined as T;
+      }
       await sftpChmodRemote(
         args?.sessionId as string,
         args?.path as string,
         args?.mode as number,
       );
       return undefined as T;
+    }
+    case "sftp_upload_dir":
+    case "sftp_download_dir": {
+      // Folder transfers require a recursive walk over the SFTP bridge that
+      // the browser-preview proxy does not expose. Surface a friendly error
+      // and emit a completion frame so the queue row finalises.
+      const transferId = args?.transferId as string;
+      const message = "Folder transfers are not available in browser preview. Try the desktop build.";
+      void emit(`sftp-transfer-complete-${transferId}`, {
+        success: false,
+        error: message,
+      });
+      throw new Error(message);
     }
     case "sftp_realpath": {
       const path = await sftpRealpathRemote(args?.sessionId as string, args?.path as string);
