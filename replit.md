@@ -21,7 +21,31 @@ A cross-platform SSH/terminal client inspired by MobaXterm, built with React + V
   - `stubs/` — Browser stubs for Tauri APIs (tauri-core, tauri-window, tauri-event, tauri-shell)
 - `src-tauri/` — Original Tauri/Rust backend (not used in browser mode)
 
-## Browser Adaptation
+## Project Principle
+
+**The final release target is the Tauri 2 + Rust desktop app.** The Vite/web mode
+that runs on Replit (and `pnpm dev` / `pnpm build` in general) exists **only**
+for development convenience and visual testing in the browser. Anything added
+purely to make the web preview work (browser stubs, the WebSocket SSH proxy,
+etc.) **must not** alter or pollute the desktop build pipeline.
+
+## Build Mode Detection
+
+`vite.config.ts` checks `process.env.TAURI_ENV_PLATFORM` to decide which mode it
+is in. The Tauri CLI sets this env var automatically whenever it invokes the
+frontend build (`pnpm tauri dev` / `pnpm tauri build`).
+
+- **Tauri mode** (`TAURI_ENV_PLATFORM` is set): no stub aliases, no SSH proxy
+  plugin. The frontend imports the real `@tauri-apps/api` and talks to the Rust
+  backend (`russh`, etc.).
+- **Web mode** (env var unset, e.g. plain `pnpm dev` / `pnpm build` on Replit):
+  stub aliases for `@tauri-apps/api/*` are applied and the WebSocket SSH proxy
+  Vite plugin is registered.
+
+`ssh2` and `ws` are listed under `devDependencies`, not `dependencies`, so they
+never ship inside the desktop bundle.
+
+## Browser Adaptation (web mode only)
 
 Since Tauri's native backend is not available in the browser, stub modules are used:
 
@@ -33,8 +57,9 @@ Since Tauri's native backend is not available in the browser, stub modules are u
 
 These stubs are aliased via `vite.config.ts` at build time.
 
-## Real SSH in the Browser (WebSocket proxy)
+## Real SSH in the Browser (WebSocket proxy, web mode only)
 
+This whole subsystem is dev-only and is **not** part of the Tauri desktop release.
 The Vite dev server hosts an SSH proxy alongside it so the browser preview can talk to real SSH servers:
 
 - **`vite-plugins/sshProxy.ts`** — A Vite plugin that attaches a `ws.WebSocketServer` (noServer mode) to Vite's HTTP server's `upgrade` event, listening on path `/__newmob/ssh-bridge`. For each WS connection it spins up an `ssh2.Client`, opens an interactive shell, and pipes bytes both ways (binary frames are base64-encoded inside small JSON envelopes).
