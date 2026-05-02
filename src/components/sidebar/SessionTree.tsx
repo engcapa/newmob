@@ -23,7 +23,16 @@ import {
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAppStore } from "../../stores/appStore";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
-import type { AuthMethod, SessionConfig, SessionGroup } from "../../lib/ipc";
+import type { SessionConfig, SessionGroup } from "../../lib/ipc";
+import {
+  parseCsvSessions,
+  parseMobaXtermSessions,
+  parseNewMobSessions,
+  serializeMobaXtermSessions,
+  serializeNewMobSessions,
+  type SessionExportResult,
+  type SessionImportResult,
+} from "../../lib/sessionImportExport";
 import {
   SESSION_ROOT_LABEL,
   ancestorGroupPaths,
@@ -49,17 +58,6 @@ interface FolderNode {
   folders: FolderNode[];
   sessions: SessionConfig[];
 }
-
-const DEFAULT_PORTS: Record<string, number> = {
-  SSH: 22,
-  Telnet: 23,
-  RDP: 3389,
-  VNC: 5900,
-  FTP: 21,
-  SFTP: 22,
-  Serial: 0,
-  LocalShell: 0,
-};
 
 export function SessionTree({ onNewSession, onConnectSession, onEditSession }: SessionTreeProps) {
   const {
@@ -176,19 +174,17 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
   const exportFolder = (folderPath: string | null) => {
     const folderSessions = sessionsInFolder(sessions, folderPath);
     const label = folderOptionLabel(folderPath);
-    const payload = {
-      version: 1,
-      folder: label,
-      exported_at: new Date().toISOString(),
-      sessions: folderSessions,
-    };
+    const result = serializeNewMobSessions(folderSessions, folderPath);
+    downloadTextFile(result.filename, result.text, result.mimeType);
+    reportExportResult("NewMob", result, folderSessions.length, label);
+  };
 
-    downloadTextFile(
-      `${slugify(label)}.newmob-sessions.json`,
-      JSON.stringify(payload, null, 2),
-      "application/json",
-    );
-    setStatusMessage(`Exported ${folderSessions.length} session${folderSessions.length === 1 ? "" : "s"} from ${label}`);
+  const exportMobaFolder = (folderPath: string | null) => {
+    const folderSessions = sessionsInFolder(sessions, folderPath);
+    const label = folderOptionLabel(folderPath);
+    const result = serializeMobaXtermSessions(folderSessions, folderPath);
+    downloadTextFile(result.filename, result.text, result.mimeType);
+    reportExportResult("MobaXterm", result, folderSessions.length - result.skipped, label);
   };
 
   const generateHtml = (folderPath: string | null) => {
@@ -229,19 +225,17 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
 
   const importJson = (folderPath: string | null) => {
     openTextFile(".json,.newmob-sessions.json,application/json", async (text) => {
-      const parsed = JSON.parse(text) as unknown;
-      const rows = Array.isArray(parsed)
-        ? parsed
-        : Array.isArray((parsed as { sessions?: unknown }).sessions)
-          ? (parsed as { sessions: unknown[] }).sessions
-          : null;
+      const result = parseNewMobSessions(text, { targetFolder: folderPath, existingSessions: sessions });
+      await applyImportResult(result, folderPath, "NewMob");
+    }).catch((error) => {
+      window.alert(error instanceof Error ? error.message : String(error));
+    });
+  };
 
-      if (!rows) throw new Error("The selected file does not contain a sessions array.");
-      const now = Math.floor(Date.now() / 1000);
-      const imported = rows.map((row) => toImportedSession(row, folderPath, now));
-      await importSessions(imported);
-      expandPath(folderPath);
-      setStatusMessage(`Imported ${imported.length} session${imported.length === 1 ? "" : "s"} into ${folderOptionLabel(folderPath)}`);
+  const importMoba = (folderPath: string | null) => {
+    openBinaryFile(".mxtsessions,.moba,text/plain,application/octet-stream", async (bytes) => {
+      const result = parseMobaXtermSessions(bytes, { targetFolder: folderPath, existingSessions: sessions });
+      await applyImportResult(result, folderPath, "MobaXterm");
     }).catch((error) => {
       window.alert(error instanceof Error ? error.message : String(error));
     });
@@ -249,23 +243,55 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
 
   const importCsv = (folderPath: string | null) => {
     openTextFile(".csv,text/csv", async (text) => {
-      const rows = parseCsv(text);
-      if (rows.length === 0) throw new Error("The selected CSV file is empty.");
-
-      const headers = rows[0].map((header) => header.trim().toLowerCase());
-      const hasHeader = ["name", "session_type", "type", "host"].some((key) => headers.includes(key));
-      const dataRows = hasHeader ? rows.slice(1) : rows;
-      const now = Math.floor(Date.now() / 1000);
-      const imported = dataRows
-        .filter((row) => row.some((cell) => cell.trim()))
-        .map((row) => csvRowToSession(row, hasHeader ? headers : null, folderPath, now));
-
-      await importSessions(imported);
-      expandPath(folderPath);
-      setStatusMessage(`Imported ${imported.length} CSV session${imported.length === 1 ? "" : "s"} into ${folderOptionLabel(folderPath)}`);
+      const result = parseCsvSessions(text, { targetFolder: folderPath, existingSessions: sessions });
+      await applyImportResult(result, folderPath, "CSV");
     }).catch((error) => {
       window.alert(error instanceof Error ? error.message : String(error));
     });
+  };
+
+  const applyImportResult = async (
+    result: SessionImportResult,
+    folderPath: string | null,
+    source: string,
+  ) => {
+    if (result.sessions.length > 0) {
+      await importSessions(result.sessions);
+      expandPath(folderPath);
+    }
+    reportImportResult(source, result, folderPath);
+  };
+
+  const reportImportResult = (
+    source: string,
+    result: SessionImportResult,
+    folderPath: string | null,
+  ) => {
+    const target = folderOptionLabel(folderPath);
+    const count = result.sessions.length;
+    const skipped = result.skipped ? `, skipped ${result.skipped}` : "";
+    const warningSuffix = result.warnings.length ? `, ${result.warnings.length} warning${result.warnings.length === 1 ? "" : "s"}` : "";
+    setStatusMessage(`Imported ${count} ${source} session${count === 1 ? "" : "s"} into ${target}${skipped}${warningSuffix}`);
+    reportWarnings(result.warnings);
+  };
+
+  const reportExportResult = (
+    format: string,
+    result: SessionExportResult,
+    count: number,
+    label: string,
+  ) => {
+    const skipped = result.skipped ? `, skipped ${result.skipped}` : "";
+    const warningSuffix = result.warnings.length ? `, ${result.warnings.length} warning${result.warnings.length === 1 ? "" : "s"}` : "";
+    setStatusMessage(`Exported ${count} ${format} session${count === 1 ? "" : "s"} from ${label}${skipped}${warningSuffix}`);
+    reportWarnings(result.warnings);
+  };
+
+  const reportWarnings = (warnings: string[]) => {
+    if (warnings.length === 0) return;
+    const shown = warnings.slice(0, 8);
+    const more = warnings.length > shown.length ? `\n...and ${warnings.length - shown.length} more warning${warnings.length - shown.length === 1 ? "" : "s"}.` : "";
+    window.alert(`${shown.join("\n")}${more}`);
   };
 
   const executeFolder = (folderPath: string | null) => {
@@ -299,11 +325,18 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
       icon: <TerminalIcon className="w-3 h-3" />,
       onClick: () => unavailable(`Import ${label}`),
     }));
-    importChildren.push({
-      label: "Import sessions from a CSV file",
-      icon: <FileText className="w-3 h-3" />,
-      onClick: () => importCsv(folderPath),
+    importChildren.unshift({
+      label: "Import MobaXterm sessions",
+      icon: <Upload className="w-3 h-3" />,
+      onClick: () => importMoba(folderPath),
     });
+    importChildren.push(
+      {
+        label: "Import sessions from a CSV file",
+        icon: <FileText className="w-3 h-3" />,
+        onClick: () => importCsv(folderPath),
+      },
+    );
 
     ctx.show(e, [
       { label: "New session", icon: <Plus className="w-3 h-3" />, onClick: () => onNewSession?.(toStoredGroupPath(folderPath)) },
@@ -312,8 +345,9 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
       { label: "Delete folder", icon: <Trash2 className="w-3 h-3" />, danger: true, disabled: isRoot, onClick: () => normalized && void deleteFolder(normalized) },
       { label: "Create a desktop shortcut", icon: <Star className="w-3 h-3" />, onClick: () => unavailable("Create a desktop shortcut") },
       { label: "", separator: true },
-      { label: "Import sessions into this folder", icon: <Upload className="w-3 h-3" />, onClick: () => importJson(folderPath) },
-      { label: "Export sessions from this folder", icon: <Download className="w-3 h-3" />, disabled: folderSessions.length === 0, onClick: () => exportFolder(folderPath) },
+      { label: "Import NewMob sessions", icon: <Upload className="w-3 h-3" />, onClick: () => importJson(folderPath) },
+      { label: "Export NewMob sessions", icon: <Download className="w-3 h-3" />, disabled: folderSessions.length === 0, onClick: () => exportFolder(folderPath) },
+      { label: "Export MobaXterm sessions", icon: <Download className="w-3 h-3" />, disabled: folderSessions.length === 0, onClick: () => exportMobaFolder(folderPath) },
       { label: "Import sessions from third-party programs", icon: <Upload className="w-3 h-3" />, children: importChildren },
       { label: "Generate HTML web page", icon: <FileText className="w-3 h-3" />, disabled: folderSessions.length === 0, onClick: () => generateHtml(folderPath) },
       { label: "", separator: true },
@@ -696,119 +730,6 @@ function filterSessions(sessions: SessionConfig[], query: string): SessionConfig
   });
 }
 
-function toImportedSession(row: unknown, folderPath: string | null, now: number): SessionConfig {
-  const source = row && typeof row === "object" ? row as Partial<SessionConfig> : {};
-  const sessionType = sanitizeSessionType(source.session_type);
-  const host = typeof source.host === "string" ? source.host : "";
-  const username = typeof source.username === "string" && source.username.trim() ? source.username : null;
-  const name = typeof source.name === "string" && source.name.trim()
-    ? source.name
-    : host || sessionType;
-
-  return {
-    id: crypto.randomUUID(),
-    name,
-    session_type: sessionType,
-    group_path: toStoredGroupPath(folderPath),
-    host,
-    port: Number(source.port) || DEFAULT_PORTS[sessionType] || 0,
-    username,
-    auth_method: sanitizeAuthMethod(source.auth_method),
-    options_json: typeof source.options_json === "string" ? source.options_json : "{}",
-    created_at: now,
-    updated_at: now,
-    last_connected_at: null,
-    sort_order: Number(source.sort_order) || 0,
-  };
-}
-
-function csvRowToSession(
-  row: string[],
-  headers: string[] | null,
-  folderPath: string | null,
-  now: number,
-): SessionConfig {
-  const get = (name: string, index: number) => {
-    if (!headers) return row[index] ?? "";
-    const headerIndex = headers.indexOf(name);
-    return headerIndex >= 0 ? row[headerIndex] ?? "" : "";
-  };
-  const typeValue = get("session_type", 1) || get("type", 1) || "SSH";
-  const sessionType = sanitizeSessionType(typeValue);
-  const host = get("host", 2).trim();
-  const name = get("name", 0).trim() || host || sessionType;
-  const username = get("username", 4).trim() || get("user", 4).trim() || null;
-  const port = Number(get("port", 3)) || DEFAULT_PORTS[sessionType] || 0;
-
-  return {
-    id: crypto.randomUUID(),
-    name,
-    session_type: sessionType,
-    group_path: toStoredGroupPath(folderPath),
-    host,
-    port,
-    username,
-    auth_method: "Password",
-    options_json: "{}",
-    created_at: now,
-    updated_at: now,
-    last_connected_at: null,
-    sort_order: 0,
-  };
-}
-
-function sanitizeSessionType(value: unknown): string {
-  const type = typeof value === "string" ? value : "SSH";
-  return Object.prototype.hasOwnProperty.call(DEFAULT_PORTS, type) ? type : "SSH";
-}
-
-function sanitizeAuthMethod(value: unknown): AuthMethod {
-  if (value === "Password" || value === "Agent" || value === "None") return value;
-  if (
-    value &&
-    typeof value === "object" &&
-    "PrivateKey" in value &&
-    typeof (value as { PrivateKey?: { key_path?: unknown } }).PrivateKey?.key_path === "string"
-  ) {
-    return { PrivateKey: { key_path: (value as { PrivateKey: { key_path: string } }).PrivateKey.key_path } };
-  }
-  return "Password";
-}
-
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-
-  for (let i = 0; i < text.length; i++) {
-    const char = text[i];
-    const next = text[i + 1];
-
-    if (char === '"' && quoted && next === '"') {
-      cell += '"';
-      i++;
-    } else if (char === '"') {
-      quoted = !quoted;
-    } else if (char === "," && !quoted) {
-      row.push(cell);
-      cell = "";
-    } else if ((char === "\n" || char === "\r") && !quoted) {
-      if (char === "\r" && next === "\n") i++;
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = "";
-    } else {
-      cell += char;
-    }
-  }
-
-  row.push(cell);
-  if (row.some((value) => value.length > 0)) rows.push(row);
-  return rows;
-}
-
 function openTextFile(accept: string, onText: (text: string) => Promise<void>): Promise<void> {
   return new Promise((resolve, reject) => {
     const input = document.createElement("input");
@@ -823,6 +744,27 @@ function openTextFile(accept: string, onText: (text: string) => Promise<void>): 
 
       file.text()
         .then(onText)
+        .then(resolve)
+        .catch(reject);
+    };
+    input.click();
+  });
+}
+
+function openBinaryFile(accept: string, onBytes: (bytes: ArrayBuffer) => Promise<void>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = accept;
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) {
+        resolve();
+        return;
+      }
+
+      file.arrayBuffer()
+        .then(onBytes)
         .then(resolve)
         .catch(reject);
     };
