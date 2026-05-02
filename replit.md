@@ -52,3 +52,10 @@ Configured as a **static** site deployment:
 - Session data is persisted in `localStorage` (keys: `newmob.sessions.v1`, `newmob.groups.v1`)
 - Terminal connections (SSH, local shell) are simulated in browser mode — actual connections require the Tauri backend
 - The app theme (light/dark/system) is stored in `localStorage` under `newmob.appTheme.v1`
+
+## Known Pitfalls / Fixes
+
+- **`onNewSession(groupPath?: string | null)` must not be bound directly to a button `onClick`.**
+  React passes the `MouseEvent` as the first argument, which then propagates as `groupPath` and crashes
+  `splitGroupPath` with `path.replace is not a function`. Always wrap: `onClick={() => onNewSession?.()}`.
+  `splitGroupPath` also has a `typeof !== "string"` guard as defence-in-depth.

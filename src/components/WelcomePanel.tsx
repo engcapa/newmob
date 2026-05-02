@@ -130,7 +130,7 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
               title="New session…"
               desc="SSH, RDP, VNC, SFTP, Telnet, Serial, Mosh, WSL, S3 — all in one dialog."
               kbd="Ctrl+Shift+N"
-              onClick={onNewSession}
+              onClick={() => onNewSession()}
             />
             <ActionCard
               icon={<Upload className="w-5 h-5" />}

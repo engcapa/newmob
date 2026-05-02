@@ -12,6 +12,7 @@ export interface PathSession {
 
 export function splitGroupPath(path: string | null | undefined): string[] {
   if (!path) return [];
+  if (typeof path !== "string") return [];
 
   const parts = path
     .replace(/\\/g, "/")

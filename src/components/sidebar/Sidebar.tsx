@@ -110,7 +110,7 @@ export function Sidebar({ onNewSession, onEditSession, onConnectSession, compact
       {!compact && (
       <div className="flex-1 flex flex-col min-w-0" style={{ background: "var(--moba-sidebar-bg)", borderRight: "1px solid var(--moba-sidebar-border)" }}>
         <div className="h-7 flex items-center gap-1 px-1.5 border-b shrink-0" style={{ borderColor: "var(--moba-divider)" }}>
-          <IconBtn title="New session" icon={<Plus className="w-3.5 h-3.5" />} onClick={onNewSession} />
+          <IconBtn title="New session" icon={<Plus className="w-3.5 h-3.5" />} onClick={() => onNewSession?.()} />
           <IconBtn title="Edit selected session" icon={<Edit3 className="w-3.5 h-3.5" />} onClick={() => selectedSession && onEditSession?.(selectedSession)} disabled={!selectedSession} />
           <IconBtn title="Duplicate selected session" icon={<Copy className="w-3.5 h-3.5" />} onClick={() => selectedSession && void duplicateSession(selectedSession.id)} disabled={!selectedSession} />
           <IconBtn title="Delete selected session" icon={<Trash2 className="w-3.5 h-3.5" />} onClick={handleDelete} disabled={!selectedSession} />
