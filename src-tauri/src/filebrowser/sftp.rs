@@ -7,7 +7,7 @@ use crate::filebrowser::transfer::{self, ProgressPayload, TransferHandle};
 use crate::terminal::ssh::{connect_ssh_authenticated, SshAuth, SshHandler};
 use russh::client;
 use russh_sftp::client::SftpSession;
-use russh_sftp::protocol::{FileType as SftpFileType, OpenFlags};
+use russh_sftp::protocol::{FileAttributes, FileType as SftpFileType, OpenFlags};
 use serde::Serialize;
 use std::path::Path;
 use std::sync::Arc;
@@ -77,13 +77,14 @@ pub async fn open_sftp(
 
 impl ActiveSftp {
     pub async fn list_dir(&self, path: &str) -> Result<Vec<FileEntryDto>, String> {
-        let sftp = self.sftp.lock().await;
-        let mut dir = sftp
-            .read_dir(path)
-            .await
-            .map_err(|e| format!("Failed to read {}: {}", path, e))?;
-        let mut entries = Vec::new();
-        while let Some(item) = next_dir_entry(&mut dir) {
+        let dir_entries = {
+            let sftp = self.sftp.lock().await;
+            sftp.read_dir(path.to_string())
+                .await
+                .map_err(|e| format!("Failed to read {}: {}", path, e))?
+        };
+        let mut entries = Vec::with_capacity(dir_entries.len());
+        for item in dir_entries {
             let name = item.file_name();
             if name == "." || name == ".." {
                 continue;
@@ -180,23 +181,26 @@ impl ActiveSftp {
     }
 
     pub async fn read_bytes(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
-        let sftp = self.sftp.lock().await;
-        let attrs = sftp
-            .metadata(path.to_string())
-            .await
-            .map_err(|e| format!("stat {}: {}", path, e))?;
-        if attrs.size.unwrap_or(0) > max_bytes {
-            return Err(format!(
-                "File is {} bytes, exceeds preview limit of {} bytes",
-                attrs.size.unwrap_or(0),
-                max_bytes
-            ));
-        }
-        let mut file = sftp
-            .open(path.to_string())
-            .await
-            .map_err(|e| format!("open {}: {}", path, e))?;
-        let mut buf = Vec::with_capacity(attrs.size.unwrap_or(0) as usize);
+        let (size, mut file) = {
+            let sftp = self.sftp.lock().await;
+            let attrs = sftp
+                .metadata(path.to_string())
+                .await
+                .map_err(|e| format!("stat {}: {}", path, e))?;
+            if attrs.size.unwrap_or(0) > max_bytes {
+                return Err(format!(
+                    "File is {} bytes, exceeds preview limit of {} bytes",
+                    attrs.size.unwrap_or(0),
+                    max_bytes
+                ));
+            }
+            let file = sftp
+                .open(path.to_string())
+                .await
+                .map_err(|e| format!("open {}: {}", path, e))?;
+            (attrs.size.unwrap_or(0), file)
+        };
+        let mut buf = Vec::with_capacity(size as usize);
         file.read_to_end(&mut buf)
             .await
             .map_err(|e| format!("read {}: {}", path, e))?;
@@ -204,14 +208,15 @@ impl ActiveSftp {
     }
 
     pub async fn write_bytes(&self, path: &str, data: &[u8]) -> Result<(), String> {
-        let sftp = self.sftp.lock().await;
-        let mut file = sftp
-            .open_with_flags(
+        let mut file = {
+            let sftp = self.sftp.lock().await;
+            sftp.open_with_flags(
                 path.to_string(),
                 OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
             )
             .await
-            .map_err(|e| format!("open {} for write: {}", path, e))?;
+            .map_err(|e| format!("open {} for write: {}", path, e))?
+        };
         file.write_all(data)
             .await
             .map_err(|e| format!("write {}: {}", path, e))?;
@@ -239,14 +244,17 @@ impl ActiveSftp {
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let sftp = self.sftp.lock().await;
-        let mut remote_file = sftp
-            .open_with_flags(
+        // Open the remote file under the session lock, then release the lock
+        // so other ops (list, stat) can interleave with the chunked transfer.
+        let mut remote_file = {
+            let sftp = self.sftp.lock().await;
+            sftp.open_with_flags(
                 remote.to_string(),
                 OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
             )
             .await
-            .map_err(|e| format!("open remote {} for write: {}", remote, e))?;
+            .map_err(|e| format!("open remote {} for write: {}", remote, e))?
+        };
 
         let mut buf = vec![0u8; CHUNK_SIZE];
         let mut written: u64 = 0;
@@ -284,16 +292,19 @@ impl ActiveSftp {
         handle: Arc<TransferHandle>,
         app: AppHandle,
     ) -> Result<(), String> {
-        let sftp = self.sftp.lock().await;
-        let attrs = sftp
-            .metadata(remote.to_string())
-            .await
-            .map_err(|e| format!("stat {}: {}", remote, e))?;
-        let total = attrs.size.unwrap_or(0);
-        let mut remote_file = sftp
-            .open(remote.to_string())
-            .await
-            .map_err(|e| format!("open {}: {}", remote, e))?;
+        // Stat + open under the session lock, then release it.
+        let (total, mut remote_file) = {
+            let sftp = self.sftp.lock().await;
+            let attrs = sftp
+                .metadata(remote.to_string())
+                .await
+                .map_err(|e| format!("stat {}: {}", remote, e))?;
+            let file = sftp
+                .open(remote.to_string())
+                .await
+                .map_err(|e| format!("open {}: {}", remote, e))?;
+            (attrs.size.unwrap_or(0), file)
+        };
 
         if let Some(parent) = local.parent() {
             tokio::fs::create_dir_all(parent)
@@ -354,14 +365,10 @@ fn emit_progress(app: &AppHandle, transfer_id: &str, bytes: u64, total: u64, sta
     transfer::touch();
 }
 
-fn next_dir_entry(dir: &mut russh_sftp::client::rawsession::ReadDir) -> Option<russh_sftp::client::rawsession::DirEntry> {
-    dir.next()
-}
-
 fn entry_from_attrs(
     name: String,
     path: String,
-    attrs: russh_sftp::protocol::FileAttributes,
+    attrs: FileAttributes,
 ) -> FileEntryDto {
     let file_type = match attrs.file_type() {
         SftpFileType::Dir => "dir",

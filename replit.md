@@ -57,6 +57,63 @@ Since Tauri's native backend is not available in the browser, stub modules are u
 
 These stubs are aliased via `vite.config.ts` at build time.
 
+## SFTP Browser
+
+A dual-pane SFTP file manager is wired in alongside the terminal. Three entry points
+all render the same `<FileBrowser>` component:
+
+1. **Attached sidebar** — every SSH terminal tab gains an "SFTP" toggle button
+   (top-right of the terminal). When opened it docks an `<SftpSidebar>` to the right
+   of the terminal that shares the same SSH credentials. The remote pane follows
+   the terminal's working directory via OSC 7 — `TerminalPanel` parses
+   `\e]7;file://host/path\e\` sequences and pushes them to `MainLayout` via the
+   `onCwdChange` prop. After connect, a small shell snippet
+   (`PROMPT_COMMAND` for bash, `precmd_functions` for zsh) is injected to start
+   emitting OSC 7 every prompt.
+2. **Standalone tab** — choosing `SessionType::SFTP` from the session editor opens
+   a full-tab `<FileBrowser>` (no terminal). Standalone tabs stay mounted while
+   inactive so transfers keep running in the background.
+3. **Detached window** — both attached and standalone variants expose a
+   "Detach to window" action that stashes the SFTP credentials in
+   `sessionStorage` (key `newmob.sftp.detached.<sid>`) and opens
+   `?sftp=<sid>`; `App.tsx` detects the query param and renders
+   `<SftpDetachedWindow>` instead of the main shell.
+
+**Frontend layers:**
+- `src/components/filebrowser/` — `FileBrowser`, `FilePanel`, `PathBreadcrumb`,
+  `FileToolbar`, `FileTransferQueue`, `SftpSidebar`, `SftpDetachedWindow`
+- `src/stores/sftpStore.ts` (per-session pane state) and `transferStore.ts`
+  (global transfer queue with progress/eta/cancel)
+- `src/lib/sftp.ts` — single source of truth for the Tauri command surface
+  (every `invoke("sftp_*", …)` lives here so the desktop and web stubs stay
+  aligned)
+- `src/lib/sftpController.ts` — high-level operations (open, refresh, mkdir,
+  remove, rename, upload, download, double-click "download first" prompt)
+- `src/lib/runtime.ts` — small Tauri-vs-web detector used by the controller to
+  decide local-FS vs IndexedDB VFS
+
+**Backend (`src-tauri/src/filebrowser/`):**
+- `sftp.rs` — `russh-sftp 2.x` wrapper. Opens a fresh `channel_open_session`,
+  requests the `sftp` subsystem, and keeps the parent `client::Handle`
+  alive for the lifetime of `ActiveSftp` so the SSH connection task is
+  not dropped under it.
+- `local.rs` — `std::fs` operations (list/stat/mkdir/remove/rename/read/write,
+  plus `xdg-open`/`open`/`start` for `sftp_open_path`)
+- `transfer.rs` — `Arc<TransferHandle>` per upload/download with an
+  `AtomicBool` cancellation flag; emits `sftp-progress-{transferId}` on
+  every chunk and `sftp-transfer-complete-{transferId}` at the end
+- `mod.rs` — registers all `sftp_*` Tauri commands (see `lib.rs` handler list).
+  `AppState` gains `sftp_sessions: HashMap<String, Arc<ActiveSftp>>` and
+  `transfers: HashMap<String, Arc<TransferHandle>>`.
+
+**Web mode (dev-only) parity:**
+- `vite-plugins/sftpProxy.ts` — `ws.WebSocketServer` on `/__newmob/sftp-bridge`,
+  drives an `ssh2.SFTPWrapper` for remote ops (mirrors the JSON envelope
+  protocol of the SSH proxy)
+- `src/stubs/sftpClient.ts` — WebSocket client used by `tauri-core` stub
+- `src/stubs/localVfs.ts` — IndexedDB-backed local filesystem rooted at
+  `/preview/` (real files cannot be touched from the browser sandbox)
+
 ## Real SSH in the Browser (WebSocket proxy, web mode only)
 
 This whole subsystem is dev-only and is **not** part of the Tauri desktop release.
@@ -90,6 +147,10 @@ Configured as a **static** site deployment:
 - Session data is persisted in `localStorage` (keys: `newmob.sessions.v1`, `newmob.groups.v1`)
 - SSH connections in browser preview are real (via the WebSocket proxy above). Local PTY and the placeholder protocols (RDP/VNC/SFTP/Telnet/Serial) are still UI-only.
 - The app theme (light/dark/system) is stored in `localStorage` under `newmob.appTheme.v1`
+- SFTP detached windows depend on browser `window.open` — if pop-ups are blocked
+  the status bar reports "Browser blocked the SFTP window…". The handoff key
+  in `sessionStorage` is removed by `<SftpDetachedWindow>` after read so a
+  refresh of the popup re-uses the still-attached parent state.
 
 ## Known Pitfalls / Fixes
 
