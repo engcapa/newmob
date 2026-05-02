@@ -1,6 +1,19 @@
-import { useEffect, useCallback, useState, useMemo } from "react";
+import {
+  useEffect,
+  useCallback,
+  useState,
+  useMemo,
+  useRef,
+} from "react";
 import { PanelGroup, Panel, PanelResizeHandle } from "react-resizable-panels";
-import { Link2, Link2Off } from "lucide-react";
+import {
+  Link2,
+  Rows,
+  Columns,
+  Maximize2,
+  X,
+  ArrowLeftRight,
+} from "lucide-react";
 import { FilePanel, isPreviewable } from "./FilePanel";
 import { FileTransferQueue } from "./FileTransferQueue";
 import { useSftpStore, type PaneSide } from "../../stores/sftpStore";
@@ -8,6 +21,27 @@ import { useSftpController } from "../../lib/sftpController";
 import { joinPath, basename, type FileEntry, type FsSide } from "../../lib/sftp";
 import type { MenuItem } from "../ContextMenu";
 import { useAppStore } from "../../stores/appStore";
+
+type Orientation = "horizontal" | "vertical";
+
+const ORIENTATION_KEY_PREFIX = "newmob.sftp.orientation.";
+
+function loadOrientation(scope: string, fallback: Orientation): Orientation {
+  try {
+    const v = localStorage.getItem(ORIENTATION_KEY_PREFIX + scope);
+    return v === "horizontal" || v === "vertical" ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveOrientation(scope: string, value: Orientation): void {
+  try {
+    localStorage.setItem(ORIENTATION_KEY_PREFIX + scope, value);
+  } catch {
+    /* noop */
+  }
+}
 
 interface FileBrowserProps {
   sessionId: string;
@@ -18,9 +52,18 @@ interface FileBrowserProps {
   authData: string | null;
   initialPath?: string;
   onDetach?: () => void;
+  onClose?: () => void;
   onTerminalSync?: (cwd: string) => void;
   cwdHint?: string | null;
   detachable?: boolean;
+  /** Default split direction; user can flip with the toolbar button. */
+  defaultOrientation?: Orientation;
+  /** Show a compact title-bar with detach/close buttons. */
+  showHeader?: boolean;
+  /** Title shown when `showHeader` is on. */
+  title?: string;
+  /** Persistence key for the orientation toggle. */
+  orientationScope?: string;
 }
 
 export function FileBrowser(props: FileBrowserProps) {
@@ -34,12 +77,31 @@ export function FileBrowser(props: FileBrowserProps) {
 
   const [downloadPrompt, setDownloadPrompt] = useState<FileEntry | null>(null);
   const [previewing, setPreviewing] = useState<{ entry: FileEntry; side: FsSide; text: string } | null>(null);
-  // Per-view toggle that gates the OSC 7 follow effect below; the user can
-  // disable it from the banner so the panel stays where they navigate.
-  const [followCwd, setFollowCwd] = useState(true);
   // Per-pane filter strings (case-insensitive substring match).
   const [localFilter, setLocalFilter] = useState("");
   const [remoteFilter, setRemoteFilter] = useState("");
+
+  const orientationScope = props.orientationScope ?? props.sessionId;
+  const [orientation, setOrientationState] = useState<Orientation>(() =>
+    loadOrientation(orientationScope, props.defaultOrientation ?? "horizontal"),
+  );
+  const setOrientation = useCallback(
+    (next: Orientation) => {
+      setOrientationState(next);
+      saveOrientation(orientationScope, next);
+    },
+    [orientationScope],
+  );
+
+  // The follow logic was previously a *continuous* effect that snapped the
+  // remote pane back to whatever cwd the terminal last reported, which made
+  // it impossible to navigate inside the SFTP browser. The new behaviour is
+  // strictly opt-in:
+  //   1. one-shot initial sync the first time we see a cwd hint after the
+  //      session attaches (so the panel opens at the shell's pwd), and
+  //   2. an explicit "Sync to terminal cwd" toolbar button the user can
+  //      click any time to jump back.
+  const initialSyncDoneRef = useRef(false);
 
   useEffect(() => {
     ensureSession(props.sessionId);
@@ -62,12 +124,9 @@ export function FileBrowser(props: FileBrowserProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sessionId]);
 
-  // Tear down the SFTP channel when this view is the last consumer of the
-  // session: the standalone tab and detached window each own their own
-  // session id, so unmounting the view should free the backend resources
-  // (channel handle + transfer registrations) that came with attach().
-  // The attached SFTP sidebar uses a *separate* sessionId so there is no
-  // risk of pulling the rug out from under a still-mounted terminal.
+  // Tear down the SFTP channel when this view unmounts. The store
+  // ref-counts attaches, so a sidebar + detached window with the same
+  // session id are safe.
   useEffect(() => {
     const sid = props.sessionId;
     return () => {
@@ -75,15 +134,29 @@ export function FileBrowser(props: FileBrowserProps) {
     };
   }, [props.sessionId, detach]);
 
-  // Follow the terminal's cwd (OSC 7) when running in attached mode and the
-  // user hasn't disabled the per-view follow toggle.
+  // One-shot initial sync to terminal cwd, after attach completes.
   useEffect(() => {
-    if (!followCwd) return;
+    if (initialSyncDoneRef.current) return;
     if (!props.cwdHint) return;
     if (!session?.attached) return;
-    if (session.remote.path === props.cwdHint) return;
+    initialSyncDoneRef.current = true;
+    if (session.remote.path !== props.cwdHint) {
+      void navigate(props.sessionId, "remote", props.cwdHint);
+    }
+  }, [props.cwdHint, props.sessionId, session?.attached, session?.remote.path, navigate]);
+
+  const syncToTerminalCwd = useCallback(() => {
+    if (!props.cwdHint) {
+      setStatus("Terminal cwd is not known yet (waiting for OSC 7).");
+      return;
+    }
+    if (!session?.attached) return;
+    if (session.remote.path === props.cwdHint) {
+      setStatus(`Already at ${props.cwdHint}`);
+      return;
+    }
     void navigate(props.sessionId, "remote", props.cwdHint);
-  }, [followCwd, props.cwdHint, props.sessionId, session?.attached, session?.remote.path, navigate]);
+  }, [props.cwdHint, props.sessionId, session?.attached, session?.remote.path, navigate, setStatus]);
 
   const handleDoubleClick = useCallback(
     async (side: PaneSide, entry: FileEntry) => {
@@ -307,9 +380,40 @@ export function FileBrowser(props: FileBrowserProps) {
     return null;
   }, [session]);
 
+  const showCwdToolbar = props.cwdHint !== undefined && props.cwdHint !== null;
+
   return (
     <div className="w-full h-full flex flex-col" style={{ background: "var(--moba-bg)" }}>
-      {props.cwdHint !== undefined && props.cwdHint !== null && (
+      {props.showHeader && (
+        <div
+          className="h-6 px-2 flex items-center text-[11px] font-semibold border-b shrink-0 gap-1"
+          style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}
+        >
+          <span className="truncate flex-1">{props.title ?? "SFTP"}</span>
+          <OrientationToggle orientation={orientation} onChange={setOrientation} />
+          {props.onDetach && (
+            <button
+              type="button"
+              className="px-1 hover:bg-[var(--moba-hover)] rounded"
+              title="Open in its own window"
+              onClick={props.onDetach}
+            >
+              <Maximize2 className="w-3 h-3" />
+            </button>
+          )}
+          {props.onClose && (
+            <button
+              type="button"
+              className="px-1 hover:bg-[var(--moba-hover)] rounded"
+              title="Hide SFTP panel"
+              onClick={props.onClose}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      )}
+      {showCwdToolbar && (
         <div
           className="text-[11px] px-2 py-1 border-b shrink-0 flex items-center gap-2"
           style={{
@@ -318,27 +422,34 @@ export function FileBrowser(props: FileBrowserProps) {
             color: "var(--moba-text-muted)",
           }}
         >
-          <span>Terminal cwd:</span>
-          <span className="font-mono truncate flex-1">{props.cwdHint}</span>
+          <span className="shrink-0">Terminal cwd:</span>
+          <span className="font-mono truncate flex-1" title={props.cwdHint ?? ""}>
+            {props.cwdHint}
+          </span>
           <button
             type="button"
-            className="px-1.5 py-0.5 inline-flex items-center gap-1 rounded hover:bg-[var(--moba-hover)]"
-            title={followCwd ? "Stop following terminal cwd" : "Follow terminal cwd"}
-            onClick={() => setFollowCwd((v) => !v)}
-            style={{ color: followCwd ? "var(--moba-accent)" : "var(--moba-text-muted)" }}
+            className="px-1.5 py-0.5 inline-flex items-center gap-1 rounded hover:bg-[var(--moba-hover)] shrink-0"
+            title="Sync the remote pane to the terminal's current directory (one-shot)"
+            onClick={syncToTerminalCwd}
+            style={{ color: "var(--moba-accent)" }}
           >
-            {followCwd ? <Link2 className="w-3 h-3" /> : <Link2Off className="w-3 h-3" />}
-            <span>{followCwd ? "Following" : "Free"}</span>
+            <Link2 className="w-3 h-3" />
+            <span>Sync</span>
           </button>
+          {!props.showHeader && (
+            <OrientationToggle orientation={orientation} onChange={setOrientation} />
+          )}
         </div>
       )}
       {banner && (
-        <div className="text-[11px] px-2 py-1 border-b shrink-0"
+        <div
+          className="text-[11px] px-2 py-1 border-b shrink-0"
           style={{
             borderColor: "var(--moba-divider)",
             background: session?.error ? "#fde7e2" : "var(--moba-quick-bg)",
             color: session?.error ? "#7a1f0a" : "var(--moba-text)",
-          }}>
+          }}
+        >
           {banner}
           {session?.error && (
             <button
@@ -363,8 +474,14 @@ export function FileBrowser(props: FileBrowserProps) {
         </div>
       )}
       <div className="flex-1 min-h-0">
-        <PanelGroup direction="horizontal" autoSaveId={`sftp-browser-${props.sessionId}`}>
-          <Panel defaultSize={50} minSize={20}>
+        <PanelGroup
+          // Re-mount the panel group when orientation flips so
+          // react-resizable-panels reads new sizes cleanly.
+          key={orientation}
+          direction={orientation}
+          autoSaveId={`sftp-browser-${orientationScope}-${orientation}`}
+        >
+          <Panel defaultSize={50} minSize={15}>
             <FilePanel
               sessionId={props.sessionId}
               side="local"
@@ -381,8 +498,14 @@ export function FileBrowser(props: FileBrowserProps) {
               onFilterTextChange={setLocalFilter}
             />
           </Panel>
-          <PanelResizeHandle className="w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize" />
-          <Panel defaultSize={50} minSize={20}>
+          <PanelResizeHandle
+            className={
+              orientation === "horizontal"
+                ? "w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize"
+                : "h-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-row-resize"
+            }
+          />
+          <Panel defaultSize={50} minSize={15}>
             <FilePanel
               sessionId={props.sessionId}
               side="remote"
@@ -400,6 +523,31 @@ export function FileBrowser(props: FileBrowserProps) {
             />
           </Panel>
         </PanelGroup>
+      </div>
+      {/* Future: cross-host transfer (between two remote SFTP sessions).
+          Disabled placeholder so the layout stays stable when the feature
+          ships. */}
+      <div
+        className="text-[11px] px-2 py-1 border-t shrink-0 flex items-center gap-2"
+        style={{
+          borderColor: "var(--moba-divider)",
+          background: "var(--moba-quick-bg)",
+          color: "var(--moba-text-muted)",
+        }}
+      >
+        <ArrowLeftRight className="w-3 h-3" />
+        <span className="truncate">
+          Cross-host transfer (remote ↔ remote) — coming soon
+        </span>
+        <button
+          type="button"
+          disabled
+          className="ml-auto px-1.5 py-0.5 rounded text-[10px] opacity-50 cursor-not-allowed"
+          style={{ border: "1px solid var(--moba-divider)" }}
+          title="Will let you move files directly between two SFTP sessions"
+        >
+          Pick peer…
+        </button>
       </div>
       <FileTransferQueue
         sessionId={props.sessionId}
@@ -427,6 +575,36 @@ export function FileBrowser(props: FileBrowserProps) {
         />
       )}
     </div>
+  );
+}
+
+function OrientationToggle({
+  orientation,
+  onChange,
+}: {
+  orientation: Orientation;
+  onChange: (next: Orientation) => void;
+}) {
+  const next: Orientation = orientation === "horizontal" ? "vertical" : "horizontal";
+  return (
+    <button
+      type="button"
+      className="px-1.5 py-0.5 inline-flex items-center gap-1 rounded hover:bg-[var(--moba-hover)] shrink-0"
+      title={
+        orientation === "horizontal"
+          ? "Switch to top/bottom layout"
+          : "Switch to side-by-side layout"
+      }
+      onClick={() => onChange(next)}
+      style={{ color: "var(--moba-text-muted)" }}
+    >
+      {orientation === "horizontal" ? (
+        <Columns className="w-3 h-3" />
+      ) : (
+        <Rows className="w-3 h-3" />
+      )}
+      <span className="text-[10px]">{orientation === "horizontal" ? "Side" : "Stack"}</span>
+    </button>
   );
 }
 

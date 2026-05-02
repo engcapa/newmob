@@ -7,7 +7,6 @@ import {
   ChevronRight,
   ChevronDown,
   FolderOpen,
-  Clock,
   Play,
   Edit3,
   Copy,
@@ -96,13 +95,6 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
   const folderPaths = useMemo(
     () => collectFolderPaths(sessions, groups),
     [sessions, groups],
-  );
-  const recentSessions = useMemo(
-    () => [...filteredSessions]
-      .filter((s) => s.last_connected_at)
-      .sort((a, b) => (b.last_connected_at ?? 0) - (a.last_connected_at ?? 0))
-      .slice(0, 5),
-    [filteredSessions],
   );
 
   const toggle = (key: string) =>
@@ -420,26 +412,6 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
         )}
       </TreeFolder>
 
-      {recentSessions.length > 0 && (
-        <>
-          <div className="px-2 mt-3 mb-1 text-[11px] uppercase tracking-wide text-[var(--moba-text-muted)]">
-            Recent
-          </div>
-          {recentSessions.map((session) => (
-            <div
-              key={`recent-${session.id}`}
-              className="flex items-center gap-1 px-1 py-0.5 cursor-pointer hover:bg-[var(--moba-hover)]"
-              onDoubleClick={() => onConnectSession?.(session)}
-              onClick={() => setSelectedSession(session.id)}
-              onContextMenu={(event) => sessionContextMenu(event, session)}
-            >
-              <span className="w-3" />
-              <Clock className="w-3.5 h-3.5 text-slate-400" />
-              <span className="flex-1 truncate">{session.name}</span>
-            </div>
-          ))}
-        </>
-      )}
     </div>
   );
 }

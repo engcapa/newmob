@@ -31,14 +31,19 @@ const STORAGE_PREFIX = "newmob.sftp.detached.";
 const HANDOFF_TTL_MS = 60_000;
 
 /**
- * Read the credential handoff for `sessionId` and **delete it immediately**.
- * Entries older than `HANDOFF_TTL_MS` are treated as expired and discarded
- * to keep stale credentials from lingering on disk.
+ * Read the credential handoff for `sessionId` without deleting it. We
+ * previously deleted the entry on first read for defence-in-depth, but
+ * that broke React StrictMode double-mount and any browser/Tauri runtime
+ * that re-renders the detached window before its `beforeunload` fires:
+ * the second read came back `null` and the window stayed blank forever.
+ *
+ * The TTL check + `clearDetachedHandoff` on `pagehide`/`beforeunload`
+ * still bound how long the credentials can sit on disk.
  *
  * We use `localStorage` instead of `sessionStorage` because Tauri's
  * `WebviewWindow` opened for a detached SFTP view runs as a fresh
  * WebContents — its `sessionStorage` is empty even though it shares the
- * origin. The compensating control is the one-shot delete + TTL below.
+ * origin.
  */
 export function consumeDetachedHandoff(sessionId: string): DetachedSftpParams | null {
   const key = STORAGE_PREFIX + sessionId;
@@ -49,17 +54,16 @@ export function consumeDetachedHandoff(sessionId: string): DetachedSftpParams | 
     return null;
   }
   if (!raw) return null;
-  // Always remove first so the secret is on disk for the shortest possible
-  // window even if parsing throws.
-  try {
-    localStorage.removeItem(key);
-  } catch {
-    /* noop */
-  }
   let parsed: HandoffEnvelope | DetachedSftpParams;
   try {
     parsed = JSON.parse(raw);
   } catch {
+    // Malformed entry — drop it so it doesn't linger.
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* noop */
+    }
     return null;
   }
   // Backwards-compat: tolerate a bare params blob (older builds).
@@ -68,6 +72,12 @@ export function consumeDetachedHandoff(sessionId: string): DetachedSftpParams | 
   }
   const env = parsed as HandoffEnvelope;
   if (Date.now() - env.createdAt > HANDOFF_TTL_MS) {
+    // Expired — wipe it.
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      /* noop */
+    }
     return null;
   }
   return env.payload;
@@ -147,6 +157,10 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
   const [params, setParams] = useState<DetachedSftpParams | null>(() =>
     consumeDetachedHandoff(sessionId),
   );
+  // Flip to true after a grace period if no handoff has arrived. Lets us
+  // replace the indefinite "waiting…" spinner with an actionable error so
+  // the popup never *looks* blank to the user.
+  const [handoffTimedOut, setHandoffTimedOut] = useState(false);
   // Latest cwd hint broadcast by the parent window (terminal OSC 7). Lets
   // a detached SFTP view follow the live shell `cd` even though it can't
   // see the terminal directly.
@@ -181,9 +195,13 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
         window.clearInterval(id);
       }
     }, 250);
+    // Flag a timeout after ~5s so the user sees an actionable message
+    // instead of an indefinite "waiting…" line.
+    const timeoutId = window.setTimeout(() => setHandoffTimedOut(true), 5_000);
     return () => {
       window.removeEventListener("storage", handler);
       window.clearInterval(id);
+      window.clearTimeout(timeoutId);
     };
   }, [sessionId, params]);
 
@@ -220,12 +238,51 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
   }, [title]);
 
   if (!params) {
+    // Use literal colours here (not CSS vars) so that even if the theme
+    // stylesheet hasn't loaded the popup is visibly populated rather than
+    // appearing as a blank white page.
     return (
       <div
-        className="w-screen h-screen flex items-center justify-center text-sm"
-        style={{ background: "var(--moba-bg)", color: "var(--moba-text)" }}
+        className="w-screen h-screen flex items-center justify-center p-6"
+        style={{ background: "#1e2128", color: "#e6e6e6" }}
       >
-        Waiting for connection details from the parent window…
+        <div className="max-w-md text-center text-sm leading-relaxed">
+          {handoffTimedOut ? (
+            <>
+              <div className="text-base font-semibold mb-2">
+                Couldn't load SFTP connection
+              </div>
+              <p style={{ color: "#a0a0a0" }}>
+                The parent window didn't hand over the connection details for
+                <span className="font-mono"> {sessionId} </span>
+                within 5&nbsp;seconds. This usually means the popup was opened
+                directly (without going through the main window) or the main
+                window was closed.
+              </p>
+              <p className="mt-3" style={{ color: "#a0a0a0" }}>
+                Close this tab and click the detach button on the SFTP panel
+                in the main window again.
+              </p>
+              <button
+                type="button"
+                className="mt-4 px-3 py-1.5 text-xs rounded"
+                style={{ background: "#3a3f4a", color: "#e6e6e6" }}
+                onClick={() => window.close()}
+              >
+                Close window
+              </button>
+            </>
+          ) : (
+            <>
+              <div className="text-base font-semibold mb-2">
+                Loading SFTP session…
+              </div>
+              <p style={{ color: "#a0a0a0" }}>
+                Waiting for connection details from the parent window.
+              </p>
+            </>
+          )}
+        </div>
       </div>
     );
   }

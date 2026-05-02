@@ -536,7 +536,7 @@ export function MainLayout() {
                         <div
                           className="shrink-0"
                           style={{
-                            width: 380,
+                            width: 640,
                             borderLeft: "1px solid var(--moba-divider)",
                             background: "var(--moba-bg)",
                           }}

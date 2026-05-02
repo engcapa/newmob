@@ -83,13 +83,26 @@ all render the same `<FileBrowser>` component:
    preview we fall back to `window.open`.
 
 The SFTP browser also supports per-view toggles:
-- **Follow terminal cwd** — both `<SftpSidebar>` and `<FileBrowser>` show a
-  link/unlink chip the user can click to stop the panel from snapping back
-  to whatever the shell last reported via OSC 7.
+- **Sync to terminal cwd** — `<FileBrowser>` (used directly by standalone
+  tabs/detached windows and wrapped by `<SftpSidebar>` for the attached
+  pane) does **one-shot** initial sync to the terminal's cwd the first
+  time a hint arrives after attach, then leaves the panel alone. The
+  *Sync* button in the cwd toolbar re-jumps on demand. Continuous
+  follow was removed because it was preventing the user from navigating
+  away inside the SFTP pane.
+- **Pane orientation** — `<FileBrowser>` accepts `defaultOrientation`
+  (`horizontal`/`vertical`) and ships a header toggle so the user can flip
+  between side-by-side and stacked layouts. The choice is persisted per
+  `orientationScope` in `localStorage` (`newmob.sftp.orientation.<scope>`).
+  The narrow attached `<SftpSidebar>` defaults to vertical (stacked); the
+  full-tab and detached views default to horizontal.
 - **OSC 7 auto-inject** — under *Advanced SSH settings* the user can
   disable injection of the `PROMPT_COMMAND`/`precmd_functions` snippet
   per-session (default ON). The flag flows through `options_json` →
   `SshConnectInfo.osc7AutoInject` → `<TerminalPanel>`.
+
+A disabled "Cross-host transfer (remote ↔ remote)" placeholder lives in
+the SFTP footer to reserve the spot for the upcoming feature.
 
 Transfers can be **paused, resumed, retried, or cancelled** from the
 queue UI. The Rust transfer worker holds an `AtomicBool + tokio::Notify`
