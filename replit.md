@@ -219,10 +219,25 @@ viewed through the workspace **Tools → VNC** panel.
   Last verified pairing: Rust crate `tauri 2.11`, npm `@tauri-apps/cli@^2.10.1`,
   npm `@tauri-apps/api@^2.11.0` — adjust together when bumping any of them.
 - **Virtual display:** the `VNC Server` workflow runs `scripts/start-vnc.sh`,
-  which launches `Xvnc :0` on port `5900` (no auth, 1280x800x24) plus
-  `fluxbox` as the window manager, then auto-launches
-  `src-tauri/target/debug/newmob` on `DISPLAY=:0` if the binary exists.
-  Replit's Tools → VNC connects to port 5900.
+  which launches `Xvnc :0` on RFB port `5901` (no auth, 1280x800x24, bound to
+  localhost), then `websockify` on `0.0.0.0:5900` to bridge wss → raw RFB,
+  plus `fluxbox` as the window manager. It then launches
+  `src-tauri/target/debug/newmob` on `DISPLAY=:0` in the background and
+  supervises all four children with `wait -n` plus an `EXIT/INT/TERM`
+  trap that tears the whole stack down if any one of them dies.
+  Replit's Tools → VNC connects via wss to port 5900; the websockify
+  bridge is required because tigervnc Xvnc speaks raw RFB only.
+  The workflow is configured with `outputType: "vnc"`; Replit auto-waits
+  for port 5900 to open before marking it ready.
+  `websockify` lives at a hashed nix-store path and is not on the workflow
+  PATH, so the script resolves it via `command -v` then a
+  `/nix/store/*python*websockify*/bin/websockify` glob fallback.
+  Security note: the websockify bridge listens on `0.0.0.0:5900` with
+  `SecurityTypes None` (no VNC password). It is safe only because port
+  5900 is not in Replit's external-port allowlist and is reachable
+  exclusively through the workspace Tools → VNC proxy. Do **not** add
+  port 5900 to `[[ports]]` in `.replit` or otherwise expose it publicly
+  without first putting auth in front of it.
 - **Build:** the `Tauri Build` workflow runs `pnpm tauri build --debug --no-bundle`.
   First compile of the Rust deps (russh, rusqlite, font-kit, portable-pty,
   tokio, …) takes ~2.5 minutes; incremental rebuilds are much faster.
