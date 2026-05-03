@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 
 import { FilePanel } from "./FilePanel";
+import { FileBrowser } from "./FileBrowser";
+import { PathBreadcrumb } from "./PathBreadcrumb";
 import { useSftpStore, type PaneState } from "../../stores/sftpStore";
 import { useSftpController } from "../../lib/sftpController";
 import type { FileEntry } from "../../lib/sftp";
@@ -256,5 +258,64 @@ describe("sftpController.download empty-local-dir fallback", () => {
     expect(setStatusMock).toHaveBeenCalledWith(
       expect.stringContaining("Download failed"),
     );
+  });
+});
+
+describe("PathBreadcrumb Windows drives root", () => {
+  it("renders the virtual drives root as a single 'Drives' segment", () => {
+    const onNavigate = vi.fn();
+    const { getByText, queryByTestId } = render(
+      <PathBreadcrumb path={"\\\\"} onNavigate={onNavigate} />,
+    );
+    // The single segment label is "Drives".
+    expect(getByText("Drives")).toBeTruthy();
+    // The leading "Show all drives" affordance is hidden when we are
+    // already at the drives root.
+    expect(queryByTestId("breadcrumb-drives-root")).toBeNull();
+  });
+
+  it("exposes a 'Show all drives' affordance on Windows paths and navigates to \\\\", () => {
+    const onNavigate = vi.fn();
+    const { getByTestId } = render(
+      <PathBreadcrumb path="C:\\Users\\me" onNavigate={onNavigate} />,
+    );
+    const drivesBtn = getByTestId("breadcrumb-drives-root");
+    fireEvent.click(drivesBtn);
+    expect(onNavigate).toHaveBeenCalledWith("\\\\");
+  });
+});
+
+describe("FileBrowser pane order", () => {
+  it("renders the REMOTE pane before the LOCAL pane in the DOM", () => {
+    seed();
+    const { container } = render(
+      <FileBrowser
+        sessionId={SESSION_ID}
+        host="example.com"
+        port={22}
+        username="alice"
+        authMethod="password"
+        authData={null}
+      />,
+    );
+    // Each FilePanel root has data-side="remote"|"local" via its
+    // toolbar/data attributes; fall back to subtitle text order.
+    const html = container.innerHTML;
+    const remoteIdx = html.indexOf("alice@example.com");
+    // The local pane omits the user@host subtitle, so look for any
+    // "local"-side marker. The DrivesPicker test-id is local-only.
+    // If neither is present (different env), at minimum the remote
+    // subtitle must appear before the closing of the first Panel.
+    expect(remoteIdx).toBeGreaterThan(-1);
+    // The remote subtitle must come before the second `data-panel`
+    // (i.e. the local pane comes after).
+    const panels = Array.from(
+      container.querySelectorAll("[data-panel]"),
+    ) as HTMLElement[];
+    expect(panels.length).toBeGreaterThanOrEqual(2);
+    // The first panel's HTML must contain the remote subtitle.
+    expect(panels[0].innerHTML).toContain("alice@example.com");
+    // The second panel's HTML must NOT contain the remote subtitle.
+    expect(panels[1].innerHTML).not.toContain("alice@example.com");
   });
 });

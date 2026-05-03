@@ -1,5 +1,5 @@
 import { useMemo, useState, useEffect } from "react";
-import { ChevronRight, Home } from "lucide-react";
+import { ChevronRight, Home, HardDrive } from "lucide-react";
 
 interface PathBreadcrumbProps {
   path: string;
@@ -102,6 +102,20 @@ export function PathBreadcrumb({
           title="Go to home"
         >
           <Home className="w-3 h-3" />
+        </button>
+      )}
+      {isWindows && !isDrivesRoot && (
+        <button
+          type="button"
+          data-testid="breadcrumb-drives-root"
+          className="px-1 hover:bg-[var(--moba-hover)] rounded shrink-0"
+          onClick={(e) => {
+            e.stopPropagation();
+            onNavigate("\\\\");
+          }}
+          title="Show all drives"
+        >
+          <HardDrive className="w-3 h-3" />
         </button>
       )}
       {segments.map((seg, i) => (

@@ -3,7 +3,7 @@ import { Folder, File as FileIcon, Link as LinkIcon, HardDrive, ChevronDown } fr
 import { PathBreadcrumb } from "./PathBreadcrumb";
 import { FileToolbar } from "./FileToolbar";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
-import { useSftpStore, type PaneSide } from "../../stores/sftpStore";
+import { useSftpStore, WINDOWS_DRIVES_ROOT, type PaneSide } from "../../stores/sftpStore";
 import {
   basename,
   formatBytes,
@@ -404,7 +404,11 @@ export function FilePanel({
         side={side}
         canBack={pane.historyIndex > 0}
         canForward={pane.historyIndex < pane.history.length - 1}
-        canUp={pane.path !== "/" && !!pane.path && !/^[A-Z]:\\?$/i.test(pane.path)}
+        canUp={
+          !!pane.path &&
+          pane.path !== "/" &&
+          pane.path !== WINDOWS_DRIVES_ROOT
+        }
         showHidden={showHidden}
         loading={pane.loading}
         selectionCount={selectedEntries.length}
