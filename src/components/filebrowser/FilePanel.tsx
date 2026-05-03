@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useCallback, useRef, type DragEvent, type MouseEvent } from "react";
-import { Folder, File as FileIcon, Link as LinkIcon, HardDrive, ChevronDown } from "lucide-react";
+import { Folder, File as FileIcon, Link as LinkIcon, HardDrive, ChevronDown, HelpCircle } from "lucide-react";
 import { PathBreadcrumb } from "./PathBreadcrumb";
 import { FileToolbar } from "./FileToolbar";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
@@ -529,6 +529,7 @@ export function FilePanel({
                 onClick={() => onHeaderClick("name")}
                 onResizeStart={(e) => startColResize("name", e)}
                 onResizeReset={() => resetCol("name")}
+                hint="Tip: drag the divider on a column's right edge to resize the next column. Double-click to reset."
               />
               <SortHeader
                 label="Size"
@@ -633,6 +634,7 @@ function SortHeader({
   className,
   onResizeStart,
   onResizeReset,
+  hint,
 }: {
   label: string;
   active: boolean;
@@ -644,6 +646,8 @@ function SortHeader({
   onResizeStart?: (e: MouseEvent) => void;
   /** Double-clicking the handle resets the affected column to its default. */
   onResizeReset?: () => void;
+  /** Optional help text shown via a small "?" icon next to the label. */
+  hint?: string;
 }) {
   return (
     <th
@@ -655,6 +659,17 @@ function SortHeader({
       <span className="truncate inline-block align-bottom max-w-full">
         {label} {active ? (dir === "asc" ? "▲" : "▼") : ""}
       </span>
+      {hint && (
+        <span
+          aria-label={hint}
+          data-testid={`col-header-${label.toLowerCase()}-hint`}
+          title={hint}
+          onClick={(e) => e.stopPropagation()}
+          className="inline-flex align-middle ml-1 opacity-60 hover:opacity-100 cursor-help"
+        >
+          <HelpCircle className="w-3 h-3" />
+        </span>
+      )}
       {onResizeStart && (
         <span
           role="separator"
