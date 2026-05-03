@@ -65,7 +65,27 @@ export function useAppTheme() {
 
 function subscribeAppTheme(listener: () => void): () => void {
   listeners.add(listener);
-  return () => listeners.delete(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== null && event.key !== APP_THEME_STORAGE_KEY) return;
+    const nextMode = normalizeAppThemeMode(
+      event.newValue ?? (() => {
+        try {
+          return window.localStorage.getItem(APP_THEME_STORAGE_KEY);
+        } catch {
+          return null;
+        }
+      })(),
+    );
+    if (nextMode === currentMode) return;
+    currentMode = nextMode;
+    listeners.forEach((listener) => listener());
+  });
 }
 
 function loadInitialAppThemeMode(): AppThemeMode {
