@@ -80,7 +80,14 @@ all render the same `<FileBrowser>` component:
    instead of the main shell. In Tauri the new window is a real OS
    `WebviewWindow` opened via the `open_sftp_window` Rust command (sharing
    the same origin, so the same `localStorage` is visible); in browser
-   preview we fall back to `window.open`.
+   preview we fall back to `window.open`. The detached window uses a
+   **distinct session id** (`<parentId>__detached`) so its backend SFTP
+   channel is independent from the sidebar/standalone tab — without this
+   they shared `Arc<Mutex<SftpSession>>` and a long transfer in one
+   window would stall clicks/listings in the other. The handoff payload
+   carries the original `parentSessionId` so the detached window can
+   still subscribe to OSC 7 cwd-hint broadcasts published by the main
+   window.
 
 The SFTP browser also supports per-view toggles:
 - **Sync to terminal cwd** — `<FileBrowser>` (used directly by standalone
@@ -251,6 +258,25 @@ viewed through the workspace **Tools → VNC** panel.
   `window.open` and report "Browser blocked the SFTP window…" if pop-ups
   are denied. Handoff is via `localStorage` so the new window can read
   the credentials regardless of runtime.
+
+## SFTP drag-and-drop
+
+Cross-pane drag-and-drop (REMOTE↔LOCAL inside the same SFTP session) is
+implemented via HTML5 drag events in `FilePanel.tsx` using a custom
+`application/x-newmob-files` MIME payload that bundles the current
+selection (multi-select + folder support routed through
+`sftp_upload_dir`/`sftp_download_dir`).
+
+OS file drops onto a pane are **intentionally disabled**. Use the
+toolbar "Upload from disk" button instead; dropping arbitrary OS files
+into the SFTP browser is not supported.
+
+**Critical Tauri config:** Tauri 2 by default intercepts drag-drop
+events on Windows (WebView2) before the webview sees them, which made
+the cross-pane drag silently no-op on Win11. Both the main window
+(`tauri.conf.json` → `app.windows[].dragDropEnabled: false`) and the
+detached SFTP `WebviewWindow` (`.disable_drag_drop_handler()` in
+`open_sftp_window`) opt out of this so HTML5 drag events reach React.
 
 ## Known Pitfalls / Fixes
 

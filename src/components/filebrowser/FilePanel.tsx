@@ -63,7 +63,6 @@ interface FilePanelProps {
   onItemDoubleClick: (entry: FileEntry) => void;
   onItemContext?: (entry: FileEntry, anchor: { x: number; y: number }) => MenuItem[];
   onEmptyContext?: (anchor: { x: number; y: number }) => MenuItem[];
-  onPaneFiles?: (files: File[]) => void;
   onCrossPaneDrop?: (entries: FileEntry[]) => void;
   acceptCrossPane?: boolean;
   /** Optional substring filter typed by the user (case-insensitive). */
@@ -95,7 +94,6 @@ export function FilePanel({
   onItemDoubleClick,
   onItemContext,
   onEmptyContext,
-  onPaneFiles,
   onCrossPaneDrop,
   acceptCrossPane,
   filterText,
@@ -296,12 +294,9 @@ export function FilePanel({
   };
 
   const handleDragOver = (e: DragEvent) => {
-    if (e.dataTransfer.types.includes("Files") && onPaneFiles) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "copy";
-      setDraggingOver(true);
-      return;
-    }
+    // OS file drops are intentionally NOT accepted here — use the toolbar
+    // "Upload from disk" button instead. Only intra-app cross-pane drags
+    // (REMOTE ↔ LOCAL inside the same SFTP session) are honoured.
     if (acceptCrossPane && e.dataTransfer.types.includes("application/x-newmob-files")) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
@@ -316,12 +311,6 @@ export function FilePanel({
   const handleDrop = (e: DragEvent) => {
     e.preventDefault();
     setDraggingOver(false);
-
-    const osFiles = Array.from(e.dataTransfer.files);
-    if (osFiles.length > 0 && onPaneFiles) {
-      onPaneFiles(osFiles);
-      return;
-    }
 
     if (acceptCrossPane) {
       const raw = e.dataTransfer.getData("application/x-newmob-files");

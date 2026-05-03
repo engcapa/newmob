@@ -4,7 +4,21 @@ import { useAppTheme } from "../../lib/appTheme";
 import { subscribeCwdHint, getLatestCwdHint } from "../../lib/sftpSync";
 
 interface DetachedSftpParams {
+  /**
+   * Session id used by the detached window for its OWN SFTP attach. We
+   * deliberately make this distinct from the parent window's session id
+   * (see `parentSessionId`) so the backend opens a fresh SFTP channel and
+   * the popup never contends with the sidebar / standalone tab for the
+   * same `Mutex<SftpSession>` lock.
+   */
   sessionId: string;
+  /**
+   * Original session id in the parent window. Used only so the detached
+   * window can subscribe to the same OSC 7 cwd-hint broadcasts that the
+   * main window publishes for the source tab. The detached window does
+   * NOT attach SFTP under this id.
+   */
+  parentSessionId?: string;
   host: string;
   port: number;
   username: string;
@@ -180,9 +194,12 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
   const [handoffTimedOut, setHandoffTimedOut] = useState(false);
   // Latest cwd hint broadcast by the parent window (terminal OSC 7). Lets
   // a detached SFTP view follow the live shell `cd` even though it can't
-  // see the terminal directly.
+  // see the terminal directly. We subscribe under the PARENT session id
+  // because the main window broadcasts under that id; fall back to the
+  // detached id for older builds that didn't carry a parentSessionId.
+  const cwdSubscriptionId = params?.parentSessionId ?? sessionId;
   const [cwdHint, setCwdHint] = useState<string | null>(() =>
-    getLatestCwdHint(sessionId),
+    getLatestCwdHint(cwdSubscriptionId),
   );
 
   useEffect(() => {
@@ -226,9 +243,9 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
   // follows OSC 7 even though we don't host a terminal here.
   useEffect(() => {
     return subscribeCwdHint((sid, cwd) => {
-      if (sid === sessionId) setCwdHint(cwd);
+      if (sid === cwdSubscriptionId) setCwdHint(cwd);
     });
-  }, [sessionId]);
+  }, [cwdSubscriptionId]);
 
   // Belt-and-braces: if the window is closed before we ever consumed the
   // handoff (e.g. user cancelled mid-load), wipe it from `localStorage`

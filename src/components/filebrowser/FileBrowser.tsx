@@ -480,7 +480,6 @@ export function FileBrowser(props: FileBrowserProps) {
               onItemDoubleClick={(e) => void handleDoubleClick("remote", e)}
               onItemContext={remoteContext}
               onEmptyContext={remoteEmptyContext}
-              onPaneFiles={(files) => void handleLocalFiles(files)}
               acceptCrossPane
               onCrossPaneDrop={handleCrossPaneToRemote}
               filterText={remoteFilter}
@@ -544,7 +543,6 @@ export function FileBrowser(props: FileBrowserProps) {
               onItemDoubleClick={(e) => void handleDoubleClick("local", e)}
               onItemContext={localContext}
               onEmptyContext={localEmptyContext}
-              onPaneFiles={handleLocalFiles}
               acceptCrossPane
               onCrossPaneDrop={handleCrossPaneToLocal}
               filterText={localFilter}

@@ -494,6 +494,13 @@ pub async fn open_sftp_window(
         .inner_size(1200.0, 760.0)
         .min_inner_size(720.0, 420.0)
         .resizable(true)
+        // Disable Tauri's native drag-drop interception so the webview's
+        // own HTML5 dragstart/dragover/drop events fire normally. Without
+        // this, REMOTE↔LOCAL drag inside the SFTP browser silently
+        // no-ops on Windows (WebView2) because Tauri swallows the events
+        // before React sees them. Mirrors the same flag in tauri.conf.json
+        // for the main window.
+        .disable_drag_drop_handler()
         .build()
         .map_err(|e| format!("failed to open SFTP window: {}", e))?;
     Ok(())
