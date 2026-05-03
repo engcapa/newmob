@@ -64,6 +64,8 @@ interface FileBrowserProps {
   title?: string;
   /** Persistence key for the orientation toggle. */
   orientationScope?: string;
+  /** When set (attached sidebar), sends a `cd <path>\n` to the parent terminal. */
+  onOpenTerminalHere?: (path: string) => void;
 }
 
 export function FileBrowser(props: FileBrowserProps) {
@@ -487,11 +489,10 @@ export function FileBrowser(props: FileBrowserProps) {
           direction={orientation}
           autoSaveId={`sftp-browser-${orientationScope}-${orientation}`}
         >
-          <Panel defaultSize={50} minSize={15}>
+          <Panel defaultSize={50} minSize={15} className="flex flex-col min-h-0 min-w-0">
             <FilePanel
               sessionId={props.sessionId}
               side="local"
-              title={`Local — ${session?.local.path ?? "—"}`}
               detachable={props.detachable}
               onDetach={props.onDetach}
               onItemDoubleClick={(e) => void handleDoubleClick("local", e)}
@@ -502,6 +503,54 @@ export function FileBrowser(props: FileBrowserProps) {
               onCrossPaneDrop={handleCrossPaneToLocal}
               filterText={localFilter}
               onFilterTextChange={setLocalFilter}
+              onUploadSelected={(entries) => {
+                const remoteDir = session?.remote.path ?? "/";
+                for (const entry of entries) {
+                  void controller.upload(entry, remoteDir);
+                }
+              }}
+              onDeleteSelected={(entries) => {
+                if (entries.length === 0) return;
+                const summary = entries.length === 1
+                  ? entries[0].name
+                  : `${entries.length} items`;
+                if (!window.confirm(`Delete ${summary}?`)) return;
+                for (const entry of entries) {
+                  void controller.remove(entry.path, "local", true);
+                }
+              }}
+              onChmodSelected={(entry) => {
+                const current = entry.mode != null
+                  ? (entry.mode & 0o777).toString(8).padStart(3, "0")
+                  : "644";
+                const input = window.prompt(`Octal mode for ${entry.name}`, current);
+                if (!input) return;
+                const mode = parseInt(input, 8);
+                if (!Number.isFinite(mode)) {
+                  setStatus(`Invalid mode: ${input}`);
+                  return;
+                }
+                void controller.chmod(entry.path, mode, "local");
+              }}
+              onPreviewSelected={(entry) => {
+                if (!isPreviewable(entry)) {
+                  setStatus(`Preview not supported for ${entry.name}`);
+                  return;
+                }
+                void (async () => {
+                  try {
+                    const { sftpReadFileText } = await import("../../lib/sftp");
+                    const text = await sftpReadFileText(props.sessionId, entry.path, "local");
+                    setPreviewing({ entry, side: "local", text });
+                  } catch (err) {
+                    setStatus(`Preview failed: ${err}`);
+                  }
+                })();
+              }}
+              onNewFile={() => {
+                const name = window.prompt("New file name", "new-file.txt");
+                if (name) void controller.createFile(session?.local.path ?? "", name, "local");
+              }}
             />
           </Panel>
           <PanelResizeHandle
@@ -511,11 +560,11 @@ export function FileBrowser(props: FileBrowserProps) {
                 : "h-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-row-resize"
             }
           />
-          <Panel defaultSize={50} minSize={15}>
+          <Panel defaultSize={50} minSize={15} className="flex flex-col min-h-0 min-w-0">
             <FilePanel
               sessionId={props.sessionId}
               side="remote"
-              title={`Remote — ${session?.remote.path ?? "—"}`}
+              subtitle={`${props.username}@${props.host}`}
               detachable={props.detachable}
               onDetach={props.onDetach}
               onItemDoubleClick={(e) => void handleDoubleClick("remote", e)}
@@ -526,6 +575,56 @@ export function FileBrowser(props: FileBrowserProps) {
               onCrossPaneDrop={handleCrossPaneToRemote}
               filterText={remoteFilter}
               onFilterTextChange={setRemoteFilter}
+              onDownloadSelected={(entries) => {
+                const localDir = session?.local.path ?? "";
+                for (const entry of entries) {
+                  void controller.download(entry, localDir, { openAfter: false });
+                }
+              }}
+              onUploadFromDisk={(files) => void handleLocalFiles(files)}
+              onDeleteSelected={(entries) => {
+                if (entries.length === 0) return;
+                const summary = entries.length === 1
+                  ? entries[0].name
+                  : `${entries.length} items`;
+                if (!window.confirm(`Delete remote: ${summary}?`)) return;
+                for (const entry of entries) {
+                  void controller.remove(entry.path, "remote", true);
+                }
+              }}
+              onChmodSelected={(entry) => {
+                const current = entry.mode != null
+                  ? (entry.mode & 0o777).toString(8).padStart(3, "0")
+                  : "644";
+                const input = window.prompt(`Octal mode for ${entry.name}`, current);
+                if (!input) return;
+                const mode = parseInt(input, 8);
+                if (!Number.isFinite(mode)) {
+                  setStatus(`Invalid mode: ${input}`);
+                  return;
+                }
+                void controller.chmod(entry.path, mode, "remote");
+              }}
+              onPreviewSelected={(entry) => {
+                if (!isPreviewable(entry)) {
+                  setStatus(`Preview not supported for ${entry.name}`);
+                  return;
+                }
+                void (async () => {
+                  try {
+                    const { sftpReadFileText } = await import("../../lib/sftp");
+                    const text = await sftpReadFileText(props.sessionId, entry.path, "remote");
+                    setPreviewing({ entry, side: "remote", text });
+                  } catch (err) {
+                    setStatus(`Preview failed: ${err}`);
+                  }
+                })();
+              }}
+              onNewFile={() => {
+                const name = window.prompt("New file name", "new-file.txt");
+                if (name) void controller.createFile(session?.remote.path ?? "/", name, "remote");
+              }}
+              onOpenTerminalHere={props.onOpenTerminalHere}
             />
           </Panel>
         </PanelGroup>

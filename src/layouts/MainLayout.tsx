@@ -20,6 +20,8 @@ import { FileBrowser } from "../components/filebrowser/FileBrowser";
 import { SftpSidebar } from "../components/filebrowser/SftpSidebar";
 import { isTauriRuntime } from "../lib/runtime";
 import { openSftpWindow } from "../lib/sftp";
+import { writeTerminal } from "../lib/ipc";
+import { encodeBase64 } from "../lib/ipc";
 import { parseSessionOptions } from "../lib/terminalProfile";
 import {
   clearDetachedHandoff,
@@ -499,75 +501,92 @@ export function MainLayout() {
                 {terminalTabs.map((tab) => {
                   const isActive = activeTabId === tab.id;
                   const sidebarOpen = !!attachedSidebars[tab.id] && !!tab.ssh;
+                  const terminalNode = (
+                    <div className="h-full w-full relative">
+                      <TerminalPanel
+                        tabId={tab.id}
+                        tabTitle={tab.title}
+                        ssh={tab.ssh}
+                        localShell={tab.localShell}
+                        terminalProfile={tab.terminalProfile}
+                        visible={isActive}
+                        onCwdChange={tab.ssh ? (cwd) => handleTerminalCwd(tab.id, cwd) : undefined}
+                      />
+                      {tab.ssh && (
+                        <button
+                          type="button"
+                          className="absolute top-1 right-2 z-30 px-2 py-0.5 text-[11px] rounded shadow flex items-center gap-1"
+                          style={{
+                            background: sidebarOpen ? "var(--moba-accent)" : "var(--moba-quick-bg)",
+                            color: sidebarOpen ? "#fff" : "var(--moba-text)",
+                            border: "1px solid var(--moba-divider)",
+                          }}
+                          title={sidebarOpen ? "Hide SFTP browser" : "Open SFTP browser"}
+                          onClick={() => toggleAttachedSidebar(tab.id)}
+                        >
+                          <FolderOpen className="w-3 h-3" />
+                          SFTP
+                        </button>
+                      )}
+                    </div>
+                  );
                   return (
                     <div
                       key={tab.id}
-                      className="absolute inset-0 flex"
-                      style={{ display: isActive ? "flex" : "none" }}
+                      className="absolute inset-0"
+                      style={{ display: isActive ? "block" : "none" }}
                     >
-                      <div className="flex-1 min-w-0 relative">
-                        <TerminalPanel
-                          tabId={tab.id}
-                          tabTitle={tab.title}
-                          ssh={tab.ssh}
-                          localShell={tab.localShell}
-                          terminalProfile={tab.terminalProfile}
-                          visible={isActive}
-                          onCwdChange={tab.ssh ? (cwd) => handleTerminalCwd(tab.id, cwd) : undefined}
-                        />
-                        {tab.ssh && (
-                          <button
-                            type="button"
-                            className="absolute top-1 right-2 z-30 px-2 py-0.5 text-[11px] rounded shadow flex items-center gap-1"
-                            style={{
-                              background: sidebarOpen ? "var(--moba-accent)" : "var(--moba-quick-bg)",
-                              color: sidebarOpen ? "#fff" : "var(--moba-text)",
-                              border: "1px solid var(--moba-divider)",
-                            }}
-                            title={sidebarOpen ? "Hide SFTP browser" : "Open SFTP browser"}
-                            onClick={() => toggleAttachedSidebar(tab.id)}
-                          >
-                            <FolderOpen className="w-3 h-3" />
-                            SFTP
-                          </button>
-                        )}
-                      </div>
-                      {sidebarOpen && tab.ssh && (
-                        <div
-                          className="shrink-0"
-                          style={{
-                            width: 640,
-                            borderLeft: "1px solid var(--moba-divider)",
-                            background: "var(--moba-bg)",
-                          }}
+                      {sidebarOpen && tab.ssh ? (
+                        <PanelGroup
+                          direction="horizontal"
+                          autoSaveId={`terminal-sftp-split-${tab.id}`}
                         >
-                          <SftpSidebar
-                            sessionId={`attached-${tab.id}`}
-                            host={tab.ssh.host}
-                            port={tab.ssh.port}
-                            username={tab.ssh.username}
-                            authMethod={tab.ssh.authMethod}
-                            authData={tab.ssh.authData}
-                            cwdHint={terminalCwds[tab.id] ?? null}
-                            title={`SFTP — ${tab.ssh.username}@${tab.ssh.host}`}
-                            onClose={() => toggleAttachedSidebar(tab.id)}
-                            onDetach={() =>
-                              openDetachedSftp(
-                                {
-                                  sessionId: `attached-${tab.id}`,
-                                  host: tab.ssh!.host,
-                                  port: tab.ssh!.port,
-                                  username: tab.ssh!.username,
-                                  authMethod: tab.ssh!.authMethod,
-                                  authData: tab.ssh!.authData,
-                                  initialPath: terminalCwds[tab.id],
-                                  attachedToTerminal: true,
-                                },
-                                `${tab.title} — SFTP`,
-                              )
-                            }
-                          />
-                        </div>
+                          <Panel defaultSize={62} minSize={20}>
+                            {terminalNode}
+                          </Panel>
+                          <PanelResizeHandle className="w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize" />
+                          <Panel defaultSize={38} minSize={20}>
+                            <div
+                              className="h-full w-full"
+                              style={{ background: "var(--moba-bg)" }}
+                            >
+                              <SftpSidebar
+                                sessionId={`attached-${tab.id}`}
+                                host={tab.ssh.host}
+                                port={tab.ssh.port}
+                                username={tab.ssh.username}
+                                authMethod={tab.ssh.authMethod}
+                                authData={tab.ssh.authData}
+                                cwdHint={terminalCwds[tab.id] ?? null}
+                                title={`SFTP — ${tab.ssh.username}@${tab.ssh.host}`}
+                                onClose={() => toggleAttachedSidebar(tab.id)}
+                                onOpenTerminalHere={(p) => {
+                                  // Send `cd <path>\n` to the parent terminal so the
+                                  // shell follows the SFTP browser into the directory.
+                                  const escaped = p.replace(/'/g, "'\\''");
+                                  void writeTerminal(tab.id, encodeBase64(`cd '${escaped}'\n`));
+                                }}
+                                onDetach={() =>
+                                  openDetachedSftp(
+                                    {
+                                      sessionId: `attached-${tab.id}`,
+                                      host: tab.ssh!.host,
+                                      port: tab.ssh!.port,
+                                      username: tab.ssh!.username,
+                                      authMethod: tab.ssh!.authMethod,
+                                      authData: tab.ssh!.authData,
+                                      initialPath: terminalCwds[tab.id],
+                                      attachedToTerminal: true,
+                                    },
+                                    `${tab.title} — SFTP`,
+                                  )
+                                }
+                              />
+                            </div>
+                          </Panel>
+                        </PanelGroup>
+                      ) : (
+                        terminalNode
                       )}
                     </div>
                   );

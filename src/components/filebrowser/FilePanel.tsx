@@ -14,7 +14,8 @@ import {
 interface FilePanelProps {
   sessionId: string;
   side: PaneSide;
-  title: string;
+  /** Optional subtitle (e.g. host) shown in muted text next to the LOCAL/REMOTE badge. */
+  subtitle?: string;
   detachable?: boolean;
   onDetach?: () => void;
   onItemDoubleClick: (entry: FileEntry) => void;
@@ -27,6 +28,15 @@ interface FilePanelProps {
   filterText?: string;
   /** Mutator wired to the filter text input. */
   onFilterTextChange?: (next: string) => void;
+  /** Toolbar callbacks operating on the current selection / current dir. */
+  onDownloadSelected?: (entries: FileEntry[]) => void;
+  onUploadSelected?: (entries: FileEntry[]) => void;
+  onUploadFromDisk?: (files: File[]) => void;
+  onDeleteSelected?: (entries: FileEntry[]) => void;
+  onChmodSelected?: (entry: FileEntry) => void;
+  onPreviewSelected?: (entry: FileEntry) => void;
+  onNewFile?: () => void;
+  onOpenTerminalHere?: (path: string) => void;
 }
 
 const SUPPORTED_PREVIEW_EXT = new Set([
@@ -37,7 +47,7 @@ const SUPPORTED_PREVIEW_EXT = new Set([
 export function FilePanel({
   sessionId,
   side,
-  title,
+  subtitle,
   detachable,
   onDetach,
   onItemDoubleClick,
@@ -48,7 +58,16 @@ export function FilePanel({
   acceptCrossPane,
   filterText,
   onFilterTextChange,
+  onDownloadSelected,
+  onUploadSelected,
+  onUploadFromDisk,
+  onDeleteSelected,
+  onChmodSelected,
+  onPreviewSelected,
+  onNewFile,
+  onOpenTerminalHere,
 }: FilePanelProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const session = useSftpStore((s) => s.sessions[sessionId]);
   const navigate = useSftpStore((s) => s.navigate);
   const navigateBack = useSftpStore((s) => s.navigateBack);
@@ -222,44 +241,140 @@ export function FilePanel({
     }
   };
 
+  const selectedEntries = useMemo<FileEntry[]>(() => {
+    if (!pane) return [];
+    const set = new Set(pane.selection);
+    return sortedEntries.filter((e) => set.has(e.path));
+  }, [pane, sortedEntries]);
+
+  const firstSelected = selectedEntries[0];
+  const canPreview = !!(
+    onPreviewSelected &&
+    selectedEntries.length === 1 &&
+    firstSelected &&
+    firstSelected.fileType === "file"
+  );
+
+  const handleMkdir = () => {
+    if (!onEmptyContext) return;
+    const items = onEmptyContext({ x: 0, y: 0 });
+    const mkdirItem = items.find((it) => it.label.toLowerCase().includes("folder"));
+    if (mkdirItem?.onClick) mkdirItem.onClick();
+  };
+
   return (
-    <div className="flex-1 min-w-0 flex flex-col min-h-0">
-      <div className="h-6 flex items-center px-2 text-[11px] font-semibold border-b shrink-0 gap-2"
-        style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}>
-        <span className="truncate flex-1">{title}</span>
+    <div className="h-full w-full min-w-0 flex flex-col min-h-0">
+      <div
+        className="h-7 flex items-center px-2 text-[11px] border-b shrink-0 gap-2"
+        style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}
+      >
+        <span
+          className="px-1.5 py-[1px] text-[10px] font-bold tracking-wider rounded shrink-0"
+          style={{
+            background: side === "remote" ? "var(--moba-accent)" : "var(--moba-text-muted)",
+            color: "#fff",
+            letterSpacing: "0.08em",
+          }}
+        >
+          {side === "remote" ? "REMOTE" : "LOCAL"}
+        </span>
+        {subtitle && (
+          <span
+            className="truncate text-[11px]"
+            style={{ color: "var(--moba-text-muted)" }}
+            title={subtitle}
+          >
+            {subtitle}
+          </span>
+        )}
+        <div className="flex-1" />
         {onFilterTextChange && (
           <input
             type="search"
             value={filterText ?? ""}
             placeholder="Filter…"
             onChange={(e) => onFilterTextChange(e.target.value)}
-            className="moba-input h-4 px-1 text-[11px] w-[120px]"
+            className="moba-input h-5 px-1.5 text-[11px] w-[140px] rounded shrink-0"
             style={{
-              background: "var(--moba-bg)",
-              border: "1px solid var(--moba-divider)",
+              background: "var(--moba-input-bg)",
+              border: "1px solid var(--moba-input-border)",
               color: "var(--moba-text)",
             }}
           />
         )}
       </div>
+      {onUploadFromDisk && (
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            if (files.length > 0) onUploadFromDisk(files);
+            e.target.value = "";
+          }}
+        />
+      )}
       <FileToolbar
+        side={side}
         canBack={pane.historyIndex > 0}
         canForward={pane.historyIndex < pane.history.length - 1}
         canUp={pane.path !== "/" && !!pane.path && !/^[A-Z]:\\?$/i.test(pane.path)}
         showHidden={showHidden}
         loading={pane.loading}
+        selectionCount={selectedEntries.length}
+        canPreview={canPreview}
         onBack={() => void navigateBack(sessionId, side)}
         onForward={() => void navigateForward(sessionId, side)}
         onUp={() => void navigateUp(sessionId, side)}
         onRefresh={() => void refresh(sessionId, side)}
-        onMkdir={() => {
-          const name = window.prompt("New folder name", "new-folder");
-          if (!name) return;
-          if (!onEmptyContext) return;
-          const items = onEmptyContext({ x: 0, y: 0 });
-          const mkdirItem = items.find((it) => it.label.toLowerCase().includes("folder"));
-          if (mkdirItem?.onClick) mkdirItem.onClick();
-        }}
+        onMkdir={handleMkdir}
+        onNewFile={onNewFile}
+        onDelete={
+          onDeleteSelected
+            ? () => {
+                if (selectedEntries.length === 0) return;
+                onDeleteSelected(selectedEntries);
+              }
+            : undefined
+        }
+        onChmod={
+          onChmodSelected && firstSelected
+            ? () => onChmodSelected(firstSelected)
+            : undefined
+        }
+        onPreview={
+          onPreviewSelected && firstSelected
+            ? () => onPreviewSelected(firstSelected)
+            : undefined
+        }
+        onDownloadSelected={
+          side === "remote" && onDownloadSelected
+            ? () => {
+                if (selectedEntries.length === 0) return;
+                onDownloadSelected(selectedEntries);
+              }
+            : undefined
+        }
+        onUploadSelected={
+          side === "local" && onUploadSelected
+            ? () => {
+                if (selectedEntries.length === 0) return;
+                onUploadSelected(selectedEntries);
+              }
+            : undefined
+        }
+        onUploadFromDisk={
+          side === "remote" && onUploadFromDisk
+            ? () => fileInputRef.current?.click()
+            : undefined
+        }
+        onOpenTerminalHere={
+          side === "remote" && onOpenTerminalHere
+            ? () => onOpenTerminalHere(pane.path)
+            : undefined
+        }
         onToggleHidden={() => toggleHidden(sessionId, side)}
         onDetach={detachable ? onDetach : undefined}
       />

@@ -5,6 +5,30 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>NewMob</title>
+    <script>
+      // Apply the saved (or system) app theme synchronously, before React
+      // mounts, so the chrome (including detached SFTP popups) doesn't
+      // flash a wrong-mode background while the JS bundle is still loading.
+      (function () {
+        try {
+          var stored = localStorage.getItem("newmob.appTheme.v1");
+          var mode = (stored === "light" || stored === "dark" || stored === "system") ? stored : "system";
+          var resolved = mode;
+          if (mode === "system") {
+            resolved = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+          }
+          var root = document.documentElement;
+          root.dataset.appTheme = resolved;
+          root.dataset.appThemeMode = mode;
+          root.style.colorScheme = resolved;
+          root.style.background = resolved === "dark" ? "#15171c" : "#ffffff";
+        } catch (_) {
+          /* noop */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

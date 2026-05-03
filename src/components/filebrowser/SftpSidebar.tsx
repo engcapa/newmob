@@ -10,6 +10,7 @@ interface SftpSidebarProps {
   cwdHint?: string | null;
   onClose?: () => void;
   onDetach?: () => void;
+  onOpenTerminalHere?: (path: string) => void;
   title?: string;
 }
 
@@ -35,6 +36,7 @@ export function SftpSidebar(props: SftpSidebarProps) {
       cwdHint={props.cwdHint}
       onDetach={props.onDetach}
       onClose={props.onClose}
+      onOpenTerminalHere={props.onOpenTerminalHere}
       showHeader
       title={props.title ?? "SFTP"}
       defaultOrientation="vertical"
