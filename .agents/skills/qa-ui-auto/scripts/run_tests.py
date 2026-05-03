@@ -30,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from parse_testcases import TestCase, parse, resolve_step  # noqa: E402
+from probe import probe, report as probe_report  # noqa: E402
 
 ROOT = Path.cwd()
 DEFAULT_TESTCASES = ROOT / "testcase-for-auto.md"
@@ -218,12 +219,24 @@ def main() -> int:
         log("no test cases selected")
         return 2
 
+    # Detect which backend services the selected cases actually need so we
+    # don't bother probing SSH when the user only runs UI smoke tests.
+    joined = "\n".join(s.raw for c in cases for s in c.steps)
+    need_ssh = "${cfg:ssh." in joined
+    need_sftp = "${cfg:sftp." in joined or "sftp" in joined.lower()
+
     base_url = cfg["app"]["base_url"]
     if args.mode == "browser":
-        if not wait_for_url(base_url, timeout=30):
-            log(f"app not reachable at {base_url} — start the dev server first "
-                "(restart the `Start application` workflow)")
-            return 2
+        # Give the dev server a brief grace period before declaring it dead —
+        # workflows take a moment to bind to the port after restart.
+        if not wait_for_url(base_url, timeout=10):
+            issues = probe(cfg, args.mode,
+                           need_ssh=need_ssh, need_sftp=need_sftp)
+            return probe_report(issues) or 2
+
+    issues = probe(cfg, args.mode, need_ssh=need_ssh, need_sftp=need_sftp)
+    if issues:
+        return probe_report(issues)
 
     report_root = Path(cfg.get("report", {}).get("dir", "qa-ui-auto-report"))
     if report_root.exists():

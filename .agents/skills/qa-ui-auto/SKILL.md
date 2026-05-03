@@ -36,6 +36,7 @@ The reason we use `playwright-cli` (not the Playwright test runner) is token eff
 │   ├── run_tests.py              ← entry point; orchestrates lifecycle + reporting
 │   ├── parse_testcases.py        ← parses testcase-for-auto.md into steps
 │   ├── env_check.py              ← verifies node/pnpm/playwright-cli/python deps
+│   ├── probe.py                  ← detects missing services and prints how to start them
 │   └── fixtures.py               ← spins up local SFTP/SSH if config requests it
 ├── assets/
 │   ├── testcase-for-auto.template.md  ← canonical template (regenerated each run)
@@ -53,16 +54,20 @@ Test cases and config live at the **project root**, not inside the skill, so use
 
 ## Workflow (always follow this order)
 
-1. **Preflight.** Run `python .agents/skills/qa-ui-auto/scripts/env_check.py`. It checks/installs:
+1. **Preflight tooling.** Run `python .agents/skills/qa-ui-auto/scripts/env_check.py`. It checks/installs:
    - `node >= 18`, `pnpm`, project deps (`pnpm install` if missing).
    - `playwright-cli` globally: `npm install -g @playwright/cli@latest` if `playwright-cli --version` fails.
    - Browsers: `playwright-cli install chromium`.
    - Python deps: `pyyaml`. Install with `pip install pyyaml` if missing.
 2. **Load config.** Read `qa-ui-auto.config.yaml`. If absent, copy the example and tell the user which fields to fill in (host/port/user/password or key path for SSH, SFTP). Never invent credentials. If the user supplies secrets in chat, write them via the environment-secrets skill, not the YAML, and reference them as `${env:VAR_NAME}`.
 3. **(Re)generate `testcase-for-auto.md`.** See "Regeneration policy" below. The file must always exist before tests run.
-4. **Start the app under test.**
-   - `browser` mode (default): ensure the `Start application` workflow is running (Vite on port 5000). If not, restart it via the workflows skill. Wait until `http://localhost:5000` responds.
-   - `native` mode: build with `pnpm tauri build --debug --no-bundle`, ensure VNC workflow is up, then launch the binary in the background (`./src-tauri/target/debug/newmob &`).
+4. **Probe required services.** `run_tests.py` automatically calls `probe.py` after parsing test cases. The probe checks only what the active cases need:
+   - Browser mode → Vite dev server reachable at `app.base_url`.
+   - Native mode → Tauri debug binary built; on Linux, a `DISPLAY` is set.
+   - SSH/SFTP host:port reachable (only if any case references `${cfg:ssh.*}` or `${cfg:sftp.*}`).
+   - Tooling (`pnpm`, `playwright-cli`) on PATH.
+   When something is missing, the probe prints a short, copy-pasteable startup recipe and `run_tests.py` exits with code `2` **without** running any tests. You can also probe manually: `python .agents/skills/qa-ui-auto/scripts/probe.py --mode browser`.
+   When the user reports the probe failing, do not silently start services for them — surface the printed recipe verbatim and ask whether to start the listed workflow / Docker container.
 5. **Run.** `python .agents/skills/qa-ui-auto/scripts/run_tests.py --mode browser` (or `--mode native`). The runner:
    - Parses `testcase-for-auto.md` into ordered cases and steps.
    - For each case, opens a fresh browser context: `playwright-cli open http://localhost:5000 --user-data-dir qa-ui-auto-report/profile-<case>`.
