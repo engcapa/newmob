@@ -399,7 +399,8 @@ describe("FileBrowser → FilePanel toolbar wiring", () => {
     await user.click(downloadBtn);
 
     expect(controllerMocks.download).toHaveBeenCalledTimes(1);
-    expect(controllerMocks.download.mock.calls[0][0]).toMatchObject({
+    const downloadArgs = controllerMocks.download.mock.calls[0] as unknown as unknown[];
+    expect(downloadArgs[0]).toMatchObject({
       path: "/work/notes.txt",
     });
   });
@@ -448,7 +449,8 @@ describe("FileBrowser → FilePanel toolbar wiring", () => {
     await user.click(uploadBtn);
 
     expect(controllerMocks.upload).toHaveBeenCalledTimes(1);
-    expect(controllerMocks.upload.mock.calls[0][0]).toMatchObject({
+    const uploadArgs = controllerMocks.upload.mock.calls[0] as unknown as unknown[];
+    expect(uploadArgs[0]).toMatchObject({
       path: "/work/notes.txt",
     });
   });
