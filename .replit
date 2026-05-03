@@ -42,12 +42,13 @@ outputType = "webview"
 name = "VNC Server"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "vnc"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "bash scripts/start-vnc.sh"
-
-[workflows.workflow.metadata]
-outputType = "vnc"
+waitForPort = 5900
 
 [[workflows.workflow]]
 name = "Tauri Build"
