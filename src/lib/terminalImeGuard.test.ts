@@ -11,7 +11,7 @@ function createGuard() {
     now: () => now,
     setTimer: (callback) => {
       timerCallback = callback;
-      return 1 as ReturnType<typeof window.setTimeout>;
+      return 1 as unknown as ReturnType<typeof window.setTimeout>;
     },
     clearTimer: () => {
       timerCallback = null;

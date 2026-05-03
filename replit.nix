@@ -1,5 +1,6 @@
 {pkgs}: {
   deps = [
+    pkgs.nettools
     pkgs.openssl
     pkgs.librsvg
     pkgs.libsoup_3

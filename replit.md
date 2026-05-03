@@ -205,6 +205,31 @@ Configured as a **static** site deployment:
 
 - Session data is persisted in `localStorage` (keys: `newmob.sessions.v1`, `newmob.groups.v1`)
 - SSH connections in browser preview are real (via the WebSocket proxy above). Local PTY and the placeholder protocols (RDP/VNC/SFTP/Telnet/Serial) are still UI-only.
+
+## Running the Tauri desktop build on Replit (verified)
+
+The full Tauri 2 + Rust desktop app builds and runs inside Replit and can be
+viewed through the workspace **Tools → VNC** panel.
+
+- **Toolchain:** `rust-stable`, `nodejs-20`, `pnpm`, plus the system libs
+  already pinned in `replit.nix` (webkit2gtk-4.1, gtk+-3.0, libsoup-3.0,
+  openssl, librsvg, glib, pkg-config). `@tauri-apps/cli` and
+  `@tauri-apps/api` must share the same major+minor as the Rust `tauri`
+  crate; otherwise `tauri build` aborts with a "version mismatched" error.
+  Last verified pairing: Rust crate `tauri 2.11`, npm `@tauri-apps/cli@^2.10.1`,
+  npm `@tauri-apps/api@^2.11.0` — adjust together when bumping any of them.
+- **Virtual display:** the `VNC Server` workflow runs `scripts/start-vnc.sh`,
+  which launches `Xvnc :0` on port `5900` (no auth, 1280x800x24) plus
+  `fluxbox` as the window manager, then auto-launches
+  `src-tauri/target/debug/newmob` on `DISPLAY=:0` if the binary exists.
+  Replit's Tools → VNC connects to port 5900.
+- **Build:** the `Tauri Build` workflow runs `pnpm tauri build --debug --no-bundle`.
+  First compile of the Rust deps (russh, rusqlite, font-kit, portable-pty,
+  tokio, …) takes ~2.5 minutes; incremental rebuilds are much faster.
+  After the binary is produced, restart the `VNC Server` workflow to relaunch it.
+- **Production bundle:** for a release build use `pnpm tauri build` (drop
+  `--debug --no-bundle`); on Replit this produces a Linux binary, not a macOS
+  `.app` / Windows `.exe` — those still require their respective host OSes.
 - The app theme (light/dark/system) is stored in `localStorage` under `newmob.appTheme.v1`
 - SFTP detached windows: in Tauri they spawn a real `WebviewWindow` via
   the `open_sftp_window` command; in browser preview they fall back to

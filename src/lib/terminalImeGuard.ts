@@ -27,7 +27,7 @@ export class TerminalImeInputGuard {
   constructor(options: TerminalImeInputGuardOptions) {
     this.commit = options.commit;
     this.now = options.now ?? (() => performance.now());
-    this.setTimer = options.setTimer ?? ((callback, delay) => window.setTimeout(callback, delay));
+    this.setTimer = options.setTimer ?? ((callback, delay) => window.setTimeout(callback, delay) as unknown as TimerHandle);
     this.clearTimer = options.clearTimer ?? ((handle) => window.clearTimeout(handle));
   }
 
