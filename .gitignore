@@ -99,3 +99,10 @@ temp/
 replit.nix
 /attached_assets
 tsconfig.tsbuildinfo
+
+# qa-ui-auto
+qa-ui-auto.config.yaml
+qa-ui-auto-report/
+qa-ui-auto-report-*/
+testcase-for-auto.fresh-*.md
+testcase-for-auto.md.bak-*
