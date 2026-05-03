@@ -90,7 +90,7 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
         accept=".config,.txt,*"
         onChange={(event) => void handleImport(event)}
       />
-      <div className="flex-1 overflow-auto px-6 py-8 flex justify-center">
+      <div data-testid="welcome-panel" className="flex-1 overflow-auto px-6 py-8 flex justify-center">
         <div className="w-full max-w-4xl">
           <div className="flex items-center gap-3 mb-4">
             <div
@@ -266,7 +266,7 @@ function LocalTerminalCard({
           </div>
         )}
         <div className="flex items-center justify-end gap-2">
-          <button className="moba-btn h-8 px-3" onClick={onStart} type="button">
+          <button data-testid="welcome-open-local-terminal" className="moba-btn h-8 px-3" onClick={onStart} type="button">
             Open
           </button>
           {canElevate && (

@@ -88,7 +88,7 @@ export function Sidebar({ onNewSession, onNewSftpSession, onEditSession, onConne
   };
 
   return (
-    <div className="h-full flex">
+    <div data-testid="sidebar" className="h-full flex">
       <div
         className="w-[26px] flex flex-col shrink-0"
         style={{ background: "var(--moba-tab-inactive)", borderRight: "1px solid var(--moba-sidebar-border)" }}
@@ -112,10 +112,10 @@ export function Sidebar({ onNewSession, onNewSftpSession, onEditSession, onConne
       {!compact && (
       <div className="flex-1 flex flex-col min-w-0" style={{ background: "var(--moba-sidebar-bg)", borderRight: "1px solid var(--moba-sidebar-border)" }}>
         <div className="h-7 flex items-center gap-1 px-1.5 border-b shrink-0" style={{ borderColor: "var(--moba-divider)" }}>
-          <IconBtn title="New session" icon={<Plus className="w-3.5 h-3.5" />} onClick={() => onNewSession?.()} />
-          <IconBtn title="Edit selected session" icon={<Edit3 className="w-3.5 h-3.5" />} onClick={() => selectedSession && onEditSession?.(selectedSession)} disabled={!selectedSession} />
-          <IconBtn title="Duplicate selected session" icon={<Copy className="w-3.5 h-3.5" />} onClick={() => selectedSession && void duplicateSession(selectedSession.id)} disabled={!selectedSession} />
-          <IconBtn title="Delete selected session" icon={<Trash2 className="w-3.5 h-3.5" />} onClick={handleDelete} disabled={!selectedSession} />
+          <IconBtn testId="session-new" title="New session" icon={<Plus className="w-3.5 h-3.5" />} onClick={() => onNewSession?.()} />
+          <IconBtn testId="session-edit" title="Edit selected session" icon={<Edit3 className="w-3.5 h-3.5" />} onClick={() => selectedSession && onEditSession?.(selectedSession)} disabled={!selectedSession} />
+          <IconBtn testId="session-duplicate" title="Duplicate selected session" icon={<Copy className="w-3.5 h-3.5" />} onClick={() => selectedSession && void duplicateSession(selectedSession.id)} disabled={!selectedSession} />
+          <IconBtn testId="session-delete" title="Delete selected session" icon={<Trash2 className="w-3.5 h-3.5" />} onClick={handleDelete} disabled={!selectedSession} />
           <span className="moba-divider-v h-4 mx-1" />
           <IconBtn title="Refresh sessions" icon={<RefreshCw className="w-3.5 h-3.5" />} onClick={() => void loadSessions()} />
           <IconBtn title="Move selected session to Favorites" icon={<Star className="w-3.5 h-3.5" />} onClick={handleFavorite} disabled={!selectedSession} />
@@ -123,6 +123,8 @@ export function Sidebar({ onNewSession, onNewSftpSession, onEditSession, onConne
           <div className="relative">
             <Search className="w-3 h-3 absolute left-1.5 top-1/2 -translate-y-1/2 text-[var(--moba-text-muted)]" />
             <input
+              data-testid="session-search"
+              aria-label="Search sessions"
               className="moba-input pl-6 w-[140px]"
               placeholder="Search sessions…"
               value={searchQuery}
@@ -208,16 +210,19 @@ function UtilityPanel({ tab }: { tab: Exclude<SideTab, "sessions"> }) {
 function IconBtn({
   icon,
   title,
+  testId,
   onClick,
   disabled,
 }: {
   icon: React.ReactNode;
   title: string;
+  testId?: string;
   onClick?: () => void;
   disabled?: boolean;
 }) {
   return (
     <button
+      data-testid={testId}
       title={title}
       onClick={onClick}
       disabled={disabled}

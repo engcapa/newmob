@@ -369,7 +369,7 @@ export function FileBrowser(props: FileBrowserProps) {
   const showCwdToolbar = props.cwdHint !== undefined && props.cwdHint !== null;
 
   return (
-    <div className="w-full h-full flex flex-col" style={{ background: "var(--moba-bg)" }}>
+    <div data-testid="sftp-browser" className="w-full h-full flex flex-col" style={{ background: "var(--moba-bg)" }}>
       {props.showHeader && (
         <div
           className="h-6 px-2 flex items-center text-[11px] font-semibold border-b shrink-0 gap-1"

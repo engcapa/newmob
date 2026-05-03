@@ -7,6 +7,7 @@ interface PathBreadcrumbProps {
   onNavigate: (path: string) => void;
   onSubmit?: (path: string) => void;
   detectWindows?: boolean;
+  testId?: string;
 }
 
 export function PathBreadcrumb({
@@ -15,6 +16,7 @@ export function PathBreadcrumb({
   onNavigate,
   onSubmit,
   detectWindows,
+  testId,
 }: PathBreadcrumbProps) {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState(path);
@@ -64,6 +66,8 @@ export function PathBreadcrumb({
   if (editing) {
     return (
       <input
+        data-testid={testId}
+        aria-label={testId}
         autoFocus
         className="moba-input flex-1 h-6"
         value={editValue}
@@ -82,6 +86,7 @@ export function PathBreadcrumb({
 
   return (
     <div
+      data-testid={testId}
       className="flex-1 h-6 flex items-center gap-0.5 px-1.5 overflow-x-auto text-[12px] cursor-text"
       style={{ background: "var(--moba-input-bg)", border: "1px solid var(--moba-input-border)", borderRadius: 2 }}
       onClick={() => setEditing(true)}

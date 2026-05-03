@@ -44,7 +44,7 @@ export function FileTransferQueue({
   const filtered = sessionId ? items.filter((it) => it.sessionId === sessionId) : items;
 
   return (
-    <div className="border-t flex flex-col shrink-0" style={{ borderColor: "var(--moba-divider)", background: "var(--moba-panel-bg)" }}>
+    <div data-testid="sftp-transfer-queue" className="border-t flex flex-col shrink-0" style={{ borderColor: "var(--moba-divider)", background: "var(--moba-panel-bg)" }}>
       <div className="h-5 px-2 flex items-center text-[11px] font-semibold gap-2"
         style={{ borderBottom: "1px solid var(--moba-divider)", background: "var(--moba-quick-bg)" }}>
         <span>Transfers</span>

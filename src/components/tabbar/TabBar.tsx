@@ -58,6 +58,7 @@ export function TabBar() {
 
   return (
     <div
+      data-testid="tab-bar"
       className="h-8 flex items-end pl-2 pr-1 pt-1.5 gap-0"
       style={{ background: "linear-gradient(to bottom, var(--moba-tab-inactive), var(--moba-chrome-bg))" }}
     >
@@ -65,6 +66,9 @@ export function TabBar() {
       {tabs.map((tab) => (
         <div
           key={tab.id}
+          data-testid="tab-item"
+          data-tab-title={tab.title}
+          data-tab-type={tab.type}
           className="moba-tab"
           data-active={activeTabId === tab.id}
           onClick={() => setActiveTab(tab.id)}
@@ -86,6 +90,7 @@ export function TabBar() {
       ))}
 
       <button
+        data-testid="new-local-terminal"
         className="moba-tab"
         data-active={false}
         onClick={handleNewTab}

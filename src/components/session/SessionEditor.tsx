@@ -726,6 +726,7 @@ function BookmarkSettings({
     <div data-testid="bookmark-settings" className="grid grid-cols-12 gap-x-3 gap-y-2.5 text-[12px]">
       <Field label="Session name">
         <input
+          data-testid="session-name"
           className="moba-input w-72"
           value={name}
           aria-label="Session name"
@@ -1179,6 +1180,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
       style={{ background: "rgba(20,30,45,0.4)" }}
     >
       <div
+        data-testid="session-editor"
         className="w-[1020px] max-w-[96%] max-h-[92vh] flex flex-col rounded-[6px] shadow-2xl border overflow-hidden"
         style={{ background: "var(--moba-panel-bg)", borderColor: "var(--moba-chrome-border)", color: "var(--moba-text)" }}
       >
@@ -1224,6 +1226,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
             {PROTOS.map((p) => (
               <button
                 key={p.id}
+                data-testid={`session-proto-${p.id.toLowerCase()}`}
                 className="moba-proto-btn"
                 data-active={proto === p.id}
                 onClick={() => handleProtoChange(p.id)}
@@ -1261,6 +1264,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
               </label>
               <div className="col-span-5 flex items-center gap-1">
                 <input
+                  data-testid="session-host"
                   className="moba-input flex-1"
                   value={host}
                   onChange={(e) => setHost(e.target.value)}
@@ -1282,6 +1286,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
                 <span>Specify username</span>
               </label>
               <input
+                data-testid="session-user"
                 className="moba-input col-span-2"
                 value={username}
                 disabled={!specifyUser}
@@ -1292,6 +1297,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
 
               <label className="col-span-2 text-[12px] text-right">Port</label>
               <input
+                data-testid="session-port"
                 className="moba-input col-span-2"
                 value={port}
                 aria-label="Port"
@@ -1316,6 +1322,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           {sectionTabs.map((t) => (
             <button
               key={t.id}
+              data-testid={`session-section-${t.id}`}
               className="moba-section-tab"
               data-active={activeSection === t.id}
               onClick={() => setSection(t.id)}
@@ -1441,6 +1448,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           </button>
           <button
             className="moba-btn"
+            data-testid="session-save"
             data-primary="true"
             onClick={handleSave}
             type="button"

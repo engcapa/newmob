@@ -336,7 +336,7 @@ export function FilePanel({
   };
 
   return (
-    <div className="h-full w-full min-w-0 flex flex-col min-h-0">
+    <div data-testid={`sftp-${side}-pane`} className="h-full w-full min-w-0 flex flex-col min-h-0">
       <div
         className="h-7 flex items-center px-2 text-[11px] border-b shrink-0 gap-2"
         style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}
@@ -463,6 +463,7 @@ export function FilePanel({
           />
         )}
         <PathBreadcrumb
+          testId={`sftp-${side}-path`}
           path={pane.path}
           homePath={side === "remote" ? session?.homeDir ?? null : null}
           onNavigate={(p) => void navigate(sessionId, side, p)}
@@ -472,6 +473,7 @@ export function FilePanel({
       </div>
 
       <div
+        data-testid={`sftp-${side}-list`}
         className="flex-1 overflow-auto text-[12px] relative"
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}

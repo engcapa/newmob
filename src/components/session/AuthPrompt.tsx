@@ -20,6 +20,7 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(20,30,45,0.4)" }}>
       <form
+        data-testid="auth-prompt"
         onSubmit={handleSubmit}
         className="w-[400px] rounded-md shadow-2xl border overflow-hidden"
         style={{ background: "var(--moba-panel-bg)", borderColor: "var(--moba-chrome-border)", color: "var(--moba-text)" }}
@@ -39,6 +40,8 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
             Enter password for <span className="font-semibold text-[var(--moba-text)]">{username}@{host}</span>
           </div>
           <input
+            data-testid="auth-password"
+            aria-label="SSH password"
             type="password"
             autoFocus
             value={password}
@@ -55,6 +58,7 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
             Cancel
           </button>
           <button type="submit"
+                  data-testid="auth-submit"
                   className="moba-btn font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                   disabled={!password}
                   data-primary="true">

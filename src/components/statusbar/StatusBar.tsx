@@ -30,7 +30,7 @@ export function StatusBar() {
   }, []);
 
   return (
-    <div className="moba-status h-6 flex items-center px-2 gap-3">
+    <div data-testid="status-bar" className="moba-status h-6 flex items-center px-2 gap-3">
       <span className="flex items-center gap-1">
         <Eye className="w-3 h-3" /> {sessions.length} sessions • {selected ? selected.name : "none selected"}
       </span>

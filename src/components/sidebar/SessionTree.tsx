@@ -375,6 +375,7 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
 
   return (
     <div
+      data-testid="session-tree"
       className="flex-1 moba-scroll-y text-[12px]"
       onContextMenu={(event) => folderContextMenu(event, null)}
     >
@@ -572,6 +573,9 @@ function SessionItem({
 
   return (
     <div
+      data-testid="session-tree-item"
+      data-session-name={session.name}
+      data-session-type={session.session_type}
       className="flex items-center gap-1 px-1 py-0.5 cursor-pointer hover:bg-[var(--moba-hover)] group"
       data-selected={selected}
       style={selected ? { background: "var(--moba-selected)" } : undefined}

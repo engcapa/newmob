@@ -47,6 +47,7 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
 
   return (
     <div
+      data-testid="quick-connect"
       className="h-7 flex items-center gap-1 px-2 text-[12px]"
       style={{
         background: "var(--moba-quick-bg)",
@@ -65,6 +66,8 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
       <span className="moba-divider-v h-4 mx-1" />
       <span className="text-[var(--moba-text-muted)]">Quick connect:</span>
       <input
+        data-testid="qc-input"
+        aria-label="Quick connect"
         className="moba-input flex-1 max-w-md"
         placeholder="ssh user@host  •  rdp://host  •  telnet host  •  paste session URL…"
         value={value}
@@ -73,7 +76,7 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
           if (event.key === "Enter") submit();
         }}
       />
-      <button className="moba-btn" onClick={submit} type="button">Go</button>
+      <button data-testid="qc-submit" className="moba-btn" onClick={submit} type="button">Go</button>
       <span className="moba-divider-v h-4 mx-2" />
       <span className="text-[var(--moba-text-muted)]">Recent:</span>
       {recent.length === 0 ? (

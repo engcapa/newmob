@@ -84,22 +84,23 @@ export function FileToolbar(props: FileToolbarProps) {
       className="h-7 flex items-center gap-0.5 px-1 border-b shrink-0 overflow-x-auto"
       style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}
     >
-      <ToolBtn title="Back" disabled={!canBack} onClick={onBack}>
+      <ToolBtn testId={`sftp-${side}-back`} title="Back" disabled={!canBack} onClick={onBack}>
         <ArrowLeft className="w-3.5 h-3.5" />
       </ToolBtn>
-      <ToolBtn title="Forward" disabled={!canForward} onClick={onForward}>
+      <ToolBtn testId={`sftp-${side}-forward`} title="Forward" disabled={!canForward} onClick={onForward}>
         <ArrowRight className="w-3.5 h-3.5" />
       </ToolBtn>
-      <ToolBtn title="Up" disabled={!canUp} onClick={onUp}>
+      <ToolBtn testId={`sftp-${side}-up`} title="Up" disabled={!canUp} onClick={onUp}>
         <ArrowUp className="w-3.5 h-3.5" />
       </ToolBtn>
       <Sep />
-      <ToolBtn title="Refresh" onClick={onRefresh}>
+      <ToolBtn testId={`sftp-${side}-refresh`} title="Refresh" onClick={onRefresh}>
         <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
       </ToolBtn>
 
       {side === "remote" && onDownloadSelected && (
         <ToolBtn
+          testId="sftp-remote-download-selected"
           title={hasSelection ? `Download ${selectionCount} selected to local` : "Download selected to local"}
           disabled={!hasSelection}
           onClick={onDownloadSelected}
@@ -109,6 +110,7 @@ export function FileToolbar(props: FileToolbarProps) {
       )}
       {side === "local" && onUploadSelected && (
         <ToolBtn
+          testId="sftp-local-upload-selected"
           title={hasSelection ? `Upload ${selectionCount} selected to remote` : "Upload selected to remote"}
           disabled={!hasSelection}
           onClick={onUploadSelected}
@@ -117,22 +119,23 @@ export function FileToolbar(props: FileToolbarProps) {
         </ToolBtn>
       )}
       {side === "remote" && onUploadFromDisk && (
-        <ToolBtn title="Upload files from this computer" onClick={onUploadFromDisk}>
+        <ToolBtn testId="sftp-remote-upload-from-disk" title="Upload files from this computer" onClick={onUploadFromDisk}>
           <HardDriveUpload className="w-3.5 h-3.5" />
         </ToolBtn>
       )}
 
       <Sep />
-      <ToolBtn title="New folder" onClick={onMkdir}>
+      <ToolBtn testId={`sftp-${side}-new-folder`} title="New folder" onClick={onMkdir}>
         <FolderPlus className="w-3.5 h-3.5" />
       </ToolBtn>
       {onNewFile && (
-        <ToolBtn title="New file" onClick={onNewFile}>
+        <ToolBtn testId={`sftp-${side}-new-file`} title="New file" onClick={onNewFile}>
           <FilePlus className="w-3.5 h-3.5" />
         </ToolBtn>
       )}
       {onDelete && (
         <ToolBtn
+          testId={`sftp-${side}-delete`}
           title={hasSelection ? `Delete ${selectionCount} selected` : "Delete selected"}
           disabled={!hasSelection}
           onClick={onDelete}
@@ -143,6 +146,7 @@ export function FileToolbar(props: FileToolbarProps) {
       )}
       {onChmod && (
         <ToolBtn
+          testId={`sftp-${side}-chmod`}
           title={
             selectionCount > 1
               ? `Permissions (chmod) for ${selectionCount} selected…`
@@ -156,6 +160,7 @@ export function FileToolbar(props: FileToolbarProps) {
       )}
       {onPreview && (
         <ToolBtn
+          testId={`sftp-${side}-preview`}
           title="View / preview text file"
           disabled={!canPreview}
           onClick={onPreview}
@@ -166,6 +171,7 @@ export function FileToolbar(props: FileToolbarProps) {
 
       <Sep />
       <ToolBtn
+        testId={`sftp-${side}-toggle-hidden`}
         title={showHidden ? "Hide hidden files" : "Show hidden files"}
         onClick={onToggleHidden}
         active={showHidden}
@@ -173,12 +179,12 @@ export function FileToolbar(props: FileToolbarProps) {
         {showHidden ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
       </ToolBtn>
       {side === "remote" && onOpenTerminalHere && (
-        <ToolBtn title="Open terminal at this path (cd into it)" onClick={onOpenTerminalHere}>
+        <ToolBtn testId="sftp-remote-open-terminal-here" title="Open terminal at this path (cd into it)" onClick={onOpenTerminalHere}>
           <Terminal className="w-3.5 h-3.5" />
         </ToolBtn>
       )}
       {onDetach && (
-        <ToolBtn title="Detach to its own window" onClick={onDetach}>
+        <ToolBtn testId={`sftp-${side}-detach`} title="Detach to its own window" onClick={onDetach}>
           <Maximize2 className="w-3.5 h-3.5" />
         </ToolBtn>
       )}
@@ -200,6 +206,7 @@ function Sep() {
 function ToolBtn({
   children,
   title,
+  testId,
   onClick,
   disabled,
   active,
@@ -207,6 +214,7 @@ function ToolBtn({
 }: {
   children: ReactNode;
   title: string;
+  testId?: string;
   onClick: () => void;
   disabled?: boolean;
   active?: boolean;
@@ -214,6 +222,7 @@ function ToolBtn({
 }) {
   return (
     <button
+      data-testid={testId}
       type="button"
       title={title}
       onClick={onClick}

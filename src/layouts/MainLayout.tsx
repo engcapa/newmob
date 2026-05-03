@@ -542,6 +542,7 @@ export function MainLayout() {
                       {tab.ssh && (
                         <button
                           type="button"
+                          data-testid="attached-sftp-toggle"
                           className="absolute top-1 right-2 z-30 px-2 py-0.5 text-[11px] rounded shadow flex items-center gap-1"
                           style={{
                             background: sidebarOpen ? "var(--moba-accent)" : "var(--moba-quick-bg)",

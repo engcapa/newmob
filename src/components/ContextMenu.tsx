@@ -77,6 +77,7 @@ const MenuSurface = forwardRef<HTMLDivElement, {
 }>(({ items, onClose, style }, ref) => (
   <div
     ref={ref}
+    data-testid="context-menu"
     className="min-w-[220px] py-1 rounded shadow-lg border text-[12px]"
     style={{ ...style, background: "var(--moba-panel-bg)", borderColor: "var(--moba-divider)", color: "var(--moba-text)" }}
   >
@@ -109,6 +110,7 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
     return (
       <div className="relative group/menu-row">
         <button
+          data-testid={`context-menu-item-${slugForTestId(item.label)}`}
           className="w-full px-3 py-1 text-left flex items-center gap-2 hover:bg-[var(--moba-hover)] disabled:opacity-40"
           style={item.danger ? { color: "#b22222" } : undefined}
           disabled={item.disabled}
@@ -127,6 +129,7 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
 
   return (
     <button
+      data-testid={`context-menu-item-${slugForTestId(item.label)}`}
       className="w-full px-3 py-1 text-left flex items-center gap-2 hover:bg-[var(--moba-hover)] disabled:opacity-40"
       style={item.danger ? { color: "#b22222" } : undefined}
       onClick={() => {
@@ -157,4 +160,8 @@ export function useContextMenu() {
   ) : null;
 
   return { show, close, render };
+}
+
+function slugForTestId(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "item";
 }

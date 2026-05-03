@@ -1041,6 +1041,7 @@ export function TerminalPanel({
   return (
     <div
       ref={panelRef}
+      data-testid="terminal-pane"
       className={panelClasses}
       style={{ background: resolvedTheme.background ?? "#1d1f21" }}
       onWheel={(event) => {
