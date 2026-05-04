@@ -72,6 +72,21 @@ src-tauri/target/release/bundle/
 src-tauri/target/release/
 ```
 
+## 版本与发布
+
+应用版本号统一维护在根目录 `package.json` 的 `version` 字段。`src-tauri/tauri.conf.json` 通过 `../package.json` 读取同一个版本，避免 Tauri bundle 版本与前端包版本分叉。
+
+`src-tauri/Cargo.toml` 中的 `version` 是 Rust crate 元数据；除非需要发布 Rust crate 或在后端代码中使用 `CARGO_PKG_VERSION`，否则应用发布版本以 `package.json` 为准。
+
+发布 tag 使用 `v<version>` 格式，例如当前 `0.1.0` 对应：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions 会在推送 `v*` tag、发布 GitHub Release，或手动运行 `Release Bundle` workflow 时构建桌面 bundle。发布触发时 workflow 会校验 tag 是否等于 `v` + `package.json` 版本；手动运行时不填 tag 只生成 workflow artifacts，填写 tag 则会上传到对应 Release。
+
 ## 测试
 
 ```bash
