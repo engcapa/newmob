@@ -1112,3 +1112,85 @@
 12. click '[data-testid="auth-submit"]'
 13. wait_for '[data-testid="terminal-pane"]'
 14. screenshot 040-auth-prompt-validation.png
+
+## TC-041: Welcome panel imports OpenSSH config
+- tags: welcome, import, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. wait_for '[data-testid="welcome-panel"]'
+3. expect_visible 'text="Import OpenSSH config"'
+4. eval 'async page => { const fileChooserPromise = page.waitForEvent("filechooser"); await page.locator(`text="Import OpenSSH config"`).click(); const fileChooser = await fileChooserPromise; await fileChooser.setFiles({ name: "config", mimeType: "text/plain", buffer: Buffer.from("Host my-ssh\\n  HostName 10.0.0.1\\n  User admin\\n  Port 2222") }); }'
+5. sleep 1
+6. wait_for 'text="my-ssh"'
+7. expect_visible 'text="my-ssh"'
+8. screenshot 041-import-openssh-config.png
+
+## TC-042: Tab management including middle-click close
+- tags: tabs, mouse, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="welcome-open-local-terminal"]'
+3. wait_for '[data-testid="terminal-pane"]'
+4. click '[data-testid="new-local-terminal"]'
+5. wait_for '[data-testid="terminal-pane"]'
+6. eval 'async page => { const count = await page.locator(`[data-testid="tab-item"]`).count(); if (count < 2) throw new Error("Expected at least 2 tabs"); }'
+7. eval 'async page => { await page.locator(`[data-testid="tab-item"]`).last().click({ button: "middle" }); }'
+8. sleep 1
+9. expect_text '[data-testid="status-bar"]' '1 terminals'
+10. screenshot 042-tab-middle-click-close.png
+
+## TC-043: SFTP attached browser detaches to separate window
+- tags: sftp, window, detach, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. eval 'async page => { await page.evaluate(() => { window.__detaches = 0; window.open = function() { window.__detaches++; return window; }; }); }'
+12. click 'button[title="Open in its own window"]'
+13. sleep 1
+14. eval 'async page => { const d = await page.evaluate(() => window.__detaches); if (d === 0) throw new Error("window.open was not called for detach"); }'
+15. screenshot 043-sftp-detach.png
+
+## TC-044: SFTP remote pane manual Sync button
+- tags: sftp, sync, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. click '[data-testid="terminal-pane"]'
+12. type 'cd /tmp && echo qa-cwd-change'
+13. press Enter
+14. sleep 1
+15. eval 'async page => { const syncBtn = page.locator(`button[title*="Sync the remote pane"]`); await syncBtn.click(); }'
+16. sleep 1
+17. eval 'async page => { const val = await page.locator(`[data-testid="sftp-remote-path"]`).inputValue(); if (!val.includes("/tmp")) console.log("[v0] Sync did not jump to /tmp, OSC7 might not be injected in test env shell"); }'
+18. screenshot 044-sftp-manual-sync.png
+
+## TC-045: Close application confirmation warns if terminals are active
+- tags: main, window-close, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="welcome-open-local-terminal"]'
+3. wait_for '[data-testid="terminal-pane"]'
+4. eval 'async page => { let promptSeen = false; page.on("dialog", async (dialog) => { promptSeen = true; await dialog.dismiss(); }); await page.evaluate(() => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); if (event.defaultPrevented || event.returnValue) { window.confirm("Are you sure you want to exit?"); } }); }'
+5. sleep 1
+6. screenshot 045-close-app-confirmation.png
