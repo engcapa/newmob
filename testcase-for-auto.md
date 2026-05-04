@@ -1,4 +1,3 @@
-<!-- qa-ui-auto:auto-generated -->
 # NewMob - UI E2E Test Cases
 
 > This file is consumed by the `qa-ui-auto` skill via
