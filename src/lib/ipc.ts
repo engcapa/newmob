@@ -221,3 +221,45 @@ export async function exitApp(): Promise<void> {
 export async function listSystemFonts(): Promise<string[]> {
   return invoke<string[]>("list_system_fonts", {});
 }
+
+// ── VNC ────────────────────────────────────────────────────────────
+
+export interface VncConnectResult {
+  session_id: string;
+  ws_port: number;
+  width: number;
+  height: number;
+  name: string;
+}
+
+export async function vncConnect(
+  host: string,
+  port: number,
+  username?: string | null,
+  password?: string,
+): Promise<VncConnectResult> {
+  return invoke<VncConnectResult>("vnc_connect", {
+    host,
+    port,
+    username: username?.trim() || null,
+    password: password ?? null,
+  });
+}
+
+export async function vncDisconnect(sessionId: string): Promise<void> {
+  return invoke("vnc_disconnect", { sessionId });
+}
+
+export async function vncTestConnection(
+  host: string,
+  port: number,
+  username?: string | null,
+  password?: string,
+): Promise<string> {
+  return invoke("vnc_test_connection", {
+    host,
+    port,
+    username: username?.trim() || null,
+    password: password ?? null,
+  });
+}

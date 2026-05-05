@@ -13,6 +13,7 @@ import { Sidebar } from "../components/sidebar/Sidebar";
 import { TabBar } from "../components/tabbar/TabBar";
 import { StatusBar } from "../components/statusbar/StatusBar";
 import { TerminalPanel } from "../components/terminal/TerminalPanel";
+import VncPanel from "../components/vnc/VncPanel";
 import { SessionEditor } from "../components/session/SessionEditor";
 import { AuthPrompt } from "../components/session/AuthPrompt";
 import { SettingsPanel } from "../components/settings/SettingsPanel";
@@ -247,6 +248,24 @@ export function MainLayout() {
     void markConnected(session.id);
   }, [addTab, markConnected]);
 
+  const openVncTab = useCallback((session: SessionConfig, password?: string) => {
+    const id = `vnc-${session.id}-${Date.now()}`;
+    addTab({
+      id,
+      type: "vnc",
+      title: session.name || `${session.host}:${session.port}`,
+      sessionId: session.id,
+      closable: true,
+      vnc: {
+        sessionId: session.id,
+        host: session.host,
+        port: session.port,
+        username: session.username,
+        password,
+      },
+    });
+  }, [addTab]);
+
   const handleConnectSession = useCallback((session: SessionConfig) => {
     const resolveAuth = (): { method: string; data: string | null } => {
       const method = typeof session.auth_method === "string"
@@ -274,11 +293,18 @@ export function MainLayout() {
       }
     } else if (session.session_type === "LocalShell") {
       openLocalTab(session.name || "Local terminal", session.id, getSessionTerminalProfile(session.options_json));
+    } else if (session.session_type === "VNC") {
+      const { method, data } = resolveAuth();
+      if (method === "Password") {
+        setPendingAuth({ session });
+      } else {
+        openVncTab(session, data ?? undefined);
+      }
     } else {
       openUnsupportedTab(session);
       void markConnected(session.id);
     }
-  }, [markConnected, openLocalTab, openSftpTab]);
+  }, [markConnected, openLocalTab, openSftpTab, openVncTab]);
 
   const openSshTab = useCallback((session: SessionConfig, authMethod: string, authData: string | null) => {
     const id = `ssh-${session.id}-${Date.now()}`;
@@ -325,11 +351,13 @@ export function MainLayout() {
     if (!pendingAuth) return;
     if (pendingAuth.session.session_type === "SFTP") {
       openSftpTab(pendingAuth.session, "Password", password);
+    } else if (pendingAuth.session.session_type === "VNC") {
+      openVncTab(pendingAuth.session, password);
     } else {
       openSshTab(pendingAuth.session, "Password", password);
     }
     setPendingAuth(null);
-  }, [pendingAuth, openSftpTab, openSshTab]);
+  }, [pendingAuth, openSftpTab, openSshTab, openVncTab]);
 
   const handleQuickConnect = useCallback((value: string) => {
     try {
@@ -468,6 +496,7 @@ export function MainLayout() {
 
   const terminalTabs = tabs.filter((t) => t.type === "terminal");
   const sftpTabs = tabs.filter((t) => t.type === "sftp" && t.sftp);
+  const vncTabs = tabs.filter((t) => t.type === "vnc" && t.vnc);
 
   return (
     <div
@@ -666,6 +695,28 @@ export function MainLayout() {
 
                 {activeTab?.type === "settings" && <SettingsPanel />}
 
+                {/* VNC tabs — always mounted so connection survives tab switches */}
+                {vncTabs.map((tab) => {
+                  if (!tab.vnc) return null;
+                  const isActive = activeTabId === tab.id;
+                  return (
+                    <div
+                      key={tab.id}
+                      className="absolute inset-0"
+                      style={{ display: isActive ? "block" : "none" }}
+                    >
+                      <VncPanel
+                        tabId={tab.id}
+                        host={tab.vnc.host}
+                        port={tab.vnc.port}
+                        username={tab.vnc.username}
+                        password={tab.vnc.password}
+                        visible={isActive}
+                      />
+                    </div>
+                  );
+                })}
+
                 {activeTab?.type === "nettools" && (
                   <TunnelManager
                     onStatusMessage={setStatusMessage}
@@ -673,11 +724,12 @@ export function MainLayout() {
                   />
                 )}
 
-                {/* Non-terminal, non-sftp, non-welcome, non-settings, non-nettools tabs */}
+                {/* Non-terminal, non-sftp, non-vnc, non-welcome, non-settings, non-nettools tabs */}
                 {activeTab &&
                   activeTab.type !== "welcome" &&
                   activeTab.type !== "terminal" &&
                   activeTab.type !== "sftp" &&
+                  activeTab.type !== "vnc" &&
                   activeTab.type !== "settings" &&
                   activeTab.type !== "nettools" && (
                   <UnavailablePanel title={activeTab.title} message={activeTab.message} />

@@ -3,6 +3,14 @@ import type { TerminalProfile } from "../lib/terminalProfile";
 
 export type TabKind = "terminal" | "sftp" | "rdp" | "vnc" | "nettools" | "welcome" | "settings" | "placeholder";
 
+export interface VncConnectInfo {
+  sessionId: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string;
+}
+
 export interface Tab {
   id: string;
   type: TabKind;
@@ -15,6 +23,7 @@ export interface Tab {
   terminalProfile?: TerminalProfile;
   message?: string;
   sftp?: SftpTabInfo;
+  vnc?: VncConnectInfo;
 }
 
 export interface SftpTabInfo {

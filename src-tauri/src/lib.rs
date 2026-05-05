@@ -7,6 +7,7 @@ mod nettools;
 mod serial;
 mod config;
 mod appearance;
+mod vnc;
 
 use state::AppState;
 use tauri::{AppHandle, Manager};
@@ -103,6 +104,9 @@ pub fn run() {
             tunnel::test_tunnel,
             tunnel::get_tunnel_status,
             tunnel::list_tunnel_statuses,
+            vnc::vnc_connect,
+            vnc::vnc_disconnect,
+            vnc::vnc_test_connection,
             exit_app,
         ])
         .run(tauri::generate_context!())
