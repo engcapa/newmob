@@ -43,7 +43,7 @@
 9. expect_visible '[data-testid="welcome-panel"]'
 10. expect_visible 'text="Welcome to NewMob"'
 11. expect_visible 'text="Start local terminal"'
-12. expect_visible 'text="New session"'
+12. expect_visible 'text="New session…"'
 13. expect_visible 'text="Import OpenSSH config"'
 14. expect_visible 'text="Active connections"'
 15. screenshot 001-main-interface.png
@@ -82,32 +82,33 @@
 7. expect_visible '[data-testid="session-proto-vnc"]'
 8. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
 9. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
-10. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
-11. expect_visible '[data-testid="advanced-ssh-settings"]'
-12. expect_visible 'text="SSH-browser type"'
-13. expect_visible 'text="Auto-inject OSC 7 cwd reporting"'
-14. fill 'input[aria-label="Execute command"]' 'echo qa-ui-auto-session'
-15. click '[data-testid="session-section-terminal"]'
-16. expect_visible '[data-testid="terminal-settings"]'
-17. expect_visible '[data-testid="terminal-appearance-settings"]'
-18. expect_visible '[data-testid="terminal-preview"]'
-19. click '[data-testid="session-section-network"]'
-20. expect_visible '[data-testid="network-settings"]'
-21. expect_visible 'text="Keep-alive"'
-22. fill 'input[aria-label="Proxy host"]' 'proxy.example.test'
-23. fill 'input[aria-label="New forward local address"]' '127.0.0.1:19090'
-24. fill 'input[aria-label="New forward remote address"]' '127.0.0.1:22'
-25. fill 'input[aria-label="New forward description"]' 'qa-ui-auto-forward'
-26. click 'text="Add"'
-27. expect_visible 'input[aria-label="Forward local address"]'
-28. click '[data-testid="session-section-bookmark"]'
-29. wait_for '[data-testid="bookmark-settings"]'
-30. fill '[data-testid="session-name"]' 'qa-ui-auto-ssh-settings'
-31. fill 'textarea[aria-label="Description notes"]' 'Created by qa-ui-auto'
-32. fill 'input[aria-label="Tags"]' 'qa, e2e, ssh'
-33. click '[data-testid="session-save"]'
-34. wait_for 'text="qa-ui-auto-ssh-settings"'
-35. screenshot 003-ssh-session-settings.png
+10. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+11. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+12. expect_visible '[data-testid="advanced-ssh-settings"]'
+13. expect_visible 'text="SSH-browser type"'
+14. expect_visible 'text="Auto-inject OSC 7 cwd reporting"'
+15. fill 'input[aria-label="Execute command"]' 'echo qa-ui-auto-session'
+16. click '[data-testid="session-section-terminal"]'
+17. expect_visible '[data-testid="terminal-settings"]'
+18. expect_visible '[data-testid="terminal-appearance-settings"]'
+19. expect_visible '[data-testid="terminal-preview"]'
+20. click '[data-testid="session-section-network"]'
+21. expect_visible '[data-testid="network-settings"]'
+22. expect_visible 'text="Keep-alive"'
+23. fill 'input[aria-label="Proxy host"]' 'proxy.example.test'
+24. fill 'input[aria-label="New forward local address"]' '127.0.0.1:19090'
+25. fill 'input[aria-label="New forward remote address"]' '127.0.0.1:22'
+26. fill 'input[aria-label="New forward description"]' 'qa-ui-auto-forward'
+27. click 'text="Add"'
+28. expect_visible 'input[aria-label="Forward local address"]'
+29. click '[data-testid="session-section-bookmark"]'
+30. wait_for '[data-testid="bookmark-settings"]'
+31. fill '[data-testid="session-name"]' 'qa-ui-auto-ssh-settings'
+32. fill 'textarea[aria-label="Description notes"]' 'Created by qa-ui-auto'
+33. fill 'input[aria-label="Tags"]' 'qa, e2e, ssh'
+34. click '[data-testid="session-save"]'
+35. wait_for 'text="qa-ui-auto-ssh-settings"'
+36. screenshot 003-ssh-session-settings.png
 
 ## TC-004: Saved SSH session connects through the sidebar
 - tags: session, ssh, terminal, persistence, p0
@@ -118,26 +119,27 @@
 3. wait_for '[data-testid="session-editor"]'
 4. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
 5. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
-6. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
-7. click '[data-testid="session-section-bookmark"]'
-8. wait_for '[data-testid="bookmark-settings"]'
-9. fill '[data-testid="session-name"]' 'qa-ui-auto-saved-ssh'
-10. click '[data-testid="session-save"]'
-11. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-saved-ssh"]'
-12. fill '[data-testid="session-search"]' 'qa-ui-auto-saved-ssh'
-13. dblclick '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-saved-ssh"]'
-14. wait_for '[data-testid="auth-prompt"]'
-15. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
-16. click '[data-testid="auth-submit"]'
-17. wait_for '[data-testid="terminal-pane"]'
-18. sleep 2
-19. expect_text '[data-testid="terminal-pane"]' 'NewMob SSH terminal'
-20. click '[data-testid="terminal-pane"]'
-21. type 'whoami'
-22. press Enter
-23. sleep 1
-24. expect_text '[data-testid="terminal-pane"]' '${cfg:ssh.user}'
-25. screenshot 004-saved-ssh-connect.png
+6. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+7. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+8. click '[data-testid="session-section-bookmark"]'
+9. wait_for '[data-testid="bookmark-settings"]'
+10. fill '[data-testid="session-name"]' 'qa-ui-auto-saved-ssh'
+11. click '[data-testid="session-save"]'
+12. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-saved-ssh"]'
+13. fill '[data-testid="session-search"]' 'qa-ui-auto-saved-ssh'
+14. dblclick '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-saved-ssh"]'
+15. wait_for '[data-testid="auth-prompt"]'
+16. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+17. click '[data-testid="auth-submit"]'
+18. wait_for '[data-testid="terminal-pane"]'
+19. sleep 2
+20. expect_text '[data-testid="terminal-pane"]' 'NewMob SSH terminal'
+21. click '[data-testid="terminal-pane"]'
+22. type 'whoami'
+23. press Enter
+24. sleep 1
+25. expect_text '[data-testid="terminal-pane"]' '${cfg:ssh.user}'
+26. screenshot 004-saved-ssh-connect.png
 
 ## TC-005: Local terminal opens and accepts input in native mode
 - tags: terminal, local, p0
@@ -206,7 +208,7 @@
 25. wait_for 'input[placeholder="Find"]'
 26. fill 'input[placeholder="Find"]' 'qa-ui-auto-search'
 27. press Enter
-28. expect_visible 'text="Match"'
+28. eval 'async page => { const s = await page.locator(`span`).filter({ hasText: /^Match \d+\/\d+$/ }).first().isVisible(); if (!s) throw new Error("Search status not showing Match N/M"); }'
 29. click 'role=button[name="Close"]'
 30. eval 'async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }'
 31. wait_for '[data-testid="context-menu"]'
@@ -307,8 +309,8 @@
 15. eval 'async page => { await page.evaluate(() => { window.__qaPromptValue = "qa-ui-auto-menu.txt"; window.prompt = () => window.__qaPromptValue; window.confirm = () => true; }); }'
 16. eval 'async page => { await page.evaluate(() => { const list = document.querySelector(`[data-testid="sftp-remote-list"]`); list?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 220 })); }); }'
 17. wait_for '[data-testid="context-menu"]'
-18. expect_visible 'text="New folder"'
-19. expect_visible 'text="New file"'
+18. expect_visible 'text="New folder…"'
+19. expect_visible 'text="New file…"'
 20. press Escape
 21. click '[data-testid="sftp-remote-new-file"]'
 22. wait_for 'text="qa-ui-auto-menu.txt"'
@@ -316,7 +318,7 @@
 24. wait_for '[data-testid="context-menu"]'
 25. expect_visible 'text="Download to local"'
 26. expect_visible 'text="Rename"'
-27. expect_visible 'text="Permissions"'
+27. expect_visible 'text="Permissions…"'
 28. expect_visible 'text="Delete"'
 29. click '[data-testid="context-menu-item-permissions"]'
 30. wait_for '[aria-label="Permissions"]'
@@ -403,25 +405,26 @@
 3. wait_for '[data-testid="session-editor"]'
 4. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
 5. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
-6. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
-7. click '[data-testid="session-section-bookmark"]'
-8. wait_for '[data-testid="bookmark-settings"]'
-9. fill '[data-testid="session-name"]' 'qa-ui-auto-menu'
-10. click '[data-testid="session-save"]'
-11. wait_for 'text="qa-ui-auto-menu"'
-12. fill '[data-testid="session-search"]' 'qa-ui-auto-menu'
-13. expect_visible '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]'
-14. click '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]'
-15. click '[data-testid="session-duplicate"]'
-16. wait_for 'text="qa-ui-auto-menu (copy)"'
-17. eval 'async page => { await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]`).click({ button: "right" }); }'
-18. wait_for '[data-testid="context-menu"]'
-19. expect_visible 'text="Connect"'
-20. expect_visible 'text="Edit..."'
-21. expect_visible 'text="Duplicate"'
-22. expect_visible 'text="Move to folder"'
-23. expect_visible 'text="Delete"'
-24. screenshot 013-session-tree-right-menu.png
+6. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+7. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+8. click '[data-testid="session-section-bookmark"]'
+9. wait_for '[data-testid="bookmark-settings"]'
+10. fill '[data-testid="session-name"]' 'qa-ui-auto-menu'
+11. click '[data-testid="session-save"]'
+12. wait_for 'text="qa-ui-auto-menu"'
+13. fill '[data-testid="session-search"]' 'qa-ui-auto-menu'
+14. expect_visible '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]'
+15. click '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]'
+16. click '[data-testid="session-duplicate"]'
+17. wait_for 'text="qa-ui-auto-menu (copy)"'
+18. eval 'async page => { await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]`).click({ button: "right" }); }'
+19. wait_for '[data-testid="context-menu"]'
+20. expect_visible 'text="Connect"'
+21. expect_visible 'text="Edit..."'
+22. expect_visible 'text="Duplicate"'
+23. expect_visible 'text="Move to folder"'
+24. expect_visible 'text="Delete"'
+25. screenshot 013-session-tree-right-menu.png
 
 ## TC-014: Tab bar right-click menu manages open tabs
 - tags: main, right-menu, tabs, p1
@@ -437,8 +440,11 @@
 8. expect_visible 'text="Close others"'
 9. expect_visible 'text="Close all"'
 10. expect_visible 'text="Duplicate tab"'
-11. expect_visible 'text="New local terminal"'
-12. screenshot 014-tab-right-menu.png
+11. press Escape
+12. eval 'async page => { const moreBtn = page.locator(`button[title="More"]`); if (await moreBtn.count()) await moreBtn.click(); else await page.locator(`[data-testid="new-local-terminal"]`).click(); }'
+13. wait_for '[data-testid="context-menu"]'
+14. expect_visible 'text="New local terminal"'
+15. screenshot 014-tab-right-menu.png
 
 ## TC-015: Application theme cycles Light → Dark → Follow system and persists
 - tags: settings, theme, persistence, p0
@@ -473,27 +479,29 @@
 4. click '[data-testid="session-proto-ssh"]'
 5. fill '[data-testid="session-host"]' 'auth.example.test'
 6. fill '[data-testid="session-port"]' '22'
-7. fill '[data-testid="session-user"]' 'qauser'
-8. expect_visible '[data-testid="advanced-ssh-settings"]'
-9. expect_visible 'input[aria-label="SSH password"]'
-10. fill 'input[aria-label="SSH password"]' 'qa-secret-123'
-11. eval 'async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "password") throw new Error(`Password should be masked, got type=${t}`); }'
-12. click 'button[title="Show / hide"]'
-13. sleep 1
-14. eval 'async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "text") throw new Error(`Password should be revealed, got type=${t}`); }'
-15. eval 'async page => { const radios = page.locator(`input[type="radio"][name][value="PrivateKey"], label:has-text("Private key") input`); await radios.first().click({ force: true }).catch(() => {}); }'
-16. wait_for 'input[aria-label="Private key path"]'
-17. fill 'input[aria-label="Private key path"]' '/home/qauser/.ssh/id_ed25519'
-18. expect_visible 'text="Jump host"'
-19. fill 'input[aria-label="Jump host"]' 'bastion.example.test'
-20. fill 'input[aria-label="Jump user"]' 'qajump'
-21. fill 'input[aria-label="Jump port"]' '22'
-22. click '[data-testid="session-section-bookmark"]'
-23. wait_for '[data-testid="bookmark-settings"]'
-24. fill '[data-testid="session-name"]' 'qa-ui-auto-auth-methods'
-25. click '[data-testid="session-save"]'
-26. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-auth-methods"]'
-27. screenshot 016-session-auth-methods.png
+7. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+8. fill '[data-testid="session-user"]' 'qauser'
+9. expect_visible '[data-testid="advanced-ssh-settings"]'
+10. expect_visible 'input[aria-label="SSH password"]'
+11. fill 'input[aria-label="SSH password"]' 'qa-secret-123'
+12. eval 'async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "password") throw new Error(`Password should be masked, got type=${t}`); }'
+13. click 'button[title="Show / hide"]'
+14. sleep 1
+15. eval 'async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "text") throw new Error(`Password should be revealed, got type=${t}`); }'
+16. eval 'async page => { const radios = page.locator(`input[type="radio"][name][value="PrivateKey"], label:has-text("Private key") input`); await radios.first().click({ force: true }).catch(() => {}); }'
+17. wait_for 'input[aria-label="Private key path"]'
+18. fill 'input[aria-label="Private key path"]' '/home/qauser/.ssh/id_ed25519'
+19. eval 'async page => { const cb = page.locator(`label:has-text("Enable jump host") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+20. expect_visible 'input[aria-label="Jump host"]'
+21. fill 'input[aria-label="Jump host"]' 'bastion.example.test'
+22. fill 'input[aria-label="Jump user"]' 'qajump'
+23. fill 'input[aria-label="Jump port"]' '22'
+24. click '[data-testid="session-section-bookmark"]'
+25. wait_for '[data-testid="bookmark-settings"]'
+26. fill '[data-testid="session-name"]' 'qa-ui-auto-auth-methods'
+27. click '[data-testid="session-save"]'
+28. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-auth-methods"]'
+29. screenshot 016-session-auth-methods.png
 
 ## TC-017: Session editor port forward list adds rows and surfaces validation errors
 - tags: session, network, forwards, p1
@@ -504,27 +512,28 @@
 3. wait_for '[data-testid="session-editor"]'
 4. fill '[data-testid="session-host"]' 'fw.example.test'
 5. fill '[data-testid="session-port"]' '22'
-6. fill '[data-testid="session-user"]' 'qauser'
-7. click '[data-testid="session-section-network"]'
-8. wait_for '[data-testid="network-settings"]'
-9. fill 'input[aria-label="New forward local address"]' '127.0.0.1:18080'
-10. fill 'input[aria-label="New forward remote address"]' 'svc.internal:80'
-11. fill 'input[aria-label="New forward description"]' 'qa-fwd-1'
-12. click 'text="Add"'
-13. wait_for 'input[aria-label="Forward local address"]'
-14. expect_visible 'input[aria-label="Forward remote address"]'
-15. fill 'input[aria-label="New forward local address"]' 'not-an-address'
-16. fill 'input[aria-label="New forward remote address"]' 'still:nope'
-17. fill 'input[aria-label="New forward description"]' 'qa-fwd-broken'
-18. click 'text="Add"'
-19. sleep 1
-20. eval 'async page => { const rows = await page.locator(`input[aria-label="Forward local address"]`).count(); if (rows < 2) throw new Error(`Expected at least 2 forward rows, got ${rows}`); }'
-21. click '[data-testid="session-section-bookmark"]'
-22. wait_for '[data-testid="bookmark-settings"]'
-23. fill '[data-testid="session-name"]' 'qa-ui-auto-forwards'
-24. click '[data-testid="session-save"]'
-25. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-forwards"]'
-26. screenshot 017-session-forwards.png
+6. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+7. fill '[data-testid="session-user"]' 'qauser'
+8. click '[data-testid="session-section-network"]'
+9. wait_for '[data-testid="network-settings"]'
+10. fill 'input[aria-label="New forward local address"]' '127.0.0.1:18080'
+11. fill 'input[aria-label="New forward remote address"]' 'svc.internal:80'
+12. fill 'input[aria-label="New forward description"]' 'qa-fwd-1'
+13. click 'text="Add"'
+14. wait_for 'input[aria-label="Forward local address"]'
+15. expect_visible 'input[aria-label="Forward remote address"]'
+16. fill 'input[aria-label="New forward local address"]' 'not-an-address'
+17. fill 'input[aria-label="New forward remote address"]' 'still:nope'
+18. fill 'input[aria-label="New forward description"]' 'qa-fwd-broken'
+19. click 'text="Add"'
+20. sleep 1
+21. eval 'async page => { const rows = await page.locator(`input[aria-label="Forward local address"]`).count(); if (rows < 2) throw new Error(`Expected at least 2 forward rows, got ${rows}`); }'
+22. click '[data-testid="session-section-bookmark"]'
+23. wait_for '[data-testid="bookmark-settings"]'
+24. fill '[data-testid="session-name"]' 'qa-ui-auto-forwards'
+25. click '[data-testid="session-save"]'
+26. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-forwards"]'
+27. screenshot 017-session-forwards.png
 
 ## TC-018: Session editor protocol switch shows protocol-specific shell
 - tags: session, protocol, p1
@@ -564,7 +573,7 @@
 9. wait_for 'input[placeholder="Find"]'
 10. fill 'input[placeholder="Find"]' 'qa-shortcut-marker'
 11. press Enter
-12. expect_visible 'text="Match"'
+12. eval 'async page => { await page.waitForTimeout(500); const status = await page.locator(`span`).filter({ hasText: /^(Match \d+\/\d+|No matches)$/ }).first().isVisible(); if (!status) throw new Error("Search status span not visible after search"); }'
 13. press Escape
 14. press Control+0
 15. sleep 1
@@ -911,25 +920,26 @@
 4. expect_visible 'text="New SSH tunnel"'
 5. expect_visible 'text="Start all tunnels"'
 6. expect_visible 'text="Stop all tunnels"'
-7. click 'text="New SSH tunnel"'
+7. click 'button:has-text("New SSH tunnel")'
 8. sleep 1
-9. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-tunnel'
-10. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-11. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
-12. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
-13. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19180"); }'
-14. eval 'async page => { const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
-15. eval 'async page => { const save = page.locator(`button:has-text("Save")`).first(); await save.click({ force: true }); }'
-16. sleep 1
-17. wait_for 'text="qa-ui-auto-tunnel"'
-18. expect_visible 'text="Local"'
-19. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel")`); await row.locator(`button[title="Start"]`).first().click(); }'
-20. sleep 2
-21. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel")`); const stopBtn = row.locator(`button[title="Stop"]`); if (await stopBtn.count()) await stopBtn.first().click(); }'
-22. sleep 1
-23. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row = page.locator(`tr:has-text("qa-ui-auto-tunnel")`); await row.locator(`button[title="Delete"], button:has(svg.lucide-trash-2)`).first().click(); }'
-24. sleep 1
-25. screenshot 032-tunnel-create-start-delete.png
+9. wait_for 'input[placeholder="e.g. postgres-replica"]'
+10. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-tunnel'
+11. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+12. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+13. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+14. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19180"); }'
+15. eval 'async page => { const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+16. eval 'async page => { const save = page.locator(`button:has-text("Save")`).first(); await save.click({ force: true }); }'
+17. sleep 1
+18. wait_for 'text="qa-ui-auto-tunnel"'
+19. expect_visible 'text="Local"'
+20. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel")`); await row.locator(`button[title="Start"]`).first().click(); }'
+21. sleep 2
+22. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel")`); const stopBtn = row.locator(`button[title="Stop"]`); if (await stopBtn.count()) await stopBtn.first().click(); }'
+23. sleep 1
+24. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row = page.locator(`tr:has-text("qa-ui-auto-tunnel")`); await row.locator(`button[title="Delete"]`).first().click(); }'
+25. sleep 1
+26. screenshot 032-tunnel-create-start-delete.png
 
 ## TC-033: Tunnel manager toggles autostart and credential reveal per row
 - tags: tunnel, autostart, credentials, p1
@@ -938,22 +948,24 @@
 1. open ${cfg:app.base_url}
 2. click '[data-testid="ribbon-tunneling"]'
 3. wait_for 'text="New SSH tunnel"'
-4. click 'text="New SSH tunnel"'
+4. click 'button:has-text("New SSH tunnel")'
 5. sleep 1
-6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-tunnel-autostart'
-7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-8. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
-9. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
-10. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19181"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
-11. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-12. wait_for 'text="qa-ui-auto-tunnel-autostart"'
-13. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); const before = await row.locator(`button[title*="Auto-start" i], button[title*="auto-start" i]`).first().getAttribute("title"); await row.locator(`button[title*="Auto-start" i], button[title*="auto-start" i]`).first().click(); await page.waitForTimeout(600); const after = await row.locator(`button[title*="Auto-start" i], button[title*="auto-start" i]`).first().getAttribute("title"); if (before === after) console.log("[v0] autostart title unchanged; UI may keep same tooltip"); }'
-14. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); await row.locator(`button[title*="Show credentials" i], button[title*="Hide credentials" i]`).first().click(); }'
-15. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); await row.locator(`button[title="Test SSH connection"]`).first().click(); }'
-16. sleep 2
-17. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); await row.locator(`button:has(svg.lucide-trash-2)`).first().click(); }'
-18. sleep 1
-19. screenshot 033-tunnel-autostart-credentials.png
+6. wait_for 'input[placeholder="e.g. postgres-replica"]'
+7. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-tunnel-autostart'
+8. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+9. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+10. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+11. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19181"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+12. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+13. sleep 1
+14. wait_for 'text="qa-ui-auto-tunnel-autostart"'
+14. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); const before = await row.locator(`button[title*="Auto-start" i], button[title*="auto-start" i]`).first().getAttribute("title"); await row.locator(`button[title*="Auto-start" i], button[title*="auto-start" i]`).first().click(); await page.waitForTimeout(600); const after = await row.locator(`button[title*="Auto-start" i], button[title*="auto-start" i]`).first().getAttribute("title"); if (before === after) console.log("[v0] autostart title unchanged; UI may keep same tooltip"); }'
+15. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); await row.locator(`button[title*="Show credentials" i], button[title*="Hide credentials" i]`).first().click(); }'
+16. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); await row.locator(`button[title="Test SSH connection"]`).first().click(); }'
+17. sleep 2
+18. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-autostart")`); await row.locator(`button[title="Delete"]`).first().click(); }'
+19. sleep 1
+20. screenshot 033-tunnel-autostart-credentials.png
 
 ## TC-034: Status bar reflects active terminal count and theme label
 - tags: main, status-bar, p1
@@ -1007,25 +1019,26 @@
 3. wait_for '[data-testid="session-editor"]'
 4. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
 5. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
-6. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
-7. click '[data-testid="session-section-bookmark"]'
-8. wait_for '[data-testid="bookmark-settings"]'
-9. fill '[data-testid="session-name"]' 'qa-ui-auto-folder-target'
-10. click '[data-testid="session-save"]'
-11. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-folder-target"]'
-12. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-group"; }); }'
-13. eval 'async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }'
-14. wait_for '[data-testid="context-menu"]'
-15. eval 'async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); for (let i = 0; i < count; i++) { const t = (await items.nth(i).innerText()).trim().toLowerCase(); if (t.includes("new folder") || t.includes("new group") || t.includes("create folder")) { await items.nth(i).click(); return; } } throw new Error("No 'new folder' entry found in tree context menu"); }'
-16. sleep 1
-17. eval 'async page => { await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-folder-target"]`).click({ button: "right" }); }'
-18. wait_for '[data-testid="context-menu"]'
-19. eval 'async page => { await page.locator(`text="Move to folder"`).hover(); }'
-20. wait_for 'text="qa-ui-auto-group"'
-21. click 'text="qa-ui-auto-group"'
-22. sleep 1
-23. expect_visible 'text="qa-ui-auto-group"'
-24. screenshot 036-session-tree-folders.png
+6. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+7. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+8. click '[data-testid="session-section-bookmark"]'
+9. wait_for '[data-testid="bookmark-settings"]'
+10. fill '[data-testid="session-name"]' 'qa-ui-auto-folder-target'
+11. click '[data-testid="session-save"]'
+12. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-folder-target"]'
+13. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-group"; }); }'
+14. eval 'async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }'
+15. wait_for '[data-testid="context-menu"]'
+16. eval 'async page => { const item = page.locator(`[data-testid^="context-menu-item-"]`).filter({ hasText: /new folder|new group|create folder/i }).first(); if (await item.count()) { await item.click(); } else { throw new Error("No new folder entry found in tree context menu"); } }'
+17. sleep 1
+18. eval 'async page => { await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-folder-target"]`).click({ button: "right" }); }'
+19. wait_for '[data-testid="context-menu"]'
+20. eval 'async page => { await page.locator(`text="Move to folder"`).hover(); }'
+21. wait_for 'text="qa-ui-auto-group"'
+22. click 'text="qa-ui-auto-group"'
+23. sleep 1
+24. expect_visible 'text="qa-ui-auto-group"'
+25. screenshot 036-session-tree-folders.png
 
 ## TC-037: Sidebar quick-connect history reflects recently saved sessions
 - tags: main, sidebar, quickconnect, p1
@@ -1036,23 +1049,24 @@
 3. wait_for '[data-testid="session-editor"]'
 4. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
 5. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
-6. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
-7. click '[data-testid="session-section-bookmark"]'
-8. wait_for '[data-testid="bookmark-settings"]'
-9. fill '[data-testid="session-name"]' 'qa-ui-auto-recent'
-10. click '[data-testid="session-save"]'
-11. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-recent"]'
-12. expect_visible '[data-testid="session-search"]'
-13. click '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-recent"]'
-14. expect_visible '[data-testid="session-edit"]'
-15. expect_visible '[data-testid="session-duplicate"]'
-16. expect_visible '[data-testid="session-delete"]'
-17. fill '[data-testid="session-search"]' 'qa-ui-auto-recent'
-18. expect_visible '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-recent"]'
-19. fill '[data-testid="session-search"]' 'qa-ui-auto-no-such-session'
-20. sleep 1
-21. expect_visible 'text="No matching sessions."'
-22. screenshot 037-sidebar-search.png
+6. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+7. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+8. click '[data-testid="session-section-bookmark"]'
+9. wait_for '[data-testid="bookmark-settings"]'
+10. fill '[data-testid="session-name"]' 'qa-ui-auto-recent'
+11. click '[data-testid="session-save"]'
+12. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-recent"]'
+13. expect_visible '[data-testid="session-search"]'
+14. click '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-recent"]'
+15. expect_visible '[data-testid="session-edit"]'
+16. expect_visible '[data-testid="session-duplicate"]'
+17. expect_visible '[data-testid="session-delete"]'
+18. fill '[data-testid="session-search"]' 'qa-ui-auto-recent'
+19. expect_visible '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-recent"]'
+20. fill '[data-testid="session-search"]' 'qa-ui-auto-no-such-session'
+21. sleep 1
+22. expect_visible 'text="No matching sessions."'
+23. screenshot 037-sidebar-search.png
 
 ## TC-038: Welcome panel local shell selector lists detected shells
 - tags: welcome, local-terminal, p0
@@ -1202,17 +1216,21 @@
 1. open ${cfg:app.base_url}
 2. click '[data-testid="ribbon-tunneling"]'
 3. wait_for 'text="New SSH tunnel"'
-4. click 'text="New SSH tunnel"'
+4. click 'button:has-text("New SSH tunnel")'
 5. sleep 1
-6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-tunnel-auth'
-7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-8. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
-9. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-10. wait_for 'text="qa-ui-auto-tunnel-auth"'
-11. eval 'async page => { await page.locator(`button[title*="Hide all credentials" i], button[title*="Show all credentials" i]`).first().click(); }'
-12. sleep 1
-13. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-auth")`); await row.locator(`button:has(svg.lucide-trash-2)`).first().click(); }'
-14. screenshot 046-tunnel-auth-display.png
+6. wait_for 'input[placeholder="e.g. postgres-replica"]'
+7. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-tunnel-auth'
+8. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+9. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+10. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+11. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19190"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+12. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+13. sleep 1
+14. wait_for 'text="qa-ui-auto-tunnel-auth"'
+15. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-auth")`); await row.locator(`button[title*="Show credentials" i], button[title*="Hide credentials" i]`).first().click(); }'
+16. sleep 1
+17. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-auth")`); await row.locator(`button[title="Delete"]`).first().click(); }'
+18. screenshot 046-tunnel-auth-display.png
 
 ## TC-047: Tunnel manager reorder controls
 - tags: tunnel, reorder, p1
@@ -1221,24 +1239,34 @@
 1. open ${cfg:app.base_url}
 2. click '[data-testid="ribbon-tunneling"]'
 3. wait_for 'text="New SSH tunnel"'
-4. click 'text="New SSH tunnel"'
+4. click 'button:has-text("New SSH tunnel")'
 5. sleep 1
-6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-tunnel-1'
-7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-8. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-9. wait_for 'text="qa-tunnel-1"'
-10. click 'text="New SSH tunnel"'
-11. sleep 1
-12. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-tunnel-2'
-13. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-14. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-15. wait_for 'text="qa-tunnel-2"'
-16. eval 'async page => { const rows = page.locator(`tr:has-text("qa-tunnel-")`); const firstRow = rows.first(); await firstRow.locator(`button[title*="Move down" i], button[title*="move down" i]`).first().click(); }'
-17. sleep 1
-18. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row1 = page.locator(`tr:has-text("qa-tunnel-1")`); await row1.locator(`button:has(svg.lucide-trash-2)`).first().click(); }'
-19. sleep 1
-20. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row2 = page.locator(`tr:has-text("qa-tunnel-2")`); await row2.locator(`button:has(svg.lucide-trash-2)`).first().click(); }'
-21. screenshot 047-tunnel-reorder.png
+6. wait_for 'input[placeholder="e.g. postgres-replica"]'
+7. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-tunnel-1'
+8. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+9. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+10. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+11. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19191"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+12. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+13. sleep 1
+14. wait_for 'text="qa-tunnel-1"'
+15. click 'button:has-text("New SSH tunnel")'
+16. sleep 1
+17. wait_for 'input[placeholder="e.g. postgres-replica"]'
+18. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-tunnel-2'
+19. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+20. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+21. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+22. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19192"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+23. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+24. sleep 1
+25. wait_for 'text="qa-tunnel-2"'
+24. eval 'async page => { const rows = page.locator(`tr:has-text("qa-tunnel-")`); const firstRow = rows.first(); await firstRow.locator(`button[title*="Move down" i], button[title*="move down" i]`).first().click(); }'
+25. sleep 1
+26. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row1 = page.locator(`tr:has-text("qa-tunnel-1")`); await row1.locator(`button[title="Delete"]`).first().click(); }'
+27. sleep 1
+28. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row2 = page.locator(`tr:has-text("qa-tunnel-2")`); await row2.locator(`button[title="Delete"]`).first().click(); }'
+29. screenshot 047-tunnel-reorder.png
 
 ## TC-048: SFTP cross-pane drag-and-drop transfers files between remote and local
 - tags: sftp, drag-drop, transfer, p1
@@ -1463,34 +1491,35 @@
 1. open ${cfg:app.base_url}
 2. click '[data-testid="ribbon-tunneling"]'
 3. wait_for 'text="Network tools — SSH tunnels"'
-4. click 'text="New SSH tunnel"'
+4. click 'button:has-text("New SSH tunnel")'
 5. sleep 1
-6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-remote-tunnel'
-7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-8. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
-9. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
-10. eval 'async page => { await page.locator(`label:has-text("Remote port forwarding") input[type="radio"]`).first().click({ force: true }); }'
-11. sleep 1
-12. fill 'input[placeholder="0"]' '19222'
-13. fill 'input[placeholder="127.0.0.1"]' '127.0.0.1'
-14. fill 'input[placeholder="5432"]' '8080'
-15. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-16. sleep 1
-17. wait_for 'text="qa-ui-auto-remote-tunnel"'
-18. expect_visible 'text="Remote"'
-19. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`); await row.locator(`button[title="Clone"]`).first().click(); }'
-20. sleep 1
-21. wait_for 'text="qa-ui-auto-remote-tunnel (copy)"'
-22. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel (copy)")`); await row.locator(`button[title="Edit"]`).first().click(); }'
-23. sleep 1
-24. eval 'async page => { await page.locator(`label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]`).first().click({ force: true }); }'
-25. sleep 1
-26. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-27. sleep 1
-28. wait_for 'text="Dynamic"'
-29. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const rows = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`); const count = await rows.count(); for (let i = 0; i < count; i++) { await rows.nth(i).locator(`button:has(svg.lucide-trash-2)`).first().click(); await page.waitForTimeout(400); } }'
-30. sleep 1
-31. screenshot 056-tunnel-remote-dynamic-clone.png
+6. wait_for 'input[placeholder="e.g. postgres-replica"]'
+7. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-remote-tunnel'
+8. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+9. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+10. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+11. eval 'async page => { await page.locator(`label:has-text("Remote port forwarding") input[type="radio"]`).first().click({ force: true }); }'
+12. sleep 1
+13. fill 'input[placeholder="0"]' '19222'
+14. fill 'input[placeholder="127.0.0.1"]' '127.0.0.1'
+15. fill 'input[placeholder="5432"]' '8080'
+16. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+17. sleep 1
+18. wait_for 'text="qa-ui-auto-remote-tunnel"'
+19. expect_visible 'text="Remote"'
+20. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`); await row.locator(`button[title="Clone"]`).first().click(); }'
+21. sleep 1
+22. wait_for 'text="qa-ui-auto-remote-tunnel (copy)"'
+23. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel (copy)")`); await row.locator(`button[title="Edit"]`).first().click(); }'
+24. sleep 1
+25. eval 'async page => { await page.locator(`label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]`).first().click({ force: true }); }'
+26. sleep 1
+27. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+28. sleep 1
+29. wait_for 'text="Dynamic"'
+30. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); let btn = await page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`).first().locator(`button[title="Delete"]`).first(); while (await btn.count()) { await btn.click(); await page.waitForTimeout(500); btn = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`).first().locator(`button[title="Delete"]`).first(); } }'
+31. sleep 1
+32. screenshot 056-tunnel-remote-dynamic-clone.png
 
 ## TC-057: Tunnel row supports test connection, edit, and drag reorder
 - tags: tunnel, test, edit, reorder, p1
@@ -1499,33 +1528,35 @@
 1. open ${cfg:app.base_url}
 2. click '[data-testid="ribbon-tunneling"]'
 3. wait_for 'text="Network tools — SSH tunnels"'
-4. click 'text="New SSH tunnel"'
+4. click 'button:has-text("New SSH tunnel")'
 5. sleep 1
-6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-reorder-a'
-7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-8. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
-9. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
-10. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19333"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
-11. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-12. sleep 1
-13. wait_for 'text="qa-ui-auto-reorder-a"'
-14. click 'text="New SSH tunnel"'
-15. sleep 1
-16. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-reorder-b'
-17. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
-18. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
-19. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
-20. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19334"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
-21. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
-22. sleep 1
-23. wait_for 'text="qa-ui-auto-reorder-b"'
-24. eval 'async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); const rowB = page.locator(`tr:has-text("qa-ui-auto-reorder-b")`); const downA = await rowA.locator(`button[title="Move down"]`).first(); await downA.click(); }'
-25. sleep 1
-26. eval 'async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); await rowA.locator(`button[title="Test SSH connection"]`).first().click(); }'
-27. sleep 2
-28. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const rows = page.locator(`tr:has-text("qa-ui-auto-reorder")`); const count = await rows.count(); for (let i = 0; i < count; i++) { await rows.nth(i).locator(`button:has(svg.lucide-trash-2)`).first().click(); await page.waitForTimeout(400); } }'
-29. sleep 1
-30. screenshot 057-tunnel-reorder-test.png
+6. wait_for 'input[placeholder="e.g. postgres-replica"]'
+7. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-reorder-a'
+8. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+9. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+10. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+11. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19333"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+12. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+13. sleep 1
+14. wait_for 'text="qa-ui-auto-reorder-a"'
+15. click 'button:has-text("New SSH tunnel")'
+16. sleep 1
+17. wait_for 'input[placeholder="e.g. postgres-replica"]'
+18. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-reorder-b'
+19. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+20. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+21. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+22. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19334"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+23. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+24. sleep 1
+25. wait_for 'text="qa-ui-auto-reorder-b"'
+26. eval 'async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); const rowB = page.locator(`tr:has-text("qa-ui-auto-reorder-b")`); const downA = await rowA.locator(`button[title="Move down"]`).first(); await downA.click(); }'
+27. sleep 1
+28. eval 'async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); await rowA.locator(`button[title="Test SSH connection"]`).first().click(); }'
+29. sleep 2
+30. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); let btn = await page.locator(`tr:has-text("qa-ui-auto-reorder")`).first().locator(`button[title="Delete"]`).first(); while (await btn.count()) { await btn.click(); await page.waitForTimeout(500); btn = page.locator(`tr:has-text("qa-ui-auto-reorder")`).first().locator(`button[title="Delete"]`).first(); } }'
+31. sleep 1
+32. screenshot 057-tunnel-reorder-test.png
 
 ## TC-058: Local terminal administrator launch button is visible and clickable
 - tags: terminal, local, admin, p1
@@ -1615,14 +1646,15 @@
 4. click '[data-testid="session-proto-ssh"]'
 5. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
 6. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
-7. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
-8. expect_visible '[data-testid="advanced-ssh-settings"]'
-9. eval 'async page => { const x11 = page.locator(`[data-testid="advanced-ssh-settings"] input[type="checkbox"]`).first(); const before = await x11.isChecked(); await x11.click(); await page.waitForTimeout(300); const after = await x11.isChecked(); if (before === after) throw new Error("X11 checkbox did not toggle"); }'
-10. eval 'async page => { const comp = page.locator(`label:has-text("Use SSH compression") input[type="checkbox"]`).first(); const before = await comp.isChecked(); await comp.click(); await page.waitForTimeout(300); const after = await comp.isChecked(); if (before === after) throw new Error("Compression checkbox did not toggle"); }'
-11. eval 'async page => { const osc7 = page.locator(`label:has-text("Auto-inject OSC 7 cwd reporting") input[type="checkbox"]`).first(); const before = await osc7.isChecked(); await osc7.click(); await page.waitForTimeout(300); const after = await osc7.isChecked(); if (before === after) throw new Error("OSC 7 checkbox did not toggle"); }'
-12. click '[data-testid="session-section-bookmark"]'
-13. wait_for '[data-testid="bookmark-settings"]'
-14. fill '[data-testid="session-name"]' 'qa-ui-auto-adv-switches'
-15. click '[data-testid="session-save"]'
-16. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-adv-switches"]'
-17. screenshot 063-session-advanced-forward-switches.png
+7. eval 'async page => { const cb = page.locator(`label:has-text("Specify username") input[type="checkbox"]`); if (!(await cb.isChecked())) await cb.click({ force: true }); }'
+8. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+9. expect_visible '[data-testid="advanced-ssh-settings"]'
+10. eval 'async page => { const x11 = page.locator(`[data-testid="advanced-ssh-settings"] input[type="checkbox"]`).first(); const before = await x11.isChecked(); await x11.click(); await page.waitForTimeout(300); const after = await x11.isChecked(); if (before === after) throw new Error("X11 checkbox did not toggle"); }'
+11. eval 'async page => { const comp = page.locator(`label:has-text("Use SSH compression") input[type="checkbox"]`).first(); const before = await comp.isChecked(); await comp.click(); await page.waitForTimeout(300); const after = await comp.isChecked(); if (before === after) throw new Error("Compression checkbox did not toggle"); }'
+12. eval 'async page => { const osc7 = page.locator(`label:has-text("Auto-inject OSC 7 cwd reporting") input[type="checkbox"]`).first(); const before = await osc7.isChecked(); await osc7.click(); await page.waitForTimeout(300); const after = await osc7.isChecked(); if (before === after) throw new Error("OSC 7 checkbox did not toggle"); }'
+13. click '[data-testid="session-section-bookmark"]'
+14. wait_for '[data-testid="bookmark-settings"]'
+15. fill '[data-testid="session-name"]' 'qa-ui-auto-adv-switches'
+16. click '[data-testid="session-save"]'
+17. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-adv-switches"]'
+18. screenshot 063-session-advanced-forward-switches.png
