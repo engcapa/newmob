@@ -41,8 +41,14 @@ dirs = "5"
 flate2 = "1"
 tungstenite = "0.24"
 tokio-tungstenite = "0.24"
+aes = "0.8"
 des = "0.8"
 generic-array = "0.14"
+rsa = "0.9"
+sha2 = "0.10"
+sha1 = "0.10"
+rand = "0.8"
+x509-cert = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi"] }

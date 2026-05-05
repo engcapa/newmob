@@ -7,6 +7,7 @@ export interface VncConnectInfo {
   sessionId: string;
   host: string;
   port: number;
+  username?: string | null;
   password?: string;
 }
 

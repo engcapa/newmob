@@ -30,7 +30,10 @@ fn read_u16(data: &[u8], pos: &mut usize) -> u16 {
 pub fn decode_raw(data: &[u8], x: u16, y: u16, w: u16, h: u16) -> DecodedRect {
     let pixel_count = w as usize * h as usize;
     let byte_count = pixel_count * 4;
-    let rgba = data[..byte_count].to_vec();
+    let mut rgba = data[..byte_count].to_vec();
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
     DecodedRect::Pixels { x, y, w, h, rgba }
 }
 
@@ -103,12 +106,7 @@ pub fn decode_hextile(
 
                 if subenc & 0x04 != 0 {
                     // Has foreground subrects
-                    let fg: [u8; 4] = [
-                        data[pos],
-                        data[pos + 1],
-                        data[pos + 2],
-                        data[pos + 3],
-                    ];
+                    let fg: [u8; 4] = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
                     pos += 4;
                     let n_subrects = data[pos] as usize;
                     pos += 1;
@@ -428,8 +426,7 @@ pub fn decode_zrle(
                     let byte_idx = pos + (pi * bits_per_pixel) / 8;
                     let bit_offset = (pi * bits_per_pixel) % 8;
                     let mask = (1u8 << bits_per_pixel) - 1;
-                    let palette_idx =
-                        ((decompressed[byte_idx] >> bit_offset) & mask) as usize;
+                    let palette_idx = ((decompressed[byte_idx] >> bit_offset) & mask) as usize;
                     if palette_idx < palette_size {
                         rgba[pi * 4..(pi + 1) * 4].copy_from_slice(&palette[palette_idx]);
                     }
@@ -589,7 +586,7 @@ mod tests {
         // Single 2x2 tile with raw subencoding (0x01)
         let data: Vec<u8> = {
             let mut v = vec![0x01u8]; // raw subencoding
-                                       // 4 pixels RGBA
+                                      // 4 pixels RGBA
             v.extend_from_slice(&[255, 0, 0, 255]);
             v.extend_from_slice(&[0, 255, 0, 255]);
             v.extend_from_slice(&[0, 0, 255, 255]);

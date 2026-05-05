@@ -3,7 +3,7 @@ pub mod rfb;
 pub mod ws;
 
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::State;
 use uuid::Uuid;
 
 use crate::state::AppState;
@@ -24,11 +24,12 @@ pub async fn vnc_connect(
     state: State<'_, AppState>,
     host: String,
     port: u16,
+    username: Option<String>,
     password: Option<String>,
 ) -> Result<VncConnectResult, String> {
     let session_id = Uuid::new_v4().to_string();
 
-    let session = spawn_vnc_relay(host, port, password).await?;
+    let session = spawn_vnc_relay(host, port, username, password).await?;
 
     let result = VncConnectResult {
         session_id: session_id.clone(),
@@ -60,10 +61,11 @@ pub async fn vnc_disconnect(state: State<'_, AppState>, session_id: String) -> R
 pub async fn vnc_test_connection(
     host: String,
     port: u16,
+    username: Option<String>,
     password: Option<String>,
 ) -> Result<String, String> {
     let mut rfb = crate::vnc::rfb::RfbConnection::connect(&host, port)?;
-    rfb.authenticate(password.as_deref())?;
+    rfb.authenticate(username.as_deref(), password.as_deref())?;
     Ok(format!(
         "Connection successful: {}x{} - {}",
         rfb.width, rfb.height, rfb.name

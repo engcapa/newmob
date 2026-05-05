@@ -109,6 +109,7 @@ testcase-for-auto.md.bak-*
 
 # playwright
 .playwright-cli
+.playwright-mcp
 
 # python
 **/__pycache__/

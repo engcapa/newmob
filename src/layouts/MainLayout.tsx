@@ -258,6 +258,7 @@ export function MainLayout() {
         sessionId: session.id,
         host: session.host,
         port: session.port,
+        username: session.username,
         password,
       },
     });
@@ -703,6 +704,7 @@ export function MainLayout() {
                         tabId={tab.id}
                         host={tab.vnc.host}
                         port={tab.vnc.port}
+                        username={tab.vnc.username}
                         password={tab.vnc.password}
                         visible={isActive}
                       />

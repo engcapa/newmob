@@ -11,11 +11,13 @@ export interface VncConnectResult {
 export async function vncConnect(
   host: string,
   port: number,
+  username?: string | null,
   password?: string,
 ): Promise<VncConnectResult> {
   return invoke<VncConnectResult>("vnc_connect", {
     host,
     port,
+    username: username?.trim() || null,
     password: password ?? null,
   });
 }
@@ -27,11 +29,13 @@ export async function vncDisconnect(sessionId: string): Promise<void> {
 export async function vncTestConnection(
   host: string,
   port: number,
+  username?: string | null,
   password?: string,
 ): Promise<string> {
   return invoke("vnc_test_connection", {
     host,
     port,
+    username: username?.trim() || null,
     password: password ?? null,
   });
 }

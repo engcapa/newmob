@@ -15,16 +15,25 @@ export interface VncPanelProps {
   tabId: string;
   host: string;
   port: number;
+  username?: string | null;
   password?: string;
   visible: boolean;
 }
 
 type ScaleMode = "fit" | "one";
+type PendingFrame = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  rgba: Uint8Array;
+};
 
 export default function VncPanel({
   tabId,
   host,
   port,
+  username,
   password,
   visible,
 }: VncPanelProps) {
@@ -32,10 +41,13 @@ export default function VncPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
-  const frameBufferRef = useRef<Uint8Array[]>([]);
+  const frameBufferRef = useRef<PendingFrame[]>([]);
+  const wsFrameLogCountRef = useRef(0);
+  const drawFrameLogCountRef = useRef(0);
   const rafRef = useRef<number>(0);
   const destroyedRef = useRef(false);
-  const connectArgsRef = useRef({ host, port, password });
+  const disconnectedByServerRef = useRef(false);
+  const connectArgsRef = useRef({ host, port, username, password });
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
 
   const store = useVncStore();
@@ -49,23 +61,38 @@ export default function VncPanel({
 
   // ── connect logic, callable for retry ─────────────────────────────
   const doConnect = useCallback(() => {
-    const { host: h, port: p, password: pw } = connectArgsRef.current;
+    const { host: h, port: p, username: user, password: pw } = connectArgsRef.current;
     destroyedRef.current = false;
     store.initConnection(tabId);
 
     let cancelled = false;
+    disconnectedByServerRef.current = false;
+    wsFrameLogCountRef.current = 0;
+    drawFrameLogCountRef.current = 0;
 
     (async () => {
       try {
-        const result = await vncConnect(h, p, pw);
-        if (cancelled || destroyedRef.current) return;
+        console.debug("[VNC] connect requested", { host: h, port: p, username: user ?? null });
+        const result = await vncConnect(h, p, user, pw);
+        if (cancelled || destroyedRef.current) {
+          vncDisconnect(result.session_id).catch(() => {});
+          return;
+        }
 
         sessionIdRef.current = result.session_id;
         store.setConnecting(tabId, result.session_id, result.ws_port);
+        console.debug("[VNC] relay allocated", {
+          sessionId: result.session_id,
+          wsPort: result.ws_port,
+        });
 
         const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}`);
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
+
+        ws.onopen = () => {
+          console.debug("[VNC] websocket open", { wsPort: result.ws_port });
+        };
 
         ws.onmessage = (event) => {
           if (destroyedRef.current) return;
@@ -73,15 +100,25 @@ export default function VncPanel({
             const header = parseFrameHeader(event.data);
             if (!header) return;
             const rgba = new Uint8Array(event.data, 12);
-            frameBufferRef.current.push(rgba);
+            frameBufferRef.current.push({ ...header, rgba });
+            wsFrameLogCountRef.current += 1;
+            if (wsFrameLogCountRef.current <= 20 || wsFrameLogCountRef.current % 60 === 0) {
+              console.debug("[VNC] websocket frame", {
+                count: wsFrameLogCountRef.current,
+                ...header,
+                bytes: rgba.length,
+              });
+            }
           } else {
             const msg = parseWsMessage(event.data as string);
             if (!msg) return;
+            console.debug("[VNC] websocket text", msg);
             switch (msg.type) {
               case "connected":
                 store.setConnected(tabId, msg.width, msg.height, msg.name);
                 break;
               case "disconnected":
+                disconnectedByServerRef.current = true;
                 store.setDisconnected(tabId, msg.reason);
                 break;
               case "clipboard":
@@ -93,7 +130,7 @@ export default function VncPanel({
 
         ws.onclose = () => {
           wsRef.current = null;
-          if (!destroyedRef.current) {
+          if (!destroyedRef.current && !disconnectedByServerRef.current) {
             store.setDisconnected(tabId, "Connection closed");
           }
         };
@@ -113,15 +150,19 @@ export default function VncPanel({
     return () => {
       cancelled = true;
     };
-  }, [host, port, password, tabId, store]);
+  }, [host, port, username, password, tabId, store]);
 
   // ── Mount / unmount ───────────────────────────────────────────────
   useEffect(() => {
-    connectArgsRef.current = { host, port, password };
-    const cancel = doConnect();
+    connectArgsRef.current = { host, port, username, password };
+    let cancel: (() => void) | undefined;
+    const connectTimer = window.setTimeout(() => {
+      cancel = doConnect();
+    }, 0);
 
     return () => {
-      cancel();
+      window.clearTimeout(connectTimer);
+      cancel?.();
       destroyedRef.current = true;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       frameBufferRef.current = [];
@@ -152,22 +193,39 @@ export default function VncPanel({
 
       const frames = frameBufferRef.current;
       if (frames.length > 0) {
-        const rgba = frames[frames.length - 1];
+        const pending = frames.splice(0, frames.length);
         frames.length = 0;
-
-        const pixelData = new Uint8ClampedArray(rgba.length);
-        pixelData.set(rgba);
 
         if (canvas.width !== conn.width || canvas.height !== conn.height) {
           canvas.width = conn.width || 1;
           canvas.height = conn.height || 1;
         }
 
-        const imgData = new ImageData(pixelData, conn.width || 1, conn.height || 1);
-        try {
-          ctx.putImageData(imgData, 0, 0);
-        } catch {
-          // size mismatch, skip
+        for (const frame of pending) {
+          if (frame.rgba.length !== frame.w * frame.h * 4) continue;
+          const pixelData = new Uint8ClampedArray(frame.rgba.length);
+          pixelData.set(frame.rgba);
+
+          const imgData = new ImageData(pixelData, frame.w || 1, frame.h || 1);
+          try {
+            ctx.putImageData(imgData, frame.x, frame.y);
+            drawFrameLogCountRef.current += 1;
+            if (
+              drawFrameLogCountRef.current <= 20 ||
+              drawFrameLogCountRef.current % 60 === 0
+            ) {
+              console.debug("[VNC] canvas frame drawn", {
+                count: drawFrameLogCountRef.current,
+                x: frame.x,
+                y: frame.y,
+                w: frame.w,
+                h: frame.h,
+                bytes: frame.rgba.length,
+              });
+            }
+          } catch {
+            // size mismatch, skip
+          }
         }
 
         sendWs({ type: "ack" });
@@ -217,31 +275,81 @@ export default function VncPanel({
   const getFbCoords = useCallback(
     (clientX: number, clientY: number) => {
       const canvas = canvasRef.current;
-      if (!canvas) return { x: 0, y: 0 };
+      const fbWidth = conn?.width ?? 0;
+      const fbHeight = conn?.height ?? 0;
+      if (!canvas || fbWidth <= 0 || fbHeight <= 0) return { x: 0, y: 0 };
       const rect = canvas.getBoundingClientRect();
-      const scaleX = conn.width / rect.width;
-      const scaleY = conn.height / rect.height;
+      if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
+
+      let contentLeft = rect.left;
+      let contentTop = rect.top;
+      let contentWidth = rect.width;
+      let contentHeight = rect.height;
+
+      if (scaleMode === "fit") {
+        const fbAspect = fbWidth / fbHeight;
+        const rectAspect = rect.width / rect.height;
+        if (rectAspect > fbAspect) {
+          contentWidth = rect.height * fbAspect;
+          contentLeft += (rect.width - contentWidth) / 2;
+        } else {
+          contentHeight = rect.width / fbAspect;
+          contentTop += (rect.height - contentHeight) / 2;
+        }
+      }
+
+      const scaleX = fbWidth / contentWidth;
+      const scaleY = fbHeight / contentHeight;
+      const x = Math.round((clientX - contentLeft) * scaleX);
+      const y = Math.round((clientY - contentTop) * scaleY);
       return {
-        x: Math.round((clientX - rect.left) * scaleX),
-        y: Math.round((clientY - rect.top) * scaleY),
+        x: Math.max(0, Math.min(fbWidth - 1, x)),
+        y: Math.max(0, Math.min(fbHeight - 1, y)),
       };
     },
-    [conn?.width, conn?.height],
+    [conn?.width, conn?.height, scaleMode],
   );
 
   const handlePointer = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (conn?.status !== "connected") return;
+      e.preventDefault();
       const { x, y } = getFbCoords(e.clientX, e.clientY);
-      const buttons = mouseButtonMask(e as unknown as MouseEvent);
+      const buttons = mouseButtonMask(e.nativeEvent);
       sendWs({ type: "pointer", x, y, buttons });
     },
     [conn?.status, getFbCoords, sendWs],
   );
 
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      e.currentTarget.focus({ preventScroll: true });
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Pointer capture can fail if the event was already cancelled.
+      }
+      handlePointer(e);
+    },
+    [handlePointer],
+  );
+
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent<HTMLCanvasElement>) => {
+      handlePointer(e);
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // The pointer may already have been released by the platform.
+      }
+    },
+    [handlePointer],
+  );
+
   const handleWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
       if (conn?.status !== "connected") return;
+      e.preventDefault();
       const { x, y } = getFbCoords(e.clientX, e.clientY);
       const wheelButton = e.deltaY < 0 ? 8 : 16;
       sendWs({ type: "pointer", x, y, buttons: wheelButton });
@@ -409,13 +517,17 @@ export default function VncPanel({
 
       <canvas
         ref={canvasRef}
-        onPointerDown={handlePointer}
+        onPointerDown={handlePointerDown}
         onPointerMove={handlePointer}
-        onPointerUp={handlePointer}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onContextMenu={(e) => e.preventDefault()}
         onWheel={handleWheel}
         style={{
           display: showCanvas ? "block" : "none",
           ...canvasStyle,
+          touchAction: "none",
+          userSelect: "none",
         }}
         tabIndex={0}
       />

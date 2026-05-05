@@ -39,7 +39,7 @@ export const useVncStore = create<VncStore>((set) => ({
       connections: {
         ...s.connections,
         [tabId]: {
-          status: "disconnected",
+          status: "connecting",
           sessionId: null,
           wsPort: null,
           width: 0,
