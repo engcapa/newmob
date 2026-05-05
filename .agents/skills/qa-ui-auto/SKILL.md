@@ -20,7 +20,7 @@ This skill is designed to run inside coding-agent CLIs (Claude Code, Codex, etc.
 
 NewMob ships in two runnable forms (see `replit.md` and the tech doc):
 
-1. **Browser dev mode** — `pnpm run dev` on port `5000`. Vite serves the React UI and the `sshProxy` / `sftpProxy` plugins implement the SSH/SFTP backend in Node, with `src/stubs/*` shimming the Tauri APIs. This mode is **headless-CI-friendly** and is the primary target for automation: a real browser drives the same React UI shipped in the desktop binary.
+1. **Browser dev mode** — start Vite on port `5000` with `DEV_PROXY_ALLOW_PRIVATE=1` and `ALLOW_PRIVATE_TARGETS=1` (PowerShell: `$env:DEV_PROXY_ALLOW_PRIVATE="1"; $env:ALLOW_PRIVATE_TARGETS="1"; pnpm run dev`, cmd.exe: `set DEV_PROXY_ALLOW_PRIVATE=1 && set ALLOW_PRIVATE_TARGETS=1 && pnpm run dev`, macOS/Linux: `DEV_PROXY_ALLOW_PRIVATE=1 ALLOW_PRIVATE_TARGETS=1 pnpm run dev`). Vite serves the React UI and the `sshProxy` / `sftpProxy` plugins implement the SSH/SFTP backend in Node, with `src/stubs/*` shimming the Tauri APIs. This mode is **headless-CI-friendly** and is the primary target for automation: a real browser drives the same React UI shipped in the desktop binary.
 2. **Native Tauri WebDriver mode** — `pnpm tauri build --debug --no-bundle` (or `cargo tauri build --debug --no-bundle`) then drive the real debug binary through `tauri-driver`. This mode tests the actual native WebView and Tauri/Rust IPC backend. On Windows it requires `msedgedriver.exe` matching the installed Edge/WebView2 runtime; on Linux it requires `WebKitWebDriver` and a display. macOS desktop WebDriver is not supported by Tauri because WKWebView has no desktop WebDriver tool.
 
 Default mode is `browser`. Use `--mode native` when the user explicitly asks to test real Tauri rendering, Rust commands, or native backend behavior.
@@ -65,7 +65,7 @@ Test cases and config live at the **project root**, not inside the skill, so use
 2. **Load config.** Read `qa-ui-auto.config.yaml`. If absent, copy the example and tell the user which fields to fill in (host/port/user/password or key path for SSH, SFTP). Never invent credentials. If the user supplies secrets in chat, write them via the environment-secrets skill, not the YAML, and reference them as `${env:VAR_NAME}`.
 3. **Load `testcase-for-auto.md`.** This skill does not generate or modify test cases. If the file is missing, stop and tell the user to generate it separately before running automation.
 4. **Probe required services.** `run_tests.py` automatically calls `probe.py` after parsing test cases. The probe checks only what the active cases need:
-   - Browser mode → Vite dev server reachable at `app.base_url`.
+   - Browser mode → Vite dev server reachable at `app.base_url`, started with `DEV_PROXY_ALLOW_PRIVATE=1` and `ALLOW_PRIVATE_TARGETS=1`.
    - Native mode → Tauri debug binary built; `tauri-driver` available; platform WebDriver available; on Linux, a `DISPLAY` is set.
    - SSH/SFTP host:port reachable (only if any case references `${cfg:ssh.*}` or `${cfg:sftp.*}`).
    - Tooling (`pnpm`, `playwright-cli`) on PATH for browser mode; `tauri-driver` and platform WebDriver tooling for native mode.
@@ -75,12 +75,12 @@ Test cases and config live at the **project root**, not inside the skill, so use
    - Parses `testcase-for-auto.md` into ordered cases and steps.
    - For each case, opens a fresh browser context: `playwright-cli open http://localhost:5000 --user-data-dir qa-ui-auto-report/profile-<case>`.
    - Executes each step as a `playwright-cli` command (`click`, `type`, `press`, `expect`, `screenshot`).
-   - On failure, captures a screenshot + the page HTML into `qa-ui-auto-report/<case>/`.
+   - On failure, captures a screenshot, DOM snapshot, page console logs, the injected page console buffer, and page HTML into `qa-ui-auto-report/<case>/`.
    - Writes `qa-ui-auto-report/summary.json` and a Markdown summary.
    The native runner starts or connects to `tauri-driver` at `webdriver.host:webdriver.port`, creates one Tauri WebDriver session per case with `tauri:options.application`, drives the real native WebView through W3C WebDriver, captures screenshots through WebDriver, and writes the same report format.
 6. **Report.** Print the Markdown summary to stdout. Exit non-zero if any case failed so the parent agent loop can react.
 7. **Failure artifacts.** For every failed case, inspect and report the artifacts listed under that failed step in `summary.md`.
-   - Browser mode captures failure screenshot, DOM snapshot, console output from `playwright-cli console`, and page HTML where available.
+   - Browser mode captures failure screenshot, DOM snapshot, console output from `playwright-cli console` at default/info/warning/error levels, an in-page console buffer JSON (`console.log/info/warn/error/debug`, `window.error`, `unhandledrejection`), and page HTML where available.
    - Native mode captures failure screenshot, page HTML, a JSON file containing the injected in-page console buffer (`console.log/info/warn/error/debug`, `window.error`, `unhandledrejection`) and basic runtime state such as `window.__TAURI__` availability.
    - Native mode also lists `tauri-driver.out.log` and `tauri-driver.err.log` in the run artifacts. Treat these as backend/native-driver logs; Tauri/Rust process output normally flows through the driver-launched process. If the Rust app exits early or WebDriver cannot create a session, surface the tail of these logs in the final answer.
 

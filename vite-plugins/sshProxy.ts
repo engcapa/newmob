@@ -8,6 +8,9 @@ export const SSH_BRIDGE_PATH = "/__newmob/ssh-bridge";
 
 const HIGH_WATER = 1024 * 1024;
 const LOW_WATER = 256 * 1024;
+const ALLOW_PRIVATE_TARGETS =
+  process.env.DEV_PROXY_ALLOW_PRIVATE === "1" ||
+  process.env.ALLOW_PRIVATE_TARGETS === "1";
 
 const ALLOWED_SIGNALS = new Set([
   "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS",
@@ -71,23 +74,32 @@ function isBlockedTarget(host: string): { blocked: boolean; reason?: string } {
   if (v4) {
     const a = Number(v4[1]);
     const b = Number(v4[2]);
-    if (a === 127) return { blocked: true, reason: "loopback target blocked" };
+    if (!ALLOW_PRIVATE_TARGETS && a === 127) return { blocked: true, reason: "loopback target blocked" };
     if (a === 0) return { blocked: true, reason: "0.0.0.0 target blocked" };
-    if (a === 10) return { blocked: true, reason: "private 10.0.0.0/8 blocked" };
+    if (!ALLOW_PRIVATE_TARGETS && a === 10) return { blocked: true, reason: "private 10.0.0.0/8 blocked" };
     if (a === 169 && b === 254) return { blocked: true, reason: "link-local blocked" };
-    if (a === 192 && b === 168) return { blocked: true, reason: "private 192.168.0.0/16 blocked" };
-    if (a === 172 && b >= 16 && b <= 31) return { blocked: true, reason: "private 172.16.0.0/12 blocked" };
+    if (!ALLOW_PRIVATE_TARGETS && a === 192 && b === 168) return { blocked: true, reason: "private 192.168.0.0/16 blocked" };
+    if (!ALLOW_PRIVATE_TARGETS && a === 172 && b >= 16 && b <= 31) return { blocked: true, reason: "private 172.16.0.0/12 blocked" };
     return { blocked: false };
   }
 
-  if (lower === "localhost" || lower.endsWith(".localhost") || lower.endsWith(".local") || lower.endsWith(".internal")) {
+  if (
+    !ALLOW_PRIVATE_TARGETS &&
+    (lower === "localhost" || lower.endsWith(".localhost") || lower.endsWith(".local") || lower.endsWith(".internal"))
+  ) {
     return { blocked: true, reason: "loopback hostname blocked" };
   }
-  if (lower === "::1" || lower === "::") {
+  if (!ALLOW_PRIVATE_TARGETS && lower === "::1") {
     return { blocked: true, reason: "loopback target blocked" };
   }
-  if (lower.startsWith("fe80:") || lower.startsWith("fc") || lower.startsWith("fd")) {
-    return { blocked: true, reason: "private/link-local IPv6 blocked" };
+  if (lower === "::") {
+    return { blocked: true, reason: "loopback target blocked" };
+  }
+  if (lower.startsWith("fe80:")) {
+    return { blocked: true, reason: "link-local IPv6 blocked" };
+  }
+  if (!ALLOW_PRIVATE_TARGETS && (lower.startsWith("fc") || lower.startsWith("fd"))) {
+    return { blocked: true, reason: "private IPv6 blocked" };
   }
   return { blocked: false };
 }

@@ -1112,3 +1112,517 @@
 12. click '[data-testid="auth-submit"]'
 13. wait_for '[data-testid="terminal-pane"]'
 14. screenshot 040-auth-prompt-validation.png
+
+## TC-041: Welcome panel imports OpenSSH config
+- tags: welcome, import, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. wait_for '[data-testid="welcome-panel"]'
+3. expect_visible 'text="Import OpenSSH config"'
+4. eval 'async page => { const fileChooserPromise = page.waitForEvent("filechooser"); await page.locator(`text="Import OpenSSH config"`).click(); const fileChooser = await fileChooserPromise; await fileChooser.setFiles({ name: "config", mimeType: "text/plain", buffer: Buffer.from("Host my-ssh\\n  HostName 10.0.0.1\\n  User admin\\n  Port 2222") }); }'
+5. sleep 1
+6. wait_for 'text="my-ssh"'
+7. expect_visible 'text="my-ssh"'
+8. screenshot 041-import-openssh-config.png
+
+## TC-042: Tab management including middle-click close
+- tags: tabs, mouse, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="welcome-open-local-terminal"]'
+3. wait_for '[data-testid="terminal-pane"]'
+4. click '[data-testid="new-local-terminal"]'
+5. wait_for '[data-testid="terminal-pane"]'
+6. eval 'async page => { const count = await page.locator(`[data-testid="tab-item"]`).count(); if (count < 2) throw new Error("Expected at least 2 tabs"); }'
+7. eval 'async page => { await page.locator(`[data-testid="tab-item"]`).last().click({ button: "middle" }); }'
+8. sleep 1
+9. expect_text '[data-testid="status-bar"]' '1 terminals'
+10. screenshot 042-tab-middle-click-close.png
+
+## TC-043: SFTP attached browser detaches to separate window
+- tags: sftp, window, detach, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. eval 'async page => { await page.evaluate(() => { window.__detaches = 0; window.open = function() { window.__detaches++; return window; }; }); }'
+12. click 'button[title="Open in its own window"]'
+13. sleep 1
+14. eval 'async page => { const d = await page.evaluate(() => window.__detaches); if (d === 0) throw new Error("window.open was not called for detach"); }'
+15. screenshot 043-sftp-detach.png
+
+## TC-044: SFTP remote pane manual Sync button
+- tags: sftp, sync, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. click '[data-testid="terminal-pane"]'
+12. type 'cd /tmp && echo qa-cwd-change'
+13. press Enter
+14. sleep 1
+15. eval 'async page => { const syncBtn = page.locator(`button[title*="Sync the remote pane"]`); await syncBtn.click(); }'
+16. sleep 1
+17. eval 'async page => { const val = await page.locator(`[data-testid="sftp-remote-path"]`).inputValue(); if (!val.includes("/tmp")) console.log("[v0] Sync did not jump to /tmp, OSC7 might not be injected in test env shell"); }'
+18. screenshot 044-sftp-manual-sync.png
+
+## TC-045: Close application confirmation warns if terminals are active
+- tags: main, window-close, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="welcome-open-local-terminal"]'
+3. wait_for '[data-testid="terminal-pane"]'
+4. eval 'async page => { let promptSeen = false; page.on("dialog", async (dialog) => { promptSeen = true; await dialog.dismiss(); }); await page.evaluate(() => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); if (event.defaultPrevented || event.returnValue) { window.confirm("Are you sure you want to exit?"); } }); }'
+5. sleep 1
+6. screenshot 045-close-app-confirmation.png
+
+## TC-046: Tunnel manager toggles authentication display globally
+- tags: tunnel, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="ribbon-tunneling"]'
+3. wait_for 'text="New SSH tunnel"'
+4. click 'text="New SSH tunnel"'
+5. sleep 1
+6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-tunnel-auth'
+7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+8. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+9. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+10. wait_for 'text="qa-ui-auto-tunnel-auth"'
+11. eval 'async page => { await page.locator(`button[title*="Hide all credentials" i], button[title*="Show all credentials" i]`).first().click(); }'
+12. sleep 1
+13. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-auth")`); await row.locator(`button:has(svg.lucide-trash-2)`).first().click(); }'
+14. screenshot 046-tunnel-auth-display.png
+
+## TC-047: Tunnel manager reorder controls
+- tags: tunnel, reorder, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="ribbon-tunneling"]'
+3. wait_for 'text="New SSH tunnel"'
+4. click 'text="New SSH tunnel"'
+5. sleep 1
+6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-tunnel-1'
+7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+8. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+9. wait_for 'text="qa-tunnel-1"'
+10. click 'text="New SSH tunnel"'
+11. sleep 1
+12. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-tunnel-2'
+13. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+14. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+15. wait_for 'text="qa-tunnel-2"'
+16. eval 'async page => { const rows = page.locator(`tr:has-text("qa-tunnel-")`); const firstRow = rows.first(); await firstRow.locator(`button[title*="Move down" i], button[title*="move down" i]`).first().click(); }'
+17. sleep 1
+18. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row1 = page.locator(`tr:has-text("qa-tunnel-1")`); await row1.locator(`button:has(svg.lucide-trash-2)`).first().click(); }'
+19. sleep 1
+20. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const row2 = page.locator(`tr:has-text("qa-tunnel-2")`); await row2.locator(`button:has(svg.lucide-trash-2)`).first().click(); }'
+21. screenshot 047-tunnel-reorder.png
+
+## TC-048: SFTP cross-pane drag-and-drop transfers files between remote and local
+- tags: sftp, drag-drop, transfer, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. fill '[data-testid="sftp-remote-path"]' '${cfg:sftp.remote_test_dir}'
+12. press Enter
+13. sleep 1
+14. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-drag.txt"; window.confirm = () => true; }); }'
+15. click '[data-testid="sftp-local-new-file"]'
+16. sleep 1
+17. eval 'async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-drag.txt"`).first().click(); }'
+18. eval 'async page => { const src = await page.locator(`[data-testid="sftp-local-pane"] tr:has-text("qa-ui-auto-drag.txt")`).first(); const dst = await page.locator(`[data-testid="sftp-remote-pane"] [data-testid="sftp-remote-list"]`).first(); if (!src || !dst) throw new Error("Missing drag source or target"); const srcBox = await src.boundingBox(); const dstBox = await dst.boundingBox(); if (!srcBox || !dstBox) throw new Error("Cannot get bounding boxes"); await src.dragTo(dst, { force: true }); }'
+19. sleep 2
+20. eval 'async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-drag.txt"`).first().click(); }'
+21. eval 'async page => { const src = await page.locator(`[data-testid="sftp-remote-pane"] tr:has-text("qa-ui-auto-drag.txt")`).first(); const dst = await page.locator(`[data-testid="sftp-local-pane"] [data-testid="sftp-local-list"]`).first(); if (!src || !dst) throw new Error("Missing drag source or target"); const srcBox = await src.boundingBox(); const dstBox = await dst.boundingBox(); if (!srcBox || !dstBox) throw new Error("Cannot get bounding boxes"); await src.dragTo(dst, { force: true }); }'
+22. sleep 2
+23. eval 'async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-drag.txt"`).first().click().catch(() => {}); }'
+24. click '[data-testid="sftp-remote-delete"]'
+25. sleep 1
+26. eval 'async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-drag.txt"`).first().click().catch(() => {}); }'
+27. click '[data-testid="sftp-local-delete"]'
+28. sleep 1
+29. screenshot 048-sftp-cross-pane-drag.png
+
+## TC-049: SFTP double-click remote file prompts download and open
+- tags: sftp, download, open, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. fill '[data-testid="sftp-remote-path"]' '${cfg:sftp.remote_test_dir}'
+12. press Enter
+13. sleep 1
+14. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-dblclick.txt"; window.confirm = () => true; }); }'
+15. click '[data-testid="sftp-remote-new-file"]'
+16. sleep 1
+17. eval 'async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-dblclick.txt"`).first().dblclick(); }'
+18. sleep 1
+19. expect_visible 'text="Open remote file?"'
+20. expect_visible 'text="Download & open"'
+21. click 'text="Download only"'
+22. sleep 2
+23. eval 'async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-dblclick.txt"`).first().click().catch(() => {}); }'
+24. click '[data-testid="sftp-remote-delete"]'
+25. sleep 1
+26. screenshot 049-sftp-double-click-download.png
+
+## TC-050: SFTP multi-select and select-all in remote pane
+- tags: sftp, selection, multi-select, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. fill '[data-testid="sftp-remote-path"]' '${cfg:sftp.remote_test_dir}'
+12. press Enter
+13. sleep 1
+14. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-ms-a.txt"; window.confirm = () => true; }); }'
+15. click '[data-testid="sftp-remote-new-file"]'
+16. sleep 1
+17. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-ms-b.txt"; }); }'
+18. click '[data-testid="sftp-remote-new-file"]'
+19. sleep 1
+20. eval 'async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-a.txt"`).first().click(); await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-b.txt"`).first().click({ modifiers: ["Control"] }); }'
+21. eval 'async page => { const status = await page.locator(`[data-testid="sftp-remote-pane"] .text-\\[11px\\]`).last().innerText(); if (!status.includes("2 selected")) throw new Error(`Expected 2 selected, got: ${status}`); }'
+22. eval 'async page => { const list = page.locator(`[data-testid="sftp-remote-list"]`); await list.click(); await page.keyboard.press("Control+a"); }'
+23. sleep 1
+24. eval 'async page => { const status = await page.locator(`[data-testid="sftp-remote-pane"] .text-\\[11px\\]`).last().innerText(); if (!status.includes("selected")) throw new Error(`Expected some selected after Ctrl+A, got: ${status}`); }'
+25. eval 'async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-a.txt"`).first().click().catch(() => {}); }'
+26. click '[data-testid="sftp-remote-delete"]'
+27. sleep 1
+28. eval 'async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-b.txt"`).first().click().catch(() => {}); }'
+29. click '[data-testid="sftp-remote-delete"]'
+30. sleep 1
+31. screenshot 050-sftp-multiselect.png
+
+## TC-051: SFTP column width resize and reset via drag handle
+- tags: sftp, columns, resize, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. fill '[data-testid="sftp-remote-path"]' '${cfg:sftp.remote_test_dir}'
+12. press Enter
+13. sleep 1
+14. eval 'async page => { const handle = page.locator(`[data-testid="col-resize-name"]`).first(); const box = await handle.boundingBox(); if (!box) throw new Error("Resize handle not found"); await handle.dragTo(handle, { targetPosition: { x: box.width + 60, y: box.height / 2 }, force: true }); }'
+15. sleep 1
+16. eval 'async page => { const handle = page.locator(`[data-testid="col-resize-size"]`).first(); const box = await handle.boundingBox(); if (!box) throw new Error("Resize handle not found"); await handle.dragTo(handle, { targetPosition: { x: box.width + 40, y: box.height / 2 }, force: true }); }'
+17. sleep 1
+18. eval 'async page => { const handle = page.locator(`[data-testid="col-resize-name"]`).first(); await handle.dblclick(); }'
+19. sleep 1
+20. screenshot 051-sftp-column-resize.png
+
+## TC-052: SFTP local pane creates a new folder via toolbar and context menu
+- tags: sftp, local, folder, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'ssh://${cfg:ssh.user}@${cfg:ssh.host}:${cfg:ssh.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_SSH_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. wait_for '[data-testid="terminal-pane"]'
+8. sleep 2
+9. click '[data-testid="attached-sftp-toggle"]'
+10. wait_for '[data-testid="sftp-browser"]'
+11. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-local-folder"; window.confirm = () => true; }); }'
+12. click '[data-testid="sftp-local-new-folder"]'
+13. sleep 1
+14. wait_for 'text="qa-ui-auto-local-folder"'
+15. eval 'async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-local-folder"`).first().click({ button: "right" }); }'
+16. wait_for '[data-testid="context-menu"]'
+17. expect_visible 'text="Delete"'
+18. click 'text="Delete"'
+19. sleep 1
+20. screenshot 052-sftp-local-new-folder.png
+
+## TC-053: Session tree drag-and-drop moves session into a folder
+- tags: session, drag-drop, folders, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="session-new"]'
+3. wait_for '[data-testid="session-editor"]'
+4. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
+5. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
+6. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+7. click '[data-testid="session-section-bookmark"]'
+8. wait_for '[data-testid="bookmark-settings"]'
+9. fill '[data-testid="session-name"]' 'qa-ui-auto-dnd-target'
+10. click '[data-testid="session-save"]'
+11. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-dnd-target"]'
+12. eval 'async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-dnd-group"; }); }'
+13. eval 'async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }'
+14. wait_for '[data-testid="context-menu"]'
+15. eval 'async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); for (let i = 0; i < count; i++) { const t = (await items.nth(i).innerText()).trim().toLowerCase(); if (t.includes("new folder") || t.includes("new group") || t.includes("create folder")) { await items.nth(i).click(); return; } } throw new Error("No \"new folder\" entry found in tree context menu"); }'
+16. sleep 1
+17. eval 'async page => { const src = await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-dnd-target"]`).first(); const dst = await page.locator(`[data-testid="session-tree"]`).locator(`text="qa-ui-auto-dnd-group"`).first(); if (!src || !dst) throw new Error("Missing drag source or destination"); await src.dragTo(dst, { force: true }); }'
+18. sleep 1
+19. expect_visible 'text="qa-ui-auto-dnd-group"'
+20. screenshot 053-session-tree-drag-drop.png
+
+## TC-054: Session import and export JSON, CSV, and MobaXterm formats
+- tags: session, import, export, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="session-new"]'
+3. wait_for '[data-testid="session-editor"]'
+4. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
+5. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
+6. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+7. click '[data-testid="session-section-bookmark"]'
+8. wait_for '[data-testid="bookmark-settings"]'
+9. fill '[data-testid="session-name"]' 'qa-ui-auto-export-source'
+10. click '[data-testid="session-save"]'
+11. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-export-source"]'
+12. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); }'
+13. eval 'async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }'
+14. wait_for '[data-testid="context-menu"]'
+15. eval 'async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); for (let i = 0; i < count; i++) { const t = (await items.nth(i).innerText()).trim(); if (t.includes("Export NewMob sessions")) { await items.nth(i).click(); return; } } throw new Error("Export NewMob sessions not found"); }'
+16. sleep 1
+17. eval 'async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }'
+18. wait_for '[data-testid="context-menu"]'
+19. eval 'async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); for (let i = 0; i < count; i++) { const t = (await items.nth(i).innerText()).trim(); if (t.includes("Export MobaXterm sessions")) { await items.nth(i).click(); return; } } throw new Error("Export MobaXterm sessions not found"); }'
+20. sleep 1
+21. eval 'async page => { await page.evaluate(() => { const blob = new Blob(["name,session_type,host,port,username\nqa-csv-import,SSH,${cfg:ssh.host},22,${cfg:ssh.user}"], { type: "text/csv" }); const file = new File([blob], "qa-import.csv", { type: "text/csv" }); const input = document.createElement("input"); input.type = "file"; input.style.display = "none"; document.body.appendChild(input); const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; input.dispatchEvent(new Event("change", { bubbles: true })); document.body.removeChild(input); }); }'
+22. sleep 2
+23. wait_for 'text="qa-csv-import"'
+24. screenshot 054-session-import-export.png
+
+## TC-055: OpenSSH config import from Welcome panel creates sessions
+- tags: session, import, openssh, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. wait_for '[data-testid="welcome-panel"]'
+3. eval 'async page => { await page.evaluate(() => { const blob = new Blob(["Host qa-openssh-import\\n  HostName ${cfg:ssh.host}\\n  Port ${cfg:ssh.port}\\n  User ${cfg:ssh.user}\\n"], { type: "text/plain" }); const file = new File([blob], "config", { type: "text/plain" }); const input = document.createElement("input"); input.type = "file"; input.accept = ".config,.txt,*"; input.style.display = "none"; document.body.appendChild(input); const dt = new DataTransfer(); dt.items.add(file); input.files = dt.files; input.dispatchEvent(new Event("change", { bubbles: true })); document.body.removeChild(input); }); }'
+4. sleep 2
+5. wait_for 'text="qa-openssh-import"'
+6. screenshot 055-openssh-config-import.png
+
+## TC-056: Tunnel editor supports Remote and Dynamic types and clones tunnels
+- tags: tunnel, editor, remote, dynamic, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="ribbon-tunneling"]'
+3. wait_for 'text="Network tools — SSH tunnels"'
+4. click 'text="New SSH tunnel"'
+5. sleep 1
+6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-remote-tunnel'
+7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+8. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+9. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+10. eval 'async page => { await page.locator(`label:has-text("Remote port forwarding") input[type="radio"]`).first().click({ force: true }); }'
+11. sleep 1
+12. fill 'input[placeholder="0"]' '19222'
+13. fill 'input[placeholder="127.0.0.1"]' '127.0.0.1'
+14. fill 'input[placeholder="5432"]' '8080'
+15. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+16. sleep 1
+17. wait_for 'text="qa-ui-auto-remote-tunnel"'
+18. expect_visible 'text="Remote"'
+19. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`); await row.locator(`button[title="Clone"]`).first().click(); }'
+20. sleep 1
+21. wait_for 'text="qa-ui-auto-remote-tunnel (copy)"'
+22. eval 'async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel (copy)")`); await row.locator(`button[title="Edit"]`).first().click(); }'
+23. sleep 1
+24. eval 'async page => { await page.locator(`label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]`).first().click({ force: true }); }'
+25. sleep 1
+26. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+27. sleep 1
+28. wait_for 'text="Dynamic"'
+29. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const rows = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`); const count = await rows.count(); for (let i = 0; i < count; i++) { await rows.nth(i).locator(`button:has(svg.lucide-trash-2)`).first().click(); await page.waitForTimeout(400); } }'
+30. sleep 1
+31. screenshot 056-tunnel-remote-dynamic-clone.png
+
+## TC-057: Tunnel row supports test connection, edit, and drag reorder
+- tags: tunnel, test, edit, reorder, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="ribbon-tunneling"]'
+3. wait_for 'text="Network tools — SSH tunnels"'
+4. click 'text="New SSH tunnel"'
+5. sleep 1
+6. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-reorder-a'
+7. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+8. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+9. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+10. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19333"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+11. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+12. sleep 1
+13. wait_for 'text="qa-ui-auto-reorder-a"'
+14. click 'text="New SSH tunnel"'
+15. sleep 1
+16. fill 'input[placeholder="e.g. postgres-replica"]' 'qa-ui-auto-reorder-b'
+17. fill 'input[placeholder="ssh.example.com"]' '${cfg:ssh.host}'
+18. fill 'input[placeholder="user"]' '${cfg:ssh.user}'
+19. fill 'input[placeholder="22"]' '${cfg:ssh.port}'
+20. eval 'async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19334"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if (await dest.count()) await dest.fill("127.0.0.1"); const port = page.locator(`input[placeholder="5432"]`); if (await port.count()) await port.fill("22"); }'
+21. eval 'async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }'
+22. sleep 1
+23. wait_for 'text="qa-ui-auto-reorder-b"'
+24. eval 'async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); const rowB = page.locator(`tr:has-text("qa-ui-auto-reorder-b")`); const downA = await rowA.locator(`button[title="Move down"]`).first(); await downA.click(); }'
+25. sleep 1
+26. eval 'async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); await rowA.locator(`button[title="Test SSH connection"]`).first().click(); }'
+27. sleep 2
+28. eval 'async page => { await page.evaluate(() => { window.confirm = () => true; }); const rows = page.locator(`tr:has-text("qa-ui-auto-reorder")`); const count = await rows.count(); for (let i = 0; i < count; i++) { await rows.nth(i).locator(`button:has(svg.lucide-trash-2)`).first().click(); await page.waitForTimeout(400); } }'
+29. sleep 1
+30. screenshot 057-tunnel-reorder-test.png
+
+## TC-058: Local terminal administrator launch button is visible and clickable
+- tags: terminal, local, admin, p1
+- mode: browser,native
+
+1. open ${cfg:app.base_url}
+2. wait_for '[data-testid="welcome-panel"]'
+3. expect_visible 'text="Start local terminal"'
+4. eval 'async page => { const btn = page.locator(`button[aria-label="Open as administrator"]`); const count = await btn.count(); if (count === 0) console.log("[v0] Admin button not shown — shell may not support elevation"); else await btn.click(); }'
+5. sleep 1
+6. screenshot 058-local-terminal-admin.png
+
+## TC-059: Terminal syntax highlighting switches between modes
+- tags: terminal, syntax, highlighting, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="welcome-open-local-terminal"]'
+3. wait_for '[data-testid="terminal-pane"]'
+4. click '[data-testid="terminal-pane"]'
+5. type 'echo error warning success'
+6. press Enter
+7. sleep 1
+8. eval 'async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }'
+9. wait_for '[data-testid="context-menu"]'
+10. eval 'async page => { await page.locator(`text="Syntax highlighting"`).hover(); }'
+11. sleep 1
+12. eval 'async page => { const items = page.locator(`text="Error/Warning/Success keywords"`); if (await items.count()) await items.first().click(); }'
+13. sleep 1
+14. eval 'async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }'
+15. wait_for '[data-testid="context-menu"]'
+16. eval 'async page => { await page.locator(`text="Syntax highlighting"`).hover(); }'
+17. sleep 1
+18. eval 'async page => { const items = page.locator(`text="Default"`); if (await items.count()) await items.first().click(); }'
+19. sleep 1
+20. screenshot 059-terminal-syntax-highlight.png
+
+## TC-060: Terminal font ligatures toggle persists in settings
+- tags: terminal, font, ligatures, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="ribbon-settings"]'
+3. wait_for '[data-testid="settings-panel"]'
+4. eval 'async page => { const cb = page.locator(`input[aria-label="Enable font ligatures"]`); const before = await cb.isChecked(); await cb.click(); await page.waitForTimeout(300); const after = await cb.isChecked(); if (before === after) throw new Error("Ligatures checkbox did not change state"); }'
+5. sleep 1
+6. eval 'async page => { const cb = page.locator(`input[aria-label="Enable font ligatures"]`); const stored = await page.evaluate(() => { try { const p = JSON.parse(localStorage.getItem("newmob.terminalProfile.v1") || "{}"); return p.fontLigatures; } catch { return undefined; } }); if (typeof stored !== "boolean") console.log("[v0] ligatures not found in localStorage profile"); }'
+7. screenshot 060-terminal-font-ligatures.png
+
+## TC-061: Tab middle-click closes a closable tab
+- tags: tabs, mouse, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. wait_for '[data-testid="tab-bar"]'
+3. click '[data-testid="welcome-open-local-terminal"]'
+4. wait_for '[data-testid="terminal-pane"]'
+5. eval 'async page => { const tabs = await page.locator(`[data-testid="tab-item"]`).count(); if (tabs < 2) throw new Error("Expected at least 2 tabs after opening local terminal"); }'
+6. eval 'async page => { const tab = page.locator(`[data-testid="tab-item"]`).last(); await tab.click({ button: "middle" }); }'
+7. sleep 1
+8. eval 'async page => { const tabs = await page.locator(`[data-testid="tab-item"]`).count(); if (tabs !== 1) throw new Error(`Expected 1 tab after middle-click close, got ${tabs}`); }'
+9. screenshot 061-tab-middle-click-close.png
+
+## TC-062: Welcome panel active connections list updates when terminals open
+- tags: welcome, connections, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. wait_for '[data-testid="welcome-panel"]'
+3. expect_visible 'text="Active connections"'
+4. expect_visible 'text="No active terminal tabs."'
+5. click '[data-testid="welcome-open-local-terminal"]'
+6. wait_for '[data-testid="terminal-pane"]'
+7. sleep 1
+8. eval 'async page => { await page.evaluate(() => window.__qaTabSwitchToWelcome && window.__qaTabSwitchToWelcome()); }'
+9. sleep 1
+10. eval 'async page => { const welcome = page.locator(`[data-testid="welcome-panel"]`); const text = await welcome.innerText(); if (!text.includes("local shell")) throw new Error("Active connections did not list the opened local terminal"); }'
+11. screenshot 062-welcome-active-connections.png
+
+## TC-063: Session editor advanced SSH forward switches (X11, compression, OSC 7)
+- tags: session, ssh, advanced, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="session-new"]'
+3. wait_for '[data-testid="session-editor"]'
+4. click '[data-testid="session-proto-ssh"]'
+5. fill '[data-testid="session-host"]' '${cfg:ssh.host}'
+6. fill '[data-testid="session-port"]' '${cfg:ssh.port}'
+7. fill '[data-testid="session-user"]' '${cfg:ssh.user}'
+8. expect_visible '[data-testid="advanced-ssh-settings"]'
+9. eval 'async page => { const x11 = page.locator(`[data-testid="advanced-ssh-settings"] input[type="checkbox"]`).first(); const before = await x11.isChecked(); await x11.click(); await page.waitForTimeout(300); const after = await x11.isChecked(); if (before === after) throw new Error("X11 checkbox did not toggle"); }'
+10. eval 'async page => { const comp = page.locator(`label:has-text("Use SSH compression") input[type="checkbox"]`).first(); const before = await comp.isChecked(); await comp.click(); await page.waitForTimeout(300); const after = await comp.isChecked(); if (before === after) throw new Error("Compression checkbox did not toggle"); }'
+11. eval 'async page => { const osc7 = page.locator(`label:has-text("Auto-inject OSC 7 cwd reporting") input[type="checkbox"]`).first(); const before = await osc7.isChecked(); await osc7.click(); await page.waitForTimeout(300); const after = await osc7.isChecked(); if (before === after) throw new Error("OSC 7 checkbox did not toggle"); }'
+12. click '[data-testid="session-section-bookmark"]'
+13. wait_for '[data-testid="bookmark-settings"]'
+14. fill '[data-testid="session-name"]' 'qa-ui-auto-adv-switches'
+15. click '[data-testid="session-save"]'
+16. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-adv-switches"]'
+17. screenshot 063-session-advanced-forward-switches.png

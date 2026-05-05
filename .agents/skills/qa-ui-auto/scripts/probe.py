@@ -30,6 +30,8 @@ sys.path.insert(0, str(HERE))
 from tauri_webdriver import native_binary, native_tool_issues  # noqa: E402
 
 ROOT = Path.cwd()
+DEV_PROXY_ALLOW_PRIVATE = "DEV_PROXY_ALLOW_PRIVATE"
+ALLOW_PRIVATE_TARGETS = "ALLOW_PRIVATE_TARGETS"
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -62,12 +64,15 @@ def probe_dev_server(cfg: dict) -> list[str]:
         return []
     hints = [
         f"✗ Dev server not reachable at {url}.",
-        "  Start it with one of:",
-        "    • pnpm run dev          # foreground",
+        f"  Start it with {DEV_PROXY_ALLOW_PRIVATE}=1 and {ALLOW_PRIVATE_TARGETS}=1 so SSH/SFTP tests can reach private and local hosts:",
+        "    • PowerShell:  $env:DEV_PROXY_ALLOW_PRIVATE=\"1\"; $env:ALLOW_PRIVATE_TARGETS=\"1\"; pnpm run dev",
+        "    • cmd.exe:     set DEV_PROXY_ALLOW_PRIVATE=1 && set ALLOW_PRIVATE_TARGETS=1 && pnpm run dev",
+        "    • macOS/Linux: DEV_PROXY_ALLOW_PRIVATE=1 ALLOW_PRIVATE_TARGETS=1 pnpm run dev",
     ]
     if _on_replit():
         hints.append("    • In Replit: restart the workflow named "
-                     "`Start application` (it runs `pnpm run dev`)")
+                     "`Start application` after adding "
+                     "`DEV_PROXY_ALLOW_PRIVATE=1` and `ALLOW_PRIVATE_TARGETS=1` to that workflow")
     hints += [
         "  Then wait until the page loads in a browser before re-running "
         "qa-ui-auto.",
@@ -182,6 +187,8 @@ def _load_config(path: Path) -> dict:
 
 
 def main() -> int:
+    os.environ.setdefault(DEV_PROXY_ALLOW_PRIVATE, "1")
+    os.environ.setdefault(ALLOW_PRIVATE_TARGETS, "1")
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["browser", "native"], default="browser")
     ap.add_argument("--config", default="qa-ui-auto.config.yaml")

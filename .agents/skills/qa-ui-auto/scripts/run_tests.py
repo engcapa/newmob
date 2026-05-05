@@ -39,6 +39,8 @@ DEFAULT_CONFIG = ROOT / "qa-ui-auto.config.yaml"
 TEMPLATE = HERE.parent / "assets" / "testcase-for-auto.template.md"
 CONFIG_EXAMPLE = HERE.parent / "assets" / "qa-ui-auto.config.example.yaml"
 AUTO_HEADER = "<!-- qa-ui-auto:auto-generated -->"
+DEV_PROXY_ALLOW_PRIVATE = "DEV_PROXY_ALLOW_PRIVATE"
+ALLOW_PRIVATE_TARGETS = "ALLOW_PRIVATE_TARGETS"
 
 
 def log(msg: str) -> None:
@@ -119,6 +121,63 @@ def _session(report_dir: Path) -> str:
     return f"qa-ui-auto-{report_dir.name.lower()}"
 
 
+BROWSER_CONSOLE_HOOK_JS = r"""
+(() => {
+  if (window.__QA_UI_AUTO_CONSOLE_HOOKED__) return true;
+  Object.defineProperty(window, '__QA_UI_AUTO_CONSOLE_HOOKED__', { value: true });
+  window.__QA_UI_AUTO_CONSOLE__ = window.__QA_UI_AUTO_CONSOLE__ || [];
+  const serialize = (arg) => {
+    try {
+      if (arg instanceof Error) return arg.stack || arg.message;
+      if (typeof arg === 'string') return arg;
+      return JSON.stringify(arg);
+    } catch (_) {
+      return String(arg);
+    }
+  };
+  for (const level of ['log', 'info', 'warn', 'error', 'debug']) {
+    const original = console[level] ? console[level].bind(console) : console.log.bind(console);
+    console[level] = (...args) => {
+      try {
+        window.__QA_UI_AUTO_CONSOLE__.push({
+          level,
+          time: new Date().toISOString(),
+          args: args.map(serialize),
+        });
+      } catch (_) {}
+      original(...args);
+    };
+  }
+  window.addEventListener('error', (event) => {
+    window.__QA_UI_AUTO_CONSOLE__.push({
+      level: 'error',
+      time: new Date().toISOString(),
+      args: [event.message, event.filename, event.lineno, event.colno],
+    });
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    window.__QA_UI_AUTO_CONSOLE__.push({
+      level: 'error',
+      time: new Date().toISOString(),
+      args: ['unhandledrejection', String(event.reason)],
+    });
+  });
+  return true;
+})()
+"""
+
+
+def _install_browser_console_hook(session: str, profile_dir: Path) -> None:
+    code = (
+        "async page => { "
+        f"const hook = {_js(BROWSER_CONSOLE_HOOK_JS)}; "
+        "await page.addInitScript(hook); "
+        "await page.evaluate(hook).catch(() => undefined); "
+        "return true; }"
+    )
+    _pw([f"-s={session}", "run-code", code], profile_dir)
+
+
 def browser_dispatch(step, profile_dir: Path, report_dir: Path) -> tuple[bool, str]:
     """Execute one step via playwright-cli. Returns (ok, message)."""
     v = step.verb
@@ -192,6 +251,8 @@ def browser_dispatch(step, profile_dir: Path, report_dir: Path) -> tuple[bool, s
         combined = (r.stdout + r.stderr).strip()
         has_cli_error = "### Error" in combined or "\nError:" in combined or combined.startswith("Error:")
         ok = r.returncode == 0 and not has_cli_error
+        if ok and v in ("open", "goto"):
+            _install_browser_console_hook(session, profile_dir)
         msg = combined.splitlines()[-1] if combined else ""
         return ok, msg or ("ok" if ok else "failed")
     except Exception as e:
@@ -203,11 +264,34 @@ def browser_collect_failure(profile_dir: Path, report_dir: Path,
     artifacts: list[str] = []
     snapshot = report_dir / f"_failure-step{step_index}.snapshot.md"
     console = report_dir / f"_failure-step{step_index}.console.txt"
+    console_info = report_dir / f"_failure-step{step_index}.console-info.txt"
+    console_warning = report_dir / f"_failure-step{step_index}.console-warning.txt"
+    console_error = report_dir / f"_failure-step{step_index}.console-error.txt"
+    console_json = report_dir / f"_failure-step{step_index}.console.json"
     html = report_dir / f"_failure-step{step_index}.html"
     session = _session(report_dir)
     commands = [
         (snapshot, [f"-s={session}", "snapshot", "--filename", str(snapshot)]),
         (console, [f"-s={session}", "console"]),
+        (console_info, [f"-s={session}", "console", "info"]),
+        (console_warning, [f"-s={session}", "console", "warning"]),
+        (console_error, [f"-s={session}", "console", "error"]),
+        (
+            console_json,
+            [
+                f"-s={session}",
+                "run-code",
+                """
+                async page => JSON.stringify({
+                  href: page.url(),
+                  title: await page.title().catch(() => ''),
+                  console: await page.evaluate(() => window.__QA_UI_AUTO_CONSOLE__ || []).catch(() => []),
+                  bodyText: await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+                }, null, 2)
+                """,
+                "--raw",
+            ],
+        ),
         (
             html,
             [
@@ -225,7 +309,7 @@ def browser_collect_failure(profile_dir: Path, report_dir: Path,
             output = (r.stdout + r.stderr).strip()
             if args[1] != "snapshot":
                 target.write_text(output, encoding="utf-8")
-            if target.exists():
+            if target.exists() and str(target) not in artifacts:
                 artifacts.append(str(target))
         except Exception:
             continue
@@ -398,6 +482,8 @@ def case_matches_mode(case: TestCase, mode: str) -> bool:
 
 
 def main() -> int:
+    os.environ.setdefault(DEV_PROXY_ALLOW_PRIVATE, "1")
+    os.environ.setdefault(ALLOW_PRIVATE_TARGETS, "1")
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["browser", "native"], default="browser")
     ap.add_argument("--testcases", default=str(DEFAULT_TESTCASES))
