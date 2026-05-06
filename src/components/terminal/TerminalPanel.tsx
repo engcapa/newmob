@@ -995,16 +995,26 @@ export function TerminalPanel({
     window.setTimeout(() => requestAnimationFrame(fitVisibleTerminal), 0);
   }, [cursorBlink, cursorStyle, fitVisibleTerminal, fontFamily, fontSize, scrollback, themeName]);
 
-  // When a hidden tab becomes visible again, only re-measure and repaint xterm.
+  // When a hidden tab becomes visible again, re-measure xterm and return
+  // keyboard focus so the active terminal is immediately ready for typing.
   useEffect(() => {
     if (!visible) return;
 
+    let frame = 0;
     const timer = window.setTimeout(() => {
-      requestAnimationFrame(fitVisibleTerminal);
+      frame = window.requestAnimationFrame(() => {
+        fitVisibleTerminal();
+        if (!searchOpen) {
+          focusTerminal();
+        }
+      });
     }, 50);
 
-    return () => window.clearTimeout(timer);
-  }, [fitVisibleTerminal, fullscreen, showScrollbar, visible]);
+    return () => {
+      window.clearTimeout(timer);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [fitVisibleTerminal, focusTerminal, fullscreen, searchOpen, showScrollbar, visible]);
 
   useEffect(() => {
     if (!visible) return;
