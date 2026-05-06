@@ -30,6 +30,10 @@ import {
   TerminalImeInputGuard,
 } from "../../lib/terminalImeGuard";
 import {
+  createInputEchoSuppressor,
+  type InputEchoSuppressor,
+} from "../../lib/terminalOutputFilter";
+import {
   createLocalTerminal,
   createSshTerminal,
   writeTerminal,
@@ -58,9 +62,6 @@ export interface SshConnectInfo {
   authMethod: string;
   authData: string | null;
   optionsJson?: string;
-  /** When false, the OSC 7 PROMPT_COMMAND/precmd snippet is NOT injected.
-   *  Default is undefined → treated as enabled. */
-  osc7AutoInject?: boolean;
 }
 
 interface TerminalPanelProps {
@@ -75,11 +76,15 @@ interface TerminalPanelProps {
   terminalProfile?: TerminalProfile;
   visible?: boolean;
   onCwdChange?: (cwd: string) => void;
+  /** Incremented by the parent when the SFTP panel explicitly asks for cwd. */
+  cwdRequestToken?: number;
   /** Called once the backend terminal session ID is known (after connect). */
   onSessionReady?: (sessionId: string) => void;
 }
 
 const DEFAULT_FONT_SIZE = 14;
+const CWD_QUERY_COMMAND =
+  " printf '\\033]7;file://%s%s\\033\\\\' \"${HOSTNAME:-localhost}\" \"${PWD}\"; : __newmob_cwd_sync_done";
 
 interface SearchMatch {
   row: number;
@@ -107,6 +112,7 @@ export function TerminalPanel({
   terminalProfile,
   visible = true,
   onCwdChange,
+  cwdRequestToken = 0,
   onSessionReady,
 }: TerminalPanelProps) {
   const cwdCallbackRef = useRef<typeof onCwdChange>(onCwdChange);
@@ -168,6 +174,8 @@ export function TerminalPanel({
   const macroPlaybackRef = useRef(false);
   const eventIdRef = useRef(0);
   const imeGuardRef = useRef<TerminalImeInputGuard | null>(null);
+  const injectedInputEchoSuppressorRef = useRef<InputEchoSuppressor | null>(null);
+  const lastCwdRequestTokenRef = useRef(cwdRequestToken);
   const quickFontOptions = useMemo(() => {
     const available = fontState.fonts;
     const preferred = SAFE_TERMINAL_FONT_FALLBACKS
@@ -267,6 +275,24 @@ export function TerminalPanel({
     }
     writeTerminal(sid, encodeBinaryStringBase64(data)).catch(console.error);
   }, []);
+
+  const requestTerminalCwd = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) {
+      setStatusMessage("Terminal is not ready yet");
+      return;
+    }
+    if (readOnlyRef.current) {
+      setStatusMessage("Terminal is read-only");
+      return;
+    }
+
+    injectedInputEchoSuppressorRef.current = createInputEchoSuppressor(CWD_QUERY_COMMAND, 5000);
+    writeTerminal(sid, encodeBase64(`${CWD_QUERY_COMMAND}\r`)).catch((err) => {
+      if (sessionIdRef.current === sid) injectedInputEchoSuppressorRef.current = null;
+      setStatusMessage(err instanceof Error ? err.message : "Terminal cwd request failed");
+    });
+  }, [setStatusMessage]);
 
   const writeClipboardText = useCallback(async (text: string, successMessage: string) => {
     if (!text) {
@@ -710,6 +736,12 @@ export function TerminalPanel({
   }, [readOnly]);
 
   useEffect(() => {
+    if (cwdRequestToken === 0 || cwdRequestToken === lastCwdRequestTokenRef.current) return;
+    lastCwdRequestTokenRef.current = cwdRequestToken;
+    requestTerminalCwd();
+  }, [cwdRequestToken, requestTerminalCwd]);
+
+  useEffect(() => {
     loggingActiveRef.current = loggingActive;
   }, [loggingActive]);
 
@@ -782,8 +814,8 @@ export function TerminalPanel({
     term.loadAddon(new WebLinksAddon());
     term.open(el);
 
-    // OSC 7 — host writes its current working directory as `file://host/path`
-    // so the attached SFTP browser can follow `cd` automatically.
+    // OSC 7 — host writes its current working directory as `file://host/path`.
+    // We listen for this so explicit SFTP "Sync" requests can learn the shell cwd.
     try {
       term.parser.registerOscHandler(7, (data) => {
         const cwd = parseOsc7(data);
@@ -870,30 +902,19 @@ export function TerminalPanel({
         }
 
         unlistenOutput = await listenTerminalOutput(sid, (b64) => {
-          const output = decodeBase64(b64);
+          let output = decodeBase64(b64);
+          const suppressor = injectedInputEchoSuppressorRef.current;
+          if (suppressor) {
+            output = suppressor.filter(output);
+            if (suppressor.done) injectedInputEchoSuppressorRef.current = null;
+          }
+          if (output.length === 0) return;
+
           if (loggingActiveRef.current) {
             outputLogRef.current += new TextDecoder().decode(output);
           }
           term.write(output);
         });
-
-        if (ssh && ssh.osc7AutoInject !== false) {
-          // Best-effort: teach the remote shell to emit OSC 7 on every
-          // prompt so the SFTP browser can follow the cwd.  We send the
-          // snippet a short while after connection so the shell PS1 has
-          // already drawn at least once and the user typically still
-          // sees a clean prompt afterwards.
-          window.setTimeout(() => {
-            if (destroyed || sessionIdRef.current !== sid) return;
-            const snippet =
-              " __newmob_osc7(){ printf '\\033]7;file://%s%s\\033\\\\' \"${HOSTNAME:-localhost}\" \"${PWD}\"; };" +
-              " case \"${ZSH_VERSION:+zsh}${BASH_VERSION:+bash}\" in" +
-              " bash) PROMPT_COMMAND=\"__newmob_osc7${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;;" +
-              " zsh) precmd_functions+=(__newmob_osc7) ;;" +
-              " esac; __newmob_osc7\r";
-            writeTerminal(sid, encodeBase64(snippet)).catch(() => {});
-          }, 1200);
-        }
 
         unlistenExit = await listenTerminalExit(sid, () => {
           appendEvent("disconnect", "Terminal session ended");

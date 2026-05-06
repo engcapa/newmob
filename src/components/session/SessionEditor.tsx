@@ -127,6 +127,13 @@ function optionString(options: Record<string, unknown>, key: string, fallback: s
   return typeof options[key] === "string" ? options[key] : fallback;
 }
 
+function stripDeprecatedCwdOptions(options: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...options };
+  delete next.followPath;
+  delete next.osc7AutoInject;
+  return next;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Tiny local UI primitives (match prototype)                         */
 /* ------------------------------------------------------------------ */
@@ -223,8 +230,6 @@ function AdvancedSshSettings({
   doNotExit, setDoNotExit,
   remoteEnv, setRemoteEnv,
   sshBrowser, setSshBrowser,
-  followPath, setFollowPath,
-  osc7AutoInject, setOsc7AutoInject,
   authRadio, setAuthRadio,
   showPwd, setShowPwd,
   password, setPassword,
@@ -242,8 +247,6 @@ function AdvancedSshSettings({
   doNotExit: boolean; setDoNotExit: (v: boolean) => void;
   remoteEnv: string; setRemoteEnv: (v: string) => void;
   sshBrowser: string; setSshBrowser: (v: string) => void;
-  followPath: boolean; setFollowPath: (v: boolean) => void;
-  osc7AutoInject: boolean; setOsc7AutoInject: (v: boolean) => void;
   authRadio: string; setAuthRadio: (v: string) => void;
   showPwd: boolean; setShowPwd: (v: boolean) => void;
   password: string; setPassword: (v: string) => void;
@@ -308,17 +311,6 @@ function AdvancedSshSettings({
           ]}
           onChange={setSshBrowser}
         />
-        <label className="ml-3 flex items-center gap-1.5">
-          <Checkbox checked={followPath} onChange={setFollowPath} />
-          Follow SSH path (experimental)
-        </label>
-        <label
-          className="ml-3 flex items-center gap-1.5"
-          title="Inject a tiny PROMPT_COMMAND/precmd snippet so the SFTP browser can follow your shell's working directory."
-        >
-          <Checkbox checked={osc7AutoInject} onChange={setOsc7AutoInject} />
-          Auto-inject OSC 7 cwd reporting
-        </label>
       </Field>
 
       <Field label="Authentication">
@@ -888,8 +880,6 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const [doNotExit, setDoNotExit] = useState(() => optionBoolean(initialOptions, "doNotExit", false));
   const [remoteEnv, setRemoteEnv] = useState(() => optionString(initialOptions, "remoteEnv", "Interactive shell"));
   const [sshBrowser, setSshBrowser] = useState(() => optionString(initialOptions, "sshBrowser", "SFTP protocol (recommended)"));
-  const [followPath, setFollowPath] = useState(() => optionBoolean(initialOptions, "followPath", true));
-  const [osc7AutoInject, setOsc7AutoInject] = useState(() => optionBoolean(initialOptions, "osc7AutoInject", true));
   const [usePrivKey, setUsePrivKey] = useState(
     extractAuthType(session?.auth_method) === "PrivateKey",
   );
@@ -971,7 +961,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
 
   const buildConfig = (overrides: Partial<SessionConfig> = {}): SessionConfig => {
     const now = Math.floor(Date.now() / 1000);
-    const previousOptions = parseSessionOptions(session?.options_json);
+    const previousOptions = stripDeprecatedCwdOptions(parseSessionOptions(session?.options_json));
     let auth: AuthMethod = "Password";
     if (authMethod === "PrivateKey")
       auth = { PrivateKey: { key_path: keyPath || "~/.ssh/id_ed25519" } };
@@ -992,7 +982,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
         ...previousOptions,
         x11, compression, startupCmd, jumpHost: jumpHost || "",
         jumpUser, jumpPort, description, tags, doNotExit,
-        remoteEnv, sshBrowser, followPath, osc7AutoInject, usePrivKey, useJump,
+        remoteEnv, sshBrowser, usePrivKey, useJump,
         terminalProfile,
         // Strip the proxy password unless the user explicitly opted into
         // "Save in vault". `options_json` lands in the SQLite session row
@@ -1072,8 +1062,6 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     setDoNotExit(optionBoolean(nextOptions, "doNotExit", false));
     setRemoteEnv(optionString(nextOptions, "remoteEnv", "Interactive shell"));
     setSshBrowser(optionString(nextOptions, "sshBrowser", "SFTP protocol (recommended)"));
-    setFollowPath(optionBoolean(nextOptions, "followPath", true));
-    setOsc7AutoInject(optionBoolean(nextOptions, "osc7AutoInject", true));
     setUsePrivKey(nextAuth === "PrivateKey");
     setUseJump(optionBoolean(nextOptions, "useJump", false));
     setJumpHost(optionString(nextOptions, "jumpHost", ""));
@@ -1346,8 +1334,6 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
               doNotExit={doNotExit} setDoNotExit={setDoNotExit}
               remoteEnv={remoteEnv} setRemoteEnv={setRemoteEnv}
               sshBrowser={sshBrowser} setSshBrowser={setSshBrowser}
-              followPath={followPath} setFollowPath={setFollowPath}
-              osc7AutoInject={osc7AutoInject} setOsc7AutoInject={setOsc7AutoInject}
               authRadio={authRadio} setAuthRadio={handleAuthRadio}
               showPwd={showPwd} setShowPwd={setShowPwd}
               password={password} setPassword={setPassword}

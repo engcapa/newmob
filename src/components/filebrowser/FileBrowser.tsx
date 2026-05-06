@@ -56,6 +56,8 @@ interface FileBrowserProps {
   onClose?: () => void;
   onTerminalSync?: (cwd: string) => void;
   cwdHint?: string | null;
+  cwdHintVersion?: number;
+  onRequestTerminalCwd?: () => boolean;
   detachable?: boolean;
   /** Default split direction; user can flip with the toolbar button. */
   defaultOrientation?: Orientation;
@@ -97,15 +99,15 @@ export function FileBrowser(props: FileBrowserProps) {
     [orientationScope],
   );
 
-  // The follow logic was previously a *continuous* effect that snapped the
-  // remote pane back to whatever cwd the terminal last reported, which made
-  // it impossible to navigate inside the SFTP browser. The new behaviour is
-  // strictly opt-in:
-  //   1. one-shot initial sync the first time we see a cwd hint after the
-  //      session attaches (so the panel opens at the shell's pwd), and
-  //   2. an explicit "Sync to terminal cwd" toolbar button the user can
-  //      click any time to jump back.
-  const initialSyncDoneRef = useRef(false);
+  const pendingTerminalSyncRef = useRef(false);
+  const requestedCwdVersionRef = useRef(props.cwdHintVersion ?? 0);
+  const terminalSyncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTerminalSyncTimeout = useCallback(() => {
+    if (!terminalSyncTimeoutRef.current) return;
+    clearTimeout(terminalSyncTimeoutRef.current);
+    terminalSyncTimeoutRef.current = null;
+  }, []);
 
   useEffect(() => {
     ensureSession(props.sessionId);
@@ -138,26 +140,35 @@ export function FileBrowser(props: FileBrowserProps) {
     };
   }, [props.sessionId, detach]);
 
-  // Reset the one-shot guard when this component is reused for a different
-  // session (e.g. tab swap that reuses the same FileBrowser instance).
   useEffect(() => {
-    initialSyncDoneRef.current = false;
-  }, [props.sessionId]);
+    pendingTerminalSyncRef.current = false;
+    requestedCwdVersionRef.current = props.cwdHintVersion ?? 0;
+    clearTerminalSyncTimeout();
+  }, [clearTerminalSyncTimeout, props.sessionId]);
 
-  // One-shot initial sync to terminal cwd, after attach completes.
-  useEffect(() => {
-    if (initialSyncDoneRef.current) return;
-    if (!props.cwdHint) return;
-    if (!session?.attached) return;
-    initialSyncDoneRef.current = true;
-    if (session.remote.path !== props.cwdHint) {
-      void navigate(props.sessionId, "remote", props.cwdHint);
-    }
-  }, [props.cwdHint, props.sessionId, session?.attached, session?.remote.path, navigate]);
+  useEffect(() => () => clearTerminalSyncTimeout(), [clearTerminalSyncTimeout]);
 
   const syncToTerminalCwd = useCallback(() => {
+    if (props.onRequestTerminalCwd) {
+      pendingTerminalSyncRef.current = true;
+      requestedCwdVersionRef.current = props.cwdHintVersion ?? 0;
+      clearTerminalSyncTimeout();
+      const requested = props.onRequestTerminalCwd();
+      if (!requested) {
+        pendingTerminalSyncRef.current = false;
+        return;
+      }
+      terminalSyncTimeoutRef.current = setTimeout(() => {
+        if (!pendingTerminalSyncRef.current) return;
+        pendingTerminalSyncRef.current = false;
+        terminalSyncTimeoutRef.current = null;
+        setStatus("Terminal cwd did not respond.");
+      }, 5000);
+      setStatus("Requesting terminal cwd...");
+      return;
+    }
     if (!props.cwdHint) {
-      setStatus("Terminal cwd is not known yet (waiting for OSC 7).");
+      setStatus("Terminal cwd is not known yet.");
       return;
     }
     if (!session?.attached) return;
@@ -166,7 +177,42 @@ export function FileBrowser(props: FileBrowserProps) {
       return;
     }
     void navigate(props.sessionId, "remote", props.cwdHint);
-  }, [props.cwdHint, props.sessionId, session?.attached, session?.remote.path, navigate, setStatus]);
+  }, [
+    clearTerminalSyncTimeout,
+    navigate,
+    props.cwdHint,
+    props.cwdHintVersion,
+    props.onRequestTerminalCwd,
+    props.sessionId,
+    session?.attached,
+    session?.remote.path,
+    setStatus,
+  ]);
+
+  useEffect(() => {
+    if (!pendingTerminalSyncRef.current) return;
+    if (!session?.attached) return;
+    if (!props.cwdHint) return;
+    const version = props.cwdHintVersion ?? 0;
+    if (version <= requestedCwdVersionRef.current) return;
+
+    pendingTerminalSyncRef.current = false;
+    clearTerminalSyncTimeout();
+    if (session.remote.path === props.cwdHint) {
+      setStatus(`Already at ${props.cwdHint}`);
+      return;
+    }
+    void navigate(props.sessionId, "remote", props.cwdHint);
+  }, [
+    clearTerminalSyncTimeout,
+    navigate,
+    props.cwdHint,
+    props.cwdHintVersion,
+    props.sessionId,
+    session?.attached,
+    session?.remote.path,
+    setStatus,
+  ]);
 
   const handleDoubleClick = useCallback(
     async (side: PaneSide, entry: FileEntry) => {
@@ -366,7 +412,7 @@ export function FileBrowser(props: FileBrowserProps) {
     return null;
   }, [session]);
 
-  const showCwdToolbar = props.cwdHint !== undefined && props.cwdHint !== null;
+  const showCwdToolbar = !!props.onRequestTerminalCwd || props.cwdHint != null;
 
   return (
     <div data-testid="sftp-browser" className="w-full h-full flex flex-col" style={{ background: "var(--moba-bg)" }}>
@@ -410,12 +456,12 @@ export function FileBrowser(props: FileBrowserProps) {
         >
           <span className="shrink-0">Terminal cwd:</span>
           <span className="font-mono truncate flex-1" title={props.cwdHint ?? ""}>
-            {props.cwdHint}
+            {props.cwdHint ?? "Not requested"}
           </span>
           <button
             type="button"
             className="px-1.5 py-0.5 inline-flex items-center gap-1 rounded hover:bg-[var(--moba-hover)] shrink-0"
-            title="Sync the remote pane to the terminal's current directory (one-shot)"
+            title="Query the terminal cwd and sync the remote pane"
             onClick={syncToTerminalCwd}
             style={{ color: "var(--moba-accent)" }}
           >

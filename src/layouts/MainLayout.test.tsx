@@ -110,7 +110,6 @@ describe("MainLayout attached SFTP sidebar", () => {
             authMethod: "Password",
             authData: "secret",
             optionsJson: undefined,
-            osc7AutoInject: false,
           },
         },
       ],
@@ -232,7 +231,6 @@ describe("MainLayout attached SFTP sidebar", () => {
             authMethod: "Password",
             authData: "secret",
             optionsJson: initialSession.options_json,
-            osc7AutoInject: false,
           },
           terminalProfile: {
             ...DEFAULT_TERMINAL_PROFILE,

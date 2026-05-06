@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -427,6 +427,65 @@ describe("FileBrowser → FilePanel toolbar wiring", () => {
     await user.click(terminalBtn);
 
     expect(onOpenTerminalHere).toHaveBeenCalledWith("/work");
+  });
+
+  it("does not auto-sync the remote pane from a terminal cwd hint on open", () => {
+    seedSession();
+    render(
+      <FileBrowser
+        sessionId={SESSION_ID}
+        host="example.com"
+        port={22}
+        username="user"
+        authMethod="password"
+        authData={null}
+        cwdHint="/terminal"
+        cwdHintVersion={1}
+      />,
+    );
+
+    expect(useSftpStore.getState().sessions[SESSION_ID].remote.path).toBe("/work");
+  });
+
+  it("requests terminal cwd and syncs only after a fresh cwd response", async () => {
+    const user = userEvent.setup();
+    seedSession();
+    const onRequestTerminalCwd = vi.fn(() => true);
+    const { rerender } = render(
+      <FileBrowser
+        sessionId={SESSION_ID}
+        host="example.com"
+        port={22}
+        username="user"
+        authMethod="password"
+        authData={null}
+        cwdHint={null}
+        cwdHintVersion={0}
+        onRequestTerminalCwd={onRequestTerminalCwd}
+      />,
+    );
+
+    await user.click(screen.getByTitle(/Query the terminal cwd/i));
+    expect(onRequestTerminalCwd).toHaveBeenCalledTimes(1);
+    expect(useSftpStore.getState().sessions[SESSION_ID].remote.path).toBe("/work");
+
+    rerender(
+      <FileBrowser
+        sessionId={SESSION_ID}
+        host="example.com"
+        port={22}
+        username="user"
+        authMethod="password"
+        authData={null}
+        cwdHint="/terminal"
+        cwdHintVersion={1}
+        onRequestTerminalCwd={onRequestTerminalCwd}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(useSftpStore.getState().sessions[SESSION_ID].remote.path).toBe("/terminal");
+    });
   });
 
   it("wires the local-pane Upload toolbar button to controller.upload", async () => {

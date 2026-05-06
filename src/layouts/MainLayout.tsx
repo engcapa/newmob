@@ -25,7 +25,6 @@ import { isTauriRuntime } from "../lib/runtime";
 import { openSftpWindow } from "../lib/sftp";
 import { writeTerminal } from "../lib/ipc";
 import { encodeBase64 } from "../lib/ipc";
-import { parseSessionOptions } from "../lib/terminalProfile";
 import {
   clearDetachedHandoff,
   detachedWindowUrl,
@@ -83,6 +82,8 @@ export function MainLayout() {
   const [attachedSidebars, setAttachedSidebars] = useState<Record<string, boolean>>({});
   const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
   const [terminalCwds, setTerminalCwds] = useState<Record<string, string>>({});
+  const [terminalCwdVersions, setTerminalCwdVersions] = useState<Record<string, number>>({});
+  const [terminalCwdRequestTokens, setTerminalCwdRequestTokens] = useState<Record<string, number>>({});
   // Maps tab.id → backend terminal session ID (set once the SSH/local session connects).
   const terminalSessionIds = useRef<Record<string, string>>({});
 
@@ -92,9 +93,11 @@ export function MainLayout() {
 
   const handleTerminalCwd = useCallback((tabId: string, cwd: string) => {
     setTerminalCwds((prev) => (prev[tabId] === cwd ? prev : { ...prev, [tabId]: cwd }));
+    setTerminalCwdVersions((prev) => ({ ...prev, [tabId]: (prev[tabId] ?? 0) + 1 }));
     // Mirror the new cwd to any same-origin window (e.g. a detached SFTP
-    // popup) so its FileBrowser can follow OSC 7 even though only the
-    // main window hosts the terminal. We publish under both the raw tab
+    // popup) so it can offer the same last-known terminal cwd for explicit
+    // sync even though only the main window hosts the terminal. We publish
+    // under both the raw tab
     // id AND the `attached-${tabId}` key, because a detached window that
     // was split off from an attached SSH sidebar uses the prefixed id as
     // its SFTP session id and would otherwise never see these updates.
@@ -103,6 +106,15 @@ export function MainLayout() {
       broadcastCwdHint(`attached-${tabId}`, cwd);
     });
   }, []);
+
+  const requestTerminalCwd = useCallback((tabId: string): boolean => {
+    if (!terminalSessionIds.current[tabId]) {
+      setStatusMessage("Terminal is not ready yet");
+      return false;
+    }
+    setTerminalCwdRequestTokens((prev) => ({ ...prev, [tabId]: (prev[tabId] ?? 0) + 1 }));
+    return true;
+  }, [setStatusMessage]);
 
   const openDetachedSftp = useCallback((params: SftpTabInfo, title: string) => {
     // Use a DIFFERENT session id for the detached window so its backend
@@ -353,10 +365,6 @@ export function MainLayout() {
         authMethod,
         authData,
         optionsJson: session.options_json,
-        // Default ON for backwards compatibility — only suppress when the
-        // user explicitly disables OSC 7 auto-injection in the editor.
-        osc7AutoInject:
-          parseSessionOptions(session.options_json).osc7AutoInject !== false,
       },
       terminalProfile: getSessionTerminalProfile(session.options_json),
     });
@@ -648,6 +656,7 @@ export function MainLayout() {
                         terminalProfile={liveTerminalProfile}
                         visible={isActive}
                         onCwdChange={tab.ssh ? (cwd) => handleTerminalCwd(tab.id, cwd) : undefined}
+                        cwdRequestToken={terminalCwdRequestTokens[tab.id] ?? 0}
                         onSessionReady={(sid) => { terminalSessionIds.current[tab.id] = sid; }}
                       />
                       {tab.ssh && (
@@ -678,8 +687,10 @@ export function MainLayout() {
                       authMethod={tab.ssh.authMethod}
                       authData={tab.ssh.authData}
                       cwdHint={terminalCwds[tab.id] ?? null}
+                      cwdHintVersion={terminalCwdVersions[tab.id] ?? 0}
                       title={`SFTP — ${tab.ssh.username}@${tab.ssh.host}`}
                       onClose={() => toggleAttachedSidebar(tab.id)}
+                      onRequestTerminalCwd={() => requestTerminalCwd(tab.id)}
                       onOpenTerminalHere={(p) => {
                         const sid = terminalSessionIds.current[tab.id];
                         if (!sid) return;
