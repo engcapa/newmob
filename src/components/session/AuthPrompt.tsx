@@ -4,17 +4,19 @@ import { KeyRound, X } from "lucide-react";
 interface AuthPromptProps {
   host: string;
   username: string;
-  onSubmit: (password: string) => void;
+  needsUsername?: boolean;
+  onSubmit: (password: string, username?: string) => void;
   onCancel: () => void;
 }
 
-export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptProps) {
+export function AuthPrompt({ host, username, needsUsername, onSubmit, onCancel }: AuthPromptProps) {
   const [password, setPassword] = useState("");
+  const [user, setUser] = useState(username);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!password) return;
-    onSubmit(password);
+    onSubmit(password, needsUsername ? user : undefined);
   };
 
   return (
@@ -35,15 +37,32 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
           </button>
         </div>
 
-        <div className="p-4">
-          <div className="text-[12px] mb-3 text-[var(--moba-text-muted)]">
-            Enter password for <span className="font-semibold text-[var(--moba-text)]">{username}@{host}</span>
+        <div className="p-4 flex flex-col gap-2">
+          {needsUsername && (
+            <>
+              <div className="text-[12px] text-[var(--moba-text-muted)]">
+                Username
+              </div>
+              <input
+                data-testid="auth-username"
+                aria-label="VNC username"
+                type="text"
+                autoFocus
+                value={user}
+                onChange={(e) => setUser(e.target.value)}
+                className="moba-input w-full h-8 text-[13px]"
+                placeholder="Username"
+              />
+            </>
+          )}
+          <div className="text-[12px] text-[var(--moba-text-muted)]">
+            Enter password for <span className="font-semibold text-[var(--moba-text)]">{user}@{host}</span>
           </div>
           <input
             data-testid="auth-password"
             aria-label="SSH password"
             type="password"
-            autoFocus
+            autoFocus={!needsUsername}
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             className="moba-input w-full h-8 text-[13px]"
@@ -60,7 +79,7 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
           <button type="submit"
                   data-testid="auth-submit"
                   className="moba-btn font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={!password}
+                  disabled={!password || (needsUsername && !user)}
                   data-primary="true">
             Connect
           </button>

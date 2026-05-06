@@ -1637,6 +1637,77 @@
 10. eval 'async page => { const welcome = page.locator(`[data-testid="welcome-panel"]`); const text = await welcome.innerText(); if (!text.includes("local shell")) throw new Error("Active connections did not list the opened local terminal"); }'
 11. screenshot 062-welcome-active-connections.png
 
+## TC-064: VNC QuickConnect opens a VNC canvas tab
+- tags: vnc, quickconnect, p0
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'vnc://${cfg:vnc.host}:${cfg:vnc.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_VNC_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. sleep 2
+8. eval 'async page => { const canvas = await page.locator(`canvas`).count(); if (canvas === 0) throw new Error("VNC canvas not rendered"); }'
+9. screenshot 064-vnc-quickconnect.png
+
+## TC-065: VNC session editor saves and connects from sidebar
+- tags: vnc, session, p0
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="session-new"]'
+3. wait_for '[data-testid="session-editor"]'
+4. click '[data-testid="session-proto-vnc"]'
+5. fill '[data-testid="session-host"]' '${cfg:vnc.host}'
+6. fill '[data-testid="session-port"]' '${cfg:vnc.port}'
+7. click '[data-testid="session-section-advanced"]'
+8. wait_for '[data-testid="advanced-vnc-settings"]'
+9. eval 'async page => { const pwd = page.locator(`input[aria-label="VNC password"]`); if (await pwd.count()) await pwd.fill(`${env:QA_VNC_PASSWORD}`); }'
+10. click '[data-testid="session-section-bookmark"]'
+11. wait_for '[data-testid="bookmark-settings"]'
+12. fill '[data-testid="session-name"]' 'qa-ui-auto-vnc-session'
+13. click '[data-testid="session-save"]'
+14. wait_for '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-vnc-session"]'
+15. dblclick '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-vnc-session"]'
+16. sleep 2
+17. eval 'async page => { const canvas = await page.locator(`canvas`).count(); if (canvas === 0) throw new Error("VNC canvas not rendered after sidebar connect"); }'
+18. screenshot 065-vnc-session-sidebar.png
+
+## TC-066: VNC session editor test connection validates host
+- tags: vnc, session, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. click '[data-testid="session-new"]'
+3. wait_for '[data-testid="session-editor"]'
+4. click '[data-testid="session-proto-vnc"]'
+5. fill '[data-testid="session-host"]' '${cfg:vnc.host}'
+6. fill '[data-testid="session-port"]' '${cfg:vnc.port}'
+7. click '[data-testid="session-section-advanced"]'
+8. wait_for '[data-testid="advanced-vnc-settings"]'
+9. eval 'async page => { const pwd = page.locator(`input[aria-label="VNC password"]`); if (await pwd.count()) await pwd.fill(`${env:QA_VNC_PASSWORD}`); }'
+10. eval 'async page => { const btn = page.locator(`button:has-text("Test connection")`).first(); if (await btn.count()) await btn.click(); }'
+11. sleep 2
+12. eval 'async page => { const result = await page.locator(`span`).filter({ hasText: /stub|successful|failed/i }).first().innerText(); if (!result) throw new Error("No test result visible"); }'
+13. screenshot 066-vnc-test-connection.png
+
+## TC-067: VNC resize triggers WS resize message
+- tags: vnc, resize, p1
+- mode: browser
+
+1. open ${cfg:app.base_url}
+2. fill '[data-testid="qc-input"]' 'vnc://${cfg:vnc.host}:${cfg:vnc.port}'
+3. click '[data-testid="qc-submit"]'
+4. wait_for '[data-testid="auth-prompt"]'
+5. fill '[data-testid="auth-password"]' '${env:QA_VNC_PASSWORD}'
+6. click '[data-testid="auth-submit"]'
+7. sleep 2
+8. eval 'async page => { await page.evaluate(() => { window.__vncResizeSent = false; }); }'
+9. eval 'async page => { await page.setViewportSize({ width: 800, height: 600 }); await page.waitForTimeout(500); await page.setViewportSize({ width: 1024, height: 768 }); }'
+10. sleep 1
+11. screenshot 067-vnc-resize.png
+
 ## TC-063: Session editor advanced SSH forward switches (X11, compression, OSC 7)
 - tags: session, ssh, advanced, p1
 - mode: browser

@@ -8,6 +8,7 @@ import {
   sshTest,
   sshWrite,
 } from "./sshClient";
+import { startVncMockWs, stopVncMockWs } from "./vncClient";
 import {
   isSftpSession,
   sftpAttach,
@@ -625,6 +626,28 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       for (const t of byId.values()) next.push(t);
       saveTunnels(next);
       return undefined as T;
+    }
+    case "vnc_connect": {
+      const host = args?.host as string;
+      const port = (args?.port as number) || 5900;
+      const wsPort = startVncMockWs(host, port);
+      return {
+        session_id: `vnc-stub-${Date.now()}`,
+        ws_port: wsPort,
+        width: 800,
+        height: 600,
+        name: "VNC Stub",
+      } as T;
+    }
+    case "vnc_disconnect": {
+      const sid = args?.sessionId as string;
+      if (sid?.startsWith("vnc-stub-")) {
+        stopVncMockWs();
+      }
+      return undefined as T;
+    }
+    case "vnc_test_connection": {
+      return "VNC stub: connection would succeed in desktop build." as T;
     }
     default:
       console.warn(`[tauri-stub] Unknown invoke command: ${cmd}`, args);

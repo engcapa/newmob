@@ -53,7 +53,8 @@ export type WsIncoming =
   | { type: "connected"; width: number; height: number; name: string }
   | { type: "disconnected"; reason: string }
   | { type: "bell" }
-  | { type: "clipboard"; text: string };
+  | { type: "clipboard"; text: string }
+  | { type: "info"; message: string };
 
 /** Parse an incoming WS text message. */
 export function parseWsMessage(data: string): WsIncoming | null {

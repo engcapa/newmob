@@ -14,6 +14,8 @@ export interface VncConnectionState {
   height: number;
   name: string;
   error: string | null;
+  reconnectCount: number;
+  encoding: string | null;
 }
 
 interface VncStore {
@@ -28,6 +30,8 @@ interface VncStore {
     name: string,
   ) => void;
   setDisconnected: (tabId: string, reason?: string) => void;
+  setReconnectCount: (tabId: string, count: number) => void;
+  setEncoding: (tabId: string, encoding: string) => void;
   removeConnection: (tabId: string) => void;
 }
 
@@ -46,6 +50,8 @@ export const useVncStore = create<VncStore>((set) => ({
           height: 0,
           name: "",
           error: null,
+          reconnectCount: 0,
+          encoding: null,
         },
       },
     }));
@@ -77,6 +83,7 @@ export const useVncStore = create<VncStore>((set) => ({
           height,
           name,
           error: null,
+          reconnectCount: 0,
         } as VncConnectionState,
       },
     }));
@@ -90,6 +97,30 @@ export const useVncStore = create<VncStore>((set) => ({
           ...(s.connections[tabId] ?? {}),
           status: "disconnected",
           error: reason ?? null,
+        } as VncConnectionState,
+      },
+    }));
+  },
+
+  setReconnectCount(tabId, count) {
+    set((s) => ({
+      connections: {
+        ...s.connections,
+        [tabId]: {
+          ...(s.connections[tabId] ?? {}),
+          reconnectCount: count,
+        } as VncConnectionState,
+      },
+    }));
+  },
+
+  setEncoding(tabId, encoding) {
+    set((s) => ({
+      connections: {
+        ...s.connections,
+        [tabId]: {
+          ...(s.connections[tabId] ?? {}),
+          encoding,
         } as VncConnectionState,
       },
     }));

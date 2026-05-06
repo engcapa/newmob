@@ -303,8 +303,17 @@
 - 前端 `VncPanel`：Canvas 画面渲染、键盘、鼠标、滚轮、剪贴板、断开提示、Reconnect、fit / 1:1 显示
 - 保存的 VNC 会话可从会话树双击连接；密码场景复用 `AuthPrompt`
 - VNC tab 常驻挂载，切换标签时连接不主动销毁
-- 当前按“基础支持”记录：尚未经过大规模服务器兼容性、长连接、性能和自动化回归测试
-- 已知限制：RDP 未实装；QuickConnect 的 VNC URL 尚未接入 VNC client 主流程；浏览器预览模式没有 VNC stub；当前 relay 主要请求 Raw + DesktopSize，编码兼容性仍需补齐/验证
+- `SetDesktopSize` / `ExtendedDesktopSize` 已下发（resize 时 WS → Rust → RFB 251）
+- QuickConnect VNC URL 已接入主流程（`vnc://host:port` 直接打开 VNC tab）
+- 浏览器预览模式已提供 VNC stub（`src/stubs/vncClient.ts` 内联 MockWebSocket + 纯色帧推送）
+- 会话编辑器已支持 VNC Test Connection、VNC Authentication 面板（None / Password / RA2）
+- 编码协商策略：默认 Raw (0) + CopyRect (1) + DesktopSize (-223)；Hextile/Tight/ZRLE 可通过 `VNC_EXPERIMENTAL_ENCODINGS` 环境变量开启
+- 编码兼容矩阵：
+  - Raw ✅（稳定）
+  - CopyRect ✅（稳定）
+  - Hextile/Tight/ZRLE 🟡（stream-accurate 读取已实现，但默认关闭以避免兼容性问题）
+  - DesktopSize / ExtendedDesktopSize ✅（伪编码）
+- 已知限制：不支持 Cursor pseudo-encoding；Tight JPEG 子编码仅 fallback 到灰屏；尚未经过大规模服务器兼容性、长连接、性能和自动化回归测试
 
 ---
 
@@ -358,7 +367,6 @@
 > - Ribbon `Tools`（除 Tunneling 之外的网络工具）
 > - Ribbon `Packages`、`Games`、`Macros`
 > - 会话协议 RDP（仅保留会话存储与编辑表单，连接动作打开占位 tab）
-> - QuickConnect 的 VNC URL 入口（已保存 VNC 会话可连接，QuickConnect 尚未接入 VNC client）
 > - SFTP 底部的 "Cross-host transfer (remote ↔ remote)" 按钮（disabled 占位）
 > - Z-modem 收发（菜单项保留但 disabled）
 

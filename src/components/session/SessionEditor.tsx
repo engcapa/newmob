@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
 import { testSshConnection } from "../../lib/ipc";
+import { vncTestConnection } from "../../lib/vnc";
 import {
   getSessionNetworkSettings,
   ipKindToLabel,
@@ -215,6 +216,66 @@ function Field({
 /* ------------------------------------------------------------------ */
 /*  Sub-panels                                                         */
 /* ------------------------------------------------------------------ */
+
+function AdvancedVncSettings({
+  vncAuthType, setVncAuthType,
+  showVncPwd, setShowVncPwd,
+  vncPassword, setVncPassword,
+}: {
+  vncAuthType: string; setVncAuthType: (v: string) => void;
+  showVncPwd: boolean; setShowVncPwd: (v: boolean) => void;
+  vncPassword: string; setVncPassword: (v: string) => void;
+}) {
+  return (
+    <div data-testid="advanced-vnc-settings" className="grid grid-cols-12 gap-x-3 gap-y-2.5 text-[12px]">
+      <Field label="VNC Authentication">
+        <div className="flex flex-col gap-1.5 w-full">
+          <div className="flex items-center gap-2 flex-wrap">
+            {(
+              [
+                ["None", "None (no password)"],
+                ["Password", "VNC Password"],
+                ["RA2", "RealVNC RA2 / RA2ne"],
+              ] as const
+            ).map(([val, lbl]) => (
+              <label key={val} className="flex items-center gap-1.5 cursor-pointer">
+                <Radio
+                  checked={vncAuthType === val}
+                  onChange={() => setVncAuthType(val)}
+                />
+                {lbl}
+              </label>
+            ))}
+          </div>
+          {vncAuthType !== "None" && (
+            <div className="flex items-center gap-2 pl-1 mt-1">
+              <span className="text-[var(--moba-text-muted)]">Password</span>
+              <div className="relative">
+                <input
+                  className="moba-input pr-7"
+                  type={showVncPwd ? "text" : "password"}
+                  value={vncPassword}
+                  aria-label="VNC password"
+                  onChange={(e) => setVncPassword(e.target.value)}
+                />
+                <button
+                  className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5"
+                  onClick={() => setShowVncPwd(!showVncPwd)}
+                  title="Show / hide"
+                  type="button"
+                >
+                  {showVncPwd
+                    ? <EyeOff className="w-3.5 h-3.5 text-[var(--moba-text-muted)]" />
+                    : <Eye className="w-3.5 h-3.5 text-[var(--moba-text-muted)]" />}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Field>
+    </div>
+  );
+}
 
 function AdvancedSshSettings({
   x11, setX11,
@@ -881,6 +942,15 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const [password, setPassword] = useState("");
   const [showPwd, setShowPwd] = useState(false);
 
+  /* --- VNC auth --- */
+  const [vncAuthType, setVncAuthType] = useState<string>(() => {
+    const opts = parseSessionOptions(session?.options_json);
+    const t = optionString(opts, "vncAuthType", "None");
+    return ["None", "Password", "RA2"].includes(t) ? t : "None";
+  });
+  const [vncPassword, setVncPassword] = useState("");
+  const [showVncPwd, setShowVncPwd] = useState(false);
+
   /* --- advanced SSH --- */
   const [x11, setX11] = useState(() => optionBoolean(initialOptions, "x11", true));
   const [compression, setCompression] = useState(() => optionBoolean(initialOptions, "compression", false));
@@ -923,6 +993,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   /* --- derived --- */
   const needsHost = !["Serial", "File", "Shell", "WSL"].includes(proto);
   const isSSH = ["SSH", "SFTP"].includes(proto);
+  const isVNC = proto === "VNC";
   const folderOptions = useMemo(() => {
     const options = new Set<string>([
       SESSION_ROOT_LABEL,
@@ -949,6 +1020,10 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const handleProtoChange = (p: Proto) => {
     setProto(p);
     setPort(String(DEFAULT_PORTS[p] ?? 22));
+    // Reset VNC-specific state when switching away from VNC
+    if (p !== "VNC") {
+      setVncAuthType("None");
+    }
   };
 
   /* Keep authMethod in sync with the radio group */
@@ -979,6 +1054,12 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     else if (authMethod === "None") auth = "None";
 
     const displayName = name || (host ? `${username ? username + "@" : ""}${host}` : "Local terminal");
+
+    // VNC-specific options
+    const vncOptions: Record<string, unknown> = isVNC
+      ? { vncAuthType }
+      : {};
+
     return {
       id: session?.id ?? crypto.randomUUID(),
       name: displayName,
@@ -994,6 +1075,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
         jumpUser, jumpPort, description, tags, doNotExit,
         remoteEnv, sshBrowser, followPath, osc7AutoInject, usePrivKey, useJump,
         terminalProfile,
+        ...vncOptions,
         // Strip the proxy password unless the user explicitly opted into
         // "Save in vault". `options_json` lands in the SQLite session row
         // in plaintext, so this is the gate keeping secrets out at rest.
@@ -1012,6 +1094,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const validate = () => {
     if (needsHost && !host.trim()) return "Remote host is required.";
     if (isSSH && specifyUser && !username.trim()) return "Username is enabled but empty.";
+    if (isVNC && vncAuthType === "RA2" && !username.trim()) return "RA2 authentication requires a username.";
     if (authMethod === "PrivateKey" && !keyPath.trim()) return "Private key path is required.";
     return null;
   };
@@ -1066,6 +1149,9 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     setKeyPath(extractKeyPath(session?.auth_method));
     setPassword("");
     setShowPwd(false);
+    setVncAuthType(optionString(nextOptions, "vncAuthType", "None"));
+    setVncPassword("");
+    setShowVncPwd(false);
     setX11(optionBoolean(nextOptions, "x11", true));
     setCompression(optionBoolean(nextOptions, "compression", false));
     setStartupCmd(optionString(nextOptions, "startupCmd", ""));
@@ -1128,30 +1214,48 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   };
 
   const handleTestConnection = async () => {
-    if (!host || !username) {
-      setTestResult({ ok: false, msg: "Host and username are required" });
+    if (!host) {
+      setTestResult({ ok: false, msg: "Host is required" });
       return;
     }
-    if (authMethod === "Password" && !password) {
+    if (isSSH && !username) {
+      setTestResult({ ok: false, msg: "Username is required for SSH" });
+      return;
+    }
+    if (isSSH && authMethod === "Password" && !password) {
       setTestResult({ ok: false, msg: "Enter password above to test" });
+      return;
+    }
+    if (isVNC && vncAuthType === "Password" && !vncPassword) {
+      setTestResult({ ok: false, msg: "Enter VNC password above to test" });
       return;
     }
     setTesting(true);
     setTestResult(null);
     try {
-      let authData: string | null = null;
-      if (authMethod === "Password") authData = password;
-      else if (authMethod === "PrivateKey")
-        authData = keyPath || "~/.ssh/id_ed25519";
-      const msg = await testSshConnection(
-        host,
-        parseInt(port) || 22,
-        username,
-        authMethod,
-        authData,
-        JSON.stringify(toNetworkSettingsPayload(networkSettings)),
-      );
-      setTestResult({ ok: true, msg });
+      if (isVNC) {
+        const msg = await vncTestConnection(
+          host,
+          parseInt(port) || 5900,
+          vncAuthType === "RA2" ? username : undefined,
+          vncAuthType === "Password" || vncAuthType === "RA2" ? vncPassword : undefined,
+        );
+        setTestResult({ ok: true, msg });
+      } else {
+        let authData: string | null = null;
+        if (authMethod === "Password") authData = password;
+        else if (authMethod === "PrivateKey")
+          authData = keyPath || "~/.ssh/id_ed25519";
+        const msg = await testSshConnection(
+          host,
+          parseInt(port) || 22,
+          username,
+          authMethod,
+          authData,
+          JSON.stringify(toNetworkSettingsPayload(networkSettings)),
+        );
+        setTestResult({ ok: true, msg });
+      }
     } catch (err) {
       setTestResult({ ok: false, msg: String(err) });
     } finally {
@@ -1162,15 +1266,17 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const sectionTabs: { id: SectionTab; label: string; icon: React.ReactNode }[] = [
     ...(isSSH
       ? [{ id: "advanced" as SectionTab, label: "Advanced SSH settings", icon: <Shield className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
-      : []),
+      : isVNC
+        ? [{ id: "advanced" as SectionTab, label: "Advanced VNC settings", icon: <Shield className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
+        : []),
     { id: "terminal", label: "Terminal settings", icon: <TerminalIcon className="w-3 h-3 inline -mt-0.5 mr-1" /> },
     { id: "network",  label: "Network settings",  icon: <Network className="w-3 h-3 inline -mt-0.5 mr-1" /> },
     { id: "bookmark", label: "Bookmark settings",  icon: <Bookmark className="w-3 h-3 inline -mt-0.5 mr-1" /> },
   ];
 
-  /* If we switched away from SSH and were on the advanced tab, fall back */
+  /* If we switched away from SSH/VNC and were on the advanced tab, fall back */
   const activeSection =
-    section === "advanced" && !isSSH ? "terminal" : section;
+    section === "advanced" && !isSSH && !isVNC ? "terminal" : section;
 
   return (
     <div
@@ -1338,6 +1444,14 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           className="flex-1 min-h-0 overflow-auto px-4 py-3 border-x border-b"
           style={{ borderColor: "var(--moba-input-border)", background: "var(--moba-bg)" }}
         >
+          {activeSection === "advanced" && isVNC && (
+            <AdvancedVncSettings
+              vncAuthType={vncAuthType} setVncAuthType={setVncAuthType}
+              showVncPwd={showVncPwd} setShowVncPwd={setShowVncPwd}
+              vncPassword={vncPassword} setVncPassword={setVncPassword}
+            />
+          )}
+
           {activeSection === "advanced" && isSSH && (
             <AdvancedSshSettings
               x11={x11} setX11={setX11}
@@ -1395,7 +1509,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           className="h-12 flex items-center px-3 gap-2 border-t shrink-0"
           style={{ background: "var(--moba-quick-bg)", borderColor: "var(--moba-divider)" }}
         >
-          {isSSH && needsHost && (
+          {needsHost && (isSSH || isVNC) && (
             <button
               className="moba-btn flex items-center gap-1.5"
               onClick={handleTestConnection}

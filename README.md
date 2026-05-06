@@ -2,7 +2,7 @@
 
 NewMob 是一个基于 Tauri 2 + React + TypeScript 的跨平台远程连接管理工具，目标是提供类似 MobaXterm 的桌面体验。
 
-当前工程已包含本地终端、SSH 终端、会话/分组管理、OpenSSH 配置导入等基础能力；RDP、VNC、SFTP 等协议入口已在界面中预留。
+当前工程已包含本地终端、SSH 终端、SFTP 文件浏览器、会话/分组管理、OpenSSH 配置导入等基础能力。VNC 基础客户端已实现（Raw 编码、RFB 握手、Canvas 渲染、SetDesktopSize、QuickConnect 接入、浏览器预览 stub）；RDP 仍为占位。
 
 ## 技术栈
 

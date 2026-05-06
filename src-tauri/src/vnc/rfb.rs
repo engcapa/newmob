@@ -17,6 +17,52 @@ const RA2_MIN_KEY_BITS: usize = 1024;
 const RA2_MAX_KEY_BITS: usize = 8192;
 const RA2_AES_FRAME_MAX: usize = 8192;
 
+#[derive(Debug, Clone)]
+pub enum VncError {
+    NetworkError(String),
+    AuthFailed(String),
+    ProtocolError(String),
+    ServerRejected(String),
+}
+
+impl std::fmt::Display for VncError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VncError::NetworkError(s) => write!(f, "network-error: {}", s),
+            VncError::AuthFailed(s) => write!(f, "auth-failed: {}", s),
+            VncError::ProtocolError(s) => write!(f, "protocol-error: {}", s),
+            VncError::ServerRejected(s) => write!(f, "server-rejected: {}", s),
+        }
+    }
+}
+
+/// Categorise a raw error string into a VncError based on its content.
+pub fn categorize_error(err: &str) -> VncError {
+    let lowered = err.to_lowercase();
+    if lowered.contains("authentication failed")
+        || lowered.contains("auth failed")
+        || lowered.contains("ra2: server hash")
+        || lowered.contains("ra2: unsupported auth subtype")
+    {
+        VncError::AuthFailed(err.to_string())
+    } else if lowered.contains("server rejected")
+        || lowered.contains("unsupported v3.3 security type")
+        || lowered.contains("no supported security type")
+    {
+        VncError::ServerRejected(err.to_string())
+    } else if lowered.contains("protocol-error")
+        || lowered.contains("invalid rfb version")
+        || lowered.contains("unknown server message")
+        || lowered.contains("read rect data")
+        || lowered.contains("read hextile")
+        || lowered.contains("read tight")
+    {
+        VncError::ProtocolError(err.to_string())
+    } else {
+        VncError::NetworkError(err.to_string())
+    }
+}
+
 #[derive(Debug)]
 pub struct ServerInit {
     pub width: u16,
@@ -868,19 +914,93 @@ impl RfbConnection {
     /// The exact length is unknown ahead of time; we use a heuristic: read up to
     /// w*h*4 bytes (worst case raw) per tile.
     fn read_hextile_len(&mut self, _x: u16, _y: u16, w: u16, h: u16) -> Result<usize, String> {
-        // Conservative: worst-case each tile is sent raw (subenc=0x01).
-        // Each tile has 1-byte subencoding header + raw pixel data.
-        // We also account for background (4B) + fg (4B) + subrects overhead.
-        // Use raw pixel count as bound + 1 byte per tile for header.
-        let tiles_x = (w + 15) / 16;
-        let tiles_y = (h + 15) / 16;
-        let max_bytes = (w as usize * h as usize * 4) + (tiles_x as usize * tiles_y as usize * 128);
-        Ok(max_bytes)
+        // Stream-accurate Hextile reading: parse tile-by-tile.
+        let tiles_x = ((w + 15) / 16) as usize;
+        let tiles_y = ((h + 15) / 16) as usize;
+        let mut total = 0usize;
+        for ty in 0..tiles_y {
+            for tx in 0..tiles_x {
+                let tile_w = if tx == tiles_x - 1 && w % 16 != 0 { (w % 16) as usize } else { 16usize };
+                let tile_h = if ty == tiles_y - 1 && h % 16 != 0 { (h % 16) as usize } else { 16usize };
+                let mut subenc = [0u8; 1];
+                self.read_exact(&mut subenc)
+                    .map_err(|e| format!("read hextile subencoding: {}", e))?;
+                total += 1;
+                if subenc[0] & 0x01 != 0 {
+                    // Raw tile
+                    total += tile_w * tile_h * 4;
+                    continue;
+                }
+                if subenc[0] & 0x02 != 0 {
+                    // Background colour
+                    total += 4;
+                }
+                if subenc[0] & 0x04 != 0 {
+                    // Foreground colour
+                    total += 4;
+                }
+                if subenc[0] & 0x08 != 0 {
+                    // AnySubrects
+                    let mut n_subrects = [0u8; 1];
+                    self.read_exact(&mut n_subrects)
+                        .map_err(|e| format!("read hextile n_subrects: {}", e))?;
+                    total += 1;
+                    let sr_count = n_subrects[0] as usize;
+                    if subenc[0] & 0x10 != 0 {
+                        // SubrectsColoured
+                        total += sr_count * (4 + 2 + 2);
+                    } else {
+                        total += sr_count * (2 + 2);
+                    }
+                }
+            }
+        }
+        Ok(total)
     }
 
     fn read_tight_len(&mut self, _x: u16, _y: u16, w: u16, h: u16) -> Result<usize, String> {
-        // Tight is compressed — the zlib data will be at most raw size
-        Ok(w as usize * h as usize * 4 + 256)
+        // Stream-accurate Tight: parse each subrect control byte + data.
+        let mut total = 0usize;
+        for _ in 0..4 {
+            let mut ctl = [0u8; 1];
+            self.read_exact(&mut ctl)
+                .map_err(|e| format!("read tight control byte: {}", e))?;
+            total += 1;
+            let comp_type = ctl[0] >> 4;
+            let fill = (ctl[0] & 0x0f) == 0x08;
+            let jpeg = (ctl[0] & 0x0f) == 0x09;
+            if fill {
+                total += 3; // remaining 3 bytes of fill colour
+            } else if jpeg {
+                let len = self.read_compact_len()?;
+                total += len;
+            } else if comp_type <= 7 {
+                // Basic compression
+                let len = self.read_compact_len()?;
+                total += len;
+            }
+        }
+        Ok(total)
+    }
+
+    fn read_compact_len(&mut self) -> Result<usize, String> {
+        let mut b0 = [0u8; 1];
+        self.read_exact(&mut b0)
+            .map_err(|e| format!("read compact len b0: {}", e))?;
+        let mut len = b0[0] as usize;
+        if len & 0x80 != 0 {
+            let mut b1 = [0u8; 1];
+            self.read_exact(&mut b1)
+                .map_err(|e| format!("read compact len b1: {}", e))?;
+            len = (len & 0x7f) | ((b1[0] as usize) << 7);
+            if b1[0] & 0x80 != 0 {
+                let mut b2 = [0u8; 1];
+                self.read_exact(&mut b2)
+                    .map_err(|e| format!("read compact len b2: {}", e))?;
+                len = len | ((b2[0] as usize) << 14);
+            }
+        }
+        Ok(len)
     }
 
     fn read_zrle_data(&mut self) -> Result<Vec<u8>, String> {
@@ -900,6 +1020,39 @@ impl RfbWriter {
     pub fn set_framebuffer_size(&mut self, width: u16, height: u16) {
         self.width = width;
         self.height = height;
+    }
+
+    /// Send SetDesktopSize (message type 251) to request a server-side resize.
+    pub fn set_desktop_size(&mut self, width: u16, height: u16) -> Result<(), String> {
+        let mut msg = vec![0u8; 16];
+        msg[0] = 251; // SetDesktopSize
+        msg[1] = 0; // padding
+        msg[2..4].copy_from_slice(&width.to_be_bytes());
+        msg[4..6].copy_from_slice(&height.to_be_bytes());
+        // Number of screens = 1
+        msg[6] = 0;
+        msg[7] = 0;
+        msg[8] = 0;
+        msg[9] = 1;
+        // Screen descriptor: id(4B) + x(2B) + y(2B) + w(2B) + h(2B) + flags(4B)
+        msg[10..14].copy_from_slice(&0u32.to_be_bytes()); // id
+        msg[14..16].copy_from_slice(&0u16.to_be_bytes()); // x
+        let mut screen = vec![0u8; 14];
+        screen[0..2].copy_from_slice(&0u16.to_be_bytes()); // y
+        screen[2..4].copy_from_slice(&width.to_be_bytes());
+        screen[4..6].copy_from_slice(&height.to_be_bytes());
+        screen[6..10].copy_from_slice(&0u32.to_be_bytes()); // flags
+        msg.extend_from_slice(&screen);
+
+        self.write_all(&msg)
+            .map_err(|e| format!("write SetDesktopSize: {}", e))?;
+        self.flush().map_err(|e| format!("flush: {}", e))?;
+
+        // Update our tracked size so subsequent update requests match
+        self.width = width;
+        self.height = height;
+
+        Ok(())
     }
 
     /// Send FramebufferUpdateRequest. incremental=true skips unchanged regions.

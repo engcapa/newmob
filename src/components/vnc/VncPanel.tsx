@@ -58,7 +58,7 @@ export default function VncPanel({
   }, []);
 
   // ── connect logic, callable for retry ─────────────────────────────
-  const doConnect = useCallback(() => {
+  const doConnect = useCallback((attempt = 1) => {
     const { host: h, port: p, username: user, password: pw } = connectArgsRef.current;
     destroyedRef.current = false;
     store.initConnection(tabId);
@@ -98,9 +98,24 @@ export default function VncPanel({
               case "disconnected":
                 disconnectedByServerRef.current = true;
                 store.setDisconnected(tabId, msg.reason);
+                // Exponential backoff reconnection (max 3 attempts)
+                if (attempt < 3 && !destroyedRef.current) {
+                  const delay = Math.min(1000 * 2 ** attempt, 8000);
+                  store.setReconnectCount(tabId, attempt);
+                  setTimeout(() => {
+                    if (!destroyedRef.current) {
+                      doConnect(attempt + 1);
+                    }
+                  }, delay);
+                }
                 break;
               case "clipboard":
                 navigator.clipboard.writeText(msg.text).catch(() => {});
+                break;
+              case "info":
+                if (msg.message.includes("Raw")) {
+                  store.setEncoding(tabId, "Raw");
+                }
                 break;
             }
           }
@@ -120,7 +135,17 @@ export default function VncPanel({
         };
       } catch (err) {
         if (!cancelled && !destroyedRef.current) {
-          store.setDisconnected(tabId, String(err));
+          const reason = String(err);
+          store.setDisconnected(tabId, reason);
+          if (attempt < 3 && !reason.toLowerCase().includes("auth")) {
+            const delay = Math.min(1000 * 2 ** attempt, 8000);
+            store.setReconnectCount(tabId, attempt);
+            setTimeout(() => {
+              if (!destroyedRef.current) {
+                doConnect(attempt + 1);
+              }
+            }, delay);
+          }
         }
       }
     })();
@@ -371,6 +396,16 @@ export default function VncPanel({
   const showError =
     conn?.status === "disconnected" || conn?.status === "error";
 
+  const errorText = conn?.error ?? "";
+  const isAuthFailed = errorText.startsWith("auth-failed");
+  const displayError = isAuthFailed
+    ? "Authentication failed"
+    : errorText.startsWith("protocol-error")
+      ? "Protocol error — server may use an unsupported encoding"
+      : errorText.startsWith("server-rejected")
+        ? "Server rejected the connection"
+        : errorText;
+
   return (
     <div
       ref={containerRef}
@@ -413,6 +448,25 @@ export default function VncPanel({
         </div>
       )}
 
+      {/* Encoding badge */}
+      {showCanvas && conn?.encoding && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 4,
+            left: 4,
+            zIndex: 10,
+            fontSize: 11,
+            color: "#888",
+            background: "rgba(0,0,0,0.5)",
+            padding: "2px 6px",
+            borderRadius: 4,
+          }}
+        >
+          Encoding: {conn.encoding}
+        </div>
+      )}
+
       {/* Status overlays */}
       {showConnecting && (
         <div
@@ -428,6 +482,11 @@ export default function VncPanel({
         >
           <div style={{ color: "#aaa", textAlign: "center" }}>
             <p>Connecting to {host}:{port}…</p>
+            {conn && conn.reconnectCount > 0 && (
+              <p style={{ fontSize: 12, marginTop: 4 }}>
+                Reconnecting ({conn.reconnectCount}/3)…
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -447,7 +506,7 @@ export default function VncPanel({
           }}
         >
           <div style={{ color: "#e44", textAlign: "center" }}>
-            <p>Disconnected{conn?.error ? `: ${conn.error}` : ""}</p>
+            <p>Disconnected{conn?.error ? `: ${displayError}` : ""}</p>
           </div>
           <button
             onClick={() => {

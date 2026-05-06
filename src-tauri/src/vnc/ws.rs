@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
 
 use crate::vnc::encodings::DecodedRect;
-use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
+use crate::vnc::rfb::{categorize_error, RfbConnection, RfbWriter, ServerMessage};
 
 // ── Messages for internal channels ──────────────────────────────────
 
@@ -24,7 +24,7 @@ pub enum VncControl {
     Key { down: bool, keysym: u32 },
     Pointer { x: u16, y: u16, buttons: u8 },
     Clipboard(String),
-    Resize,
+    Resize { width: u16, height: u16 },
     Ack,
     Disconnect,
 }
@@ -92,12 +92,16 @@ pub async fn spawn_vnc_relay(
     let server_init = rfb.authenticate(username.as_deref(), password.as_deref())?;
 
     rfb.set_pixel_format_rgba()?;
-    // Keep the first working path conservative. The Tight/Hextile readers in
-    // this client are not stream-accurate yet, while Raw has an exact length.
-    rfb.set_encodings(&[
-        0,    // Raw
-        -223, // DesktopSize pseudo
-    ])?;
+    // Conservative default: Raw + CopyRect (both have exact lengths) +
+    // DesktopSize.  Hextile/Tight/ZRLE are excluded by default because the
+    // stream reader is heuristic-based; they can be enabled via the
+    // `VNC_EXPERIMENTAL_ENCODINGS` env var for testing.
+    let mut encodings = vec![0, 1, -223];
+    if std::env::var("VNC_EXPERIMENTAL_ENCODINGS").is_ok() {
+        encodings.extend_from_slice(&[5, 7, 16]);
+    }
+    rfb.set_encodings(&encodings)?;
+    tracing::info!("VNC negotiated encodings: {:?}", encodings);
     rfb.request_update(false)?;
     let writer = rfb.take_writer()?;
 
@@ -124,6 +128,14 @@ pub async fn spawn_vnc_relay(
     })
     .unwrap();
     let _ = ws_out_tx.send(WsOutgoing::Text(connected));
+
+    // Notify the frontend about the negotiated encoding strategy
+    let info_json = serde_json::to_string(&serde_json::json!({
+        "type": "info",
+        "message": "Server using Raw encoding (Hextile/Tight/ZRLE require VNC_EXPERIMENTAL_ENCODINGS)"
+    }))
+    .unwrap_or_default();
+    let _ = ws_out_tx.send(WsOutgoing::Text(info_json));
 
     // 4. Spawn the relay
     let cancel_clone = cancel.clone();
@@ -208,8 +220,7 @@ async fn run_relay(
                             }
                             WsIncoming::Clipboard { text } => VncControl::Clipboard(text),
                             WsIncoming::Resize { width, height } => {
-                                let _requested_size = (width, height);
-                                VncControl::Resize
+                                VncControl::Resize { width, height }
                             }
                         };
                         let _ = ctrl.send(ctrl_msg);
@@ -239,8 +250,10 @@ async fn run_relay(
                 match conn.read_message() {
                     Ok(m) => m,
                     Err(e) => {
+                        let categorized = categorize_error(&e);
+                        let reason = categorized.to_string();
                         let json = serde_json::to_string(&WsOutgoingText::Disconnected {
-                            reason: e.clone(),
+                            reason,
                         })
                         .unwrap();
                         let _ = ws_out.send(WsOutgoing::Text(json));
@@ -300,7 +313,10 @@ async fn run_relay(
                 VncControl::Key { down, keysym } => conn.send_key_event(down, keysym),
                 VncControl::Pointer { x, y, buttons } => conn.send_pointer_event(x, y, buttons),
                 VncControl::Clipboard(text) => conn.send_client_cut_text(&text),
-                VncControl::Resize => conn.request_update(false),
+                VncControl::Resize { width, height } => {
+                    let _ = conn.set_desktop_size(width, height);
+                    conn.request_update(false)
+                }
                 VncControl::Disconnect => {
                     cl_cancel.cancel();
                     Ok(())

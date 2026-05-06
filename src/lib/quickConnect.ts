@@ -69,12 +69,27 @@ export function parseQuickConnectInput(input: string): ParsedQuickConnect {
 
   const port = parsed.port ?? DEFAULT_PORTS[sessionType] ?? 22;
   const username = parsed.username ?? (sessionType === "SSH" || sessionType === "SFTP" ? "root" : null);
-  const authMethod: AuthMethod = sessionType === "SSH" ? "Password" : "None";
+  let authMethod: AuthMethod = "None";
+  let authData: string | null = null;
+  if (sessionType === "SSH") {
+    authMethod = "Password";
+  } else if (sessionType === "VNC") {
+    authMethod = "Password";
+    // If the URL contained a password in the query string, capture it
+    try {
+      const url = new URL(target);
+      if (url.searchParams.has("password")) {
+        authData = url.searchParams.get("password");
+      }
+    } catch {
+      // not a valid URL, ignore
+    }
+  }
   const titlePrefix = username ? `${username}@` : "";
 
   return {
     transient: true,
-    authData: null,
+    authData,
     config: {
       id: `quick-${sessionType.toLowerCase()}-${Date.now()}`,
       name: `${sessionType.toLowerCase()}://${titlePrefix}${parsed.host}${port ? `:${port}` : ""}`,

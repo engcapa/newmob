@@ -295,11 +295,18 @@ export function MainLayout() {
     } else if (session.session_type === "LocalShell") {
       openLocalTab(session.name || "Local terminal", session.id, getSessionTerminalProfile(session.options_json));
     } else if (session.session_type === "VNC") {
-      const { method, data } = resolveAuth();
-      if (method === "Password") {
+      // Read vncAuthType from options_json to decide auth flow
+      let vncAuthType = "None";
+      try {
+        const opts = JSON.parse(session.options_json || "{}");
+        vncAuthType = opts.vncAuthType || "None";
+      } catch {
+        // ignore
+      }
+      if (vncAuthType === "Password" || vncAuthType === "RA2") {
         setPendingAuth({ session });
       } else {
-        openVncTab(session, data ?? undefined);
+        openVncTab(session);
       }
     } else {
       openUnsupportedTab(session);
@@ -348,12 +355,15 @@ export function MainLayout() {
     });
   }, [addTab]);
 
-  const handleAuthSubmit = useCallback((password: string) => {
+  const handleAuthSubmit = useCallback((password: string, vncUsername?: string) => {
     if (!pendingAuth) return;
     if (pendingAuth.session.session_type === "SFTP") {
       openSftpTab(pendingAuth.session, "Password", password);
     } else if (pendingAuth.session.session_type === "VNC") {
-      openVncTab(pendingAuth.session, password);
+      const session = vncUsername
+        ? { ...pendingAuth.session, username: vncUsername }
+        : pendingAuth.session;
+      openVncTab(session, password);
     } else {
       openSshTab(pendingAuth.session, "Password", password);
     }
@@ -377,13 +387,19 @@ export function MainLayout() {
             openSshTab(session, authMethod, parsed.authData);
           }
         }
+      } else if (session.session_type === "VNC") {
+        if (session.auth_method === "Password") {
+          setPendingAuth({ session });
+        } else {
+          openVncTab(session, parsed.authData ?? undefined);
+        }
       } else {
         openUnsupportedTab(session);
       }
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [openLocalTab, openSftpTab, openSshTab, openUnsupportedTab, setStatusMessage]);
+  }, [openLocalTab, openSftpTab, openSshTab, openVncTab, openUnsupportedTab, setStatusMessage]);
 
   const openPlaceholderTab = useCallback((title: string, message: string) => {
     addTab({
@@ -763,6 +779,7 @@ export function MainLayout() {
         <AuthPrompt
           host={pendingAuth.session.host}
           username={pendingAuth.session.username ?? "root"}
+          needsUsername={pendingAuth.session.session_type === "VNC"}
           onSubmit={handleAuthSubmit}
           onCancel={() => setPendingAuth(null)}
         />
