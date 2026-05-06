@@ -23,7 +23,7 @@ import {
   HelpCircle,
 } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
-import { testSshConnection } from "../../lib/ipc";
+import { selectPrivateKeyFile, testSshConnection } from "../../lib/ipc";
 import { vncTestConnection } from "../../lib/vnc";
 import {
   getSessionNetworkSettings,
