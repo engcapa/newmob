@@ -24,55 +24,12 @@ pub enum VncControl {
     Key { down: bool, keysym: u32 },
     Pointer { x: u16, y: u16, buttons: u8 },
     Clipboard(String),
-    Resize { width: u16, height: u16 },
+    Resize,
     Ack,
     Disconnect,
 }
 
 // ── JSON messages on the wire ───────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DisconnectSource {
-    Backend,
-    Relay,
-    Frontend,
-}
-
-#[derive(Debug, Clone, Copy, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum DisconnectCode {
-    Requested,
-    AuthFailed,
-    NetworkError,
-    ProtocolError,
-    WebsocketClosed,
-    InternalError,
-}
-
-#[derive(Debug, Clone)]
-struct DisconnectInfo {
-    source: DisconnectSource,
-    code: DisconnectCode,
-    message: String,
-    retryable: bool,
-}
-
-impl DisconnectInfo {
-    fn new(
-        source: DisconnectSource,
-        code: DisconnectCode,
-        message: impl Into<String>,
-        retryable: bool,
-    ) -> Self {
-        Self {
-            source,
-            code,
-            message: message.into(),
-            retryable,
-        }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -104,12 +61,7 @@ enum WsOutgoingText {
         name: String,
     },
     #[serde(rename = "disconnected")]
-    Disconnected {
-        reason: String,
-        source: DisconnectSource,
-        code: DisconnectCode,
-        retryable: bool,
-    },
+    Disconnected { reason: String },
     #[serde(rename = "bell")]
     Bell,
     #[serde(rename = "clipboard")]
@@ -239,27 +191,12 @@ async fn run_relay(
     // Task: read WS messages → control_tx
     let ctrl = control_tx.clone();
     let cancel_read = cancel.clone();
-    let ws_out_for_read = ws_out_tx.clone();
     let ws_read = tokio::spawn(async move {
         let mut reader = ws_reader;
-        while let Some(msg) = reader.next().await {
+        while let Some(Ok(msg)) = reader.next().await {
             if cancel_read.is_cancelled() {
                 break;
             }
-            let msg = match msg {
-                Ok(m) => m,
-                Err(e) => {
-                    let info = classify_disconnect(
-                        DisconnectSource::Relay,
-                        format!("WebSocket read error: {}", e),
-                        DisconnectCode::WebsocketClosed,
-                        true,
-                    );
-                    send_disconnect(&ws_out_for_read, &info);
-                    let _ = ctrl.send(VncControl::Disconnect);
-                    break;
-                }
-            };
             match msg {
                 Message::Text(text) => {
                     if let Ok(incoming) = serde_json::from_str::<WsIncoming>(&text) {
@@ -271,7 +208,8 @@ async fn run_relay(
                             }
                             WsIncoming::Clipboard { text } => VncControl::Clipboard(text),
                             WsIncoming::Resize { width, height } => {
-                                VncControl::Resize { width, height }
+                                let _requested_size = (width, height);
+                                VncControl::Resize
                             }
                         };
                         let _ = ctrl.send(ctrl_msg);
@@ -301,13 +239,11 @@ async fn run_relay(
                 match conn.read_message() {
                     Ok(m) => m,
                     Err(e) => {
-                        let info = classify_disconnect(
-                            DisconnectSource::Backend,
-                            e,
-                            DisconnectCode::InternalError,
-                            true,
-                        );
-                        send_disconnect(&ws_out, &info);
+                        let json = serde_json::to_string(&WsOutgoingText::Disconnected {
+                            reason: e.clone(),
+                        })
+                        .unwrap();
+                        let _ = ws_out.send(WsOutgoing::Text(json));
                         break;
                     }
                 }
@@ -352,7 +288,6 @@ async fn run_relay(
 
     // Task: control loop — process commands from WS client
     let rfb_ctrl = writer.clone();
-    let ws_out_for_ctrl = ws_out_tx.clone();
     let cl_cancel = cancel.clone();
     let vnc_ctrl = tokio::spawn(async move {
         while let Some(ctrl) = control_rx.recv().await {
@@ -365,34 +300,15 @@ async fn run_relay(
                 VncControl::Key { down, keysym } => conn.send_key_event(down, keysym),
                 VncControl::Pointer { x, y, buttons } => conn.send_pointer_event(x, y, buttons),
                 VncControl::Clipboard(text) => conn.send_client_cut_text(&text),
-                VncControl::Resize { width, height } => {
-                    conn.set_desktop_size(width, height)
-                        .and_then(|_| conn.request_update(false))
-                }
+                VncControl::Resize => conn.request_update(false),
                 VncControl::Disconnect => {
                     cl_cancel.cancel();
-                    let info = DisconnectInfo::new(
-                        DisconnectSource::Frontend,
-                        DisconnectCode::Requested,
-                        "Disconnected by client",
-                        true,
-                    );
-                    send_disconnect(&ws_out_for_ctrl, &info);
                     Ok(())
                 }
             };
             drop(conn);
             if let Err(e) = result {
-                let info = classify_disconnect(
-                    DisconnectSource::Backend,
-                    e,
-                    DisconnectCode::InternalError,
-                    true,
-                );
-                tracing::error!("VNC control error: {}", info.message);
-                send_disconnect(&ws_out_for_ctrl, &info);
-                cl_cancel.cancel();
-                break;
+                tracing::error!("VNC control error: {}", e);
             }
         }
     });
@@ -419,54 +335,6 @@ async fn run_relay(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
-
-fn classify_disconnect(
-    source: DisconnectSource,
-    message: impl Into<String>,
-    fallback_code: DisconnectCode,
-    fallback_retryable: bool,
-) -> DisconnectInfo {
-    let message = message.into();
-    let lowered = message.to_ascii_lowercase();
-
-    if lowered.contains("authentication failed")
-        || lowered.contains("auth failure")
-        || lowered.contains("no vnc username")
-    {
-        return DisconnectInfo::new(source, DisconnectCode::AuthFailed, message, false);
-    }
-
-    if lowered.contains("protocol")
-        || lowered.contains("invalid rfb")
-        || lowered.contains("unknown server message")
-    {
-        return DisconnectInfo::new(source, DisconnectCode::ProtocolError, message, false);
-    }
-
-    if lowered.contains("connection reset")
-        || lowered.contains("broken pipe")
-        || lowered.contains("timed out")
-        || lowered.contains("failed to fill whole buffer")
-        || lowered.contains("tcp connect")
-        || lowered.contains("network")
-    {
-        return DisconnectInfo::new(source, DisconnectCode::NetworkError, message, true);
-    }
-
-    DisconnectInfo::new(source, fallback_code, message, fallback_retryable)
-}
-
-fn send_disconnect(ws_out: &UnboundedSender<WsOutgoing>, info: &DisconnectInfo) {
-    let payload = WsOutgoingText::Disconnected {
-        reason: info.message.clone(),
-        source: info.source,
-        code: info.code,
-        retryable: info.retryable,
-    };
-    if let Ok(json) = serde_json::to_string(&payload) {
-        let _ = ws_out.send(WsOutgoing::Text(json));
-    }
-}
 
 fn make_frame_header(x: u16, y: u16, w: u16, h: u16) -> [u8; 12] {
     let mut hdr = [0u8; 12];

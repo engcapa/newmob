@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import type { VncDisconnectInfo } from "../lib/vnc";
 
 export type VncConnectionStatus =
   | "disconnected"
@@ -15,7 +14,6 @@ export interface VncConnectionState {
   height: number;
   name: string;
   error: string | null;
-  disconnect: VncDisconnectInfo | null;
 }
 
 interface VncStore {
@@ -29,11 +27,7 @@ interface VncStore {
     height: number,
     name: string,
   ) => void;
-  setDisconnected: (
-    tabId: string,
-    reason?: string,
-    disconnect?: VncDisconnectInfo,
-  ) => void;
+  setDisconnected: (tabId: string, reason?: string) => void;
   removeConnection: (tabId: string) => void;
 }
 
@@ -52,7 +46,6 @@ export const useVncStore = create<VncStore>((set) => ({
           height: 0,
           name: "",
           error: null,
-          disconnect: null,
         },
       },
     }));
@@ -68,7 +61,6 @@ export const useVncStore = create<VncStore>((set) => ({
           sessionId,
           wsPort,
           error: null,
-          disconnect: null,
         } as VncConnectionState,
       },
     }));
@@ -85,13 +77,12 @@ export const useVncStore = create<VncStore>((set) => ({
           height,
           name,
           error: null,
-          disconnect: null,
         } as VncConnectionState,
       },
     }));
   },
 
-  setDisconnected(tabId, reason, disconnect) {
+  setDisconnected(tabId, reason) {
     set((s) => ({
       connections: {
         ...s.connections,
@@ -99,7 +90,6 @@ export const useVncStore = create<VncStore>((set) => ({
           ...(s.connections[tabId] ?? {}),
           status: "disconnected",
           error: reason ?? null,
-          disconnect: disconnect ?? null,
         } as VncConnectionState,
       },
     }));

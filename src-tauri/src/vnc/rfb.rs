@@ -919,36 +919,6 @@ impl RfbWriter {
         Ok(())
     }
 
-    /// Send SetDesktopSize with a single-screen layout.
-    pub fn set_desktop_size(&mut self, width: u16, height: u16) -> Result<(), String> {
-        if width == 0 || height == 0 {
-            return Err("desktop size must be greater than 0".to_string());
-        }
-
-        let mut msg = [0u8; 24];
-        msg[0] = 251; // SetDesktopSize
-        msg[1] = 0; // padding
-        msg[2..4].copy_from_slice(&width.to_be_bytes());
-        msg[4..6].copy_from_slice(&height.to_be_bytes());
-        msg[6] = 1; // number-of-screens
-        msg[7] = 0; // padding
-        msg[8..12].copy_from_slice(&0u32.to_be_bytes()); // screen id
-        msg[12..14].copy_from_slice(&0u16.to_be_bytes()); // x-position
-        msg[14..16].copy_from_slice(&0u16.to_be_bytes()); // y-position
-        msg[16..18].copy_from_slice(&width.to_be_bytes());
-        msg[18..20].copy_from_slice(&height.to_be_bytes());
-        msg[20..24].copy_from_slice(&0u32.to_be_bytes()); // screen flags
-
-        self.write_all(&msg)
-            .map_err(|e| format!("write set desktop size: {}", e))?;
-        self.flush().map_err(|e| format!("flush: {}", e))?;
-
-        self.width = width;
-        self.height = height;
-
-        Ok(())
-    }
-
     /// Send KeyEvent.
     pub fn send_key_event(&mut self, down: bool, keysym: u32) -> Result<(), String> {
         let mut msg = [0u8; 8];
