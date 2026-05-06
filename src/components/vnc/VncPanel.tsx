@@ -1,13 +1,16 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import {
-  vncConnect,
-  vncDisconnect,
-  parseWsMessage,
-  parseFrameHeader,
+  classifyVncConnectError,
+  formatVncDisconnect,
   keyEventToKeysym,
   mouseButtonMask,
+  normalizeVncDisconnectInfo,
+  parseFrameHeader,
+  parseWsMessage,
+  vncConnect,
+  vncDisconnect,
 } from "../../lib/vnc";
-import type { WsOutgoing } from "../../lib/vnc";
+import type { VncDisconnectInfo, WsOutgoing } from "../../lib/vnc";
 import { useVncStore } from "../../stores/vncStore";
 import { Maximize, Minimize, RefreshCw } from "lucide-react";
 
@@ -44,12 +47,46 @@ export default function VncPanel({
   const frameBufferRef = useRef<PendingFrame[]>([]);
   const rafRef = useRef<number>(0);
   const destroyedRef = useRef(false);
-  const disconnectedByServerRef = useRef(false);
+  const connectAttemptRef = useRef(0);
+  const disconnectedAttemptRef = useRef<number | null>(null);
+  const lastResizeRef = useRef<{ width: number; height: number } | null>(null);
   const connectArgsRef = useRef({ host, port, username, password });
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
 
-  const store = useVncStore();
-  const conn = store.connections[tabId];
+  const conn = useVncStore((s) => s.connections[tabId]);
+  const initConnection = useVncStore((s) => s.initConnection);
+  const setConnecting = useVncStore((s) => s.setConnecting);
+  const setConnected = useVncStore((s) => s.setConnected);
+  const setDisconnected = useVncStore((s) => s.setDisconnected);
+  const removeConnection = useVncStore((s) => s.removeConnection);
+
+  const setDisconnectedState = useCallback(
+    (info: VncDisconnectInfo) => {
+      setDisconnected(tabId, formatVncDisconnect(info), info);
+    },
+    [setDisconnected, tabId],
+  );
+
+  const cleanupActiveConnection = useCallback((notifyBackend: boolean) => {
+    const sid = sessionIdRef.current;
+    sessionIdRef.current = null;
+
+    if (notifyBackend && sid) {
+      vncDisconnect(sid).catch(() => {});
+    }
+
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch {
+        // no-op
+      }
+      wsRef.current = null;
+    }
+
+    frameBufferRef.current = [];
+    lastResizeRef.current = null;
+  }, []);
 
   const sendWs = useCallback((msg: WsOutgoing) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -60,101 +97,125 @@ export default function VncPanel({
   // ── connect logic, callable for retry ─────────────────────────────
   const doConnect = useCallback(() => {
     const { host: h, port: p, username: user, password: pw } = connectArgsRef.current;
-    destroyedRef.current = false;
-    store.initConnection(tabId);
 
-    let cancelled = false;
-    disconnectedByServerRef.current = false;
+    const attempt = connectAttemptRef.current + 1;
+    connectAttemptRef.current = attempt;
+    disconnectedAttemptRef.current = null;
+
+    cleanupActiveConnection(true);
+    destroyedRef.current = false;
+    initConnection(tabId);
 
     (async () => {
       try {
         const result = await vncConnect(h, p, user, pw);
-        if (cancelled || destroyedRef.current) {
+        if (destroyedRef.current || connectAttemptRef.current !== attempt) {
           vncDisconnect(result.session_id).catch(() => {});
           return;
         }
 
         sessionIdRef.current = result.session_id;
-        store.setConnecting(tabId, result.session_id, result.ws_port);
+        setConnecting(tabId, result.session_id, result.ws_port);
 
         const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}`);
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
 
         ws.onmessage = (event) => {
-          if (destroyedRef.current) return;
+          if (destroyedRef.current || connectAttemptRef.current !== attempt) return;
+
           if (event.data instanceof ArrayBuffer) {
             const header = parseFrameHeader(event.data);
             if (!header) return;
             const rgba = new Uint8Array(event.data, 12);
             frameBufferRef.current.push({ ...header, rgba });
-          } else {
-            const msg = parseWsMessage(event.data as string);
-            if (!msg) return;
-            switch (msg.type) {
-              case "connected":
-                store.setConnected(tabId, msg.width, msg.height, msg.name);
-                break;
-              case "disconnected":
-                disconnectedByServerRef.current = true;
-                store.setDisconnected(tabId, msg.reason);
-                break;
-              case "clipboard":
-                navigator.clipboard.writeText(msg.text).catch(() => {});
-                break;
+            return;
+          }
+
+          const msg = parseWsMessage(event.data as string);
+          if (!msg) return;
+
+          switch (msg.type) {
+            case "connected":
+              setConnected(tabId, msg.width, msg.height, msg.name);
+              break;
+            case "disconnected": {
+              disconnectedAttemptRef.current = attempt;
+              const info = normalizeVncDisconnectInfo(msg, "backend");
+              setDisconnectedState(info);
+              break;
             }
+            case "clipboard":
+              navigator.clipboard.writeText(msg.text).catch(() => {});
+              break;
           }
         };
 
         ws.onclose = () => {
+          if (connectAttemptRef.current !== attempt) return;
           wsRef.current = null;
-          if (!destroyedRef.current && !disconnectedByServerRef.current) {
-            store.setDisconnected(tabId, "Connection closed");
+          if (destroyedRef.current || disconnectedAttemptRef.current === attempt) {
+            return;
           }
+          const info = normalizeVncDisconnectInfo(
+            {
+              reason: "WebSocket channel closed",
+              source: "relay",
+              code: "websocket_closed",
+              retryable: true,
+            },
+            "relay",
+          );
+          setDisconnectedState(info);
         };
 
         ws.onerror = () => {
-          if (!destroyedRef.current) {
-            store.setDisconnected(tabId, "WebSocket error");
-          }
+          if (destroyedRef.current || connectAttemptRef.current !== attempt) return;
+          disconnectedAttemptRef.current = attempt;
+          const info = normalizeVncDisconnectInfo(
+            {
+              reason: "WebSocket transport error",
+              source: "relay",
+              code: "websocket_closed",
+              retryable: true,
+            },
+            "relay",
+          );
+          setDisconnectedState(info);
         };
-      } catch (err) {
-        if (!cancelled && !destroyedRef.current) {
-          store.setDisconnected(tabId, String(err));
-        }
+      } catch (error) {
+        if (destroyedRef.current || connectAttemptRef.current !== attempt) return;
+        setDisconnectedState(classifyVncConnectError(error));
       }
     })();
+  }, [
+    cleanupActiveConnection,
+    initConnection,
+    setConnected,
+    setConnecting,
+    setDisconnectedState,
+    tabId,
+  ]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [host, port, username, password, tabId, store]);
+  useEffect(() => {
+    connectArgsRef.current = { host, port, username, password };
+  }, [host, port, username, password]);
 
   // ── Mount / unmount ───────────────────────────────────────────────
   useEffect(() => {
-    connectArgsRef.current = { host, port, username, password };
-    let cancel: (() => void) | undefined;
     const connectTimer = window.setTimeout(() => {
-      cancel = doConnect();
+      doConnect();
     }, 0);
 
     return () => {
       window.clearTimeout(connectTimer);
-      cancel?.();
       destroyedRef.current = true;
+      connectAttemptRef.current += 1;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      frameBufferRef.current = [];
-      const sid = sessionIdRef.current;
-      if (sid) {
-        vncDisconnect(sid).catch(() => {});
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
-      store.removeConnection(tabId);
+      cleanupActiveConnection(true);
+      removeConnection(tabId);
     };
-  }, []);
+  }, [cleanupActiveConnection, doConnect, removeConnection, tabId]);
 
   // ── Canvas rendering loop ────────────────────────────────────────
   useEffect(() => {
@@ -322,7 +383,7 @@ export default function VncPanel({
     [conn?.status, getFbCoords, sendWs],
   );
 
-  // ── Resize → set_desktop_size ─────────────────────────────────────
+  // ── Resize → true RFB SetDesktopSize ──────────────────────────────
   useEffect(() => {
     if (!visible || conn?.status !== "connected") return;
     const container = containerRef.current;
@@ -334,12 +395,20 @@ export default function VncPanel({
       timer = setTimeout(() => {
         const entry = entries[0];
         if (!entry) return;
-        const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          sendWs({ type: "resize", width: Math.round(width), height: Math.round(height) });
+
+        const nextWidth = Math.max(1, Math.round(entry.contentRect.width));
+        const nextHeight = Math.max(1, Math.round(entry.contentRect.height));
+        const last = lastResizeRef.current;
+
+        if (last && last.width === nextWidth && last.height === nextHeight) {
+          return;
         }
-      }, 300);
+
+        lastResizeRef.current = { width: nextWidth, height: nextHeight };
+        sendWs({ type: "resize", width: nextWidth, height: nextHeight });
+      }, 150);
     });
+
     observer.observe(container);
 
     return () => {
@@ -370,6 +439,7 @@ export default function VncPanel({
   const showConnecting = conn?.status === "connecting";
   const showError =
     conn?.status === "disconnected" || conn?.status === "error";
+  const retryable = conn?.disconnect?.retryable ?? true;
 
   return (
     <div
@@ -446,19 +516,16 @@ export default function VncPanel({
             gap: 12,
           }}
         >
-          <div style={{ color: "#e44", textAlign: "center" }}>
+          <div style={{ color: "#e44", textAlign: "center", maxWidth: 540 }}>
             <p>Disconnected{conn?.error ? `: ${conn.error}` : ""}</p>
+            {!retryable && (
+              <p style={{ marginTop: 6, color: "#d4a017", fontSize: 12 }}>
+                This error is usually not transient, but you can retry after updating credentials/settings.
+              </p>
+            )}
           </div>
           <button
             onClick={() => {
-              // Cleanup old session
-              const sid = sessionIdRef.current;
-              if (sid) vncDisconnect(sid).catch(() => {});
-              if (wsRef.current) {
-                wsRef.current.close();
-                wsRef.current = null;
-              }
-              // Reconnect
               doConnect();
             }}
             style={{

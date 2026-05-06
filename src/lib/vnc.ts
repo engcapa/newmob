@@ -40,6 +40,22 @@ export async function vncTestConnection(
   });
 }
 
+export type VncDisconnectSource = "backend" | "relay" | "frontend";
+export type VncDisconnectCode =
+  | "requested"
+  | "auth_failed"
+  | "network_error"
+  | "protocol_error"
+  | "websocket_closed"
+  | "internal_error";
+
+export interface VncDisconnectInfo {
+  source: VncDisconnectSource;
+  code: VncDisconnectCode;
+  reason: string;
+  retryable: boolean;
+}
+
 /** WebSocket message types sent to the VNC relay. */
 export type WsOutgoing =
   | { type: "ack" }
@@ -51,7 +67,13 @@ export type WsOutgoing =
 /** WebSocket message types received from the VNC relay. */
 export type WsIncoming =
   | { type: "connected"; width: number; height: number; name: string }
-  | { type: "disconnected"; reason: string }
+  | {
+      type: "disconnected";
+      reason: string;
+      source?: VncDisconnectSource;
+      code?: VncDisconnectCode;
+      retryable?: boolean;
+    }
   | { type: "bell" }
   | { type: "clipboard"; text: string };
 
@@ -62,6 +84,119 @@ export function parseWsMessage(data: string): WsIncoming | null {
   } catch {
     return null;
   }
+}
+
+export function classifyVncConnectError(error: unknown): VncDisconnectInfo {
+  const reason = extractErrorMessage(error);
+  return classifyVncDisconnect(
+    "backend",
+    reason,
+    "network_error",
+    true,
+  );
+}
+
+export function normalizeVncDisconnectInfo(
+  msg: {
+    reason: string;
+    source?: VncDisconnectSource;
+    code?: VncDisconnectCode;
+    retryable?: boolean;
+  },
+  fallbackSource: VncDisconnectSource = "relay",
+): VncDisconnectInfo {
+  const source = msg.source ?? fallbackSource;
+  const classified = classifyVncDisconnect(
+    source,
+    msg.reason,
+    msg.code ?? "internal_error",
+    msg.retryable ?? true,
+  );
+
+  return {
+    source,
+    code: msg.code ?? classified.code,
+    reason: msg.reason,
+    retryable: msg.retryable ?? classified.retryable,
+  };
+}
+
+export function formatVncDisconnect(info: VncDisconnectInfo): string {
+  const source =
+    info.source === "backend"
+      ? "Backend"
+      : info.source === "relay"
+        ? "Relay"
+        : "Frontend";
+  return `${source} (${info.code}): ${info.reason}`;
+}
+
+function classifyVncDisconnect(
+  source: VncDisconnectSource,
+  reason: string,
+  fallbackCode: VncDisconnectCode,
+  fallbackRetryable: boolean,
+): VncDisconnectInfo {
+  const lower = reason.toLowerCase();
+
+  if (
+    lower.includes("authentication failed") ||
+    lower.includes("auth failure") ||
+    lower.includes("no vnc username")
+  ) {
+    return { source, code: "auth_failed", reason, retryable: false };
+  }
+
+  if (
+    lower.includes("protocol") ||
+    lower.includes("invalid rfb") ||
+    lower.includes("unknown server message")
+  ) {
+    return { source, code: "protocol_error", reason, retryable: false };
+  }
+
+  if (
+    lower.includes("websocket") ||
+    lower.includes("connection closed") ||
+    lower.includes("socket")
+  ) {
+    return { source, code: "websocket_closed", reason, retryable: true };
+  }
+
+  if (
+    lower.includes("connection reset") ||
+    lower.includes("broken pipe") ||
+    lower.includes("timed out") ||
+    lower.includes("failed to fill whole buffer") ||
+    lower.includes("tcp connect") ||
+    lower.includes("network")
+  ) {
+    return { source, code: "network_error", reason, retryable: true };
+  }
+
+  return {
+    source,
+    code: fallbackCode,
+    reason,
+    retryable: fallbackRetryable,
+  };
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const maybeError = error as { message?: unknown };
+    if (typeof maybeError.message === "string") {
+      return maybeError.message;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
 }
 
 /** Parse a binary frame header: [x(2B), y(2B), w(2B), h(2B)] — all big-endian. */
