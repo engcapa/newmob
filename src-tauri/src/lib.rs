@@ -93,6 +93,7 @@ pub fn run() {
             filebrowser::sftp_resume_transfer,
             filebrowser::open_sftp_window,
             appearance::list_system_fonts,
+            config::select_private_key_file,
             tunnel::list_tunnels,
             tunnel::upsert_tunnel,
             tunnel::delete_tunnel,

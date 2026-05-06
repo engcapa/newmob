@@ -8,6 +8,8 @@ interface SftpSidebarProps {
   authMethod: string;
   authData: string | null;
   cwdHint?: string | null;
+  cwdHintVersion?: number;
+  onRequestTerminalCwd?: () => boolean;
   onClose?: () => void;
   onDetach?: () => void;
   onOpenTerminalHere?: (path: string) => void;
@@ -20,9 +22,8 @@ interface SftpSidebarProps {
  * sidebar is only ~380px wide; the user can flip to side-by-side via the
  * orientation toggle in the header.
  *
- * Follow-cwd behaviour is delegated to <FileBrowser/>: it does a one-shot
- * sync the first time a cwd hint arrives after attach, then leaves the
- * panel alone unless the user clicks the explicit Sync button.
+ * Cwd sync is delegated to <FileBrowser/> and is strictly user-triggered:
+ * the panel only asks the terminal for cwd when the explicit Sync button is clicked.
  */
 export function SftpSidebar(props: SftpSidebarProps) {
   return (
@@ -34,6 +35,8 @@ export function SftpSidebar(props: SftpSidebarProps) {
       authMethod={props.authMethod}
       authData={props.authData}
       cwdHint={props.cwdHint}
+      cwdHintVersion={props.cwdHintVersion}
+      onRequestTerminalCwd={props.onRequestTerminalCwd}
       onDetach={props.onDetach}
       onClose={props.onClose}
       onOpenTerminalHere={props.onOpenTerminalHere}

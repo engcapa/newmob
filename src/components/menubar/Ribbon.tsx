@@ -33,6 +33,7 @@ export type RibbonCommand =
   | "macros"
   | "help"
   | "toggle-xserver"
+  | "toggle-compact"
   | "exit";
 
 interface RibbonProps {

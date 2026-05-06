@@ -216,6 +216,11 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
     case "list_system_fonts": {
       return [] as T;
     }
+    case "select_private_key_file": {
+      const current = (args?.currentPath as string | null) || "~/.ssh/id_ed25519";
+      const selected = window.prompt("Private key path", current);
+      return (selected?.trim() || null) as T;
+    }
     case "create_local_terminal": {
       throw new Error(
         "Local terminal is not available in browser preview. Use the Quick connect bar or 'New session' to open an SSH connection (e.g. demo@test.rebex.net).",

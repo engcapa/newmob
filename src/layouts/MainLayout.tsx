@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, useCallback } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Panel,
@@ -10,8 +10,10 @@ import { MenuBar } from "../components/menubar/MenuBar";
 import { Ribbon, type RibbonCommand } from "../components/menubar/Ribbon";
 import { QuickConnect } from "../components/quickconnect/QuickConnect";
 import { Sidebar } from "../components/sidebar/Sidebar";
+import { CompactTitleBar } from "../components/tabbar/CompactTitleBar";
 import { TabBar } from "../components/tabbar/TabBar";
 import { StatusBar } from "../components/statusbar/StatusBar";
+import { AppTitleBar } from "../components/window/AppTitleBar";
 import { TerminalPanel } from "../components/terminal/TerminalPanel";
 import { SessionEditor } from "../components/session/SessionEditor";
 import { AuthPrompt } from "../components/session/AuthPrompt";
@@ -23,13 +25,12 @@ import { isTauriRuntime } from "../lib/runtime";
 import { openSftpWindow } from "../lib/sftp";
 import { writeTerminal } from "../lib/ipc";
 import { encodeBase64 } from "../lib/ipc";
-import { parseSessionOptions } from "../lib/terminalProfile";
 import {
   clearDetachedHandoff,
   detachedWindowUrl,
   writeDetachedHandoff,
 } from "../components/filebrowser/SftpDetachedWindow";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, X } from "lucide-react";
 import type { SftpTabInfo } from "../types";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
@@ -50,17 +51,26 @@ export function MainLayout() {
     tabs,
     activeTabId,
     sidebarCollapsed,
+    compactMode,
     xServerEnabled,
     addTab,
     removeTab,
     setActiveTab,
     toggleSidebar,
     setSidebarCollapsed,
+    toggleCompactMode,
     toggleXServer,
     setStatusMessage,
   } = useAppStore();
-  const { loadSessions, markConnected } = useSessionStore();
+  const { loadSessions, markConnected, sessions } = useSessionStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  const terminalProfilesBySessionId = useMemo(() => {
+    const profiles = new Map<string, TerminalProfile | undefined>();
+    for (const session of sessions) {
+      profiles.set(session.id, getSessionTerminalProfile(session.options_json));
+    }
+    return profiles;
+  }, [sessions]);
   const tabsRef = useRef(tabs);
   const sidebarPanelRef = useRef<ImperativePanelHandle>(null);
   const lastSidebarSizeRef = useRef(22);
@@ -70,7 +80,10 @@ export function MainLayout() {
   const [newSessionInitialProto, setNewSessionInitialProto] = useState<string | undefined>();
   const [pendingAuth, setPendingAuth] = useState<PendingAuth | null>(null);
   const [attachedSidebars, setAttachedSidebars] = useState<Record<string, boolean>>({});
+  const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
   const [terminalCwds, setTerminalCwds] = useState<Record<string, string>>({});
+  const [terminalCwdVersions, setTerminalCwdVersions] = useState<Record<string, number>>({});
+  const [terminalCwdRequestTokens, setTerminalCwdRequestTokens] = useState<Record<string, number>>({});
   // Maps tab.id → backend terminal session ID (set once the SSH/local session connects).
   const terminalSessionIds = useRef<Record<string, string>>({});
 
@@ -80,9 +93,11 @@ export function MainLayout() {
 
   const handleTerminalCwd = useCallback((tabId: string, cwd: string) => {
     setTerminalCwds((prev) => (prev[tabId] === cwd ? prev : { ...prev, [tabId]: cwd }));
+    setTerminalCwdVersions((prev) => ({ ...prev, [tabId]: (prev[tabId] ?? 0) + 1 }));
     // Mirror the new cwd to any same-origin window (e.g. a detached SFTP
-    // popup) so its FileBrowser can follow OSC 7 even though only the
-    // main window hosts the terminal. We publish under both the raw tab
+    // popup) so it can offer the same last-known terminal cwd for explicit
+    // sync even though only the main window hosts the terminal. We publish
+    // under both the raw tab
     // id AND the `attached-${tabId}` key, because a detached window that
     // was split off from an attached SSH sidebar uses the prefixed id as
     // its SFTP session id and would otherwise never see these updates.
@@ -91,6 +106,15 @@ export function MainLayout() {
       broadcastCwdHint(`attached-${tabId}`, cwd);
     });
   }, []);
+
+  const requestTerminalCwd = useCallback((tabId: string): boolean => {
+    if (!terminalSessionIds.current[tabId]) {
+      setStatusMessage("Terminal is not ready yet");
+      return false;
+    }
+    setTerminalCwdRequestTokens((prev) => ({ ...prev, [tabId]: (prev[tabId] ?? 0) + 1 }));
+    return true;
+  }, [setStatusMessage]);
 
   const openDetachedSftp = useCallback((params: SftpTabInfo, title: string) => {
     // Use a DIFFERENT session id for the detached window so its backend
@@ -143,7 +167,7 @@ export function MainLayout() {
     if (!panel) return;
 
     const frame = requestAnimationFrame(() => {
-      if (sidebarCollapsed) {
+      if (compactMode || sidebarCollapsed) {
         panel.collapse();
       } else {
         panel.resize(lastSidebarSizeRef.current);
@@ -151,7 +175,25 @@ export function MainLayout() {
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [sidebarCollapsed]);
+  }, [compactMode, sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!compactMode) {
+      setCompactSidebarOpen(false);
+    }
+  }, [compactMode]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        toggleCompactMode();
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [toggleCompactMode]);
 
   const confirmExitWithOpenTabs = useCallback(() => {
     const currentTabs = tabsRef.current;
@@ -330,10 +372,6 @@ export function MainLayout() {
         authMethod,
         authData,
         optionsJson: session.options_json,
-        // Default ON for backwards compatibility — only suppress when the
-        // user explicitly disables OSC 7 auto-injection in the editor.
-        osc7AutoInject:
-          parseSessionOptions(session.options_json).osc7AutoInject !== false,
       },
       terminalProfile: getSessionTerminalProfile(session.options_json),
     });
@@ -448,11 +486,22 @@ export function MainLayout() {
         toggleXServer();
         break;
       case "view":
-        toggleSidebar();
+        if (compactMode) {
+          setCompactSidebarOpen((open) => !open);
+        } else {
+          toggleSidebar();
+        }
+        break;
+      case "toggle-compact":
+        toggleCompactMode();
         break;
       case "servers":
       case "sessions":
-        setSidebarCollapsed(false);
+        if (compactMode) {
+          setCompactSidebarOpen(true);
+        } else {
+          setSidebarCollapsed(false);
+        }
         break;
       case "split":
       case "multiexec":
@@ -496,6 +545,7 @@ export function MainLayout() {
     }
   }, [
     activeTab,
+    compactMode,
     handleNewSession,
     handleNewSftpSession,
     loadSessions,
@@ -507,6 +557,7 @@ export function MainLayout() {
     setActiveTab,
     setStatusMessage,
     setSidebarCollapsed,
+    toggleCompactMode,
     toggleSidebar,
     toggleXServer,
   ]);
@@ -517,37 +568,66 @@ export function MainLayout() {
 
   return (
     <div
-      className="w-full h-full flex flex-col"
+      data-compact-mode={compactMode}
+      className={`relative w-full h-full flex flex-col${compactMode ? " moba-compact-root" : ""}`}
       style={{ background: "var(--moba-chrome-bg)" }}
     >
-      <MenuBar activeTabClosable={!!activeTab?.closable} onCommand={handleCommand} />
-      <Ribbon xServerEnabled={xServerEnabled} onCommand={handleCommand} />
-      <QuickConnect
-        onConnectInput={handleQuickConnect}
-        onConnectSession={handleConnectSession}
-        onHome={() => setActiveTab("welcome")}
-      />
+      {!compactMode && <AppTitleBar />}
+      {!compactMode && (
+        <>
+          <MenuBar activeTabClosable={!!activeTab?.closable} onCommand={handleCommand} />
+          <Ribbon xServerEnabled={xServerEnabled} onCommand={handleCommand} />
+          <QuickConnect
+            onConnectInput={handleQuickConnect}
+            onConnectSession={handleConnectSession}
+            onHome={() => setActiveTab("welcome")}
+          />
+        </>
+      )}
+      {compactMode && (
+        <CompactTitleBar
+          activeTabClosable={!!activeTab?.closable}
+          onCommand={handleCommand}
+          onToggleSidebarDrawer={() => setCompactSidebarOpen((open) => !open)}
+        />
+      )}
 
       <div className="flex-1 flex min-h-0">
-        <PanelGroup direction="horizontal" autoSaveId="main-layout">
+        {!compactMode && sidebarCollapsed && (
+          <div data-testid="collapsed-sidebar-rail" className="h-full w-[26px] shrink-0 overflow-hidden">
+            <Sidebar
+              compact
+              onNewSession={handleNewSession}
+              onNewSftpSession={handleNewSftpSession}
+              onEditSession={handleEditSession}
+              onConnectSession={handleConnectSession}
+            />
+          </div>
+        )}
+
+        <PanelGroup direction="horizontal" autoSaveId="main-layout" className="flex-1 min-w-0">
           <Panel
             ref={sidebarPanelRef}
             defaultSize={22}
             minSize={15}
             maxSize={40}
             collapsible
-            collapsedSize={2}
-            onCollapse={() => setSidebarCollapsed(true)}
-            onExpand={() => setSidebarCollapsed(false)}
+            collapsedSize={0}
+            onCollapse={() => {
+              if (!compactMode) setSidebarCollapsed(true);
+            }}
+            onExpand={() => {
+              if (!compactMode) setSidebarCollapsed(false);
+            }}
             onResize={(size) => {
               if (size > 2) {
                 lastSidebarSizeRef.current = size;
               }
             }}
           >
-            <div className="h-full overflow-hidden">
+            <div className="h-full overflow-hidden" style={compactMode || sidebarCollapsed ? { display: "none" } : undefined}>
               <Sidebar
-                compact={sidebarCollapsed}
+                compact={compactMode}
                 onNewSession={handleNewSession}
                 onNewSftpSession={handleNewSftpSession}
                 onEditSession={handleEditSession}
@@ -556,11 +636,14 @@ export function MainLayout() {
             </div>
           </Panel>
 
-          <PanelResizeHandle className="w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize" />
+          <PanelResizeHandle
+            data-testid="main-sidebar-resize-handle"
+            className={compactMode || sidebarCollapsed ? "hidden" : "w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize"}
+          />
 
           <Panel>
             <div className="h-full flex flex-col min-w-0">
-              <TabBar />
+              {!compactMode && <TabBar />}
               <div className="flex-1 min-h-0 overflow-hidden relative">
                 {/* Welcome panel */}
                 {(activeTab?.type === "welcome" || !activeTab) && (
@@ -576,6 +659,9 @@ export function MainLayout() {
                 {terminalTabs.map((tab) => {
                   const isActive = activeTabId === tab.id;
                   const sidebarOpen = !!attachedSidebars[tab.id] && !!tab.ssh;
+                  const liveTerminalProfile = tab.sessionId
+                    ? terminalProfilesBySessionId.get(tab.sessionId) ?? tab.terminalProfile
+                    : tab.terminalProfile;
                   const terminalNode = (
                     <div className="h-full w-full relative">
                       <TerminalPanel
@@ -583,9 +669,10 @@ export function MainLayout() {
                         tabTitle={tab.title}
                         ssh={tab.ssh}
                         localShell={tab.localShell}
-                        terminalProfile={tab.terminalProfile}
+                        terminalProfile={liveTerminalProfile}
                         visible={isActive}
                         onCwdChange={tab.ssh ? (cwd) => handleTerminalCwd(tab.id, cwd) : undefined}
+                        cwdRequestToken={terminalCwdRequestTokens[tab.id] ?? 0}
                         onSessionReady={(sid) => { terminalSessionIds.current[tab.id] = sid; }}
                       />
                       {tab.ssh && (
@@ -616,8 +703,10 @@ export function MainLayout() {
                       authMethod={tab.ssh.authMethod}
                       authData={tab.ssh.authData}
                       cwdHint={terminalCwds[tab.id] ?? null}
+                      cwdHintVersion={terminalCwdVersions[tab.id] ?? 0}
                       title={`SFTP — ${tab.ssh.username}@${tab.ssh.host}`}
                       onClose={() => toggleAttachedSidebar(tab.id)}
+                      onRequestTerminalCwd={() => requestTerminalCwd(tab.id)}
                       onOpenTerminalHere={(p) => {
                         const sid = terminalSessionIds.current[tab.id];
                         if (!sid) return;
@@ -759,7 +848,20 @@ export function MainLayout() {
         </PanelGroup>
       </div>
 
-      <StatusBar />
+      {!compactMode && <StatusBar />}
+
+      {compactMode && compactSidebarOpen && (
+        <CompactSidebarDrawer
+          onClose={() => setCompactSidebarOpen(false)}
+          onNewSession={handleNewSession}
+          onNewSftpSession={handleNewSftpSession}
+          onEditSession={handleEditSession}
+          onConnectSession={(session) => {
+            setCompactSidebarOpen(false);
+            handleConnectSession(session);
+          }}
+        />
+      )}
 
       {showSessionEditor && (
         <SessionEditor
@@ -784,6 +886,71 @@ export function MainLayout() {
           onCancel={() => setPendingAuth(null)}
         />
       )}
+    </div>
+  );
+}
+
+function CompactSidebarDrawer({
+  onClose,
+  onNewSession,
+  onNewSftpSession,
+  onEditSession,
+  onConnectSession,
+}: {
+  onClose: () => void;
+  onNewSession: (groupPath?: string | null) => void;
+  onNewSftpSession: () => void;
+  onEditSession: (session: SessionConfig) => void;
+  onConnectSession: (session: SessionConfig) => void;
+}) {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div data-testid="compact-sidebar-drawer" className="absolute inset-x-0 top-8 bottom-0 z-[1200] pointer-events-none">
+      <button
+        type="button"
+        aria-label="Close sessions drawer"
+        className="absolute inset-0 bg-black/10 pointer-events-auto"
+        onClick={onClose}
+      />
+      <div
+        className="absolute left-0 top-0 bottom-0 w-[min(380px,calc(100vw-44px))] pointer-events-auto shadow-xl"
+        style={{
+          background: "var(--moba-sidebar-bg)",
+          borderRight: "1px solid var(--moba-sidebar-border)",
+        }}
+      >
+        <div
+          className="h-7 flex items-center px-2 border-b text-[12px] font-semibold"
+          style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}
+        >
+          Sessions
+          <button
+            type="button"
+            title="Close sessions drawer"
+            aria-label="Close sessions drawer"
+            className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded hover:bg-[var(--moba-hover)]"
+            onClick={onClose}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+        <div className="absolute left-0 right-0 top-7 bottom-0">
+          <Sidebar
+            compact={false}
+            onNewSession={onNewSession}
+            onNewSftpSession={onNewSftpSession}
+            onEditSession={onEditSession}
+            onConnectSession={onConnectSession}
+          />
+        </div>
+      </div>
     </div>
   );
 }

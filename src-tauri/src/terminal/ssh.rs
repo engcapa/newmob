@@ -1,6 +1,7 @@
 use async_trait::async_trait;
-use russh::keys::key::PublicKey;
-use russh::{client, ChannelId};
+use russh::keys::key::{self as ssh_key, PublicKey, SignatureHash};
+use russh::{client, kex, ChannelId, Pty};
+use std::borrow::Cow;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -58,8 +59,90 @@ pub enum SshAuth {
     Agent,
 }
 
+const COMPAT_KEX_ORDER: &[kex::Name] = &[
+    kex::CURVE25519,
+    kex::CURVE25519_PRE_RFC_8731,
+    kex::ECDH_SHA2_NISTP256,
+    kex::ECDH_SHA2_NISTP384,
+    kex::ECDH_SHA2_NISTP521,
+    kex::DH_G16_SHA512,
+    kex::DH_G14_SHA256,
+    kex::DH_G14_SHA1,
+    kex::EXTENSION_SUPPORT_AS_CLIENT,
+    kex::EXTENSION_SUPPORT_AS_SERVER,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+    kex::EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+];
+
+const COMPAT_HOST_KEY_ORDER: &[ssh_key::Name] = &[
+    ssh_key::ED25519,
+    ssh_key::ECDSA_SHA2_NISTP256,
+    ssh_key::ECDSA_SHA2_NISTP384,
+    ssh_key::ECDSA_SHA2_NISTP521,
+    ssh_key::RSA_SHA2_512,
+    ssh_key::RSA_SHA2_256,
+    ssh_key::SSH_RSA,
+];
+
+const DEFAULT_PTY_MODES: &[(Pty, u32)] = &[
+    (Pty::VINTR, 3),
+    (Pty::VQUIT, 28),
+    (Pty::VERASE, 127),
+    (Pty::VKILL, 21),
+    (Pty::VEOF, 4),
+    (Pty::VSTART, 17),
+    (Pty::VSTOP, 19),
+    (Pty::VSUSP, 26),
+    (Pty::VREPRINT, 18),
+    (Pty::VWERASE, 23),
+    (Pty::VLNEXT, 22),
+    (Pty::IGNPAR, 0),
+    (Pty::PARMRK, 0),
+    (Pty::INPCK, 0),
+    (Pty::ISTRIP, 0),
+    (Pty::INLCR, 0),
+    (Pty::IGNCR, 0),
+    (Pty::ICRNL, 1),
+    (Pty::IXON, 1),
+    (Pty::IXANY, 0),
+    (Pty::IXOFF, 0),
+    (Pty::IMAXBEL, 1),
+    (Pty::IUTF8, 1),
+    (Pty::ISIG, 1),
+    (Pty::ICANON, 1),
+    (Pty::ECHO, 1),
+    (Pty::ECHOE, 1),
+    (Pty::ECHOK, 1),
+    (Pty::ECHONL, 0),
+    (Pty::NOFLSH, 0),
+    (Pty::TOSTOP, 0),
+    (Pty::IEXTEN, 1),
+    (Pty::ECHOCTL, 1),
+    (Pty::ECHOKE, 1),
+    (Pty::OPOST, 1),
+    (Pty::OLCUC, 0),
+    (Pty::ONLCR, 1),
+    (Pty::OCRNL, 0),
+    (Pty::ONOCR, 0),
+    (Pty::ONLRET, 0),
+    (Pty::CS7, 0),
+    (Pty::CS8, 1),
+    (Pty::PARENB, 0),
+    (Pty::PARODD, 0),
+    (Pty::TTY_OP_ISPEED, 38400),
+    (Pty::TTY_OP_OSPEED, 38400),
+];
+
 fn build_client_config(network: Option<&NetworkSettings>) -> Arc<client::Config> {
     let mut cfg = client::Config::default();
+    let preferred = cfg.preferred.clone();
+    cfg.preferred = russh::Preferred {
+        kex: Cow::Borrowed(COMPAT_KEX_ORDER),
+        key: Cow::Borrowed(COMPAT_HOST_KEY_ORDER),
+        cipher: preferred.cipher,
+        mac: preferred.mac,
+        compression: preferred.compression,
+    };
     if let Some(n) = network {
         if let Some(d) = n.keepalive_duration() {
             cfg.keepalive_interval = Some(d);
@@ -69,7 +152,11 @@ fn build_client_config(network: Option<&NetworkSettings>) -> Arc<client::Config>
     Arc::new(cfg)
 }
 
-async fn authenticate(handle: &mut client::Handle<SshHandler>, username: &str, auth: SshAuth) -> Result<(), String> {
+async fn authenticate(
+    handle: &mut client::Handle<SshHandler>,
+    username: &str,
+    auth: SshAuth,
+) -> Result<(), String> {
     match auth {
         SshAuth::Password(password) => {
             let ok = handle
@@ -84,19 +171,56 @@ async fn authenticate(handle: &mut client::Handle<SshHandler>, username: &str, a
             let key_path = shellexpand::tilde(&key_path).to_string();
             let key = russh_keys::load_secret_key(&key_path, None)
                 .map_err(|e| format!("Failed to load key {}: {}", key_path, e))?;
-            let ok = handle
-                .authenticate_publickey(username, Arc::new(key))
-                .await
-                .map_err(|e| format!("SSH key auth failed: {}", e))?;
-            if !ok {
-                return Err("SSH key authentication rejected".to_string());
-            }
+            authenticate_private_key(handle, username, key).await?;
         }
         SshAuth::Agent => {
             return Err("SSH agent auth not yet implemented".to_string());
         }
     }
     Ok(())
+}
+
+async fn authenticate_private_key(
+    handle: &mut client::Handle<SshHandler>,
+    username: &str,
+    key: ssh_key::KeyPair,
+) -> Result<(), String> {
+    let attempts = private_key_auth_attempts(&key);
+    let mut tried = Vec::with_capacity(attempts.len());
+
+    for key in attempts {
+        let algorithm = key.name().to_string();
+        tried.push(algorithm.clone());
+        let ok = handle
+            .authenticate_publickey(username, Arc::new(key))
+            .await
+            .map_err(|e| format!("SSH key auth failed using {}: {}", algorithm, e))?;
+        if ok {
+            return Ok(());
+        }
+    }
+
+    Err(format!(
+        "SSH key authentication rejected (tried {})",
+        tried.join(", ")
+    ))
+}
+
+fn private_key_auth_attempts(key: &ssh_key::KeyPair) -> Vec<ssh_key::KeyPair> {
+    let rsa_attempts = [
+        SignatureHash::SHA2_512,
+        SignatureHash::SHA2_256,
+        SignatureHash::SHA1,
+    ]
+    .into_iter()
+    .filter_map(|hash| key.with_signature_hash(hash))
+    .collect::<Vec<_>>();
+
+    if rsa_attempts.is_empty() {
+        vec![key.clone()]
+    } else {
+        rsa_attempts
+    }
 }
 
 pub async fn connect_ssh(
@@ -136,7 +260,15 @@ pub async fn connect_ssh(
         .map_err(|e| format!("Failed to open SSH channel: {}", e))?;
 
     channel
-        .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, &[])
+        .request_pty(
+            false,
+            "xterm-256color",
+            cols as u32,
+            rows as u32,
+            0,
+            0,
+            DEFAULT_PTY_MODES,
+        )
         .await
         .map_err(|e| format!("Failed to request PTY: {}", e))?;
 

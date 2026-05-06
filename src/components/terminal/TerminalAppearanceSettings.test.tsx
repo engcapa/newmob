@@ -56,6 +56,24 @@ describe("TerminalAppearanceSettings", () => {
     expect(onProfileChange).toHaveBeenLastCalledWith(expect.objectContaining({ theme: "kanagawa-wave" }));
   });
 
+  it("merges successive edits before the parent rerenders", async () => {
+    const user = userEvent.setup();
+    const { onProfileChange } = renderAppearance();
+
+    await waitFor(() => expect(screen.getByRole("option", { name: "JetBrains Mono" })).toBeInTheDocument());
+    await user.selectOptions(screen.getByLabelText("Terminal font"), "JetBrains Mono");
+    const fontSize = screen.getByLabelText("Terminal font size");
+    await user.clear(fontSize);
+    await user.type(fontSize, "18");
+    await user.click(screen.getByRole("button", { name: "Use theme Kanagawa Wave" }));
+
+    expect(onProfileChange).toHaveBeenLastCalledWith(expect.objectContaining({
+      fontFamily: expect.stringContaining("JetBrains Mono"),
+      fontSize: 18,
+      theme: "kanagawa-wave",
+    }));
+  });
+
   it("renders terminal profile controls before the bottom preview", async () => {
     renderAppearance();
 

@@ -6,9 +6,9 @@
  * in its own window we want both windows to stay in sync:
  *
  *   1. The transfer queue (uploads/downloads kicked off in either window)
- *   2. The terminal cwd hint that drives "follow OSC 7" — only the main
- *      window observes the terminal, so a detached SFTP window has to be
- *      told what `cwd` the user just `cd`-ed into.
+ *   2. The last terminal cwd hint — only the main window observes terminal
+ *      OSC 7 responses, so a detached SFTP window has to be told the latest
+ *      cwd available for explicit user-triggered sync.
  *
  * We use a single `BroadcastChannel` so messages stay scoped to same-origin
  * windows and never round-trip through the disk. Each broadcast is tagged
@@ -145,7 +145,7 @@ export function detachSftpSync(): void {
   channel = null;
 }
 
-/** Broadcast that the terminal driving `sessionId` just changed cwd. */
+/** Broadcast the latest terminal cwd hint for `sessionId`. */
 export function broadcastCwdHint(sessionId: string, cwd: string | null): void {
   if (lastCwd.get(sessionId) === cwd) return;
   lastCwd.set(sessionId, cwd);

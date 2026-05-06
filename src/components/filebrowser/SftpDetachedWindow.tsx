@@ -188,8 +188,8 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
   // the popup never *looks* blank to the user.
   const [handoffTimedOut, setHandoffTimedOut] = useState(false);
   // Latest cwd hint broadcast by the parent window (terminal OSC 7). Lets
-  // a detached SFTP view follow the live shell `cd` even though it can't
-  // see the terminal directly. We subscribe under the PARENT session id
+  // a detached SFTP view offer last-known terminal cwd sync even though it
+  // can't see the terminal directly. We subscribe under the PARENT session id
   // because the main window broadcasts under that id; fall back to the
   // detached id for older builds that didn't carry a parentSessionId.
   const cwdSubscriptionId = params?.parentSessionId ?? sessionId;
@@ -234,8 +234,8 @@ export function SftpDetachedWindow({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId, params]);
 
-  // Subscribe to live cwd updates from the main window so the panel
-  // follows OSC 7 even though we don't host a terminal here.
+  // Subscribe to cwd hint updates from the main window; detached SFTP can
+  // use them for explicit Sync, but it no longer auto-follows the terminal.
   useEffect(() => {
     return subscribeCwdHint((sid, cwd) => {
       if (sid === cwdSubscriptionId) setCwdHint(cwd);
