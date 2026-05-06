@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Minus, Plus } from "lucide-react";
 import {
   TERMINAL_THEME_DEFINITIONS,
@@ -58,6 +58,11 @@ export function TerminalAppearanceSettings({
   const [fg, setFg] = useState(colors.foreground);
   const [fontSizeText, setFontSizeText] = useState(String(profile.fontSize));
   const [scrollbackText, setScrollbackText] = useState(String(profile.scrollback));
+  const draftProfileRef = useRef(profile);
+
+  useEffect(() => {
+    draftProfileRef.current = profile;
+  }, [profile]);
 
   useEffect(() => {
     const nextColors = terminalProfileThemeColors(profile);
@@ -74,7 +79,9 @@ export function TerminalAppearanceSettings({
   }, [profile.scrollback]);
 
   const updateProfile = (patch: Partial<TerminalProfile>) => {
-    onProfileChange({ ...profile, ...patch });
+    const next = { ...draftProfileRef.current, ...patch };
+    draftProfileRef.current = next;
+    onProfileChange(next);
   };
 
   const updateCustomColor = (nextBg: string, nextFg: string) => {

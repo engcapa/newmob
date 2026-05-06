@@ -134,6 +134,9 @@ export function TerminalPanel({
     initialProfileRef.current = terminalProfile ?? loadGlobalTerminalProfile();
   }
   const initialProfile = initialProfileRef.current;
+  const appliedTerminalProfileSignatureRef = useRef<string | null>(
+    terminalProfile ? terminalProfileSignature(terminalProfile) : null,
+  );
 
   const [fontFamily, setFontFamily] = useState(initialProfile.fontFamily);
   const [fontSize, setFontSize] = useState(initialProfile.fontSize);
@@ -141,11 +144,12 @@ export function TerminalPanel({
   const [showScrollbar, setShowScrollbar] = useState(initialProfile.showScrollbar);
   const [readOnly, setReadOnly] = useState(initialProfile.readOnly);
   const [themeName, setThemeName] = useState(initialProfile.theme || theme);
-  const [cursorStyle] = useState(initialProfile.cursorStyle);
-  const [cursorBlink] = useState(initialProfile.cursorBlink);
-  const [scrollback] = useState(initialProfile.scrollback);
+  const [cursorStyle, setCursorStyle] = useState(initialProfile.cursorStyle);
+  const [cursorBlink, setCursorBlink] = useState(initialProfile.cursorBlink);
+  const [scrollback, setScrollback] = useState(initialProfile.scrollback);
   const [syntaxMode, setSyntaxMode] = useState<TerminalSyntaxMode>(initialProfile.syntaxMode);
   const [loggingActive, setLoggingActive] = useState(initialProfile.loggingEnabled);
+  const [multilinePasteConfirm, setMultilinePasteConfirm] = useState(initialProfile.multilinePasteConfirm);
   const [fullscreen, setFullscreen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [eventLogOpen, setEventLogOpen] = useState(false);
@@ -217,6 +221,7 @@ export function TerminalPanel({
     cursorBlink,
     showScrollbar,
     readOnly,
+    multilinePasteConfirm,
     syntaxMode,
     loggingEnabled: loggingActive,
   }), [
@@ -227,6 +232,7 @@ export function TerminalPanel({
     fontSize,
     initialProfile,
     loggingActive,
+    multilinePasteConfirm,
     readOnly,
     scrollback,
     showScrollbar,
@@ -341,7 +347,7 @@ export function TerminalPanel({
         : window.prompt("Paste text") ?? "";
       if (!text) return;
       if (
-        initialProfile.multilinePasteConfirm &&
+        multilinePasteConfirm &&
         /\r?\n/.test(text) &&
         !window.confirm(`Paste ${text.split(/\r?\n/).length} lines into this terminal?`)
       ) {
@@ -352,7 +358,7 @@ export function TerminalPanel({
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : "Clipboard paste failed");
     }
-  }, [focusTerminal, initialProfile.multilinePasteConfirm, setStatusMessage, writeInput]);
+  }, [focusTerminal, multilinePasteConfirm, setStatusMessage, writeInput]);
 
   const saveBufferToFile = useCallback(() => {
     const term = termRef.current;
@@ -706,6 +712,31 @@ export function TerminalPanel({
   useEffect(() => {
     loggingActiveRef.current = loggingActive;
   }, [loggingActive]);
+
+  useEffect(() => {
+    if (!terminalProfile) {
+      appliedTerminalProfileSignatureRef.current = null;
+      return;
+    }
+
+    const signature = terminalProfileSignature(terminalProfile);
+    if (appliedTerminalProfileSignatureRef.current === signature) return;
+    appliedTerminalProfileSignatureRef.current = signature;
+    initialProfileRef.current = terminalProfile;
+
+    setFontFamily(terminalProfile.fontFamily);
+    setFontSize(terminalProfile.fontSize);
+    setFontLigatures(terminalProfile.fontLigatures);
+    setShowScrollbar(terminalProfile.showScrollbar);
+    setReadOnly(terminalProfile.readOnly);
+    setThemeName(terminalProfile.theme || theme);
+    setCursorStyle(terminalProfile.cursorStyle);
+    setCursorBlink(terminalProfile.cursorBlink);
+    setScrollback(terminalProfile.scrollback);
+    setSyntaxMode(terminalProfile.syntaxMode);
+    setLoggingActive(terminalProfile.loggingEnabled);
+    setMultilinePasteConfirm(terminalProfile.multilinePasteConfirm);
+  }, [terminalProfile, theme]);
 
   useEffect(() => {
     macroRecordingRef.current = macroRecording;
@@ -1495,6 +1526,10 @@ function timestampFilePart(): string {
 
 function safeFilePart(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "terminal";
+}
+
+function terminalProfileSignature(profile: TerminalProfile): string {
+  return JSON.stringify(profile);
 }
 
 function escapeHtml(value: string): string {

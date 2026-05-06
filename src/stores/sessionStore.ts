@@ -117,9 +117,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   updateSession: async (config) => {
     await saveSession(config);
-    set((s) => ({
-      sessions: s.sessions.map((x) => (x.id === config.id ? config : x)),
-    }));
+    await reloadSessionState(set);
   },
 
   duplicateSession: async (id) => {

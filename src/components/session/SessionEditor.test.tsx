@@ -328,4 +328,72 @@ describe("SessionEditor SSH settings tabs", () => {
     });
     expect(JSON.parse(savedConfig.options_json).terminalProfile.fontFamily).toContain("JetBrains Mono");
   });
+
+  it("persists edited Terminal settings for an existing session", async () => {
+    const user = userEvent.setup();
+    const session = {
+      id: "existing-terminal-profile",
+      name: "prod-shell",
+      session_type: "SSH",
+      group_path: null,
+      host: "prod.example.com",
+      port: 22,
+      username: "root",
+      auth_method: "Password" as const,
+      options_json: JSON.stringify({
+        compression: true,
+        terminalProfile: {
+          fontFamily: "Consolas, monospace",
+          fontSize: 14,
+          fontLigatures: false,
+          theme: "classic",
+          scrollback: 10000,
+          cursorStyle: "block",
+          cursorBlink: true,
+          showScrollbar: true,
+          copyOnSelect: false,
+          rightClickBehavior: "menu",
+          readOnly: false,
+          bracketedPaste: true,
+          multilinePasteConfirm: true,
+          syntaxMode: "default",
+          loggingEnabled: false,
+        },
+      }),
+      created_at: 10,
+      updated_at: 10,
+      last_connected_at: 20,
+      sort_order: 0,
+    };
+    const { onClose } = renderEditor(session);
+
+    await user.click(screen.getByRole("button", { name: /terminal settings/i }));
+    await waitFor(() => expect(screen.getByRole("option", { name: "JetBrains Mono" })).toBeInTheDocument());
+
+    await user.selectOptions(screen.getByLabelText("Terminal font"), "JetBrains Mono");
+    const fontSize = screen.getByLabelText("Terminal font size");
+    await user.clear(fontSize);
+    await user.type(fontSize, "18");
+    await user.click(screen.getByRole("button", { name: /use theme termius dark/i }));
+    await user.click(screen.getByRole("button", { name: "OK" }));
+
+    expect(ipcMocks.saveSession).toHaveBeenCalledTimes(1);
+    const savedConfig = ipcMocks.saveSession.mock.calls[0][0];
+    const savedOptions = JSON.parse(savedConfig.options_json);
+    expect(savedConfig).toMatchObject({
+      id: "existing-terminal-profile",
+      name: "prod-shell",
+      host: "prod.example.com",
+      username: "root",
+      created_at: 10,
+      last_connected_at: 20,
+    });
+    expect(savedOptions.compression).toBe(true);
+    expect(savedOptions.terminalProfile).toMatchObject({
+      fontSize: 18,
+      theme: "termius-dark",
+    });
+    expect(savedOptions.terminalProfile.fontFamily).toContain("JetBrains Mono");
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });

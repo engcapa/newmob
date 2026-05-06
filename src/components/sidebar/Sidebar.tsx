@@ -67,6 +67,7 @@ export function Sidebar({ onNewSession, onNewSftpSession, onEditSession, onConne
   const handleSideTabClick = (tab: SideTab) => {
     if (compact) {
       setActiveSideTab(tab);
+      setSidebarCollapsed(false);
       return;
     }
 

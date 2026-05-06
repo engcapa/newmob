@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState, useCallback } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   Panel,
@@ -63,8 +63,15 @@ export function MainLayout() {
     toggleXServer,
     setStatusMessage,
   } = useAppStore();
-  const { loadSessions, markConnected } = useSessionStore();
+  const { loadSessions, markConnected, sessions } = useSessionStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
+  const terminalProfilesBySessionId = useMemo(() => {
+    const profiles = new Map<string, TerminalProfile | undefined>();
+    for (const session of sessions) {
+      profiles.set(session.id, getSessionTerminalProfile(session.options_json));
+    }
+    return profiles;
+  }, [sessions]);
   const tabsRef = useRef(tabs);
   const sidebarPanelRef = useRef<ImperativePanelHandle>(null);
   const lastSidebarSizeRef = useRef(22);
@@ -562,14 +569,26 @@ export function MainLayout() {
       )}
 
       <div className="flex-1 flex min-h-0">
-        <PanelGroup direction="horizontal" autoSaveId="main-layout">
+        {!compactMode && sidebarCollapsed && (
+          <div data-testid="collapsed-sidebar-rail" className="h-full w-[26px] shrink-0 overflow-hidden">
+            <Sidebar
+              compact
+              onNewSession={handleNewSession}
+              onNewSftpSession={handleNewSftpSession}
+              onEditSession={handleEditSession}
+              onConnectSession={handleConnectSession}
+            />
+          </div>
+        )}
+
+        <PanelGroup direction="horizontal" autoSaveId="main-layout" className="flex-1 min-w-0">
           <Panel
             ref={sidebarPanelRef}
             defaultSize={22}
             minSize={15}
             maxSize={40}
             collapsible
-            collapsedSize={compactMode ? 0 : 2}
+            collapsedSize={0}
             onCollapse={() => {
               if (!compactMode) setSidebarCollapsed(true);
             }}
@@ -582,9 +601,9 @@ export function MainLayout() {
               }
             }}
           >
-            <div className="h-full overflow-hidden" style={compactMode ? { display: "none" } : undefined}>
+            <div className="h-full overflow-hidden" style={compactMode || sidebarCollapsed ? { display: "none" } : undefined}>
               <Sidebar
-                compact={compactMode || sidebarCollapsed}
+                compact={compactMode}
                 onNewSession={handleNewSession}
                 onNewSftpSession={handleNewSftpSession}
                 onEditSession={handleEditSession}
@@ -593,7 +612,10 @@ export function MainLayout() {
             </div>
           </Panel>
 
-          <PanelResizeHandle className={compactMode ? "hidden" : "w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize"} />
+          <PanelResizeHandle
+            data-testid="main-sidebar-resize-handle"
+            className={compactMode || sidebarCollapsed ? "hidden" : "w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize"}
+          />
 
           <Panel>
             <div className="h-full flex flex-col min-w-0">
@@ -613,6 +635,9 @@ export function MainLayout() {
                 {terminalTabs.map((tab) => {
                   const isActive = activeTabId === tab.id;
                   const sidebarOpen = !!attachedSidebars[tab.id] && !!tab.ssh;
+                  const liveTerminalProfile = tab.sessionId
+                    ? terminalProfilesBySessionId.get(tab.sessionId) ?? tab.terminalProfile
+                    : tab.terminalProfile;
                   const terminalNode = (
                     <div className="h-full w-full relative">
                       <TerminalPanel
@@ -620,7 +645,7 @@ export function MainLayout() {
                         tabTitle={tab.title}
                         ssh={tab.ssh}
                         localShell={tab.localShell}
-                        terminalProfile={tab.terminalProfile}
+                        terminalProfile={liveTerminalProfile}
                         visible={isActive}
                         onCwdChange={tab.ssh ? (cwd) => handleTerminalCwd(tab.id, cwd) : undefined}
                         onSessionReady={(sid) => { terminalSessionIds.current[tab.id] = sid; }}
