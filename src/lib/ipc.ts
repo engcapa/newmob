@@ -222,6 +222,10 @@ export async function listSystemFonts(): Promise<string[]> {
   return invoke<string[]>("list_system_fonts", {});
 }
 
+export async function selectPrivateKeyFile(currentPath?: string): Promise<string | null> {
+  return invoke<string | null>("select_private_key_file", { currentPath: currentPath ?? null });
+}
+
 // ── VNC ────────────────────────────────────────────────────────────
 
 export interface VncConnectResult {

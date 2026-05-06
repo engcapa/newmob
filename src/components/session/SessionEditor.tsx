@@ -23,7 +23,7 @@ import {
   HelpCircle,
 } from "lucide-react";
 import { useSessionStore } from "../../stores/sessionStore";
-import { testSshConnection } from "../../lib/ipc";
+import { selectPrivateKeyFile, testSshConnection } from "../../lib/ipc";
 import {
   getSessionNetworkSettings,
   ipKindToLabel,
@@ -1091,12 +1091,16 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     if (parsed.port) setPort(String(parsed.port));
   };
 
-  const handleBrowseKey = () => {
-    const next = window.prompt("Private key path", keyPath || "~/.ssh/id_ed25519");
-    if (next !== null) {
-      setKeyPath(next.trim());
+  const handleBrowseKey = async () => {
+    setSaveError(null);
+    try {
+      const selected = await selectPrivateKeyFile(keyPath || "~/.ssh/id_ed25519");
+      if (!selected) return;
+      setKeyPath(selected.trim());
       setUsePrivKey(true);
       handleAuthRadio("privatekey");
+    } catch (err) {
+      setSaveError(`Could not open private key chooser: ${String(err)}`);
     }
   };
 
