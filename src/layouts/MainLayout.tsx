@@ -10,6 +10,7 @@ import { MenuBar } from "../components/menubar/MenuBar";
 import { Ribbon, type RibbonCommand } from "../components/menubar/Ribbon";
 import { QuickConnect } from "../components/quickconnect/QuickConnect";
 import { Sidebar } from "../components/sidebar/Sidebar";
+import { CompactTitleBar } from "../components/tabbar/CompactTitleBar";
 import { TabBar } from "../components/tabbar/TabBar";
 import { StatusBar } from "../components/statusbar/StatusBar";
 import { TerminalPanel } from "../components/terminal/TerminalPanel";
@@ -29,7 +30,7 @@ import {
   detachedWindowUrl,
   writeDetachedHandoff,
 } from "../components/filebrowser/SftpDetachedWindow";
-import { FolderOpen } from "lucide-react";
+import { FolderOpen, X } from "lucide-react";
 import type { SftpTabInfo } from "../types";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
@@ -50,12 +51,14 @@ export function MainLayout() {
     tabs,
     activeTabId,
     sidebarCollapsed,
+    compactMode,
     xServerEnabled,
     addTab,
     removeTab,
     setActiveTab,
     toggleSidebar,
     setSidebarCollapsed,
+    toggleCompactMode,
     toggleXServer,
     setStatusMessage,
   } = useAppStore();
@@ -70,6 +73,7 @@ export function MainLayout() {
   const [newSessionInitialProto, setNewSessionInitialProto] = useState<string | undefined>();
   const [pendingAuth, setPendingAuth] = useState<PendingAuth | null>(null);
   const [attachedSidebars, setAttachedSidebars] = useState<Record<string, boolean>>({});
+  const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
   const [terminalCwds, setTerminalCwds] = useState<Record<string, string>>({});
   // Maps tab.id → backend terminal session ID (set once the SSH/local session connects).
   const terminalSessionIds = useRef<Record<string, string>>({});
@@ -143,7 +147,7 @@ export function MainLayout() {
     if (!panel) return;
 
     const frame = requestAnimationFrame(() => {
-      if (sidebarCollapsed) {
+      if (compactMode || sidebarCollapsed) {
         panel.collapse();
       } else {
         panel.resize(lastSidebarSizeRef.current);
@@ -151,7 +155,25 @@ export function MainLayout() {
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [sidebarCollapsed]);
+  }, [compactMode, sidebarCollapsed]);
+
+  useEffect(() => {
+    if (!compactMode) {
+      setCompactSidebarOpen(false);
+    }
+  }, [compactMode]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        toggleCompactMode();
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [toggleCompactMode]);
 
   const confirmExitWithOpenTabs = useCallback(() => {
     const currentTabs = tabsRef.current;
@@ -432,11 +454,22 @@ export function MainLayout() {
         toggleXServer();
         break;
       case "view":
-        toggleSidebar();
+        if (compactMode) {
+          setCompactSidebarOpen((open) => !open);
+        } else {
+          toggleSidebar();
+        }
+        break;
+      case "toggle-compact":
+        toggleCompactMode();
         break;
       case "servers":
       case "sessions":
-        setSidebarCollapsed(false);
+        if (compactMode) {
+          setCompactSidebarOpen(true);
+        } else {
+          setSidebarCollapsed(false);
+        }
         break;
       case "split":
       case "multiexec":
@@ -480,6 +513,7 @@ export function MainLayout() {
     }
   }, [
     activeTab,
+    compactMode,
     handleNewSession,
     handleNewSftpSession,
     loadSessions,
@@ -491,6 +525,7 @@ export function MainLayout() {
     setActiveTab,
     setStatusMessage,
     setSidebarCollapsed,
+    toggleCompactMode,
     toggleSidebar,
     toggleXServer,
   ]);
@@ -501,16 +536,28 @@ export function MainLayout() {
 
   return (
     <div
-      className="w-full h-full flex flex-col"
+      data-compact-mode={compactMode}
+      className={`relative w-full h-full flex flex-col${compactMode ? " moba-compact-root" : ""}`}
       style={{ background: "var(--moba-chrome-bg)" }}
     >
-      <MenuBar activeTabClosable={!!activeTab?.closable} onCommand={handleCommand} />
-      <Ribbon xServerEnabled={xServerEnabled} onCommand={handleCommand} />
-      <QuickConnect
-        onConnectInput={handleQuickConnect}
-        onConnectSession={handleConnectSession}
-        onHome={() => setActiveTab("welcome")}
-      />
+      {!compactMode && (
+        <>
+          <MenuBar activeTabClosable={!!activeTab?.closable} onCommand={handleCommand} />
+          <Ribbon xServerEnabled={xServerEnabled} onCommand={handleCommand} />
+          <QuickConnect
+            onConnectInput={handleQuickConnect}
+            onConnectSession={handleConnectSession}
+            onHome={() => setActiveTab("welcome")}
+          />
+        </>
+      )}
+      {compactMode && (
+        <CompactTitleBar
+          activeTabClosable={!!activeTab?.closable}
+          onCommand={handleCommand}
+          onToggleSidebarDrawer={() => setCompactSidebarOpen((open) => !open)}
+        />
+      )}
 
       <div className="flex-1 flex min-h-0">
         <PanelGroup direction="horizontal" autoSaveId="main-layout">
@@ -520,18 +567,22 @@ export function MainLayout() {
             minSize={15}
             maxSize={40}
             collapsible
-            collapsedSize={2}
-            onCollapse={() => setSidebarCollapsed(true)}
-            onExpand={() => setSidebarCollapsed(false)}
+            collapsedSize={compactMode ? 0 : 2}
+            onCollapse={() => {
+              if (!compactMode) setSidebarCollapsed(true);
+            }}
+            onExpand={() => {
+              if (!compactMode) setSidebarCollapsed(false);
+            }}
             onResize={(size) => {
               if (size > 2) {
                 lastSidebarSizeRef.current = size;
               }
             }}
           >
-            <div className="h-full overflow-hidden">
+            <div className="h-full overflow-hidden" style={compactMode ? { display: "none" } : undefined}>
               <Sidebar
-                compact={sidebarCollapsed}
+                compact={compactMode || sidebarCollapsed}
                 onNewSession={handleNewSession}
                 onNewSftpSession={handleNewSftpSession}
                 onEditSession={handleEditSession}
@@ -540,11 +591,11 @@ export function MainLayout() {
             </div>
           </Panel>
 
-          <PanelResizeHandle className="w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize" />
+          <PanelResizeHandle className={compactMode ? "hidden" : "w-[3px] bg-[var(--moba-divider)] hover:bg-[var(--moba-accent)] transition-colors cursor-col-resize"} />
 
           <Panel>
             <div className="h-full flex flex-col min-w-0">
-              <TabBar />
+              {!compactMode && <TabBar />}
               <div className="flex-1 min-h-0 overflow-hidden relative">
                 {/* Welcome panel */}
                 {(activeTab?.type === "welcome" || !activeTab) && (
@@ -743,7 +794,20 @@ export function MainLayout() {
         </PanelGroup>
       </div>
 
-      <StatusBar />
+      {!compactMode && <StatusBar />}
+
+      {compactMode && compactSidebarOpen && (
+        <CompactSidebarDrawer
+          onClose={() => setCompactSidebarOpen(false)}
+          onNewSession={handleNewSession}
+          onNewSftpSession={handleNewSftpSession}
+          onEditSession={handleEditSession}
+          onConnectSession={(session) => {
+            setCompactSidebarOpen(false);
+            handleConnectSession(session);
+          }}
+        />
+      )}
 
       {showSessionEditor && (
         <SessionEditor
@@ -767,6 +831,71 @@ export function MainLayout() {
           onCancel={() => setPendingAuth(null)}
         />
       )}
+    </div>
+  );
+}
+
+function CompactSidebarDrawer({
+  onClose,
+  onNewSession,
+  onNewSftpSession,
+  onEditSession,
+  onConnectSession,
+}: {
+  onClose: () => void;
+  onNewSession: (groupPath?: string | null) => void;
+  onNewSftpSession: () => void;
+  onEditSession: (session: SessionConfig) => void;
+  onConnectSession: (session: SessionConfig) => void;
+}) {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div data-testid="compact-sidebar-drawer" className="absolute inset-x-0 top-8 bottom-0 z-[1200] pointer-events-none">
+      <button
+        type="button"
+        aria-label="Close sessions drawer"
+        className="absolute inset-0 bg-black/10 pointer-events-auto"
+        onClick={onClose}
+      />
+      <div
+        className="absolute left-0 top-0 bottom-0 w-[min(380px,calc(100vw-44px))] pointer-events-auto shadow-xl"
+        style={{
+          background: "var(--moba-sidebar-bg)",
+          borderRight: "1px solid var(--moba-sidebar-border)",
+        }}
+      >
+        <div
+          className="h-7 flex items-center px-2 border-b text-[12px] font-semibold"
+          style={{ borderColor: "var(--moba-divider)", background: "var(--moba-quick-bg)" }}
+        >
+          Sessions
+          <button
+            type="button"
+            title="Close sessions drawer"
+            aria-label="Close sessions drawer"
+            className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded hover:bg-[var(--moba-hover)]"
+            onClick={onClose}
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+        <div className="absolute left-0 right-0 top-7 bottom-0">
+          <Sidebar
+            compact={false}
+            onNewSession={onNewSession}
+            onNewSftpSession={onNewSftpSession}
+            onEditSession={onEditSession}
+            onConnectSession={onConnectSession}
+          />
+        </div>
+      </div>
     </div>
   );
 }

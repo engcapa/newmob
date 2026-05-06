@@ -236,6 +236,41 @@ body {
   background: var(--moba-hover);
 }
 
+.moba-compact-root .moba-tabbar {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--moba-divider);
+}
+
+.moba-compact-titlebar {
+  background: linear-gradient(to bottom, var(--moba-titlebar-from), var(--moba-titlebar-to));
+  border-bottom: 1px solid var(--moba-chrome-border);
+  color: var(--moba-text);
+  user-select: none;
+}
+
+.moba-compact-titlebar .moba-tabbar {
+  height: 32px;
+  padding-top: 5px;
+  background: transparent !important;
+  border-bottom: none;
+}
+
+.moba-compact-titlebar .moba-tab {
+  height: 25px;
+}
+
+.moba-tabbar button[data-compact-toggle="true"] {
+  border: 1px solid color-mix(in srgb, var(--moba-accent) 55%, transparent);
+}
+
+.moba-tabbar button[data-compact-toggle="true"][data-active="true"] {
+  background: color-mix(in srgb, var(--moba-accent) 15%, var(--moba-input-bg));
+}
+
+.moba-compact-root .moba-tab {
+  max-width: min(220px, 28vw);
+}
+
 .moba-tree-row {
   display: flex;
   align-items: center;

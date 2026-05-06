@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { forwardRef, useEffect } from "react";
+import { forwardRef, useEffect, useImperativeHandle } from "react";
 import { MainLayout } from "./MainLayout";
 import { useAppStore } from "../stores/appStore";
 
@@ -19,9 +19,13 @@ vi.mock("react-resizable-panels", () => ({
   PanelGroup: ({ children, className }: { children: React.ReactNode; className?: string }) => (
     <div className={className} data-testid="panel-group">{children}</div>
   ),
-  Panel: forwardRef<HTMLDivElement, { children: React.ReactNode }>(({ children }, ref) => (
-    <div ref={ref} data-testid="panel">{children}</div>
-  )),
+  Panel: forwardRef<unknown, { children: React.ReactNode }>(({ children }, ref) => {
+    useImperativeHandle(ref, () => ({
+      collapse: vi.fn(),
+      resize: vi.fn(),
+    }));
+    return <div data-testid="panel">{children}</div>;
+  }),
   PanelResizeHandle: ({ className }: { className?: string }) => (
     <div className={className} data-testid="panel-resize-handle" />
   ),
@@ -94,6 +98,8 @@ describe("MainLayout attached SFTP sidebar", () => {
         },
       ],
       activeTabId: "ssh-tab",
+      sidebarCollapsed: false,
+      compactMode: false,
       statusMessage: "Ready",
     });
   });
@@ -115,5 +121,55 @@ describe("MainLayout attached SFTP sidebar", () => {
     expect(screen.getByTestId("terminal-panel")).toBeInTheDocument();
     expect(terminalLifecycle.mounted).toHaveBeenCalledTimes(1);
     expect(terminalLifecycle.unmounted).not.toHaveBeenCalled();
+  });
+
+  it("hides outer chrome in compact mode without remounting the terminal", () => {
+    render(<MainLayout />);
+
+    expect(screen.getByTestId("menu-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("ribbon")).toBeInTheDocument();
+    expect(screen.getByTestId("quick-connect")).toBeInTheDocument();
+    expect(screen.getByTestId("status-bar")).toBeInTheDocument();
+    expect(terminalLifecycle.mounted).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /enter compact mode/i }));
+
+    expect(screen.queryByTestId("menu-bar")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("ribbon")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("quick-connect")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("status-bar")).not.toBeInTheDocument();
+    expect(screen.getByTestId("compact-titlebar")).toBeInTheDocument();
+    expect(screen.getByTestId("tab-bar")).toHaveAttribute("data-compact", "true");
+    expect(screen.getByTestId("terminal-panel")).toBeInTheDocument();
+    expect(terminalLifecycle.mounted).toHaveBeenCalledTimes(1);
+    expect(terminalLifecycle.unmounted).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /exit compact mode/i }));
+
+    expect(screen.getByTestId("menu-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("ribbon")).toBeInTheDocument();
+    expect(screen.getByTestId("quick-connect")).toBeInTheDocument();
+    expect(screen.getByTestId("status-bar")).toBeInTheDocument();
+    expect(terminalLifecycle.mounted).toHaveBeenCalledTimes(1);
+    expect(terminalLifecycle.unmounted).not.toHaveBeenCalled();
+  });
+
+  it("opens compact main menu and sessions drawer from the titlebar", () => {
+    render(<MainLayout />);
+
+    fireEvent.click(screen.getByRole("button", { name: /enter compact mode/i }));
+
+    fireEvent.click(screen.getByRole("button", { name: /main menu/i }));
+    expect(screen.getByTestId("context-menu-item-new-local-terminal")).toBeInTheDocument();
+    expect(screen.getByTestId("context-menu-item-sessions")).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: /show sessions drawer/i }));
+    expect(screen.getByTestId("compact-sidebar-drawer")).toBeInTheDocument();
+    expect(terminalLifecycle.mounted).toHaveBeenCalledTimes(1);
+    expect(terminalLifecycle.unmounted).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getAllByRole("button", { name: /close sessions drawer/i })[0]);
+    expect(screen.queryByTestId("compact-sidebar-drawer")).not.toBeInTheDocument();
   });
 });

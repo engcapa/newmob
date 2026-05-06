@@ -2,6 +2,7 @@ import {
   FolderOpen,
   HelpCircle,
   PanelLeft,
+  PanelTopClose,
   Plus,
   RefreshCw,
   Terminal as TerminalIcon,
@@ -45,6 +46,7 @@ export function MenuBar({ activeTabClosable, onCommand }: MenuBarProps) {
     if (menu === "View") {
       ctx.show(event, [
         { label: "Toggle sidebar", icon: <PanelLeft className="w-3 h-3" />, onClick: () => onCommand("view") },
+        { label: "Toggle compact mode", icon: <PanelTopClose className="w-3 h-3" />, shortcut: "Ctrl+Shift+M", onClick: () => onCommand("toggle-compact") },
         { label: "Split active terminal", icon: <PanelLeft className="w-3 h-3" />, onClick: () => onCommand("split") },
       ]);
       return;

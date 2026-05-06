@@ -3,10 +3,13 @@ import type { Tab } from "../types";
 
 export type SideTab = "sessions" | "tools" | "macros" | "games";
 
+const COMPACT_MODE_KEY = "newmob.compactMode";
+
 interface AppState {
   tabs: Tab[];
   activeTabId: string | null;
   sidebarCollapsed: boolean;
+  compactMode: boolean;
   activeSideTab: SideTab;
   xServerEnabled: boolean;
   statusMessage: string;
@@ -18,9 +21,27 @@ interface AppState {
   setActiveTab: (id: string) => void;
   toggleSidebar: () => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
+  toggleCompactMode: () => void;
+  setCompactMode: (compact: boolean) => void;
   setActiveSideTab: (tab: SideTab) => void;
   toggleXServer: () => void;
   setStatusMessage: (message: string) => void;
+}
+
+function readCompactMode() {
+  try {
+    return window.localStorage.getItem(COMPACT_MODE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeCompactMode(compact: boolean) {
+  try {
+    window.localStorage.setItem(COMPACT_MODE_KEY, compact ? "true" : "false");
+  } catch {
+    // Ignore storage failures; compact mode still works for this run.
+  }
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -34,6 +55,7 @@ export const useAppStore = create<AppState>((set) => ({
   ],
   activeTabId: "welcome",
   sidebarCollapsed: false,
+  compactMode: readCompactMode(),
   activeSideTab: "sessions",
   xServerEnabled: false,
   statusMessage: "Ready",
@@ -78,6 +100,22 @@ export const useAppStore = create<AppState>((set) => ({
 
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSidebarCollapsed: (collapsed) => set({ sidebarCollapsed: collapsed }),
+  toggleCompactMode: () =>
+    set((s) => {
+      const compactMode = !s.compactMode;
+      writeCompactMode(compactMode);
+      return {
+        compactMode,
+        statusMessage: `Compact mode ${compactMode ? "enabled" : "disabled"}`,
+      };
+    }),
+  setCompactMode: (compactMode) => {
+    writeCompactMode(compactMode);
+    set({
+      compactMode,
+      statusMessage: `Compact mode ${compactMode ? "enabled" : "disabled"}`,
+    });
+  },
   setActiveSideTab: (tab) => set({ activeSideTab: tab, sidebarCollapsed: false }),
 
   toggleXServer: () =>
