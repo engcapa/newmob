@@ -11,8 +11,10 @@ import {
   X,
   PanelTopOpen,
 } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TabBar } from "./TabBar";
 import { useContextMenu } from "../ContextMenu";
+import { WindowControls } from "../window/WindowControls";
 import type { RibbonCommand } from "../menubar/Ribbon";
 
 type CompactCommand = RibbonCommand | "close-active" | "reload-sessions";
@@ -29,6 +31,12 @@ export function CompactTitleBar({
   onToggleSidebarDrawer,
 }: CompactTitleBarProps) {
   const ctx = useContextMenu();
+
+  const startDrag = (event: React.MouseEvent) => {
+    if (event.button !== 0) return;
+    if (!(event.target as HTMLElement).closest("[data-window-drag]")) return;
+    void getCurrentWindow().startDragging().catch(() => {});
+  };
 
   const openMainMenu = (event: React.MouseEvent) => {
     ctx.show(event, [
@@ -69,6 +77,7 @@ export function CompactTitleBar({
     <div
       data-testid="compact-titlebar"
       className="moba-compact-titlebar h-8 flex items-center min-w-0"
+      onMouseDown={startDrag}
     >
       {ctx.render}
       <div className="flex items-center gap-1 px-1.5 shrink-0">
@@ -78,7 +87,8 @@ export function CompactTitleBar({
       <div className="min-w-0 flex-1 self-stretch">
         <TabBar />
       </div>
-      <div className="w-10 self-stretch shrink-0" />
+      <div data-window-drag className="w-10 self-stretch shrink-0" />
+      <WindowControls />
     </div>
   );
 }

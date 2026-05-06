@@ -236,6 +236,13 @@ body {
   background: var(--moba-hover);
 }
 
+.moba-app-titlebar {
+  background: linear-gradient(to bottom, var(--moba-titlebar-from), var(--moba-titlebar-to));
+  border-bottom: 1px solid var(--moba-chrome-border);
+  color: var(--moba-text);
+  user-select: none;
+}
+
 .moba-compact-root .moba-tabbar {
   flex-shrink: 0;
   border-bottom: 1px solid var(--moba-divider);
@@ -257,6 +264,15 @@ body {
 
 .moba-compact-titlebar .moba-tab {
   height: 25px;
+}
+
+.moba-window-controls {
+  border-left: 1px solid color-mix(in srgb, var(--moba-divider) 80%, transparent);
+}
+
+.moba-window-controls button[data-danger="true"]:hover {
+  background: #c42b1c;
+  color: #fff;
 }
 
 .moba-tabbar button[data-compact-toggle="true"] {

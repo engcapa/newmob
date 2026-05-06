@@ -117,7 +117,7 @@ export function TabBar() {
         <Plus className="w-3 h-3" />
       </button>
 
-      <div className="flex-1 self-stretch" />
+      <div className="flex-1 self-stretch" data-window-drag />
       <div className="flex items-center gap-1 pr-1 pb-0.5">
         {!compactMode && (
           <>

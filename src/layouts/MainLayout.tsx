@@ -13,6 +13,7 @@ import { Sidebar } from "../components/sidebar/Sidebar";
 import { CompactTitleBar } from "../components/tabbar/CompactTitleBar";
 import { TabBar } from "../components/tabbar/TabBar";
 import { StatusBar } from "../components/statusbar/StatusBar";
+import { AppTitleBar } from "../components/window/AppTitleBar";
 import { TerminalPanel } from "../components/terminal/TerminalPanel";
 import { SessionEditor } from "../components/session/SessionEditor";
 import { AuthPrompt } from "../components/session/AuthPrompt";
@@ -540,6 +541,7 @@ export function MainLayout() {
       className={`relative w-full h-full flex flex-col${compactMode ? " moba-compact-root" : ""}`}
       style={{ background: "var(--moba-chrome-bg)" }}
     >
+      {!compactMode && <AppTitleBar />}
       {!compactMode && (
         <>
           <MenuBar activeTabClosable={!!activeTab?.closable} onCommand={handleCommand} />
