@@ -50,17 +50,23 @@ const fitMocks = vi.hoisted(() => ({
 
 const ipcMocks = vi.hoisted(() => ({
   closeTerminal: vi.fn(async () => undefined),
-  createLocalTerminal: vi.fn(async () => "terminal-session"),
-  createSshTerminal: vi.fn(async () => "terminal-session"),
-  decodeBase64: vi.fn(() => new Uint8Array()),
+  createLocalTerminal: vi.fn(async (sessionId: string) => sessionId),
+  createSshTerminal: vi.fn(async (sessionId: string) => sessionId),
+  createTerminalSessionId: vi.fn(() => "terminal-session"),
   encodeBase64: vi.fn((value: string) => btoa(value)),
   listenTerminalExit: vi.fn(async () => vi.fn()),
   listenTerminalForwardError: vi.fn(async () => vi.fn()),
-  listenTerminalOutput: vi.fn(async () => vi.fn()),
   listSystemFonts: vi.fn(async () => ["Source Code Pro"]),
+  readFileBytes: vi.fn(async () => new Uint8Array()),
   resizeTerminal: vi.fn(async () => undefined),
+  selectSaveDirectory: vi.fn(async () => null),
+  selectUploadFile: vi.fn(async () => []),
   sendTerminalSignal: vi.fn(async () => undefined),
   writeTerminal: vi.fn(async () => undefined),
+  writeStreamAbort: vi.fn(async () => undefined),
+  writeStreamAppend: vi.fn(async () => undefined),
+  writeStreamClose: vi.fn(async () => undefined),
+  writeStreamOpen: vi.fn(async () => "stream-handle"),
 }));
 
 vi.mock("@xterm/xterm", () => ({

@@ -7,6 +7,7 @@ import {
   sshSignal,
   sshTest,
   sshWrite,
+  type SshConnectArgs,
 } from "./sshClient";
 import {
   isSftpSession,
@@ -120,6 +121,15 @@ function saveGroups(groups: SessionGroup[]): void {
 }
 
 type InvokeArgs = Record<string, unknown>;
+interface InvokeOptions {
+  headers?: Record<string, string>;
+}
+
+export class Channel<T = unknown> {
+  onmessage: ((message: T) => void) | null = null;
+}
+
+const writeStreams = new Map<string, { path: string; chunks: Uint8Array[] }>();
 
 function basename(path: string): string {
   const idx = path.lastIndexOf("/");
@@ -146,7 +156,27 @@ function arrayBufferToB64(data: ArrayBuffer): string {
   return btoa(binary);
 }
 
-export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+function rawBytesFromInvokeArgs(args?: unknown): Uint8Array {
+  if (args instanceof Uint8Array) return args;
+  if (args instanceof ArrayBuffer) return new Uint8Array(args);
+  if (ArrayBuffer.isView(args)) {
+    return new Uint8Array(args.buffer, args.byteOffset, args.byteLength);
+  }
+  throw new Error("Expected raw bytes payload");
+}
+
+function concatChunks(chunks: Uint8Array[]): ArrayBuffer {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out.buffer;
+}
+
+export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions): Promise<T> {
   switch (cmd) {
     case "list_sessions": {
       return loadSessions() as T;
@@ -220,6 +250,45 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       const selected = window.prompt("Private key path", current);
       return (selected?.trim() || null) as T;
     }
+    case "select_upload_file": {
+      const selected = window.prompt("Upload file path in browser VFS", VFS_ROOT);
+      return (selected?.trim() ? [selected.trim()] : []) as T;
+    }
+    case "select_save_directory": {
+      const current = ((args as InvokeArgs | undefined)?.currentPath as string | null) || VFS_ROOT;
+      const selected = window.prompt("Save directory in browser VFS", current);
+      return (selected?.trim() || null) as T;
+    }
+    case "read_file_bytes": {
+      return (await vfsReadBytes((args as InvokeArgs)?.path as string)) as T;
+    }
+    case "write_stream_open": {
+      const handleId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      writeStreams.set(handleId, { path: (args as InvokeArgs)?.path as string, chunks: [] });
+      return handleId as T;
+    }
+    case "write_stream_append": {
+      const handleId = options?.headers?.["x-handle-id"] ?? options?.headers?.["X-Handle-Id"];
+      if (!handleId) throw new Error("Missing x-handle-id header");
+      const stream = writeStreams.get(handleId);
+      if (!stream) throw new Error(`Write stream handle ${handleId} not found`);
+      const bytes = rawBytesFromInvokeArgs(args);
+      stream.chunks.push(new Uint8Array(bytes));
+      return undefined as T;
+    }
+    case "write_stream_close": {
+      const handleId = (args as InvokeArgs)?.handleId as string;
+      const stream = writeStreams.get(handleId);
+      if (!stream) throw new Error(`Write stream handle ${handleId} not found`);
+      writeStreams.delete(handleId);
+      await vfsWriteBytes(stream.path, concatChunks(stream.chunks));
+      return undefined as T;
+    }
+    case "write_stream_abort": {
+      const handleId = (args as InvokeArgs)?.handleId as string;
+      writeStreams.delete(handleId);
+      return undefined as T;
+    }
     case "create_local_terminal": {
       throw new Error(
         "Local terminal is not available in browser preview. Use the Quick connect bar or 'New session' to open an SSH connection (e.g. demo@test.rebex.net).",
@@ -232,6 +301,7 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       // simply ignore `networkSettingsJson` here and let the WS proxy
       // handle the SSH connection directly.
       return (await sshConnect({
+        sessionId: args?.sessionId as string,
         host: args?.host as string,
         port: (args?.port as number) || 22,
         username: args?.username as string,
@@ -239,6 +309,7 @@ export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
         authData: (args?.authData as string | null) ?? null,
         cols,
         rows,
+        onOutput: args?.onOutput as SshConnectArgs["onOutput"],
       })) as T;
     }
     case "test_ssh_connection": {

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export interface LocalShellOption {
@@ -18,16 +18,38 @@ export async function openLocalShellAsAdministrator(shell?: string): Promise<voi
   return invoke("open_local_shell_as_administrator", { shell });
 }
 
+export function createTerminalSessionId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `term-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function createBinaryOutputChannel(callback: (data: Uint8Array) => void): Channel<ArrayBuffer> {
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = (message) => {
+    callback(new Uint8Array(message));
+  };
+  return channel;
+}
+
 export async function createLocalTerminal(
+  sessionId: string,
   cols: number,
   rows: number,
   shell?: string,
   cwd?: string,
+  onOutput?: (data: Uint8Array) => void,
 ): Promise<string> {
-  return invoke<string>("create_local_terminal", { cols, rows, shell, cwd });
+  return invoke<string>("create_local_terminal", {
+    sessionId,
+    cols,
+    rows,
+    shell,
+    cwd,
+    onOutput: createBinaryOutputChannel(onOutput ?? (() => undefined)),
+  });
 }
 
 export async function createSshTerminal(
+  sessionId: string,
   host: string,
   port: number,
   username: string,
@@ -36,8 +58,10 @@ export async function createSshTerminal(
   cols: number,
   rows: number,
   networkSettingsJson: string | null = null,
+  onOutput?: (data: Uint8Array) => void,
 ): Promise<string> {
   return invoke<string>("create_ssh_terminal", {
+    sessionId,
     host,
     port,
     username,
@@ -46,6 +70,7 @@ export async function createSshTerminal(
     cols,
     rows,
     networkSettingsJson,
+    onOutput: createBinaryOutputChannel(onOutput ?? (() => undefined)),
   });
 }
 
@@ -93,15 +118,6 @@ export async function closeTerminal(sessionId: string): Promise<void> {
   return invoke("close_terminal", { sessionId });
 }
 
-export async function listenTerminalOutput(
-  sessionId: string,
-  callback: (data: string) => void,
-): Promise<UnlistenFn> {
-  return listen<string>(`terminal-output-${sessionId}`, (event) => {
-    callback(event.payload);
-  });
-}
-
 export async function listenTerminalExit(
   sessionId: string,
   callback: () => void,
@@ -137,15 +153,6 @@ export function encodeBase64(str: string): string {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
-}
-
-export function decodeBase64(b64: string): Uint8Array {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
 }
 
 // --- Session CRUD ---
@@ -234,12 +241,27 @@ export async function selectSaveDirectory(currentPath?: string): Promise<string 
   return invoke<string | null>("select_save_directory", { currentPath: currentPath ?? null });
 }
 
-export async function readFileBytes(path: string): Promise<string> {
-  return invoke<string>("read_file_bytes", { path });
+export async function readFileBytes(path: string): Promise<Uint8Array> {
+  const buffer = await invoke<ArrayBuffer>("read_file_bytes", { path });
+  return new Uint8Array(buffer);
 }
 
-export async function writeFileBytes(path: string, data: string): Promise<void> {
-  return invoke("write_file_bytes", { path, data });
+export async function writeStreamOpen(path: string): Promise<string> {
+  return invoke<string>("write_stream_open", { path });
+}
+
+export async function writeStreamAppend(handleId: string, data: Uint8Array): Promise<void> {
+  return invoke("write_stream_append", data, {
+    headers: { "x-handle-id": handleId },
+  });
+}
+
+export async function writeStreamClose(handleId: string): Promise<void> {
+  return invoke("write_stream_close", { handleId });
+}
+
+export async function writeStreamAbort(handleId: string): Promise<void> {
+  return invoke("write_stream_abort", { handleId });
 }
 
 // --- VNC ────────────────────────────────────────────────────────────

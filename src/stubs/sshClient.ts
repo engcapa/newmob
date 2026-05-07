@@ -46,6 +46,7 @@ function openSocket(): Promise<WebSocket> {
 }
 
 export interface SshConnectArgs {
+  sessionId: string;
   host: string;
   port: number;
   username: string;
@@ -53,12 +54,13 @@ export interface SshConnectArgs {
   authData: string | null;
   cols: number;
   rows: number;
+  onOutput?: { onmessage?: (data: ArrayBuffer) => void };
 }
 
 type ConnectState = "handshake" | "streaming" | "closed";
 
 export async function sshConnect(args: SshConnectArgs): Promise<string> {
-  const sid = `ssh-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const sid = args.sessionId;
   const ws = await openSocket();
 
   let state: ConnectState = "handshake";
@@ -109,7 +111,7 @@ export async function sshConnect(args: SshConnectArgs): Promise<string> {
 
     if (state === "streaming") {
       if (msg.type === "output" && typeof msg.data === "string") {
-        void emit(`terminal-output-${sid}`, msg.data);
+        args.onOutput?.onmessage?.(bytesB64ToArrayBuffer(msg.data));
       } else if (msg.type === "closed" || msg.type === "error") {
         state = "closed";
         void emit(`terminal-exit-${sid}`, "closed");
@@ -142,7 +144,14 @@ export async function sshConnect(args: SshConnectArgs): Promise<string> {
   return sid;
 }
 
-export async function sshTest(args: Omit<SshConnectArgs, "cols" | "rows">): Promise<string> {
+function bytesB64ToArrayBuffer(b64: string): ArrayBuffer {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+export async function sshTest(args: Omit<SshConnectArgs, "sessionId" | "cols" | "rows" | "onOutput">): Promise<string> {
   const ws = await openSocket();
 
   return new Promise<string>((resolve, reject) => {

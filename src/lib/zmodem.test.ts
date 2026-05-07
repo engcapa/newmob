@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Session, Transfer } from "zmodem.js";
+import type { Offer, Session, Transfer } from "zmodem.js";
 import { ZmodemSession, type ZmodemCallbacks } from "./zmodem";
 
 const zmodemMock = vi.hoisted(() => {
@@ -94,6 +94,98 @@ describe("ZmodemSession", () => {
     });
     expect(transfer.send).toHaveBeenCalledWith([7, 8]);
   });
+
+  it("streams received file chunks in order and closes after append", async () => {
+    const session = makeReceiveSession();
+    const offer = makeOffer("remote.bin", 3);
+    const appended: number[][] = [];
+    const callbacks = makeCallbacks({
+      onSelectSaveDir: vi.fn(async () => "/downloads"),
+      onOpenWriteStream: vi.fn(async () => "handle-1"),
+      onAppendWriteStream: vi.fn(async (_handleId, data) => {
+        appended.push(Array.from(data));
+      }),
+    });
+
+    new ZmodemSession(vi.fn(), callbacks);
+    detect(session);
+
+    await expect.poll(() => session.start.mock.calls.length).toBe(1);
+    session.emitOffer(offer);
+    await expect.poll(() => (callbacks.onOpenWriteStream as any).mock.calls.length).toBe(1);
+
+    offer.emitInput([1, 2]);
+    offer.emitInput([3]);
+    offer.resolveAccept();
+
+    await expect.poll(() => (callbacks.onComplete as any).mock.calls.length).toBe(1);
+
+    expect(callbacks.onOpenWriteStream).toHaveBeenCalledWith("/downloads/remote.bin");
+    expect(appended).toEqual([[1, 2], [3]]);
+    expect(callbacks.onCloseWriteStream).toHaveBeenCalledWith("handle-1");
+    expect(callbacks.onAbortWriteStream).not.toHaveBeenCalled();
+    expect(callbacks.onComplete).toHaveBeenCalledWith("remote.bin");
+  });
+
+  it("waits for pending receive appends before closing", async () => {
+    const session = makeReceiveSession();
+    const offer = makeOffer("slow.bin", 1);
+    let resolveAppend!: () => void;
+    const callbacks = makeCallbacks({
+      onSelectSaveDir: vi.fn(async () => "/downloads"),
+      onOpenWriteStream: vi.fn(async () => "handle-2"),
+      onAppendWriteStream: vi.fn(
+        () => new Promise<void>((resolve) => {
+          resolveAppend = resolve;
+        }),
+      ),
+    });
+
+    new ZmodemSession(vi.fn(), callbacks);
+    detect(session);
+
+    await expect.poll(() => session.start.mock.calls.length).toBe(1);
+    session.emitOffer(offer);
+    await expect.poll(() => (callbacks.onOpenWriteStream as any).mock.calls.length).toBe(1);
+
+    offer.emitInput([9]);
+    offer.resolveAccept();
+    await Promise.resolve();
+
+    expect(callbacks.onCloseWriteStream).not.toHaveBeenCalled();
+    resolveAppend();
+
+    await expect.poll(() => (callbacks.onCloseWriteStream as any).mock.calls.length).toBe(1);
+    expect(callbacks.onComplete).toHaveBeenCalledWith("slow.bin");
+  });
+
+  it("aborts the write stream when receive append fails", async () => {
+    const session = makeReceiveSession();
+    const offer = makeOffer("broken.bin", 1);
+    const callbacks = makeCallbacks({
+      onSelectSaveDir: vi.fn(async () => "/downloads"),
+      onOpenWriteStream: vi.fn(async () => "handle-3"),
+      onAppendWriteStream: vi.fn(async () => {
+        throw new Error("disk full");
+      }),
+    });
+
+    new ZmodemSession(vi.fn(), callbacks);
+    detect(session);
+
+    await expect.poll(() => session.start.mock.calls.length).toBe(1);
+    session.emitOffer(offer);
+    await expect.poll(() => (callbacks.onOpenWriteStream as any).mock.calls.length).toBe(1);
+
+    offer.emitInput([1]);
+    offer.resolveAccept();
+
+    await expect.poll(() => (callbacks.onAbortWriteStream as any).mock.calls.length).toBe(1);
+
+    expect(callbacks.onCloseWriteStream).not.toHaveBeenCalled();
+    expect(callbacks.onComplete).not.toHaveBeenCalled();
+    expect(callbacks.onError).toHaveBeenCalledWith("disk full");
+  });
 });
 
 function makeCallbacks(overrides: Partial<ZmodemCallbacks> = {}): ZmodemCallbacks {
@@ -103,7 +195,10 @@ function makeCallbacks(overrides: Partial<ZmodemCallbacks> = {}): ZmodemCallback
     onProgress: vi.fn(),
     onSelectSaveDir: vi.fn(async () => null),
     onSelectSendFiles: vi.fn(async () => null),
-    onWriteFile: vi.fn(async () => undefined),
+    onOpenWriteStream: vi.fn(async () => "stream-handle"),
+    onAppendWriteStream: vi.fn(async () => undefined),
+    onCloseWriteStream: vi.fn(async () => undefined),
+    onAbortWriteStream: vi.fn(async () => undefined),
     onComplete: vi.fn(),
     onError: vi.fn(),
     ...overrides,
@@ -132,6 +227,51 @@ function makeSendSession(transfer: Transfer) {
     close: ReturnType<typeof vi.fn>;
     send_offer: ReturnType<typeof vi.fn>;
     abort: ReturnType<typeof vi.fn>;
+  };
+}
+
+function makeReceiveSession() {
+  let offerHandler: ((offer: Offer) => void) | null = null;
+  const session = {
+    type: "receive" as const,
+    on: vi.fn((event: string, handler: (payload?: unknown) => void) => {
+      if (event === "offer") offerHandler = handler as (offer: Offer) => void;
+    }),
+    start: vi.fn(),
+    close: vi.fn(async () => undefined),
+    abort: vi.fn(),
+    emitOffer: (offer: Offer) => {
+      offerHandler?.(offer);
+    },
+  };
+  return session as unknown as Session & {
+    start: ReturnType<typeof vi.fn>;
+    abort: ReturnType<typeof vi.fn>;
+    emitOffer: (offer: Offer) => void;
+  };
+}
+
+function makeOffer(name: string, size: number) {
+  let inputHandler: ((octets: number[]) => void) | null = null;
+  let resolveAccept: (() => void) | null = null;
+  const offer = {
+    get_details: vi.fn(() => ({ name, size })),
+    on: vi.fn((event: string, handler: (octets: number[]) => void) => {
+      if (event === "input") inputHandler = handler;
+    }),
+    accept: vi.fn(() => new Promise<void>((resolve) => {
+      resolveAccept = resolve;
+    })),
+    emitInput: (octets: number[]) => {
+      inputHandler?.(octets);
+    },
+    resolveAccept: () => {
+      resolveAccept?.();
+    },
+  };
+  return offer as unknown as Offer & {
+    emitInput: (octets: number[]) => void;
+    resolveAccept: () => void;
   };
 }
 

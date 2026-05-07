@@ -34,21 +34,23 @@ import {
   type InputEchoSuppressor,
 } from "../../lib/terminalOutputFilter";
 import {
+  createTerminalSessionId,
   createLocalTerminal,
   createSshTerminal,
   writeTerminal,
   resizeTerminal,
   sendTerminalSignal,
   closeTerminal,
-  listenTerminalOutput,
   listenTerminalExit,
   listenTerminalForwardError,
   encodeBase64,
-  decodeBase64,
   selectUploadFile,
   selectSaveDirectory,
   readFileBytes,
-  writeFileBytes,
+  writeStreamOpen,
+  writeStreamAppend,
+  writeStreamClose,
+  writeStreamAbort,
 } from "../../lib/ipc";
 import {
   ZmodemSession,
@@ -573,10 +575,7 @@ export function TerminalPanel({
 
     const files: ZmodemSendFile[] = [];
     for (const filePath of filePaths) {
-      const b64 = await readFileBytes(filePath);
-      const binary = atob(b64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const bytes = await readFileBytes(filePath);
       const fileName = filePath.replace(/\\/g, "/").split("/").pop() ?? "file";
       files.push({ name: fileName, bytes });
     }
@@ -888,7 +887,6 @@ export function TerminalPanel({
     initializedRef.current = true;
 
     let destroyed = false;
-    let unlistenOutput: UnlistenFn | null = null;
     let unlistenExit: UnlistenFn | null = null;
     let unlistenForwardError: UnlistenFn | null = null;
     let detachImeGuard: (() => void) | null = null;
@@ -963,9 +961,73 @@ export function TerminalPanel({
     observer.observe(el);
 
     const { cols, rows } = term;
+    const sid = createTerminalSessionId();
+
+    // Create the ZMODEM sentry before invoking the backend. The raw output
+    // channel can receive early SSH banners before create*Terminal resolves.
+    const zmodem = new ZmodemSession(
+      (bytes) => {
+        let b64 = "";
+        for (let i = 0; i < bytes.length; i++) b64 += String.fromCharCode(bytes[i]);
+        writeTerminal(sid, btoa(b64)).catch(console.error);
+      },
+      {
+        onTerminalData: (data) => {
+          if (destroyed) return;
+          const suppressor = injectedInputEchoSuppressorRef.current;
+          let filtered = suppressor ? suppressor.filter(data) : data;
+          if (suppressor?.done) injectedInputEchoSuppressorRef.current = null;
+          if (filtered.length === 0) return;
+          if (loggingActiveRef.current) {
+            outputLogRef.current += new TextDecoder().decode(filtered);
+          }
+          term.write(filtered);
+        },
+        onStateChange: (state, progress) => {
+          setZmodemState(state);
+          setZmodemProgress(progress ?? null);
+        },
+        onProgress: (progress) => {
+          setZmodemProgress({ ...progress });
+        },
+        onSelectSaveDir: async () => {
+          const dir = await selectSaveDirectory(zmodemSaveDirRef.current);
+          if (dir) zmodemSaveDirRef.current = dir;
+          return dir;
+        },
+        onSelectSendFiles: async () => {
+          appendEvent("zmodem", "Remote rz requested local files");
+          setStatusMessage("Remote rz detected; choose local files to send");
+          const files = await selectZmodemSendFiles();
+          if (files.length === 0) {
+            appendEvent("zmodem", "Send canceled");
+            setStatusMessage("ZMODEM send canceled");
+            focusTerminal();
+            return null;
+          }
+          const names = files.map((f) => f.name).join(", ");
+          setStatusMessage(`Sending ${files.length === 1 ? files[0].name : `${files.length} files (${names})`} via ZMODEM…`);
+          focusTerminal();
+          return files;
+        },
+        onOpenWriteStream: writeStreamOpen,
+        onAppendWriteStream: writeStreamAppend,
+        onCloseWriteStream: writeStreamClose,
+        onAbortWriteStream: writeStreamAbort,
+        onComplete: (fileName) => {
+          appendEvent("zmodem", `Transfer complete: ${fileName}`);
+          setStatusMessage(`ZMODEM: ${fileName} transferred`);
+        },
+        onError: (message) => {
+          appendEvent("error", `ZMODEM error: ${message}`);
+          setStatusMessage(`ZMODEM error: ${message}`);
+        },
+      },
+    );
 
     const connectPromise = ssh
       ? createSshTerminal(
+          sid,
           ssh.host,
           ssh.port,
           ssh.username,
@@ -977,8 +1039,16 @@ export function TerminalPanel({
             const ns = getSessionNetworkSettings(ssh.optionsJson);
             return JSON.stringify(toNetworkSettingsPayload(ns));
           })(),
+          (raw) => zmodem.consume(raw),
         )
-      : createLocalTerminal(cols, rows, localShell?.id);
+      : createLocalTerminal(
+          sid,
+          cols,
+          rows,
+          localShell?.id,
+          undefined,
+          (raw) => zmodem.consume(raw),
+        );
 
     if (ssh) {
       appendEvent("connection", `Connecting to ${ssh.username}@${ssh.host}:${ssh.port}`);
@@ -989,91 +1059,20 @@ export function TerminalPanel({
     }
 
     connectPromise
-      .then(async (sid) => {
+      .then(async (connectedSid) => {
         if (destroyed) {
-          closeTerminal(sid).catch(() => {});
+          closeTerminal(connectedSid).catch(() => {});
           return;
         }
-        sessionIdRef.current = sid;
-        onSessionReadyRef.current?.(sid);
-        appendEvent("connection", `Connected (${sid})`);
+        sessionIdRef.current = connectedSid;
+        zmodemRef.current = zmodem;
+        onSessionReadyRef.current?.(connectedSid);
+        appendEvent("connection", `Connected (${connectedSid})`);
         if (ssh) {
           term.write(formatSshInfoBanner(ssh));
         }
 
-        // Create a ZmodemSession for this terminal connection.
-        // It intercepts the output stream to detect ZMODEM handshakes.
-        const zmodem = new ZmodemSession(
-          (bytes) => {
-            // Send ZMODEM protocol bytes back to the remote.
-            let b64 = "";
-            for (let i = 0; i < bytes.length; i++) b64 += String.fromCharCode(bytes[i]);
-            writeTerminal(sid, btoa(b64)).catch(console.error);
-          },
-          {
-            onTerminalData: (data) => {
-              // Non-ZMODEM bytes — write to xterm as normal.
-              const suppressor = injectedInputEchoSuppressorRef.current;
-              let filtered = suppressor ? suppressor.filter(data) : data;
-              if (suppressor?.done) injectedInputEchoSuppressorRef.current = null;
-              if (filtered.length === 0) return;
-              if (loggingActiveRef.current) {
-                outputLogRef.current += new TextDecoder().decode(filtered);
-              }
-              term.write(filtered);
-            },
-            onStateChange: (state, progress) => {
-              setZmodemState(state);
-              setZmodemProgress(progress ?? null);
-            },
-            onProgress: (progress) => {
-              setZmodemProgress({ ...progress });
-            },
-            onSelectSaveDir: async () => {
-              const dir = await selectSaveDirectory(zmodemSaveDirRef.current);
-              if (dir) zmodemSaveDirRef.current = dir;
-              return dir;
-            },
-            onSelectSendFiles: async () => {
-              appendEvent("zmodem", "Remote rz requested local files");
-              setStatusMessage("Remote rz detected; choose local files to send");
-              const files = await selectZmodemSendFiles();
-              if (files.length === 0) {
-                appendEvent("zmodem", "Send canceled");
-                setStatusMessage("ZMODEM send canceled");
-                focusTerminal();
-                return null;
-              }
-              const names = files.map((f) => f.name).join(", ");
-              setStatusMessage(`Sending ${files.length === 1 ? files[0].name : `${files.length} files (${names})`} via ZMODEM…`);
-              focusTerminal();
-              return files;
-            },
-            onWriteFile: async (fullPath, bytes) => {
-              let binary = "";
-              for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-              await writeFileBytes(fullPath, btoa(binary));
-            },
-            onComplete: (fileName) => {
-              appendEvent("zmodem", `Transfer complete: ${fileName}`);
-              setStatusMessage(`ZMODEM: ${fileName} transferred`);
-            },
-            onError: (message) => {
-              appendEvent("error", `ZMODEM error: ${message}`);
-              setStatusMessage(`ZMODEM error: ${message}`);
-            },
-          },
-        );
-        zmodemRef.current = zmodem;
-
-        unlistenOutput = await listenTerminalOutput(sid, (b64) => {
-          const raw = decodeBase64(b64);
-          // Feed all output through the ZMODEM sentry.
-          // The sentry calls onTerminalData for non-ZMODEM bytes.
-          zmodem.consume(raw);
-        });
-
-        unlistenExit = await listenTerminalExit(sid, () => {
+        unlistenExit = await listenTerminalExit(connectedSid, () => {
           appendEvent("disconnect", "Terminal session ended");
           if (loggingActiveRef.current && outputLogRef.current) {
             flushRecordedOutput("Session ended; saved recorded output");
@@ -1087,7 +1086,7 @@ export function TerminalPanel({
         // as a window-level CustomEvent keyed by the persisted session
         // config id so an open SessionEditor can show the failure
         // inline next to the offending forward row.
-        unlistenForwardError = await listenTerminalForwardError(sid, (err) => {
+        unlistenForwardError = await listenTerminalForwardError(connectedSid, (err) => {
           appendEvent(
             "error",
             `Local forward ${err.local} → ${err.remote}: ${err.message}`,
@@ -1119,7 +1118,6 @@ export function TerminalPanel({
       renderDisposable.dispose();
       resizeDisposable.dispose();
       clearTimeout(resizeTimer);
-      unlistenOutput?.();
       unlistenExit?.();
       unlistenForwardError?.();
       detachImeGuard?.();
@@ -1132,6 +1130,7 @@ export function TerminalPanel({
       fitAddonRef.current = null;
       searchAddonRef.current = null;
       sessionIdRef.current = null;
+      zmodemRef.current = null;
       imeGuardRef.current = null;
       initializedRef.current = false;
     };

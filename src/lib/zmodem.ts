@@ -21,8 +21,10 @@ export interface ZmodemCallbacks {
   onSelectSaveDir: () => Promise<string | null>;
   /** Called when the remote starts rz without a queued file. Return files to send, or null/empty to cancel. */
   onSelectSendFiles?: () => Promise<ZmodemSendFile[] | null>;
-  /** Called for each received file with the resolved full path and bytes. */
-  onWriteFile: (fullPath: string, bytes: Uint8Array) => Promise<void>;
+  onOpenWriteStream: (fullPath: string) => Promise<string>;
+  onAppendWriteStream: (handleId: string, data: Uint8Array) => Promise<void>;
+  onCloseWriteStream: (handleId: string) => Promise<void>;
+  onAbortWriteStream: (handleId: string) => Promise<void>;
   onComplete: (fileName: string) => void;
   onError: (message: string) => void;
 }
@@ -112,6 +114,7 @@ export class ZmodemSession {
 
       zsession.on("offer", (offer: Offer) => {
         const details = offer.get_details();
+        const fullPath = dirBase + sep + details.name;
         const progress: ZmodemProgress = {
           fileName: details.name,
           fileSize: details.size ?? 0,
@@ -119,26 +122,42 @@ export class ZmodemSession {
         };
         this.callbacks.onStateChange("receiving", progress);
 
-        const chunks: Uint8Array[] = [];
+        void (async () => {
+          let handleId: string | null = null;
+          let appendChain = Promise.resolve();
+          let appendError: unknown = null;
 
-        offer.on("input", (octets: number[]) => {
-          const chunk = new Uint8Array(octets);
-          chunks.push(chunk);
-          progress.bytesTransferred += chunk.length;
-          this.callbacks.onProgress({ ...progress });
-        });
+          try {
+            handleId = await this.callbacks.onOpenWriteStream(fullPath);
 
-        offer.accept().then(() => {
-          const bytes = mergeChunks(chunks);
-          const fullPath = dirBase + sep + details.name;
-          this.callbacks.onWriteFile(fullPath, bytes)
-            .then(() => this.callbacks.onComplete(details.name))
-            .catch((err: unknown) => {
-              this.callbacks.onError(err instanceof Error ? err.message : String(err));
+            offer.on("input", (octets: number[]) => {
+              const chunk = new Uint8Array(octets);
+              progress.bytesTransferred += chunk.length;
+              this.callbacks.onProgress({ ...progress });
+
+              appendChain = appendChain
+                .then(() => {
+                  if (appendError || handleId == null) return undefined;
+                  return this.callbacks.onAppendWriteStream(handleId, chunk);
+                })
+                .catch((err: unknown) => {
+                  appendError = err;
+                });
             });
-        }).catch((err: unknown) => {
-          this.callbacks.onError(err instanceof Error ? err.message : String(err));
-        });
+
+            await offer.accept();
+            await appendChain;
+            if (appendError) throw appendError;
+            await this.callbacks.onCloseWriteStream(handleId);
+            handleId = null;
+            this.callbacks.onComplete(details.name);
+          } catch (err: unknown) {
+            if (handleId) {
+              await this.callbacks.onAbortWriteStream(handleId).catch(() => undefined);
+            }
+            this.callbacks.onError(err instanceof Error ? err.message : String(err));
+          }
+        })();
       });
 
       zsession.on("session_end", () => {
@@ -240,15 +259,4 @@ export class ZmodemSession {
       }
     })();
   }
-}
-
-function mergeChunks(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, c) => sum + c.length, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return out;
 }

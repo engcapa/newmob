@@ -1,4 +1,9 @@
+use crate::state::{AppState, WriteStreamHandle};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
+use tauri::ipc::{InvokeBody, Request, Response};
+use tauri::State;
 
 #[tauri::command]
 pub fn select_private_key_file(current_path: Option<String>) -> Result<Option<String>, String> {
@@ -16,22 +21,88 @@ pub fn select_save_directory(current_path: Option<String>) -> Result<Option<Stri
 }
 
 #[tauri::command]
-pub fn write_file_bytes(path: String, data: String) -> Result<(), String> {
-    let expanded = shellexpand::tilde(&path).to_string();
-    let bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        &data,
-    )
-    .map_err(|e| format!("Failed to decode base64: {}", e))?;
-    std::fs::write(&expanded, &bytes).map_err(|e| format!("Failed to write file: {}", e))
-}
-
-#[tauri::command]
-pub fn read_file_bytes(path: String) -> Result<String, String> {
+pub fn read_file_bytes(path: String) -> Result<Response, String> {
     let expanded = shellexpand::tilde(&path).to_string();
     let bytes = std::fs::read(&expanded)
         .map_err(|e| format!("Failed to read file: {}", e))?;
-    Ok(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes))
+    Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn write_stream_open(path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let expanded = expanded_path(&path);
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&expanded)
+        .map_err(|e| format!("Failed to open write stream: {}", e))?;
+    let handle_id = uuid::Uuid::new_v4().to_string();
+    let mut handles = state
+        .write_handles
+        .lock()
+        .map_err(|e| format!("Write stream lock failed: {}", e))?;
+    handles.insert(handle_id.clone(), WriteStreamHandle { path: expanded, file });
+    Ok(handle_id)
+}
+
+#[tauri::command]
+pub fn write_stream_append(
+    request: Request<'_>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let handle_id = request
+        .headers()
+        .get("x-handle-id")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "Missing x-handle-id header".to_string())?;
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes,
+        InvokeBody::Json(_) => return Err("write_stream_append expects raw bytes".to_string()),
+    };
+
+    let mut handles = state
+        .write_handles
+        .lock()
+        .map_err(|e| format!("Write stream lock failed: {}", e))?;
+    let handle = handles
+        .get_mut(handle_id)
+        .ok_or_else(|| format!("Write stream handle {} not found", handle_id))?;
+    handle
+        .file
+        .write_all(bytes)
+        .map_err(|e| format!("Failed to append write stream: {}", e))
+}
+
+#[tauri::command]
+pub fn write_stream_close(handle_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut handles = state
+        .write_handles
+        .lock()
+        .map_err(|e| format!("Write stream lock failed: {}", e))?;
+    let mut handle = handles
+        .remove(&handle_id)
+        .ok_or_else(|| format!("Write stream handle {} not found", handle_id))?;
+    handle
+        .file
+        .flush()
+        .map_err(|e| format!("Failed to flush write stream: {}", e))
+}
+
+#[tauri::command]
+pub fn write_stream_abort(handle_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let handle = {
+        let mut handles = state
+            .write_handles
+            .lock()
+            .map_err(|e| format!("Write stream lock failed: {}", e))?;
+        handles.remove(&handle_id)
+    };
+    if let Some(handle) = handle {
+        drop(handle.file);
+        let _ = std::fs::remove_file(handle.path);
+    }
+    Ok(())
 }
 
 fn expanded_path(value: &str) -> PathBuf {
