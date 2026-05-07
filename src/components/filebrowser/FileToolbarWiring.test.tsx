@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -406,6 +406,28 @@ describe("FileBrowser → FilePanel toolbar wiring", () => {
     });
   });
 
+  it("wires the remote-pane context Download action to the full multi-selection", async () => {
+    const user = userEvent.setup();
+    seedSession();
+    renderBrowser();
+
+    const remotePanel = screen.getByText("REMOTE").closest("div.h-full") as HTMLElement;
+    setSelection("remote", ["/work/subdir", "/work/notes.txt"]);
+
+    fireEvent.contextMenu(within(remotePanel).getByText("notes.txt"), {
+      clientX: 20,
+      clientY: 20,
+    });
+    await user.click(await screen.findByTestId("context-menu-item-download-2-selected-to-local"));
+
+    expect(controllerMocks.download).toHaveBeenCalledTimes(2);
+    const downloadCalls = controllerMocks.download.mock.calls as unknown as Array<[FileEntry]>;
+    expect(downloadCalls.map(([entry]) => entry.path)).toEqual([
+      "/work/subdir",
+      "/work/notes.txt",
+    ]);
+  });
+
   it("wires the remote-pane Open-terminal-here toolbar button to the FileBrowser onOpenTerminalHere prop", async () => {
     const user = userEvent.setup();
     seedSession();
@@ -513,5 +535,27 @@ describe("FileBrowser → FilePanel toolbar wiring", () => {
     expect(uploadArgs[0]).toMatchObject({
       path: "/work/notes.txt",
     });
+  });
+
+  it("wires the local-pane context Upload action to the full multi-selection", async () => {
+    const user = userEvent.setup();
+    seedSession();
+    renderBrowser();
+
+    const localPanel = screen.getByText("LOCAL").closest("div.h-full") as HTMLElement;
+    setSelection("local", ["/work/subdir", "/work/notes.txt"]);
+
+    fireEvent.contextMenu(within(localPanel).getByText("subdir"), {
+      clientX: 20,
+      clientY: 20,
+    });
+    await user.click(await screen.findByTestId("context-menu-item-upload-2-selected-to-remote"));
+
+    expect(controllerMocks.upload).toHaveBeenCalledTimes(2);
+    const uploadCalls = controllerMocks.upload.mock.calls as unknown as Array<[FileEntry]>;
+    expect(uploadCalls.map(([entry]) => entry.path)).toEqual([
+      "/work/subdir",
+      "/work/notes.txt",
+    ]);
   });
 });

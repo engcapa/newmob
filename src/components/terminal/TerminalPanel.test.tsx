@@ -1,6 +1,7 @@
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TerminalPanel } from "./TerminalPanel";
+import { DEFAULT_TERMINAL_PROFILE } from "../../lib/terminalProfile";
 
 const terminalMocks = vi.hoisted(() => {
   const focus = vi.fn();
@@ -34,6 +35,7 @@ const terminalMocks = vi.hoisted(() => {
     focus,
     dispose: vi.fn(),
     getSelection: vi.fn(() => ""),
+    hasSelection: vi.fn(() => false),
     clearSelection: vi.fn(),
     scrollToLine: vi.fn(),
     select: vi.fn(),
@@ -133,5 +135,63 @@ describe("TerminalPanel focus behavior", () => {
     await waitFor(() => {
       expect(terminalMocks.focus).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("pastes clipboard text with Shift+Insert", async () => {
+    const readText = vi.fn(async () => "pasted text");
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      clipboard: { readText },
+    });
+    const onSessionReady = vi.fn();
+
+    render(<TerminalPanel visible onSessionReady={onSessionReady} />);
+
+    await waitFor(() => {
+      expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+    });
+
+    fireEvent.keyDown(window, { key: "Insert", shiftKey: true });
+
+    await waitFor(() => {
+      expect(ipcMocks.writeTerminal).toHaveBeenCalledWith(
+        "terminal-session",
+        btoa("pasted text"),
+      );
+    });
+  });
+
+  it("honors the right-click paste terminal setting", async () => {
+    const readText = vi.fn(async () => "right click paste");
+    vi.stubGlobal("navigator", {
+      ...navigator,
+      clipboard: { readText },
+    });
+    const onSessionReady = vi.fn();
+
+    render(
+      <TerminalPanel
+        visible
+        onSessionReady={onSessionReady}
+        terminalProfile={{
+          ...DEFAULT_TERMINAL_PROFILE,
+          rightClickBehavior: "paste",
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+    });
+
+    fireEvent.contextMenu(screen.getByTestId("terminal-pane"));
+
+    await waitFor(() => {
+      expect(ipcMocks.writeTerminal).toHaveBeenCalledWith(
+        "terminal-session",
+        btoa("right click paste"),
+      );
+    });
+    expect(screen.queryByTestId("context-menu")).not.toBeInTheDocument();
   });
 });

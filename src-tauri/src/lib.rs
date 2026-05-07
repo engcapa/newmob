@@ -10,7 +10,7 @@ mod appearance;
 mod vnc;
 
 use state::AppState;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindowBuilder};
 
 #[tauri::command]
 fn exit_app(app_handle: AppHandle) {
@@ -46,6 +46,14 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+
+            if let Some(main_window_config) = app.config().app.windows.first().cloned() {
+                WebviewWindowBuilder::from_config(app.handle(), &main_window_config)?
+                    // Required on Linux/Windows for navigator.clipboard.readText().
+                    // Terminal right-click paste and Shift+Insert use that API.
+                    .enable_clipboard_access()
+                    .build()?;
             }
             Ok(())
         })

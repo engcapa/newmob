@@ -13,6 +13,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "create": false,
         "title": "NewMob",
         "width": 1280,
         "height": 800,

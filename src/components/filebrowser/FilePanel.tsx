@@ -61,7 +61,11 @@ interface FilePanelProps {
   detachable?: boolean;
   onDetach?: () => void;
   onItemDoubleClick: (entry: FileEntry) => void;
-  onItemContext?: (entry: FileEntry, anchor: { x: number; y: number }) => MenuItem[];
+  onItemContext?: (
+    entry: FileEntry,
+    anchor: { x: number; y: number },
+    selectedEntries: FileEntry[],
+  ) => MenuItem[];
   onEmptyContext?: (anchor: { x: number; y: number }) => MenuItem[];
   onCrossPaneDrop?: (entries: FileEntry[]) => void;
   acceptCrossPane?: boolean;
@@ -260,11 +264,20 @@ export function FilePanel({
 
   const handleRowContext = (entry: FileEntry, e: MouseEvent) => {
     e.preventDefault();
+    const effectiveSelection = pane.selection.includes(entry.path)
+      ? pane.selection
+      : [entry.path];
     if (!pane.selection.includes(entry.path)) {
-      setSelection(sessionId, side, [entry.path]);
+      setSelection(sessionId, side, effectiveSelection);
     }
     if (!onItemContext) return;
-    const items = onItemContext(entry, { x: e.clientX, y: e.clientY });
+    const selectedSet = new Set(effectiveSelection);
+    const contextEntries = sortedEntries.filter((x) => selectedSet.has(x.path));
+    const items = onItemContext(
+      entry,
+      { x: e.clientX, y: e.clientY },
+      contextEntries.length > 0 ? contextEntries : [entry],
+    );
     if (items.length > 0) ctx.show(e, items);
   };
 

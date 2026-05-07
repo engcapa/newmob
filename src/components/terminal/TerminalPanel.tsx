@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type MutableRefObject } from "react";
 import { Terminal, type IBufferLine } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -154,6 +154,7 @@ export function TerminalPanel({
   const [cursorBlink, setCursorBlink] = useState(initialProfile.cursorBlink);
   const [scrollback, setScrollback] = useState(initialProfile.scrollback);
   const [syntaxMode, setSyntaxMode] = useState<TerminalSyntaxMode>(initialProfile.syntaxMode);
+  const [rightClickBehavior, setRightClickBehavior] = useState(initialProfile.rightClickBehavior);
   const [loggingActive, setLoggingActive] = useState(initialProfile.loggingEnabled);
   const [multilinePasteConfirm, setMultilinePasteConfirm] = useState(initialProfile.multilinePasteConfirm);
   const [fullscreen, setFullscreen] = useState(false);
@@ -229,6 +230,7 @@ export function TerminalPanel({
     cursorBlink,
     showScrollbar,
     readOnly,
+    rightClickBehavior,
     multilinePasteConfirm,
     syntaxMode,
     loggingEnabled: loggingActive,
@@ -242,6 +244,7 @@ export function TerminalPanel({
     loggingActive,
     multilinePasteConfirm,
     readOnly,
+    rightClickBehavior,
     scrollback,
     showScrollbar,
     syntaxMode,
@@ -731,6 +734,34 @@ export function TerminalPanel({
     macroRecording,
   ]);
 
+  const handleTerminalContextMenu = useCallback((event: ReactMouseEvent) => {
+    if (rightClickBehavior === "paste") {
+      event.preventDefault();
+      event.stopPropagation();
+      void pasteFromClipboard();
+      return;
+    }
+
+    if (rightClickBehavior === "copy-or-paste") {
+      event.preventDefault();
+      event.stopPropagation();
+      if (termRef.current?.hasSelection()) {
+        copySelection();
+      } else {
+        void pasteFromClipboard();
+      }
+      return;
+    }
+
+    contextMenu.show(event, buildContextMenu());
+  }, [
+    buildContextMenu,
+    contextMenu,
+    copySelection,
+    pasteFromClipboard,
+    rightClickBehavior,
+  ]);
+
   useEffect(() => {
     readOnlyRef.current = readOnly;
   }, [readOnly]);
@@ -766,6 +797,7 @@ export function TerminalPanel({
     setCursorBlink(terminalProfile.cursorBlink);
     setScrollback(terminalProfile.scrollback);
     setSyntaxMode(terminalProfile.syntaxMode);
+    setRightClickBehavior(terminalProfile.rightClickBehavior);
     setLoggingActive(terminalProfile.loggingEnabled);
     setMultilinePasteConfirm(terminalProfile.multilinePasteConfirm);
   }, [terminalProfile, theme]);
@@ -1135,7 +1167,7 @@ export function TerminalPanel({
           decreaseFontSize();
         }
       }}
-      onContextMenu={(event) => contextMenu.show(event, buildContextMenu())}
+      onContextMenu={handleTerminalContextMenu}
     >
       <div ref={containerRef} className="w-full h-full" />
 

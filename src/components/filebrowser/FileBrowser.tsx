@@ -250,35 +250,43 @@ export function FileBrowser(props: FileBrowserProps) {
   );
 
   const localContext = useCallback(
-    (entry: FileEntry): MenuItem[] => {
+    (entry: FileEntry, _anchor: { x: number; y: number }, selectedEntries: FileEntry[]): MenuItem[] => {
+      const targets = selectedEntries.length > 0 ? selectedEntries : [entry];
+      const target = targets[0] ?? entry;
+      const multi = targets.length > 1;
       const items: MenuItem[] = [];
-      if (entry.fileType === "file") {
+      items.push({
+        label: multi ? `Upload ${targets.length} selected to remote` : "Upload to remote",
+        onClick: () => {
+          const remoteDir = session?.remote.path ?? "/";
+          for (const item of targets) {
+            void controller.upload(item, remoteDir);
+          }
+        },
+      });
+      if (!multi) {
         items.push({
-          label: "Upload to remote",
+          label: "Rename",
           onClick: () => {
-            const remoteDir = session?.remote.path ?? "/";
-            void controller.upload(entry, remoteDir);
+            const next = window.prompt("Rename to", target.name);
+            if (next && next !== target.name) {
+              void controller.rename(target.path, next, "local");
+            }
           },
         });
       }
       items.push({
-        label: "Rename",
-        onClick: () => {
-          const next = window.prompt("Rename to", entry.name);
-          if (next && next !== entry.name) {
-            void controller.rename(entry.path, next, "local");
-          }
-        },
+        label: multi ? `Permissions for ${targets.length} selected...` : "Permissions…",
+        onClick: () => setChmodPrompt({ entries: targets, side: "local" }),
       });
       items.push({
-        label: "Permissions…",
-        onClick: () => setChmodPrompt({ entries: [entry], side: "local" }),
-      });
-      items.push({
-        label: "Delete",
+        label: multi ? `Delete ${targets.length} selected` : "Delete",
         onClick: () => {
-          if (window.confirm(`Delete ${entry.name}?`)) {
-            void controller.remove(entry.path, "local", true);
+          const summary = multi ? `${targets.length} items` : target.name;
+          if (window.confirm(`Delete ${summary}?`)) {
+            for (const item of targets) {
+              void controller.remove(item.path, "local", true);
+            }
           }
         },
         danger: true,
@@ -289,42 +297,52 @@ export function FileBrowser(props: FileBrowserProps) {
   );
 
   const remoteContext = useCallback(
-    (entry: FileEntry): MenuItem[] => {
+    (entry: FileEntry, _anchor: { x: number; y: number }, selectedEntries: FileEntry[]): MenuItem[] => {
+      const targets = selectedEntries.length > 0 ? selectedEntries : [entry];
+      const target = targets[0] ?? entry;
+      const multi = targets.length > 1;
       const items: MenuItem[] = [];
-      if (entry.fileType === "file") {
-        items.push({
-          label: "Download to local",
-          onClick: () => {
-            const localDir = session?.local.path ?? "";
-            void controller.download(entry, localDir, { openAfter: false });
-          },
-        });
+      items.push({
+        label: multi ? `Download ${targets.length} selected to local` : "Download to local",
+        onClick: () => {
+          const localDir = session?.local.path ?? "";
+          for (const item of targets) {
+            void controller.download(item, localDir, { openAfter: false });
+          }
+        },
+      });
+      if (!multi && target.fileType === "file") {
         items.push({
           label: "Download and open",
           onClick: () => {
             const localDir = session?.local.path ?? "";
-            void controller.download(entry, localDir, { openAfter: true });
+            void controller.download(target, localDir, { openAfter: true });
+          },
+        });
+      }
+      if (!multi) {
+        items.push({
+          label: "Rename",
+          onClick: () => {
+            const next = window.prompt("Rename to", target.name);
+            if (next && next !== target.name) {
+              void controller.rename(target.path, next, "remote");
+            }
           },
         });
       }
       items.push({
-        label: "Rename",
-        onClick: () => {
-          const next = window.prompt("Rename to", entry.name);
-          if (next && next !== entry.name) {
-            void controller.rename(entry.path, next, "remote");
-          }
-        },
+        label: multi ? `Permissions for ${targets.length} selected...` : "Permissions…",
+        onClick: () => setChmodPrompt({ entries: targets, side: "remote" }),
       });
       items.push({
-        label: "Permissions…",
-        onClick: () => setChmodPrompt({ entries: [entry], side: "remote" }),
-      });
-      items.push({
-        label: "Delete",
+        label: multi ? `Delete ${targets.length} selected` : "Delete",
         onClick: () => {
-          if (window.confirm(`Delete remote: ${entry.name}?`)) {
-            void controller.remove(entry.path, "remote", true);
+          const summary = multi ? `${targets.length} items` : target.name;
+          if (window.confirm(`Delete remote: ${summary}?`)) {
+            for (const item of targets) {
+              void controller.remove(item.path, "remote", true);
+            }
           }
         },
         danger: true,

@@ -501,6 +501,7 @@ pub async fn open_sftp_window(
         // before React sees them. Mirrors the same flag in tauri.conf.json
         // for the main window.
         .disable_drag_drop_handler()
+        .enable_clipboard_access()
         .build()
         .map_err(|e| format!("failed to open SFTP window: {}", e))?;
     Ok(())
