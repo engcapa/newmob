@@ -11,6 +11,10 @@ class MockWindow {
     return undefined;
   }
 
+  async startResizeDragging(_direction: string): Promise<void> {
+    return undefined;
+  }
+
   async minimize(): Promise<void> {
     return undefined;
   }

@@ -14,6 +14,7 @@ import { CompactTitleBar } from "../components/tabbar/CompactTitleBar";
 import { TabBar } from "../components/tabbar/TabBar";
 import { StatusBar } from "../components/statusbar/StatusBar";
 import { AppTitleBar } from "../components/window/AppTitleBar";
+import { WindowResizeHandles } from "../components/window/WindowResizeHandles";
 import { TerminalPanel } from "../components/terminal/TerminalPanel";
 import { SessionEditor } from "../components/session/SessionEditor";
 import { AuthPrompt } from "../components/session/AuthPrompt";
@@ -556,6 +557,7 @@ export function MainLayout() {
       className={`relative w-full h-full flex flex-col${compactMode ? " moba-compact-root" : ""}`}
       style={{ background: "var(--moba-chrome-bg)" }}
     >
+      <WindowResizeHandles />
       {!compactMode && <AppTitleBar />}
       {!compactMode && (
         <>
