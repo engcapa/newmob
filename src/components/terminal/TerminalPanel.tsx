@@ -556,19 +556,6 @@ export function TerminalPanel({
     focusTerminal();
   }, [focusTerminal]);
 
-  const startZmodemReceive = useCallback(() => {
-    if (!zmodemRef.current) {
-      setStatusMessage("Terminal not ready for ZMODEM");
-      return;
-    }
-    if (zmodemRef.current.isActive) {
-      setStatusMessage("A ZMODEM transfer is already in progress");
-      return;
-    }
-    setStatusMessage("Waiting for remote sz… (run: sz <file> on the remote)");
-    focusTerminal();
-  }, [focusTerminal, setStatusMessage]);
-
   const selectZmodemSendFiles = useCallback(async (): Promise<ZmodemSendFile[]> => {
     const filePaths = await selectUploadFile();
     if (!filePaths || filePaths.length === 0) return [];
@@ -747,7 +734,6 @@ export function TerminalPanel({
       { label: "Save to file", shortcut: "Ctrl+Shift+S", onClick: saveBufferToFile },
       { label: "Print", shortcut: "Ctrl+Shift+P", disabled: true },
       { label: "", separator: true },
-      { label: "Receive file using Z-modem", onClick: startZmodemReceive, disabled: zmodemState !== "idle" },
       { label: "Send file using Z-modem", onClick: () => void startZmodemSend(), disabled: zmodemState !== "idle" },
       { label: "", separator: true },
       { label: "Change current terminal settings...", disabled: true },
@@ -796,7 +782,6 @@ export function TerminalPanel({
     toggleOutputRecording,
     loggingActive,
     macroRecording,
-    startZmodemReceive,
     startZmodemSend,
     zmodemState,
   ]);

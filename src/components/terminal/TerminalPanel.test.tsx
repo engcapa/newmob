@@ -200,4 +200,22 @@ describe("TerminalPanel focus behavior", () => {
     });
     expect(screen.queryByTestId("context-menu")).not.toBeInTheDocument();
   });
+
+  it("omits the no-op ZMODEM receive action from the context menu", async () => {
+    const onSessionReady = vi.fn();
+
+    render(<TerminalPanel visible onSessionReady={onSessionReady} />);
+
+    await waitFor(() => {
+      expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+    });
+
+    fireEvent.contextMenu(screen.getByTestId("terminal-pane"));
+
+    await waitFor(() => {
+      expect(screen.queryAllByTestId("context-menu").length).toBeGreaterThan(0);
+    });
+    expect(screen.queryByTestId("context-menu-item-receive-file-using-z-modem")).not.toBeInTheDocument();
+    expect(screen.getByTestId("context-menu-item-send-file-using-z-modem")).toBeInTheDocument();
+  });
 });
