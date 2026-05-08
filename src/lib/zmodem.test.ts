@@ -4,7 +4,13 @@ import { ZmodemSession, type ZmodemCallbacks } from "./zmodem";
 
 const zmodemMock = vi.hoisted(() => {
   let options: {
-    on_detect: (detection: { confirm: () => Session }) => void;
+    on_detect: (detection: {
+      confirm: () => Session;
+      deny: () => void;
+      is_valid: () => boolean;
+      get_session_role: () => "send" | "receive";
+    }) => void;
+    on_retract: () => void;
     sender: (octets: number[]) => void;
   } | null = null;
 
@@ -63,14 +69,58 @@ describe("ZmodemSession", () => {
     expect(callbacks.onStateChange).toHaveBeenLastCalledWith("idle");
   });
 
+  it("keeps a single file picker open while remote rz repeats its header", async () => {
+    const firstSession = makeSendSession(makeTransfer());
+    const secondTransfer = makeTransfer();
+    const secondSession = makeSendSession(secondTransfer);
+    let resolveSelection!: (files: Array<{ name: string; bytes: Uint8Array }>) => void;
+    const selectFiles = vi.fn(
+      () => new Promise<Array<{ name: string; bytes: Uint8Array }>>((resolve) => {
+        resolveSelection = resolve;
+      }),
+    );
+    const callbacks = makeCallbacks({ onSelectSendFiles: selectFiles });
+    const firstDetection = makeDetection(firstSession);
+    const secondDetection = makeDetection(secondSession);
+
+    new ZmodemSession(vi.fn(), callbacks);
+    detect(firstDetection);
+    await Promise.resolve();
+
+    expect(selectFiles).toHaveBeenCalledTimes(1);
+    expect(firstDetection.confirm).not.toHaveBeenCalled();
+    expect(callbacks.onStateChange).toHaveBeenLastCalledWith("sending");
+
+    zmodemMock.getOptions()?.on_retract();
+    detect(secondDetection);
+    await Promise.resolve();
+
+    expect(selectFiles).toHaveBeenCalledTimes(1);
+    expect(callbacks.onStateChange).toHaveBeenLastCalledWith("sending");
+
+    resolveSelection([{ name: "late.bin", bytes: new Uint8Array([4, 5]) }]);
+
+    await expect.poll(() => secondSession.close.mock.calls.length).toBe(1);
+
+    expect(firstDetection.confirm).not.toHaveBeenCalled();
+    expect(secondDetection.confirm).toHaveBeenCalledTimes(1);
+    expect(secondSession.send_offer).toHaveBeenCalledWith({
+      name: "late.bin",
+      size: 2,
+      mtime: expect.any(Number),
+    });
+    expect(secondTransfer.send).toHaveBeenCalledWith([4, 5]);
+  });
+
   it("aborts the remote rz session when file selection is canceled", async () => {
     const session = makeSendSession(makeTransfer());
     const callbacks = makeCallbacks({ onSelectSendFiles: vi.fn(async () => []) });
+    const detection = makeDetection(session);
 
     new ZmodemSession(vi.fn(), callbacks);
-    detect(session);
+    detect(detection);
 
-    await expect.poll(() => session.abort.mock.calls.length).toBe(1);
+    await expect.poll(() => detection.deny.mock.calls.length).toBe(1);
 
     expect(session.send_offer).not.toHaveBeenCalled();
     expect(callbacks.onError).not.toHaveBeenCalled();
@@ -338,8 +388,18 @@ function makeOffer(name: string, size: number) {
   };
 }
 
-function detect(session: Session) {
-  zmodemMock.getOptions()?.on_detect({
-    confirm: () => session,
-  });
+function detect(sessionOrDetection: Session | ReturnType<typeof makeDetection>) {
+  const detection = "confirm" in sessionOrDetection ? sessionOrDetection : makeDetection(sessionOrDetection);
+  zmodemMock.getOptions()?.on_detect(detection);
+}
+
+function makeDetection(session: Session) {
+  return {
+    confirm: vi.fn(() => session),
+    deny: vi.fn(() => {
+      session.abort();
+    }),
+    is_valid: vi.fn(() => true),
+    get_session_role: vi.fn(() => session.type),
+  };
 }

@@ -13,6 +13,7 @@ declare module "zmodem.js" {
     confirm(): Session;
     deny(): void;
     is_valid(): boolean;
+    get_session_role(): "send" | "receive";
   }
 
   export class Session {

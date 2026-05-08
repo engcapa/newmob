@@ -1,4 +1,4 @@
-import { Sentry, type Session, type Offer, type Transfer } from "zmodem.js";
+import { Sentry, type Detection, type Session, type Offer, type Transfer } from "zmodem.js";
 
 export type ZmodemState = "idle" | "receiving" | "sending";
 
@@ -48,6 +48,9 @@ export class ZmodemSession {
   private sendErrorReported = false;
   private currentSession: Session | null = null;
   private receiveFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingSendDetection: Detection | null = null;
+  private selectingSendFiles = false;
+  private sendSelectionId = 0;
 
   constructor(
     private readonly sender: ZmodemSender,
@@ -65,16 +68,27 @@ export class ZmodemSession {
         this.queueSendToPeer(octets);
       },
       on_retract: () => {
+        if (this.selectingSendFiles && !this.currentSession) {
+          this.pendingSendDetection = null;
+          return;
+        }
         if (this.active) {
           this.active = false;
           this.pendingSend = [];
           this.currentSession = null;
+          this.pendingSendDetection = null;
           this.clearReceiveFinalizeTimer();
           this.callbacks.onStateChange("idle");
         }
       },
       on_detect: (detection) => {
         this.resetSendQueue();
+        const role = detection.get_session_role();
+        if (role === "send" && this.pendingSend.length === 0) {
+          this.doSelectThenConfirmSend(detection);
+          return;
+        }
+
         const zsession = detection.confirm();
         this.currentSession = zsession;
         if (zsession.type === "receive") {
@@ -118,6 +132,9 @@ export class ZmodemSession {
     this.clearReceiveFinalizeTimer();
     this.resetSendQueue();
     this.currentSession = null;
+    this.pendingSendDetection = null;
+    this.selectingSendFiles = false;
+    this.sendSelectionId++;
     this.active = false;
     this.pendingSend = [];
     this.sentry = this.createSentry();
@@ -274,6 +291,78 @@ export class ZmodemSession {
         }
       }
     })();
+  }
+
+  private doSelectThenConfirmSend(detection: Detection): void {
+    this.pendingSendDetection = detection;
+    if (this.selectingSendFiles) return;
+
+    const selectFiles = this.callbacks.onSelectSendFiles;
+    if (!selectFiles) {
+      this.abortPendingSendDetection();
+      this.callbacks.onError("Unexpected ZMODEM send session (no file queued)");
+      return;
+    }
+
+    this.selectingSendFiles = true;
+    const selectionId = ++this.sendSelectionId;
+    this.active = true;
+    this.callbacks.onStateChange("sending");
+
+    void (async () => {
+      let delegatedToSender = false;
+      try {
+        const files = await selectFiles();
+        if (selectionId !== this.sendSelectionId) return;
+
+        if (!files || files.length === 0) {
+          this.abortPendingSendDetection();
+          return;
+        }
+
+        const zsession = this.confirmPendingSendDetection();
+        if (!zsession) {
+          this.callbacks.onError("Remote rz is no longer waiting for files");
+          return;
+        }
+
+        delegatedToSender = true;
+        this.doSendAll(zsession, files);
+      } catch (err) {
+        this.abortPendingSendDetection();
+        this.callbacks.onError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (selectionId === this.sendSelectionId) {
+          this.selectingSendFiles = false;
+          if (!delegatedToSender) {
+            this.active = false;
+            this.currentSession = null;
+            this.callbacks.onStateChange("idle");
+          }
+        }
+      }
+    })();
+  }
+
+  private confirmPendingSendDetection(): Session | null {
+    const detection = this.pendingSendDetection;
+    this.pendingSendDetection = null;
+    if (!detection?.is_valid()) return null;
+
+    const zsession = detection.confirm();
+    this.currentSession = zsession;
+    return zsession;
+  }
+
+  private abortPendingSendDetection(): void {
+    const detection = this.pendingSendDetection;
+    this.pendingSendDetection = null;
+    if (!detection?.is_valid()) return;
+    try {
+      detection.deny();
+    } catch {
+      /* detection may have become stale between the validity check and abort */
+    }
   }
 
   private doSendAll(zsession: Session, files: ZmodemSendFile[]): void {
