@@ -43,7 +43,7 @@ import {
   closeTerminal,
   listenTerminalExit,
   listenTerminalForwardError,
-  encodeBase64,
+  encodeBinaryString,
   selectUploadFile,
   selectSaveDirectory,
   readFileBytes,
@@ -273,7 +273,7 @@ export function TerminalPanel({
     if (macroRecordingRef.current && !macroPlaybackRef.current) {
       macroBufferRef.current += data;
     }
-    writeTerminal(sid, encodeBase64(data)).catch(console.error);
+    writeTerminal(sid, data).catch(console.error);
   }, []);
 
   const writeInput = sendTerminalInput;
@@ -292,7 +292,7 @@ export function TerminalPanel({
     if (macroRecordingRef.current && !macroPlaybackRef.current) {
       macroBufferRef.current += data;
     }
-    writeTerminal(sid, encodeBinaryStringBase64(data)).catch(console.error);
+    writeTerminal(sid, encodeBinaryString(data)).catch(console.error);
   }, []);
 
   const requestTerminalCwd = useCallback(() => {
@@ -307,7 +307,7 @@ export function TerminalPanel({
     }
 
     injectedInputEchoSuppressorRef.current = createInputEchoSuppressor(CWD_QUERY_COMMAND, 5000);
-    writeTerminal(sid, encodeBase64(`${CWD_QUERY_COMMAND}\r`)).catch((err) => {
+    writeTerminal(sid, `${CWD_QUERY_COMMAND}\r`).catch((err) => {
       if (sessionIdRef.current === sid) injectedInputEchoSuppressorRef.current = null;
       setStatusMessage(err instanceof Error ? err.message : "Terminal cwd request failed");
     });
@@ -952,9 +952,7 @@ export function TerminalPanel({
     // channel can receive early SSH banners before create*Terminal resolves.
     const zmodem = new ZmodemSession(
       (bytes) => {
-        let b64 = "";
-        for (let i = 0; i < bytes.length; i++) b64 += String.fromCharCode(bytes[i]);
-        return writeTerminal(sid, btoa(b64)).catch((err) => {
+        return writeTerminal(sid, bytes).catch((err) => {
           console.error(err);
           throw err;
         });
@@ -1751,14 +1749,6 @@ function parseOsc7(data: string): string | null {
   } catch {
     return match[1];
   }
-}
-
-function encodeBinaryStringBase64(str: string): string {
-  let binary = "";
-  for (let i = 0; i < str.length; i++) {
-    binary += String.fromCharCode(str.charCodeAt(i) & 0xff);
-  }
-  return btoa(binary);
 }
 
 function formatZmodemBytes(n: number): string {

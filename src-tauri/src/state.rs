@@ -22,6 +22,7 @@ pub struct AppState {
     pub tunnels: Arc<TunnelRegistry>,
     pub vnc_sessions: Arc<RwLock<HashMap<String, VncSession>>>,
     pub write_handles: Arc<Mutex<HashMap<String, WriteStreamHandle>>>,
+    pub file_read_tokens: Arc<Mutex<HashMap<String, PathBuf>>>,
     pub db: Mutex<rusqlite::Connection>,
 }
 
@@ -34,6 +35,7 @@ impl AppState {
             tunnels: Arc::new(TunnelRegistry::new()),
             vnc_sessions: Arc::new(RwLock::new(HashMap::new())),
             write_handles: Arc::new(Mutex::new(HashMap::new())),
+            file_read_tokens: Arc::new(Mutex::new(HashMap::new())),
             db: Mutex::new(db),
         }
     }

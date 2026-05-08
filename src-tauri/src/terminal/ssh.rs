@@ -12,7 +12,7 @@ pub struct SshSession {
 }
 
 pub struct SshHandler {
-    pub output_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>,
+    pub output_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>>,
 }
 
 #[async_trait]
@@ -33,8 +33,9 @@ impl client::Handler for SshHandler {
         data: &[u8],
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        if let Some(tx) = self.output_tx.lock().await.as_ref() {
-            let _ = tx.send(data.to_vec());
+        let tx = self.output_tx.lock().await.as_ref().cloned();
+        if let Some(tx) = tx {
+            let _ = tx.send(data.to_vec()).await;
         }
         Ok(())
     }
@@ -46,8 +47,9 @@ impl client::Handler for SshHandler {
         data: &[u8],
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
-        if let Some(tx) = self.output_tx.lock().await.as_ref() {
-            let _ = tx.send(data.to_vec());
+        let tx = self.output_tx.lock().await.as_ref().cloned();
+        if let Some(tx) = tx {
+            let _ = tx.send(data.to_vec()).await;
         }
         Ok(())
     }
@@ -235,11 +237,12 @@ pub async fn connect_ssh(
     (
         client::Handle<SshHandler>,
         russh::Channel<client::Msg>,
-        tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
     ),
     String,
 > {
-    let (output_tx, output_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (output_tx, output_rx) =
+        tokio::sync::mpsc::channel(super::TERMINAL_OUTPUT_CHANNEL_CAPACITY);
 
     let config = build_client_config(network);
 

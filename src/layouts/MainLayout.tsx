@@ -25,7 +25,6 @@ import { SftpSidebar } from "../components/filebrowser/SftpSidebar";
 import { isTauriRuntime } from "../lib/runtime";
 import { openSftpWindow } from "../lib/sftp";
 import { writeTerminal } from "../lib/ipc";
-import { encodeBase64 } from "../lib/ipc";
 import {
   clearDetachedHandoff,
   detachedWindowUrl,
@@ -697,7 +696,7 @@ export function MainLayout() {
                         const sid = terminalSessionIds.current[tab.id];
                         if (!sid) return;
                         const escaped = p.replace(/'/g, "'\\''");
-                        void writeTerminal(sid, encodeBase64(`cd '${escaped}'\n`));
+                        void writeTerminal(sid, `cd '${escaped}'\n`);
                       }}
                       onDetach={() =>
                         openDetachedSftp(

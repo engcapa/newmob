@@ -1,12 +1,12 @@
-mod state;
-mod terminal;
-mod session;
+mod appearance;
+mod config;
 mod filebrowser;
-mod tunnel;
 mod nettools;
 mod serial;
-mod config;
-mod appearance;
+mod session;
+mod state;
+mod terminal;
+mod tunnel;
 mod vnc;
 
 use state::AppState;
@@ -19,7 +19,15 @@ fn exit_app(app_handle: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+
     tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("newmob-file", |ctx, request, responder| {
+            config::respond_file_read_request(ctx.app_handle(), request, responder);
+        })
         .setup(|app| {
             let app_data = app
                 .path()
@@ -28,8 +36,7 @@ pub fn run() {
             std::fs::create_dir_all(&app_data).ok();
 
             let db_path = app_data.join("newmob.db");
-            let conn = rusqlite::Connection::open(&db_path)
-                .expect("failed to open database");
+            let conn = rusqlite::Connection::open(&db_path).expect("failed to open database");
             session::db::init_db(&conn).expect("failed to init database");
 
             app.manage(AppState::new(conn));
@@ -64,6 +71,7 @@ pub fn run() {
             terminal::create_ssh_terminal,
             terminal::test_ssh_connection,
             terminal::write_terminal,
+            terminal::write_terminal_text,
             terminal::resize_terminal,
             terminal::send_terminal_signal,
             terminal::close_terminal,
@@ -105,6 +113,8 @@ pub fn run() {
             config::select_upload_file,
             config::select_save_directory,
             config::read_file_bytes,
+            config::create_file_read_url,
+            config::release_file_read_url,
             config::write_stream_open,
             config::write_stream_append,
             config::write_stream_close,

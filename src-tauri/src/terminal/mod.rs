@@ -4,17 +4,20 @@ pub mod pty;
 pub mod ssh;
 
 use crate::state::AppState;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use russh::Sig;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
-use tauri::ipc::{Channel, InvokeResponseBody};
+use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
 type TerminalOutputChannel = Channel<InvokeResponseBody>;
+
+pub const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 256;
+const TERMINAL_OUTPUT_CHUNK_SIZE: usize = 64 * 1024;
+const TERMINAL_OUTPUT_BATCH_CAPACITY: usize = 8 * 1024;
 
 pub enum ActiveTerminal {
     Local {
@@ -74,10 +77,21 @@ pub async fn create_local_terminal(
         terminals.insert(session_id.clone(), terminal);
     }
 
+    let (output_tx, output_rx) = tokio::sync::mpsc::channel(TERMINAL_OUTPUT_CHANNEL_CAPACITY);
+    tokio::task::spawn_blocking(move || {
+        read_loop_local(reader, output_tx);
+    });
+
     let sid = session_id.clone();
     let app = app_handle.clone();
-    std::thread::spawn(move || {
-        read_loop_local(reader, sid, app, on_output);
+    let terminals = state.terminals.clone();
+    tokio::spawn(async move {
+        forward_terminal_output(output_rx, on_output).await;
+        {
+            let mut map = terminals.write().await;
+            map.remove(&sid);
+        }
+        let _ = app.emit(&format!("terminal-exit-{}", sid), "closed");
     });
 
     Ok(session_id)
@@ -108,16 +122,16 @@ pub async fn create_ssh_terminal(
 
     let auth = match auth_method.as_str() {
         "Password" => ssh::SshAuth::Password(auth_data.unwrap_or_default()),
-        "PrivateKey" => ssh::SshAuth::PrivateKey(
-            auth_data.unwrap_or_else(|| "~/.ssh/id_ed25519".to_string()),
-        ),
+        "PrivateKey" => {
+            ssh::SshAuth::PrivateKey(auth_data.unwrap_or_else(|| "~/.ssh/id_ed25519".to_string()))
+        }
         "Agent" => ssh::SshAuth::Agent,
         _ => ssh::SshAuth::Password(auth_data.unwrap_or_default()),
     };
 
     let network = network::NetworkSettings::from_json(network_settings_json.as_deref());
 
-    let (handle, channel, mut output_rx) =
+    let (handle, channel, output_rx) =
         ssh::connect_ssh(&host, port, &username, auth, cols, rows, network.as_ref()).await?;
 
     let handle_arc = Arc::new(handle);
@@ -158,9 +172,7 @@ pub async fn create_ssh_terminal(
     let app = app_handle.clone();
     let terminals = state.terminals.clone();
     tokio::spawn(async move {
-        while let Some(data) = output_rx.recv().await {
-            let _ = on_output.send(InvokeResponseBody::Raw(data));
-        }
+        forward_terminal_output(output_rx, on_output).await;
         // SSH session ended naturally (peer closed, network drop, exit).
         // Remove the terminal entry and abort any session-attached
         // forward listeners so their bound TCP ports are released and
@@ -186,21 +198,48 @@ pub async fn create_ssh_terminal(
 
 fn read_loop_local(
     mut reader: Box<dyn Read + Send>,
-    session_id: String,
-    app: AppHandle,
-    on_output: TerminalOutputChannel,
+    output_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) {
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; TERMINAL_OUTPUT_CHUNK_SIZE];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                let _ = on_output.send(InvokeResponseBody::Raw(buf[..n].to_vec()));
+                if output_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
             }
             Err(_) => break,
         }
     }
-    let _ = app.emit(&format!("terminal-exit-{}", session_id), "closed");
+}
+
+async fn forward_terminal_output(
+    mut output_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    on_output: TerminalOutputChannel,
+) {
+    let mut pending = Vec::with_capacity(TERMINAL_OUTPUT_BATCH_CAPACITY);
+
+    while let Some(data) = output_rx.recv().await {
+        pending.extend_from_slice(&data);
+        while pending.len() < TERMINAL_OUTPUT_CHUNK_SIZE {
+            match output_rx.try_recv() {
+                Ok(data) => pending.extend_from_slice(&data),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    flush_terminal_output(&mut pending, &on_output);
+                    return;
+                }
+            }
+        }
+        flush_terminal_output(&mut pending, &on_output);
+    }
+}
+
+fn flush_terminal_output(pending: &mut Vec<u8>, on_output: &TerminalOutputChannel) {
+    let mut out = Vec::with_capacity(TERMINAL_OUTPUT_BATCH_CAPACITY);
+    std::mem::swap(pending, &mut out);
+    let _ = on_output.send(InvokeResponseBody::Raw(out));
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), String> {
@@ -212,23 +251,46 @@ fn validate_session_id(session_id: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn write_terminal(
+    request: Request<'_>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let session_id = request
+        .headers()
+        .get("x-session-id")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "Missing x-session-id header".to_string())?
+        .to_string();
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.as_slice(),
+        InvokeBody::Json(_) => return Err("write_terminal expects raw bytes".to_string()),
+    };
+    write_terminal_bytes(&session_id, bytes, &state).await
+}
+
+#[tauri::command]
+pub async fn write_terminal_text(
     session_id: String,
     data: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let bytes = B64
-        .decode(&data)
-        .map_err(|e| format!("Invalid base64: {}", e))?;
+    write_terminal_bytes(&session_id, data.as_bytes(), &state).await
+}
 
+async fn write_terminal_bytes(
+    session_id: &str,
+    bytes: &[u8],
+    state: &AppState,
+) -> Result<(), String> {
     let terminals = state.terminals.read().await;
     let terminal = terminals
-        .get(&session_id)
+        .get(session_id)
         .ok_or_else(|| format!("Terminal {} not found", session_id))?;
 
     match terminal {
         ActiveTerminal::Local { writer, .. } => {
             let mut w = writer.lock().map_err(|e| format!("Lock failed: {}", e))?;
-            w.write_all(&bytes).map_err(|e| format!("Write failed: {}", e))?;
+            w.write_all(&bytes)
+                .map_err(|e| format!("Write failed: {}", e))?;
             w.flush().map_err(|e| format!("Flush failed: {}", e))?;
         }
         ActiveTerminal::Ssh { channel, .. } => {
@@ -281,9 +343,7 @@ pub async fn send_terminal_signal(
         .ok_or_else(|| format!("Terminal {} not found", session_id))?;
 
     match terminal {
-        ActiveTerminal::Local { child, .. } => {
-            send_local_signal(child, &signal)
-        }
+        ActiveTerminal::Local { child, .. } => send_local_signal(child, &signal),
         ActiveTerminal::Ssh { channel, .. } => {
             let sig = ssh_signal_from_name(&signal)?;
             let ch = channel.lock().await;
@@ -295,10 +355,7 @@ pub async fn send_terminal_signal(
 }
 
 #[tauri::command]
-pub async fn close_terminal(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn close_terminal(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let removed = {
         let mut terminals = state.terminals.write().await;
         terminals.remove(&session_id)
@@ -351,9 +408,14 @@ fn send_local_signal(
     match signal {
         "SIGTERM" | "SIGKILL" => {
             let mut child = child.lock().map_err(|e| format!("Lock failed: {}", e))?;
-            child.kill().map_err(|e| format!("Local kill failed: {}", e))
+            child
+                .kill()
+                .map_err(|e| format!("Local kill failed: {}", e))
         }
-        _ => Err(format!("Local signal {} is not supported on this platform", signal)),
+        _ => Err(format!(
+            "Local signal {} is not supported on this platform",
+            signal
+        )),
     }
 }
 
@@ -379,9 +441,9 @@ pub async fn test_ssh_connection(
 ) -> Result<String, String> {
     let auth = match auth_method.as_str() {
         "Password" => ssh::SshAuth::Password(auth_data.unwrap_or_default()),
-        "PrivateKey" => ssh::SshAuth::PrivateKey(
-            auth_data.unwrap_or_else(|| "~/.ssh/id_ed25519".to_string()),
-        ),
+        "PrivateKey" => {
+            ssh::SshAuth::PrivateKey(auth_data.unwrap_or_else(|| "~/.ssh/id_ed25519".to_string()))
+        }
         "Agent" => ssh::SshAuth::Agent,
         _ => ssh::SshAuth::Password(auth_data.unwrap_or_default()),
     };
@@ -397,5 +459,8 @@ pub async fn test_ssh_connection(
     drop(channel);
     drop(handle);
 
-    Ok(format!("Connection successful ({:.0}ms)", elapsed.as_millis()))
+    Ok(format!(
+        "Connection successful ({:.0}ms)",
+        elapsed.as_millis()
+    ))
 }

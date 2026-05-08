@@ -75,7 +75,6 @@ vi.mock("../components/filebrowser/SftpSidebar", () => ({
 }));
 
 vi.mock("../lib/ipc", () => ({
-  encodeBase64: (value: string) => btoa(value),
   exitApp: vi.fn(async () => undefined),
   listSessionGroups: vi.fn(async () => []),
   listSessions: vi.fn(async () => []),

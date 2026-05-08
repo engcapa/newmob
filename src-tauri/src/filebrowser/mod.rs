@@ -16,10 +16,10 @@ pub mod transfer;
 
 use crate::state::AppState;
 use crate::terminal::ssh::SshAuth;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -38,11 +38,50 @@ pub struct AttachResultPayload {
 fn auth_from(method: &str, data: Option<String>) -> SshAuth {
     match method {
         "Password" => SshAuth::Password(data.unwrap_or_default()),
-        "PrivateKey" => SshAuth::PrivateKey(
-            data.unwrap_or_else(|| "~/.ssh/id_ed25519".to_string()),
-        ),
+        "PrivateKey" => {
+            SshAuth::PrivateKey(data.unwrap_or_else(|| "~/.ssh/id_ed25519".to_string()))
+        }
         "Agent" => SshAuth::Agent,
         _ => SshAuth::Password(data.unwrap_or_default()),
+    }
+}
+
+fn required_decoded_header(request: &Request<'_>, name: &str) -> Result<String, String> {
+    let value = request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| format!("Missing {name} header"))?;
+    percent_decode(value)
+}
+
+fn percent_decode(value: &str) -> Result<String, String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len() {
+                return Err("Invalid percent-encoded header".to_string());
+            }
+            let hi = hex_value(bytes[i + 1])?;
+            let lo = hex_value(bytes[i + 2])?;
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|e| format!("Invalid UTF-8 header: {}", e))
+}
+
+fn hex_value(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err("Invalid percent-encoded header".to_string()),
     }
 }
 
@@ -72,10 +111,7 @@ pub async fn sftp_attach(
 }
 
 #[tauri::command]
-pub async fn sftp_detach(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn sftp_detach(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let mut sessions = state.sftp_sessions.write().await;
     sessions.remove(&session_id);
     Ok(())
@@ -242,17 +278,18 @@ pub async fn sftp_write_file_text(
 
 #[tauri::command]
 pub async fn sftp_upload_bytes(
-    session_id: String,
-    transfer_id: String,
-    local_name: String,
-    remote_path: String,
-    bytes_b64: String,
+    request: Request<'_>,
     state: State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    let bytes = B64
-        .decode(bytes_b64.as_bytes())
-        .map_err(|e| format!("Invalid base64 payload: {}", e))?;
+    let session_id = required_decoded_header(&request, "x-session-id")?;
+    let transfer_id = required_decoded_header(&request, "x-transfer-id")?;
+    let local_name = required_decoded_header(&request, "x-local-name")?;
+    let remote_path = required_decoded_header(&request, "x-remote-path")?;
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes,
+        InvokeBody::Json(_) => return Err("sftp_upload_bytes expects raw bytes".to_string()),
+    };
     let session = get_session(&state, &session_id).await?;
     // Frontend already passes the full destination path; only fall back to
     // joining when the caller explicitly provided a directory path with no
@@ -262,7 +299,7 @@ pub async fn sftp_upload_bytes(
     } else {
         remote_path.clone()
     };
-    session.write_bytes(&dest, &bytes).await?;
+    session.write_bytes(&dest, bytes).await?;
     let _ = app_handle.emit(
         &format!("sftp-transfer-complete-{}", transfer_id),
         transfer::CompletePayload::ok(Some(dest)),
@@ -276,11 +313,11 @@ pub async fn sftp_download_bytes(
     _transfer_id: String,
     remote_path: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<Response, String> {
     let session = get_session(&state, &session_id).await?;
     // 32 MiB hard cap to match the JS-side proxy.
     let bytes = session.read_bytes(&remote_path, 32 * 1024 * 1024).await?;
-    Ok(B64.encode(&bytes))
+    Ok(Response::new(bytes))
 }
 
 #[tauri::command]
@@ -306,7 +343,13 @@ pub async fn sftp_upload(
     };
     let app = app_handle.clone();
     let result = session
-        .upload_file(&local, &dest, transfer_id.clone(), handle.clone(), app.clone())
+        .upload_file(
+            &local,
+            &dest,
+            transfer_id.clone(),
+            handle.clone(),
+            app.clone(),
+        )
         .await;
     transfer::unregister(&state, &transfer_id).await;
     let payload = match &result {
@@ -347,7 +390,13 @@ pub async fn sftp_download(
     };
     let app = app_handle.clone();
     let result = session
-        .download_file(&remote_path, &dest, transfer_id.clone(), handle.clone(), app.clone())
+        .download_file(
+            &remote_path,
+            &dest,
+            transfer_id.clone(),
+            handle.clone(),
+            app.clone(),
+        )
         .await;
     transfer::unregister(&state, &transfer_id).await;
     let final_path = dest.to_string_lossy().to_string();
@@ -386,7 +435,13 @@ pub async fn sftp_upload_dir(
     };
     let app = app_handle.clone();
     let result = session
-        .upload_dir(&local, &dest, transfer_id.clone(), handle.clone(), app.clone())
+        .upload_dir(
+            &local,
+            &dest,
+            transfer_id.clone(),
+            handle.clone(),
+            app.clone(),
+        )
         .await;
     transfer::unregister(&state, &transfer_id).await;
     let payload = match &result {
@@ -422,7 +477,13 @@ pub async fn sftp_download_dir(
     };
     let app = app_handle.clone();
     let result = session
-        .download_dir(&remote_path, &dest, transfer_id.clone(), handle.clone(), app.clone())
+        .download_dir(
+            &remote_path,
+            &dest,
+            transfer_id.clone(),
+            handle.clone(),
+            app.clone(),
+        )
         .await;
     transfer::unregister(&state, &transfer_id).await;
     let final_path = dest.to_string_lossy().to_string();
@@ -471,7 +532,10 @@ pub async fn open_sftp_window(
     session_id: String,
     title: Option<String>,
 ) -> Result<(), String> {
-    let label = format!("sftp-{}", session_id.replace(|c: char| !c.is_alphanumeric(), "-"));
+    let label = format!(
+        "sftp-{}",
+        session_id.replace(|c: char| !c.is_alphanumeric(), "-")
+    );
     if app_handle.get_webview_window(&label).is_some() {
         // Reuse / focus the existing window if it is still alive.
         if let Some(w) = app_handle.get_webview_window(&label) {

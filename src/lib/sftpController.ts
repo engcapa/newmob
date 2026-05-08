@@ -27,7 +27,6 @@ import {
 import { newTransferId, useTransferStore } from "../stores/transferStore";
 import { useSftpStore, type PaneSide } from "../stores/sftpStore";
 import { useAppStore } from "../stores/appStore";
-import { encodeBase64 } from "./ipc";
 import { isTauriRuntime } from "./runtime";
 
 export interface TransferStartOpts {
@@ -162,17 +161,7 @@ export function useSftpController(sessionId: string) {
       await startTransferTracking(transferId, "remote");
       try {
         const arrayBuffer = await file.arrayBuffer();
-        const bytes = new Uint8Array(arrayBuffer);
-        let binary = "";
-        const CHUNK = 0x8000;
-        for (let i = 0; i < bytes.length; i += CHUNK) {
-          binary += String.fromCharCode.apply(
-            null,
-            Array.from(bytes.subarray(i, Math.min(i + CHUNK, bytes.length))),
-          );
-        }
-        const b64 = btoa(binary);
-        await sftpUploadBytes(sessionId, transferId, file.name, remotePath, b64);
+        await sftpUploadBytes(sessionId, transferId, file.name, remotePath, new Uint8Array(arrayBuffer));
       } catch (err) {
         setStatus(`Upload failed: ${err instanceof Error ? err.message : err}`);
       }
@@ -428,11 +417,6 @@ export function useSftpController(sessionId: string) {
     [refreshPane, sessionId, setStatus],
   );
 
-  const encodedAuth = useCallback((value: string | null): string | null => {
-    if (value == null) return null;
-    return encodeBase64(value);
-  }, []);
-
   return {
     upload,
     uploadBlob,
@@ -447,6 +431,5 @@ export function useSftpController(sessionId: string) {
     pauseTransfer,
     resumeTransfer,
     retryTransfer,
-    encodedAuth,
   };
 }

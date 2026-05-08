@@ -94,9 +94,14 @@ export async function testSshConnection(
 
 export async function writeTerminal(
   sessionId: string,
-  data: string,
+  data: string | Uint8Array,
 ): Promise<void> {
-  return invoke("write_terminal", { sessionId, data });
+  if (typeof data === "string") {
+    return invoke("write_terminal_text", { sessionId, data });
+  }
+  return invoke("write_terminal", data, {
+    headers: { "x-session-id": sessionId },
+  });
 }
 
 export async function resizeTerminal(
@@ -145,14 +150,12 @@ export async function listenTerminalForwardError(
   );
 }
 
-export function encodeBase64(str: string): string {
-  const encoder = new TextEncoder();
-  const bytes = encoder.encode(str);
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+export function encodeBinaryString(str: string): Uint8Array {
+  const bytes = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) {
+    bytes[i] = str.charCodeAt(i) & 0xff;
   }
-  return btoa(binary);
+  return bytes;
 }
 
 // --- Session CRUD ---
@@ -241,9 +244,25 @@ export async function selectSaveDirectory(currentPath?: string): Promise<string 
   return invoke<string | null>("select_save_directory", { currentPath: currentPath ?? null });
 }
 
+interface FileReadUrl {
+  token: string;
+  url: string;
+}
+
 export async function readFileBytes(path: string): Promise<Uint8Array> {
-  const buffer = await invoke<ArrayBuffer>("read_file_bytes", { path });
-  return new Uint8Array(buffer);
+  const { token, url } = await invoke<FileReadUrl>("create_file_read_url", { path });
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      throw new Error(`Failed to read file: HTTP ${resp.status}`);
+    }
+    return new Uint8Array(await resp.arrayBuffer());
+  } catch {
+    const buffer = await invoke<ArrayBuffer>("read_file_bytes", { path });
+    return new Uint8Array(buffer);
+  } finally {
+    await invoke("release_file_read_url", { token }).catch(() => undefined);
+  }
 }
 
 export async function writeStreamOpen(path: string): Promise<string> {
