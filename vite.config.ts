@@ -14,6 +14,18 @@ export default defineConfig({
   optimizeDeps: {
     include: ["zmodem.js"],
   },
+  // Tauri 2 targets modern WebView2 / WebKitGTK / WKWebView, all of which
+  // support ES2022. Staying on the default (esnext/modules) target means
+  // esbuild does not down-level syntax like `||=`. We previously hit a
+  // ReferenceError in xterm's `requestMode` because a default low target
+  // mis-compiled `r ||= {}` and dropped the `let r` declaration, making
+  // `vi` (which sends DECRQM queries) crash the parser.
+  esbuild: {
+    target: "es2022",
+  },
+  build: {
+    target: "es2022",
+  },
   resolve: {
     alias: isTauriBuild
       ? {}
