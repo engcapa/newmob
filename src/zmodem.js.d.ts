@@ -31,11 +31,11 @@ declare module "zmodem.js" {
     get_details(): { name: string; size?: number; mtime?: number };
     skip(): void;
     on(event: "input", cb: (octets: number[]) => void): void;
-    accept(): Promise<void>;
+    accept(opts?: { offset?: number; on_input?: "spool_uint8array" | "spool_array" | ((octets: number[]) => void) }): Promise<void>;
   }
 
   export class Transfer {
-    send(octets: number[]): void;
-    end(octets: number[]): Promise<void>;
+    send(octets: number[] | Uint8Array): void;
+    end(octets: number[] | Uint8Array): Promise<void>;
   }
 }

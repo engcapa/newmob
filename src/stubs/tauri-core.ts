@@ -130,6 +130,7 @@ export class Channel<T = unknown> {
 }
 
 const writeStreams = new Map<string, { path: string; chunks: Uint8Array[] }>();
+const readStreams = new Map<string, { bytes: Uint8Array; offset: number }>();
 
 function basename(path: string): string {
   const idx = path.lastIndexOf("/");
@@ -261,6 +262,32 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     }
     case "read_file_bytes": {
       return (await vfsReadBytes((args as InvokeArgs)?.path as string)) as T;
+    }
+    case "read_stream_open": {
+      const path = (args as InvokeArgs)?.path as string;
+      const stat = await vfsStat(path);
+      const bytes = new Uint8Array(await vfsReadBytes(path));
+      const handleId = `read-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      readStreams.set(handleId, { bytes, offset: 0 });
+      return { handleId, size: stat.size, mtime: stat.mtime } as T;
+    }
+    case "read_stream_read": {
+      const handleId = (args as InvokeArgs)?.handleId as string;
+      const maxBytes = (args as InvokeArgs)?.maxBytes as number;
+      if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 1_048_576) {
+        throw new Error("read_stream_read maxBytes must be between 1 and 1048576");
+      }
+      const stream = readStreams.get(handleId);
+      if (!stream) throw new Error(`Read stream handle ${handleId} not found`);
+      const end = Math.min(stream.offset + maxBytes, stream.bytes.byteLength);
+      const chunk = stream.bytes.slice(stream.offset, end);
+      stream.offset = end;
+      return chunk.buffer as T;
+    }
+    case "read_stream_close": {
+      const handleId = (args as InvokeArgs)?.handleId as string;
+      if (!readStreams.delete(handleId)) throw new Error(`Read stream handle ${handleId} not found`);
+      return undefined as T;
     }
     case "write_stream_open": {
       const handleId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

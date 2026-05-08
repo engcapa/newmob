@@ -58,9 +58,12 @@ const ipcMocks = vi.hoisted(() => ({
   listenTerminalForwardError: vi.fn(async () => vi.fn()),
   listSystemFonts: vi.fn(async () => ["Source Code Pro"]),
   readFileBytes: vi.fn(async () => new Uint8Array()),
+  readStreamClose: vi.fn(async () => undefined),
+  readStreamOpen: vi.fn(async () => ({ handleId: "read-handle", size: 0, mtime: 0 })),
+  readStreamRead: vi.fn(async () => new Uint8Array()),
   resizeTerminal: vi.fn(async () => undefined),
   selectSaveDirectory: vi.fn(async () => null),
-  selectUploadFile: vi.fn(async () => []),
+  selectUploadFile: vi.fn(async (): Promise<string[]> => []),
   sendTerminalSignal: vi.fn(async () => undefined),
   writeTerminal: vi.fn(async () => undefined),
   writeStreamAbort: vi.fn(async () => undefined),
@@ -217,5 +220,29 @@ describe("TerminalPanel focus behavior", () => {
     });
     expect(screen.queryByTestId("context-menu-item-receive-file-using-z-modem")).not.toBeInTheDocument();
     expect(screen.getByTestId("context-menu-item-send-file-using-z-modem")).toBeInTheDocument();
+  });
+
+  it("queues a ZMODEM send from the context menu without reading the selected file into memory", async () => {
+    ipcMocks.selectUploadFile.mockResolvedValueOnce(["/preview/uploads/big.bin"]);
+    const onSessionReady = vi.fn();
+
+    render(<TerminalPanel visible onSessionReady={onSessionReady} />);
+
+    await waitFor(() => {
+      expect(onSessionReady).toHaveBeenCalledWith("terminal-session");
+    });
+
+    fireEvent.contextMenu(screen.getByTestId("terminal-pane"));
+    await waitFor(() => {
+      expect(screen.getByTestId("context-menu-item-send-file-using-z-modem")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByTestId("context-menu-item-send-file-using-z-modem"));
+
+    await waitFor(() => {
+      expect(ipcMocks.writeTerminal).toHaveBeenCalledWith("terminal-session", btoa("rz\r"));
+    });
+    expect(ipcMocks.selectUploadFile).toHaveBeenCalledTimes(1);
+    expect(ipcMocks.readFileBytes).not.toHaveBeenCalled();
+    expect(ipcMocks.readStreamOpen).not.toHaveBeenCalled();
   });
 });

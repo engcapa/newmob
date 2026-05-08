@@ -1,9 +1,20 @@
-use crate::state::{AppState, WriteStreamHandle};
+use crate::state::{AppState, ReadStreamHandle, WriteStreamHandle};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::time::UNIX_EPOCH;
 use tauri::ipc::{InvokeBody, Request, Response};
 use tauri::State;
+
+const MAX_READ_STREAM_CHUNK: usize = 1_048_576;
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadStreamOpenResult {
+    handle_id: String,
+    size: u64,
+    mtime: u64,
+}
 
 #[tauri::command]
 pub fn select_private_key_file(current_path: Option<String>) -> Result<Option<String>, String> {
@@ -26,6 +37,80 @@ pub fn read_file_bytes(path: String) -> Result<Response, String> {
     let bytes = std::fs::read(&expanded)
         .map_err(|e| format!("Failed to read file: {}", e))?;
     Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn read_stream_open(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ReadStreamOpenResult, String> {
+    let expanded = expanded_path(&path);
+    let file = OpenOptions::new()
+        .read(true)
+        .open(&expanded)
+        .map_err(|e| format!("Failed to open read stream: {}", e))?;
+    let metadata = file
+        .metadata()
+        .map_err(|e| format!("Failed to stat read stream: {}", e))?;
+    let size = metadata.len();
+    let mtime = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let handle_id = uuid::Uuid::new_v4().to_string();
+    let mut handles = state
+        .read_handles
+        .lock()
+        .map_err(|e| format!("Read stream lock failed: {}", e))?;
+    handles.insert(handle_id.clone(), ReadStreamHandle { file });
+    Ok(ReadStreamOpenResult {
+        handle_id,
+        size,
+        mtime,
+    })
+}
+
+#[tauri::command]
+pub fn read_stream_read(
+    handle_id: String,
+    max_bytes: usize,
+    state: State<'_, AppState>,
+) -> Result<Response, String> {
+    if !(1..=MAX_READ_STREAM_CHUNK).contains(&max_bytes) {
+        return Err(format!(
+            "read_stream_read maxBytes must be between 1 and {}",
+            MAX_READ_STREAM_CHUNK
+        ));
+    }
+
+    let mut handles = state
+        .read_handles
+        .lock()
+        .map_err(|e| format!("Read stream lock failed: {}", e))?;
+    let handle = handles
+        .get_mut(&handle_id)
+        .ok_or_else(|| format!("Read stream handle {} not found", handle_id))?;
+    let mut bytes = vec![0_u8; max_bytes];
+    let count = handle
+        .file
+        .read(&mut bytes)
+        .map_err(|e| format!("Failed to read stream: {}", e))?;
+    bytes.truncate(count);
+    Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+pub fn read_stream_close(handle_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut handles = state
+        .read_handles
+        .lock()
+        .map_err(|e| format!("Read stream lock failed: {}", e))?;
+    handles
+        .remove(&handle_id)
+        .ok_or_else(|| format!("Read stream handle {} not found", handle_id))?;
+    Ok(())
 }
 
 #[tauri::command]

@@ -46,7 +46,9 @@ import {
   encodeBase64,
   selectUploadFile,
   selectSaveDirectory,
-  readFileBytes,
+  readStreamOpen,
+  readStreamRead,
+  readStreamClose,
   writeStreamOpen,
   writeStreamAppend,
   writeStreamClose,
@@ -562,9 +564,8 @@ export function TerminalPanel({
 
     const files: ZmodemSendFile[] = [];
     for (const filePath of filePaths) {
-      const bytes = await readFileBytes(filePath);
       const fileName = filePath.replace(/\\/g, "/").split("/").pop() ?? "file";
-      files.push({ name: fileName, bytes });
+      files.push({ name: fileName, path: filePath });
     }
     return files;
   }, []);
@@ -998,6 +999,9 @@ export function TerminalPanel({
           focusTerminal();
           return files;
         },
+        onOpenReadStream: readStreamOpen,
+        onReadStream: readStreamRead,
+        onCloseReadStream: readStreamClose,
         onOpenWriteStream: writeStreamOpen,
         onAppendWriteStream: writeStreamAppend,
         onCloseWriteStream: writeStreamClose,

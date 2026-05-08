@@ -10,7 +10,13 @@ export interface ZmodemProgress {
 
 export interface ZmodemSendFile {
   name: string;
-  bytes: Uint8Array;
+  path: string;
+}
+
+export interface ZmodemReadStream {
+  handleId: string;
+  size: number;
+  mtime: number;
 }
 
 export interface ZmodemCallbacks {
@@ -21,6 +27,9 @@ export interface ZmodemCallbacks {
   onSelectSaveDir: () => Promise<string | null>;
   /** Called when the remote starts rz without a queued file. Return files to send, or null/empty to cancel. */
   onSelectSendFiles?: () => Promise<ZmodemSendFile[] | null>;
+  onOpenReadStream: (path: string) => Promise<ZmodemReadStream>;
+  onReadStream: (handleId: string, maxBytes: number) => Promise<Uint8Array>;
+  onCloseReadStream: (handleId: string) => Promise<void>;
   onOpenWriteStream: (fullPath: string) => Promise<string>;
   onAppendWriteStream: (handleId: string, data: Uint8Array) => Promise<void>;
   onCloseWriteStream: (handleId: string) => Promise<void>;
@@ -29,7 +38,7 @@ export interface ZmodemCallbacks {
   onError: (message: string) => void;
 }
 
-const SEND_CHUNK = 8192;
+const SEND_CHUNK = 64 * 1024;
 const RECEIVE_FINALIZE_GRACE_MS = 750;
 
 type ZmodemSender = (data: Uint8Array) => void | Promise<void>;
@@ -212,7 +221,7 @@ export class ZmodemSession {
           try {
             handleId = await this.callbacks.onOpenWriteStream(fullPath);
 
-            offer.on("input", (octets: number[]) => {
+            const onInput = (octets: number[]) => {
               const chunk = new Uint8Array(octets);
               progress.bytesTransferred += chunk.length;
               this.callbacks.onProgress({ ...progress });
@@ -225,9 +234,9 @@ export class ZmodemSession {
                 .catch((err: unknown) => {
                   appendError = err;
                 });
-            });
+            };
 
-            await offer.accept();
+            await offer.accept({ on_input: onInput });
             await appendChain;
             if (appendError) throw appendError;
             await this.callbacks.onCloseWriteStream(handleId);
@@ -377,40 +386,65 @@ export class ZmodemSession {
     const first = files[0];
     const progress: ZmodemProgress = {
       fileName: first.name,
-      fileSize: first.bytes.length,
+      fileSize: 0,
       bytesTransferred: 0,
     };
     this.callbacks.onStateChange("sending", progress);
 
     void (async () => {
       try {
-        for (const { name, bytes } of files) {
-          progress.fileName = name;
-          progress.fileSize = bytes.length;
-          progress.bytesTransferred = 0;
-          this.callbacks.onStateChange("sending", { ...progress });
+        for (const { name, path } of files) {
+          let handleId: string | null = null;
 
-          const xfer: Transfer | undefined = await zsession.send_offer({
-            name,
-            size: bytes.length,
-            mtime: Math.floor(Date.now() / 1000),
-          });
+          try {
+            const stream = await this.callbacks.onOpenReadStream(path);
+            handleId = stream.handleId;
 
-          if (!xfer) {
-            this.callbacks.onError(`Remote skipped file: ${name}`);
-          } else {
-            for (let offset = 0; offset < bytes.length; offset += SEND_CHUNK) {
-              xfer.send(Array.from(bytes.slice(offset, offset + SEND_CHUNK)));
-              progress.bytesTransferred = Math.min(offset + SEND_CHUNK, bytes.length);
+            progress.fileName = name;
+            progress.fileSize = stream.size;
+            progress.bytesTransferred = 0;
+            this.callbacks.onStateChange("sending", { ...progress });
+
+            const xfer: Transfer | undefined = await zsession.send_offer({
+              name,
+              size: stream.size,
+              mtime: stream.mtime,
+            });
+
+            if (!xfer) {
+              this.callbacks.onError(`Remote skipped file: ${name}`);
+              await this.callbacks.onCloseReadStream(handleId);
+              handleId = null;
+              continue;
+            }
+
+            for (;;) {
+              const chunk = await this.callbacks.onReadStream(handleId, SEND_CHUNK);
+              if (chunk.length === 0) break;
+              xfer.send(chunk);
+              progress.bytesTransferred += chunk.length;
               this.callbacks.onProgress({ ...progress });
             }
-            await xfer.end([]);
+
+            await this.callbacks.onCloseReadStream(handleId);
+            handleId = null;
+            await xfer.end(new Uint8Array());
             this.callbacks.onComplete(name);
+          } catch (err) {
+            if (handleId) {
+              await this.callbacks.onCloseReadStream(handleId).catch(() => undefined);
+            }
+            throw err;
           }
         }
 
         await zsession.close();
       } catch (err) {
+        try {
+          zsession.abort();
+        } catch {
+          /* session may already be closed */
+        }
         this.callbacks.onError(err instanceof Error ? err.message : String(err));
       } finally {
         this.active = false;

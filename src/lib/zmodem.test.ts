@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Offer, Session, Transfer } from "zmodem.js";
-import { ZmodemSession, type ZmodemCallbacks } from "./zmodem";
+import { ZmodemSession, type ZmodemCallbacks, type ZmodemSendFile } from "./zmodem";
 
 const zmodemMock = vi.hoisted(() => {
   let options: {
@@ -46,9 +46,15 @@ describe("ZmodemSession", () => {
     const transfer = makeTransfer();
     const session = makeSendSession(transfer);
     const selectFiles = vi.fn(async () => [
-      { name: "hello.txt", bytes: new Uint8Array([1, 2, 3]) },
+      { name: "hello.txt", path: "/uploads/hello.txt" },
     ]);
-    const callbacks = makeCallbacks({ onSelectSendFiles: selectFiles });
+    const callbacks = makeCallbacks({
+      onSelectSendFiles: selectFiles,
+      onOpenReadStream: vi.fn(async () => ({ handleId: "read-1", size: 3, mtime: 123 })),
+      onReadStream: vi.fn()
+        .mockResolvedValueOnce(new Uint8Array([1, 2, 3]))
+        .mockResolvedValueOnce(new Uint8Array()),
+    });
 
     new ZmodemSession(vi.fn(), callbacks);
     detect(session);
@@ -59,10 +65,13 @@ describe("ZmodemSession", () => {
     expect(session.send_offer).toHaveBeenCalledWith({
       name: "hello.txt",
       size: 3,
-      mtime: expect.any(Number),
+      mtime: 123,
     });
-    expect(transfer.send).toHaveBeenCalledWith([1, 2, 3]);
-    expect(transfer.end).toHaveBeenCalledWith([]);
+    expect(callbacks.onOpenReadStream).toHaveBeenCalledWith("/uploads/hello.txt");
+    expect(callbacks.onReadStream).toHaveBeenCalledWith("read-1", 64 * 1024);
+    expect(callbacks.onCloseReadStream).toHaveBeenCalledWith("read-1");
+    expect(transfer.send).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]));
+    expect(transfer.end).toHaveBeenCalledWith(new Uint8Array());
     expect(callbacks.onComplete).toHaveBeenCalledWith("hello.txt");
     expect(callbacks.onError).not.toHaveBeenCalled();
     expect(callbacks.onStateChange).toHaveBeenCalledWith("sending");
@@ -73,13 +82,19 @@ describe("ZmodemSession", () => {
     const firstSession = makeSendSession(makeTransfer());
     const secondTransfer = makeTransfer();
     const secondSession = makeSendSession(secondTransfer);
-    let resolveSelection!: (files: Array<{ name: string; bytes: Uint8Array }>) => void;
+    let resolveSelection!: (files: ZmodemSendFile[]) => void;
     const selectFiles = vi.fn(
-      () => new Promise<Array<{ name: string; bytes: Uint8Array }>>((resolve) => {
+      () => new Promise<ZmodemSendFile[]>((resolve) => {
         resolveSelection = resolve;
       }),
     );
-    const callbacks = makeCallbacks({ onSelectSendFiles: selectFiles });
+    const callbacks = makeCallbacks({
+      onSelectSendFiles: selectFiles,
+      onOpenReadStream: vi.fn(async () => ({ handleId: "read-late", size: 2, mtime: 456 })),
+      onReadStream: vi.fn()
+        .mockResolvedValueOnce(new Uint8Array([4, 5]))
+        .mockResolvedValueOnce(new Uint8Array()),
+    });
     const firstDetection = makeDetection(firstSession);
     const secondDetection = makeDetection(secondSession);
 
@@ -98,7 +113,7 @@ describe("ZmodemSession", () => {
     expect(selectFiles).toHaveBeenCalledTimes(1);
     expect(callbacks.onStateChange).toHaveBeenLastCalledWith("sending");
 
-    resolveSelection([{ name: "late.bin", bytes: new Uint8Array([4, 5]) }]);
+    resolveSelection([{ name: "late.bin", path: "/uploads/late.bin" }]);
 
     await expect.poll(() => secondSession.close.mock.calls.length).toBe(1);
 
@@ -107,9 +122,9 @@ describe("ZmodemSession", () => {
     expect(secondSession.send_offer).toHaveBeenCalledWith({
       name: "late.bin",
       size: 2,
-      mtime: expect.any(Number),
+      mtime: 456,
     });
-    expect(secondTransfer.send).toHaveBeenCalledWith([4, 5]);
+    expect(secondTransfer.send).toHaveBeenCalledWith(new Uint8Array([4, 5]));
   });
 
   it("aborts the remote rz session when file selection is canceled", async () => {
@@ -131,12 +146,18 @@ describe("ZmodemSession", () => {
     const transfer = makeTransfer();
     const session = makeSendSession(transfer);
     const selectFiles = vi.fn(async () => [
-      { name: "unused.txt", bytes: new Uint8Array([9]) },
+      { name: "unused.txt", path: "/uploads/unused.txt" },
     ]);
-    const callbacks = makeCallbacks({ onSelectSendFiles: selectFiles });
+    const callbacks = makeCallbacks({
+      onSelectSendFiles: selectFiles,
+      onOpenReadStream: vi.fn(async () => ({ handleId: "read-queued", size: 2, mtime: 789 })),
+      onReadStream: vi.fn()
+        .mockResolvedValueOnce(new Uint8Array([7, 8]))
+        .mockResolvedValueOnce(new Uint8Array()),
+    });
     const zmodem = new ZmodemSession(vi.fn(), callbacks);
 
-    zmodem.queueSend([{ name: "queued.bin", bytes: new Uint8Array([7, 8]) }]);
+    zmodem.queueSend([{ name: "queued.bin", path: "/uploads/queued.bin" }]);
     detect(session);
 
     await expect.poll(() => session.close.mock.calls.length).toBe(1);
@@ -145,9 +166,71 @@ describe("ZmodemSession", () => {
     expect(session.send_offer).toHaveBeenCalledWith({
       name: "queued.bin",
       size: 2,
-      mtime: expect.any(Number),
+      mtime: 789,
     });
-    expect(transfer.send).toHaveBeenCalledWith([7, 8]);
+    expect(callbacks.onOpenReadStream).toHaveBeenCalledWith("/uploads/queued.bin");
+    expect(transfer.send).toHaveBeenCalledWith(new Uint8Array([7, 8]));
+  });
+
+  it("closes the read stream when the remote skips an offered file", async () => {
+    const session = makeSendSession(undefined);
+    const callbacks = makeCallbacks({
+      onOpenReadStream: vi.fn(async () => ({ handleId: "read-skip", size: 5, mtime: 111 })),
+    });
+    const zmodem = new ZmodemSession(vi.fn(), callbacks);
+
+    zmodem.queueSend([{ name: "skip.bin", path: "/uploads/skip.bin" }]);
+    detect(session);
+
+    await expect.poll(() => session.close.mock.calls.length).toBe(1);
+
+    expect(session.send_offer).toHaveBeenCalledWith({
+      name: "skip.bin",
+      size: 5,
+      mtime: 111,
+    });
+    expect(callbacks.onReadStream).not.toHaveBeenCalled();
+    expect(callbacks.onCloseReadStream).toHaveBeenCalledWith("read-skip");
+    expect(callbacks.onError).toHaveBeenCalledWith("Remote skipped file: skip.bin");
+    expect(session.abort).not.toHaveBeenCalled();
+  });
+
+  it("aborts the send session when opening the read stream fails", async () => {
+    const session = makeSendSession(makeTransfer());
+    const callbacks = makeCallbacks({
+      onOpenReadStream: vi.fn(async () => {
+        throw new Error("missing file");
+      }),
+    });
+    const zmodem = new ZmodemSession(vi.fn(), callbacks);
+
+    zmodem.queueSend([{ name: "missing.bin", path: "/uploads/missing.bin" }]);
+    detect(session);
+
+    await expect.poll(() => session.abort.mock.calls.length).toBe(1);
+
+    expect(session.send_offer).not.toHaveBeenCalled();
+    expect(callbacks.onCloseReadStream).not.toHaveBeenCalled();
+    expect(callbacks.onError).toHaveBeenCalledWith("missing file");
+  });
+
+  it("closes the read stream and aborts when reading a send chunk fails", async () => {
+    const session = makeSendSession(makeTransfer());
+    const callbacks = makeCallbacks({
+      onOpenReadStream: vi.fn(async () => ({ handleId: "read-broken", size: 5, mtime: 222 })),
+      onReadStream: vi.fn(async () => {
+        throw new Error("read failed");
+      }),
+    });
+    const zmodem = new ZmodemSession(vi.fn(), callbacks);
+
+    zmodem.queueSend([{ name: "broken.bin", path: "/uploads/broken.bin" }]);
+    detect(session);
+
+    await expect.poll(() => session.abort.mock.calls.length).toBe(1);
+
+    expect(callbacks.onCloseReadStream).toHaveBeenCalledWith("read-broken");
+    expect(callbacks.onError).toHaveBeenCalledWith("read failed");
   });
 
   it("streams received file chunks in order and closes after append", async () => {
@@ -168,6 +251,7 @@ describe("ZmodemSession", () => {
     await expect.poll(() => session.start.mock.calls.length).toBe(1);
     session.emitOffer(offer);
     await expect.poll(() => (callbacks.onOpenWriteStream as any).mock.calls.length).toBe(1);
+    await expect.poll(() => offer.accept.mock.calls.length).toBe(1);
 
     offer.emitInput([1, 2]);
     offer.emitInput([3]);
@@ -176,6 +260,8 @@ describe("ZmodemSession", () => {
     await expect.poll(() => (callbacks.onComplete as any).mock.calls.length).toBe(1);
 
     expect(callbacks.onOpenWriteStream).toHaveBeenCalledWith("/downloads/remote.bin");
+    expect(offer.accept).toHaveBeenCalledWith({ on_input: expect.any(Function) });
+    expect(offer.on).not.toHaveBeenCalledWith("input", expect.any(Function));
     expect(appended).toEqual([[1, 2], [3]]);
     expect(callbacks.onCloseWriteStream).toHaveBeenCalledWith("handle-1");
     expect(callbacks.onAbortWriteStream).not.toHaveBeenCalled();
@@ -202,6 +288,7 @@ describe("ZmodemSession", () => {
     await expect.poll(() => session.start.mock.calls.length).toBe(1);
     session.emitOffer(offer);
     await expect.poll(() => (callbacks.onOpenWriteStream as any).mock.calls.length).toBe(1);
+    await expect.poll(() => offer.accept.mock.calls.length).toBe(1);
 
     offer.emitInput([9]);
     offer.resolveAccept();
@@ -231,6 +318,7 @@ describe("ZmodemSession", () => {
     await expect.poll(() => session.start.mock.calls.length).toBe(1);
     session.emitOffer(offer);
     await expect.poll(() => (callbacks.onOpenWriteStream as any).mock.calls.length).toBe(1);
+    await expect.poll(() => offer.accept.mock.calls.length).toBe(1);
 
     offer.emitInput([1]);
     offer.resolveAccept();
@@ -296,6 +384,9 @@ function makeCallbacks(overrides: Partial<ZmodemCallbacks> = {}): ZmodemCallback
     onProgress: vi.fn(),
     onSelectSaveDir: vi.fn(async () => null),
     onSelectSendFiles: vi.fn(async () => null),
+    onOpenReadStream: vi.fn(async () => ({ handleId: "read-handle", size: 0, mtime: 0 })),
+    onReadStream: vi.fn(async () => new Uint8Array()),
+    onCloseReadStream: vi.fn(async () => undefined),
     onOpenWriteStream: vi.fn(async () => "stream-handle"),
     onAppendWriteStream: vi.fn(async () => undefined),
     onCloseWriteStream: vi.fn(async () => undefined),
@@ -316,7 +407,7 @@ function makeTransfer() {
   };
 }
 
-function makeSendSession(transfer: Transfer) {
+function makeSendSession(transfer: Transfer | undefined) {
   return {
     type: "send" as const,
     on: vi.fn(),
@@ -367,15 +458,18 @@ function makeReceiveSession() {
 function makeOffer(name: string, size: number) {
   let inputHandler: ((octets: number[]) => void) | null = null;
   let resolveAccept: (() => void) | null = null;
+  let acceptOptions: { on_input?: (octets: number[]) => void } | null = null;
   const offer = {
     get_details: vi.fn(() => ({ name, size })),
     on: vi.fn((event: string, handler: (octets: number[]) => void) => {
       if (event === "input") inputHandler = handler;
     }),
-    accept: vi.fn(() => new Promise<void>((resolve) => {
+    accept: vi.fn((opts?: { on_input?: (octets: number[]) => void }) => new Promise<void>((resolve) => {
+      acceptOptions = opts ?? null;
       resolveAccept = resolve;
     })),
     emitInput: (octets: number[]) => {
+      acceptOptions?.on_input?.(octets);
       inputHandler?.(octets);
     },
     resolveAccept: () => {
@@ -383,6 +477,8 @@ function makeOffer(name: string, size: number) {
     },
   };
   return offer as unknown as Offer & {
+    accept: ReturnType<typeof vi.fn>;
+    on: ReturnType<typeof vi.fn>;
     emitInput: (octets: number[]) => void;
     resolveAccept: () => void;
   };

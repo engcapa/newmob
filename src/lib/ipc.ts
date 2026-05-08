@@ -246,6 +246,25 @@ export async function readFileBytes(path: string): Promise<Uint8Array> {
   return new Uint8Array(buffer);
 }
 
+export interface ReadStreamOpenResult {
+  handleId: string;
+  size: number;
+  mtime: number;
+}
+
+export async function readStreamOpen(path: string): Promise<ReadStreamOpenResult> {
+  return invoke<ReadStreamOpenResult>("read_stream_open", { path });
+}
+
+export async function readStreamRead(handleId: string, maxBytes = 64 * 1024): Promise<Uint8Array> {
+  const buffer = await invoke<ArrayBuffer>("read_stream_read", { handleId, maxBytes });
+  return new Uint8Array(buffer);
+}
+
+export async function readStreamClose(handleId: string): Promise<void> {
+  return invoke("read_stream_close", { handleId });
+}
+
 export async function writeStreamOpen(path: string): Promise<string> {
   return invoke<string>("write_stream_open", { path });
 }
