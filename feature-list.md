@@ -123,6 +123,17 @@
 - 已实现：Local 端真实 Unix 信号、SSH channel 信号 + Ctrl+C 兜底 SIGINT、Break、IGNORE message
 - 未实现：SSH break request、跨平台完整信号矩阵
 
+### 4.10 Z-modem 文件收发（rz / sz）✅
+- 基于 `zmodem.js` 的 `Sentry` 实现协议检测，所有终端输出字节流经 `ZmodemSession.consume()` 透明路由
+- **接收（sz → 本地）**：检测到远端 `sz` 握手后弹出目录选择对话框，通过 Tauri 文件写流（`onOpenWriteStream / onAppendWriteStream / onCloseWriteStream`）落盘，支持中途 abort
+- **发送（rz → 远端）**：
+  - 右键菜单 "Send file using Z-modem" 主动触发：弹出文件选择器，选好后自动向终端注入 `rz\r` 并排队发送
+  - 远端主动执行 `rz` 时自动弹出文件选择器，通过 Tauri 文件读流（`onOpenReadStream / onReadStream / onCloseReadStream`）分 64 KB 块发送
+- 传输进度条：实时显示文件名、已传字节 / 总字节、百分比进度条，覆盖接收与发送两个方向
+- 事件日志：传输完成与错误均写入终端事件日志（`appendEvent("zmodem", ...)`）
+- 状态互斥：传输进行中菜单项 disabled，防止并发冲突；传输结束后自动重置为 idle
+- 协议容错：`on_retract` / 超时 grace 期（750 ms）自动重置协议状态，异常时重建 Sentry 实例
+
 ### 4.7 事件日志 🟡
 - 已记录：connect / auth / resize / disconnect / error / 导出 / 日志 / 宏 / 信号
 - 未记录：reconnect 事件（重连流程尚未上线）
@@ -360,5 +371,4 @@
 > - 会话协议 RDP（仅保留会话存储与编辑表单，连接动作打开占位 tab）
 > - QuickConnect 的 VNC URL 入口（已保存 VNC 会话可连接，QuickConnect 尚未接入 VNC client）
 > - SFTP 底部的 "Cross-host transfer (remote ↔ remote)" 按钮（disabled 占位）
-> - Z-modem 收发（菜单项保留但 disabled）
 
