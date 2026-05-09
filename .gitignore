@@ -37,6 +37,7 @@ perf.data*
 .kiro/
 .agent/
 .codex
+CLAUDE.md
 
 # Generic AI cache / vector index
 .ai-cache/
