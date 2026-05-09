@@ -384,6 +384,8 @@ function makeCallbacks(overrides: Partial<ZmodemCallbacks> = {}): ZmodemCallback
     onProgress: vi.fn(),
     onSelectSaveDir: vi.fn(async () => null),
     onSelectSendFiles: vi.fn(async () => null),
+    onCheckFileExists: vi.fn(async () => false),
+    onFileConflict: vi.fn(async () => ({ type: "overwrite" as const, applyToAll: false })),
     onOpenReadStream: vi.fn(async () => ({ handleId: "read-handle", size: 0, mtime: 0 })),
     onReadStream: vi.fn(async () => new Uint8Array()),
     onCloseReadStream: vi.fn(async () => undefined),
