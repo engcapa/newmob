@@ -112,6 +112,7 @@ pub fn run() {
             config::write_stream_append,
             config::write_stream_close,
             config::write_stream_abort,
+            config::check_file_exists,
             tunnel::list_tunnels,
             tunnel::upsert_tunnel,
             tunnel::delete_tunnel,

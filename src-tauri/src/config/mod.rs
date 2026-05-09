@@ -190,6 +190,11 @@ pub fn write_stream_abort(handle_id: String, state: State<'_, AppState>) -> Resu
     Ok(())
 }
 
+#[tauri::command]
+pub fn check_file_exists(path: String) -> bool {
+    expanded_path(&path).exists()
+}
+
 fn expanded_path(value: &str) -> PathBuf {
     PathBuf::from(shellexpand::tilde(value).to_string())
 }
