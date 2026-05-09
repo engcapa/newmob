@@ -283,6 +283,10 @@ export async function writeStreamAbort(handleId: string): Promise<void> {
   return invoke("write_stream_abort", { handleId });
 }
 
+export async function checkFileExists(path: string): Promise<boolean> {
+  return invoke<boolean>("check_file_exists", { path });
+}
+
 // --- VNC ────────────────────────────────────────────────────────────
 
 export interface VncConnectResult {

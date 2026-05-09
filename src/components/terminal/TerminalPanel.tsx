@@ -53,13 +53,17 @@ import {
   writeStreamAppend,
   writeStreamClose,
   writeStreamAbort,
+  checkFileExists,
 } from "../../lib/ipc";
 import {
   ZmodemSession,
   type ZmodemState,
   type ZmodemProgress,
   type ZmodemSendFile,
+  type ConflictAction,
+  type SendConflictAction,
 } from "../../lib/zmodem";
+import { ZmodemConflictDialog } from "./ZmodemConflictDialog";
 import { useAppStore } from "../../stores/appStore";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -185,6 +189,12 @@ export function TerminalPanel({
   const [zmodemProgress, setZmodemProgress] = useState<ZmodemProgress | null>(null);
   const zmodemRef = useRef<ZmodemSession | null>(null);
   const zmodemSaveDirRef = useRef<string | undefined>(undefined);
+  const [conflictDialogState, setConflictDialogState] = useState<{
+    fileName: string;
+    hasMore: boolean;
+    mode: "receive" | "send";
+    resolve: (action: ConflictAction | SendConflictAction) => void;
+  } | null>(null);
   const outputLogRef = useRef("");
   const loggingActiveRef = useRef(loggingActive);
   const macroRecordingRef = useRef(macroRecording);
@@ -999,6 +1009,20 @@ export function TerminalPanel({
           focusTerminal();
           return files;
         },
+        onCheckFileExists: checkFileExists,
+        onFileConflict: (fileName, hasMore) =>
+          new Promise<ConflictAction>((resolve) => {
+            setConflictDialogState({ fileName, hasMore, mode: "receive", resolve });
+          }),
+        onSendConflict: (fileName, hasMore) =>
+          new Promise<SendConflictAction>((resolve) => {
+            setConflictDialogState({
+              fileName,
+              hasMore,
+              mode: "send",
+              resolve: resolve as (action: ConflictAction | SendConflictAction) => void,
+            });
+          }),
         onOpenReadStream: readStreamOpen,
         onReadStream: readStreamRead,
         onCloseReadStream: readStreamClose,
@@ -1429,6 +1453,18 @@ export function TerminalPanel({
       )}
 
       {contextMenu.render}
+
+      {conflictDialogState && (
+        <ZmodemConflictDialog
+          fileName={conflictDialogState.fileName}
+          hasMore={conflictDialogState.hasMore}
+          mode={conflictDialogState.mode}
+          onResolve={(action) => {
+            setConflictDialogState(null);
+            conflictDialogState.resolve(action);
+          }}
+        />
+      )}
     </div>
   );
 }

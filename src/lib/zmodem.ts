@@ -19,6 +19,18 @@ export interface ZmodemReadStream {
   mtime: number;
 }
 
+export type ConflictActionType = "overwrite" | "skip" | "rename";
+
+export interface ConflictAction {
+  type: ConflictActionType;
+  applyToAll: boolean;
+}
+
+export interface SendConflictAction {
+  type: "skip" | "rename";
+  applyToAll: boolean;
+}
+
 export interface ZmodemCallbacks {
   onTerminalData: (data: Uint8Array) => void;
   onStateChange: (state: ZmodemState, progress?: ZmodemProgress) => void;
@@ -27,6 +39,13 @@ export interface ZmodemCallbacks {
   onSelectSaveDir: () => Promise<string | null>;
   /** Called when the remote starts rz without a queued file. Return files to send, or null/empty to cancel. */
   onSelectSendFiles?: () => Promise<ZmodemSendFile[] | null>;
+  /** Check whether a local path already exists. */
+  onCheckFileExists: (path: string) => Promise<boolean>;
+  /** Called when a receive target file already exists. hasMore=true when more files are pending. */
+  onFileConflict: (fileName: string, hasMore: boolean) => Promise<ConflictAction>;
+  /** Called when the remote rz skipped a file (remote file already exists).
+   *  Return "skip" to skip, or "rename" to retry with a numbered name. */
+  onSendConflict?: (fileName: string, hasMore: boolean) => Promise<SendConflictAction>;
   onOpenReadStream: (path: string) => Promise<ZmodemReadStream>;
   onReadStream: (handleId: string, maxBytes: number) => Promise<Uint8Array>;
   onCloseReadStream: (handleId: string) => Promise<void>;
@@ -203,23 +222,59 @@ export class ZmodemSession {
       const sep = saveDir.includes("\\") ? "\\" : "/";
       const dirBase = saveDir.replace(/[/\\]+$/, "");
 
+      // Tracks a "apply to all" policy chosen by the user for conflict resolution.
+      let conflictPolicy: ConflictActionType | null = null;
+      // Counts pending offers so we can pass hasMore correctly.
+      let pendingOffers = 0;
+
       zsession.on("offer", (offer: Offer) => {
+        pendingOffers++;
         const details = offer.get_details();
-        const fullPath = dirBase + sep + details.name;
+        const baseName = details.name;
         const progress: ZmodemProgress = {
-          fileName: details.name,
+          fileName: baseName,
           fileSize: details.size ?? 0,
           bytesTransferred: 0,
         };
         this.callbacks.onStateChange("receiving", progress);
 
         void (async () => {
+          pendingOffers--;
           let handleId: string | null = null;
           let appendChain = Promise.resolve();
           let appendError: unknown = null;
 
           try {
-            handleId = await this.callbacks.onOpenWriteStream(fullPath);
+            const initialPath = dirBase + sep + baseName;
+            const exists = await this.callbacks.onCheckFileExists(initialPath);
+
+            let resolvedPath = initialPath;
+            let shouldSkip = false;
+
+            if (exists) {
+              let actionType = conflictPolicy;
+              if (actionType === null) {
+                const action = await this.callbacks.onFileConflict(baseName, pendingOffers > 0);
+                if (action.applyToAll) {
+                  conflictPolicy = action.type;
+                }
+                actionType = action.type;
+              }
+
+              if (actionType === "skip") {
+                shouldSkip = true;
+              } else if (actionType === "rename") {
+                resolvedPath = await this.resolveRenamedPath(dirBase, sep, baseName);
+              }
+              // "overwrite" keeps resolvedPath = initialPath
+            }
+
+            if (shouldSkip) {
+              offer.skip();
+              return;
+            }
+
+            handleId = await this.callbacks.onOpenWriteStream(resolvedPath);
 
             const onInput = (octets: number[]) => {
               const chunk = new Uint8Array(octets);
@@ -241,7 +296,7 @@ export class ZmodemSession {
             if (appendError) throw appendError;
             await this.callbacks.onCloseWriteStream(handleId);
             handleId = null;
-            this.callbacks.onComplete(details.name);
+            this.callbacks.onComplete(resolvedPath.replace(/.*[/\\]/, "") || baseName);
           } catch (err: unknown) {
             if (handleId) {
               await this.callbacks.onAbortWriteStream(handleId).catch(() => undefined);
@@ -263,6 +318,20 @@ export class ZmodemSession {
 
       zsession.start();
     })();
+  }
+
+  private async resolveRenamedPath(dirBase: string, sep: string, name: string): Promise<string> {
+    const lastDot = name.lastIndexOf(".");
+    const stem = lastDot > 0 ? name.slice(0, lastDot) : name;
+    const ext = lastDot > 0 ? name.slice(lastDot) : "";
+
+    for (let i = 1; i <= 9999; i++) {
+      const candidate = dirBase + sep + stem + `(${i})` + ext;
+      const taken = await this.callbacks.onCheckFileExists(candidate);
+      if (!taken) return candidate;
+    }
+    // Fallback: append timestamp to guarantee uniqueness.
+    return dirBase + sep + stem + `(${Date.now()})` + ext;
   }
 
   private doSelectAndSend(zsession: Session): void {
@@ -392,8 +461,12 @@ export class ZmodemSession {
     this.callbacks.onStateChange("sending", progress);
 
     void (async () => {
+      let sendConflictPolicy: SendConflictAction["type"] | null = null;
+
       try {
-        for (const { name, path } of files) {
+        for (let index = 0; index < files.length; index++) {
+          const { name, path } = files[index];
+          const hasMore = index < files.length - 1;
           let handleId: string | null = null;
 
           try {
@@ -405,31 +478,71 @@ export class ZmodemSession {
             progress.bytesTransferred = 0;
             this.callbacks.onStateChange("sending", { ...progress });
 
-            const xfer: Transfer | undefined = await zsession.send_offer({
+            let xfer: Transfer | undefined = await zsession.send_offer({
               name,
               size: stream.size,
               mtime: stream.mtime,
             });
 
             if (!xfer) {
-              this.callbacks.onError(`Remote skipped file: ${name}`);
-              await this.callbacks.onCloseReadStream(handleId);
-              handleId = null;
-              continue;
+              const onSendConflict = this.callbacks.onSendConflict;
+              if (!onSendConflict) {
+                this.callbacks.onError(`Remote skipped file: ${name}`);
+                await this.callbacks.onCloseReadStream(handleId);
+                handleId = null;
+                continue;
+              }
+
+              let actionType = sendConflictPolicy;
+              if (actionType === null) {
+                const action = await onSendConflict(name, hasMore);
+                if (action.applyToAll) sendConflictPolicy = action.type;
+                actionType = action.type;
+              }
+
+              if (actionType === "skip") {
+                await this.callbacks.onCloseReadStream(handleId);
+                handleId = null;
+                continue;
+              }
+
+              // rename: try name(1), name(2), ... until remote accepts
+              let accepted = false;
+              for (let n = 1; n <= 9999; n++) {
+                const newName = numberedName(name, n);
+                xfer = await zsession.send_offer({
+                  name: newName,
+                  size: stream.size,
+                  mtime: stream.mtime,
+                });
+                if (xfer) {
+                  progress.fileName = newName;
+                  this.callbacks.onStateChange("sending", { ...progress });
+                  accepted = true;
+                  break;
+                }
+              }
+
+              if (!accepted) {
+                this.callbacks.onError(`Could not send ${name}: remote rejected all rename attempts`);
+                await this.callbacks.onCloseReadStream(handleId);
+                handleId = null;
+                continue;
+              }
             }
 
             for (;;) {
               const chunk = await this.callbacks.onReadStream(handleId, SEND_CHUNK);
               if (chunk.length === 0) break;
-              xfer.send(chunk);
+              xfer!.send(chunk);
               progress.bytesTransferred += chunk.length;
               this.callbacks.onProgress({ ...progress });
             }
 
             await this.callbacks.onCloseReadStream(handleId);
             handleId = null;
-            await xfer.end(new Uint8Array());
-            this.callbacks.onComplete(name);
+            await xfer!.end(new Uint8Array());
+            this.callbacks.onComplete(progress.fileName);
           } catch (err) {
             if (handleId) {
               await this.callbacks.onCloseReadStream(handleId).catch(() => undefined);
@@ -461,4 +574,11 @@ function isZfinHeader(payload: unknown): boolean {
     payload !== null &&
     (payload as { NAME?: unknown }).NAME === "ZFIN"
   );
+}
+
+function numberedName(name: string, n: number): string {
+  const dot = name.lastIndexOf(".");
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  return `${stem}(${n})${ext}`;
 }
