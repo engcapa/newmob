@@ -98,6 +98,14 @@ interface TerminalPanelProps {
   cwdRequestToken?: number;
   /** Called once the backend terminal session ID is known (after connect). */
   onSessionReady?: (sessionId: string) => void;
+  /** Called whenever the terminal receives output (for new-output badge). */
+  onOutput?: () => void;
+  /** Whether MultiExec broadcast mode is active globally. */
+  multiExecActive?: boolean;
+  /** Whether this terminal is a selected broadcast target (shows visual indicator). */
+  isMultiExecTarget?: boolean;
+  /** Called with user input when MultiExec is active; parent broadcasts to other terminals. */
+  onInputBroadcast?: (data: string) => void;
 }
 
 const DEFAULT_FONT_SIZE = 14;
@@ -132,13 +140,23 @@ export function TerminalPanel({
   onCwdChange,
   cwdRequestToken = 0,
   onSessionReady,
+  onOutput,
+  multiExecActive,
+  isMultiExecTarget,
+  onInputBroadcast,
 }: TerminalPanelProps) {
   const cwdCallbackRef = useRef<typeof onCwdChange>(onCwdChange);
   const onSessionReadyRef = useRef<typeof onSessionReady>(onSessionReady);
+  const onOutputRef = useRef<typeof onOutput>(onOutput);
+  const onInputBroadcastRef = useRef<typeof onInputBroadcast>(onInputBroadcast);
+  const multiExecActiveRef = useRef(multiExecActive);
   useEffect(() => {
     cwdCallbackRef.current = onCwdChange;
     onSessionReadyRef.current = onSessionReady;
-  }, [onCwdChange, onSessionReady]);
+    onOutputRef.current = onOutput;
+    onInputBroadcastRef.current = onInputBroadcast;
+    multiExecActiveRef.current = multiExecActive;
+  }, [onCwdChange, onSessionReady, onOutput, onInputBroadcast, multiExecActive]);
   const containerRef = useRef<HTMLDivElement>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
@@ -290,10 +308,22 @@ export function TerminalPanel({
 
   const writeInput = sendTerminalInput;
 
+  // Broadcast-aware input: used for paste and any injected text so that
+  // MultiExec mode forwards the same data to all selected terminals.
+  const writeBroadcastInput = useCallback((data: string) => {
+    if (multiExecActiveRef.current) {
+      onInputBroadcastRef.current?.(data);
+    }
+    sendTerminalInput(data);
+  }, [sendTerminalInput]);
+
   const writeXtermInput = useCallback((data: string) => {
     const filtered = imeGuardRef.current?.filterTerminalData(data) ?? data;
     if (filtered === null) {
       return;
+    }
+    if (multiExecActiveRef.current) {
+      onInputBroadcastRef.current?.(filtered);
     }
     sendTerminalInput(filtered);
   }, [sendTerminalInput]);
@@ -410,12 +440,12 @@ export function TerminalPanel({
       ) {
         return;
       }
-      writeInput(normalizePasteText(text));
+      writeBroadcastInput(normalizePasteText(text));
       focusTerminal();
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : "Clipboard paste failed");
     }
-  }, [focusTerminal, multilinePasteConfirm, setStatusMessage, writeInput]);
+  }, [focusTerminal, multilinePasteConfirm, setStatusMessage, writeBroadcastInput]);
 
   const saveBufferToFile = useCallback(() => {
     const term = termRef.current;
@@ -980,6 +1010,7 @@ export function TerminalPanel({
           if (loggingActiveRef.current) {
             outputLogRef.current += new TextDecoder().decode(filtered);
           }
+          onOutputRef.current?.();
           term.write(filtered);
         },
         onStateChange: (state, progress) => {
@@ -1299,7 +1330,10 @@ export function TerminalPanel({
       ref={panelRef}
       data-testid="terminal-pane"
       className={panelClasses}
-      style={{ background: resolvedTheme.background ?? "#1d1f21" }}
+      style={{
+        background: resolvedTheme.background ?? "#1d1f21",
+        ...(isMultiExecTarget ? { borderTop: "2px solid var(--moba-accent)" } : {}),
+      }}
       onWheel={(event) => {
         if (!event.ctrlKey) return;
         event.preventDefault();
@@ -1312,6 +1346,15 @@ export function TerminalPanel({
       onContextMenu={handleTerminalContextMenu}
     >
       <div ref={containerRef} className="w-full h-full" />
+
+      {isMultiExecTarget && (
+        <div
+          className="absolute top-1 right-16 z-40 px-1.5 py-0.5 rounded pointer-events-none"
+          style={{ background: "var(--moba-accent)", color: "#fff", opacity: 0.85, fontSize: 10, fontWeight: 600 }}
+        >
+          ⊕ MultiExec
+        </div>
+      )}
 
       {keywordHighlights.length > 0 && (
         <div className="absolute inset-0 z-20 pointer-events-none">

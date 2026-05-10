@@ -16,6 +16,7 @@ import { StatusBar } from "../components/statusbar/StatusBar";
 import { AppTitleBar } from "../components/window/AppTitleBar";
 import { WindowResizeHandles } from "../components/window/WindowResizeHandles";
 import { TerminalPanel } from "../components/terminal/TerminalPanel";
+import { MultiExecBar } from "../components/terminal/MultiExecBar";
 import { SessionEditor } from "../components/session/SessionEditor";
 import { AuthPrompt } from "../components/session/AuthPrompt";
 import { SettingsPanel } from "../components/settings/SettingsPanel";
@@ -62,6 +63,12 @@ export function MainLayout() {
     toggleCompactMode,
     toggleXServer,
     setStatusMessage,
+    multiExecActive,
+    multiExecSelectedTabIds,
+    toggleMultiExec,
+    selectAllTerminalTabs,
+    clearMultiExecSelection,
+    setTabHasNewOutput,
   } = useAppStore();
   const { loadSessions, markConnected, sessions } = useSessionStore();
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -117,6 +124,22 @@ export function MainLayout() {
     return true;
   }, [setStatusMessage]);
 
+  const broadcastToSelectedTerminals = useCallback((data: string, sourceTabId?: string) => {
+    const { multiExecSelectedTabIds: selectedIds } = useAppStore.getState();
+    for (const tabId of selectedIds) {
+      if (tabId === sourceTabId) continue; // skip the source terminal — it handles its own input
+      const sessionId = terminalSessionIds.current[tabId];
+      if (sessionId) {
+        writeTerminal(sessionId, encodeBase64(data)).catch(console.error);
+      }
+    }
+  }, []);
+
+  const handleTerminalOutput = useCallback((tabId: string) => {
+    if (tabId === useAppStore.getState().activeTabId) return;
+    setTabHasNewOutput(tabId, true);
+  }, [setTabHasNewOutput]);
+
   const openDetachedSftp = useCallback((params: SftpTabInfo, title: string) => {
     // Use a DIFFERENT session id for the detached window so its backend
     // SFTP channel is independent from the sidebar's. Without this, the
@@ -158,6 +181,10 @@ export function MainLayout() {
   useEffect(() => {
     void loadSessions();
   }, [loadSessions]);
+
+  useEffect(() => {
+    if (activeTabId) setTabHasNewOutput(activeTabId, false);
+  }, [activeTabId, setTabHasNewOutput]);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -489,8 +516,10 @@ export function MainLayout() {
         }
         break;
       case "split":
+        setStatusMessage("Split view is not active in this phase");
+        break;
       case "multiexec":
-        setStatusMessage(`${command === "split" ? "Split view" : "MultiExec"} is not active in this phase`);
+        toggleMultiExec();
         break;
       case "exit":
         requestAppExit();
@@ -630,6 +659,16 @@ export function MainLayout() {
           <Panel>
             <div className="h-full flex flex-col min-w-0">
               {!compactMode && <TabBar />}
+              {multiExecActive && (
+                <MultiExecBar
+                  selectedCount={multiExecSelectedTabIds.size}
+                  totalTerminalCount={tabs.filter((t) => t.type === "terminal").length}
+                  onSend={broadcastToSelectedTerminals}
+                  onSelectAll={selectAllTerminalTabs}
+                  onClearSelection={clearMultiExecSelection}
+                  onClose={toggleMultiExec}
+                />
+              )}
               <div className="flex-1 min-h-0 overflow-hidden relative">
                 {/* Welcome panel */}
                 {(activeTab?.type === "welcome" || !activeTab) && (
@@ -660,6 +699,10 @@ export function MainLayout() {
                         onCwdChange={tab.ssh ? (cwd) => handleTerminalCwd(tab.id, cwd) : undefined}
                         cwdRequestToken={terminalCwdRequestTokens[tab.id] ?? 0}
                         onSessionReady={(sid) => { terminalSessionIds.current[tab.id] = sid; }}
+                        onOutput={() => handleTerminalOutput(tab.id)}
+                        multiExecActive={multiExecActive}
+                        isMultiExecTarget={multiExecActive && multiExecSelectedTabIds.has(tab.id)}
+                        onInputBroadcast={isActive && multiExecActive ? (data) => broadcastToSelectedTerminals(data, tab.id) : undefined}
                       />
                       {tab.ssh && (
                         <button

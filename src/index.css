@@ -235,6 +235,13 @@ body {
 .moba-tab:hover:not([data-active="true"]) {
   background: var(--moba-hover);
 }
+.moba-tab[data-multiexec-selected="true"] {
+  border-left: 2px solid var(--moba-accent);
+  background: color-mix(in srgb, var(--moba-accent) 12%, var(--moba-tab-inactive));
+}
+.moba-tab[data-multiexec-selected="true"][data-active="true"] {
+  background: color-mix(in srgb, var(--moba-accent) 12%, var(--moba-tab-active));
+}
 
 .moba-app-titlebar {
   background: linear-gradient(to bottom, var(--moba-titlebar-from), var(--moba-titlebar-to));

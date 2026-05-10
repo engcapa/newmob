@@ -24,6 +24,7 @@ export interface Tab {
   message?: string;
   sftp?: SftpTabInfo;
   vnc?: VncConnectInfo;
+  hasNewOutput?: boolean;
 }
 
 export interface SftpTabInfo {

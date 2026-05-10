@@ -27,6 +27,10 @@ export function TabBar() {
     removeTabs,
     addTab,
     toggleCompactMode,
+    multiExecActive,
+    multiExecSelectedTabIds,
+    toggleMultiExec,
+    toggleMultiExecTab,
   } = useAppStore();
   const ctx = useContextMenu();
 
@@ -81,31 +85,62 @@ export function TabBar() {
       style={{ background: "linear-gradient(to bottom, var(--moba-tab-inactive), var(--moba-chrome-bg))" }}
     >
       {ctx.render}
-      {tabs.map((tab) => (
-        <div
-          key={tab.id}
-          data-testid="tab-item"
-          data-tab-title={tab.title}
-          data-tab-type={tab.type}
-          className="moba-tab"
-          data-active={activeTabId === tab.id}
-          onClick={() => setActiveTab(tab.id)}
-          onMouseDown={(e) => handleMouseDown(e, tab)}
-          onContextMenu={(e) => handleTabContext(e, tab)}
-        >
-          <TabIcon kind={tab.type} ssh={!!tab.ssh} />
-          <span className="truncate max-w-[180px]">{tab.title}</span>
-          {tab.closable && (
-            <X
-              className="w-3 h-3 ml-1 opacity-60 hover:opacity-100"
-              onClick={(e) => {
-                e.stopPropagation();
-                removeTab(tab.id);
-              }}
-            />
-          )}
-        </div>
-      ))}
+      {tabs.map((tab) => {
+        const isSelected = multiExecActive && tab.type === "terminal" && multiExecSelectedTabIds.has(tab.id);
+        return (
+          <div
+            key={tab.id}
+            data-testid="tab-item"
+            data-tab-title={tab.title}
+            data-tab-type={tab.type}
+            data-multiexec-selected={isSelected || undefined}
+            className="moba-tab relative"
+            data-active={activeTabId === tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            onMouseDown={(e) => handleMouseDown(e, tab)}
+            onContextMenu={(e) => handleTabContext(e, tab)}
+          >
+            {multiExecActive && tab.type === "terminal" && (
+              <button
+                type="button"
+                title={isSelected ? "Remove from MultiExec" : "Add to MultiExec"}
+                className="absolute -top-0.5 -left-0.5 w-3 h-3 rounded-full border flex items-center justify-center z-10 flex-shrink-0"
+                style={{
+                  background: isSelected ? "var(--moba-accent)" : "var(--moba-chrome-bg)",
+                  borderColor: isSelected ? "var(--moba-accent)" : "var(--moba-divider)",
+                  fontSize: 7,
+                  color: isSelected ? "#fff" : "var(--moba-text-muted)",
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleMultiExecTab(tab.id);
+                }}
+              >
+                {isSelected ? "✓" : ""}
+              </button>
+            )}
+            <div className="relative flex-shrink-0">
+              <TabIcon kind={tab.type} ssh={!!tab.ssh} />
+              {tab.hasNewOutput && (
+                <span
+                  className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 pointer-events-none"
+                  aria-label="New output"
+                />
+              )}
+            </div>
+            <span className="truncate max-w-[180px]">{tab.title}</span>
+            {tab.closable && (
+              <X
+                className="w-3 h-3 ml-1 opacity-60 hover:opacity-100"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeTab(tab.id);
+                }}
+              />
+            )}
+          </div>
+        );
+      })}
 
       <button
         data-testid="new-local-terminal"
@@ -122,7 +157,12 @@ export function TabBar() {
         {!compactMode && (
           <>
             <IconBtn title="Split view is not active in this phase" icon={<SplitSquareVertical className="w-3.5 h-3.5" />} disabled />
-            <IconBtn title="MultiExec is not active in this phase" icon={<Users className="w-3.5 h-3.5" />} disabled />
+            <IconBtn
+              title={multiExecActive ? "Disable MultiExec" : "Enable MultiExec"}
+              icon={<Users className="w-3.5 h-3.5" />}
+              onClick={toggleMultiExec}
+              active={multiExecActive}
+            />
           </>
         )}
         <IconBtn
