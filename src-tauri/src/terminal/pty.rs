@@ -436,6 +436,9 @@ pub fn create_pty(
         cmd.arg(arg);
     }
 
+    #[cfg(unix)]
+    cmd.env("TERM", "xterm-256color");
+
     if let Some(dir) = cwd {
         cmd.cwd(dir);
     }
