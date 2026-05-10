@@ -279,13 +279,25 @@ pub fn read_zrle<R: Read>(
     // Feed the newly-arrived bytes into the persistent inflater, growing the
     // buffer as we go. The inflater's internal state is preserved across
     // rectangles — RFB keeps a single zlib stream per session.
+    //
+    // Subtle point: it is NOT enough to stop as soon as the input slice has
+    // been fully consumed. miniz_oxide buffers input internally, so
+    // `consumed_in == compressed.len()` can mean "bytes copied into the
+    // inflater's internal ring" rather than "all output bytes emitted". If
+    // the output buffer also happened to fill on that same call, queued
+    // bytes are left behind and the tile decoder below then runs off the end
+    // with `eof cpixel`. Drain the inflater with an extra empty-input call
+    // before returning.
     let mut src_consumed = 0usize;
     loop {
-        if src_consumed >= compressed.len() {
-            break;
-        }
         let current_len = dec.buf.len();
         dec.buf.resize(current_len + 64 * 1024, 0);
+
+        let input_slice: &[u8] = if src_consumed < compressed.len() {
+            &compressed[src_consumed..]
+        } else {
+            &[]
+        };
 
         let tin_before = dec.inflater.total_in();
         let tout_before = dec.inflater.total_out();
@@ -293,7 +305,7 @@ pub fn read_zrle<R: Read>(
         let status = dec
             .inflater
             .decompress(
-                &compressed[src_consumed..],
+                input_slice,
                 &mut dec.buf[current_len..],
                 FlushDecompress::None,
             )
@@ -305,6 +317,11 @@ pub fn read_zrle<R: Read>(
         dec.buf.truncate(current_len + produced_out);
         src_consumed += consumed_in;
 
+        // All input fed in AND the inflater has nothing more to emit.
+        if src_consumed >= compressed.len() && produced_out == 0 {
+            break;
+        }
+        // Safety net against a livelock on malformed input.
         if consumed_in == 0 && produced_out == 0 {
             break;
         }
@@ -677,5 +694,80 @@ mod tests {
         let out2 = read_zrle(&mut cur2, 0, 64, 64, 64, &mut dec).unwrap();
         let DecodedRect::Pixels { rgba, .. } = &out2[0];
         assert_eq!(rgba[0..4], [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn zrle_decompresses_output_larger_than_initial_buffer() {
+        // Regression for "zrle: eof cpixel": real ZRLE streams are a single
+        // persistent zlib stream that spans the whole session, so the inflater
+        // never sees a StreamEnd marker. It is NOT enough to stop decompressing
+        // the moment the input slice is drained — the inflater can still have
+        // bytes queued internally, and those need to be pulled out with one
+        // more call (empty input) before we hand the buffer off to the tile
+        // decoder. Otherwise the tile decoder runs off the end with `eof cpixel`.
+        //
+        // Build a rectangle whose tile stream is well over 64 KB and wrap it
+        // in a Sync-flushed zlib frame (no StreamEnd), just like a real server
+        // would transmit one rectangle within an ongoing session.
+        use flate2::{Compress, Compression, FlushCompress};
+
+        let rect_w: u16 = 256;
+        let rect_h: u16 = 256;
+        let tile_w: u16 = 64;
+        let tile_h: u16 = 64;
+
+        let mut uncompressed: Vec<u8> = Vec::new();
+        let tiles_x = rect_w / tile_w;
+        let tiles_y = rect_h / tile_h;
+        for _ in 0..tiles_y {
+            for _ in 0..tiles_x {
+                uncompressed.push(0u8); // subenc = raw CPIXEL stream
+                for _ in 0..(tile_w as usize * tile_h as usize) {
+                    // Distinctive colour so we detect any byte-alignment bug.
+                    uncompressed.extend_from_slice(&[0x12, 0x34, 0x56]);
+                }
+            }
+        }
+        assert!(uncompressed.len() > 64 * 1024);
+
+        // Compress with Sync flush so the output is complete but the stream
+        // is NOT terminated (zlib would otherwise emit StreamEnd, which hides
+        // the bug via an early loop exit).
+        let mut zlib = Compress::new(Compression::default(), true);
+        let mut compressed: Vec<u8> = Vec::new();
+        let mut src_pos = 0usize;
+        loop {
+            let mut scratch = vec![0u8; 32 * 1024];
+            let in_before = zlib.total_in();
+            let out_before = zlib.total_out();
+            zlib.compress(&uncompressed[src_pos..], &mut scratch, FlushCompress::Sync)
+                .unwrap();
+            let consumed = (zlib.total_in() - in_before) as usize;
+            let produced = (zlib.total_out() - out_before) as usize;
+            compressed.extend_from_slice(&scratch[..produced]);
+            src_pos += consumed;
+            if src_pos >= uncompressed.len() && produced < scratch.len() {
+                break;
+            }
+            if consumed == 0 && produced == 0 {
+                break;
+            }
+        }
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&compressed);
+
+        let mut cur = Cursor::new(&payload);
+        let mut dec = ZrleDecoder::new();
+        let out = read_zrle(&mut cur, 0, 0, rect_w, rect_h, &mut dec).unwrap();
+        assert_eq!(out.len() as u16, tiles_x * tiles_y);
+        for rect in &out {
+            let DecodedRect::Pixels { rgba, .. } = rect;
+            assert_eq!(rgba.len(), tile_w as usize * tile_h as usize * 4);
+            for p in rgba.chunks_exact(4) {
+                assert_eq!(p, &[0x12, 0x34, 0x56, 255]);
+            }
+        }
     }
 }
