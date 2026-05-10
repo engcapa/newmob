@@ -43,6 +43,7 @@ export async function vncTestConnection(
 /** WebSocket message types sent to the VNC relay. */
 export type WsOutgoing =
   | { type: "ack" }
+  | { type: "ping" }
   | { type: "key"; down: boolean; keysym: number }
   | { type: "pointer"; x: number; y: number; buttons: number }
   | { type: "clipboard"; text: string }

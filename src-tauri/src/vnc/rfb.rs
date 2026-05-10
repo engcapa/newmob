@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::TcpStream;
 
-use crate::vnc::encodings::{self, DecodedRect};
+use crate::vnc::encodings::{self, DecodedRect, HextileState, ZrleDecoder};
 
 const SEC_TYPE_NONE: u8 = 1;
 const SEC_TYPE_VNC_AUTH: u8 = 2;
@@ -24,21 +24,6 @@ pub struct ServerInit {
     pub name: String,
 }
 
-#[derive(Debug)]
-pub struct FramebufferUpdate {
-    pub rects: Vec<FramebufferRect>,
-}
-
-#[derive(Debug)]
-pub struct FramebufferRect {
-    pub x: u16,
-    pub y: u16,
-    pub w: u16,
-    pub h: u16,
-    pub encoding: i32,
-    pub data: Vec<u8>,
-}
-
 pub struct RfbConnection {
     stream: TcpStream,
     secure_io: Option<RsaAesIo>,
@@ -48,6 +33,10 @@ pub struct RfbConnection {
     framebuffer: Vec<u8>,
     /// Negotiated protocol minor version (3, 7, or 8).
     proto_minor: u8,
+    /// Hextile bg/fg carry across tiles per the RFB spec.
+    hextile_state: HextileState,
+    /// ZRLE uses a single zlib stream for the whole session.
+    zrle_decoder: ZrleDecoder,
 }
 
 pub struct RfbWriter {
@@ -74,6 +63,8 @@ impl RfbConnection {
             name: String::new(),
             framebuffer: Vec::new(),
             proto_minor: 8,
+            hextile_state: HextileState::new(),
+            zrle_decoder: ZrleDecoder::new(),
         };
 
         conn.handshake_protocol_version()?;
@@ -510,7 +501,8 @@ impl RfbConnection {
         })
     }
 
-    /// Request pixel format: 32-bit RGBA (8-8-8-8).
+    /// Request pixel format: 32-bit true-colour with depth 24 so ZRLE can use
+    /// the 3-byte CPIXEL form.
     pub fn set_pixel_format_rgba(&mut self) -> Result<(), String> {
         let mut msg = vec![0u8; 20];
         msg[0] = 0; // SetPixelFormat message type
@@ -519,7 +511,7 @@ impl RfbConnection {
         msg[3] = 0; // padding
                     // Pixel format:
         msg[4] = 32; // bits-per-pixel
-        msg[5] = 32; // depth
+        msg[5] = 24; // depth: 24 so ZRLE's CPIXEL rule kicks in
         msg[6] = 0; // big-endian false (little-endian)
         msg[7] = 1; // true-colour
         msg[8] = 0; // red-max hi
@@ -602,95 +594,26 @@ impl RfbConnection {
         })
     }
 
-    /// Read a server-to-client message. Returns None for FramebufferUpdate (handled internally).
-    pub fn read_message(&mut self) -> Result<ServerMessage, String> {
+    /// Read the next server-to-client message, decoding rectangle data in
+    /// place. `FramebufferUpdate` is returned with the already-decoded rects
+    /// so callers never have to know about the specific wire encoding.
+    pub fn read_server_message(&mut self) -> Result<ServerMessage, String> {
         let msg_type = self.read_u8()?;
         match msg_type {
-            0 => {
-                // FramebufferUpdate
-                self.read_exact(&mut [0u8; 1])
-                    .map_err(|e| format!("read fu padding: {}", e))?;
-                let num_rects = self.read_u16()?;
-                let mut rects = Vec::with_capacity(num_rects as usize);
-
-                for _ in 0..num_rects {
-                    let x = self.read_u16()?;
-                    let y = self.read_u16()?;
-                    let w = self.read_u16()?;
-                    let h = self.read_u16()?;
-                    let encoding = self.read_i32()?;
-
-                    let data_len = match encoding {
-                        0 => {
-                            // Raw
-                            w as usize * h as usize * 4
-                        }
-                        1 => {
-                            // CopyRect
-                            4
-                        }
-                        5 => {
-                            // Hextile: read until we've covered the rect
-                            // We read all remaining data for now (actual parsing in decoder)
-                            self.read_hextile_len(x, y, w, h)?
-                        }
-                        7 => {
-                            // Tight
-                            self.read_tight_len(x, y, w, h)?
-                        }
-                        16 => 0,
-                        -223 => {
-                            // DesktopSize pseudo-encoding (no data)
-                            0
-                        }
-                        _ => {
-                            // Unknown encoding — read remaining data
-                            w as usize * h as usize * 4
-                        }
-                    };
-
-                    let data = if encoding == 16 {
-                        self.read_zrle_data()?
-                    } else {
-                        let mut data = vec![0u8; data_len];
-                        self.read_exact(&mut data)
-                            .map_err(|e| format!("read rect data: {}", e))?;
-                        data
-                    };
-
-                    rects.push(FramebufferRect {
-                        x,
-                        y,
-                        w,
-                        h,
-                        encoding,
-                        data,
-                    });
-                }
-
-                Ok(ServerMessage::FramebufferUpdate(FramebufferUpdate {
-                    rects,
-                }))
-            }
+            0 => self.read_framebuffer_update(),
             1 => {
-                // SetColourMapEntries
                 self.read_exact(&mut [0u8; 1])
                     .map_err(|e| format!("read colourmap padding: {}", e))?;
                 let _first = self.read_u16()?;
                 let count = self.read_u16()?;
-                // Read and discard colour map entries (6 bytes each: 2B R + 2B G + 2B B)
                 let entry_size = 6 * count as usize;
                 let mut entries = vec![0u8; entry_size];
                 self.read_exact(&mut entries)
                     .map_err(|e| format!("read colourmap entries: {}", e))?;
                 Ok(ServerMessage::SetColourMapEntries)
             }
-            2 => {
-                // Bell
-                Ok(ServerMessage::Bell)
-            }
+            2 => Ok(ServerMessage::Bell),
             3 => {
-                // ServerCutText
                 self.read_exact(&mut [0u8; 3])
                     .map_err(|e| format!("read cut text padding: {}", e))?;
                 let len = self.read_u32()? as usize;
@@ -705,115 +628,103 @@ impl RfbConnection {
         }
     }
 
-    /// Decode a FramebufferUpdate into a list of DecodedRects, updating the internal framebuffer.
-    pub fn decode_update(
-        &mut self,
-        update: &FramebufferUpdate,
-    ) -> Result<Vec<DecodedRect>, String> {
-        let mut decoded: Vec<DecodedRect> = Vec::new();
+    fn read_framebuffer_update(&mut self) -> Result<ServerMessage, String> {
+        self.read_exact(&mut [0u8; 1])
+            .map_err(|e| format!("read fu padding: {}", e))?;
+        let num_rects = self.read_u16()?;
 
-        for rect in &update.rects {
-            match rect.encoding {
+        let mut decoded: Vec<DecodedRect> = Vec::new();
+        for _ in 0..num_rects {
+            let x = self.read_u16()?;
+            let y = self.read_u16()?;
+            let w = self.read_u16()?;
+            let h = self.read_u16()?;
+            let encoding = self.read_i32()?;
+
+            match encoding {
                 0 => {
-                    // Raw
-                    let result = encodings::decode_raw(&rect.data, rect.x, rect.y, rect.w, rect.h);
-                    self.write_to_fb(&result);
-                    decoded.push(result);
+                    let rect = self.decode_via_reader(|reader| encodings::read_raw(reader, x, y, w, h))?;
+                    self.write_to_fb(&rect);
+                    decoded.push(rect);
                 }
                 1 => {
-                    // CopyRect
-                    let (src_x, src_y) = encodings::decode_copyrect(&rect.data);
-                    self.copy_in_fb(rect.x, rect.y, rect.w, rect.h, src_x, src_y);
-                    decoded.push(DecodedRect::Copy { src_x, src_y });
+                    // CopyRect resolves against the framebuffer inside the
+                    // decoder, so borrow it explicitly before handing off the
+                    // reader.
+                    let Self {
+                        stream,
+                        secure_io,
+                        framebuffer,
+                        width,
+                        height,
+                        ..
+                    } = self;
+                    let rect = {
+                        let mut reader = RfbStreamReader::new(stream, secure_io.as_mut());
+                        encodings::read_copyrect(&mut reader, x, y, w, h, framebuffer, *width, *height)?
+                    };
+                    self.write_to_fb(&rect);
+                    decoded.push(rect);
                 }
                 5 => {
-                    // Hextile
-                    let results = encodings::decode_hextile(
-                        &rect.data,
-                        rect.x,
-                        rect.y,
-                        rect.w,
-                        rect.h,
-                        &self.framebuffer,
-                        self.width,
-                    )?;
-                    for r in &results {
+                    let Self {
+                        stream,
+                        secure_io,
+                        hextile_state,
+                        ..
+                    } = self;
+                    let rects = {
+                        let mut reader = RfbStreamReader::new(stream, secure_io.as_mut());
+                        encodings::read_hextile(&mut reader, x, y, w, h, hextile_state)?
+                    };
+                    for r in &rects {
                         self.write_to_fb(r);
                     }
-                    decoded.extend(results);
-                }
-                7 => {
-                    // Tight
-                    let results =
-                        encodings::decode_tight(&rect.data, rect.x, rect.y, rect.w, rect.h)?;
-                    for r in &results {
-                        self.write_to_fb(r);
-                    }
-                    decoded.extend(results);
+                    decoded.extend(rects);
                 }
                 16 => {
-                    // ZRLE
-                    let results =
-                        encodings::decode_zrle(&rect.data, rect.x, rect.y, rect.w, rect.h)?;
-                    for r in &results {
+                    let Self {
+                        stream,
+                        secure_io,
+                        zrle_decoder,
+                        ..
+                    } = self;
+                    let rects = {
+                        let mut reader = RfbStreamReader::new(stream, secure_io.as_mut());
+                        encodings::read_zrle(&mut reader, x, y, w, h, zrle_decoder)?
+                    };
+                    for r in &rects {
                         self.write_to_fb(r);
                     }
-                    decoded.extend(results);
+                    decoded.extend(rects);
                 }
                 -223 => {
-                    // DesktopSize: resize framebuffer
-                    let new_w = rect.w;
-                    let new_h = rect.h;
-                    self.width = new_w;
-                    self.height = new_h;
-                    self.framebuffer = vec![0u8; new_w as usize * new_h as usize * 4];
+                    // DesktopSize pseudo-encoding: no payload, just a resize.
+                    self.width = w;
+                    self.height = h;
+                    self.framebuffer = vec![0u8; w as usize * h as usize * 4];
                 }
-                _ => {
-                    // Unknown encoding, skip
-                }
-            }
-        }
-
-        Ok(decoded)
-    }
-
-    /// Write a decoded pixel rect into the framebuffer.
-    fn write_to_fb(&mut self, rect: &DecodedRect) {
-        if let DecodedRect::Pixels { x, y, w, h, rgba } = rect {
-            let fb_w = self.width as usize;
-            let src_w = *w as usize;
-            for row in 0..*h as usize {
-                let fb_start = ((*y as usize + row) * fb_w + *x as usize) * 4;
-                let src_start = row * src_w * 4;
-                let len = src_w * 4;
-                if fb_start + len <= self.framebuffer.len() && src_start + len <= rgba.len() {
-                    self.framebuffer[fb_start..fb_start + len]
-                        .copy_from_slice(&rgba[src_start..src_start + len]);
+                other => {
+                    return Err(format!(
+                        "unsupported encoding {} — client did not request this",
+                        other
+                    ));
                 }
             }
         }
+
+        Ok(ServerMessage::FramebufferUpdate { rects: decoded })
     }
 
-    /// Copy a region within the framebuffer.
-    fn copy_in_fb(&mut self, dst_x: u16, dst_y: u16, w: u16, h: u16, src_x: u16, src_y: u16) {
-        let fb_w = self.width as usize;
-        let row_bytes = w as usize * 4;
-        for row in 0..h as usize {
-            let src_start = ((src_y as usize + row) * fb_w + src_x as usize) * 4;
-            let dst_start = ((dst_y as usize + row) * fb_w + dst_x as usize) * 4;
-            if src_start + row_bytes <= self.framebuffer.len()
-                && dst_start + row_bytes <= self.framebuffer.len()
-            {
-                // Use a temp buffer because src and dst may overlap
-                let row_data = self.framebuffer[src_start..src_start + row_bytes].to_vec();
-                self.framebuffer[dst_start..dst_start + row_bytes].copy_from_slice(&row_data);
-            }
-        }
-    }
-
-    /// Apply all decoded rects to the framebuffer and return the full updated frame as RGBA bytes.
-    pub fn take_full_frame(&self) -> Vec<u8> {
-        self.framebuffer.clone()
+    /// Run a decoder closure over a temporary `impl Read` view of the stream.
+    /// Scoped borrowing so self stays available for framebuffer writes afterwards.
+    fn decode_via_reader<T>(
+        &mut self,
+        f: impl FnOnce(&mut RfbStreamReader<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let Self { stream, secure_io, .. } = self;
+        let mut reader = RfbStreamReader::new(stream, secure_io.as_mut());
+        f(&mut reader)
     }
 
     // --- I/O helpers ---
@@ -864,35 +775,65 @@ impl RfbConnection {
         Ok(i32::from_be_bytes(buf))
     }
 
-    /// Read Hextile data length by consuming the stream until the tile count is covered.
-    /// The exact length is unknown ahead of time; we use a heuristic: read up to
-    /// w*h*4 bytes (worst case raw) per tile.
-    fn read_hextile_len(&mut self, _x: u16, _y: u16, w: u16, h: u16) -> Result<usize, String> {
-        // Conservative: worst-case each tile is sent raw (subenc=0x01).
-        // Each tile has 1-byte subencoding header + raw pixel data.
-        // We also account for background (4B) + fg (4B) + subrects overhead.
-        // Use raw pixel count as bound + 1 byte per tile for header.
-        let tiles_x = (w + 15) / 16;
-        let tiles_y = (h + 15) / 16;
-        let max_bytes = (w as usize * h as usize * 4) + (tiles_x as usize * tiles_y as usize * 128);
-        Ok(max_bytes)
+    /// Write a decoded pixel rect into the framebuffer. Used so subsequent
+    /// Hextile/CopyRect rects can reference prior pixel state.
+    fn write_to_fb(&mut self, rect: &DecodedRect) {
+        let DecodedRect::Pixels { x, y, w, h, rgba } = rect;
+        let fb_w = self.width as usize;
+        let src_w = *w as usize;
+        for row in 0..*h as usize {
+            let fb_start = ((*y as usize + row) * fb_w + *x as usize) * 4;
+            let src_start = row * src_w * 4;
+            let len = src_w * 4;
+            if fb_start + len <= self.framebuffer.len() && src_start + len <= rgba.len() {
+                self.framebuffer[fb_start..fb_start + len]
+                    .copy_from_slice(&rgba[src_start..src_start + len]);
+            }
+        }
     }
 
-    fn read_tight_len(&mut self, _x: u16, _y: u16, w: u16, h: u16) -> Result<usize, String> {
-        // Tight is compressed — the zlib data will be at most raw size
-        Ok(w as usize * h as usize * 4 + 256)
+    /// Snapshot of the full framebuffer (RGBA). Currently unused externally;
+    /// kept for future server-side caching / re-attach support.
+    #[allow(dead_code)]
+    pub fn take_full_frame(&self) -> Vec<u8> {
+        self.framebuffer.clone()
+    }
+}
+
+/// Temporary read view over the underlying VNC TCP stream (plus an optional
+/// AES-EAX secure layer). Lives only for the duration of a single decode call
+/// so we can borrow sibling fields of `RfbConnection` at the same time.
+pub(crate) struct RfbStreamReader<'a> {
+    stream: &'a mut TcpStream,
+    secure_io: Option<&'a mut RsaAesIo>,
+}
+
+impl<'a> RfbStreamReader<'a> {
+    fn new(stream: &'a mut TcpStream, secure_io: Option<&'a mut RsaAesIo>) -> Self {
+        Self { stream, secure_io }
+    }
+}
+
+impl<'a> Read for RfbStreamReader<'a> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // Decoders all rely on `read_exact`; this path is just a fallback so
+        // generic `Read` combinators keep working. AES-EAX frames are
+        // message-oriented and only expose read_exact, so we saturate the
+        // requested buffer rather than return a partial read.
+        match self.secure_io.as_mut() {
+            Some(io) => {
+                io.read_exact(self.stream, buf)?;
+                Ok(buf.len())
+            }
+            None => self.stream.read(buf),
+        }
     }
 
-    fn read_zrle_data(&mut self) -> Result<Vec<u8>, String> {
-        let mut buf = [0u8; 4];
-        self.read_exact(&mut buf)
-            .map_err(|e| format!("read zrle len: {}", e))?;
-        let zipped_len = u32::from_be_bytes(buf) as usize;
-        let mut data = vec![0u8; 4 + zipped_len];
-        data[..4].copy_from_slice(&buf);
-        self.read_exact(&mut data[4..])
-            .map_err(|e| format!("read zrle data: {}", e))?;
-        Ok(data)
+    fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        match self.secure_io.as_mut() {
+            Some(io) => io.read_exact(self.stream, buf),
+            None => self.stream.read_exact(buf),
+        }
     }
 }
 
@@ -1341,7 +1282,7 @@ fn increment_le(counter: &mut [u8; 16]) {
 
 #[derive(Debug)]
 pub enum ServerMessage {
-    FramebufferUpdate(FramebufferUpdate),
+    FramebufferUpdate { rects: Vec<DecodedRect> },
     SetColourMapEntries,
     Bell,
     ServerCutText { text: String },

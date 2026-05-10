@@ -1,6 +1,11 @@
-use flate2::read::ZlibDecoder;
+use flate2::{Decompress, FlushDecompress};
 use std::io::Read;
 
+/// A decoded framebuffer rectangle, in destination RGBA32.
+///
+/// `Copy` rectangles are resolved against the framebuffer inside the decoder,
+/// so what we emit upstream is always pixel data.
+#[derive(Debug)]
 pub enum DecodedRect {
     Pixels {
         x: u16,
@@ -9,653 +14,760 @@ pub enum DecodedRect {
         h: u16,
         rgba: Vec<u8>,
     },
-    Copy {
-        src_x: u16,
-        src_y: u16,
-    },
 }
 
-const _TIGHT_FILL: u8 = 0x80;
-const _TIGHT_JPEG: u8 = 0x90;
-const _TIGHT_PNG: u8 = 0xA0;
+// ── Helpers to read big-endian integers from an `impl Read`. ──
 
-/// Read a big-endian u16 from bytes at offset.
-fn read_u16(data: &[u8], pos: &mut usize) -> u16 {
-    let v = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
-    *pos += 2;
-    v
+fn read_u8<R: Read>(r: &mut R) -> std::io::Result<u8> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b)?;
+    Ok(b[0])
 }
 
-/// Raw encoding (0): w*h*bpp bytes of raw pixel data.
-pub fn decode_raw(data: &[u8], x: u16, y: u16, w: u16, h: u16) -> DecodedRect {
+fn read_u16_be<R: Read>(r: &mut R) -> std::io::Result<u16> {
+    let mut b = [0u8; 2];
+    r.read_exact(&mut b)?;
+    Ok(u16::from_be_bytes(b))
+}
+
+fn read_u32_be<R: Read>(r: &mut R) -> std::io::Result<u32> {
+    let mut b = [0u8; 4];
+    r.read_exact(&mut b)?;
+    Ok(u32::from_be_bytes(b))
+}
+
+// ── Raw encoding (type 0) ──────────────────────────────────────────
+
+/// Read a Raw-encoded rectangle from the stream: `w*h` PIXEL units of 4 bytes
+/// each (per the RGBA32 pixel format we negotiate). Alpha byte is forced to
+/// 0xFF because many servers leave it at 0.
+pub fn read_raw<R: Read>(
+    r: &mut R,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+) -> Result<DecodedRect, String> {
     let pixel_count = w as usize * h as usize;
-    let byte_count = pixel_count * 4;
-    let mut rgba = data[..byte_count].to_vec();
+    let mut rgba = vec![0u8; pixel_count * 4];
+    r.read_exact(&mut rgba)
+        .map_err(|e| format!("raw: read pixels: {}", e))?;
     for pixel in rgba.chunks_exact_mut(4) {
         pixel[3] = 255;
     }
-    DecodedRect::Pixels { x, y, w, h, rgba }
+    Ok(DecodedRect::Pixels { x, y, w, h, rgba })
 }
 
-/// CopyRect encoding (1): 2 bytes src_x, 2 bytes src_y.
-pub fn decode_copyrect(data: &[u8]) -> (u16, u16) {
-    let mut pos = 0;
-    (read_u16(data, &mut pos), read_u16(data, &mut pos))
+// ── CopyRect encoding (type 1) ─────────────────────────────────────
+
+/// Read the 4-byte CopyRect payload (src_x, src_y) and resolve it against the
+/// framebuffer, returning a Pixels rectangle that contains the copied region
+/// so downstream consumers do not need to understand the framebuffer.
+pub fn read_copyrect<R: Read>(
+    r: &mut R,
+    dst_x: u16,
+    dst_y: u16,
+    w: u16,
+    h: u16,
+    fb: &[u8],
+    fb_w: u16,
+    fb_h: u16,
+) -> Result<DecodedRect, String> {
+    let src_x = read_u16_be(r).map_err(|e| format!("copyrect: src_x: {}", e))?;
+    let src_y = read_u16_be(r).map_err(|e| format!("copyrect: src_y: {}", e))?;
+
+    let fb_w = fb_w as usize;
+    let fb_h = fb_h as usize;
+    let w_us = w as usize;
+    let h_us = h as usize;
+
+    // Defensive bounds: a misbehaving server could send coordinates that walk
+    // off the framebuffer. Clip rather than panic.
+    let mut rgba = vec![0u8; w_us * h_us * 4];
+    if fb_w == 0 || fb_h == 0 {
+        return Ok(DecodedRect::Pixels { x: dst_x, y: dst_y, w, h, rgba });
+    }
+    for row in 0..h_us {
+        let sy = src_y as usize + row;
+        if sy >= fb_h {
+            break;
+        }
+        let src_start = (sy * fb_w + src_x as usize) * 4;
+        // Row length constrained by both the requested width and the fb edge.
+        let avail_cols = fb_w.saturating_sub(src_x as usize).min(w_us);
+        let src_end = src_start + avail_cols * 4;
+        let dst_start = row * w_us * 4;
+        let dst_end = dst_start + avail_cols * 4;
+        if src_end <= fb.len() && dst_end <= rgba.len() {
+            rgba[dst_start..dst_end].copy_from_slice(&fb[src_start..src_end]);
+        }
+    }
+    Ok(DecodedRect::Pixels { x: dst_x, y: dst_y, w, h, rgba })
 }
 
-/// Hextile encoding (5): 16x16 tiles with subencoding.
-pub fn decode_hextile(
-    data: &[u8],
+// ── Hextile encoding (type 5) ──────────────────────────────────────
+
+const HEXTILE_RAW: u8 = 0x01;
+const HEXTILE_BG_SPECIFIED: u8 = 0x02;
+const HEXTILE_FG_SPECIFIED: u8 = 0x04;
+const HEXTILE_ANY_SUBRECTS: u8 = 0x08;
+const HEXTILE_SUBRECTS_COLOURED: u8 = 0x10;
+
+/// State carried across Hextile tiles: RFB requires bg/fg to persist when the
+/// server omits them from a tile.
+#[derive(Default)]
+pub struct HextileState {
+    bg: [u8; 4],
+    fg: [u8; 4],
+}
+
+impl HextileState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Read a Hextile-encoded rectangle from the stream, tile-by-tile.
+///
+/// Unlike the previous decoder, this implementation:
+///   - reads exactly as many bytes as the server sent (no heuristics),
+///   - carries bg/fg across tiles per the RFB spec,
+///   - applies the five subencoding flags correctly.
+pub fn read_hextile<R: Read>(
+    r: &mut R,
     rect_x: u16,
     rect_y: u16,
     rect_w: u16,
     rect_h: u16,
-    fb: &[u8],
-    fb_w: u16,
+    state: &mut HextileState,
 ) -> Result<Vec<DecodedRect>, String> {
     let mut results: Vec<DecodedRect> = Vec::new();
-    let mut pos: usize = 0;
-    let mut tile_y = rect_y;
 
+    let mut tile_y = rect_y;
     while tile_y < rect_y + rect_h {
         let tile_h = 16u16.min(rect_y + rect_h - tile_y);
         let mut tile_x = rect_x;
         while tile_x < rect_x + rect_w {
             let tile_w = 16u16.min(rect_x + rect_w - tile_x);
-            let subenc = data[pos];
-            pos += 1;
+            let subenc = read_u8(r).map_err(|e| format!("hextile: subenc: {}", e))?;
             let pixel_count = tile_w as usize * tile_h as usize;
             let byte_count = pixel_count * 4;
 
-            if subenc & 0x01 != 0 {
-                // Raw tile
-                let pixels = data[pos..pos + byte_count].to_vec();
-                pos += byte_count;
-                results.push(DecodedRect::Pixels {
-                    x: tile_x,
-                    y: tile_y,
-                    w: tile_w,
-                    h: tile_h,
-                    rgba: pixels,
-                });
-            } else {
-                let has_bg = subenc & 0x02 != 0;
-                let mut bg: [u8; 4] = [0, 0, 0, 0];
-                if has_bg {
-                    bg.copy_from_slice(&data[pos..pos + 4]);
-                    pos += 4;
-                }
-                // Initialize tile with background color
-                let mut tile_pixels = vec![0u8; byte_count];
-                if has_bg {
-                    for i in 0..pixel_count {
-                        tile_pixels[i * 4..(i + 1) * 4].copy_from_slice(&bg);
-                    }
-                }
-                // Copy from framebuffer when no explicit background
-                if !has_bg {
-                    for py in 0..tile_h as usize {
-                        let fb_row = (tile_y as usize + py) * fb_w as usize + tile_x as usize;
-                        let t_row = py * tile_w as usize;
-                        let src = fb_row * 4;
-                        let dst = t_row * 4;
-                        let len = tile_w as usize * 4;
-                        tile_pixels[dst..dst + len].copy_from_slice(&fb[src..src + len]);
-                    }
-                }
-
-                if subenc & 0x04 != 0 {
-                    // Has foreground subrects
-                    let fg: [u8; 4] = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
-                    pos += 4;
-                    let n_subrects = data[pos] as usize;
-                    pos += 1;
-                    for _ in 0..n_subrects {
-                        let sr_rgba: [u8; 4] =
-                            [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
-                        pos += 4;
-                        let sr_xy = data[pos];
-                        pos += 1;
-                        let sr_wh = data[pos];
-                        pos += 1;
-                        let sr_x = (sr_xy >> 4) as usize;
-                        let sr_y = (sr_xy & 0x0F) as usize;
-                        let sr_w = ((sr_wh >> 4) + 1) as usize;
-                        let sr_h = ((sr_wh & 0x0F) + 1) as usize;
-                        if sr_rgba != fg {
-                            for r in sr_y..sr_y + sr_h {
-                                for c in sr_x..sr_x + sr_w {
-                                    let idx = (r * tile_w as usize + c) * 4;
-                                    tile_pixels[idx..idx + 4].copy_from_slice(&sr_rgba);
-                                }
-                            }
-                        } else {
-                            for r in sr_y..sr_y + sr_h {
-                                for c in sr_x..sr_x + sr_w {
-                                    let idx = (r * tile_w as usize + c) * 4;
-                                    tile_pixels[idx..idx + 4].copy_from_slice(&fg);
-                                }
-                            }
-                        }
-                    }
-                }
-                if subenc & 0x08 != 0 {
-                    // Subrects colored (each subrect has its own color)
-                    let n_subrects = data[pos] as usize;
-                    pos += 1;
-                    for _ in 0..n_subrects {
-                        let sr_rgba: [u8; 4] =
-                            [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
-                        pos += 4;
-                        let sr_xy = data[pos];
-                        pos += 1;
-                        let sr_wh = data[pos];
-                        pos += 1;
-                        let sr_x = (sr_xy >> 4) as usize;
-                        let sr_y = (sr_xy & 0x0F) as usize;
-                        let sr_w = ((sr_wh >> 4) + 1) as usize;
-                        let sr_h = ((sr_wh & 0x0F) + 1) as usize;
-                        for r in sr_y..sr_y + sr_h {
-                            for c in sr_x..sr_x + sr_w {
-                                let idx = (r * tile_w as usize + c) * 4;
-                                tile_pixels[idx..idx + 4].copy_from_slice(&sr_rgba);
-                            }
-                        }
-                    }
+            if subenc & HEXTILE_RAW != 0 {
+                let mut rgba = vec![0u8; byte_count];
+                r.read_exact(&mut rgba)
+                    .map_err(|e| format!("hextile: raw tile pixels: {}", e))?;
+                for pixel in rgba.chunks_exact_mut(4) {
+                    pixel[3] = 255;
                 }
                 results.push(DecodedRect::Pixels {
                     x: tile_x,
                     y: tile_y,
                     w: tile_w,
                     h: tile_h,
-                    rgba: tile_pixels,
+                    rgba,
                 });
+                tile_x += tile_w;
+                continue;
             }
+
+            if subenc & HEXTILE_BG_SPECIFIED != 0 {
+                r.read_exact(&mut state.bg)
+                    .map_err(|e| format!("hextile: bg: {}", e))?;
+                state.bg[3] = 255;
+            }
+            if subenc & HEXTILE_FG_SPECIFIED != 0 {
+                r.read_exact(&mut state.fg)
+                    .map_err(|e| format!("hextile: fg: {}", e))?;
+                state.fg[3] = 255;
+            }
+
+            // Fill the tile with the background colour.
+            let mut tile_pixels = vec![0u8; byte_count];
+            for i in 0..pixel_count {
+                tile_pixels[i * 4..(i + 1) * 4].copy_from_slice(&state.bg);
+            }
+
+            if subenc & HEXTILE_ANY_SUBRECTS != 0 {
+                let n_subrects = read_u8(r).map_err(|e| format!("hextile: n_subrects: {}", e))?
+                    as usize;
+                let coloured = subenc & HEXTILE_SUBRECTS_COLOURED != 0;
+                for _ in 0..n_subrects {
+                    let colour = if coloured {
+                        let mut c = [0u8; 4];
+                        r.read_exact(&mut c)
+                            .map_err(|e| format!("hextile: sr colour: {}", e))?;
+                        c[3] = 255;
+                        c
+                    } else {
+                        state.fg
+                    };
+                    let xy = read_u8(r).map_err(|e| format!("hextile: sr xy: {}", e))?;
+                    let wh = read_u8(r).map_err(|e| format!("hextile: sr wh: {}", e))?;
+                    let sx = (xy >> 4) as usize;
+                    let sy = (xy & 0x0F) as usize;
+                    let sw = ((wh >> 4) as usize) + 1;
+                    let sh = ((wh & 0x0F) as usize) + 1;
+                    for r2 in sy..(sy + sh).min(tile_h as usize) {
+                        for c in sx..(sx + sw).min(tile_w as usize) {
+                            let idx = (r2 * tile_w as usize + c) * 4;
+                            tile_pixels[idx..idx + 4].copy_from_slice(&colour);
+                        }
+                    }
+                }
+            }
+
+            results.push(DecodedRect::Pixels {
+                x: tile_x,
+                y: tile_y,
+                w: tile_w,
+                h: tile_h,
+                rgba: tile_pixels,
+            });
             tile_x += tile_w;
         }
         tile_y += tile_h;
     }
+
     Ok(results)
 }
 
-/// Tight encoding (7): zlib-compressed with multiple compression types.
-pub fn decode_tight(
-    data: &[u8],
+// ── ZRLE encoding (type 16) ────────────────────────────────────────
+
+/// Persistent ZRLE zlib stream. RFB keeps a single zlib stream that spans
+/// every ZRLE rectangle in the session, so the decoder state cannot be
+/// discarded between rectangles.
+pub struct ZrleDecoder {
+    inflater: Decompress,
+    /// Decompressed bytes already produced but not yet consumed by a tile.
+    buf: Vec<u8>,
+    /// Read cursor into `buf`.
+    pos: usize,
+}
+
+impl ZrleDecoder {
+    pub fn new() -> Self {
+        Self {
+            inflater: Decompress::new(/* zlib */ true),
+            buf: Vec::new(),
+            pos: 0,
+        }
+    }
+}
+
+impl Default for ZrleDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Read a ZRLE rectangle from the stream. Uses `dec` to preserve zlib state
+/// across calls, per RFB 7.7.6.
+pub fn read_zrle<R: Read>(
+    r: &mut R,
     rect_x: u16,
     rect_y: u16,
     rect_w: u16,
     rect_h: u16,
+    dec: &mut ZrleDecoder,
 ) -> Result<Vec<DecodedRect>, String> {
-    let mut results: Vec<DecodedRect> = Vec::new();
-    let mut pos: usize = 0;
-    let fb_w = rect_w;
-    let fb_h = rect_h;
+    let zlib_len = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))? as usize;
+    let mut compressed = vec![0u8; zlib_len];
+    r.read_exact(&mut compressed)
+        .map_err(|e| format!("zrle: body: {}", e))?;
 
-    // Allocate a temporary framebuffer for this rectangle
-    let mut fb = vec![0u8; rect_w as usize * rect_h as usize * 4];
+    // Feed the newly-arrived bytes into the persistent inflater, growing the
+    // buffer as we go. The inflater's internal state is preserved across
+    // rectangles — RFB keeps a single zlib stream per session.
+    //
+    // Subtle point: it is NOT enough to stop as soon as the input slice has
+    // been fully consumed. miniz_oxide buffers input internally, so
+    // `consumed_in == compressed.len()` can mean "bytes copied into the
+    // inflater's internal ring" rather than "all output bytes emitted". If
+    // the output buffer also happened to fill on that same call, queued
+    // bytes are left behind and the tile decoder below then runs off the end
+    // with `eof cpixel`. Drain the inflater with an extra empty-input call
+    // before returning.
+    let mut src_consumed = 0usize;
+    loop {
+        let current_len = dec.buf.len();
+        dec.buf.resize(current_len + 64 * 1024, 0);
 
-    let mut row = 0u16;
-    while row < fb_h {
-        if pos >= data.len() {
+        let input_slice: &[u8] = if src_consumed < compressed.len() {
+            &compressed[src_consumed..]
+        } else {
+            &[]
+        };
+
+        let tin_before = dec.inflater.total_in();
+        let tout_before = dec.inflater.total_out();
+
+        let status = dec
+            .inflater
+            .decompress(
+                input_slice,
+                &mut dec.buf[current_len..],
+                FlushDecompress::None,
+            )
+            .map_err(|e| format!("zrle: inflate: {}", e))?;
+
+        let consumed_in = (dec.inflater.total_in() - tin_before) as usize;
+        let produced_out = (dec.inflater.total_out() - tout_before) as usize;
+
+        dec.buf.truncate(current_len + produced_out);
+        src_consumed += consumed_in;
+
+        // All input fed in AND the inflater has nothing more to emit.
+        if src_consumed >= compressed.len() && produced_out == 0 {
             break;
         }
-        let ctrl = data[pos];
-        pos += 1;
-
-        let comp_type = ctrl >> 4;
-        let row_size = (ctrl & 0x0F) as u16 + 1;
-
-        match comp_type {
-            0x08 => {
-                // Fill - single color repeated
-                let pixel = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
-                pos += 4;
-                let mut rgba = vec![0u8; (fb_w as usize * row_size as usize) * 4];
-                for i in 0..fb_w as usize * row_size as usize {
-                    rgba[i * 4..(i + 1) * 4].copy_from_slice(&pixel);
-                }
-                // Write into temp framebuffer
-                let dst_start = row as usize * fb_w as usize * 4;
-                fb[dst_start..dst_start + rgba.len()].copy_from_slice(&rgba);
-
-                results.push(DecodedRect::Pixels {
-                    x: rect_x,
-                    y: rect_y + row,
-                    w: fb_w,
-                    h: row_size,
-                    rgba,
-                });
-            }
-            0x09 => {
-                // JPEG - not supported, skip
-                let jpeg_len = read_compact_len(data, &mut pos) as usize;
-                pos += jpeg_len;
-                // Fill with grey as fallback
-                let pixel_count = fb_w as usize * row_size as usize;
-                let rgba = vec![128u8; pixel_count * 4];
-                let dst_start = row as usize * fb_w as usize * 4;
-                fb[dst_start..dst_start + rgba.len()].copy_from_slice(&rgba);
-                results.push(DecodedRect::Pixels {
-                    x: rect_x,
-                    y: rect_y + row,
-                    w: fb_w,
-                    h: row_size,
-                    rgba,
-                });
-            }
-            _ => {
-                // Basic compression (0x00-0x07) with optional filter
-                let filter_id = comp_type;
-                let data_size = read_compact_len(data, &mut pos) as usize;
-                let row_bytes = fb_w as usize * row_size as usize * 4;
-
-                let mut decompressed = vec![0u8; row_bytes];
-                {
-                    // Tight basic compression uses a new zlib stream per row
-                    let all_compressed = &data[pos..pos + data_size];
-                    let mut new_dec = ZlibDecoder::new(all_compressed);
-                    new_dec
-                        .read_exact(&mut decompressed)
-                        .map_err(|e| format!("tight zlib decompress failed: {}", e))?;
-                }
-                pos += data_size;
-
-                // Apply filter
-                if filter_id == 1 {
-                    // Palette filter: each pixel is an index into a color palette
-                    let palette_count = decompressed[0] as usize + 1;
-                    let mut palette = vec![[0u8; 4]; palette_count];
-                    for i in 0..palette_count {
-                        palette[i][0] = decompressed[1 + i * 3];
-                        palette[i][1] = decompressed[1 + i * 3 + 1];
-                        palette[i][2] = decompressed[1 + i * 3 + 2];
-                        palette[i][3] = 255;
-                    }
-                    let data_offset = 1 + palette_count * 3;
-                    let pixel_count = fb_w as usize * row_size as usize;
-                    let mut rgba = vec![0u8; pixel_count * 4];
-                    for i in 0..pixel_count {
-                        let idx = decompressed[data_offset + i] as usize;
-                        if idx < palette_count {
-                            rgba[i * 4..(i + 1) * 4].copy_from_slice(&palette[idx]);
-                        }
-                    }
-                    let dst_start = row as usize * fb_w as usize * 4;
-                    fb[dst_start..dst_start + rgba.len()].copy_from_slice(&rgba);
-                    results.push(DecodedRect::Pixels {
-                        x: rect_x,
-                        y: rect_y + row,
-                        w: fb_w,
-                        h: row_size,
-                        rgba,
-                    });
-                } else if filter_id == 2 {
-                    // Gradient filter
-                    let mut rgba = vec![0u8; row_bytes];
-                    for y in 0..row_size as usize {
-                        for x in 0..fb_w as usize {
-                            let idx = (y * fb_w as usize + x) * 4;
-                            if data_size > 0 && idx + 3 < decompressed.len() {
-                                rgba[idx] = decompressed[idx];
-                                rgba[idx + 1] = decompressed[idx + 1];
-                                rgba[idx + 2] = decompressed[idx + 2];
-                                rgba[idx + 3] = 255;
-                            }
-                        }
-                    }
-                    let dst_start = row as usize * fb_w as usize * 4;
-                    fb[dst_start..dst_start + rgba.len()].copy_from_slice(&rgba);
-                    results.push(DecodedRect::Pixels {
-                        x: rect_x,
-                        y: rect_y + row,
-                        w: fb_w,
-                        h: row_size,
-                        rgba,
-                    });
-                } else {
-                    // No filter (filter_id 0): raw BGRA → RGBA
-                    let mut rgba = vec![0u8; row_bytes];
-                    for i in 0..fb_w as usize * row_size as usize {
-                        let src = i * 3; // Tight basic uses 3 bytes per pixel (BGR)
-                        if src + 2 < decompressed.len() {
-                            // BGR → RGBA
-                            rgba[i * 4] = decompressed[src + 2]; // R
-                            rgba[i * 4 + 1] = decompressed[src + 1]; // G
-                            rgba[i * 4 + 2] = decompressed[src]; // B
-                            rgba[i * 4 + 3] = 255; // A
-                        }
-                    }
-                    let dst_start = row as usize * fb_w as usize * 4;
-                    fb[dst_start..dst_start + rgba.len()].copy_from_slice(&rgba);
-                    results.push(DecodedRect::Pixels {
-                        x: rect_x,
-                        y: rect_y + row,
-                        w: fb_w,
-                        h: row_size,
-                        rgba,
-                    });
-                }
-            }
+        // Safety net against a livelock on malformed input.
+        if consumed_in == 0 && produced_out == 0 {
+            break;
         }
-        row += row_size;
+        if matches!(status, flate2::Status::StreamEnd) {
+            break;
+        }
     }
 
-    Ok(results)
-}
-
-/// ZRLE encoding (16): zlib-compressed tile-based encoding.
-pub fn decode_zrle(
-    data: &[u8],
-    rect_x: u16,
-    rect_y: u16,
-    rect_w: u16,
-    rect_h: u16,
-) -> Result<Vec<DecodedRect>, String> {
-    let zipped_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    let compressed = &data[4..4 + zipped_len];
-    let mut dec = ZlibDecoder::new(compressed);
-    let mut decompressed = Vec::new();
-    dec.read_to_end(&mut decompressed)
-        .map_err(|e| format!("zrle zlib: {}", e))?;
-
+    // Now decode tiles from `dec.buf`, advancing `dec.pos`.
     let mut results: Vec<DecodedRect> = Vec::new();
-    let mut pos: usize = 0;
-
     let mut tile_y = rect_y;
     while tile_y < rect_y + rect_h {
         let tile_h = 64u16.min(rect_y + rect_h - tile_y);
         let mut tile_x = rect_x;
         while tile_x < rect_x + rect_w {
             let tile_w = 64u16.min(rect_x + rect_w - tile_x);
-            let subenc = decompressed[pos];
-            pos += 1;
-
-            if subenc == 0 {
-                // Raw pixels (RGBA)
-                let count = tile_w as usize * tile_h as usize * 4;
-                let rgba = decompressed[pos..pos + count].to_vec();
-                pos += count;
-                results.push(DecodedRect::Pixels {
-                    x: tile_x,
-                    y: tile_y,
-                    w: tile_w,
-                    h: tile_h,
-                    rgba,
-                });
-            } else if subenc == 1 {
-                // Solid tile (single color)
-                let rgba: Vec<u8> = vec![
-                    decompressed[pos],
-                    decompressed[pos + 1],
-                    decompressed[pos + 2],
-                    decompressed[pos + 3],
-                ];
-                pos += 4;
-                let mut pixels = vec![0u8; tile_w as usize * tile_h as usize * 4];
-                for i in 0..tile_w as usize * tile_h as usize {
-                    pixels[i * 4..(i + 1) * 4].copy_from_slice(&rgba);
-                }
-                results.push(DecodedRect::Pixels {
-                    x: tile_x,
-                    y: tile_y,
-                    w: tile_w,
-                    h: tile_h,
-                    rgba: pixels,
-                });
-            } else if subenc >= 2 && subenc <= 16 {
-                // Packed palette (subenc-1 colors)
-                let palette_size = subenc as usize;
-                let mut palette = vec![[0u8; 4]; palette_size];
-                for i in 0..palette_size {
-                    palette[i][0] = decompressed[pos + i * 4];
-                    palette[i][1] = decompressed[pos + i * 4 + 1];
-                    palette[i][2] = decompressed[pos + i * 4 + 2];
-                    palette[i][3] = decompressed[pos + i * 4 + 3];
-                }
-                pos += palette_size * 4;
-                let pixel_count = tile_w as usize * tile_h as usize;
-                let bits_per_pixel = if palette_size <= 2 {
-                    1
-                } else if palette_size <= 4 {
-                    2
-                } else {
-                    4
-                };
-                let mut rgba = vec![0u8; pixel_count * 4];
-                for pi in 0..pixel_count {
-                    let byte_idx = pos + (pi * bits_per_pixel) / 8;
-                    let bit_offset = (pi * bits_per_pixel) % 8;
-                    let mask = (1u8 << bits_per_pixel) - 1;
-                    let palette_idx = ((decompressed[byte_idx] >> bit_offset) & mask) as usize;
-                    if palette_idx < palette_size {
-                        rgba[pi * 4..(pi + 1) * 4].copy_from_slice(&palette[palette_idx]);
-                    }
-                }
-                pos += (pixel_count * bits_per_pixel + 7) / 8;
-                results.push(DecodedRect::Pixels {
-                    x: tile_x,
-                    y: tile_y,
-                    w: tile_w,
-                    h: tile_h,
-                    rgba,
-                });
-            } else if subenc == 128 {
-                // Plain RLE
-                let pixel_count = tile_w as usize * tile_h as usize;
-                let mut rgba = vec![0u8; pixel_count * 4];
-                let mut pix_idx: usize = 0;
-                while pix_idx < pixel_count {
-                    let color = [
-                        decompressed[pos],
-                        decompressed[pos + 1],
-                        decompressed[pos + 2],
-                        decompressed[pos + 3],
-                    ];
-                    pos += 4;
-                    let mut run_len: usize = 1;
-                    loop {
-                        let b = decompressed[pos];
-                        pos += 1;
-                        run_len += b as usize;
-                        if b != 255 {
-                            break;
-                        }
-                    }
-                    for _ in 0..run_len {
-                        if pix_idx < pixel_count {
-                            rgba[pix_idx * 4..(pix_idx + 1) * 4].copy_from_slice(&color);
-                            pix_idx += 1;
-                        }
-                    }
-                }
-                results.push(DecodedRect::Pixels {
-                    x: tile_x,
-                    y: tile_y,
-                    w: tile_w,
-                    h: tile_h,
-                    rgba,
-                });
-            } else if subenc >= 130 {
-                // Palette RLE
-                let palette_size = (subenc - 128) as usize;
-                let mut palette = vec![[0u8; 4]; palette_size];
-                for i in 0..palette_size {
-                    palette[i][0] = decompressed[pos + i * 4];
-                    palette[i][1] = decompressed[pos + i * 4 + 1];
-                    palette[i][2] = decompressed[pos + i * 4 + 2];
-                    palette[i][3] = decompressed[pos + i * 4 + 3];
-                }
-                pos += palette_size * 4;
-                let pixel_count = tile_w as usize * tile_h as usize;
-                let mut rgba = vec![0u8; pixel_count * 4];
-                let mut pix_idx: usize = 0;
-                while pix_idx < pixel_count {
-                    let pal_idx = decompressed[pos] as usize & 0x7F;
-                    pos += 1;
-                    let mut run_len: usize = 1;
-                    if decompressed[pos - 1] & 0x80 != 0 {
-                        loop {
-                            let b = decompressed[pos];
-                            pos += 1;
-                            run_len += b as usize;
-                            if b != 255 {
-                                break;
-                            }
-                        }
-                    }
-                    if pal_idx < palette_size {
-                        for _ in 0..run_len {
-                            if pix_idx < pixel_count {
-                                rgba[pix_idx * 4..(pix_idx + 1) * 4]
-                                    .copy_from_slice(&palette[pal_idx]);
-                                pix_idx += 1;
-                            }
-                        }
-                    }
-                }
-                results.push(DecodedRect::Pixels {
-                    x: tile_x,
-                    y: tile_y,
-                    w: tile_w,
-                    h: tile_h,
-                    rgba,
-                });
-            }
+            let pixels = zrle_read_tile(&dec.buf, &mut dec.pos, tile_w, tile_h)?;
+            results.push(DecodedRect::Pixels {
+                x: tile_x,
+                y: tile_y,
+                w: tile_w,
+                h: tile_h,
+                rgba: pixels,
+            });
             tile_x += tile_w;
         }
         tile_y += tile_h;
     }
+
+    // Compact the buffer once we've cleared enough of it to avoid unbounded growth.
+    if dec.pos >= dec.buf.len() {
+        dec.buf.clear();
+        dec.pos = 0;
+    } else if dec.pos > 1 << 20 {
+        dec.buf.drain(..dec.pos);
+        dec.pos = 0;
+    }
+
     Ok(results)
 }
 
-/// Read a "compact length" used by Tight encoding.
-/// Lengths 0-127 are stored in 1 byte, 128-16383 in 2 bytes, larger in 3 bytes.
-fn read_compact_len(data: &[u8], pos: &mut usize) -> u32 {
-    let b1 = data[*pos];
+/// Read one ZRLE tile from the already-inflated byte slice.
+///
+/// ZRLE uses **CPIXEL** — the compact form of the negotiated pixel format.
+/// With our RGBA32 format (R@0, G@8, B@16, A@24, little-endian, true-colour,
+/// max=255/255/255) the spec says the CPIXEL is 3 bytes (the colour bytes,
+/// dropping the zero-padding byte). We send R@0 G@8 B@16 so CPIXEL is `[R, G, B]`.
+fn zrle_read_tile(buf: &[u8], pos: &mut usize, w: u16, h: u16) -> Result<Vec<u8>, String> {
+    let pixel_count = w as usize * h as usize;
+    let mut rgba = vec![0u8; pixel_count * 4];
+
+    let subenc = *buf.get(*pos).ok_or_else(|| "zrle: eof subenc".to_string())?;
     *pos += 1;
-    if b1 <= 0x7F {
-        b1 as u32
-    } else if b1 <= 0xBF {
-        let b2 = data[*pos];
+
+    if subenc == 0 {
+        // Raw CPIXEL stream.
+        for i in 0..pixel_count {
+            let c = read_cpixel(buf, pos)?;
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&c);
+        }
+        return Ok(rgba);
+    }
+
+    if subenc == 1 {
+        let c = read_cpixel(buf, pos)?;
+        for i in 0..pixel_count {
+            rgba[i * 4..i * 4 + 4].copy_from_slice(&c);
+        }
+        return Ok(rgba);
+    }
+
+    if (2..=16).contains(&subenc) {
+        // Packed palette, 1/2/4 bits-per-pixel.
+        let palette_size = subenc as usize;
+        let mut palette = [[0u8; 4]; 16];
+        for slot in palette.iter_mut().take(palette_size) {
+            *slot = read_cpixel(buf, pos)?;
+        }
+        let bpp: usize = if palette_size == 2 {
+            1
+        } else if palette_size <= 4 {
+            2
+        } else {
+            4
+        };
+        // Each row is packed independently: the partial trailing byte of a row
+        // is padded, and the next row starts on a fresh byte.
+        for row in 0..h as usize {
+            let mut col = 0usize;
+            while col < w as usize {
+                let byte = *buf.get(*pos).ok_or_else(|| "zrle: eof packed".to_string())?;
+                *pos += 1;
+                let pixels_in_byte = 8 / bpp;
+                for slot in 0..pixels_in_byte {
+                    if col >= w as usize {
+                        break;
+                    }
+                    let shift = 8 - (slot + 1) * bpp;
+                    let mask = (1u8 << bpp) - 1;
+                    let idx = ((byte >> shift) & mask) as usize;
+                    let colour = if idx < palette_size {
+                        palette[idx]
+                    } else {
+                        [0, 0, 0, 255]
+                    };
+                    let px = (row * w as usize + col) * 4;
+                    rgba[px..px + 4].copy_from_slice(&colour);
+                    col += 1;
+                }
+            }
+        }
+        return Ok(rgba);
+    }
+
+    if subenc == 128 {
+        // Plain RLE over CPIXEL.
+        let mut filled = 0usize;
+        while filled < pixel_count {
+            let colour = read_cpixel(buf, pos)?;
+            let run_len = read_zrle_run_length(buf, pos)?;
+            let take = run_len.min(pixel_count - filled);
+            for _ in 0..take {
+                rgba[filled * 4..filled * 4 + 4].copy_from_slice(&colour);
+                filled += 1;
+            }
+        }
+        return Ok(rgba);
+    }
+
+    if (130..=255).contains(&subenc) {
+        // Palette RLE. 2..=127 colours; indices of 127 means single pixel,
+        // indices with the high bit set have a run length trailer.
+        let palette_size = (subenc - 128) as usize;
+        let mut palette = vec![[0u8; 4]; palette_size];
+        for slot in palette.iter_mut() {
+            *slot = read_cpixel(buf, pos)?;
+        }
+        let mut filled = 0usize;
+        while filled < pixel_count {
+            let idx_byte = *buf
+                .get(*pos)
+                .ok_or_else(|| "zrle: eof paletteRLE idx".to_string())?;
+            *pos += 1;
+            let pal_idx = (idx_byte & 0x7F) as usize;
+            let colour = if pal_idx < palette_size {
+                palette[pal_idx]
+            } else {
+                [0, 0, 0, 255]
+            };
+            let run_len = if idx_byte & 0x80 != 0 {
+                read_zrle_run_length(buf, pos)?
+            } else {
+                1
+            };
+            let take = run_len.min(pixel_count - filled);
+            for _ in 0..take {
+                rgba[filled * 4..filled * 4 + 4].copy_from_slice(&colour);
+                filled += 1;
+            }
+        }
+        return Ok(rgba);
+    }
+
+    Err(format!("zrle: unsupported subencoding {}", subenc))
+}
+
+/// Read a CPIXEL (3 bytes R, G, B). Alpha is always 0xFF.
+fn read_cpixel(buf: &[u8], pos: &mut usize) -> Result<[u8; 4], String> {
+    let s = *pos;
+    if s + 3 > buf.len() {
+        return Err("zrle: eof cpixel".to_string());
+    }
+    let out = [buf[s], buf[s + 1], buf[s + 2], 255];
+    *pos += 3;
+    Ok(out)
+}
+
+/// ZRLE run length: bytes of 255 accumulate, the first byte < 255 terminates.
+/// The total run length is 1 + sum(bytes).
+fn read_zrle_run_length(buf: &[u8], pos: &mut usize) -> Result<usize, String> {
+    let mut total: usize = 1;
+    loop {
+        let b = *buf
+            .get(*pos)
+            .ok_or_else(|| "zrle: eof run length".to_string())?;
         *pos += 1;
-        (((b1 & 0x3F) as u32) << 8) | (b2 as u32)
-    } else {
-        let b2 = data[*pos];
-        *pos += 1;
-        let b3 = data[*pos];
-        *pos += 1;
-        (((b1 & 0x3F) as u32) << 16) | ((b2 as u32) << 8) | (b3 as u32)
+        total += b as usize;
+        if b != 255 {
+            return Ok(total);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
-    fn test_raw_decoding() {
-        // 2x2 RGBA pixels: red, green, blue, white
-        let data: Vec<u8> = vec![
-            255, 0, 0, 255, // red
-            0, 255, 0, 255, // green
-            0, 0, 255, 255, // blue
-            255, 255, 255, 255, // white
+    fn raw_alpha_is_forced_opaque() {
+        // 2x1 pixels, alpha bytes left at 0 by the server.
+        let bytes: Vec<u8> = vec![10, 20, 30, 0, 40, 50, 60, 0];
+        let mut cur = Cursor::new(bytes);
+        let rect = read_raw(&mut cur, 0, 0, 2, 1).unwrap();
+        let DecodedRect::Pixels { rgba, .. } = rect;
+        assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn copyrect_emits_fb_window_as_pixels() {
+        // 4x1 framebuffer, copying the last 2 pixels into the first 2 slots.
+        let fb: Vec<u8> = vec![
+            1, 1, 1, 255, // (0,0)
+            2, 2, 2, 255, // (1,0)
+            3, 3, 3, 255, // (2,0)
+            4, 4, 4, 255, // (3,0)
         ];
-        let result = decode_raw(&data, 0, 0, 2, 2);
-        match result {
-            DecodedRect::Pixels { x, y, w, h, rgba } => {
-                assert_eq!((x, y, w, h), (0, 0, 2, 2));
-                assert_eq!(rgba.len(), 16);
-                assert_eq!(rgba[0..4], [255, 0, 0, 255]);
-                assert_eq!(rgba[12..16], [255, 255, 255, 255]);
+        // src_x=2, src_y=0
+        let mut payload = Cursor::new(vec![0u8, 2, 0, 0]);
+        let rect = read_copyrect(&mut payload, 0, 0, 2, 1, &fb, 4, 1).unwrap();
+        let DecodedRect::Pixels { rgba, .. } = rect;
+        assert_eq!(rgba, vec![3, 3, 3, 255, 4, 4, 4, 255]);
+    }
+
+    #[test]
+    fn hextile_raw_subencoding_reads_exact_bytes() {
+        let mut payload = vec![HEXTILE_RAW]; // subenc byte
+        payload.extend_from_slice(&[255, 0, 0, 0, 0, 255, 0, 0]); // 2 pixels
+        // 2x1 rect, exactly one tile
+        let mut cur = Cursor::new(&payload);
+        let mut st = HextileState::new();
+        let out = read_hextile(&mut cur, 0, 0, 2, 1, &mut st).unwrap();
+        assert_eq!(out.len(), 1);
+        let DecodedRect::Pixels { rgba, .. } = &out[0];
+        // Alpha forced to 255.
+        assert_eq!(rgba, &vec![255, 0, 0, 255, 0, 255, 0, 255]);
+        // No trailing bytes consumed from the cursor.
+        assert_eq!(cur.position() as usize, payload.len());
+    }
+
+    #[test]
+    fn hextile_bg_fg_persist_across_tiles() {
+        // Two 16x1 tiles. First tile sets bg to red, no subrects. Second tile
+        // has no bg flag and no subrects — should still paint red.
+        let mut payload = Vec::new();
+        // Tile 1: BG specified, red, no subrects.
+        payload.push(HEXTILE_BG_SPECIFIED);
+        payload.extend_from_slice(&[255, 0, 0, 0]);
+        // Tile 2: no flags — reuse bg.
+        payload.push(0);
+        let mut cur = Cursor::new(&payload);
+        let mut st = HextileState::new();
+        let out = read_hextile(&mut cur, 0, 0, 32, 1, &mut st).unwrap();
+        assert_eq!(out.len(), 2);
+        for rect in &out {
+            let DecodedRect::Pixels { rgba, .. } = rect;
+            // Every pixel should be red.
+            for p in rgba.chunks_exact(4) {
+                assert_eq!(p, &[255, 0, 0, 255]);
             }
-            _ => panic!("expected Pixels"),
         }
     }
 
     #[test]
-    fn test_copyrect_decoding() {
-        let data: Vec<u8> = vec![0x00, 0x0A, 0x00, 0x14]; // src_x=10, src_y=20
-        let (sx, sy) = decode_copyrect(&data);
-        assert_eq!(sx, 10);
-        assert_eq!(sy, 20);
-    }
-
-    #[test]
-    fn test_hextile_raw_subenc() {
-        // Single 2x2 tile with raw subencoding (0x01)
-        let data: Vec<u8> = {
-            let mut v = vec![0x01u8]; // raw subencoding
-                                      // 4 pixels RGBA
-            v.extend_from_slice(&[255, 0, 0, 255]);
-            v.extend_from_slice(&[0, 255, 0, 255]);
-            v.extend_from_slice(&[0, 0, 255, 255]);
-            v.extend_from_slice(&[255, 255, 255, 255]);
-            v
-        };
-        let fb = vec![0u8; 16];
-        let results = decode_hextile(&data, 0, 0, 2, 2, &fb, 2).unwrap();
-        assert_eq!(results.len(), 1);
-        match &results[0] {
-            DecodedRect::Pixels { x, y, w, h, rgba } => {
-                assert_eq!((*x, *y, *w, *h), (0, 0, 2, 2));
-                assert_eq!(rgba[0..4], [255, 0, 0, 255]);
-            }
-            _ => panic!("expected Pixels"),
-        }
-    }
-
-    #[test]
-    fn test_tight_fill() {
-        // Fill: control byte 0x80 (fill, 1 row: 0+1=1), 4 bytes color
-        let data: Vec<u8> = vec![0x80, 255, 0, 0, 255]; // red fill, 1 row
-        let results = decode_tight(&data, 0, 0, 2, 1).unwrap();
-        assert_eq!(results.len(), 1);
-        match &results[0] {
-            DecodedRect::Pixels { w, h, rgba, .. } => {
-                assert_eq!((*w, *h), (2, 1));
-                // Both pixels should be red
-                assert_eq!(rgba[0..4], [255, 0, 0, 255]);
-                assert_eq!(rgba[4..8], [255, 0, 0, 255]);
-            }
-            _ => panic!("expected Pixels"),
-        }
-    }
-
-    #[test]
-    fn test_read_compact_len() {
-        // 1-byte
-        assert_eq!(read_compact_len(&[0x42], &mut 0), 0x42);
-        // 2-byte
-        assert_eq!(read_compact_len(&[0x80, 0x42], &mut 0), 0x42);
-        // 3-byte
-        assert_eq!(read_compact_len(&[0xC0, 0x00, 0x42], &mut 0), 0x42);
-    }
-
-    #[test]
-    fn test_zrle_solid_tile() {
-        // zlib-compressed data: subenc=1 (solid), color=red
+    fn zrle_solid_tile_with_persistent_stream() {
         use flate2::write::ZlibEncoder;
         use flate2::Compression;
         use std::io::Write;
 
-        let raw = vec![1u8, 255, 0, 0, 255]; // solid, red
+        // One 64x64 ZRLE tile, subenc=1 (solid), CPIXEL = [R,G,B] = [255,0,0].
+        let uncompressed: Vec<u8> = vec![1u8, 255, 0, 0];
         let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-        enc.write_all(&raw).unwrap();
+        enc.write_all(&uncompressed).unwrap();
         let compressed = enc.finish().unwrap();
 
-        let zipped_len = compressed.len() as u32;
-        let mut data = vec![0u8; 4 + compressed.len()];
-        data[0..4].copy_from_slice(&zipped_len.to_be_bytes());
-        data[4..].copy_from_slice(&compressed);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&compressed);
 
-        let results = decode_zrle(&data, 0, 0, 64, 64).unwrap();
-        assert_eq!(results.len(), 1);
-        match &results[0] {
-            DecodedRect::Pixels { rgba, .. } => {
-                assert_eq!(rgba[0..4], [255, 0, 0, 255]);
+        let mut cur = Cursor::new(&payload);
+        let mut dec = ZrleDecoder::new();
+        let out = read_zrle(&mut cur, 0, 0, 64, 64, &mut dec).unwrap();
+        assert_eq!(out.len(), 1);
+        let DecodedRect::Pixels { rgba, .. } = &out[0];
+        assert_eq!(rgba.len(), 64 * 64 * 4);
+        for p in rgba.chunks_exact(4) {
+            assert_eq!(p, &[255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn zrle_plain_rle_with_run_length_continuation() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // subenc=128, colour = green (0,255,0), run length = 1 + 255 + 0 = 256
+        // (covers every pixel of a 16x16 tile == 256).
+        let mut uncompressed = vec![128u8, 0, 255, 0];
+        uncompressed.push(255); // keep reading
+        uncompressed.push(0); // terminator
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(&uncompressed).unwrap();
+        let compressed = enc.finish().unwrap();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&compressed);
+
+        let mut cur = Cursor::new(&payload);
+        let mut dec = ZrleDecoder::new();
+        let out = read_zrle(&mut cur, 0, 0, 16, 16, &mut dec).unwrap();
+        let DecodedRect::Pixels { rgba, .. } = &out[0];
+        assert_eq!(rgba.len(), 16 * 16 * 4);
+        for p in rgba.chunks_exact(4) {
+            assert_eq!(p, &[0, 255, 0, 255]);
+        }
+    }
+
+    #[test]
+    fn zrle_preserves_zlib_state_across_rects() {
+        // Two ZRLE rectangles share a single zlib stream. We build the stream
+        // with two FlushCompress::Sync-delimited chunks so the inflater can
+        // pause mid-stream and resume on the next rectangle.
+        use flate2::{Compress, Compression, FlushCompress};
+
+        fn emit(zlib: &mut Compress, input: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let in_before = zlib.total_in();
+            let target_in = in_before + input.len() as u64;
+            let mut src_pos = 0usize;
+
+            // Loop until all input has been consumed AND the Sync flush has
+            // flushed everything to the output buffer.
+            loop {
+                let mut scratch = vec![0u8; 256];
+                let prod_before = zlib.total_out();
+                zlib.compress(&input[src_pos..], &mut scratch, FlushCompress::Sync)
+                    .unwrap();
+                let produced = (zlib.total_out() - prod_before) as usize;
+                out.extend_from_slice(&scratch[..produced]);
+                src_pos = (zlib.total_in() - in_before) as usize;
+
+                if zlib.total_in() == target_in && produced < scratch.len() {
+                    break;
+                }
+                if produced == 0 {
+                    break;
+                }
             }
-            _ => panic!("expected Pixels"),
+            out
+        }
+
+        let mut zlib = Compress::new(Compression::default(), true);
+        let rect1 = emit(&mut zlib, &[1u8, 255, 0, 0]); // solid red tile
+        let rect2 = emit(&mut zlib, &[1u8, 0, 0, 255]); // solid blue tile
+
+        let mut payload1 = Vec::new();
+        payload1.extend_from_slice(&(rect1.len() as u32).to_be_bytes());
+        payload1.extend_from_slice(&rect1);
+        let mut cur1 = Cursor::new(&payload1);
+        let mut dec = ZrleDecoder::new();
+        let out1 = read_zrle(&mut cur1, 0, 0, 64, 64, &mut dec).unwrap();
+        let DecodedRect::Pixels { rgba, .. } = &out1[0];
+        assert_eq!(rgba[0..4], [255, 0, 0, 255]);
+
+        let mut payload2 = Vec::new();
+        payload2.extend_from_slice(&(rect2.len() as u32).to_be_bytes());
+        payload2.extend_from_slice(&rect2);
+        let mut cur2 = Cursor::new(&payload2);
+        let out2 = read_zrle(&mut cur2, 0, 64, 64, 64, &mut dec).unwrap();
+        let DecodedRect::Pixels { rgba, .. } = &out2[0];
+        assert_eq!(rgba[0..4], [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn zrle_decompresses_output_larger_than_initial_buffer() {
+        // Regression for "zrle: eof cpixel": real ZRLE streams are a single
+        // persistent zlib stream that spans the whole session, so the inflater
+        // never sees a StreamEnd marker. It is NOT enough to stop decompressing
+        // the moment the input slice is drained — the inflater can still have
+        // bytes queued internally, and those need to be pulled out with one
+        // more call (empty input) before we hand the buffer off to the tile
+        // decoder. Otherwise the tile decoder runs off the end with `eof cpixel`.
+        //
+        // Build a rectangle whose tile stream is well over 64 KB and wrap it
+        // in a Sync-flushed zlib frame (no StreamEnd), just like a real server
+        // would transmit one rectangle within an ongoing session.
+        use flate2::{Compress, Compression, FlushCompress};
+
+        let rect_w: u16 = 256;
+        let rect_h: u16 = 256;
+        let tile_w: u16 = 64;
+        let tile_h: u16 = 64;
+
+        let mut uncompressed: Vec<u8> = Vec::new();
+        let tiles_x = rect_w / tile_w;
+        let tiles_y = rect_h / tile_h;
+        for _ in 0..tiles_y {
+            for _ in 0..tiles_x {
+                uncompressed.push(0u8); // subenc = raw CPIXEL stream
+                for _ in 0..(tile_w as usize * tile_h as usize) {
+                    // Distinctive colour so we detect any byte-alignment bug.
+                    uncompressed.extend_from_slice(&[0x12, 0x34, 0x56]);
+                }
+            }
+        }
+        assert!(uncompressed.len() > 64 * 1024);
+
+        // Compress with Sync flush so the output is complete but the stream
+        // is NOT terminated (zlib would otherwise emit StreamEnd, which hides
+        // the bug via an early loop exit).
+        let mut zlib = Compress::new(Compression::default(), true);
+        let mut compressed: Vec<u8> = Vec::new();
+        let mut src_pos = 0usize;
+        loop {
+            let mut scratch = vec![0u8; 32 * 1024];
+            let in_before = zlib.total_in();
+            let out_before = zlib.total_out();
+            zlib.compress(&uncompressed[src_pos..], &mut scratch, FlushCompress::Sync)
+                .unwrap();
+            let consumed = (zlib.total_in() - in_before) as usize;
+            let produced = (zlib.total_out() - out_before) as usize;
+            compressed.extend_from_slice(&scratch[..produced]);
+            src_pos += consumed;
+            if src_pos >= uncompressed.len() && produced < scratch.len() {
+                break;
+            }
+            if consumed == 0 && produced == 0 {
+                break;
+            }
+        }
+
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(compressed.len() as u32).to_be_bytes());
+        payload.extend_from_slice(&compressed);
+
+        let mut cur = Cursor::new(&payload);
+        let mut dec = ZrleDecoder::new();
+        let out = read_zrle(&mut cur, 0, 0, rect_w, rect_h, &mut dec).unwrap();
+        assert_eq!(out.len() as u16, tiles_x * tiles_y);
+        for rect in &out {
+            let DecodedRect::Pixels { rgba, .. } = rect;
+            assert_eq!(rgba.len(), tile_w as usize * tile_h as usize * 4);
+            for p in rgba.chunks_exact(4) {
+                assert_eq!(p, &[0x12, 0x34, 0x56, 255]);
+            }
         }
     }
 }

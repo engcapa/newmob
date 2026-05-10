@@ -46,6 +46,7 @@ export default function VncPanel({
   const destroyedRef = useRef(false);
   const disconnectedByServerRef = useRef(false);
   const connectArgsRef = useRef({ host, port, username, password });
+  const heartbeatTimerRef = useRef<number | null>(null);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
 
   const store = useVncStore();
@@ -81,6 +82,18 @@ export default function VncPanel({
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
 
+        ws.onopen = () => {
+          if (heartbeatTimerRef.current !== null) {
+            window.clearInterval(heartbeatTimerRef.current);
+          }
+          // Ping every 15s; the backend tears the session down after 30s of silence.
+          heartbeatTimerRef.current = window.setInterval(() => {
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: "ping" }));
+            }
+          }, 15000);
+        };
+
         ws.onmessage = (event) => {
           if (destroyedRef.current) return;
           if (event.data instanceof ArrayBuffer) {
@@ -108,6 +121,10 @@ export default function VncPanel({
 
         ws.onclose = () => {
           wsRef.current = null;
+          if (heartbeatTimerRef.current !== null) {
+            window.clearInterval(heartbeatTimerRef.current);
+            heartbeatTimerRef.current = null;
+          }
           if (!destroyedRef.current && !disconnectedByServerRef.current) {
             store.setDisconnected(tabId, "Connection closed");
           }
@@ -144,6 +161,10 @@ export default function VncPanel({
       destroyedRef.current = true;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       frameBufferRef.current = [];
+      if (heartbeatTimerRef.current !== null) {
+        window.clearInterval(heartbeatTimerRef.current);
+        heartbeatTimerRef.current = null;
+      }
       const sid = sessionIdRef.current;
       if (sid) {
         vncDisconnect(sid).catch(() => {});

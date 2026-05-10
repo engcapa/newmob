@@ -1,14 +1,23 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
 
 use crate::vnc::encodings::DecodedRect;
 use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
+
+/// Deadline for the frontend to complete its WebSocket upgrade after we bind.
+const WS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum time without a ping from the frontend before we tear down.
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often the idle watchdog checks the last-seen timestamp.
+const WS_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 // ── Messages for internal channels ──────────────────────────────────
 
@@ -36,6 +45,8 @@ pub enum VncControl {
 enum WsIncoming {
     #[serde(rename = "ack")]
     Ack,
+    #[serde(rename = "ping")]
+    Ping,
     #[serde(rename = "key")]
     Key { down: bool, keysym: u32 },
     #[serde(rename = "pointer")]
@@ -92,9 +103,14 @@ pub async fn spawn_vnc_relay(
     let server_init = rfb.authenticate(username.as_deref(), password.as_deref())?;
 
     rfb.set_pixel_format_rgba()?;
-    // Keep the first working path conservative. The Tight/Hextile readers in
-    // this client are not stream-accurate yet, while Raw has an exact length.
+    // Encoding preference: ZRLE (bandwidth) > Hextile (tile cache) > CopyRect
+    // (scroll) > Raw (fallback). DesktopSize must be listed so server-driven
+    // resolution changes keep working. Tight is intentionally omitted — the
+    // decoder in encodings.rs is not RFC-compliant and would desync the stream.
     rfb.set_encodings(&[
+        16,   // ZRLE
+        5,    // Hextile
+        1,    // CopyRect
         0,    // Raw
         -223, // DesktopSize pseudo
     ])?;
@@ -164,9 +180,18 @@ async fn run_relay(
     mut control_rx: UnboundedReceiver<VncControl>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
-    // Accept one WS connection
+    // Accept one WS connection with a bounded deadline so a webview that never
+    // comes up doesn't leave the relay and its TCP connection hanging forever.
     let (stream, _) = tokio::select! {
-        r = listener.accept() => r.map_err(|e| format!("accept: {}", e))?,
+        r = tokio::time::timeout(WS_ACCEPT_TIMEOUT, listener.accept()) => match r {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => return Err(format!("accept: {}", e)),
+            Err(_) => {
+                tracing::warn!("VNC WS accept timed out after {:?}", WS_ACCEPT_TIMEOUT);
+                cancel.cancel();
+                return Ok(());
+            }
+        },
         _ = cancel.cancelled() => return Ok(()),
     };
     let ws_stream = tokio_tungstenite::accept_async(stream)
@@ -174,6 +199,9 @@ async fn run_relay(
         .map_err(|e| format!("WS upgrade: {}", e))?;
 
     let (mut ws_sink, ws_reader) = ws_stream.split();
+
+    // Shared "last time we heard from the frontend" — updated on every ping/control.
+    let last_seen = Arc::new(AsyncMutex::new(Instant::now()));
 
     // Task: pump outgoing messages → WS sink
     let ws_write = tokio::spawn(async move {
@@ -191,28 +219,36 @@ async fn run_relay(
     // Task: read WS messages → control_tx
     let ctrl = control_tx.clone();
     let cancel_read = cancel.clone();
+    let last_seen_read = last_seen.clone();
     let ws_read = tokio::spawn(async move {
         let mut reader = ws_reader;
         while let Some(Ok(msg)) = reader.next().await {
             if cancel_read.is_cancelled() {
                 break;
             }
+            // Any inbound message counts as the frontend being alive.
+            *last_seen_read.lock().await = Instant::now();
             match msg {
                 Message::Text(text) => {
                     if let Ok(incoming) = serde_json::from_str::<WsIncoming>(&text) {
                         let ctrl_msg = match incoming {
-                            WsIncoming::Ack => VncControl::Ack,
-                            WsIncoming::Key { down, keysym } => VncControl::Key { down, keysym },
-                            WsIncoming::Pointer { x, y, buttons } => {
-                                VncControl::Pointer { x, y, buttons }
+                            WsIncoming::Ack => Some(VncControl::Ack),
+                            WsIncoming::Ping => None, // already refreshed last_seen
+                            WsIncoming::Key { down, keysym } => {
+                                Some(VncControl::Key { down, keysym })
                             }
-                            WsIncoming::Clipboard { text } => VncControl::Clipboard(text),
+                            WsIncoming::Pointer { x, y, buttons } => {
+                                Some(VncControl::Pointer { x, y, buttons })
+                            }
+                            WsIncoming::Clipboard { text } => Some(VncControl::Clipboard(text)),
                             WsIncoming::Resize { width, height } => {
                                 let _requested_size = (width, height);
-                                VncControl::Resize
+                                Some(VncControl::Resize)
                             }
                         };
-                        let _ = ctrl.send(ctrl_msg);
+                        if let Some(m) = ctrl_msg {
+                            let _ = ctrl.send(m);
+                        }
                     }
                 }
                 Message::Close(_) => {
@@ -234,10 +270,10 @@ async fn run_relay(
             if cancel_vnc.is_cancelled() {
                 break;
             }
-            let msg = {
+            let (msg, fb_width, fb_height) = {
                 let mut conn = rfb_read.lock().await;
-                match conn.read_message() {
-                    Ok(m) => m,
+                match conn.read_server_message() {
+                    Ok(m) => (m, conn.width, conn.height),
                     Err(e) => {
                         let json = serde_json::to_string(&WsOutgoingText::Disconnected {
                             reason: e.clone(),
@@ -249,28 +285,17 @@ async fn run_relay(
                 }
             };
             match msg {
-                ServerMessage::FramebufferUpdate(update) => {
-                    let (decoded, fb_width, fb_height) = {
-                        let mut conn = rfb_read.lock().await;
-                        match conn.decode_update(&update) {
-                            Ok(d) => (d, conn.width, conn.height),
-                            Err(e) => {
-                                tracing::error!("Decode error: {}", e);
-                                continue;
-                            }
-                        }
-                    };
+                ServerMessage::FramebufferUpdate { rects } => {
                     {
                         let mut writer = rfb_writer_for_read.lock().await;
                         writer.set_framebuffer_size(fb_width, fb_height);
                     }
-                    for rect in decoded {
-                        if let DecodedRect::Pixels { x, y, w, h, rgba } = rect {
-                            let mut frame = Vec::with_capacity(12 + rgba.len());
-                            frame.extend_from_slice(&make_frame_header(x, y, w, h));
-                            frame.extend_from_slice(&rgba);
-                            let _ = ws_out.send(WsOutgoing::Frame(frame));
-                        }
+                    for rect in rects {
+                        let DecodedRect::Pixels { x, y, w, h, rgba } = rect;
+                        let mut frame = Vec::with_capacity(12 + rgba.len());
+                        frame.extend_from_slice(&make_frame_header(x, y, w, h));
+                        frame.extend_from_slice(&rgba);
+                        let _ = ws_out.send(WsOutgoing::Frame(frame));
                     }
                 }
                 ServerMessage::Bell => {
@@ -313,6 +338,32 @@ async fn run_relay(
         }
     });
 
+    // Task: idle watchdog — if the frontend stops pinging, tear everything down.
+    let watchdog_cancel = cancel.clone();
+    let watchdog_last_seen = last_seen.clone();
+    let idle_watch = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(WS_IDLE_CHECK_INTERVAL);
+        // The first tick fires immediately; skip it so we don't race the ws_read task.
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let elapsed = watchdog_last_seen.lock().await.elapsed();
+                    if elapsed > WS_IDLE_TIMEOUT {
+                        tracing::warn!(
+                            "VNC relay idle for {:?} (> {:?}); disconnecting",
+                            elapsed,
+                            WS_IDLE_TIMEOUT
+                        );
+                        watchdog_cancel.cancel();
+                        break;
+                    }
+                }
+                _ = watchdog_cancel.cancelled() => break,
+            }
+        }
+    });
+
     // Wait for any critical task to finish, then cancel everything
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {},
@@ -327,6 +378,9 @@ async fn run_relay(
         }
         r = vnc_ctrl => {
             if let Err(e) = r { tracing::error!("vnc_ctrl: {}", e); }
+        }
+        r = idle_watch => {
+            if let Err(e) = r { tracing::error!("idle_watch: {}", e); }
         }
     }
 
