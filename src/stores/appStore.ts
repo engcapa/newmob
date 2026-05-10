@@ -13,6 +13,8 @@ interface AppState {
   activeSideTab: SideTab;
   xServerEnabled: boolean;
   statusMessage: string;
+  multiExecActive: boolean;
+  multiExecSelectedTabIds: Set<string>;
 
   addTab: (tab: Tab) => void;
   removeTab: (id: string) => void;
@@ -26,6 +28,11 @@ interface AppState {
   setActiveSideTab: (tab: SideTab) => void;
   toggleXServer: () => void;
   setStatusMessage: (message: string) => void;
+  toggleMultiExec: () => void;
+  toggleMultiExecTab: (tabId: string) => void;
+  selectAllTerminalTabs: () => void;
+  clearMultiExecSelection: () => void;
+  setTabHasNewOutput: (tabId: string, hasNewOutput: boolean) => void;
 }
 
 function readCompactMode() {
@@ -59,6 +66,8 @@ export const useAppStore = create<AppState>((set) => ({
   activeSideTab: "sessions",
   xServerEnabled: false,
   statusMessage: "Ready",
+  multiExecActive: false,
+  multiExecSelectedTabIds: new Set(),
 
   addTab: (tab) =>
     set((s) => ({
@@ -125,4 +134,43 @@ export const useAppStore = create<AppState>((set) => ({
     })),
 
   setStatusMessage: (message) => set({ statusMessage: message }),
+
+  toggleMultiExec: () =>
+    set((s) => {
+      const next = !s.multiExecActive;
+      return {
+        multiExecActive: next,
+        multiExecSelectedTabIds: new Set(),
+        tabs: next ? s.tabs : s.tabs.map((t) => ({ ...t, hasNewOutput: false })),
+        statusMessage: next ? "MultiExec enabled" : "MultiExec disabled",
+      };
+    }),
+
+  toggleMultiExecTab: (tabId) =>
+    set((s) => {
+      const next = new Set(s.multiExecSelectedTabIds);
+      if (next.has(tabId)) {
+        next.delete(tabId);
+      } else {
+        next.add(tabId);
+      }
+      return { multiExecSelectedTabIds: next };
+    }),
+
+  selectAllTerminalTabs: () =>
+    set((s) => ({
+      multiExecSelectedTabIds: new Set(
+        s.tabs.filter((t) => t.type === "terminal").map((t) => t.id),
+      ),
+    })),
+
+  clearMultiExecSelection: () =>
+    set({ multiExecSelectedTabIds: new Set() }),
+
+  setTabHasNewOutput: (tabId, hasNewOutput) =>
+    set((s) => {
+      const tab = s.tabs.find((t) => t.id === tabId);
+      if (!tab || tab.hasNewOutput === hasNewOutput) return s;
+      return { tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, hasNewOutput } : t)) };
+    }),
 }));
