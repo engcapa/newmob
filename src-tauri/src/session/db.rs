@@ -28,8 +28,19 @@ pub fn init_db(conn: &Connection) -> SqlResult<()> {
             FOREIGN KEY (parent_id) REFERENCES session_groups(id)
         );
 
+        CREATE TABLE IF NOT EXISTS command_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            host_key TEXT NOT NULL,
+            command TEXT NOT NULL,
+            last_used_at INTEGER NOT NULL,
+            use_count INTEGER NOT NULL DEFAULT 1,
+            UNIQUE(host_key, command)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_sessions_group ON sessions(group_path);
-        CREATE INDEX IF NOT EXISTS idx_sessions_type ON sessions(session_type);",
+        CREATE INDEX IF NOT EXISTS idx_sessions_type ON sessions(session_type);
+        CREATE INDEX IF NOT EXISTS idx_history_host_time
+            ON command_history(host_key, last_used_at DESC);",
     )
 }
 

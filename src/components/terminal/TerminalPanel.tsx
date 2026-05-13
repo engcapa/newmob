@@ -33,6 +33,7 @@ import {
   createInputEchoSuppressor,
   type InputEchoSuppressor,
 } from "../../lib/terminalOutputFilter";
+import { makeHostKey, useCommandHistory } from "../../lib/history";
 import {
   createTerminalSessionId,
   createLocalTerminal,
@@ -193,6 +194,8 @@ export function TerminalPanel({
   const [rightClickBehavior, setRightClickBehavior] = useState(initialProfile.rightClickBehavior);
   const [loggingActive, setLoggingActive] = useState(initialProfile.loggingEnabled);
   const [multilinePasteConfirm, setMultilinePasteConfirm] = useState(initialProfile.multilinePasteConfirm);
+  const [inlineSuggestionsEnabled, setInlineSuggestionsEnabled] = useState(initialProfile.inlineSuggestions);
+  const [inlineSuggestionsMax, setInlineSuggestionsMax] = useState(initialProfile.inlineSuggestionsMax);
   const [fullscreen, setFullscreen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [eventLogOpen, setEventLogOpen] = useState(false);
@@ -280,6 +283,8 @@ export function TerminalPanel({
     multilinePasteConfirm,
     syntaxMode,
     loggingEnabled: loggingActive,
+    inlineSuggestions: inlineSuggestionsEnabled,
+    inlineSuggestionsMax,
   }), [
     cursorBlink,
     cursorStyle,
@@ -294,8 +299,147 @@ export function TerminalPanel({
     scrollback,
     showScrollbar,
     syntaxMode,
+    inlineSuggestionsEnabled,
+    inlineSuggestionsMax,
     themeName,
   ]);
+
+  // Per-host command history for inline ghost-text suggestions.
+  const historyHostKey = useMemo(() => makeHostKey(ssh), [ssh]);
+  const isLocalPowerShell = useMemo(
+    () => !ssh && (localShell?.id === "powershell" || localShell?.id === "windows-powershell"),
+    [ssh, localShell?.id],
+  );
+  const suggestionsActive = inlineSuggestionsEnabled && !isLocalPowerShell;
+  const history = useCommandHistory(historyHostKey, inlineSuggestionsMax);
+
+  // Refs decouple the once-mounted xterm.onData callback from the live
+  // history/enabled values. Without this, the initial writeXtermInput closure
+  // captures the empty prewarm cache and never sees later state changes.
+  const historyRef = useRef(history);
+  const suggestionsActiveRef = useRef(suggestionsActive);
+  useEffect(() => {
+    historyRef.current = history;
+    suggestionsActiveRef.current = suggestionsActive;
+  }, [history, suggestionsActive]);
+
+  // State shared between onData tracking and the ghost renderer.
+  const pendingRef = useRef("");
+  const invalidatedRef = useRef(false);
+  const suggestionRef = useRef<string | null>(null);
+  const [ghostTick, setGhostTick] = useState(0);
+  const ghostVisibleRef = useRef(false);
+
+  const bumpGhost = useCallback(() => setGhostTick((v) => v + 1), []);
+
+  const refreshSuggestion = useCallback(() => {
+    if (!suggestionsActiveRef.current || invalidatedRef.current || pendingRef.current === "") {
+      if (suggestionRef.current !== null) {
+        suggestionRef.current = null;
+      }
+      bumpGhost();
+      return;
+    }
+    const prefix = pendingRef.current;
+    const matches = historyRef.current.match(prefix, 1);
+    const next = matches[0] && matches[0].length > prefix.length ? matches[0] : null;
+    suggestionRef.current = next;
+    bumpGhost();
+  }, [bumpGhost]);
+
+  const invalidatePending = useCallback(() => {
+    if (invalidatedRef.current && suggestionRef.current === null) return;
+    invalidatedRef.current = true;
+    suggestionRef.current = null;
+    bumpGhost();
+  }, [bumpGhost]);
+
+  const trackPending = useCallback((data: string) => {
+    if (!suggestionsActiveRef.current) return;
+
+    // Bracketed paste: whole block is shell input, never a typed command.
+    if (data.startsWith("\x1b[200~")) {
+      invalidatePending();
+      return;
+    }
+
+    // Defensive: large chunk with any control char → treat as paste, invalidate.
+    if (data.length > 64) {
+      invalidatePending();
+      return;
+    }
+
+    let changed = false;
+    for (let i = 0; i < data.length; i++) {
+      const code = data.charCodeAt(i);
+
+      // CR / LF → Enter: commit the actual command on screen (handles Tab
+      // completion, history recall, etc.), fall back to tracked pending.
+      if (code === 0x0d || code === 0x0a) {
+        let committed: string | null = null;
+        const term = termRef.current;
+        if (term && term.buffer.active.type !== "alternate") {
+          const fromBuffer = captureBufferCommand(term);
+          if (fromBuffer) committed = fromBuffer;
+        }
+        if (!committed && pendingRef.current !== "" && !invalidatedRef.current) {
+          committed = pendingRef.current;
+        }
+        if (committed) historyRef.current.commit(committed);
+        pendingRef.current = "";
+        invalidatedRef.current = false;
+        changed = true;
+        continue;
+      }
+
+      // Ctrl+C: cancel current line entirely, but re-enable suggestions immediately.
+      if (code === 0x03) {
+        pendingRef.current = "";
+        invalidatedRef.current = false;
+        changed = true;
+        continue;
+      }
+
+      // Backspace / DEL.
+      if (code === 0x08 || code === 0x7f) {
+        if (!invalidatedRef.current && pendingRef.current.length > 0) {
+          pendingRef.current = pendingRef.current.slice(0, -1);
+          changed = true;
+        }
+        continue;
+      }
+
+      // Escape or any CSI-like sequence — arrows, Home/End, Tab completion, function
+      // keys: give up on the current line until the next Enter.
+      if (code === 0x1b || code === 0x09) {
+        invalidatedRef.current = true;
+        changed = true;
+        // Skip rest of this data chunk; it's almost certainly a single escape seq.
+        break;
+      }
+
+      // Other C0 control chars (Ctrl+A/E/U/W/K/L/R/...) → invalidate.
+      if (code < 0x20) {
+        invalidatedRef.current = true;
+        changed = true;
+        break;
+      }
+
+      // Printable: append unless we're already invalidated.
+      if (!invalidatedRef.current) {
+        pendingRef.current += data[i];
+        changed = true;
+      }
+    }
+
+    if (changed) refreshSuggestion();
+  }, [invalidatePending, refreshSuggestion]);
+
+  // Rerun suggestion matching whenever the live cache or the on/off toggles
+  // change — this is what picks up a freshly-prewarmed history list.
+  useEffect(() => {
+    refreshSuggestion();
+  }, [suggestionsActive, history, refreshSuggestion]);
 
   const sendTerminalInput = useCallback((data: string) => {
     const sid = sessionIdRef.current;
@@ -311,22 +455,24 @@ export function TerminalPanel({
   // Broadcast-aware input: used for paste and any injected text so that
   // MultiExec mode forwards the same data to all selected terminals.
   const writeBroadcastInput = useCallback((data: string) => {
+    trackPending(data);
     if (multiExecActiveRef.current) {
       onInputBroadcastRef.current?.(data);
     }
     sendTerminalInput(data);
-  }, [sendTerminalInput]);
+  }, [sendTerminalInput, trackPending]);
 
   const writeXtermInput = useCallback((data: string) => {
     const filtered = imeGuardRef.current?.filterTerminalData(data) ?? data;
     if (filtered === null) {
       return;
     }
+    trackPending(filtered);
     if (multiExecActiveRef.current) {
       onInputBroadcastRef.current?.(filtered);
     }
     sendTerminalInput(filtered);
-  }, [sendTerminalInput]);
+  }, [sendTerminalInput, trackPending]);
 
   const writeBinaryInput = useCallback((data: string) => {
     const sid = sessionIdRef.current;
@@ -653,6 +799,39 @@ export function TerminalPanel({
     focusTerminal();
   }, [appendEvent, focusTerminal, setStatusMessage, writeInput]);
 
+  // Sends raw input to the terminal (and broadcasts when MultiExec is active)
+  // WITHOUT running the pending-command tracker. Used by inline-suggestion
+  // accept, which manages pending state explicitly.
+  const sendUntrackedInput = useCallback((data: string) => {
+    if (multiExecActiveRef.current) {
+      onInputBroadcastRef.current?.(data);
+    }
+    sendTerminalInput(data);
+  }, [sendTerminalInput]);
+
+  const acceptInlineSuggestion = useCallback((): boolean => {
+    if (!suggestionsActiveRef.current) return false;
+    const term = termRef.current;
+    if (!term || term.buffer.active.type === "alternate") return false;
+    const suggestion = suggestionRef.current;
+    const pending = pendingRef.current;
+    if (!suggestion || !pending || suggestion.length <= pending.length) return false;
+    if (invalidatedRef.current) return false;
+    if (!ghostVisibleRef.current) return false;
+
+    const suffix = suggestion.slice(pending.length);
+    if (suffix.length === 0) return false;
+
+    sendUntrackedInput(suffix);
+
+    pendingRef.current = suggestion;
+    invalidatedRef.current = false;
+    suggestionRef.current = null;
+    refreshSuggestion();
+    bumpGhost();
+    return true;
+  }, [sendUntrackedInput, refreshSuggestion, bumpGhost]);
+
   const handleShortcutKey = useCallback((event: KeyboardEvent): boolean => {
     if (event.key === "F11") {
       event.preventDefault();
@@ -699,8 +878,18 @@ export function TerminalPanel({
       closeSearch();
       return false;
     }
+    if (
+      (event.key === "ArrowRight" || event.key === "End") &&
+      !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey
+    ) {
+      if (acceptInlineSuggestion()) {
+        event.preventDefault();
+        return false;
+      }
+    }
     return true;
   }, [
+    acceptInlineSuggestion,
     closeSearch,
     decreaseFontSize,
     executeMacro,
@@ -893,6 +1082,8 @@ export function TerminalPanel({
     setRightClickBehavior(terminalProfile.rightClickBehavior);
     setLoggingActive(terminalProfile.loggingEnabled);
     setMultilinePasteConfirm(terminalProfile.multilinePasteConfirm);
+    setInlineSuggestionsEnabled(terminalProfile.inlineSuggestions);
+    setInlineSuggestionsMax(terminalProfile.inlineSuggestionsMax);
   }, [terminalProfile, theme]);
 
   useEffect(() => {
@@ -1303,6 +1494,26 @@ export function TerminalPanel({
     [fontSize, fullscreen, showScrollbar, syntaxMode, viewportVersion],
   );
 
+  const inlineGhost = useMemo(
+    () => computeInlineGhost(
+      termRef.current,
+      panelRef.current,
+      containerRef.current,
+      suggestionsActive,
+      pendingRef.current,
+      suggestionRef.current,
+      invalidatedRef.current,
+    ),
+    // ghostTick bumps on pending/suggestion changes; viewportVersion on scroll/render.
+    // fontSize/fullscreen/showScrollbar also force recompute on layout shifts.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [ghostTick, viewportVersion, suggestionsActive, fontSize, fullscreen, showScrollbar],
+  );
+
+  useEffect(() => {
+    ghostVisibleRef.current = inlineGhost !== null;
+  }, [inlineGhost]);
+
   const panelClasses = [
     "relative w-full h-full",
     fullscreen ? "fixed inset-0 z-[9000]" : "",
@@ -1387,6 +1598,25 @@ export function TerminalPanel({
               }}
             />
           ))}
+        </div>
+      )}
+
+      {inlineGhost && (
+        <div
+          className="terminal-inline-ghost"
+          aria-hidden
+          style={{
+            left: inlineGhost.left,
+            top: inlineGhost.top,
+            height: inlineGhost.height,
+            maxWidth: inlineGhost.maxWidth,
+            fontFamily,
+            fontSize,
+            lineHeight: `${inlineGhost.height}px`,
+            color: resolvedTheme.foreground ?? "#eaeaea",
+          }}
+        >
+          {inlineGhost.text}
         </div>
       )}
 
@@ -1641,6 +1871,88 @@ function lineToSearchText(line: IBufferLine): { text: string; stringIndexToCell:
     text: text.slice(0, trimmedLength),
     stringIndexToCell: stringIndexToCell.slice(0, trimmedLength),
   };
+}
+
+function captureBufferCommand(term: Terminal): string {
+  const buffer = term.buffer.active;
+  const cursorRow = buffer.baseY + buffer.cursorY;
+
+  // Walk up through wrapped lines to find the start of the logical row.
+  let start = cursorRow;
+  while (start > 0) {
+    const line = buffer.getLine(start);
+    if (line?.isWrapped) start -= 1;
+    else break;
+  }
+
+  let text = "";
+  for (let row = start; row <= cursorRow; row += 1) {
+    const line = buffer.getLine(row);
+    if (!line) continue;
+    if (row === cursorRow) {
+      const segment = line.translateToString(false).slice(0, buffer.cursorX);
+      text += segment;
+    } else {
+      text += line.translateToString(false);
+    }
+  }
+
+  const trimmed = text.replace(/\s+$/, "");
+
+  // Heuristic prompt removal: take the tail after the last common shell
+  // prompt terminator. Covers bash/zsh ("$ "/"# "), fish/tcsh ("% "),
+  // PowerShell ("> "). If no terminator is found, return the whole line.
+  const markers = ["$ ", "# ", "> ", "% "];
+  let best = -1;
+  for (const marker of markers) {
+    const idx = trimmed.lastIndexOf(marker);
+    if (idx > best) best = idx + marker.length;
+  }
+
+  const command = best >= 0 ? trimmed.slice(best) : trimmed;
+  return command.trim();
+}
+
+function computeInlineGhost(
+  term: Terminal | null,
+  panel: HTMLDivElement | null,
+  container: HTMLDivElement | null,
+  enabled: boolean,
+  pending: string,
+  suggestion: string | null,
+  invalidated: boolean,
+): { left: number; top: number; maxWidth: number; height: number; text: string } | null {
+  if (!enabled || !term || !panel || !container) return null;
+  if (invalidated || !pending || !suggestion) return null;
+  if (!suggestion.startsWith(pending) || suggestion.length <= pending.length) return null;
+  if (term.buffer.active.type === "alternate") return null;
+
+  const screen = container.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen) return null;
+
+  const screenRect = screen.getBoundingClientRect();
+  const panelRect = panel.getBoundingClientRect();
+  if (screenRect.width === 0 || screenRect.height === 0 || term.cols === 0 || term.rows === 0) {
+    return null;
+  }
+
+  // Only render when the cursor row is actually on screen (user hasn't scrolled away).
+  const cursorX = term.buffer.active.cursorX;
+  const cursorY = term.buffer.active.cursorY;
+  if (cursorY < 0 || cursorY >= term.rows) return null;
+
+  const cellWidth = screenRect.width / term.cols;
+  const cellHeight = screenRect.height / term.rows;
+  const baseLeft = screenRect.left - panelRect.left;
+  const baseTop = screenRect.top - panelRect.top;
+
+  const left = baseLeft + cursorX * cellWidth;
+  const top = baseTop + cursorY * cellHeight;
+  const maxWidth = Math.max(0, (term.cols - cursorX) * cellWidth);
+  if (maxWidth <= 0) return null;
+
+  const text = suggestion.slice(pending.length);
+  return { left, top, maxWidth, height: cellHeight, text };
 }
 
 function getVisibleSearchHighlights(

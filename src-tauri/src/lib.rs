@@ -8,6 +8,7 @@ mod serial;
 mod config;
 mod appearance;
 mod vnc;
+mod history;
 
 use state::AppState;
 use tauri::{AppHandle, Manager, WebviewWindowBuilder};
@@ -127,6 +128,10 @@ pub fn run() {
             vnc::vnc_connect,
             vnc::vnc_disconnect,
             vnc::vnc_test_connection,
+            history::history_append,
+            history::history_match_prefix,
+            history::history_list_recent,
+            history::history_clear,
             exit_app,
         ])
         .run(tauri::generate_context!())

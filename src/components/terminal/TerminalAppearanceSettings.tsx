@@ -19,6 +19,7 @@ import {
   useSystemFonts,
   useTerminalFontOptions,
 } from "../../lib/systemFonts";
+import { historyClear } from "../../lib/ipc";
 
 interface TerminalAppearanceSettingsProps {
   profile: TerminalProfile;
@@ -58,6 +59,10 @@ export function TerminalAppearanceSettings({
   const [fg, setFg] = useState(colors.foreground);
   const [fontSizeText, setFontSizeText] = useState(String(profile.fontSize));
   const [scrollbackText, setScrollbackText] = useState(String(profile.scrollback));
+  const [inlineSuggestionsMaxText, setInlineSuggestionsMaxText] = useState(
+    String(profile.inlineSuggestionsMax),
+  );
+  const [clearingHistory, setClearingHistory] = useState(false);
   const draftProfileRef = useRef(profile);
 
   useEffect(() => {
@@ -77,6 +82,10 @@ export function TerminalAppearanceSettings({
   useEffect(() => {
     setScrollbackText(String(profile.scrollback));
   }, [profile.scrollback]);
+
+  useEffect(() => {
+    setInlineSuggestionsMaxText(String(profile.inlineSuggestionsMax));
+  }, [profile.inlineSuggestionsMax]);
 
   const updateProfile = (patch: Partial<TerminalProfile>) => {
     const next = { ...draftProfileRef.current, ...patch };
@@ -340,6 +349,75 @@ export function TerminalAppearanceSettings({
               checked={profile.loggingEnabled}
               onChange={(checked) => updateProfile({ loggingEnabled: checked })}
             />
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-md border border-[var(--moba-divider)] bg-[var(--moba-panel-bg)] p-3">
+        <div className="text-[12px] font-semibold mb-2">Inline command suggestions</div>
+        <div className="grid grid-cols-12 gap-x-3 gap-y-3 text-[12px] items-end">
+          <div className="col-span-12 md:col-span-7">
+            <CheckControl
+              label="Show ghost-text suggestions from command history"
+              checked={profile.inlineSuggestions}
+              onChange={(checked) => updateProfile({ inlineSuggestions: checked })}
+            />
+            <p className="mt-1 text-[11px] text-[var(--moba-text-muted)] leading-snug">
+              Press → or End at the end of the line to accept. Recommended with a bar or
+              underline cursor. Ignored for local PowerShell (its PSReadLine already provides
+              predictions).
+            </p>
+          </div>
+
+          <label className="col-span-8 md:col-span-3">
+            <span className="block mb-1 text-[var(--moba-text-muted)]">Max entries per host</span>
+            <input
+              className="moba-input w-28"
+              value={inlineSuggestionsMaxText}
+              aria-label="Maximum command history entries per host"
+              inputMode="numeric"
+              disabled={!profile.inlineSuggestions}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (!/^\d*$/.test(next)) return;
+                setInlineSuggestionsMaxText(next);
+                const parsed = Number(next);
+                if (Number.isFinite(parsed) && parsed >= 100 && parsed <= 50000) {
+                  updateProfile({ inlineSuggestionsMax: Math.round(parsed) });
+                }
+              }}
+              onBlur={() => {
+                const parsed = Number(inlineSuggestionsMaxText);
+                if (Number.isFinite(parsed) && parsed > 0) {
+                  const clamped = Math.max(100, Math.min(50000, Math.round(parsed)));
+                  setInlineSuggestionsMaxText(String(clamped));
+                  updateProfile({ inlineSuggestionsMax: clamped });
+                } else {
+                  setInlineSuggestionsMaxText(String(profile.inlineSuggestionsMax));
+                }
+              }}
+            />
+          </label>
+
+          <div className="col-span-12 md:col-span-2 flex md:justify-end">
+            <button
+              type="button"
+              className="moba-btn h-8 px-2 text-[11px]"
+              disabled={clearingHistory}
+              onClick={() => {
+                if (!window.confirm("Clear all command history? This affects every host.")) {
+                  return;
+                }
+                setClearingHistory(true);
+                historyClear(null)
+                  .catch((err) => {
+                    console.error("Failed to clear history", err);
+                  })
+                  .finally(() => setClearingHistory(false));
+              }}
+            >
+              Clear all history
+            </button>
           </div>
         </div>
       </section>

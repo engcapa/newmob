@@ -731,6 +731,15 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     }
     default:
       console.warn(`[tauri-stub] Unknown invoke command: ${cmd}`, args);
+      if (cmd === "history_match_prefix" || cmd === "history_list_recent") {
+        return ([] as unknown) as T;
+      }
+      if (
+        cmd === "history_append" ||
+        cmd === "history_clear"
+      ) {
+        return undefined as T;
+      }
       return undefined as T;
   }
 }

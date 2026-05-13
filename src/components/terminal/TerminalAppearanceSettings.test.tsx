@@ -6,6 +6,7 @@ import { DEFAULT_TERMINAL_PROFILE, type TerminalProfile } from "../../lib/termin
 
 const ipcMocks = vi.hoisted(() => ({
   listSystemFonts: vi.fn(),
+  historyClear: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../lib/ipc", () => ({

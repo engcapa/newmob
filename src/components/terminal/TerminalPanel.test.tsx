@@ -71,6 +71,10 @@ const ipcMocks = vi.hoisted(() => ({
   writeStreamClose: vi.fn(async () => undefined),
   writeStreamOpen: vi.fn(async () => "stream-handle"),
   checkFileExists: vi.fn(async () => false),
+  historyAppend: vi.fn(async () => undefined),
+  historyMatchPrefix: vi.fn(async () => [] as string[]),
+  historyListRecent: vi.fn(async () => [] as string[]),
+  historyClear: vi.fn(async () => undefined),
 }));
 
 vi.mock("@xterm/xterm", () => ({

@@ -23,6 +23,8 @@ export interface TerminalProfile {
   syntaxMode: TerminalSyntaxMode;
   loggingEnabled: boolean;
   logPath?: string;
+  inlineSuggestions: boolean;
+  inlineSuggestionsMax: number;
 }
 
 export const DEFAULT_TERMINAL_PROFILE: TerminalProfile = {
@@ -41,6 +43,8 @@ export const DEFAULT_TERMINAL_PROFILE: TerminalProfile = {
   multilinePasteConfirm: true,
   syntaxMode: "default",
   loggingEnabled: false,
+  inlineSuggestions: true,
+  inlineSuggestionsMax: 2000,
 };
 
 const TERMINAL_PROFILE_STORAGE_KEY = "newmob.terminalProfile.v1";
@@ -116,6 +120,13 @@ export function normalizeTerminalProfile(input: unknown): TerminalProfile {
       DEFAULT_TERMINAL_PROFILE.syntaxMode,
     ),
     loggingEnabled: readBoolean(source.loggingEnabled, DEFAULT_TERMINAL_PROFILE.loggingEnabled),
+    inlineSuggestions: readBoolean(source.inlineSuggestions, DEFAULT_TERMINAL_PROFILE.inlineSuggestions),
+    inlineSuggestionsMax: clampInteger(
+      source.inlineSuggestionsMax,
+      DEFAULT_TERMINAL_PROFILE.inlineSuggestionsMax,
+      100,
+      50000,
+    ),
   };
 
   const logPath = readOptionalString(source.logPath);
