@@ -11,6 +11,7 @@ import {
   saveGlobalTerminalProfile,
   type TerminalProfile,
   type TerminalSyntaxMode,
+  type UserCommonCommand,
 } from "../../lib/terminalProfile";
 import {
   getSessionNetworkSettings,
@@ -65,6 +66,8 @@ import {
   type SendConflictAction,
 } from "../../lib/zmodem";
 import { ZmodemConflictDialog } from "./ZmodemConflictDialog";
+import { CommonCommandsPalette } from "./CommonCommandsPalette";
+import { WINDOWS_PRESET_COMMANDS } from "../../lib/commonCommandsPresets";
 import { useAppStore } from "../../stores/appStore";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -196,6 +199,8 @@ export function TerminalPanel({
   const [multilinePasteConfirm, setMultilinePasteConfirm] = useState(initialProfile.multilinePasteConfirm);
   const [inlineSuggestionsEnabled, setInlineSuggestionsEnabled] = useState(initialProfile.inlineSuggestions);
   const [inlineSuggestionsMax, setInlineSuggestionsMax] = useState(initialProfile.inlineSuggestionsMax);
+  const [commonCommands, setCommonCommands] = useState<UserCommonCommand[]>(initialProfile.commonCommands);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [eventLogOpen, setEventLogOpen] = useState(false);
@@ -285,6 +290,7 @@ export function TerminalPanel({
     loggingEnabled: loggingActive,
     inlineSuggestions: inlineSuggestionsEnabled,
     inlineSuggestionsMax,
+    commonCommands,
   }), [
     cursorBlink,
     cursorStyle,
@@ -301,11 +307,13 @@ export function TerminalPanel({
     syntaxMode,
     inlineSuggestionsEnabled,
     inlineSuggestionsMax,
+    commonCommands,
     themeName,
   ]);
 
   // Per-host command history for inline ghost-text suggestions.
   const historyHostKey = useMemo(() => makeHostKey(ssh), [ssh]);
+  const isLocal = !ssh;
   const isLocalPowerShell = useMemo(
     () => !ssh && (localShell?.id === "powershell" || localShell?.id === "windows-powershell"),
     [ssh, localShell?.id],
@@ -838,6 +846,17 @@ export function TerminalPanel({
       setFullscreen((v) => !v);
       return false;
     }
+    if (
+      isLocal &&
+      event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey &&
+      event.key.toLowerCase() === "p"
+    ) {
+      if (readOnlyRef.current) return false;
+      if (termRef.current?.buffer.active.type === "alternate") return false;
+      event.preventDefault();
+      setPaletteOpen(true);
+      return false;
+    }
     if (event.shiftKey && event.key === "Insert") {
       event.preventDefault();
       void pasteFromClipboard();
@@ -894,6 +913,7 @@ export function TerminalPanel({
     decreaseFontSize,
     executeMacro,
     increaseFontSize,
+    isLocal,
     openSearch,
     pasteFromClipboard,
     resetFontSize,
@@ -1084,6 +1104,7 @@ export function TerminalPanel({
     setMultilinePasteConfirm(terminalProfile.multilinePasteConfirm);
     setInlineSuggestionsEnabled(terminalProfile.inlineSuggestions);
     setInlineSuggestionsMax(terminalProfile.inlineSuggestionsMax);
+    setCommonCommands(terminalProfile.commonCommands);
   }, [terminalProfile, theme]);
 
   useEffect(() => {
@@ -1735,6 +1756,24 @@ export function TerminalPanel({
           onResolve={(action) => {
             setConflictDialogState(null);
             conflictDialogState.resolve(action);
+          }}
+        />
+      )}
+
+      {isLocal && (
+        <CommonCommandsPalette
+          open={paletteOpen}
+          historyHostKey={historyHostKey}
+          userCommands={commonCommands}
+          presets={WINDOWS_PRESET_COMMANDS}
+          onPick={(cmd) => {
+            setPaletteOpen(false);
+            sendTerminalInput(cmd);
+            focusTerminal();
+          }}
+          onClose={() => {
+            setPaletteOpen(false);
+            focusTerminal();
           }}
         />
       )}

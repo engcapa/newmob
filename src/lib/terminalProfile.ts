@@ -6,6 +6,11 @@ export type TerminalCursorStyle = "block" | "underline" | "bar";
 export type TerminalRightClickBehavior = "menu" | "paste" | "copy-or-paste";
 export type TerminalSyntaxMode = "default" | "keywords" | "shell" | "cisco" | "perl" | "sql";
 
+export interface UserCommonCommand {
+  command: string;
+  description?: string;
+}
+
 export interface TerminalProfile {
   fontFamily: string;
   fontSize: number;
@@ -25,6 +30,8 @@ export interface TerminalProfile {
   logPath?: string;
   inlineSuggestions: boolean;
   inlineSuggestionsMax: number;
+  commonCommands: UserCommonCommand[];
+  commonCommandsShortcut: string;
 }
 
 export const DEFAULT_TERMINAL_PROFILE: TerminalProfile = {
@@ -45,6 +52,8 @@ export const DEFAULT_TERMINAL_PROFILE: TerminalProfile = {
   loggingEnabled: false,
   inlineSuggestions: true,
   inlineSuggestionsMax: 2000,
+  commonCommands: [],
+  commonCommandsShortcut: "Ctrl+Shift+P",
 };
 
 const TERMINAL_PROFILE_STORAGE_KEY = "newmob.terminalProfile.v1";
@@ -127,6 +136,11 @@ export function normalizeTerminalProfile(input: unknown): TerminalProfile {
       100,
       50000,
     ),
+    commonCommands: readCommonCommands(source.commonCommands),
+    commonCommandsShortcut: readString(
+      source.commonCommandsShortcut,
+      DEFAULT_TERMINAL_PROFILE.commonCommandsShortcut,
+    ),
   };
 
   const logPath = readOptionalString(source.logPath);
@@ -192,4 +206,17 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
 
 function readEnum<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   return typeof value === "string" && allowed.includes(value as T) ? value as T : fallback;
+}
+
+function readCommonCommands(value: unknown): UserCommonCommand[] {
+  if (!Array.isArray(value)) return [];
+  const out: UserCommonCommand[] = [];
+  for (const raw of value) {
+    if (!isRecord(raw)) continue;
+    const command = typeof raw.command === "string" ? raw.command.trim() : "";
+    if (!command) continue;
+    const desc = typeof raw.description === "string" ? raw.description.trim() : "";
+    out.push(desc ? { command, description: desc } : { command });
+  }
+  return out;
 }

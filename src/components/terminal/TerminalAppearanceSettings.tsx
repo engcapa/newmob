@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Minus, Plus } from "lucide-react";
+import { Check, Minus, Plus, Trash2 } from "lucide-react";
 import {
   TERMINAL_THEME_DEFINITIONS,
   resolveThemeId,
@@ -12,6 +12,7 @@ import {
   type TerminalCursorStyle,
   type TerminalProfile,
   type TerminalRightClickBehavior,
+  type UserCommonCommand,
 } from "../../lib/terminalProfile";
 import {
   makeTerminalFontFamily,
@@ -422,6 +423,18 @@ export function TerminalAppearanceSettings({
         </div>
       </section>
 
+      <section className="rounded-md border border-[var(--moba-divider)] bg-[var(--moba-panel-bg)] p-3">
+        <div className="text-[12px] font-semibold mb-2">Common commands (Ctrl+Shift+P)</div>
+        <p className="text-[11px] text-[var(--moba-text-muted)] leading-snug mb-2">
+          仅在本地终端生效。按 Ctrl+Shift+P 弹出可搜索的命令列表，所选命令会插入到当前输入行（不回车）。
+          以下条目会与命令历史和预置命令合并。
+        </p>
+        <CommonCommandsEditor
+          value={profile.commonCommands}
+          onChange={(next) => updateProfile({ commonCommands: next })}
+        />
+      </section>
+
       {showPreview && (
         <TerminalPreview
           background={showCustomColors ? bg : colors.background}
@@ -624,4 +637,73 @@ function TerminalPreviewCursor({
 
 function isHexColor(value: string): boolean {
   return /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+interface CommonCommandsEditorProps {
+  value: UserCommonCommand[];
+  onChange: (next: UserCommonCommand[]) => void;
+}
+
+function CommonCommandsEditor({ value, onChange }: CommonCommandsEditorProps) {
+  const updateRow = (index: number, patch: Partial<UserCommonCommand>) => {
+    const next = value.slice();
+    const current = next[index] ?? { command: "" };
+    next[index] = { ...current, ...patch };
+    onChange(next);
+  };
+  const removeRow = (index: number) => {
+    const next = value.slice();
+    next.splice(index, 1);
+    onChange(next);
+  };
+  const addRow = () => {
+    onChange([...value, { command: "" }]);
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {value.length === 0 ? (
+        <div className="text-[11px] text-[var(--moba-text-muted)] italic px-1 py-2">
+          暂无自定义命令
+        </div>
+      ) : (
+        <div className="flex flex-col gap-1">
+          {value.map((item, idx) => (
+            <div key={idx} className="flex items-center gap-2">
+              <input
+                className="moba-input flex-1 min-w-0 font-mono text-[12px]"
+                placeholder="命令"
+                value={item.command}
+                onChange={(e) => updateRow(idx, { command: e.target.value })}
+                aria-label={`Command ${idx + 1}`}
+              />
+              <input
+                className="moba-input flex-1 min-w-0 text-[12px]"
+                placeholder="说明（可选）"
+                value={item.description ?? ""}
+                onChange={(e) => updateRow(idx, { description: e.target.value })}
+                aria-label={`Description ${idx + 1}`}
+              />
+              <button
+                type="button"
+                className="moba-btn h-8 w-8 p-0 inline-flex items-center justify-center"
+                onClick={() => removeRow(idx)}
+                aria-label={`Remove command ${idx + 1}`}
+                title="删除"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <button
+        type="button"
+        className="moba-btn h-8 px-2 text-[11px] self-start inline-flex items-center gap-1"
+        onClick={addRow}
+      >
+        <Plus size={12} /> 添加一条
+      </button>
+    </div>
+  );
 }
