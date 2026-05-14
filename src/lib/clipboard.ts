@@ -5,6 +5,8 @@
 // upcoming ExtendedClipboard / image clipboard work needs a single place that
 // knows how to touch the system clipboard with multi-format payloads.
 
+import { invoke } from "@tauri-apps/api/core";
+
 export interface MultiFormatPayload {
   text: string;
   html?: string;
@@ -37,6 +39,11 @@ function fallbackCopyText(text: string): boolean {
 }
 
 export async function readText(): Promise<string> {
+  try {
+    return await invoke<string>("clipboard_read_text");
+  } catch {
+    // Fallback to browser API (e.g. in dev mode without Tauri runtime).
+  }
   if (typeof navigator === "undefined" || !navigator.clipboard?.readText) {
     return "";
   }

@@ -203,6 +203,15 @@ pub fn check_file_exists(path: String) -> bool {
     expanded_path(&path).exists()
 }
 
+#[tauri::command]
+pub fn clipboard_read_text() -> Result<String, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?;
+    clipboard
+        .get_text()
+        .map_err(|e| format!("clipboard read: {}", e))
+}
+
 fn expanded_path(value: &str) -> PathBuf {
     PathBuf::from(shellexpand::tilde(value).to_string())
 }
