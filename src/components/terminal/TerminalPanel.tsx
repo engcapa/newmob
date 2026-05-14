@@ -31,6 +31,21 @@ import {
   TerminalImeInputGuard,
 } from "../../lib/terminalImeGuard";
 import {
+  readText as clipboardReadText,
+  writeText as clipboardWriteText,
+  writeMultiFormat as clipboardWriteMultiFormat,
+} from "../../lib/clipboard";
+import {
+  captureContainerCanvasesPng,
+  captureXtermFullBuffer,
+  captureXtermVisible,
+  renderXtermVisibleToCanvas,
+  type XtermCaptureTheme,
+} from "../../lib/capture";
+import CaptureToolbar from "../capture/CaptureToolbar";
+import FloatingToolbar from "../floating-toolbar/FloatingToolbar";
+import { FolderOpen } from "lucide-react";
+import {
   createInputEchoSuppressor,
   type InputEchoSuppressor,
 } from "../../lib/terminalOutputFilter";
@@ -110,6 +125,12 @@ interface TerminalPanelProps {
   isMultiExecTarget?: boolean;
   /** Called with user input when MultiExec is active; parent broadcasts to other terminals. */
   onInputBroadcast?: (data: string) => void;
+  /** When set, the floating toolbar shows an SFTP toggle button. Only used
+   *  for SSH terminals where the parent owns the attached SFTP sidebar. */
+  sftpToggle?: {
+    open: boolean;
+    onToggle: () => void;
+  };
 }
 
 const DEFAULT_FONT_SIZE = 14;
@@ -148,6 +169,7 @@ export function TerminalPanel({
   multiExecActive,
   isMultiExecTarget,
   onInputBroadcast,
+  sftpToggle,
 }: TerminalPanelProps) {
   const cwdCallbackRef = useRef<typeof onCwdChange>(onCwdChange);
   const onSessionReadyRef = useRef<typeof onSessionReady>(onSessionReady);
@@ -514,20 +536,11 @@ export function TerminalPanel({
       setStatusMessage("Nothing to copy");
       return;
     }
-
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        fallbackCopyText(text);
-      }
+      await clipboardWriteText(text);
       setStatusMessage(successMessage);
     } catch (err) {
-      if (fallbackCopyText(text)) {
-        setStatusMessage(successMessage);
-      } else {
-        setStatusMessage(err instanceof Error ? err.message : "Clipboard copy failed");
-      }
+      setStatusMessage(err instanceof Error ? err.message : "Clipboard copy failed");
     }
   }, [setStatusMessage]);
 
@@ -558,17 +571,8 @@ export function TerminalPanel({
     const html = `<pre style="margin:0;font-family:${escapeHtml(fontFamily)};font-size:${fontSize}px;background:${resolvedTheme.background ?? "#1d1f21"};color:${resolvedTheme.foreground ?? "#eaeaea"};white-space:pre-wrap;">${escapeHtml(text)}</pre>`;
 
     try {
-      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
-        await navigator.clipboard.write([
-          new ClipboardItem({
-            "text/html": new Blob([html], { type: "text/html" }),
-            "text/plain": new Blob([text], { type: "text/plain" }),
-          }),
-        ]);
-        setStatusMessage("Copied formatted selection");
-      } else {
-        await writeClipboardText(text, "Copied selection");
-      }
+      await clipboardWriteMultiFormat({ text, html });
+      setStatusMessage("Copied formatted selection");
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : "Formatted copy failed");
     } finally {
@@ -583,9 +587,7 @@ export function TerminalPanel({
     }
 
     try {
-      const text = navigator.clipboard?.readText
-        ? await navigator.clipboard.readText()
-        : window.prompt("Paste text") ?? "";
+      const text = (await clipboardReadText()) || window.prompt("Paste text") || "";
       if (!text) return;
       if (
         multilinePasteConfirm &&
@@ -1579,9 +1581,99 @@ export function TerminalPanel({
     >
       <div ref={containerRef} className="w-full h-full" />
 
+      <FloatingToolbar
+        storageKey={`mob.terminal.toolbar.${ssh ? "ssh" : "local"}`}
+        defaultTop={4}
+        defaultRight={4}
+        testId="terminal-floating-toolbar"
+      >
+        <CaptureToolbar
+          filenamePrefix={`${safeFilePart(tabTitle)}`}
+          getVisible={async () => {
+            const term = termRef.current;
+            const container = containerRef.current;
+            if (!term) throw new Error("Terminal not ready");
+            const theme: XtermCaptureTheme = {
+              background: resolvedTheme.background ?? "#1d1f21",
+              foreground: resolvedTheme.foreground ?? "#eaeaea",
+              fontFamily,
+              fontSize,
+              lineHeight: 1.2,
+            };
+            try {
+              return await captureXtermVisible(term, theme);
+            } catch (err) {
+              if (container) return await captureContainerCanvasesPng(container);
+              throw err;
+            }
+          }}
+          getFull={async () => {
+            const term = termRef.current;
+            if (!term) throw new Error("Terminal not ready");
+            const theme: XtermCaptureTheme = {
+              background: resolvedTheme.background ?? "#1d1f21",
+              foreground: resolvedTheme.foreground ?? "#eaeaea",
+              fontFamily,
+              fontSize,
+              lineHeight: 1.2,
+            };
+            return await captureXtermFullBuffer(term, theme);
+          }}
+          getScrollFrame={() => {
+            const term = termRef.current;
+            if (!term) return null;
+            const theme: XtermCaptureTheme = {
+              background: resolvedTheme.background ?? "#1d1f21",
+              foreground: resolvedTheme.foreground ?? "#eaeaea",
+              fontFamily,
+              fontSize,
+              lineHeight: 1.2,
+            };
+            return renderXtermVisibleToCanvas(term, theme);
+          }}
+          getGifFrame={() => {
+            const term = termRef.current;
+            if (!term) return null;
+            const theme: XtermCaptureTheme = {
+              background: resolvedTheme.background ?? "#1d1f21",
+              foreground: resolvedTheme.foreground ?? "#eaeaea",
+              fontFamily,
+              fontSize,
+              lineHeight: 1.2,
+            };
+            return renderXtermVisibleToCanvas(term, theme);
+          }}
+          onStatus={(msg) => setStatusMessage(msg)}
+          compact
+        />
+        {sftpToggle && (
+          <button
+            type="button"
+            data-testid="attached-sftp-toggle"
+            onClick={sftpToggle.onToggle}
+            title={sftpToggle.open ? "Hide SFTP browser" : "Open SFTP browser"}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              padding: "2px 8px",
+              fontSize: 11,
+              borderRadius: 4,
+              background: sftpToggle.open ? "var(--moba-accent)" : "rgba(0,0,0,0.5)",
+              color: sftpToggle.open ? "#fff" : "#ccc",
+              border: "1px solid rgba(255,255,255,0.2)",
+              cursor: "pointer",
+            }}
+          >
+            <FolderOpen size={12} />
+            SFTP
+          </button>
+        )}
+      </FloatingToolbar>
+
       {isMultiExecTarget && (
         <div
-          className="absolute top-1 right-16 z-40 px-1.5 py-0.5 rounded pointer-events-none"
+          className="absolute top-1 left-1 z-40 px-1.5 py-0.5 rounded pointer-events-none"
           style={{ background: "var(--moba-accent)", color: "#fff", opacity: 0.85, fontSize: 10, fontWeight: 600 }}
         >
           ⊕ MultiExec
@@ -2125,23 +2217,6 @@ function firstVisibleMatchIndex(
 
 function normalizePasteText(text: string): string {
   return text.replace(/\r?\n/g, "\r");
-}
-
-function fallbackCopyText(text: string): boolean {
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  textarea.style.top = "-9999px";
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-
-  try {
-    return document.execCommand("copy");
-  } finally {
-    document.body.removeChild(textarea);
-  }
 }
 
 function downloadTextFile(filename: string, text: string, type: string): void {

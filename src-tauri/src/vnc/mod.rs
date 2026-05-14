@@ -1,3 +1,4 @@
+pub mod clipboard;
 pub mod encodings;
 pub mod rfb;
 pub mod ws;

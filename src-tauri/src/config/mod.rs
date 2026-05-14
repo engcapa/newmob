@@ -32,6 +32,14 @@ pub fn select_save_directory(current_path: Option<String>) -> Result<Option<Stri
 }
 
 #[tauri::command]
+pub fn select_save_file_path(
+    default_name: Option<String>,
+    current_path: Option<String>,
+) -> Result<Option<String>, String> {
+    platform::select_save_file_path(default_name.as_deref(), current_path.as_deref())
+}
+
+#[tauri::command]
 pub fn read_file_bytes(path: String) -> Result<Response, String> {
     let expanded = shellexpand::tilde(&path).to_string();
     let bytes = std::fs::read(&expanded)
@@ -383,6 +391,58 @@ mod platform {
             .to_string();
         Ok((!path.is_empty()).then_some(path))
     }
+
+    pub fn select_save_file_path(
+        default_name: Option<&str>,
+        current_path: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        use winapi::um::commdlg::{GetSaveFileNameW, OFN_OVERWRITEPROMPT};
+
+        let mut file_buf = [0u16; 32768];
+        if let Some(name) = default_name {
+            let wide = wide(name);
+            let len = wide.len().saturating_sub(1).min(file_buf.len() - 1);
+            file_buf[..len].copy_from_slice(&wide[..len]);
+        }
+        let filter = wide_filter(&[("All files", "*")]);
+        let title = wide("Save as");
+        let initial_dir = super::initial_dir_from(current_path)
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir)
+            .map(|p| wide_os(p.as_os_str()));
+
+        let mut ofn: OPENFILENAMEW = unsafe { zeroed() };
+        ofn.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+        ofn.lpstrFilter = filter.as_ptr();
+        ofn.lpstrFile = file_buf.as_mut_ptr();
+        ofn.nMaxFile = file_buf.len() as u32;
+        ofn.lpstrTitle = title.as_ptr();
+        ofn.lpstrInitialDir = initial_dir
+            .as_ref()
+            .map(|dir| dir.as_ptr())
+            .unwrap_or(ptr::null());
+        ofn.Flags = OFN_EXPLORER
+            | OFN_PATHMUSTEXIST
+            | OFN_HIDEREADONLY
+            | OFN_NOCHANGEDIR
+            | OFN_OVERWRITEPROMPT;
+
+        let ok = unsafe { GetSaveFileNameW(&mut ofn) };
+        if ok != 0 {
+            let len = file_buf
+                .iter()
+                .position(|&ch| ch == 0)
+                .unwrap_or(file_buf.len());
+            return Ok(Some(String::from_utf16_lossy(&file_buf[..len])));
+        }
+
+        let err = unsafe { CommDlgExtendedError() };
+        if err == 0 {
+            Ok(None)
+        } else {
+            Err(format!("Windows save dialog failed: 0x{err:04x}"))
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -399,6 +459,19 @@ mod platform {
 
     pub fn select_save_directory(_current_path: Option<&str>) -> Result<Option<String>, String> {
         run_osascript(r#"POSIX path of (choose folder with prompt "Select save directory")"#)
+    }
+
+    pub fn select_save_file_path(
+        default_name: Option<&str>,
+        _current_path: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let default = default_name.unwrap_or("capture.png");
+        let escaped = default.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            r#"POSIX path of (choose file name with prompt "Save as" default name "{}")"#,
+            escaped
+        );
+        run_osascript(&script)
     }
 
     fn run_osascript_multi(script: &str) -> Result<Vec<String>, String> {
@@ -469,6 +542,23 @@ mod platform {
     pub fn select_save_directory(_current_path: Option<&str>) -> Result<Option<String>, String> {
         let initial = dirs::download_dir().or_else(dirs::home_dir);
         open_dir_dialog("Select save directory", initial.as_deref())
+    }
+
+    pub fn select_save_file_path(
+        default_name: Option<&str>,
+        current_path: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let initial_dir = initial_dir_from(current_path)
+            .or_else(dirs::download_dir)
+            .or_else(dirs::home_dir);
+        let initial_path = initial_dir.map(|dir| {
+            let mut path = dir;
+            if let Some(name) = default_name {
+                path.push(name);
+            }
+            path
+        });
+        open_save_dialog("Save as", initial_path.as_deref())
     }
 
     fn open_file_dialog_multi(title: &str, initial_dir: Option<&Path>) -> Result<Vec<String>, String> {
@@ -650,6 +740,50 @@ mod platform {
             .arg(initial_dir.unwrap_or_else(|| Path::new("~")));
         handle_output(cmd.output(), "kdialog")
     }
+
+    fn open_save_dialog(
+        title: &str,
+        initial_path: Option<&Path>,
+    ) -> Result<Option<String>, String> {
+        match run_zenity_save(title, initial_path) {
+            Ok(result) => return result,
+            Err(DialogAttempt::NotFound) => {}
+            Err(DialogAttempt::Failed(err)) => return Err(err),
+        }
+
+        match run_kdialog_save(title, initial_path) {
+            Ok(result) => result,
+            Err(DialogAttempt::NotFound) => {
+                Err("No native file dialog helper found. Install zenity or kdialog.".to_string())
+            }
+            Err(DialogAttempt::Failed(err)) => Err(err),
+        }
+    }
+
+    fn run_zenity_save(
+        title: &str,
+        initial_path: Option<&Path>,
+    ) -> Result<Result<Option<String>, String>, DialogAttempt> {
+        let mut cmd = Command::new("zenity");
+        cmd.arg("--file-selection")
+            .arg("--save")
+            .arg("--confirm-overwrite")
+            .arg(format!("--title={}", title));
+        if let Some(path) = initial_path {
+            cmd.arg(format!("--filename={}", path.to_string_lossy()));
+        }
+        handle_output(cmd.output(), "zenity")
+    }
+
+    fn run_kdialog_save(
+        _title: &str,
+        initial_path: Option<&Path>,
+    ) -> Result<Result<Option<String>, String>, DialogAttempt> {
+        let mut cmd = Command::new("kdialog");
+        cmd.arg("--getsavefilename")
+            .arg(initial_path.unwrap_or_else(|| Path::new("~")));
+        handle_output(cmd.output(), "kdialog")
+    }
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -663,6 +797,13 @@ mod platform {
     }
 
     pub fn select_save_directory(_current_path: Option<&str>) -> Result<Option<String>, String> {
+        Err("Native file dialog is not supported on this platform".to_string())
+    }
+
+    pub fn select_save_file_path(
+        _default_name: Option<&str>,
+        _current_path: Option<&str>,
+    ) -> Result<Option<String>, String> {
         Err("Native file dialog is not supported on this platform".to_string())
     }
 }

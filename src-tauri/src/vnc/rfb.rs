@@ -2,6 +2,9 @@ use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Read, Write};
 use std::net::TcpStream;
 
+use crate::vnc::clipboard::{
+    parse_extended_body, ExtendedClipboardMsg, ENCODING_EXTENDED_CLIPBOARD,
+};
 use crate::vnc::encodings::{self, DecodedRect, HextileState, ZrleDecoder};
 
 const SEC_TYPE_NONE: u8 = 1;
@@ -616,13 +619,34 @@ impl RfbConnection {
             3 => {
                 self.read_exact(&mut [0u8; 3])
                     .map_err(|e| format!("read cut text padding: {}", e))?;
-                let len = self.read_u32()? as usize;
-                let mut text = vec![0u8; len];
-                self.read_exact(&mut text)
-                    .map_err(|e| format!("read cut text: {}", e))?;
-                Ok(ServerMessage::ServerCutText {
-                    text: String::from_utf8_lossy(&text).to_string(),
-                })
+                let len_signed = self.read_i32()?;
+                if len_signed < 0 {
+                    // ExtendedClipboard rides on ServerCutText with a negative length.
+                    let len = (-len_signed) as usize;
+                    // Reasonable cap so a corrupt server can't make us allocate
+                    // a 4 GiB buffer.
+                    if len > 16 * 1024 * 1024 {
+                        return Err(format!("extended clipboard body too large: {}", len));
+                    }
+                    let mut body = vec![0u8; len];
+                    self.read_exact(&mut body)
+                        .map_err(|e| format!("read ext clipboard: {}", e))?;
+                    match parse_extended_body(&body) {
+                        Some(msg) => Ok(ServerMessage::ExtendedClipboard(msg)),
+                        None => {
+                            // Unknown action — return a no-op so the relay keeps running.
+                            Ok(ServerMessage::SetColourMapEntries)
+                        }
+                    }
+                } else {
+                    let len = len_signed as usize;
+                    let mut text = vec![0u8; len];
+                    self.read_exact(&mut text)
+                        .map_err(|e| format!("read cut text: {}", e))?;
+                    Ok(ServerMessage::ServerCutText {
+                        text: String::from_utf8_lossy(&text).to_string(),
+                    })
+                }
             }
             _ => Err(format!("unknown server message type: {}", msg_type)),
         }
@@ -901,6 +925,23 @@ impl RfbWriter {
 
         self.write_all(&msg)
             .map_err(|e| format!("write client cut text: {}", e))?;
+        self.flush().map_err(|e| format!("flush: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Send an ExtendedClipboard body. The wire frame is a ClientCutText (msg
+    /// type 6) with a *negative* length signaling the extended payload.
+    pub fn send_extended_clipboard(&mut self, body: &[u8]) -> Result<(), String> {
+        let neg_len = -(body.len() as i32);
+        let mut msg = Vec::with_capacity(8 + body.len());
+        msg.push(6);
+        msg.extend_from_slice(&[0u8; 3]); // padding
+        msg.extend_from_slice(&neg_len.to_be_bytes());
+        msg.extend_from_slice(body);
+
+        self.write_all(&msg)
+            .map_err(|e| format!("write ext clipboard: {}", e))?;
         self.flush().map_err(|e| format!("flush: {}", e))?;
 
         Ok(())
@@ -1286,6 +1327,7 @@ pub enum ServerMessage {
     SetColourMapEntries,
     Bell,
     ServerCutText { text: String },
+    ExtendedClipboard(ExtendedClipboardMsg),
 }
 
 /// VNC DES authentication: encrypt the 16-byte challenge with a key derived from the password.
