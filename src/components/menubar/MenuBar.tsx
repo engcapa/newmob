@@ -9,7 +9,6 @@ import {
   X,
 } from "lucide-react";
 import { useContextMenu } from "../ContextMenu";
-import { AppThemeIconButton } from "../settings/AppThemeSwitcher";
 import type { RibbonCommand } from "./Ribbon";
 
 interface MenuBarProps {
@@ -92,9 +91,6 @@ export function MenuBar({ activeTabClosable, onCommand }: MenuBarProps) {
           </span>
         </button>
       ))}
-      <div className="ml-auto">
-        <AppThemeIconButton />
-      </div>
     </div>
   );
 }

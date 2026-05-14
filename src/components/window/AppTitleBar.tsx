@@ -1,5 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WindowControls } from "./WindowControls";
+import { TitleBarTrayControls } from "./TitleBarTrayControls";
 
 export function AppTitleBar() {
   const startDrag = (event: React.MouseEvent) => {
@@ -22,6 +23,7 @@ export function AppTitleBar() {
     >
       <div className="w-28 shrink-0" />
       <div className="flex-1 text-center text-[12px] font-semibold truncate">NewMob</div>
+      <TitleBarTrayControls />
       <WindowControls />
     </div>
   );

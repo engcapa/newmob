@@ -15,6 +15,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { TabBar } from "./TabBar";
 import { useContextMenu } from "../ContextMenu";
 import { WindowControls } from "../window/WindowControls";
+import { TitleBarTrayControls } from "../window/TitleBarTrayControls";
 import type { RibbonCommand } from "../menubar/Ribbon";
 
 type CompactCommand = RibbonCommand | "close-active" | "reload-sessions";
@@ -88,6 +89,7 @@ export function CompactTitleBar({
         <TabBar />
       </div>
       <div data-window-drag className="w-10 self-stretch shrink-0" />
+      <TitleBarTrayControls />
       <WindowControls />
     </div>
   );

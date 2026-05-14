@@ -10,7 +10,6 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { parseOpenSshConfig } from "../lib/quickConnect";
 import { listLocalShells, openLocalShellAsAdministrator, type LocalShellOption } from "../lib/ipc";
-import { AppThemeIconButton } from "./settings/AppThemeSwitcher";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
 import type { LocalShellSelection } from "../types";
@@ -104,9 +103,13 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
               <div className="text-[12px] text-[var(--moba-text-muted)]">
                 A cross‑platform port of the MobaXterm experience — Linux • macOS • Windows
               </div>
-            </div>
-            <div className="ml-auto">
-              <AppThemeIconButton />
+              <div
+                data-testid="welcome-version"
+                className="text-[11px] mt-0.5 moba-mono"
+                style={{ color: "var(--moba-text-muted)" }}
+              >
+                Version {__APP_VERSION__}
+              </div>
             </div>
           </div>
 
@@ -155,6 +158,18 @@ export function WelcomePanel({ onStartLocalTerminal, onNewSession }: WelcomePane
               <li>Right‑click any session in the sidebar to connect, edit, duplicate, or delete it.</li>
               <li>Drag a session onto a folder in the tree to update its group.</li>
             </ul>
+          </div>
+
+          <div
+            data-testid="welcome-version-footer"
+            className="mt-6 pt-3 flex items-center justify-between text-[11px] moba-mono"
+            style={{
+              borderTop: "1px solid var(--moba-divider)",
+              color: "var(--moba-text-muted)",
+            }}
+          >
+            <span>NewMob</span>
+            <span>v{__APP_VERSION__}</span>
           </div>
         </div>
       </div>

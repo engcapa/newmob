@@ -37,6 +37,7 @@ import type { SftpTabInfo } from "../types";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { WelcomePanel } from "../components/WelcomePanel";
+import { AboutDialog } from "../components/AboutDialog";
 import { parseQuickConnectInput } from "../lib/quickConnect";
 import { exitApp, type SessionConfig } from "../lib/ipc";
 import { getSessionTerminalProfile, type TerminalProfile } from "../lib/terminalProfile";
@@ -87,6 +88,7 @@ export function MainLayout() {
   const [newSessionGroupPath, setNewSessionGroupPath] = useState<string | null>(null);
   const [newSessionInitialProto, setNewSessionInitialProto] = useState<string | undefined>();
   const [pendingAuth, setPendingAuth] = useState<PendingAuth | null>(null);
+  const [showAbout, setShowAbout] = useState(false);
   const [attachedSidebars, setAttachedSidebars] = useState<Record<string, boolean>>({});
   const [compactSidebarOpen, setCompactSidebarOpen] = useState(false);
   const [terminalCwds, setTerminalCwds] = useState<Record<string, string>>({});
@@ -552,7 +554,7 @@ export function MainLayout() {
         openPlaceholderTab(command === "games" ? "Games" : "Macros", "This module is intentionally inactive in the MVP.");
         break;
       case "help":
-        setActiveTab("welcome");
+        setShowAbout(true);
         break;
       default:
         setStatusMessage("Command is not available in this phase");
@@ -898,6 +900,8 @@ export function MainLayout() {
           onCancel={() => setPendingAuth(null)}
         />
       )}
+
+      {showAbout && <AboutDialog onClose={() => setShowAbout(false)} />}
     </div>
   );
 }
