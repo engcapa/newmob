@@ -9,7 +9,11 @@ import {
 } from "../../lib/vnc";
 import type { WsOutgoing } from "../../lib/vnc";
 import { useVncStore } from "../../stores/vncStore";
+import { useAppStore } from "../../stores/appStore";
 import { Maximize, Minimize, RefreshCw } from "lucide-react";
+import CaptureToolbar from "../capture/CaptureToolbar";
+import { captureCanvasPng } from "../../lib/capture";
+import { readMultiFormat, writeMultiFormat } from "../../lib/clipboard";
 
 export interface VncPanelProps {
   tabId: string;
@@ -114,6 +118,13 @@ export default function VncPanel({
                 break;
               case "clipboard":
                 navigator.clipboard.writeText(msg.text).catch(() => {});
+                break;
+              case "ext_clipboard":
+                writeMultiFormat({
+                  text: msg.text ?? "",
+                  html: msg.html,
+                  rtf: msg.rtf,
+                }).catch(() => {});
                 break;
             }
           }
@@ -231,9 +242,29 @@ export default function VncPanel({
   useEffect(() => {
     if (!visible || conn?.status !== "connected") return;
 
+    const sendLocalClipboardToRemote = async () => {
+      try {
+        const data = await readMultiFormat();
+        if (!data.text && !data.html && !data.rtf) return;
+        sendWs({ type: "ext_clipboard", text: data.text, html: data.html, rtf: data.rtf });
+      } catch {
+        // Permission denied or insecure context — best-effort only.
+      }
+    };
+
     const handleKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
         return;
+
+      // Intercept Ctrl/Meta + V to push the local clipboard to the remote
+      // before the keysym goes through. Without this, the canvas never
+      // receives a `paste` event because it isn't an editable element.
+      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
+        void sendLocalClipboardToRemote();
+        // Still forward the keysym so the remote app sees the V (it will then
+        // use whatever the server-side clipboard now holds).
+      }
+
       const keysym = keyEventToKeysym(e);
       if (keysym === 0) return;
       e.preventDefault();
@@ -243,9 +274,15 @@ export default function VncPanel({
     window.addEventListener("keydown", handleKey);
     window.addEventListener("keyup", handleKey);
 
+    // Keep the legacy paste listener as a secondary path — useful when the
+    // user pastes via context menu and the OS does dispatch the paste event.
     const handlePaste = (e: ClipboardEvent) => {
-      const text = e.clipboardData?.getData("text/plain");
-      if (text) sendWs({ type: "clipboard", text });
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      const html = e.clipboardData?.getData("text/html") || undefined;
+      const rtf = e.clipboardData?.getData("text/rtf") || undefined;
+      if (text || html || rtf) {
+        sendWs({ type: "ext_clipboard", text: text || undefined, html, rtf });
+      }
     };
     window.addEventListener("paste", handlePaste);
 
@@ -414,8 +451,23 @@ export default function VncPanel({
             zIndex: 10,
             display: "flex",
             gap: 4,
+            alignItems: "center",
           }}
         >
+          <CaptureToolbar
+            filenamePrefix={`vnc-${host}`}
+            getVisible={async () => {
+              if (!canvasRef.current) throw new Error("VNC not ready");
+              return await captureCanvasPng(canvasRef.current);
+            }}
+            getFull={async () => {
+              if (!canvasRef.current) throw new Error("VNC not ready");
+              return await captureCanvasPng(canvasRef.current);
+            }}
+            getGifFrame={async () => canvasRef.current ?? null}
+            onStatus={(msg) => useAppStore.getState().setStatusMessage(msg)}
+            compact
+          />
           <button
             onClick={() => setScaleMode((m) => (m === "fit" ? "one" : "fit"))}
             style={{

@@ -9,6 +9,11 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
 
+use crate::vnc::clipboard::{
+    build_caps_body, build_notify_body, build_provide_body, build_request_body,
+    ClipboardFormats, ExtendedClipboardMsg, ENCODING_EXTENDED_CLIPBOARD, FORMAT_HTML, FORMAT_RTF,
+    FORMAT_TEXT,
+};
 use crate::vnc::encodings::DecodedRect;
 use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
 
@@ -33,6 +38,10 @@ pub enum VncControl {
     Key { down: bool, keysym: u32 },
     Pointer { x: u16, y: u16, buttons: u8 },
     Clipboard(String),
+    /// Send an ExtendedClipboard payload using whatever formats the server has
+    /// advertised support for. The relay handles caps negotiation and falls
+    /// back to plain ClientCutText if the server didn't advertise the encoding.
+    ExtendedClipboard(ClipboardFormats),
     Resize,
     Ack,
     Disconnect,
@@ -58,6 +67,15 @@ enum WsIncoming {
     },
     #[serde(rename = "clipboard")]
     Clipboard { text: String },
+    #[serde(rename = "ext_clipboard")]
+    ExtClipboard {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        html: Option<String>,
+        #[serde(default)]
+        rtf: Option<String>,
+    },
     #[serde(rename = "resize")]
     Resize { width: u16, height: u16 },
 }
@@ -77,6 +95,17 @@ enum WsOutgoingText {
     Bell,
     #[serde(rename = "clipboard")]
     Clipboard { text: String },
+    /// Server delivered an ExtendedClipboard payload. The frontend writes the
+    /// matching MIME types to the system clipboard.
+    #[serde(rename = "ext_clipboard")]
+    ExtClipboard {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        html: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rtf: Option<String>,
+    },
 }
 
 // ── Public session handle ───────────────────────────────────────────
@@ -107,12 +136,16 @@ pub async fn spawn_vnc_relay(
     // (scroll) > Raw (fallback). DesktopSize must be listed so server-driven
     // resolution changes keep working. Tight is intentionally omitted — the
     // decoder in encodings.rs is not RFC-compliant and would desync the stream.
+    // ExtendedClipboard (-1063) is a pseudo-encoding advertising support for
+    // multi-format clipboard exchange (HTML/RTF/UTF-8); the server only sends
+    // extended ClientCutText when both sides have advertised it.
     rfb.set_encodings(&[
-        16,   // ZRLE
-        5,    // Hextile
-        1,    // CopyRect
-        0,    // Raw
-        -223, // DesktopSize pseudo
+        16,                          // ZRLE
+        5,                           // Hextile
+        1,                           // CopyRect
+        0,                           // Raw
+        -223,                        // DesktopSize pseudo
+        ENCODING_EXTENDED_CLIPBOARD, // ExtendedClipboard pseudo (-1063)
     ])?;
     rfb.request_update(false)?;
     let writer = rfb.take_writer()?;
@@ -203,6 +236,10 @@ async fn run_relay(
     // Shared "last time we heard from the frontend" — updated on every ping/control.
     let last_seen = Arc::new(AsyncMutex::new(Instant::now()));
 
+    // Server's advertised ExtendedClipboard formats. Set on receipt of the
+    // server's caps message; until then we fall back to plain ClientCutText.
+    let server_clip_caps = Arc::new(AsyncMutex::new(0u32));
+
     // Task: pump outgoing messages → WS sink
     let ws_write = tokio::spawn(async move {
         while let Some(out) = ws_out_rx.recv().await {
@@ -241,6 +278,13 @@ async fn run_relay(
                                 Some(VncControl::Pointer { x, y, buttons })
                             }
                             WsIncoming::Clipboard { text } => Some(VncControl::Clipboard(text)),
+                            WsIncoming::ExtClipboard { text, html, rtf } => {
+                                Some(VncControl::ExtendedClipboard(ClipboardFormats {
+                                    text,
+                                    html,
+                                    rtf,
+                                }))
+                            }
                             WsIncoming::Resize { width, height } => {
                                 let _requested_size = (width, height);
                                 Some(VncControl::Resize)
@@ -265,6 +309,8 @@ async fn run_relay(
     let rfb_writer_for_read = writer.clone();
     let ws_out = ws_out_tx.clone();
     let cancel_vnc = cancel.clone();
+    let server_caps_read = server_clip_caps.clone();
+    let writer_for_caps = writer.clone();
     let vnc_read = tokio::spawn(async move {
         loop {
             if cancel_vnc.is_cancelled() {
@@ -306,6 +352,15 @@ async fn run_relay(
                     let json = serde_json::to_string(&WsOutgoingText::Clipboard { text }).unwrap();
                     let _ = ws_out.send(WsOutgoing::Text(json));
                 }
+                ServerMessage::ExtendedClipboard(ext) => {
+                    handle_server_ext_clipboard(
+                        ext,
+                        &server_caps_read,
+                        &writer_for_caps,
+                        &ws_out,
+                    )
+                    .await;
+                }
                 ServerMessage::SetColourMapEntries => {}
             }
         }
@@ -314,6 +369,7 @@ async fn run_relay(
     // Task: control loop — process commands from WS client
     let rfb_ctrl = writer.clone();
     let cl_cancel = cancel.clone();
+    let server_caps_ctrl = server_clip_caps.clone();
     let vnc_ctrl = tokio::spawn(async move {
         while let Some(ctrl) = control_rx.recv().await {
             if cl_cancel.is_cancelled() {
@@ -325,6 +381,38 @@ async fn run_relay(
                 VncControl::Key { down, keysym } => conn.send_key_event(down, keysym),
                 VncControl::Pointer { x, y, buttons } => conn.send_pointer_event(x, y, buttons),
                 VncControl::Clipboard(text) => conn.send_client_cut_text(&text),
+                VncControl::ExtendedClipboard(formats) => {
+                    let server_caps = *server_caps_ctrl.lock().await;
+                    if server_caps == 0 {
+                        // No caps received — server doesn't support ExtendedClipboard.
+                        if let Some(text) = formats.text.as_deref() {
+                            conn.send_client_cut_text(text)
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        // Filter to formats the server actually supports.
+                        let filtered = ClipboardFormats {
+                            text: if server_caps & FORMAT_TEXT != 0 { formats.text } else { None },
+                            html: if server_caps & FORMAT_HTML != 0 { formats.html } else { None },
+                            rtf: if server_caps & FORMAT_RTF != 0 { formats.rtf } else { None },
+                        };
+                        if filtered.format_mask() == 0 {
+                            Ok(())
+                        } else {
+                            // First send a notify so the server knows we have data,
+                            // then deliver the provide payload directly. TigerVNC
+                            // accepts unsolicited provides.
+                            let _ = conn.send_extended_clipboard(&build_notify_body(
+                                filtered.format_mask(),
+                            ));
+                            match build_provide_body(&filtered) {
+                                Ok(body) => conn.send_extended_clipboard(&body),
+                                Err(e) => Err(e),
+                            }
+                        }
+                    }
+                }
                 VncControl::Resize => conn.request_update(false),
                 VncControl::Disconnect => {
                     cl_cancel.cancel();
@@ -389,6 +477,56 @@ async fn run_relay(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/// Drive the ExtendedClipboard handshake on receipt of a server message.
+async fn handle_server_ext_clipboard(
+    msg: ExtendedClipboardMsg,
+    server_caps: &Arc<AsyncMutex<u32>>,
+    writer: &Arc<tokio::sync::Mutex<RfbWriter>>,
+    ws_out: &UnboundedSender<WsOutgoing>,
+) {
+    // We support UTF-8 text, RTF, and HTML — call out our caps with a generous
+    // 16 MiB ceiling per format.
+    const OUR_CAPS: u32 = FORMAT_TEXT | FORMAT_RTF | FORMAT_HTML;
+    const MAX_SIZE: u32 = 16 * 1024 * 1024;
+
+    match msg {
+        ExtendedClipboardMsg::Caps { formats, .. } => {
+            *server_caps.lock().await = formats & OUR_CAPS;
+            // Reply with our caps so the server knows what to deliver.
+            let body = build_caps_body(OUR_CAPS, MAX_SIZE);
+            let mut w = writer.lock().await;
+            let _ = w.send_extended_clipboard(&body);
+        }
+        ExtendedClipboardMsg::Notify { formats } => {
+            // Server is advertising new clipboard contents — request the
+            // formats it has that we also understand.
+            let want = formats & OUR_CAPS;
+            if want != 0 {
+                let body = build_request_body(want);
+                let mut w = writer.lock().await;
+                let _ = w.send_extended_clipboard(&body);
+            }
+        }
+        ExtendedClipboardMsg::Provide { formats: _, formats_data } => {
+            let json = serde_json::to_string(&WsOutgoingText::ExtClipboard {
+                text: formats_data.text,
+                html: formats_data.html,
+                rtf: formats_data.rtf,
+            })
+            .unwrap();
+            let _ = ws_out.send(WsOutgoing::Text(json));
+        }
+        ExtendedClipboardMsg::Request { formats: _ } => {
+            // The server is asking us to provide clipboard data. We don't keep
+            // a server-side cache of the local clipboard (the frontend pushes
+            // it on demand), so this is a no-op.
+        }
+        ExtendedClipboardMsg::Peek => {
+            // Same as Request — no cached clipboard to peek at.
+        }
+    }
+}
 
 fn make_frame_header(x: u16, y: u16, w: u16, h: u16) -> [u8; 12] {
     let mut hdr = [0u8; 12];

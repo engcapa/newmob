@@ -47,6 +47,12 @@ export type WsOutgoing =
   | { type: "key"; down: boolean; keysym: number }
   | { type: "pointer"; x: number; y: number; buttons: number }
   | { type: "clipboard"; text: string }
+  | {
+      type: "ext_clipboard";
+      text?: string;
+      html?: string;
+      rtf?: string;
+    }
   | { type: "resize"; width: number; height: number };
 
 /** WebSocket message types received from the VNC relay. */
@@ -54,7 +60,13 @@ export type WsIncoming =
   | { type: "connected"; width: number; height: number; name: string }
   | { type: "disconnected"; reason: string }
   | { type: "bell" }
-  | { type: "clipboard"; text: string };
+  | { type: "clipboard"; text: string }
+  | {
+      type: "ext_clipboard";
+      text?: string;
+      html?: string;
+      rtf?: string;
+    };
 
 /** Parse an incoming WS text message. */
 export function parseWsMessage(data: string): WsIncoming | null {
