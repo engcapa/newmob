@@ -55,7 +55,13 @@ vi.mock("../components/statusbar/StatusBar", () => ({
 }));
 
 vi.mock("../components/terminal/TerminalPanel", () => ({
-  TerminalPanel: ({ terminalProfile }: { terminalProfile?: TerminalProfile }) => {
+  TerminalPanel: ({
+    terminalProfile,
+    sftpToggle,
+  }: {
+    terminalProfile?: TerminalProfile;
+    sftpToggle?: { open: boolean; onToggle: () => void };
+  }) => {
     useEffect(() => {
       terminalLifecycle.mounted();
       return () => terminalLifecycle.unmounted();
@@ -65,7 +71,17 @@ vi.mock("../components/terminal/TerminalPanel", () => ({
         data-testid="terminal-panel"
         data-terminal-font-size={terminalProfile?.fontSize ?? ""}
         data-terminal-theme={terminalProfile?.theme ?? ""}
-      />
+      >
+        {sftpToggle && (
+          <button
+            type="button"
+            data-testid="attached-sftp-toggle"
+            onClick={sftpToggle.onToggle}
+          >
+            SFTP
+          </button>
+        )}
+      </div>
     );
   },
 }));

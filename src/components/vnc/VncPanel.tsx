@@ -12,6 +12,7 @@ import { useVncStore } from "../../stores/vncStore";
 import { useAppStore } from "../../stores/appStore";
 import { Maximize, Minimize, RefreshCw } from "lucide-react";
 import CaptureToolbar from "../capture/CaptureToolbar";
+import FloatingToolbar from "../floating-toolbar/FloatingToolbar";
 import { captureCanvasPng } from "../../lib/capture";
 import { readMultiFormat, writeMultiFormat } from "../../lib/clipboard";
 
@@ -443,16 +444,11 @@ export default function VncPanel({
     >
       {/* Scaling toolbar */}
       {showCanvas && (
-        <div
-          style={{
-            position: "absolute",
-            top: 4,
-            right: 4,
-            zIndex: 10,
-            display: "flex",
-            gap: 4,
-            alignItems: "center",
-          }}
+        <FloatingToolbar
+          storageKey="mob.vnc.toolbar"
+          defaultTop={4}
+          defaultRight={4}
+          testId="vnc-floating-toolbar"
         >
           <CaptureToolbar
             filenamePrefix={`vnc-${host}`}
@@ -484,7 +480,7 @@ export default function VncPanel({
           >
             {scaleMode === "fit" ? <Maximize size={14} /> : <Minimize size={14} />}
           </button>
-        </div>
+        </FloatingToolbar>
       )}
 
       {/* Status overlays */}

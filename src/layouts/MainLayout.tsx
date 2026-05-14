@@ -32,7 +32,7 @@ import {
   detachedWindowUrl,
   writeDetachedHandoff,
 } from "../components/filebrowser/SftpDetachedWindow";
-import { FolderOpen, X } from "lucide-react";
+import { X } from "lucide-react";
 import type { SftpTabInfo } from "../types";
 import { useAppStore } from "../stores/appStore";
 import { useSessionStore } from "../stores/sessionStore";
@@ -703,24 +703,8 @@ export function MainLayout() {
                         multiExecActive={multiExecActive}
                         isMultiExecTarget={multiExecActive && multiExecSelectedTabIds.has(tab.id)}
                         onInputBroadcast={isActive && multiExecActive ? (data) => broadcastToSelectedTerminals(data, tab.id) : undefined}
+                        sftpToggle={tab.ssh ? { open: sidebarOpen, onToggle: () => toggleAttachedSidebar(tab.id) } : undefined}
                       />
-                      {tab.ssh && (
-                        <button
-                          type="button"
-                          data-testid="attached-sftp-toggle"
-                          className="absolute top-1 right-2 z-30 px-2 py-0.5 text-[11px] rounded shadow flex items-center gap-1"
-                          style={{
-                            background: sidebarOpen ? "var(--moba-accent)" : "var(--moba-quick-bg)",
-                            color: sidebarOpen ? "#fff" : "var(--moba-text)",
-                            border: "1px solid var(--moba-divider)",
-                          }}
-                          title={sidebarOpen ? "Hide SFTP browser" : "Open SFTP browser"}
-                          onClick={() => toggleAttachedSidebar(tab.id)}
-                        >
-                          <FolderOpen className="w-3 h-3" />
-                          SFTP
-                        </button>
-                      )}
                     </div>
                   );
                   const sftpSidebarNode = sidebarOpen && tab.ssh ? (

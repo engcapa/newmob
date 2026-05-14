@@ -43,6 +43,8 @@ import {
   type XtermCaptureTheme,
 } from "../../lib/capture";
 import CaptureToolbar from "../capture/CaptureToolbar";
+import FloatingToolbar from "../floating-toolbar/FloatingToolbar";
+import { FolderOpen } from "lucide-react";
 import {
   createInputEchoSuppressor,
   type InputEchoSuppressor,
@@ -123,6 +125,12 @@ interface TerminalPanelProps {
   isMultiExecTarget?: boolean;
   /** Called with user input when MultiExec is active; parent broadcasts to other terminals. */
   onInputBroadcast?: (data: string) => void;
+  /** When set, the floating toolbar shows an SFTP toggle button. Only used
+   *  for SSH terminals where the parent owns the attached SFTP sidebar. */
+  sftpToggle?: {
+    open: boolean;
+    onToggle: () => void;
+  };
 }
 
 const DEFAULT_FONT_SIZE = 14;
@@ -161,6 +169,7 @@ export function TerminalPanel({
   multiExecActive,
   isMultiExecTarget,
   onInputBroadcast,
+  sftpToggle,
 }: TerminalPanelProps) {
   const cwdCallbackRef = useRef<typeof onCwdChange>(onCwdChange);
   const onSessionReadyRef = useRef<typeof onSessionReady>(onSessionReady);
@@ -1572,9 +1581,11 @@ export function TerminalPanel({
     >
       <div ref={containerRef} className="w-full h-full" />
 
-      <div
-        className={`absolute top-1 z-50 pointer-events-auto ${ssh ? "right-16" : "right-1"}`}
-        style={{ display: "flex", gap: 4, alignItems: "center" }}
+      <FloatingToolbar
+        storageKey={`mob.terminal.toolbar.${ssh ? "ssh" : "local"}`}
+        defaultTop={4}
+        defaultRight={4}
+        testId="terminal-floating-toolbar"
       >
         <CaptureToolbar
           filenamePrefix={`${safeFilePart(tabTitle)}`}
@@ -1635,11 +1646,34 @@ export function TerminalPanel({
           onStatus={(msg) => setStatusMessage(msg)}
           compact
         />
-      </div>
+        {sftpToggle && (
+          <button
+            type="button"
+            data-testid="attached-sftp-toggle"
+            onClick={sftpToggle.onToggle}
+            title={sftpToggle.open ? "Hide SFTP browser" : "Open SFTP browser"}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 4,
+              padding: "2px 8px",
+              fontSize: 11,
+              borderRadius: 4,
+              background: sftpToggle.open ? "var(--moba-accent)" : "rgba(0,0,0,0.5)",
+              color: sftpToggle.open ? "#fff" : "#ccc",
+              border: "1px solid rgba(255,255,255,0.2)",
+              cursor: "pointer",
+            }}
+          >
+            <FolderOpen size={12} />
+            SFTP
+          </button>
+        )}
+      </FloatingToolbar>
 
       {isMultiExecTarget && (
         <div
-          className={`absolute top-1 z-40 px-1.5 py-0.5 rounded pointer-events-none ${ssh ? "right-32" : "right-20"}`}
+          className="absolute top-1 left-1 z-40 px-1.5 py-0.5 rounded pointer-events-none"
           style={{ background: "var(--moba-accent)", color: "#fff", opacity: 0.85, fontSize: 10, fontWeight: 600 }}
         >
           ⊕ MultiExec
