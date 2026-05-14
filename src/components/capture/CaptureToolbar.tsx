@@ -18,6 +18,7 @@ import {
   Clipboard,
   Download,
   FileImage,
+  ScrollText,
   Square,
   Video,
 } from "lucide-react";
@@ -27,13 +28,20 @@ import {
   type GifRecorder,
   saveBlobToFile,
   safeFilePart,
+  startScrollCapture,
+  type ScrollCapture,
   timestampFilePart,
 } from "../../lib/capture";
 
 export interface CaptureToolbarProps {
   filenamePrefix: string;
   getVisible: () => Promise<Blob>;
+  /** Whole-buffer snapshot (e.g. xterm scrollback). When provided, the
+   *  default scroll-screenshot action saves it directly. */
   getFull?: () => Promise<Blob>;
+  /** Frame source for live scroll capture (Start → manual scroll → Stop).
+   *  Falls back to getFull when omitted. */
+  getScrollFrame?: () => Promise<CanvasImageSource | null> | CanvasImageSource | null;
   getGifFrame?: () => Promise<CanvasImageSource | null> | CanvasImageSource | null;
   onStatus?: (msg: string) => void;
   /** Override default styling; e.g. position relative to a container. */
@@ -78,6 +86,7 @@ export default function CaptureToolbar({
   filenamePrefix,
   getVisible,
   getFull,
+  getScrollFrame,
   getGifFrame,
   onStatus,
   style,
@@ -87,6 +96,8 @@ export default function CaptureToolbar({
   const [recorder, setRecorder] = useState<GifRecorder | null>(null);
   const [recordingStartedAt, setRecordingStartedAt] = useState<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [scroller, setScroller] = useState<ScrollCapture | null>(null);
+  const [scrollProgress, setScrollProgress] = useState({ frames: 0, height: 0 });
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   // Tick the elapsed display while recording.
@@ -120,8 +131,12 @@ export default function CaptureToolbar({
     setMenuOpen(false);
     try {
       const blob = await getVisible();
-      saveBlobToFile(blob, baseName("png"));
-      onStatus?.("Saved screenshot");
+      const saved = await saveBlobToFile(blob, baseName("png"));
+      if (saved) {
+        onStatus?.(`Saved screenshot to ${saved}`);
+      } else {
+        onStatus?.("Save canceled");
+      }
     } catch (err) {
       onStatus?.(err instanceof Error ? err.message : "Screenshot failed");
     }
@@ -144,12 +159,52 @@ export default function CaptureToolbar({
     try {
       onStatus?.("Capturing scroll screenshot…");
       const blob = await getFull();
-      saveBlobToFile(blob, baseName("png"));
-      onStatus?.("Saved scroll screenshot");
+      const saved = await saveBlobToFile(blob, baseName("png"));
+      if (saved) {
+        onStatus?.(`Saved scroll screenshot to ${saved}`);
+      } else {
+        onStatus?.("Save canceled");
+      }
     } catch (err) {
       onStatus?.(err instanceof Error ? err.message : "Scroll capture failed");
     }
   }, [baseName, getFull, onStatus]);
+
+  const handleStartScrollCapture = useCallback(() => {
+    setMenuOpen(false);
+    if (!getScrollFrame || scroller) return;
+    setScrollProgress({ frames: 0, height: 0 });
+    const s = startScrollCapture({
+      getFrame: getScrollFrame,
+      intervalMs: 250,
+      onProgress: (info) => setScrollProgress(info),
+    });
+    setScroller(s);
+    onStatus?.("Scroll capture started — scroll the view, then press Stop");
+  }, [getScrollFrame, onStatus, scroller]);
+
+  const handleStopScrollCapture = useCallback(async () => {
+    if (!scroller) return;
+    onStatus?.("Finalizing scroll screenshot…");
+    try {
+      const blob = await scroller.stop();
+      if (blob.size === 0) {
+        onStatus?.("Scroll capture stopped (no frames)");
+        return;
+      }
+      const saved = await saveBlobToFile(blob, baseName("png"));
+      if (saved) {
+        onStatus?.(`Saved scroll screenshot to ${saved}`);
+      } else {
+        onStatus?.("Save canceled");
+      }
+    } catch (err) {
+      onStatus?.(err instanceof Error ? err.message : "Scroll capture failed");
+    } finally {
+      setScroller(null);
+      setScrollProgress({ frames: 0, height: 0 });
+    }
+  }, [baseName, onStatus, scroller]);
 
   const handleStartRecording = useCallback(() => {
     if (!getGifFrame || recorder) return;
@@ -173,8 +228,12 @@ export default function CaptureToolbar({
     try {
       const blob = await recorder.stop();
       if (blob.size > 0) {
-        saveBlobToFile(blob, baseName("gif"));
-        onStatus?.(`Saved GIF (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+        const saved = await saveBlobToFile(blob, baseName("gif"));
+        if (saved) {
+          onStatus?.(`Saved GIF (${(blob.size / 1024 / 1024).toFixed(1)} MB) to ${saved}`);
+        } else {
+          onStatus?.("GIF save canceled");
+        }
       } else {
         onStatus?.("Recording stopped (no frames)");
       }
@@ -188,6 +247,7 @@ export default function CaptureToolbar({
   }, [baseName, onStatus, recorder]);
 
   const isRecording = recorder !== null;
+  const isScrollCapturing = scroller !== null;
 
   return (
     <div
@@ -198,35 +258,58 @@ export default function CaptureToolbar({
         ...style,
       }}
     >
-      {/* Visible screenshot — split button */}
+      {/* Active-capture pill: only visible while a scroll capture or GIF
+       *  recording is running. Tap Stop to finalize. */}
+      {isScrollCapturing && (
+        <button
+          onClick={() => void handleStopScrollCapture()}
+          style={{
+            ...BUTTON_STYLE,
+            color: "#5cb8ff",
+            borderColor: "rgba(92,184,255,0.6)",
+          }}
+          title="Stop scroll capture and save"
+        >
+          <Square size={14} />
+          <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12 }}>
+            {scrollProgress.frames}f
+          </span>
+        </button>
+      )}
+      {isRecording && (
+        <button
+          onClick={() => void handleStopRecording()}
+          style={{
+            ...BUTTON_STYLE,
+            color: "#ff5050",
+            borderColor: "rgba(255,80,80,0.6)",
+          }}
+          title="Stop GIF recording"
+        >
+          <Square size={14} />
+          <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12 }}>
+            {formatElapsed(elapsed)}
+          </span>
+        </button>
+      )}
+
+      {/* Single camera button → dropdown with every capture action.
+       *  Hides into a 22×22 icon so it never collides with neighbouring
+       *  toolbar buttons (e.g. the SFTP toggle). */}
       <div ref={menuRef} style={{ position: "relative" }}>
-        <div style={{ display: "flex" }}>
-          <button
-            onClick={() => void handleSaveVisible()}
-            style={{
-              ...BUTTON_STYLE,
-              borderTopRightRadius: 0,
-              borderBottomRightRadius: 0,
-            }}
-            title="Save visible-area screenshot"
-          >
-            <Camera size={14} />
-            {compact ? null : <span>Screenshot</span>}
-          </button>
-          <button
-            onClick={() => setMenuOpen((v) => !v)}
-            style={{
-              ...BUTTON_STYLE,
-              borderTopLeftRadius: 0,
-              borderBottomLeftRadius: 0,
-              borderLeft: "none",
-              padding: "4px 2px",
-            }}
-            title="Screenshot options"
-          >
-            <ChevronDown size={12} />
-          </button>
-        </div>
+        <button
+          onClick={() => setMenuOpen((v) => !v)}
+          style={{
+            ...BUTTON_STYLE,
+            opacity: menuOpen ? 1 : 0.6,
+          }}
+          title="Capture"
+          aria-label="Capture menu"
+        >
+          <Camera size={14} />
+          {compact ? null : <span>Capture</span>}
+          <ChevronDown size={12} />
+        </button>
         {menuOpen && (
           <div
             style={{
@@ -237,7 +320,7 @@ export default function CaptureToolbar({
               background: "rgba(20,20,28,0.95)",
               border: "1px solid rgba(255,255,255,0.15)",
               borderRadius: 4,
-              minWidth: 180,
+              minWidth: 220,
               zIndex: 50,
               boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
             }}
@@ -253,31 +336,33 @@ export default function CaptureToolbar({
                 <FileImage size={14} /> Save full scroll PNG
               </button>
             )}
+            {getScrollFrame && (
+              <button
+                onClick={
+                  isScrollCapturing
+                    ? () => void handleStopScrollCapture()
+                    : handleStartScrollCapture
+                }
+                style={MENU_ITEM_STYLE}
+              >
+                <ScrollText size={14} />
+                {isScrollCapturing
+                  ? `Stop scroll capture (${scrollProgress.frames} frames)`
+                  : "Start scroll capture (manual scroll)"}
+              </button>
+            )}
+            {getGifFrame && (
+              <button
+                onClick={isRecording ? () => void handleStopRecording() : handleStartRecording}
+                style={MENU_ITEM_STYLE}
+              >
+                {isRecording ? <Square size={14} /> : <Video size={14} />}
+                {isRecording ? `Stop GIF (${formatElapsed(elapsed)})` : "Record GIF"}
+              </button>
+            )}
           </div>
         )}
       </div>
-
-      {/* GIF record */}
-      {getGifFrame && (
-        <button
-          onClick={isRecording ? () => void handleStopRecording() : handleStartRecording}
-          style={{
-            ...BUTTON_STYLE,
-            color: isRecording ? "#ff5050" : "#ccc",
-            borderColor: isRecording ? "rgba(255,80,80,0.6)" : "rgba(255,255,255,0.2)",
-          }}
-          title={isRecording ? "Stop GIF recording" : "Record GIF"}
-        >
-          {isRecording ? <Square size={14} /> : <Video size={14} />}
-          {isRecording ? (
-            <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 12 }}>
-              {formatElapsed(elapsed)}
-            </span>
-          ) : compact ? null : (
-            <span>GIF</span>
-          )}
-        </button>
-      )}
     </div>
   );
 }

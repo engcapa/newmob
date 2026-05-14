@@ -241,6 +241,16 @@ export async function selectSaveDirectory(currentPath?: string): Promise<string 
   return invoke<string | null>("select_save_directory", { currentPath: currentPath ?? null });
 }
 
+export async function selectSaveFilePath(
+  defaultName?: string,
+  currentPath?: string,
+): Promise<string | null> {
+  return invoke<string | null>("select_save_file_path", {
+    defaultName: defaultName ?? null,
+    currentPath: currentPath ?? null,
+  });
+}
+
 export async function readFileBytes(path: string): Promise<Uint8Array> {
   const buffer = await invoke<ArrayBuffer>("read_file_bytes", { path });
   return new Uint8Array(buffer);

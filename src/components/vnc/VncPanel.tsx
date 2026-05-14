@@ -464,6 +464,7 @@ export default function VncPanel({
               if (!canvasRef.current) throw new Error("VNC not ready");
               return await captureCanvasPng(canvasRef.current);
             }}
+            getScrollFrame={async () => canvasRef.current ?? null}
             getGifFrame={async () => canvasRef.current ?? null}
             onStatus={(msg) => useAppStore.getState().setStatusMessage(msg)}
             compact

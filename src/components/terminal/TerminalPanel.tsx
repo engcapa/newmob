@@ -39,6 +39,7 @@ import {
   captureContainerCanvasesPng,
   captureXtermFullBuffer,
   captureXtermVisible,
+  renderXtermVisibleToCanvas,
   type XtermCaptureTheme,
 } from "../../lib/capture";
 import CaptureToolbar from "../capture/CaptureToolbar";
@@ -1572,7 +1573,7 @@ export function TerminalPanel({
       <div ref={containerRef} className="w-full h-full" />
 
       <div
-        className="absolute top-1 right-1 z-50 pointer-events-auto"
+        className={`absolute top-1 z-50 pointer-events-auto ${ssh ? "right-16" : "right-1"}`}
         style={{ display: "flex", gap: 4, alignItems: "center" }}
       >
         <CaptureToolbar
@@ -1607,11 +1608,29 @@ export function TerminalPanel({
             };
             return await captureXtermFullBuffer(term, theme);
           }}
-          getGifFrame={async () => {
-            const container = containerRef.current;
-            if (!container) return null;
-            const canvas = container.querySelector("canvas");
-            return canvas ?? null;
+          getScrollFrame={() => {
+            const term = termRef.current;
+            if (!term) return null;
+            const theme: XtermCaptureTheme = {
+              background: resolvedTheme.background ?? "#1d1f21",
+              foreground: resolvedTheme.foreground ?? "#eaeaea",
+              fontFamily,
+              fontSize,
+              lineHeight: 1.2,
+            };
+            return renderXtermVisibleToCanvas(term, theme);
+          }}
+          getGifFrame={() => {
+            const term = termRef.current;
+            if (!term) return null;
+            const theme: XtermCaptureTheme = {
+              background: resolvedTheme.background ?? "#1d1f21",
+              foreground: resolvedTheme.foreground ?? "#eaeaea",
+              fontFamily,
+              fontSize,
+              lineHeight: 1.2,
+            };
+            return renderXtermVisibleToCanvas(term, theme);
           }}
           onStatus={(msg) => setStatusMessage(msg)}
           compact
@@ -1620,7 +1639,7 @@ export function TerminalPanel({
 
       {isMultiExecTarget && (
         <div
-          className="absolute top-1 right-16 z-40 px-1.5 py-0.5 rounded pointer-events-none"
+          className={`absolute top-1 z-40 px-1.5 py-0.5 rounded pointer-events-none ${ssh ? "right-32" : "right-20"}`}
           style={{ background: "var(--moba-accent)", color: "#fff", opacity: 0.85, fontSize: 10, fontWeight: 600 }}
         >
           ⊕ MultiExec
