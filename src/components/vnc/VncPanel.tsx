@@ -11,6 +11,8 @@ import {
   parseFrameHeader,
   keyEventToKeysym,
   mouseButtonMask,
+  codePointToKeysym,
+  iterCodePoints,
 } from "../../lib/vnc";
 import type { WsOutgoing } from "../../lib/vnc";
 import { useVncStore } from "../../stores/vncStore";
@@ -106,6 +108,12 @@ export default function VncPanel({
     heldModifiers: Set<number>;
     deferredKeyUps: Set<number>;
   } | null>(null);
+  // Tracks whether the connected server negotiated the ExtendedClipboard
+  // pseudo-encoding. When false (e.g. vino-server), we type non-ASCII paste
+  // content as Unicode keysyms because legacy ClientCutText is Latin-1 and
+  // mojibakes CJK. Stored as a ref so the keyboard handler reads the latest
+  // value without re-binding.
+  const extClipboardSupportedRef = useRef<boolean>(false);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
 
   const store = useVncStore();
@@ -199,6 +207,12 @@ export default function VncPanel({
                   rtf: msg.rtf,
                 }).catch(() => {});
                 break;
+              case "ext_clipboard_support":
+                extClipboardSupportedRef.current = msg.available;
+                console.info(
+                  `[vnc.clip] server ExtendedClipboard support: ${msg.available}`,
+                );
+                break;
             }
           }
         };
@@ -261,6 +275,7 @@ export default function VncPanel({
       pendingPointerRef.current = null;
       lastPointerSentRef.current = null;
       pasteInFlightRef.current = null;
+      extClipboardSupportedRef.current = false;
       const sid = sessionIdRef.current;
       if (sid) {
         vncDisconnect(sid).catch(() => {});
@@ -332,56 +347,122 @@ export default function VncPanel({
   useEffect(() => {
     if (!visible || conn?.status !== "connected") return;
 
-    const sendLocalClipboardToRemote = async () => {
+    const readLocalClipboard = async (): Promise<{
+      text: string;
+      html?: string;
+      rtf?: string;
+    } | null> => {
       try {
         const data = await readMultiFormat();
-        if (!data.text && !data.html && !data.rtf) return;
-        sendWs({ type: "ext_clipboard", text: data.text, html: data.html, rtf: data.rtf });
-      } catch {
-        // Permission denied or insecure context — best-effort only.
+        if (!data.text && !data.html && !data.rtf) return null;
+        return { text: data.text || "", html: data.html, rtf: data.rtf };
+      } catch (err) {
+        console.warn("[vnc.clip] read local clipboard failed:", err);
+        return null;
       }
     };
 
-    const sendPasteKeyAfterClipboard = (e: KeyboardEvent) => {
-      const keysym = keyEventToKeysym(e);
-      if (keysym === 0 || pasteInFlightRef.current) return;
+    const sendExtClipboardToRelay = (data: {
+      text: string;
+      html?: string;
+      rtf?: string;
+    }) => {
+      sendWs({
+        type: "ext_clipboard",
+        text: data.text || undefined,
+        html: data.html,
+        rtf: data.rtf,
+      });
+    };
+
+    /**
+     * When the user presses Ctrl+V on the canvas, decide between three paths:
+     *
+     * 1. Server speaks ExtendedClipboard → push the clipboard up via the
+     *    relay (UTF-8 + zlib via ExtClipboard provide), then forward the V
+     *    keysym so the remote app does its normal paste.
+     * 2. Clipboard is ASCII-only → push via legacy ClientCutText (Latin-1
+     *    safe), then forward V. Works with every server.
+     * 3. Clipboard contains non-ASCII characters AND server doesn't speak
+     *    ExtendedClipboard (vino-server etc.) → type each character as a
+     *    Unicode keysym. We deliberately skip pushing to the clipboard and
+     *    skip the V keystroke: the legacy channel is Latin-1 and would
+     *    mojibake CJK, and we don't want a V to fire and grab the prior
+     *    clipboard content from the server. Modifier keys are still
+     *    suppressed and re-released so Ctrl/Cmd/Shift state stays consistent.
+     */
+    const handlePasteShortcut = (e: KeyboardEvent) => {
+      const pasteKeysym = keyEventToKeysym(e);
+      if (pasteKeysym === 0 || pasteInFlightRef.current) return;
 
       pasteInFlightRef.current = {
-        pasteKeysym: keysym,
+        pasteKeysym,
         heldModifiers: pasteModifierKeysyms(e),
         deferredKeyUps: new Set<number>(),
       };
 
       void (async () => {
-        try {
-          await sendLocalClipboardToRemote();
-        } finally {
-          if (destroyedRef.current) {
+        const clipboard = await readLocalClipboard();
+        if (clipboard) {
+          sendExtClipboardToRelay(clipboard);
+        }
+        const text = clipboard?.text ?? "";
+        const hasNonAscii = /[^\x00-\x7f]/.test(text);
+        const useUnicodeTyping =
+          hasNonAscii && !extClipboardSupportedRef.current;
+        console.info(
+          `[vnc.clip] paste shortcut: text_len=${text.length} non_ascii=${hasNonAscii} ext_support=${extClipboardSupportedRef.current} → ${useUnicodeTyping ? "type-as-keysyms" : "clipboard+V"}`,
+        );
+
+        if (destroyedRef.current) {
+          pasteInFlightRef.current = null;
+          return;
+        }
+        if (pasteDelayTimerRef.current !== null) {
+          window.clearTimeout(pasteDelayTimerRef.current);
+        }
+
+        // Wait briefly so the relay has time to ship the clipboard payload
+        // ahead of the V keystroke (when we send one).
+        pasteDelayTimerRef.current = window.setTimeout(() => {
+          pasteDelayTimerRef.current = null;
+          const pending = pasteInFlightRef.current;
+          if (!pending || destroyedRef.current) {
             pasteInFlightRef.current = null;
             return;
           }
-          if (pasteDelayTimerRef.current !== null) {
-            window.clearTimeout(pasteDelayTimerRef.current);
-          }
-          pasteDelayTimerRef.current = window.setTimeout(() => {
-            pasteDelayTimerRef.current = null;
-            const pending = pasteInFlightRef.current;
-            if (!pending || destroyedRef.current) {
-              pasteInFlightRef.current = null;
-              return;
-            }
 
+          // Release any held modifiers (Ctrl/Cmd/Shift) before injecting
+          // characters — otherwise the remote app sees Ctrl+character
+          // shortcuts instead of plain text.
+          pending.heldModifiers.forEach((modKeysym) => {
+            sendWsBinary(encodeWsKey(false, modKeysym));
+          });
+
+          if (useUnicodeTyping) {
+            for (const cp of iterCodePoints(text)) {
+              const ks = codePointToKeysym(cp);
+              sendWsBinary(encodeWsKey(true, ks));
+              sendWsBinary(encodeWsKey(false, ks));
+            }
+          } else {
+            // Clipboard path: re-press modifiers and send V so the remote
+            // app's paste shortcut fires against the now-updated clipboard.
             pending.heldModifiers.forEach((modKeysym) => {
               sendWsBinary(encodeWsKey(true, modKeysym));
             });
-            sendWsBinary(encodeWsKey(true, keysym));
-            sendWsBinary(encodeWsKey(false, keysym));
-            pending.deferredKeyUps.forEach((modKeysym) => {
-              sendWsBinary(encodeWsKey(false, modKeysym));
-            });
-            pasteInFlightRef.current = null;
-          }, PASTE_KEY_DELAY_MS);
-        }
+            sendWsBinary(encodeWsKey(true, pasteKeysym));
+            sendWsBinary(encodeWsKey(false, pasteKeysym));
+          }
+
+          // The user's physical modifier keys are still held — defer their
+          // key-ups until the user actually releases them so we don't
+          // generate phantom up events.
+          pending.deferredKeyUps.forEach((modKeysym) => {
+            sendWsBinary(encodeWsKey(false, modKeysym));
+          });
+          pasteInFlightRef.current = null;
+        }, PASTE_KEY_DELAY_MS);
       })();
     };
 
@@ -409,7 +490,7 @@ export default function VncPanel({
       if (isPasteShortcut(e)) {
         e.preventDefault();
         if (e.type === "keydown" && !e.repeat) {
-          sendPasteKeyAfterClipboard(e);
+          handlePasteShortcut(e);
         }
         return;
       }
@@ -425,12 +506,20 @@ export default function VncPanel({
 
     // Keep the legacy paste listener as a secondary path — useful when the
     // user pastes via context menu and the OS does dispatch the paste event.
+    // For non-ASCII content we still type as Unicode keysyms when the server
+    // doesn't speak ExtendedClipboard.
     const handlePaste = (e: ClipboardEvent) => {
       const text = e.clipboardData?.getData("text/plain") ?? "";
       const html = e.clipboardData?.getData("text/html") || undefined;
       const rtf = e.clipboardData?.getData("text/rtf") || undefined;
-      if (text || html || rtf) {
-        sendWs({ type: "ext_clipboard", text: text || undefined, html, rtf });
+      if (!text && !html && !rtf) return;
+      sendWs({ type: "ext_clipboard", text: text || undefined, html, rtf });
+      if (text && /[^\x00-\x7f]/.test(text) && !extClipboardSupportedRef.current) {
+        for (const cp of iterCodePoints(text)) {
+          const ks = codePointToKeysym(cp);
+          sendWsBinary(encodeWsKey(true, ks));
+          sendWsBinary(encodeWsKey(false, ks));
+        }
       }
     };
     window.addEventListener("paste", handlePaste);

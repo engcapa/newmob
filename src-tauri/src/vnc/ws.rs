@@ -14,7 +14,7 @@ use crate::vnc::clipboard::{
     build_caps_body, build_notify_body, build_provide_body, build_request_body, ClipboardFormats,
     ExtendedClipboardMsg, ACTION_CAPS, ACTION_NOTIFY, ACTION_PROVIDE, ACTION_REQUEST,
     ENCODING_EXTENDED_CLIPBOARD, ENCODING_EXTENDED_CLIPBOARD_LEGACY, FORMAT_HTML, FORMAT_RTF,
-    FORMAT_TEXT,
+    FORMAT_TEXT, SUPPORTED_ACTIONS,
 };
 use crate::vnc::encodings::DecodedRect;
 use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
@@ -115,6 +115,12 @@ enum WsOutgoingText {
         #[serde(skip_serializing_if = "Option::is_none")]
         rtf: Option<String>,
     },
+    /// Tells the frontend whether the connected server negotiated the
+    /// ExtendedClipboard pseudo-encoding. When false, the frontend types
+    /// non-ASCII paste content as Unicode keysyms because the legacy
+    /// ClientCutText channel is Latin-1 only and would mojibake CJK.
+    #[serde(rename = "ext_clipboard_support")]
+    ExtClipboardSupport { available: bool },
 }
 
 // ── Public session handle ───────────────────────────────────────────
@@ -296,8 +302,22 @@ async fn run_relay(
                             WsIncoming::Pointer { x, y, buttons } => {
                                 Some(VncControl::Pointer { x, y, buttons })
                             }
-                            WsIncoming::Clipboard { text } => Some(VncControl::Clipboard(text)),
+                            WsIncoming::Clipboard { text } => {
+                                log::info!(
+                                    "vnc.clip: ws→relay legacy clipboard, len={} preview={:?}",
+                                    text.len(),
+                                    truncate_preview(&text, 32),
+                                );
+                                Some(VncControl::Clipboard(text))
+                            }
                             WsIncoming::ExtClipboard { text, html, rtf } => {
+                                log::info!(
+                                    "vnc.clip: ws→relay ext clipboard text_len={} html_len={} rtf_len={} preview={:?}",
+                                    text.as_deref().map(str::len).unwrap_or(0),
+                                    html.as_deref().map(str::len).unwrap_or(0),
+                                    rtf.as_deref().map(str::len).unwrap_or(0),
+                                    text.as_deref().map(|t| truncate_preview(t, 32)).unwrap_or_default(),
+                                );
                                 Some(VncControl::ExtendedClipboard(ClipboardFormats {
                                     text,
                                     html,
@@ -374,10 +394,16 @@ async fn run_relay(
                     let _ = ws_out.send(WsOutgoing::Text(json));
                 }
                 ServerMessage::ServerCutText { text } => {
+                    log::info!(
+                        "vnc.clip: server→client legacy cut text len={} preview={:?}",
+                        text.len(),
+                        truncate_preview(&text, 32),
+                    );
                     let json = serde_json::to_string(&WsOutgoingText::Clipboard { text }).unwrap();
                     let _ = ws_out.send(WsOutgoing::Text(json));
                 }
                 ServerMessage::ExtendedClipboard(ext) => {
+                    log::info!("vnc.clip: server→client ext clipboard {:?}", &ext);
                     handle_server_ext_clipboard(
                         ext,
                         &server_caps_read,
@@ -428,13 +454,20 @@ async fn run_relay(
                 VncControl::Pointer { x, y, buttons } => {
                     rfb_ctrl.lock().await.send_pointer_event(x, y, buttons)
                 }
-                VncControl::Clipboard(text) => rfb_ctrl.lock().await.send_client_cut_text(&text),
+                VncControl::Clipboard(text) => {
+                    log::debug!("vnc.clip: relay→server legacy cut text len={}", text.len());
+                    rfb_ctrl.lock().await.send_client_cut_text(&text)
+                }
                 VncControl::ExtendedClipboard(formats) => {
                     let server_caps = *server_caps_ctrl.lock().await;
                     *latest_clipboard_ctrl.lock().await = Some(formats.clone());
                     let mut conn = rfb_ctrl.lock().await;
                     if server_caps.formats == 0 {
                         // No caps received — server doesn't support ExtendedClipboard.
+                        log::info!(
+                            "vnc.clip: relay→server FALLBACK (no ext caps), sending legacy cut text len={}",
+                            formats.text.as_deref().map(str::len).unwrap_or(0),
+                        );
                         if let Some(text) = formats.text.as_deref() {
                             conn.send_client_cut_text(text)
                         } else {
@@ -460,8 +493,18 @@ async fn run_relay(
                             },
                         };
                         if filtered.format_mask() == 0 {
+                            log::info!(
+                                "vnc.clip: relay→server skip — server caps {:b} don't overlap with our payload",
+                                server_caps.formats,
+                            );
                             Ok(())
                         } else {
+                            log::info!(
+                                "vnc.clip: relay→server ext (server caps fmt={:b} actions={:b}) text_len={}",
+                                server_caps.formats,
+                                server_caps.actions,
+                                filtered.text.as_deref().map(str::len).unwrap_or(0),
+                            );
                             if can_send_notify(server_caps) {
                                 let _ = conn.send_extended_clipboard(&build_notify_body(
                                     filtered.format_mask(),
@@ -559,20 +602,45 @@ async fn handle_server_ext_clipboard(
         ExtendedClipboardMsg::Caps {
             formats, actions, ..
         } => {
+            log::info!(
+                "vnc.clip: ← Caps from server formats={:b} actions={:b} (negotiated {:b})",
+                formats,
+                actions,
+                formats & OUR_CAPS,
+            );
             *server_caps.lock().await = ServerClipboardCaps {
                 formats: formats & OUR_CAPS,
                 actions,
             };
             // Reply with our caps so the server knows what to deliver.
             let body = build_caps_body(OUR_CAPS, MAX_SIZE);
+            log::info!(
+                "vnc.clip: → Caps to server formats={:b} actions={:b}",
+                OUR_CAPS,
+                SUPPORTED_ACTIONS,
+            );
             let mut w = writer.lock().await;
             let _ = w.send_extended_clipboard(&body);
+            // Tell the frontend whether the server supports ExtendedClipboard.
+            // The frontend uses this to decide whether to type non-ASCII paste
+            // text as Unicode keysyms (works on every server) instead of
+            // relying on the clipboard channel (which legacy servers limit to
+            // Latin-1).
+            let support = WsOutgoingText::ExtClipboardSupport {
+                available: actions != 0 && (formats & OUR_CAPS) != 0,
+            };
+            if let Ok(json) = serde_json::to_string(&support) {
+                let _ = ws_out.send(WsOutgoing::Text(json));
+            }
         }
         ExtendedClipboardMsg::Notify { formats } => {
-            // Server is advertising new clipboard contents — request the
-            // formats it has that we also understand.
             let want = formats & OUR_CAPS;
             let caps = *server_caps.lock().await;
+            log::info!(
+                "vnc.clip: ← Notify from server formats={:b}, requesting={:b}",
+                formats,
+                want,
+            );
             if want != 0 && can_send_request(caps) {
                 let body = build_request_body(want);
                 let mut w = writer.lock().await;
@@ -583,6 +651,17 @@ async fn handle_server_ext_clipboard(
             formats: _,
             formats_data,
         } => {
+            log::info!(
+                "vnc.clip: ← Provide from server text_len={} html_len={} rtf_len={} preview={:?}",
+                formats_data.text.as_deref().map(str::len).unwrap_or(0),
+                formats_data.html.as_deref().map(str::len).unwrap_or(0),
+                formats_data.rtf.as_deref().map(str::len).unwrap_or(0),
+                formats_data
+                    .text
+                    .as_deref()
+                    .map(|t| truncate_preview(t, 32))
+                    .unwrap_or_default(),
+            );
             let json = serde_json::to_string(&WsOutgoingText::ExtClipboard {
                 text: formats_data.text,
                 html: formats_data.html,
@@ -592,6 +671,7 @@ async fn handle_server_ext_clipboard(
             let _ = ws_out.send(WsOutgoing::Text(json));
         }
         ExtendedClipboardMsg::Request { formats } => {
+            log::info!("vnc.clip: ← Request from server formats={:b}", formats);
             let cached = latest_local_clipboard.lock().await.clone();
             if let Some(data) = cached {
                 let filtered = filter_clipboard_formats(data, formats & OUR_CAPS);
@@ -604,6 +684,7 @@ async fn handle_server_ext_clipboard(
             }
         }
         ExtendedClipboardMsg::Peek => {
+            log::info!("vnc.clip: ← Peek from server");
             let formats = latest_local_clipboard
                 .lock()
                 .await
@@ -760,4 +841,15 @@ fn make_frame_header(x: u16, y: u16, w: u16, h: u16) -> [u8; 12] {
     hdr[6..8].copy_from_slice(&h.to_be_bytes());
     // bytes 8-11 reserved (zero)
     hdr
+}
+
+/// Trim a string to at most `max_chars` characters for log output without
+/// breaking grapheme boundaries.
+fn truncate_preview(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut out: String = (&mut chars).take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }

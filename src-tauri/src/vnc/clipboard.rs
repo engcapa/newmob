@@ -270,17 +270,14 @@ pub fn decode_legacy_cut_text(bytes: &[u8]) -> String {
     bytes.iter().map(|b| char::from(*b)).collect()
 }
 
+// RFC 6143 nominally specifies Latin-1 for legacy ClientCutText, but every
+// modern VNC server (TigerVNC/RealVNC/TightVNC/TurboVNC/NoVNC) treats the body
+// as UTF-8. Truncating to Latin-1 mojibakes anything outside ASCII (Chinese,
+// Japanese, etc.) to '?', so we send UTF-8 directly. This also makes the
+// fallback path correct for pastes that fire before ExtendedClipboard caps
+// have been negotiated.
 pub fn encode_legacy_cut_text(text: &str) -> Vec<u8> {
-    text.chars()
-        .map(|ch| {
-            let code = ch as u32;
-            if code <= 0xff {
-                code as u8
-            } else {
-                b'?'
-            }
-        })
-        .collect()
+    text.as_bytes().to_vec()
 }
 
 fn normalize_text_newlines(text: &str) -> String {
@@ -407,10 +404,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cut_text_prefers_utf8_but_accepts_latin1() {
-        assert_eq!(decode_legacy_cut_text("中文".as_bytes()), "中文");
+    fn legacy_cut_text_roundtrips_utf8_and_decodes_latin1() {
+        // Modern servers send UTF-8 in legacy ClientCutText; we must roundtrip it.
+        let bytes = encode_legacy_cut_text("中文");
+        assert_eq!(bytes, "中文".as_bytes());
+        assert_eq!(decode_legacy_cut_text(&bytes), "中文");
+        // Pre-UTF-8 servers may still send Latin-1 — accept it on read.
         assert_eq!(decode_legacy_cut_text(&[0x63, 0x61, 0x66, 0xe9]), "café");
-        assert_eq!(encode_legacy_cut_text("café"), vec![0x63, 0x61, 0x66, 0xe9]);
-        assert_eq!(encode_legacy_cut_text("中文"), vec![b'?', b'?']);
     }
 }

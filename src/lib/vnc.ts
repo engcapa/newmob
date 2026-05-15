@@ -66,7 +66,8 @@ export type WsIncoming =
       text?: string;
       html?: string;
       rtf?: string;
-    };
+    }
+  | { type: "ext_clipboard_support"; available: boolean };
 
 /** Parse an incoming WS text message. */
 export function parseWsMessage(data: string): WsIncoming | null {
@@ -209,4 +210,27 @@ export function mouseButtonMask(e: MouseEvent | PointerEvent): number {
   if (e.buttons & 2) mask |= 4; // right
   if (e.buttons & 4) mask |= 2; // middle
   return mask;
+}
+
+/**
+ * Map a Unicode code point to an RFB keysym.
+ *
+ * Latin-1 (≤ U+00FF) maps directly — that's also the X11 keysym range. Code
+ * points above 0xFF use the X.org "Unicode keysym" extension: 0x01000000 |
+ * codepoint. GNOME (vino), KDE, TigerVNC, RealVNC, and X.Org all accept it,
+ * which is the only way to deliver CJK/Emoji to a server that doesn't speak
+ * ExtendedClipboard (the legacy ClientCutText channel is Latin-1 and
+ * physically can't carry those characters).
+ */
+export function codePointToKeysym(cp: number): number {
+  if (cp <= 0xff) return cp;
+  return 0x01000000 | cp;
+}
+
+/** Iterate Unicode code points in a string (handles surrogate pairs). */
+export function* iterCodePoints(text: string): Generator<number> {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (cp !== undefined) yield cp;
+  }
 }
