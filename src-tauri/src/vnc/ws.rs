@@ -12,7 +12,7 @@ use tungstenite::Message;
 
 use crate::vnc::clipboard::{
     build_caps_body, build_notify_body, build_provide_body, build_request_body, ClipboardFormats,
-    ExtendedClipboardMsg, ACTION_CAPS, ACTION_NOTIFY, ACTION_PROVIDE, ACTION_REQUEST,
+    ExtendedClipboardMsg, ACTION_NOTIFY, ACTION_PROVIDE, ACTION_REQUEST,
     ENCODING_EXTENDED_CLIPBOARD, ENCODING_EXTENDED_CLIPBOARD_LEGACY, FORMAT_HTML, FORMAT_RTF,
     FORMAT_TEXT, SUPPORTED_ACTIONS,
 };
@@ -51,7 +51,10 @@ pub enum VncControl {
     /// advertised support for. The relay handles caps negotiation and falls
     /// back to plain ClientCutText if the server didn't advertise the encoding.
     ExtendedClipboard(ClipboardFormats),
-    Resize { width: u16, height: u16 },
+    Resize {
+        width: u16,
+        height: u16,
+    },
     Ack,
     Disconnect,
 }
@@ -464,12 +467,20 @@ async fn run_relay(
                     let mut conn = rfb_ctrl.lock().await;
                     if server_caps.formats == 0 {
                         // No caps received — server doesn't support ExtendedClipboard.
-                        log::info!(
-                            "vnc.clip: relay→server FALLBACK (no ext caps), sending legacy cut text len={}",
-                            formats.text.as_deref().map(str::len).unwrap_or(0),
-                        );
                         if let Some(text) = formats.text.as_deref() {
-                            conn.send_client_cut_text(text)
+                            if text.is_ascii() {
+                                log::info!(
+                                    "vnc.clip: relay→server FALLBACK (no ext caps), sending legacy cut text len={}",
+                                    text.len(),
+                                );
+                                conn.send_client_cut_text(text)
+                            } else {
+                                log::info!(
+                                    "vnc.clip: relay→server SKIP legacy cut text — non-ASCII payload len={} requires ExtendedClipboard or Unicode key events",
+                                    text.len(),
+                                );
+                                Ok(())
+                            }
                         } else {
                             Ok(())
                         }
@@ -506,11 +517,10 @@ async fn run_relay(
                                 filtered.text.as_deref().map(str::len).unwrap_or(0),
                             );
                             if can_send_notify(server_caps) {
-                                let _ = conn.send_extended_clipboard(&build_notify_body(
+                                conn.send_extended_clipboard(&build_notify_body(
                                     filtered.format_mask(),
-                                ));
-                            }
-                            if can_send_provide(server_caps) {
+                                ))
+                            } else if can_send_provide(server_caps) {
                                 match build_provide_body(&filtered) {
                                     Ok(body) => conn.send_extended_clipboard(&body),
                                     Err(e) => Err(e),
@@ -621,13 +631,11 @@ async fn handle_server_ext_clipboard(
             );
             let mut w = writer.lock().await;
             let _ = w.send_extended_clipboard(&body);
-            // Tell the frontend whether the server supports ExtendedClipboard.
-            // The frontend uses this to decide whether to type non-ASCII paste
-            // text as Unicode keysyms (works on every server) instead of
-            // relying on the clipboard channel (which legacy servers limit to
-            // Latin-1).
+            // Tell the frontend which clipboard path is active so diagnostics
+            // can distinguish ExtendedClipboard from the legacy fallback.
             let support = WsOutgoingText::ExtClipboardSupport {
-                available: actions != 0 && (formats & OUR_CAPS) != 0,
+                available: (formats & OUR_CAPS) != 0
+                    && (actions & (ACTION_REQUEST | ACTION_NOTIFY | ACTION_PROVIDE)) != 0,
             };
             if let Ok(json) = serde_json::to_string(&support) {
                 let _ = ws_out.send(WsOutgoing::Text(json));
@@ -719,15 +727,15 @@ fn filter_clipboard_formats(data: ClipboardFormats, mask: u32) -> ClipboardForma
 }
 
 fn can_send_request(caps: ServerClipboardCaps) -> bool {
-    caps.actions == 0 || caps.actions == ACTION_CAPS || caps.actions & ACTION_REQUEST != 0
+    caps.actions == 0 || caps.actions & ACTION_REQUEST != 0
 }
 
 fn can_send_notify(caps: ServerClipboardCaps) -> bool {
-    caps.actions == 0 || caps.actions == ACTION_CAPS || caps.actions & ACTION_NOTIFY != 0
+    caps.actions == 0 || caps.actions & ACTION_NOTIFY != 0
 }
 
 fn can_send_provide(caps: ServerClipboardCaps) -> bool {
-    caps.actions == 0 || caps.actions == ACTION_CAPS || caps.actions & ACTION_PROVIDE != 0
+    caps.actions == 0 || caps.actions & ACTION_PROVIDE != 0
 }
 
 fn parse_binary_control(bytes: &[u8]) -> Option<VncControl> {

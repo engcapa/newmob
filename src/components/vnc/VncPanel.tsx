@@ -22,6 +22,7 @@ import CaptureToolbar from "../capture/CaptureToolbar";
 import FloatingToolbar from "../floating-toolbar/FloatingToolbar";
 import { captureCanvasPng } from "../../lib/capture";
 import {
+  readText as readClipboardText,
   readMultiFormat,
   writeMultiFormat,
   writeText as writeClipboardText,
@@ -37,7 +38,9 @@ export interface VncPanelProps {
 }
 
 type ScaleMode = "fit" | "one";
-const PASTE_KEY_DELAY_MS = 60;
+const PASTE_KEY_DELAY_MS = 120;
+const CLIPBOARD_SYNC_INTERVAL_MS = 750;
+const CLIPBOARD_SYNC_MIN_INTERVAL_MS = 250;
 type PendingFrame = {
   x: number;
   y: number;
@@ -49,6 +52,11 @@ type PointerState = {
   x: number;
   y: number;
   buttons: number;
+};
+type DelayedPointerDown = {
+  pointerId: number;
+  down: PointerState;
+  up: PointerState | null;
 };
 
 function modifierKeysymFromKey(key: string): number | null {
@@ -79,6 +87,10 @@ function isPasteShortcut(e: KeyboardEvent): boolean {
   return (e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V");
 }
 
+function hasNonAsciiText(text: string): boolean {
+  return /[^\x00-\x7f]/.test(text);
+}
+
 export default function VncPanel({
   tabId,
   host,
@@ -103,16 +115,19 @@ export default function VncPanel({
   const pointerRafRef = useRef<number | null>(null);
   const pendingPointerRef = useRef<PointerState | null>(null);
   const lastPointerSentRef = useRef<PointerState | null>(null);
+  const delayedPointerDownRef = useRef<DelayedPointerDown | null>(null);
+  const clipboardSyncPromiseRef = useRef<Promise<void> | null>(null);
+  const serverClipboardWriteInFlightRef = useRef(0);
+  const lastClipboardSyncCheckAtRef = useRef(0);
+  const lastSyncedLocalClipboardTextRef = useRef<string | null>(null);
   const pasteInFlightRef = useRef<{
     pasteKeysym: number;
     heldModifiers: Set<number>;
     deferredKeyUps: Set<number>;
   } | null>(null);
   // Tracks whether the connected server negotiated the ExtendedClipboard
-  // pseudo-encoding. When false (e.g. vino-server), we type non-ASCII paste
-  // content as Unicode keysyms because legacy ClientCutText is Latin-1 and
-  // mojibakes CJK. Stored as a ref so the keyboard handler reads the latest
-  // value without re-binding.
+  // pseudo-encoding. Stored as a ref so input handlers read the latest value
+  // without re-binding.
   const extClipboardSupportedRef = useRef<boolean>(false);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
 
@@ -130,6 +145,67 @@ export default function VncPanel({
       wsRef.current.send(data);
     }
   }, []);
+
+  const syncLocalClipboardToServer = useCallback(
+    (reason: string, force = false): Promise<void> => {
+      if (destroyedRef.current || wsRef.current?.readyState !== WebSocket.OPEN) {
+        return Promise.resolve();
+      }
+      if (serverClipboardWriteInFlightRef.current > 0) {
+        return Promise.resolve();
+      }
+
+      const now = Date.now();
+      if (!force && now - lastClipboardSyncCheckAtRef.current < CLIPBOARD_SYNC_MIN_INTERVAL_MS) {
+        return Promise.resolve();
+      }
+      lastClipboardSyncCheckAtRef.current = now;
+
+      if (clipboardSyncPromiseRef.current) {
+        return clipboardSyncPromiseRef.current;
+      }
+
+      const sync = (async () => {
+        let text = "";
+        try {
+          text = await readClipboardText();
+        } catch (err) {
+          console.warn(`[vnc.clip] read local clipboard for ${reason} sync failed:`, err);
+          return;
+        }
+        if (serverClipboardWriteInFlightRef.current > 0) {
+          return;
+        }
+
+        // Avoid clearing the remote clipboard just because the local clipboard
+        // is temporarily empty or unreadable.
+        if (!text || text === lastSyncedLocalClipboardTextRef.current) {
+          return;
+        }
+        if (hasNonAsciiText(text) && !extClipboardSupportedRef.current) {
+          console.info(
+            `[vnc.clip] local→server ${reason} sync skipped non-ASCII text_len=${text.length} because server has no ExtendedClipboard`,
+          );
+          return;
+        }
+
+        lastSyncedLocalClipboardTextRef.current = text;
+        console.info(
+          `[vnc.clip] local→server ${reason} sync text_len=${text.length} ext_support=${extClipboardSupportedRef.current}`,
+        );
+        sendWs({ type: "ext_clipboard", text });
+      })();
+
+      const tracked = sync.finally(() => {
+        if (clipboardSyncPromiseRef.current === tracked) {
+          clipboardSyncPromiseRef.current = null;
+        }
+      });
+      clipboardSyncPromiseRef.current = tracked;
+      return clipboardSyncPromiseRef.current;
+    },
+    [sendWs],
+  );
 
   // ── connect logic, callable for retry ─────────────────────────────
   const doConnect = useCallback(() => {
@@ -198,14 +274,38 @@ export default function VncPanel({
                 store.setDisconnected(tabId, msg.reason);
                 break;
               case "clipboard":
-                writeClipboardText(msg.text).catch(() => {});
+                serverClipboardWriteInFlightRef.current += 1;
+                writeClipboardText(msg.text)
+                  .then(() => {
+                    lastSyncedLocalClipboardTextRef.current = msg.text;
+                  })
+                  .catch(() => {})
+                  .finally(() => {
+                    serverClipboardWriteInFlightRef.current = Math.max(
+                      0,
+                      serverClipboardWriteInFlightRef.current - 1,
+                    );
+                  });
                 break;
               case "ext_clipboard":
+                serverClipboardWriteInFlightRef.current += 1;
                 writeMultiFormat({
                   text: msg.text ?? "",
                   html: msg.html,
                   rtf: msg.rtf,
-                }).catch(() => {});
+                })
+                  .then(() => {
+                    if (msg.text !== undefined) {
+                      lastSyncedLocalClipboardTextRef.current = msg.text;
+                    }
+                  })
+                  .catch(() => {})
+                  .finally(() => {
+                    serverClipboardWriteInFlightRef.current = Math.max(
+                      0,
+                      serverClipboardWriteInFlightRef.current - 1,
+                    );
+                  });
                 break;
               case "ext_clipboard_support":
                 extClipboardSupportedRef.current = msg.available;
@@ -274,8 +374,13 @@ export default function VncPanel({
       }
       pendingPointerRef.current = null;
       lastPointerSentRef.current = null;
+      delayedPointerDownRef.current = null;
       pasteInFlightRef.current = null;
       extClipboardSupportedRef.current = false;
+      clipboardSyncPromiseRef.current = null;
+      serverClipboardWriteInFlightRef.current = 0;
+      lastClipboardSyncCheckAtRef.current = 0;
+      lastSyncedLocalClipboardTextRef.current = null;
       const sid = sessionIdRef.current;
       if (sid) {
         vncDisconnect(sid).catch(() => {});
@@ -291,6 +396,15 @@ export default function VncPanel({
   useEffect(() => {
     visibleRef.current = visible;
   }, [visible]);
+
+  useEffect(() => {
+    if (!visible || conn?.status !== "connected") return;
+    void syncLocalClipboardToServer("connect", true);
+    const timer = window.setInterval(() => {
+      void syncLocalClipboardToServer("poll");
+    }, CLIPBOARD_SYNC_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [visible, conn?.status, syncLocalClipboardToServer]);
 
   // ── Canvas rendering loop ────────────────────────────────────────
   useEffect(() => {
@@ -375,21 +489,19 @@ export default function VncPanel({
       });
     };
 
+    const sendTextAsKeysyms = (text: string) => {
+      for (const cp of iterCodePoints(text)) {
+        const ks = cp === 0x0a || cp === 0x0d ? 0xff0d : codePointToKeysym(cp);
+        sendWsBinary(encodeWsKey(true, ks));
+        sendWsBinary(encodeWsKey(false, ks));
+      }
+    };
+
     /**
-     * When the user presses Ctrl+V on the canvas, decide between three paths:
-     *
-     * 1. Server speaks ExtendedClipboard → push the clipboard up via the
-     *    relay (UTF-8 + zlib via ExtClipboard provide), then forward the V
-     *    keysym so the remote app does its normal paste.
-     * 2. Clipboard is ASCII-only → push via legacy ClientCutText (Latin-1
-     *    safe), then forward V. Works with every server.
-     * 3. Clipboard contains non-ASCII characters AND server doesn't speak
-     *    ExtendedClipboard (vino-server etc.) → type each character as a
-     *    Unicode keysym. We deliberately skip pushing to the clipboard and
-     *    skip the V keystroke: the legacy channel is Latin-1 and would
-     *    mojibake CJK, and we don't want a V to fire and grab the prior
-     *    clipboard content from the server. Modifier keys are still
-     *    suppressed and re-released so Ctrl/Cmd/Shift state stays consistent.
+     * When the user presses Ctrl+V on the canvas, prefer the real clipboard
+     * path. If the server only supports legacy ClientCutText, non-ASCII text
+     * cannot be represented without mojibake, so we type it as Unicode keysyms
+     * instead and deliberately do not send the remote V shortcut.
      */
     const handlePasteShortcut = (e: KeyboardEvent) => {
       const pasteKeysym = keyEventToKeysym(e);
@@ -403,15 +515,15 @@ export default function VncPanel({
 
       void (async () => {
         const clipboard = await readLocalClipboard();
-        if (clipboard) {
+        const text = clipboard?.text ?? "";
+        const useUnicodeTyping =
+          !!text && hasNonAsciiText(text) && !extClipboardSupportedRef.current;
+        if (clipboard && !useUnicodeTyping) {
+          lastSyncedLocalClipboardTextRef.current = text;
           sendExtClipboardToRelay(clipboard);
         }
-        const text = clipboard?.text ?? "";
-        const hasNonAscii = /[^\x00-\x7f]/.test(text);
-        const useUnicodeTyping =
-          hasNonAscii && !extClipboardSupportedRef.current;
         console.info(
-          `[vnc.clip] paste shortcut: text_len=${text.length} non_ascii=${hasNonAscii} ext_support=${extClipboardSupportedRef.current} → ${useUnicodeTyping ? "type-as-keysyms" : "clipboard+V"}`,
+          `[vnc.clip] paste shortcut: text_len=${text.length} non_ascii=${hasNonAsciiText(text)} ext_support=${extClipboardSupportedRef.current} → ${useUnicodeTyping ? "type-as-keysyms" : "clipboard+V"}`,
         );
 
         if (destroyedRef.current) {
@@ -440,14 +552,10 @@ export default function VncPanel({
           });
 
           if (useUnicodeTyping) {
-            for (const cp of iterCodePoints(text)) {
-              const ks = codePointToKeysym(cp);
-              sendWsBinary(encodeWsKey(true, ks));
-              sendWsBinary(encodeWsKey(false, ks));
-            }
+            sendTextAsKeysyms(text);
           } else {
-            // Clipboard path: re-press modifiers and send V so the remote
-            // app's paste shortcut fires against the now-updated clipboard.
+            // Re-press modifiers and send V so the remote app's paste shortcut
+            // fires against the now-updated clipboard.
             pending.heldModifiers.forEach((modKeysym) => {
               sendWsBinary(encodeWsKey(true, modKeysym));
             });
@@ -504,23 +612,21 @@ export default function VncPanel({
     window.addEventListener("keydown", handleKey);
     window.addEventListener("keyup", handleKey);
 
-    // Keep the legacy paste listener as a secondary path — useful when the
-    // user pastes via context menu and the OS does dispatch the paste event.
-    // For non-ASCII content we still type as Unicode keysyms when the server
-    // doesn't speak ExtendedClipboard.
+    // Keep the paste listener as a secondary path — useful when the OS
+    // dispatches a paste event directly to the WebView.
     const handlePaste = (e: ClipboardEvent) => {
       const text = e.clipboardData?.getData("text/plain") ?? "";
       const html = e.clipboardData?.getData("text/html") || undefined;
       const rtf = e.clipboardData?.getData("text/rtf") || undefined;
       if (!text && !html && !rtf) return;
-      sendWs({ type: "ext_clipboard", text: text || undefined, html, rtf });
-      if (text && /[^\x00-\x7f]/.test(text) && !extClipboardSupportedRef.current) {
-        for (const cp of iterCodePoints(text)) {
-          const ks = codePointToKeysym(cp);
-          sendWsBinary(encodeWsKey(true, ks));
-          sendWsBinary(encodeWsKey(false, ks));
-        }
+      if (text && hasNonAsciiText(text) && !extClipboardSupportedRef.current) {
+        sendTextAsKeysyms(text);
+        return;
       }
+      if (text) {
+        lastSyncedLocalClipboardTextRef.current = text;
+      }
+      sendWs({ type: "ext_clipboard", text, html, rtf });
     };
     window.addEventListener("paste", handlePaste);
 
@@ -570,10 +676,32 @@ export default function VncPanel({
     [conn?.width, conn?.height, scaleMode],
   );
 
+  const sendPointerNow = useCallback(
+    (pointer: PointerState) => {
+      const last = lastPointerSentRef.current;
+      if (
+        last &&
+        last.x === pointer.x &&
+        last.y === pointer.y &&
+        last.buttons === pointer.buttons
+      ) {
+        return;
+      }
+      lastPointerSentRef.current = pointer;
+      sendWsBinary(encodeWsPointer(pointer.x, pointer.y, pointer.buttons));
+    },
+    [sendWsBinary],
+  );
+
   const handlePointer = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (conn?.status !== "connected") return;
+      if (delayedPointerDownRef.current?.pointerId === e.pointerId) {
+        e.preventDefault();
+        return;
+      }
       e.preventDefault();
+      void syncLocalClipboardToServer("pointer");
       const { x, y } = getFbCoords(e.clientX, e.clientY);
       const buttons = mouseButtonMask(e.nativeEvent);
       const pointer = { x, y, buttons };
@@ -586,30 +714,16 @@ export default function VncPanel({
             const pending = pendingPointerRef.current;
             pendingPointerRef.current = null;
             if (!pending || destroyedRef.current || conn?.status !== "connected") return;
-            const last = lastPointerSentRef.current;
-            if (
-              last &&
-              last.x === pending.x &&
-              last.y === pending.y &&
-              last.buttons === pending.buttons
-            ) {
-              return;
-            }
-            lastPointerSentRef.current = pending;
-            sendWsBinary(encodeWsPointer(pending.x, pending.y, pending.buttons));
+            sendPointerNow(pending);
           });
         }
         return;
       }
 
       pendingPointerRef.current = null;
-      const last = lastPointerSentRef.current;
-      if (!last || last.x !== x || last.y !== y || last.buttons !== buttons) {
-        lastPointerSentRef.current = pointer;
-        sendWsBinary(encodeWsPointer(x, y, buttons));
-      }
+      sendPointerNow(pointer);
     },
-    [conn?.status, getFbCoords, sendWsBinary],
+    [conn?.status, getFbCoords, sendPointerNow, syncLocalClipboardToServer],
   );
 
   const handlePointerDown = useCallback(
@@ -620,13 +734,46 @@ export default function VncPanel({
       } catch {
         // Pointer capture can fail if the event was already cancelled.
       }
+      if (conn?.status === "connected" && (e.button === 1 || e.button === 2)) {
+        e.preventDefault();
+        const { x, y } = getFbCoords(e.clientX, e.clientY);
+        const delayed: DelayedPointerDown = {
+          pointerId: e.pointerId,
+          down: { x, y, buttons: mouseButtonMask(e.nativeEvent) },
+          up: null,
+        };
+        delayedPointerDownRef.current = delayed;
+        void (async () => {
+          await syncLocalClipboardToServer("button", true);
+          await new Promise((resolve) => window.setTimeout(resolve, PASTE_KEY_DELAY_MS));
+          if (destroyedRef.current || delayedPointerDownRef.current !== delayed) return;
+          sendPointerNow(delayed.down);
+          if (delayed.up) {
+            sendPointerNow(delayed.up);
+          }
+          delayedPointerDownRef.current = null;
+        })();
+        return;
+      }
       handlePointer(e);
     },
-    [handlePointer],
+    [conn?.status, getFbCoords, handlePointer, sendPointerNow, syncLocalClipboardToServer],
   );
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const delayed = delayedPointerDownRef.current;
+      if (delayed?.pointerId === e.pointerId) {
+        e.preventDefault();
+        const { x, y } = getFbCoords(e.clientX, e.clientY);
+        delayed.up = { x, y, buttons: mouseButtonMask(e.nativeEvent) };
+        try {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        } catch {
+          // The pointer may already have been released by the platform.
+        }
+        return;
+      }
       handlePointer(e);
       try {
         e.currentTarget.releasePointerCapture(e.pointerId);
@@ -634,7 +781,7 @@ export default function VncPanel({
         // The pointer may already have been released by the platform.
       }
     },
-    [handlePointer],
+    [getFbCoords, handlePointer],
   );
 
   const handleWheel = useCallback(

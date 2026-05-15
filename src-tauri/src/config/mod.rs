@@ -204,17 +204,34 @@ pub fn check_file_exists(path: String) -> bool {
 }
 
 #[tauri::command]
-pub fn clipboard_read_text() -> Result<String, String> {
-    let mut clipboard =
-        arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?;
+pub fn clipboard_read_text(state: State<'_, AppState>) -> Result<String, String> {
+    let mut guard = state
+        .clipboard
+        .lock()
+        .map_err(|e| format!("clipboard lock: {}", e))?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?);
+    }
+    let clipboard = guard
+        .as_mut()
+        .ok_or_else(|| "clipboard unavailable".to_string())?;
     clipboard
         .get_text()
         .map_err(|e| format!("clipboard read: {}", e))
 }
 
 #[tauri::command]
-pub fn clipboard_write_text(text: String) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?;
+pub fn clipboard_write_text(text: String, state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state
+        .clipboard
+        .lock()
+        .map_err(|e| format!("clipboard lock: {}", e))?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?);
+    }
+    let clipboard = guard
+        .as_mut()
+        .ok_or_else(|| "clipboard unavailable".to_string())?;
     clipboard
         .set_text(text)
         .map_err(|e| format!("clipboard write: {}", e))

@@ -270,12 +270,11 @@ pub fn decode_legacy_cut_text(bytes: &[u8]) -> String {
     bytes.iter().map(|b| char::from(*b)).collect()
 }
 
-// RFC 6143 nominally specifies Latin-1 for legacy ClientCutText, but every
-// modern VNC server (TigerVNC/RealVNC/TightVNC/TurboVNC/NoVNC) treats the body
-// as UTF-8. Truncating to Latin-1 mojibakes anything outside ASCII (Chinese,
-// Japanese, etc.) to '?', so we send UTF-8 directly. This also makes the
-// fallback path correct for pastes that fire before ExtendedClipboard caps
-// have been negotiated.
+// RFC 6143 nominally specifies Latin-1 for legacy ClientCutText. Some modern
+// VNC servers accept UTF-8 bytes here, while stricter X11-backed servers expose
+// the payload as Latin-1/STRING and will mojibake CJK. Keep the bytes intact so
+// ASCII and UTF-8-friendly servers work; callers that know the peer lacks
+// ExtendedClipboard should avoid sending non-ASCII through this path.
 pub fn encode_legacy_cut_text(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
