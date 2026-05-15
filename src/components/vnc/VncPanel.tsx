@@ -2,6 +2,11 @@ import { useEffect, useRef, useCallback, useState } from "react";
 import {
   vncConnect,
   vncDisconnect,
+  encodeWsAck,
+  encodeWsKey,
+  encodeWsPing,
+  encodeWsPointer,
+  encodeWsResize,
   parseWsMessage,
   parseFrameHeader,
   keyEventToKeysym,
@@ -14,7 +19,11 @@ import { Maximize, Minimize, RefreshCw } from "lucide-react";
 import CaptureToolbar from "../capture/CaptureToolbar";
 import FloatingToolbar from "../floating-toolbar/FloatingToolbar";
 import { captureCanvasPng } from "../../lib/capture";
-import { readMultiFormat, writeMultiFormat } from "../../lib/clipboard";
+import {
+  readMultiFormat,
+  writeMultiFormat,
+  writeText as writeClipboardText,
+} from "../../lib/clipboard";
 
 export interface VncPanelProps {
   tabId: string;
@@ -26,13 +35,47 @@ export interface VncPanelProps {
 }
 
 type ScaleMode = "fit" | "one";
+const PASTE_KEY_DELAY_MS = 60;
 type PendingFrame = {
   x: number;
   y: number;
   w: number;
   h: number;
-  rgba: Uint8Array;
+  rgba: Uint8ClampedArray<ArrayBuffer>;
 };
+type PointerState = {
+  x: number;
+  y: number;
+  buttons: number;
+};
+
+function modifierKeysymFromKey(key: string): number | null {
+  switch (key) {
+    case "Shift":
+      return 0xffe1;
+    case "Control":
+      return 0xffe3;
+    case "Alt":
+      return 0xffe9;
+    case "Meta":
+      return 0xffeb;
+    default:
+      return null;
+  }
+}
+
+function pasteModifierKeysyms(e: KeyboardEvent): Set<number> {
+  const keysyms = new Set<number>();
+  if (e.shiftKey) keysyms.add(0xffe1);
+  if (e.ctrlKey) keysyms.add(0xffe3);
+  if (e.altKey) keysyms.add(0xffe9);
+  if (e.metaKey) keysyms.add(0xffeb);
+  return keysyms;
+}
+
+function isPasteShortcut(e: KeyboardEvent): boolean {
+  return (e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V");
+}
 
 export default function VncPanel({
   tabId,
@@ -52,6 +95,17 @@ export default function VncPanel({
   const disconnectedByServerRef = useRef(false);
   const connectArgsRef = useRef({ host, port, username, password });
   const heartbeatTimerRef = useRef<number | null>(null);
+  const visibleRef = useRef(visible);
+  const ackPendingRef = useRef(false);
+  const pasteDelayTimerRef = useRef<number | null>(null);
+  const pointerRafRef = useRef<number | null>(null);
+  const pendingPointerRef = useRef<PointerState | null>(null);
+  const lastPointerSentRef = useRef<PointerState | null>(null);
+  const pasteInFlightRef = useRef<{
+    pasteKeysym: number;
+    heldModifiers: Set<number>;
+    deferredKeyUps: Set<number>;
+  } | null>(null);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
 
   const store = useVncStore();
@@ -60,6 +114,12 @@ export default function VncPanel({
   const sendWs = useCallback((msg: WsOutgoing) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(msg));
+    }
+  }, []);
+
+  const sendWsBinary = useCallback((data: ArrayBuffer) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(data);
     }
   }, []);
 
@@ -94,7 +154,7 @@ export default function VncPanel({
           // Ping every 15s; the backend tears the session down after 30s of silence.
           heartbeatTimerRef.current = window.setInterval(() => {
             if (wsRef.current?.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: "ping" }));
+              wsRef.current.send(encodeWsPing());
             }
           }, 15000);
         };
@@ -102,9 +162,21 @@ export default function VncPanel({
         ws.onmessage = (event) => {
           if (destroyedRef.current) return;
           if (event.data instanceof ArrayBuffer) {
+            if (event.data.byteLength === 0) {
+              if (visibleRef.current) {
+                ackPendingRef.current = false;
+                sendWsBinary(encodeWsAck());
+              } else {
+                ackPendingRef.current = true;
+              }
+              return;
+            }
             const header = parseFrameHeader(event.data);
             if (!header) return;
-            const rgba = new Uint8Array(event.data, 12);
+            const rgba = new Uint8ClampedArray(
+              event.data as ArrayBuffer,
+              12,
+            ) as Uint8ClampedArray<ArrayBuffer>;
             frameBufferRef.current.push({ ...header, rgba });
           } else {
             const msg = parseWsMessage(event.data as string);
@@ -118,7 +190,7 @@ export default function VncPanel({
                 store.setDisconnected(tabId, msg.reason);
                 break;
               case "clipboard":
-                navigator.clipboard.writeText(msg.text).catch(() => {});
+                writeClipboardText(msg.text).catch(() => {});
                 break;
               case "ext_clipboard":
                 writeMultiFormat({
@@ -177,6 +249,18 @@ export default function VncPanel({
         window.clearInterval(heartbeatTimerRef.current);
         heartbeatTimerRef.current = null;
       }
+      if (pasteDelayTimerRef.current !== null) {
+        window.clearTimeout(pasteDelayTimerRef.current);
+        pasteDelayTimerRef.current = null;
+      }
+      ackPendingRef.current = false;
+      if (pointerRafRef.current !== null) {
+        cancelAnimationFrame(pointerRafRef.current);
+        pointerRafRef.current = null;
+      }
+      pendingPointerRef.current = null;
+      lastPointerSentRef.current = null;
+      pasteInFlightRef.current = null;
       const sid = sessionIdRef.current;
       if (sid) {
         vncDisconnect(sid).catch(() => {});
@@ -188,6 +272,10 @@ export default function VncPanel({
       store.removeConnection(tabId);
     };
   }, []);
+
+  useEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
 
   // ── Canvas rendering loop ────────────────────────────────────────
   useEffect(() => {
@@ -214,10 +302,7 @@ export default function VncPanel({
 
         for (const frame of pending) {
           if (frame.rgba.length !== frame.w * frame.h * 4) continue;
-          const pixelData = new Uint8ClampedArray(frame.rgba.length);
-          pixelData.set(frame.rgba);
-
-          const imgData = new ImageData(pixelData, frame.w || 1, frame.h || 1);
+          const imgData = new ImageData(frame.rgba, frame.w || 1, frame.h || 1);
           try {
             ctx.putImageData(imgData, frame.x, frame.y);
           } catch {
@@ -225,7 +310,11 @@ export default function VncPanel({
           }
         }
 
-        sendWs({ type: "ack" });
+      }
+
+      if (ackPendingRef.current) {
+        ackPendingRef.current = false;
+        sendWsBinary(encodeWsAck());
       }
 
       rafRef.current = requestAnimationFrame(render);
@@ -237,7 +326,7 @@ export default function VncPanel({
       running = false;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [visible, conn?.status, conn?.width, conn?.height, sendWs]);
+  }, [visible, conn?.status, conn?.width, conn?.height, sendWsBinary]);
 
   // ── Keyboard ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -253,23 +342,82 @@ export default function VncPanel({
       }
     };
 
+    const sendPasteKeyAfterClipboard = (e: KeyboardEvent) => {
+      const keysym = keyEventToKeysym(e);
+      if (keysym === 0 || pasteInFlightRef.current) return;
+
+      pasteInFlightRef.current = {
+        pasteKeysym: keysym,
+        heldModifiers: pasteModifierKeysyms(e),
+        deferredKeyUps: new Set<number>(),
+      };
+
+      void (async () => {
+        try {
+          await sendLocalClipboardToRemote();
+        } finally {
+          if (destroyedRef.current) {
+            pasteInFlightRef.current = null;
+            return;
+          }
+          if (pasteDelayTimerRef.current !== null) {
+            window.clearTimeout(pasteDelayTimerRef.current);
+          }
+          pasteDelayTimerRef.current = window.setTimeout(() => {
+            pasteDelayTimerRef.current = null;
+            const pending = pasteInFlightRef.current;
+            if (!pending || destroyedRef.current) {
+              pasteInFlightRef.current = null;
+              return;
+            }
+
+            pending.heldModifiers.forEach((modKeysym) => {
+              sendWsBinary(encodeWsKey(true, modKeysym));
+            });
+            sendWsBinary(encodeWsKey(true, keysym));
+            sendWsBinary(encodeWsKey(false, keysym));
+            pending.deferredKeyUps.forEach((modKeysym) => {
+              sendWsBinary(encodeWsKey(false, modKeysym));
+            });
+            pasteInFlightRef.current = null;
+          }, PASTE_KEY_DELAY_MS);
+        }
+      })();
+    };
+
     const handleKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
         return;
 
-      // Intercept Ctrl/Meta + V to push the local clipboard to the remote
-      // before the keysym goes through. Without this, the canvas never
-      // receives a `paste` event because it isn't an editable element.
-      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && (e.key === "v" || e.key === "V")) {
-        void sendLocalClipboardToRemote();
-        // Still forward the keysym so the remote app sees the V (it will then
-        // use whatever the server-side clipboard now holds).
+      const pendingPaste = pasteInFlightRef.current;
+      if (pendingPaste && e.type === "keyup") {
+        const modifierKeysym = modifierKeysymFromKey(e.key);
+        if (modifierKeysym && pendingPaste.heldModifiers.has(modifierKeysym)) {
+          e.preventDefault();
+          pendingPaste.deferredKeyUps.add(modifierKeysym);
+          return;
+        }
+        const keysym = keyEventToKeysym(e);
+        if (keysym === pendingPaste.pasteKeysym) {
+          e.preventDefault();
+          return;
+        }
+      }
+
+      // Intercept Ctrl/Meta + V so the remote clipboard is updated before the
+      // remote application receives the paste shortcut.
+      if (isPasteShortcut(e)) {
+        e.preventDefault();
+        if (e.type === "keydown" && !e.repeat) {
+          sendPasteKeyAfterClipboard(e);
+        }
+        return;
       }
 
       const keysym = keyEventToKeysym(e);
       if (keysym === 0) return;
       e.preventDefault();
-      sendWs({ type: "key", down: e.type === "keydown", keysym });
+      sendWsBinary(encodeWsKey(e.type === "keydown", keysym));
     };
 
     window.addEventListener("keydown", handleKey);
@@ -292,7 +440,7 @@ export default function VncPanel({
       window.removeEventListener("keyup", handleKey);
       window.removeEventListener("paste", handlePaste);
     };
-  }, [visible, conn?.status, sendWs]);
+  }, [visible, conn?.status, sendWs, sendWsBinary]);
 
   // ── Pointer ───────────────────────────────────────────────────────
   const getFbCoords = useCallback(
@@ -339,9 +487,40 @@ export default function VncPanel({
       e.preventDefault();
       const { x, y } = getFbCoords(e.clientX, e.clientY);
       const buttons = mouseButtonMask(e.nativeEvent);
-      sendWs({ type: "pointer", x, y, buttons });
+      const pointer = { x, y, buttons };
+
+      if (e.type === "pointermove") {
+        pendingPointerRef.current = pointer;
+        if (pointerRafRef.current === null) {
+          pointerRafRef.current = requestAnimationFrame(() => {
+            pointerRafRef.current = null;
+            const pending = pendingPointerRef.current;
+            pendingPointerRef.current = null;
+            if (!pending || destroyedRef.current || conn?.status !== "connected") return;
+            const last = lastPointerSentRef.current;
+            if (
+              last &&
+              last.x === pending.x &&
+              last.y === pending.y &&
+              last.buttons === pending.buttons
+            ) {
+              return;
+            }
+            lastPointerSentRef.current = pending;
+            sendWsBinary(encodeWsPointer(pending.x, pending.y, pending.buttons));
+          });
+        }
+        return;
+      }
+
+      pendingPointerRef.current = null;
+      const last = lastPointerSentRef.current;
+      if (!last || last.x !== x || last.y !== y || last.buttons !== buttons) {
+        lastPointerSentRef.current = pointer;
+        sendWsBinary(encodeWsPointer(x, y, buttons));
+      }
     },
-    [conn?.status, getFbCoords, sendWs],
+    [conn?.status, getFbCoords, sendWsBinary],
   );
 
   const handlePointerDown = useCallback(
@@ -375,10 +554,10 @@ export default function VncPanel({
       e.preventDefault();
       const { x, y } = getFbCoords(e.clientX, e.clientY);
       const wheelButton = e.deltaY < 0 ? 8 : 16;
-      sendWs({ type: "pointer", x, y, buttons: wheelButton });
-      setTimeout(() => sendWs({ type: "pointer", x, y, buttons: 0 }), 50);
+      sendWsBinary(encodeWsPointer(x, y, wheelButton));
+      setTimeout(() => sendWsBinary(encodeWsPointer(x, y, 0)), 50);
     },
-    [conn?.status, getFbCoords, sendWs],
+    [conn?.status, getFbCoords, sendWsBinary],
   );
 
   // ── Resize → set_desktop_size ─────────────────────────────────────
@@ -395,7 +574,7 @@ export default function VncPanel({
         if (!entry) return;
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
-          sendWs({ type: "resize", width: Math.round(width), height: Math.round(height) });
+          sendWsBinary(encodeWsResize(Math.round(width), Math.round(height)));
         }
       }, 300);
     });
@@ -405,7 +584,7 @@ export default function VncPanel({
       observer.disconnect();
       clearTimeout(timer);
     };
-  }, [visible, conn?.status, sendWs]);
+  }, [visible, conn?.status, sendWsBinary]);
 
   // ── Canvas CSS size for scaling ───────────────────────────────────
   const canvasStyle: React.CSSProperties =
@@ -414,12 +593,12 @@ export default function VncPanel({
           width: "100%",
           height: "100%",
           objectFit: "contain",
-          cursor: "none",
+          cursor: "default",
         }
       : {
           width: conn?.width ?? 0,
           height: conn?.height ?? 0,
-          cursor: "none",
+          cursor: "default",
           maxWidth: "none",
           maxHeight: "none",
         };

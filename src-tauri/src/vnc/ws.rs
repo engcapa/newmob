@@ -4,14 +4,16 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
 
 use crate::vnc::clipboard::{
-    build_caps_body, build_notify_body, build_provide_body, build_request_body,
-    ClipboardFormats, ExtendedClipboardMsg, ENCODING_EXTENDED_CLIPBOARD, FORMAT_HTML, FORMAT_RTF,
+    build_caps_body, build_notify_body, build_provide_body, build_request_body, ClipboardFormats,
+    ExtendedClipboardMsg, ACTION_CAPS, ACTION_NOTIFY, ACTION_PROVIDE, ACTION_REQUEST,
+    ENCODING_EXTENDED_CLIPBOARD, ENCODING_EXTENDED_CLIPBOARD_LEGACY, FORMAT_HTML, FORMAT_RTF,
     FORMAT_TEXT,
 };
 use crate::vnc::encodings::DecodedRect;
@@ -35,14 +37,21 @@ pub enum WsOutgoing {
 /// Control messages from the WebSocket client toward the VNC event loop.
 #[derive(Debug)]
 pub enum VncControl {
-    Key { down: bool, keysym: u32 },
-    Pointer { x: u16, y: u16, buttons: u8 },
+    Key {
+        down: bool,
+        keysym: u32,
+    },
+    Pointer {
+        x: u16,
+        y: u16,
+        buttons: u8,
+    },
     Clipboard(String),
     /// Send an ExtendedClipboard payload using whatever formats the server has
     /// advertised support for. The relay handles caps negotiation and falls
     /// back to plain ClientCutText if the server didn't advertise the encoding.
     ExtendedClipboard(ClipboardFormats),
-    Resize,
+    Resize { width: u16, height: u16 },
     Ack,
     Disconnect,
 }
@@ -116,6 +125,12 @@ pub struct VncSession {
     pub cancel: CancellationToken,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ServerClipboardCaps {
+    formats: u32,
+    actions: u32,
+}
+
 // ── Main entry point ────────────────────────────────────────────────
 
 /// Connect to a VNC server and spawn the relay. Returns a session handle.
@@ -136,16 +151,17 @@ pub async fn spawn_vnc_relay(
     // (scroll) > Raw (fallback). DesktopSize must be listed so server-driven
     // resolution changes keep working. Tight is intentionally omitted — the
     // decoder in encodings.rs is not RFC-compliant and would desync the stream.
-    // ExtendedClipboard (-1063) is a pseudo-encoding advertising support for
+    // ExtendedClipboard is a pseudo-encoding advertising support for
     // multi-format clipboard exchange (HTML/RTF/UTF-8); the server only sends
     // extended ClientCutText when both sides have advertised it.
     rfb.set_encodings(&[
-        16,                          // ZRLE
-        5,                           // Hextile
-        1,                           // CopyRect
-        0,                           // Raw
-        -223,                        // DesktopSize pseudo
-        ENCODING_EXTENDED_CLIPBOARD, // ExtendedClipboard pseudo (-1063)
+        16,                                 // ZRLE
+        5,                                  // Hextile
+        1,                                  // CopyRect
+        0,                                  // Raw
+        -223,                               // DesktopSize pseudo
+        ENCODING_EXTENDED_CLIPBOARD,        // ExtendedClipboard pseudo.
+        ENCODING_EXTENDED_CLIPBOARD_LEGACY, // Compatibility with old draft value.
     ])?;
     rfb.request_update(false)?;
     let writer = rfb.take_writer()?;
@@ -236,9 +252,12 @@ async fn run_relay(
     // Shared "last time we heard from the frontend" — updated on every ping/control.
     let last_seen = Arc::new(AsyncMutex::new(Instant::now()));
 
-    // Server's advertised ExtendedClipboard formats. Set on receipt of the
-    // server's caps message; until then we fall back to plain ClientCutText.
-    let server_clip_caps = Arc::new(AsyncMutex::new(0u32));
+    // Server's advertised ExtendedClipboard formats/actions. Set on receipt of
+    // the server's caps message; until then we fall back to plain ClientCutText.
+    let server_clip_caps = Arc::new(AsyncMutex::new(ServerClipboardCaps::default()));
+    // Cache the latest local clipboard payload so servers that follow the
+    // notify/request/provide flow can request it after our paste shortcut.
+    let latest_local_clipboard = Arc::new(AsyncMutex::new(None::<ClipboardFormats>));
 
     // Task: pump outgoing messages → WS sink
     let ws_write = tokio::spawn(async move {
@@ -286,13 +305,17 @@ async fn run_relay(
                                 }))
                             }
                             WsIncoming::Resize { width, height } => {
-                                let _requested_size = (width, height);
-                                Some(VncControl::Resize)
+                                Some(VncControl::Resize { width, height })
                             }
                         };
                         if let Some(m) = ctrl_msg {
                             let _ = ctrl.send(m);
                         }
+                    }
+                }
+                Message::Binary(bytes) => {
+                    if let Some(ctrl_msg) = parse_binary_control(&bytes) {
+                        let _ = ctrl.send(ctrl_msg);
                     }
                 }
                 Message::Close(_) => {
@@ -310,6 +333,7 @@ async fn run_relay(
     let ws_out = ws_out_tx.clone();
     let cancel_vnc = cancel.clone();
     let server_caps_read = server_clip_caps.clone();
+    let latest_clipboard_read = latest_local_clipboard.clone();
     let writer_for_caps = writer.clone();
     let vnc_read = tokio::spawn(async move {
         loop {
@@ -343,6 +367,7 @@ async fn run_relay(
                         frame.extend_from_slice(&rgba);
                         let _ = ws_out.send(WsOutgoing::Frame(frame));
                     }
+                    let _ = ws_out.send(WsOutgoing::Frame(Vec::new()));
                 }
                 ServerMessage::Bell => {
                     let json = serde_json::to_string(&WsOutgoingText::Bell).unwrap();
@@ -356,6 +381,7 @@ async fn run_relay(
                     handle_server_ext_clipboard(
                         ext,
                         &server_caps_read,
+                        &latest_clipboard_read,
                         &writer_for_caps,
                         &ws_out,
                     )
@@ -370,20 +396,44 @@ async fn run_relay(
     let rfb_ctrl = writer.clone();
     let cl_cancel = cancel.clone();
     let server_caps_ctrl = server_clip_caps.clone();
+    let latest_clipboard_ctrl = latest_local_clipboard.clone();
     let vnc_ctrl = tokio::spawn(async move {
-        while let Some(ctrl) = control_rx.recv().await {
+        let mut deferred_ctrl: Option<VncControl> = None;
+        let mut last_pointer_buttons = 0u8;
+        loop {
+            let ctrl = match deferred_ctrl.take() {
+                Some(ctrl) => ctrl,
+                None => match control_rx.recv().await {
+                    Some(ctrl) => ctrl,
+                    None => break,
+                },
+            };
             if cl_cancel.is_cancelled() {
                 break;
             }
-            let mut conn = rfb_ctrl.lock().await;
+            let ctrl = coalesce_pointer_control(
+                ctrl,
+                &mut control_rx,
+                &mut deferred_ctrl,
+                last_pointer_buttons,
+            );
+            if let VncControl::Pointer { buttons, .. } = &ctrl {
+                last_pointer_buttons = *buttons;
+            }
             let result = match ctrl {
-                VncControl::Ack => conn.request_update(true),
-                VncControl::Key { down, keysym } => conn.send_key_event(down, keysym),
-                VncControl::Pointer { x, y, buttons } => conn.send_pointer_event(x, y, buttons),
-                VncControl::Clipboard(text) => conn.send_client_cut_text(&text),
+                VncControl::Ack => rfb_ctrl.lock().await.request_update(true),
+                VncControl::Key { down, keysym } => {
+                    rfb_ctrl.lock().await.send_key_event(down, keysym)
+                }
+                VncControl::Pointer { x, y, buttons } => {
+                    rfb_ctrl.lock().await.send_pointer_event(x, y, buttons)
+                }
+                VncControl::Clipboard(text) => rfb_ctrl.lock().await.send_client_cut_text(&text),
                 VncControl::ExtendedClipboard(formats) => {
                     let server_caps = *server_caps_ctrl.lock().await;
-                    if server_caps == 0 {
+                    *latest_clipboard_ctrl.lock().await = Some(formats.clone());
+                    let mut conn = rfb_ctrl.lock().await;
+                    if server_caps.formats == 0 {
                         // No caps received — server doesn't support ExtendedClipboard.
                         if let Some(text) = formats.text.as_deref() {
                             conn.send_client_cut_text(text)
@@ -393,33 +443,47 @@ async fn run_relay(
                     } else {
                         // Filter to formats the server actually supports.
                         let filtered = ClipboardFormats {
-                            text: if server_caps & FORMAT_TEXT != 0 { formats.text } else { None },
-                            html: if server_caps & FORMAT_HTML != 0 { formats.html } else { None },
-                            rtf: if server_caps & FORMAT_RTF != 0 { formats.rtf } else { None },
+                            text: if server_caps.formats & FORMAT_TEXT != 0 {
+                                formats.text
+                            } else {
+                                None
+                            },
+                            html: if server_caps.formats & FORMAT_HTML != 0 {
+                                formats.html
+                            } else {
+                                None
+                            },
+                            rtf: if server_caps.formats & FORMAT_RTF != 0 {
+                                formats.rtf
+                            } else {
+                                None
+                            },
                         };
                         if filtered.format_mask() == 0 {
                             Ok(())
                         } else {
-                            // First send a notify so the server knows we have data,
-                            // then deliver the provide payload directly. TigerVNC
-                            // accepts unsolicited provides.
-                            let _ = conn.send_extended_clipboard(&build_notify_body(
-                                filtered.format_mask(),
-                            ));
-                            match build_provide_body(&filtered) {
-                                Ok(body) => conn.send_extended_clipboard(&body),
-                                Err(e) => Err(e),
+                            if can_send_notify(server_caps) {
+                                let _ = conn.send_extended_clipboard(&build_notify_body(
+                                    filtered.format_mask(),
+                                ));
+                            }
+                            if can_send_provide(server_caps) {
+                                match build_provide_body(&filtered) {
+                                    Ok(body) => conn.send_extended_clipboard(&body),
+                                    Err(e) => Err(e),
+                                }
+                            } else {
+                                Ok(())
                             }
                         }
                     }
                 }
-                VncControl::Resize => conn.request_update(false),
+                VncControl::Resize { .. } => rfb_ctrl.lock().await.request_update(false),
                 VncControl::Disconnect => {
                     cl_cancel.cancel();
                     Ok(())
                 }
             };
-            drop(conn);
             if let Err(e) = result {
                 tracing::error!("VNC control error: {}", e);
             }
@@ -481,7 +545,8 @@ async fn run_relay(
 /// Drive the ExtendedClipboard handshake on receipt of a server message.
 async fn handle_server_ext_clipboard(
     msg: ExtendedClipboardMsg,
-    server_caps: &Arc<AsyncMutex<u32>>,
+    server_caps: &Arc<AsyncMutex<ServerClipboardCaps>>,
+    latest_local_clipboard: &Arc<AsyncMutex<Option<ClipboardFormats>>>,
     writer: &Arc<tokio::sync::Mutex<RfbWriter>>,
     ws_out: &UnboundedSender<WsOutgoing>,
 ) {
@@ -491,8 +556,13 @@ async fn handle_server_ext_clipboard(
     const MAX_SIZE: u32 = 16 * 1024 * 1024;
 
     match msg {
-        ExtendedClipboardMsg::Caps { formats, .. } => {
-            *server_caps.lock().await = formats & OUR_CAPS;
+        ExtendedClipboardMsg::Caps {
+            formats, actions, ..
+        } => {
+            *server_caps.lock().await = ServerClipboardCaps {
+                formats: formats & OUR_CAPS,
+                actions,
+            };
             // Reply with our caps so the server knows what to deliver.
             let body = build_caps_body(OUR_CAPS, MAX_SIZE);
             let mut w = writer.lock().await;
@@ -502,13 +572,17 @@ async fn handle_server_ext_clipboard(
             // Server is advertising new clipboard contents — request the
             // formats it has that we also understand.
             let want = formats & OUR_CAPS;
-            if want != 0 {
+            let caps = *server_caps.lock().await;
+            if want != 0 && can_send_request(caps) {
                 let body = build_request_body(want);
                 let mut w = writer.lock().await;
                 let _ = w.send_extended_clipboard(&body);
             }
         }
-        ExtendedClipboardMsg::Provide { formats: _, formats_data } => {
+        ExtendedClipboardMsg::Provide {
+            formats: _,
+            formats_data,
+        } => {
             let json = serde_json::to_string(&WsOutgoingText::ExtClipboard {
                 text: formats_data.text,
                 html: formats_data.html,
@@ -517,14 +591,164 @@ async fn handle_server_ext_clipboard(
             .unwrap();
             let _ = ws_out.send(WsOutgoing::Text(json));
         }
-        ExtendedClipboardMsg::Request { formats: _ } => {
-            // The server is asking us to provide clipboard data. We don't keep
-            // a server-side cache of the local clipboard (the frontend pushes
-            // it on demand), so this is a no-op.
+        ExtendedClipboardMsg::Request { formats } => {
+            let cached = latest_local_clipboard.lock().await.clone();
+            if let Some(data) = cached {
+                let filtered = filter_clipboard_formats(data, formats & OUR_CAPS);
+                if filtered.format_mask() != 0 {
+                    if let Ok(body) = build_provide_body(&filtered) {
+                        let mut w = writer.lock().await;
+                        let _ = w.send_extended_clipboard(&body);
+                    }
+                }
+            }
         }
         ExtendedClipboardMsg::Peek => {
-            // Same as Request — no cached clipboard to peek at.
+            let formats = latest_local_clipboard
+                .lock()
+                .await
+                .as_ref()
+                .map(|data| data.format_mask() & OUR_CAPS)
+                .unwrap_or(0);
+            let body = build_notify_body(formats);
+            let mut w = writer.lock().await;
+            let _ = w.send_extended_clipboard(&body);
         }
+    }
+}
+
+fn filter_clipboard_formats(data: ClipboardFormats, mask: u32) -> ClipboardFormats {
+    ClipboardFormats {
+        text: if mask & FORMAT_TEXT != 0 {
+            data.text
+        } else {
+            None
+        },
+        html: if mask & FORMAT_HTML != 0 {
+            data.html
+        } else {
+            None
+        },
+        rtf: if mask & FORMAT_RTF != 0 {
+            data.rtf
+        } else {
+            None
+        },
+    }
+}
+
+fn can_send_request(caps: ServerClipboardCaps) -> bool {
+    caps.actions == 0 || caps.actions == ACTION_CAPS || caps.actions & ACTION_REQUEST != 0
+}
+
+fn can_send_notify(caps: ServerClipboardCaps) -> bool {
+    caps.actions == 0 || caps.actions == ACTION_CAPS || caps.actions & ACTION_NOTIFY != 0
+}
+
+fn can_send_provide(caps: ServerClipboardCaps) -> bool {
+    caps.actions == 0 || caps.actions == ACTION_CAPS || caps.actions & ACTION_PROVIDE != 0
+}
+
+fn parse_binary_control(bytes: &[u8]) -> Option<VncControl> {
+    match bytes.first().copied()? {
+        0 if bytes.len() == 1 => Some(VncControl::Ack),
+        1 if bytes.len() == 1 => None,
+        2 if bytes.len() == 6 => {
+            let down = bytes[1] != 0;
+            let keysym = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+            Some(VncControl::Key { down, keysym })
+        }
+        3 if bytes.len() == 6 => {
+            let buttons = bytes[1];
+            let x = u16::from_be_bytes([bytes[2], bytes[3]]);
+            let y = u16::from_be_bytes([bytes[4], bytes[5]]);
+            Some(VncControl::Pointer { x, y, buttons })
+        }
+        4 if bytes.len() == 5 => Some(VncControl::Resize {
+            width: u16::from_be_bytes([bytes[1], bytes[2]]),
+            height: u16::from_be_bytes([bytes[3], bytes[4]]),
+        }),
+        _ => None,
+    }
+}
+
+fn coalesce_pointer_control(
+    ctrl: VncControl,
+    control_rx: &mut UnboundedReceiver<VncControl>,
+    deferred_ctrl: &mut Option<VncControl>,
+    last_buttons: u8,
+) -> VncControl {
+    let (mut x, mut y, buttons) = match ctrl {
+        VncControl::Pointer { x, y, buttons } => (x, y, buttons),
+        other => return other,
+    };
+
+    if buttons != last_buttons {
+        return VncControl::Pointer { x, y, buttons };
+    }
+
+    loop {
+        match control_rx.try_recv() {
+            Ok(VncControl::Pointer {
+                x: next_x,
+                y: next_y,
+                buttons: next_buttons,
+            }) if next_buttons == buttons => {
+                x = next_x;
+                y = next_y;
+            }
+            Ok(other @ VncControl::Pointer { .. }) => {
+                *deferred_ctrl = Some(other);
+                break;
+            }
+            Ok(other) => {
+                *deferred_ctrl = Some(other);
+                break;
+            }
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        }
+    }
+
+    VncControl::Pointer { x, y, buttons }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binary_control_decodes_key_pointer_and_resize() {
+        match parse_binary_control(&[2, 1, 0, 0, 0xff, 0x0d]) {
+            Some(VncControl::Key { down, keysym }) => {
+                assert!(down);
+                assert_eq!(keysym, 0xff0d);
+            }
+            other => panic!("expected key control, got {:?}", other),
+        }
+
+        match parse_binary_control(&[3, 1, 0x01, 0x02, 0x03, 0x04]) {
+            Some(VncControl::Pointer { x, y, buttons }) => {
+                assert_eq!(x, 0x0102);
+                assert_eq!(y, 0x0304);
+                assert_eq!(buttons, 1);
+            }
+            other => panic!("expected pointer control, got {:?}", other),
+        }
+
+        match parse_binary_control(&[4, 0x05, 0x00, 0x03, 0x20]) {
+            Some(VncControl::Resize { width, height }) => {
+                assert_eq!(width, 1280);
+                assert_eq!(height, 800);
+            }
+            other => panic!("expected resize control, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn binary_control_decodes_ack_and_ignores_ping() {
+        assert!(matches!(parse_binary_control(&[0]), Some(VncControl::Ack)));
+        assert!(parse_binary_control(&[1]).is_none());
+        assert!(parse_binary_control(&[3, 0]).is_none());
     }
 }
 

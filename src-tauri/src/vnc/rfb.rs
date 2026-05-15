@@ -3,7 +3,7 @@ use std::io::{Error, ErrorKind, Read, Write};
 use std::net::TcpStream;
 
 use crate::vnc::clipboard::{
-    parse_extended_body, ExtendedClipboardMsg, ENCODING_EXTENDED_CLIPBOARD,
+    decode_legacy_cut_text, encode_legacy_cut_text, parse_extended_body, ExtendedClipboardMsg,
 };
 use crate::vnc::encodings::{self, DecodedRect, HextileState, ZrleDecoder};
 
@@ -640,11 +640,14 @@ impl RfbConnection {
                     }
                 } else {
                     let len = len_signed as usize;
+                    if len > 16 * 1024 * 1024 {
+                        return Err(format!("legacy clipboard body too large: {}", len));
+                    }
                     let mut text = vec![0u8; len];
                     self.read_exact(&mut text)
                         .map_err(|e| format!("read cut text: {}", e))?;
                     Ok(ServerMessage::ServerCutText {
-                        text: String::from_utf8_lossy(&text).to_string(),
+                        text: decode_legacy_cut_text(&text),
                     })
                 }
             }
@@ -916,12 +919,12 @@ impl RfbWriter {
 
     /// Send ClientCutText (clipboard).
     pub fn send_client_cut_text(&mut self, text: &str) -> Result<(), String> {
-        let text_bytes = text.as_bytes();
+        let text_bytes = encode_legacy_cut_text(text);
         let mut msg = vec![0u8; 8 + text_bytes.len()];
         msg[0] = 6;
         msg[1..4].copy_from_slice(&[0u8; 3]);
         msg[4..8].copy_from_slice(&(text_bytes.len() as u32).to_be_bytes());
-        msg[8..].copy_from_slice(text_bytes);
+        msg[8..].copy_from_slice(&text_bytes);
 
         self.write_all(&msg)
             .map_err(|e| format!("write client cut text: {}", e))?;

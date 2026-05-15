@@ -77,6 +77,42 @@ export function parseWsMessage(data: string): WsIncoming | null {
   }
 }
 
+export function encodeWsAck(): ArrayBuffer {
+  return new Uint8Array([0]).buffer;
+}
+
+export function encodeWsPing(): ArrayBuffer {
+  return new Uint8Array([1]).buffer;
+}
+
+export function encodeWsKey(down: boolean, keysym: number): ArrayBuffer {
+  const bytes = new Uint8Array(6);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 2;
+  bytes[1] = down ? 1 : 0;
+  view.setUint32(2, keysym >>> 0);
+  return bytes.buffer;
+}
+
+export function encodeWsPointer(x: number, y: number, buttons: number): ArrayBuffer {
+  const bytes = new Uint8Array(6);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 3;
+  bytes[1] = buttons & 0xff;
+  view.setUint16(2, x & 0xffff);
+  view.setUint16(4, y & 0xffff);
+  return bytes.buffer;
+}
+
+export function encodeWsResize(width: number, height: number): ArrayBuffer {
+  const bytes = new Uint8Array(5);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 4;
+  view.setUint16(1, width & 0xffff);
+  view.setUint16(3, height & 0xffff);
+  return bytes.buffer;
+}
+
 /** Parse a binary frame header: [x(2B), y(2B), w(2B), h(2B)] — all big-endian. */
 export function parseFrameHeader(
   data: ArrayBuffer,

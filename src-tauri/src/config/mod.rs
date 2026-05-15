@@ -212,6 +212,14 @@ pub fn clipboard_read_text() -> Result<String, String> {
         .map_err(|e| format!("clipboard read: {}", e))
 }
 
+#[tauri::command]
+pub fn clipboard_write_text(text: String) -> Result<(), String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?;
+    clipboard
+        .set_text(text)
+        .map_err(|e| format!("clipboard write: {}", e))
+}
+
 fn expanded_path(value: &str) -> PathBuf {
     PathBuf::from(shellexpand::tilde(value).to_string())
 }

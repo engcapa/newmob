@@ -246,6 +246,17 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     case "list_system_fonts": {
       return [] as T;
     }
+    case "clipboard_read_text": {
+      return ((await navigator.clipboard?.readText?.()) ?? "") as T;
+    }
+    case "clipboard_write_text": {
+      const text = ((args as InvokeArgs | undefined)?.text as string) ?? "";
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard write is not available in browser preview.");
+      }
+      await navigator.clipboard.writeText(text);
+      return undefined as T;
+    }
     case "select_private_key_file": {
       const current = (args?.currentPath as string | null) || "~/.ssh/id_ed25519";
       const selected = window.prompt("Private key path", current);
