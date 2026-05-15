@@ -11,8 +11,6 @@ import {
   parseFrameHeader,
   keyEventToKeysym,
   mouseButtonMask,
-  codePointToKeysym,
-  iterCodePoints,
 } from "../../lib/vnc";
 import type { WsOutgoing } from "../../lib/vnc";
 import { useVncStore } from "../../stores/vncStore";
@@ -182,13 +180,9 @@ export default function VncPanel({
         if (!text || text === lastSyncedLocalClipboardTextRef.current) {
           return;
         }
-        if (hasNonAsciiText(text) && !extClipboardSupportedRef.current) {
-          console.info(
-            `[vnc.clip] local→server ${reason} sync skipped non-ASCII text_len=${text.length} because server has no ExtendedClipboard`,
-          );
-          return;
-        }
-
+        // Non-ASCII text is sent even when the server lacks ExtendedClipboard:
+        // the relay will fall back to UTF-8 legacy ClientCutText, which vino
+        // and most modern servers accept despite RFC 6143 specifying Latin-1.
         lastSyncedLocalClipboardTextRef.current = text;
         console.info(
           `[vnc.clip] local→server ${reason} sync text_len=${text.length} ext_support=${extClipboardSupportedRef.current}`,
@@ -489,18 +483,10 @@ export default function VncPanel({
       });
     };
 
-    const sendTextAsKeysyms = (text: string) => {
-      for (const cp of iterCodePoints(text)) {
-        const ks = cp === 0x0a || cp === 0x0d ? 0xff0d : codePointToKeysym(cp);
-        sendWsBinary(encodeWsKey(true, ks));
-        sendWsBinary(encodeWsKey(false, ks));
-      }
-    };
-
     /**
-     * When the user presses Ctrl+V on the canvas, prefer the real clipboard
-     * path. If the server only supports legacy ClientCutText, non-ASCII text
-     * cannot be represented without mojibake, so we type it as Unicode keysyms
+     * When the user presses Ctrl+V on the canvas, send the clipboard content
+     * via the relay (UTF-8 legacy ClientCutText for servers without
+     * ExtendedClipboard, ExtendedClipboard for servers that support it).
      * instead and deliberately do not send the remote V shortcut.
      */
     const handlePasteShortcut = (e: KeyboardEvent) => {
@@ -516,14 +502,12 @@ export default function VncPanel({
       void (async () => {
         const clipboard = await readLocalClipboard();
         const text = clipboard?.text ?? "";
-        const useUnicodeTyping =
-          !!text && hasNonAsciiText(text) && !extClipboardSupportedRef.current;
-        if (clipboard && !useUnicodeTyping) {
+        if (clipboard) {
           lastSyncedLocalClipboardTextRef.current = text;
           sendExtClipboardToRelay(clipboard);
         }
         console.info(
-          `[vnc.clip] paste shortcut: text_len=${text.length} non_ascii=${hasNonAsciiText(text)} ext_support=${extClipboardSupportedRef.current} → ${useUnicodeTyping ? "type-as-keysyms" : "clipboard+V"}`,
+          `[vnc.clip] paste shortcut: text_len=${text.length} non_ascii=${hasNonAsciiText(text)} ext_support=${extClipboardSupportedRef.current} → clipboard+V`,
         );
 
         if (destroyedRef.current) {
@@ -551,17 +535,13 @@ export default function VncPanel({
             sendWsBinary(encodeWsKey(false, modKeysym));
           });
 
-          if (useUnicodeTyping) {
-            sendTextAsKeysyms(text);
-          } else {
-            // Re-press modifiers and send V so the remote app's paste shortcut
-            // fires against the now-updated clipboard.
-            pending.heldModifiers.forEach((modKeysym) => {
-              sendWsBinary(encodeWsKey(true, modKeysym));
-            });
-            sendWsBinary(encodeWsKey(true, pasteKeysym));
-            sendWsBinary(encodeWsKey(false, pasteKeysym));
-          }
+          // Re-press modifiers and send V so the remote app's paste shortcut
+          // fires against the now-updated clipboard.
+          pending.heldModifiers.forEach((modKeysym) => {
+            sendWsBinary(encodeWsKey(true, modKeysym));
+          });
+          sendWsBinary(encodeWsKey(true, pasteKeysym));
+          sendWsBinary(encodeWsKey(false, pasteKeysym));
 
           // The user's physical modifier keys are still held — defer their
           // key-ups until the user actually releases them so we don't
@@ -619,10 +599,6 @@ export default function VncPanel({
       const html = e.clipboardData?.getData("text/html") || undefined;
       const rtf = e.clipboardData?.getData("text/rtf") || undefined;
       if (!text && !html && !rtf) return;
-      if (text && hasNonAsciiText(text) && !extClipboardSupportedRef.current) {
-        sendTextAsKeysyms(text);
-        return;
-      }
       if (text) {
         lastSyncedLocalClipboardTextRef.current = text;
       }

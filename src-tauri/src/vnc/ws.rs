@@ -467,20 +467,15 @@ async fn run_relay(
                     let mut conn = rfb_ctrl.lock().await;
                     if server_caps.formats == 0 {
                         // No caps received — server doesn't support ExtendedClipboard.
+                        // Send UTF-8 bytes via legacy ClientCutText. RFC 6143 nominally
+                        // specifies Latin-1, but vino and most modern servers accept UTF-8
+                        // and write it directly into the X11 selection (which is UTF-8).
                         if let Some(text) = formats.text.as_deref() {
-                            if text.is_ascii() {
-                                log::info!(
-                                    "vnc.clip: relay→server FALLBACK (no ext caps), sending legacy cut text len={}",
-                                    text.len(),
-                                );
-                                conn.send_client_cut_text(text)
-                            } else {
-                                log::info!(
-                                    "vnc.clip: relay→server SKIP legacy cut text — non-ASCII payload len={} requires ExtendedClipboard or Unicode key events",
-                                    text.len(),
-                                );
-                                Ok(())
-                            }
+                            log::info!(
+                                "vnc.clip: relay→server FALLBACK (no ext caps), sending legacy cut text (UTF-8) len={}",
+                                text.len(),
+                            );
+                            conn.send_client_cut_text(text)
                         } else {
                             Ok(())
                         }
