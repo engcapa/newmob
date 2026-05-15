@@ -217,6 +217,8 @@ export function TerminalPanel({
   const [scrollback, setScrollback] = useState(initialProfile.scrollback);
   const [syntaxMode, setSyntaxMode] = useState<TerminalSyntaxMode>(initialProfile.syntaxMode);
   const [rightClickBehavior, setRightClickBehavior] = useState(initialProfile.rightClickBehavior);
+  const [copyOnSelect, setCopyOnSelect] = useState(initialProfile.copyOnSelect);
+  const copyOnSelectRef = useRef(copyOnSelect);
   const [loggingActive, setLoggingActive] = useState(initialProfile.loggingEnabled);
   const [multilinePasteConfirm, setMultilinePasteConfirm] = useState(initialProfile.multilinePasteConfirm);
   const [inlineSuggestionsEnabled, setInlineSuggestionsEnabled] = useState(initialProfile.inlineSuggestions);
@@ -842,6 +844,8 @@ export function TerminalPanel({
     return true;
   }, [sendUntrackedInput, refreshSuggestion, bumpGhost]);
 
+  const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
+
   const handleShortcutKey = useCallback((event: KeyboardEvent): boolean => {
     if (event.key === "F11") {
       event.preventDefault();
@@ -858,6 +862,43 @@ export function TerminalPanel({
       event.preventDefault();
       setPaletteOpen(true);
       return false;
+    }
+    // Cross-platform copy/paste shortcuts
+    if (isMac) {
+      if (event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "c") {
+        if (termRef.current?.hasSelection()) {
+          event.preventDefault();
+          copySelection();
+          return false;
+        }
+        return true; // no selection: pass through (sends ETX)
+      }
+      if (event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "v") {
+        if (!readOnlyRef.current) {
+          event.preventDefault();
+          void pasteFromClipboard();
+          return false;
+        }
+        return true;
+      }
+    } else {
+      // Windows / Linux
+      if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "c") {
+        if (termRef.current?.hasSelection()) {
+          event.preventDefault();
+          copySelection();
+          return false;
+        }
+        return true; // no selection: pass through
+      }
+      if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.key.toLowerCase() === "v") {
+        if (!readOnlyRef.current) {
+          event.preventDefault();
+          void pasteFromClipboard();
+          return false;
+        }
+        return true;
+      }
     }
     if (event.shiftKey && event.key === "Insert") {
       event.preventDefault();
@@ -925,12 +966,14 @@ export function TerminalPanel({
 
   const buildContextMenu = useCallback((): MenuItem[] => {
     const hasSelection = termRef.current?.hasSelection() ?? false;
+    const copyShortcut = isMac ? "Cmd+C" : "Ctrl+Shift+C";
+    const pasteShortcut = isMac ? "Cmd+V" : "Ctrl+Shift+V / Shift+Insert";
 
     return [
-      { label: "Copy", onClick: copySelection, disabled: !hasSelection },
+      { label: "Copy", shortcut: copyShortcut, onClick: copySelection, disabled: !hasSelection },
       { label: "Copy All", onClick: copyAll },
       { label: "Copy formatted text (HTML/RTF)", onClick: () => void copyFormattedSelection(), disabled: !hasSelection },
-      { label: "Paste", shortcut: "Shift+Insert", onClick: () => void pasteFromClipboard(), disabled: readOnly },
+      { label: "Paste", shortcut: pasteShortcut, onClick: () => void pasteFromClipboard(), disabled: readOnly },
       { label: "Find", shortcut: "Ctrl+Shift+F", onClick: openSearch },
       { label: "", separator: true },
       {
@@ -1081,6 +1124,10 @@ export function TerminalPanel({
   }, [loggingActive]);
 
   useEffect(() => {
+    copyOnSelectRef.current = copyOnSelect;
+  }, [copyOnSelect]);
+
+  useEffect(() => {
     if (!terminalProfile) {
       appliedTerminalProfileSignatureRef.current = null;
       return;
@@ -1102,6 +1149,7 @@ export function TerminalPanel({
     setScrollback(terminalProfile.scrollback);
     setSyntaxMode(terminalProfile.syntaxMode);
     setRightClickBehavior(terminalProfile.rightClickBehavior);
+    setCopyOnSelect(terminalProfile.copyOnSelect);
     setLoggingActive(terminalProfile.loggingEnabled);
     setMultilinePasteConfirm(terminalProfile.multilinePasteConfirm);
     setInlineSuggestionsEnabled(terminalProfile.inlineSuggestions);
@@ -1184,6 +1232,11 @@ export function TerminalPanel({
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       return handleShortcutKey(event);
+    });
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (copyOnSelectRef.current && term.hasSelection()) {
+        void writeClipboardText(term.getSelection(), "");
+      }
     });
     const scrollDisposable = term.onScroll(() => setViewportVersion((v) => v + 1));
     const renderDisposable = term.onRender(() => setViewportVersion((v) => v + 1));
@@ -1377,6 +1430,7 @@ export function TerminalPanel({
     return () => {
       destroyed = true;
       observer.disconnect();
+      selectionDisposable.dispose();
       scrollDisposable.dispose();
       renderDisposable.dispose();
       resizeDisposable.dispose();
