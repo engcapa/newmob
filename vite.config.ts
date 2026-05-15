@@ -1,6 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
+import { readFileSync } from "fs";
 import { sshProxyPlugin } from "./vite-plugins/sshProxy";
 import { sftpProxyPlugin } from "./vite-plugins/sftpProxy";
 
@@ -8,9 +9,16 @@ const isTauriBuild = !!process.env.TAURI_ENV_PLATFORM;
 
 const devPort = isTauriBuild ? 1420 : 5000;
 
+const pkg = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf-8")) as {
+  version: string;
+};
+
 export default defineConfig({
   plugins: [react(), ...(isTauriBuild ? [] : [sshProxyPlugin(), sftpProxyPlugin()])],
   clearScreen: false,
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
   optimizeDeps: {
     include: ["zmodem.js"],
   },

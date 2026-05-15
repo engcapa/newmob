@@ -165,13 +165,6 @@ export function TabBar() {
             />
           </>
         )}
-        <IconBtn
-          title={compactMode ? "Exit compact mode" : "Enter compact mode"}
-          icon={compactMode ? <PanelTopOpen className="w-3.5 h-3.5" /> : <PanelTopClose className="w-3.5 h-3.5" />}
-          onClick={toggleCompactMode}
-          active={compactMode}
-          compactToggle
-        />
         <IconBtn title="More" icon={<MoreHorizontal className="w-3.5 h-3.5" />} onClick={handleMore} />
       </div>
     </div>
@@ -203,21 +196,18 @@ function IconBtn({
   onClick,
   disabled,
   active,
-  compactToggle,
 }: {
   icon: React.ReactNode;
   title: string;
   onClick?: (event: React.MouseEvent) => void;
   disabled?: boolean;
   active?: boolean;
-  compactToggle?: boolean;
 }) {
   return (
     <button
       title={title}
       aria-label={title}
       data-active={active || undefined}
-      data-compact-toggle={compactToggle || undefined}
       className="w-6 h-6 inline-flex items-center justify-center rounded hover:bg-[var(--moba-hover)] disabled:opacity-40 disabled:cursor-default"
       style={active ? { background: "var(--moba-selected)", color: "var(--moba-accent)" } : undefined}
       onClick={onClick}

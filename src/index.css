@@ -282,12 +282,17 @@ body {
   color: #fff;
 }
 
-.moba-tabbar button[data-compact-toggle="true"] {
-  border: 1px solid color-mix(in srgb, var(--moba-accent) 55%, transparent);
+.moba-titlebar-tray {
+  border-left: 1px solid color-mix(in srgb, var(--moba-divider) 80%, transparent);
 }
 
-.moba-tabbar button[data-compact-toggle="true"][data-active="true"] {
-  background: color-mix(in srgb, var(--moba-accent) 15%, var(--moba-input-bg));
+.moba-titlebar-tray-btn + .moba-titlebar-tray-btn {
+  border-left: 1px solid color-mix(in srgb, var(--moba-divider) 80%, transparent);
+}
+
+.moba-titlebar-tray-btn[data-active="true"] {
+  background: color-mix(in srgb, var(--moba-accent) 15%, transparent);
+  color: var(--moba-accent);
 }
 
 .moba-compact-root .moba-tab {
