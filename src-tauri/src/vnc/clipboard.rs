@@ -1,4 +1,4 @@
-// ExtendedClipboard pseudo-encoding (-1063 / 0xFFFFFBD9) helpers.
+// ExtendedClipboard pseudo-encoding (0xc0a1e5ce) helpers.
 //
 // Wire format follows the de-facto RFB community extension implemented by
 // TigerVNC / TightVNC / RealVNC / TurboVNC. The encoding rides on top of the
@@ -6,7 +6,7 @@
 // but signals an extended payload by encoding a *negative* 32-bit length:
 //
 //     length = -N    (N = absolute size of the body that follows)
-//     body[0..4]     = flags (action mask in top byte | format mask in low 24 bits)
+//     body[0..4]     = flags (action mask in top byte | format mask in low 16 bits)
 //     body[4..]      = action-specific payload
 //
 // Actions:
@@ -16,7 +16,7 @@
 //   notify   0x08000000  body = empty (advertise which formats are available)
 //   provide  0x10000000  body = concatenated per-format (u32 length + zlib data)
 //
-// Formats (low 24 bits, set bits indicate supported/requested):
+// Formats (low 16 bits, set bits indicate supported/requested):
 //   text  0x01   plain UTF-8
 //   rtf   0x02
 //   html  0x04
@@ -29,7 +29,11 @@ use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use std::io::{Read, Write};
 
-pub const ENCODING_EXTENDED_CLIPBOARD: i32 = -1063;
+pub const ENCODING_EXTENDED_CLIPBOARD: i32 = 0xC0A1_E5CEu32 as i32;
+// Older NewMob builds advertised this incorrect value. Keeping it in the
+// SetEncodings list is harmless for conforming servers and lets us keep
+// talking to any test servers that copied the old draft value.
+pub const ENCODING_EXTENDED_CLIPBOARD_LEGACY: i32 = -1063;
 
 pub const ACTION_CAPS: u32 = 0x01_00_00_00;
 pub const ACTION_REQUEST: u32 = 0x02_00_00_00;
@@ -37,11 +41,13 @@ pub const ACTION_PEEK: u32 = 0x04_00_00_00;
 pub const ACTION_NOTIFY: u32 = 0x08_00_00_00;
 pub const ACTION_PROVIDE: u32 = 0x10_00_00_00;
 pub const ACTION_MASK: u32 = 0xFF_00_00_00;
+pub const SUPPORTED_ACTIONS: u32 =
+    ACTION_CAPS | ACTION_REQUEST | ACTION_PEEK | ACTION_NOTIFY | ACTION_PROVIDE;
 
 pub const FORMAT_TEXT: u32 = 0x00_00_00_01;
 pub const FORMAT_RTF: u32 = 0x00_00_00_02;
 pub const FORMAT_HTML: u32 = 0x00_00_00_04;
-pub const FORMAT_MASK: u32 = 0x00_FF_FF_FF;
+pub const FORMAT_MASK: u32 = 0x00_00_FF_FF;
 
 #[derive(Debug, Clone, Default)]
 pub struct ClipboardFormats {
@@ -71,6 +77,7 @@ impl ClipboardFormats {
 pub enum ExtendedClipboardMsg {
     Caps {
         formats: u32,
+        actions: u32,
         sizes: Vec<u32>,
     },
     Request {
@@ -97,30 +104,35 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
     let formats = flags & FORMAT_MASK;
     let payload = &body[4..];
 
-    match action {
-        ACTION_CAPS => {
-            // For each set bit in `formats`, read one u32 (max size).
-            let mut sizes = Vec::new();
-            let mut cursor = 0;
-            let mut bit = 1u32;
-            while bit & FORMAT_MASK != 0 {
-                if formats & bit != 0 {
-                    if payload.len() < cursor + 4 {
-                        break;
-                    }
-                    let size = u32::from_be_bytes([
-                        payload[cursor],
-                        payload[cursor + 1],
-                        payload[cursor + 2],
-                        payload[cursor + 3],
-                    ]);
-                    sizes.push(size);
-                    cursor += 4;
+    if action & ACTION_CAPS != 0 {
+        // For each set bit in `formats`, read one u32 (max size).
+        let mut sizes = Vec::new();
+        let mut cursor = 0;
+        let mut bit = 1u32;
+        while bit & FORMAT_MASK != 0 {
+            if formats & bit != 0 {
+                if payload.len() < cursor + 4 {
+                    break;
                 }
-                bit <<= 1;
+                let size = u32::from_be_bytes([
+                    payload[cursor],
+                    payload[cursor + 1],
+                    payload[cursor + 2],
+                    payload[cursor + 3],
+                ]);
+                sizes.push(size);
+                cursor += 4;
             }
-            Some(ExtendedClipboardMsg::Caps { formats, sizes })
+            bit <<= 1;
         }
+        return Some(ExtendedClipboardMsg::Caps {
+            formats,
+            actions: action,
+            sizes,
+        });
+    }
+
+    match action {
         ACTION_REQUEST => Some(ExtendedClipboardMsg::Request { formats }),
         ACTION_PEEK => Some(ExtendedClipboardMsg::Peek),
         ACTION_NOTIFY => Some(ExtendedClipboardMsg::Notify { formats }),
@@ -155,12 +167,12 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
                         break;
                     }
                     let raw = &decoded[cursor..cursor + len];
-                    // Trim trailing NUL — TigerVNC includes a NUL terminator.
-                    let trimmed = match raw.iter().position(|b| *b == 0) {
-                        Some(idx) => &raw[..idx],
-                        None => raw,
-                    };
-                    let s = String::from_utf8_lossy(trimmed).to_string();
+                    // Trim trailing NUL — the extended text format requires it.
+                    let trimmed = raw.strip_suffix(&[0]).unwrap_or(raw);
+                    let mut s = String::from_utf8_lossy(trimmed).to_string();
+                    if bit == FORMAT_TEXT {
+                        s = denormalize_text_newlines(&s);
+                    }
                     cursor += len;
                     match bit {
                         FORMAT_TEXT => data.text = Some(s),
@@ -183,7 +195,7 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
 /// Build the body for a caps message advertising the formats we support.
 pub fn build_caps_body(supported_formats: u32, max_size_per_format: u32) -> Vec<u8> {
     let mut body = Vec::new();
-    body.extend_from_slice(&(ACTION_CAPS | supported_formats).to_be_bytes());
+    body.extend_from_slice(&(SUPPORTED_ACTIONS | supported_formats).to_be_bytes());
     let mut bit = 1u32;
     while bit & FORMAT_MASK != 0 {
         if supported_formats & bit != 0 {
@@ -219,7 +231,14 @@ pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
         };
         if let Some(s) = chunk {
             // TigerVNC convention: NUL-terminated UTF-8 + 4-byte big-endian length.
-            let mut buf = s.as_bytes().to_vec();
+            let text;
+            let value = if bit == FORMAT_TEXT {
+                text = normalize_text_newlines(s);
+                text.as_str()
+            } else {
+                s
+            };
+            let mut buf = value.as_bytes().to_vec();
             buf.push(0);
             payload.extend_from_slice(&(buf.len() as u32).to_be_bytes());
             payload.extend_from_slice(&buf);
@@ -233,12 +252,66 @@ pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
         encoder
             .write_all(&payload)
             .map_err(|e| format!("zlib write: {}", e))?;
-        encoder.finish().map_err(|e| format!("zlib finish: {}", e))?;
+        encoder
+            .finish()
+            .map_err(|e| format!("zlib finish: {}", e))?;
     }
     let mut body = Vec::with_capacity(4 + compressed.len());
     body.extend_from_slice(&(ACTION_PROVIDE | formats).to_be_bytes());
     body.extend_from_slice(&compressed);
     Ok(body)
+}
+
+pub fn decode_legacy_cut_text(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+
+    bytes.iter().map(|b| char::from(*b)).collect()
+}
+
+// RFC 6143 nominally specifies Latin-1 for legacy ClientCutText. Some modern
+// VNC servers accept UTF-8 bytes here, while stricter X11-backed servers expose
+// the payload as Latin-1/STRING and will mojibake CJK. Keep the bytes intact so
+// ASCII and UTF-8-friendly servers work; callers that know the peer lacks
+// ExtendedClipboard should avoid sending non-ASCII through this path.
+pub fn encode_legacy_cut_text(text: &str) -> Vec<u8> {
+    text.as_bytes().to_vec()
+}
+
+fn normalize_text_newlines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    let _ = chars.next();
+                }
+                out.push_str("\r\n");
+            }
+            '\n' => out.push_str("\r\n"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn denormalize_text_newlines(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    let _ = chars.next();
+                }
+                out.push('\n');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -249,9 +322,40 @@ mod tests {
     fn caps_roundtrip_advertises_supported_formats() {
         let body = build_caps_body(FORMAT_TEXT | FORMAT_HTML, 4096);
         match parse_extended_body(&body) {
-            Some(ExtendedClipboardMsg::Caps { formats, sizes }) => {
+            Some(ExtendedClipboardMsg::Caps {
+                formats,
+                actions,
+                sizes,
+            }) => {
                 assert_eq!(formats, FORMAT_TEXT | FORMAT_HTML);
+                assert_eq!(actions, SUPPORTED_ACTIONS);
                 assert_eq!(sizes, vec![4096, 4096]);
+            }
+            other => panic!("expected Caps, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn caps_parses_multi_action_server_flags() {
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            &(ACTION_CAPS | ACTION_REQUEST | ACTION_NOTIFY | ACTION_PROVIDE | FORMAT_TEXT)
+                .to_be_bytes(),
+        );
+        body.extend_from_slice(&0u32.to_be_bytes());
+
+        match parse_extended_body(&body) {
+            Some(ExtendedClipboardMsg::Caps {
+                formats,
+                actions,
+                sizes,
+            }) => {
+                assert_eq!(formats, FORMAT_TEXT);
+                assert_eq!(
+                    actions,
+                    ACTION_CAPS | ACTION_REQUEST | ACTION_NOTIFY | ACTION_PROVIDE
+                );
+                assert_eq!(sizes, vec![0]);
             }
             other => panic!("expected Caps, got {:?}", other),
         }
@@ -260,14 +364,14 @@ mod tests {
     #[test]
     fn provide_roundtrips_html_and_text() {
         let data = ClipboardFormats {
-            text: Some("hi".into()),
+            text: Some("hi\n中文".into()),
             html: Some("<b>hi</b>".into()),
             rtf: None,
         };
         let body = build_provide_body(&data).unwrap();
         match parse_extended_body(&body) {
             Some(ExtendedClipboardMsg::Provide { formats_data, .. }) => {
-                assert_eq!(formats_data.text.as_deref(), Some("hi"));
+                assert_eq!(formats_data.text.as_deref(), Some("hi\n中文"));
                 assert_eq!(formats_data.html.as_deref(), Some("<b>hi</b>"));
                 assert!(formats_data.rtf.is_none());
             }
@@ -296,5 +400,15 @@ mod tests {
     #[test]
     fn truncated_body_returns_none() {
         assert!(parse_extended_body(&[1, 2]).is_none());
+    }
+
+    #[test]
+    fn legacy_cut_text_roundtrips_utf8_and_decodes_latin1() {
+        // Modern servers send UTF-8 in legacy ClientCutText; we must roundtrip it.
+        let bytes = encode_legacy_cut_text("中文");
+        assert_eq!(bytes, "中文".as_bytes());
+        assert_eq!(decode_legacy_cut_text(&bytes), "中文");
+        // Pre-UTF-8 servers may still send Latin-1 — accept it on read.
+        assert_eq!(decode_legacy_cut_text(&[0x63, 0x61, 0x66, 0xe9]), "café");
     }
 }

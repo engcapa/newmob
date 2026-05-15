@@ -66,7 +66,8 @@ export type WsIncoming =
       text?: string;
       html?: string;
       rtf?: string;
-    };
+    }
+  | { type: "ext_clipboard_support"; available: boolean };
 
 /** Parse an incoming WS text message. */
 export function parseWsMessage(data: string): WsIncoming | null {
@@ -75,6 +76,42 @@ export function parseWsMessage(data: string): WsIncoming | null {
   } catch {
     return null;
   }
+}
+
+export function encodeWsAck(): ArrayBuffer {
+  return new Uint8Array([0]).buffer;
+}
+
+export function encodeWsPing(): ArrayBuffer {
+  return new Uint8Array([1]).buffer;
+}
+
+export function encodeWsKey(down: boolean, keysym: number): ArrayBuffer {
+  const bytes = new Uint8Array(6);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 2;
+  bytes[1] = down ? 1 : 0;
+  view.setUint32(2, keysym >>> 0);
+  return bytes.buffer;
+}
+
+export function encodeWsPointer(x: number, y: number, buttons: number): ArrayBuffer {
+  const bytes = new Uint8Array(6);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 3;
+  bytes[1] = buttons & 0xff;
+  view.setUint16(2, x & 0xffff);
+  view.setUint16(4, y & 0xffff);
+  return bytes.buffer;
+}
+
+export function encodeWsResize(width: number, height: number): ArrayBuffer {
+  const bytes = new Uint8Array(5);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 4;
+  view.setUint16(1, width & 0xffff);
+  view.setUint16(3, height & 0xffff);
+  return bytes.buffer;
 }
 
 /** Parse a binary frame header: [x(2B), y(2B), w(2B), h(2B)] — all big-endian. */
@@ -173,4 +210,27 @@ export function mouseButtonMask(e: MouseEvent | PointerEvent): number {
   if (e.buttons & 2) mask |= 4; // right
   if (e.buttons & 4) mask |= 2; // middle
   return mask;
+}
+
+/**
+ * Map a Unicode code point to an RFB keysym.
+ *
+ * Latin-1 (≤ U+00FF) maps directly — that's also the X11 keysym range. Code
+ * points above 0xFF use the X.org "Unicode keysym" extension: 0x01000000 |
+ * codepoint. GNOME (vino), KDE, TigerVNC, RealVNC, and X.Org all accept it,
+ * which is the only way to deliver CJK/Emoji to a server that doesn't speak
+ * ExtendedClipboard (the legacy ClientCutText channel is Latin-1 and
+ * physically can't carry those characters).
+ */
+export function codePointToKeysym(cp: number): number {
+  if (cp <= 0xff) return cp;
+  return 0x01000000 | cp;
+}
+
+/** Iterate Unicode code points in a string (handles surrogate pairs). */
+export function* iterCodePoints(text: string): Generator<number> {
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (cp !== undefined) yield cp;
+  }
 }

@@ -27,6 +27,7 @@ pub struct AppState {
     pub vnc_sessions: Arc<RwLock<HashMap<String, VncSession>>>,
     pub read_handles: Arc<Mutex<HashMap<String, ReadStreamHandle>>>,
     pub write_handles: Arc<Mutex<HashMap<String, WriteStreamHandle>>>,
+    pub clipboard: Arc<Mutex<Option<arboard::Clipboard>>>,
     pub db: Mutex<rusqlite::Connection>,
 }
 
@@ -40,6 +41,7 @@ impl AppState {
             vnc_sessions: Arc::new(RwLock::new(HashMap::new())),
             read_handles: Arc::new(Mutex::new(HashMap::new())),
             write_handles: Arc::new(Mutex::new(HashMap::new())),
+            clipboard: Arc::new(Mutex::new(None)),
             db: Mutex::new(db),
         }
     }

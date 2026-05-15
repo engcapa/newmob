@@ -52,6 +52,12 @@ export async function readText(): Promise<string> {
 
 export async function writeText(text: string): Promise<void> {
   if (!text) return;
+  try {
+    await invoke("clipboard_write_text", { text });
+    return;
+  } catch {
+    // Fallback to browser API (e.g. in dev mode without Tauri runtime).
+  }
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
       await navigator.clipboard.writeText(text);
