@@ -218,7 +218,6 @@ export function TerminalPanel({
   const [syntaxMode, setSyntaxMode] = useState<TerminalSyntaxMode>(initialProfile.syntaxMode);
   const [rightClickBehavior, setRightClickBehavior] = useState(initialProfile.rightClickBehavior);
   const [copyOnSelect, setCopyOnSelect] = useState(initialProfile.copyOnSelect);
-  const copyOnSelectRef = useRef(copyOnSelect);
   const [loggingActive, setLoggingActive] = useState(initialProfile.loggingEnabled);
   const [multilinePasteConfirm, setMultilinePasteConfirm] = useState(initialProfile.multilinePasteConfirm);
   const [inlineSuggestionsEnabled, setInlineSuggestionsEnabled] = useState(initialProfile.inlineSuggestions);
@@ -247,6 +246,7 @@ export function TerminalPanel({
   } | null>(null);
   const outputLogRef = useRef("");
   const loggingActiveRef = useRef(loggingActive);
+  const copyOnSelectRef = useRef(copyOnSelect);
   const macroRecordingRef = useRef(macroRecording);
   const macroBufferRef = useRef("");
   const lastMacroRef = useRef("");
@@ -1109,6 +1109,25 @@ export function TerminalPanel({
     rightClickBehavior,
   ]);
 
+  // Middle-click paste: if the terminal has a current selection, paste it at
+  // the cursor; otherwise fall back to the system clipboard. Same behaviour
+  // on Windows, macOS and Linux.
+  const handleMiddleClick = useCallback((event: ReactMouseEvent) => {
+    if (event.button !== 1) return;
+    event.preventDefault();
+    if (readOnlyRef.current) {
+      setStatusMessage("Terminal is read-only");
+      return;
+    }
+    const selection = termRef.current?.getSelection();
+    if (selection) {
+      writeBroadcastInput(normalizePasteText(selection));
+      focusTerminal();
+      return;
+    }
+    void pasteFromClipboard();
+  }, [focusTerminal, pasteFromClipboard, setStatusMessage, writeBroadcastInput]);
+
   useEffect(() => {
     readOnlyRef.current = readOnly;
   }, [readOnly]);
@@ -1229,6 +1248,12 @@ export function TerminalPanel({
 
     term.onData(writeXtermInput);
     term.onBinary(writeBinaryInput);
+    term.onSelectionChange(() => {
+      if (!copyOnSelectRef.current) return;
+      const selected = term.getSelection();
+      if (!selected) return;
+      navigator.clipboard?.writeText(selected).catch(() => {});
+    });
     term.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       return handleShortcutKey(event);
@@ -1632,6 +1657,7 @@ export function TerminalPanel({
         }
       }}
       onContextMenu={handleTerminalContextMenu}
+      onAuxClick={handleMiddleClick}
     >
       <div ref={containerRef} className="w-full h-full" />
 
