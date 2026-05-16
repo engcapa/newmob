@@ -1549,6 +1549,22 @@ export function TerminalPanel({
     return () => el.removeEventListener("wheel", handleWheel, { capture: true });
   }, [decreaseFontSize, increaseFontSize, visible]);
 
+  // Linux/WebKitGTK runs a native middle-click paste from the X11 PRIMARY
+  // selection / system clipboard against the focused .xterm-helper-textarea,
+  // which fires before our onAuxClick handler. Without this, both the browser
+  // default and our handler inject text into the PTY (e.g. selection "pwd"
+  // plus an unrelated clipboard "python --version" both arrive on the line).
+  // Suppress the default at mousedown so only our handler runs.
+  useEffect(() => {
+    const el = panelRef.current;
+    if (!el) return;
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button === 1) event.preventDefault();
+    };
+    el.addEventListener("mousedown", onMouseDown, { capture: true });
+    return () => el.removeEventListener("mousedown", onMouseDown, { capture: true });
+  }, []);
+
   useEffect(() => {
     if (!searchOpen) return;
 
