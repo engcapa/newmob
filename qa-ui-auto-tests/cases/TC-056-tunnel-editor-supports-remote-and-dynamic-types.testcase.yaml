@@ -1,0 +1,63 @@
+id: TC-056
+title: Tunnel editor supports Remote and Dynamic types and clones tunnels
+covers: [F8.2]
+tags: [dynamic, editor, legacy-imported, needs-review, p1, remote, tunnel]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"ribbon-tunneling\"]"
+  - wait_for: "text=\"Network tools — SSH tunnels\""
+  - click: "button:has-text(\"New SSH tunnel\")"
+  - wait: 1
+  - wait_for: "input[placeholder=\"e.g. postgres-replica\"]"
+  - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-ui-auto-remote-tunnel}
+  - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
+  - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`label:has-text("Remote port forwarding") input[type="radio"]`).first().click({ force: true }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - fill: {selector: "input[placeholder=\"0\"]", value: "19222"}
+  - fill: {selector: "input[placeholder=\"127.0.0.1\"]", value: 127.0.0.1}
+  - fill: {selector: "input[placeholder=\"5432\"]", value: "8080"}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - wait_for: "text=\"qa-ui-auto-remote-tunnel\""
+  - assert_visible: "text=\"Remote\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel")`); await row.locator(`button[title="Clone"]`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - wait_for: "text=\"qa-ui-auto-remote-tunnel (copy)\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const row = page.locator(`tr:has-text("qa-ui-auto-remote-tunnel (copy)")`); await row.locator(`button[title="Edit"]`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]`).first().click({ force: true }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - wait_for: "text=\"Dynamic\""
+  - seed_dialog: {confirm: true}
+  - wait: 1
+  - screenshot: 056-tunnel-remote-dynamic-clone.png

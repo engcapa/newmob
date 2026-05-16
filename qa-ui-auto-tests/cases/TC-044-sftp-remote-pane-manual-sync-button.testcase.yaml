@@ -1,0 +1,33 @@
+id: TC-044
+title: SFTP remote pane manual Sync button
+covers: [F3.3, F7.2]
+tags: [legacy-imported, needs-review, p1, sftp, sync]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  - click: "[data-testid=\"attached-sftp-toggle\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  - click: "[data-testid=\"terminal-pane\"]"
+  - type: "cd /tmp && echo qa-cwd-change"
+  - press: Enter
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const syncBtn = page.locator(`button[title*="Sync the remote pane"]`); await syncBtn.click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const val = await page.locator(`[data-testid="sftp-remote-path"]`).inputValue(); if (!val.includes("/tmp")) console.log("[v0] Sync did not jump to /tmp, OSC7 might not be injected in test env shell"); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - screenshot: 044-sftp-manual-sync.png

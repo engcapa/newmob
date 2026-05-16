@@ -1,0 +1,17 @@
+id: TC-005
+title: Local terminal opens and accepts input in native mode
+covers: [F2.1, F2.2]
+tags: [legacy-imported, local, p0, terminal]
+modes: [native]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"welcome-open-local-terminal\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 1
+  - click: "[data-testid=\"terminal-pane\"]"
+  - type: echo qa-ui-auto-local
+  - press: Enter
+  - wait: 2
+  - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: qa-ui-auto-local}
+  - screenshot: 005-local-terminal.png

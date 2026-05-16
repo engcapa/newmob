@@ -1,0 +1,48 @@
+id: TC-016
+title: Session editor switches authentication methods and reveals credentials
+covers: [F6.3, F6.5]
+tags: [auth, legacy-imported, needs-review, p1, session, ssh]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - click: "[data-testid=\"session-proto-ssh\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: auth.example.test}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "22"}
+  - send_text_via_label: {label_contains: Specify username, checked: true}
+  - fill: {selector: "[data-testid=\"session-user\"]", value: qauser}
+  - assert_visible: "[data-testid=\"advanced-ssh-settings\"]"
+  - assert_visible: "input[aria-label=\"SSH password\"]"
+  - fill: {selector: "input[aria-label=\"SSH password\"]", value: qa-secret-123}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "password") throw new Error(`Password should be masked, got type=${t}`); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "button[title=\"Show / hide\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "text") throw new Error(`Password should be revealed, got type=${t}`); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const radios = page.locator(`input[type="radio"][name][value="PrivateKey"], label:has-text("Private key") input`); await radios.first().click({ force: true }).catch(() => {}); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "input[aria-label=\"Private key path\"]"
+  - fill: {selector: "input[aria-label=\"Private key path\"]", value: /home/qauser/.ssh/id_ed25519}
+  - send_text_via_label: {label_contains: Enable jump host, checked: true}
+  - assert_visible: "input[aria-label=\"Jump host\"]"
+  - fill: {selector: "input[aria-label=\"Jump host\"]", value: bastion.example.test}
+  - fill: {selector: "input[aria-label=\"Jump user\"]", value: qajump}
+  - fill: {selector: "input[aria-label=\"Jump port\"]", value: "22"}
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-auth-methods}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-auth-methods\"]"
+  - screenshot: 016-session-auth-methods.png

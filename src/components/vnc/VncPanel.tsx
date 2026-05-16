@@ -825,6 +825,7 @@ export default function VncPanel({
     <div
       ref={containerRef}
       className="vnc-container"
+      data-testid="vnc-panel"
       style={{
         width: "100%",
         height: "100%",
@@ -942,6 +943,7 @@ export default function VncPanel({
 
       <canvas
         ref={canvasRef}
+        data-testid="vnc-canvas"
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointer}
         onPointerUp={handlePointerUp}

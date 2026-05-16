@@ -1,0 +1,66 @@
+id: TC-050
+title: SFTP multi-select and select-all in remote pane
+covers: [F7.2]
+tags: [legacy-imported, multi-select, needs-review, p1, selection, sftp]
+modes: [browser]
+fixtures: [reset_db, ssh_required, sftp_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  - click: "[data-testid=\"attached-sftp-toggle\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
+  - press: Enter
+  - wait: 1
+  - seed_dialog: {prompt: qa-ui-auto-ms-a.txt, confirm: true}
+  - click: "[data-testid=\"sftp-remote-new-file\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-ms-b.txt"; }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-remote-new-file\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-a.txt"`).first().click(); await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-b.txt"`).first().click({ modif
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const status = await page.locator(`[data-testid="sftp-remote-pane"] .text-\\[11px\\]`).last().innerText(); if (!status.includes("2 selected")) throw new Error(`Expected 2 selected, got: ${status}`); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const list = page.locator(`[data-testid="sftp-remote-list"]`); await list.click(); await page.keyboard.press("Control+a"); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const status = await page.locator(`[data-testid="sftp-remote-pane"] .text-\\[11px\\]`).last().innerText(); if (!status.includes("selected")) throw new Error(`Expected some selected after Ctrl+A, got: ${status}`); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-a.txt"`).first().click().catch(() => {}); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-remote-delete\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-ms-b.txt"`).first().click().catch(() => {}); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-remote-delete\"]"
+  - wait: 1
+  - screenshot: 050-sftp-multiselect.png

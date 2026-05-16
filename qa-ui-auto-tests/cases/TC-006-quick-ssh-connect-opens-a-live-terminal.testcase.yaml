@@ -1,0 +1,24 @@
+id: TC-006
+title: Quick SSH connect opens a live terminal
+covers: [F6.4, F3.1]
+tags: [legacy-imported, p0, quickconnect, ssh, terminal]
+modes: [browser, native]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 4
+  - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: NewMob SSH terminal}
+  - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: SSH-browser}
+  - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: X11-forwarding}
+  - click: "[data-testid=\"terminal-pane\"]"
+  - type: whoami
+  - press: Enter
+  - wait: 1
+  - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: "${cfg.ssh.user}"}
+  - screenshot: 006-quick-ssh-terminal.png

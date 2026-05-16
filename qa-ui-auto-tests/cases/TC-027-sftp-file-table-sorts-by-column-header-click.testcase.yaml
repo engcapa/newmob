@@ -1,0 +1,52 @@
+id: TC-027
+title: SFTP file table sorts by column header click
+covers: [F7.2]
+tags: [columns, legacy-imported, needs-review, p1, sftp, sorting]
+modes: [browser, native]
+fixtures: [reset_db, ssh_required, sftp_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 4
+  - click: "[data-testid=\"attached-sftp-toggle\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  - click: "[data-testid=\"sftp-remote-path\"]"
+  - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
+  - press: Enter
+  - wait: 2
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const h = document.querySelector(`[data-testid="col-header-name"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const h = document.querySelector(`[data-testid="col-header-name"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const h = document.querySelector(`[data-testid="col-header-size"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const h = document.querySelector(`[data-testid="col-header-modified"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const h = document.querySelector(`[data-testid="col-header-type"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - screenshot: 027-sftp-column-sort.png

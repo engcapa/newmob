@@ -1,0 +1,43 @@
+id: TC-053
+title: Session tree drag-and-drop moves session into a folder
+covers: [F6.2]
+tags: [drag-drop, folders, legacy-imported, needs-review, p1, session]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "${cfg.ssh.port}"}
+  - fill: {selector: "[data-testid=\"session-user\"]", value: "${cfg.ssh.user}"}
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-dnd-target}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-dnd-target\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-dnd-group"; }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); for (let i = 0; i < count; i++) { const t = (await items.nth(i).innerText()).trim().toLowerCase(); if (t.includes("new fol
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const src = await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-dnd-target"]`).first(); const dst = await page.locator(`[data-testid="session-tree"]`).locator(`text="qa-ui-auto-dnd-group"`).fi
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - assert_visible: "text=\"qa-ui-auto-dnd-group\""
+  - screenshot: 053-session-tree-drag-drop.png

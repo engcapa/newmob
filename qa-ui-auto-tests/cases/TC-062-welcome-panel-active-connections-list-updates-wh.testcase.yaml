@@ -1,0 +1,26 @@
+id: TC-062
+title: Welcome panel active connections list updates when terminals open
+covers: [F1.6]
+tags: [connections, legacy-imported, needs-review, p1, welcome]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"welcome-panel\"]"
+  - assert_visible: "text=\"Active connections\""
+  - assert_visible: "text=\"No active terminal tabs.\""
+  - click: "[data-testid=\"welcome-open-local-terminal\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.evaluate(() => window.__qaTabSwitchToWelcome && window.__qaTabSwitchToWelcome()); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const welcome = page.locator(`[data-testid="welcome-panel"]`); const text = await welcome.innerText(); if (!text.includes("local shell")) throw new Error("Active connections did not list the opened local terminal"); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - screenshot: 062-welcome-active-connections.png

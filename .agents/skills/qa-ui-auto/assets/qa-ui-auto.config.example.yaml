@@ -1,11 +1,15 @@
 # qa-ui-auto configuration
 # Copy this file to project root as `qa-ui-auto.config.yaml` and fill in.
-# Secrets MUST come from environment variables: ${env:VAR_NAME}.
+# Secrets MUST come from environment variables: ${env.VAR_NAME}.
+# Both ${cfg.x.y} and the legacy ${cfg:x.y} forms are accepted by the runner.
 
 app:
   base_url: http://localhost:5000   # Vite dev server in browser mode
   mode: browser                     # browser | native
   # native_binary: ./src-tauri/target/debug/newmob.exe   # used when mode=native on Windows
+
+worker:
+  parallel: 4                       # max browser worker processes (browser mode only)
 
 webdriver:
   host: 127.0.0.1
@@ -18,22 +22,20 @@ ssh:
   host: 127.0.0.1
   port: 2222
   user: testuser
-  password: ${env:QA_SSH_PASSWORD}
+  password: ${env.QA_SSH_PASSWORD}
   # private_key_path: ~/.ssh/id_ed25519
-  # private_key_passphrase: ${env:QA_SSH_KEY_PASSPHRASE}
+  # private_key_passphrase: ${env.QA_SSH_KEY_PASSPHRASE}
 
 sftp:
   host: 127.0.0.1
   port: 2222
   user: testuser
-  password: ${env:QA_SSH_PASSWORD}
+  password: ${env.QA_SSH_PASSWORD}
   remote_test_dir: /config/qa-ui-auto
 
-fixtures:
-  start_local_sshd: false           # true → spin up linuxserver/openssh-server in Docker
-  sshd_port: 2222
-  sshd_user: testuser
-  sshd_password: ${env:QA_SSH_PASSWORD}
+# Note: the qa-ui-auto runner does not start any docker fixtures. If the
+# host above is unreachable, the TCP probe fails and SSH/SFTP cases skip.
+# Fix the network rather than letting the runner fall back.
 
 report:
   dir: qa-ui-auto-report

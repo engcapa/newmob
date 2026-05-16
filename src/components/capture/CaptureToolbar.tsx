@@ -251,6 +251,7 @@ export default function CaptureToolbar({
 
   return (
     <div
+      data-testid="capture-toolbar"
       style={{
         display: "flex",
         alignItems: "center",
@@ -299,6 +300,7 @@ export default function CaptureToolbar({
       <div ref={menuRef} style={{ position: "relative" }}>
         <button
           onClick={() => setMenuOpen((v) => !v)}
+          data-testid="capture-menu"
           style={{
             ...BUTTON_STYLE,
             opacity: menuOpen ? 1 : 0.6,

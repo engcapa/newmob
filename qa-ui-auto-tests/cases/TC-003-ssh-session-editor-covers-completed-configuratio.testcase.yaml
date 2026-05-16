@@ -1,0 +1,44 @@
+id: TC-003
+title: SSH session editor covers completed configuration sections
+covers: [F6.3, F3.2]
+tags: [legacy-imported, p0, session, settings, ssh]
+modes: [browser, native]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - assert_visible: "[data-testid=\"session-proto-ssh\"]"
+  - assert_visible: "[data-testid=\"session-proto-sftp\"]"
+  - assert_visible: "[data-testid=\"session-proto-rdp\"]"
+  - assert_visible: "[data-testid=\"session-proto-vnc\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "${cfg.ssh.port}"}
+  - send_text_via_label: {label_contains: Specify username, checked: true}
+  - wait: 1
+  - fill: {selector: "[data-testid=\"session-user\"]", value: "${cfg.ssh.user}"}
+  - assert_visible: "[data-testid=\"advanced-ssh-settings\"]"
+  - assert_visible: "text=\"SSH-browser type\""
+  - assert_visible: "text=\"Auto-inject OSC 7 cwd reporting\""
+  - fill: {selector: "input[aria-label=\"Execute command\"]", value: echo qa-ui-auto-session}
+  - click: "[data-testid=\"session-section-terminal\"]"
+  - assert_visible: "[data-testid=\"terminal-settings\"]"
+  - assert_visible: "[data-testid=\"terminal-appearance-settings\"]"
+  - assert_visible: "[data-testid=\"terminal-preview\"]"
+  - click: "[data-testid=\"session-section-network\"]"
+  - assert_visible: "[data-testid=\"network-settings\"]"
+  - assert_visible: "text=\"Keep-alive\""
+  - fill: {selector: "input[aria-label=\"Proxy host\"]", value: proxy.example.test}
+  - fill: {selector: "input[aria-label=\"New forward local address\"]", value: "127.0.0.1:19090"}
+  - fill: {selector: "input[aria-label=\"New forward remote address\"]", value: "127.0.0.1:22"}
+  - fill: {selector: "input[aria-label=\"New forward description\"]", value: qa-ui-auto-forward}
+  - click: "text=\"Add\""
+  - assert_visible: "input[aria-label=\"Forward local address\"]"
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-ssh-settings}
+  - fill: {selector: "textarea[aria-label=\"Description notes\"]", value: Created by qa-ui-auto}
+  - fill: {selector: "input[aria-label=\"Tags\"]", value: "qa, e2e, ssh"}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "text=\"qa-ui-auto-ssh-settings\""
+  - screenshot: 003-ssh-session-settings.png

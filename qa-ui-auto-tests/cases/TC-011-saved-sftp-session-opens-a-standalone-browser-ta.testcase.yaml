@@ -1,0 +1,36 @@
+id: TC-011
+title: Saved SFTP session opens a standalone browser tab
+covers: [F7.4]
+tags: [legacy-imported, p0, session, sftp, standalone]
+modes: [browser, native]
+fixtures: [reset_db, sftp_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"ribbon-sftp\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - assert_visible: "[data-testid=\"session-proto-sftp\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: "${cfg.sftp.host}"}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "${cfg.sftp.port}"}
+  - send_text_via_label: {label_contains: Specify username, checked: true}
+  - wait: 1
+  - fill: {selector: "[data-testid=\"session-user\"]", value: "${cfg.sftp.user}"}
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-sftp-session}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-sftp-session\"]"
+  - dblclick: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-sftp-session\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  - assert_visible: "[data-testid=\"sftp-remote-pane\"]"
+  - assert_visible: "[data-testid=\"sftp-local-pane\"]"
+  - click: "[data-testid=\"sftp-remote-path\"]"
+  - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
+  - press: Enter
+  - wait: 1
+  - assert_visible: "text=\"REMOTE\""
+  - assert_visible: "text=\"LOCAL\""
+  - assert_visible: "[data-testid=\"sftp-transfer-queue\"]"
+  - screenshot: 011-standalone-sftp-session.png

@@ -1,0 +1,32 @@
+id: TC-035
+title: Menu bar Terminal dropdown opens a new local terminal
+covers: [F1.2]
+tags: [legacy-imported, main, menu-bar, needs-review, p1]
+modes: [browser, native]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"menu-bar\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const btn = document.querySelector(`[data-testid="menu-bar"] button`); if (btn) { btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, clientX: btn.getBoundingClientRect().left + 4, clientY: btn.getBoundingClientRect
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - assert_visible: "text=\"New local terminal\""
+  - assert_visible: "text=\"New remote session…\""
+  - assert_visible: "text=\"Close active tab\""
+  - click: "text=\"New local terminal\""
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: 1 terminals}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const buttons = Array.from(document.querySelectorAll(`[data-testid="menu-bar"] button`)); const sessBtn = buttons.find(b => b.textContent.trim().startsWith("Sessions")); if (sessBtn) { sessBtn.dispatchEvent(new MouseEvent("click", { bubbles
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - assert_visible: "text=\"New session…\""
+  - assert_visible: "text=\"Show sessions\""
+  - assert_visible: "text=\"Reload sessions\""
+  - press: Escape
+  - screenshot: 035-menubar-dropdowns.png

@@ -1,0 +1,23 @@
+id: TC-034
+title: Status bar reflects active terminal count and theme label
+covers: [F1.7]
+tags: [legacy-imported, main, p1, status-bar]
+modes: [browser, native]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"status-bar\"]"
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: "Theme:"}
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: sessions}
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: terminals}
+  - click: "[data-testid=\"welcome-open-local-terminal\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 1
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: 1 terminals}
+  - click: "[data-testid=\"new-local-terminal\"]"
+  - wait: 1
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: 2 terminals}
+  - click: "button[aria-label=\"Cycle application theme\"]"
+  - wait: 1
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: "Theme:"}
+  - screenshot: 034-status-bar-counts.png

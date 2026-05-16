@@ -1,0 +1,25 @@
+id: TC-038
+title: Welcome panel exposes local-terminal launcher
+description: |
+  Verify the welcome panel renders the "Start local terminal" affordance and
+  that clicking it opens a terminal pane. Browser-mode: the local shell is
+  faked by the dev-mode stubs; we only check that the UI plumbing reaches
+  the terminal pane.
+covers: [F1.6, F2.4]
+tags: [smoke, p0, welcome, local-terminal]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 45
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - assert_visible: '[data-testid="welcome-open-local-terminal"]'
+  - assert_text:
+      selector: '[data-testid="welcome-panel"]'
+      contains: Start local terminal
+  - click: '[data-testid="welcome-open-local-terminal"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 20
+  - assert_visible: '[data-testid="terminal-pane"]'
+  - screenshot: 038-welcome-shell-select.png

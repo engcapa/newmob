@@ -1,0 +1,37 @@
+id: TC-008
+title: Attached SFTP browser opens from an SSH terminal and navigates
+description: |
+  Establish an SSH terminal via QuickConnect, toggle the attached SFTP
+  browser, set the remote path to the configured test dir, and verify
+  both panes plus the transfer queue are mounted.
+  Requires ssh.host and sftp.remote_test_dir reachable and QA_SSH_PASSWORD set.
+covers: [F3.1, F7.1, F7.2, F7.4]
+tags: [ssh, sftp, attached, p0]
+modes: [browser]
+fixtures: [reset_db, ssh_required, sftp_required]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="quick-connect"]'
+  - quick_connect: { url: 'ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}' }
+  - auth: ${env.QA_SSH_PASSWORD}
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 30
+  - wait: 3
+  - attach_sftp: {}
+  - wait_for:
+      selector: '[data-testid="sftp-browser"]'
+      timeout_sec: 15
+  - assert_visible: '[data-testid="sftp-remote-pane"]'
+  - assert_visible: '[data-testid="sftp-local-pane"]'
+  - assert_visible: '[data-testid="sftp-transfer-queue"]'
+  - assert_visible: '[data-testid="col-header-name"]'
+  - assert_visible: '[data-testid="col-header-size"]'
+  - assert_visible: '[data-testid="col-header-modified"]'
+  - assert_visible: '[data-testid="col-header-type"]'
+  - set_remote_path: '${cfg.sftp.remote_test_dir}'
+  - wait: 1
+  - click: '[data-testid="sftp-remote-refresh"]'
+  - wait: 1
+  - screenshot: 008-attached-sftp-browser.png

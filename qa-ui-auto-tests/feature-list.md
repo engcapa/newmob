@@ -18,6 +18,16 @@
 - 同时支持 **Tauri 桌面打包模式** 与 **Vite 浏览器开发预览模式**（通过 `TAURI_ENV_PLATFORM` 自动切换 stub/真实后端）
 
 ### 1.2 主窗口三栏布局 ✅
+
+<!-- feature
+id: F1.2
+status: done
+area: main
+components: [MainLayout, MenuBar, Ribbon, QuickConnect, Sidebar, TabBar, StatusBar]
+files:
+  - src/layouts/MainLayout.tsx
+-->
+
 - 顶部菜单栏 `MenuBar`（File/Edit/View/Sessions/Tools/Help）
 - Ribbon 工具条 `Ribbon`（Session、Servers、Tools、Games、Sessions、View、Split、MultiExec、Tunneling、Packages、Settings、Help、X server、Exit）
 - 地址栏式快速连接 `QuickConnect`
@@ -27,18 +37,49 @@
 - 侧边栏宽度通过 `react-resizable-panels` 持久化
 
 ### 1.3 自定义标题栏与窗口控制 ✅
+
+<!-- feature
+id: F1.3
+status: done
+area: main/window
+components: [AppTitleBar, WindowControls, WindowResizeHandles, TitleBarTrayControls]
+files:
+  - src/components/window/AppTitleBar.tsx
+  - src/components/window/WindowControls.tsx
+-->
+
 - 取消原生 decorations，前端自绘 `AppTitleBar` + `WindowControls`（最小化 / 最大化 / 关闭）
 - 标题栏托盘 `TitleBarTrayControls`：主题循环按钮（Light / Dark / Follow system）+ 紧凑模式开关
 - `WindowResizeHandles` 在无 decorations 模式下提供 8 向窗口缩放（North/South/East/West/四个角）
 - 主菜单 / Sessions / View / Tunneling / Settings / Help / Exit 入口接入
 
 ### 1.4 紧凑 UI 模式（Compact mode）✅
+
+<!-- feature
+id: F1.4
+status: done
+area: main/window
+components: [CompactTitleBar]
+files:
+  - src/components/window/CompactTitleBar.tsx
+-->
+
 - 默认布局 vs 紧凑布局可一键切换，状态持久化到 `localStorage` (`newmob.compactMode`)
 - 紧凑模式下使用 `CompactTitleBar`：主菜单按钮 + 标签栏 + 托盘控件统一在一行
 - 标题栏内置主菜单：新建本地/远程会话、新建 SFTP、关闭活动标签、Sessions、View、Tunneling、Settings、Help、Exit
 - 快捷键 Ctrl+Shift+M 切换紧凑模式
 
 ### 1.5 标签页系统 ✅
+
+<!-- feature
+id: F1.5
+status: done
+area: main/tabs
+components: [TabBar]
+files:
+  - src/components/tabbar/TabBar.tsx
+-->
+
 - 多标签：本地终端 / SSH 终端 / SFTP / VNC / 设置 / 隧道管理 / Welcome / 占位标签
 - 标签操作：新建、切换、关闭、中键关闭
 - 标签右键菜单：关闭、关闭其他、关闭全部、复制标签、新建本地终端
@@ -46,10 +87,30 @@
 - 关闭应用前若有终端活跃会弹出确认
 
 ### 1.6 欢迎页 `WelcomePanel` ✅
+
+<!-- feature
+id: F1.6
+status: done
+area: main/welcome
+components: [WelcomePanel]
+files:
+  - src/components/WelcomePanel.tsx
+-->
+
 - 启动入口：开始本地终端、新建会话、导入 OpenSSH config
 - 显示活跃连接列表
 
 ### 1.7 状态栏 ✅
+
+<!-- feature
+id: F1.7
+status: done
+area: main/statusbar
+components: [StatusBar]
+files:
+  - src/components/statusbar/StatusBar.tsx
+-->
+
 - 显示活跃连接数
 - 显示当前应用主题（Light / Dark / Follow system）
 - 显示瞬时状态消息（操作反馈）
@@ -64,6 +125,16 @@
 ## 2. 本地终端（Local Terminal）
 
 ### 2.1 PTY 后端 ✅
+
+<!-- feature
+id: F2.1
+status: done
+area: terminal/local
+components: [TerminalPanel]
+files:
+  - src-tauri/src/terminal/
+-->
+
 - Rust 端基于 `portable-pty` 创建 PTY（Linux/macOS/Windows）
 - 平台默认 shell 自动判定（bash / zsh / powershell）
 - 命令：`create_local_terminal` / `write_terminal` / `resize_terminal` / `close_terminal`
@@ -71,6 +142,16 @@
 - 桌面启动器中 `TERM` 缺失的回归已修复（保证 vi、TUI 程序可用）
 
 ### 2.2 终端面板 `TerminalPanel` ✅
+
+<!-- feature
+id: F2.2
+status: done
+area: terminal/local
+components: [TerminalPanel]
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - xterm.js + FitAddon + WebglAddon（失败回退 canvas）+ SearchAddon + WebLinksAddon
 - ResizeObserver + debounce 自动 fit
 - 容器卸载时正确 dispose 终端实例与监听器
@@ -84,6 +165,16 @@
 - 端会话失败时给出错误提示
 
 ### 2.4 本地 shell 选择 ✅
+
+<!-- feature
+id: F2.4
+status: done
+area: terminal/local
+components: [WelcomePanel]
+files:
+  - src/components/WelcomePanel.tsx
+-->
+
 - `list_local_shells` 列出系统 shell
 - `open_local_shell_as_administrator` 以管理员身份启动（平台支持时）
 - 支持选择 shell 启动本地终端
@@ -97,6 +188,16 @@
 ## 3. SSH 终端
 
 ### 3.1 SSH 后端（russh）✅
+
+<!-- feature
+id: F3.1
+status: done
+area: terminal/ssh
+components: [TerminalPanel]
+files:
+  - src-tauri/src/terminal/
+-->
+
 - `create_ssh_terminal` / `test_ssh_connection` / `send_terminal_signal`
 - 三种认证：Password、PrivateKey（密钥文件）、Agent
 - 请求 PTY channel（term=`xterm-256color`），启动 shell
@@ -104,6 +205,16 @@
 - Windows 11 上私钥认证失败的兼容性问题已修复
 
 ### 3.2 高级 SSH 能力 ✅
+
+<!-- feature
+id: F3.2
+status: done
+area: terminal/ssh
+files:
+  - src-tauri/src/terminal/forwards.rs
+  - src-tauri/src/terminal/network.rs
+-->
+
 - ProxyJump（跳板机）：`forwards.rs` 实现 direct-tcpip 链路
 - Agent 转发
 - X11 转发（Linux）
@@ -112,6 +223,15 @@
 - 网络代理配置（`network.rs` 入口）
 
 ### 3.3 OSC 7 工作目录广播 ✅
+
+<!-- feature
+id: F3.3
+status: done
+area: terminal/ssh
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - 终端解析 `\e]7;file://host/path\e\` 序列
 - 通过 `onCwdChange` prop 同步给主布局
 - 连接成功后自动注入 `PROMPT_COMMAND` (bash) / `precmd_functions` (zsh) 来周期性发出 OSC 7
@@ -127,6 +247,15 @@
 ## 4. 终端右键菜单与操作（MobaXterm 同款）
 
 ### 4.1 复制粘贴查找 ✅
+
+<!-- feature
+id: F4.1
+status: done
+area: terminal/right-menu
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - Copy / Copy All / Paste / Paste with Shift+Insert
 - 跨平台复制/粘贴快捷键：macOS `Cmd+C / Cmd+V`，Windows / Linux `Ctrl+Shift+C / Ctrl+Shift+V`
 - **CopyOnSelect**：选区释放后自动复制到剪贴板（开关存在 `terminalProfile`，每会话可覆盖）
@@ -135,18 +264,54 @@
 - HTML + 纯文本剪贴板写入（`ClipboardItem` 可用时）
 
 ### 4.2 字体与显示 ✅
+
+<!-- feature
+id: F4.2
+status: done
+area: terminal/right-menu
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - 字体设置子菜单：切换字体家族、显示字体连字、字号增大/减小/重置
 - Ctrl+滚轮调整字号、Ctrl+0 重置
 - Terminal display 子菜单：Reset terminal output、Clear scrollback、Set terminal title、Toggle scrollbar、Fullscreen (F11)、Read-only
 
 ### 4.3 语法高亮 ✅
+
+<!-- feature
+id: F4.3
+status: done
+area: terminal/right-menu
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - Default / Error-Warning-Success keywords / Unix shell / Cisco / Perl / SQL
 - Read-only 模式下输入被拦截，输出仍正常渲染
 
 ### 4.4 宏录制与回放 ✅
+
+<!-- feature
+id: F4.4
+status: done
+area: terminal/right-menu
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - 录制新宏、执行宏（Ctrl+Space）
 
 ### 4.5 输出导出 ✅
+
+<!-- feature
+id: F4.5
+status: done
+area: terminal/right-menu
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - Save to file（Ctrl+Shift+S）：浏览器下载导出当前 buffer
 - Record terminal output to file：实时记录会话输出
 
@@ -155,10 +320,28 @@
 - 未实现：SSH break request、跨平台完整信号矩阵
 
 ### 4.7 事件日志 🟡
+
+<!-- feature
+id: F4.7
+status: partial
+area: terminal/right-menu
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - 已记录：connect / auth / resize / disconnect / error / 导出 / 日志 / 宏 / 信号
 - 未记录：reconnect 事件（重连流程尚未上线）
 
 ### 4.8 快捷键 ✅
+
+<!-- feature
+id: F4.8
+status: done
+area: terminal/right-menu
+files:
+  - src/components/terminal/TerminalPanel.tsx
+-->
+
 - Shift+Insert 粘贴、Ctrl+Shift+F 查找、F11 全屏、Ctrl+0 重置字号、Ctrl+滚轮缩放字号
 - macOS Cmd+C / Cmd+V，Windows / Linux Ctrl+Shift+C / Ctrl+Shift+V
 
@@ -168,6 +351,17 @@
 - `compositionend`/`beforeinput` fallback、组合时间窗内的去重
 
 ### 4.10 Z-modem 文件收发（rz / sz）✅
+
+<!-- feature
+id: F4.10
+status: done
+area: terminal/file-transfer
+components: [TerminalPanel, ZmodemConflictDialog]
+files:
+  - src/lib/zmodem.ts
+  - src/components/terminal/ZmodemConflictDialog.tsx
+-->
+
 - 基于 `zmodem.js` 的 `Sentry` 实现协议检测，所有终端输出字节流经 `ZmodemSession.consume()` 透明路由
 - **接收（sz → 本地）**：检测到远端 `sz` 握手后弹出目录选择对话框，通过 Tauri 文件写流（`onOpenWriteStream / onAppendWriteStream / onCloseWriteStream`）落盘，支持中途 abort
 - **发送（rz → 远端）**：
@@ -182,17 +376,48 @@
 - 已修复 password 模式 SSH 终端下 rz/sz 不工作 / 弹出多次文件选择器 / vi 等 TUI 程序回归等问题
 
 ### 4.11 MultiExec 多终端广播模式 ✅
+
+<!-- feature
+id: F4.11
+status: done
+area: terminal/multiexec
+components: [MultiExecBar]
+files:
+  - src/components/terminal/MultiExecBar.tsx
+-->
+
 - Ribbon 入口 + 全局 `Ctrl+Alt+M` 切换
 - 选中多个标签后，输入广播到所有被选中的终端
 - `MultiExecBar`：紧凑发送条 + 可拖拽的展开编辑器（多行文本、最近命令历史、回车 / Ctrl+Enter 发送）
 - 选中状态在 TabBar 上有视觉标记（`isMultiExecTarget`）
 
 ### 4.12 Common commands 调色板 ✅
+
+<!-- feature
+id: F4.12
+status: done
+area: terminal/palette
+components: [CommonCommandsPalette]
+files:
+  - src/components/terminal/CommonCommandsPalette.tsx
+-->
+
 - 本地终端中通过快捷键调出 `CommonCommandsPalette`
 - 候选合并三类来源并去重：命令历史（host 维度）、用户自定义命令、平台预置命令（Windows / Unix 各一套，覆盖 nav / git / network / process / system / files / env）
 - 选中后注入到当前终端
 
 ### 4.13 终端截图 / 滚动截屏 / GIF 录制 ✅
+
+<!-- feature
+id: F4.13
+status: done
+area: capture
+components: [CaptureToolbar, FloatingToolbar]
+files:
+  - src/components/capture/CaptureToolbar.tsx
+  - src/lib/capture/
+-->
+
 - 终端面板内嵌 `CaptureToolbar`（通过 `FloatingToolbar` 浮窗承载，可拖拽 / 折叠 / 位置持久化）
 - **可见区域 PNG**：截取当前可见 viewport，可保存到磁盘或写入剪贴板（`ClipboardItem`）
 - **滚动截屏**：滚动捕获整段 scrollback 拼接为单张长图（`startScrollCapture`）
@@ -209,6 +434,16 @@
 - Source Code Pro 在可用时作为默认字体
 
 ### 5.2 终端主题画廊（Termius 风格）✅
+
+<!-- feature
+id: F5.2
+status: done
+area: terminal/appearance
+components: [TerminalAppearanceSettings]
+files:
+  - src/components/settings/TerminalAppearanceSettings.tsx
+-->
+
 - 多套预置主题，带可视化预览
 - 主题元数据驱动 UI
 - 终端右键菜单可快速切换主题（无需重连重挂载）
@@ -226,6 +461,16 @@
 - 活跃终端可在不重启的情况下应用主题/字体/字号/连字变化
 
 ### 5.5 应用整体主题（Light / Dark / Follow system）✅
+
+<!-- feature
+id: F5.5
+status: done
+area: main/theme
+files:
+  - src/lib/appTheme.ts
+  - src/components/settings/AppThemeSwitcher.tsx
+-->
+
 - `localStorage` key `newmob.appTheme.v1`
 - `data-app-theme` 应用到 root document
 - Follow system 监听 `prefers-color-scheme` 变化
@@ -237,12 +482,32 @@
 ## 6. 会话管理
 
 ### 6.1 SQLite 会话存储 ✅
+
+<!-- feature
+id: F6.1
+status: done
+area: sessions/persistence
+files:
+  - src-tauri/src/session/
+  - src/stubs/tauri-core.ts
+-->
+
 - 表：`sessions` + `session_groups`
 - 命令：`list_sessions / get_session / save_session / delete_session / mark_session_connected / list_session_groups / save_session_group / delete_session_group`
 - 应用启动时初始化于 `app_data_dir/newmob.db`
 - 浏览器预览模式回退到 `localStorage`（key `newmob.sessions.v1` / `newmob.groups.v1`）
 
 ### 6.2 会话树 `SessionTree` ✅
+
+<!-- feature
+id: F6.2
+status: done
+area: sessions
+components: [SessionTree, Sidebar]
+files:
+  - src/components/sidebar/SessionTree.tsx
+-->
+
 - 分组树（展开 / 折叠 / 拖拽到分组）
 - 搜索框 `session-search`
 - 双击 → 触发连接
@@ -250,6 +515,16 @@
 - 「最近连接」区域
 
 ### 6.3 会话编辑器 `SessionEditor` ✅
+
+<!-- feature
+id: F6.3
+status: done
+area: sessions
+components: [SessionEditor]
+files:
+  - src/components/session/SessionEditor.tsx
+-->
+
 - 协议选择：SSH、SFTP、RDP、VNC（SSH/SFTP 已实装；VNC 为基础 client 支持；RDP 仍占位）
 - 基础设置：host、port、username、auth method
 - Advanced SSH：SSH-browser type、Auto-inject OSC 7、Execute command、跳板机/代理
@@ -260,15 +535,45 @@
 - Session 类型 LocalShell：在编辑器中设置启动参数
 
 ### 6.4 快速连接栏 `QuickConnect` ✅
+
+<!-- feature
+id: F6.4
+status: done
+area: sessions
+components: [QuickConnect]
+files:
+  - src/components/quickconnect/QuickConnect.tsx
+-->
+
 - 地址栏式输入：`ssh://user@host:port`、`ssh user@host:port`
 - 自动解析协议/用户/主机/端口
 - Enter 提交后弹出认证弹窗（密码场景）
 
 ### 6.5 认证弹窗 `AuthPrompt` ✅
+
+<!-- feature
+id: F6.5
+status: done
+area: sessions
+components: [AuthPrompt]
+files:
+  - src/components/AuthPrompt.tsx
+-->
+
 - 密码输入弹窗
 - 空密码不可提交（防 Enter 误触）
 
 ### 6.6 OpenSSH 配置导入 ✅
+
+<!-- feature
+id: F6.6
+status: done
+area: sessions/import
+files:
+  - src/lib/sessionImportExport.ts
+  - src/components/WelcomePanel.tsx
+-->
+
 - 解析 `~/.ssh/config` 并批量导入会话
 - Welcome 页提供入口
 
@@ -280,6 +585,15 @@
 ## 7. SFTP 文件浏览器
 
 ### 7.1 SFTP 后端（russh-sftp 2.x）✅
+
+<!-- feature
+id: F7.1
+status: done
+area: sftp
+files:
+  - src-tauri/src/filebrowser/
+-->
+
 - 命令：
   - 连接：`sftp_attach / sftp_detach`
   - 浏览：`sftp_list_remote / sftp_list_local / sftp_local_home / sftp_local_drives / sftp_realpath / sftp_stat`
@@ -292,6 +606,16 @@
 - `ActiveSftp` 内持有 `client::Handle` 保持 SSH 连接存活
 
 ### 7.2 双面板浏览器 `FileBrowser` ✅
+
+<!-- feature
+id: F7.2
+status: done
+area: sftp
+components: [FileBrowser, FilePanel]
+files:
+  - src/components/filebrowser/FileBrowser.tsx
+-->
+
 - 远程面板 + 本地面板（左右或上下，可切换 orientation）
 - 列：图标 / 名称 / 大小 / 修改时间 / 类型 / 权限 / 所有者
 - 列头点击排序
@@ -302,6 +626,15 @@
 - 远程预览（`sftp_remote_preview`）
 
 ### 7.3 文件传输队列 ✅
+
+<!-- feature
+id: F7.3
+status: done
+area: sftp
+files:
+  - src/components/filebrowser/FileBrowser.tsx
+-->
+
 - 状态：进度条、速度、ETA、状态徽章
 - 操作：暂停 / 恢复 / 取消 / 重试
 - 暂停事件 `sftp-paused-{id}` 即时反馈
@@ -312,6 +645,15 @@
 - 复制粘贴：跨面板复制粘贴文件（参考 OS 行为，配合 `application/x-newmob-files` MIME）
 
 ### 7.4 SFTP 入口（三种）✅
+
+<!-- feature
+id: F7.4
+status: done
+area: sftp
+files:
+  - src/components/filebrowser/FileBrowser.tsx
+-->
+
 - **附加侧边栏**：每个 SSH 终端右上角 `attached-sftp-toggle`，与终端共用凭证；远程面板首次跟随 OSC 7 跳转一次，工具条 Sync 按钮可手动重跳
 - **独立标签页**：从会话编辑器选择 `SessionType::SFTP` → 全标签 `FileBrowser`，未激活时仍挂载以保持传输
 - **分离窗口**：附加 / 独立两种均提供 Detach 入口
@@ -322,6 +664,15 @@
   - 父窗口 OSC 7 cwd 通过 `BroadcastChannel` 同步给分离窗口
 
 ### 7.5 面板交互 ✅
+
+<!-- feature
+id: F7.5
+status: done
+area: sftp
+files:
+  - src/components/filebrowser/FileBrowser.tsx
+-->
+
 - 右键菜单：
   - 远程：Download to local、Rename、Permissions（chmod）、Delete、New folder、New file
   - 本地：对应操作
@@ -352,6 +703,16 @@
 - 状态通过 `tunnel-status-{id}` 事件推送
 
 ### 8.2 隧道管理界面 `TunnelManager` ✅
+
+<!-- feature
+id: F8.2
+status: done
+area: tunnel
+components: [TunnelManager]
+files:
+  - src/components/tunnel/TunnelManager.tsx
+-->
+
 - 列表展示：类型、状态徽章（运行/错误/停止）、本地端口 → 远程地址、关联会话、认证图标
 - 操作：启动 / 停止 / 启动全部 / 停止全部 / 测试 / 编辑 / 复制 / 删除 / 显示隐藏认证 / 拖拽排序
 - 实时状态订阅 `listenTunnelStatus`
@@ -362,6 +723,15 @@
 ## 9. VNC 客户端
 
 ### 9.1 嵌入式 VNC client（RFB 协议引擎）✅
+
+<!-- feature
+id: F9.1
+status: done
+area: vnc
+files:
+  - src-tauri/src/vnc/
+-->
+
 - Rust 端 VNC 模块：`src-tauri/src/vnc/{mod, rfb, ws, encodings, clipboard}.rs`
 - Tauri 命令：`vnc_connect / vnc_disconnect / vnc_test_connection`
 - 本地动态端口 WebSocket relay：VNC server ↔ 前端 Canvas（前端不再直接持有 TCP 套接字）
@@ -390,6 +760,16 @@
 - 剪贴板：双向同步，自动切换 Extended / Legacy
 
 ### 9.6 前端 `VncPanel` ✅
+
+<!-- feature
+id: F9.6
+status: done
+area: vnc
+components: [VncPanel, FloatingToolbar, CaptureToolbar]
+files:
+  - src/components/vnc/VncPanel.tsx
+-->
+
 - Canvas 画面渲染 + fit / 1:1 缩放
 - 浮动 `FloatingToolbar`：可拖拽 / 折叠 / 位置持久化
 - 内嵌 `CaptureToolbar`：可见区域 PNG / 全帧 PNG / GIF 录制（与终端共用截图链路）
@@ -434,6 +814,16 @@
 ---
 
 ## 11. 应用全局设置 `SettingsPanel` ✅
+
+<!-- feature
+id: F11.1
+status: done
+area: settings
+components: [SettingsPanel]
+files:
+  - src/components/settings/SettingsPanel.tsx
+-->
+
 - Application Theme 切换（Light / Dark / Follow system）
 - Terminal Appearance 区块（与会话编辑器 Terminal 段一致的完整外观与行为控件）
 - 终端预览
@@ -477,4 +867,3 @@
 > - 会话协议 RDP（仅保留会话存储与编辑表单，连接动作打开占位 tab）
 > - QuickConnect 的 VNC URL 入口（已保存 VNC 会话可连接，QuickConnect 尚未接入 VNC client）
 > - SFTP 底部的 "Cross-host transfer (remote ↔ remote)" 按钮（disabled 占位）
-

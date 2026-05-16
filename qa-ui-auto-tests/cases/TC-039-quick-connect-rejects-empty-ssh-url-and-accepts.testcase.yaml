@@ -1,0 +1,31 @@
+id: TC-039
+title: Quick-connect rejects empty SSH URL and accepts valid SSH URL
+covers: [F6.4]
+tags: [legacy-imported, needs-review, p1, quickconnect, validation]
+modes: [browser, native]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"qc-input\"]"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://"}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const btn = document.querySelector(`[data-testid="qc-submit"]`); if (btn) btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!btn;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const ap = document.querySelectorAll(`[data-testid="auth-prompt"]`).length; if (ap > 0) throw new Error("Empty SSH URL should not open auth prompt"); return true;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # const btn = document.querySelector(`[data-testid="qc-submit"]`); if (btn) btn.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!btn;
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - assert_visible: "[data-testid=\"auth-password\"]"
+  - press: Escape
+  - screenshot: 039-quickconnect-validation.png

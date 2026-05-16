@@ -1,0 +1,38 @@
+id: TC-017
+title: Session editor port forward list adds rows and surfaces validation errors
+covers: [F6.3, F3.2]
+tags: [forwards, legacy-imported, needs-review, network, p1, session]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: fw.example.test}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "22"}
+  - send_text_via_label: {label_contains: Specify username, checked: true}
+  - fill: {selector: "[data-testid=\"session-user\"]", value: qauser}
+  - click: "[data-testid=\"session-section-network\"]"
+  - wait_for: "[data-testid=\"network-settings\"]"
+  - fill: {selector: "input[aria-label=\"New forward local address\"]", value: "127.0.0.1:18080"}
+  - fill: {selector: "input[aria-label=\"New forward remote address\"]", value: "svc.internal:80"}
+  - fill: {selector: "input[aria-label=\"New forward description\"]", value: qa-fwd-1}
+  - click: "text=\"Add\""
+  - wait_for: "input[aria-label=\"Forward local address\"]"
+  - assert_visible: "input[aria-label=\"Forward remote address\"]"
+  - fill: {selector: "input[aria-label=\"New forward local address\"]", value: not-an-address}
+  - fill: {selector: "input[aria-label=\"New forward remote address\"]", value: "still:nope"}
+  - fill: {selector: "input[aria-label=\"New forward description\"]", value: qa-fwd-broken}
+  - click: "text=\"Add\""
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const rows = await page.locator(`input[aria-label="Forward local address"]`).count(); if (rows < 2) throw new Error(`Expected at least 2 forward rows, got ${rows}`); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-forwards}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-forwards\"]"
+  - screenshot: 017-session-forwards.png

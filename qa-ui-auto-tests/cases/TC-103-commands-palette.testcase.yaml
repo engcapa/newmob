@@ -1,0 +1,32 @@
+id: TC-103
+title: Common commands palette opens, filters, and dismisses
+description: |
+  Smoke test for F4.12. Open a local terminal, invoke the palette via its
+  shortcut (Ctrl+Shift+P) or right-click → "Common commands", filter the
+  list, then close with Escape.
+covers: [F4.12]
+tags: [smoke, p1, terminal, palette]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 30
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-open-local-terminal"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 15
+  - click: '[data-testid="terminal-pane"]'
+  - press: Control+Shift+P
+  - wait_for:
+      selector: '[data-testid="commands-palette"]'
+      timeout_sec: 5
+  - assert_visible: '[data-testid="commands-search"]'
+  - assert_visible: '[data-testid="commands-list"]'
+  - fill:
+      selector: '[data-testid="commands-search"]'
+      value: "ls"
+  - wait: 0.5
+  - press: Escape
+  - assert_not_visible: '[data-testid="commands-palette"]'
+  - screenshot: 103-commands-palette.png

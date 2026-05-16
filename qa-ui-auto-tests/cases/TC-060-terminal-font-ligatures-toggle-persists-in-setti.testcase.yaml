@@ -1,0 +1,22 @@
+id: TC-060
+title: Terminal font ligatures toggle persists in settings
+covers: [F5.2]
+tags: [font, legacy-imported, ligatures, needs-review, p1, terminal]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"ribbon-settings\"]"
+  - wait_for: "[data-testid=\"settings-panel\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const cb = page.locator(`input[aria-label="Enable font ligatures"]`); const before = await cb.isChecked(); await cb.click(); await page.waitForTimeout(300); const after = await cb.isChecked(); if (before === after) throw new
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const cb = page.locator(`input[aria-label="Enable font ligatures"]`); const stored = await page.evaluate(() => { try { const p = JSON.parse(localStorage.getItem("newmob.terminalProfile.v1") || "{}"); return p.fontLigatures; 
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - screenshot: 060-terminal-font-ligatures.png

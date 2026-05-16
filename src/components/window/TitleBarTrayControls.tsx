@@ -18,8 +18,9 @@ export function TitleBarTrayControls() {
   const next = THEME_MODES[(currentIndex + 1) % THEME_MODES.length] ?? THEME_MODES[0];
 
   return (
-    <div className="moba-titlebar-tray flex items-stretch self-stretch shrink-0">
+    <div className="moba-titlebar-tray flex items-stretch self-stretch shrink-0" data-testid="titlebar-tray">
       <TrayButton
+        testId="theme-cycle"
         title={`Theme: ${appThemeModeLabel(mode)} (${resolvedTheme}). Click for ${appThemeModeLabel(next.mode)}.`}
         ariaLabel="Cycle application theme"
         onClick={() => setMode(next.mode)}
@@ -27,6 +28,7 @@ export function TitleBarTrayControls() {
         {current.icon}
       </TrayButton>
       <TrayButton
+        testId="compact-toggle"
         title={compactMode ? "Exit compact mode" : "Enter compact mode"}
         ariaLabel={compactMode ? "Exit compact mode" : "Enter compact mode"}
         active={compactMode}
@@ -44,18 +46,21 @@ function TrayButton({
   ariaLabel,
   onClick,
   active,
+  testId,
 }: {
   children: React.ReactNode;
   title: string;
   ariaLabel: string;
   onClick: () => void;
   active?: boolean;
+  testId?: string;
 }) {
   return (
     <button
       type="button"
       title={title}
       aria-label={ariaLabel}
+      data-testid={testId}
       data-active={active || undefined}
       className="moba-titlebar-tray-btn h-full w-10 inline-flex items-center justify-center hover:bg-[var(--moba-hover)]"
       style={{ color: "var(--moba-text)" }}

@@ -404,6 +404,7 @@ export function MultiExecBar({
       )}
       <div
         className="flex items-start gap-1.5 px-2 py-1 flex-shrink-0"
+        data-testid="multiexec-bar"
         style={{
           minHeight: 34,
           background: "var(--moba-chrome-bg)",
@@ -417,6 +418,7 @@ export function MultiExecBar({
         <div className="flex-1 flex items-start gap-1 min-w-0">
           <textarea
             ref={textareaRef}
+            data-testid="multiexec-input"
             className="moba-input flex-1 resize-none leading-5 py-0.5"
             style={{ minHeight: 22, maxHeight: 100, overflow: "auto" }}
             rows={1}

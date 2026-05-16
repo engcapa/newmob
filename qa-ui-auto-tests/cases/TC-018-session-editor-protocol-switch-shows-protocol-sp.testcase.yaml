@@ -1,0 +1,25 @@
+id: TC-018
+title: Session editor protocol switch shows protocol-specific shell
+covers: [F6.3]
+tags: [legacy-imported, p1, protocol, session]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - click: "[data-testid=\"session-proto-ssh\"]"
+  - assert_visible: "[data-testid=\"advanced-ssh-settings\"]"
+  - click: "[data-testid=\"session-proto-sftp\"]"
+  - wait: 1
+  - assert_visible: "[data-testid=\"session-host\"]"
+  - assert_visible: "[data-testid=\"session-user\"]"
+  - click: "[data-testid=\"session-proto-rdp\"]"
+  - wait: 1
+  - assert_visible: "[data-testid=\"session-host\"]"
+  - click: "[data-testid=\"session-proto-vnc\"]"
+  - wait: 1
+  - assert_visible: "[data-testid=\"session-host\"]"
+  - click: "[data-testid=\"session-proto-ssh\"]"
+  - assert_visible: "[data-testid=\"advanced-ssh-settings\"]"
+  - screenshot: 018-session-protocol-switch.png

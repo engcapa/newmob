@@ -1,0 +1,36 @@
+id: TC-013
+title: Session tree search, duplicate, and context menu
+covers: [F6.2]
+tags: [legacy-imported, needs-review, p1, right-menu, session]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "${cfg.ssh.port}"}
+  - send_text_via_label: {label_contains: Specify username, checked: true}
+  - fill: {selector: "[data-testid=\"session-user\"]", value: "${cfg.ssh.user}"}
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-menu}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "text=\"qa-ui-auto-menu\""
+  - fill: {selector: "[data-testid=\"session-search\"]", value: qa-ui-auto-menu}
+  - assert_visible: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu\"]"
+  - click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu\"]"
+  - click: "[data-testid=\"session-duplicate\"]"
+  - wait_for: "text=\"qa-ui-auto-menu (copy)\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]`).click({ button: "right" }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - assert_visible: "text=\"Connect\""
+  - assert_visible: "text=\"Edit...\""
+  - assert_visible: "text=\"Duplicate\""
+  - assert_visible: "text=\"Move to folder\""
+  - assert_visible: "text=\"Delete\""
+  - screenshot: 013-session-tree-right-menu.png

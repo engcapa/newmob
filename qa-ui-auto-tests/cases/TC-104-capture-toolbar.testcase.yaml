@@ -1,0 +1,28 @@
+id: TC-104
+title: Capture toolbar mounts and exposes the camera menu
+description: |
+  Smoke test for F4.13 (capture/screenshot/GIF). Open a local terminal,
+  verify the FloatingToolbar→CaptureToolbar mounts, click the camera
+  dropdown to expose the menu, then dismiss.
+covers: [F4.13]
+tags: [smoke, p1, terminal, capture]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 30
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-open-local-terminal"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 15
+  - hover: '[data-testid="terminal-pane"]'
+  - wait_for:
+      selector: '[data-testid="capture-toolbar"]'
+      timeout_sec: 5
+  - assert_visible: '[data-testid="capture-menu"]'
+  - click: '[data-testid="capture-menu"]'
+  - wait: 0.5
+  - assert_visible: 'text=Save visible PNG'
+  - press: Escape
+  - screenshot: 104-capture-toolbar.png

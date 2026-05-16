@@ -179,6 +179,7 @@ export function CommonCommandsPalette({
       <div
         role="dialog"
         aria-label="Common commands"
+        data-testid="commands-palette"
         className="w-[560px] max-w-[92vw] rounded shadow-lg flex flex-col"
         style={{
           background: "var(--moba-panel-bg)",
@@ -190,6 +191,7 @@ export function CommonCommandsPalette({
         <div className="p-2 border-b" style={{ borderColor: "var(--moba-divider)" }}>
           <input
             ref={inputRef}
+            data-testid="commands-search"
             className="moba-input w-full"
             placeholder="搜索常用命令…   (↑↓ 选择, Enter 插入, Esc 关闭)"
             value={query}
@@ -198,7 +200,7 @@ export function CommonCommandsPalette({
             autoFocus
           />
         </div>
-        <div className="flex-1 overflow-auto">
+        <div className="flex-1 overflow-auto" data-testid="commands-list">
           {filtered.length === 0 ? (
             <div
               className="px-3 py-4 text-[12px]"

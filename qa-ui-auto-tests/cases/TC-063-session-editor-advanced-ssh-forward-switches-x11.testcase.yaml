@@ -1,0 +1,29 @@
+id: TC-063
+title: Session editor advanced SSH forward switches (X11, compression, OSC 7)
+covers: [F3.2, F6.3]
+tags: [advanced, legacy-imported, needs-review, p1, session, ssh]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - click: "[data-testid=\"session-proto-ssh\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "${cfg.ssh.port}"}
+  - send_text_via_label: {label_contains: Specify username, checked: true}
+  - fill: {selector: "[data-testid=\"session-user\"]", value: "${cfg.ssh.user}"}
+  - assert_visible: "[data-testid=\"advanced-ssh-settings\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const x11 = page.locator(`[data-testid="advanced-ssh-settings"] input[type="checkbox"]`).first(); const before = await x11.isChecked(); await x11.click(); await page.waitForTimeout(300); const after = await x11.isChecked(); 
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - send_text_via_label: {label_contains: Use SSH compression, checked: true}
+  - send_text_via_label: {label_contains: Auto-inject OSC 7 cwd reporting, checked: true}
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-adv-switches}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-adv-switches\"]"
+  - screenshot: 063-session-advanced-forward-switches.png

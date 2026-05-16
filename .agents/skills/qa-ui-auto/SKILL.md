@@ -1,128 +1,283 @@
 ---
 name: qa-ui-auto
-description: "Run end-to-end UI automation tests against the NewMob Tauri desktop app (cross-platform Linux, macOS, Windows). Drives the app via playwright-cli plus Python orchestration scripts. Use when the user asks to run UI tests, do E2E testing, automate the GUI, verify a feature end-to-end, regression test the SSH/SFTP/terminal flows, or mentions qa-ui-auto, testcase-for-auto.md, or automated UI test. Test cases are read from testcase-for-auto.md at the project root. SSH/SFTP servers and other test fixtures are read from qa-ui-auto.config.yaml."
+description: "End-to-end UI automation for the NewMob Tauri desktop app, plus tools to maintain the testcase catalog and the feature inventory. Provides six subcommands: `run` (execute testcases), `lint` (schema-validate YAML), `gen-coverage` (find features with no test and draft new cases), `gen-diff` (find tests impacted by a code change and patch them), `gen-from-range` (refresh feature-list.md based on a commit range), `explore` (free-form exploratory testing). Browser mode (Vite + real backend proxies) is primary; native mode is a Tauri WebDriver smoke subset. Test cases live as typed YAML under qa-ui-auto-tests/cases/*.testcase.yaml; the feature catalog lives in qa-ui-auto-tests/feature-list.md with embedded HTML-comment frontmatter. Use when the user asks to: run UI tests, do E2E testing, smoke test the app, regression test SSH/SFTP/terminal/SFTP/tunnel flows, validate testcases, check the coverage matrix, ask 'which features have no test', ask 'did my change break a test', update tests for a PR, refresh the feature list from recent commits, exploratory test a feature area, or mentions qa-ui-auto, testcase-for-auto.md, feature-list.md, or automated UI testing."
 ---
 
-# qa-ui-auto — NewMob UI E2E Automation
+# qa-ui-auto — NewMob UI E2E + catalog maintenance
 
-## When to use
+This skill exposes **six subcommands**. Three (`run`, `lint`, plus the data fetchers behind `gen-coverage` / `gen-diff` / `gen-from-range`) are deterministic Python tools. Three are **playbooks** the parent agent (Claude Code) follows in the current session — they read project state, draft / patch files, verify, and do **not** call any external LLM API. Claude Code itself **is** the LLM; that's how the drafting work gets done.
 
-Trigger this skill whenever the user asks for any of:
+## Trigger keywords
 
-- "Run UI tests", "E2E test", "automate the GUI", "smoke test the app".
-- Verifying SSH connect / SFTP browse / file transfer / terminal flows end-to-end.
-- Running cases defined in `testcase-for-auto.md`.
-- Any mention of `qa-ui-auto`, `playwright-cli`, or "test the Tauri UI".
+- "run UI tests", "E2E test", "smoke test the app", "regression test", "verify the X flow" → **`run`**
+- "validate testcases", "check the testcase YAML", "lint" → **`lint`**
+- "coverage matrix", "which features have no test", "what's untested", "draft a test for F4.X" → **`gen-coverage`**
+- "did my change break a test", "update tests for this PR", "what tests should I run for this diff" → **`gen-diff`**
+- "refresh feature-list.md from recent commits", "what new features did I add since X", "missing features for this range" → **`gen-from-range`**
+- "exploratory test the SFTP flow", "free-form test the terminal", "find UI bugs" → **`explore`**
 
-This skill is designed to run inside coding-agent CLIs (Claude Code, Codex, etc.). It must remain non-interactive and exit non-zero on failure so the agent can react.
+## Boundaries between gen-* subcommands
 
-## Architecture & rationale
+```
+                                    code change            commit history          missing tests
+                                          ↓                       ↓                       ↓
+                                   ┌──────────────┐       ┌──────────────┐       ┌───────────────┐
+                                   │  gen-diff    │       │ gen-from-    │       │ gen-coverage  │
+                                   │              │       │   range      │       │               │
+                                   │ patches      │       │ updates      │       │ drafts new    │
+                                   │ existing     │       │ feature-     │       │ test cases    │
+                                   │ test cases   │       │ list.md      │       │ in cases/auto │
+                                   └──────┬───────┘       └──────┬───────┘       └──────┬────────┘
+                                          ▼                      ▼                      ▼
+                       qa-ui-auto-tests/cases/  qa-ui-auto-tests/feature-list.md   qa-ui-auto-tests/cases/auto/
+```
 
-NewMob ships in two runnable forms (see `replit.md` and the tech doc):
-
-1. **Browser dev mode** — start Vite on port `5000` with `DEV_PROXY_ALLOW_PRIVATE=1` and `ALLOW_PRIVATE_TARGETS=1` (PowerShell: `$env:DEV_PROXY_ALLOW_PRIVATE="1"; $env:ALLOW_PRIVATE_TARGETS="1"; pnpm run dev`, cmd.exe: `set DEV_PROXY_ALLOW_PRIVATE=1 && set ALLOW_PRIVATE_TARGETS=1 && pnpm run dev`, macOS/Linux: `DEV_PROXY_ALLOW_PRIVATE=1 ALLOW_PRIVATE_TARGETS=1 pnpm run dev`). Vite serves the React UI and the `sshProxy` / `sftpProxy` plugins implement the SSH/SFTP backend in Node, with `src/stubs/*` shimming the Tauri APIs. This mode is **headless-CI-friendly** and is the primary target for automation: a real browser drives the same React UI shipped in the desktop binary.
-2. **Native Tauri WebDriver mode** — `pnpm tauri build --debug --no-bundle` (or `cargo tauri build --debug --no-bundle`) then drive the real debug binary through `tauri-driver`. This mode tests the actual native WebView and Tauri/Rust IPC backend. On Windows it requires `msedgedriver.exe` matching the installed Edge/WebView2 runtime; on Linux it requires `WebKitWebDriver` and a display. macOS desktop WebDriver is not supported by Tauri because WKWebView has no desktop WebDriver tool.
-
-Default mode is `browser`. Use `--mode native` when the user explicitly asks to test real Tauri rendering, Rust commands, or native backend behavior.
-
-The reason we use `playwright-cli` (not the Playwright test runner) is token efficiency: the coding agent can issue concise CLI commands without loading the Playwright API surface or accessibility trees. See `references/playwright-cli.md` for the command cheatsheet.
+Each command **only writes** to one place. Don't blur boundaries: `gen-from-range` never touches cases; `gen-coverage` never touches feature-list.md; `gen-diff` never creates new cases.
 
 ## Layout
 
 ```
 .agents/skills/qa-ui-auto/
-├── SKILL.md                      ← this file
+├── SKILL.md                                this file
+├── schema/testcase.schema.json             feature-list.md is parser-validated, no schema
 ├── scripts/
-│   ├── run_tests.py              ← entry point; orchestrates lifecycle + reporting
-│   ├── parse_testcases.py        ← parses testcase-for-auto.md into steps
-│   ├── env_check.py              ← verifies node/pnpm/playwright-cli/python deps
-│   ├── probe.py                  ← detects missing services and prints how to start them
-│   ├── tauri_webdriver.py        ← minimal W3C WebDriver client for native Tauri
-│   └── fixtures.py               ← spins up local SFTP/SSH if config requests it
-├── assets/
-│   ├── testcase-for-auto.template.md  ← template for separately creating test cases
-│   └── qa-ui-auto.config.example.yaml
+│   ├── qa_ui_auto/                         python package, no LLM calls
+│   │   ├── runner.py                       `run`
+│   │   ├── lint.py                         `lint`
+│   │   ├── feature_catalog.py              feature-list.md parser (used by all gen-*)
+│   │   ├── coverage_report.py              data for `gen-coverage`
+│   │   ├── diff_impact.py                  data for `gen-diff`
+│   │   ├── range_changes.py                data for `gen-from-range`
+│   │   ├── reporter.py / config.py / testcase.py
+│   │   ├── steps/                          39 controlled verbs
+│   │   └── fixtures/                       reset_db, ssh_required, sftp_required
+│   ├── probe.py                            service preflight
+│   ├── tauri_webdriver.py                  native-mode harness
+│   ├── migrate.py / backfill_covers.py     one-off legacy tools, kept for reference
 └── references/
-    ├── playwright-cli.md         ← command cheatsheet
-    └── selectors.md              ← stable selectors for NewMob UI
+    ├── verb-catalog.md                     verbs available in YAML
+    ├── testid-catalog.md                   stable selectors per surface
+    ├── authoring.md                        rules for writing/fixing a case
+    └── migration-mapping.md                legacy DSL → YAML cheatsheet
 ```
 
-Test cases and config live at the **project root**, not inside the skill, so users can edit them:
+Project root holds:
+- `qa-ui-auto.config.yaml` — host/port/user, references env vars for secrets
+- `qa-ui-auto-tests/feature-list.md` — feature catalog (Markdown + frontmatter)
+- `qa-ui-auto-tests/cases/*.testcase.yaml` — typed YAML testcases
+- `qa-ui-auto-tests/cases/auto/*.testcase.yaml` — auto-drafted by `gen-coverage`
+- `qa-ui-auto-report/run-<timestamp>/` — gitignored output
 
-- `testcase-for-auto.md`        — the test case file, generated separately before running this skill
-- `qa-ui-auto.config.yaml`      — server endpoints + credentials (gitignored)
-- `qa-ui-auto-report/`          — reports, screenshots, traces (gitignored)
+## Subcommand: `run`
 
-## Workflow (always follow this order)
+Execute existing testcases. Pure executor — no authoring.
 
-1. **Preflight tooling.**
-   - Browser mode: run `python .agents/skills/qa-ui-auto/scripts/env_check.py --mode browser`. It checks/installs:
-     - `node >= 18`, `pnpm`, project deps (`pnpm install` if missing).
-     - `playwright-cli` globally: `npm install -g @playwright/cli@latest` if `playwright-cli --version` fails.
-     - Browsers: `playwright-cli install chromium`.
-     - Python deps: `pyyaml`. Install with `pip install pyyaml` if missing.
-   - Native mode: run `python .agents/skills/qa-ui-auto/scripts/env_check.py --mode native`. It checks only; it does not install automatically. It verifies `cargo`, `tauri-driver`, the Tauri debug binary, and platform WebDriver dependencies. If `tauri-driver` is missing, ask the user whether to run `cargo install tauri-driver --locked`. If the debug binary is missing, ask whether to run `cargo tauri build --debug --no-bundle` (or `pnpm tauri build --debug --no-bundle`). On Windows, `msedgedriver.exe` must be on PATH or configured as `webdriver.native_driver`; do not auto-install it because it must match the local Edge/WebView2 runtime.
-2. **Load config.** Read `qa-ui-auto.config.yaml`. If absent, copy the example and tell the user which fields to fill in (host/port/user/password or key path for SSH, SFTP). Never invent credentials. If the user supplies secrets in chat, write them via the environment-secrets skill, not the YAML, and reference them as `${env:VAR_NAME}`.
-3. **Load `testcase-for-auto.md`.** This skill does not generate or modify test cases. If the file is missing, stop and tell the user to generate it separately before running automation.
-4. **Probe required services.** `run_tests.py` automatically calls `probe.py` after parsing test cases. The probe checks only what the active cases need:
-   - Browser mode → Vite dev server reachable at `app.base_url`, started with `DEV_PROXY_ALLOW_PRIVATE=1` and `ALLOW_PRIVATE_TARGETS=1`.
-   - Native mode → Tauri debug binary built; `tauri-driver` available; platform WebDriver available; on Linux, a `DISPLAY` is set.
-   - SSH/SFTP host:port reachable (only if any case references `${cfg:ssh.*}` or `${cfg:sftp.*}`).
-   - Tooling (`pnpm`, `playwright-cli`) on PATH for browser mode; `tauri-driver` and platform WebDriver tooling for native mode.
-   When something is missing, the probe prints a short, copy-pasteable startup recipe and `run_tests.py` exits with code `2` **without** running any tests. You can also probe manually: `python .agents/skills/qa-ui-auto/scripts/probe.py --mode browser`.
-   When the user reports the probe failing, do not silently start services for them — surface the printed recipe verbatim and ask whether to start the listed workflow / Docker container.
-5. **Run.** `python .agents/skills/qa-ui-auto/scripts/run_tests.py --mode browser` or `python .agents/skills/qa-ui-auto/scripts/run_tests.py --mode native`. The browser runner:
-   - Parses `testcase-for-auto.md` into ordered cases and steps.
-   - For each case, opens a fresh browser context: `playwright-cli open http://localhost:5000 --user-data-dir qa-ui-auto-report/profile-<case>`.
-   - Executes each step as a `playwright-cli` command (`click`, `type`, `press`, `expect`, `screenshot`).
-   - On failure, captures a screenshot, DOM snapshot, page console logs, the injected page console buffer, and page HTML into `qa-ui-auto-report/<case>/`.
-   - Writes `qa-ui-auto-report/summary.json` and a Markdown summary.
-   The native runner starts or connects to `tauri-driver` at `webdriver.host:webdriver.port`, creates one Tauri WebDriver session per case with `tauri:options.application`, drives the real native WebView through W3C WebDriver, captures screenshots through WebDriver, and writes the same report format.
-6. **Report.** Print the Markdown summary to stdout. Exit non-zero if any case failed so the parent agent loop can react.
-7. **Failure artifacts.** For every failed case, inspect and report the artifacts listed under that failed step in `summary.md`.
-   - Browser mode captures failure screenshot, DOM snapshot, console output from `playwright-cli console` at default/info/warning/error levels, an in-page console buffer JSON (`console.log/info/warn/error/debug`, `window.error`, `unhandledrejection`), and page HTML where available.
-   - Native mode captures failure screenshot, page HTML, a JSON file containing the injected in-page console buffer (`console.log/info/warn/error/debug`, `window.error`, `unhandledrejection`) and basic runtime state such as `window.__TAURI__` availability.
-   - Native mode also lists `tauri-driver.out.log` and `tauri-driver.err.log` in the run artifacts. Treat these as backend/native-driver logs; Tauri/Rust process output normally flows through the driver-launched process. If the Rust app exits early or WebDriver cannot create a session, surface the tail of these logs in the final answer.
+1. **Read config** `qa-ui-auto.config.yaml`. Confirm `app.base_url`, `ssh.host`, `sftp.host` are set.
+2. **Confirm secrets**: cases tagged with `fixtures: [ssh_required]` or `[sftp_required]` need `QA_SSH_PASSWORD` in the environment. Without it those cases skip via the fixture.
+3. **Preflight**: `python .agents/skills/qa-ui-auto/scripts/probe.py --mode browser`. Browser mode requires Vite up (`DEV_PROXY_ALLOW_PRIVATE=1 ALLOW_PRIVATE_TARGETS=1 pnpm dev`). Don't auto-start services or auto-install — surface the recipe and ask first.
+4. **Lint**: `PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint`.
+5. **Run**: `PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.runner [flags]`. Flags: `--mode browser|native`, `--tag smoke,p0`, `--filter TC-001,TC-007`, `--workers N`, `--dry-run`, `--headed`.
+6. **Report**: runner echoes `summary.md`. For each failure, read `summary.json` and inline failing step / first failure screenshot / in-page console errors.
+7. Don't auto-rerun, auto-heal, or guess at YAML fixes inline. Failed test? That's `gen-diff` territory.
 
-## Test case format (`testcase-for-auto.md`)
+## Subcommand: `lint`
 
-Each case is a `## TC-<id>: <title>` heading followed by metadata and a numbered step list. Steps use a tiny DSL the parser understands — one verb per line:
-
-```
-## TC-001: Launch and render main window
-- tags: smoke, p0
-- mode: browser
-
-1. open http://localhost:5000
-2. expect_visible role=tablist
-3. expect_visible text="Local Terminal"
-4. screenshot launch.png
+```bash
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
 ```
 
-Supported verbs (see `scripts/parse_testcases.py` for the authoritative list): `open`, `goto`, `click`, `dblclick`, `type`, `press`, `fill`, `select`, `wait`, `wait_for selector=...`, `expect_visible`, `expect_text`, `expect_url`, `screenshot`, `eval`, `sleep`. Selectors accept Playwright syntax (`role=button[name="Connect"]`, `text="Open"`, CSS, `data-testid=...`).
+Validates `qa-ui-auto-tests/cases/**/*.testcase.yaml` against the schema and parses `qa-ui-auto-tests/feature-list.md` to check frontmatter blocks. Reports duplicate IDs. Exit 0 ok / 1 errors. Always run before `run`.
 
-For SSH/SFTP/terminal interactions that need credentials, reference config keys with `${cfg:ssh.host}` etc. The parser substitutes them before dispatch.
+## Subcommand: `gen-coverage`
 
-## Config (`qa-ui-auto.config.yaml`)
+Find features with no testcase (or only weak coverage), and draft new cases.
 
-The full schema and examples live in `assets/qa-ui-auto.config.example.yaml`. Copy that file to the project root as `qa-ui-auto.config.yaml` and fill in the fields needed by the selected test cases.
+### Step 1 — Run the coverage analyzer (deterministic)
 
-Do not duplicate the config schema in this skill document. Keep configuration details in the example asset so there is a single source of truth.
+```bash
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.coverage_report
+# variants:
+#   --uncovered-only        only the gap list
+#   --feature F4.10         detail for one feature
+#   --json                  machine-readable
+```
+
+Returns three buckets:
+- **uncovered** — features with zero testcase referencing them via `covers`.
+- **needs-review only** — features only covered by auto-migrated cases that still have `_TODO_MIGRATE` placeholders or `tags: [needs-review]`. Structurally covered, but assertions are weak.
+- **fully reviewed** — at least one non-needs-review case covers them.
+
+### Step 2 — For each gap (or `--feature F.x` from user), draft a case
+
+You — the parent agent — are doing this. Procedure:
+
+1. Look up the feature via `python -m qa_ui_auto.feature_catalog --feature F.x --json` (or read the JSON from coverage_report). Get `components` and `files`.
+2. **Read** every file in `files`. Use Grep to extract `data-testid`, `aria-label`, `role=`, key event handlers, notable text labels.
+3. Skim `references/testid-catalog.md` (canonical selectors) and `references/verb-catalog.md` (39 verbs).
+4. **Draft** to `qa-ui-auto-tests/cases/auto/TC-auto-F4.X-<slug>.testcase.yaml`:
+   - `id: TC-auto-F4.X` (or `TC-auto-F4.Xb` if there's already an auto- case for this feature)
+   - `covers: [F4.X]`
+   - `tags: [auto-generated, smoke, needs-review]` — the `auto-generated` tag flags it for human review; `smoke` keeps it in CI; `needs-review` warns the assertions may be shallow
+   - `fixtures: [reset_db]` plus `ssh_required` / `sftp_required` if the case talks to the network
+   - Steps using only verbs from `verb-catalog.md`. Aim for: open → wait_for main container → 1-2 interactions exercising the key path → assert_visible / assert_text on the key outcomes → screenshot.
+5. **Validate**: `python -m qa_ui_auto.lint`. Fix schema errors before continuing.
+6. **Dry-run**: `python -m qa_ui_auto.runner --filter TC-auto-F4.X --dry-run`. Fix unbound `${cfg.x}` placeholders or unknown verbs.
+7. **Real run** if Vite is up: `python -m qa_ui_auto.runner --filter TC-auto-F4.X --workers 1`. If the case fails on first run, fix it before declaring done. If you can't fix it, **delete the draft** rather than leaving a flaky case.
+8. **Don't commit.** Tell the user: file path, what was verified, what assertions are weak and why.
+
+### Step 3 — For "needs-review only" features
+
+Same procedure, but instead of a new file, read the existing needs-review case, find `_TODO_MIGRATE` comments, and replace them with proper verb steps (the original eval body is preserved as a comment so you can see what it was trying to do). After patching, drop the `needs-review` tag if you've done a full pass.
+
+### CI implication
+
+Cases under `qa-ui-auto-tests/cases/auto/` with `tags: [auto-generated, smoke]` **DO** run in CI by default. If they're flaky and break PRs, the response is to fix the case (proper review), not to exclude `auto-generated` from `--tag smoke`.
+
+## Subcommand: `gen-diff`
+
+Find tests impacted by an in-progress change and patch the broken ones.
+
+### Step 1 — Run the diff impact analyzer (deterministic)
+
+```bash
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.diff_impact
+# variants:
+#   --base origin/main      explicit base (default tries origin/main, main, HEAD~1)
+#   --files a.tsx b.tsx     bypass git, treat these as the change set
+#   --no-uncommitted        ignore staged/unstaged/untracked
+#   --json                  machine-readable
+```
+
+Returns:
+- **Impacted features**: features whose `files:` paths intersect the changed paths.
+- **Impacted testcases**: cases that `cover` any impacted feature, OR whose YAML file itself was edited.
+- **Features with NO testcase touching the change**: gaps the user might want to fill.
+
+### Step 2 — Patch broken tests
+
+For each impacted case:
+
+1. Read the case YAML and the changed component source.
+2. For every `[data-testid="..."]`, `text="..."`, `aria-label="..."` literal in YAML, grep the new source — still there?
+3. If a selector is gone:
+   - Find what replaced it in the new source (semantic match: same nearby button, same role, similar label).
+   - Output a unified diff (markdown code block) for the YAML change.
+   - **Don't apply** until the user confirms.
+4. After applying, run `python -m qa_ui_auto.runner --filter <id>` to verify.
+
+### Step 3 — Suggest new coverage if needed
+
+If diff_impact reports "Features with NO testcase touching the change", suggest the user run `gen-coverage --feature F.x` to draft a case before merging. Don't do it unilaterally — keep the boundary clean.
+
+## Subcommand: `gen-from-range`
+
+Refresh `feature-list.md` based on a range of commits (or an explicit commit set). **Only modifies `feature-list.md`** — never touches testcases.
+
+### Step 1 — Run the range analyzer (deterministic)
+
+```bash
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.range_changes
+# variants:
+#   --since v0.1.10                   from a tag / branch / SHA / "yesterday"
+#   --since HEAD~5                    last N commits
+#   --until <ref>                     end of range (default HEAD)
+#   --commits abc,def,ghi             explicit commit set
+#   --json                            machine-readable
+```
+
+Returns three classifications:
+
+- **Touched features**: existing features in feature-list.md whose `files:` were modified or added
+- **Orphan NEW**: files added in the range that no existing feature lists. **Most likely to be a new feature.**
+- **Orphan MODIFIED**: files modified but no feature claims them. Possibly an existing feature that should grow its `files:` list, or a new feature.
+- **Deleted in features**: files listed by an existing feature that were deleted in the range. The feature may need status downgrade or section removal.
+
+### Step 2 — Update feature-list.md (you, the agent)
+
+For each **Orphan NEW** file:
+1. Read the file (Read), the relevant commit message (`git show <sha> --stat -- <path>`).
+2. Decide: is this a new feature, or an extension of an existing one?
+   - If the file lives in a new component directory and the commit subject reads like a new capability ("feat: add X session type") → new feature.
+   - If the file is a sibling of existing feature files in the same directory → likely extending an existing feature.
+3. **For a new feature**:
+   - Pick the next free section number in the appropriate H2 chapter (e.g. F2.6 if chapter 2 has F2.1..F2.5).
+   - Read enough of the new file(s) to write a 3-6 bullet description in Chinese (matches existing feature-list.md style).
+   - Build a `<!-- feature ... -->` frontmatter block with `id`, `status: done` (if the commit shipped it), `area`, `components`, `files`.
+   - Use the Edit tool to insert: `### N.M <title> <emoji>` heading + frontmatter block + bullets. Place it at the right chapter ordering.
+   - Show the user the proposed insertion as a unified diff before applying.
+4. **For an extension**: add the new path to the existing feature's `files:` block.
+
+For each **Touched feature**:
+1. Read the commits' diff/messages.
+2. Decide if the description needs a refresh (new sub-capability, status change, additional bullets).
+3. Show diff, apply only after confirmation.
+
+For each **Deleted file in features**:
+1. Don't auto-delete the section. Add a `<!-- DELETED in <commit> -->` HTML comment at the top of the section's body so it's visible in raw view.
+2. Suggest the user manually decide whether to drop the section, downgrade status, or update the file list.
+
+### Step 3 — Run lint
+
+After modifying feature-list.md:
+
+```bash
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+```
+
+Confirms feature_catalog still parses cleanly (no duplicate IDs, no malformed YAML in frontmatter).
+
+### Important boundaries
+
+- **Don't run `gen-coverage` automatically** after gen-from-range. Tell the user "feature-list.md updated. Run `/qa-ui-auto gen-coverage` next to draft tests for the new features." That's a separate, explicit step.
+- **Don't write any testcase YAML.** That's strictly `gen-coverage`'s job.
+- **Don't commit.** The user reviews and commits.
+
+## Subcommand: `explore`
+
+Free-form exploratory testing — drive the UI like a curious user, surface anomalies, write a report. **Does NOT** modify `qa-ui-auto-tests/cases/`.
+
+### Procedure
+
+1. **Bound the run**:
+   - `--area sftp|terminal|tunnel|settings` what to focus on
+   - `--duration 10m` (default 10 min, hard cap)
+   - Action cap default 200 actions; stop on whichever hits first
+2. **Preflight**: browser mode only. Confirm Vite is up. Prefer `mcp__playwright__*` tools; otherwise `playwright-cli`.
+3. **Drive**: cycles of snapshot → action → check console.error / pageerror / unhandledrejection / network 4xx/5xx on `/__newmob/ssh-bridge` and `/__newmob/sftp-bridge`.
+4. **Stay scoped**: don't drift outside `--area` unless a bug trail leads there. Don't touch `~/.ssh/config` or other user files. Don't actually upload from `~/Documents` etc.
+5. **Write report** to `qa-ui-auto-report/exploratory-<YYYYMMDD-HHMM>.md`: actions taken, anomalies, repro steps, screenshot paths, suggested next steps (which feature each anomaly touches).
+6. **Don't add to cases/**. Tell the user "if anomaly N is real, run `/qa-ui-auto gen-coverage --feature F.x` to lock in regression coverage."
+
+### Bounds
+
+- Token budget: explore can go runaway. After 200 actions or `--duration` minutes, stop and write the report.
+- No persistence mutations beyond what `reset_db` cleans up.
+- No real SSH connects unless user explicitly says so — default to local-only flows (welcome panel, settings, session editor without saving, tab management).
+
+## Authoring rules (cross-cutting)
+
+When `gen-coverage` writes new YAML or `gen-diff` patches existing YAML, follow `references/authoring.md`:
+
+- One file per case: `qa-ui-auto-tests/cases/<id>-<slug>.testcase.yaml` (auto-drafted ones go under `cases/auto/`).
+- Always set `covers: [F.x]`.
+- Always declare `fixtures` explicitly. Use `reset_db` for any case that mutates persistent state.
+- Verbs only from `references/verb-catalog.md`. Each step is a single-key map.
+- Selectors prefer `[data-testid="..."]`. Fall back to `text=`, `role=`, CSS, XPath only when no testid exists — and consider adding a testid in the same change.
+- Only escape hatch for raw JS is `eval_readonly`. Schema rejects assignments, `await`, DOM mutations.
+- Modes: `[browser]` is default. Add `native` only when the case truly needs the Tauri Rust backend.
+
+## Failure handling for `run`
+
+- The first failing step in a case is fatal **for that case only**; the runner continues with remaining cases.
+- Exit codes: `0` all passed, `1` at least one failed, `2` setup/config error.
+- `summary.json` is the stable contract Claude Code parses.
 
 ## Cross-platform notes
 
-- **Linux (CI / Replit):** browser mode runs headless Chromium fine. Native mode needs `tauri-driver`, `WebKitWebDriver`, and Xvfb or the existing `VNC Server` workflow up.
-- **macOS:** browser mode is supported. Tauri desktop WebDriver is not available because WKWebView has no desktop WebDriver tool.
-- **Windows:** native binary is `.exe`; native mode requires `tauri-driver` plus `msedgedriver.exe` matching Edge/WebView2.
-- The runner detects the platform with `platform.system()` — never hard-code paths.
+- **Linux/CI**: browser mode runs headless Chromium. Native needs `tauri-driver`, `WebKitWebDriver`, and Xvfb/VNC.
+- **macOS**: browser only; Tauri WebDriver is unsupported on macOS.
+- **Windows**: browser mode works as-is. Native requires `tauri-driver` + `msedgedriver.exe`.
 
-## Failure handling
+## Adding a new feature manually (without commit history)
 
-- Treat first failing step in a case as fatal for that case but continue with remaining cases.
-- Always exit `1` if any case failed, `0` if all passed.
-- On any unexpected exception, dump traceback into `qa-ui-auto-report/error.log` and surface its tail in stdout.
-
-## Maintenance
-
-- Keep `references/selectors.md` in sync when UI components rename their `data-testid`s. The runner depends on these — if you change a component, update the reference file in the same change.
-- Don't add new verbs to the DSL without updating both `parse_testcases.py` and the verb list in this SKILL.md.
+If the user already added a feature to the codebase but hasn't committed yet (or commits don't reflect what they want documented), they can manually add a frontmatter block to feature-list.md and then run `gen-coverage --feature F.x`. `gen-from-range` is the convenience for the more common case of "I committed a few times, now backfill the catalog."

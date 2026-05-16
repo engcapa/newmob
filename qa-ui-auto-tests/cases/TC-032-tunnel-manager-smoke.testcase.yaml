@@ -1,0 +1,28 @@
+id: TC-032
+title: Tunnel manager opens, lists controls, and the new-tunnel editor
+description: |
+  Smoke test for the SSH tunnel manager UI. Does not actually start a tunnel
+  (that requires the configured SSH host) — only verifies the tab opens, the
+  global controls render, and the tunnel editor opens with its required
+  fields when "New SSH tunnel" is clicked.
+covers: [F8.2]
+tags: [tunnel, smoke, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 45
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="ribbon"]'
+  - click: '[data-testid="ribbon-tunneling"]'
+  - wait_for: 'text=Network tools'
+  - assert_visible: 'text=New SSH tunnel'
+  - assert_visible: 'text=Start all tunnels'
+  - assert_visible: 'text=Stop all tunnels'
+  - click: 'button:has-text("New SSH tunnel")'
+  - wait_for:
+      selector: 'input[placeholder="e.g. postgres-replica"]'
+      timeout_sec: 10
+  - assert_visible: 'input[placeholder="ssh.example.com"]'
+  - assert_visible: 'input[placeholder="user"]'
+  - press: Escape
+  - screenshot: 032-tunnel-manager.png

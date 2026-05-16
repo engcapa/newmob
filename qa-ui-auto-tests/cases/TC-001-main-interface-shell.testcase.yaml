@@ -1,0 +1,31 @@
+id: TC-001
+title: Main interface shell renders all primary surfaces
+description: |
+  Smoke test for the chrome of the app. Loads the welcome screen and verifies
+  every top-level layout surface is mounted: menu bar, ribbon, quick-connect,
+  sidebar, session tree, tab bar, status bar, welcome panel.
+covers: [F1.2, F1.6, F1.7]
+tags: [smoke, p0, main]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 60
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="menu-bar"]'
+  - assert_visible: '[data-testid="ribbon"]'
+  - assert_visible: '[data-testid="quick-connect"]'
+  - assert_visible: '[data-testid="sidebar"]'
+  - assert_visible: '[data-testid="session-tree"]'
+  - assert_visible: '[data-testid="tab-bar"]'
+  - assert_visible: '[data-testid="status-bar"]'
+  - assert_visible: '[data-testid="welcome-panel"]'
+  - assert_text:
+      selector: '[data-testid="welcome-panel"]'
+      contains: Welcome to NewMob
+  - assert_text:
+      selector: '[data-testid="welcome-panel"]'
+      contains: Start local terminal
+  - assert_text:
+      selector: '[data-testid="welcome-panel"]'
+      contains: Active connections
+  - screenshot: 001-main-interface.png

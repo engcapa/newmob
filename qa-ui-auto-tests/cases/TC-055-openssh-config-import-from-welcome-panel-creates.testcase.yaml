@@ -1,0 +1,17 @@
+id: TC-055
+title: OpenSSH config import from Welcome panel creates sessions
+covers: [F6.6]
+tags: [import, legacy-imported, needs-review, openssh, p1, session]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"welcome-panel\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.evaluate(() => { const blob = new Blob(["Host qa-openssh-import\\n  HostName ${cfg.ssh.host}\\n  Port ${cfg.ssh.port}\\n  User ${cfg.ssh.user}\\n"], { type: "text/plain" }); const file = new File([blob], "config",
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 2
+  - wait_for: "text=\"qa-openssh-import\""
+  - screenshot: 055-openssh-config-import.png

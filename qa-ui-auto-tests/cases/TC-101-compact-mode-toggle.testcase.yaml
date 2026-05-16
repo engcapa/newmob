@@ -1,0 +1,21 @@
+id: TC-101
+title: Compact mode toggle persists across reload
+description: |
+  Smoke test for F1.4 (compact UI mode). Click the compact-toggle, verify
+  newmob.compactMode flips in localStorage, reload, and confirm it sticks.
+covers: [F1.4]
+tags: [smoke, p1, main, window]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 30
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="titlebar-tray"]'
+  - assert_localstorage: { key: "newmob.compactMode", exists: false }
+  - click: '[data-testid="compact-toggle"]'
+  - wait: 0.5
+  - assert_localstorage: { key: "newmob.compactMode", exists: true }
+  - reload:
+  - wait_for: '[data-testid="titlebar-tray"]'
+  - assert_localstorage: { key: "newmob.compactMode", exists: true }
+  - screenshot: 101-compact-mode.png

@@ -1,0 +1,26 @@
+id: TC-025
+title: Terminal event log records connect and resize events
+covers: [F4.7]
+tags: [event-log, legacy-imported, needs-review, p1, ssh, terminal]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - click: "[data-testid=\"context-menu-item-event-log\"]"
+  - wait_for: "text=\"Event Log\""
+  - assert_visible: "text=\"connection\""
+  - assert_visible: "text=\"auth\""
+  - screenshot: 025-terminal-event-log.png

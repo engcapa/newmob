@@ -1,0 +1,71 @@
+id: TC-010
+title: SFTP remote context menu supports chmod, rename, and delete
+covers: [F7.5]
+tags: [chmod, legacy-imported, needs-review, p1, right-menu, sftp]
+modes: [browser]
+fixtures: [reset_db, ssh_required, sftp_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  - click: "[data-testid=\"attached-sftp-toggle\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  - click: "[data-testid=\"sftp-remote-path\"]"
+  - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
+  - press: Enter
+  - wait: 1
+  - seed_dialog: {confirm: true}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.evaluate(() => { const list = document.querySelector(`[data-testid="sftp-remote-list"]`); list?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 220 })); }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - assert_visible: "text=\"New folder…\""
+  - assert_visible: "text=\"New file…\""
+  - press: Escape
+  - click: "[data-testid=\"sftp-remote-new-file\"]"
+  - wait_for: "text=\"qa-ui-auto-menu.txt\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-menu.txt"`).first().click({ button: "right" }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - assert_visible: "text=\"Download to local\""
+  - assert_visible: "text=\"Rename\""
+  - assert_visible: "text=\"Permissions…\""
+  - assert_visible: "text=\"Delete\""
+  - click: "[data-testid=\"context-menu-item-permissions\"]"
+  - wait_for: "[aria-label=\"Permissions\"]"
+  - assert_visible: "text=\"Owner\""
+  - assert_visible: "text=\"Group\""
+  - assert_visible: "text=\"Other\""
+  - click: "role=button[name=\"Apply\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.evaluate(() => { window.__qaPromptValue = "qa-ui-auto-menu-renamed.txt"; }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-menu.txt"`).first().click({ button: "right" }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - click: "[data-testid=\"context-menu-item-rename\"]"
+  - wait_for: "text=\"qa-ui-auto-menu-renamed.txt\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-menu-renamed.txt"`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-remote-delete\"]"
+  - wait: 1
+  - screenshot: 010-sftp-context-chmod-rename.png

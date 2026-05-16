@@ -1,0 +1,28 @@
+id: TC-029
+title: SFTP browser orientation toggles between vertical and horizontal split
+covers: [F7.2]
+tags: [layout, legacy-imported, needs-review, orientation, p1, sftp]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  - click: "[data-testid=\"attached-sftp-toggle\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  - assert_visible: "[data-testid=\"sftp-remote-pane\"]"
+  - assert_visible: "[data-testid=\"sftp-local-pane\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const buttons = page.locator(`[data-testid="sftp-browser"] button[title*="layout" i], [data-testid="sftp-browser"] button[title*="orientation" i], [data-testid="sftp-browser"] button[title*="vertical" i], [data-testid="sftp-
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - assert_visible: "[data-testid=\"sftp-remote-pane\"]"
+  - assert_visible: "[data-testid=\"sftp-local-pane\"]"
+  - screenshot: 029-sftp-orientation.png

@@ -1,0 +1,35 @@
+id: TC-024
+title: Terminal Special Command sends SIGINT to interrupt foreground process
+covers: [F3.1]
+tags: [legacy-imported, needs-review, p1, signal, terminal]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  - click: "[data-testid=\"terminal-pane\"]"
+  - type: "sleep 60 && echo qa-should-not-appear"
+  - press: Enter
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait_for: "[data-testid=\"context-menu\"]"
+  - hover: text=Special Command
+  - wait_for: "text=\"SIGINT (Interrupt)\""
+  - click: "text=\"SIGINT (Interrupt)\""
+  - wait: 2
+  - click: "[data-testid=\"terminal-pane\"]"
+  - type: echo qa-after-sigint
+  - press: Enter
+  - wait: 1
+  - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: qa-after-sigint}
+  - screenshot: 024-terminal-sigint.png

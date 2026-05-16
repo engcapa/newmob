@@ -1,5 +1,27 @@
 # NewMob - UI E2E Test Cases
 
+> **DEPRECATED — kept for historical reference.**
+>
+> All 63 cases in this file have been migrated to typed YAML at
+> `tests/cases/*.testcase.yaml` and are now executed by the rewritten
+> `qa-ui-auto` skill. The new schema lives at
+> `.agents/skills/qa-ui-auto/schema/testcase.schema.json`.
+>
+> Cases that needed manual review during migration are tagged
+> `legacy-imported, needs-review` in the new YAML files; please fix those
+> rather than editing this Markdown.
+>
+> To run tests now:
+>
+>     PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.runner
+>
+> See `.agents/skills/qa-ui-auto/SKILL.md` for the full procedure and
+> `.agents/skills/qa-ui-auto/references/authoring.md` for how to write new
+> cases.
+>
+> The legacy `run_tests.py` and `parse_testcases.py` are still present for
+> the migration path but should not be invoked directly.
+
 > This file is consumed by the `qa-ui-auto` skill via
 > `.agents/skills/qa-ui-auto/scripts/run_tests.py`.
 >

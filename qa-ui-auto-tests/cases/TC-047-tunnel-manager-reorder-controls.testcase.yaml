@@ -1,0 +1,58 @@
+id: TC-047
+title: Tunnel manager reorder controls
+covers: [F8.2]
+tags: [legacy-imported, needs-review, p1, reorder, tunnel]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"ribbon-tunneling\"]"
+  - wait_for: "text=\"New SSH tunnel\""
+  - click: "button:has-text(\"New SSH tunnel\")"
+  - wait: 1
+  - wait_for: "input[placeholder=\"e.g. postgres-replica\"]"
+  - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-tunnel-1}
+  - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
+  - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19191"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - wait_for: "text=\"qa-tunnel-1\""
+  - click: "button:has-text(\"New SSH tunnel\")"
+  - wait: 1
+  - wait_for: "input[placeholder=\"e.g. postgres-replica\"]"
+  - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-tunnel-2}
+  - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
+  - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19192"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - wait_for: "text=\"qa-tunnel-2\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const rows = page.locator(`tr:has-text("qa-tunnel-")`); const firstRow = rows.first(); await firstRow.locator(`button[title*="Move down" i], button[title*="move down" i]`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - seed_dialog: {confirm: true}
+  - wait: 1
+  - seed_dialog: {confirm: true}
+  - screenshot: 047-tunnel-reorder.png

@@ -1,0 +1,211 @@
+name: e2e
+# qa-ui-auto end-to-end tests.
+#
+# Triggers:
+#   - pull_request (paths-filtered): ubuntu-only smoke (~6 min)
+#   - push to main: ubuntu + windows full sweep matrix
+#   - workflow_dispatch: ubuntu + windows; optional macOS smoke when
+#     include_macos=true (macOS is 10× billing — kept off automatic runs)
+#
+# SSH/SFTP-required cases auto-skip via the runner's fixtures because no
+# QA_SSH_PASSWORD secret / reachable host is exposed in CI. That's by
+# design: CI guards the front-end shell layer; back-end integration runs
+# locally or on a self-hosted runner.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - '.agents/skills/qa-ui-auto/**'
+      - 'vite-plugins/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/e2e.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag filter (e.g. smoke, p0). Empty = full sweep.'
+        required: false
+        default: ''
+      include_macos:
+        description: 'Also run macOS smoke (10× billing)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ── PR: ubuntu smoke only ───────────────────────────────────────────────
+  pr-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DEV_PROXY_ALLOW_PRIVATE: "1"
+      ALLOW_PRIVATE_TARGETS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pnpm install --frozen-lockfile
+      - run: pip install pyyaml jsonschema 'playwright>=1.48,<2.0'
+      - run: python -m playwright install --with-deps chromium
+      - name: Seed qa-ui-auto config from example
+        run: cp .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml qa-ui-auto.config.yaml
+      - name: Lint testcases
+        run: PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+      - name: Start Vite (background)
+        run: |
+          nohup pnpm dev > vite.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fs http://localhost:5000 > /dev/null; then
+              echo "vite up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "vite failed to start in 60s; tail of vite.log:"; tail -80 vite.log; exit 1
+      - name: Run smoke
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.runner --tag smoke --workers 4
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-ui-auto-report-pr-smoke
+          path: |
+            qa-ui-auto-report/
+            vite.log
+          retention-days: 7
+
+  # ── push to main / workflow_dispatch: ubuntu + windows matrix ──────────
+  full-matrix:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 30 || 20 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      DEV_PROXY_ALLOW_PRIVATE: "1"
+      ALLOW_PRIVATE_TARGETS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pnpm install --frozen-lockfile
+      - run: pip install pyyaml jsonschema 'playwright>=1.48,<2.0'
+      - name: Install Playwright (Linux, with deps)
+        if: runner.os == 'Linux'
+        run: python -m playwright install --with-deps chromium
+      - name: Install Playwright (non-Linux)
+        if: runner.os != 'Linux'
+        run: python -m playwright install chromium
+      - name: Seed qa-ui-auto config from example
+        run: cp .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml qa-ui-auto.config.yaml
+      - name: Lint testcases
+        run: PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+      - name: Start Vite (background)
+        run: |
+          nohup pnpm dev > vite.log 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -fs http://localhost:5000 > /dev/null; then
+              echo "vite up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "vite failed to start in 90s; tail of vite.log:"; tail -80 vite.log; exit 1
+      - name: Run sweep
+        env:
+          QA_SSH_PASSWORD: ${{ secrets.QA_SSH_PASSWORD }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -n "$TAG" ]; then
+            PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+              python -m qa_ui_auto.runner --tag "$TAG" --workers 4
+          else
+            PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+              python -m qa_ui_auto.runner --workers 4
+          fi
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-ui-auto-report-${{ matrix.os }}
+          path: |
+            qa-ui-auto-report/
+            vite.log
+          retention-days: 14
+
+  # ── macOS smoke: only on manual dispatch with include_macos=true ────────
+  macos-smoke:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.include_macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      DEV_PROXY_ALLOW_PRIVATE: "1"
+      ALLOW_PRIVATE_TARGETS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 10 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: pnpm }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pnpm install --frozen-lockfile
+      - run: pip install pyyaml jsonschema 'playwright>=1.48,<2.0'
+      - run: python -m playwright install chromium
+      - name: Seed qa-ui-auto config from example
+        run: cp .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml qa-ui-auto.config.yaml
+      - name: Lint testcases
+        run: PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+      - name: Start Vite (background)
+        run: |
+          nohup pnpm dev > vite.log 2>&1 &
+          for i in $(seq 1 90); do
+            if curl -fs http://localhost:5000 > /dev/null; then
+              echo "vite up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "vite failed to start in 90s; tail of vite.log:"; tail -80 vite.log; exit 1
+      - name: Run smoke
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="smoke"; fi
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.runner --tag "$TAG" --workers 2
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-ui-auto-report-macos-smoke
+          path: |
+            qa-ui-auto-report/
+            vite.log
+          retention-days: 14

@@ -1,0 +1,33 @@
+id: TC-040
+title: Auth prompt blocks empty submission and accepts paste
+description: |
+  Verifies the auth submit button stays disabled until a non-empty password
+  is provided, and that the prompt advances to the terminal once a real
+  password is submitted.
+covers: [F6.5]
+tags: [auth, validation, p1]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill:
+      selector: '[data-testid="qc-input"]'
+      value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"
+  - click: '[data-testid="qc-submit"]'
+  - wait_for: '[data-testid="auth-prompt"]'
+  - assert_visible: '[data-testid="auth-password"]'
+  - assert_visible: '[data-testid="auth-submit"]'
+  - assert_disabled: '[data-testid="auth-submit"]'
+  - fill:
+      selector: '[data-testid="auth-password"]'
+      value: "   "
+  - assert_disabled: '[data-testid="auth-submit"]'
+  - fill:
+      selector: '[data-testid="auth-password"]'
+      value: "${env.QA_SSH_PASSWORD}"
+  - assert_enabled: '[data-testid="auth-submit"]'
+  - click: '[data-testid="auth-submit"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 30
+  - screenshot: 040-auth-prompt-validation.png

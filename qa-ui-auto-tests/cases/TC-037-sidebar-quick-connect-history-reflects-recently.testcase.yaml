@@ -1,0 +1,30 @@
+id: TC-037
+title: Sidebar quick-connect history reflects recently saved sessions
+covers: [F1.6, F6.2]
+tags: [legacy-imported, main, p1, quickconnect, sidebar]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"session-new\"]"
+  - wait_for: "[data-testid=\"session-editor\"]"
+  - fill: {selector: "[data-testid=\"session-host\"]", value: "${cfg.ssh.host}"}
+  - fill: {selector: "[data-testid=\"session-port\"]", value: "${cfg.ssh.port}"}
+  - send_text_via_label: {label_contains: Specify username, checked: true}
+  - fill: {selector: "[data-testid=\"session-user\"]", value: "${cfg.ssh.user}"}
+  - click: "[data-testid=\"session-section-bookmark\"]"
+  - wait_for: "[data-testid=\"bookmark-settings\"]"
+  - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-recent}
+  - click: "[data-testid=\"session-save\"]"
+  - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-recent\"]"
+  - assert_visible: "[data-testid=\"session-search\"]"
+  - click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-recent\"]"
+  - assert_visible: "[data-testid=\"session-edit\"]"
+  - assert_visible: "[data-testid=\"session-duplicate\"]"
+  - assert_visible: "[data-testid=\"session-delete\"]"
+  - fill: {selector: "[data-testid=\"session-search\"]", value: qa-ui-auto-recent}
+  - assert_visible: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-recent\"]"
+  - fill: {selector: "[data-testid=\"session-search\"]", value: qa-ui-auto-no-such-session}
+  - wait: 1
+  - assert_visible: "text=\"No matching sessions.\""
+  - screenshot: 037-sidebar-search.png

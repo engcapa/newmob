@@ -1,0 +1,17 @@
+id: TC-058
+title: Local terminal administrator launch button is visible and clickable
+covers: [F2.1]
+tags: [admin, legacy-imported, local, needs-review, p1, terminal]
+modes: [browser, native]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"welcome-panel\"]"
+  - assert_visible: "text=\"Start local terminal\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const btn = page.locator(`button[aria-label="Open as administrator"]`); const count = await btn.count(); if (count === 0) console.log("[v0] Admin button not shown — shell may not support elevation"); else await btn.click(); 
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - screenshot: 058-local-terminal-admin.png

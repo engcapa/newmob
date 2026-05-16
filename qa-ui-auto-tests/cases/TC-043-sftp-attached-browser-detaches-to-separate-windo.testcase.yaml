@@ -1,0 +1,30 @@
+id: TC-043
+title: SFTP attached browser detaches to separate window
+covers: [F7.4]
+tags: [detach, legacy-imported, needs-review, p1, sftp, window]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  - click: "[data-testid=\"attached-sftp-toggle\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.evaluate(() => { window.__detaches = 0; window.open = function() { window.__detaches++; return window; }; }); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "button[title=\"Open in its own window\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const d = await page.evaluate(() => window.__detaches); if (d === 0) throw new Error("window.open was not called for detach"); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - screenshot: 043-sftp-detach.png

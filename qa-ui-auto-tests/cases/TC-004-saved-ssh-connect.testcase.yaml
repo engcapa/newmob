@@ -1,0 +1,44 @@
+id: TC-004
+title: Saved SSH session connects and accepts whoami
+description: |
+  Create a bookmark for the configured SSH server, connect via the session
+  tree (double-click), authenticate, and run `whoami`. Verifies persistence
+  → reconnect → terminal I/O end-to-end.
+  Requires ssh.host:port reachable and QA_SSH_PASSWORD set.
+covers: [F3.1, F6.1, F6.2, F6.5]
+tags: [ssh, terminal, persistence, p0]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="sidebar"]'
+  - click: '[data-testid="session-new"]'
+  - wait_for: '[data-testid="session-editor"]'
+  - fill: { selector: '[data-testid="session-host"]', value: '${cfg.ssh.host}' }
+  - fill: { selector: '[data-testid="session-port"]', value: '${cfg.ssh.port}' }
+  - fill: { selector: '[data-testid="session-user"]', value: '${cfg.ssh.user}' }
+  - click: '[data-testid="session-section-bookmark"]'
+  - wait_for: '[data-testid="bookmark-settings"]'
+  - fill: { selector: '[data-testid="session-name"]', value: 'qa-ui-auto-saved-ssh' }
+  - click: '[data-testid="session-save"]'
+  - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-saved-ssh"]'
+  - open_session: { name: 'qa-ui-auto-saved-ssh', double_click: true }
+  - auth: ${env.QA_SSH_PASSWORD}
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 30
+  - wait: 2
+  - assert_text:
+      selector: '[data-testid="terminal-pane"]'
+      contains: NewMob SSH terminal
+      timeout_sec: 30
+  - click: '[data-testid="terminal-pane"]'
+  - send_keys: 'whoami'
+  - press: Enter
+  - wait: 1
+  - assert_text:
+      selector: '[data-testid="terminal-pane"]'
+      contains: '${cfg.ssh.user}'
+      timeout_sec: 15
+  - screenshot: 004-saved-ssh-connect.png

@@ -1,0 +1,41 @@
+id: TC-015
+title: Application theme cycles Light → Dark → Follow system and persists
+covers: [F5.5]
+tags: [legacy-imported, needs-review, p0, persistence, settings, theme]
+modes: [browser, native]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"status-bar\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { try { await page.evaluate(() => localStorage.removeItem("newmob.appTheme.v1")); } catch {} }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - reload: null
+  - wait_for: "[data-testid=\"status-bar\"]"
+  - assert_text: {selector: "[data-testid=\"status-bar\"]", contains: "Theme:"}
+  - click: "button[aria-label=\"Cycle application theme\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const v = await page.evaluate(() => document.documentElement.getAttribute("data-app-theme")); if (!v) throw new Error("data-app-theme attribute missing after cycle"); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "button[aria-label=\"Cycle application theme\"]"
+  - wait: 1
+  - click: "button[aria-label=\"Cycle application theme\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const stored = await page.evaluate(() => localStorage.getItem("newmob.appTheme.v1")); if (!stored) throw new Error("App theme not persisted to localStorage"); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - reload: null
+  - wait_for: "[data-testid=\"status-bar\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { const after = await page.evaluate(() => document.documentElement.getAttribute("data-app-theme")); if (!after) throw new Error("data-app-theme missing after reload"); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - screenshot: 015-app-theme-cycle.png

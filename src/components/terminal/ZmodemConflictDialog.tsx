@@ -36,6 +36,7 @@ export function ZmodemConflictDialog({ fileName, hasMore, mode, onResolve }: Zmo
         role="dialog"
         aria-label={title}
         aria-modal="true"
+        data-testid="zmodem-conflict"
         className="w-[400px] rounded shadow-lg p-4"
         style={{ background: "var(--moba-bg)", border: "1px solid var(--moba-card-border)" }}
         onClick={(e) => e.stopPropagation()}
@@ -54,6 +55,7 @@ export function ZmodemConflictDialog({ fileName, hasMore, mode, onResolve }: Zmo
             <button
               ref={firstButtonRef}
               type="button"
+              data-testid="zmodem-overwrite"
               className="w-full px-3 py-1.5 text-[12px] rounded text-left hover:opacity-90"
               style={{ background: "var(--moba-accent)", color: "#fff" }}
               onClick={() => resolve("overwrite")}
@@ -64,6 +66,7 @@ export function ZmodemConflictDialog({ fileName, hasMore, mode, onResolve }: Zmo
           <button
             ref={mode === "send" ? firstButtonRef : undefined}
             type="button"
+            data-testid="zmodem-rename"
             className="w-full px-3 py-1.5 text-[12px] rounded text-left"
             style={{
               background: mode === "send" ? "var(--moba-accent)" : "var(--moba-input-bg)",
@@ -76,6 +79,7 @@ export function ZmodemConflictDialog({ fileName, hasMore, mode, onResolve }: Zmo
           </button>
           <button
             type="button"
+            data-testid="zmodem-skip"
             className="w-full px-3 py-1.5 text-[12px] rounded text-left"
             style={{
               background: "var(--moba-input-bg)",

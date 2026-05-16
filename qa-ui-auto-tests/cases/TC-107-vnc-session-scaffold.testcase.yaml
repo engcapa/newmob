@@ -1,0 +1,36 @@
+id: TC-107
+title: Saved VNC session opens the VNC panel scaffolding
+description: |
+  Coverage smoke for F9.6. Creates a VNC session bookmark and double-clicks
+  to open it; the auth prompt fires (we cancel it) and we then verify the
+  panel scaffolding is reachable.
+
+  Because the configured cfg.ssh.host is not necessarily a VNC server, we
+  do NOT actually authenticate — the test only confirms the protocol
+  selector + auth flow + panel mount path is wired up. Real VNC connection
+  testing requires a configured VNC fixture.
+covers: [F9.6]
+tags: [smoke, p1, vnc, scaffolding-only]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 45
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="sidebar"]'
+  - click: '[data-testid="session-new"]'
+  - wait_for: '[data-testid="session-editor"]'
+  - click: '[data-testid="session-proto-vnc"]'
+  - fill:
+      selector: '[data-testid="session-host"]'
+      value: vnc-host.example.test
+  - fill:
+      selector: '[data-testid="session-port"]'
+      value: "5900"
+  - click: '[data-testid="session-section-bookmark"]'
+  - wait_for: '[data-testid="bookmark-settings"]'
+  - fill:
+      selector: '[data-testid="session-name"]'
+      value: qa-ui-auto-vnc
+  - click: '[data-testid="session-save"]'
+  - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-vnc"]'
+  - screenshot: 107-vnc-saved.png

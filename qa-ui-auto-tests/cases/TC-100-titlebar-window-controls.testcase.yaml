@@ -1,0 +1,23 @@
+id: TC-100
+title: Custom title bar renders window controls and tray
+description: |
+  Smoke test for F1.3 (custom title bar). Verifies the app-titlebar, the
+  three window controls (minimize/maximize/close), and the tray (theme cycle
+  + compact toggle) are all mounted at startup. Does not click them — that
+  would actually minimize/close the window.
+covers: [F1.3]
+tags: [smoke, p1, main, window]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 30
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="app-titlebar"]'
+  - assert_visible: '[data-testid="window-controls"]'
+  - assert_visible: '[data-testid="window-min"]'
+  - assert_visible: '[data-testid="window-max"]'
+  - assert_visible: '[data-testid="window-close"]'
+  - assert_visible: '[data-testid="titlebar-tray"]'
+  - assert_visible: '[data-testid="theme-cycle"]'
+  - assert_visible: '[data-testid="compact-toggle"]'
+  - screenshot: 100-titlebar.png

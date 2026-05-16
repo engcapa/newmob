@@ -1,0 +1,24 @@
+id: TC-102
+title: MultiExec broadcast bar mounts when activated from ribbon
+description: |
+  Smoke test for F4.11. Open at least one terminal, toggle MultiExec via
+  the ribbon (or its keyboard shortcut), and assert the multiexec-bar with
+  its input renders.
+covers: [F4.11]
+tags: [smoke, p1, terminal, multiexec]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 45
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - click: '[data-testid="welcome-open-local-terminal"]'
+  - wait_for:
+      selector: '[data-testid="terminal-pane"]'
+      timeout_sec: 20
+  - press: Control+Alt+M
+  - wait_for:
+      selector: '[data-testid="multiexec-bar"]'
+      timeout_sec: 5
+  - assert_visible: '[data-testid="multiexec-input"]'
+  - screenshot: 102-multiexec-bar.png

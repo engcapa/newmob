@@ -1,0 +1,348 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://newmob.local/qa-ui-auto/testcase.schema.json",
+  "title": "qa-ui-auto Test Case",
+  "description": "Typed YAML test case consumed by .agents/skills/qa-ui-auto/scripts/runner.py. Authored by humans or by Claude Code via the qa-ui-auto skill. Inline JS is forbidden; only verbs from the controlled step library are allowed.",
+  "type": "object",
+  "required": ["id", "title", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^TC-[A-Za-z0-9_\\-]+$",
+      "description": "Unique stable identifier, e.g. TC-001 or TC-zmodem-conflict-overwrite."
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "covers": {
+      "type": "array",
+      "description": "Feature IDs from tests/features.yaml that this case exercises.",
+      "items": { "type": "string", "pattern": "^F[0-9]+(\\.[0-9]+)*[a-z]?$" },
+      "uniqueItems": true
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "modes": {
+      "type": "array",
+      "description": "Modes this case is valid in. Default is [browser]. Use [native] only when the case truly needs the Tauri Rust backend (local PTY, native dialogs, system clipboard).",
+      "items": { "enum": ["browser", "native"] },
+      "uniqueItems": true,
+      "minItems": 1,
+      "default": ["browser"]
+    },
+    "fixtures": {
+      "type": "array",
+      "description": "Pre/post fixtures applied around this case. Each is implemented in scripts/fixtures/.",
+      "items": { "enum": ["reset_db", "ssh_required", "sftp_required"] },
+      "uniqueItems": true
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 5,
+      "maximum": 600,
+      "default": 90,
+      "description": "Per-case wall-clock timeout. Default 90s."
+    },
+    "skip": {
+      "type": "string",
+      "description": "If set, the case is skipped and this reason is recorded in the report."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/step" }
+    }
+  },
+  "$defs": {
+    "selector": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Playwright-syntax selector. Prefer 'data-testid=...'. Other accepted: 'role=...', 'text=...', CSS, XPath via 'xpath=...'."
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "maxProperties": 1,
+      "description": "Each step is a single-key map: {verb: args}. The args schema is verb-specific.",
+      "properties": {
+        "open":               { "$ref": "#/$defs/url_or_app" },
+        "goto":               { "$ref": "#/$defs/url_arg" },
+        "wait":               { "$ref": "#/$defs/seconds_arg" },
+        "wait_for":           { "$ref": "#/$defs/wait_for_arg" },
+        "screenshot":         { "$ref": "#/$defs/screenshot_arg" },
+        "click":              { "$ref": "#/$defs/click_arg" },
+        "dblclick":           { "$ref": "#/$defs/click_arg" },
+        "right_click":        { "$ref": "#/$defs/click_arg" },
+        "hover":              { "$ref": "#/$defs/hover_arg" },
+        "drag_to":            { "$ref": "#/$defs/drag_arg" },
+        "fill":               { "$ref": "#/$defs/fill_arg" },
+        "type":               { "$ref": "#/$defs/type_arg" },
+        "send_keys":          { "$ref": "#/$defs/text_arg" },
+        "press":              { "$ref": "#/$defs/press_arg" },
+        "select_option":      { "$ref": "#/$defs/select_arg" },
+        "upload_file":        { "$ref": "#/$defs/upload_arg" },
+        "assert_visible":     { "$ref": "#/$defs/selector" },
+        "assert_not_visible": { "$ref": "#/$defs/selector" },
+        "assert_text":        { "$ref": "#/$defs/assert_text_arg" },
+        "assert_pattern":     { "$ref": "#/$defs/assert_pattern_arg" },
+        "assert_count":       { "$ref": "#/$defs/assert_count_arg" },
+        "assert_url":         { "$ref": "#/$defs/url_arg" },
+        "assert_menu_items":  { "$ref": "#/$defs/menu_items_arg" },
+        "click_menu":         { "$ref": "#/$defs/menu_pick_arg" },
+        "quick_connect":      { "$ref": "#/$defs/quick_connect_arg" },
+        "auth":               { "$ref": "#/$defs/auth_arg" },
+        "open_session":       { "$ref": "#/$defs/open_session_arg" },
+        "attach_sftp":        { "type": ["null", "object"] },
+        "set_remote_path":    { "$ref": "#/$defs/text_arg" },
+        "seed_clipboard":     { "$ref": "#/$defs/text_arg" },
+        "seed_dialog":        { "$ref": "#/$defs/seed_dialog_arg" },
+        "reload":             { "type": ["null", "object", "string"] },
+        "assert_localstorage": { "$ref": "#/$defs/assert_localstorage_arg" },
+        "assert_attribute":   { "$ref": "#/$defs/assert_attribute_arg" },
+        "assert_disabled":    { "$ref": "#/$defs/selector" },
+        "assert_enabled":     { "$ref": "#/$defs/selector" },
+        "set_check":          { "$ref": "#/$defs/set_check_arg" },
+        "send_text_via_label": { "$ref": "#/$defs/send_text_via_label_arg" },
+        "eval_readonly":      { "$ref": "#/$defs/eval_readonly_arg" }
+      }
+    },
+    "url_or_app": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "object", "additionalProperties": false,
+          "properties": { "url": { "type": "string" } }, "required": ["url"] }
+      ]
+    },
+    "url_arg":     { "type": "string", "minLength": 1 },
+    "seconds_arg": { "oneOf": [ { "type": "number", "minimum": 0 }, { "type": "string", "minLength": 1 } ] },
+    "text_arg":    { "type": "string" },
+    "wait_for_arg": {
+      "oneOf": [
+        { "$ref": "#/$defs/selector" },
+        { "type": "object", "additionalProperties": false,
+          "required": ["selector"],
+          "properties": {
+            "selector": { "$ref": "#/$defs/selector" },
+            "timeout_sec": { "type": "number", "minimum": 0.5, "maximum": 120 },
+            "state": { "enum": ["attached", "detached", "visible", "hidden"], "default": "visible" }
+          } }
+      ]
+    },
+    "screenshot_arg": {
+      "oneOf": [
+        { "type": "string", "minLength": 1, "description": "Filename only; relative to qa-ui-auto-report/<run>/<case>/" },
+        { "type": "object", "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path":     { "type": "string", "minLength": 1 },
+            "selector": { "$ref": "#/$defs/selector" },
+            "full_page": { "type": "boolean", "default": false }
+          } }
+      ]
+    },
+    "click_arg": {
+      "oneOf": [
+        { "$ref": "#/$defs/selector" },
+        { "type": "object", "additionalProperties": false,
+          "required": ["selector"],
+          "properties": {
+            "selector": { "$ref": "#/$defs/selector" },
+            "position": { "type": "object", "additionalProperties": false,
+              "required": ["x", "y"],
+              "properties": {
+                "x": { "type": "number" }, "y": { "type": "number" }
+              } },
+            "modifiers": { "type": "array",
+              "items": { "enum": ["Alt", "Control", "Meta", "Shift"] },
+              "uniqueItems": true },
+            "force": { "type": "boolean" }
+          } }
+      ]
+    },
+    "hover_arg": { "$ref": "#/$defs/selector" },
+    "drag_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/$defs/selector" },
+        "to":   { "$ref": "#/$defs/selector" }
+      }
+    },
+    "fill_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector", "value"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "value": { "type": "string" }
+      }
+    },
+    "type_arg": { "type": "string" },
+    "press_arg": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "object", "additionalProperties": false,
+          "required": ["key"],
+          "properties": {
+            "key": { "type": "string" },
+            "selector": { "$ref": "#/$defs/selector" }
+          } }
+      ]
+    },
+    "select_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "label": { "type": "string" },
+        "value": { "type": "string" }
+      }
+    },
+    "upload_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector", "path"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "path":     { "type": "string" }
+      }
+    },
+    "assert_text_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector", "contains"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "contains": { "type": "string" },
+        "timeout_sec": { "type": "number", "minimum": 0.5, "maximum": 60, "default": 10 }
+      }
+    },
+    "assert_pattern_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector", "regex"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "regex":    { "type": "string", "minLength": 1 },
+        "timeout_sec": { "type": "number", "minimum": 0.5, "maximum": 60, "default": 10 }
+      }
+    },
+    "assert_count_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "min":   { "type": "integer", "minimum": 0 },
+        "max":   { "type": "integer", "minimum": 0 },
+        "equal": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "menu_items_arg": {
+      "type": "array", "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "Each entry is the visible label of a context-menu item to assert visible."
+    },
+    "menu_pick_arg": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "object", "additionalProperties": false,
+          "required": ["label"],
+          "properties": { "label": { "type": "string" } } }
+      ]
+    },
+    "quick_connect_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["url"],
+      "properties": {
+        "url": { "type": "string", "minLength": 1, "description": "ssh://user@host:port" }
+      }
+    },
+    "auth_arg": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "object", "additionalProperties": false,
+          "properties": { "password": { "type": "string" } }, "required": ["password"] }
+      ]
+    },
+    "open_session_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string" },
+        "double_click": { "type": "boolean", "default": true }
+      }
+    },
+    "eval_readonly_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["expression"],
+      "description": "READ-ONLY JavaScript expression evaluated in the page. May not contain assignments, function declarations, DOM mutations, or `await`. Validator rejects steps that look like side effects.",
+      "properties": {
+        "expression": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400,
+          "not": {
+            "anyOf": [
+              { "pattern": "[^=!<>]=[^=]" },
+              { "pattern": "\\+=|-=|\\*=|/=" },
+              { "pattern": "\\bawait\\b" },
+              { "pattern": "\\bfunction\\b" },
+              { "pattern": "\\bnew\\b" },
+              { "pattern": "\\bclick\\(" },
+              { "pattern": "\\bsetAttribute\\(" },
+              { "pattern": "\\bremoveAttribute\\(" },
+              { "pattern": "\\bdispatchEvent\\(" },
+              { "pattern": "\\.innerHTML\\s*=" },
+              { "pattern": "\\bdocument\\.write" }
+            ]
+          }
+        },
+        "expect_truthy": { "type": "boolean", "default": true },
+        "contains": { "type": "string", "description": "Optional: assert that String(result) contains this substring." }
+      }
+    },
+    "seed_dialog_arg": {
+      "type": "object", "additionalProperties": false,
+      "description": "Pre-arm window.prompt and window.confirm responses for the next interaction.",
+      "properties": {
+        "prompt":  { "oneOf": [ { "type": "string" }, { "type": "array", "items": { "type": "string" } } ] },
+        "confirm": { "type": "boolean" }
+      }
+    },
+    "assert_localstorage_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["key"],
+      "properties": {
+        "key":      { "type": "string", "minLength": 1 },
+        "exists":   { "type": "boolean" },
+        "contains": { "type": "string" },
+        "equals":   { "type": "string" }
+      }
+    },
+    "assert_attribute_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector", "name", "equals"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "name":     { "type": "string", "minLength": 1 },
+        "equals":   { "type": "string" }
+      }
+    },
+    "set_check_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selector", "checked"],
+      "properties": {
+        "selector": { "$ref": "#/$defs/selector" },
+        "checked":  { "type": "boolean" }
+      }
+    },
+    "send_text_via_label_arg": {
+      "type": "object", "additionalProperties": false,
+      "required": ["label_contains", "checked"],
+      "properties": {
+        "label_contains": { "type": "string", "minLength": 1 },
+        "checked":        { "type": "boolean" }
+      }
+    }
+  }
+}

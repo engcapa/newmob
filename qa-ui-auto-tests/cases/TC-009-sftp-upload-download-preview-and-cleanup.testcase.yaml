@@ -1,0 +1,56 @@
+id: TC-009
+title: SFTP upload, download, preview, and cleanup
+covers: [F7.2, F7.3]
+tags: [legacy-imported, needs-review, p0, sftp, transfer]
+modes: [browser]
+fixtures: [reset_db, ssh_required, sftp_required]
+steps:
+  - open: "${cfg.app.base_url}"
+  - fill: {selector: "[data-testid=\"qc-input\"]", value: "ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}"}
+  - click: "[data-testid=\"qc-submit\"]"
+  - wait_for: "[data-testid=\"auth-prompt\"]"
+  - fill: {selector: "[data-testid=\"auth-password\"]", value: "${env.QA_SSH_PASSWORD}"}
+  - click: "[data-testid=\"auth-submit\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  - wait: 2
+  - click: "[data-testid=\"attached-sftp-toggle\"]"
+  - wait_for: "[data-testid=\"sftp-browser\"]"
+  - click: "[data-testid=\"sftp-remote-path\"]"
+  - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
+  - press: Enter
+  - wait: 1
+  - seed_dialog: {prompt: qa-ui-auto-transfer.txt, confirm: true}
+  - click: "[data-testid=\"sftp-local-new-file\"]"
+  - wait_for: "text=\"qa-ui-auto-transfer.txt\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-transfer.txt"`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-local-upload-selected\"]"
+  - wait_for: "text=\"done\""
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-transfer.txt"`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-remote-download-selected\"]"
+  - wait_for: "text=\"done\""
+  - click: "[data-testid=\"sftp-remote-preview\"]"
+  - assert_visible: "text=\"qa-ui-auto-transfer.txt\""
+  - click: "role=button[name=\"Close\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-transfer.txt"`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-remote-delete\"]"
+  - wait: 1
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-transfer.txt"`).first().click(); }
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - click: "[data-testid=\"sftp-local-delete\"]"
+  - wait: 1
+  - screenshot: 009-sftp-transfer-cleanup.png

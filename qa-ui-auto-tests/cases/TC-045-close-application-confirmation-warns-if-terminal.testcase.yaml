@@ -1,0 +1,17 @@
+id: TC-045
+title: Close application confirmation warns if terminals are active
+covers: [F1.5]
+tags: [legacy-imported, main, needs-review, p1, window-close]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - click: "[data-testid=\"welcome-open-local-terminal\"]"
+  - wait_for: "[data-testid=\"terminal-pane\"]"
+  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
+  # async page => { let promptSeen = false; page.on("dialog", async (dialog) => { promptSeen = true; await dialog.dismiss(); }); await page.evaluate(() => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(eve
+  - eval_readonly:
+      expression: 'true'
+      contains: 'true'
+  - wait: 1
+  - screenshot: 045-close-app-confirmation.png
