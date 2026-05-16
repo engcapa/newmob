@@ -1549,20 +1549,43 @@ export function TerminalPanel({
     return () => el.removeEventListener("wheel", handleWheel, { capture: true });
   }, [decreaseFontSize, increaseFontSize, visible]);
 
-  // Linux/WebKitGTK runs a native middle-click paste from the X11 PRIMARY
-  // selection / system clipboard against the focused .xterm-helper-textarea,
-  // which fires before our onAuxClick handler. Without this, both the browser
-  // default and our handler inject text into the PTY (e.g. selection "pwd"
-  // plus an unrelated clipboard "python --version" both arrive on the line).
-  // Suppress the default at mousedown so only our handler runs.
+  // Linux/WebKitGTK fires a native X11 PRIMARY-selection paste via a DOM
+  // `paste` event on the focused .xterm-helper-textarea when the middle button
+  // is clicked. xterm.js has its own capture-phase `paste` listener that
+  // injects the clipboard text into the PTY — this runs in addition to our
+  // onAuxClick handler, causing double-paste (e.g. selection "pwd" AND the
+  // previous clipboard "python --version" both land on the command line).
+  //
+  // Fix: track middle-button presses with a short-lived flag, then block the
+  // `paste` event in the capture phase while that flag is set. Our onAuxClick
+  // handler still runs and performs the correct selection-or-clipboard paste.
   useEffect(() => {
     const el = panelRef.current;
     if (!el) return;
+    let middleClickPending = false;
+    let pendingTimer = 0;
     const onMouseDown = (event: MouseEvent) => {
-      if (event.button === 1) event.preventDefault();
+      if (event.button !== 1) return;
+      middleClickPending = true;
+      clearTimeout(pendingTimer);
+      // Clear the flag after a short window; the paste event arrives within
+      // a few ms of mousedown on WebKitGTK.
+      pendingTimer = window.setTimeout(() => { middleClickPending = false; }, 200);
+    };
+    const onPaste = (event: ClipboardEvent) => {
+      if (!middleClickPending) return;
+      middleClickPending = false;
+      clearTimeout(pendingTimer);
+      event.stopImmediatePropagation();
+      event.preventDefault();
     };
     el.addEventListener("mousedown", onMouseDown, { capture: true });
-    return () => el.removeEventListener("mousedown", onMouseDown, { capture: true });
+    el.addEventListener("paste", onPaste, { capture: true });
+    return () => {
+      clearTimeout(pendingTimer);
+      el.removeEventListener("mousedown", onMouseDown, { capture: true });
+      el.removeEventListener("paste", onPaste, { capture: true });
+    };
   }, []);
 
   useEffect(() => {
