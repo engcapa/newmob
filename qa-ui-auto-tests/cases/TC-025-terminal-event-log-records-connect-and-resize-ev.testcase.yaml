@@ -1,7 +1,7 @@
 id: TC-025
 title: Terminal event log records connect and resize events
 covers: [F4.7]
-tags: [event-log, legacy-imported, needs-review, p1, ssh, terminal]
+tags: [event-log, legacy-imported, p1, ssh, terminal]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -13,11 +13,7 @@ steps:
   - click: "[data-testid=\"auth-submit\"]"
   - wait_for: "[data-testid=\"terminal-pane\"]"
   - wait: 2
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - click: "[data-testid=\"context-menu-item-event-log\"]"
   - wait_for: "text=\"Event Log\""

@@ -1,7 +1,7 @@
 id: TC-017
 title: Session editor port forward list adds rows and surfaces validation errors
 covers: [F6.3, F3.2]
-tags: [forwards, legacy-imported, needs-review, network, p1, session]
+tags: [forwards, legacy-imported, network, p1, session]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -25,11 +25,7 @@ steps:
   - fill: {selector: "input[aria-label=\"New forward description\"]", value: qa-fwd-broken}
   - click: "text=\"Add\""
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const rows = await page.locator(`input[aria-label="Forward local address"]`).count(); if (rows < 2) throw new Error(`Expected at least 2 forward rows, got ${rows}`); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_count: {selector: 'input[aria-label="Forward local address"]', min: 2}
   - click: "[data-testid=\"session-section-bookmark\"]"
   - wait_for: "[data-testid=\"bookmark-settings\"]"
   - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-forwards}

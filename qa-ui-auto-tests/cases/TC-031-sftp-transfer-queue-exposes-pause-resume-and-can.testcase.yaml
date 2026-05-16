@@ -1,7 +1,7 @@
 id: TC-031
 title: SFTP transfer queue exposes pause, resume, and cancel controls
 covers: [F7.3]
-tags: [legacy-imported, needs-review, p1, queue, sftp, transfer]
+tags: [legacy-imported, p1, queue, sftp, transfer]
 modes: [browser]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
@@ -21,36 +21,16 @@ steps:
   - seed_dialog: {prompt: qa-ui-auto-queue.txt, confirm: true}
   - click: "[data-testid=\"sftp-local-new-file\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-queue.txt"`).first().click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: '[data-testid="sftp-local-pane"] >> text="qa-ui-auto-queue.txt"'
   - click: "[data-testid=\"sftp-local-upload-selected\"]"
   - wait_for: "[data-testid=\"sftp-transfer-queue\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const queue = page.locator(`[data-testid="sftp-transfer-queue"]`); const titles = await queue.locator(`button[title]`).evaluateAll((els) => els.map((e) => e.getAttribute("title"))); const expected = ["Pause", "Resume", "Retr
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const remove = page.locator(`[data-testid="sftp-transfer-queue"] button[title="Remove from list"]`).first(); if (await remove.count()) await remove.click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_count: {selector: '[data-testid="sftp-transfer-queue"] button[title]', min: 1}
+  - click: '[data-testid="sftp-transfer-queue"] button[title="Remove from list"]'
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-queue.txt"`).first().click().catch(() => {}); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-queue.txt"'
   - click: "[data-testid=\"sftp-remote-delete\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-queue.txt"`).first().click().catch(() => {}); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: '[data-testid="sftp-local-pane"] >> text="qa-ui-auto-queue.txt"'
   - click: "[data-testid=\"sftp-local-delete\"]"
   - wait: 1
   - screenshot: 031-sftp-queue-controls.png

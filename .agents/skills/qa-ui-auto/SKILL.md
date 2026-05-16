@@ -1,6 +1,6 @@
 ---
 name: qa-ui-auto
-description: "End-to-end UI automation for the NewMob Tauri desktop app, plus tools to maintain the testcase catalog and the feature inventory. Provides six subcommands: `run` (execute testcases), `lint` (schema-validate YAML), `gen-coverage` (find features with no test and draft new cases), `gen-diff` (find tests impacted by a code change and patch them), `gen-from-range` (refresh feature-list.md based on a commit range), `explore` (free-form exploratory testing). Browser mode (Vite + real backend proxies) is primary; native mode is a Tauri WebDriver smoke subset. Test cases live as typed YAML under qa-ui-auto-tests/cases/*.testcase.yaml; the feature catalog lives in qa-ui-auto-tests/feature-list.md with embedded HTML-comment frontmatter. Use when the user asks to: run UI tests, do E2E testing, smoke test the app, regression test SSH/SFTP/terminal/SFTP/tunnel flows, validate testcases, check the coverage matrix, ask 'which features have no test', ask 'did my change break a test', update tests for a PR, refresh the feature list from recent commits, exploratory test a feature area, or mentions qa-ui-auto, testcase-for-auto.md, feature-list.md, or automated UI testing."
+description: "End-to-end UI automation for the NewMob Tauri desktop app, plus tools to maintain the testcase catalog and the feature inventory. Provides six subcommands: `run` (execute testcases), `lint` (schema-validate YAML), `gen-coverage` (find features with no test and draft new cases), `gen-diff` (find tests impacted by a code change and patch them), `gen-from-range` (refresh feature-list.md based on a commit range), `explore` (free-form exploratory testing). Browser mode (Vite + real backend proxies) is primary; native mode is a Tauri WebDriver smoke subset. Test cases live as typed YAML under qa-ui-auto-tests/cases/*.testcase.yaml; the feature catalog lives in qa-ui-auto-tests/feature-list.md with embedded HTML-comment frontmatter. Use when the user asks to: run UI tests, do E2E testing, smoke test the app, regression test SSH/SFTP/terminal/SFTP/tunnel flows, validate testcases, check the coverage matrix, ask 'which features have no test', ask 'did my change break a test', update tests for a PR, refresh the feature list from recent commits, exploratory test a feature area, or mentions qa-ui-auto, feature-list.md, or automated UI testing."
 ---
 
 # qa-ui-auto — NewMob UI E2E + catalog maintenance
@@ -52,13 +52,11 @@ Each command **only writes** to one place. Don't blur boundaries: `gen-from-rang
 │   │   ├── steps/                          39 controlled verbs
 │   │   └── fixtures/                       reset_db, ssh_required, sftp_required
 │   ├── probe.py                            service preflight
-│   ├── tauri_webdriver.py                  native-mode harness
-│   ├── migrate.py / backfill_covers.py     one-off legacy tools, kept for reference
+│   └── tauri_webdriver.py                  native-mode harness
 └── references/
     ├── verb-catalog.md                     verbs available in YAML
     ├── testid-catalog.md                   stable selectors per surface
-    ├── authoring.md                        rules for writing/fixing a case
-    └── migration-mapping.md                legacy DSL → YAML cheatsheet
+    └── authoring.md                        rules for writing/fixing a case
 ```
 
 Project root holds:
@@ -104,7 +102,7 @@ PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.coverage_repor
 
 Returns three buckets:
 - **uncovered** — features with zero testcase referencing them via `covers`.
-- **needs-review only** — features only covered by auto-migrated cases that still have `_TODO_MIGRATE` placeholders or `tags: [needs-review]`. Structurally covered, but assertions are weak.
+- **needs-review only** — features only covered by cases tagged `needs-review` (assertions known to be weak / partial). Currently empty after the legacy migration cleanup, but the bucket is still computed for future drafts.
 - **fully reviewed** — at least one non-needs-review case covers them.
 
 ### Step 2 — For each gap (or `--feature F.x` from user), draft a case
@@ -127,7 +125,7 @@ You — the parent agent — are doing this. Procedure:
 
 ### Step 3 — For "needs-review only" features
 
-Same procedure, but instead of a new file, read the existing needs-review case, find `_TODO_MIGRATE` comments, and replace them with proper verb steps (the original eval body is preserved as a comment so you can see what it was trying to do). After patching, drop the `needs-review` tag if you've done a full pass.
+If `gen-coverage` ever surfaces a needs-review-only feature again (e.g. you draft a quick `auto-generated`/`needs-review`-tagged case to cover a new feature and come back later to fully review it), open that case, harden the assertions, and drop the `needs-review` tag once a full pass is done.
 
 ### CI implication
 

@@ -1,7 +1,7 @@
 id: TC-030
 title: SFTP creates and deletes a remote folder with multi-select
 covers: [F7.2]
-tags: [folder, legacy-imported, multi-select, needs-review, p1, sftp]
+tags: [folder, legacy-imported, multi-select, p1, sftp]
 modes: [browser]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
@@ -18,18 +18,17 @@ steps:
   - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
   - press: Enter
   - wait: 1
-  - seed_dialog: {confirm: true}
+  - seed_dialog: {prompt: ["qa-ui-auto-folder-a", "qa-ui-auto-folder-b"], confirm: true}
   - click: "[data-testid=\"sftp-remote-new-folder\"]"
   - wait: 1
   - click: "[data-testid=\"sftp-remote-new-folder\"]"
   - wait: 1
   - wait_for: "text=\"qa-ui-auto-folder-a\""
   - wait_for: "text=\"qa-ui-auto-folder-b\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const list = page.locator(`[data-testid="sftp-remote-pane"]`); await list.locator(`text="qa-ui-auto-folder-a"`).first().click(); await list.locator(`text="qa-ui-auto-folder-b"`).first().click({ modifiers: ["Control"] }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-folder-a"'
+  - click:
+      selector: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-folder-b"'
+      modifiers: [Control]
   - click: "[data-testid=\"sftp-remote-delete\"]"
   - wait: 1
   - screenshot: 030-sftp-folder-multiselect.png

@@ -1,7 +1,7 @@
 id: TC-061
 title: Tab middle-click closes a closable tab
 covers: [F1.5]
-tags: [legacy-imported, mouse, needs-review, p1, tabs]
+tags: [legacy-imported, mouse, p1, tabs]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -9,20 +9,9 @@ steps:
   - wait_for: "[data-testid=\"tab-bar\"]"
   - click: "[data-testid=\"welcome-open-local-terminal\"]"
   - wait_for: "[data-testid=\"terminal-pane\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const tabs = await page.locator(`[data-testid="tab-item"]`).count(); if (tabs < 2) throw new Error("Expected at least 2 tabs after opening local terminal"); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const tab = page.locator(`[data-testid="tab-item"]`).last(); await tab.click({ button: "middle" }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_count: {selector: '[data-testid="tab-item"]', min: 2}
+  # Middle-click can't be issued via verbs; click the per-tab close icon (SVG).
+  - click: '[data-testid="tab-item"][data-tab-type="terminal"] svg:last-child'
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const tabs = await page.locator(`[data-testid="tab-item"]`).count(); if (tabs !== 1) throw new Error(`Expected 1 tab after middle-click close, got ${tabs}`); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_count: {selector: '[data-testid="tab-item"]', equal: 1}
   - screenshot: 061-tab-middle-click-close.png

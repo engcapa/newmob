@@ -1,7 +1,7 @@
 id: TC-019
 title: Terminal keyboard shortcuts (Ctrl+0 reset font, Ctrl+Shift+F find)
 covers: [F4.8]
-tags: [legacy-imported, needs-review, p1, shortcuts, terminal]
+tags: [legacy-imported, p1, shortcuts, terminal]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -16,11 +16,9 @@ steps:
   - wait_for: "input[placeholder=\"Find\"]"
   - fill: {selector: "input[placeholder=\"Find\"]", value: qa-shortcut-marker}
   - press: Enter
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.waitForTimeout(500); const status = await page.locator(`span`).filter({ hasText: /^(Match \d+\/\d+|No matches)$/ }).first().isVisible(); if (!status) throw new Error("Search status span not visible after search");
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_pattern:
+      selector: 'span:has-text("Match")'
+      regex: '^(Match \d+/\d+|No matches)$'
   - press: Escape
   - press: Control+0
   - wait: 1

@@ -1,7 +1,7 @@
 id: TC-013
 title: Session tree search, duplicate, and context menu
 covers: [F6.2]
-tags: [legacy-imported, needs-review, p1, right-menu, session]
+tags: [legacy-imported, p1, right-menu, session]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -22,11 +22,7 @@ steps:
   - click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu\"]"
   - click: "[data-testid=\"session-duplicate\"]"
   - wait_for: "text=\"qa-ui-auto-menu (copy)\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-menu"]`).click({ button: "right" }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-menu\"]"
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Connect\""
   - assert_visible: "text=\"Edit...\""

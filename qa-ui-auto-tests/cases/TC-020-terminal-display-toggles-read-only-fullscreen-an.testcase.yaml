@@ -1,7 +1,7 @@
 id: TC-020
 title: Terminal display toggles read-only, fullscreen, and scrollbar
 covers: [F4.2]
-tags: [display, legacy-imported, needs-review, p1, right-menu, terminal]
+tags: [display, legacy-imported, p1, right-menu, terminal]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -12,11 +12,7 @@ steps:
   - type: echo qa-display-marker
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - hover: text=Terminal display
   - wait_for: "text=\"Read-only terminal\""
@@ -26,25 +22,13 @@ steps:
   - click: "[data-testid=\"terminal-pane\"]"
   - type: this-input-must-be-blocked
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const t = await page.locator(`[data-testid="terminal-pane"]`).innerText(); if (t.includes("this-input-must-be-blocked")) throw new Error("Read-only mode did not block input"); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_not_visible: 'text=this-input-must-be-blocked'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - hover: text=Terminal display
   - click: "text=\"Read-only terminal\""
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - hover: text=Terminal display
   - click: "text=\"Toggle terminal scrollbar\""

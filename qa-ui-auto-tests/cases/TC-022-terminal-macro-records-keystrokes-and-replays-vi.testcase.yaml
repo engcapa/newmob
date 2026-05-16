@@ -1,7 +1,7 @@
 id: TC-022
 title: Terminal macro records keystrokes and replays via Ctrl+Space
 covers: [F4.4]
-tags: [legacy-imported, macro, needs-review, p1, terminal]
+tags: [legacy-imported, macro, p1, terminal]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -10,11 +10,7 @@ steps:
   - wait_for: "[data-testid=\"terminal-pane\"]"
   - click: "[data-testid=\"terminal-pane\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - click: "text=\"Record new macro\""
   - wait: 1
@@ -22,11 +18,7 @@ steps:
   - type: echo qa-macro-payload
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Stop macro recording\""
   - click: "text=\"Stop macro recording\""

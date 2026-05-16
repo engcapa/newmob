@@ -1,7 +1,7 @@
 id: TC-014
 title: Tab bar right-click menu manages open tabs
 covers: [F1.5]
-tags: [legacy-imported, main, needs-review, p1, right-menu, tabs]
+tags: [legacy-imported, main, p1, right-menu, tabs]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -9,22 +9,14 @@ steps:
   - wait_for: "[data-testid=\"tab-bar\"]"
   - click: "[data-testid=\"ribbon-settings\"]"
   - wait_for: "[data-testid=\"settings-panel\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="tab-item"]`).last().click({ button: "right" }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: "[data-testid=\"tab-item\"]"
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Close\""
   - assert_visible: "text=\"Close others\""
   - assert_visible: "text=\"Close all\""
   - assert_visible: "text=\"Duplicate tab\""
   - press: Escape
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const moreBtn = page.locator(`button[title="More"]`); if (await moreBtn.count()) await moreBtn.click(); else await page.locator(`[data-testid="new-local-terminal"]`).click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "button[title=\"More\"]"
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"New local terminal\""
   - screenshot: 014-tab-right-menu.png

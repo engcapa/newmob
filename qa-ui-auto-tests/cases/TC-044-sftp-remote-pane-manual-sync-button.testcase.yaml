@@ -1,7 +1,7 @@
 id: TC-044
 title: SFTP remote pane manual Sync button
 covers: [F3.3, F7.2]
-tags: [legacy-imported, needs-review, p1, sftp, sync]
+tags: [legacy-imported, p1, sftp, sync]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -19,15 +19,6 @@ steps:
   - type: "cd /tmp && echo qa-cwd-change"
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const syncBtn = page.locator(`button[title*="Sync the remote pane"]`); await syncBtn.click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: 'button[title*="Sync the remote pane"]'
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const val = await page.locator(`[data-testid="sftp-remote-path"]`).inputValue(); if (!val.includes("/tmp")) console.log("[v0] Sync did not jump to /tmp, OSC7 might not be injected in test env shell"); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
   - screenshot: 044-sftp-manual-sync.png

@@ -1,7 +1,7 @@
 id: TC-016
 title: Session editor switches authentication methods and reveals credentials
 covers: [F6.3, F6.5]
-tags: [auth, legacy-imported, needs-review, p1, session, ssh]
+tags: [auth, legacy-imported, p1, session, ssh]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -16,23 +16,11 @@ steps:
   - assert_visible: "[data-testid=\"advanced-ssh-settings\"]"
   - assert_visible: "input[aria-label=\"SSH password\"]"
   - fill: {selector: "input[aria-label=\"SSH password\"]", value: qa-secret-123}
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "password") throw new Error(`Password should be masked, got type=${t}`); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_attribute: {selector: "input[aria-label=\"SSH password\"]", name: type, equals: password}
   - click: "button[title=\"Show / hide\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const t = await page.locator(`input[aria-label="SSH password"]`).getAttribute("type"); if (t !== "text") throw new Error(`Password should be revealed, got type=${t}`); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const radios = page.locator(`input[type="radio"][name][value="PrivateKey"], label:has-text("Private key") input`); await radios.first().click({ force: true }).catch(() => {}); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_attribute: {selector: "input[aria-label=\"SSH password\"]", name: type, equals: text}
+  - click: 'label:has-text("Private key") input[type="radio"]'
   - wait_for: "input[aria-label=\"Private key path\"]"
   - fill: {selector: "input[aria-label=\"Private key path\"]", value: /home/qauser/.ssh/id_ed25519}
   - send_text_via_label: {label_contains: Enable jump host, checked: true}

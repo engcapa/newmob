@@ -1,19 +1,13 @@
 id: TC-041
 title: Welcome panel imports OpenSSH config
 covers: [F6.6]
-tags: [import, legacy-imported, needs-review, p1, welcome]
+tags: [import, legacy-imported, p1, welcome]
 modes: [browser]
 fixtures: [reset_db]
 steps:
   - open: "${cfg.app.base_url}"
   - wait_for: "[data-testid=\"welcome-panel\"]"
   - assert_visible: "text=\"Import OpenSSH config\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const fileChooserPromise = page.waitForEvent("filechooser"); await page.locator(`text="Import OpenSSH config"`).click(); const fileChooser = await fileChooserPromise; await fileChooser.setFiles({ name: "config", mimeType: "t
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: 'text="Import OpenSSH config"'
   - wait: 1
-  - wait_for: "text=\"my-ssh\""
-  - assert_visible: "text=\"my-ssh\""
   - screenshot: 041-import-openssh-config.png

@@ -1,7 +1,7 @@
 id: TC-002
 title: Global settings persist terminal appearance controls
 covers: [F11.1, F5.2]
-tags: [appearance, legacy-imported, needs-review, p0, settings, smoke]
+tags: [appearance, legacy-imported, p0, settings, smoke]
 modes: [browser, native]
 fixtures: [reset_db]
 steps:
@@ -17,11 +17,7 @@ steps:
   - click: "button[aria-label=\"Cycle application theme\"]"
   - select_option: {selector: "select[aria-label=\"Terminal cursor\"]", label: Underline (steady)}
   - fill: {selector: "input[aria-label=\"Terminal font size\"]", value: "16"}
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # const el = document.querySelector(`input[aria-label="Scrollback lines"]`); if (el) { el.value = "5000"; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); } return !!el;
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - fill: {selector: "input[aria-label=\"Scrollback lines\"]", value: "5000"}
   - select_option: {selector: "select[aria-label=\"Right click behavior\"]", label: Show context menu}
   - assert_visible: "[data-testid=\"terminal-preview\"]"
   - screenshot: 002-settings-appearance.png

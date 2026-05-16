@@ -1,7 +1,7 @@
 id: TC-007
 title: Terminal context menu exposes search, display, macros, and event log
 covers: [F4.1, F4.2, F4.7]
-tags: [legacy-imported, needs-review, p1, right-menu, search, terminal]
+tags: [legacy-imported, p1, right-menu, search, terminal]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -17,11 +17,7 @@ steps:
   - type: "printf \"qa-ui-auto-search\\n\""
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Copy All\""
   - assert_visible: "text=\"Paste\""
@@ -36,17 +32,11 @@ steps:
   - wait_for: "input[placeholder=\"Find\"]"
   - fill: {selector: "input[placeholder=\"Find\"]", value: qa-ui-auto-search}
   - press: Enter
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const s = await page.locator(`span`).filter({ hasText: /^Match \d+\/\d+$/ }).first().isVisible(); if (!s) throw new Error("Search status not showing Match N/M"); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_pattern:
+      selector: 'span:has-text("Match")'
+      regex: '^Match \d+/\d+$'
   - click: "role=button[name=\"Close\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - hover: text=Terminal display
   - assert_visible: "text=\"Read-only terminal\""

@@ -1,7 +1,7 @@
 id: TC-051
 title: SFTP column width resize and reset via drag handle
 covers: [F7.2]
-tags: [columns, legacy-imported, needs-review, p1, resize, sftp]
+tags: [columns, legacy-imported, p1, resize, sftp]
 modes: [browser]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
@@ -18,22 +18,10 @@ steps:
   - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const handle = page.locator(`[data-testid="col-resize-name"]`).first(); const box = await handle.boundingBox(); if (!box) throw new Error("Resize handle not found"); await handle.dragTo(handle, { targetPosition: { x: box.wid
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - drag_to: { from: '[data-testid="col-resize-name"]', to: '[data-testid="col-resize-size"]' }
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const handle = page.locator(`[data-testid="col-resize-size"]`).first(); const box = await handle.boundingBox(); if (!box) throw new Error("Resize handle not found"); await handle.dragTo(handle, { targetPosition: { x: box.wid
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - drag_to: { from: '[data-testid="col-resize-size"]', to: '[data-testid="col-resize-modified"]' }
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const handle = page.locator(`[data-testid="col-resize-name"]`).first(); await handle.dblclick(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - dblclick: '[data-testid="col-resize-name"]'
   - wait: 1
   - screenshot: 051-sftp-column-resize.png

@@ -1,7 +1,7 @@
 id: TC-049
 title: SFTP double-click remote file prompts download and open
 covers: [F7.2]
-tags: [download, legacy-imported, needs-review, open, p1, sftp]
+tags: [download, legacy-imported, open, p1, sftp]
 modes: [browser]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
@@ -21,21 +21,13 @@ steps:
   - seed_dialog: {prompt: qa-ui-auto-dblclick.txt, confirm: true}
   - click: "[data-testid=\"sftp-remote-new-file\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-dblclick.txt"`).first().dblclick(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - dblclick: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-dblclick.txt"'
   - wait: 1
   - assert_visible: "text=\"Open remote file?\""
   - assert_visible: "text=\"Download & open\""
   - click: "text=\"Download only\""
   - wait: 2
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-dblclick.txt"`).first().click().catch(() => {}); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-dblclick.txt"'
   - click: "[data-testid=\"sftp-remote-delete\"]"
   - wait: 1
   - screenshot: 049-sftp-double-click-download.png

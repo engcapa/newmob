@@ -1,6 +1,6 @@
 # NewMob 已完成功能清单
 
-> 本文档基于当前仓库代码 + `IMPLEMENTATION_PLAN.md` / `TERMINAL_EXPERIENCE_PLAN.md` / `TERMINAL_APPEARANCE_PLAN.md` / `ipc-improve-plan.md` / `replit.md` / `testcase-for-auto.md` 的标记，**仅记录已实现并接入主流程的功能**。
+> 本文档基于当前仓库代码 + `IMPLEMENTATION_PLAN.md` / `TERMINAL_EXPERIENCE_PLAN.md` / `TERMINAL_APPEARANCE_PLAN.md` / `ipc-improve-plan.md` / `replit.md` 的标记，**仅记录已实现并接入主流程的功能**。
 > 标记说明：
 > - ✅ 已完成
 > - 🟡 已部分完成（关键路径可用，仍有未覆盖的能力，列出具体范围）
@@ -848,8 +848,8 @@ files:
 - VNC `clipboard` 模块单元测试（Extended caps body 编/解码）
 - `cargo check` 通过
 
-### 12.3 端到端测试用例（`testcase-for-auto.md`，被 `qa-ui-auto` 消费）✅ 63 条
-- 覆盖 TC-001 ～ TC-063：主界面、设置、会话编辑器、SSH/SFTP/QuickConnect 全流程、终端右键菜单与快捷键、SFTP 多种交互（chmod / rename / 拖拽 / 多选 / 双击下载 / 列宽 / 创建文件夹）、独立 SFTP 标签、open-terminal-here、会话树搜索 / 复制 / 拖拽、标签栏右键、应用主题循环、隧道编辑器与重排、终端字体连字 / 语法高亮、本地管理员启动、tab 中键关闭、会话 import/export 多格式、OpenSSH config 导入、Welcome active connections 等
+### 12.3 端到端测试用例（`qa-ui-auto-tests/cases/*.testcase.yaml`，被 `qa-ui-auto` 消费）✅ 70 条
+- 覆盖 TC-001 ～ TC-107：主界面、设置、会话编辑器、SSH/SFTP/QuickConnect 全流程、终端右键菜单与快捷键、SFTP 多种交互（chmod / rename / 拖拽 / 多选 / 双击下载 / 列宽 / 创建文件夹）、独立 SFTP 标签、open-terminal-here、会话树搜索 / 复制 / 拖拽、标签栏右键、应用主题循环、隧道编辑器与重排、终端字体连字 / 语法高亮、本地管理员启动、tab 中键关闭、会话 import/export 多格式、OpenSSH config 导入、Welcome active connections、custom title bar、compact mode、MultiExec、command palette、capture toolbar、zmodem 冲突、VNC scaffold 等
 
 ### 12.4 部署 ✅
 - Replit 上验证通过：Tauri 桌面构建（`pnpm tauri build --debug --no-bundle`）通过 VNC 查看；Web 模式作为静态站点构建到 `dist/`

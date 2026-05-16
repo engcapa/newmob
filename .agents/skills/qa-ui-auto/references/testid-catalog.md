@@ -4,9 +4,6 @@ The runner targets stable `data-testid` attributes whenever possible. When the
 UI changes, update both the component and this list. New testcase YAML in
 `qa-ui-auto-tests/cases/` should reference these selectors verbatim.
 
-> This file replaces `selectors.md` (kept temporarily for the legacy runner
-> in `run_tests.py`). The canonical name is `testid-catalog.md`.
-
 ## Main shell
 - `[data-testid="menu-bar"]` - top menu row
 - `[data-testid="ribbon"]` - ribbon command row

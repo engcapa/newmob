@@ -1,7 +1,7 @@
 id: TC-027
 title: SFTP file table sorts by column header click
 covers: [F7.2]
-tags: [columns, legacy-imported, needs-review, p1, sftp, sorting]
+tags: [columns, legacy-imported, p1, sftp, sorting]
 modes: [browser, native]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
@@ -19,34 +19,14 @@ steps:
   - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
   - press: Enter
   - wait: 2
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # const h = document.querySelector(`[data-testid="col-header-name"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "[data-testid=\"col-header-name\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # const h = document.querySelector(`[data-testid="col-header-name"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "[data-testid=\"col-header-name\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # const h = document.querySelector(`[data-testid="col-header-size"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "[data-testid=\"col-header-size\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # const h = document.querySelector(`[data-testid="col-header-modified"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "[data-testid=\"col-header-modified\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # const h = document.querySelector(`[data-testid="col-header-type"]`); if (h) h.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })); return !!h;
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "[data-testid=\"col-header-type\"]"
   - wait: 1
   - screenshot: 027-sftp-column-sort.png

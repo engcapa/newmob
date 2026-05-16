@@ -1,7 +1,7 @@
 id: TC-046
 title: Tunnel manager toggles authentication display globally
 covers: [F8.2]
-tags: [legacy-imported, needs-review, p1, tunnel]
+tags: [legacy-imported, p1, tunnel]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -15,23 +15,11 @@ steps:
   - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
   - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
   - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19190"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - fill: {selector: 'input[placeholder="0"]', value: "19190"}
+  - click: 'button:has-text("Save")'
   - wait: 1
   - wait_for: "text=\"qa-ui-auto-tunnel-auth\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const row = page.locator(`tr:has-text("qa-ui-auto-tunnel-auth")`); await row.locator(`button[title*="Show credentials" i], button[title*="Hide credentials" i]`).first().click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: 'tr:has-text("qa-ui-auto-tunnel-auth") button[title*="credentials" i]'
   - wait: 1
   - seed_dialog: {confirm: true}
   - screenshot: 046-tunnel-auth-display.png

@@ -1,7 +1,7 @@
 id: TC-023
 title: Terminal saves buffer to file and toggles output recording
 covers: [F4.5]
-tags: [export, legacy-imported, logging, needs-review, p1, terminal]
+tags: [export, legacy-imported, logging, p1, terminal]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -12,11 +12,7 @@ steps:
   - type: echo qa-buffer-export-line
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Save to file\""
   - assert_visible: "text=\"Record terminal output to file\""
@@ -26,11 +22,7 @@ steps:
   - type: echo qa-recorded-line
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Stop recording terminal output\""
   - click: "text=\"Stop recording terminal output\""

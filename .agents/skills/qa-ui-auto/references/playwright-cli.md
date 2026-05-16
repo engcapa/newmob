@@ -49,5 +49,4 @@ the VNC workflow is running.
 
 ## Versioning
 `playwright-cli` is pre-1.0; flags occasionally change. If a verb stops
-working, check `playwright-cli --help` and `playwright-cli <verb> --help` and
-update `scripts/run_tests.py::dispatch` accordingly.
+working, check `playwright-cli --help` and `playwright-cli <verb> --help`.

@@ -1,7 +1,7 @@
 id: TC-024
 title: Terminal Special Command sends SIGINT to interrupt foreground process
 covers: [F3.1]
-tags: [legacy-imported, needs-review, p1, signal, terminal]
+tags: [legacy-imported, p1, signal, terminal]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -17,11 +17,7 @@ steps:
   - type: "sleep 60 && echo qa-should-not-appear"
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - hover: text=Special Command
   - wait_for: "text=\"SIGINT (Interrupt)\""

@@ -1,7 +1,7 @@
 id: TC-052
 title: SFTP local pane creates a new folder via toolbar and context menu
 covers: [F7.2]
-tags: [folder, legacy-imported, local, needs-review, p1, sftp]
+tags: [folder, legacy-imported, local, p1, sftp]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -19,11 +19,7 @@ steps:
   - click: "[data-testid=\"sftp-local-new-folder\"]"
   - wait: 1
   - wait_for: "text=\"qa-ui-auto-local-folder\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-local-pane"]`).locator(`text="qa-ui-auto-local-folder"`).first().click({ button: "right" }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: '[data-testid="sftp-local-pane"] >> text="qa-ui-auto-local-folder"'
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Delete\""
   - click: "text=\"Delete\""

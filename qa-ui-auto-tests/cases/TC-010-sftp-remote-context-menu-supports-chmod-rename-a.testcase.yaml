@@ -1,7 +1,7 @@
 id: TC-010
 title: SFTP remote context menu supports chmod, rename, and delete
 covers: [F7.5]
-tags: [chmod, legacy-imported, needs-review, p1, right-menu, sftp]
+tags: [chmod, legacy-imported, p1, right-menu, sftp]
 modes: [browser]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
@@ -20,22 +20,15 @@ steps:
   - press: Enter
   - wait: 1
   - seed_dialog: {confirm: true}
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.evaluate(() => { const list = document.querySelector(`[data-testid="sftp-remote-list"]`); list?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 120, clientY: 220 })); }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"sftp-remote-list\"]", position: { x: 120, y: 220 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"New folder…\""
   - assert_visible: "text=\"New file…\""
   - press: Escape
+  - seed_dialog: {prompt: qa-ui-auto-menu.txt, confirm: true}
   - click: "[data-testid=\"sftp-remote-new-file\"]"
   - wait_for: "text=\"qa-ui-auto-menu.txt\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-menu.txt"`).first().click({ button: "right" }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-menu.txt"'
   - wait_for: "[data-testid=\"context-menu\"]"
   - assert_visible: "text=\"Download to local\""
   - assert_visible: "text=\"Rename\""
@@ -48,24 +41,12 @@ steps:
   - assert_visible: "text=\"Other\""
   - click: "role=button[name=\"Apply\"]"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.evaluate(() => { window.__qaPromptValue = "qa-ui-auto-menu-renamed.txt"; }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-menu.txt"`).first().click({ button: "right" }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - seed_dialog: {prompt: qa-ui-auto-menu-renamed.txt, confirm: true}
+  - right_click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-menu.txt"'
   - wait_for: "[data-testid=\"context-menu\"]"
   - click: "[data-testid=\"context-menu-item-rename\"]"
   - wait_for: "text=\"qa-ui-auto-menu-renamed.txt\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="sftp-remote-pane"]`).locator(`text="qa-ui-auto-menu-renamed.txt"`).first().click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: '[data-testid="sftp-remote-pane"] >> text="qa-ui-auto-menu-renamed.txt"'
   - click: "[data-testid=\"sftp-remote-delete\"]"
   - wait: 1
   - screenshot: 010-sftp-context-chmod-rename.png

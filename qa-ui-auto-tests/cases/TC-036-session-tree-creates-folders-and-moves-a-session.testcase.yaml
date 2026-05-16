@@ -1,7 +1,7 @@
 id: TC-036
 title: Session tree creates folders and moves a session via context menu
 covers: [F6.2]
-tags: [folders, legacy-imported, needs-review, p1, session]
+tags: [folders, legacy-imported, p1, session]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -17,34 +17,14 @@ steps:
   - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-folder-target}
   - click: "[data-testid=\"session-save\"]"
   - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-folder-target\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.evaluate(() => { window.prompt = () => "qa-ui-auto-group"; }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - seed_dialog: {prompt: qa-ui-auto-group, confirm: true}
+  - right_click: { selector: "[data-testid=\"session-tree\"]", position: { x: 16, y: 16 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const item = page.locator(`[data-testid^="context-menu-item-"]`).filter({ hasText: /new folder|new group|create folder/i }).first(); if (await item.count()) { await item.click(); } else { throw new Error("No new folder entry
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: '[data-testid="context-menu"] >> text=/new folder|new group|create folder/i'
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="session-tree-item"][data-session-name="qa-ui-auto-folder-target"]`).click({ button: "right" }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-folder-target\"]"
   - wait_for: "[data-testid=\"context-menu\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`text="Move to folder"`).hover(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - hover: 'text="Move to folder"'
   - wait_for: "text=\"qa-ui-auto-group\""
   - click: "text=\"qa-ui-auto-group\""
   - wait: 1

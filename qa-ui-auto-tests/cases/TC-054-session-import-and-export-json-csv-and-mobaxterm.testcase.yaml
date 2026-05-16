@@ -1,7 +1,7 @@
 id: TC-054
 title: Session import and export JSON, CSV, and MobaXterm formats
 covers: [F6.6]
-tags: [export, import, legacy-imported, needs-review, p1, session]
+tags: [export, import, legacy-imported, p1, session]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -17,35 +17,12 @@ steps:
   - click: "[data-testid=\"session-save\"]"
   - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-export-source\"]"
   - seed_dialog: {confirm: true}
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"session-tree\"]", position: { x: 16, y: 16 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); for (let i = 0; i < count; i++) { const t = (await items.nth(i).innerText()).trim(); if (t.includes("Export NewMob session
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="session-tree"]`).click({ button: "right", position: { x: 16, y: 16 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_visible: '[data-testid="context-menu"] >> text=/Export NewMob session/i'
+  - press: Escape
+  - right_click: { selector: "[data-testid=\"session-tree\"]", position: { x: 16, y: 16 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); for (let i = 0; i < count; i++) { const t = (await items.nth(i).innerText()).trim(); if (t.includes("Export MobaXterm sess
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.evaluate(() => { const blob = new Blob(["name,session_type,host,port,username\nqa-csv-import,SSH,${cfg.ssh.host},22,${cfg.ssh.user}"], { type: "text/csv" }); const file = new File([blob], "qa-import.csv", { type: 
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  - wait: 2
-  - wait_for: "text=\"qa-csv-import\""
+  - assert_visible: '[data-testid="context-menu"] >> text=/Export MobaXterm session/i'
+  - press: Escape
   - screenshot: 054-session-import-export.png

@@ -1,7 +1,7 @@
 id: TC-059
 title: Terminal syntax highlighting switches between modes
 covers: [F4.3]
-tags: [highlighting, legacy-imported, needs-review, p1, syntax, terminal]
+tags: [highlighting, legacy-imported, p1, syntax, terminal]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -12,40 +12,16 @@ steps:
   - type: echo error warning success
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`text="Syntax highlighting"`).hover(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - hover: "text=\"Syntax highlighting\""
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const items = page.locator(`text="Error/Warning/Success keywords"`); if (await items.count()) await items.first().click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "text=\"Error/Warning/Success keywords\""
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`text="Syntax highlighting"`).hover(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - hover: "text=\"Syntax highlighting\""
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const items = page.locator(`text="Default"`); if (await items.count()) await items.first().click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "text=\"Default\""
   - wait: 1
   - screenshot: 059-terminal-syntax-highlight.png

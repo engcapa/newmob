@@ -1,8 +1,7 @@
 # NewMob UI selectors used by qa-ui-auto
 
 The runner targets stable `data-testid` attributes whenever possible. When the
-UI changes, update both the component and this list. The template
-`testcase-for-auto.md` is regenerated from these selectors.
+UI changes, update both the component and this list.
 
 ## Main shell
 - `[data-testid="menu-bar"]` - top menu row

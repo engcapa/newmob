@@ -1,7 +1,7 @@
 id: TC-021
 title: Terminal theme gallery hot-swaps without reconnecting
 covers: [F5.2]
-tags: [appearance, legacy-imported, needs-review, p1, terminal, theme]
+tags: [appearance, legacy-imported, p1, terminal, theme]
 modes: [browser]
 fixtures: [reset_db]
 steps:
@@ -12,23 +12,12 @@ steps:
   - type: echo qa-theme-marker
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`[data-testid="terminal-pane"]`).click({ button: "right", position: { x: 24, y: 24 } }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - right_click: { selector: "[data-testid=\"terminal-pane\"]", position: { x: 24, y: 24 } }
   - wait_for: "[data-testid=\"context-menu\"]"
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`text=Theme`).first().hover(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - hover: "text=Theme"
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const items = page.locator(`[data-testid^="context-menu-item-"]`); const count = await items.count(); if (count < 3) throw new Error(`Expected several theme entries, got ${count}`); await items.nth(1).click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - assert_count: { selector: '[data-testid^="context-menu-item-"]', min: 3 }
+  - click: '[data-testid^="context-menu-item-"] >> nth=1'
   - wait: 1
   - assert_text: {selector: "[data-testid=\"terminal-pane\"]", contains: qa-theme-marker}
   - click: "[data-testid=\"terminal-pane\"]"

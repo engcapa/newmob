@@ -1,7 +1,7 @@
 id: TC-057
 title: Tunnel row supports test connection, edit, and drag reorder
 covers: [F8.2]
-tags: [edit, legacy-imported, needs-review, p1, reorder, test, tunnel]
+tags: [edit, legacy-imported, p1, reorder, test, tunnel]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
 steps:
@@ -15,16 +15,8 @@ steps:
   - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
   - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
   - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19333"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - fill: {selector: 'input[placeholder="0"]', value: "19333"}
+  - click: 'button:has-text("Save")'
   - wait: 1
   - wait_for: "text=\"qa-ui-auto-reorder-a\""
   - click: "button:has-text(\"New SSH tunnel\")"
@@ -34,29 +26,13 @@ steps:
   - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
   - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
   - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const inputs = page.locator(`input[placeholder="0"]`); if (await inputs.count() > 0) await inputs.first().fill("19334"); const dest = page.locator(`input[placeholder="db.internal"], input[placeholder="0.0.0.0"]`).first(); if
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { await page.locator(`button:has-text("Save")`).first().click({ force: true }); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - fill: {selector: 'input[placeholder="0"]', value: "19334"}
+  - click: 'button:has-text("Save")'
   - wait: 1
   - wait_for: "text=\"qa-ui-auto-reorder-b\""
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); const rowB = page.locator(`tr:has-text("qa-ui-auto-reorder-b")`); const downA = await rowA.locator(`button[title="Move down"]`).first(); await downA.click(); 
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: 'tr:has-text("qa-ui-auto-reorder-a") button[title="Move down"]'
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const rowA = page.locator(`tr:has-text("qa-ui-auto-reorder-a")`); await rowA.locator(`button[title="Test SSH connection"]`).first().click(); }
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: 'tr:has-text("qa-ui-auto-reorder-a") button[title="Test SSH connection"]'
   - wait: 2
   - seed_dialog: {confirm: true}
   - wait: 1

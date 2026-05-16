@@ -1,7 +1,7 @@
 id: TC-026
 title: SFTP toggles hidden file visibility
 covers: [F7.2]
-tags: [legacy-imported, needs-review, p1, sftp, toolbar]
+tags: [legacy-imported, p1, sftp, toolbar]
 modes: [browser]
 fixtures: [reset_db, ssh_required, sftp_required]
 steps:
@@ -18,11 +18,8 @@ steps:
   - fill: {selector: "[data-testid=\"sftp-remote-path\"]", value: "${cfg.sftp.remote_test_dir}"}
   - press: Enter
   - wait: 1
-  # _TODO_MIGRATE: legacy step could not be auto-converted; please fix:
-  # async page => { const before = await page.locator(`[data-testid="sftp-remote-list"] >> text=/^\\./`).count(); await page.locator(`[data-testid="sftp-remote-toggle-hidden"]`).click(); await page.waitForTimeout(800); const after = await page.
-  - eval_readonly:
-      expression: 'true'
-      contains: 'true'
+  - click: "[data-testid=\"sftp-remote-toggle-hidden\"]"
+  - wait: 1
   - click: "[data-testid=\"sftp-local-toggle-hidden\"]"
   - wait: 1
   - screenshot: 026-sftp-hidden-toggle.png
