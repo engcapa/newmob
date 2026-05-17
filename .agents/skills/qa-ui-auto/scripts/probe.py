@@ -191,7 +191,7 @@ def main() -> int:
     os.environ.setdefault(ALLOW_PRIVATE_TARGETS, "1")
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["browser", "native"], default="browser")
-    ap.add_argument("--config", default="qa-ui-auto.config.yaml")
+    ap.add_argument("--config", default="qa-ui-auto-tests/qa-ui-auto.config.yaml")
     ap.add_argument("--no-ssh", action="store_true")
     ap.add_argument("--no-sftp", action="store_true")
     args = ap.parse_args()

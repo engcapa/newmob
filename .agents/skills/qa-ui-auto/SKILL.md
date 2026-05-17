@@ -1,6 +1,6 @@
 ---
 name: qa-ui-auto
-description: "End-to-end UI automation for the NewMob Tauri desktop app, plus tools to maintain the testcase catalog and the feature inventory. Provides six subcommands: `run` (execute testcases), `lint` (schema-validate YAML), `gen-coverage` (find features with no test and draft new cases), `gen-diff` (find tests impacted by a code change and patch them), `gen-from-range` (refresh feature-list.md based on a commit range), `explore` (free-form exploratory testing). Browser mode (Vite + real backend proxies) is primary; native mode is a Tauri WebDriver smoke subset. Test cases live as typed YAML under qa-ui-auto-tests/cases/*.testcase.yaml; the feature catalog lives in qa-ui-auto-tests/feature-list.md with embedded HTML-comment frontmatter. Use when the user asks to: run UI tests, do E2E testing, smoke test the app, regression test SSH/SFTP/terminal/SFTP/tunnel flows, validate testcases, check the coverage matrix, ask 'which features have no test', ask 'did my change break a test', update tests for a PR, refresh the feature list from recent commits, exploratory test a feature area, or mentions qa-ui-auto, feature-list.md, or automated UI testing."
+description: "End-to-end UI automation for the NewMob Tauri desktop app, plus tools to maintain the testcase catalog and the feature inventory. Provides six subcommands: `run` (execute testcases), `lint` (schema-validate YAML), `gen-coverage` (find features with no test and draft new cases), `gen-diff` (find tests impacted by a code change and patch them), `gen-from-range` (refresh feature-list.md based on a commit range), `explore` (free-form exploratory testing). Browser mode (Vite + real backend proxies) is primary; native mode is a Tauri WebDriver smoke subset. Test cases live as typed YAML under qa-ui-auto-tests/cases/*.testcase.yaml; the feature catalog lives in qa-ui-auto-tests/feature-list.md with embedded HTML-comment frontmatter; the active config lives at qa-ui-auto-tests/qa-ui-auto.config.yaml (template and smoke preset are in .agents/skills/qa-ui-auto/assets/). Use when the user asks to: run UI tests, do E2E testing, smoke test the app, regression test SSH/SFTP/terminal/SFTP/tunnel flows, validate testcases, check the coverage matrix, ask 'which features have no test', ask 'did my change break a test', update tests for a PR, refresh the feature list from recent commits, exploratory test a feature area, or mentions qa-ui-auto, feature-list.md, or automated UI testing."
 ---
 
 # qa-ui-auto — NewMob UI E2E + catalog maintenance
@@ -40,6 +40,9 @@ Each command **only writes** to one place. Don't blur boundaries: `gen-from-rang
 .agents/skills/qa-ui-auto/
 ├── SKILL.md                                this file
 ├── schema/testcase.schema.json             feature-list.md is parser-validated, no schema
+├── assets/
+│   ├── qa-ui-auto.config.example.yaml      template — copy to qa-ui-auto-tests/ to get started
+│   └── qa-ui-auto.config.smoke.yaml        local smoke config (localhost sshd on port 2222)
 ├── scripts/
 │   ├── qa_ui_auto/                         python package, no LLM calls
 │   │   ├── runner.py                       `run`
@@ -57,20 +60,23 @@ Each command **only writes** to one place. Don't blur boundaries: `gen-from-rang
     ├── verb-catalog.md                     verbs available in YAML
     ├── testid-catalog.md                   stable selectors per surface
     └── authoring.md                        rules for writing/fixing a case
+
+qa-ui-auto-tests/
+├── qa-ui-auto.config.yaml                  host/port/user, references env vars for secrets
+├── feature-list.md                         feature catalog (Markdown + frontmatter)
+└── cases/
+    ├── *.testcase.yaml                     typed YAML testcases
+    └── auto/*.testcase.yaml                auto-drafted by `gen-coverage`
 ```
 
-Project root holds:
-- `qa-ui-auto.config.yaml` — host/port/user, references env vars for secrets
-- `qa-ui-auto-tests/feature-list.md` — feature catalog (Markdown + frontmatter)
-- `qa-ui-auto-tests/cases/*.testcase.yaml` — typed YAML testcases
-- `qa-ui-auto-tests/cases/auto/*.testcase.yaml` — auto-drafted by `gen-coverage`
-- `qa-ui-auto-report/run-<timestamp>/` — gitignored output
+Other paths:
+- `qa-ui-auto-report/run-<timestamp>/` — gitignored runner output
 
 ## Subcommand: `run`
 
 Execute existing testcases. Pure executor — no authoring.
 
-1. **Read config** `qa-ui-auto.config.yaml`. Confirm `app.base_url`, `ssh.host`, `sftp.host` are set.
+1. **Read config** `qa-ui-auto-tests/qa-ui-auto.config.yaml`. Confirm `app.base_url`, `ssh.host`, `sftp.host` are set.
 2. **Confirm secrets**: cases tagged with `fixtures: [ssh_required]` or `[sftp_required]` need `QA_SSH_PASSWORD` in the environment. Without it those cases skip via the fixture.
 3. **Preflight**: `python .agents/skills/qa-ui-auto/scripts/probe.py --mode browser`. Browser mode requires Vite up (`DEV_PROXY_ALLOW_PRIVATE=1 ALLOW_PRIVATE_TARGETS=1 pnpm dev`). Don't auto-start services or auto-install — surface the recipe and ask first.
 4. **Lint**: `PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint`.

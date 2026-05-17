@@ -37,12 +37,12 @@ def _walk(value: Any) -> list[tuple[str, str]]:
     return out
 
 
-def load_config(path: Path | str = "qa-ui-auto.config.yaml") -> dict:
+def load_config(path: Path | str = "qa-ui-auto-tests/qa-ui-auto.config.yaml") -> dict:
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(
             f"qa-ui-auto.config.yaml not found at {p}. "
-            "Copy assets/qa-ui-auto.config.example.yaml to the project root."
+            "Copy .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml to qa-ui-auto-tests/."
         )
     cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
     cfg.setdefault("app", {}).setdefault("base_url", "http://localhost:5000")

@@ -8,7 +8,7 @@ Usage:
 
     python -m qa_ui_auto.runner [--mode browser|native] [--tag smoke]
         [--filter TC-007,TC-008] [--workers 4] [--cases qa-ui-auto-tests/cases]
-        [--config qa-ui-auto.config.yaml] [--dry-run]
+        [--config qa-ui-auto-tests/qa-ui-auto.config.yaml] [--dry-run]
         [--report-dir qa-ui-auto-report] [--keep-going]
 """
 
@@ -354,7 +354,7 @@ def _rotate_runs(report_dir: Path, keep: int) -> None:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="qa_ui_auto.runner")
     ap.add_argument("--mode", choices=["browser", "native"], default=None)
-    ap.add_argument("--config", default="qa-ui-auto.config.yaml")
+    ap.add_argument("--config", default="qa-ui-auto-tests/qa-ui-auto.config.yaml")
     ap.add_argument("--cases", default="qa-ui-auto-tests/cases")
     ap.add_argument("--tag", default=None,
                     help="comma-separated tags; case must match at least one")

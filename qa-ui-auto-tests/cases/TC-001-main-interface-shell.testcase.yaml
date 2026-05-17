@@ -1,9 +1,15 @@
 id: TC-001
 title: Main interface shell renders all primary surfaces
 description: |
-  Smoke test for the chrome of the app. Loads the welcome screen and verifies
-  every top-level layout surface is mounted: menu bar, ribbon, quick-connect,
-  sidebar, session tree, tab bar, status bar, welcome panel.
+  Smoke test for the chrome of the app in standard (non-compact) mode. Loads
+  the welcome screen and verifies every top-level layout surface is mounted:
+  menu bar, ribbon, quick-connect, sidebar (sidetab strip + Recent connections
+  rail), session tree, tab bar, status bar, welcome panel. Asserts the four
+  welcome cards (Start local terminal, New session, Import OpenSSH config,
+  Refresh sessions), the Tips section, and the right-hand activity column
+  (Active connections / Last events with the empty placeholder). Status bar
+  segments are spot-checked. Compact-mode interaction is covered separately
+  in TC-auto-F1.4.
 covers: [F1.2, F1.6, F1.7]
 tags: [smoke, p0, main]
 modes: [browser]
@@ -13,11 +19,23 @@ steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="menu-bar"]'
   - assert_visible: '[data-testid="ribbon"]'
+  - assert_visible: '[data-testid="ribbon-session"]'
+  - assert_visible: '[data-testid="ribbon-sftp"]'
+  - assert_visible: '[data-testid="ribbon-settings"]'
   - assert_visible: '[data-testid="quick-connect"]'
+  - assert_visible: '[data-testid="qc-input"]'
+  - assert_visible: '[data-testid="qc-submit"]'
   - assert_visible: '[data-testid="sidebar"]'
   - assert_visible: '[data-testid="session-tree"]'
+  - assert_visible: '[data-testid="session-search"]'
+  - assert_visible: '[data-testid="session-new"]'
   - assert_visible: '[data-testid="tab-bar"]'
+  - assert_visible: '[data-testid="new-local-terminal"]'
   - assert_visible: '[data-testid="status-bar"]'
+  - assert_visible: '[data-testid="app-titlebar"]'
+  - assert_visible: '[data-testid="titlebar-tray"]'
+  - assert_visible: '[data-testid="theme-cycle"]'
+  - assert_visible: '[data-testid="compact-toggle"]'
   - assert_visible: '[data-testid="welcome-panel"]'
   - assert_text:
       selector: '[data-testid="welcome-panel"]'
@@ -25,7 +43,25 @@ steps:
   - assert_text:
       selector: '[data-testid="welcome-panel"]'
       contains: Start local terminal
-  - assert_text:
-      selector: '[data-testid="welcome-panel"]'
-      contains: Active connections
+  - assert_visible: '[data-testid="welcome-open-local-terminal"]'
+  - assert_enabled: '[data-testid="welcome-open-local-terminal"]'
+  - assert_visible: '[data-testid="welcome-version"]'
+  - assert_visible: '[data-testid="welcome-version-footer"]'
+  # Welcome screen content — four cards + tips + quick connect hint
+  - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'New session'}
+  - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Import OpenSSH config'}
+  - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Refresh sessions'}
+  - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Tips'}
+  - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Quick connect'}
+  # Right-hand activity column lives outside the welcome-panel testid container.
+  - assert_visible: 'text=Active connections'
+  - assert_visible: 'text=No active terminal tabs.'
+  - assert_visible: 'text=Last events'
+  # Sidebar Recent connections rail (lower panel below the session tree).
+  - assert_visible: 'text=Recent connections'
+  # Status-bar segments (Image 2 reference).
+  - assert_text: {selector: '[data-testid="status-bar"]', contains: 'sessions'}
+  - assert_text: {selector: '[data-testid="status-bar"]', contains: 'Network'}
+  - assert_text: {selector: '[data-testid="status-bar"]', contains: 'Theme'}
+  - assert_text: {selector: '[data-testid="status-bar"]', contains: 'terminals'}
   - screenshot: 001-main-interface.png
