@@ -1,0 +1,56 @@
+id: TC-auto-F1-9
+title: Ribbon command bar dispatches Session / SFTP / Settings / Tunneling to the right surface
+description: |
+  Auto-generated focused coverage for F1.9 (Ribbon). Asserts the ribbon
+  itself is mounted, then exercises the four primary required actions.
+  Each action verifies the resulting surface is reachable from the ribbon:
+    - ribbon-session    → SessionEditor opens with SSH proto preselected
+    - ribbon-sftp       → SessionEditor opens with SFTP proto preselected
+    - ribbon-settings   → settings tab mounts
+    - ribbon-tunneling  → nettools "SSH tunnels" tab with TunnelManager
+  Optional ribbon controls (multiexec, commands palette) are gated by
+  feature flag and intentionally out of scope.
+covers: [F1.9]
+tags: [auto-generated, smoke, p1, main, ribbon, needs-review]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 60
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="ribbon"]'
+  - assert_visible: '[data-testid="ribbon"]'
+  - assert_visible: '[data-testid="ribbon-session"]'
+  - assert_visible: '[data-testid="ribbon-sftp"]'
+  - assert_visible: '[data-testid="ribbon-settings"]'
+  - assert_visible: '[data-testid="ribbon-tunneling"]'
+
+  # ribbon-session → SessionEditor with SSH preselected
+  - click: '[data-testid="ribbon-session"]'
+  - wait_for: '[data-testid="session-editor"]'
+  - assert_visible: '[data-testid="session-proto-ssh"]'
+  - press: Escape
+  - wait_for:
+      selector: '[data-testid="session-editor"]'
+      state: detached
+      timeout_sec: 5
+
+  # ribbon-sftp → SessionEditor with SFTP preselected
+  - click: '[data-testid="ribbon-sftp"]'
+  - wait_for: '[data-testid="session-editor"]'
+  - assert_visible: '[data-testid="session-proto-sftp"]'
+  - press: Escape
+  - wait_for:
+      selector: '[data-testid="session-editor"]'
+      state: detached
+      timeout_sec: 5
+
+  # ribbon-settings → settings panel mounts in a tab
+  - click: '[data-testid="ribbon-settings"]'
+  - wait_for: '[data-testid="settings-panel"]'
+  - assert_visible: '[data-testid="settings-panel"]'
+
+  # ribbon-tunneling → nettools tab with the TunnelManager surface
+  - click: '[data-testid="ribbon-tunneling"]'
+  - wait_for: '[data-testid="tunnel-manager"]'
+  - assert_visible: '[data-testid="tunnel-manager"]'
+  - screenshot: F1.9-ribbon.png
