@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Deterministic feature × testcase coverage analyzer.
 
-This is the data-fetcher behind the `gen-coverage` subcommand of qa-ui-auto.
-It does NOT generate testcases — it surfaces what's uncovered so the parent
-agent (Claude Code) can read the relevant components and draft new YAML.
+This is the data-fetcher behind the `audit` and `fix tests` commands of
+qa-ui-auto. It does NOT generate testcases — it surfaces what's uncovered
+so the parent agent (Claude Code) can read the relevant components and
+draft new YAML.
 
 Usage:
 
@@ -245,7 +246,7 @@ def render_text(rows: list[FeatureRow], *, uncovered_only: bool = False) -> str:
 def render_uncovered_controls(rows: list[FeatureRow]) -> str:
     """List every required control that no case touches, grouped by feature.
 
-    This is the actionable view for `gen-coverage` — it tells the agent
+    This is the actionable view for `fix tests <F.x>` — it tells the agent
     which specific controls need a new (or extended) testcase. Optional
     controls and shallow-only ones aren't listed here; shallow shows up in
     the main report's "Partial control coverage" section.
@@ -292,7 +293,7 @@ def render_feature_detail(row: FeatureRow) -> str:
             for cid, kind, sel in row.uncovered_required_controls:
                 out.append(f"    - {cid:<24} [{kind:<11}] {sel}")
     else:
-        out.append("  controls:   (none declared — fill in via `gen-controls`)")
+        out.append("  controls:   (none declared — fill in via `fix controls`)")
     out.append(f"  cases ({len(row.case_ids)}):")
     for cid in row.case_ids:
         flag = " (needs-review)" if cid in row.needs_review_case_ids else ""
@@ -310,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="print only the uncovered list (text mode)")
     ap.add_argument("--controls", action="store_true",
                     help="report uncovered required controls (control-level "
-                         "actionable list — feeds gen-coverage drafting)")
+                         "actionable list — feeds `fix tests` drafting)")
     ap.add_argument("--feature", default=None,
                     help="show detail for one feature ID, e.g. F4.10")
     args = ap.parse_args(argv)

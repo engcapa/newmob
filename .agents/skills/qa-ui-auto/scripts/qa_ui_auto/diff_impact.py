@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Map a git diff to impacted features and testcases.
 
-This is the data-fetcher behind the `gen-diff` subcommand of qa-ui-auto.
+This is the data-fetcher behind `audit --diff` and `fix tests --diff`.
 It does NOT modify YAML — it tells the parent agent which features and
 cases a code change touches, so the agent can decide what to patch.
 
@@ -329,7 +329,7 @@ def render_text(
     out.append(f"== Impacted testcases ({len(case_hits)})")
     if not case_hits:
         out.append("  (none — none of the existing cases cover these features, "
-                   "consider gen-coverage to add new ones)")
+                   "consider `fix tests <F.x>` to add one)")
     needs_new = [
         f.id for f in feature_hits
         if not any(f.id in c.via_features for c in case_hits)
@@ -360,7 +360,7 @@ def render_text(
             f"({len(needs_new)})"
         )
         for fid in needs_new:
-            out.append(f"  ✗ {fid}  — consider drafting a new case via gen-coverage")
+            out.append(f"  ✗ {fid}  — consider drafting a new case via `fix tests {fid}`")
 
     return "\n".join(out)
 

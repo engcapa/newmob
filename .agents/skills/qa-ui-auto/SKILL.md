@@ -182,7 +182,12 @@ A `-` entry with a `text="..."` selector is the strongest signal that **a testid
 
 ### `fix features --range REF` — backfill feature-list.md
 
-The playbook references the underlying `range_changes` analyzer. The agent walks through the four classifications (Touched / Orphan NEW / Orphan MODIFIED / Deleted in features) and edits feature-list.md per the rules in `gen-from-range`'s legacy playbook (still listed in the appendix below).
+The playbook wraps the `range_changes` analyzer. The agent walks through the four classifications it produces — Touched / Orphan NEW / Orphan MODIFIED / Deleted — and edits `feature-list.md` per these rules:
+
+- **Orphan NEW** (file added, no feature owns it) → either create a new feature, or extend the `files:` list of the most-related existing feature.
+- **Orphan MODIFIED** (file modified but no feature claims it) → same triage as Orphan NEW; if it was always a private helper, leave alone.
+- **Touched** (modified file already owned by a feature) → refresh the feature's description if its observable capability changed; otherwise no edit.
+- **Deleted** (file removed) → remove from the owning feature's `files:`. If it was the feature's last source file, mark the feature with an HTML comment and decide manually whether to drop it.
 
 After adding new features, the playbook directs the agent to chain into `fix controls F.x` then `fix tests F.x` for each.
 

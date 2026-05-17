@@ -1,6 +1,6 @@
 # Authoring testcases
 
-Rules for the parent agent (Claude Code) when writing or fixing a `qa-ui-auto-tests/cases/*.testcase.yaml` file. The runner skill itself does not author cases unprompted; this is the rulebook the `gen-coverage` and `gen-diff` subcommands follow when they do.
+Rules for the parent agent (Claude Code) when writing or fixing a `qa-ui-auto-tests/cases/*.testcase.yaml` file. The runner skill itself does not author cases unprompted; this is the rulebook the `fix tests` and `fix tests --diff` playbooks expect the agent to follow.
 
 ## Discovery helpers (read these first)
 
@@ -15,7 +15,7 @@ PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.coverage_repor
 PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.diff_impact
 PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.diff_impact --files src/components/foo.tsx
 
-# Which features did a commit range add / change / break? (for gen-from-range)
+# Which features did a commit range add / change / break? (feeds `fix features --range`)
 PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.range_changes --since HEAD~5
 
 # Inspect the feature catalog directly (parses qa-ui-auto-tests/feature-list.md):

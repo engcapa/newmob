@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Classify file changes across a git commit range, for gen-from-range.
+"""Classify file changes across a git commit range, for `fix features --range`.
 
-This is the data-fetcher behind the `gen-from-range` subcommand of qa-ui-auto.
-It does NOT modify feature-list.md — it tells the parent agent which files
-were added / modified / deleted across a range and which existing features
-those files belong to, so the agent can decide what to add or update.
+This is the data-fetcher behind the `fix features --range` command of
+qa-ui-auto. It does NOT modify feature-list.md — it tells the parent agent
+which files were added / modified / deleted across a range and which
+existing features those files belong to, so the agent can decide what to
+add or update.
 
 Usage:
     python -m qa_ui_auto.range_changes                                  # vs origin/main..HEAD

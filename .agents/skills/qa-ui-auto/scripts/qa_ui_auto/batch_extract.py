@@ -14,7 +14,7 @@ For each feature:
   - a top-level MANIFEST.md is produced summarising every feature: source
     file count, extracted control count, and a triage hint.
 
-This script is part of the **gen-controls** workflow's "batch fill" mode.
+This script is part of the **fix controls** workflow's "batch fill" mode.
 It DOES NOT modify feature-list.md. Reviewers paste accepted draft blocks
 into the feature's frontmatter manually.
 
@@ -178,7 +178,7 @@ def _draft_for_feature(
             "Every file declared by this feature is missing from disk. The "
             "feature was probably moved or renamed without updating "
             "`feature-list.md`. Fix the `files:` list first (use "
-            "`/qa-ui-auto gen-diff` if the change is recent, or grep for the "
+            "`audit --diff` if the change is recent, or grep for the "
             "component name to find its new home), then re-run "
             f"`batch_extract --feature {feat.id}`."
         )
