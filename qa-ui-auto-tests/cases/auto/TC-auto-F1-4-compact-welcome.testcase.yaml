@@ -1,0 +1,54 @@
+id: TC-auto-F1-4
+title: Compact mode hides ribbon and welcome panel still renders
+description: |
+  Auto-generated coverage for F1.4 (compact UI mode) interacting with the
+  welcome shell. Enters compact mode by clicking compact-toggle in the
+  titlebar tray. Asserts that menu-bar / ribbon / quick-connect unmount,
+  while compact-titlebar mounts and the welcome panel remains visible
+  with its content. Opens and closes the compact sessions drawer.
+  Finally exits compact mode and verifies the standard chrome is restored.
+covers: [F1.4]
+tags: [auto-generated, smoke, p1, main, window, welcome, needs-review]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 60
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="menu-bar"]'
+  - assert_visible: '[data-testid="ribbon"]'
+  - assert_visible: '[data-testid="quick-connect"]'
+  - assert_visible: '[data-testid="welcome-panel"]'
+  - assert_visible: '[data-testid="compact-toggle"]'
+  # Enter compact mode.
+  - click: '[data-testid="compact-toggle"]'
+  - wait_for: '[data-testid="compact-titlebar"]'
+  - assert_not_visible: '[data-testid="menu-bar"]'
+  - assert_not_visible: '[data-testid="ribbon"]'
+  - assert_not_visible: '[data-testid="quick-connect"]'
+  # Welcome panel is still mounted with the same key content.
+  - assert_visible: '[data-testid="welcome-panel"]'
+  - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Welcome to NewMob'}
+  - assert_text: {selector: '[data-testid="welcome-panel"]', contains: 'Start local terminal'}
+  - assert_visible: '[data-testid="welcome-open-local-terminal"]'
+  - assert_visible: '[data-testid="tab-bar"]'
+  # Status bar is hidden in compact mode.
+  - assert_not_visible: '[data-testid="status-bar"]'
+  - screenshot: F1.4-compact-welcome.png
+  # Open the compact sessions drawer.
+  - click: '[aria-label="Show sessions drawer"]'
+  - wait_for: '[data-testid="compact-sidebar-drawer"]'
+  - assert_visible: '[data-testid="compact-sidebar-drawer"]'
+  - assert_visible: '[data-testid="compact-sidebar-drawer"] [data-testid="session-tree"]'
+  - press: Escape
+  - wait_for:
+      selector: '[data-testid="compact-sidebar-drawer"]'
+      state: detached
+      timeout_sec: 5
+  # Exit compact mode and verify the standard shell is back.
+  - click: '[data-testid="compact-toggle"]'
+  - wait_for: '[data-testid="menu-bar"]'
+  - assert_visible: '[data-testid="ribbon"]'
+  - assert_visible: '[data-testid="quick-connect"]'
+  - assert_visible: '[data-testid="status-bar"]'
+  - assert_not_visible: '[data-testid="compact-titlebar"]'
+  - screenshot: F1.4-compact-restored.png
