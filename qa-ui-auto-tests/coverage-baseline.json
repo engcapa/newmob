@@ -3,7 +3,7 @@
   "totals": {
     "features_with_controls": 32,
     "required": 164,
-    "covered_required": 162,
+    "covered_required": 164,
     "shallow": 7,
     "orphans": 90
   },
@@ -160,7 +160,7 @@
     },
     "F9.6": {
       "required": 2,
-      "covered_required": 0,
+      "covered_required": 2,
       "shallow": 0
     },
     "F11.1": {

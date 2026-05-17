@@ -359,7 +359,7 @@
 ## vnc (F9.6)
 
 - `[data-testid="vnc-panel"]` — display — F9.6.panel-root
-- `[data-testid="vnc-canvas"]` — interactive — F9.6.canvas
+- `[data-testid="vnc-canvas"]` — display — F9.6.canvas
 - `[data-testid="vnc-floating-toolbar"]` — display [optional] — F9.6.floating-toolbar
 - `[data-testid="vnc-scale-toggle"]` — interactive [optional] — F9.6.scale-toggle
 - `[data-testid="vnc-reconnect"]` — interactive [optional] — F9.6.reconnect

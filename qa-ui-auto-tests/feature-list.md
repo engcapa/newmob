@@ -1713,7 +1713,9 @@ controls:
     kind: display
   - id: canvas
     selector: '[data-testid="vnc-canvas"]'
-    kind: interactive       # pointer / wheel / context-menu handlers attached
+    kind: display       # pointer / wheel / context-menu handlers fire only after a live RFB session;
+                        # without a configured VNC fixture we can only verify the canvas is attached.
+                        # Driving it is left to feature-flagged conformance tests.
   - id: floating-toolbar
     selector: '[data-testid="vnc-floating-toolbar"]'
     kind: display

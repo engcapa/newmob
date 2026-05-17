@@ -2,8 +2,10 @@ id: TC-107
 title: Saved VNC session opens the VNC panel scaffolding
 description: |
   Coverage smoke for F9.6. Creates a VNC session bookmark and double-clicks
-  to open it; the auth prompt fires (we cancel it) and we then verify the
-  panel scaffolding is reachable.
+  to open it. The panel mounts immediately (the canvas inside is hidden
+  until conn.status === "connected"), so we assert the vnc-panel testid
+  is present without requiring a real RFB handshake. The auth prompt
+  also fires for the configured host; we dismiss it.
 
   Because the configured cfg.ssh.host is not necessarily a VNC server, we
   do NOT actually authenticate — the test only confirms the protocol
@@ -33,4 +35,15 @@ steps:
       value: qa-ui-auto-vnc
   - click: '[data-testid="session-save"]'
   - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-vnc"]'
+  # Open the VNC tab — the panel mounts immediately, regardless of dial state.
+  - open_session: { name: qa-ui-auto-vnc, double_click: true }
+  - wait_for:
+      selector: '[data-testid="vnc-panel"]'
+      timeout_sec: 10
+  - assert_visible: '[data-testid="vnc-panel"]'
+  # The canvas element is rendered (CSS display:none until connected) — assert it's attached.
+  - wait_for:
+      selector: '[data-testid="vnc-canvas"]'
+      state: attached
+      timeout_sec: 5
   - screenshot: 107-vnc-saved.png
