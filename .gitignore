@@ -105,6 +105,9 @@ tsconfig.tsbuildinfo
 qa-ui-auto.config.yaml
 qa-ui-auto-report/
 qa-ui-auto-report-*/
+# `fix controls` / `batch_extract` drafts: agent scratchpad, reviewer copies
+# the accepted bits into feature-list.md and discards the rest. Always reproducible.
+qa-ui-auto-tests/controls-drafts/
 
 # playwright
 .playwright-cli
