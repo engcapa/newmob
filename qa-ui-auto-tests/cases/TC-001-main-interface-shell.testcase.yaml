@@ -26,6 +26,7 @@ steps:
   - assert_visible: '[data-testid="qc-input"]'
   - assert_visible: '[data-testid="qc-submit"]'
   - assert_visible: '[data-testid="sidebar"]'
+  - assert_visible: '[data-testid="main-sidebar-resize-handle"]'
   - assert_visible: '[data-testid="session-tree"]'
   - assert_visible: '[data-testid="session-search"]'
   - assert_visible: '[data-testid="session-new"]'

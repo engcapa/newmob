@@ -24,7 +24,7 @@
 
 - `[data-testid="collapsed-sidebar-rail"]` — interactive [optional] — F1.2.collapsed-sidebar-rail
 - `[data-testid="compact-sidebar-drawer"]` — display [optional] — F1.2.compact-sidebar-drawer
-- `[data-testid="main-sidebar-resize-handle"]` — interactive — F1.2.sidebar-resize-handle
+- `[data-testid="main-sidebar-resize-handle"]` — display — F1.2.sidebar-resize-handle
 
 ## main/menubar (F1.8)
 
@@ -49,7 +49,7 @@
 - `[data-testid="tab-bar"]` — display — F1.5.tab-bar
 - `[data-testid="tab-item"]` — interactive — F1.5.tab-item
 - `[data-testid="new-local-terminal"]` — interactive — F1.5.new-local-terminal
-- `[data-testid="tab-split-view"]` — interactive — F1.5.split-view
+- `[data-testid="tab-split-view"]` — display — F1.5.split-view
 - `[data-testid="tab-multiexec-toggle"]` — interactive — F1.5.multiexec-toggle
 - `[data-testid="tab-more"]` — interactive — F1.5.tabs-more
 
@@ -85,9 +85,9 @@
 - `[data-testid="theme-cycle"]` — interactive — F1.3.theme-cycle
 - `[data-testid="compact-toggle"]` — interactive — F1.3.compact-toggle
 - `[data-testid="window-controls"]` — display — F1.3.window-controls
-- `[data-testid="window-min"]` — interactive — F1.3.window-min
-- `[data-testid="window-max"]` — interactive — F1.3.window-max
-- `[data-testid="window-close"]` — interactive — F1.3.window-close
+- `[data-testid="window-min"]` — display — F1.3.window-min
+- `[data-testid="window-max"]` — display — F1.3.window-max
+- `[data-testid="window-close"]` — display — F1.3.window-close
 
 ## main/window (F1.4)
 

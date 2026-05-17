@@ -3,35 +3,35 @@
   "totals": {
     "features_with_controls": 32,
     "required": 160,
-    "covered_required": 118,
-    "shallow": 14,
-    "orphans": 97
+    "covered_required": 134,
+    "shallow": 9,
+    "orphans": 96
   },
   "features": {
     "F1.2": {
       "required": 1,
-      "covered_required": 0,
+      "covered_required": 1,
       "shallow": 0
     },
     "F1.3": {
       "required": 8,
-      "covered_required": 4,
-      "shallow": 4
+      "covered_required": 8,
+      "shallow": 0
     },
     "F1.4": {
       "required": 3,
-      "covered_required": 2,
+      "covered_required": 3,
       "shallow": 0
     },
     "F1.5": {
       "required": 6,
-      "covered_required": 3,
+      "covered_required": 6,
       "shallow": 0
     },
     "F1.6": {
       "required": 10,
-      "covered_required": 7,
-      "shallow": 2
+      "covered_required": 10,
+      "shallow": 1
     },
     "F1.7": {
       "required": 1,
@@ -110,7 +110,7 @@
     },
     "F5.5": {
       "required": 3,
-      "covered_required": 0,
+      "covered_required": 3,
       "shallow": 0
     },
     "F6.2": {
@@ -165,7 +165,7 @@
     },
     "F11.1": {
       "required": 2,
-      "covered_required": 1,
+      "covered_required": 2,
       "shallow": 0
     }
   }

@@ -38,7 +38,7 @@ controls:
     optional: true       # only in compact mode after Show sessions drawer
   - id: sidebar-resize-handle
     selector: '[data-testid="main-sidebar-resize-handle"]'
-    kind: interactive
+    kind: display    # drag handle — meaningless to click; existence is the assertion
 -->
 
 - 顶部菜单栏 `MenuBar`（File/Edit/View/Sessions/Tools/Help）
@@ -78,13 +78,13 @@ controls:
     kind: display
   - id: window-min
     selector: '[data-testid="window-min"]'
-    kind: interactive
+    kind: display    # clicking would minimize the window — assertion of presence is the right check
   - id: window-max
     selector: '[data-testid="window-max"]'
-    kind: interactive
+    kind: display    # clicking would maximize/restore the window
   - id: window-close
     selector: '[data-testid="window-close"]'
-    kind: interactive
+    kind: display    # clicking would close the window and abort the test
 -->
 
 - 取消原生 decorations，前端自绘 `AppTitleBar` + `WindowControls`（最小化 / 最大化 / 关闭）
@@ -139,9 +139,9 @@ controls:
   - id: new-local-terminal     # the "+" plus tab button
     selector: '[data-testid="new-local-terminal"]'
     kind: interactive
-  - id: split-view             # currently always-disabled
+  - id: split-view             # always-disabled placeholder — presence-only verification
     selector: '[data-testid="tab-split-view"]'
-    kind: interactive
+    kind: display
   - id: multiexec-toggle
     selector: '[data-testid="tab-multiexec-toggle"]'
     kind: interactive

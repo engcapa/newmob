@@ -20,4 +20,8 @@ steps:
   - fill: {selector: "input[aria-label=\"Scrollback lines\"]", value: "5000"}
   - select_option: {selector: "select[aria-label=\"Right click behavior\"]", label: Show context menu}
   - assert_visible: "[data-testid=\"terminal-preview\"]"
+  # Reset terminal profile back to defaults
+  - click: '[data-testid="settings-reset-terminal-profile"]'
+  - wait: 0.5
+  - assert_visible: "[data-testid=\"terminal-preview\"]"
   - screenshot: 002-settings-appearance.png

@@ -1,0 +1,40 @@
+id: TC-auto-F5-5
+title: Application theme switcher exposes Light / Dark / System buttons in settings
+description: |
+  Auto-generated focused coverage for F5.5 (application theme). The
+  AppThemeSwitcher renders three discrete buttons in the settings panel
+  (data-testid="app-theme-{light,dark,system}"). TC-015 already exercises
+  the title-bar tray cycle button — this case drives the explicit picker
+  used inside the settings tab and verifies each click is honored by the
+  document attribute and persisted to localStorage.
+covers: [F5.5]
+tags: [auto-generated, smoke, p1, settings, theme, needs-review]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 30
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="ribbon-settings"]'
+  - click: '[data-testid="ribbon-settings"]'
+  - wait_for: '[data-testid="settings-panel"]'
+  - assert_visible: '[data-testid="app-theme-light"]'
+  - assert_visible: '[data-testid="app-theme-dark"]'
+  - assert_visible: '[data-testid="app-theme-system"]'
+
+  - click: '[data-testid="app-theme-light"]'
+  - wait: 0.5
+  - eval_readonly:
+      expression: 'document.documentElement.getAttribute("data-app-theme")'
+      contains: light
+
+  - click: '[data-testid="app-theme-dark"]'
+  - wait: 0.5
+  - eval_readonly:
+      expression: 'document.documentElement.getAttribute("data-app-theme")'
+      contains: dark
+
+  - click: '[data-testid="app-theme-system"]'
+  - wait: 0.5
+  - assert_localstorage: { key: "newmob.appTheme.v1", exists: true }
+
+  - screenshot: F5.5-theme-switcher.png

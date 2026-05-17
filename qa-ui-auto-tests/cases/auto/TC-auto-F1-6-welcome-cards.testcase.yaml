@@ -1,0 +1,38 @@
+id: TC-auto-F1-6
+title: Welcome panel exposes the action cards and tips section
+description: |
+  Auto-generated focused coverage for F1.6 (WelcomePanel). The panel
+  exposes three action cards alongside the local-terminal launcher
+  ("New session…", "Import OpenSSH config", "Refresh sessions") plus a
+  static "Tips" section. This case clicks each non-destructive card
+  (new-session opens the SessionEditor and is dismissed; refresh just
+  reloads sessions; import is asserted visible only — file picker is
+  covered by TC-041/TC-055) and verifies the tips block renders.
+covers: [F1.6]
+tags: [auto-generated, smoke, p1, welcome, needs-review]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 45
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="welcome-panel"]'
+  - assert_visible: text="New session…"
+  - assert_visible: text="Import OpenSSH config"
+  - assert_visible: text="Refresh sessions"
+  - assert_visible: text="Tips"
+
+  # New session card opens the SessionEditor; close without saving.
+  - click: text="New session…"
+  - wait_for: '[data-testid="session-editor"]'
+  - press: Escape
+  - wait_for:
+      selector: '[data-testid="session-editor"]'
+      state: detached
+      timeout_sec: 5
+
+  # Refresh sessions card reloads the list (no UI dialog).
+  - click: text="Refresh sessions"
+  - wait: 0.5
+  - assert_visible: '[data-testid="welcome-panel"]'
+
+  - screenshot: F1.6-welcome-cards.png

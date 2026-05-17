@@ -3,8 +3,10 @@ title: Custom title bar renders window controls and tray
 description: |
   Smoke test for F1.3 (custom title bar). Verifies the app-titlebar, the
   three window controls (minimize/maximize/close), and the tray (theme cycle
-  + compact toggle) are all mounted at startup. Does not click them — that
-  would actually minimize/close the window.
+  + compact toggle) are all mounted at startup. Window-min/max/close are
+  asserted as display-only — clicking them would tear down the test
+  window. The theme-cycle button is clicked once to confirm the
+  interactive contract.
 covers: [F1.3]
 tags: [smoke, p1, main, window]
 modes: [browser]
@@ -20,4 +22,7 @@ steps:
   - assert_visible: '[data-testid="titlebar-tray"]'
   - assert_visible: '[data-testid="theme-cycle"]'
   - assert_visible: '[data-testid="compact-toggle"]'
+  - click: '[data-testid="theme-cycle"]'
+  - wait: 0.5
+  - assert_localstorage: { key: "newmob.appTheme.v1", exists: true }
   - screenshot: 100-titlebar.png
