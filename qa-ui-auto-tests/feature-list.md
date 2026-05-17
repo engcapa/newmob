@@ -1520,9 +1520,10 @@ controls:
 id: F8.2
 status: done
 area: tunnel
-components: [TunnelManager]
+components: [TunnelManager, TunnelEditor]
 files:
   - src/components/tunnel/TunnelManager.tsx
+  - src/components/tunnel/TunnelEditor.tsx
 controls:
   - id: panel-root
     selector: '[data-testid="tunnel-manager"]'
@@ -1534,6 +1535,8 @@ controls:
   - id: new-tunnel
     selector: '[data-testid="tunnel-new"]'
     kind: interactive
+    aliases:
+      - 'button:has-text("New SSH tunnel")'   # legacy text-based reference in TC-032..057
   - id: start-all
     selector: '[data-testid="tunnel-start-all"]'
     kind: interactive
@@ -1582,6 +1585,48 @@ controls:
   - id: row-power            # right-edge duplicate of row-toggle
     selector: '[data-testid="tunnel-row-power"]'
     kind: interactive
+  # TunnelEditor dialog (modal opened by new-tunnel / row-edit)
+  - id: editor-root
+    selector: '[data-testid="tunnel-editor"]'
+    kind: display
+  - id: editor-name
+    selector: 'input[placeholder="e.g. postgres-replica"]'
+    kind: interactive
+  - id: editor-host
+    selector: 'input[placeholder="ssh.example.com"]'
+    kind: interactive
+  - id: editor-user
+    selector: 'input[placeholder="user"]'
+    kind: interactive
+  - id: editor-port
+    selector: 'input[placeholder="22"]'
+    kind: interactive
+  - id: editor-local-port
+    selector: 'input[placeholder="0"]'
+    kind: interactive
+  - id: editor-remote-host
+    selector: 'input[placeholder="127.0.0.1"]'
+    kind: interactive
+    optional: true       # only rendered for remote-forward / dynamic kinds
+  - id: editor-remote-port
+    selector: 'input[placeholder="5432"]'
+    kind: interactive
+    optional: true
+  - id: editor-kind-remote
+    selector: 'label:has-text("Remote port forwarding") input[type="radio"]'
+    kind: interactive
+  - id: editor-kind-dynamic
+    selector: 'label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]'
+    kind: interactive
+  - id: editor-save
+    selector: '[data-testid="tunnel-editor-save"]'
+    kind: interactive
+    aliases:
+      - 'button:has-text("Save")'
+  - id: editor-cancel
+    selector: '[data-testid="tunnel-editor-cancel"]'
+    kind: interactive
+    optional: true
 -->
 
 - 列表展示：类型、状态徽章（运行/错误/停止）、本地端口 → 远程地址、关联会话、认证图标

@@ -7,10 +7,9 @@ fixtures: [reset_db, ssh_required]
 steps:
   - open: "${cfg.app.base_url}"
   - click: "[data-testid=\"ribbon-tunneling\"]"
-  - wait_for: "text=\"Network tools — SSH tunnels\""
-  - click: "button:has-text(\"New SSH tunnel\")"
-  - wait: 1
-  - wait_for: "input[placeholder=\"e.g. postgres-replica\"]"
+  - wait_for: "[data-testid=\"tunnel-manager\"]"
+  - click: "[data-testid=\"tunnel-new\"]"
+  - wait_for: "[data-testid=\"tunnel-editor\"]"
   - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-ui-auto-remote-tunnel}
   - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
   - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
@@ -20,7 +19,7 @@ steps:
   - fill: {selector: "input[placeholder=\"0\"]", value: "19222"}
   - fill: {selector: "input[placeholder=\"127.0.0.1\"]", value: 127.0.0.1}
   - fill: {selector: "input[placeholder=\"5432\"]", value: "8080"}
-  - click: 'button:has-text("Save")'
+  - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
   - wait_for: "text=\"qa-ui-auto-remote-tunnel\""
   - assert_visible: "text=\"Remote\""
@@ -31,7 +30,7 @@ steps:
   - wait: 1
   - click: 'label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]'
   - wait: 1
-  - click: 'button:has-text("Save")'
+  - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
   - wait_for: "text=\"Dynamic\""
   - seed_dialog: {confirm: true}

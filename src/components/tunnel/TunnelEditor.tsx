@@ -131,6 +131,7 @@ export function TunnelEditor({ initial, sessions, focus, onSave, onCancel }: Pro
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(20,30,45,0.45)" }}>
       <div
+        data-testid="tunnel-editor"
         className="w-[940px] max-w-[96%] max-h-[92vh] flex flex-col rounded-[6px] shadow-2xl border overflow-hidden"
         style={{ background: "var(--moba-panel-bg)", borderColor: "var(--moba-chrome-border)", color: "var(--moba-text)" }}
       >
@@ -430,13 +431,14 @@ export function TunnelEditor({ initial, sessions, focus, onSave, onCancel }: Pro
           <button
             type="button"
             className="moba-btn flex items-center gap-1.5"
+            data-testid="tunnel-editor-save"
             data-primary="true"
             onClick={handleSave}
             disabled={busy}
           >
             <SaveIcon className="w-3.5 h-3.5" /> {busy ? "Saving…" : "Save"}
           </button>
-          <button type="button" className="moba-btn flex items-center gap-1.5" onClick={onCancel} disabled={busy}>
+          <button type="button" className="moba-btn flex items-center gap-1.5" data-testid="tunnel-editor-cancel" onClick={onCancel} disabled={busy}>
             <XCircle className="w-3.5 h-3.5" /> Cancel
           </button>
         </div>

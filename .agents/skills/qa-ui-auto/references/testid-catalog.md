@@ -319,6 +319,7 @@
 - `[data-testid="tunnel-manager"]` — display — F8.2.panel-root
 - `[data-testid="tunnel-list"]` — display — F8.2.tunnel-list
 - `[data-testid="tunnel-new"]` — interactive — F8.2.new-tunnel
+  ↳ `button:has-text("New SSH tunnel")` — alias
 - `[data-testid="tunnel-start-all"]` — interactive — F8.2.start-all
 - `[data-testid="tunnel-stop-all"]` — interactive — F8.2.stop-all
 - `[data-testid="tunnel-exit"]` — interactive [optional] — F8.2.exit-button
@@ -334,6 +335,19 @@
 - `[data-testid="tunnel-row-autostart"]` — interactive — F8.2.row-autostart
 - `[data-testid="tunnel-row-delete"]` — interactive — F8.2.row-delete
 - `[data-testid="tunnel-row-power"]` — interactive — F8.2.row-power
+- `[data-testid="tunnel-editor"]` — display — F8.2.editor-root
+- `input[placeholder="e.g. postgres-replica"]` — interactive — F8.2.editor-name
+- `input[placeholder="ssh.example.com"]` — interactive — F8.2.editor-host
+- `input[placeholder="user"]` — interactive — F8.2.editor-user
+- `input[placeholder="22"]` — interactive — F8.2.editor-port
+- `input[placeholder="0"]` — interactive — F8.2.editor-local-port
+- `input[placeholder="127.0.0.1"]` — interactive [optional] — F8.2.editor-remote-host
+- `input[placeholder="5432"]` — interactive [optional] — F8.2.editor-remote-port
+- `label:has-text("Remote port forwarding") input[type="radio"]` — interactive — F8.2.editor-kind-remote
+- `label:has-text("Dynamic port forwarding (SOCKS proxy)") input[type="radio"]` — interactive — F8.2.editor-kind-dynamic
+- `[data-testid="tunnel-editor-save"]` — interactive — F8.2.editor-save
+  ↳ `button:has-text("Save")` — alias
+- `[data-testid="tunnel-editor-cancel"]` — interactive [optional] — F8.2.editor-cancel
 
 ## vnc (F9.6)
 

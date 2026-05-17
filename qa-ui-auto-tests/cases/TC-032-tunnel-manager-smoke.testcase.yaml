@@ -14,14 +14,14 @@ steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="ribbon"]'
   - click: '[data-testid="ribbon-tunneling"]'
-  - wait_for: 'text=Network tools'
-  - assert_visible: 'text=New SSH tunnel'
-  - assert_visible: 'text=Start all tunnels'
-  - assert_visible: 'text=Stop all tunnels'
-  - click: 'button:has-text("New SSH tunnel")'
-  - wait_for:
-      selector: 'input[placeholder="e.g. postgres-replica"]'
-      timeout_sec: 10
+  - wait_for: '[data-testid="tunnel-manager"]'
+  - assert_visible: '[data-testid="tunnel-list"]'
+  - assert_visible: '[data-testid="tunnel-new"]'
+  - assert_visible: '[data-testid="tunnel-start-all"]'
+  - assert_visible: '[data-testid="tunnel-stop-all"]'
+  - click: '[data-testid="tunnel-new"]'
+  - wait_for: '[data-testid="tunnel-editor"]'
+  - assert_visible: 'input[placeholder="e.g. postgres-replica"]'
   - assert_visible: 'input[placeholder="ssh.example.com"]'
   - assert_visible: 'input[placeholder="user"]'
   - press: Escape

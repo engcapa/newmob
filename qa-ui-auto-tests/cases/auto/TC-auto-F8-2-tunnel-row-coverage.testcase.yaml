@@ -1,0 +1,93 @@
+id: TC-auto-F8-2
+title: Tunnel manager exposes every row control after a tunnel is persisted
+description: |
+  Auto-generated focused coverage for F8.2 (TunnelManager) — closes the
+  gap where row-* controls were never reachable because TC-032 only
+  opened the editor without saving. This case persists two tunnels (no
+  live SSH dial) and exercises every row testid directly. Selectors are
+  written as testids first, with Playwright `>> nth=N` pipes when row
+  disambiguation is needed, so each interaction attributes to the right
+  control under coverage matching. The status-column toggle and the
+  right-edge power button are clicked but the actual SSH dial is not
+  driven (it needs a real configured host — covered by TC-032..057).
+covers: [F8.2]
+tags: [auto-generated, smoke, p1, tunnel, needs-review]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="ribbon"]'
+  - click: '[data-testid="ribbon-tunneling"]'
+  - wait_for: '[data-testid="tunnel-manager"]'
+  - assert_visible: '[data-testid="tunnel-list"]'
+
+  # Bulk action affordances
+  - assert_visible: '[data-testid="tunnel-start-all"]'
+  - assert_visible: '[data-testid="tunnel-stop-all"]'
+  - click: '[data-testid="tunnel-start-all"]'
+  - wait: 1
+  - click: '[data-testid="tunnel-stop-all"]'
+  - wait: 1
+
+  # ── Persist tunnel A ─────────────────────────────────────────────
+  - click: '[data-testid="tunnel-new"]'
+  - wait_for: '[data-testid="tunnel-editor"]'
+  - fill: {selector: 'input[placeholder="e.g. postgres-replica"]', value: qa-row-coverage-a}
+  - fill: {selector: 'input[placeholder="ssh.example.com"]', value: tunnel-a.example}
+  - fill: {selector: 'input[placeholder="user"]', value: alice}
+  - fill: {selector: 'input[placeholder="22"]', value: '22'}
+  - fill: {selector: 'input[placeholder="0"]', value: '19401'}
+  - click: '[data-testid="tunnel-editor-save"]'
+  - wait_for: 'text="qa-row-coverage-a"'
+
+  # ── On the single existing row, exercise every settings-column testid.
+  # Direct testid selectors disambiguate to the only match.
+  - assert_visible: '[data-testid="tunnel-row"]'
+  - click: '[data-testid="tunnel-row-toggle-reveal"]'   # reveal credentials
+  - wait: 1
+  - click: '[data-testid="tunnel-row-autostart"]'       # autostart toggle on
+  - wait: 1
+  - click: '[data-testid="tunnel-row-edit-key"]'        # opens credential editor
+  - wait: 1
+  - press: Escape
+  - wait: 1
+  - click: '[data-testid="tunnel-row-edit"]'            # opens TunnelEditor
+  - wait_for: '[data-testid="tunnel-editor"]'
+  - press: Escape
+  - wait: 1
+  - click: '[data-testid="tunnel-row-test"]'            # asks for test confirmation
+  - seed_dialog: {confirm: false}                        # decline so no live dial
+  - wait: 1
+  - click: '[data-testid="tunnel-row-toggle"]'          # status-column toggle (UI-only)
+  - wait: 1
+  - click: '[data-testid="tunnel-row-power"]'           # right-edge power button
+  - wait: 1
+
+  # ── Persist tunnel B so we have two rows for move-up / move-down ─
+  - click: '[data-testid="tunnel-new"]'
+  - wait_for: '[data-testid="tunnel-editor"]'
+  - fill: {selector: 'input[placeholder="e.g. postgres-replica"]', value: qa-row-coverage-b}
+  - fill: {selector: 'input[placeholder="ssh.example.com"]', value: tunnel-b.example}
+  - fill: {selector: 'input[placeholder="user"]', value: bob}
+  - fill: {selector: 'input[placeholder="22"]', value: '22'}
+  - fill: {selector: 'input[placeholder="0"]', value: '19402'}
+  - click: '[data-testid="tunnel-editor-save"]'
+  - wait_for: 'text="qa-row-coverage-b"'
+  - assert_count: {selector: '[data-testid="tunnel-row"]', equal: 2}
+
+  # Move up on the second row (B) → puts B in position 1
+  - click: '[data-testid="tunnel-row-move-up"] >> nth=1'
+  - wait: 1
+  # Move down on the first row (B again) → swaps back
+  - click: '[data-testid="tunnel-row-move-down"]'
+  - wait: 1
+
+  # ── Clone produces a "(copy)" row, then delete it via row-delete
+  - click: '[data-testid="tunnel-row-clone"]'
+  - wait_for: 'text="qa-row-coverage-a (copy)"'
+  - assert_count: {selector: '[data-testid="tunnel-row"]', equal: 3}
+  - seed_dialog: {confirm: true}
+  - click: '[data-testid="tunnel-row-delete"]'
+  - wait: 1
+  - screenshot: F8.2-tunnel-row-coverage.png

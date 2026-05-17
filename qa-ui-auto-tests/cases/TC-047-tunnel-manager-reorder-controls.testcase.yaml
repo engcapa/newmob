@@ -7,27 +7,25 @@ fixtures: [reset_db, ssh_required]
 steps:
   - open: "${cfg.app.base_url}"
   - click: "[data-testid=\"ribbon-tunneling\"]"
-  - wait_for: "text=\"New SSH tunnel\""
-  - click: "button:has-text(\"New SSH tunnel\")"
-  - wait: 1
-  - wait_for: "input[placeholder=\"e.g. postgres-replica\"]"
+  - wait_for: "[data-testid=\"tunnel-manager\"]"
+  - click: "[data-testid=\"tunnel-new\"]"
+  - wait_for: "[data-testid=\"tunnel-editor\"]"
   - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-tunnel-1}
   - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
   - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
   - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
   - fill: {selector: 'input[placeholder="0"]', value: "19191"}
-  - click: 'button:has-text("Save")'
+  - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
   - wait_for: "text=\"qa-tunnel-1\""
-  - click: "button:has-text(\"New SSH tunnel\")"
-  - wait: 1
-  - wait_for: "input[placeholder=\"e.g. postgres-replica\"]"
+  - click: "[data-testid=\"tunnel-new\"]"
+  - wait_for: "[data-testid=\"tunnel-editor\"]"
   - fill: {selector: "input[placeholder=\"e.g. postgres-replica\"]", value: qa-tunnel-2}
   - fill: {selector: "input[placeholder=\"ssh.example.com\"]", value: "${cfg.ssh.host}"}
   - fill: {selector: "input[placeholder=\"user\"]", value: "${cfg.ssh.user}"}
   - fill: {selector: "input[placeholder=\"22\"]", value: "${cfg.ssh.port}"}
   - fill: {selector: 'input[placeholder="0"]', value: "19192"}
-  - click: 'button:has-text("Save")'
+  - click: '[data-testid="tunnel-editor-save"]'
   - wait: 1
   - wait_for: "text=\"qa-tunnel-2\""
   - click: 'tr:has-text("qa-tunnel-1") button[title*="Move down" i]'
