@@ -5,9 +5,15 @@ Usage:
     python -m qa_ui_auto.lint                        # validate defaults
     python -m qa_ui_auto.lint --cases qa-ui-auto-tests/cases    # only testcases
     python -m qa_ui_auto.lint --features qa-ui-auto-tests/feature-list.md   # only features
+    python -m qa_ui_auto.lint --strict-orphans       # fail on selector orphans
 
 Exit codes:
     0 = all valid, 1 = at least one validation error, 2 = setup error.
+
+Warnings (orphan selectors, missing controls coverage) print to stderr but
+DO NOT fail by default. Pass `--strict-orphans` to make them fail. This is
+the migration-mode default — once feature.controls are filled in across the
+catalog, flip the default to strict.
 """
 
 from __future__ import annotations
@@ -71,20 +77,90 @@ def lint_cases(cases_dir: Path) -> tuple[int, int, list[str]]:
     return len(files), len(seen_ids), all_errors
 
 
-def lint_features(features_path: Path) -> list[str]:
-    """Validate feature-list.md by parsing its <!-- feature --> blocks."""
+def lint_features(features_path: Path) -> tuple[list[str], dict[str, int]]:
+    """Validate feature-list.md by parsing its <!-- feature --> blocks.
+
+    Returns (errors, stats) where stats describes feature/control counts.
+    Cross-feature selector duplication is reported as an error: the same
+    selector should appear in at most one feature's controls list, otherwise
+    coverage attribution is ambiguous.
+    """
     if not features_path.exists():
-        return [f"{features_path}: feature-list.md not found"]
-    # Late import keeps lint usable even if jsonschema-only checks are wanted.
+        return ([f"{features_path}: feature-list.md not found"], {})
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from qa_ui_auto.feature_catalog import load_features, FeatureCatalogError
     try:
-        load_features(features_path)
+        feats = load_features(features_path)
     except FeatureCatalogError as e:
-        return [str(e)]
+        return ([str(e)], {})
     except Exception as e:  # noqa: BLE001
-        return [f"{features_path}: parse error: {e}"]
-    return []
+        return ([f"{features_path}: parse error: {e}"], {})
+
+    errors: list[str] = []
+    sel_to_owner: dict[str, tuple[str, str]] = {}      # selector → (feat_id, control_id)
+    features_with_controls = 0
+    features_explicitly_empty = 0       # backend-only: declared `controls: []`
+    features_undeclared = 0             # never wrote `controls:` at all
+    total_controls = 0
+    interactive_controls = 0
+    display_controls = 0
+    optional_controls = 0
+    for f in feats:
+        if f.controls:
+            features_with_controls += 1
+        elif f.controls_declared:
+            features_explicitly_empty += 1
+        else:
+            features_undeclared += 1
+        for c in f.controls:
+            total_controls += 1
+            if c.kind == "interactive":
+                interactive_controls += 1
+            else:
+                display_controls += 1
+            if c.optional:
+                optional_controls += 1
+            key = c.selector.strip()
+            if key in sel_to_owner:
+                ofeat, octrl = sel_to_owner[key]
+                errors.append(
+                    f"{features_path}: selector {c.selector!r} listed by both "
+                    f"{ofeat}.{octrl} and {f.id}.{c.id} — selectors must be "
+                    "unique across feature.controls (move it to one place "
+                    "or use a more specific selector)"
+                )
+            else:
+                sel_to_owner[key] = (f.id, c.id)
+    stats = {
+        "features": len(feats),
+        "features_with_controls": features_with_controls,
+        "features_explicitly_empty": features_explicitly_empty,
+        "features_undeclared": features_undeclared,
+        "controls": total_controls,
+        "interactive": interactive_controls,
+        "display": display_controls,
+        "optional": optional_controls,
+    }
+    return errors, stats
+
+
+def warn_selector_orphans(
+    features_path: Path, cases_dir: Path
+) -> list[str]:
+    """Compute selector orphans: case-step selectors not in any feature.controls.
+
+    Returns a list of human-readable warning lines. Empty list = clean.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    try:
+        from qa_ui_auto.control_coverage import build_coverage
+    except Exception as e:  # noqa: BLE001
+        return [f"warn: control_coverage import failed: {e}"]
+    try:
+        _, orphans = build_coverage(features_path, cases_dir)
+    except Exception as e:  # noqa: BLE001
+        return [f"warn: control_coverage build failed: {e}"]
+    return orphans
 
 
 def main() -> int:
@@ -95,6 +171,12 @@ def main() -> int:
                     help="features catalog YAML")
     ap.add_argument("--skip-cases", action="store_true")
     ap.add_argument("--skip-features", action="store_true")
+    ap.add_argument("--skip-orphans", action="store_true",
+                    help="don't compute selector orphans (skips control_coverage)")
+    ap.add_argument("--strict-orphans", action="store_true",
+                    help="treat orphan selectors as errors (default: warn only)")
+    ap.add_argument("--max-orphans-shown", type=int, default=20,
+                    help="cap how many orphans print to stderr (default 20)")
     args = ap.parse_args()
 
     total_errors: list[str] = []
@@ -102,16 +184,50 @@ def main() -> int:
         n, ok, errs = lint_cases(Path(args.cases))
         total_errors.extend(errs)
         print(f"[cases] {n} files, {ok} unique ids, {len(errs)} error(s)")
+
+    feats_count = 0
     if not args.skip_features:
-        errs = lint_features(Path(args.features))
+        errs, stats = lint_features(Path(args.features))
         total_errors.extend(errs)
-        feats_ok = 0
-        try:
-            from qa_ui_auto.feature_catalog import load_features
-            feats_ok = len(load_features(Path(args.features)))
-        except Exception:  # noqa: BLE001
-            pass
-        print(f"[features] {feats_ok} entries, {len(errs)} error(s)")
+        feats_count = stats.get("features", 0)
+        if stats:
+            print(
+                f"[features] {feats_count} entries, "
+                f"{stats['features_with_controls']} filled / "
+                f"{stats['features_explicitly_empty']} backend-only / "
+                f"{stats['features_undeclared']} undeclared "
+                f"({stats['controls']} controls: "
+                f"{stats['interactive']} interactive, "
+                f"{stats['display']} display, "
+                f"{stats['optional']} optional), "
+                f"{len(errs)} error(s)"
+            )
+        else:
+            print(f"[features] 0 entries, {len(errs)} error(s)")
+
+    if not args.skip_orphans and not args.skip_cases and not args.skip_features:
+        warns = warn_selector_orphans(Path(args.features), Path(args.cases))
+        if warns:
+            level = "error" if args.strict_orphans else "warn"
+            stream = sys.stderr if args.strict_orphans else sys.stdout
+            print(
+                f"[orphans] {len(warns)} selector(s) used by cases but not "
+                f"declared in any feature.controls ({level})",
+                file=stream,
+            )
+            for line in warns[: args.max_orphans_shown]:
+                print(f"  · {line}", file=stream)
+            if len(warns) > args.max_orphans_shown:
+                print(
+                    f"  · ... and {len(warns) - args.max_orphans_shown} more "
+                    "(run `python -m qa_ui_auto.control_coverage --orphans` "
+                    "for the full list)",
+                    file=stream,
+                )
+            if args.strict_orphans:
+                total_errors.extend(f"orphan: {w}" for w in warns)
+        else:
+            print("[orphans] 0 (every case selector matches a feature.control)")
 
     if total_errors:
         print("\nErrors:")

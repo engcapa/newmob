@@ -464,6 +464,7 @@ export function FileBrowser(props: FileBrowserProps) {
           <OrientationToggle orientation={orientation} onChange={setOrientation} />
           {props.onDetach && (
             <button
+              data-testid="sftp-detach"
               type="button"
               className="px-1 hover:bg-[var(--moba-hover)] rounded"
               title="Open in its own window"
@@ -474,6 +475,7 @@ export function FileBrowser(props: FileBrowserProps) {
           )}
           {props.onClose && (
             <button
+              data-testid="sftp-close"
               type="button"
               className="px-1 hover:bg-[var(--moba-hover)] rounded"
               title="Hide SFTP panel"
@@ -769,6 +771,7 @@ function OrientationToggle({
   const next: Orientation = orientation === "horizontal" ? "vertical" : "horizontal";
   return (
     <button
+      data-testid="sftp-orientation-toggle"
       type="button"
       className="px-1.5 py-0.5 inline-flex items-center gap-1 rounded hover:bg-[var(--moba-hover)] shrink-0"
       title={

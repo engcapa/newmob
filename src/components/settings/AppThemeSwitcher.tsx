@@ -86,6 +86,7 @@ function ThemeModeButton({
 
   return (
     <button
+      data-testid={`app-theme-${mode}`}
       type="button"
       aria-pressed={selected}
       className="h-9 px-3 inline-flex items-center gap-2 text-[12px] border-r last:border-r-0 border-[var(--moba-input-border)]"

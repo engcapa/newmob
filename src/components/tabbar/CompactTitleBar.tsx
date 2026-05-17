@@ -82,8 +82,8 @@ export function CompactTitleBar({
     >
       {ctx.render}
       <div className="flex items-center gap-1 px-1.5 shrink-0">
-        <TitleBarButton title="Main menu" icon={<Menu className="w-4 h-4" />} onClick={openMainMenu} />
-        <TitleBarButton title="Show sessions drawer" icon={<PanelLeft className="w-4 h-4" />} onClick={onToggleSidebarDrawer} />
+        <TitleBarButton testId="compact-main-menu" title="Main menu" icon={<Menu className="w-4 h-4" />} onClick={openMainMenu} />
+        <TitleBarButton testId="compact-sidebar-drawer-toggle" title="Show sessions drawer" icon={<PanelLeft className="w-4 h-4" />} onClick={onToggleSidebarDrawer} />
       </div>
       <div className="min-w-0 flex-1 self-stretch">
         <TabBar />
@@ -99,13 +99,16 @@ function TitleBarButton({
   icon,
   title,
   onClick,
+  testId,
 }: {
   icon: React.ReactNode;
   title: string;
   onClick?: (event: React.MouseEvent) => void;
+  testId?: string;
 }) {
   return (
     <button
+      data-testid={testId}
       type="button"
       title={title}
       aria-label={title}

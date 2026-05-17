@@ -263,6 +263,7 @@ export default function CaptureToolbar({
        *  recording is running. Tap Stop to finalize. */}
       {isScrollCapturing && (
         <button
+          data-testid="capture-stop-scroll"
           onClick={() => void handleStopScrollCapture()}
           style={{
             ...BUTTON_STYLE,
@@ -279,6 +280,7 @@ export default function CaptureToolbar({
       )}
       {isRecording && (
         <button
+          data-testid="capture-stop-gif"
           onClick={() => void handleStopRecording()}
           style={{
             ...BUTTON_STYLE,
@@ -327,19 +329,20 @@ export default function CaptureToolbar({
               boxShadow: "0 4px 16px rgba(0,0,0,0.5)",
             }}
           >
-            <button onClick={() => void handleSaveVisible()} style={MENU_ITEM_STYLE}>
+            <button data-testid="capture-save-visible" onClick={() => void handleSaveVisible()} style={MENU_ITEM_STYLE}>
               <Download size={14} /> Save visible PNG
             </button>
-            <button onClick={() => void handleCopyVisible()} style={MENU_ITEM_STYLE}>
+            <button data-testid="capture-copy-clipboard" onClick={() => void handleCopyVisible()} style={MENU_ITEM_STYLE}>
               <Clipboard size={14} /> Copy to clipboard
             </button>
             {getFull && (
-              <button onClick={() => void handleSaveFull()} style={MENU_ITEM_STYLE}>
+              <button data-testid="capture-save-full" onClick={() => void handleSaveFull()} style={MENU_ITEM_STYLE}>
                 <FileImage size={14} /> Save full scroll PNG
               </button>
             )}
             {getScrollFrame && (
               <button
+                data-testid="capture-toggle-scroll"
                 onClick={
                   isScrollCapturing
                     ? () => void handleStopScrollCapture()
@@ -355,6 +358,7 @@ export default function CaptureToolbar({
             )}
             {getGifFrame && (
               <button
+                data-testid="capture-toggle-gif"
                 onClick={isRecording ? () => void handleStopRecording() : handleStartRecording}
                 style={MENU_ITEM_STYLE}
               >

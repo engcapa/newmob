@@ -30,7 +30,7 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
           <KeyRound className="w-3.5 h-3.5 mr-1.5" />
           <span className="text-[12px] font-semibold">Authentication required</span>
           <div className="flex-1" />
-          <button type="button" onClick={onCancel} className="hover:bg-white/20 rounded p-0.5">
+          <button data-testid="auth-close" type="button" onClick={onCancel} className="hover:bg-white/20 rounded p-0.5">
             <X className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -53,7 +53,7 @@ export function AuthPrompt({ host, username, onSubmit, onCancel }: AuthPromptPro
 
         <div className="h-12 flex items-center justify-end px-3 gap-2 border-t"
              style={{ background: "var(--moba-quick-bg)", borderColor: "var(--moba-divider)" }}>
-          <button type="button" onClick={onCancel}
+          <button data-testid="auth-cancel" type="button" onClick={onCancel}
                   className="moba-btn">
             Cancel
           </button>

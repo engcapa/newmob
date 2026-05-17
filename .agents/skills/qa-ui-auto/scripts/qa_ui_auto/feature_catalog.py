@@ -55,6 +55,38 @@ ID_PATTERN = re.compile(r"^F[0-9]+(?:\.[0-9]+)*[a-z]?$")
 
 
 @dataclass
+class Control:
+    """A single interactive or observable element inside a feature.
+
+    `kind` determines coverage semantics:
+      - interactive: must be exercised by a click / fill / select / press / key step
+      - display:     must be observed by a wait_for / assert_visible / assert_text step
+    `optional` marks elements that only render under conditions (e.g. admin
+    button only when canElevate). They are reported separately and don't fail
+    the "must be covered" gate by default.
+    `aliases` is a list of additional selector strings that should count as
+    touching this control. Use it when the same DOM element is reachable via
+    multiple stable selector forms — e.g. a context-menu item that can be
+    clicked by `text="Find"` (base) or by `[data-testid="context-menu-item-find"]`
+    (alias). All aliases participate in coverage matching with the same
+    derivation rules as the base selector.
+    """
+
+    id: str
+    selector: str
+    kind: str = "interactive"
+    optional: bool = False
+    note: str = ""
+    aliases: list[str] = field(default_factory=list)
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def all_selectors(self) -> list[str]:
+        return [self.selector, *self.aliases]
+
+
+@dataclass
 class Feature:
     id: str
     title: str
@@ -62,6 +94,8 @@ class Feature:
     area: str = ""
     components: list[str] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
+    controls: list[Control] = field(default_factory=list)
+    controls_declared: bool = False    # True iff the YAML had a `controls:` key
     section_title: str = ""        # raw heading like "### 4.10 Z-modem ..."
     line: int = 0                  # 1-based line number of the heading
 
@@ -146,6 +180,53 @@ def parse(text: str, *, source: str = "<input>") -> list[Feature]:
         heading, heading_line = _find_preceding_heading(lines, block_start_line)
         title = doc.get("title") or _heading_title(heading) or fid
 
+        controls_raw = doc.get("controls")
+        controls_declared = "controls" in doc
+        if controls_raw is None:
+            controls_raw = []
+        if not isinstance(controls_raw, list):
+            raise FeatureCatalogError(
+                f"{source}: feature {fid}: `controls` must be a list, got "
+                f"{type(controls_raw).__name__}"
+            )
+        controls: list[Control] = []
+        seen_cids: set[str] = set()
+        for idx, c in enumerate(controls_raw):
+            if not isinstance(c, dict):
+                raise FeatureCatalogError(
+                    f"{source}: feature {fid}: controls[{idx}] must be a mapping"
+                )
+            cid = c.get("id")
+            sel = c.get("selector")
+            if not cid or not isinstance(cid, str):
+                raise FeatureCatalogError(
+                    f"{source}: feature {fid}: controls[{idx}] missing string `id`"
+                )
+            if not sel or not isinstance(sel, str):
+                raise FeatureCatalogError(
+                    f"{source}: feature {fid}: control {cid!r} missing string "
+                    "`selector`"
+                )
+            if cid in seen_cids:
+                raise FeatureCatalogError(
+                    f"{source}: feature {fid}: duplicate control id {cid!r}"
+                )
+            seen_cids.add(cid)
+            kind = str(c.get("kind", "interactive"))
+            if kind not in ("interactive", "display"):
+                raise FeatureCatalogError(
+                    f"{source}: feature {fid}: control {cid!r}: kind must be "
+                    f"'interactive' or 'display', got {kind!r}"
+                )
+            controls.append(Control(
+                id=cid,
+                selector=sel,
+                kind=kind,
+                optional=bool(c.get("optional", False)),
+                note=str(c.get("note", "")),
+                aliases=[str(a) for a in (c.get("aliases") or [])],
+            ))
+
         feat = Feature(
             id=str(fid),
             title=str(title),
@@ -153,6 +234,8 @@ def parse(text: str, *, source: str = "<input>") -> list[Feature]:
             area=str(doc.get("area", "")),
             components=[str(x) for x in (doc.get("components") or [])],
             files=[str(x) for x in (doc.get("files") or [])],
+            controls=controls,
+            controls_declared=controls_declared,
             section_title=heading.strip(),
             line=heading_line,
         )
@@ -223,6 +306,13 @@ def _detail(f: Feature) -> str:
         f"files:",
     ]
     out += [f"  - {fp}" for fp in f.files] or ["  (none)"]
+    if f.controls:
+        out.append(f"controls ({len(f.controls)}):")
+        for c in f.controls:
+            tag = c.kind + (" optional" if c.optional else "")
+            out.append(f"  - {c.id:<24} [{tag}] {c.selector}")
+    else:
+        out.append("controls: (none)")
     return "\n".join(out)
 
 

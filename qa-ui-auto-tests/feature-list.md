@@ -26,6 +26,19 @@ area: main
 components: [MainLayout, MenuBar, Ribbon, QuickConnect, Sidebar, TabBar, StatusBar]
 files:
   - src/layouts/MainLayout.tsx
+controls:
+  # MainLayout owns layout-level chrome only; menu/ribbon/sidebar/quick-connect testids belong to their own features
+  - id: collapsed-sidebar-rail
+    selector: '[data-testid="collapsed-sidebar-rail"]'
+    kind: interactive
+    optional: true       # only when sidebar collapsed
+  - id: compact-sidebar-drawer
+    selector: '[data-testid="compact-sidebar-drawer"]'
+    kind: display
+    optional: true       # only in compact mode after Show sessions drawer
+  - id: sidebar-resize-handle
+    selector: '[data-testid="main-sidebar-resize-handle"]'
+    kind: interactive
 -->
 
 - 顶部菜单栏 `MenuBar`（File/Edit/View/Sessions/Tools/Help）
@@ -46,6 +59,32 @@ components: [AppTitleBar, WindowControls, WindowResizeHandles, TitleBarTrayContr
 files:
   - src/components/window/AppTitleBar.tsx
   - src/components/window/WindowControls.tsx
+  - src/components/window/TitleBarTrayControls.tsx
+controls:
+  - id: titlebar
+    selector: '[data-testid="app-titlebar"]'
+    kind: display
+  - id: tray
+    selector: '[data-testid="titlebar-tray"]'
+    kind: display
+  - id: theme-cycle
+    selector: '[data-testid="theme-cycle"]'
+    kind: interactive
+  - id: compact-toggle
+    selector: '[data-testid="compact-toggle"]'
+    kind: interactive
+  - id: window-controls
+    selector: '[data-testid="window-controls"]'
+    kind: display
+  - id: window-min
+    selector: '[data-testid="window-min"]'
+    kind: interactive
+  - id: window-max
+    selector: '[data-testid="window-max"]'
+    kind: interactive
+  - id: window-close
+    selector: '[data-testid="window-close"]'
+    kind: interactive
 -->
 
 - 取消原生 decorations，前端自绘 `AppTitleBar` + `WindowControls`（最小化 / 最大化 / 关闭）
@@ -61,7 +100,19 @@ status: done
 area: main/window
 components: [CompactTitleBar]
 files:
-  - src/components/window/CompactTitleBar.tsx
+  - src/components/tabbar/CompactTitleBar.tsx
+controls:
+  - id: titlebar
+    selector: '[data-testid="compact-titlebar"]'
+    kind: display
+  - id: main-menu
+    selector: '[data-testid="compact-main-menu"]'
+    kind: interactive
+  - id: sidebar-drawer-toggle
+    selector: '[data-testid="compact-sidebar-drawer-toggle"]'
+    kind: interactive
+    aliases:
+      - '[aria-label="Show sessions drawer"]'
 -->
 
 - 默认布局 vs 紧凑布局可一键切换，状态持久化到 `localStorage` (`newmob.compactMode`)
@@ -78,6 +129,25 @@ area: main/tabs
 components: [TabBar]
 files:
   - src/components/tabbar/TabBar.tsx
+controls:
+  - id: tab-bar
+    selector: '[data-testid="tab-bar"]'
+    kind: display
+  - id: tab-item               # individual tab; pair with [data-tab-type=...] / [data-tab-title=...] when targeting
+    selector: '[data-testid="tab-item"]'
+    kind: interactive
+  - id: new-local-terminal     # the "+" plus tab button
+    selector: '[data-testid="new-local-terminal"]'
+    kind: interactive
+  - id: split-view             # currently always-disabled
+    selector: '[data-testid="tab-split-view"]'
+    kind: interactive
+  - id: multiexec-toggle
+    selector: '[data-testid="tab-multiexec-toggle"]'
+    kind: interactive
+  - id: tabs-more
+    selector: '[data-testid="tab-more"]'
+    kind: interactive
 -->
 
 - 多标签：本地终端 / SSH 终端 / SFTP / VNC / 设置 / 隧道管理 / Welcome / 占位标签
@@ -95,6 +165,51 @@ area: main/welcome
 components: [WelcomePanel]
 files:
   - src/components/WelcomePanel.tsx
+controls:
+  - id: panel-root
+    selector: '[data-testid="welcome-panel"]'
+    kind: display
+  - id: open-local-terminal
+    selector: '[data-testid="welcome-open-local-terminal"]'
+    kind: interactive
+  - id: shell-select
+    selector: 'select[aria-label="Terminal shell"]'
+    kind: interactive
+    optional: true       # only rendered when >1 local shell detected
+  - id: open-home-folder
+    selector: '[data-testid="welcome-open-home-folder"]'
+    kind: interactive
+    optional: true       # only rendered when onOpenLocalPath prop is set
+  - id: open-as-administrator
+    selector: 'button[aria-label="Open as administrator"]'
+    kind: interactive
+    optional: true       # only rendered when selected shell canElevate
+  - id: new-session-card
+    selector: 'text="New session…"'
+    kind: interactive
+  - id: import-openssh-card
+    selector: 'text="Import OpenSSH config"'
+    kind: interactive
+  - id: refresh-sessions-card
+    selector: 'text="Refresh sessions"'
+    kind: interactive
+  - id: tips-section
+    selector: 'text="Tips"'
+    kind: display
+  - id: active-connections-list
+    selector: 'text="Active connections"'
+    kind: display
+    aliases:
+      - 'text="No active terminal tabs."'   # empty-state copy used by tests as a proxy for the list
+  - id: last-events-list
+    selector: 'text="Last events"'
+    kind: display
+  - id: version-header
+    selector: '[data-testid="welcome-version"]'
+    kind: display
+  - id: version-footer
+    selector: '[data-testid="welcome-version-footer"]'
+    kind: display
 -->
 
 - 启动入口：开始本地终端、新建会话、导入 OpenSSH config
@@ -109,6 +224,10 @@ area: main/statusbar
 components: [StatusBar]
 files:
   - src/components/statusbar/StatusBar.tsx
+controls:
+  - id: status-bar
+    selector: '[data-testid="status-bar"]'
+    kind: display
 -->
 
 - 显示活跃连接数
@@ -119,6 +238,63 @@ files:
 - Help 菜单入口
 - 展示应用图标、`Version` 字段（来自 `__APP_VERSION__` 注入的 `package.json` 版本号）
 - Esc / 点击遮罩 / Close 按钮均可关闭
+
+### 1.8 主菜单栏 `MenuBar` ✅
+
+<!-- feature
+id: F1.8
+status: done
+area: main/menubar
+components: [MenuBar]
+files:
+  - src/components/menubar/MenuBar.tsx
+controls:
+  - id: menu-bar
+    selector: '[data-testid="menu-bar"]'
+    kind: display
+-->
+
+- 顶级菜单：Terminal / Sessions / View / X server / Tools / Games / Settings / Macros / Help
+- 下拉项调用 ribbon 命令或在新标签内打开会话
+- 右键菜单兜底已被 ContextMenu 通用化
+
+### 1.9 Ribbon 命令条 `Ribbon` ✅
+
+<!-- feature
+id: F1.9
+status: done
+area: main/ribbon
+components: [Ribbon]
+files:
+  - src/components/menubar/Ribbon.tsx
+controls:
+  - id: ribbon
+    selector: '[data-testid="ribbon"]'
+    kind: display
+  - id: ribbon-session
+    selector: '[data-testid="ribbon-session"]'
+    kind: interactive
+  - id: ribbon-sftp
+    selector: '[data-testid="ribbon-sftp"]'
+    kind: interactive
+  - id: ribbon-settings
+    selector: '[data-testid="ribbon-settings"]'
+    kind: interactive
+  - id: ribbon-tunneling
+    selector: '[data-testid="ribbon-tunneling"]'
+    kind: interactive
+  - id: ribbon-multiexec
+    selector: '[data-testid="ribbon-multiexec"]'
+    kind: interactive
+    optional: true
+  - id: ribbon-commands
+    selector: '[data-testid="ribbon-commands"]'
+    kind: interactive
+    optional: true
+-->
+
+- 大图标命令：Session / SFTP / Servers / Tools / Games / Sessions / View / Split / MultiExec / Tunneling / Packages / Settings / Help
+- 每条命令通过 `data-testid={`ribbon-${slug(label)}`}` 暴露稳定锚点
 
 ---
 
@@ -133,6 +309,7 @@ area: terminal/local
 components: [TerminalPanel]
 files:
   - src-tauri/src/terminal/
+controls: []   # backend-only — PTY runtime has no UI surface; the terminal pane is owned by F2.2
 -->
 
 - Rust 端基于 `portable-pty` 创建 PTY（Linux/macOS/Windows）
@@ -150,6 +327,20 @@ area: terminal/local
 components: [TerminalPanel]
 files:
   - src/components/terminal/TerminalPanel.tsx
+  - src/components/ContextMenu.tsx
+controls:
+  - id: terminal-pane
+    selector: '[data-testid="terminal-pane"]'
+    kind: interactive       # type / send_keys go here
+  - id: attached-sftp-toggle
+    selector: '[data-testid="attached-sftp-toggle"]'
+    kind: interactive
+    optional: true          # only on SSH-backed terminals
+  # Shared right-click menu surface (rendered by ContextMenu)
+  - id: context-menu
+    selector: '[data-testid="context-menu"]'
+    kind: display
+    optional: true          # only after right_click
 -->
 
 - xterm.js + FitAddon + WebglAddon（失败回退 canvas）+ SearchAddon + WebLinksAddon
@@ -171,8 +362,8 @@ id: F2.4
 status: done
 area: terminal/local
 components: [WelcomePanel]
-files:
-  - src/components/WelcomePanel.tsx
+files: []     # WelcomePanel UI is owned by F1.6; F2.4 is the logical concern (which shells get listed) and has no dedicated source surface
+controls: []
 -->
 
 - `list_local_shells` 列出系统 shell
@@ -196,6 +387,7 @@ area: terminal/ssh
 components: [TerminalPanel]
 files:
   - src-tauri/src/terminal/
+controls: []   # backend-only — russh client + IPC lives in src-tauri; the terminal pane belongs to F2.2
 -->
 
 - `create_ssh_terminal` / `test_ssh_connection` / `send_terminal_signal`
@@ -213,6 +405,7 @@ area: terminal/ssh
 files:
   - src-tauri/src/terminal/forwards.rs
   - src-tauri/src/terminal/network.rs
+controls: []   # backend-only — ProxyJump / agent forwarding / keepalive run in Rust; user-facing toggles live in the SessionEditor (F6.3)
 -->
 
 - ProxyJump（跳板机）：`forwards.rs` 实现 direct-tcpip 链路
@@ -230,6 +423,7 @@ status: done
 area: terminal/ssh
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls: []   # OSC 7 is an in-pty protocol; the terminal pane surface is owned by F2.2
 -->
 
 - 终端解析 `\e]7;file://host/path\e\` 序列
@@ -254,6 +448,43 @@ status: done
 area: terminal/right-menu
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls:
+  # Right-click menu items (text-based — ContextMenu generates testids dynamically by label slug)
+  - id: copy
+    selector: 'text="Copy"'
+    kind: interactive
+    optional: true            # only after right_click on terminal
+  - id: copy-all
+    selector: 'text="Copy All"'
+    kind: interactive
+    optional: true
+  - id: copy-formatted
+    selector: 'text="Copy formatted text (HTML/RTF)"'
+    kind: interactive
+    optional: true
+  - id: paste
+    selector: 'text="Paste"'
+    kind: interactive
+    optional: true
+  - id: find
+    selector: 'text="Find"'
+    kind: interactive
+    optional: true
+    aliases:
+      - '[data-testid="context-menu-item-find"]'
+  # Find dialog spawned by Ctrl+Shift+F or "Find" menu item
+  - id: find-input
+    selector: 'input[placeholder="Find"]'
+    kind: interactive
+    optional: true
+  - id: find-match-info
+    selector: 'span:has-text("Match")'
+    kind: display
+    optional: true
+  - id: find-close
+    selector: 'role=button[name="Close"]'
+    kind: interactive
+    optional: true
 -->
 
 - Copy / Copy All / Paste / Paste with Shift+Insert
@@ -271,6 +502,31 @@ status: done
 area: terminal/right-menu
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls:
+  - id: font-settings
+    selector: 'text="Font settings"'
+    kind: interactive
+    optional: true
+  - id: font-ligatures-toggle
+    selector: 'input[aria-label="Enable font ligatures"]'
+    kind: interactive
+    optional: true
+  - id: terminal-display
+    selector: 'text="Terminal display"'
+    kind: interactive
+    optional: true
+  - id: read-only-toggle
+    selector: 'text="Read-only terminal"'
+    kind: interactive
+    optional: true
+  - id: scrollbar-toggle
+    selector: 'text="Toggle terminal scrollbar"'
+    kind: interactive
+    optional: true
+  - id: fullscreen-toggle
+    selector: 'text="Fullscreen terminal"'
+    kind: interactive
+    optional: true
 -->
 
 - 字体设置子菜单：切换字体家族、显示字体连字、字号增大/减小/重置
@@ -285,6 +541,19 @@ status: done
 area: terminal/right-menu
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls:
+  - id: syntax-highlighting
+    selector: 'text="Syntax highlighting"'
+    kind: interactive
+    optional: true
+  - id: syntax-default
+    selector: 'text="Default"'
+    kind: interactive
+    optional: true
+  - id: syntax-keywords
+    selector: 'text="Error/Warning/Success keywords"'
+    kind: interactive
+    optional: true
 -->
 
 - Default / Error-Warning-Success keywords / Unix shell / Cisco / Perl / SQL
@@ -298,6 +567,15 @@ status: done
 area: terminal/right-menu
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls:
+  - id: record-macro
+    selector: 'text="Record new macro"'
+    kind: interactive
+    optional: true
+  - id: stop-macro
+    selector: 'text="Stop macro recording"'
+    kind: interactive
+    optional: true
 -->
 
 - 录制新宏、执行宏（Ctrl+Space）
@@ -310,6 +588,19 @@ status: done
 area: terminal/right-menu
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls:
+  - id: save-to-file
+    selector: 'text="Save to file"'
+    kind: interactive
+    optional: true
+  - id: start-output-record
+    selector: 'text="Record terminal output to file"'
+    kind: interactive
+    optional: true
+  - id: stop-output-record
+    selector: 'text="Stop recording terminal output"'
+    kind: interactive
+    optional: true
 -->
 
 - Save to file（Ctrl+Shift+S）：浏览器下载导出当前 buffer
@@ -327,6 +618,13 @@ status: partial
 area: terminal/right-menu
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls:
+  - id: event-log-menu-item
+    selector: '[data-testid="context-menu-item-event-log"]'
+    kind: interactive
+    optional: true
+    aliases:
+      - 'text="Event Log"'
 -->
 
 - 已记录：connect / auth / resize / disconnect / error / 导出 / 日志 / 宏 / 信号
@@ -340,6 +638,7 @@ status: done
 area: terminal/right-menu
 files:
   - src/components/terminal/TerminalPanel.tsx
+controls: []   # F4.8 covers OS-level keyboard shortcuts (Ctrl+0 / F11 / Ctrl+Shift+F / etc.) — exercised via `press` verb against [data-testid="terminal-pane"] (F2.2). No dedicated DOM surface.
 -->
 
 - Shift+Insert 粘贴、Ctrl+Shift+F 查找、F11 全屏、Ctrl+0 重置字号、Ctrl+滚轮缩放字号
@@ -360,6 +659,23 @@ components: [TerminalPanel, ZmodemConflictDialog]
 files:
   - src/lib/zmodem.ts
   - src/components/terminal/ZmodemConflictDialog.tsx
+controls:
+  - id: dialog
+    selector: '[data-testid="zmodem-conflict"]'
+    kind: display
+    optional: true       # only when a name conflict surfaces during rz/sz
+  - id: overwrite
+    selector: '[data-testid="zmodem-overwrite"]'
+    kind: interactive
+    optional: true
+  - id: rename
+    selector: '[data-testid="zmodem-rename"]'
+    kind: interactive
+    optional: true
+  - id: skip
+    selector: '[data-testid="zmodem-skip"]'
+    kind: interactive
+    optional: true
 -->
 
 - 基于 `zmodem.js` 的 `Sentry` 实现协议检测，所有终端输出字节流经 `ZmodemSession.consume()` 透明路由
@@ -384,6 +700,15 @@ area: terminal/multiexec
 components: [MultiExecBar]
 files:
   - src/components/terminal/MultiExecBar.tsx
+controls:
+  - id: bar
+    selector: '[data-testid="multiexec-bar"]'
+    kind: display
+    optional: true       # only when MultiExec is active
+  - id: input
+    selector: '[data-testid="multiexec-input"]'
+    kind: interactive
+    optional: true
 -->
 
 - Ribbon 入口 + 全局 `Ctrl+Alt+M` 切换
@@ -400,6 +725,19 @@ area: terminal/palette
 components: [CommonCommandsPalette]
 files:
   - src/components/terminal/CommonCommandsPalette.tsx
+controls:
+  - id: palette
+    selector: '[data-testid="commands-palette"]'
+    kind: display
+    optional: true       # only when palette is open
+  - id: search
+    selector: '[data-testid="commands-search"]'
+    kind: interactive
+    optional: true
+  - id: list
+    selector: '[data-testid="commands-list"]'
+    kind: display
+    optional: true
 -->
 
 - 本地终端中通过快捷键调出 `CommonCommandsPalette`
@@ -416,6 +754,41 @@ components: [CaptureToolbar, FloatingToolbar]
 files:
   - src/components/capture/CaptureToolbar.tsx
   - src/lib/capture/
+controls:
+  - id: toolbar-root
+    selector: '[data-testid="capture-toolbar"]'
+    kind: display
+  - id: capture-menu
+    selector: '[data-testid="capture-menu"]'
+    kind: interactive
+  - id: save-visible
+    selector: '[data-testid="capture-save-visible"]'
+    kind: interactive
+    optional: true       # only renders when menu is open
+  - id: copy-clipboard
+    selector: '[data-testid="capture-copy-clipboard"]'
+    kind: interactive
+    optional: true
+  - id: save-full
+    selector: '[data-testid="capture-save-full"]'
+    kind: interactive
+    optional: true       # menu open AND host provides getFull
+  - id: toggle-scroll
+    selector: '[data-testid="capture-toggle-scroll"]'
+    kind: interactive
+    optional: true       # menu open AND host provides getScrollFrame
+  - id: toggle-gif
+    selector: '[data-testid="capture-toggle-gif"]'
+    kind: interactive
+    optional: true       # menu open AND host provides getGifFrame
+  - id: stop-scroll-pill   # active-capture pill, only while scroll-capturing
+    selector: '[data-testid="capture-stop-scroll"]'
+    kind: interactive
+    optional: true
+  - id: stop-gif-pill      # active-capture pill, only while recording
+    selector: '[data-testid="capture-stop-gif"]'
+    kind: interactive
+    optional: true
 -->
 
 - 终端面板内嵌 `CaptureToolbar`（通过 `FloatingToolbar` 浮窗承载，可拖拽 / 折叠 / 位置持久化）
@@ -441,7 +814,33 @@ status: done
 area: terminal/appearance
 components: [TerminalAppearanceSettings]
 files:
-  - src/components/settings/TerminalAppearanceSettings.tsx
+  - src/components/terminal/TerminalAppearanceSettings.tsx
+controls:
+  - id: appearance-root
+    selector: '[data-testid="terminal-appearance-settings"]'
+    kind: display
+  - id: theme-gallery
+    selector: '[data-testid="terminal-theme-gallery"]'
+    kind: display
+  - id: preview
+    selector: '[data-testid="terminal-preview"]'
+    kind: display
+  - id: preview-cursor
+    selector: '[data-testid="terminal-preview-cursor"]'
+    kind: display
+  # Settings inputs (aria-label fallback — promote to testids when these labels change)
+  - id: font-size
+    selector: 'input[aria-label="Terminal font size"]'
+    kind: interactive
+  - id: scrollback
+    selector: 'input[aria-label="Scrollback lines"]'
+    kind: interactive
+  - id: cursor-style
+    selector: 'select[aria-label="Terminal cursor"]'
+    kind: interactive
+  - id: right-click-behavior
+    selector: 'select[aria-label="Right click behavior"]'
+    kind: interactive
 -->
 
 - 多套预置主题，带可视化预览
@@ -469,6 +868,26 @@ area: main/theme
 files:
   - src/lib/appTheme.ts
   - src/components/settings/AppThemeSwitcher.tsx
+controls:
+  # Title-bar quick-cycle theme button is owned by F1.3 (theme-cycle).
+  # F5.5 owns the in-Settings switcher: 3-button group + compact <select> + standalone icon button.
+  - id: theme-light
+    selector: '[data-testid="app-theme-light"]'
+    kind: interactive
+  - id: theme-dark
+    selector: '[data-testid="app-theme-dark"]'
+    kind: interactive
+  - id: theme-system
+    selector: '[data-testid="app-theme-system"]'
+    kind: interactive
+  - id: theme-compact-select
+    selector: 'select[aria-label="Application theme"]'
+    kind: interactive
+    optional: true       # only renders in compact mode of AppThemeSwitcher
+  - id: theme-icon-button
+    selector: 'button[aria-label="Cycle application theme"]'
+    kind: interactive
+    optional: true       # AppThemeIconButton — currently unused outside the title-bar tray
 -->
 
 - `localStorage` key `newmob.appTheme.v1`
@@ -490,6 +909,7 @@ area: sessions/persistence
 files:
   - src-tauri/src/session/
   - src/stubs/tauri-core.ts
+controls: []   # backend-only — SQLite persistence + dev-mode IPC stubs; sidebar/editor surfaces belong to F6.2 / F6.3
 -->
 
 - 表：`sessions` + `session_groups`
@@ -506,6 +926,32 @@ area: sessions
 components: [SessionTree, Sidebar]
 files:
   - src/components/sidebar/SessionTree.tsx
+  - src/components/sidebar/Sidebar.tsx
+controls:
+  - id: sidebar
+    selector: '[data-testid="sidebar"]'
+    kind: display
+  - id: session-tree
+    selector: '[data-testid="session-tree"]'
+    kind: display
+  - id: session-tree-item       # individual row; pair with [data-session-name=...] / [data-session-type=...]
+    selector: '[data-testid="session-tree-item"]'
+    kind: interactive
+  - id: session-search
+    selector: '[data-testid="session-search"]'
+    kind: interactive
+  - id: session-new
+    selector: '[data-testid="session-new"]'
+    kind: interactive
+  - id: session-edit
+    selector: '[data-testid="session-edit"]'
+    kind: interactive
+  - id: session-duplicate
+    selector: '[data-testid="session-duplicate"]'
+    kind: interactive
+  - id: session-delete
+    selector: '[data-testid="session-delete"]'
+    kind: interactive
 -->
 
 - 分组树（展开 / 折叠 / 拖拽到分组）
@@ -523,6 +969,155 @@ area: sessions
 components: [SessionEditor]
 files:
   - src/components/session/SessionEditor.tsx
+controls:
+  # Dialog frame
+  - id: editor
+    selector: '[data-testid="session-editor"]'
+    kind: display
+  # Protocol selectors (dynamic: session-proto-${id.toLowerCase()})
+  - id: proto-ssh
+    selector: '[data-testid="session-proto-ssh"]'
+    kind: interactive
+  - id: proto-sftp
+    selector: '[data-testid="session-proto-sftp"]'
+    kind: interactive
+  - id: proto-rdp
+    selector: '[data-testid="session-proto-rdp"]'
+    kind: interactive
+  - id: proto-vnc
+    selector: '[data-testid="session-proto-vnc"]'
+    kind: interactive
+  - id: proto-telnet
+    selector: '[data-testid="session-proto-telnet"]'
+    kind: interactive
+    optional: true        # placeholder protocols may be hidden in some builds
+  - id: proto-mosh
+    selector: '[data-testid="session-proto-mosh"]'
+    kind: interactive
+    optional: true
+  - id: proto-localshell
+    selector: '[data-testid="session-proto-localshell"]'
+    kind: interactive
+    optional: true
+  - id: proto-file-browser
+    selector: '[data-testid="session-proto-file-browser"]'
+    kind: interactive
+    optional: true
+  # Top-level connection fields (visible when SSH/SFTP/VNC/RDP)
+  - id: host
+    selector: '[data-testid="session-host"]'
+    kind: interactive
+  - id: user
+    selector: '[data-testid="session-user"]'
+    kind: interactive
+  - id: port
+    selector: '[data-testid="session-port"]'
+    kind: interactive
+  - id: name
+    selector: '[data-testid="session-name"]'
+    kind: interactive
+  - id: file-target
+    selector: '[data-testid="session-file-target"]'
+    kind: interactive
+    optional: true        # only visible for file-browser proto
+  # Section tabs (dynamic: session-section-${t.id})
+  - id: section-bookmark
+    selector: '[data-testid="session-section-bookmark"]'
+    kind: interactive
+  - id: section-advanced
+    selector: '[data-testid="session-section-advanced"]'
+    kind: interactive
+  - id: section-terminal
+    selector: '[data-testid="session-section-terminal"]'
+    kind: interactive
+  - id: section-network
+    selector: '[data-testid="session-section-network"]'
+    kind: interactive
+  # Section bodies
+  - id: advanced-body
+    selector: '[data-testid="advanced-ssh-settings"]'
+    kind: display
+  - id: terminal-body
+    selector: '[data-testid="terminal-settings"]'
+    kind: display
+  - id: network-body
+    selector: '[data-testid="network-settings"]'
+    kind: display
+  - id: bookmark-body
+    selector: '[data-testid="bookmark-settings"]'
+    kind: display
+  # Advanced SSH inputs (aria-label fallback — selectors will fail when label text changes; promote to testids later)
+  - id: advanced-execute-command
+    selector: 'input[aria-label="Execute command"]'
+    kind: interactive
+  - id: advanced-ssh-password
+    selector: 'input[aria-label="SSH password"]'
+    kind: interactive
+    optional: true        # only when authMethod=Password
+  - id: advanced-private-key
+    selector: 'input[aria-label="Private key path"]'
+    kind: interactive
+    optional: true        # only when authMethod=PrivateKey
+  - id: advanced-jump-host
+    selector: 'input[aria-label="Jump host"]'
+    kind: interactive
+    optional: true
+  - id: advanced-jump-user
+    selector: 'input[aria-label="Jump user"]'
+    kind: interactive
+    optional: true
+  - id: advanced-jump-port
+    selector: 'input[aria-label="Jump port"]'
+    kind: interactive
+    optional: true
+  # Network inputs
+  - id: network-proxy-host
+    selector: 'input[aria-label="Proxy host"]'
+    kind: interactive
+  - id: network-proxy-port
+    selector: 'input[aria-label="Proxy port"]'
+    kind: interactive
+  - id: network-proxy-user
+    selector: 'input[aria-label="Proxy username"]'
+    kind: interactive
+  - id: network-proxy-password
+    selector: 'input[aria-label="Proxy password"]'
+    kind: interactive
+  - id: network-keepalive
+    selector: 'input[aria-label="Keep-alive interval"]'
+    kind: interactive
+  - id: network-new-forward-local
+    selector: 'input[aria-label="New forward local address"]'
+    kind: interactive
+  - id: network-new-forward-remote
+    selector: 'input[aria-label="New forward remote address"]'
+    kind: interactive
+  - id: network-new-forward-desc
+    selector: 'input[aria-label="New forward description"]'
+    kind: interactive
+  # Bookmark inputs
+  - id: bookmark-background
+    selector: 'input[aria-label="Background image"]'
+    kind: interactive
+  - id: bookmark-bg-opacity
+    selector: 'input[aria-label="Background opacity"]'
+    kind: interactive
+  - id: bookmark-description
+    selector: 'textarea[aria-label="Description notes"]'
+    kind: interactive
+  - id: bookmark-tags
+    selector: 'input[aria-label="Tags"]'
+    kind: interactive
+  - id: bookmark-extra-params
+    selector: 'input[aria-label="Additional parameters"]'
+    kind: interactive
+  - id: bookmark-shortcut
+    selector: 'input[aria-label="Keyboard shortcut"]'
+    kind: interactive
+  # Footer
+  - id: save
+    selector: '[data-testid="session-save"]'
+    kind: interactive
 -->
 
 - 协议选择：SSH、SFTP、RDP、VNC（SSH/SFTP 已实装；VNC 为基础 client 支持；RDP 仍占位）
@@ -543,6 +1138,32 @@ area: sessions
 components: [QuickConnect]
 files:
   - src/components/quickconnect/QuickConnect.tsx
+controls:
+  - id: bar-root
+    selector: '[data-testid="quick-connect"]'
+    kind: display
+  - id: input
+    selector: '[data-testid="qc-input"]'
+    kind: interactive
+  - id: submit
+    selector: '[data-testid="qc-submit"]'
+    kind: interactive
+  - id: back
+    selector: '[data-testid="qc-back"]'
+    kind: interactive
+  - id: forward
+    selector: '[data-testid="qc-forward"]'
+    kind: interactive
+  - id: home
+    selector: '[data-testid="qc-home"]'
+    kind: interactive
+  - id: recent-button         # one of N rendered for each recent session
+    selector: '[data-testid="qc-recent"]'
+    kind: interactive
+    optional: true            # only when there's at least one recent session
+  - id: refresh
+    selector: '[data-testid="qc-refresh"]'
+    kind: interactive
 -->
 
 - 地址栏式输入：`ssh://user@host:port`、`ssh user@host:port`
@@ -557,7 +1178,23 @@ status: done
 area: sessions
 components: [AuthPrompt]
 files:
-  - src/components/AuthPrompt.tsx
+  - src/components/session/AuthPrompt.tsx
+controls:
+  - id: prompt
+    selector: '[data-testid="auth-prompt"]'
+    kind: display
+  - id: password
+    selector: '[data-testid="auth-password"]'
+    kind: interactive
+  - id: submit
+    selector: '[data-testid="auth-submit"]'
+    kind: interactive
+  - id: cancel
+    selector: '[data-testid="auth-cancel"]'
+    kind: interactive
+  - id: close
+    selector: '[data-testid="auth-close"]'
+    kind: interactive
 -->
 
 - 密码输入弹窗
@@ -571,7 +1208,7 @@ status: done
 area: sessions/import
 files:
   - src/lib/sessionImportExport.ts
-  - src/components/WelcomePanel.tsx
+controls: []   # UI entry is F1.6's `import-openssh-card`; this feature is the import library logic only
 -->
 
 - 解析 `~/.ssh/config` 并批量导入会话
@@ -592,6 +1229,7 @@ status: done
 area: sftp
 files:
   - src-tauri/src/filebrowser/
+controls: []   # backend-only — russh-sftp protocol layer; the dual-pane UI is owned by F7.2
 -->
 
 - 命令：
@@ -614,6 +1252,49 @@ area: sftp
 components: [FileBrowser, FilePanel]
 files:
   - src/components/filebrowser/FileBrowser.tsx
+  - src/components/filebrowser/FilePanel.tsx
+  - src/components/filebrowser/PathBreadcrumb.tsx
+controls:
+  - id: panel-root
+    selector: '[data-testid="sftp-browser"]'
+    kind: display
+  - id: local-pane
+    selector: '[data-testid="sftp-local-pane"]'
+    kind: display
+  - id: remote-pane
+    selector: '[data-testid="sftp-remote-pane"]'
+    kind: display
+  - id: local-list
+    selector: '[data-testid="sftp-local-list"]'
+    kind: display
+  - id: remote-list
+    selector: '[data-testid="sftp-remote-list"]'
+    kind: display
+  - id: col-header-name
+    selector: '[data-testid="col-header-name"]'
+    kind: interactive       # click to sort
+  - id: col-header-size
+    selector: '[data-testid="col-header-size"]'
+    kind: interactive
+  - id: col-header-type
+    selector: '[data-testid="col-header-type"]'
+    kind: interactive
+  - id: col-header-modified
+    selector: '[data-testid="col-header-modified"]'
+    kind: interactive
+  - id: col-resize-name
+    selector: '[data-testid="col-resize-name"]'
+    kind: interactive       # drag handle
+  - id: col-resize-size
+    selector: '[data-testid="col-resize-size"]'
+    kind: interactive
+  - id: col-resize-modified
+    selector: '[data-testid="col-resize-modified"]'
+    kind: interactive
+  - id: breadcrumb-drives-root
+    selector: '[data-testid="breadcrumb-drives-root"]'
+    kind: interactive
+    optional: true          # Windows-only drives breadcrumb
 -->
 
 - 远程面板 + 本地面板（左右或上下，可切换 orientation）
@@ -632,7 +1313,11 @@ id: F7.3
 status: done
 area: sftp
 files:
-  - src/components/filebrowser/FileBrowser.tsx
+  - src/components/filebrowser/FileTransferQueue.tsx
+controls:
+  - id: queue-root
+    selector: '[data-testid="sftp-transfer-queue"]'
+    kind: display
 -->
 
 - 状态：进度条、速度、ETA、状态徽章
@@ -652,6 +1337,28 @@ status: done
 area: sftp
 files:
   - src/components/filebrowser/FileBrowser.tsx
+  - src/components/filebrowser/FileToolbar.tsx
+  - src/components/filebrowser/SftpDetachedWindow.tsx
+controls:
+  - id: detach
+    selector: '[data-testid="sftp-detach"]'
+    kind: interactive
+    optional: true       # only when host wires onDetach
+  - id: close
+    selector: '[data-testid="sftp-close"]'
+    kind: interactive
+    optional: true       # only when host wires onClose (attached sidebar)
+  - id: orientation-toggle
+    selector: '[data-testid="sftp-orientation-toggle"]'
+    kind: interactive
+  - id: local-detach           # toolbar detach (FileToolbar testId={`sftp-${side}-detach`})
+    selector: '[data-testid="sftp-local-detach"]'
+    kind: interactive
+    optional: true
+  - id: remote-detach
+    selector: '[data-testid="sftp-remote-detach"]'
+    kind: interactive
+    optional: true
 -->
 
 - **附加侧边栏**：每个 SSH 终端右上角 `attached-sftp-toggle`，与终端共用凭证；远程面板首次跟随 OSC 7 跳转一次，工具条 Sync 按钮可手动重跳
@@ -670,7 +1377,112 @@ id: F7.5
 status: done
 area: sftp
 files:
-  - src/components/filebrowser/FileBrowser.tsx
+  - src/components/filebrowser/FileToolbar.tsx
+  - src/components/filebrowser/FilePanel.tsx
+  - src/components/filebrowser/PathBreadcrumb.tsx
+  - src/components/filebrowser/ChmodDialog.tsx
+controls:
+  # path input + breadcrumb (FilePanel renders PathBreadcrumb with testId={`sftp-${side}-path`})
+  - id: local-path
+    selector: '[data-testid="sftp-local-path"]'
+    kind: interactive       # click to edit, Enter to navigate
+  - id: remote-path
+    selector: '[data-testid="sftp-remote-path"]'
+    kind: interactive
+  # toolbar — local side
+  - id: local-back
+    selector: '[data-testid="sftp-local-back"]'
+    kind: interactive
+  - id: local-forward
+    selector: '[data-testid="sftp-local-forward"]'
+    kind: interactive
+  - id: local-up
+    selector: '[data-testid="sftp-local-up"]'
+    kind: interactive
+  - id: local-refresh
+    selector: '[data-testid="sftp-local-refresh"]'
+    kind: interactive
+  - id: local-upload-selected
+    selector: '[data-testid="sftp-local-upload-selected"]'
+    kind: interactive
+    optional: true       # only when host wires onUploadSelected
+  - id: local-open-selected
+    selector: '[data-testid="sftp-local-open-selected"]'
+    kind: interactive
+    optional: true
+  - id: local-reveal-in-os
+    selector: '[data-testid="sftp-local-reveal-in-os"]'
+    kind: interactive
+    optional: true
+  - id: local-new-folder
+    selector: '[data-testid="sftp-local-new-folder"]'
+    kind: interactive
+  - id: local-new-file
+    selector: '[data-testid="sftp-local-new-file"]'
+    kind: interactive
+    optional: true
+  - id: local-delete
+    selector: '[data-testid="sftp-local-delete"]'
+    kind: interactive
+    optional: true
+  - id: local-chmod
+    selector: '[data-testid="sftp-local-chmod"]'
+    kind: interactive
+    optional: true
+  - id: local-preview
+    selector: '[data-testid="sftp-local-preview"]'
+    kind: interactive
+    optional: true
+  - id: local-toggle-hidden
+    selector: '[data-testid="sftp-local-toggle-hidden"]'
+    kind: interactive
+  # toolbar — remote side
+  - id: remote-back
+    selector: '[data-testid="sftp-remote-back"]'
+    kind: interactive
+  - id: remote-forward
+    selector: '[data-testid="sftp-remote-forward"]'
+    kind: interactive
+  - id: remote-up
+    selector: '[data-testid="sftp-remote-up"]'
+    kind: interactive
+  - id: remote-refresh
+    selector: '[data-testid="sftp-remote-refresh"]'
+    kind: interactive
+  - id: remote-download-selected
+    selector: '[data-testid="sftp-remote-download-selected"]'
+    kind: interactive
+    optional: true
+  - id: remote-upload-from-disk
+    selector: '[data-testid="sftp-remote-upload-from-disk"]'
+    kind: interactive
+    optional: true
+  - id: remote-new-folder
+    selector: '[data-testid="sftp-remote-new-folder"]'
+    kind: interactive
+  - id: remote-new-file
+    selector: '[data-testid="sftp-remote-new-file"]'
+    kind: interactive
+    optional: true
+  - id: remote-delete
+    selector: '[data-testid="sftp-remote-delete"]'
+    kind: interactive
+    optional: true
+  - id: remote-chmod
+    selector: '[data-testid="sftp-remote-chmod"]'
+    kind: interactive
+    optional: true
+  - id: remote-preview
+    selector: '[data-testid="sftp-remote-preview"]'
+    kind: interactive
+    optional: true
+  - id: remote-toggle-hidden
+    selector: '[data-testid="sftp-remote-toggle-hidden"]'
+    kind: interactive
+  - id: remote-open-terminal-here
+    selector: '[data-testid="sftp-remote-open-terminal-here"]'
+    kind: interactive
+    optional: true
 -->
 
 - 右键菜单：
@@ -711,6 +1523,65 @@ area: tunnel
 components: [TunnelManager]
 files:
   - src/components/tunnel/TunnelManager.tsx
+controls:
+  - id: panel-root
+    selector: '[data-testid="tunnel-manager"]'
+    kind: display
+  - id: tunnel-list
+    selector: '[data-testid="tunnel-list"]'
+    kind: display
+  # Footer: bulk actions
+  - id: new-tunnel
+    selector: '[data-testid="tunnel-new"]'
+    kind: interactive
+  - id: start-all
+    selector: '[data-testid="tunnel-start-all"]'
+    kind: interactive
+  - id: stop-all
+    selector: '[data-testid="tunnel-stop-all"]'
+    kind: interactive
+  - id: exit-button
+    selector: '[data-testid="tunnel-exit"]'
+    kind: interactive
+    optional: true       # only rendered when onClose prop is wired
+  # Per-row controls (matched by data-tunnel-id when targeting a specific tunnel)
+  - id: row
+    selector: '[data-testid="tunnel-row"]'
+    kind: display
+  - id: row-move-up
+    selector: '[data-testid="tunnel-row-move-up"]'
+    kind: interactive
+  - id: row-move-down
+    selector: '[data-testid="tunnel-row-move-down"]'
+    kind: interactive
+  - id: row-toggle           # central status-column start/stop button
+    selector: '[data-testid="tunnel-row-toggle"]'
+    kind: interactive
+  - id: row-toggle-reveal
+    selector: '[data-testid="tunnel-row-toggle-reveal"]'
+    kind: interactive
+  # Settings-column action icons (rendered via IconBtn — extractor missed them)
+  - id: row-edit
+    selector: '[data-testid="tunnel-row-edit"]'
+    kind: interactive
+  - id: row-edit-key
+    selector: '[data-testid="tunnel-row-edit-key"]'
+    kind: interactive
+  - id: row-test
+    selector: '[data-testid="tunnel-row-test"]'
+    kind: interactive
+  - id: row-clone
+    selector: '[data-testid="tunnel-row-clone"]'
+    kind: interactive
+  - id: row-autostart
+    selector: '[data-testid="tunnel-row-autostart"]'
+    kind: interactive
+  - id: row-delete
+    selector: '[data-testid="tunnel-row-delete"]'
+    kind: interactive
+  - id: row-power            # right-edge duplicate of row-toggle
+    selector: '[data-testid="tunnel-row-power"]'
+    kind: interactive
 -->
 
 - 列表展示：类型、状态徽章（运行/错误/停止）、本地端口 → 远程地址、关联会话、认证图标
@@ -730,6 +1601,7 @@ status: done
 area: vnc
 files:
   - src-tauri/src/vnc/
+controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas surface is owned by F9.6
 -->
 
 - Rust 端 VNC 模块：`src-tauri/src/vnc/{mod, rfb, ws, encodings, clipboard}.rs`
@@ -768,6 +1640,25 @@ area: vnc
 components: [VncPanel, FloatingToolbar, CaptureToolbar]
 files:
   - src/components/vnc/VncPanel.tsx
+controls:
+  - id: panel-root
+    selector: '[data-testid="vnc-panel"]'
+    kind: display
+  - id: canvas
+    selector: '[data-testid="vnc-canvas"]'
+    kind: interactive       # pointer / wheel / context-menu handlers attached
+  - id: floating-toolbar
+    selector: '[data-testid="vnc-floating-toolbar"]'
+    kind: display
+    optional: true          # only renders when canvas is showing (connected)
+  - id: scale-toggle
+    selector: '[data-testid="vnc-scale-toggle"]'
+    kind: interactive
+    optional: true          # inside the floating toolbar
+  - id: reconnect
+    selector: '[data-testid="vnc-reconnect"]'
+    kind: interactive
+    optional: true          # only on disconnected/error state
 -->
 
 - Canvas 画面渲染 + fit / 1:1 缩放
@@ -822,6 +1713,13 @@ area: settings
 components: [SettingsPanel]
 files:
   - src/components/settings/SettingsPanel.tsx
+controls:
+  - id: panel-root
+    selector: '[data-testid="settings-panel"]'
+    kind: display
+  - id: reset-terminal-profile
+    selector: '[data-testid="settings-reset-terminal-profile"]'
+    kind: interactive
 -->
 
 - Application Theme 切换（Light / Dark / Follow system）

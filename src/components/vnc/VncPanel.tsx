@@ -858,6 +858,7 @@ export default function VncPanel({
             compact
           />
           <button
+            data-testid="vnc-scale-toggle"
             onClick={() => setScaleMode((m) => (m === "fit" ? "one" : "fit"))}
             style={{
               background: "rgba(0,0,0,0.5)",
@@ -912,6 +913,7 @@ export default function VncPanel({
             <p>Disconnected{conn?.error ? `: ${conn.error}` : ""}</p>
           </div>
           <button
+            data-testid="vnc-reconnect"
             onClick={() => {
               // Cleanup old session
               const sid = sessionIdRef.current;

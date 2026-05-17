@@ -54,13 +54,13 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
         borderBottom: "1px solid var(--moba-divider)",
       }}
     >
-      <button className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Back" onClick={() => window.history.back()} type="button">
+      <button data-testid="qc-back" className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Back" onClick={() => window.history.back()} type="button">
         <ArrowLeft className="w-3.5 h-3.5" />
       </button>
-      <button className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Forward" onClick={() => window.history.forward()} type="button">
+      <button data-testid="qc-forward" className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Forward" onClick={() => window.history.forward()} type="button">
         <ArrowRight className="w-3.5 h-3.5" />
       </button>
-      <button className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Home" onClick={onHome} type="button">
+      <button data-testid="qc-home" className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded" title="Home" onClick={onHome} type="button">
         <Home className="w-3.5 h-3.5" />
       </button>
       <span className="moba-divider-v h-4 mx-1" />
@@ -84,6 +84,9 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
       ) : (
         recent.map((session) => (
           <button
+            data-testid="qc-recent"
+            data-session-id={session.id}
+            data-session-type={session.session_type}
             key={session.id}
             className="px-1.5 py-0.5 rounded hover:bg-[var(--moba-control-hover)] underline max-w-[110px] truncate"
             style={{ color: "var(--moba-link)" }}
@@ -96,6 +99,7 @@ export function QuickConnect({ onConnectInput, onConnectSession, onHome }: Quick
         ))
       )}
       <button
+        data-testid="qc-refresh"
         className="p-0.5 hover:bg-[var(--moba-control-hover)] rounded disabled:opacity-50"
         title={refreshing ? "Refreshing sessions..." : "Refresh sessions"}
         onClick={() => void refreshSessions()}

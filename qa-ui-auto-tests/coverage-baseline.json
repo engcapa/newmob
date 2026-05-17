@@ -1,0 +1,172 @@
+{
+  "version": 1,
+  "totals": {
+    "features_with_controls": 32,
+    "required": 151,
+    "covered_required": 91,
+    "shallow": 15,
+    "orphans": 106
+  },
+  "features": {
+    "F1.2": {
+      "required": 1,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F1.3": {
+      "required": 8,
+      "covered_required": 4,
+      "shallow": 4
+    },
+    "F1.4": {
+      "required": 3,
+      "covered_required": 2,
+      "shallow": 0
+    },
+    "F1.5": {
+      "required": 6,
+      "covered_required": 3,
+      "shallow": 0
+    },
+    "F1.6": {
+      "required": 10,
+      "covered_required": 7,
+      "shallow": 2
+    },
+    "F1.7": {
+      "required": 1,
+      "covered_required": 1,
+      "shallow": 0
+    },
+    "F1.8": {
+      "required": 1,
+      "covered_required": 1,
+      "shallow": 0
+    },
+    "F1.9": {
+      "required": 5,
+      "covered_required": 4,
+      "shallow": 1
+    },
+    "F2.2": {
+      "required": 1,
+      "covered_required": 1,
+      "shallow": 0
+    },
+    "F4.1": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 2
+    },
+    "F4.2": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 2
+    },
+    "F4.3": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F4.4": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F4.5": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 1
+    },
+    "F4.7": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F4.10": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F4.11": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 1
+    },
+    "F4.12": {
+      "required": 0,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F4.13": {
+      "required": 2,
+      "covered_required": 2,
+      "shallow": 0
+    },
+    "F5.2": {
+      "required": 8,
+      "covered_required": 8,
+      "shallow": 0
+    },
+    "F5.5": {
+      "required": 3,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F6.2": {
+      "required": 8,
+      "covered_required": 6,
+      "shallow": 2
+    },
+    "F6.3": {
+      "required": 33,
+      "covered_required": 24,
+      "shallow": 0
+    },
+    "F6.4": {
+      "required": 7,
+      "covered_required": 3,
+      "shallow": 0
+    },
+    "F6.5": {
+      "required": 5,
+      "covered_required": 3,
+      "shallow": 0
+    },
+    "F7.2": {
+      "required": 12,
+      "covered_required": 11,
+      "shallow": 0
+    },
+    "F7.3": {
+      "required": 1,
+      "covered_required": 1,
+      "shallow": 0
+    },
+    "F7.4": {
+      "required": 1,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F7.5": {
+      "required": 14,
+      "covered_required": 9,
+      "shallow": 0
+    },
+    "F8.2": {
+      "required": 17,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F9.6": {
+      "required": 2,
+      "covered_required": 0,
+      "shallow": 0
+    },
+    "F11.1": {
+      "required": 2,
+      "covered_required": 1,
+      "shallow": 0
+    }
+  }
+}

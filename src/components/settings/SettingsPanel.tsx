@@ -50,6 +50,7 @@ export function SettingsPanel() {
             <div className="text-[12px] text-[var(--moba-text-muted)]">Font and theme defaults</div>
           </div>
           <button
+            data-testid="settings-reset-terminal-profile"
             className="moba-btn ml-auto h-8 inline-flex items-center gap-1.5"
             type="button"
             onClick={() => setProfile(DEFAULT_TERMINAL_PROFILE)}

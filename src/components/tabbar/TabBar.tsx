@@ -157,8 +157,9 @@ export function TabBar() {
       <div className="flex items-center gap-1 pr-1 pb-0.5">
         {!compactMode && (
           <>
-            <IconBtn title="Split view is not active in this phase" icon={<SplitSquareVertical className="w-3.5 h-3.5" />} disabled />
+            <IconBtn testId="tab-split-view" title="Split view is not active in this phase" icon={<SplitSquareVertical className="w-3.5 h-3.5" />} disabled />
             <IconBtn
+              testId="tab-multiexec-toggle"
               title={multiExecActive ? "Disable MultiExec" : "Enable MultiExec"}
               icon={<Users className="w-3.5 h-3.5" />}
               onClick={toggleMultiExec}
@@ -166,7 +167,7 @@ export function TabBar() {
             />
           </>
         )}
-        <IconBtn title="More" icon={<MoreHorizontal className="w-3.5 h-3.5" />} onClick={handleMore} />
+        <IconBtn testId="tab-more" title="More" icon={<MoreHorizontal className="w-3.5 h-3.5" />} onClick={handleMore} />
       </div>
     </div>
   );
@@ -199,15 +200,18 @@ function IconBtn({
   onClick,
   disabled,
   active,
+  testId,
 }: {
   icon: React.ReactNode;
   title: string;
   onClick?: (event: React.MouseEvent) => void;
   disabled?: boolean;
   active?: boolean;
+  testId?: string;
 }) {
   return (
     <button
+      data-testid={testId}
       title={title}
       aria-label={title}
       data-active={active || undefined}

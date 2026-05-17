@@ -236,6 +236,7 @@ export function TunnelManager({ onStatusMessage, onClose }: Props) {
 
   return (
     <div
+      data-testid="tunnel-manager"
       className="w-full h-full flex flex-col"
       style={{ background: "var(--moba-bg)", color: "var(--moba-text)" }}
     >
@@ -273,7 +274,7 @@ export function TunnelManager({ onStatusMessage, onClose }: Props) {
           className="rounded border overflow-hidden"
           style={{ borderColor: "var(--moba-divider)", background: "var(--moba-panel-bg)" }}
         >
-          <table className="w-full text-[12px] border-collapse">
+          <table data-testid="tunnel-list" className="w-full text-[12px] border-collapse">
             <thead>
               <tr style={{ background: "var(--moba-quick-bg)", color: "var(--moba-text)" }}>
                 <Th>Order</Th>
@@ -342,10 +343,11 @@ export function TunnelManager({ onStatusMessage, onClose }: Props) {
         className="h-12 flex items-center px-3 gap-2 border-t shrink-0"
         style={{ background: "var(--moba-quick-bg)", borderColor: "var(--moba-divider)" }}
       >
-        <button type="button" className="moba-btn flex items-center gap-1.5" onClick={handleNew}>
+        <button data-testid="tunnel-new" type="button" className="moba-btn flex items-center gap-1.5" onClick={handleNew}>
           <Plus className="w-3.5 h-3.5" /> New SSH tunnel
         </button>
         <button
+          data-testid="tunnel-start-all"
           type="button"
           className="moba-btn flex items-center gap-1.5"
           onClick={handleStartAll}
@@ -354,6 +356,7 @@ export function TunnelManager({ onStatusMessage, onClose }: Props) {
           <Play className="w-3.5 h-3.5" style={{ color: "#1f7a4a" }} /> Start all tunnels
         </button>
         <button
+          data-testid="tunnel-stop-all"
           type="button"
           className="moba-btn flex items-center gap-1.5"
           onClick={handleStopAll}
@@ -363,6 +366,7 @@ export function TunnelManager({ onStatusMessage, onClose }: Props) {
         </button>
         {onClose && (
           <button
+            data-testid="tunnel-exit"
             type="button"
             className="moba-btn flex items-center gap-1.5"
             onClick={onClose}
@@ -491,12 +495,15 @@ function TunnelRow({
 
   return (
     <tr
+      data-testid="tunnel-row"
+      data-tunnel-id={tunnel.id}
       className="border-b"
       style={{ borderColor: "var(--moba-divider)" }}
     >
       <Td className="text-center">
         <div className="inline-flex items-center gap-0.5 text-[10px]" style={{ color: "var(--moba-text-muted)" }}>
           <button
+            data-testid="tunnel-row-move-up"
             type="button"
             className="px-1 hover:text-[var(--moba-accent)] disabled:opacity-30"
             title="Move up"
@@ -507,6 +514,7 @@ function TunnelRow({
           </button>
           <GripVertical className="w-3 h-3" />
           <button
+            data-testid="tunnel-row-move-down"
             type="button"
             className="px-1 hover:text-[var(--moba-accent)] disabled:opacity-30"
             title="Move down"
@@ -539,6 +547,7 @@ function TunnelRow({
       <Td className="text-center">
         <div className="flex items-center justify-center gap-1.5">
           <button
+            data-testid="tunnel-row-toggle"
             type="button"
             title={running ? "Stop" : "Start"}
             className="p-1 rounded hover:bg-[var(--moba-hover)]"
@@ -572,6 +581,7 @@ function TunnelRow({
             {authPreview}
           </span>
           <button
+            data-testid="tunnel-row-toggle-reveal"
             type="button"
             className="p-0.5 hover:text-[var(--moba-accent)]"
             title={revealAuth ? "Hide credentials" : "Show credentials"}
@@ -583,19 +593,20 @@ function TunnelRow({
       </Td>
       <Td className="text-center">
         <div className="flex items-center justify-center gap-1">
-          <IconBtn title="Edit" onClick={onEdit}>
+          <IconBtn testId="tunnel-row-edit" title="Edit" onClick={onEdit}>
             <Pencil className="w-3.5 h-3.5" style={{ color: "#2b5d8b" }} />
           </IconBtn>
-          <IconBtn title="Manage SSH key / credentials" onClick={onEditKey}>
+          <IconBtn testId="tunnel-row-edit-key" title="Manage SSH key / credentials" onClick={onEditKey}>
             <KeyIcon className="w-3.5 h-3.5" style={{ color: "#c97a23" }} />
           </IconBtn>
-          <IconBtn title="Test SSH connection" onClick={onTest}>
+          <IconBtn testId="tunnel-row-test" title="Test SSH connection" onClick={onTest}>
             <TestTube2 className="w-3.5 h-3.5" style={{ color: "#1e6db8" }} />
           </IconBtn>
-          <IconBtn title="Clone" onClick={onClone}>
+          <IconBtn testId="tunnel-row-clone" title="Clone" onClick={onClone}>
             <Copy className="w-3.5 h-3.5" style={{ color: "#7a3d9d" }} />
           </IconBtn>
           <IconBtn
+            testId="tunnel-row-autostart"
             title={tunnel.autostart ? "Auto-start enabled (click to disable)" : "Enable auto-start"}
             onClick={onToggleAutostart}
           >
@@ -604,10 +615,10 @@ function TunnelRow({
               style={{ color: tunnel.autostart ? "#c97a23" : "var(--moba-text-muted)" }}
             />
           </IconBtn>
-          <IconBtn title="Delete" onClick={onDelete}>
+          <IconBtn testId="tunnel-row-delete" title="Delete" onClick={onDelete}>
             <Trash2 className="w-3.5 h-3.5" style={{ color: "#b22222" }} />
           </IconBtn>
-          <IconBtn title={running ? "Stop" : "Start"} onClick={running ? onStop : onStart}>
+          <IconBtn testId="tunnel-row-power" title={running ? "Stop" : "Start"} onClick={running ? onStop : onStart}>
             <Power
               className="w-3.5 h-3.5"
               style={{ color: running ? "#1f7a4a" : "var(--moba-text-muted)" }}
@@ -631,13 +642,16 @@ function IconBtn({
   title,
   onClick,
   children,
+  testId,
 }: {
   title: string;
   onClick: () => void;
   children: React.ReactNode;
+  testId?: string;
 }) {
   return (
     <button
+      data-testid={testId}
       type="button"
       className="p-1 rounded hover:bg-[var(--moba-hover)]"
       title={title}

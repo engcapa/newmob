@@ -73,6 +73,15 @@ jobs:
         run: cp .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml qa-ui-auto.config.yaml
       - name: Lint testcases
         run: PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+      - name: Coverage gate (controls)
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.control_coverage \
+              --gate qa-ui-auto-tests/coverage-baseline.json
+      - name: testid-catalog up to date
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.gen_testid_catalog --check
       - name: Start Vite (background)
         run: |
           nohup pnpm dev > vite.log 2>&1 &
@@ -129,6 +138,17 @@ jobs:
         run: cp .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml qa-ui-auto.config.yaml
       - name: Lint testcases
         run: PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+      - name: Coverage gate (controls)
+        shell: bash
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.control_coverage \
+              --gate qa-ui-auto-tests/coverage-baseline.json
+      - name: testid-catalog up to date
+        shell: bash
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.gen_testid_catalog --check
       - name: Start Vite (background)
         run: |
           nohup pnpm dev > vite.log 2>&1 &
@@ -184,6 +204,17 @@ jobs:
         run: cp .agents/skills/qa-ui-auto/assets/qa-ui-auto.config.example.yaml qa-ui-auto.config.yaml
       - name: Lint testcases
         run: PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+      - name: Coverage gate (controls)
+        shell: bash
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.control_coverage \
+              --gate qa-ui-auto-tests/coverage-baseline.json
+      - name: testid-catalog up to date
+        shell: bash
+        run: |
+          PYTHONPATH=.agents/skills/qa-ui-auto/scripts \
+            python -m qa_ui_auto.gen_testid_catalog --check
       - name: Start Vite (background)
         run: |
           nohup pnpm dev > vite.log 2>&1 &
