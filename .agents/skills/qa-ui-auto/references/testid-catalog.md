@@ -235,6 +235,13 @@
 - `[data-testid="sftp-remote-preview"]` — interactive [optional] — F7.5.remote-preview
 - `[data-testid="sftp-remote-toggle-hidden"]` — interactive — F7.5.remote-toggle-hidden
 - `[data-testid="sftp-remote-open-terminal-here"]` — interactive [optional] — F7.5.remote-open-terminal-here
+- `[data-testid="context-menu-item-permissions"]` — interactive — F7.5.ctx-permissions
+  ↳ `text="Permissions…"` — alias
+- `[data-testid="context-menu-item-rename"]` — interactive — F7.5.ctx-rename
+  ↳ `text="Rename"` — alias
+- `[data-testid="context-menu-item-delete"]` — interactive [optional] — F7.5.ctx-delete
+- `[aria-label="Permissions"]` — display — F7.5.chmod-dialog
+- `role=button[name="Apply"]` — interactive — F7.5.chmod-apply
 
 ## terminal/appearance (F5.2)
 

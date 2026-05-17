@@ -1483,6 +1483,28 @@ controls:
     selector: '[data-testid="sftp-remote-open-terminal-here"]'
     kind: interactive
     optional: true
+  # Right-click context-menu items (rendered by the shared ContextMenu surface)
+  - id: ctx-permissions
+    selector: '[data-testid="context-menu-item-permissions"]'
+    kind: interactive
+    aliases:
+      - 'text="Permissions…"'
+  - id: ctx-rename
+    selector: '[data-testid="context-menu-item-rename"]'
+    kind: interactive
+    aliases:
+      - 'text="Rename"'
+  - id: ctx-delete
+    selector: '[data-testid="context-menu-item-delete"]'
+    kind: interactive
+    optional: true       # also reachable via toolbar; menu item only fires when right-click chooses it
+  # ChmodDialog (opened by ctx-permissions)
+  - id: chmod-dialog
+    selector: '[aria-label="Permissions"]'
+    kind: display
+  - id: chmod-apply
+    selector: 'role=button[name="Apply"]'
+    kind: interactive
 -->
 
 - 右键菜单：

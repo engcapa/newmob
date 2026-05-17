@@ -1,6 +1,6 @@
 id: TC-029
 title: SFTP browser orientation toggles between vertical and horizontal split
-covers: [F7.2]
+covers: [F7.2, F7.4]
 tags: [layout, legacy-imported, orientation, p1, sftp]
 modes: [browser]
 fixtures: [reset_db, ssh_required]
@@ -17,7 +17,7 @@ steps:
   - wait_for: "[data-testid=\"sftp-browser\"]"
   - assert_visible: "[data-testid=\"sftp-remote-pane\"]"
   - assert_visible: "[data-testid=\"sftp-local-pane\"]"
-  - click: '[data-testid="sftp-browser"] button[title*="orientation" i], [data-testid="sftp-browser"] button[title*="layout" i]'
+  - click: '[data-testid="sftp-orientation-toggle"]'
   - wait: 1
   - assert_visible: "[data-testid=\"sftp-remote-pane\"]"
   - assert_visible: "[data-testid=\"sftp-local-pane\"]"

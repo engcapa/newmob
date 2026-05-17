@@ -1,0 +1,50 @@
+id: TC-auto-F7-5
+title: SFTP local pane navigation toolbar exposes path / back / forward / up / refresh
+description: |
+  Auto-generated focused coverage for F7.5 (panel interactions). Existing
+  cases focus on the remote pane; this one drives the local pane's
+  navigation toolbar so each interactive testid is exercised at least
+  once. Opens an SFTP session, navigates the local pane up to its parent
+  via sftp-local-up, walks back / forward via the history buttons,
+  refreshes, and asserts the breadcrumb exposes the local-path testid.
+covers: [F7.5]
+tags: [auto-generated, smoke, p1, sftp, panel, needs-review]
+modes: [browser]
+fixtures: [reset_db, ssh_required]
+timeout_sec: 90
+steps:
+  - open: ${cfg.app.base_url}
+  - fill: {selector: '[data-testid="qc-input"]', value: 'ssh://${cfg.ssh.user}@${cfg.ssh.host}:${cfg.ssh.port}'}
+  - click: '[data-testid="qc-submit"]'
+  - wait_for: '[data-testid="auth-prompt"]'
+  - fill: {selector: '[data-testid="auth-password"]', value: '${env.QA_SSH_PASSWORD}'}
+  - click: '[data-testid="auth-submit"]'
+  - wait_for: '[data-testid="terminal-pane"]'
+  - wait: 2
+  - click: '[data-testid="attached-sftp-toggle"]'
+  - wait_for: '[data-testid="sftp-browser"]'
+
+  # Local pane is mounted with its toolbar
+  - assert_visible: '[data-testid="sftp-local-pane"]'
+  - assert_visible: '[data-testid="sftp-local-list"]'
+  - assert_visible: '[data-testid="sftp-local-refresh"]'
+
+  # Path breadcrumb is editable — click activates edit mode, Escape cancels
+  - click: '[data-testid="sftp-local-path"]'
+  - press: Escape
+  - wait: 0.3
+
+  # Walk Up to parent — establishes history; then Back/Forward
+  - click: '[data-testid="sftp-local-up"]'
+  - wait: 0.8
+  - click: '[data-testid="sftp-local-back"]'
+  - wait: 0.8
+  - click: '[data-testid="sftp-local-forward"]'
+  - wait: 0.8
+
+  # Refresh keeps the pane mounted
+  - click: '[data-testid="sftp-local-refresh"]'
+  - wait: 0.8
+  - assert_visible: '[data-testid="sftp-local-pane"]'
+
+  - screenshot: F7.5-local-pane-nav.png
