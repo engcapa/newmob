@@ -22,6 +22,7 @@ import {
 import { useSessionStore } from "../../stores/sessionStore";
 import { useAppStore } from "../../stores/appStore";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
+import { FolderNameDialog } from "./FolderNameDialog";
 import type { SessionConfig, SessionGroup } from "../../lib/ipc";
 import {
   parseCsvSessions,
@@ -78,6 +79,7 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
   const { setStatusMessage } = useAppStore();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ root: true });
   const [dragOverGroup, setDragOverGroup] = useState<string | null>(null);
+  const [createFolderParent, setCreateFolderParent] = useState<{ path: string | null } | null>(null);
   const ctx = useContextMenu();
 
   useEffect(() => {
@@ -127,10 +129,13 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
     setDragOverGroup(folderKey(groupPath));
   };
 
-  const createFolder = async (parentPath: string | null) => {
-    const base = folderOptionLabel(parentPath);
-    const next = window.prompt("New folder", `${base} / New folder`);
-    const normalized = normalizeGroupPath(next);
+  const createFolder = (parentPath: string | null) => {
+    setCreateFolderParent({ path: normalizeGroupPath(parentPath) });
+  };
+
+  const handleCreateFolderSubmit = async (folderPath: string) => {
+    setCreateFolderParent(null);
+    const normalized = normalizeGroupPath(folderPath);
     if (!normalized) return;
 
     await createFolderPath(normalized);
@@ -332,7 +337,7 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
 
     ctx.show(e, [
       { label: "New session", icon: <Plus className="w-3 h-3" />, onClick: () => onNewSession?.(toStoredGroupPath(folderPath)) },
-      { label: "New folder", icon: <FolderPlus className="w-3 h-3" />, onClick: () => void createFolder(folderPath) },
+      { label: "New folder", icon: <FolderPlus className="w-3 h-3" />, onClick: () => createFolder(folderPath) },
       { label: "Edit folder", icon: <Edit3 className="w-3 h-3" />, disabled: isRoot, onClick: () => normalized && void renameFolder(normalized) },
       { label: "Delete folder", icon: <Trash2 className="w-3 h-3" />, danger: true, disabled: isRoot, onClick: () => normalized && void deleteFolder(normalized) },
       { label: "Create a desktop shortcut", icon: <Star className="w-3 h-3" />, onClick: () => unavailable("Create a desktop shortcut") },
@@ -374,13 +379,21 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
   };
 
   return (
-    <div
-      data-testid="session-tree"
-      className="flex-1 moba-scroll-y text-[12px]"
-      onContextMenu={(event) => folderContextMenu(event, null)}
-    >
-      {ctx.render}
-      <TreeFolder
+    <>
+      {createFolderParent && (
+        <FolderNameDialog
+          parentPath={createFolderParent.path}
+          onCancel={() => setCreateFolderParent(null)}
+          onSubmit={handleCreateFolderSubmit}
+        />
+      )}
+      <div
+        data-testid="session-tree"
+        className="flex-1 moba-scroll-y text-[12px]"
+        onContextMenu={(event) => folderContextMenu(event, null)}
+      >
+        {ctx.render}
+        <TreeFolder
         node={tree}
         count={countNodeSessions(tree)}
         open={expanded.root !== false}
@@ -414,6 +427,7 @@ export function SessionTree({ onNewSession, onConnectSession, onEditSession }: S
       </TreeFolder>
 
     </div>
+    </>
   );
 }
 

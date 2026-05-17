@@ -16,10 +16,12 @@ steps:
   - fill: {selector: "[data-testid=\"session-name\"]", value: qa-ui-auto-dnd-target}
   - click: "[data-testid=\"session-save\"]"
   - wait_for: "[data-testid=\"session-tree-item\"][data-session-name=\"qa-ui-auto-dnd-target\"]"
-  - seed_dialog: {prompt: qa-ui-auto-dnd-group, confirm: true}
   - right_click: { selector: "[data-testid=\"session-tree\"]", position: { x: 16, y: 16 } }
   - wait_for: "[data-testid=\"context-menu\"]"
   - click: '[data-testid="context-menu"] >> text=/new folder|new group|create folder/i'
+  - wait_for: "[data-testid=\"folder-name-dialog\"]"
+  - fill: {selector: "[data-testid=\"folder-name-dialog-input\"]", value: qa-ui-auto-dnd-group}
+  - click: "[data-testid=\"folder-name-dialog-confirm\"]"
   - wait: 1
   - drag_to:
       from: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-dnd-target"]'
