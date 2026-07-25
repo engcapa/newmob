@@ -178,6 +178,7 @@ jobs:
       - name: Verify Windows SocksCap helper and preflight
         if: matrix.platform == 'windows-latest'
         run: |
+          pwsh scripts/fetch-windivert.ps1
           pwsh scripts/stage-sockscap-windows.ps1
           cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::policy sockscap::config
           pwsh scripts/stage-sockscap-windows.ps1 --check

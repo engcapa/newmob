@@ -8,19 +8,19 @@ print("=" * 85)
 # --------------------------------------------------------------------------
 # Environment Configuration
 # --------------------------------------------------------------------------
-REPO_ROOT = r"C:\code\person\taomni"
-HELPER_EXE = os.path.join(REPO_ROOT, r"src-tauri\target\debug\sockscap-helper.exe")
-WINDIVERT_DIR = os.path.join(REPO_ROOT, r"src-tauri\target\debug")
-CURL_EXE = r"C:\Windows\System32\curl.exe"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _sockscap_env as ENV
 
-HTTP_HOST, HTTP_PORT = "10.1.0.80", 3228
-SOCKS5_HOST, SOCKS5_PORT = "10.1.5.52", 6088
-SSH_HOST, SSH_PORT = "10.1.0.80", 22
-SSH_USER = "zhyhang"
-SSH_PASS = os.getenv("QA_SSH_PASSWORD")
-if not SSH_PASS:
-    import getpass
-    SSH_PASS = getpass.getpass(f"Enter SSH password for {SSH_USER}@{SSH_HOST}: ")
+REPO_ROOT = ENV.REPO_ROOT
+HELPER_EXE = ENV.HELPER_EXE
+WINDIVERT_DIR = ENV.WINDIVERT_DIR
+CURL_EXE = ENV.CURL_EXE
+
+HTTP_HOST, HTTP_PORT = ENV.HTTP_HOST, ENV.HTTP_PORT
+SOCKS5_HOST, SOCKS5_PORT = ENV.SOCKS5_HOST, ENV.SOCKS5_PORT
+SSH_HOST, SSH_PORT = ENV.SSH_HOST, ENV.SSH_PORT
+SSH_USER = ENV.SSH_USER
+SSH_PASS = ENV.ssh_password()
 
 # Profile Matrix:
 #  P1 Global-HTTP   : mode=global, upstream=HTTP,   rule=GFWList
@@ -318,10 +318,10 @@ print("  Profile: Global proxy via HTTP upstream, GFWList routing")
 routing_audit_log.clear()
 for pat, url in GFWLIST_TARGETS:
     code, ms = run_curl(url)
-    chk(f"P1 GFWList-PROXY {url}", code in ("200", "301", "302", "403"), f"[{code} {ms:.0f}ms]")
+    chk(f"P1 GFWList-PROXY {url}", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
 for pat, url in NON_GFWLIST_TARGETS:
     code, ms = run_curl(url)
-    chk(f"P1 Non-GFW-DIRECT {url}", code in ("200", "301", "302"), f"[{code} {ms:.0f}ms]")
+    chk(f"P1 Non-GFW-DIRECT {url}", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
 proxy_c = sum(1 for e in routing_audit_log if e["decision"] == "PROXY")
 direct_c = sum(1 for e in routing_audit_log if e["decision"] == "DIRECT")
 chk("P1 Audit >=1 PROXY in relay log",  proxy_c > 0,  f"[proxy={proxy_c} direct={direct_c}]")
@@ -336,7 +336,7 @@ routing_audit_log.clear()
 switch_relay("P2-Global-SOCKS5")
 for pat, url in GFWLIST_TARGETS + NON_GFWLIST_TARGETS:
     code, ms = run_curl(url)
-    chk(f"P2 ProxyAll-PROXY {url}", code in ("200", "301", "302", "403"), f"[{code} {ms:.0f}ms]")
+    chk(f"P2 ProxyAll-PROXY {url}", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
 all_prx = all(e["decision"] == "PROXY" for e in routing_audit_log)
 chk("P2 Audit ALL=PROXY", all_prx, f"[{len(routing_audit_log)} entries]")
 
@@ -349,10 +349,10 @@ routing_audit_log.clear()
 switch_relay("P3-Apps-HTTP")
 for pat, url in GFWLIST_TARGETS:
     code, ms = run_curl(url)
-    chk(f"P3 GFWList-PROXY {url}", code in ("200", "301", "302", "403"), f"[{code} {ms:.0f}ms]")
+    chk(f"P3 GFWList-PROXY {url}", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
 for pat, url in NON_GFWLIST_TARGETS:
     code, ms = run_curl(url)
-    chk(f"P3 Non-GFW-DIRECT {url}", code in ("200", "301", "302"), f"[{code} {ms:.0f}ms]")
+    chk(f"P3 Non-GFW-DIRECT {url}", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
 
 # --------------------------------------------------------------------------
 # Step 5d: P4 – Apps-filter SSH + GFWList (SSH upstream smoke)
@@ -377,18 +377,18 @@ print("  Single helper serves P1 (global) and P3 (app-filter) concurrently.")
 switch_relay("P1-Global-HTTP")
 routing_audit_log.clear()
 
-# Bypass CIDR: 10.1.0.80 must still be directly reachable
+# Bypass CIDR: the HTTP upstream host must still be directly reachable
 try:
     s = socket.create_connection((HTTP_HOST, HTTP_PORT), timeout=3)
     s.close()
-    chk("Concurrency: BypassCIDR 10.1.0.80 still reachable", True, "[direct TCP OK]")
+    chk(f"Concurrency: BypassCIDR {HTTP_HOST} still reachable", True, "[direct TCP OK]")
 except Exception as e:
-    chk("Concurrency: BypassCIDR 10.1.0.80 still reachable", False, str(e))
+    chk(f"Concurrency: BypassCIDR {HTTP_HOST} still reachable", False, str(e))
 
 # curl.exe (P3 intercept): GFWList domains proxied even while P1 global is notionally active
 for pat, url in GFWLIST_TARGETS[:2]:
     code, ms = run_curl(url)
-    chk(f"Concurrency curl GFWList {url}", code in ("200", "301", "302", "403"), f"[{code} {ms:.0f}ms]")
+    chk(f"Concurrency curl GFWList {url}", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
 
 # --------------------------------------------------------------------------
 # Step 7: Soak – cycle P1 -> P2 -> P3 for 3 rounds
@@ -407,11 +407,11 @@ for cycle in range(1, SOAK_CYCLES + 1):
     switch_relay(pid)
     gfw_url = GFWLIST_TARGETS[(cycle - 1) % len(GFWLIST_TARGETS)][1]
     code, ms = run_curl(gfw_url)
-    chk(f"Soak {pid} GFWList", code in ("200", "301", "302", "403"), f"[{code} {ms:.0f}ms]")
+    chk(f"Soak {pid} GFWList", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
     if rule != "proxyAll":
         non_url = NON_GFWLIST_TARGETS[(cycle - 1) % len(NON_GFWLIST_TARGETS)][1]
         code, ms = run_curl(non_url)
-        chk(f"Soak {pid} Non-GFW-DIRECT", code in ("200", "301", "302"), f"[{code} {ms:.0f}ms]")
+        chk(f"Soak {pid} Non-GFW-DIRECT", ENV.http_reachable(code), f"[{code} {ms:.0f}ms]")
     time.sleep(0.5)
 
 # --------------------------------------------------------------------------

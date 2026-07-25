@@ -74,8 +74,56 @@ pub async fn recover_system() -> Result<(), String> {
     {
         return linux::recover_system(None);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        return recover_system_windows();
+    }
+    #[cfg(all(not(target_os = "linux"), not(windows)))]
     Ok(())
+}
+
+/// Windows recovery: kill any leftover elevated `sockscap-helper.exe`. When the
+/// helper exits, its WinDivert handles close and the driver unloads on its own,
+/// so terminating a stranded helper is sufficient to release capture state.
+///
+/// Best-effort: the main app is typically **not** elevated, so it cannot kill
+/// the elevated helper directly — `taskkill` returns Access Denied. In that case
+/// the helper's own parent-death watchdog already handles the common crash/kill
+/// path; here we just surface a clear message and treat "no such process" and
+/// "access denied" as non-fatal (nothing this process can further clean up).
+#[cfg(windows)]
+fn recover_system_windows() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let output = Command::new("taskkill.exe")
+        .args(["/F", "/IM", "sockscap-helper.exe"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("taskkill sockscap-helper: {e}"))?;
+
+    if output.status.success() {
+        tracing::info!("sockscap: recover killed leftover sockscap-helper.exe");
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        stderr
+    );
+    let lower = combined.to_ascii_lowercase();
+    // "not found" → nothing to clean. "access is denied" → elevated helper we
+    // can't touch from a non-elevated app; watchdog is the real safety net.
+    if lower.contains("not found")
+        || lower.contains("no running instance")
+        || lower.contains("access is denied")
+    {
+        tracing::info!("sockscap: recover — no killable leftover helper ({})", combined.trim());
+        return Ok(());
+    }
+    Err(format!("taskkill sockscap-helper failed: {}", combined.trim()))
 }
 
 /// Future trait for platform adapters.

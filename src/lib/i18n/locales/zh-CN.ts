@@ -1161,7 +1161,10 @@ export const zhCN: DeepPartial<typeof en> = {
     saved: "配置已保存",
     started: "SocksCap 已启动",
     stopped: "SocksCap 已停止",
+    restarted: "SocksCap 已重启",
     recovered: "已请求恢复网络",
+    restartNeeded: "作用域或上游的修改需重启捕获后才会生效。",
+    restartNow: "重启捕获",
     captureNotReady: "系统捕获尚未就绪",
     captureNotReadyHint:
       "规则引擎与上游拨号已可用。WinDivert / 平台捕获仍在接入中。",

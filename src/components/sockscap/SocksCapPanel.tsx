@@ -54,6 +54,7 @@ import {
   type UpstreamKind,
   type UserRule,
 } from "../../lib/sockscap";
+import { requiresRestart } from "../../lib/sockscapRestart";
 import { SocksCapRootPrompt } from "./SocksCapRootPrompt";
 import {
   listSessions,
@@ -237,6 +238,12 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [downSpeed, setDownSpeed] = useState(0);
   const lastBytesRef = useRef<{ up: number; down: number; ts: number } | null>(null);
 
+  // Config as it was when capture last started successfully. Used to detect
+  // scope/upstream edits that the running backend will not apply until a
+  // Stop+Start (see lib/sockscapRestart).
+  const startedCfgRef = useRef<SocksCapConfig | null>(null);
+  const [needsRestart, setNeedsRestart] = useState(false);
+
   // Resizable profile sidebar & ribbon collapse state
   const [sidebarWidth, setSidebarWidth] = useState(230);
   const [isRibbon, setIsRibbon] = useState(false);
@@ -366,6 +373,17 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     if (!cfg) return [DEFAULT_PROFILE];
     return cfg.profiles.filter((p) => p.enabled && cfg.activeProfileIds.includes(p.id));
   }, [cfg]);
+
+  // While capture is running, editing scope/upstream (mode, apps, active
+  // profiles, upstream) does not take effect until Stop+Start — the backend
+  // only hot-reloads the rule policy. Flag that so the UI can offer a restart.
+  useEffect(() => {
+    if (!running || !cfg || !startedCfgRef.current) {
+      setNeedsRestart(false);
+      return;
+    }
+    setNeedsRestart(requiresRestart(startedCfgRef.current, cfg));
+  }, [cfg, running]);
 
   const persistConfig = async (next: SocksCapConfig) => {
     setCfg(next);
@@ -555,6 +573,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       await sockscapSetConfig(cfg);
       const st = await sockscapStart(sudoPassword);
       setStatus(st);
+      // Snapshot the capture scope so later edits can flag a needed restart.
+      startedCfgRef.current = cfg;
+      setNeedsRestart(false);
       setShowRootPrompt(false);
       setRootPromptError(null);
       report(st.message || t("sockscap.started"), st.phase !== "idle");
@@ -590,6 +611,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     try {
       const st = await sockscapStop();
       setStatus(st);
+      startedCfgRef.current = null;
+      setNeedsRestart(false);
       const [sn, hp] = await Promise.all([
         sockscapStatsSnapshot().catch(() => null),
         sockscapHelperStatus().catch(() => null),
@@ -597,6 +620,32 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       if (sn) setStats(sn);
       if (hp) setHelper(hp);
       report(t("sockscap.stopped"));
+    } catch (e) {
+      report(String(e), false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Apply scope/upstream edits to a running capture: Stop then Start so the
+  // backend rebuilds the capture plan and upstream connections.
+  const onRestart = async () => {
+    setBusy(true);
+    try {
+      await sockscapStop().catch(() => null);
+      startedCfgRef.current = null;
+      setNeedsRestart(false);
+      if (cfg) await sockscapSetConfig(cfg);
+      const st = await sockscapStart();
+      setStatus(st);
+      startedCfgRef.current = cfg;
+      const [sn, hp] = await Promise.all([
+        sockscapStatsSnapshot().catch(() => null),
+        sockscapHelperStatus().catch(() => null),
+      ]);
+      if (sn) setStats(sn);
+      if (hp) setHelper(hp);
+      report(t("sockscap.restarted"), st.phase !== "idle");
     } catch (e) {
       report(String(e), false);
     } finally {
@@ -916,6 +965,29 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           )}
         </div>
       </div>
+
+      {/* Scope/upstream edited while running — needs Stop+Start to apply */}
+      {needsRestart && running && (
+        <div
+          data-testid="sockscap-restart-banner"
+          className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-[11px] flex flex-wrap items-center justify-between gap-2 text-amber-700 dark:text-amber-400"
+        >
+          <span className="flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+            {t("sockscap.restartNeeded")}
+          </span>
+          <button
+            type="button"
+            data-testid="sockscap-restart"
+            className="inline-flex items-center gap-1 px-3 py-1 rounded text-[11px] bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-60"
+            onClick={() => void onRestart()}
+            disabled={busy}
+          >
+            <RefreshCw className={`w-3 h-3 ${busy ? "animate-spin" : ""}`} />
+            {t("sockscap.restartNow")}
+          </button>
+        </div>
+      )}
 
       {/* Main Dual-Column Content Area */}
       <div className="flex-1 min-h-0 flex overflow-hidden">

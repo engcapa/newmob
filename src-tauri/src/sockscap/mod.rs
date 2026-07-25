@@ -1278,6 +1278,52 @@ pub async fn sockscap_test_upstream(
     }
 }
 
+/// App-exit hook (blocking): cleanly stop the elevated helper's WinDivert
+/// capture and shut the helper down, then clear the recovery journal. Called
+/// from the Tauri `RunEvent::Exit` handler so a normal quit does not leave an
+/// elevated helper + loaded WinDivert driver behind. The helper's own
+/// parent-death watchdog is the backstop for crash/kill paths.
+///
+/// Runs synchronously (no async runtime is guaranteed at exit) and is
+/// best-effort: any RPC error is logged, and the journal is only cleared when
+/// the helper confirmed capture stopped (so a failure still triggers
+/// `boot_repair` on the next launch).
+pub fn shutdown_on_exit(app: &AppHandle, state: &AppState) {
+    let sess = state
+        .sockscap
+        .helper
+        .inner
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().cloned());
+    let Some(sess) = sess else {
+        // No helper (e.g. Linux, or capture never started). Nothing elevated
+        // to reap here; leave any dirty journal for boot_repair.
+        return;
+    };
+
+    let stopped = match helper::capture_stop(&sess) {
+        Ok(()) => {
+            tracing::info!("sockscap: exit — helper capture_stop ok");
+            true
+        }
+        Err(e) => {
+            tracing::warn!("sockscap: exit — helper capture_stop failed: {e}");
+            false
+        }
+    };
+    // Ask the helper process to exit so it and the WinDivert driver go away.
+    if let Err(e) = helper::send_json(&sess, serde_json::json!({ "cmd": "shutdown" })) {
+        tracing::warn!("sockscap: exit — helper shutdown RPC failed: {e}");
+    }
+
+    if stopped {
+        if let Ok(dir) = data_dir(app) {
+            let _ = recovery::mark_clean_and_clear(&recovery::journal_path(&dir));
+        }
+    }
+}
+
 /// Boot-time hook: if the previous run left a dirty recovery journal, force
 /// platform recover so the OS is not left with half-installed capture rules.
 pub async fn boot_repair(app: &AppHandle) {

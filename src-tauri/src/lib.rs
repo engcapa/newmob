@@ -817,8 +817,17 @@ pub fn run() {
             notes::commands::notes_ack_alert,
             exit_app,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app_handle, event| {
+            // On app exit, cleanly stop the elevated SocksCap helper (and its
+            // WinDivert driver) so no elevated process/driver leaks. The
+            // helper's parent-death watchdog covers crash/kill paths.
+            if let tauri::RunEvent::Exit = event {
+                let state = app_handle.state::<AppState>();
+                sockscap::shutdown_on_exit(app_handle, &state);
+            }
+        });
 }
 
 #[cfg(test)]
