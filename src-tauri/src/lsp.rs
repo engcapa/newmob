@@ -173,6 +173,19 @@ pub struct LspLocationsResult {
     pub locations: Vec<LspLocation>,
 }
 
+/// Contents of a library / virtual document (JDK, dependency JAR, jdt:// URI).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspUriContentsResult {
+    pub status: LspDocumentStatus,
+    pub uri: String,
+    pub path: Option<String>,
+    pub title: String,
+    pub language_id: String,
+    pub text: String,
+    pub read_only: bool,
+}
+
 /// One entry of a flattened `textDocument/documentSymbol` tree; `depth`
 /// preserves the hierarchy for indented rendering.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3219,6 +3232,112 @@ pub async fn lsp_implementation(
     .await
 }
 
+/// Open library / virtual LSP locations (JDK classes, dependency JARs, jdt://).
+/// Prefer a real filesystem path when the URI maps to one; otherwise ask JDT LS
+/// for decompiled or attached source via `java/classFileContents`.
+#[tauri::command]
+pub async fn lsp_read_uri_contents(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    uri: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<LspUriContentsResult, String> {
+    let uri = uri.trim().to_string();
+    if uri.is_empty() {
+        return Err("Missing document URI".into());
+    }
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let status = state
+        .lsp
+        .document_status(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await;
+
+    // Real file on disk (workspace sources, cargo registry, jdt extracted sources, …).
+    if let Some(path) = path_from_uri(&uri) {
+        let target = PathBuf::from(&path);
+        if target.is_file() {
+            let text = std::fs::read_to_string(&target)
+                .map_err(|e| format!("read {}: {e}", target.display()))?;
+            let language = detect_language_for_path(&target)
+                .map(|detected| detected.language_id)
+                .unwrap_or_else(|| language_id_from_uri(&uri));
+            return Ok(LspUriContentsResult {
+                status,
+                uri,
+                path: Some(path.clone()),
+                title: target
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone()),
+                language_id: language,
+                text,
+                read_only: true,
+            });
+        }
+    }
+
+    // Virtual class-file URIs from Eclipse JDT LS (JDK + third-party JARs).
+    if is_virtual_class_uri(&uri) {
+        let session = state
+            .lsp
+            .active_session(
+                &document,
+                server_command_id.as_deref(),
+                custom_server_command.as_ref(),
+            )
+            .await
+            .ok_or_else(|| {
+                "No language server session is active for this file; cannot open library source"
+                    .to_string()
+            })?;
+        let result = session
+            .request_with_timeout(
+                "java/classFileContents",
+                json!({ "uri": uri }),
+                REQUEST_TIMEOUT_SECS.max(20),
+            )
+            .await
+            .map_err(|e| format!("Failed to load class contents: {e}"))?;
+        let text = result
+            .as_str()
+            .ok_or_else(|| {
+                "Language server returned empty class file contents (attach sources or enable decompiler)"
+                    .to_string()
+            })?
+            .to_string();
+        let title = title_from_class_uri(&uri);
+        let status = state
+            .lsp
+            .document_status(
+                &document,
+                server_command_id.as_deref(),
+                custom_server_command.as_ref(),
+            )
+            .await;
+        return Ok(LspUriContentsResult {
+            status,
+            uri: uri.clone(),
+            path: None,
+            title,
+            language_id: "java".to_string(),
+            text,
+            read_only: true,
+        });
+    }
+
+    Err(format!(
+        "Cannot open location URI (not a readable file path and not a class-file URI): {uri}"
+    ))
+}
+
 #[tauri::command]
 pub async fn lsp_workspace_symbols(
     state: State<'_, AppState>,
@@ -5246,10 +5365,87 @@ fn parse_location(value: &Value) -> Option<LspLocation> {
 }
 
 fn path_from_uri(uri: &str) -> Option<String> {
+    let trimmed = uri.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // jar:file:///path/to.jar!/com/Foo.class — not a plain filesystem path.
+    // Open via java/classFileContents (or fail for non-Java servers).
+    if trimmed.to_ascii_lowercase().starts_with("jar:file:") {
+        return None;
+    }
+
+    if trimmed.starts_with("file:") {
+        return path_from_file_uri(trimmed);
+    }
+
+    // Some servers emit raw absolute paths instead of file:// URIs.
+    let path = Path::new(trimmed);
+    if path.is_absolute() {
+        return Some(normalize_os_path_string(trimmed.to_string()));
+    }
+    None
+}
+
+fn path_from_file_uri(uri: &str) -> Option<String> {
     url::Url::parse(uri)
         .ok()
+        .filter(|url| url.scheme() == "file")
         .and_then(|url| url.to_file_path().ok())
-        .map(|path| path.to_string_lossy().into_owned())
+        .map(|path| normalize_os_path_string(path.to_string_lossy().into_owned()))
+}
+
+fn normalize_os_path_string(path: String) -> String {
+    // Windows extended-length prefix breaks relativePathWithinRoot comparisons.
+    path.strip_prefix(r"\\?\")
+        .unwrap_or(path.as_str())
+        .to_string()
+}
+
+fn is_virtual_class_uri(uri: &str) -> bool {
+    let lower = uri.to_ascii_lowercase();
+    lower.starts_with("jdt:")
+        || lower.starts_with("jar:file:")
+        || lower.contains(".class?")
+        || lower.ends_with(".class")
+}
+
+fn language_id_from_uri(uri: &str) -> String {
+    let lower = uri.to_ascii_lowercase();
+    if lower.contains(".kt") {
+        "kotlin".into()
+    } else if lower.contains(".scala") {
+        "scala".into()
+    } else if lower.contains(".rs") {
+        "rust".into()
+    } else if lower.contains(".ts") {
+        "typescript".into()
+    } else if lower.contains(".js") {
+        "javascript".into()
+    } else if lower.contains(".py") {
+        "python".into()
+    } else {
+        "java".into()
+    }
+}
+
+/// Best-effort display name for jdt://contents/.../String.class?=... URIs.
+fn title_from_class_uri(uri: &str) -> String {
+    // jdt://contents/java.base/java.lang/String.class?=java.base/...
+    if let Some(after) = uri.split("://").nth(1) {
+        let path_part = after.split('?').next().unwrap_or(after);
+        if let Some(name) = path_part.rsplit('/').next() {
+            let clean = name.trim();
+            if !clean.is_empty() {
+                if clean.ends_with(".class") {
+                    return clean[..clean.len() - 6].to_string() + ".java";
+                }
+                return clean.to_string();
+            }
+        }
+    }
+    "Library Class".into()
 }
 
 fn detect_language_id(language_id: &str) -> Option<DetectedLanguage> {
@@ -6479,6 +6675,31 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
                 &json!({ "edits": [{ "start": 99, "deleteCount": 1 }] }),
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn path_from_uri_maps_file_uris_and_rejects_class_uris() {
+        #[cfg(windows)]
+        {
+            let path = path_from_uri("file:///C:/Users/test/Project/Main.java").unwrap();
+            assert!(path.replace('\\', "/").ends_with("Users/test/Project/Main.java"));
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(
+                path_from_uri("file:///home/test/Project/Main.java").as_deref(),
+                Some("/home/test/Project/Main.java")
+            );
+        }
+        assert!(path_from_uri("jdt://contents/java.base/java.lang/String.class?=x").is_none());
+        assert!(path_from_uri("jar:file:///lib/foo.jar!/com/Foo.class").is_none());
+        assert!(is_virtual_class_uri(
+            "jdt://contents/java.base/java.lang/String.class?=x"
+        ));
+        assert_eq!(
+            title_from_class_uri("jdt://contents/java.base/java.lang/String.class?=x"),
+            "String.java"
         );
     }
 }

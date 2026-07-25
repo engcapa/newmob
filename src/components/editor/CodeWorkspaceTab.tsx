@@ -70,6 +70,7 @@ import {
   lspPrepareRename,
   lspPrepareTypeHierarchy,
   lspRangeFormatting,
+  lspReadUriContents,
   lspReferences,
   lspRename,
   lspSelectionRanges,
@@ -1116,6 +1117,16 @@ export function CodeWorkspaceTab({
     ],
   );
 
+  const revealNavLocation = useCallback((key: string, position: { line: number; character: number }) => {
+    revealNonceRef.current += 1;
+    setRevealTarget({
+      key,
+      line: position.line,
+      character: position.character,
+      nonce: revealNonceRef.current,
+    });
+  }, []);
+
   const {
     navCan,
     goToFileItems,
@@ -1124,6 +1135,9 @@ export function CodeWorkspaceTab({
     openSearchEverywhere,
     openGoToFileItem,
     navigateHistory,
+    recordNavigationLocation,
+    suppressNextHistoryRecord,
+    noteCaretPosition,
     openRecentFiles,
     pickRecentFile,
   } = useWorkspaceNavigation({
@@ -1137,6 +1151,7 @@ export function CodeWorkspaceTab({
     openFilesRef,
     loadFlatFiles,
     openFile,
+    revealLocation: revealNavLocation,
     setSearchEverywhereMode,
     setSearchEverywhereOpen,
     setRecentEntries,
@@ -2950,29 +2965,182 @@ export function CodeWorkspaceTab({
     });
   }, []);
 
+  /** Inject a library/virtual buffer (JDK, dependency JAR) without reading from the workspace FS. */
+  const openVirtualBuffer = useCallback(async (
+    displayPath: string,
+    title: string,
+    text: string,
+    range: LspLocation["range"],
+    options: { groupId?: EditorGroupId; preview?: boolean } = {},
+  ) => {
+    const loose = makeLooseFile(displayPath);
+    // Prefer a stable title from the language server (e.g. String.java) over a raw URI slug.
+    const namedLoose = { ...loose, name: title || loose.name };
+    const ref: CodeWorkspaceFileRef = { kind: "loose", id: namedLoose.id, path: namedLoose.path };
+    setLooseFiles((current) => (
+      current.some((item) => item.path === namedLoose.path)
+        ? current
+        : [...current, namedLoose]
+    ));
+    const key = fileKey(ref);
+    const normalized = normalizeEditorText(text);
+    const meta = fileMeta(ref, rootsRef.current, [...looseFilesRef.current, namedLoose]);
+    suppressNextHistoryRecord();
+    setOpenFiles((current) => ({
+      ...current,
+      [key]: {
+        ref,
+        key,
+        path: meta.path,
+        title: namedLoose.name || meta.title,
+        subtitle: meta.subtitle.startsWith("jdt:") || meta.subtitle.startsWith("jar:")
+          ? `Library · ${namedLoose.name}`
+          : meta.subtitle,
+        languagePath: namedLoose.name.endsWith(".java")
+          ? namedLoose.name
+          : (meta.languagePath || namedLoose.name),
+        text: normalized.text,
+        savedText: normalized.text,
+        eol: normalized.eol,
+        hash: `virtual:${key}`,
+        mtime: Date.now(),
+        size: normalized.text.length,
+        loading: false,
+        saving: false,
+        dirty: false,
+        error: null,
+      },
+    }));
+    const currentUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+    const groupId = options.groupId ?? currentUi.activeEditorGroupId;
+    updateEditorGroup(groupId, (group) => {
+      const alreadyOpen = group.openOrder.includes(key);
+      let nextOrder = group.openOrder;
+      let previewKey = group.previewKey;
+      if (!alreadyOpen) {
+        if (options.preview && previewKey && previewKey !== key && !group.pinnedKeys.includes(previewKey)) {
+          nextOrder = nextOrder.filter((entry) => entry !== previewKey);
+        }
+        nextOrder = [...nextOrder, key];
+      }
+      if (options.preview) {
+        previewKey = group.pinnedKeys.includes(key) ? null : key;
+      } else if (previewKey === key) {
+        previewKey = null;
+      }
+      return { ...group, openOrder: nextOrder, activeKey: key, previewKey };
+    });
+    if (groupId !== currentUi.activeEditorGroupId) activateEditorGroup(groupId);
+    revealEditorLocation(key, range);
+    recordNavigationLocation(ref, {
+      line: range.start.line,
+      character: range.start.character,
+    }, { replaceSameFile: false });
+    setStatusMessage(`Opened ${namedLoose.name}`);
+    return true;
+  }, [
+    activateEditorGroup,
+    recordNavigationLocation,
+    revealEditorLocation,
+    setStatusMessage,
+    suppressNextHistoryRecord,
+    updateEditorGroup,
+    workspaceInstanceId,
+  ]);
+
   const openLspLocation = useCallback(
     async (
       location: LspLocation,
       options: { groupId?: EditorGroupId; preview?: boolean } = {},
     ) => {
-      const path = location.path;
-      if (!path) return false;
-      for (const root of rootsRef.current) {
-        const relative = relativePathWithinRoot(root.path, path);
-        if (relative === null) continue;
-        const ref: CodeWorkspaceFileRef = { kind: "root", rootId: root.id, path: relative };
+      const openResolvedPath = async (path: string) => {
+        for (const root of rootsRef.current) {
+          const relative = relativePathWithinRoot(root.path, path);
+          if (relative === null) continue;
+          const ref: CodeWorkspaceFileRef = { kind: "root", rootId: root.id, path: relative };
+          suppressNextHistoryRecord();
+          revealEditorLocation(fileKey(ref), location.range);
+          await openFile(ref, options);
+          recordNavigationLocation(ref, {
+            line: location.range.start.line,
+            character: location.range.start.character,
+          }, { replaceSameFile: false });
+          return true;
+        }
+        const loose = makeLooseFile(path);
+        const ref: CodeWorkspaceFileRef = { kind: "loose", id: loose.id, path: loose.path };
+        setLooseFiles((current) => current.some((item) => item.path === loose.path) ? current : [...current, loose]);
+        suppressNextHistoryRecord();
         revealEditorLocation(fileKey(ref), location.range);
         await openFile(ref, options);
+        recordNavigationLocation(ref, {
+          line: location.range.start.line,
+          character: location.range.start.character,
+        }, { replaceSameFile: false });
         return true;
+      };
+
+      if (location.path) {
+        try {
+          return await openResolvedPath(location.path);
+        } catch (err) {
+          // Fall through to URI content fetch when the path is not readable as a workspace/loose file
+          // (e.g. missing source attachment path that still has a jdt:// URI).
+          if (!location.uri || location.uri.startsWith("file:")) {
+            setStatusMessage(errorMessage(err));
+            return false;
+          }
+        }
       }
-      const loose = makeLooseFile(path);
-      const ref: CodeWorkspaceFileRef = { kind: "loose", id: loose.id, path: loose.path };
-      setLooseFiles((current) => current.some((item) => item.path === loose.path) ? current : [...current, loose]);
-      revealEditorLocation(fileKey(ref), location.range);
-      await openFile(ref, options);
-      return true;
+
+      // JDK / third-party JAR / other virtual URIs (jdt://, jar:file:…).
+      if (!location.uri) {
+        setStatusMessage("No definition found");
+        return false;
+      }
+      const origin = activeFile
+        ?? Object.values(openFilesRef.current).find((item) => !item.loading)
+        ?? null;
+      const descriptor = origin ? lspDescriptorForFile(origin) : null;
+      if (!descriptor) {
+        setStatusMessage("Cannot open library source without an active language server document");
+        return false;
+      }
+      try {
+        const virtual = await lspReadUriContents(descriptor, location.uri);
+        updateLspStatusForFile(origin!, virtual.status);
+        if (virtual.path) {
+          try {
+            return await openResolvedPath(virtual.path);
+          } catch {
+            // Keep going and inject the text we already fetched.
+          }
+        }
+        const displayPath = virtual.path
+          ?? `library/${virtual.title || "Class.java"}`;
+        return openVirtualBuffer(
+          displayPath,
+          virtual.title,
+          virtual.text,
+          location.range,
+          options,
+        );
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+        return false;
+      }
     },
-    [openFile, revealEditorLocation],
+    [
+      activeFile,
+      lspDescriptorForFile,
+      openFile,
+      openVirtualBuffer,
+      recordNavigationLocation,
+      revealEditorLocation,
+      setStatusMessage,
+      suppressNextHistoryRecord,
+      updateLspStatusForFile,
+    ],
   );
 
   const fetchWorkspaceSymbols = useCallback(async (query: string): Promise<GoToSymbolItem[]> => {
@@ -3515,6 +3683,8 @@ export function CodeWorkspaceTab({
       title: "Navigate Back",
       category: "Navigation",
       keybinding: "Ctrl+Alt+Left",
+      // Also accept Alt+Left (common IDEA keymap variant) when history is available.
+      keybindings: ["Alt+Left"],
       when: () => navCan.back,
       run: () => navigateHistory(-1),
     },
@@ -3523,6 +3693,7 @@ export function CodeWorkspaceTab({
       title: "Navigate Forward",
       category: "Navigation",
       keybinding: "Ctrl+Alt+Right",
+      keybindings: ["Alt+Right"],
       when: () => navCan.forward,
       run: () => navigateHistory(1),
     },
@@ -4136,8 +4307,7 @@ export function CodeWorkspaceTab({
     }
     if (locations.length === 1) {
       setLocationPeek(null);
-      await openLspLocation(locations[0]);
-      return true;
+      return openLspLocation(locations[0]);
     }
     setLocationPeek({ title, locations });
     return true;
@@ -4147,6 +4317,8 @@ export function CodeWorkspaceTab({
     async (file: OpenFileState, position: LspPosition) => {
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return false;
+      // Record the origin code focus before jumping (IDEA Navigate Back).
+      recordNavigationLocation(file.ref, position);
       try {
         const result = await lspDefinition(descriptor, position);
         updateLspStatusForFile(file, result.status);
@@ -4156,7 +4328,7 @@ export function CodeWorkspaceTab({
         return false;
       }
     },
-    [lspDescriptorForFile, navigateLocations, setStatusMessage, updateLspStatusForFile],
+    [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
 
   const goToTypeDefinition = useCallback(
@@ -4168,6 +4340,7 @@ export function CodeWorkspaceTab({
         setStatusMessage("Type definition is not supported by this language server");
         return false;
       }
+      recordNavigationLocation(file.ref, position);
       try {
         const result = await lspTypeDefinition(descriptor, position);
         updateLspStatusForFile(file, result.status);
@@ -4177,7 +4350,7 @@ export function CodeWorkspaceTab({
         return false;
       }
     },
-    [lspDescriptorForFile, navigateLocations, setStatusMessage, updateLspStatusForFile],
+    [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
 
   const goToImplementation = useCallback(
@@ -4189,6 +4362,7 @@ export function CodeWorkspaceTab({
         setStatusMessage("Go to implementation is not supported by this language server");
         return false;
       }
+      recordNavigationLocation(file.ref, position);
       try {
         const result = await lspImplementation(descriptor, position);
         updateLspStatusForFile(file, result.status);
@@ -4198,7 +4372,7 @@ export function CodeWorkspaceTab({
         return false;
       }
     },
-    [lspDescriptorForFile, navigateLocations, setStatusMessage, updateLspStatusForFile],
+    [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
   goToTypeDefinitionRef.current = goToTypeDefinition;
   goToImplementationRef.current = goToImplementation;
@@ -4616,6 +4790,9 @@ export function CodeWorkspaceTab({
           if (groupId === activeEditorGroupId) {
             editorSelectionRef.current = selection;
             setEditorAiSelection(!selection.empty && selection.text.trim().length >= 2 ? selection : null);
+          }
+          if (groupFile) {
+            noteCaretPosition(groupFile.key, selection.end);
           }
           setCursorPositions((current) => ({ ...current, [groupId]: selection.end }));
         }}

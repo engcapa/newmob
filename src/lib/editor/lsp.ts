@@ -130,6 +130,17 @@ export interface LspLocationsResult {
   locations: LspLocation[];
 }
 
+/** Library / virtual document opened from jdt://, jar:, or an absolute file URI. */
+export interface LspUriContentsResult {
+  status: LspDocumentStatus;
+  uri: string;
+  path: string | null;
+  title: string;
+  languageId: string;
+  text: string;
+  readOnly: boolean;
+}
+
 export interface LspDocumentSymbol {
   name: string;
   detail: string | null;
@@ -706,6 +717,20 @@ export function lspImplementation(
     ...documentArgs(descriptor),
     line: position.line,
     character: position.character,
+  });
+}
+
+/**
+ * Load contents for a definition/reference URI that is not a workspace file
+ * (JDK classes, dependency JARs via jdtls `java/classFileContents`, or absolute paths).
+ */
+export function lspReadUriContents(
+  descriptor: LspDocumentDescriptor,
+  uri: string,
+): Promise<LspUriContentsResult> {
+  return invoke<LspUriContentsResult>("lsp_read_uri_contents", {
+    ...documentArgs(descriptor),
+    uri,
   });
 }
 

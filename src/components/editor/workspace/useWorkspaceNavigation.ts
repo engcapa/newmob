@@ -14,6 +14,18 @@ import {
   type OpenFileState,
 } from "./codeWorkspaceModel";
 
+/** One IDE navigation-history entry: file + caret (IDEA Navigate Back/Forward). */
+export interface WorkspaceNavLocation {
+  ref: CodeWorkspaceFileRef;
+  line: number;
+  character: number;
+}
+
+export interface WorkspaceNavPosition {
+  line: number;
+  character: number;
+}
+
 interface UseWorkspaceNavigationOptions {
   workspaceInstanceId: string;
   activeKey: string | null;
@@ -28,6 +40,8 @@ interface UseWorkspaceNavigationOptions {
     ref: CodeWorkspaceFileRef,
     options?: { preview?: boolean; groupId?: EditorGroupId },
   ) => Promise<void>;
+  /** Reveal caret after back/forward (same path as go-to-definition). */
+  revealLocation: (key: string, position: WorkspaceNavPosition) => void;
   setSearchEverywhereMode: (mode: SearchEverywhereMode) => void;
   setSearchEverywhereOpen: (open: boolean) => void;
   setRecentEntries: (entries: RecentFileEntry[]) => void;
@@ -42,8 +56,36 @@ export interface WorkspaceNavigationController {
   openSearchEverywhere: (mode?: SearchEverywhereMode) => void;
   openGoToFileItem: (item: GoToFileItem, options?: { split: boolean }) => void;
   navigateHistory: (delta: -1 | 1) => void;
+  /**
+   * Push an explicit (file, caret) entry — call before go-to-definition and after
+   * landing so Ctrl+Alt+Left restores the previous code focus like IDEA.
+   *
+   * - `replaceSameFile` (default true): refine the current stack entry when still
+   *   on the same file (origin caret before a jump).
+   * - `replaceSameFile: false`: always push a new entry (destination after a jump,
+   *   including same-file definition targets).
+   */
+  recordNavigationLocation: (
+    ref: CodeWorkspaceFileRef,
+    position: WorkspaceNavPosition,
+    options?: { replaceSameFile?: boolean },
+  ) => void;
+  /**
+   * Suppress the next activeKey-driven history push (pair with openFile +
+   * recordNavigationLocation when landing on a go-to-definition target).
+   */
+  suppressNextHistoryRecord: () => void;
+  /** Remember the live caret so tab switches keep accurate history positions. */
+  noteCaretPosition: (key: string, position: WorkspaceNavPosition) => void;
   openRecentFiles: () => void;
   pickRecentFile: (entry: RecentFileEntry) => void;
+}
+
+function sameNavLocation(a: WorkspaceNavLocation | undefined, b: WorkspaceNavLocation): boolean {
+  if (!a) return false;
+  return fileKey(a.ref) === fileKey(b.ref)
+    && a.line === b.line
+    && a.character === b.character;
 }
 
 export function useWorkspaceNavigation({
@@ -57,6 +99,7 @@ export function useWorkspaceNavigation({
   openFilesRef,
   loadFlatFiles,
   openFile,
+  revealLocation,
   setSearchEverywhereMode,
   setSearchEverywhereOpen,
   setRecentEntries,
@@ -65,11 +108,14 @@ export function useWorkspaceNavigation({
   const setSplitOrientation = useCodeWorkspaceStore((state) => state.setSplitOrientation);
   const [navCan, setNavCan] = useState({ back: false, forward: false });
   const navHistoryRef = useRef<{
-    stack: CodeWorkspaceFileRef[];
+    stack: WorkspaceNavLocation[];
     index: number;
+    /** Skip the next activeKey-driven push (history walk or explicit open+record). */
     suppress: boolean;
   }>({ stack: [], index: -1, suppress: false });
   const recentFilesRef = useRef<CodeWorkspaceFileRef[]>([]);
+  const caretByKeyRef = useRef<Record<string, WorkspaceNavPosition>>({});
+  const previousActiveKeyRef = useRef<string | null>(null);
 
   const openSearchEverywhere = useCallback((mode: SearchEverywhereMode = "files") => {
     rootsRef.current?.forEach((root) => void loadFlatFiles(root.id));
@@ -114,22 +160,105 @@ export function useWorkspaceNavigation({
     void openFile(ref, { preview: true });
   }, [openFile, setSearchEverywhereOpen, setSplitOrientation, workspaceInstanceId]);
 
+  const noteCaretPosition = useCallback((key: string, position: WorkspaceNavPosition) => {
+    caretByKeyRef.current[key] = {
+      line: Math.max(0, position.line),
+      character: Math.max(0, position.character),
+    };
+  }, []);
+
+  const recordNavigationLocation = useCallback((
+    ref: CodeWorkspaceFileRef,
+    position: WorkspaceNavPosition,
+    options?: { replaceSameFile?: boolean },
+  ) => {
+    const replaceSameFile = options?.replaceSameFile !== false;
+    const entry: WorkspaceNavLocation = {
+      ref,
+      line: Math.max(0, position.line),
+      character: Math.max(0, position.character),
+    };
+    caretByKeyRef.current[fileKey(ref)] = {
+      line: entry.line,
+      character: entry.character,
+    };
+    const nav = navHistoryRef.current;
+    // Explicit destination records win over a pending suppress from openFile.
+    nav.suppress = false;
+    if (sameNavLocation(nav.stack[nav.index], entry)) {
+      setNavCan({ back: nav.index > 0, forward: nav.index < nav.stack.length - 1 });
+      return;
+    }
+    const current = nav.stack[nav.index];
+    // Origin recording: keep a single refined caret for the active file.
+    if (replaceSameFile && current && fileKey(current.ref) === fileKey(ref)) {
+      nav.stack[nav.index] = entry;
+      setNavCan({ back: nav.index > 0, forward: nav.index < nav.stack.length - 1 });
+      return;
+    }
+    nav.stack = [...nav.stack.slice(0, nav.index + 1), entry].slice(-NAV_HISTORY_LIMIT);
+    nav.index = nav.stack.length - 1;
+    setNavCan({ back: nav.index > 0, forward: false });
+  }, []);
+
+  const suppressNextHistoryRecord = useCallback(() => {
+    navHistoryRef.current.suppress = true;
+  }, []);
+
   useEffect(() => {
-    if (!activeKey) return;
+    if (!activeKey) {
+      previousActiveKeyRef.current = null;
+      return;
+    }
     const ref = openFilesRef.current?.[activeKey]?.ref;
     if (!ref) return;
+
     recentFilesRef.current = [
       ref,
       ...recentFilesRef.current.filter((item) => fileKey(item) !== activeKey),
     ].slice(0, RECENT_FILES_LIMIT);
+
     const nav = navHistoryRef.current;
+    const prevKey = previousActiveKeyRef.current;
+    previousActiveKeyRef.current = activeKey;
+
+    // Before switching away, persist the previous file's live caret onto the
+    // current stack entry so Navigate Back restores the real code focus.
+    if (prevKey && prevKey !== activeKey) {
+      const prevPos = caretByKeyRef.current[prevKey];
+      const current = nav.stack[nav.index];
+      if (prevPos && current && fileKey(current.ref) === prevKey) {
+        nav.stack[nav.index] = {
+          ...current,
+          line: prevPos.line,
+          character: prevPos.character,
+        };
+      }
+    }
+
     if (nav.suppress) {
       nav.suppress = false;
       setNavCan({ back: nav.index > 0, forward: nav.index < nav.stack.length - 1 });
       return;
     }
-    if (nav.index >= 0 && nav.stack[nav.index] && fileKey(nav.stack[nav.index]) === activeKey) return;
-    nav.stack = [...nav.stack.slice(0, nav.index + 1), ref].slice(-NAV_HISTORY_LIMIT);
+
+    const pos = caretByKeyRef.current[activeKey] ?? { line: 0, character: 0 };
+    const entry: WorkspaceNavLocation = {
+      ref,
+      line: pos.line,
+      character: pos.character,
+    };
+    if (sameNavLocation(nav.stack[nav.index], entry)) {
+      setNavCan({ back: nav.index > 0, forward: nav.index < nav.stack.length - 1 });
+      return;
+    }
+    // Same file as current entry (e.g. only caret moved via explicit record) —
+    // do not double-push on re-render when keys match.
+    if (nav.index >= 0 && nav.stack[nav.index] && fileKey(nav.stack[nav.index].ref) === activeKey) {
+      setNavCan({ back: nav.index > 0, forward: nav.index < nav.stack.length - 1 });
+      return;
+    }
+    nav.stack = [...nav.stack.slice(0, nav.index + 1), entry].slice(-NAV_HISTORY_LIMIT);
     nav.index = nav.stack.length - 1;
     setNavCan({ back: nav.index > 0, forward: false });
   }, [activeKey, openFilesRef]);
@@ -138,11 +267,16 @@ export function useWorkspaceNavigation({
     const nav = navHistoryRef.current;
     const nextIndex = nav.index + delta;
     if (nextIndex < 0 || nextIndex >= nav.stack.length) return;
+    const entry = nav.stack[nextIndex];
+    if (!entry) return;
     nav.index = nextIndex;
     nav.suppress = true;
     setNavCan({ back: nextIndex > 0, forward: nextIndex < nav.stack.length - 1 });
-    void openFile(nav.stack[nextIndex]);
-  }, [openFile]);
+    const key = fileKey(entry.ref);
+    caretByKeyRef.current[key] = { line: entry.line, character: entry.character };
+    revealLocation(key, { line: entry.line, character: entry.character });
+    void openFile(entry.ref);
+  }, [openFile, revealLocation]);
 
   const openRecentFiles = useCallback(() => {
     const entries: RecentFileEntry[] = recentFilesRef.current.map((ref) => {
@@ -186,6 +320,9 @@ export function useWorkspaceNavigation({
     openSearchEverywhere,
     openGoToFileItem,
     navigateHistory,
+    recordNavigationLocation,
+    suppressNextHistoryRecord,
+    noteCaretPosition,
     openRecentFiles,
     pickRecentFile,
   };
