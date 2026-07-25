@@ -46,25 +46,67 @@ pub struct FileEntryDto {
     pub group: Option<String>,
 }
 
+/// Everything needed to re-establish a dropped SFTP session without any
+/// frontend round-trip. Auth credentials were already resolved to plaintext
+/// (vault refs dereferenced, proxy/jump creds filled in) by `sftp_attach`
+/// before `open_sftp` was called, so a reconnect can reuse them verbatim.
+struct ReconnectParams {
+    host: String,
+    port: u16,
+    username: String,
+    auth: SshAuth,
+    /// Effective network settings (keep-alive already forced on — see
+    /// `network_with_keepalive`).
+    network: NetworkSettings,
+}
+
 pub struct ActiveSftp {
     pub sftp: Arc<Mutex<SftpSession>>,
     pub home: String,
     /// The parent SSH handle is kept alive for the lifetime of the SFTP
-    /// session: dropping it would close the underlying connection.
-    pub _handle: client::Handle<SshHandler>,
+    /// session: dropping it would close the underlying connection. Held in a
+    /// `Mutex` so `reconnect` can swap in a fresh handle after the old
+    /// connection dies.
+    _handle: Mutex<client::Handle<SshHandler>>,
+    /// Credentials + endpoint for transparent reconnect. `None` disables
+    /// auto-reconnect (not currently used, but keeps the door open for
+    /// sessions where re-auth would need a human, e.g. an agent-only setup).
+    reconnect: Option<ReconnectParams>,
+    /// Serializes reconnect attempts so a burst of failing operations triggers
+    /// a single re-handshake rather than a thundering herd.
+    reconnect_lock: Mutex<()>,
 }
 
-pub async fn open_sftp(
-    host: &str,
-    port: u16,
-    username: &str,
-    auth: SshAuth,
-    network: Option<&NetworkSettings>,
+/// Force an SSH keep-alive onto SFTP connections. An idle SFTP channel with no
+/// keep-alive is silently reaped by server-side idle timeouts / NAT / firewalls;
+/// when that happens every later operation fails with "session closed". A
+/// periodic keep-alive keeps the channel warm. Respects an explicit user
+/// interval when one is set; otherwise defaults to 30s.
+fn network_with_keepalive(network: Option<&NetworkSettings>) -> NetworkSettings {
+    let mut n = network.cloned().unwrap_or_default();
+    n.keep_alive = true;
+    if n.keep_alive_interval_secs == 0 {
+        n.keep_alive_interval_secs = 30;
+    }
+    n
+}
+
+/// Open one SSH connection, request the sftp subsystem, and complete the SFTP
+/// handshake. Returns the live session plus the handle that owns the
+/// connection's lifetime. Shared by the initial attach and every reconnect.
+async fn connect_sftp(
+    params: &ReconnectParams,
     prompter: Option<&KbdInteractivePrompter>,
-) -> Result<ActiveSftp, String> {
-    let handle =
-        connect_ssh_authenticated_with_prompter(host, port, username, auth, network, prompter)
-            .await?;
+) -> Result<(SftpSession, client::Handle<SshHandler>), String> {
+    let handle = connect_ssh_authenticated_with_prompter(
+        &params.host,
+        params.port,
+        &params.username,
+        params.auth.clone(),
+        Some(&params.network),
+        prompter,
+    )
+    .await?;
     let channel = handle
         .channel_open_session()
         .await
@@ -77,6 +119,44 @@ pub async fn open_sftp(
     let sftp = SftpSession::new(channel.into_stream())
         .await
         .map_err(|e| format!("SFTP handshake failed: {}", e))?;
+    Ok((sftp, handle))
+}
+
+/// True when an error string indicates the transport died (dropped connection,
+/// closed channel, EOF, timeout) rather than a normal per-file failure like
+/// "No such file" or "Permission denied". Used to decide whether an operation
+/// is worth retrying after a reconnect. Kept deliberately conservative so we
+/// never loop on a genuine, reproducible error.
+pub(crate) fn is_disconnect_error(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("session closed")
+        || e.contains("sender dropped")
+        || e.contains("connection closed")
+        || e.contains("connection reset")
+        || e.contains("channel closed")
+        || e.contains("broken pipe")
+        || e.contains("unexpected eof")
+        || e.contains("not connected")
+        || e.contains("timeout")
+        || e.contains("timed out")
+}
+
+pub async fn open_sftp(
+    host: &str,
+    port: u16,
+    username: &str,
+    auth: SshAuth,
+    network: Option<&NetworkSettings>,
+    prompter: Option<&KbdInteractivePrompter>,
+) -> Result<ActiveSftp, String> {
+    let params = ReconnectParams {
+        host: host.to_string(),
+        port,
+        username: username.to_string(),
+        auth,
+        network: network_with_keepalive(network),
+    };
+    let (sftp, handle) = connect_sftp(&params, prompter).await?;
 
     let home = sftp
         .canonicalize(".")
@@ -86,12 +166,79 @@ pub async fn open_sftp(
     Ok(ActiveSftp {
         sftp: Arc::new(Mutex::new(sftp)),
         home,
-        _handle: handle,
+        _handle: Mutex::new(handle),
+        reconnect: Some(params),
+        reconnect_lock: Mutex::new(()),
     })
 }
 
+/// Run an `ActiveSftp` operation, and if it fails because the transport died,
+/// reconnect once and retry it. `$op` is re-evaluated verbatim after the
+/// reconnect, so it must be a self-contained call (a `*_once` helper) — no `?`
+/// may escape into the surrounding function between the two attempts.
+macro_rules! retry_reconnect {
+    ($self:ident, $op:expr) => {{
+        match $op {
+            Err(e) if is_disconnect_error(&e) => {
+                tracing::warn!("SFTP operation failed ({e}); attempting reconnect");
+                match $self.reconnect().await {
+                    Ok(()) => $op,
+                    // Reconnect failed (e.g. the server demands an interactive
+                    // second factor we can't answer here). Surface the original
+                    // transport error, not the handshake error: it's the true
+                    // cause and reliably drives the frontend's reconnect banner,
+                    // where a human can re-auth.
+                    Err(reconnect_err) => {
+                        tracing::warn!("SFTP reconnect failed: {reconnect_err}");
+                        Err(e)
+                    }
+                }
+            }
+            other => other,
+        }
+    }};
+}
+
 impl ActiveSftp {
+    /// Re-establish the SSH + SFTP connection in place after it dropped. Swaps
+    /// a fresh session and handle into the existing `Mutex`es, so every
+    /// outstanding `Arc<Mutex<SftpSession>>` clone keeps working transparently.
+    /// Serialized by `reconnect_lock`; callers that queue behind a winning
+    /// attempt re-probe and skip the redundant handshake.
+    ///
+    /// Auto-reconnect runs without a keyboard-interactive prompter, so a server
+    /// that demands an interactive second factor (MFA) on every login fails
+    /// here and falls back to the frontend's manual reconnect, which re-prompts.
+    async fn reconnect(&self) -> Result<(), String> {
+        let params = self
+            .reconnect
+            .as_ref()
+            .ok_or("SFTP session is not reconnectable")?;
+        let _guard = self.reconnect_lock.lock().await;
+        // A prior waiter may have healed the session while we queued on the
+        // lock. Probe cheaply; if it responds now, skip the re-handshake.
+        if self
+            .sftp
+            .lock()
+            .await
+            .canonicalize(".".to_string())
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let (sftp, handle) = connect_sftp(params, None).await?;
+        *self.sftp.lock().await = sftp;
+        *self._handle.lock().await = handle;
+        tracing::info!("SFTP session reconnected to {}:{}", params.host, params.port);
+        Ok(())
+    }
+
     pub async fn list_dir(&self, path: &str) -> Result<Vec<FileEntryDto>, String> {
+        retry_reconnect!(self, self.list_dir_once(path).await)
+    }
+
+    async fn list_dir_once(&self, path: &str) -> Result<Vec<FileEntryDto>, String> {
         let dir_entries = {
             let sftp = self.sftp.lock().await;
             sftp.read_dir(path.to_string())
@@ -135,6 +282,10 @@ impl ActiveSftp {
     }
 
     pub async fn read_link(&self, path: &str) -> Result<String, String> {
+        retry_reconnect!(self, self.read_link_once(path).await)
+    }
+
+    async fn read_link_once(&self, path: &str) -> Result<String, String> {
         let sftp = self.sftp.lock().await;
         sftp.read_link(path.to_string())
             .await
@@ -142,6 +293,10 @@ impl ActiveSftp {
     }
 
     pub async fn stat(&self, path: &str) -> Result<FileEntryDto, String> {
+        retry_reconnect!(self, self.stat_once(path).await)
+    }
+
+    async fn stat_once(&self, path: &str) -> Result<FileEntryDto, String> {
         let sftp = self.sftp.lock().await;
         let attrs = sftp
             .metadata(path.to_string())
@@ -152,6 +307,10 @@ impl ActiveSftp {
     }
 
     pub async fn mkdir(&self, path: &str) -> Result<(), String> {
+        retry_reconnect!(self, self.mkdir_once(path).await)
+    }
+
+    async fn mkdir_once(&self, path: &str) -> Result<(), String> {
         let sftp = self.sftp.lock().await;
         sftp.create_dir(path.to_string())
             .await
@@ -159,6 +318,10 @@ impl ActiveSftp {
     }
 
     pub async fn remove(&self, path: &str, recursive: bool) -> Result<(), String> {
+        retry_reconnect!(self, self.remove_once(path, recursive).await)
+    }
+
+    async fn remove_once(&self, path: &str, recursive: bool) -> Result<(), String> {
         let sftp = self.sftp.lock().await;
         let attrs = sftp
             .metadata(path.to_string())
@@ -199,6 +362,10 @@ impl ActiveSftp {
     }
 
     pub async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
+        retry_reconnect!(self, self.rename_once(from, to).await)
+    }
+
+    async fn rename_once(&self, from: &str, to: &str) -> Result<(), String> {
         let sftp = self.sftp.lock().await;
         sftp.rename(from.to_string(), to.to_string())
             .await
@@ -206,6 +373,10 @@ impl ActiveSftp {
     }
 
     pub async fn chmod(&self, path: &str, mode: u32) -> Result<(), String> {
+        retry_reconnect!(self, self.chmod_once(path, mode).await)
+    }
+
+    async fn chmod_once(&self, path: &str, mode: u32) -> Result<(), String> {
         let sftp = self.sftp.lock().await;
         let mut attrs = sftp
             .metadata(path.to_string())
@@ -218,6 +389,10 @@ impl ActiveSftp {
     }
 
     pub async fn realpath(&self, path: &str) -> Result<String, String> {
+        retry_reconnect!(self, self.realpath_once(path).await)
+    }
+
+    async fn realpath_once(&self, path: &str) -> Result<String, String> {
         let sftp = self.sftp.lock().await;
         sftp.canonicalize(path.to_string())
             .await
@@ -225,6 +400,10 @@ impl ActiveSftp {
     }
 
     pub async fn read_bytes(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+        retry_reconnect!(self, self.read_bytes_once(path, max_bytes).await)
+    }
+
+    async fn read_bytes_once(&self, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
         let (size, mut file) = {
             let sftp = self.sftp.lock().await;
             let attrs = sftp
@@ -252,6 +431,10 @@ impl ActiveSftp {
     }
 
     pub async fn write_bytes(&self, path: &str, data: &[u8]) -> Result<(), String> {
+        retry_reconnect!(self, self.write_bytes_once(path, data).await)
+    }
+
+    async fn write_bytes_once(&self, path: &str, data: &[u8]) -> Result<(), String> {
         let mut file = {
             let sftp = self.sftp.lock().await;
             sftp.open_with_flags(
@@ -818,5 +1001,55 @@ fn remote_basename(path: &str) -> &str {
     match trimmed.rsplit_once('/') {
         Some((_, name)) => name,
         None => trimmed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnect_errors_are_classified_for_retry() {
+        // The exact string from issue #425 (russh-sftp UnexpectedBehavior,
+        // wrapped by list_dir's "Failed to read {path}: {e}").
+        assert!(is_disconnect_error(
+            "Failed to read /data/users/x/scripts: session closed"
+        ));
+        assert!(is_disconnect_error("sender dropped"));
+        assert!(is_disconnect_error("Unexpected EOF on stream"));
+        assert!(is_disconnect_error("connection reset by peer"));
+        assert!(is_disconnect_error("Broken pipe"));
+        assert!(is_disconnect_error("Timeout"));
+    }
+
+    #[test]
+    fn genuine_file_errors_are_not_retried() {
+        assert!(!is_disconnect_error("stat /x: No such file or directory"));
+        assert!(!is_disconnect_error("mkdir /x: Permission denied"));
+        assert!(!is_disconnect_error("File is 999 bytes, exceeds preview limit"));
+    }
+
+    #[test]
+    fn keepalive_is_forced_on_for_sftp() {
+        // No settings at all → synthesize a keep-alive.
+        let n = network_with_keepalive(None);
+        assert!(n.keep_alive);
+        assert_eq!(n.keep_alive_interval_secs, 30);
+
+        // keep_alive on but interval unset (the Rust default) → fill a default.
+        let mut base = NetworkSettings::default();
+        base.keep_alive = true;
+        base.keep_alive_interval_secs = 0;
+        let n = network_with_keepalive(Some(&base));
+        assert_eq!(n.keep_alive_interval_secs, 30);
+
+        // Explicit user interval is preserved.
+        base.keep_alive_interval_secs = 60;
+        let n = network_with_keepalive(Some(&base));
+        assert_eq!(n.keep_alive_interval_secs, 60);
+
+        // A synthesized default must not accidentally select a proxy.
+        let n = network_with_keepalive(None);
+        assert!(n.proxy_kind.is_empty() || n.proxy_kind == "none");
     }
 }

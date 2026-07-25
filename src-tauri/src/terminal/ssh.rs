@@ -97,6 +97,7 @@ impl client::Handler for SshHandler {
     }
 }
 
+#[derive(Clone)]
 pub enum SshAuth {
     Password(String),
     PrivateKey(String),
