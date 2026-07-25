@@ -937,6 +937,68 @@ impl LspManager {
         }
         notified
     }
+
+    /// Collect every stored diagnostic across ready sessions for `workspace_id`
+    /// (M7-C). Includes files the user never opened — jdtls publishes project-wide
+    /// after a build — de-duplicated per file (later sessions win) and sorted by
+    /// path. Library / virtual (`jdt://`, non-`file:`) URIs are skipped.
+    async fn workspace_diagnostics(&self, workspace_id: &str) -> Vec<WorkspaceDiagnosticFile> {
+        let sessions: Vec<Arc<LspSession>> = {
+            let guard = self.sessions.lock().await;
+            guard
+                .values()
+                .filter_map(|entry| match entry {
+                    LspSessionEntry::Ready(session)
+                        if session.key.workspace_id == workspace_id =>
+                    {
+                        Some(session.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut by_path: HashMap<String, WorkspaceDiagnosticFile> = HashMap::new();
+        for session in sessions {
+            for (uri, diagnostics) in session.diagnostics.read().await.iter() {
+                if diagnostics.is_empty() {
+                    continue;
+                }
+                let Some(path) = file_path_from_uri(uri) else {
+                    continue;
+                };
+                by_path.insert(
+                    path.clone(),
+                    WorkspaceDiagnosticFile {
+                        path,
+                        uri: uri.clone(),
+                        diagnostics: diagnostics.clone(),
+                    },
+                );
+            }
+        }
+        let mut files: Vec<WorkspaceDiagnosticFile> = by_path.into_values().collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files
+    }
+}
+
+/// One file's diagnostics for the workspace-wide Problems view (M7-C).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDiagnosticFile {
+    /// Absolute filesystem path (from the `file:` URI).
+    pub path: String,
+    pub uri: String,
+    pub diagnostics: Vec<LspDiagnostic>,
+}
+
+/// Convert a `file:` URI to an absolute path; `None` for `jdt://` / non-file URIs.
+fn file_path_from_uri(uri: &str) -> Option<String> {
+    url::Url::parse(uri)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 impl LspSessionEntry {
@@ -2934,6 +2996,57 @@ pub async fn lsp_get_diagnostics(
         status,
         diagnostics,
     })
+}
+
+/// All diagnostics stored across the workspace's ready sessions (M7-C), including
+/// files the user never opened (jdtls publishes project-wide after a build). The
+/// frontend uses this for the Problems panel's "whole project" mode and refreshes
+/// it on the `lsp:diagnostics-updated` event. Empty when no session is active.
+#[tauri::command]
+pub async fn lsp_workspace_diagnostics(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<WorkspaceDiagnosticFile>, String> {
+    let workspace_id = workspace_id.trim();
+    let workspace_id = if workspace_id.is_empty() { "default" } else { workspace_id };
+    Ok(state.lsp.workspace_diagnostics(workspace_id).await)
+}
+
+/// Trigger a full project build on the active jdtls session (M7-C "Rebuild
+/// project") via `workspace/executeCommand: java.buildWorkspace`. `full = true`
+/// forces a clean rebuild so diagnostics for unopened files are (re)published.
+#[tauri::command]
+pub async fn lsp_build_workspace(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<(), String> {
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            "No language server session is active for this project; open a project file first"
+                .to_string()
+        })?;
+    // jdtls's java.buildWorkspace takes a single boolean `full`.
+    session
+        .request(
+            "workspace/executeCommand",
+            json!({ "command": "java.buildWorkspace", "arguments": [true] }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Failed to rebuild project: {e}"))
 }
 
 #[tauri::command]
@@ -6593,6 +6706,20 @@ mod tests {
             "vmargs should carry the Lombok agent so both launch paths pick it up"
         );
         set_configured_java_settings(None);
+    }
+
+    #[test]
+    fn file_path_from_uri_maps_file_and_skips_virtual() {
+        let (uri, expected_suffix) = if cfg!(windows) {
+            ("file:///C:/repo/src/Main.java", "Main.java")
+        } else {
+            ("file:///repo/src/Main.java", "Main.java")
+        };
+        let path = file_path_from_uri(uri).expect("file uri maps to a path");
+        assert!(path.ends_with(expected_suffix), "got {path}");
+        // Virtual / non-file URIs are skipped (library sources must not clutter Problems).
+        assert!(file_path_from_uri("jdt://contents/java.base/java.lang/String.class?=x").is_none());
+        assert!(file_path_from_uri("not a uri").is_none());
     }
 
     #[test]
