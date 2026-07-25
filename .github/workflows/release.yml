@@ -174,13 +174,17 @@ jobs:
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::capture::linux
           bash scripts/stage-sockscap-linux.sh --check
+          # Stage xray-core (MPL-2.0) into resources so the Linux bundle can serve
+          # core-backed upstreams (ss/trojan/vmess/vless/wireguard).
+          pwsh scripts/fetch-xray.ps1 -Platform linux
+          cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::core
 
       - name: Verify Windows SocksCap helper and preflight
         if: matrix.platform == 'windows-latest'
         run: |
           pwsh scripts/fetch-windivert.ps1
           pwsh scripts/stage-sockscap-windows.ps1
-          cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::policy sockscap::config
+          cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::policy sockscap::config sockscap::core
           pwsh scripts/stage-sockscap-windows.ps1 --check
 
       - name: Resolve release version
@@ -326,6 +330,11 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
+
+      # Stage xray-core (MPL-2.0, Apple silicon) into resources so the macOS
+      # bundle can serve core-backed upstreams. Runner has pwsh preinstalled.
+      - name: Stage xray-core (macos arm64)
+        run: pwsh scripts/fetch-xray.ps1 -Platform macos-arm64
 
       - name: Resolve release version
         id: version

@@ -43,6 +43,7 @@ Major modules:
 - `session/` — SQLite session/group persistence; imports from PuTTY / WSL / Tabby / OpenSSH (`import.rs`, `import_secrets/`)
 - `tunnel/` — local/remote/dynamic port forwarding with autostart
 - `proxy/`, `nettools/` — shared proxy plumbing and network utilities
+- `sockscap/` — per-app/global OS traffic capture routed through an upstream (a MobaXterm/netch-style "SocksCap"). Windows: elevated `sockscap-helper` + WinDivert (bundled resource, provisioned by `scripts/fetch-windivert.ps1`); Linux: nftables + cgroup v2 redirect. Captured TCP flows enter a loopback relay (`relay.rs`) that applies GFWList/rule policy then dials an upstream via `egress/`. Native upstreams: HTTP / SOCKS5 / SSH. Core-backed upstreams (Shadowsocks / Trojan / VMess / VLESS / WireGuard) are served by a bundled **xray-core** sidecar (MPL-2.0, `core/`; `scripts/fetch-xray.ps1`, pinned SHA256) — one process per profile exposing a local SOCKS inbound the relay dials, so no protocol/crypto lives in-tree. Share links (`ss://`/`vmess://`/`vless://`/`trojan://`) and subscriptions are parsed in `core/share_link.rs`. SSR is intentionally unsupported
 - `vnc/` — RFB protocol client + WebSocket bridge; `rdp/` — RDP client (ironrdp)
 - `servers/` — local servers, including an RDP **server** (`servers/rdp/`) with screen capture + cross-platform input injection (enigo)
 - `database/` — SQL clients (MySQL/PostgreSQL via sqlx, SQL Server via tiberius, ClickHouse via HTTP) and Redis; connections can route through proxy / SSH jump host (`forward.rs`)
