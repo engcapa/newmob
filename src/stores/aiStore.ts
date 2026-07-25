@@ -74,6 +74,8 @@ export interface AiConfig {
   fully_disabled?: boolean;
   /** Default output format for chat replies: "md" | "html" | "plain". */
   chat_output_format?: string;
+  /** Composer send shortcut: "ctrl_enter" (default) | "enter". */
+  chat_send_shortcut?: string;
 }
 
 export interface CcCustomSettingsProfile {
@@ -430,6 +432,7 @@ const DEFAULT_CONFIG: AiConfig = {
   full_local_mode: false,
   fully_disabled: false,
   chat_output_format: "md",
+  chat_send_shortcut: "ctrl_enter",
 };
 
 function normalizeModelName(model: string | undefined | null): string {

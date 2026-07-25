@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Composer } from "./Composer";
 import { useChatStore } from "../../stores/chatStore";
+import { useAiStore } from "../../stores/aiStore";
 import type { ChatAttachment } from "../../lib/chat/attachments";
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -37,6 +38,8 @@ describe("Composer attachments", () => {
       composerDrafts: {},
       consumePendingComposerText: () => "",
     });
+    // null config → Composer falls back to Ctrl+Enter (historical default)
+    useAiStore.setState({ config: null });
     invokeMock.mockImplementation((command: string, args: { paths?: string[] }) => {
       if (command === "chat_stat_attachment_paths") {
         return Promise.resolve((args.paths ?? []).map((path, index) => attachment(path, index)));
@@ -197,5 +200,33 @@ describe("Composer attachments", () => {
     const textarea = screen.getByPlaceholderText(/Type a message/) as HTMLTextAreaElement;
     expect(textarea.style.height).toBe("136px");
     expect(localStorage.getItem("taomni.chatComposer.height.v1")).toBe("136");
+  });
+
+  it("sends on Enter when chat_send_shortcut is enter", async () => {
+    useAiStore.setState({
+      config: { chat_send_shortcut: "enter" } as NonNullable<ReturnType<typeof useAiStore.getState>["config"]>,
+    });
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<Composer onSend={onSend} sending={false} />);
+
+    expect(screen.getByTitle("Send (Enter)")).toBeInTheDocument();
+    const textarea = screen.getByPlaceholderText(/Type a message/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "hello enter" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("hello enter", undefined, []));
+  });
+
+  it("does not send on bare Enter when chat_send_shortcut is ctrl_enter", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<Composer onSend={onSend} sending={false} />);
+
+    const textarea = screen.getByPlaceholderText(/Type a message/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "keep drafting" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(onSend).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("keep drafting", undefined, []));
   });
 });

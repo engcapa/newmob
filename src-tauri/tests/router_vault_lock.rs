@@ -76,6 +76,7 @@ fn make_config(api_key: String) -> AiConfig {
         full_local_mode: false,
         fully_disabled: false,
         chat_output_format: "md".into(),
+        chat_send_shortcut: "ctrl_enter".into(),
     }
 }
 
