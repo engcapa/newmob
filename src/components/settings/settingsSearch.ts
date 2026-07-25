@@ -201,6 +201,15 @@ export const SETTINGS_SEARCH_ENTRIES: SettingsSearchEntry[] = [
     terms: ["output format", "markdown", "html", "rendering", "输出格式", "渲染"],
   },
   {
+    id: "ai-chatsend",
+    titleKeys: ["settings.chatSendShortcut", "aiSettings.chatSendShortcutTitle"],
+    terms: [
+      "send", "shortcut", "hotkey", "keyboard", "enter", "ctrl+enter", "cmd+enter",
+      "composer", "send key",
+      "发送", "快捷键", "热键", "回车", "ctrl+enter", "发送快捷键",
+    ],
+  },
+  {
     id: "ai-chathistory",
     titleKeys: ["aiSettings.chatHistoryTitle", "settings.chatHistory"],
     terms: ["chat history", "retention", "clear history", "对话历史", "聊天记录", "保留", "清除"],
@@ -259,6 +268,7 @@ export const SETTINGS_GROUPS: SettingsGroupDef[] = [
       "ai-codex",
       "ai-acp",
       "ai-chatformat",
+      "ai-chatsend",
       "ai-chathistory",
       "ai-models",
     ],

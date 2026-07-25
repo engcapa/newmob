@@ -28,10 +28,18 @@ pub struct AiConfig {
     /// Per-thread overrides live on `ai_chat_threads.output_format`.
     #[serde(default = "default_chat_output_format")]
     pub chat_output_format: String,
+    /// Keyboard shortcut used to send from the AI chat composer.
+    /// One of "ctrl_enter" (default) or "enter".
+    #[serde(default = "default_chat_send_shortcut")]
+    pub chat_send_shortcut: String,
 }
 
 fn default_chat_output_format() -> String {
     "md".into()
+}
+
+fn default_chat_send_shortcut() -> String {
+    "ctrl_enter".into()
 }
 
 impl Default for AiConfig {
@@ -46,6 +54,7 @@ impl Default for AiConfig {
             full_local_mode: false,
             fully_disabled: false,
             chat_output_format: default_chat_output_format(),
+            chat_send_shortcut: default_chat_send_shortcut(),
         }
     }
 }

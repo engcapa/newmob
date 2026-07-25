@@ -678,10 +678,13 @@ export function ChatDrawer({ terminalContext }: ChatDrawerProps) {
     : currentMode === "video"
       ? t("chat.emptyVideoHint")
       : t("chat.emptyHint");
+  const sendShortcutLabel = (aiConfig?.chat_send_shortcut === "enter")
+    ? t("chat.shortcutEnter")
+    : t("chat.shortcutCtrlEnter");
   const composerPlaceholder = currentMode === "image"
-    ? t("chat.imagePromptPlaceholder")
+    ? t("chat.imagePromptPlaceholder", { shortcut: sendShortcutLabel })
     : currentMode === "video"
-      ? t("chat.videoPromptPlaceholder")
+      ? t("chat.videoPromptPlaceholder", { shortcut: sendShortcutLabel })
       : undefined;
   const composerDraftKey = activeThreadId
     ? `thread:${activeThreadId}`

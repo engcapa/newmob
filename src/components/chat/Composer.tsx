@@ -29,6 +29,11 @@ import {
   type NativeFileDropDetail,
 } from "../../lib/osFileDrop";
 import { AttachmentChip } from "./AttachmentChip";
+import {
+  isChatSendKey,
+  normalizeChatSendShortcut,
+} from "../../lib/chat/sendShortcut";
+import { useAiStore } from "../../stores/aiStore";
 import { useT } from "../../lib/i18n";
 
 interface ComposerProps {
@@ -61,6 +66,12 @@ export function Composer({
   resolveTerminalContext,
 }: ComposerProps) {
   const t = useT();
+  const sendShortcut = normalizeChatSendShortcut(
+    useAiStore((s) => s.config?.chat_send_shortcut),
+  );
+  const sendShortcutLabel = sendShortcut === "enter"
+    ? t("chat.shortcutEnter")
+    : t("chat.shortcutCtrlEnter");
   const initialDraft = draftKey ? useChatStore.getState().composerDrafts[draftKey] : undefined;
   const [text, setText] = useState(() => initialDraft?.text ?? "");
   const [selectedAttachments, setSelectedAttachments] = useState<ChatAttachment[]>(
@@ -357,14 +368,21 @@ export function Composer({
         <textarea
           ref={textareaRef}
           className="taomni-input flex-1 text-[12px] resize-none py-1.5"
-          placeholder={placeholder ?? t("chat.inputPlaceholder")}
+          placeholder={placeholder ?? t("chat.inputPlaceholder", { shortcut: sendShortcutLabel })}
           value={text}
           disabled={draftDisabled}
           style={{ height: composerHeight, minHeight: MIN_COMPOSER_HEIGHT, maxHeight: MAX_COMPOSER_HEIGHT }}
           onChange={(e) => setText(e.target.value)}
           onPaste={handlePaste}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+            if (isChatSendKey({
+              key: e.key,
+              ctrlKey: e.ctrlKey,
+              metaKey: e.metaKey,
+              shiftKey: e.shiftKey,
+              isComposing: e.nativeEvent.isComposing,
+              keyCode: e.nativeEvent.keyCode,
+            }, sendShortcut)) {
               e.preventDefault();
               void handleSend();
             }
@@ -375,7 +393,7 @@ export function Composer({
           className="taomni-btn h-8 w-8 p-0 inline-flex items-center justify-center shrink-0"
           onClick={handleSend}
           disabled={!canSend || sending || draftDisabled}
-          title={t("chat.sendShortcutTitle")}
+          title={t("chat.sendShortcutTitle", { shortcut: sendShortcutLabel })}
         >
           {sending ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />

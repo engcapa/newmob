@@ -70,6 +70,7 @@ function makeConfig(): AiConfig {
     full_local_mode: false,
     fully_disabled: false,
     chat_output_format: "md",
+    chat_send_shortcut: "ctrl_enter",
   };
 }
 
