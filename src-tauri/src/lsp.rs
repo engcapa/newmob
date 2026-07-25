@@ -181,6 +181,8 @@ pub struct LspUriContentsResult {
     pub uri: String,
     pub path: Option<String>,
     pub title: String,
+    /// Human label for where the source came from (package · jar/module).
+    pub container: Option<String>,
     pub language_id: String,
     pub text: String,
     pub read_only: bool,
@@ -527,6 +529,7 @@ struct LspSession {
     stderr_tail: Mutex<String>,
 }
 
+#[derive(Clone)]
 struct ResolvedDocument {
     path: PathBuf,
     uri: String,
@@ -2621,13 +2624,17 @@ pub async fn lsp_hover(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    document_uri: Option<String>,
     line: u32,
     character: u32,
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
 ) -> Result<LspHoverResult, String> {
-    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let document = with_document_uri(
+        resolve_document(workspace_id, root_path, file_path, language_id, 0)?,
+        document_uri,
+    );
     let session = match state
         .lsp
         .active_session(
@@ -2685,6 +2692,7 @@ pub async fn lsp_definition(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    document_uri: Option<String>,
     line: u32,
     character: u32,
     language_id: Option<String>,
@@ -2696,6 +2704,7 @@ pub async fn lsp_definition(
         workspace_id,
         root_path,
         file_path,
+        document_uri,
         line,
         character,
         language_id,
@@ -2713,6 +2722,7 @@ pub async fn lsp_references(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    document_uri: Option<String>,
     line: u32,
     character: u32,
     include_declaration: Option<bool>,
@@ -2725,6 +2735,7 @@ pub async fn lsp_references(
         workspace_id,
         root_path,
         file_path,
+        document_uri,
         line,
         character,
         language_id,
@@ -2745,6 +2756,7 @@ async fn lsp_location_request(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    document_uri: Option<String>,
     line: u32,
     character: u32,
     language_id: Option<String>,
@@ -2753,7 +2765,10 @@ async fn lsp_location_request(
     method: &str,
     mut extra: Value,
 ) -> Result<LspLocationsResult, String> {
-    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let document = with_document_uri(
+        resolve_document(workspace_id, root_path, file_path, language_id, 0)?,
+        document_uri,
+    );
     let session = match state
         .lsp
         .active_session(
@@ -2802,11 +2817,15 @@ pub async fn lsp_document_symbols(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    document_uri: Option<String>,
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
 ) -> Result<LspDocumentSymbolsResult, String> {
-    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let document = with_document_uri(
+        resolve_document(workspace_id, root_path, file_path, language_id, 0)?,
+        document_uri,
+    );
     let session = match state
         .lsp
         .active_session(
@@ -3182,6 +3201,7 @@ pub async fn lsp_type_definition(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    document_uri: Option<String>,
     line: u32,
     character: u32,
     language_id: Option<String>,
@@ -3193,6 +3213,7 @@ pub async fn lsp_type_definition(
         workspace_id,
         root_path,
         file_path,
+        document_uri,
         line,
         character,
         language_id,
@@ -3210,6 +3231,7 @@ pub async fn lsp_implementation(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    document_uri: Option<String>,
     line: u32,
     character: u32,
     language_id: Option<String>,
@@ -3221,6 +3243,7 @@ pub async fn lsp_implementation(
         workspace_id,
         root_path,
         file_path,
+        document_uri,
         line,
         character,
         language_id,
@@ -3277,6 +3300,9 @@ pub async fn lsp_read_uri_contents(
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.clone()),
+                container: target
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().into_owned()),
                 language_id: language,
                 text,
                 read_only: true,
@@ -3306,27 +3332,29 @@ pub async fn lsp_read_uri_contents(
             )
             .await
             .map_err(|e| format!("Failed to load class contents: {e}"))?;
+        // jdtls answers with an empty string when neither attached sources nor the
+        // bundled decompiler could produce anything for this class.
         let text = result
             .as_str()
+            .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| {
-                "Language server returned empty class file contents (attach sources or enable decompiler)"
-                    .to_string()
+                format!(
+                    "{} returned no source for {}: attach a sources JAR or install a decompiler",
+                    document
+                        .preset
+                        .as_ref()
+                        .map(|preset| preset.display_name.clone())
+                        .unwrap_or_else(|| "The language server".to_string()),
+                    title_from_class_uri(&uri),
+                )
             })?
             .to_string();
-        let title = title_from_class_uri(&uri);
-        let status = state
-            .lsp
-            .document_status(
-                &document,
-                server_command_id.as_deref(),
-                custom_server_command.as_ref(),
-            )
-            .await;
         return Ok(LspUriContentsResult {
             status,
             uri: uri.clone(),
             path: None,
-            title,
+            title: title_from_class_uri(&uri),
+            container: container_from_class_uri(&uri),
             language_id: "java".to_string(),
             text,
             read_only: true,
@@ -4229,6 +4257,22 @@ fn resolve_document(
     })
 }
 
+/// Retarget a resolved document at a virtual URI (a `jdt://` library buffer) while
+/// keeping the origin file's path for session / SDK selection: library sources have
+/// no project of their own, so requests must ride the origin project's session.
+fn with_document_uri(
+    mut document: ResolvedDocument,
+    document_uri: Option<String>,
+) -> ResolvedDocument {
+    if let Some(uri) = document_uri
+        .map(|uri| uri.trim().to_string())
+        .filter(|uri| !uri.is_empty())
+    {
+        document.uri = uri;
+    }
+    document
+}
+
 fn resolve_file_path(root_path: Option<&str>, file_path: &str) -> Result<PathBuf, String> {
     let file = Path::new(file_path);
     let path = if file.is_absolute() {
@@ -4283,6 +4327,14 @@ fn lsp_initialization_options(
                     "runtimes": runtimes
                 }
             }
+        },
+        // JDT LS drops every location that resolves into a `.class` file unless the
+        // client declares `classFileContentsSupport` (JDTUtils#toUri(IClassFile)
+        // returns null otherwise). Without it, Ctrl+click on a JDK or dependency
+        // type silently resolves to nothing. It also widens workspace symbol search
+        // to application/system libraries and enables decompiled-source lookups.
+        "extendedClientCapabilities": {
+            "classFileContentsSupport": true
         }
     })
 }
@@ -5448,6 +5500,43 @@ fn title_from_class_uri(uri: &str) -> String {
     "Library Class".into()
 }
 
+/// Where a library class came from, shown as the editor tab subtitle:
+/// `java.lang · java.base` for jdt:// URIs, `com.foo · lib.jar` for jar: URIs.
+fn container_from_class_uri(uri: &str) -> Option<String> {
+    let after = uri.split("://").nth(1)?;
+    let path = after.split('?').next().unwrap_or(after);
+    if uri.to_ascii_lowercase().starts_with("jar:file:") {
+        // /path/to/lib.jar!/com/foo/Bar.class
+        let (archive, entry) = path.split_once("!/")?;
+        let jar = archive.rsplit('/').next().unwrap_or(archive);
+        let package = entry
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.replace('/', "."))
+            .unwrap_or_default();
+        return Some(if package.is_empty() {
+            jar.to_string()
+        } else {
+            format!("{package} · {jar}")
+        });
+    }
+    // contents/java.base/java.lang/String.class
+    let segments: Vec<&str> = path.split('/').collect();
+    if segments.len() < 4 {
+        return None;
+    }
+    let jar = segments[1].trim();
+    let package = segments[2].trim();
+    let package = if package.is_empty() {
+        "(default package)"
+    } else {
+        package
+    };
+    if jar.is_empty() {
+        return Some(package.to_string());
+    }
+    Some(format!("{package} · {jar}"))
+}
+
 fn detect_language_id(language_id: &str) -> Option<DetectedLanguage> {
     let language_id = language_id.trim();
     let preset_id = match language_id {
@@ -5839,6 +5928,11 @@ mod tests {
         assert_eq!(
             options["settings"]["java"]["configuration"]["runtimes"][0],
             json!({ "name": "JavaSE-17", "path": "/sdk/jdk-17", "default": true })
+        );
+        // Required for jdt:// definitions into the JDK and dependency JARs.
+        assert_eq!(
+            options["extendedClientCapabilities"]["classFileContentsSupport"],
+            json!(true)
         );
         assert_eq!(lsp_initialization_options(false, &environment), Value::Null);
     }
@@ -6701,5 +6795,53 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             title_from_class_uri("jdt://contents/java.base/java.lang/String.class?=x"),
             "String.java"
         );
+    }
+
+    #[test]
+    fn container_from_class_uri_labels_package_and_archive() {
+        assert_eq!(
+            container_from_class_uri("jdt://contents/java.base/java.lang/String.class?=x")
+                .as_deref(),
+            Some("java.lang · java.base")
+        );
+        let jar_class = concat!(
+            "jdt://contents/commons-lang3-3.12.0.jar/",
+            "org.apache.commons.lang3/StringUtils.class?=y"
+        );
+        assert_eq!(
+            container_from_class_uri(jar_class).as_deref(),
+            Some("org.apache.commons.lang3 · commons-lang3-3.12.0.jar")
+        );
+        assert_eq!(
+            container_from_class_uri("jar:file:///libs/foo.jar!/com/acme/Bar.class").as_deref(),
+            Some("com.acme · foo.jar")
+        );
+        assert!(container_from_class_uri("jdt://contents/String.class").is_none());
+    }
+
+    #[test]
+    fn with_document_uri_overrides_only_when_present() {
+        let document = ResolvedDocument {
+            path: PathBuf::from(if cfg!(windows) {
+                r"C:\repo\src\Main.java"
+            } else {
+                "/repo/src/Main.java"
+            }),
+            uri: "file:///repo/src/Main.java".to_string(),
+            root_path: PathBuf::from(if cfg!(windows) { r"C:\repo" } else { "/repo" }),
+            workspace_id: "workspace".to_string(),
+            preset: find_preset("java"),
+            language_id: Some("java".to_string()),
+            version: 0,
+        };
+        let untouched = with_document_uri(document.clone(), Some("   ".to_string()));
+        assert_eq!(untouched.uri, "file:///repo/src/Main.java");
+        let library = with_document_uri(
+            document,
+            Some("jdt://contents/java.base/java.lang/String.class?=x".to_string()),
+        );
+        assert_eq!(library.uri, "jdt://contents/java.base/java.lang/String.class?=x");
+        // Session / SDK resolution still keys off the origin project file.
+        assert!(library.path.ends_with("Main.java"));
     }
 }

@@ -91,6 +91,8 @@ interface CodeMirrorHostProps {
   gitChanges?: GitLineChange[];
   gitBlame?: GitBlameLine | null;
   reveal: EditorRevealTarget | null;
+  /** Block edits (library / decompiled sources that have no file to write back to). */
+  readOnly?: boolean;
   onChange: (doc: string) => void;
   onSave: () => void;
   onHover: (position: LspPosition) => Promise<string | null>;
@@ -128,6 +130,14 @@ export interface EditorContextMenuRequest {
   cut: () => void;
   copy: () => void;
   paste: () => void;
+}
+
+/**
+ * Read-only buffers keep the caret, selection, search, and Ctrl+click navigation —
+ * only document changes are rejected (IDEA's decompiled-source behaviour).
+ */
+function readOnlyExtension(readOnly: boolean): Extension {
+  return readOnly ? EditorState.readOnly.of(true) : [];
 }
 
 const WORKSPACE_EDITOR_STYLE = EditorView.theme({
@@ -278,6 +288,7 @@ export function CodeMirrorHost({
   gitChanges = EMPTY_GIT_CHANGES,
   gitBlame = null,
   reveal,
+  readOnly = false,
   onChange,
   onSave,
   onHover,
@@ -303,6 +314,7 @@ export function CodeMirrorHost({
   const semanticTokensCompartment = useRef(new Compartment());
   const gitCompartment = useRef(new Compartment());
   const signatureCompartment = useRef(new Compartment());
+  const readOnlyCompartment = useRef(new Compartment());
   const signatureShownRef = useRef(false);
   /** True while applying a prop-driven doc replace so it is not treated as a user edit. */
   const applyingExternalDocRef = useRef(false);
@@ -569,6 +581,7 @@ export function CodeMirrorHost({
           (change) => onGitChangeClickRef.current?.(change),
         )),
         signatureCompartment.current.of([]),
+        readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
         ...lspInteractionExtensions(onHoverRef, onDefinitionRef, onReferencesRef),
         ...codeViewExtensions(),
         WORKSPACE_EDITOR_STYLE,
@@ -728,6 +741,12 @@ export function CodeMirrorHost({
       cancelled = true;
     };
   }, [path]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({ effects: readOnlyCompartment.current.reconfigure(readOnlyExtension(readOnly)) });
+  }, [readOnly]);
 
   useEffect(() => {
     const view = viewRef.current;

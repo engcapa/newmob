@@ -136,6 +136,8 @@ export interface LspUriContentsResult {
   uri: string;
   path: string | null;
   title: string;
+  /** Package · jar/module label for the tab subtitle. */
+  container: string | null;
   languageId: string;
   text: string;
   readOnly: boolean;
@@ -207,6 +209,12 @@ export interface LspDocumentDescriptor {
   workspaceId: string;
   rootPath?: string | null;
   filePath: string;
+  /**
+   * Virtual document URI to request instead of `filePath`'s own file URI, used by
+   * library buffers (JDK / dependency `jdt://` sources). `filePath` still selects
+   * the language-server session, so it must point at a file in the origin project.
+   */
+  documentUri?: string | null;
   languageId?: string | null;
   serverCommandId?: string | null;
   customServerCommand?: LspCustomServerCommand | null;
@@ -219,6 +227,7 @@ function documentArgs(descriptor: LspDocumentDescriptor) {
     workspaceId: descriptor.workspaceId,
     rootPath: descriptor.rootPath ?? null,
     filePath: descriptor.filePath,
+    documentUri: descriptor.documentUri?.trim() || null,
     languageId: descriptor.languageId ?? null,
     serverCommandId: descriptor.serverCommandId ?? null,
     customServerCommand: descriptor.customServerCommand ?? null,

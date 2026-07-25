@@ -114,6 +114,15 @@ export interface WorkspaceLspSessionController {
   updateCommandPref: (presetId: string, commandId: string) => void;
   updateCustomCommand: (presetId: string, patch: Partial<LspCustomCommandConfig>) => void;
   descriptorForFile: (file: OpenFileState) => LspDocumentDescriptor | null;
+  /**
+   * Descriptor for a path that has no open buffer (library sources re-fetched from
+   * the server). `documentUri` retargets the request at a virtual document.
+   */
+  descriptorForPath: (
+    rootPath: string | null,
+    filePath: string,
+    documentUri?: string | null,
+  ) => LspDocumentDescriptor;
   /** True when the language server has the given buffer and no didChange is in flight. */
   isDocumentSynced: (key: string, text: string) => boolean;
   syncDocument: (file: OpenFileState, mode: "open" | "change") => Promise<void>;
@@ -249,36 +258,47 @@ export function useWorkspaceLspSession({
     invalidateSyncedText();
   }, [invalidateSyncedText]);
 
-  const descriptorForFile = useCallback((file: OpenFileState): LspDocumentDescriptor | null => {
-    const presetId = lspPresetIdForPath(file.languagePath);
+  const descriptorForPath = useCallback((
+    rootPath: string | null,
+    filePath: string,
+    documentUri: string | null = null,
+  ): LspDocumentDescriptor => {
+    const presetId = lspPresetIdForPath(filePath);
     const commandPref = presetId ? commandPrefs[presetId] ?? null : null;
     const serverCommandId = commandPref && commandPref !== CUSTOM_LSP_COMMAND_ID ? commandPref : null;
     const customServerCommand = presetId && commandPref === CUSTOM_LSP_COMMAND_ID
       ? customServerCommandFromConfig(customCommands[presetId])
       : null;
-    const configuredJavaHome = javaHome.trim() || null;
+    return {
+      workspaceId: workspaceInstanceId,
+      rootPath,
+      filePath,
+      documentUri,
+      serverCommandId,
+      customServerCommand,
+      javaHome: javaHome.trim() || null,
+    };
+  }, [commandPrefs, customCommands, javaHome, workspaceInstanceId]);
+
+  const descriptorForFile = useCallback((file: OpenFileState): LspDocumentDescriptor | null => {
+    // Library sources (jdt:// JDK / JAR classes) have no file of their own: keep the
+    // origin project's path so the request lands on that project's session, and let
+    // the server resolve the class from the virtual URI.
+    if (file.library) {
+      return descriptorForPath(
+        file.library.originRootPath,
+        file.library.originFilePath,
+        file.library.uri,
+      );
+    }
     if (file.ref.kind === "root") {
       const rootId = file.ref.rootId;
       const root = rootsRef.current.find((candidate) => candidate.id === rootId);
       if (!root) return null;
-      return {
-        workspaceId: workspaceInstanceId,
-        rootPath: root.path,
-        filePath: file.ref.path,
-        serverCommandId,
-        customServerCommand,
-        javaHome: configuredJavaHome,
-      };
+      return descriptorForPath(root.path, file.ref.path);
     }
-    return {
-      workspaceId: workspaceInstanceId,
-      rootPath: null,
-      filePath: file.ref.path,
-      serverCommandId,
-      customServerCommand,
-      javaHome: configuredJavaHome,
-    };
-  }, [commandPrefs, customCommands, javaHome, workspaceInstanceId]);
+    return descriptorForPath(null, file.ref.path);
+  }, [descriptorForPath]);
 
   const updateStatus = useCallback((file: OpenFileState, status: LspDocumentStatus) => {
     if (!mountedRef.current) return;
@@ -302,6 +322,8 @@ export function useWorkspaceLspSession({
   }, [updateLspFiles]);
 
   const refreshDiagnostics = useCallback(async (file: OpenFileState) => {
+    // Library sources are never opened on the server, so they publish no diagnostics.
+    if (file.library) return;
     const descriptor = descriptorForFile(file);
     if (!descriptor) return;
     try {
@@ -375,6 +397,8 @@ export function useWorkspaceLspSession({
 
   const syncDocument = useCallback(async (file: OpenFileState, mode: "open" | "change") => {
     if (file.loading) return;
+    // Library sources are owned by the server, not by us: no didOpen/didChange.
+    if (file.library) return;
     // No language-server preset for this extension → never open an IPC path.
     if (!lspPresetIdForPath(file.languagePath)) return;
     // didChange without an active session (and not mid-open) is a no-op.
@@ -539,6 +563,7 @@ export function useWorkspaceLspSession({
   }, [descriptorForFile, openFilesRef, scheduleDiagnostics, updateLspFiles]);
 
   const saveDocument = useCallback(async (file: OpenFileState, text: string) => {
+    if (file.library) return;
     const descriptor = descriptorForFile(file);
     if (!descriptor) return;
     try {
@@ -586,7 +611,8 @@ export function useWorkspaceLspSession({
       queue.pending = null;
       delete syncQueuesRef.current[file.key];
     }
-    const descriptor = descriptorForFile(file);
+    // Never opened by us (library source) → nothing to close on the server.
+    const descriptor = file.library ? null : descriptorForFile(file);
     if (descriptor) void lspCloseDocument(descriptor);
     forgetDocument(file.key);
   }, [descriptorForFile, forgetDocument]);
@@ -599,6 +625,7 @@ export function useWorkspaceLspSession({
     updateCommandPref,
     updateCustomCommand,
     descriptorForFile,
+    descriptorForPath,
     isDocumentSynced,
     syncDocument,
     saveDocument,

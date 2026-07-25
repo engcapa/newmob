@@ -145,6 +145,47 @@ describe("useWorkspaceLspSession", () => {
     );
   });
 
+  it("routes library sources through the origin project session and never syncs them", async () => {
+    const libraryFile: OpenFileState = {
+      ...file,
+      key: "loose:loose-jdt-string",
+      ref: { kind: "loose", id: "loose-jdt-string", path: "jdt://contents/java.base/java.lang/String.class?=x" },
+      title: "String.java",
+      subtitle: "java.lang · java.base · String.java",
+      path: "jdt://contents/java.base/java.lang/String.class?=x",
+      languagePath: "String.java",
+      library: {
+        uri: "jdt://contents/java.base/java.lang/String.class?=x",
+        container: "java.lang · java.base",
+        originRootPath: "/repo",
+        originFilePath: "src/Main.java",
+      },
+    };
+    const openFilesRef = { current: { [libraryFile.key]: libraryFile } };
+    const { result } = renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-1",
+      roots,
+      openFilesRef,
+      updateLspFiles: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    await waitFor(() => expect(lspMocks.lspDetectServers).toHaveBeenCalled());
+    // Requests must ride the origin project's session but target the class URI.
+    expect(result.current.descriptorForFile(libraryFile)).toMatchObject({
+      rootPath: "/repo",
+      filePath: "src/Main.java",
+      documentUri: "jdt://contents/java.base/java.lang/String.class?=x",
+    });
+
+    await act(async () => result.current.syncDocument(libraryFile, "open"));
+    await act(async () => result.current.saveDocument(libraryFile, "text"));
+    act(() => result.current.closeDocument(libraryFile));
+    expect(lspMocks.lspOpenDocument).not.toHaveBeenCalled();
+    expect(lspMocks.lspSaveDocument).not.toHaveBeenCalled();
+    expect(lspMocks.lspCloseDocument).not.toHaveBeenCalled();
+  });
+
   it("does not commit an async response after its buffer was closed", async () => {
     let resolveOpen!: (value: LspDocumentStatus) => void;
     lspMocks.lspOpenDocument.mockImplementation(() => new Promise<LspDocumentStatus>((resolve) => {

@@ -11,9 +11,13 @@ import {
   gitDirectoryChangeCount,
   isFlatViewSourceFile,
   languageSourceRootFor,
+  libraryLanguagePath,
+  looksLikeDocumentUri,
+  makeLibraryFile,
   matchesTreeFilter,
   normalizeEditorText,
   shouldHideEntry,
+  type LibraryBufferInfo,
 } from "./codeWorkspaceModel";
 
 const entry = (name: string, path: string): WorkspaceEntry => ({
@@ -92,5 +96,49 @@ describe("project tree model helpers", () => {
     expect(gitDirectoryChangeCount(map, "root1", "src")).toBe(1);
     expect(gitDirectoryChangeCount(map, "root1", "")).toBe(1);
     expect(gitDirectoryChangeCount(map, "other", "")).toBe(0);
+  });
+
+  it("makeLibraryFile builds a clean read-only buffer keyed by class URI", () => {
+    const info: LibraryBufferInfo = {
+      uri: "jdt://contents/java.base/java.lang/String.class?=java.base",
+      title: "String.java",
+      container: "java.lang · java.base",
+      languageId: "java",
+      originFilePath: "src/Main.java",
+      originRootPath: "/repo",
+    };
+    const file = makeLibraryFile(info, "public class String {}\r\n");
+
+    expect(file.path).toBe(info.uri);
+    expect(file.title).toBe("String.java");
+    expect(file.subtitle).toBe("java.lang · java.base · String.java");
+    expect(file.languagePath).toBe("String.java");
+    expect(file.text).toBe("public class String {}\n");
+    expect(file.dirty).toBe(false);
+    expect(file.library).toEqual({
+      uri: info.uri,
+      container: "java.lang · java.base",
+      originFilePath: "src/Main.java",
+      originRootPath: "/repo",
+    });
+
+    // Same-named classes from different packages must not share a buffer.
+    const other = makeLibraryFile({
+      ...info,
+      uri: "jdt://contents/other.jar/com.acme/String.class?=other",
+      container: "com.acme · other.jar",
+    }, "class String {}");
+    expect(other.key).not.toBe(file.key);
+
+    expect(libraryLanguagePath({ ...info, title: "String", languageId: "kotlin" })).toBe("String.kt");
+  });
+
+  it("looksLikeDocumentUri separates URIs from filesystem paths", () => {
+    expect(looksLikeDocumentUri("jdt://contents/java.base/java.lang/String.class?=x")).toBe(true);
+    expect(looksLikeDocumentUri("jar:file:///libs/foo.jar!/com/acme/Bar.class")).toBe(true);
+    expect(looksLikeDocumentUri("file:///repo/src/Main.java")).toBe(true);
+    expect(looksLikeDocumentUri("C:\\repo\\src\\Main.java")).toBe(false);
+    expect(looksLikeDocumentUri("/repo/src/Main.java")).toBe(false);
+    expect(looksLikeDocumentUri("src/Main.java")).toBe(false);
   });
 });

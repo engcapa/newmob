@@ -483,6 +483,8 @@ export function EditorGroup({
                         gitChanges={activeGitChanges}
                         gitBlame={activeGitBlame}
                         reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
+                        // Library sources (JDK / dependency classes) cannot be written back.
+                        readOnly={!!activeFile.library}
                         onChange={(doc) => {
                           if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
                           onChangeText(activeFile.key, doc);
