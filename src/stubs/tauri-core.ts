@@ -1438,6 +1438,8 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     case "lsp_read_uri_contents": {
       const uri = String((args as InvokeArgs)?.uri ?? "");
       const title = uri.split("/").pop()?.split("?")[0] || "Library.java";
+      const decompiled = uri.includes(".class");
+      const banner = "// Source code is decompiled from a .class file using FernFlower decompiler (from Intellij IDEA).\n";
       return {
         status: stubLspDocumentStatus(args as InvokeArgs),
         uri,
@@ -1445,8 +1447,19 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         title: title.endsWith(".class") ? title.replace(/\.class$/, ".java") : title,
         container: uri.split("/").slice(-3, -1).reverse().join(" · ") || null,
         languageId: "java",
-        text: `// Stub library source for ${uri}\n`,
+        text: `${decompiled ? banner : ""}// Stub library source for ${uri}\n`,
         readOnly: true,
+        decompiled,
+      } as T;
+    }
+    case "lsp_download_sources": {
+      const uri = String((args as InvokeArgs)?.uri ?? "");
+      // Stub pretends the sources JAR published, returning non-decompiled text.
+      return {
+        attached: true,
+        text: `// Stub attached source for ${uri}\n`,
+        decompiled: false,
+        message: null,
       } as T;
     }
     case "lsp_prepare_call_hierarchy":

@@ -12,6 +12,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Columns2,
+  Download,
   Eye,
   File,
   Loader2,
@@ -102,6 +103,10 @@ interface EditorGroupProps {
   onRevealInSystem: (key: string) => void;
   onOpenInTerminal: (key: string) => void;
   onLocalHistory?: (key: string) => void;
+  /** Fetch attached sources for a decompiled library buffer (jdtls Java classes). */
+  onDownloadSources?: (key: string) => void;
+  /** Keys whose sources are currently downloading (drives the banner spinner). */
+  downloadingSourcesKeys?: string[];
   onMarkdownModeChange: (mode: MarkdownViewMode) => void;
   onChangeText: (key: string, text: string) => void;
   onSave: (key: string) => void;
@@ -176,6 +181,8 @@ export function EditorGroup({
   onRevealInSystem,
   onOpenInTerminal,
   onLocalHistory,
+  onDownloadSources,
+  downloadingSourcesKeys,
   onMarkdownModeChange,
   onChangeText,
   onSave,
@@ -458,6 +465,34 @@ export function EditorGroup({
                 <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-red-500/30 bg-red-500/10 text-[12px] text-red-500">
                   <AlertTriangle className="w-4 h-4 shrink-0" />
                   <span className="min-w-0 truncate">{activeFile.error}</span>
+                </div>
+              )}
+              {activeFile.library?.decompiled && (
+                <div
+                  data-testid="code-workspace-decompiled-banner"
+                  className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-amber-500/30 bg-amber-500/10 text-[12px] text-[var(--taomni-code-fg)]"
+                >
+                  <AlertTriangle className="w-4 h-4 shrink-0 text-amber-500" />
+                  <span className="min-w-0 flex-1 truncate">
+                    Decompiled from bytecode — source not attached.
+                  </span>
+                  {onDownloadSources && (() => {
+                    const downloading = downloadingSourcesKeys?.includes(activeFile.key) ?? false;
+                    return (
+                      <button
+                        type="button"
+                        data-testid="code-workspace-download-sources"
+                        disabled={downloading}
+                        onClick={() => onDownloadSources(activeFile.key)}
+                        className="shrink-0 inline-flex items-center gap-1 rounded px-2 py-0.5 text-[12px] font-medium border border-[var(--taomni-code-border)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-60"
+                      >
+                        {downloading
+                          ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          : <Download className="w-3.5 h-3.5" />}
+                        {downloading ? "Downloading…" : "Download sources"}
+                      </button>
+                    );
+                  })()}
                 </div>
               )}
               <div data-testid="code-workspace-editor" className="relative flex-1 min-h-0">

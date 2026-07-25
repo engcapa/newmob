@@ -70,6 +70,7 @@ import {
   lspPrepareRename,
   lspPrepareTypeHierarchy,
   lspRangeFormatting,
+  lspDownloadSources,
   lspReadUriContents,
   lspReferences,
   lspRename,
@@ -727,6 +728,8 @@ export function CodeWorkspaceTab({
     onError: setStatusMessage,
   });
   const [revealTarget, setRevealTarget] = useState<EditorRevealTarget | null>(null);
+  // Editor keys whose library sources are being fetched (drives the button spinner).
+  const [downloadingSourcesKeys, setDownloadingSourcesKeys] = useState<string[]>([]);
   const [cursorPositions, setCursorPositions] = useState<Record<EditorGroupId, LspPosition>>({
     primary: { line: 0, character: 0 },
     secondary: { line: 0, character: 0 },
@@ -1083,6 +1086,7 @@ export function CodeWorkspaceTab({
             title: contents.title || library.title,
             container: contents.container ?? library.container,
             languageId: contents.languageId || library.languageId,
+            decompiled: contents.decompiled,
           };
           libraryBuffersRef.current[key] = info;
           setOpenFiles((current) => ({ ...current, [key]: makeLibraryFile(info, contents.text) }));
@@ -3117,6 +3121,43 @@ export function CodeWorkspaceTab({
     workspaceInstanceId,
   ]);
 
+  /**
+   * IDEA-style on-demand "Download sources" for a decompiled library buffer:
+   * ask jdtls to fetch the sources JAR, then swap the buffer's decompiled bytecode
+   * for the attached source in place (keeping the same tab / caret).
+   */
+  const downloadLibrarySources = useCallback(async (key: string) => {
+    const info = libraryBuffersRef.current[key];
+    const file = openFilesRef.current[key];
+    if (!info || !file?.library) return;
+    if (downloadingSourcesKeys.includes(key)) return;
+    setDownloadingSourcesKeys((current) => [...current, key]);
+    setStatusMessage(`Downloading sources for ${info.title}…`);
+    try {
+      const descriptor = lspDescriptorForPath(info.originRootPath, info.originFilePath);
+      const result = await lspDownloadSources(descriptor, info.uri);
+      if (!openFilesRef.current[key]) return; // tab closed mid-download
+      if (result.attached && !result.decompiled) {
+        const nextInfo: LibraryBufferInfo = { ...info, decompiled: false };
+        libraryBuffersRef.current[key] = nextInfo;
+        // Preserve caret/scroll: only the text + decompiled flag change.
+        setOpenFiles((current) => {
+          const existing = current[key];
+          if (!existing) return current;
+          const rebuilt = makeLibraryFile(nextInfo, result.text);
+          return { ...current, [key]: { ...rebuilt, key: existing.key } };
+        });
+        setStatusMessage(`Attached sources for ${info.title}`);
+      } else {
+        setStatusMessage(result.message ?? `No sources published for ${info.title}`);
+      }
+    } catch (err) {
+      setStatusMessage(errorMessage(err));
+    } finally {
+      setDownloadingSourcesKeys((current) => current.filter((entry) => entry !== key));
+    }
+  }, [downloadingSourcesKeys, lspDescriptorForPath, setStatusMessage]);
+
   const openLspLocation = useCallback(
     async (
       location: LspLocation,
@@ -3203,6 +3244,7 @@ export function CodeWorkspaceTab({
             languageId: contents.languageId,
             originRootPath: descriptor.rootPath ?? null,
             originFilePath: descriptor.filePath,
+            decompiled: contents.decompiled,
           },
           contents.text,
           location.range,
@@ -4857,6 +4899,8 @@ export function CodeWorkspaceTab({
         onRevealInSystem={revealEditorTabInExplorer}
         onOpenInTerminal={openEditorTabInTerminal}
         onLocalHistory={openLocalHistoryForKey}
+        onDownloadSources={(key) => void downloadLibrarySources(key)}
+        downloadingSourcesKeys={downloadingSourcesKeys}
         onMarkdownModeChange={(mode) => {
           if (!groupFile) return;
           setMarkdownModes((current) => ({ ...current, [groupFile.key]: mode }));

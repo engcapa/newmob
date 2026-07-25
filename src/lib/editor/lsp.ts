@@ -141,6 +141,19 @@ export interface LspUriContentsResult {
   languageId: string;
   text: string;
   readOnly: boolean;
+  /** True when `text` is decompiled bytecode; the UI offers "Download sources". */
+  decompiled: boolean;
+}
+
+/** Outcome of an on-demand "Download sources" request (jdtls Java classes). */
+export interface LspDownloadSourcesResult {
+  /** True when attached (non-decompiled) source is now available. */
+  attached: boolean;
+  /** Fresh class contents to swap into the open buffer. */
+  text: string;
+  decompiled: boolean;
+  /** Why nothing was attached, when `attached` is false. */
+  message: string | null;
 }
 
 export interface LspDocumentSymbol {
@@ -738,6 +751,22 @@ export function lspReadUriContents(
   uri: string,
 ): Promise<LspUriContentsResult> {
   return invoke<LspUriContentsResult>("lsp_read_uri_contents", {
+    ...documentArgs(descriptor),
+    uri,
+  });
+}
+
+/**
+ * On-demand "Download sources" for a Java library class (jdtls only). `descriptor`
+ * must resolve to a file in the origin project (its session drives the download);
+ * `uri` is the jdt:// class URI to refresh. Long-running: jdtls fetches the sources
+ * JAR via Maven/Gradle before attached source replaces the decompiled bytecode.
+ */
+export function lspDownloadSources(
+  descriptor: LspDocumentDescriptor,
+  uri: string,
+): Promise<LspDownloadSourcesResult> {
+  return invoke<LspDownloadSourcesResult>("lsp_download_sources", {
     ...documentArgs(descriptor),
     uri,
   });

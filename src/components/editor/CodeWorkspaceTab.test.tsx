@@ -42,6 +42,7 @@ const lspMocks = vi.hoisted(() => ({
   lspHover: vi.fn(),
   lspDefinition: vi.fn(),
   lspReadUriContents: vi.fn(),
+  lspDownloadSources: vi.fn(),
   lspReferences: vi.fn(),
   lspPrepareCallHierarchy: vi.fn(),
   lspCallHierarchyIncoming: vi.fn(),
@@ -239,6 +240,7 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
     lspMocks.lspReadUriContents.mockReset();
+    lspMocks.lspDownloadSources.mockReset();
     lspMocks.lspReferences.mockReset();
     lspMocks.lspPrepareCallHierarchy.mockReset();
     lspMocks.lspCallHierarchyIncoming.mockReset();
@@ -1747,6 +1749,146 @@ describe("CodeWorkspaceTab", () => {
     expect(workspaceMocks.workspaceReadLooseFile).not.toHaveBeenCalled();
     expect(workspaceMocks.workspaceWriteLooseFile).not.toHaveBeenCalled();
     expect(workspaceMocks.workspaceWriteFile).not.toHaveBeenCalled();
+  });
+
+  it("offers Download sources on a decompiled class and swaps in attached source", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-download-sources",
+      workspaceInstanceId: "instance-download-sources",
+      name: "Download sources",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Main.java" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/Main.java",
+      uri: "file:///repo/app/src/Main.java",
+      presetId: "java",
+      languageId: "java",
+      displayName: "Java",
+      available: true,
+      active: true,
+    });
+    const classUri = "jdt://contents/guava-33.jar/com.google.common.base/Strings.class?=guava";
+    workspaceMocks.workspaceReadFile.mockResolvedValue(
+      file("src/Main.java", "class Main { Strings s; }"),
+    );
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: classUri,
+        path: null,
+        range: { start: { line: 0, character: 13 }, end: { line: 0, character: 20 } },
+      }],
+    });
+    // First open returns decompiled bytecode (marked decompiled: true).
+    lspMocks.lspReadUriContents.mockResolvedValue({
+      status: activeStatus,
+      uri: classUri,
+      path: null,
+      title: "Strings.java",
+      container: "com.google.common.base · guava-33.jar",
+      languageId: "java",
+      text: "// Source code is decompiled…\npublic final class Strings {}\n",
+      readOnly: true,
+      decompiled: true,
+    });
+    lspMocks.lspDownloadSources.mockResolvedValue({
+      attached: true,
+      text: "package com.google.common.base;\n\npublic final class Strings { /* real */ }\n",
+      decompiled: false,
+      message: null,
+    });
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/Main.java");
+    fireEvent.keyDown(rendered.container.querySelector<HTMLElement>(".cm-content")!, { key: "F12" });
+
+    // Decompiled banner + Download sources button appear for the library buffer.
+    const downloadBtn = await screen.findByTestId("code-workspace-download-sources");
+    expect(screen.getByTestId("code-workspace-decompiled-banner")).toBeInTheDocument();
+
+    fireEvent.click(downloadBtn);
+
+    await waitFor(() => expect(lspMocks.lspDownloadSources).toHaveBeenCalledWith(
+      expect.objectContaining({ rootPath: "/repo/app", filePath: "src/Main.java" }),
+      classUri,
+    ));
+    // Attached source arrives → banner disappears and status reports success.
+    await waitFor(() => expect(screen.queryByTestId("code-workspace-decompiled-banner")).toBeNull());
+    await waitFor(() => expect(useAppStore.getState().statusMessage)
+      .toBe("Attached sources for Strings.java"));
+    // Never written back to disk.
+    expect(workspaceMocks.workspaceWriteFile).not.toHaveBeenCalled();
+    expect(workspaceMocks.workspaceWriteLooseFile).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Download sources banner when no sources are published", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-download-none",
+      workspaceInstanceId: "instance-download-none",
+      name: "Download none",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Main.java" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/Main.java",
+      uri: "file:///repo/app/src/Main.java",
+      presetId: "java",
+      languageId: "java",
+      displayName: "Java",
+      available: true,
+      active: true,
+    });
+    const classUri = "jdt://contents/legacy.jar/com.legacy/Widget.class?=legacy";
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/Main.java", "class Main { Widget w; }"));
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: classUri,
+        path: null,
+        range: { start: { line: 0, character: 13 }, end: { line: 0, character: 19 } },
+      }],
+    });
+    lspMocks.lspReadUriContents.mockResolvedValue({
+      status: activeStatus,
+      uri: classUri,
+      path: null,
+      title: "Widget.java",
+      container: "com.legacy · legacy.jar",
+      languageId: "java",
+      text: "// Source code is decompiled…\npublic class Widget {}\n",
+      readOnly: true,
+      decompiled: true,
+    });
+    lspMocks.lspDownloadSources.mockResolvedValue({
+      attached: false,
+      text: "// Source code is decompiled…\npublic class Widget {}\n",
+      decompiled: true,
+      message: "No sources published for this artifact (still showing decompiled bytecode).",
+    });
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/Main.java");
+    fireEvent.keyDown(rendered.container.querySelector<HTMLElement>(".cm-content")!, { key: "F12" });
+
+    const downloadBtn = await screen.findByTestId("code-workspace-download-sources");
+    fireEvent.click(downloadBtn);
+
+    await waitFor(() => expect(lspMocks.lspDownloadSources).toHaveBeenCalled());
+    await waitFor(() => expect(useAppStore.getState().statusMessage)
+      .toContain("No sources published"));
+    // Still decompiled → banner stays so the user can retry.
+    expect(screen.getByTestId("code-workspace-decompiled-banner")).toBeInTheDocument();
   });
 
   it("requests usage highlights, viewport inlay hints, and semantic selection ranges", async () => {

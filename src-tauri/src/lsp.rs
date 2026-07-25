@@ -23,6 +23,14 @@ const JDTLS_INITIALIZE_TIMEOUT_SECS: u64 = 120;
 const JDTLS_MIN_JAVA_MAJOR: u32 = 21;
 /// Default jdtls JVM args when Settings has no override (matches prior 1G heap).
 const DEFAULT_JDTLS_VMARGS: &str = "-Xms1024m -Xmx1024m";
+/// Marker file inside each jdtls `-data` dir naming the project it indexes, used to
+/// prune indexes whose project has been deleted/renamed.
+const JDTLS_WORKSPACE_MARKER: &str = ".taomni-workspace";
+/// On-demand source download: how many times to re-poll classFileContents while the
+/// build tool fetches the sources JAR, and how long to wait between polls. ~24s total
+/// budget covers a cold Maven/Gradle source fetch without hanging the UI forever.
+const DOWNLOAD_SOURCES_POLL_ATTEMPTS: u32 = 20;
+const DOWNLOAD_SOURCES_POLL_INTERVAL_MS: u64 = 1200;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 3;
 const EXIT_TIMEOUT_SECS: u64 = 2;
 const COMMAND_AVAILABILITY_TTL: Duration = Duration::from_secs(30);
@@ -186,6 +194,9 @@ pub struct LspUriContentsResult {
     pub language_id: String,
     pub text: String,
     pub read_only: bool,
+    /// True when `text` is FernFlower-decompiled bytecode rather than attached
+    /// source. The UI offers "Download sources" in this case (jdtls only).
+    pub decompiled: bool,
 }
 
 /// One entry of a flattened `textDocument/documentSymbol` tree; `depth`
@@ -548,6 +559,9 @@ impl LspManager {
     }
 
     pub fn with_sdk(sdk: Arc<SdkManager>) -> Self {
+        // Drop indexes for projects that no longer exist so the cache dir does not
+        // grow without bound. Off the async path — never blocks startup.
+        std::thread::spawn(prune_stale_jdtls_data_dirs);
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             last_errors: Arc::new(Mutex::new(HashMap::new())),
@@ -1469,9 +1483,30 @@ fn build_lsp_server_command(
     }
     #[cfg(not(windows))]
     {
-        let _ = (workspace_root, tooling_java_home, tooling_java_error);
+        let _ = (tooling_java_home, tooling_java_error);
         let mut cmd = Command::new(program);
-        cmd.args(args);
+        // For the jdtls wrapper, pin `-data` to our managed per-workspace index dir
+        // (unless the caller already passed one) so the index location is ours to
+        // control and prune — matching the Windows launch path. The wrapper forwards
+        // unknown args straight to the Equinox launcher, and `-data` is exactly what
+        // upstream jdtls.py appends.
+        let resolved = which::which(program).unwrap_or_else(|_| PathBuf::from(program));
+        if is_jdtls_program(program, &resolved)
+            && !args.iter().any(|arg| arg == "-data" || arg == "--data")
+        {
+            let data_dir = jdtls_data_dir(workspace_root);
+            ensure_jdtls_data_dir(&data_dir, workspace_root)?;
+            cmd.args(args);
+            cmd.arg("-data");
+            cmd.arg(&data_dir);
+            log::info!(
+                "lsp: launching jdtls wrapper {program} with -data {}",
+                data_dir.display()
+            );
+        } else {
+            let _ = workspace_root;
+            cmd.args(args);
+        }
         Ok(cmd)
     }
 }
@@ -1572,12 +1607,7 @@ fn build_jdtls_java_command(
         ));
     }
     let data_dir = jdtls_data_dir(workspace_root);
-    std::fs::create_dir_all(&data_dir).map_err(|e| {
-        format!(
-            "cannot create jdtls data dir {}: {e}",
-            data_dir.display()
-        )
-    })?;
+    ensure_jdtls_data_dir(&data_dir, workspace_root)?;
 
     // Mirror eclipse.jdt.ls product scripts/jdtls.py (shared config + JPMS opens).
     let mut cmd = Command::new(&java);
@@ -2098,15 +2128,84 @@ fn parse_java_major_from_version_output(text: &str) -> Option<u32> {
     None
 }
 
-#[cfg(windows)]
+/// Root that holds every per-workspace jdtls `-data` directory.
+///
+/// Windows keeps the historical `%LOCALAPPDATA%\jdtls-ws`; other platforms use the
+/// user cache dir (`~/.cache/jdtls-ws` on Linux, `~/Library/Caches/jdtls-ws` on
+/// macOS) so the location is ours to manage rather than left to the wrapper script.
+fn jdtls_data_root() -> PathBuf {
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local).join("jdtls-ws");
+    }
+    #[cfg(not(windows))]
+    if let Some(cache) = dirs::cache_dir() {
+        return cache.join("jdtls-ws");
+    }
+    std::env::temp_dir().join("jdtls-ws")
+}
+
+/// Per-workspace jdtls index/metadata directory. Keyed by the project scope path so
+/// the same project reuses its index across restarts, while distinct projects stay
+/// isolated (matching how IDEA keeps one index per project).
 fn jdtls_data_dir(workspace_root: &Path) -> PathBuf {
     let mut hasher = DefaultHasher::new();
     workspace_root.to_string_lossy().hash(&mut hasher);
     let digest = format!("{:x}", hasher.finish());
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local).join("jdtls-ws").join(&digest);
+    jdtls_data_root().join(digest)
+}
+
+/// Best-effort prune of stale jdtls index directories.
+///
+/// Each `-data` dir carries a `.taomni-workspace` marker naming the project it
+/// indexes; when that project path no longer exists on disk, the whole index is
+/// removed so abandoned/renamed projects do not accumulate unbounded disk usage.
+/// Runs on a blocking thread and never fails the caller.
+fn prune_stale_jdtls_data_dirs() {
+    let root = jdtls_data_root();
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let marker = dir.join(JDTLS_WORKSPACE_MARKER);
+        let Ok(project) = std::fs::read_to_string(&marker) else {
+            // No marker (older layout or partial dir): leave it alone to be safe.
+            continue;
+        };
+        let project = project.trim();
+        if project.is_empty() || Path::new(project).exists() {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_dir_all(&dir) {
+            log::warn!(
+                "lsp: failed to prune stale jdtls data dir {} (project {project} gone): {error}",
+                dir.display()
+            );
+        } else {
+            log::info!(
+                "lsp: pruned stale jdtls data dir {} (project {project} no longer exists)",
+                dir.display()
+            );
+        }
     }
-    std::env::temp_dir().join("jdtls-ws").join(digest)
+}
+
+/// Create `data_dir` and stamp the `.taomni-workspace` marker with `workspace_root`
+/// so [`prune_stale_jdtls_data_dirs`] can later tell which project it belongs to.
+fn ensure_jdtls_data_dir(data_dir: &Path, workspace_root: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| format!("cannot create jdtls data dir {}: {e}", data_dir.display()))?;
+    // Marker write is best-effort: a missing marker only disables pruning for this dir.
+    let _ = std::fs::write(
+        data_dir.join(JDTLS_WORKSPACE_MARKER),
+        workspace_root.to_string_lossy().as_bytes(),
+    );
+    Ok(())
 }
 
 fn server_request_result(method: &str, params: Option<&Value>) -> Value {
@@ -3304,6 +3403,7 @@ pub async fn lsp_read_uri_contents(
                     .parent()
                     .map(|parent| parent.to_string_lossy().into_owned()),
                 language_id: language,
+                decompiled: is_decompiled_contents(&text),
                 text,
                 read_only: true,
             });
@@ -3356,6 +3456,7 @@ pub async fn lsp_read_uri_contents(
             title: title_from_class_uri(&uri),
             container: container_from_class_uri(&uri),
             language_id: "java".to_string(),
+            decompiled: is_decompiled_contents(&text),
             text,
             read_only: true,
         });
@@ -3364,6 +3465,139 @@ pub async fn lsp_read_uri_contents(
     Err(format!(
         "Cannot open location URI (not a readable file path and not a class-file URI): {uri}"
     ))
+}
+
+/// Result of an on-demand source-attachment request.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspDownloadSourcesResult {
+    /// True when attached (non-decompiled) source is now available for the class.
+    pub attached: bool,
+    /// Fresh contents for the class (attached source when `attached`, otherwise the
+    /// existing decompiled text) so the caller can refresh the buffer in place.
+    pub text: String,
+    pub decompiled: bool,
+    /// User-facing note (why nothing was attached), when `attached` is false.
+    pub message: Option<String>,
+}
+
+/// FernFlower stamps a fixed banner as the first line of decompiled output; jdtls
+/// serves attached source verbatim, so the banner uniquely marks decompiled text.
+/// Keep in sync with FernFlowerDecompiler.DECOMPILER_HEADER upstream.
+const JDTLS_DECOMPILER_HEADER: &str =
+    "// Source code is decompiled from a .class file using FernFlower decompiler";
+
+fn is_decompiled_contents(text: &str) -> bool {
+    text.trim_start().starts_with(JDTLS_DECOMPILER_HEADER)
+}
+
+/// IDEA-style "Download sources": enable Maven/Gradle source download for the
+/// active jdtls session, trigger a project re-configuration so the build tool
+/// fetches the sources JAR, then poll `java/classFileContents` until attached
+/// source replaces the decompiled bytecode (or a timeout elapses).
+///
+/// Kept off by default (so imports stay fast); this only flips it on when the user
+/// explicitly asks, matching IntelliJ's on-demand download button.
+#[tauri::command]
+pub async fn lsp_download_sources(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    uri: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<LspDownloadSourcesResult, String> {
+    let uri = uri.trim().to_string();
+    if uri.is_empty() {
+        return Err("Missing class URI".into());
+    }
+    if !is_virtual_class_uri(&uri) {
+        return Err("Download sources is only available for library class files".into());
+    }
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            "No language server session is active for this project; open a project file first"
+                .to_string()
+        })?;
+
+    // 1) Turn on source download for this session (Maven + Gradle + Eclipse importers).
+    session
+        .notify(
+            "workspace/didChangeConfiguration",
+            json!({
+                "settings": {
+                    "java": {
+                        "maven": { "downloadSources": true },
+                        "eclipse": { "downloadSources": true },
+                        "gradle": { "wrapper": { "enabled": true } },
+                        "import": {
+                            "maven": { "enabled": true },
+                            "gradle": { "enabled": true }
+                        }
+                    }
+                }
+            }),
+        )
+        .await?;
+
+    // 2) Trigger project reconfiguration keyed on the origin project file so the
+    //    build tool re-resolves the classpath and pulls the sources JAR.
+    session
+        .notify(
+            "java/projectConfigurationUpdate",
+            json!({ "uri": document.uri }),
+        )
+        .await?;
+
+    // 3) Poll classFileContents until attached source shows up (no decompiler
+    //    banner) or we give up. Reconfiguration + download is async in jdtls.
+    let mut last_text = String::new();
+    for attempt in 0..DOWNLOAD_SOURCES_POLL_ATTEMPTS {
+        tokio::time::sleep(Duration::from_millis(DOWNLOAD_SOURCES_POLL_INTERVAL_MS)).await;
+        let result = session
+            .request_with_timeout("java/classFileContents", json!({ "uri": uri }), 20)
+            .await
+            .map_err(|e| format!("Failed to reload class contents: {e}"))?;
+        let text = result.as_str().unwrap_or_default().to_string();
+        if text.trim().is_empty() {
+            continue;
+        }
+        last_text = text;
+        if !is_decompiled_contents(&last_text) {
+            return Ok(LspDownloadSourcesResult {
+                attached: true,
+                text: last_text,
+                decompiled: false,
+                message: None,
+            });
+        }
+        log::debug!(
+            "lsp: download sources poll {}/{} still decompiled for {uri}",
+            attempt + 1,
+            DOWNLOAD_SOURCES_POLL_ATTEMPTS
+        );
+    }
+
+    Ok(LspDownloadSourcesResult {
+        attached: false,
+        text: last_text,
+        decompiled: true,
+        message: Some(
+            "No sources published for this artifact (still showing decompiled bytecode). \
+             The dependency may not ship a -sources JAR."
+                .to_string(),
+        ),
+    })
 }
 
 #[tauri::command]
@@ -6136,6 +6370,87 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             server_request_result("client/registerCapability", None),
             Value::Null
         );
+    }
+
+    #[test]
+    fn detects_fernflower_decompiler_banner() {
+        let decompiled = format!(
+            "{JDTLS_DECOMPILER_HEADER} (from Intellij IDEA).\npackage java.lang;\n"
+        );
+        assert!(is_decompiled_contents(&decompiled));
+        // Leading blank lines still count (jdtls hands us the banner verbatim).
+        assert!(is_decompiled_contents(&format!("\n{decompiled}")));
+        assert!(!is_decompiled_contents("package java.lang;\npublic class String {}\n"));
+        assert!(!is_decompiled_contents(""));
+    }
+
+    #[test]
+    fn jdtls_data_dir_is_stable_per_project_and_distinct_across_projects() {
+        let a1 = jdtls_data_dir(Path::new(if cfg!(windows) { r"C:\a" } else { "/a" }));
+        let a2 = jdtls_data_dir(Path::new(if cfg!(windows) { r"C:\a" } else { "/a" }));
+        let b = jdtls_data_dir(Path::new(if cfg!(windows) { r"C:\b" } else { "/b" }));
+        assert_eq!(a1, a2, "same project must reuse its index dir");
+        assert_ne!(a1, b, "different projects must not share an index dir");
+        assert!(a1.starts_with(jdtls_data_root()));
+    }
+
+    #[test]
+    fn prune_removes_only_indexes_whose_project_is_gone() {
+        let base = std::env::temp_dir().join(format!("taomni-jdtls-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let live_project = base.join("live-project");
+        std::fs::create_dir_all(&live_project).unwrap();
+
+        // Stand-ins for two index dirs: one for a live project, one for a deleted one.
+        let live_index = base.join("index-live");
+        let gone_index = base.join("index-gone");
+        let no_marker = base.join("index-nomarker");
+        for dir in [&live_index, &gone_index, &no_marker] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            live_index.join(JDTLS_WORKSPACE_MARKER),
+            live_project.to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            gone_index.join(JDTLS_WORKSPACE_MARKER),
+            base.join("deleted-project").to_string_lossy().as_bytes(),
+        )
+        .unwrap();
+
+        // Exercise the same predicate prune uses, scoped to this temp tree.
+        for entry in std::fs::read_dir(&base).unwrap().flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let Ok(project) = std::fs::read_to_string(dir.join(JDTLS_WORKSPACE_MARKER)) else {
+                continue;
+            };
+            let project = project.trim();
+            if !project.is_empty() && !Path::new(project).exists() {
+                std::fs::remove_dir_all(&dir).unwrap();
+            }
+        }
+
+        assert!(live_index.is_dir(), "index of a live project must be kept");
+        assert!(!gone_index.is_dir(), "index of a deleted project must be pruned");
+        assert!(no_marker.is_dir(), "unmarked dirs are left untouched");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ensure_jdtls_data_dir_creates_dir_and_marker() {
+        let base = std::env::temp_dir().join(format!("taomni-jdtls-ensure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let data_dir = base.join("index");
+        let workspace = base.join("proj");
+        ensure_jdtls_data_dir(&data_dir, &workspace).unwrap();
+        assert!(data_dir.is_dir());
+        let marker = std::fs::read_to_string(data_dir.join(JDTLS_WORKSPACE_MARKER)).unwrap();
+        assert_eq!(marker, workspace.to_string_lossy());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
