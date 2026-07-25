@@ -1,11 +1,42 @@
 # Backend tests
 
-Unit tests live inline in each module (`#[cfg(test)]`); integration tests live
-in this directory. Run everything that needs no external services with:
+Unit tests live inline in each module (`#[cfg(test)]`). Integration tests live
+under this directory as a **single** Cargo test binary
+(`tests/integration/main.rs` + sibling modules), so `cargo test` only links
+one heavy executable instead of one per former top-level file (large
+`target/` savings).
+
+## Recommended day-to-day commands
+
+Prefer the library unit tests while iterating — they do not build the
+integration binary or the `acp-fake-agent` helper:
+
+```bash
+cargo test --lib
+cargo test --lib sockscap::          # filter by module path
+```
+
+Run the unified integration suite when needed:
+
+```bash
+cargo test --test integration
+cargo test --test integration router_routing
+```
+
+Full suite (lib + integration + bins that have tests):
 
 ```bash
 cargo test
 ```
+
+## Layout
+
+| Path | Role |
+| --- | --- |
+| `tests/integration/main.rs` | Single integration-test crate root (modules only) |
+| `tests/integration/*.rs` | Integration cases (former top-level `tests/*.rs`) |
+| `tests/integration/support/` | Shared mocks for the integration crate |
+| `tests/support/acp_fake_agent.rs` | `[[bin]] acp-fake-agent` fixture (not a test target) |
 
 ## Network / proxy / SSH jump-host tests
 
@@ -55,3 +86,11 @@ cargo test -- --ignored
 
 > Strategy 3 (a real third-party HTTP/SOCKS5 proxy via `TAOMNI_PROXY_*`) is not
 > wired up yet — add it once a proxy is available in the test environment.
+
+## Disk / profile notes
+
+`Cargo.toml` sets `profile.dev` / `profile.test` to `debug = 1` and turns off
+debug info on dependency crates (`profile.dev.package."*".debug = false`) so
+`target/` grows more slowly. Do not keep parallel long-lived trees (e.g. host
+`target/debug` plus `target/<triple>/` plus `release`) unless you need them;
+`cargo clean` (or deleting `target/`) reclaims space after large experiments.

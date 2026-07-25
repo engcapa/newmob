@@ -1,11 +1,10 @@
 //! Tests for the LlmRouter — verifies fallback, task routing, full-local
 //! filtering. None of these tests touch the network.
 
-mod support;
-
 use std::sync::Arc;
 use std::time::Duration;
-use support::mock_provider::{MockEvent, MockLlm};
+
+use crate::support::mock_provider::{MockEvent, MockLlm};
 use taomni_lib::llm::router::{provider_group_route_id, FallbackConfig, LlmRouter};
 use taomni_lib::llm::{ChatRequest, TaskKind};
 

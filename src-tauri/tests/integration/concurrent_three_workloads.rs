@@ -4,11 +4,10 @@
 //! all three complete within their per-feature budgets even when running
 //! concurrently on a small tokio runtime.
 
-mod support;
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use support::mock_provider::{MockEvent, MockLlm};
+
+use crate::support::mock_provider::{MockEvent, MockLlm};
 use taomni_lib::llm::router::LlmRouter;
 use taomni_lib::llm::{ChatRequest, TaskKind};
 
