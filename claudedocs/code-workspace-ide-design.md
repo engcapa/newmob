@@ -592,7 +592,7 @@ src/stores/
 
 ### 8.1 进度明细（勾选清单）
 
-> 更新于 2026-07-12（v2.10）。M0–M5 已由 PR #361 合入 `main`；后续收口位于 `feat/code-workspace-followups`。功能按代码、提交与自动化门禁复核；真机冒烟由用户执行并待回填，M0 壳拆分技术债继续消化。完成度按本节拆分条目计数，已完成项附提交号。
+> 更新于 2026-07-12（v2.10）；自动化门禁于 2026-07-25 在 `fix/code-workspace-nav-history-and-library-goto` 复核恢复全绿（见下方横切事项）。M0–M5 已由 PR #361 合入 `main`；后续收口位于 `feat/code-workspace-followups`。功能按代码、提交与自动化门禁复核；真机冒烟由用户执行并待回填，M0 壳拆分技术债继续消化。完成度按本节拆分条目计数，已完成项附提交号。
 
 **M0 前置重构 — 🔶 清单项齐，壳体继续瘦身中**
 
@@ -674,7 +674,7 @@ src/stores/
 - [x] 交互原型交付（`claudedocs/prototype/code-workspace-prototype.html`）
 - [x] 签名帮助键位决策：Ctrl+Shift+Space（Ctrl+P 已作 Go to File 别名）— `f4d9c15`
 - [x] 代码与自动化复核（2026-07-12 v2.8）：全量 Vitest **159 文件 / 1267 项**通过（`--testTimeout=15000 --maxWorkers=4`）；`pnpm build` 通过；全量 `cargo test` 通过（lib **748 passed / 11 ignored**，其余 integration/doc tests 全绿）
-- [ ] **⚠ 当前自动化门禁（v2.10）**：全量 Vitest **164 文件 / 1304 项**通过；`pnpm build` 通过；Git ignore Rust 定向测试 **2 passed**；全量 `cargo test` 为 **739 passed / 3 failed / 11 ignored**，失败均为未被本分支修改的 Windows `rdp::cliprdr::uri_list_*` 路径前导斜杠断言，需独立修复后恢复全绿
+- [x] **自动化门禁恢复全绿（2026-07-25）**：全量 Vitest **164 文件 / 1304 项**通过；`pnpm build` 通过；全量 `cargo test` 全绿（lib **892 passed / 0 failed / 11 ignored**，其余 integration/doc tests 全绿）。原 v2.10 记录的 3 例 Windows `rdp::cliprdr::uri_list_*` 前导斜杠断言失败已修（测试辅助 `uri_path` 误对 Unix 风格路径剥前导斜杠，生产 `uri_list_to_paths` 保留斜杠属有意行为）；顺带修复 v2.10 后由 `11382ec` 引入的同类 Windows 失败 `chat::acp` grok 图片 `file://` URI 断言（`\\?\` 前缀不对称比较）。两处均只改测试、生产代码零改动 — `d2861f4`
 - [x] WorkspaceEdit §5.2.9 三态规则收口（open-clean 应用后保存、open-dirty 保持 dirty、未打开写盘 + hash 预检）— `workspaceEditApply` + `5d87203`
 - [x] 合并门禁 8 例 Windows 失败已修复（clipboard URI ×4、pushd ×1、git 根 ×3）— `f6c1f36`
 - [ ] **⚠ 真机验证欠账（由用户执行）**：M0–M5 能力仍以单测/构建为主；`pnpm tauri dev` 冒烟结果回填本节
@@ -683,7 +683,7 @@ src/stores/
 
 ### 8.2 下一步待办（建议顺序）
 
-> M0–M5 计划项均已交付并合入主干。后续收口已完成自动化门禁固化，Git snapshot、导航与文件动作 controller 抽离，以及保存时格式化和 Git ignore。**真机冒烟由用户执行；当前另有 3 项既有 Windows cliprdr Rust 门禁失败待修。**
+> M0–M5 计划项均已交付并合入主干。后续收口已完成自动化门禁固化，Git snapshot、导航与文件动作 controller 抽离，以及保存时格式化和 Git ignore。**原 3 项 Windows `rdp::cliprdr` 门禁失败（及顺带发现的 `chat::acp` 同类失败）已于 2026-07-25 修复，全量 `cargo test` 恢复全绿 — `d2861f4`；真机冒烟仍由用户执行。**
 
 1. **✅ 固化全量前端门禁参数** — `a9f7484`
    `vitest.config.ts` 已统一设置 `testTimeout: 15_000` 与 `maxWorkers: 4`；无额外参数的 `pnpm test` 全绿。
