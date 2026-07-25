@@ -10,12 +10,16 @@ print(" Taomni SocksCap Windows 11 Extended Matrix & Soak / Long-Duration Test S
 print(" Start Time:", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 print("=" * 80)
 
-# Matrix Configuration
-UPSTREAM_HTTP = "http://10.1.0.80:3228"
-UPSTREAM_SOCKS5 = "socks5h://10.1.5.52:6088"
-SSH_HOST = "10.1.0.80"
-SSH_PORT = 22
-SSH_USER = "zhyhang"
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _sockscap_env as ENV
+
+# Matrix Configuration (env-var driven; see _sockscap_env.py)
+UPSTREAM_HTTP = ENV.http_proxy_url()
+UPSTREAM_SOCKS5 = ENV.socks5_proxy_url()
+SSH_HOST = ENV.SSH_HOST
+SSH_PORT = ENV.SSH_PORT
+SSH_USER = ENV.SSH_USER
 
 GFWLIST_DOMAINS = [
     "https://www.google.com",
@@ -34,7 +38,7 @@ SSH_ONLY_TARGETS = [
 ]
 
 LOCAL_BYPASS_TARGETS = [
-    ("10.1.0.80", 3228),
+    (ENV.HTTP_HOST, ENV.HTTP_PORT),
     ("127.0.0.1", 1420),
 ]
 
@@ -79,7 +83,7 @@ def record_test(name, success, code, elapsed_ms, details=""):
 # --------------------------------------------------------------------------
 print("\n>>> Phase 1: Full Combination Matrix Tests <<<")
 
-# Scenario 1.1: SSH Tunnel Upstream (zhyhang@10.1.0.80:22) for https://www.baidu.com
+# Scenario 1.1: SSH Tunnel Upstream (SSH_USER@SSH_HOST) for https://www.baidu.com
 for target in SSH_ONLY_TARGETS:
     start = time.perf_counter()
     try:
@@ -97,21 +101,21 @@ for target in SSH_ONLY_TARGETS:
 for domain in GFWLIST_DOMAINS:
     cmd = f'curl.exe -s -o NUL -w "%{{http_code}}" -x {UPSTREAM_HTTP} {domain}'
     _, out, err, elapsed_ms = run_command(cmd)
-    success = out in ["200", "301", "302"]
+    success = ENV.http_reachable(out)
     record_test(f"HTTP-Proxy (GFWList) -> {domain}", success, out, elapsed_ms)
 
 # Scenario 1.3: SOCKS5 Proxy + GFWList Domains
 for domain in GFWLIST_DOMAINS:
     cmd = f'curl.exe -s -o NUL -w "%{{http_code}}" -x {UPSTREAM_SOCKS5} {domain}'
     _, out, err, elapsed_ms = run_command(cmd)
-    success = out in ["200", "301", "302"]
+    success = ENV.http_reachable(out)
     record_test(f"SOCKS5-Proxy (GFWList) -> {domain}", success, out, elapsed_ms)
 
 # Scenario 1.4: Direct Egress for Non-GFWList Domestic Domains
 for domain in NON_GFWLIST_DOMAINS:
     cmd = f'curl.exe -s -o NUL -w "%{{http_code}}" {domain}'
     _, out, err, elapsed_ms = run_command(cmd)
-    success = out in ["200", "301", "302"]
+    success = ENV.http_reachable(out)
     record_test(f"Direct-Egress (Non-GFWList) -> {domain}", success, out, elapsed_ms)
 
 # Scenario 1.5: Local IP Bypass CIDR Protection
@@ -140,18 +144,18 @@ for cycle in range(1, SOAK_CYCLES + 1):
     target_gfw = GFWLIST_DOMAINS[(cycle - 1) % len(GFWLIST_DOMAINS)]
     cmd_http = f'curl.exe -s -o NUL -w "%{{http_code}}" -x {UPSTREAM_HTTP} {target_gfw}'
     _, out_h, _, ms_h = run_command(cmd_http)
-    record_test(f"Soak HTTP ({target_gfw})", out_h in ["200", "301", "302"], out_h, ms_h)
+    record_test(f"Soak HTTP ({target_gfw})", ENV.http_reachable(out_h), out_h, ms_h)
 
     # 2. SOCKS5 Proxy GFWList domain
     cmd_socks = f'curl.exe -s -o NUL -w "%{{http_code}}" -x {UPSTREAM_SOCKS5} {target_gfw}'
     _, out_s, _, ms_s = run_command(cmd_socks)
-    record_test(f"Soak SOCKS5 ({target_gfw})", out_s in ["200", "301", "302"], out_s, ms_s)
+    record_test(f"Soak SOCKS5 ({target_gfw})", ENV.http_reachable(out_s), out_s, ms_s)
 
     # 3. Direct Non-GFWList domain
     target_non = NON_GFWLIST_DOMAINS[(cycle - 1) % len(NON_GFWLIST_DOMAINS)]
     cmd_dir = f'curl.exe -s -o NUL -w "%{{http_code}}" {target_non}'
     _, out_d, _, ms_d = run_command(cmd_dir)
-    record_test(f"Soak Direct ({target_non})", out_d in ["200", "301", "302"], out_d, ms_d)
+    record_test(f"Soak Direct ({target_non})", ENV.http_reachable(out_d), out_d, ms_d)
 
     # 4. SSH Banner health probe
     start_ssh = time.perf_counter()
@@ -169,10 +173,10 @@ for cycle in range(1, SOAK_CYCLES + 1):
 
 # New Scenario: Full SSH-Tunnel Upstream (background -D proxy + curl.exe raw request)
 # Covers SSH as upstream in the 6-step driver flow (steps 4-5)
-print("\n>>> Phase 3: Full SSH-Tunnel Upstream Automation (zhyhang@10.1.0.80) <<<")
+print(f"\n>>> Phase 3: Full SSH-Tunnel Upstream Automation ({SSH_USER}@{SSH_HOST}) <<<")
 for target in SSH_ONLY_TARGETS:
     # Start SSH -D in background, wait, curl via socks5h, kill
-    cmd_start = 'ssh -D 1080 -N -o StrictHostKeyChecking=no -o PasswordAuthentication=yes -o PubkeyAuthentication=no zhyhang@10.1.0.80 &'
+    cmd_start = f'ssh -D 1080 -N -p {SSH_PORT} -o StrictHostKeyChecking=no -o PasswordAuthentication=yes -o PubkeyAuthentication=no {SSH_USER}@{SSH_HOST} &'
     cmd_curl = f'curl.exe -s -o NUL -w "%{{http_code}}" -x socks5h://127.0.0.1:1080 {target}'
     cmd_kill = 'pkill -f "ssh -D 1080" || true'
     
@@ -181,7 +185,7 @@ for target in SSH_ONLY_TARGETS:
     time.sleep(3)
     _, out, err, ms = run_command(cmd_curl)
     subprocess.run(cmd_kill, shell=True)
-    success = out in ["200", "301", "302"]
+    success = ENV.http_reachable(out)
     record_test(f"SSH-Tunnel-Proxy (via 127.0.0.1:1080) -> {target}", success, out, ms, f"(PID managed)")
 
 # --------------------------------------------------------------------------

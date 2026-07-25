@@ -1163,7 +1163,11 @@ const dict = {
     saved: "Configuration saved",
     started: "SocksCap started",
     stopped: "SocksCap stopped",
+    restarted: "SocksCap restarted",
     recovered: "Network recovery requested",
+    restartNeeded:
+      "Scope or upstream changes won't apply until capture restarts.",
+    restartNow: "Restart capture",
     captureNotReady: "OS capture not active yet",
     captureNotReadyHint:
       "Rules engine and upstream dialers work now. WinDivert / platform capture is still being integrated.",

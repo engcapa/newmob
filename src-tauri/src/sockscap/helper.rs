@@ -173,6 +173,10 @@ pub async fn sockscap_helper_start(
             port.to_string(),
             "--ready-file".into(),
             ready_file.display().to_string(),
+            // Parent-death watchdog: helper self-terminates (and unloads
+            // WinDivert) if this process dies without a clean shutdown RPC.
+            "--parent-pid".into(),
+            std::process::id().to_string(),
         ];
         let Some(wd) = resolve_windivert_dir(&app) else {
             return Err(windivert_missing_hint(&app));

@@ -14,26 +14,26 @@ print(" (WinDivert Kernel Packet NAT + GFWList Domain/Subdomain Routing + Multi-
 print("=" * 85)
 
 # --------------------------------------------------------------------------
-# Environment & Upstream Configurations
+# Environment & Upstream Configurations (env-var driven; see _sockscap_env.py)
 # --------------------------------------------------------------------------
-REPO_ROOT = r"C:\code\person\taomni"
-HELPER_EXE = os.path.join(REPO_ROOT, r"src-tauri\target\debug\sockscap-helper.exe")
-WINDIVERT_DIR = os.path.join(REPO_ROOT, r"src-tauri\target\debug")
-CURL_EXE = r"C:\Windows\System32\curl.exe"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _sockscap_env as ENV
 
-UPSTREAM_HTTP_HOST = "10.1.0.80"
-UPSTREAM_HTTP_PORT = 3228
+REPO_ROOT = ENV.REPO_ROOT
+HELPER_EXE = ENV.HELPER_EXE
+WINDIVERT_DIR = ENV.WINDIVERT_DIR
+CURL_EXE = ENV.CURL_EXE
 
-UPSTREAM_SOCKS5_HOST = "10.1.5.52"
-UPSTREAM_SOCKS5_PORT = 6088
+UPSTREAM_HTTP_HOST = ENV.HTTP_HOST
+UPSTREAM_HTTP_PORT = ENV.HTTP_PORT
 
-SSH_HOST = "10.1.0.80"
-SSH_PORT = 22
-SSH_USER = "zhyhang"
-SSH_PASS = os.getenv("QA_SSH_PASSWORD")
-if not SSH_PASS:
-    import getpass
-    SSH_PASS = getpass.getpass("Enter SSH password for zhyhang@10.1.0.80: ")  # console prompt fallback; set QA_SSH_PASSWORD env var to avoid prompt
+UPSTREAM_SOCKS5_HOST = ENV.SOCKS5_HOST
+UPSTREAM_SOCKS5_PORT = ENV.SOCKS5_PORT
+
+SSH_HOST = ENV.SSH_HOST
+SSH_PORT = ENV.SSH_PORT
+SSH_USER = ENV.SSH_USER
+SSH_PASS = ENV.ssh_password()
 
 # GFWList Domains & Subdomains Matrix (Must be PROXIED)
 GFWLIST_TARGETS = [
@@ -348,7 +348,7 @@ def run_test_case(name, target_url, expected_gfw_match, upstream_mode):
     actual_gfw_match = last_audit.get("gfwlist_match", False)
     decision = last_audit.get("decision", "DIRECT")
     
-    success = code in ["200", "301", "302", "404"] and (actual_gfw_match == expected_gfw_match)
+    success = ENV.http_reachable(code) and (actual_gfw_match == expected_gfw_match)
     if success:
         test_stats["passed"] += 1
         status_str = "PASS"
@@ -368,14 +368,14 @@ def run_test_case(name, target_url, expected_gfw_match, upstream_mode):
     })
 
 # 1. SSH Server Probe
-print("\n--- Testing SSH Tunnel Upstream (zhyhang@10.1.0.80:22) ---")
+print(f"\n--- Testing SSH Tunnel Upstream ({SSH_USER}@{SSH_HOST}:{SSH_PORT}) ---")
 try:
     s = socket.create_connection((SSH_HOST, SSH_PORT), timeout=5)
     banner = s.recv(1024).decode('utf-8', errors='ignore').strip()
     s.close()
-    print(f"  SSH Server Probe (10.1.0.80:22): PASS ({banner[:30]})")
+    print(f"  SSH Server Probe ({SSH_HOST}:{SSH_PORT}): PASS ({banner[:30]})")
 except Exception as e:
-    print(f"  SSH Server Probe (10.1.0.80:22): FAIL ({e})")
+    print(f"  SSH Server Probe ({SSH_HOST}:{SSH_PORT}): FAIL ({e})")
 
 SOAK_CYCLES = 5
 print(f"\n--- Running Multi-Cycle Soak Matrix ({SOAK_CYCLES} Cycles) ---")
