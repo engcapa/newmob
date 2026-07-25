@@ -58,6 +58,31 @@ function positionFromStringOffset(text: string, offset: number): LspPosition {
   return { line, character: offset - lineStart };
 }
 
+/**
+ * Position at `toOffset` given the known position at `fromOffset` (`fromOffset <=
+ * toOffset`). Scans only the `[fromOffset, toOffset)` span instead of restarting
+ * from 0 — for an edit late in a large file this halves the total scan the diff
+ * would otherwise pay to locate both endpoints. Output is identical to
+ * `positionFromStringOffset(text, toOffset)`.
+ */
+function advanceStringPosition(
+  text: string,
+  from: LspPosition,
+  fromOffset: number,
+  toOffset: number,
+): LspPosition {
+  let { line, character } = from;
+  for (let index = fromOffset; index < toOffset; index += 1) {
+    if (text.charCodeAt(index) === 10) {
+      line += 1;
+      character = 0;
+    } else {
+      character += 1;
+    }
+  }
+  return { line, character };
+}
+
 function offsetSplitsSurrogatePair(text: string, offset: number): boolean {
   if (offset <= 0 || offset >= text.length) return false;
   const previous = text.charCodeAt(offset - 1);
@@ -97,10 +122,13 @@ export function buildIncrementalContentChange(
     nextEnd += 1;
   }
 
+  const startPosition = positionFromStringOffset(previousText, start);
   return {
     range: {
-      start: positionFromStringOffset(previousText, start),
-      end: positionFromStringOffset(previousText, previousEnd),
+      start: startPosition,
+      // Continue from `start` over the (usually tiny) changed span rather than
+      // re-scanning `previousText` from offset 0 a second time.
+      end: advanceStringPosition(previousText, startPosition, start, previousEnd),
     },
     rangeLength: previousEnd - start,
     text: nextText.slice(start, nextEnd),

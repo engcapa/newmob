@@ -1,5 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StatusBar } from "./StatusBar";
 import { useAppStore } from "../../stores/appStore";
 import { useCodeWorkspaceStatusStore } from "../../stores/codeWorkspaceStatusStore";
@@ -42,6 +42,10 @@ vi.mock("../../stores/aiStore", () => ({
 }));
 
 describe("StatusBar code-workspace segments", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   beforeEach(() => {
     useAppStore.setState({
       tabs: [{
@@ -83,6 +87,7 @@ describe("StatusBar code-workspace segments", () => {
         gitAhead: 1,
         gitBehind: 2,
         fontSize: 14,
+        largeFile: false,
       },
       actions: { openLanguagePanel, openGitManager },
     });
@@ -106,5 +111,32 @@ describe("StatusBar code-workspace segments", () => {
     fireEvent.click(screen.getByTestId("status-bar-workspace-git"));
     expect(openLanguagePanel).toHaveBeenCalledTimes(1);
     expect(openGitManager).toHaveBeenCalledTimes(1);
+    // Normal-size file: no large-file indicator.
+    expect(screen.queryByTestId("status-bar-workspace-large-file")).toBeNull();
+  });
+
+  it("shows the large-file indicator only in large-file mode", () => {
+    useCodeWorkspaceStatusStore.setState({
+      status: {
+        tabId: "ws-tab",
+        line: 1,
+        column: 1,
+        encoding: "UTF-8",
+        eol: "LF",
+        languageId: "typescript",
+        lspActive: true,
+        lspLabel: "tsserver",
+        lspError: false,
+        gitBranch: null,
+        gitAhead: 0,
+        gitBehind: 0,
+        fontSize: 14,
+        largeFile: true,
+      },
+      actions: null,
+    });
+
+    render(<StatusBar />);
+    expect(screen.getByTestId("status-bar-workspace-large-file")).toBeInTheDocument();
   });
 });

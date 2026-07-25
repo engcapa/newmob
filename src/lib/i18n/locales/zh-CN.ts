@@ -340,6 +340,7 @@ export const zhCN: DeepPartial<typeof en> = {
     refreshed: "会话已刷新",
   },
   statusBar: {
+    largeFileMode: "大文件模式",
     sessions: "{count} 个会话",
     none: "未选择",
     networkOnline: "网络已连接",

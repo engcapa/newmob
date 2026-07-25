@@ -341,6 +341,7 @@ const dict = {
     refreshed: "Sessions refreshed",
   },
   statusBar: {
+    largeFileMode: "Large file mode",
     sessions: "{count} sessions",
     none: "none selected",
     networkOnline: "Network online",

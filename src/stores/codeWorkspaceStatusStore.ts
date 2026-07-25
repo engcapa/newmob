@@ -18,6 +18,8 @@ export interface CodeWorkspaceStatusSegments {
   gitAhead: number;
   gitBehind: number;
   fontSize: number;
+  /** Large-file mode: semantic tokens / inlay hints / highlight are downgraded. */
+  largeFile: boolean;
 }
 
 export interface CodeWorkspaceStatusActions {
@@ -51,7 +53,8 @@ function segmentsEqual(
     && left.gitBranch === right.gitBranch
     && left.gitAhead === right.gitAhead
     && left.gitBehind === right.gitBehind
-    && left.fontSize === right.fontSize;
+    && left.fontSize === right.fontSize
+    && left.largeFile === right.largeFile;
 }
 
 export function detectWorkspaceEol(text: string): WorkspaceEol {

@@ -255,6 +255,14 @@ export function StatusBar() {
               )}
             </StatusSegment>
           )}
+          {workspaceStatus.largeFile && (
+            <StatusSegment
+              testId="status-bar-workspace-large-file"
+              title="Large file mode: semantic highlighting, inlay hints and usage highlight are off for performance. Syntax highlighting and on-demand features (completion, hover, go-to) still work."
+            >
+              {t("statusBar.largeFileMode")}
+            </StatusSegment>
+          )}
           <StatusSegment
             testId="status-bar-workspace-zoom"
             title="Editor font size"

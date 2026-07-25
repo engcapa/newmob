@@ -148,6 +148,7 @@ import {
   type WorkspaceIntelligencePreferences,
 } from "./workspace/intelligencePreferences";
 import { applyLspTextEditsToString } from "./workspace/lspTextEdits";
+import { isLargeFileContent } from "./workspace/largeFile";
 import {
   applyWorkspaceEdit,
   summarizeWorkspaceEditOutcomes,
@@ -2345,6 +2346,13 @@ export function CodeWorkspaceTab({
   }, [activateEditorGroup, editorGroups, setStoreSplitOrientation, splitOrientation, updateEditorGroup, workspaceInstanceId]);
 
   const activeFile = activeKey ? openFiles[activeKey] ?? null : null;
+  // Large-file mode (M6-B): above the size/line threshold, skip the per-edit
+  // semantic-tokens / inlay-hint / document-highlight storm and their decoration
+  // rebuilds. Lezer highlighting and on-demand features stay available.
+  const activeFileIsLarge = useMemo(
+    () => (activeFile && !activeFile.loading ? isLargeFileContent(activeFile.text) : false),
+    [activeFile],
+  );
   // Metadata panels and AI workspace context do not need a new snapshot for
   // every character.  Let React publish that non-interactive work after the
   // input update has painted.
@@ -2522,7 +2530,8 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
-    if (!file || file.loading) {
+    // Large-file mode: no per-cursor highlight (LSP request nor text-scan fallback).
+    if (!file || file.loading || activeFileIsLarge) {
       setHighlightsByGroup((current) => (
         current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
       ));
@@ -2576,6 +2585,7 @@ export function CodeWorkspaceTab({
     activeCapabilities?.documentHighlight,
     activeEditorGroupId,
     activeFile,
+    activeFileIsLarge,
     activeLspDocumentIsSynced,
     cursorPositions,
     isCurrentLspDocumentRequest,
@@ -2586,7 +2596,7 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
-    if (!file || file.loading || !activeInlayHintsEnabled || !activeCapabilities?.inlayHint) {
+    if (!file || file.loading || activeFileIsLarge || !activeInlayHintsEnabled || !activeCapabilities?.inlayHint) {
       setInlayHintsByGroup((current) => (
         current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
       ));
@@ -2626,6 +2636,7 @@ export function CodeWorkspaceTab({
     activeCapabilities?.inlayHint,
     activeEditorGroupId,
     activeFile,
+    activeFileIsLarge,
     activeInlayHintsEnabled,
     activeLspDocumentIsSynced,
     isCurrentLspDocumentRequest,
@@ -2637,7 +2648,7 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
-    if (!file || file.loading || !activeCapabilities?.semanticTokens) {
+    if (!file || file.loading || activeFileIsLarge || !activeCapabilities?.semanticTokens) {
       setSemanticTokensByGroup((current) => (
         current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
       ));
@@ -2676,6 +2687,7 @@ export function CodeWorkspaceTab({
     activeCapabilities?.semanticTokens,
     activeEditorGroupId,
     activeFile,
+    activeFileIsLarge,
     activeLspDocumentIsSynced,
     isCurrentLspDocumentRequest,
     lspDescriptorForFile,
@@ -2801,10 +2813,12 @@ export function CodeWorkspaceTab({
       gitAhead: gitSnapshot?.ahead ?? 0,
       gitBehind: gitSnapshot?.behind ?? 0,
       fontSize: codeViewProfile.fontSize,
+      largeFile: activeFileIsLarge,
     });
   }, [
     activeEditorGroupId,
     activeFile?.eol,
+    activeFileIsLarge,
     activeGitRoot,
     activeLanguageId,
     activeLspState,
