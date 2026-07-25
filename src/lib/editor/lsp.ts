@@ -365,6 +365,30 @@ export function lspGetDiagnostics(
   return invoke<LspDiagnosticsResult>("lsp_get_diagnostics", documentArgs(descriptor));
 }
 
+/** One file's diagnostics in the workspace-wide Problems view (M7-C). */
+export interface WorkspaceDiagnosticFile {
+  path: string;
+  uri: string;
+  diagnostics: LspDiagnostic[];
+}
+
+/**
+ * All diagnostics stored across the workspace's active sessions, including files
+ * the user never opened (jdtls publishes project-wide after a build). Used by the
+ * Problems panel's "whole project" mode; the panel polls this while open.
+ */
+export function lspWorkspaceDiagnostics(workspaceId: string): Promise<WorkspaceDiagnosticFile[]> {
+  return invoke<WorkspaceDiagnosticFile[]>("lsp_workspace_diagnostics", { workspaceId });
+}
+
+/**
+ * Trigger a full jdtls project rebuild (java.buildWorkspace) so diagnostics for
+ * unopened files are (re)published. `descriptor` selects the jdtls session.
+ */
+export function lspBuildWorkspace(descriptor: LspDocumentDescriptor): Promise<void> {
+  return invoke("lsp_build_workspace", documentArgs(descriptor));
+}
+
 export function lspDocumentSymbols(
   descriptor: LspDocumentDescriptor,
 ): Promise<LspDocumentSymbolsResult> {

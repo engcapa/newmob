@@ -74,6 +74,8 @@ import {
   lspRangeFormatting,
   lspDownloadSources,
   lspReloadProject,
+  lspBuildWorkspace,
+  lspWorkspaceDiagnostics,
   lspReadUriContents,
   lspReferences,
   lspRename,
@@ -165,6 +167,7 @@ import {
 import {
   ProblemsPanel,
   type ProblemFileGroup,
+  type ProblemsScope,
 } from "./workspace/panels/ProblemsPanel";
 import { FindInFilesPanel } from "./workspace/panels/FindInFilesPanel";
 import { DocumentationPane } from "./workspace/panels/DocumentationPane";
@@ -515,6 +518,9 @@ export function CodeWorkspaceTab({
   const openFilesRef = useRef(openFiles);
   const openOrderRef = useRef(openOrder);
   const lspFilesRef = useRef(lspFiles);
+  /** False after unmount so async project-diagnostics callbacks skip setState. */
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const pendingEditorTextByFileRef = useRef(new Map<string, OpenFileState>());
   const pendingEditorTextTimerRef = useRef<number | null>(null);
   /** Debounced didChange timers keyed by open-file key (live buffer path). */
@@ -4776,8 +4782,82 @@ export function CodeWorkspaceTab({
     }),
     [deferredOpenFiles, lspFiles, openOrder],
   );
-  const problemCounts = useMemo(
-    () => problemFiles.reduce(
+  // M7-C: whole-project Problems. jdtls stores diagnostics for unopened files
+  // after a build; we poll the aggregate while the panel is in "project" scope
+  // (push events were dropped — see lsp.rs C-1). `key` is the absolute path.
+  const [problemsScope, setProblemsScope] = useState<ProblemsScope>("open");
+  const [projectProblemFiles, setProjectProblemFiles] = useState<ProblemFileGroup[]>([]);
+  const [projectProblemsLoading, setProjectProblemsLoading] = useState(false);
+  const [rebuildingProject, setRebuildingProject] = useState(false);
+
+  const problemPathToRef = useCallback((absPath: string): CodeWorkspaceFileRef | null => {
+    for (const root of rootsRef.current) {
+      const rel = relativePathWithinRoot(root.path, absPath);
+      if (rel !== null && rel !== "") {
+        return { kind: "root", rootId: root.id, path: rel };
+      }
+    }
+    return null;
+  }, []);
+
+  const refreshProjectProblems = useCallback(async () => {
+    try {
+      const files = await lspWorkspaceDiagnostics(workspaceInstanceId);
+      if (!mountedRef.current) return;
+      setProjectProblemFiles(files.map((entry): ProblemFileGroup => {
+        const ref = problemPathToRef(entry.path);
+        const rootName = ref?.kind === "root" ? findRoot(ref.rootId)?.name : undefined;
+        const subtitle = ref?.kind === "root"
+          ? (rootName ? `${rootName} / ${ref.path}` : ref.path)
+          : entry.path;
+        return {
+          key: entry.path,
+          title: basename(entry.path),
+          subtitle,
+          diagnostics: entry.diagnostics,
+        };
+      }));
+    } catch {
+      // No active jdtls session / command unsupported: leave the list as-is.
+    }
+  }, [findRoot, problemPathToRef, workspaceInstanceId]);
+
+  // Poll project diagnostics while the Problems panel is open in project scope.
+  useEffect(() => {
+    if (!(bottomDockOpen && bottomDockTab === "problems" && problemsScope === "project")) return;
+    let cancelled = false;
+    setProjectProblemsLoading(true);
+    void refreshProjectProblems().finally(() => {
+      if (!cancelled && mountedRef.current) setProjectProblemsLoading(false);
+    });
+    const timer = window.setInterval(() => void refreshProjectProblems(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bottomDockOpen, bottomDockTab, problemsScope, refreshProjectProblems]);
+
+  const rebuildProject = useCallback(async () => {
+    const root = rootsRef.current[0];
+    if (!root) return;
+    // A synthetic .java path selects the root's jdtls session (keyed on scope).
+    const descriptor = lspDescriptorForPath(root.path, "__taomni_build__.java");
+    setRebuildingProject(true);
+    try {
+      await lspBuildWorkspace(descriptor);
+      setStatusMessage("Rebuilding project…");
+    } catch (err) {
+      setStatusMessage(errorMessage(err));
+    } finally {
+      if (mountedRef.current) setRebuildingProject(false);
+    }
+    // Give jdtls a beat to publish, then refresh.
+    window.setTimeout(() => void refreshProjectProblems(), 1200);
+  }, [lspDescriptorForPath, refreshProjectProblems, setStatusMessage]);
+
+  const problemsScopeFiles = problemsScope === "project" ? projectProblemFiles : problemFiles;
+  const activeProblemCounts = useMemo(
+    () => problemsScopeFiles.reduce(
       (counts, file) => {
         for (const diagnostic of file.diagnostics) {
           if (diagnostic.severity === 1) counts.errors += 1;
@@ -4787,16 +4867,24 @@ export function CodeWorkspaceTab({
       },
       { errors: 0, warnings: 0 },
     ),
-    [problemFiles],
+    [problemsScopeFiles],
   );
+
   const openProblem = useCallback(
     (fileKeyValue: string, diagnostic: LspDiagnostic) => {
-      const file = openFilesRef.current[fileKeyValue];
-      if (!file) return;
-      revealEditorLocation(file.key, diagnostic.range);
-      void openFile(file.ref);
+      // Open-file key (open scope) → reveal in place.
+      const openState = openFilesRef.current[fileKeyValue];
+      if (openState) {
+        revealEditorLocation(openState.key, diagnostic.range);
+        void openFile(openState.ref);
+        return;
+      }
+      // Project scope: the key is an absolute path to a (possibly unopened) file.
+      const ref = problemPathToRef(fileKeyValue);
+      if (!ref) return;
+      void openFile(ref).then(() => revealEditorLocation(fileKey(ref), diagnostic.range));
     },
-    [openFile, revealEditorLocation],
+    [openFile, problemPathToRef, revealEditorLocation],
   );
   useEffect(() => {
     if (!onSyncGitManager) return;
@@ -5390,17 +5478,22 @@ export function CodeWorkspaceTab({
             id: "problems",
             label: "Problems",
             icon: <AlertTriangle className="h-3.5 w-3.5" />,
-            badge: problemCounts.errors > 0 || problemCounts.warnings > 0 ? (
+            badge: activeProblemCounts.errors > 0 || activeProblemCounts.warnings > 0 ? (
               <span className="inline-flex items-center gap-1">
-                {problemCounts.errors > 0 && <span className="text-red-500">{problemCounts.errors}</span>}
-                {problemCounts.warnings > 0 && <span className="text-amber-500">{problemCounts.warnings}</span>}
+                {activeProblemCounts.errors > 0 && <span className="text-red-500">{activeProblemCounts.errors}</span>}
+                {activeProblemCounts.warnings > 0 && <span className="text-amber-500">{activeProblemCounts.warnings}</span>}
               </span>
             ) : undefined,
             content: (
               <ProblemsPanel
-                files={problemFiles}
+                files={problemsScopeFiles}
                 onOpenProblem={openProblem}
                 onQuickFix={(fileKey, diagnostic) => void openQuickFixForProblem(fileKey, diagnostic)}
+                scope={problemsScope}
+                onScopeChange={setProblemsScope}
+                onRebuild={() => void rebuildProject()}
+                rebuilding={rebuildingProject}
+                loading={problemsScope === "project" && projectProblemsLoading}
               />
             ),
           },

@@ -46,6 +46,8 @@ const lspMocks = vi.hoisted(() => ({
   lspDownloadSources: vi.fn(),
   lspReloadProject: vi.fn(),
   lspJavaModules: vi.fn(),
+  lspWorkspaceDiagnostics: vi.fn(),
+  lspBuildWorkspace: vi.fn(),
   lspReferences: vi.fn(),
   lspPrepareCallHierarchy: vi.fn(),
   lspCallHierarchyIncoming: vi.fn(),
@@ -241,6 +243,8 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspCloseDocument.mockReset();
     lspMocks.lspStopWorkspace.mockReset().mockResolvedValue(0);
     lspMocks.lspGetDiagnostics.mockReset();
+    lspMocks.lspWorkspaceDiagnostics.mockReset().mockResolvedValue([]);
+    lspMocks.lspBuildWorkspace.mockReset().mockResolvedValue(undefined);
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
     lspMocks.lspReadUriContents.mockReset();

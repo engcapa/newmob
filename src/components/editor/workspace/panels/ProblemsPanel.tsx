@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AlertCircle, AlertTriangle, Info } from "lucide-react";
+import { AlertCircle, AlertTriangle, Hammer, Info, Loader2 } from "lucide-react";
 import type { LspDiagnostic } from "../../../../lib/editor/lsp";
 import { writeText } from "../../../../lib/clipboard";
 import { useContextMenu } from "../../../ContextMenu";
@@ -11,10 +11,20 @@ export interface ProblemFileGroup {
   diagnostics: LspDiagnostic[];
 }
 
+export type ProblemsScope = "open" | "project";
+
 interface ProblemsPanelProps {
   files: ProblemFileGroup[];
   onOpenProblem: (fileKey: string, diagnostic: LspDiagnostic) => void;
   onQuickFix?: (fileKey: string, diagnostic: LspDiagnostic) => void;
+  /** "open files" (default) vs "whole project" (M7-C). Omit to hide the toggle. */
+  scope?: ProblemsScope;
+  onScopeChange?: (scope: ProblemsScope) => void;
+  /** Whole-project rebuild (jdtls java.buildWorkspace); shown only in project scope. */
+  onRebuild?: () => void;
+  rebuilding?: boolean;
+  /** True while the project-scope diagnostics are (re)loading. */
+  loading?: boolean;
 }
 
 type SeverityKind = "error" | "warning" | "info";
@@ -31,7 +41,17 @@ function SeverityIcon({ kind }: { kind: SeverityKind }) {
   return <Info className="h-3.5 w-3.5 shrink-0 text-sky-500" />;
 }
 
-export function ProblemsPanel({ files, onOpenProblem, onQuickFix }: ProblemsPanelProps) {
+export function ProblemsPanel({
+  files,
+  onOpenProblem,
+  onQuickFix,
+  scope,
+  onScopeChange,
+  onRebuild,
+  rebuilding,
+  loading,
+}: ProblemsPanelProps) {
+  const projectScope = scope === "project";
   const [visible, setVisible] = useState<Record<SeverityKind, boolean>>({
     error: true,
     warning: true,
@@ -58,7 +78,38 @@ export function ProblemsPanel({ files, onOpenProblem, onQuickFix }: ProblemsPane
   return (
     <div data-testid="code-workspace-problems-panel" className="h-full min-h-0 flex flex-col text-[11px]">
       <div className="h-8 shrink-0 flex items-center gap-1 border-b border-[var(--taomni-code-border)] px-2">
-        <span className="mr-1 text-[10px] text-[var(--taomni-code-muted)]">Open files</span>
+        {scope && onScopeChange ? (
+          <div className="mr-1 inline-flex rounded border border-[var(--taomni-code-border)] text-[10px]">
+            {(["open", "project"] as const).map((value) => (
+              <button
+                key={value}
+                type="button"
+                data-testid={`problems-scope-${value}`}
+                aria-pressed={scope === value}
+                data-active={scope === value || undefined}
+                className="px-1.5 py-0.5 text-[var(--taomni-code-muted)] first:rounded-l last:rounded-r data-[active=true]:bg-[var(--taomni-code-selection-match-bg)] data-[active=true]:text-[var(--taomni-code-text)]"
+                onClick={() => onScopeChange(value)}
+              >
+                {value === "open" ? "Open files" : "Whole project"}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <span className="mr-1 text-[10px] text-[var(--taomni-code-muted)]">Open files</span>
+        )}
+        {projectScope && onRebuild && (
+          <button
+            type="button"
+            data-testid="problems-rebuild"
+            className="h-6 inline-flex items-center gap-1 rounded px-1.5 text-[10px] text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)]"
+            onClick={onRebuild}
+            disabled={rebuilding}
+            title="Rebuild project (jdtls java.buildWorkspace)"
+          >
+            {rebuilding ? <Loader2 className="h-3 w-3 animate-spin" /> : <Hammer className="h-3 w-3" />}
+            Rebuild
+          </button>
+        )}
         {(["error", "warning", "info"] as const).map((kind) => (
           <button
             key={kind}
@@ -80,7 +131,11 @@ export function ProblemsPanel({ files, onOpenProblem, onQuickFix }: ProblemsPane
       <div className="flex-1 min-h-0 overflow-auto py-1">
         {filteredFiles.length === 0 && (
           <div className="px-3 py-2 text-[var(--taomni-code-muted)]">
-            {counts.error + counts.warning + counts.info === 0 ? "No problems in open files" : "No matching problems"}
+            {loading
+              ? "Loading project problems…"
+              : counts.error + counts.warning + counts.info === 0
+                ? (projectScope ? "No problems in the project" : "No problems in open files")
+                : "No matching problems"}
           </div>
         )}
         {filteredFiles.map((file) => (
