@@ -6,6 +6,7 @@ import {
   lspGetDiagnostics,
   lspOpenDocument,
   lspSaveDocument,
+  lspSetJavaBundles,
   lspSetJavaHome,
   lspSetJavaSettings,
   lspSetJavaVmargs,
@@ -26,6 +27,7 @@ import {
   lspPresetIdForPath,
   readLspCommandPrefs,
   readLspCustomCommands,
+  readLspJavaBundles,
   readLspJavaHome,
   readLspJavaSettings,
   readLspJavaVmargs,
@@ -186,6 +188,7 @@ export function useWorkspaceLspSession({
       await lspSetJavaHome(home || null);
       await lspSetJavaVmargs(readLspJavaVmargs());
       await lspSetJavaSettings(readLspJavaSettings());
+      await lspSetJavaBundles(readLspJavaBundles());
       const statuses = await lspDetectServers({ javaHome: home || null });
       if (mountedRef.current) setServerStatuses(statuses);
     } catch (error) {

@@ -8,6 +8,8 @@ const detectMock = vi.fn();
 const setJavaHomeMock = vi.fn(async (_home?: string | null) => {});
 const setJavaVmargsMock = vi.fn(async (vmargs?: string | null) => vmargs?.trim() || "-Xms1024m -Xmx1024m");
 const setJavaSettingsMock = vi.fn(async (_settings: unknown) => 0);
+const setJavaBundlesMock = vi.fn(async (_config: unknown) => {});
+const detectJavaBundlesMock = vi.fn(async () => [] as unknown[]);
 const selectFolderPathMock = vi.fn(async (_current?: string) => null as string | null);
 
 vi.mock("../../lib/clipboard", () => ({
@@ -19,6 +21,8 @@ vi.mock("../../lib/editor/lsp", () => ({
   lspSetJavaHome: (javaHome?: string | null) => setJavaHomeMock(javaHome),
   lspSetJavaVmargs: (vmargs?: string | null) => setJavaVmargsMock(vmargs),
   lspSetJavaSettings: (settings: unknown) => setJavaSettingsMock(settings),
+  lspSetJavaBundles: (config: unknown) => setJavaBundlesMock(config),
+  lspDetectJavaBundles: () => detectJavaBundlesMock(),
 }));
 
 vi.mock("../../lib/ipc", () => ({
@@ -306,5 +310,29 @@ describe("LanguageServersSettings", () => {
       );
       expect(parsed.completionImportOrder).toEqual(["java", "javax", "com", "org"]);
     });
+  });
+
+  it("persists jdtls extension bundle paths and re-probes (M8)", async () => {
+    detectJavaBundlesMock.mockResolvedValue([
+      { id: "javaDebug", path: "/opt/java-debug/plugin.jar", available: true },
+      { id: "javaTest", path: null, available: false },
+    ]);
+    render(<LanguageServersSettings />);
+
+    const debugInput = await screen.findByTestId("language-servers-bundle-javaDebug");
+    fireEvent.change(debugInput, { target: { value: "/opt/java-debug" } });
+    fireEvent.blur(debugInput);
+
+    await waitFor(() => {
+      const parsed = JSON.parse(
+        window.localStorage.getItem("taomni.codeWorkspace.lspJavaBundles.v1") ?? "{}",
+      );
+      expect(parsed.javaDebugPath).toBe("/opt/java-debug");
+    });
+    await waitFor(() => expect(setJavaBundlesMock).toHaveBeenCalledWith(
+      expect.objectContaining({ javaDebugPath: "/opt/java-debug" }),
+    ));
+    // Probe status renders after the commit re-probe.
+    await screen.findByTestId("language-servers-bundle-status-javaDebug");
   });
 });

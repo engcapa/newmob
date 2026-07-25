@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Copy, FolderOpen, RefreshCw, Server } from "lucide-react";
 import {
+  lspDetectJavaBundles,
   lspDetectServers,
+  lspSetJavaBundles,
   lspSetJavaHome,
   lspSetJavaSettings,
   lspSetJavaVmargs,
+  type LspBundleStatus,
+  type LspJavaBundleConfig,
   type LspJavaSettings,
   type LspServerStatus,
 } from "../../lib/editor/lsp";
@@ -27,11 +31,13 @@ import {
   DEFAULT_LSP_JAVA_VMARGS,
   readLspCommandPrefs,
   readLspCustomCommands,
+  readLspJavaBundles,
   readLspJavaHome,
   readLspJavaSettings,
   readLspJavaVmargs,
   writeLspCommandPrefs,
   writeLspCustomCommands,
+  writeLspJavaBundles,
   writeLspJavaHome,
   writeLspJavaSettings,
   writeLspJavaVmargs,
@@ -55,6 +61,8 @@ export function LanguageServersSettings() {
   const [javaHome, setJavaHome] = useState(() => readLspJavaHome());
   const [javaVmargs, setJavaVmargs] = useState(() => readLspJavaVmargs());
   const [javaSettings, setJavaSettings] = useState<LspJavaSettings>(() => readLspJavaSettings());
+  const [javaBundles, setJavaBundles] = useState<LspJavaBundleConfig>(() => readLspJavaBundles());
+  const [bundleStatuses, setBundleStatuses] = useState<LspBundleStatus[]>([]);
   /** Expanded install panels keyed by presetId. */
   const [expandedInstall, setExpandedInstall] = useState<Record<string, boolean>>({});
   /** Brief highlight when deep-linked from a Code Workspace file. */
@@ -84,6 +92,18 @@ export function LanguageServersSettings() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Sync persisted bundle paths to the backend once, then probe for availability.
+  useEffect(() => {
+    void (async () => {
+      try {
+        await lspSetJavaBundles(readLspJavaBundles());
+        setBundleStatuses(await lspDetectJavaBundles());
+      } catch {
+        // Non-fatal: the bundle status simply stays unknown.
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     const pending = consumePendingSettingsSection();
@@ -164,6 +184,25 @@ export function LanguageServersSettings() {
       void (async () => {
         try {
           await lspSetJavaSettings(next);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      })();
+      return next;
+    });
+  }, []);
+
+  /**
+   * Merge a patch into the jdtls bundle paths, persist, push to the backend, then
+   * re-probe. Bundles apply on the next jdtls start (they cannot be hot-added).
+   */
+  const commitJavaBundles = useCallback((patch: Partial<LspJavaBundleConfig>) => {
+    setJavaBundles((current) => {
+      const next = writeLspJavaBundles({ ...current, ...patch });
+      void (async () => {
+        try {
+          await lspSetJavaBundles(next);
+          setBundleStatuses(await lspDetectJavaBundles());
         } catch (err) {
           setError(err instanceof Error ? err.message : String(err));
         }
@@ -539,6 +578,49 @@ export function LanguageServersSettings() {
                             {t("settings.languageServersJavaImportOrderHint")}
                           </span>
                         </label>
+                      </div>
+                      <div className="mt-3 border-t border-[var(--taomni-border)] pt-2">
+                        <div className="text-[11px] font-medium text-[var(--taomni-text)]">
+                          {t("settings.languageServersJavaBundlesTitle")}
+                        </div>
+                        <div className="mt-0.5 text-[10px] leading-snug text-[var(--taomni-text-muted)]">
+                          {t("settings.languageServersJavaBundlesHint")}
+                        </div>
+                        {([
+                          ["javaDebug", "javaDebugPath", "settings.languageServersJavaDebugBundle"],
+                          ["javaTest", "javaTestPath", "settings.languageServersJavaTestBundle"],
+                        ] as const).map(([id, field, labelKey]) => {
+                          const probe = bundleStatuses.find((entry) => entry.id === id);
+                          return (
+                            <label key={id} className="mt-1.5 block text-[11px] text-[var(--taomni-text-muted)]">
+                              <span className="flex items-center gap-1.5">
+                                {t(labelKey)}
+                                {probe && (
+                                  <span
+                                    data-testid={`language-servers-bundle-status-${id}`}
+                                    className={probe.available ? "text-emerald-500" : "text-[var(--taomni-text-muted)]"}
+                                    title={probe.path ?? undefined}
+                                  >
+                                    {probe.available ? "● detected" : "○ not found"}
+                                  </span>
+                                )}
+                              </span>
+                              <input
+                                type="text"
+                                spellCheck={false}
+                                data-testid={`language-servers-bundle-${id}`}
+                                className="mt-0.5 w-full rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-1 font-mono text-[11px] text-[var(--taomni-text)] outline-none"
+                                placeholder={t("settings.languageServersJavaBundlePlaceholder")}
+                                defaultValue={javaBundles[field]}
+                                onBlur={(event) => {
+                                  if (event.target.value.trim() !== javaBundles[field].trim()) {
+                                    commitJavaBundles({ [field]: event.target.value.trim() });
+                                  }
+                                }}
+                              />
+                            </label>
+                          );
+                        })}
                       </div>
                     </>
                   )}

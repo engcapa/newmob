@@ -305,6 +305,32 @@ export function lspSetJavaSettings(settings: LspJavaSettings | null): Promise<nu
   return invoke<number>("lsp_set_java_settings", { settings });
 }
 
+/**
+ * jdtls extension bundle paths (M8). Each is a directory holding the versioned
+ * jar, or the jar path itself. Lombok is NOT here — it loads as a `-javaagent`.
+ */
+export interface LspJavaBundleConfig {
+  javaDebugPath: string;
+  javaTestPath: string;
+}
+
+/** Probe result for one jdtls extension bundle. */
+export interface LspBundleStatus {
+  id: string;
+  path: string | null;
+  available: boolean;
+}
+
+/** Persist jdtls extension bundle paths (applied on the next jdtls start). */
+export function lspSetJavaBundles(config: LspJavaBundleConfig): Promise<void> {
+  return invoke("lsp_set_java_bundles", { config });
+}
+
+/** Probe configured jdtls extension bundles (java-debug / java-test). */
+export function lspDetectJavaBundles(): Promise<LspBundleStatus[]> {
+  return invoke<LspBundleStatus[]>("lsp_detect_java_bundles");
+}
+
 export function lspDocumentStatus(
   descriptor: LspDocumentDescriptor,
 ): Promise<LspDocumentStatus> {

@@ -2647,6 +2647,22 @@ pub async fn lsp_set_java_settings(
     Ok(notified)
 }
 
+/// Persist the Settings-configured jdtls extension bundle paths (java-debug /
+/// java-test). Applied on the next jdtls start via `initializationOptions.bundles`
+/// (bundles cannot be hot-added). `None` fields clear that bundle.
+#[tauri::command]
+pub fn lsp_set_java_bundles(config: crate::java_bundles::JavaBundleConfig) -> Result<(), String> {
+    crate::java_bundles::set_configured_bundles(config);
+    Ok(())
+}
+
+/// Probe the configured jdtls extension bundles (java-debug / java-test) for the
+/// Settings UI: which are found and the resolved jar path.
+#[tauri::command]
+pub fn lsp_detect_java_bundles() -> Vec<crate::java_bundles::BundleStatus> {
+    crate::java_bundles::probe_bundles(&crate::java_bundles::get_configured_bundles())
+}
+
 #[tauri::command]
 pub fn lsp_detect_servers(java_home: Option<String>) -> Vec<LspServerStatus> {
     // Accept an optional override so Settings can probe without waiting for a
@@ -5012,7 +5028,7 @@ fn lsp_initialization_options(
     }
     let runtimes: &[JavaRuntimeConfiguration] = &sdk_environment.java_runtimes;
     let java_settings = get_configured_java_settings().to_java_settings(runtimes);
-    json!({
+    let mut options = json!({
         "settings": {
             "java": java_settings
         },
@@ -5024,7 +5040,15 @@ fn lsp_initialization_options(
         "extendedClientCapabilities": {
             "classFileContentsSupport": true
         }
-    })
+    });
+    // Load configured jdtls extension bundles (java-debug / java-test) so
+    // debugging + testing become available (M8). Omitted when none are configured.
+    // Lombok is NOT here — it loads as a `-javaagent`, not an OSGi bundle.
+    let bundles = crate::java_bundles::configured_bundle_jars();
+    if !bundles.is_empty() {
+        options["bundles"] = json!(bundles);
+    }
+    options
 }
 
 fn server_status(

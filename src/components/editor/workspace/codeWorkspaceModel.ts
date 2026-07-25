@@ -4,7 +4,7 @@
  */
 import type { CodeWorkspaceFileRef, CodeWorkspaceLooseFileInfo, CodeWorkspaceRootInfo, CodeWorkspaceTabInfo } from "../../../types";
 import type { WorkspaceEntry, WorkspaceGitRoot } from "../../../lib/editor/workspace";
-import type { LspCustomServerCommand, LspDocumentStatus, LspDiagnostic, LspJavaSettings } from "../../../lib/editor/lsp";
+import type { LspCustomServerCommand, LspDocumentStatus, LspDiagnostic, LspJavaSettings, LspJavaBundleConfig } from "../../../lib/editor/lsp";
 import type { GitChange } from "../../../lib/git";
 import { DEFAULT_CODE_VIEW_PROFILE } from "../../../lib/codeViewProfile";
 import type { OpenFileEol, OpenFileViewModel } from "./editorGroupTypes";
@@ -70,6 +70,8 @@ export const LSP_JAVA_HEAP_MB_KEY = "taomni.codeWorkspace.lspJavaHeapMb.v1";
 export const DEFAULT_LSP_JAVA_VMARGS = "-Xms1024m -Xmx1024m";
 /** jdtls `java.*` language settings (Lombok, autobuild, organize imports, …). */
 export const LSP_JAVA_SETTINGS_KEY = "taomni.codeWorkspace.lspJavaSettings.v1";
+/** jdtls extension bundle paths (java-debug / java-test) for debug + test (M8). */
+export const LSP_JAVA_BUNDLES_KEY = "taomni.codeWorkspace.lspJavaBundles.v1";
 export const CUSTOM_LSP_COMMAND_ID = "__custom__";
 export const TREE_FONT_SIZE_KEY = "taomni.codeWorkspace.treeFontSize.v1";
 export const TREE_VIEW_MODE_KEY = "taomni.codeWorkspace.treeViewMode.v1";
@@ -766,6 +768,7 @@ export function subscribeLspServerPrefs(listener: () => void): () => void {
       && event.key !== LSP_JAVA_VMARGS_KEY
       && event.key !== LSP_JAVA_HEAP_MB_KEY
       && event.key !== LSP_JAVA_SETTINGS_KEY
+      && event.key !== LSP_JAVA_BUNDLES_KEY
     ) {
       return;
     }
@@ -977,6 +980,46 @@ export function writeLspJavaSettings(settings: LspJavaSettings): LspJavaSettings
   const normalized = normalizeLspJavaSettings(settings);
   try {
     window.localStorage.setItem(LSP_JAVA_SETTINGS_KEY, JSON.stringify(normalized));
+  } catch {
+    // Ignore storage failures.
+  }
+  emitLspPrefsChanged();
+  return normalized;
+}
+
+/** Defaults for jdtls extension bundle paths (unset → debug/test unavailable). */
+export const DEFAULT_LSP_JAVA_BUNDLES: LspJavaBundleConfig = {
+  javaDebugPath: "",
+  javaTestPath: "",
+};
+
+/** Coerce arbitrary parsed data into a complete `LspJavaBundleConfig`. */
+export function normalizeLspJavaBundles(raw: unknown): LspJavaBundleConfig {
+  const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const str = (key: keyof LspJavaBundleConfig): string =>
+    typeof source[key] === "string" ? (source[key] as string) : "";
+  return {
+    javaDebugPath: str("javaDebugPath"),
+    javaTestPath: str("javaTestPath"),
+  };
+}
+
+/** Read persisted jdtls extension bundle paths (defaults when unset/corrupt). */
+export function readLspJavaBundles(): LspJavaBundleConfig {
+  try {
+    const stored = window.localStorage.getItem(LSP_JAVA_BUNDLES_KEY);
+    if (!stored) return { ...DEFAULT_LSP_JAVA_BUNDLES };
+    return normalizeLspJavaBundles(JSON.parse(stored));
+  } catch {
+    return { ...DEFAULT_LSP_JAVA_BUNDLES };
+  }
+}
+
+/** Persist jdtls extension bundle paths and notify listeners. */
+export function writeLspJavaBundles(config: LspJavaBundleConfig): LspJavaBundleConfig {
+  const normalized = normalizeLspJavaBundles(config);
+  try {
+    window.localStorage.setItem(LSP_JAVA_BUNDLES_KEY, JSON.stringify(normalized));
   } catch {
     // Ignore storage failures.
   }
