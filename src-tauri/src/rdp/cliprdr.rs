@@ -469,12 +469,11 @@ fn hex_nibble(c: u8) -> Option<u8> {
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
-    fn uri_path(path: &str) -> PathBuf {
-        PathBuf::from(path.trim_start_matches('/'))
-    }
-
-    #[cfg(not(windows))]
+    // Unix-style absolute URIs (`file:///tmp/foo`) decode to a leading-slash
+    // path on every platform: `uri_list_to_paths` re-anchors them with a
+    // leading `/` on Windows too, so host/remote/WSL clipboard sources keep
+    // their absolute form. The expected path is therefore identical across
+    // platforms — no drive-letter stripping (that only applies to `/C:/...`).
     fn uri_path(path: &str) -> PathBuf {
         PathBuf::from(path)
     }
