@@ -8,6 +8,7 @@
 
 pub mod capture;
 pub mod config;
+pub mod core;
 pub mod dns_win;
 pub mod egress;
 pub mod flow;
@@ -42,6 +43,10 @@ use crate::state::AppState;
 pub struct SocksCapRuntime {
     pub orch: Arc<RwLock<Orchestrator>>,
     pub helper: Arc<helper::HelperRegistry>,
+    /// xray-core sidecar pool for core-backed upstreams. Initialized during
+    /// `setup()` once the `AppHandle` (resource dir / app data dir) is available
+    /// via [`init_xray_manager`]; `None` until then.
+    pub xray: std::sync::OnceLock<Arc<core::XrayManager>>,
 }
 
 impl SocksCapRuntime {
@@ -49,8 +54,33 @@ impl SocksCapRuntime {
         Self {
             orch: Arc::new(RwLock::new(Orchestrator::new())),
             helper: Arc::new(helper::HelperRegistry::new()),
+            xray: std::sync::OnceLock::new(),
         }
     }
+
+    /// The xray manager, if it has been initialized.
+    pub fn xray(&self) -> Option<&Arc<core::XrayManager>> {
+        self.xray.get()
+    }
+}
+
+/// Resolve the xray binary + work dir and install the [`core::XrayManager`] on
+/// the runtime. Idempotent (later calls are ignored by the `OnceLock`). Called
+/// from `setup()`; logs whether the binary was found so a missing provisioning
+/// step is visible without blocking startup.
+pub fn init_xray_manager(app: &AppHandle, state: &AppState) {
+    let exe = paths::resolve_xray_exe(app);
+    match &exe {
+        Some(p) => tracing::info!("sockscap: xray-core found at {}", p.display()),
+        None => tracing::info!(
+            "sockscap: xray-core binary not provisioned (core-backed upstreams unavailable; run scripts/fetch-xray.ps1)"
+        ),
+    }
+    let work_dir = data_dir(app)
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("xray");
+    let mgr = Arc::new(core::XrayManager::new(exe, work_dir));
+    let _ = state.sockscap.xray.set(mgr);
 }
 
 impl Default for SocksCapRuntime {
@@ -1289,6 +1319,13 @@ pub async fn sockscap_test_upstream(
 /// the helper confirmed capture stopped (so a failure still triggers
 /// `boot_repair` on the next launch).
 pub fn shutdown_on_exit(app: &AppHandle, state: &AppState) {
+    // Kill any xray-core sidecars first (all platforms). Best-effort, sync:
+    // start_kill without reaping, since no async runtime is guaranteed at exit.
+    // kill_on_drop is the further backstop for a hard crash.
+    if let Some(mgr) = state.sockscap.xray() {
+        mgr.shutdown_all_blocking();
+    }
+
     let sess = state
         .sockscap
         .helper

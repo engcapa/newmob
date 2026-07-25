@@ -102,6 +102,7 @@ fn test_policy_app_isolation_and_bypass() {
             port: 1080,
             username: String::new(),
             password_ref: String::new(),
+            params: Default::default(),
         },
     );
 

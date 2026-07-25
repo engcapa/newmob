@@ -73,6 +73,83 @@ pub fn resolve_helper_exe(app: &AppHandle) -> Result<PathBuf, String> {
     ))
 }
 
+/// Base filename of the bundled xray-core executable per platform.
+pub fn xray_exe_name() -> &'static str {
+    if cfg!(windows) { "xray.exe" } else { "xray" }
+}
+
+/// All candidate paths for the bundled xray-core binary (first existing wins).
+///
+/// Mirrors [`helper_exe_candidates`]: install layout (next to the app / under
+/// `sockscap/<platform>/`), dev `target/` dirs, the Tauri resource dir, and a
+/// `SOCKSCAP_XRAY_DIR` / `SOCKSCAP_XRAY_EXE` override (used by tests/CI).
+pub fn xray_exe_candidates(app: &AppHandle) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !out.iter().any(|x| x == &p) {
+            out.push(p);
+        }
+    };
+    let name = xray_exe_name();
+    let platform_dir = xray_platform_subdir();
+
+    // Explicit overrides win.
+    if let Ok(exe) = std::env::var("SOCKSCAP_XRAY_EXE") {
+        push(PathBuf::from(exe));
+    }
+    if let Ok(dir) = std::env::var("SOCKSCAP_XRAY_DIR") {
+        push(PathBuf::from(&dir).join(name));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push(dir.join(name));
+            push(dir.join("sockscap").join(platform_dir).join(name));
+            push(
+                dir.join("resources")
+                    .join("sockscap")
+                    .join(platform_dir)
+                    .join(name),
+            );
+        }
+    }
+
+    if let Ok(dir) = app.path().resource_dir() {
+        push(dir.join("sockscap").join(platform_dir).join(name));
+        push(dir.join(name));
+    }
+
+    // Dev / CWD-relative.
+    push(PathBuf::from(format!("src-tauri/resources/sockscap/{platform_dir}/{name}")));
+    push(PathBuf::from(format!("resources/sockscap/{platform_dir}/{name}")));
+    push(PathBuf::from("src-tauri/target/debug").join(name));
+    push(PathBuf::from("target/debug").join(name));
+
+    out
+}
+
+/// Resource subdirectory holding the platform's xray binary.
+pub fn xray_platform_subdir() -> &'static str {
+    if cfg!(windows) {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+/// First existing xray executable, or None if not provisioned.
+pub fn resolve_xray_exe(app: &AppHandle) -> Option<PathBuf> {
+    for c in xray_exe_candidates(app) {
+        if c.is_file() {
+            return Some(std::fs::canonicalize(&c).unwrap_or(c));
+        }
+    }
+    // Last resort: a system-installed xray on PATH (dev convenience).
+    which::which("xray").ok()
+}
+
 /// Directories that may contain WinDivert.dll / WinDivert64.sys.
 pub fn windivert_dir_candidates(app: &AppHandle) -> Vec<PathBuf> {
     let mut out = Vec::new();

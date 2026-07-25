@@ -238,6 +238,14 @@ pub fn run() {
                 sockscap::boot_repair(&app_for_sockscap).await;
             });
 
+            // SocksCap: resolve the bundled xray-core binary and install the
+            // sidecar manager (used by core-backed upstreams: ss/trojan/vmess/
+            // vless/wireguard). Non-fatal if the binary is absent.
+            {
+                let state = app.state::<AppState>();
+                sockscap::init_xray_manager(app.handle(), &state);
+            }
+
             // Auto-start any local servers with startOnLaunch=true.
             let app_for_servers = app.handle().clone();
             tauri::async_runtime::spawn(async move {

@@ -1,0 +1,6 @@
+# xray-core redistributable (MPL-2.0; staged by scripts/fetch-xray.ps1 -Platform linux).
+# Not committed to git.
+xray
+*.so
+!README.md
+!.gitignore

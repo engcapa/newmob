@@ -434,6 +434,18 @@ pub(crate) async fn handle_captured_client(
                     write_prefix(&mut remote, &prefix).await?;
                     bridge_any(&mut client, &mut remote).await
                 }
+                // xray-core–backed kinds are dialed via a per-profile local SOCKS
+                // port opened by the XrayManager. P1 wires that port into
+                // `ResolvedUpstream`; until then the relay cannot serve them.
+                other if other.requires_core() => {
+                    return Err(format!(
+                        "upstream kind {} is core-backed; relay integration lands in P1",
+                        other.as_tag()
+                    ));
+                }
+                other => {
+                    return Err(format!("unhandled upstream kind {}", other.as_tag()));
+                }
             }
         }
     };
