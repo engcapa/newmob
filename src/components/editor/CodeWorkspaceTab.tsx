@@ -36,6 +36,7 @@ import {
   Rows2,
   TerminalSquare,
   Play,
+  Hammer,
   Search,
   X,
   ZoomIn,
@@ -370,7 +371,8 @@ import {
   TerminalDockPanel,
   type TerminalDockHandle,
 } from "./workspace/panels/TerminalDockPanel";
-import { RunPanel, type RunPanelHandle } from "./workspace/panels/RunPanel";
+import { RunPanel, type RunPanelHandle, type WorkspaceTaskItem } from "./workspace/panels/RunPanel";
+import { BuildPanel } from "./workspace/panels/BuildPanel";
 import type { EditorRevealTarget } from "./workspace/EditorGroup";
 
 export function CodeWorkspaceTab({
@@ -834,6 +836,21 @@ export function CodeWorkspaceTab({
   const inactiveEditorPaneRef = useRef<HTMLElement | null>(null);
   const terminalDockRef = useRef<TerminalDockHandle | null>(null);
   const runPanelRef = useRef<RunPanelHandle | null>(null);
+
+  /** Run a workspace task in the integrated terminal (shared by Run + Build panels). */
+  const runWorkspaceTask = useCallback(
+    (task: WorkspaceTaskItem, onExit?: (exitCode: number) => void) => {
+      terminalDockRef.current?.runCommand(
+        task.command,
+        task.cwd,
+        `Run: ${task.label}`,
+        onExit,
+      );
+      setBottomDockTab("terminal");
+      setBottomDockOpen(true);
+    },
+    [setBottomDockOpen, setBottomDockTab],
+  );
   const {
     descriptorForFile: lspDescriptorForFile,
     descriptorForPath: lspDescriptorForPath,
@@ -5490,16 +5507,20 @@ export function CodeWorkspaceTab({
                 workspaceInstanceId={workspaceInstanceId}
                 roots={roots}
                 active={bottomDockOpen && bottomDockTab === "run"}
-                onRun={(task, onExit) => {
-                  terminalDockRef.current?.runCommand(
-                    task.command,
-                    task.cwd,
-                    `Run: ${task.label}`,
-                    onExit,
-                  );
-                  setBottomDockTab("terminal");
-                  setBottomDockOpen(true);
-                }}
+                onRun={runWorkspaceTask}
+              />
+            ),
+          },
+          {
+            id: "build",
+            label: "Build",
+            icon: <Hammer className="h-3.5 w-3.5" />,
+            content: (
+              <BuildPanel
+                workspaceInstanceId={workspaceInstanceId}
+                roots={roots}
+                active={bottomDockOpen && bottomDockTab === "build"}
+                onRunTask={(task) => runWorkspaceTask(task)}
               />
             ),
           },

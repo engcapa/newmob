@@ -90,6 +90,21 @@ export function workspaceDetectTasks(repoRoot: string): Promise<WorkspaceTask[]>
   return invoke<WorkspaceTask[]>("workspace_detect_tasks", { repoRoot });
 }
 
+/** A source-grouped bucket of tasks for the Build panel task tree (M7 F-2). */
+export interface WorkspaceTaskGroup {
+  source: string;
+  tasks: WorkspaceTask[];
+}
+
+/**
+ * Grouped task tree: Maven/Gradle carry their full lifecycle / common tasks;
+ * other ecosystems group their detected tasks by source. Pure/offline (no build
+ * tool is spawned).
+ */
+export function workspaceTaskTree(repoRoot: string): Promise<WorkspaceTaskGroup[]> {
+  return invoke<WorkspaceTaskGroup[]>("workspace_task_tree", { repoRoot });
+}
+
 export function workspaceReadFile(
   repoRoot: string,
   path: string,

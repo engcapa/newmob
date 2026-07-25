@@ -456,6 +456,7 @@ pub fn run() {
             workspace::workspace_list_files_recursive,
             workspace::workspace_detect_git_roots,
             workspace::workspace_detect_tasks,
+            workspace::workspace_task_tree,
             workspace::workspace_read_file,
             workspace::workspace_read_loose_file,
             workspace::workspace_write_file,

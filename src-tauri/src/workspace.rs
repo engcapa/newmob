@@ -112,6 +112,108 @@ fn parse_named_targets(contents: &str) -> Vec<String> {
     targets
 }
 
+/// Grouped task view for the Build panel task tree (M7 F-2). Unlike the flat
+/// `workspace_detect_tasks`, tasks are bucketed by source and Maven/Gradle carry
+/// their full lifecycle / common tasks rather than the two-entry Run-tab subset.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskGroup {
+    /// Source key (also the group label), e.g. "Maven", "Gradle", "package.json".
+    pub source: String,
+    pub tasks: Vec<WorkspaceTask>,
+}
+
+/// Wrapper-aware Gradle invocation for `root` (`./gradlew`, `gradlew.bat`, or `gradle`).
+fn gradle_runner(root: &Path) -> &'static str {
+    if cfg!(windows) && root.join("gradlew.bat").is_file() {
+        "gradlew.bat"
+    } else if root.join("gradlew").is_file() {
+        "./gradlew"
+    } else {
+        "gradle"
+    }
+}
+
+/// Wrapper-aware Maven invocation for `root` (`mvnw.cmd`, `./mvnw`, or `mvn`).
+fn maven_runner(root: &Path) -> &'static str {
+    if cfg!(windows) && root.join("mvnw.cmd").is_file() {
+        "mvnw.cmd"
+    } else if root.join("mvnw").is_file() {
+        "./mvnw"
+    } else {
+        "mvn"
+    }
+}
+
+/// Maven's default lifecycle phases most people run, in lifecycle order.
+const MAVEN_LIFECYCLE_PHASES: &[&str] = &[
+    "clean", "validate", "compile", "test", "package", "verify", "install",
+];
+
+/// Gradle tasks common to the base/Java plugins (a fixed set — a live
+/// `gradle tasks --all` enumeration would require spawning Gradle and is left as
+/// a follow-up so this stays a pure, fast, offline function).
+const GRADLE_COMMON_TASKS: &[&str] = &["clean", "build", "assemble", "check", "test", "jar"];
+
+/// Build the grouped task tree: detected tasks bucketed by source (first-seen
+/// order preserved), with Maven/Gradle enriched to their full lifecycle / common
+/// tasks. Pure and offline — no build tool is spawned.
+fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, String> {
+    let detected = detect_workspace_tasks(root)?;
+    let mut groups: Vec<WorkspaceTaskGroup> = Vec::new();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut push = |groups: &mut Vec<WorkspaceTaskGroup>,
+                    index: &mut std::collections::HashMap<String, usize>,
+                    task: WorkspaceTask| {
+        // Skip duplicate labels within a source (enrichment may overlap detection).
+        if let Some(&i) = index.get(&task.source) {
+            let group: &mut WorkspaceTaskGroup = &mut groups[i];
+            if group.tasks.iter().any(|existing| existing.label == task.label) {
+                return;
+            }
+            group.tasks.push(task);
+        } else {
+            index.insert(task.source.clone(), groups.len());
+            groups.push(WorkspaceTaskGroup {
+                source: task.source.clone(),
+                tasks: vec![task],
+            });
+        }
+    };
+
+    // Maven / Gradle full lifecycle first (before the detected subset merges in),
+    // so lifecycle order is preserved in the tree.
+    if root.join("pom.xml").is_file() {
+        let runner = maven_runner(root);
+        for phase in MAVEN_LIFECYCLE_PHASES {
+            push(&mut groups, &mut index, WorkspaceTask {
+                id: format!("Maven:{phase}"),
+                label: (*phase).to_string(),
+                command: format!("{runner} {phase}"),
+                cwd: path_to_string(root),
+                source: "Maven".to_string(),
+            });
+        }
+    }
+    if root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file() {
+        let runner = gradle_runner(root);
+        for task in GRADLE_COMMON_TASKS {
+            push(&mut groups, &mut index, WorkspaceTask {
+                id: format!("Gradle:{task}"),
+                label: (*task).to_string(),
+                command: format!("{runner} {task}"),
+                cwd: path_to_string(root),
+                source: "Gradle".to_string(),
+            });
+        }
+    }
+
+    for task in detected {
+        push(&mut groups, &mut index, task);
+    }
+    Ok(groups)
+}
+
 fn detect_workspace_tasks(root: &Path) -> Result<Vec<WorkspaceTask>, String> {
     let mut tasks = Vec::new();
 
@@ -286,6 +388,14 @@ fn detect_workspace_tasks(root: &Path) -> Result<Vec<WorkspaceTask>, String> {
 pub fn workspace_detect_tasks(repo_root: String) -> Result<Vec<WorkspaceTask>, String> {
     let root = canonical_repo_root(&repo_root)?;
     detect_workspace_tasks(&root)
+}
+
+/// Grouped task tree for the Build panel (M7 F-2). Maven/Gradle carry their full
+/// lifecycle / common tasks; other ecosystems group their detected tasks by source.
+#[tauri::command]
+pub fn workspace_task_tree(repo_root: String) -> Result<Vec<WorkspaceTaskGroup>, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    build_workspace_task_tree(&root)
 }
 
 #[tauri::command]
@@ -1451,6 +1561,51 @@ mod tests {
                 tasks.iter().any(|task| task.command == command),
                 "missing {command}"
             );
+        }
+    }
+
+    #[test]
+    fn task_tree_groups_by_source_with_full_maven_and_gradle_lifecycles() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("package.json"),
+            r#"{"scripts":{"dev":"vite","test":"vitest run"}}"#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("pom.xml"), "<project />").unwrap();
+        fs::write(dir.path().join("build.gradle"), "plugins {}").unwrap();
+
+        let groups = build_workspace_task_tree(dir.path()).unwrap();
+        let find = |source: &str| groups.iter().find(|group| group.source == source);
+
+        // Maven carries the full lifecycle (not just the Run-tab package/test subset).
+        let maven = find("Maven").expect("Maven group");
+        for phase in ["clean", "compile", "package", "verify", "install"] {
+            assert!(
+                maven.tasks.iter().any(|task| task.label == phase),
+                "Maven lifecycle missing {phase}"
+            );
+        }
+        // Gradle carries the common tasks.
+        let gradle = find("Gradle").expect("Gradle group");
+        for task in ["clean", "build", "assemble", "check"] {
+            assert!(
+                gradle.tasks.iter().any(|entry| entry.label == task),
+                "Gradle tasks missing {task}"
+            );
+        }
+        // Other ecosystems still group their detected tasks.
+        let npm = find("package.json").expect("package.json group");
+        assert!(npm.tasks.iter().any(|task| task.label == "dev"));
+        assert!(npm.tasks.iter().any(|task| task.label == "test"));
+
+        // No duplicate labels within a group (enrichment vs detection overlap).
+        for group in &groups {
+            let mut labels: Vec<&str> = group.tasks.iter().map(|task| task.label.as_str()).collect();
+            let count = labels.len();
+            labels.sort_unstable();
+            labels.dedup();
+            assert_eq!(labels.len(), count, "duplicate label in {}", group.source);
         }
     }
 }
