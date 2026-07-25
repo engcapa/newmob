@@ -1433,6 +1433,86 @@ pub async fn sockscap_test_upstream(
     }
 }
 
+/// Parse a single proxy share link (`ss://`/`trojan://`/`vmess://`/`vless://`)
+/// into upstream fields the UI can drop into a form. Secrets come back as
+/// plaintext for the frontend to store as `vault:<id>` refs.
+#[tauri::command]
+pub async fn sockscap_parse_share_link(
+    link: String,
+) -> Result<core::share_link::ParsedShareLink, String> {
+    core::share_link::parse(&link)
+}
+
+/// Parse a subscription blob (base64 or plain newline-separated links) into a
+/// list of upstreams. Unparseable lines are skipped.
+#[tauri::command]
+pub async fn sockscap_parse_subscription(
+    blob: String,
+) -> Result<Vec<core::share_link::ParsedShareLink>, String> {
+    Ok(core::share_link::parse_subscription(&blob))
+}
+
+/// Test a core-backed upstream (shadowsocks/trojan/vmess/vless/wireguard) by
+/// spawning a throwaway xray sidecar, dialing a probe target through it, and
+/// tearing it down. Secrets in `upstream` (password_ref / uuid_ref / wg key
+/// refs) are resolved from the vault, matching a real capture start.
+#[tauri::command]
+pub async fn sockscap_test_core_upstream(
+    state: State<'_, AppState>,
+    upstream: config::UpstreamRef,
+    test_host: Option<String>,
+    test_port: Option<u16>,
+) -> Result<String, String> {
+    if !upstream.kind.requires_core() {
+        return Err(format!(
+            "{} is not a core-backed upstream",
+            upstream.kind.as_tag()
+        ));
+    }
+    let target_host = test_host.unwrap_or_else(|| "www.google.com".into());
+    let target_port = test_port.unwrap_or(443);
+    if upstream.host.trim().is_empty() || upstream.port == 0 {
+        return Err("upstream host and port are required".into());
+    }
+
+    let mgr = state
+        .sockscap
+        .xray()
+        .ok_or_else(|| "xray manager not initialized".to_string())?;
+    if !mgr.has_exe() {
+        return Err("xray-core binary not provisioned; run scripts/fetch-xray.ps1".into());
+    }
+
+    let spec = build_core_spec(
+        &state.vault,
+        upstream.kind,
+        upstream.host.clone(),
+        upstream.port,
+        &upstream,
+    );
+    // Unique throwaway key so a concurrent Test never collides with a live
+    // profile's core or another Test in flight.
+    let key = format!(
+        "__test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let local_port = mgr.ensure(&key, &spec).await?;
+    let result =
+        egress::socks5::dial("127.0.0.1", local_port, &target_host, target_port, "", "").await;
+    mgr.remove(&key).await;
+    result.map(|_| {
+        format!(
+            "{} via {}:{} to {target_host}:{target_port} ok",
+            upstream.kind.as_tag(),
+            upstream.host,
+            upstream.port
+        )
+    })
+}
+
 /// App-exit hook (blocking): cleanly stop the elevated helper's WinDivert
 /// capture and shut the helper down, then clear the recovery journal. Called
 /// from the Tauri `RunEvent::Exit` handler so a normal quit does not leave an

@@ -14,6 +14,7 @@
 //! for the `RunEvent::Exit` hook so a normal quit never leaks an xray process.
 
 pub mod config_gen;
+pub mod share_link;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
