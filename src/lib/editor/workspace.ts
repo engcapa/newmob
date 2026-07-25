@@ -105,6 +105,26 @@ export function workspaceTaskTree(repoRoot: string): Promise<WorkspaceTaskGroup[
   return invoke<WorkspaceTaskGroup[]>("workspace_task_tree", { repoRoot });
 }
 
+/** A resolved dependency-tree node (Maven / Gradle) for the Build panel (M7 F-1). */
+export interface DependencyNode {
+  group: string;
+  artifact: string;
+  version: string;
+  scope: string;
+  /** Version-arbitration note (Gradle `-> x`, Maven verbose conflict), when any. */
+  conflict: string | null;
+  children: DependencyNode[];
+}
+
+/**
+ * Resolve the project dependency tree by spawning the build tool
+ * (`mvn dependency:tree` / `gradle dependencies`). Slow on a cold cache; requires
+ * the tool (or wrapper) present. Rejects for non-Maven/Gradle projects.
+ */
+export function workspaceDependencyTree(repoRoot: string): Promise<DependencyNode[]> {
+  return invoke<DependencyNode[]>("workspace_dependency_tree", { repoRoot });
+}
+
 export function workspaceReadFile(
   repoRoot: string,
   path: string,

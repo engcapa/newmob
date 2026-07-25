@@ -4,6 +4,7 @@ import { BuildPanel } from "./BuildPanel";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceTaskTree: vi.fn(),
+  workspaceDependencyTree: vi.fn(),
 }));
 
 vi.mock("../../../../lib/editor/workspace", () => workspaceMocks);
@@ -55,7 +56,49 @@ describe("BuildPanel", () => {
 
   it("shows an empty state when no tasks are detected", async () => {
     workspaceMocks.workspaceTaskTree.mockResolvedValue([]);
+    workspaceMocks.workspaceDependencyTree.mockResolvedValue([]);
     render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={vi.fn()} />);
     await screen.findByText(/No build tasks detected/);
+  });
+
+  it("loads the dependency tree on demand and flags conflicts", async () => {
+    workspaceMocks.workspaceDependencyTree.mockResolvedValue([
+      {
+        group: "org.springframework",
+        artifact: "spring-core",
+        version: "5.3.0",
+        scope: "compile",
+        conflict: null,
+        children: [
+          { group: "org.springframework", artifact: "spring-jcl", version: "5.3.0", scope: "compile", conflict: null, children: [] },
+        ],
+      },
+      {
+        group: "com.google.guava",
+        artifact: "guava",
+        version: "31.0",
+        scope: "",
+        conflict: "com.google.guava:guava:30.0 -> 31.0",
+        children: [],
+      },
+    ]);
+    render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={vi.fn()} />);
+
+    // Dependencies are on-demand: nothing fetched until the user clicks Load.
+    await screen.findByTestId("build-panel-deps-load-app");
+    expect(workspaceMocks.workspaceDependencyTree).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("build-panel-deps-load-app"));
+    await waitFor(() => expect(workspaceMocks.workspaceDependencyTree).toHaveBeenCalledWith("/repo/app"));
+    await screen.findByText("spring-core");
+    // Arbitration conflict surfaces a badge.
+    expect(screen.getByText("conflict")).toBeInTheDocument();
+  });
+
+  it("surfaces a dependency resolution error", async () => {
+    workspaceMocks.workspaceDependencyTree.mockRejectedValue(new Error("mvn not found"));
+    render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={vi.fn()} />);
+    fireEvent.click(await screen.findByTestId("build-panel-deps-load-app"));
+    await screen.findByText("mvn not found");
   });
 });

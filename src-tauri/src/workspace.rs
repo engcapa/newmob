@@ -112,6 +112,193 @@ fn parse_named_targets(contents: &str) -> Vec<String> {
     targets
 }
 
+/// A resolved dependency-tree node for the Build panel (M7 F-1). Nested by the
+/// build tool's own tree output (Maven `dependency:tree` / Gradle `dependencies`).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyNode {
+    pub group: String,
+    pub artifact: String,
+    pub version: String,
+    /// Maven scope (compile/test/…) or Gradle configuration hint; empty when unknown.
+    pub scope: String,
+    /// Version-arbitration note when the build tool bumped/omitted this node
+    /// (e.g. Gradle `-> 2.0`, Maven verbose `omitted for conflict with 2.0`).
+    pub conflict: Option<String>,
+    pub children: Vec<DependencyNode>,
+}
+
+/// Parse `mvn dependency:tree` text output into a forest (the root project's
+/// direct dependencies). Tree connectors are `+- ` / `\- `, each level indented
+/// 3 columns (`|  ` / `   `). Coordinates are `group:artifact:packaging[:classifier]:version[:scope]`.
+fn parse_maven_dependency_tree(output: &str) -> Vec<DependencyNode> {
+    let mut forest: Vec<DependencyNode> = Vec::new();
+    // Index path to the current parent at each depth: `path[d]` is the child index
+    // (within its parent's `children`) of the depth-(d+1) ancestor. Navigating this
+    // path each insert keeps the tree safe (no raw pointers into reallocating Vecs).
+    let mut path: Vec<usize> = Vec::new();
+    let mut seen_root = false;
+
+    for raw in output.lines() {
+        let line = raw.strip_prefix("[INFO] ").unwrap_or(raw);
+        let trimmed_end = line.trim_end();
+        if trimmed_end.is_empty() {
+            continue;
+        }
+        let connector = ["+- ", "\\- "]
+            .iter()
+            .filter_map(|marker| trimmed_end.find(*marker).map(|idx| (idx, marker.len())))
+            .min_by_key(|(idx, _)| *idx);
+        let (coord_start, depth) = match connector {
+            Some((idx, marker_len)) => (idx + marker_len, idx / 3 + 1),
+            None => {
+                if seen_root || trimmed_end.matches(':').count() < 2 {
+                    continue;
+                }
+                (0, 0)
+            }
+        };
+        let Some(node) = parse_maven_coordinate(&trimmed_end[coord_start..]) else {
+            continue;
+        };
+        if depth == 0 {
+            // Root project line: its direct deps (depth 1) become the forest.
+            seen_root = true;
+            forest.clear();
+            path.clear();
+            continue;
+        }
+        insert_dependency_node(&mut forest, &mut path, depth, node);
+    }
+    forest
+}
+
+/// Insert `node` at `depth` (1 = top-level) into `forest`, using `path` as the
+/// index trail to the current parent. `path` is truncated to `depth - 1` so the
+/// node attaches under the correct ancestor, then extended with the new index.
+fn insert_dependency_node(
+    forest: &mut Vec<DependencyNode>,
+    path: &mut Vec<usize>,
+    depth: usize,
+    node: DependencyNode,
+) {
+    // Keep ancestors above the new node. `truncate` is a no-op when `level`
+    // exceeds the path length (malformed deeper-by->1 jump → attach under deepest).
+    path.truncate(depth - 1);
+    if path.is_empty() {
+        forest.push(node);
+        path.push(forest.len() - 1);
+        return;
+    }
+    // Walk the index path to the parent's children Vec.
+    let mut children = &mut *forest;
+    for &index in &path[..path.len() - 1] {
+        children = &mut children[index].children;
+    }
+    let last = *path.last().unwrap();
+    let siblings = &mut children[last].children;
+    siblings.push(node);
+    path.push(siblings.len() - 1);
+}
+
+/// Parse one Maven coordinate + optional conflict suffix into a leaf node.
+fn parse_maven_coordinate(text: &str) -> Option<DependencyNode> {
+    let text = text.trim();
+    // Split off a trailing `(...)` note (verbose conflict/version-managed marker).
+    let (coord, conflict) = match text.split_once(" (") {
+        Some((coord, note)) => (coord.trim(), Some(format!("({}", note.trim()))),
+        None => (text, None),
+    };
+    let parts: Vec<&str> = coord.split(':').collect();
+    let (group, artifact, version, scope) = match parts.as_slice() {
+        // group:artifact:packaging:version:scope
+        [g, a, _pkg, v, s] => ((*g).to_string(), (*a).to_string(), (*v).to_string(), (*s).to_string()),
+        // group:artifact:packaging:classifier:version:scope
+        [g, a, _pkg, _cls, v, s] => ((*g).to_string(), (*a).to_string(), (*v).to_string(), (*s).to_string()),
+        // group:artifact:packaging:version (root project — no scope)
+        [g, a, _pkg, v] => ((*g).to_string(), (*a).to_string(), (*v).to_string(), String::new()),
+        _ => return None,
+    };
+    if group.is_empty() || artifact.is_empty() {
+        return None;
+    }
+    Some(DependencyNode {
+        group,
+        artifact,
+        version,
+        scope,
+        conflict,
+        children: Vec::new(),
+    })
+}
+
+/// Parse `gradle dependencies --configuration <cfg>` output into a forest. Tree
+/// connectors are `+--- ` / `\--- ` (5 columns per level). A `req -> resolved`
+/// suffix marks Gradle's version arbitration (recorded as a conflict note, with
+/// the resolved version used). Trailing `(*)` / `(c)` / `(n)` markers are dropped.
+fn parse_gradle_dependencies(output: &str) -> Vec<DependencyNode> {
+    let mut forest: Vec<DependencyNode> = Vec::new();
+    let mut path: Vec<usize> = Vec::new();
+
+    for raw in output.lines() {
+        let line = raw.trim_end();
+        let connector = ["+--- ", "\\--- "]
+            .iter()
+            .filter_map(|marker| line.find(*marker).map(|idx| (idx, marker.len())))
+            .min_by_key(|(idx, _)| *idx);
+        let Some((idx, marker_len)) = connector else {
+            continue;
+        };
+        // Everything before the connector is `|    ` / `     ` indentation (5 cols).
+        let depth = idx / 5 + 1;
+        let Some(node) = parse_gradle_coordinate(&line[idx + marker_len..]) else {
+            continue;
+        };
+        insert_dependency_node(&mut forest, &mut path, depth, node);
+    }
+    forest
+}
+
+/// Parse one Gradle coordinate line (already stripped of its connector).
+fn parse_gradle_coordinate(text: &str) -> Option<DependencyNode> {
+    let mut text = text.trim();
+    // Drop trailing status markers: (*) already shown, (c) constraint, (n) not resolved.
+    for marker in [" (*)", " (c)", " (n)"] {
+        if let Some(stripped) = text.strip_suffix(marker) {
+            text = stripped.trim_end();
+        }
+    }
+    if text.is_empty() {
+        return None;
+    }
+    // Version arbitration: `group:artifact:requested -> resolved`.
+    let (coord, conflict, resolved) = match text.split_once(" -> ") {
+        Some((left, resolved)) => {
+            let resolved = resolved.trim();
+            (left.trim(), Some(format!("{} -> {resolved}", left.trim())), Some(resolved.to_string()))
+        }
+        None => (text, None, None),
+    };
+    let parts: Vec<&str> = coord.split(':').collect();
+    let (group, artifact, requested) = match parts.as_slice() {
+        [g, a, v] => ((*g).to_string(), (*a).to_string(), (*v).to_string()),
+        // A constraint line may be just `group:artifact` with the version arbitrated.
+        [g, a] => ((*g).to_string(), (*a).to_string(), String::new()),
+        _ => return None,
+    };
+    if group.is_empty() || artifact.is_empty() {
+        return None;
+    }
+    Some(DependencyNode {
+        group,
+        artifact,
+        version: resolved.unwrap_or(requested),
+        scope: String::new(),
+        conflict,
+        children: Vec::new(),
+    })
+}
+
 /// Grouped task view for the Build panel task tree (M7 F-2). Unlike the flat
 /// `workspace_detect_tasks`, tasks are bucketed by source and Maven/Gradle carry
 /// their full lifecycle / common tasks rather than the two-entry Run-tab subset.
@@ -396,6 +583,88 @@ pub fn workspace_detect_tasks(repo_root: String) -> Result<Vec<WorkspaceTask>, S
 pub fn workspace_task_tree(repo_root: String) -> Result<Vec<WorkspaceTaskGroup>, String> {
     let root = canonical_repo_root(&repo_root)?;
     build_workspace_task_tree(&root)
+}
+
+/// Suppress the transient console window when spawning `.cmd`/`.bat` wrappers
+/// (mvnw.cmd / gradlew.bat) from the GUI process on Windows.
+fn no_console_window(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Dependency resolution can take a while on a cold Maven/Gradle cache; cap it.
+const DEPENDENCY_TREE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Resolve the project dependency tree (M7 F-1) by spawning the build tool:
+/// `mvn dependency:tree` for a pom.xml, `gradle dependencies` for a Gradle build.
+/// Requires the tool (or its wrapper) to be available; returns a clear error if
+/// the project is neither Maven nor Gradle, or the command fails / times out.
+#[tauri::command]
+pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<DependencyNode>, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    let is_maven = root.join("pom.xml").is_file();
+    let is_gradle = root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file();
+    if !is_maven && !is_gradle {
+        return Err("No pom.xml or build.gradle found; dependency tree needs a Maven or Gradle project".into());
+    }
+
+    // Maven is preferred when both exist (rare); its tree carries scopes.
+    let (program, args): (String, Vec<String>) = if is_maven {
+        (
+            maven_runner(&root).to_string(),
+            vec![
+                "-B".into(),
+                "-q".into(),
+                "dependency:tree".into(),
+            ],
+        )
+    } else {
+        (
+            gradle_runner(&root).to_string(),
+            vec![
+                "-q".into(),
+                "dependencies".into(),
+                "--configuration".into(),
+                "runtimeClasspath".into(),
+            ],
+        )
+    };
+
+    let mut command = tokio::process::Command::new(&program);
+    command
+        .args(&args)
+        .current_dir(&root)
+        .kill_on_drop(true);
+    no_console_window(&mut command);
+
+    let output = tokio::time::timeout(DEPENDENCY_TREE_TIMEOUT, command.output())
+        .await
+        .map_err(|_| "Dependency resolution timed out".to_string())?
+        .map_err(|error| {
+            format!("Failed to run `{program}` (is it installed / on PATH?): {error}")
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        let detail = if detail.is_empty() { stdout.trim() } else { detail };
+        let snippet: String = detail.chars().take(600).collect();
+        return Err(format!("`{program}` exited with {}: {snippet}", output.status));
+    }
+
+    let tree = if is_maven {
+        parse_maven_dependency_tree(&stdout)
+    } else {
+        parse_gradle_dependencies(&stdout)
+    };
+    Ok(tree)
 }
 
 #[tauri::command]
@@ -1562,6 +1831,73 @@ mod tests {
                 "missing {command}"
             );
         }
+    }
+
+    #[test]
+    fn parses_maven_dependency_tree_with_nesting_and_scopes() {
+        let output = "\
+[INFO] com.example:demo:jar:1.0.0
+[INFO] +- org.springframework:spring-core:jar:5.3.0:compile
+[INFO] |  \\- org.springframework:spring-jcl:jar:5.3.0:compile
+[INFO] \\- junit:junit:jar:4.13:test
+[INFO]    \\- org.hamcrest:hamcrest-core:jar:1.3:test
+";
+        let tree = parse_maven_dependency_tree(output);
+        // Root project's direct deps become the forest.
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].artifact, "spring-core");
+        assert_eq!(tree[0].scope, "compile");
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].artifact, "spring-jcl");
+        assert_eq!(tree[1].artifact, "junit");
+        assert_eq!(tree[1].scope, "test");
+        assert_eq!(tree[1].children[0].artifact, "hamcrest-core");
+        assert!(tree.iter().all(|node| node.conflict.is_none()));
+    }
+
+    #[test]
+    fn parses_maven_verbose_conflict_marker() {
+        let output = "\
+[INFO] com.example:demo:jar:1.0.0
+[INFO] +- a:one:jar:1.0:compile
+[INFO] \\- b:two:jar:2.0:compile (omitted for conflict with 3.0)
+";
+        let tree = parse_maven_dependency_tree(output);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[1].artifact, "two");
+        assert_eq!(
+            tree[1].conflict.as_deref(),
+            Some("(omitted for conflict with 3.0)")
+        );
+    }
+
+    #[test]
+    fn parses_gradle_dependencies_with_arbitration() {
+        let output = "\
+runtimeClasspath - Runtime classpath of source set 'main'.
++--- org.springframework:spring-core:5.3.0
+|    \\--- org.springframework:spring-jcl:5.3.0
+\\--- com.google.guava:guava:30.0 -> 31.0 (*)
+";
+        let tree = parse_gradle_dependencies(output);
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].artifact, "spring-core");
+        assert_eq!(tree[0].version, "5.3.0");
+        assert_eq!(tree[0].children[0].artifact, "spring-jcl");
+        // Arbitration: resolved version wins, conflict note records the bump.
+        assert_eq!(tree[1].artifact, "guava");
+        assert_eq!(tree[1].version, "31.0");
+        assert_eq!(
+            tree[1].conflict.as_deref(),
+            Some("com.google.guava:guava:30.0 -> 31.0")
+        );
+    }
+
+    #[test]
+    fn dependency_parsers_tolerate_empty_and_noise() {
+        assert!(parse_maven_dependency_tree("").is_empty());
+        assert!(parse_gradle_dependencies("No dependencies\n").is_empty());
+        assert!(parse_maven_dependency_tree("[INFO] Scanning for projects...\n").is_empty());
     }
 
     #[test]

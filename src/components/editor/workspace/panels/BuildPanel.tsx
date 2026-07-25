@@ -1,11 +1,52 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Loader2, Play, RefreshCw } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Loader2, Play, Package, RefreshCw } from "lucide-react";
 import {
+  workspaceDependencyTree,
   workspaceTaskTree,
+  type DependencyNode,
   type WorkspaceTaskGroup,
 } from "../../../../lib/editor/workspace";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
 import type { WorkspaceTaskItem } from "./RunPanel";
+
+/** One row of the dependency tree; children expand lazily via local state. */
+function DependencyRow({ node, depth }: { node: DependencyNode; depth: number }) {
+  const [open, setOpen] = useState(depth < 1);
+  const hasChildren = node.children.length > 0;
+  return (
+    <>
+      <div
+        className="flex items-center gap-1 py-0.5 pr-2 hover:bg-[var(--taomni-hover-bg)]"
+        style={{ paddingLeft: `${8 + depth * 12}px` }}
+      >
+        {hasChildren ? (
+          <button type="button" className="shrink-0" onClick={() => setOpen((v) => !v)}>
+            {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          </button>
+        ) : (
+          <span className="inline-block w-3 shrink-0" />
+        )}
+        <span className="truncate">
+          {node.group}:<span className="text-[var(--taomni-text)]">{node.artifact}</span>
+          <span className="text-[var(--taomni-text-muted)]">:{node.version}</span>
+          {node.scope && <span className="ml-1 text-[10px] text-[var(--taomni-text-muted)]">({node.scope})</span>}
+        </span>
+        {node.conflict && (
+          <span
+            className="ml-auto inline-flex items-center gap-0.5 text-[10px] text-amber-500"
+            title={node.conflict}
+          >
+            <AlertTriangle className="h-3 w-3" />
+            conflict
+          </span>
+        )}
+      </div>
+      {open && hasChildren && node.children.map((child, index) => (
+        <DependencyRow key={`${child.group}:${child.artifact}:${index}`} node={child} depth={depth + 1} />
+      ))}
+    </>
+  );
+}
 
 interface RootTaskTree {
   rootId: string;
@@ -31,6 +72,26 @@ export function BuildPanel({ roots, active, onRunTask }: BuildPanelProps) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  // Dependency trees are on-demand per root (they spawn Maven/Gradle).
+  const [deps, setDeps] = useState<Record<string, DependencyNode[]>>({});
+  const [depsLoading, setDepsLoading] = useState<Record<string, boolean>>({});
+  const [depsError, setDepsError] = useState<Record<string, string | null>>({});
+
+  const loadDependencies = useCallback(async (rootId: string, rootPath: string) => {
+    setDepsLoading((current) => ({ ...current, [rootId]: true }));
+    setDepsError((current) => ({ ...current, [rootId]: null }));
+    try {
+      const tree = await workspaceDependencyTree(rootPath);
+      setDeps((current) => ({ ...current, [rootId]: tree }));
+    } catch (reason) {
+      setDepsError((current) => ({
+        ...current,
+        [rootId]: reason instanceof Error ? reason.message : String(reason),
+      }));
+    } finally {
+      setDepsLoading((current) => ({ ...current, [rootId]: false }));
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     if (roots.length === 0) {
@@ -130,6 +191,58 @@ export function BuildPanel({ roots, active, onRunTask }: BuildPanelProps) {
             </div>
           );
         }))}
+
+        {trees.map((tree) => {
+          const key = `deps:${tree.rootId}`;
+          const isCollapsed = collapsed[key];
+          const loaded = deps[tree.rootId];
+          const heading = showRootNames ? `${tree.rootName} · Dependencies` : "Dependencies";
+          return (
+            <div key={key} className="mt-1 select-none border-t border-[var(--taomni-code-border)] pt-1">
+              <div className="flex items-center gap-1 px-2 py-0.5">
+                <button
+                  type="button"
+                  className="flex items-center gap-1 text-left"
+                  onClick={() => toggle(key)}
+                >
+                  {isCollapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                  <Package className="h-3 w-3 shrink-0" />
+                  <span className="font-medium text-[var(--taomni-text-muted)]">{heading}</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid={`build-panel-deps-load-${tree.rootId}`}
+                  className="taomni-btn ml-auto h-5 px-1.5 text-[10px] inline-flex items-center gap-1"
+                  onClick={() => void loadDependencies(tree.rootId, tree.rootPath)}
+                  disabled={depsLoading[tree.rootId]}
+                >
+                  {depsLoading[tree.rootId]
+                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                    : <RefreshCw className="h-3 w-3" />}
+                  {loaded ? "Reload" : "Load"}
+                </button>
+              </div>
+              {!isCollapsed && (
+                <div data-testid={`build-panel-deps-${tree.rootId}`}>
+                  {depsError[tree.rootId] && (
+                    <div className="px-2 py-1 text-red-500">{depsError[tree.rootId]}</div>
+                  )}
+                  {loaded && loaded.length === 0 && !depsError[tree.rootId] && (
+                    <div className="px-2 py-1 text-[var(--taomni-text-muted)]">No dependencies resolved.</div>
+                  )}
+                  {loaded && loaded.map((node, index) => (
+                    <DependencyRow key={`${node.group}:${node.artifact}:${index}`} node={node} depth={0} />
+                  ))}
+                  {!loaded && !depsLoading[tree.rootId] && !depsError[tree.rootId] && (
+                    <div className="px-2 py-1 text-[10px] text-[var(--taomni-text-muted)]">
+                      Load to resolve the dependency tree (runs Maven/Gradle).
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
