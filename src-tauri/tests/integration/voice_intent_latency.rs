@@ -3,11 +3,10 @@
 //! here — that's covered by the Layer 3 nightly job. We measure only the
 //! LLM portion.
 
-mod support;
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use support::mock_provider::{MockEvent, MockLlm};
+
+use crate::support::mock_provider::{MockEvent, MockLlm};
 use taomni_lib::llm::router::LlmRouter;
 use taomni_lib::llm::{ChatRequest, TaskKind};
 
