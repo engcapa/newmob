@@ -116,6 +116,23 @@ describe("CodeMirrorHost search", () => {
     await waitFor(() => expect(onChange).toHaveBeenLastCalledWith("one\ntwo"));
   });
 
+  it("rejects edits in read-only buffers but keeps navigation working", async () => {
+    const onChange = vi.fn();
+    const onDefinition = vi.fn(async () => true);
+    const { content } = renderEditor("one\ntwo", onChange, { readOnly: true, onDefinition });
+
+    // Editing commands are no-ops on library / decompiled sources.
+    fireEvent.keyDown(content, { key: "d", code: "KeyD", ctrlKey: true });
+    fireEvent.keyDown(content, { key: "y", code: "KeyY", ctrlKey: true });
+    await waitFor(() => expect(onDefinition).not.toHaveBeenCalled());
+    expect(onChange).not.toHaveBeenCalled();
+
+    // Go to definition still jumps out of a read-only buffer.
+    fireEvent.keyDown(content, { key: "F12" });
+    await waitFor(() => expect(onDefinition).toHaveBeenCalled());
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("moves selected lines with Alt+Shift+Arrow", async () => {
     const onChange = vi.fn();
     const { content } = renderEditor("one\ntwo", onChange);

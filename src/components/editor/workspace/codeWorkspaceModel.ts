@@ -208,6 +208,86 @@ export function looseIdForPath(path: string): string {
   return `loose-${hashString(path)}`;
 }
 
+/**
+ * A JDK / dependency source delivered by the language server instead of the file
+ * system (jdtls answers `java/classFileContents` for `jdt://` class URIs).
+ */
+export interface LibraryBufferInfo {
+  uri: string;
+  /** Display name, e.g. `String.java`. */
+  title: string;
+  /** `package · jar/module` label for the tab subtitle. */
+  container: string | null;
+  languageId: string;
+  /** Project file the jump started from; selects the language-server session. */
+  originFilePath: string;
+  originRootPath: string | null;
+}
+
+const LIBRARY_LANGUAGE_EXTENSIONS: Record<string, string> = {
+  java: "java",
+  kotlin: "kt",
+  scala: "scala",
+  groovy: "groovy",
+};
+
+/**
+ * True when a location "path" is really a document URI (`jdt://`, `jar:file:`,
+ * `file://`, …) rather than a filesystem path. Language servers and our own
+ * symbol mapping both fall back to the URI when there is no path, and reading
+ * such a string from disk always fails.
+ */
+export function looksLikeDocumentUri(candidate: string): boolean {
+  const match = /^([A-Za-z][A-Za-z0-9+.-]*):/.exec(candidate.trim());
+  if (!match) return false;
+  // A single letter before the colon is a Windows drive (C:\src\Main.java).
+  return match[1]!.length > 1;
+}
+
+/** Library buffers are keyed by URI so same-named classes never collide. */
+export function libraryFileRef(uri: string): CodeWorkspaceFileRef {
+  return { kind: "loose", id: looseIdForPath(uri), path: uri };
+}
+
+/** File name used only for syntax highlighting of a library buffer. */
+export function libraryLanguagePath(info: LibraryBufferInfo): string {
+  const title = info.title.trim();
+  if (title.includes(".")) return title;
+  const extension = LIBRARY_LANGUAGE_EXTENSIONS[info.languageId] ?? "txt";
+  return `${title || "Library"}.${extension}`;
+}
+
+/** Read-only open-buffer view model for a library source (never touches disk). */
+export function makeLibraryFile(info: LibraryBufferInfo, text: string): OpenFileState {
+  const ref = libraryFileRef(info.uri);
+  const normalized = normalizeEditorText(text);
+  const title = info.title.trim() || pathName(info.uri, "Library");
+  return {
+    ref,
+    key: fileKey(ref),
+    path: info.uri,
+    title,
+    subtitle: info.container ? `${info.container} · ${title}` : title,
+    languagePath: libraryLanguagePath(info),
+    text: normalized.text,
+    savedText: normalized.text,
+    eol: normalized.eol,
+    hash: `library:${hashString(info.uri)}`,
+    mtime: 0,
+    size: normalized.text.length,
+    loading: false,
+    saving: false,
+    dirty: false,
+    error: null,
+    library: {
+      uri: info.uri,
+      container: info.container,
+      originFilePath: info.originFilePath,
+      originRootPath: info.originRootPath,
+    },
+  };
+}
+
 export function makeRoot(path: string, kind: CodeWorkspaceRootInfo["kind"] = "folder"): CodeWorkspaceRootInfo {
   const normalized = path.trim();
   return {

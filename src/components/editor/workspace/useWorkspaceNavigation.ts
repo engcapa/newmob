@@ -281,13 +281,15 @@ export function useWorkspaceNavigation({
   const openRecentFiles = useCallback(() => {
     const entries: RecentFileEntry[] = recentFilesRef.current.map((ref) => {
       const key = fileKey(ref);
+      const open = openFilesRef.current?.[key];
       const meta = fileMeta(ref, rootsRef.current ?? [], looseFilesRef.current ?? []);
       return {
         key,
         ref,
-        title: meta.title,
-        subtitle: meta.subtitle,
-        open: !!openFilesRef.current?.[key],
+        // Open buffers carry their own labels; library sources have no path to derive them from.
+        title: open?.title || meta.title,
+        subtitle: open?.subtitle || meta.subtitle,
+        open: !!open,
       };
     });
     setRecentEntries(entries);

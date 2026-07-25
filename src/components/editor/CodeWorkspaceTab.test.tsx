@@ -41,6 +41,7 @@ const lspMocks = vi.hoisted(() => ({
   lspGetDiagnostics: vi.fn(),
   lspHover: vi.fn(),
   lspDefinition: vi.fn(),
+  lspReadUriContents: vi.fn(),
   lspReferences: vi.fn(),
   lspPrepareCallHierarchy: vi.fn(),
   lspCallHierarchyIncoming: vi.fn(),
@@ -237,6 +238,7 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspGetDiagnostics.mockReset();
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
+    lspMocks.lspReadUriContents.mockReset();
     lspMocks.lspReferences.mockReset();
     lspMocks.lspPrepareCallHierarchy.mockReset();
     lspMocks.lspCallHierarchyIncoming.mockReset();
@@ -483,6 +485,7 @@ describe("CodeWorkspaceTab", () => {
           workspaceId: "instance-multi",
           rootPath: "/repo/app",
           filePath: "src/Program.cs",
+          documentUri: null,
           serverCommandId: null,
           customServerCommand: null,
           javaHome: null,
@@ -1632,6 +1635,118 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(lspMocks.lspPrepareTypeHierarchy).toHaveBeenCalled());
     expect(screen.getByRole("tab", { name: "Type Hierarchy", selected: true })).toBeInTheDocument();
     expect(screen.getByTestId("code-workspace-type-hierarchy-panel")).toHaveTextContent("Base");
+  });
+
+  it("opens a JDK / dependency class as a read-only library buffer", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-library-goto",
+      workspaceInstanceId: "instance-library-goto",
+      name: "Library goto",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Main.java" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/Main.java",
+      uri: "file:///repo/app/src/Main.java",
+      presetId: "java",
+      languageId: "java",
+      displayName: "Java",
+      available: true,
+      active: true,
+    });
+    const classUri = "jdt://contents/java.base/java.lang/String.class?=java.base";
+    workspaceMocks.workspaceReadFile.mockResolvedValue(
+      file("src/Main.java", "class Main { String value; }"),
+    );
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    // jdtls answers binary targets with a jdt:// URI and no filesystem path.
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: classUri,
+        path: null,
+        range: {
+          start: { line: 3, character: 13 },
+          end: { line: 3, character: 19 },
+        },
+      }],
+    });
+    const charSequenceUri = "jdt://contents/java.base/java.lang/CharSequence.class?=java.base";
+    lspMocks.lspReadUriContents.mockImplementation(async (_descriptor: unknown, uri: string) => (
+      uri === charSequenceUri
+        ? {
+          status: activeStatus,
+          uri,
+          path: null,
+          title: "CharSequence.java",
+          container: "java.lang · java.base",
+          languageId: "java",
+          text: "package java.lang;\n\npublic interface CharSequence {}\n",
+          readOnly: true,
+        }
+        : {
+          status: activeStatus,
+          uri,
+          path: null,
+          title: "String.java",
+          container: "java.lang · java.base",
+          languageId: "java",
+          text: "package java.lang;\n\npublic final class String implements CharSequence {}\n",
+          readOnly: true,
+        }
+    ));
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/Main.java");
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+
+    fireEvent.keyDown(content!, { key: "F12" });
+
+    await waitFor(() => expect(lspMocks.lspReadUriContents).toHaveBeenCalledWith(
+      expect.objectContaining({ rootPath: "/repo/app", filePath: "src/Main.java" }),
+      classUri,
+    ));
+    const libraryTab = await screen.findByTitle("java.lang · java.base · String.java");
+    expect(libraryTab).toBeInTheDocument();
+    // Library sources never touch the file system, and never open a server document.
+    expect(workspaceMocks.workspaceReadLooseFile).not.toHaveBeenCalled();
+    expect(lspMocks.lspOpenDocument).not.toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: classUri }),
+      expect.anything(),
+      expect.anything(),
+    );
+
+    await waitFor(() => expect(useAppStore.getState().statusMessage)
+      .toBe("Opened java.lang · java.base · String.java (read-only)"));
+
+    // Jumping again from inside the library buffer rides the origin project's
+    // session, and a URI reported as a "path" is never read from disk.
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: charSequenceUri,
+        path: charSequenceUri,
+        range: {
+          start: { line: 2, character: 17 },
+          end: { line: 2, character: 29 },
+        },
+      }],
+    });
+    fireEvent.keyDown(rendered.container.querySelector<HTMLElement>(".cm-content")!, { key: "F12" });
+
+    await waitFor(() => expect(lspMocks.lspReadUriContents).toHaveBeenCalledWith(
+      expect.objectContaining({ filePath: "src/Main.java", documentUri: classUri }),
+      charSequenceUri,
+    ));
+    expect(await screen.findByTitle("java.lang · java.base · CharSequence.java")).toBeInTheDocument();
+    expect(workspaceMocks.workspaceReadLooseFile).not.toHaveBeenCalled();
+    expect(workspaceMocks.workspaceWriteLooseFile).not.toHaveBeenCalled();
+    expect(workspaceMocks.workspaceWriteFile).not.toHaveBeenCalled();
   });
 
   it("requests usage highlights, viewport inlay hints, and semantic selection ranges", async () => {

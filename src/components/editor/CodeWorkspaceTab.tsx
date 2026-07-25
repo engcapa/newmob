@@ -230,6 +230,15 @@ function breadcrumbSegmentsForFile(
   file: OpenFileState,
   roots: CodeWorkspaceRootInfo[],
 ): BreadcrumbPathSegment[] {
+  // Library sources have no directory trail — show where the class came from.
+  if (file.library) {
+    const trail: BreadcrumbPathSegment[] = [];
+    if (file.library.container) {
+      trail.push({ label: file.library.container, path: "", kind: "root" });
+    }
+    trail.push({ label: file.title, path: file.path, kind: "file" });
+    return trail;
+  }
   if (file.ref.kind === "root") {
     const rootId = file.ref.rootId;
     const root = roots.find((candidate) => candidate.id === rootId);
@@ -281,6 +290,7 @@ const LSP_DOCUMENT_SYMBOLS_IDLE_DELAY_MS = 650;
 const EDITOR_TEXT_COMMIT_IDLE_DELAY_MS = 220;
 
 import {
+  type LibraryBufferInfo,
   type LspFileState,
   type MarkdownViewMode,
   type OpenFileState,
@@ -312,8 +322,10 @@ import {
   isLspFeatureReady,
   isMarkdownPath,
   applyEditorEol,
+  looksLikeDocumentUri,
   shouldLiveSyncLsp,
   shouldProbeLsp,
+  makeLibraryFile,
   makeLoadingFile,
   makeLooseFile,
   normalizeEditorText,
@@ -767,6 +779,9 @@ export function CodeWorkspaceTab({
   }, [workspaceInstanceId]);
   const rootsRef = useRef(roots);
   const looseFilesRef = useRef(looseFiles);
+  // Library sources opened from the language server (JDK / dependency classes),
+  // keyed by editor key so a closed tab can be re-fetched from history.
+  const libraryBuffersRef = useRef<Record<string, LibraryBufferInfo>>({});
   const codeViewProfileRef = useRef(codeViewProfile);
   const treeFontSizeRef = useRef(treeFontSize);
   const gitHeadRequestsRef = useRef(new Set<string>());
@@ -804,6 +819,7 @@ export function CodeWorkspaceTab({
   const runPanelRef = useRef<RunPanelHandle | null>(null);
   const {
     descriptorForFile: lspDescriptorForFile,
+    descriptorForPath: lspDescriptorForPath,
     isDocumentSynced: isLspDocumentSynced,
     syncDocument: syncLspDocument,
     saveDocument: saveLspDocument,
@@ -1049,6 +1065,42 @@ export function CodeWorkspaceTab({
       });
       if (groupId !== currentUi.activeEditorGroupId) activateEditorGroup(groupId);
       if (openFilesRef.current[key] && !openFilesRef.current[key].loading) return;
+      // Library sources (JDK / dependency classes) have no file to read: ask the
+      // language server again so history and Recent Files can reopen them.
+      const library = libraryBuffersRef.current[key];
+      if (library) {
+        setOpenFiles((current) => ({
+          ...current,
+          [key]: current[key] ?? { ...makeLibraryFile(library, ""), loading: true },
+        }));
+        try {
+          const contents = await lspReadUriContents(
+            lspDescriptorForPath(library.originRootPath, library.originFilePath),
+            library.uri,
+          );
+          const info: LibraryBufferInfo = {
+            ...library,
+            title: contents.title || library.title,
+            container: contents.container ?? library.container,
+            languageId: contents.languageId || library.languageId,
+          };
+          libraryBuffersRef.current[key] = info;
+          setOpenFiles((current) => ({ ...current, [key]: makeLibraryFile(info, contents.text) }));
+          setStatusMessage(`Opened ${info.title}`);
+        } catch (err) {
+          const message = errorMessage(err);
+          setOpenFiles((current) => ({
+            ...current,
+            [key]: {
+              ...(current[key] ?? makeLibraryFile(library, "")),
+              loading: false,
+              error: message,
+            },
+          }));
+          setStatusMessage(message);
+        }
+        return;
+      }
       setOpenFiles((current) => ({
         ...current,
         [key]: current[key] ?? makeLoadingFile(ref, rootsRef.current, looseFilesRef.current),
@@ -1111,6 +1163,7 @@ export function CodeWorkspaceTab({
       activateEditorGroup,
       findRoot,
       flushPendingEditorText,
+      lspDescriptorForPath,
       setStatusMessage,
       updateEditorGroup,
       workspaceInstanceId,
@@ -1221,6 +1274,22 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     if (!workspaceInstanceId) return;
     const timer = window.setTimeout(() => {
+      // Library buffers come from a live language server, so they cannot be
+      // restored on the next launch — keep them out of the persisted layout.
+      const persistableGroups = Object.fromEntries(
+        (Object.entries(editorGroups) as Array<[EditorGroupId, typeof editorGroups.primary]>)
+          .map(([groupId, group]) => [groupId, {
+            ...group,
+            openOrder: group.openOrder.filter((key) => !libraryBuffersRef.current[key]),
+            pinnedKeys: group.pinnedKeys.filter((key) => !libraryBuffersRef.current[key]),
+            activeKey: group.activeKey && libraryBuffersRef.current[group.activeKey]
+              ? null
+              : group.activeKey,
+            previewKey: group.previewKey && libraryBuffersRef.current[group.previewKey]
+              ? null
+              : group.previewKey,
+          }]),
+      ) as typeof editorGroups;
       writeWorkspaceLayoutSnapshot(workspaceInstanceId, snapshotFromWorkspaceUi({
         bottomDockOpen,
         bottomDockTab,
@@ -1231,7 +1300,7 @@ export function CodeWorkspaceTab({
         activeEditorGroupId,
         expandedRootIds,
         expandedDirKeys,
-        editorGroups,
+        editorGroups: persistableGroups,
       }));
     }, 250);
     return () => window.clearTimeout(timer);
@@ -1348,6 +1417,10 @@ export function CodeWorkspaceTab({
   const revealEditorTabInExplorer = useCallback((key: string) => {
     const file = openFilesRef.current[key];
     if (!file) return;
+    if (file.library) {
+      setStatusMessage(`${file.title} is a library source with no file on disk`);
+      return;
+    }
     if (file.ref.kind === "root") {
       void revealInExplorer(file.ref.rootId, file.ref.path);
       return;
@@ -1370,6 +1443,8 @@ export function CodeWorkspaceTab({
     const segmentIndex = trail.findIndex((item) =>
       item.path === segment.path && item.kind === segment.kind && item.label === segment.label
     );
+    // Nothing to browse inside a JAR / decompiled class.
+    if (file.library) return [];
     const nextSegment = segmentIndex >= 0 ? trail[segmentIndex + 1] ?? null : null;
     const activeChildPath = nextSegment && nextSegment.kind !== "root" ? nextSegment.path : null;
 
@@ -1455,6 +1530,8 @@ export function CodeWorkspaceTab({
     segment: BreadcrumbPathSegment,
     file: OpenFileState,
   ): BreadcrumbPathAction[] => {
+    // Copy path / reveal / open-in-terminal make no sense for a class inside a JAR.
+    if (file.library) return [];
     const actions: BreadcrumbPathAction[] = [];
     actions.push({
       id: "reveal-tree",
@@ -1526,6 +1603,10 @@ export function CodeWorkspaceTab({
   const openEditorTabInTerminal = useCallback((key: string) => {
     const file = openFilesRef.current[key];
     if (!file) return;
+    if (file.library) {
+      setStatusMessage(`${file.title} is a library source with no directory on disk`);
+      return;
+    }
     if (file.ref.kind === "root") {
       openTerminalAt(file.ref.rootId, file.ref.path, true);
       return;
@@ -1534,7 +1615,7 @@ export function CodeWorkspaceTab({
     setBottomDockTab("terminal");
     setBottomDockOpen(true);
     terminalDockRef.current?.openAt(cwd, basename(cwd));
-  }, [openTerminalAt]);
+  }, [openTerminalAt, setStatusMessage]);
 
   const handleTreeKeyDown = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
     const pane = treePaneRef.current;
@@ -1795,6 +1876,8 @@ export function CodeWorkspaceTab({
   }, [flushPendingEditorText, scheduleLiveLspSync]);
 
   const absolutePathForOpenFile = useCallback((file: OpenFileState): string | null => {
+    // Library sources live inside a JAR / the language server, not on disk.
+    if (file.library) return null;
     if (file.ref.kind === "loose") return normalizeFsPath(file.ref.path);
     const root = findRoot(file.ref.rootId);
     if (!root) return null;
@@ -1813,7 +1896,9 @@ export function CodeWorkspaceTab({
     if (!file) return;
     const absolute = absolutePathForOpenFile(file);
     if (!absolute) {
-      setStatusMessage("Cannot resolve path for local history");
+      setStatusMessage(file.library
+        ? `${file.title} is a library source with no local history`
+        : "Cannot resolve path for local history");
       return;
     }
     setLocalHistoryTarget({ key, path: absolute });
@@ -1912,6 +1997,9 @@ export function CodeWorkspaceTab({
     const file = openFilesRef.current[key];
     if (!file || file.loading) {
       throw new Error("Open buffer is not available to save");
+    }
+    if (file.library) {
+      throw new Error(`${file.title} is a read-only library source`);
     }
     setOpenFiles((current) => ({
       ...current,
@@ -2057,6 +2145,10 @@ export function CodeWorkspaceTab({
       if (!key) return;
       const file = openFilesRef.current[key];
       if (!file) return;
+      if (file.library) {
+        setStatusMessage(`${file.title} is a read-only library source`);
+        return;
+      }
       if (file.dirty) {
         const confirmed = await confirmAppDialog({
           title: "Reload file",
@@ -2374,8 +2466,12 @@ export function CodeWorkspaceTab({
   const activeFileKey = activeFile?.key ?? null;
   const activeFileLoading = activeFile?.loading ?? false;
   const activeFileLanguagePath = activeFile?.languagePath ?? null;
+  // Library buffers are served by the origin project's session and never opened as
+  // documents, so they must not start a server of their own.
+  const activeFileIsLibrary = !!activeFile?.library;
   useEffect(() => {
     if (!visible || !activeFileKey || activeFileLoading || !activeFileLanguagePath) return;
+    if (activeFileIsLibrary) return;
     const lspState = lspFilesRef.current[activeFileKey];
     if (!shouldProbeLsp(activeFileLanguagePath, lspState)) return;
     if (lspState?.status?.active) {
@@ -2389,6 +2485,7 @@ export function CodeWorkspaceTab({
     }, 0);
     return () => window.clearTimeout(timer);
   }, [
+    activeFileIsLibrary,
     activeFileKey,
     activeFileLanguagePath,
     activeFileLoading,
@@ -2965,52 +3062,24 @@ export function CodeWorkspaceTab({
     });
   }, []);
 
-  /** Inject a library/virtual buffer (JDK, dependency JAR) without reading from the workspace FS. */
-  const openVirtualBuffer = useCallback(async (
-    displayPath: string,
-    title: string,
+  /**
+   * Open a language-server library source (JDK class, dependency JAR) as a
+   * read-only buffer. Nothing is read from or written to disk, and the buffer is
+   * not registered as a loose workspace file — it only exists while open (plus in
+   * the library registry so history can reopen it).
+   */
+  const openLibraryBuffer = useCallback(async (
+    info: LibraryBufferInfo,
     text: string,
     range: LspLocation["range"],
     options: { groupId?: EditorGroupId; preview?: boolean } = {},
   ) => {
-    const loose = makeLooseFile(displayPath);
-    // Prefer a stable title from the language server (e.g. String.java) over a raw URI slug.
-    const namedLoose = { ...loose, name: title || loose.name };
-    const ref: CodeWorkspaceFileRef = { kind: "loose", id: namedLoose.id, path: namedLoose.path };
-    setLooseFiles((current) => (
-      current.some((item) => item.path === namedLoose.path)
-        ? current
-        : [...current, namedLoose]
-    ));
-    const key = fileKey(ref);
-    const normalized = normalizeEditorText(text);
-    const meta = fileMeta(ref, rootsRef.current, [...looseFilesRef.current, namedLoose]);
+    const file = makeLibraryFile(info, text);
+    const ref = file.ref;
+    const key = file.key;
+    libraryBuffersRef.current[key] = info;
     suppressNextHistoryRecord();
-    setOpenFiles((current) => ({
-      ...current,
-      [key]: {
-        ref,
-        key,
-        path: meta.path,
-        title: namedLoose.name || meta.title,
-        subtitle: meta.subtitle.startsWith("jdt:") || meta.subtitle.startsWith("jar:")
-          ? `Library · ${namedLoose.name}`
-          : meta.subtitle,
-        languagePath: namedLoose.name.endsWith(".java")
-          ? namedLoose.name
-          : (meta.languagePath || namedLoose.name),
-        text: normalized.text,
-        savedText: normalized.text,
-        eol: normalized.eol,
-        hash: `virtual:${key}`,
-        mtime: Date.now(),
-        size: normalized.text.length,
-        loading: false,
-        saving: false,
-        dirty: false,
-        error: null,
-      },
-    }));
+    setOpenFiles((current) => ({ ...current, [key]: file }));
     const currentUi = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
     const groupId = options.groupId ?? currentUi.activeEditorGroupId;
     updateEditorGroup(groupId, (group) => {
@@ -3036,7 +3105,7 @@ export function CodeWorkspaceTab({
       line: range.start.line,
       character: range.start.character,
     }, { replaceSameFile: false });
-    setStatusMessage(`Opened ${namedLoose.name}`);
+    setStatusMessage(`Opened ${file.subtitle} (read-only)`);
     return true;
   }, [
     activateEditorGroup,
@@ -3061,6 +3130,8 @@ export function CodeWorkspaceTab({
           suppressNextHistoryRecord();
           revealEditorLocation(fileKey(ref), location.range);
           await openFile(ref, options);
+          // openFile reports read failures on the buffer instead of throwing.
+          if (openFilesRef.current[fileKey(ref)]?.error) return false;
           recordNavigationLocation(ref, {
             line: location.range.start.line,
             character: location.range.start.character,
@@ -3073,6 +3144,8 @@ export function CodeWorkspaceTab({
         suppressNextHistoryRecord();
         revealEditorLocation(fileKey(ref), location.range);
         await openFile(ref, options);
+        // openFile reports read failures on the buffer instead of throwing.
+        if (openFilesRef.current[fileKey(ref)]?.error) return false;
         recordNavigationLocation(ref, {
           line: location.range.start.line,
           character: location.range.start.character,
@@ -3080,17 +3153,20 @@ export function CodeWorkspaceTab({
         return true;
       };
 
-      if (location.path) {
+      // Workspace-symbol hits fall back to the URI when the server reports no path,
+      // and a URI string is never readable from disk.
+      const diskPath = location.path && !looksLikeDocumentUri(location.path) ? location.path : null;
+      if (diskPath) {
         try {
-          return await openResolvedPath(location.path);
+          if (await openResolvedPath(diskPath)) return true;
         } catch (err) {
-          // Fall through to URI content fetch when the path is not readable as a workspace/loose file
-          // (e.g. missing source attachment path that still has a jdt:// URI).
-          if (!location.uri || location.uri.startsWith("file:")) {
+          if (!location.uri) {
             setStatusMessage(errorMessage(err));
             return false;
           }
         }
+        // Path unreadable (missing source attachment, JAR entry): try the URI below.
+        if (!location.uri) return false;
       }
 
       // JDK / third-party JAR / other virtual URIs (jdt://, jar:file:…).
@@ -3098,30 +3174,37 @@ export function CodeWorkspaceTab({
         setStatusMessage("No definition found");
         return false;
       }
+      // Library sources ride the origin project's language-server session: prefer the
+      // active buffer, and fall back to the origin project of a library buffer.
       const origin = activeFile
         ?? Object.values(openFilesRef.current).find((item) => !item.loading)
         ?? null;
       const descriptor = origin ? lspDescriptorForFile(origin) : null;
-      if (!descriptor) {
+      if (!origin || !descriptor) {
         setStatusMessage("Cannot open library source without an active language server document");
         return false;
       }
       try {
-        const virtual = await lspReadUriContents(descriptor, location.uri);
-        updateLspStatusForFile(origin!, virtual.status);
-        if (virtual.path) {
+        const contents = await lspReadUriContents(descriptor, location.uri);
+        updateLspStatusForFile(origin, contents.status);
+        // Attached sources that exist on disk open as a normal editable-looking file.
+        if (contents.path) {
           try {
-            return await openResolvedPath(virtual.path);
+            if (await openResolvedPath(contents.path)) return true;
           } catch {
             // Keep going and inject the text we already fetched.
           }
         }
-        const displayPath = virtual.path
-          ?? `library/${virtual.title || "Class.java"}`;
-        return openVirtualBuffer(
-          displayPath,
-          virtual.title,
-          virtual.text,
+        return openLibraryBuffer(
+          {
+            uri: contents.uri || location.uri,
+            title: contents.title,
+            container: contents.container,
+            languageId: contents.languageId,
+            originRootPath: descriptor.rootPath ?? null,
+            originFilePath: descriptor.filePath,
+          },
+          contents.text,
           location.range,
           options,
         );
@@ -3134,7 +3217,7 @@ export function CodeWorkspaceTab({
       activeFile,
       lspDescriptorForFile,
       openFile,
-      openVirtualBuffer,
+      openLibraryBuffer,
       recordNavigationLocation,
       revealEditorLocation,
       setStatusMessage,

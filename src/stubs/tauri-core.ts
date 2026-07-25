@@ -1443,6 +1443,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         uri,
         path: null,
         title: title.endsWith(".class") ? title.replace(/\.class$/, ".java") : title,
+        container: uri.split("/").slice(-3, -1).reverse().join(" · ") || null,
         languageId: "java",
         text: `// Stub library source for ${uri}\n`,
         readOnly: true,
