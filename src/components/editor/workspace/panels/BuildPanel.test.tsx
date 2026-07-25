@@ -101,4 +101,49 @@ describe("BuildPanel", () => {
     fireEvent.click(await screen.findByTestId("build-panel-deps-load-app"));
     await screen.findByText("mvn not found");
   });
+
+  it("shows the Modules section only for Java roots and loads on demand", async () => {
+    const onLoadModules = vi.fn().mockResolvedValue([
+      { name: "app", path: "/repo/app", uri: "file:///repo/app" },
+      { name: "core", path: "/repo/core", uri: "file:///repo/core" },
+    ]);
+    render(
+      <BuildPanel
+        workspaceInstanceId="ws"
+        roots={roots}
+        active
+        onRunTask={vi.fn()}
+        onLoadModules={onLoadModules}
+      />,
+    );
+
+    // Maven group present → Modules section shows, on-demand.
+    const loadBtn = await screen.findByTestId("build-panel-modules-load-app");
+    expect(onLoadModules).not.toHaveBeenCalled();
+    fireEvent.click(loadBtn);
+    await waitFor(() => expect(onLoadModules).toHaveBeenCalledWith("/repo/app"));
+    await screen.findByText("core");
+  });
+
+  it("omits the Modules section when no Java build tasks are present", async () => {
+    workspaceMocks.workspaceTaskTree.mockResolvedValue([
+      {
+        source: "package.json",
+        tasks: [
+          { id: "package.json:test", label: "test", command: "pnpm run test", cwd: "/repo/app", source: "package.json" },
+        ],
+      },
+    ]);
+    render(
+      <BuildPanel
+        workspaceInstanceId="ws"
+        roots={roots}
+        active
+        onRunTask={vi.fn()}
+        onLoadModules={vi.fn()}
+      />,
+    );
+    await screen.findByText("package.json");
+    expect(screen.queryByTestId("build-panel-modules-load-app")).toBeNull();
+  });
 });

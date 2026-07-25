@@ -3858,6 +3858,92 @@ pub async fn lsp_reload_project(
         .await
 }
 
+/// A Java project/module discovered by jdtls (`java.project.getAll`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaModule {
+    /// Module name (last path segment of the project directory).
+    pub name: String,
+    /// Absolute filesystem path to the module root.
+    pub path: String,
+    /// Original project URI as reported by jdtls.
+    pub uri: String,
+}
+
+/// Turn jdtls `java.project.getAll` output (an array of `file://` project URIs)
+/// into module entries. Non-file / unparseable URIs are skipped; results are
+/// de-duplicated and sorted by name for a stable module view.
+fn parse_java_modules(value: &Value) -> Vec<JavaModule> {
+    let mut modules: Vec<JavaModule> = Vec::new();
+    let Some(items) = value.as_array() else {
+        return modules;
+    };
+    for item in items {
+        let Some(uri) = item.as_str() else {
+            continue;
+        };
+        let path = url::Url::parse(uri)
+            .ok()
+            .filter(|url| url.scheme() == "file")
+            .and_then(|url| url.to_file_path().ok());
+        let Some(path) = path else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("module")
+            .to_string();
+        let path_str = path.to_string_lossy().into_owned();
+        if modules.iter().any(|module| module.path == path_str) {
+            continue;
+        }
+        modules.push(JavaModule {
+            name,
+            path: path_str,
+            uri: uri.to_string(),
+        });
+    }
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+    modules
+}
+
+/// List the Java projects/modules in the workspace via jdtls
+/// `workspace/executeCommand: java.project.getAll` (M7 F-4). Returns an empty
+/// list when the session has no such command; errors when no session is active.
+#[tauri::command]
+pub async fn lsp_java_modules(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<Vec<JavaModule>, String> {
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            "No language server session is active for this project; open a project file first"
+                .to_string()
+        })?;
+    let result = session
+        .request(
+            "workspace/executeCommand",
+            json!({ "command": "java.project.getAll", "arguments": [] }),
+        )
+        .await
+        .map_err(|e| format!("Failed to list Java modules: {e}"))?;
+    Ok(parse_java_modules(&result))
+}
+
 #[tauri::command]
 pub async fn lsp_workspace_symbols(
     state: State<'_, AppState>,
@@ -6507,6 +6593,27 @@ mod tests {
             "vmargs should carry the Lombok agent so both launch paths pick it up"
         );
         set_configured_java_settings(None);
+    }
+
+    #[test]
+    fn parses_java_modules_from_project_uris() {
+        let (root_a, root_b) = if cfg!(windows) {
+            ("file:///C:/repo/app", "file:///C:/repo/lib")
+        } else {
+            ("file:///repo/app", "file:///repo/lib")
+        };
+        // Out of order + a duplicate + a non-file URI that must be skipped.
+        let value = json!([root_b, root_a, root_b, "jdt://contents/foo"]);
+        let modules = parse_java_modules(&value);
+        assert_eq!(modules.len(), 2, "dedup + skip non-file, got {modules:?}");
+        // Sorted by name: app before lib.
+        assert_eq!(modules[0].name, "app");
+        assert_eq!(modules[1].name, "lib");
+        assert_eq!(modules[0].uri, root_a);
+        assert!(modules[0].path.ends_with("app"));
+
+        assert!(parse_java_modules(&json!(null)).is_empty());
+        assert!(parse_java_modules(&json!([])).is_empty());
     }
 
     #[test]

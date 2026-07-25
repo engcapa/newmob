@@ -67,6 +67,7 @@ import {
   lspHover,
   lspImplementation,
   lspInlayHints,
+  lspJavaModules,
   lspPrepareCallHierarchy,
   lspPrepareRename,
   lspPrepareTypeHierarchy,
@@ -5521,6 +5522,10 @@ export function CodeWorkspaceTab({
                 roots={roots}
                 active={bottomDockOpen && bottomDockTab === "build"}
                 onRunTask={(task) => runWorkspaceTask(task)}
+                onLoadModules={(rootPath) =>
+                  // A synthetic .java path selects the root's jdtls session
+                  // (session keys on project scope, not on the file existing).
+                  lspJavaModules(lspDescriptorForPath(rootPath, "__taomni_modules__.java"))}
               />
             ),
           },

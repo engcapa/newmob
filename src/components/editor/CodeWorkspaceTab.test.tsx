@@ -45,6 +45,7 @@ const lspMocks = vi.hoisted(() => ({
   lspReadUriContents: vi.fn(),
   lspDownloadSources: vi.fn(),
   lspReloadProject: vi.fn(),
+  lspJavaModules: vi.fn(),
   lspReferences: vi.fn(),
   lspPrepareCallHierarchy: vi.fn(),
   lspCallHierarchyIncoming: vi.fn(),

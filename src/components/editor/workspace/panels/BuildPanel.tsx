@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ChevronDown, ChevronRight, Loader2, Play, Package, RefreshCw } from "lucide-react";
+import { AlertTriangle, Boxes, ChevronDown, ChevronRight, Loader2, Play, Package, RefreshCw } from "lucide-react";
 import {
   workspaceDependencyTree,
   workspaceTaskTree,
   type DependencyNode,
   type WorkspaceTaskGroup,
 } from "../../../../lib/editor/workspace";
+import type { JavaModule } from "../../../../lib/editor/lsp";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
 import type { WorkspaceTaskItem } from "./RunPanel";
 
@@ -60,13 +61,15 @@ interface BuildPanelProps {
   roots: CodeWorkspaceRootInfo[];
   active: boolean;
   onRunTask: (task: WorkspaceTaskItem) => void;
+  /** Resolve Java modules for a root via jdtls (M7 F-4); omitted → no Modules section. */
+  onLoadModules?: (rootPath: string) => Promise<JavaModule[]>;
 }
 
 /**
  * Build panel (M7 F): the task tree (F-2) grouped root -> source -> task.
  * Dependency tree (F-1) and module view (F-4) attach as further sections.
  */
-export function BuildPanel({ roots, active, onRunTask }: BuildPanelProps) {
+export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPanelProps) {
   const [trees, setTrees] = useState<RootTaskTree[]>([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -76,6 +79,27 @@ export function BuildPanel({ roots, active, onRunTask }: BuildPanelProps) {
   const [deps, setDeps] = useState<Record<string, DependencyNode[]>>({});
   const [depsLoading, setDepsLoading] = useState<Record<string, boolean>>({});
   const [depsError, setDepsError] = useState<Record<string, string | null>>({});
+
+  const [modules, setModules] = useState<Record<string, JavaModule[]>>({});
+  const [modulesLoading, setModulesLoading] = useState<Record<string, boolean>>({});
+  const [modulesError, setModulesError] = useState<Record<string, string | null>>({});
+
+  const loadModules = useCallback(async (rootId: string, rootPath: string) => {
+    if (!onLoadModules) return;
+    setModulesLoading((current) => ({ ...current, [rootId]: true }));
+    setModulesError((current) => ({ ...current, [rootId]: null }));
+    try {
+      const loaded = await onLoadModules(rootPath);
+      setModules((current) => ({ ...current, [rootId]: loaded }));
+    } catch (reason) {
+      setModulesError((current) => ({
+        ...current,
+        [rootId]: reason instanceof Error ? reason.message : String(reason),
+      }));
+    } finally {
+      setModulesLoading((current) => ({ ...current, [rootId]: false }));
+    }
+  }, [onLoadModules]);
 
   const loadDependencies = useCallback(async (rootId: string, rootPath: string) => {
     setDepsLoading((current) => ({ ...current, [rootId]: true }));
@@ -243,6 +267,67 @@ export function BuildPanel({ roots, active, onRunTask }: BuildPanelProps) {
             </div>
           );
         })}
+
+        {onLoadModules && trees
+          .filter((tree) => tree.groups.some((group) => group.source === "Maven" || group.source === "Gradle"))
+          .map((tree) => {
+            const key = `modules:${tree.rootId}`;
+            const isCollapsed = collapsed[key];
+            const loaded = modules[tree.rootId];
+            const heading = showRootNames ? `${tree.rootName} · Modules` : "Modules";
+            return (
+              <div key={key} className="mt-1 select-none border-t border-[var(--taomni-code-border)] pt-1">
+                <div className="flex items-center gap-1 px-2 py-0.5">
+                  <button
+                    type="button"
+                    className="flex items-center gap-1 text-left"
+                    onClick={() => toggle(key)}
+                  >
+                    {isCollapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                    <Boxes className="h-3 w-3 shrink-0" />
+                    <span className="font-medium text-[var(--taomni-text-muted)]">{heading}</span>
+                  </button>
+                  <button
+                    type="button"
+                    data-testid={`build-panel-modules-load-${tree.rootId}`}
+                    className="taomni-btn ml-auto h-5 px-1.5 text-[10px] inline-flex items-center gap-1"
+                    onClick={() => void loadModules(tree.rootId, tree.rootPath)}
+                    disabled={modulesLoading[tree.rootId]}
+                  >
+                    {modulesLoading[tree.rootId]
+                      ? <Loader2 className="h-3 w-3 animate-spin" />
+                      : <RefreshCw className="h-3 w-3" />}
+                    {loaded ? "Reload" : "Load"}
+                  </button>
+                </div>
+                {!isCollapsed && (
+                  <div data-testid={`build-panel-modules-${tree.rootId}`}>
+                    {modulesError[tree.rootId] && (
+                      <div className="px-2 py-1 text-red-500">{modulesError[tree.rootId]}</div>
+                    )}
+                    {loaded && loaded.length === 0 && !modulesError[tree.rootId] && (
+                      <div className="px-2 py-1 text-[var(--taomni-text-muted)]">No modules reported.</div>
+                    )}
+                    {loaded && loaded.map((module) => (
+                      <div
+                        key={module.uri}
+                        className="flex items-center gap-1.5 py-0.5 pl-6 pr-2"
+                        title={module.path}
+                      >
+                        <span className="truncate">{module.name}</span>
+                        <span className="ml-auto truncate text-[10px] text-[var(--taomni-text-muted)]">{module.path}</span>
+                      </div>
+                    ))}
+                    {!loaded && !modulesLoading[tree.rootId] && !modulesError[tree.rootId] && (
+                      <div className="px-2 py-1 text-[10px] text-[var(--taomni-text-muted)]">
+                        Load to list Java modules (requires an active language server).
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
       </div>
     </div>
   );

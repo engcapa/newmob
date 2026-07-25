@@ -811,6 +811,22 @@ export function lspReloadProject(descriptor: LspDocumentDescriptor): Promise<voi
   return invoke("lsp_reload_project", documentArgs(descriptor));
 }
 
+/** A Java project/module discovered by jdtls `java.project.getAll` (M7 F-4). */
+export interface JavaModule {
+  name: string;
+  path: string;
+  uri: string;
+}
+
+/**
+ * List the Java projects/modules via jdtls `java.project.getAll`. `descriptor`
+ * selects the jdtls session (any project file works). Returns [] when the server
+ * lacks the command; rejects when no session is active.
+ */
+export function lspJavaModules(descriptor: LspDocumentDescriptor): Promise<JavaModule[]> {
+  return invoke<JavaModule[]>("lsp_java_modules", documentArgs(descriptor));
+}
+
 export function lspReferences(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
