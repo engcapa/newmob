@@ -280,6 +280,17 @@ impl XrayManager {
     pub async fn running_count(&self) -> usize {
         self.inner.lock().await.len()
     }
+
+    /// OS PIDs of all running cores. The capture layer must bypass these so the
+    /// xray→node connection is not itself re-captured into an infinite loop.
+    pub async fn pids(&self) -> Vec<u32> {
+        self.inner
+            .lock()
+            .await
+            .values()
+            .filter_map(|c| c.pid())
+            .collect()
+    }
 }
 
 /// Pick a free loopback TCP port for a core's SOCKS inbound.

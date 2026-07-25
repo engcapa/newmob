@@ -570,6 +570,72 @@ fn session_ssh_auth(
     }
 }
 
+/// Resolve a `vault:<id>` reference to plaintext, treating a non-reference value
+/// as a literal (backwards compat, matching [`session_proxy_password`]). Blank
+/// refs and vault errors (e.g. locked) yield an empty string.
+fn resolve_secret_ref(vault: &crate::vault::Vault, reference: &str) -> String {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return String::new();
+    }
+    match vault.resolve(reference) {
+        Ok(Some(plain)) => (*plain).clone(),
+        Ok(None) => reference.to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Build a [`core::ResolvedCoreUpstream`] for a core-backed upstream, decrypting
+/// every `vault:<id>` secret to plaintext for the (short-lived) xray config.
+/// `host`/`port` are the node address the xray outbound dials.
+fn build_core_spec(
+    vault: &crate::vault::Vault,
+    kind: config::UpstreamKind,
+    host: String,
+    port: u16,
+    up: &config::UpstreamRef,
+) -> core::ResolvedCoreUpstream {
+    core::ResolvedCoreUpstream {
+        kind,
+        host,
+        port,
+        secret: resolve_secret_ref(vault, &up.password_ref),
+        uuid: resolve_secret_ref(vault, &up.params.uuid_ref),
+        private_key: resolve_secret_ref(vault, &up.params.private_key_ref),
+        pre_shared_key: resolve_secret_ref(vault, &up.params.pre_shared_key_ref),
+        params: up.params.clone(),
+    }
+}
+
+/// Ensure a core is running for a core-backed upstream and return its local
+/// SOCKS port. Non-core kinds return None immediately. Failures are logged and
+/// return None (the relay then emits a clear per-flow error) so one bad profile
+/// does not abort the whole capture start — mirrors the per-profile SSH policy.
+async fn ensure_core_port(
+    state: &State<'_, AppState>,
+    profile_key: &str,
+    kind: config::UpstreamKind,
+    host: &str,
+    port: u16,
+    up: &config::UpstreamRef,
+) -> Option<u16> {
+    if !kind.requires_core() {
+        return None;
+    }
+    let mgr = state.sockscap.xray()?;
+    let spec = build_core_spec(&state.vault, kind, host.to_string(), port, up);
+    match mgr.ensure(profile_key, &spec).await {
+        Ok(local_port) => Some(local_port),
+        Err(e) => {
+            tracing::warn!("sockscap: xray core for '{profile_key}' ({}) failed: {e}", kind.as_tag());
+            None
+        }
+    }
+}
+
+/// Synthetic manager key for the global (non-profile) upstream's core.
+const GLOBAL_CORE_KEY: &str = "__global__";
+
 #[cfg(target_os = "linux")]
 async fn build_linux_relay_context(
     state: &State<'_, AppState>,
@@ -696,6 +762,20 @@ async fn build_linux_relay_context(
         } else {
             None
         };
+        // Core-backed profile: spawn/reuse an xray sidecar. NOTE: on Linux the
+        // capture backend is cgroup-based; ensuring the xray child is excluded
+        // from the taomni cgroup (so its node connection is not re-captured) is
+        // a Linux-capture follow-up. Windows (PID bypass) is the phase-1 target.
+        let profile_xray_port = ensure_core_port(
+            state,
+            &profile.id,
+            profile.upstream.kind,
+            &host,
+            port,
+            &profile.upstream,
+        )
+        .await;
+
         profile_upstreams.insert(
             profile.id.clone(),
             relay::ResolvedUpstream {
@@ -705,6 +785,7 @@ async fn build_linux_relay_context(
                 user,
                 pass: password,
                 ssh_pool: profile_ssh_pool,
+                xray_port: profile_xray_port,
             },
         );
     }
@@ -722,6 +803,17 @@ async fn build_linux_relay_context(
         std::time::Duration::from_secs(300),
     )));
 
+    // Optional global xray core (when the global upstream is core-backed).
+    let global_xray_port = ensure_core_port(
+        state,
+        GLOBAL_CORE_KEY,
+        cfg.upstream.kind,
+        &upstream_host,
+        upstream_port,
+        &cfg.upstream,
+    )
+    .await;
+
     Ok(Arc::new(RwLock::new(relay::RelayContext {
         config: cfg.clone(),
         rules,
@@ -733,6 +825,7 @@ async fn build_linux_relay_context(
         upstream_pass,
         self_pid: std::process::id(),
         ssh_pool,
+        xray_port: global_xray_port,
         profile_upstreams,
         dns_map,
         domains,
@@ -894,6 +987,11 @@ async fn start_windows_capture(
             None
         };
 
+        // Core-backed profile: spawn/reuse an xray sidecar and record its
+        // local SOCKS port for the relay to dial.
+        let p_xray_port =
+            ensure_core_port(state, &p.id, p.upstream.kind, &phost, pport, &p.upstream).await;
+
         profile_upstreams.insert(
             p.id.clone(),
             relay::ResolvedUpstream {
@@ -903,9 +1001,21 @@ async fn start_windows_capture(
                 user: puser,
                 pass: ppass,
                 ssh_pool: p_ssh_pool,
+                xray_port: p_xray_port,
             },
         );
     }
+
+    // Optional global xray core (when the global upstream is core-backed).
+    let global_xray_port = ensure_core_port(
+        state,
+        GLOBAL_CORE_KEY,
+        cfg.upstream.kind,
+        &up_host,
+        up_port,
+        &cfg.upstream,
+    )
+    .await;
 
     // Optional SSH pool for capture-path PROXY via direct-tcpip.
     let ssh_pool = if matches!(cfg.upstream.kind, crate::sockscap::config::UpstreamKind::Ssh)
@@ -960,6 +1070,7 @@ async fn start_windows_capture(
         upstream_pass: up_pass,
         self_pid: std::process::id(),
         ssh_pool,
+        xray_port: global_xray_port,
         profile_upstreams,
         dns_map: Arc::clone(&dns_map),
         domains,
@@ -995,6 +1106,14 @@ async fn start_windows_capture(
     let mut bypass_pids = vec![std::process::id()];
     if let Some(pid) = helper_st.pid {
         bypass_pids.push(pid);
+    }
+    // Bypass every xray core: its own connection to the remote node must not be
+    // re-captured (that would loop node traffic back into the relay). Robust for
+    // domain nodes / multi-IP resolution where endpoint bypass alone can miss.
+    if let Some(mgr) = state.sockscap.xray() {
+        for pid in mgr.pids().await {
+            bypass_pids.push(pid);
+        }
     }
     let mut bypass_endpoints = Vec::new();
     if !up_host.is_empty() && up_port > 0 {
@@ -1181,6 +1300,12 @@ async fn full_teardown(
     if let Some(relay) = relay {
         // Internal: dual-stack wake + 800ms abort fallback.
         relay.stop().await;
+    }
+
+    // --- 3b) Stop all xray cores (all platforms). Their node connections are
+    //         now unnecessary; leaving them would leak processes on Stop.
+    if let Some(mgr) = state.sockscap.xray() {
+        mgr.shutdown_all().await;
     }
 
     // --- 4) Finish engine state + DNS + journal ------------------------------
