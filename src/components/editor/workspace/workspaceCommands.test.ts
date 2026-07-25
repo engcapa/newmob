@@ -41,6 +41,15 @@ describe("workspaceCommands", () => {
       altKey: true,
       metaKey: false,
     })).toBe(true);
+    // Windows WebView2 can report unreliable event.key under Alt; fall back to code.
+    expect(workspaceCommandMatchesKeybinding(command({ keybinding: "Ctrl+Alt+Left" }), {
+      key: "Unidentified",
+      code: "ArrowLeft",
+      ctrlKey: true,
+      shiftKey: false,
+      altKey: true,
+      metaKey: false,
+    })).toBe(true);
   });
 
   it("dispatches the first enabled matching command and consumes the event", () => {

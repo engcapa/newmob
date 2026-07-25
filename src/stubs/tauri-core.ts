@@ -1435,6 +1435,19 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         locations: [],
       } as T;
     }
+    case "lsp_read_uri_contents": {
+      const uri = String((args as InvokeArgs)?.uri ?? "");
+      const title = uri.split("/").pop()?.split("?")[0] || "Library.java";
+      return {
+        status: stubLspDocumentStatus(args as InvokeArgs),
+        uri,
+        path: null,
+        title: title.endsWith(".class") ? title.replace(/\.class$/, ".java") : title,
+        languageId: "java",
+        text: `// Stub library source for ${uri}\n`,
+        readOnly: true,
+      } as T;
+    }
     case "lsp_prepare_call_hierarchy":
     case "lsp_prepare_type_hierarchy":
     case "lsp_type_hierarchy_supertypes":

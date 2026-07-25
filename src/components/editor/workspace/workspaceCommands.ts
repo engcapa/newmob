@@ -32,6 +32,8 @@ export interface WorkspaceCommandRegistration {
 
 interface KeyboardEventLike {
   key: string;
+  /** Physical key code (e.g. ArrowLeft); used when `key` is unreliable under Alt. */
+  code?: string;
   ctrlKey: boolean;
   shiftKey: boolean;
   altKey: boolean;
@@ -57,6 +59,28 @@ function normalizeKey(value: string): string {
   return key;
 }
 
+/**
+ * Resolve the logical key for a keyboard event.
+ * Prefer `event.key`, but fall back to `event.code` when Alt/Ctrl combinations
+ * on Windows WebView2 yield an empty or non-arrow `key` for ArrowLeft/Right.
+ */
+export function eventLogicalKey(
+  event: Pick<KeyboardEventLike, "key"> & { code?: string },
+): string {
+  const rawKey = (event.key ?? "").trim();
+  if (rawKey && rawKey !== "Unidentified" && rawKey !== "Process") {
+    const normalized = normalizeKey(rawKey);
+    // Single printable keys and named keys (ArrowLeft, F12, …).
+    if (normalized.length > 0) return normalized;
+  }
+  const code = event.code ?? "";
+  if (!code) return normalizeKey(rawKey);
+  if (code.startsWith("Key") && code.length === 4) return code.slice(3).toLowerCase();
+  if (code.startsWith("Digit") && code.length === 6) return code.slice(5).toLowerCase();
+  if (code.startsWith("Numpad") && code.length > 6) return normalizeKey(code.slice(6));
+  return normalizeKey(code);
+}
+
 function parseKeybinding(value: string): ParsedKeybinding | null {
   const parts = value.split("+").map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) return null;
@@ -79,13 +103,16 @@ export function workspaceCommandEnabled(
 
 export function workspaceCommandMatchesKeybinding(
   command: WorkspaceCommand,
-  event: Pick<KeyboardEventLike, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
+  event: Pick<KeyboardEventLike, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey"> & {
+    code?: string;
+  },
 ): boolean {
   const bindings = [command.keybinding, ...(command.keybindings ?? [])].filter((value): value is string => !!value);
+  const eventKey = eventLogicalKey(event);
   return bindings.some((value) => {
     const binding = parseKeybinding(value);
     return !!binding
-      && binding.key === normalizeKey(event.key)
+      && binding.key === eventKey
       && binding.ctrl === event.ctrlKey
       && binding.shift === event.shiftKey
       && binding.alt === event.altKey

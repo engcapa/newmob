@@ -66,6 +66,7 @@ describe("useWorkspaceNavigation", () => {
       openFilesRef: { current: {} },
       loadFlatFiles,
       openFile: vi.fn(async () => {}),
+      revealLocation: vi.fn(),
       setSearchEverywhereMode: setMode,
       setSearchEverywhereOpen: setOpen,
       setRecentEntries: vi.fn(),
@@ -84,7 +85,7 @@ describe("useWorkspaceNavigation", () => {
     expect(setOpen).toHaveBeenCalledWith(true);
   });
 
-  it("owns recent files and back-forward navigation history", async () => {
+  it("owns recent files and back-forward navigation history with caret restore", async () => {
     const first: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/first.ts" };
     const second: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/second.ts" };
     const openFilesRef = { current: {
@@ -92,6 +93,7 @@ describe("useWorkspaceNavigation", () => {
       "root:root-1:src/second.ts": openState(second),
     } };
     const openFile = vi.fn(async () => {});
+    const revealLocation = vi.fn();
     const setRecentEntries = vi.fn();
     const setRecentFilesOpen = vi.fn();
     const props = {
@@ -104,6 +106,7 @@ describe("useWorkspaceNavigation", () => {
       openFilesRef,
       loadFlatFiles: vi.fn(async () => {}),
       openFile,
+      revealLocation,
       setSearchEverywhereMode: vi.fn(),
       setSearchEverywhereOpen: vi.fn(),
       setRecentEntries,
@@ -113,11 +116,13 @@ describe("useWorkspaceNavigation", () => {
       ({ activeKey }) => useWorkspaceNavigation({ ...props, activeKey }),
       { initialProps: { activeKey: "root:root-1:src/first.ts" as string | null } },
     );
+    act(() => result.current.noteCaretPosition("root:root-1:src/first.ts", { line: 10, character: 4 }));
     rerender({ activeKey: "root:root-1:src/second.ts" });
     await waitFor(() => expect(result.current.navCan.back).toBe(true));
 
     act(() => result.current.navigateHistory(-1));
     expect(openFile).toHaveBeenCalledWith(first);
+    expect(revealLocation).toHaveBeenCalledWith("root:root-1:src/first.ts", { line: 10, character: 4 });
     expect(result.current.navCan.forward).toBe(true);
 
     act(() => result.current.openRecentFiles());
@@ -126,6 +131,42 @@ describe("useWorkspaceNavigation", () => {
       expect.objectContaining({ ref: first, open: true }),
     ]);
     expect(setRecentFilesOpen).toHaveBeenCalledWith(true);
+  });
+
+  it("records origin and destination so same-file go-to-definition can navigate back", () => {
+    const file: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/Main.java" };
+    const openFilesRef = {
+      current: { "root:root-1:src/Main.java": openState(file) },
+    };
+    const openFile = vi.fn(async () => {});
+    const revealLocation = vi.fn();
+    const { result } = renderHook(() => useWorkspaceNavigation({
+      workspaceInstanceId: "workspace-1",
+      activeKey: "root:root-1:src/Main.java",
+      roots,
+      flatFiles: {},
+      visible: false,
+      rootsRef: { current: roots },
+      looseFilesRef: { current: [] },
+      openFilesRef,
+      loadFlatFiles: vi.fn(async () => {}),
+      openFile,
+      revealLocation,
+      setSearchEverywhereMode: vi.fn(),
+      setSearchEverywhereOpen: vi.fn(),
+      setRecentEntries: vi.fn(),
+      setRecentFilesOpen: vi.fn(),
+    }));
+
+    act(() => {
+      result.current.recordNavigationLocation(file, { line: 5, character: 2 });
+      result.current.recordNavigationLocation(file, { line: 40, character: 8 }, { replaceSameFile: false });
+    });
+    expect(result.current.navCan.back).toBe(true);
+
+    act(() => result.current.navigateHistory(-1));
+    expect(openFile).toHaveBeenCalledWith(file);
+    expect(revealLocation).toHaveBeenCalledWith("root:root-1:src/Main.java", { line: 5, character: 2 });
   });
 
   it("opens Go to File results in preview or the opposite split", () => {
@@ -142,6 +183,7 @@ describe("useWorkspaceNavigation", () => {
       openFilesRef: { current: {} },
       loadFlatFiles: vi.fn(async () => {}),
       openFile,
+      revealLocation: vi.fn(),
       setSearchEverywhereMode: vi.fn(),
       setSearchEverywhereOpen,
       setRecentEntries: vi.fn(),
