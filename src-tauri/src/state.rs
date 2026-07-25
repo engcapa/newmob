@@ -173,6 +173,8 @@ pub struct AppState {
         Arc<RwLock<HashMap<String, crate::agent::context::AgentCodeWorkspace>>>,
     /// Local language-server process registry for code-workspace editor tabs.
     pub lsp: Arc<LspManager>,
+    /// Debug Adapter Protocol sessions + adapter registry (M8 D1).
+    pub dap: Arc<crate::dap::DapManager>,
     /// Versioned SDK installations, defaults and per-workspace manual bindings.
     pub sdk: Arc<SdkManager>,
     /// Top-level AI context — holds AsrManager + LlmRouter.
@@ -234,6 +236,7 @@ impl AppState {
             agent_db_selected_objects: Arc::new(RwLock::new(HashMap::new())),
             agent_code_workspaces: Arc::new(RwLock::new(HashMap::new())),
             lsp: Arc::new(LspManager::with_sdk(sdk.clone())),
+            dap: Arc::new(crate::dap::DapManager::new()),
             sdk,
             ai_ctx: Arc::new(RwLock::new(ai_ctx)),
             lanchat,

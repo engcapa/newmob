@@ -4,6 +4,7 @@ mod appearance;
 mod asr;
 mod chat;
 mod config;
+mod dap;
 mod database;
 mod filebrowser;
 mod git;
@@ -497,6 +498,9 @@ pub fn run() {
             lsp::lsp_java_modules,
             lsp::lsp_workspace_diagnostics,
             lsp::lsp_build_workspace,
+            dap::dap_start_session,
+            dap::dap_send_request,
+            dap::dap_terminate,
             lsp::lsp_references,
             lsp::lsp_document_symbols,
             lsp::lsp_completion,
