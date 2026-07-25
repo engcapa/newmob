@@ -1,2 +1,4 @@
 /.gitattributes text eol=lf
 src-tauri/Cargo.toml text eol=lf
+# Shell hooks run via git-bash on the Windows CI runner; CRLF breaks them.
+*.sh text eol=lf
