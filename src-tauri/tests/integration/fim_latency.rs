@@ -3,11 +3,10 @@
 //! cloud fallback) is fast. The mock simulates a 150ms inference; we assert
 //! that complete() resolves within 300ms even on a single-thread runtime.
 
-mod support;
-
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use support::mock_provider::{MockEvent, MockLlm};
+
+use crate::support::mock_provider::{MockEvent, MockLlm};
 use taomni_lib::llm::router::LlmRouter;
 use taomni_lib::llm::{ChatRequest, TaskKind};
 

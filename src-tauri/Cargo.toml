@@ -250,3 +250,19 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+# Shrink debug artifacts for this heavy Tauri crate. Default `debug = 2` (full
+# DWARF) balloons `target/` via rlibs, the main binary, incremental caches, and
+# especially integration-test executables. Line tables keep usable backtraces;
+# dependency crates drop debug info entirely (local package is unaffected).
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
+
+# `cargo test` uses profile.test (inherits dev); keep the same line-table level
+# so test binaries stay small even if someone overrides profile.dev later.
+[profile.test]
+debug = 1
+

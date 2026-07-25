@@ -12,7 +12,9 @@ Taomni is a Tauri 2 desktop app with a React 19/TypeScript frontend and Rust bac
 - `pnpm build`: run `tsc -b` and build frontend assets into `dist/`.
 - `pnpm test`: run frontend/unit tests with Vitest and jsdom.
 - `pnpm tauri build`: build and package the desktop app.
-- `cd src-tauri && cargo test`: run Rust unit and integration tests.
+- `cd src-tauri && cargo test --lib`: day-to-day Rust unit tests (fastest; no integration binary).
+- `cd src-tauri && cargo test --test integration`: unified integration suite (one linked binary).
+- `cd src-tauri && cargo test`: full suite (lib + integration + relevant bins).
 
 ## Coding Style & Naming Conventions
 
