@@ -8,7 +8,28 @@ import { invoke } from "@tauri-apps/api/core";
 export type ScopeMode = "global" | "apps";
 export type RuleMode = "gfwList" | "proxyAll" | "off";
 export type Decision = "direct" | "proxy" | "block";
-export type UpstreamKind = "http" | "socks5" | "ssh";
+export type UpstreamKind =
+  | "http"
+  | "socks5"
+  | "ssh"
+  | "shadowsocks"
+  | "trojan"
+  | "vmess"
+  | "vless"
+  | "wireguard";
+
+/** Upstream kinds served by the bundled xray-core sidecar (not native dialers). */
+export const CORE_UPSTREAM_KINDS: UpstreamKind[] = [
+  "shadowsocks",
+  "trojan",
+  "vmess",
+  "vless",
+  "wireguard",
+];
+
+export function upstreamRequiresCore(kind: UpstreamKind): boolean {
+  return CORE_UPSTREAM_KINDS.includes(kind);
+}
 export type EnginePhase =
   | "idle"
   | "preparing"
@@ -38,6 +59,35 @@ export interface SocksCapProfile {
   defaultAction: Decision;
 }
 
+/** Protocol-specific upstream parameters (only meaningful for core kinds). */
+export interface UpstreamParams {
+  // Shadowsocks
+  method?: string;
+  // VMess / VLESS
+  uuidRef?: string;
+  security?: string;
+  flow?: string;
+  encryption?: string;
+  // Transport (trojan/vmess/vless)
+  network?: string;
+  path?: string;
+  wsHost?: string;
+  // TLS / REALITY
+  tls?: string;
+  sni?: string;
+  alpn?: string[];
+  fingerprint?: string;
+  allowInsecure?: boolean;
+  realityPublicKey?: string;
+  realityShortId?: string;
+  // WireGuard
+  privateKeyRef?: string;
+  peerPublicKey?: string;
+  preSharedKeyRef?: string;
+  localAddress?: string[];
+  mtu?: number;
+}
+
 export interface UpstreamRef {
   kind: UpstreamKind;
   sessionId?: string;
@@ -45,6 +95,18 @@ export interface UpstreamRef {
   port?: number;
   username?: string;
   passwordRef?: string;
+  params?: UpstreamParams;
+}
+
+/** A share link decoded by the backend; secret/uuid are plaintext (vault them). */
+export interface ParsedShareLink {
+  kindTag: string;
+  name: string;
+  host: string;
+  port: number;
+  params: UpstreamParams;
+  secret: string;
+  uuid: string;
 }
 
 export interface UserRule {
@@ -195,6 +257,28 @@ export function sockscapTestUpstream(args: {
     username: args.username ?? null,
     password: args.password ?? null,
     sessionId: args.sessionId ?? null,
+    testHost: args.testHost ?? null,
+    testPort: args.testPort ?? null,
+  });
+}
+
+export function sockscapParseShareLink(link: string): Promise<ParsedShareLink> {
+  return invoke("sockscap_parse_share_link", { link });
+}
+
+export function sockscapParseSubscription(
+  blob: string,
+): Promise<ParsedShareLink[]> {
+  return invoke("sockscap_parse_subscription", { blob });
+}
+
+export function sockscapTestCoreUpstream(args: {
+  upstream: UpstreamRef;
+  testHost?: string;
+  testPort?: number;
+}): Promise<string> {
+  return invoke("sockscap_test_core_upstream", {
+    upstream: args.upstream,
     testHost: args.testHost ?? null,
     testPort: args.testPort ?? null,
   });

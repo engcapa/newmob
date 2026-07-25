@@ -38,6 +38,9 @@ import {
   sockscapHelperStatus,
   sockscapTestTarget,
   sockscapTestUpstream,
+  sockscapTestCoreUpstream,
+  sockscapParseShareLink,
+  upstreamRequiresCore,
   type Decision,
   type DomainRecord,
   type GfwListStatus,
@@ -52,6 +55,7 @@ import {
   type StatsSnapshot,
   type TargetTestResult,
   type UpstreamKind,
+  type UpstreamParams,
   type UserRule,
 } from "../../lib/sockscap";
 import { requiresRestart } from "../../lib/sockscapRestart";
@@ -222,6 +226,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [showProcPicker, setShowProcPicker] = useState(false);
   const [password, setPassword] = useState("");
   const [storingPass, setStoringPass] = useState(false);
+  const [shareLink, setShareLink] = useState("");
+  const [uuidInput, setUuidInput] = useState("");
+  const [wgKeyInput, setWgKeyInput] = useState("");
 
   // Linux sudo prompt modal state
   const [showRootPrompt, setShowRootPrompt] = useState(false);
@@ -768,6 +775,16 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     setBusy(true);
     try {
       const u = selectedProf.upstream;
+      // Core-backed kinds spawn a throwaway xray sidecar (secrets from vault).
+      if (upstreamRequiresCore(u.kind)) {
+        const text = await sockscapTestCoreUpstream({
+          upstream: u,
+          testHost: "www.google.com",
+          testPort: 443,
+        });
+        report(text);
+        return;
+      }
       const text = await sockscapTestUpstream({
         kind: u.kind,
         host: u.host || "127.0.0.1",
@@ -784,6 +801,354 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  /** Merge protocol-specific params into the selected profile's upstream. */
+  const patchUpstreamParams = async (patch: Partial<UpstreamParams>) => {
+    await patchSelectedProfile({
+      upstream: {
+        ...selectedProf.upstream,
+        params: { ...(selectedProf.upstream.params || {}), ...patch },
+      },
+    });
+  };
+
+  /** Store a plaintext secret in the vault, returning its `vault:<id>` ref.
+   *  Returns null (and surfaces a message) if the vault is locked. */
+  const vaultStore = async (
+    name: string,
+    label: string,
+    value: string,
+  ): Promise<string | null> => {
+    const status = await vaultStatus().catch(() => null);
+    if (!status || status.state !== "unlocked") {
+      window.dispatchEvent(
+        new CustomEvent(VAULT_LOCKED_EVENT, {
+          detail: { reason: t("sockscap.vaultLocked") },
+        }),
+      );
+      report(t("sockscap.vaultLocked"), false);
+      return null;
+    }
+    const res = await vaultPut(name, label, value);
+    return res.reference;
+  };
+
+  const storeUuid = async () => {
+    if (!cfg || !uuidInput.trim()) return;
+    setBusy(true);
+    try {
+      const ref = await vaultStore(
+        "sockscap_upstream_uuid",
+        "SocksCap Upstream UUID",
+        uuidInput.trim(),
+      );
+      if (ref === null) return;
+      await patchUpstreamParams({ uuidRef: ref });
+      setUuidInput("");
+      report(t("sockscap.secretStored"));
+    } catch (e) {
+      report(String(e), false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const storeWgKey = async () => {
+    if (!cfg || !wgKeyInput.trim()) return;
+    setBusy(true);
+    try {
+      const ref = await vaultStore(
+        "sockscap_upstream_wg_key",
+        "SocksCap WireGuard Private Key",
+        wgKeyInput.trim(),
+      );
+      if (ref === null) return;
+      await patchUpstreamParams({ privateKeyRef: ref });
+      setWgKeyInput("");
+      report(t("sockscap.secretStored"));
+    } catch (e) {
+      report(String(e), false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Parse a pasted share link and populate the current profile's upstream,
+   *  vaulting the secret (SS/trojan password) and uuid (vmess/vless). */
+  const onImportShareLink = async () => {
+    if (!cfg || !shareLink.trim()) return;
+    setBusy(true);
+    try {
+      const parsed = await sockscapParseShareLink(shareLink.trim());
+      const kind = parsed.kindTag as UpstreamKind;
+      const params: UpstreamParams = { ...parsed.params };
+
+      // Vault the primary secret (SS/trojan password) → passwordRef.
+      let passwordRef = "";
+      if (parsed.secret) {
+        const ref = await vaultStore(
+          "sockscap_upstream_password",
+          "SocksCap Upstream Password",
+          parsed.secret,
+        );
+        if (ref === null) return; // vault locked
+        passwordRef = ref;
+      }
+      // Vault the uuid (vmess/vless) → params.uuidRef.
+      if (parsed.uuid) {
+        const ref = await vaultStore(
+          "sockscap_upstream_uuid",
+          "SocksCap Upstream UUID",
+          parsed.uuid,
+        );
+        if (ref === null) return;
+        params.uuidRef = ref;
+      }
+
+      await patchSelectedProfile({
+        upstream: {
+          ...selectedProf.upstream,
+          kind,
+          sessionId: "",
+          host: parsed.host,
+          port: parsed.port,
+          passwordRef,
+          params,
+        },
+      });
+      setShareLink("");
+      setPassword("");
+      report(
+        t("sockscap.shareLinkImported", {
+          name: parsed.name || `${parsed.host}:${parsed.port}`,
+        }),
+      );
+    } catch (e) {
+      report(String(e), false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Protocol-specific fields for core-backed upstreams. Secrets (uuid, wg key)
+  // are stored in the vault; non-secret transport/TLS params are plain fields.
+  const renderCoreParams = () => {
+    const kind = selectedProf.upstream.kind;
+    if (!upstreamRequiresCore(kind)) return null;
+    const p: UpstreamParams = selectedProf.upstream.params || {};
+    const cls =
+      "w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]";
+    const net = p.network || "tcp";
+    const tls = p.tls || (kind === "trojan" ? "tls" : "none");
+    const hasTransport = kind === "trojan" || kind === "vmess" || kind === "vless";
+    const hasTls = hasTransport;
+
+    const uuidField = (
+      <Field label="UUID">
+        <div className="flex gap-1.5">
+          <input
+            type="password"
+            className={"flex-1 " + cls}
+            placeholder={p.uuidRef ? t("sockscap.passwordStored") : "UUID"}
+            value={uuidInput}
+            onChange={(e) => setUuidInput(e.target.value)}
+          />
+          <button
+            type="button"
+            className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] shrink-0"
+            onClick={() => void storeUuid()}
+            disabled={busy || !uuidInput}
+          >
+            {t("sockscap.passwordStore")}
+          </button>
+        </div>
+      </Field>
+    );
+
+    const transportFields = hasTransport && (
+      <>
+        <Field label={t("sockscap.transport")}>
+          <select
+            className={cls}
+            value={net}
+            onChange={(e) => void patchUpstreamParams({ network: e.target.value })}
+          >
+            <option value="tcp">TCP</option>
+            <option value="ws">WebSocket</option>
+            <option value="grpc">gRPC</option>
+            <option value="httpupgrade">HTTPUpgrade</option>
+          </select>
+        </Field>
+        {(net === "ws" || net === "grpc" || net === "httpupgrade") && (
+          <Field label={net === "grpc" ? t("sockscap.grpcService") : t("sockscap.wsPath")}>
+            <input
+              className={cls}
+              value={p.path || ""}
+              onChange={(e) => void patchUpstreamParams({ path: e.target.value })}
+            />
+          </Field>
+        )}
+        {(net === "ws" || net === "httpupgrade") && (
+          <Field label={t("sockscap.wsHost")}>
+            <input
+              className={cls}
+              value={p.wsHost || ""}
+              onChange={(e) => void patchUpstreamParams({ wsHost: e.target.value })}
+            />
+          </Field>
+        )}
+      </>
+    );
+
+    const tlsFields = hasTls && (
+      <>
+        <Field label="TLS">
+          <select
+            className={cls}
+            value={tls}
+            onChange={(e) => void patchUpstreamParams({ tls: e.target.value })}
+          >
+            <option value="none">None</option>
+            <option value="tls">TLS</option>
+            <option value="reality">REALITY</option>
+          </select>
+        </Field>
+        {(tls === "tls" || tls === "reality") && (
+          <Field label="SNI">
+            <input
+              className={cls}
+              value={p.sni || ""}
+              onChange={(e) => void patchUpstreamParams({ sni: e.target.value })}
+            />
+          </Field>
+        )}
+        {tls === "reality" && (
+          <>
+            <Field label={t("sockscap.realityPbk")}>
+              <input
+                className={cls}
+                value={p.realityPublicKey || ""}
+                onChange={(e) =>
+                  void patchUpstreamParams({ realityPublicKey: e.target.value })
+                }
+              />
+            </Field>
+            <Field label={t("sockscap.realitySid")}>
+              <input
+                className={cls}
+                value={p.realityShortId || ""}
+                onChange={(e) =>
+                  void patchUpstreamParams({ realityShortId: e.target.value })
+                }
+              />
+            </Field>
+          </>
+        )}
+      </>
+    );
+
+    const wgFields = kind === "wireguard" && (
+      <>
+        <Field label={t("sockscap.wgPrivateKey")}>
+          <div className="flex gap-1.5">
+            <input
+              type="password"
+              className={"flex-1 " + cls}
+              placeholder={p.privateKeyRef ? t("sockscap.passwordStored") : t("sockscap.wgPrivateKey")}
+              value={wgKeyInput}
+              onChange={(e) => setWgKeyInput(e.target.value)}
+            />
+            <button
+              type="button"
+              className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] shrink-0"
+              onClick={() => void storeWgKey()}
+              disabled={busy || !wgKeyInput}
+            >
+              {t("sockscap.passwordStore")}
+            </button>
+          </div>
+        </Field>
+        <Field label={t("sockscap.wgPeerKey")}>
+          <input
+            className={cls}
+            value={p.peerPublicKey || ""}
+            onChange={(e) => void patchUpstreamParams({ peerPublicKey: e.target.value })}
+          />
+        </Field>
+        <Field label={t("sockscap.wgLocalAddr")}>
+          <input
+            className={cls}
+            placeholder="10.0.0.2/32, fd00::2/128"
+            value={(p.localAddress || []).join(", ")}
+            onChange={(e) =>
+              void patchUpstreamParams({
+                localAddress: e.target.value
+                  .split(",")
+                  .map((s) => s.trim())
+                  .filter(Boolean),
+              })
+            }
+          />
+        </Field>
+      </>
+    );
+
+    const vlessFlow = kind === "vless" && (
+      <Field label={t("sockscap.vlessFlow")}>
+        <select
+          className={cls}
+          value={p.flow || ""}
+          onChange={(e) => void patchUpstreamParams({ flow: e.target.value })}
+        >
+          <option value="">None</option>
+          <option value="xtls-rprx-vision">xtls-rprx-vision</option>
+        </select>
+      </Field>
+    );
+
+    const vmessSecurity = kind === "vmess" && (
+      <Field label={t("sockscap.vmessSecurity")}>
+        <select
+          className={cls}
+          value={p.security || "auto"}
+          onChange={(e) => void patchUpstreamParams({ security: e.target.value })}
+        >
+          <option value="auto">auto</option>
+          <option value="aes-128-gcm">aes-128-gcm</option>
+          <option value="chacha20-poly1305">chacha20-poly1305</option>
+          <option value="none">none</option>
+        </select>
+      </Field>
+    );
+
+    return (
+      <>
+        {kind === "shadowsocks" && (
+          <Field label={t("sockscap.ssMethod")}>
+            <select
+              className={cls}
+              value={p.method || "aes-256-gcm"}
+              onChange={(e) => void patchUpstreamParams({ method: e.target.value })}
+            >
+              <option value="aes-256-gcm">aes-256-gcm</option>
+              <option value="aes-128-gcm">aes-128-gcm</option>
+              <option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
+              <option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option>
+              <option value="2022-blake3-chacha20-poly1305">
+                2022-blake3-chacha20-poly1305
+              </option>
+            </select>
+          </Field>
+        )}
+        {(kind === "vmess" || kind === "vless") && uuidField}
+        {vmessSecurity}
+        {vlessFlow}
+        {transportFields}
+        {tlsFields}
+        {wgFields}
+      </>
+    );
   };
 
   const loadProcesses = async () => {
@@ -1259,6 +1624,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label={t("sockscap.upstreamKind")}>
                 <select
+                  data-testid="sockscap-upstream-kind"
                   className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
                   value={selectedProf.upstream.kind}
                   onChange={(e) =>
@@ -1273,10 +1639,36 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   <option value="socks5">SOCKS5</option>
                   <option value="http">HTTP / HTTPS</option>
                   <option value="ssh">SSH Tunnel (Dynamic SOCKS)</option>
+                  <option value="shadowsocks">Shadowsocks</option>
+                  <option value="trojan">Trojan</option>
+                  <option value="vmess">VMess</option>
+                  <option value="vless">VLESS</option>
+                  <option value="wireguard">WireGuard</option>
                 </select>
               </Field>
 
-              {selectedProf.upstream.kind === "ssh" ? (
+              {upstreamRequiresCore(selectedProf.upstream.kind) ? (
+                <Field label={t("sockscap.shareLinkImport")}>
+                  <div className="flex gap-1.5">
+                    <input
+                      data-testid="sockscap-sharelink-input"
+                      className="flex-1 text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                      placeholder="ss:// vmess:// vless:// trojan://"
+                      value={shareLink}
+                      onChange={(e) => setShareLink(e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      data-testid="sockscap-sharelink-import"
+                      className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] shrink-0"
+                      onClick={() => void onImportShareLink()}
+                      disabled={busy || !shareLink.trim()}
+                    >
+                      {t("sockscap.shareLinkImportBtn")}
+                    </button>
+                  </div>
+                </Field>
+              ) : selectedProf.upstream.kind === "ssh" ? (
                 <Field label={t("sockscap.upstreamSession")}>
                   <select
                     className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
@@ -1400,6 +1792,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   )}
                 </div>
               </Field>
+
+              {renderCoreParams()}
             </div>
             <div className="mt-3 flex gap-2">
               <button
