@@ -2,7 +2,9 @@
 
 > 目标：在现有 Code Workspace 基础上做功能与交互完善，达到"日常代码开发够用"的 IntelliJ IDEA 级体验（非全量对标）。本文档为设计稿，不含实现代码。
 >
-> 日期：2026-07-25 · 版本：v3.0（新增 §11 Java 深度支持完善计划 M6–M9，并据此修订 §2.3 非目标；M0–M5 交付情况见 §8.1–8.2）· 状态：**实施中**（M0–M5 已合入 `main`；M6–M9 为 Java 工程能力深化——jdtls 设置补齐、大文件性能、全项目诊断、构建集成、测试与调试(DAP)，详见 §11，尚未开工）
+> 日期：2026-07-25 · 版本：v3.1（M6 Java 基础对齐代码交付：`c35d963` jdtls `java.*` 设置全集 + `4a06f91` 大文件降级守卫/增量 diff 提速；ChangeSet→LSP 全量重写按失步风险显式后置，见 §11.B。M7–M9 未开工）· 状态：**实施中**（M0–M5 已合入 `main`；M6 代码已交付于 `feat/code-workspace-m6-java`，真机冒烟后置；M7 全项目诊断需先 spike，M8–M9 测试与调试(DAP)详见 §11）
+>
+> 早期版本：v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
@@ -583,7 +585,7 @@ src/stores/
 | **M3 布局与终端（P1）** | 分屏、tab 管理/预览 tab、面包屑、集成终端、Run/Tasks | L | ✅ 5/5 |
 | **M4 语言智能·下 + Git（P1）** | 调用层级、类型层级、用法高亮、inlay hints、智能选区(LSP)、Git gutter、inline blame、状态栏分段、持久化增强 | L | ✅ 10/10（代码已交付；真机冒烟后置） |
 | **M5 差异化（P2）** | 本地历史、AI 集成入口、语义高亮、TODO/书签（可选）、远程工作区 spike | M–L | ✅ 5/5（代码已交付；真机冒烟后置） |
-| **M6 Java 基础对齐（P0，§11 A+B）** | jdtls 初始化 `java.*` 设置全集（含 Lombok/autobuild/organizeImports/codeGeneration）；大文件性能（ChangeSet→LSP 增量、大文件降级守卫） | M | ⬜ 未开工 |
+| **M6 Java 基础对齐（P0，§11 A+B）** | jdtls 初始化 `java.*` 设置全集（含 Lombok/autobuild/organizeImports/codeGeneration）；大文件性能（大文件降级守卫、增量 diff 提速） | M | ✅ 代码已交付（`c35d963` A + `4a06f91` B；真机冒烟后置；ChangeSet→LSP 全量重写按风险显式后置，见 §11.B） |
 | **M7 工程智能（P1，§11 C+F）** | 全项目诊断（先 spike，后端聚合命令 + event + Problems 面板切换）；构建集成增强（依赖树、生命周期/任务树、项目重载、模块视图） | L | ⬜ 未开工（C 需 spike 前置） |
 | **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test/lombok 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | ⬜ 未开工（依赖 Bundle 基建） |
 | **M9 调试主线 + 收口（P1/P2，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载；debug-test；真机冒烟回填 | XL | ⬜ 未开工（依赖 M8 的 D1–D2） |
@@ -700,8 +702,8 @@ src/stores/
 5. **✅ 合入主干**
    M0–M5 已由 PR #361 合入 `main`；后续收口分支待独立合并，真机冒烟结果可在后续独立补录。
 
-6. **⬜ Java 深度支持（M6–M9，§11 新增）**
-   突破原 §2.3 非目标，深化 Java 工程能力：先并行 **M6**（jdtls `java.*` 设置补齐 + 大文件性能，快赢）；再 **M7** 工程智能（全项目诊断需先 spike jdtls `buildWorkspace` 推送语义 + 构建集成增强）；**M8/M9** 为测试与调试（DAP）——分 D1–D5 阶段推进，通用 DAP 框架而非 Java 特判。完整方案、命令清单与风险见 §11。
+6. **🔶 Java 深度支持（M6–M9，§11 新增）**
+   突破原 §2.3 非目标，深化 Java 工程能力。**M6 代码已交付**（`c35d963` A：jdtls `java.*` 设置全集 + 热更新 + Lombok；`4a06f91` B：大文件降级守卫 + 增量 diff 提速；ChangeSet→LSP 全量重写按失步风险显式后置，见 §11.B）——真机冒烟随 M0–M5 一并后置。下一步 **M7** 工程智能：全项目诊断需**先 spike** jdtls `java.buildWorkspace` 是否对未打开含错文件推送 `publishDiagnostics`（§11.C 硬门槛），构建集成增强（§11.F）独立可并行；**M8/M9** 为测试与调试（DAP）——分 D1–D5 阶段推进，通用 DAP 框架而非 Java 特判。完整方案、命令清单与风险见 §11。
 
 ---
 
@@ -770,7 +772,7 @@ src/stores/
 
 **前端 / 设置页**：Settings → Language Servers → Java 增子项（Lombok 开关、保存时组织导入、格式化 profile 路径、导入顺序、autobuild 开关）；复用现有 `workspace/didChangeConfiguration` 通道（`lsp.rs:3536` Download Sources 已用）做**热更新**，无需重启会话。
 
-**交付物**：`java.*` 设置全集 + 设置 UI + 单测（扩展 `jdtls_initialization_*`）。
+**交付物**：`java.*` 设置全集 + 设置 UI + 单测（扩展 `jdtls_initialization_*`）。**✅ 已交付 `c35d963`**：`JavaLanguageSettings` 进程级 blob（serde 默认；autobuild/completion/format/import/organizeImports+saveActions/codeGeneration/codeLens/signatureHelp/inlayHints/incompleteClasspath），`lsp_initialization_options` 输出完整 `settings.java` 树；`lsp_set_java_settings` 命令走 `workspace/didChangeConfiguration` 热更新（空 runtimes 省略以免覆盖 initialize 的 JDK 配置）；Lombok 短期经 `-javaagent` 注入 `jdtls_vmargs()`（直连 + JAVA_OPTS 两路径）；前端 `LSP_JAVA_SETTINGS_KEY` 持久化 + Language Servers 设置子区（autobuild/保存组织导入/Lombok+jar/格式化 profile/导入顺序）+ en/zh i18n；Rust 4 新测（全树、默认往返、Lombok 门禁、热更新省 runtimes，共享全局锁串行）+ 前端设置/持久化测试。
 
 ### 11.B 大文件性能（M6，快赢，规模 M，风险中）
 
@@ -784,6 +786,12 @@ src/stores/
 4. **保存回传去全量**：补齐 controlled-doc effect 的二次全串转换消除（`lastDocumentTextRef` 已部分缓解）。
 
 **交付物**：ChangeSet→LSP 增量适配、大文件降级 compartment、阈值配置、大文件基准测试。**兜底**：增量与 server 版本不一致时回退全量（已有 catch 路径）+ 版本代际校验（已有 epoch guard）。
+
+**✅ 已交付 `4a06f91`（部分，含一处显式后置）**：
+- **大文件降级守卫（本项主干、性能主因）**：`largeFile.ts` 阈值（>1.5 MB 或 >20k 行，字节判定 O(1) + 有界行扫描）；`CodeWorkspaceTab` 的 `activeFileIsLarge` memo 关停 semanticTokens / inlayHints / documentHighlight 三个 per-edit effect（含 documentHighlight 的文本兜底扫描）及其装饰重建，保留 Lezer 高亮与按需补全/悬停/跳转；状态栏「大文件模式」分段（`codeWorkspaceStatusStore.largeFile` + `StatusBar` + en/zh i18n）。
+- **增量 diff 提速（安全等价优化）**：`buildIncrementalContentChange` 的变更结束位置改为从 `start` 沿变更跨度续扫，不再对 `previousText` 从 0 再扫一遍——输出完全等价，大文件尾部编辑的端点定位成本约减半。
+- **增量默认开 + 全量兜底**：`textDocumentSyncKind===2 → omitFullText` 与失败回退已由既有 `useWorkspaceLspSession` 测试覆盖，本次未改其语义。
+- **⏸ 显式后置：ChangeSet→LSP 数组全量重写（彻底去掉「两份全串 diff」）**。原方案的兜底仅捕获 server 报错，无法捕获「静默接受但错误」的增量；要真正安全需一次 O(n) 校验（apply→比对），成本与现有 O(n) 全串 diff 相当，抵消收益。其非安全形态存在静默 LSP 失步风险：外部/程序化编辑（格式化、Git 回滚、WorkspaceEdit）经 `applyingExternalDocRef` 绕过 `onChange`、分屏共享单 buffer、多光标需降序处理——这些只能靠真机 jdtls 冒烟验证（正是本方案尚欠的真机项）。故保留全串 diff 为权威来源（现已更省），把数组重写留作独立决策项。测试：largeFile 阈值、diff 单遍端点等价（深处编辑 + 跨行删除）、StatusBar 大文件分段；`pnpm build` + 相关 vitest 全绿。
 
 ### 11.C 全项目诊断（M7，攻坚，规模 L，风险中高，需 spike 前置）
 
