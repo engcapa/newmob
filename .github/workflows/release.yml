@@ -175,12 +175,59 @@ jobs:
           cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::capture::linux
           bash scripts/stage-sockscap-linux.sh --check
 
+      - name: Fetch WinDivert redistributable (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dest = "src-tauri/resources/sockscap/windows"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          if (Test-Path (Join-Path $dest "WinDivert.dll")) {
+            Write-Host "WinDivert already present in $dest, skipping download."
+            exit 0
+          }
+          # WinDivert redistributable (LGPLv3/GPLv2) — loaded dynamically by the
+          # elevated helper only. reqrypt.org is canonical; GitHub release is a mirror.
+          $version = "2.2.2"
+          $zip = Join-Path $env:RUNNER_TEMP "WinDivert-$version-A.zip"
+          $extract = Join-Path $env:RUNNER_TEMP "WinDivert-extract"
+          $urls = @(
+            "https://reqrypt.org/download/WinDivert-$version-A.zip",
+            "https://github.com/basil00/WinDivert/releases/download/v$version/WinDivert-$version-A.zip"
+          )
+          $ok = $false
+          foreach ($url in $urls) {
+            for ($i = 1; $i -le 3; $i++) {
+              try {
+                Write-Host "Downloading $url (attempt $i)..."
+                Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+                $ok = $true; break
+              } catch {
+                Write-Warning "Download failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds 5
+              }
+            }
+            if ($ok) { break }
+          }
+          if (-not $ok) { throw "Unable to download WinDivert $version from any mirror." }
+          if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+          $x64 = Join-Path $extract "WinDivert-$version-A\x64"
+          Copy-Item -Force (Join-Path $x64 "WinDivert.dll") $dest
+          Copy-Item -Force (Join-Path $x64 "WinDivert64.sys") $dest
+          Write-Host "WinDivert $version staged into ${dest}:"
+          Get-ChildItem $dest | Select-Object Name, Length
+
       - name: Verify Windows SocksCap helper and preflight
         if: matrix.platform == 'windows-latest'
+        shell: pwsh
         run: |
-          pwsh scripts/fetch-windivert.ps1
+          $ErrorActionPreference = "Stop"
+          # Make each native command's non-zero exit fatal so a failing test can't be
+          # masked by a later command's exit code (default pwsh only checks the last).
+          $PSNativeCommandUseErrorActionPreference = $true
           pwsh scripts/stage-sockscap-windows.ps1
-          cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::policy sockscap::config
+          cargo test --manifest-path src-tauri/Cargo.toml --lib -- sockscap::policy sockscap::config
           pwsh scripts/stage-sockscap-windows.ps1 --check
 
       - name: Resolve release version

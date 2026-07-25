@@ -718,7 +718,7 @@ fn scan_securecrt(_files: &mut Vec<LocalSessionFile>) {
                 .join("Config")
                 .join("Sessions"),
             "ini",
-            files,
+            _files,
         );
     }
 }

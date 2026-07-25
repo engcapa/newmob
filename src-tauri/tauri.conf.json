@@ -8,7 +8,7 @@
     "devUrl": "http://localhost:1980",
     "beforeDevCommand": "bash scripts/bundle-krb5-macos.sh stage && pnpm dev",
     "beforeBuildCommand": "pnpm build && bash scripts/bundle-krb5-macos.sh stage",
-    "beforeBundleCommand": "bash scripts/bundle-krb5-macos.sh fixbin && bash scripts/stage-sockscap-linux.sh --check && case \"$(uname -s)\" in MINGW*|MSYS*|CYGWIN*|Windows_NT) pwsh -File scripts/stage-sockscap-windows.ps1 --check;; esac"
+    "beforeBundleCommand": "bash scripts/before-bundle.sh"
   },
   "app": {
     "withGlobalTauri": true,
