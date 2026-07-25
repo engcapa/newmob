@@ -846,10 +846,14 @@ mod tests {
         assert_eq!(links[0].mime_type.as_deref(), Some("image/png"));
         let uri = url::Url::parse(&links[0].uri).unwrap();
         assert_eq!(uri.scheme(), "file");
-        assert_eq!(
-            uri.to_file_path().unwrap(),
-            std::fs::canonicalize(image).unwrap()
-        );
+        // Compare against a URL built the same way production builds it
+        // (`canonicalize` → `from_file_path`). On Windows `canonicalize`
+        // yields a `\\?\` verbatim path that `Url::to_file_path` normalizes
+        // away, so asserting `to_file_path() == canonicalize()` fails on the
+        // prefix alone. Round-tripping both through `from_file_path` keeps the
+        // comparison symmetric across platforms.
+        let expected = url::Url::from_file_path(std::fs::canonicalize(&image).unwrap()).unwrap();
+        assert_eq!(uri, expected);
         assert!(grok_image_resource_links("another-agent", &[]).is_empty());
     }
 }
