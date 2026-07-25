@@ -110,17 +110,19 @@ mod tests {
 
     #[test]
     fn handles_symlink_selectors_correctly() {
+        // A launcher symlink selector must match the process whose
+        // /proc/<pid>/exe resolves to the symlink's canonical target.
         let target = std::env::current_exe().unwrap();
-        let symlink = target.with_file_name("grok-symlink");
-        // Simulate symlink selector
-        std::fs::copy(&target, &symlink).unwrap();
-        // On Linux, we can make it a symlink
+        // Use a private temp dir so the symlink path is unique per run and is
+        // cleaned up unconditionally when `dir` drops (avoids the EEXIST that a
+        // fixed, left-over path next to the test binary caused).
+        let dir = tempfile::tempdir().unwrap();
+        let symlink = dir.path().join("grok-symlink");
         std::os::unix::fs::symlink(&target, &symlink).unwrap();
         assert!(selector_matches_process_path(
             target.to_str().unwrap(),
             symlink.to_str().unwrap()
         ));
-        let _ = std::fs::remove_file(&symlink); // cleanup
     }
 
     #[test]
