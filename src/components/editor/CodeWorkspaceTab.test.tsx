@@ -33,6 +33,7 @@ const lspMocks = vi.hoisted(() => ({
   lspDetectServers: vi.fn(),
   lspSetJavaHome: vi.fn(),
   lspSetJavaVmargs: vi.fn(),
+  lspSetJavaSettings: vi.fn(),
   lspOpenDocument: vi.fn(),
   lspChangeDocument: vi.fn(),
   lspSaveDocument: vi.fn(),
@@ -231,6 +232,7 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspDetectServers.mockReset();
     lspMocks.lspSetJavaHome.mockReset().mockResolvedValue(undefined);
     lspMocks.lspSetJavaVmargs.mockReset().mockResolvedValue("-Xms1024m -Xmx1024m");
+    lspMocks.lspSetJavaSettings.mockReset().mockResolvedValue(0);
     lspMocks.lspOpenDocument.mockReset();
     lspMocks.lspChangeDocument.mockReset();
     lspMocks.lspSaveDocument.mockReset();

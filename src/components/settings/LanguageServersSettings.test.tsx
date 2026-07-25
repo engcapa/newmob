@@ -7,6 +7,7 @@ const writeTextMock = vi.fn(async (_text: string) => {});
 const detectMock = vi.fn();
 const setJavaHomeMock = vi.fn(async (_home?: string | null) => {});
 const setJavaVmargsMock = vi.fn(async (vmargs?: string | null) => vmargs?.trim() || "-Xms1024m -Xmx1024m");
+const setJavaSettingsMock = vi.fn(async (_settings: unknown) => 0);
 const selectFolderPathMock = vi.fn(async (_current?: string) => null as string | null);
 
 vi.mock("../../lib/clipboard", () => ({
@@ -17,6 +18,7 @@ vi.mock("../../lib/editor/lsp", () => ({
   lspDetectServers: (options?: { javaHome?: string | null }) => detectMock(options),
   lspSetJavaHome: (javaHome?: string | null) => setJavaHomeMock(javaHome),
   lspSetJavaVmargs: (vmargs?: string | null) => setJavaVmargsMock(vmargs),
+  lspSetJavaSettings: (settings: unknown) => setJavaSettingsMock(settings),
 }));
 
 vi.mock("../../lib/ipc", () => ({
@@ -256,5 +258,53 @@ describe("LanguageServersSettings", () => {
       "-Xms2048m -Xmx2048m",
     );
     expect(window.localStorage.getItem("taomni.codeWorkspace.lspJavaHeapMb.v1")).toBeNull();
+  });
+
+  it("persists Java language settings and hot-applies them to jdtls", async () => {
+    render(<LanguageServersSettings />);
+
+    // Toggling save-organize-imports persists and pushes to the backend.
+    const organizeImports = await screen.findByTestId("language-servers-java-organize-imports");
+    expect(organizeImports).not.toBeChecked();
+    fireEvent.click(organizeImports);
+
+    await waitFor(() => {
+      const stored = window.localStorage.getItem("taomni.codeWorkspace.lspJavaSettings.v1");
+      expect(stored).not.toBeNull();
+      expect(JSON.parse(stored ?? "{}").saveActionsOrganizeImports).toBe(true);
+    });
+    await waitFor(() => {
+      expect(setJavaSettingsMock).toHaveBeenCalledWith(
+        expect.objectContaining({ saveActionsOrganizeImports: true }),
+      );
+    });
+
+    // Enabling Lombok reveals the jar-path field; committing it persists.
+    fireEvent.click(screen.getByTestId("language-servers-java-lombok"));
+    const jarInput = await screen.findByTestId("language-servers-java-lombok-jar");
+    fireEvent.change(jarInput, { target: { value: "/opt/lombok.jar" } });
+    fireEvent.blur(jarInput);
+
+    await waitFor(() => {
+      const parsed = JSON.parse(
+        window.localStorage.getItem("taomni.codeWorkspace.lspJavaSettings.v1") ?? "{}",
+      );
+      expect(parsed.lombokEnabled).toBe(true);
+      expect(parsed.lombokJarPath).toBe("/opt/lombok.jar");
+    });
+  });
+
+  it("parses import order from a comma-separated field", async () => {
+    render(<LanguageServersSettings />);
+    const input = await screen.findByTestId("language-servers-java-import-order");
+    fireEvent.change(input, { target: { value: " java , javax, com ,, org " } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      const parsed = JSON.parse(
+        window.localStorage.getItem("taomni.codeWorkspace.lspJavaSettings.v1") ?? "{}",
+      );
+      expect(parsed.completionImportOrder).toEqual(["java", "javax", "com", "org"]);
+    });
   });
 });

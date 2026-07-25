@@ -4,7 +4,7 @@
  */
 import type { CodeWorkspaceFileRef, CodeWorkspaceLooseFileInfo, CodeWorkspaceRootInfo, CodeWorkspaceTabInfo } from "../../../types";
 import type { WorkspaceEntry, WorkspaceGitRoot } from "../../../lib/editor/workspace";
-import type { LspCustomServerCommand, LspDocumentStatus, LspDiagnostic } from "../../../lib/editor/lsp";
+import type { LspCustomServerCommand, LspDocumentStatus, LspDiagnostic, LspJavaSettings } from "../../../lib/editor/lsp";
 import type { GitChange } from "../../../lib/git";
 import { DEFAULT_CODE_VIEW_PROFILE } from "../../../lib/codeViewProfile";
 import type { OpenFileEol, OpenFileViewModel } from "./editorGroupTypes";
@@ -68,6 +68,8 @@ export const LSP_JAVA_VMARGS_KEY = "taomni.codeWorkspace.lspJavaVmargs.v1";
 /** Legacy heap-only key; migrated into vmargs on first read. */
 export const LSP_JAVA_HEAP_MB_KEY = "taomni.codeWorkspace.lspJavaHeapMb.v1";
 export const DEFAULT_LSP_JAVA_VMARGS = "-Xms1024m -Xmx1024m";
+/** jdtls `java.*` language settings (Lombok, autobuild, organize imports, …). */
+export const LSP_JAVA_SETTINGS_KEY = "taomni.codeWorkspace.lspJavaSettings.v1";
 export const CUSTOM_LSP_COMMAND_ID = "__custom__";
 export const TREE_FONT_SIZE_KEY = "taomni.codeWorkspace.treeFontSize.v1";
 export const TREE_VIEW_MODE_KEY = "taomni.codeWorkspace.treeViewMode.v1";
@@ -763,6 +765,7 @@ export function subscribeLspServerPrefs(listener: () => void): () => void {
       && event.key !== LSP_JAVA_HOME_KEY
       && event.key !== LSP_JAVA_VMARGS_KEY
       && event.key !== LSP_JAVA_HEAP_MB_KEY
+      && event.key !== LSP_JAVA_SETTINGS_KEY
     ) {
       return;
     }
@@ -901,6 +904,84 @@ export function writeLspJavaVmargs(vmargs: string | null | undefined): string {
   }
   emitLspPrefsChanged();
   return normalized ?? DEFAULT_LSP_JAVA_VMARGS;
+}
+
+/** Defaults mirror the Rust `JavaLanguageSettings::default` (autobuild on, Lombok off). */
+export const DEFAULT_LSP_JAVA_SETTINGS: LspJavaSettings = {
+  autobuildEnabled: true,
+  lombokEnabled: false,
+  lombokJarPath: "",
+  saveActionsOrganizeImports: false,
+  formatSettingsUrl: "",
+  formatSettingsProfile: "",
+  guessMethodArguments: true,
+  completionImportOrder: [],
+  organizeImportsStarThreshold: 99,
+  organizeImportsStaticStarThreshold: 99,
+  mavenImportEnabled: true,
+  gradleImportEnabled: true,
+};
+
+function clampThreshold(value: unknown, fallback: number): number {
+  const num = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(999, Math.max(1, Math.round(num)));
+}
+
+/** Coerce an arbitrary parsed value into a complete, defaulted `LspJavaSettings`. */
+export function normalizeLspJavaSettings(raw: unknown): LspJavaSettings {
+  const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const bool = (key: keyof LspJavaSettings): boolean =>
+    typeof source[key] === "boolean"
+      ? (source[key] as boolean)
+      : (DEFAULT_LSP_JAVA_SETTINGS[key] as boolean);
+  const str = (key: keyof LspJavaSettings): string =>
+    typeof source[key] === "string" ? (source[key] as string) : (DEFAULT_LSP_JAVA_SETTINGS[key] as string);
+  return {
+    autobuildEnabled: bool("autobuildEnabled"),
+    lombokEnabled: bool("lombokEnabled"),
+    lombokJarPath: str("lombokJarPath"),
+    saveActionsOrganizeImports: bool("saveActionsOrganizeImports"),
+    formatSettingsUrl: str("formatSettingsUrl"),
+    formatSettingsProfile: str("formatSettingsProfile"),
+    guessMethodArguments: bool("guessMethodArguments"),
+    completionImportOrder: Array.isArray(source.completionImportOrder)
+      ? source.completionImportOrder.filter((entry): entry is string => typeof entry === "string")
+      : [...DEFAULT_LSP_JAVA_SETTINGS.completionImportOrder],
+    organizeImportsStarThreshold: clampThreshold(
+      source.organizeImportsStarThreshold,
+      DEFAULT_LSP_JAVA_SETTINGS.organizeImportsStarThreshold,
+    ),
+    organizeImportsStaticStarThreshold: clampThreshold(
+      source.organizeImportsStaticStarThreshold,
+      DEFAULT_LSP_JAVA_SETTINGS.organizeImportsStaticStarThreshold,
+    ),
+    mavenImportEnabled: bool("mavenImportEnabled"),
+    gradleImportEnabled: bool("gradleImportEnabled"),
+  };
+}
+
+/** Read the persisted jdtls `java.*` settings (defaults when unset/corrupt). */
+export function readLspJavaSettings(): LspJavaSettings {
+  try {
+    const stored = window.localStorage.getItem(LSP_JAVA_SETTINGS_KEY);
+    if (!stored) return { ...DEFAULT_LSP_JAVA_SETTINGS };
+    return normalizeLspJavaSettings(JSON.parse(stored));
+  } catch {
+    return { ...DEFAULT_LSP_JAVA_SETTINGS };
+  }
+}
+
+/** Persist the jdtls `java.*` settings and notify listeners. */
+export function writeLspJavaSettings(settings: LspJavaSettings): LspJavaSettings {
+  const normalized = normalizeLspJavaSettings(settings);
+  try {
+    window.localStorage.setItem(LSP_JAVA_SETTINGS_KEY, JSON.stringify(normalized));
+  } catch {
+    // Ignore storage failures.
+  }
+  emitLspPrefsChanged();
+  return normalized;
 }
 
 export function splitCommandArgs(value: string): string[] {

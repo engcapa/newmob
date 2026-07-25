@@ -473,6 +473,7 @@ pub fn run() {
             lsp::lsp_list_presets,
             lsp::lsp_set_java_home,
             lsp::lsp_set_java_vmargs,
+            lsp::lsp_set_java_settings,
             lsp::lsp_detect_servers,
             lsp::lsp_document_status,
             lsp::lsp_open_document,

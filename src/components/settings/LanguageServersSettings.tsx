@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Copy, FolderOpen, RefreshCw, Server } from "lucide-react";
-import { lspDetectServers, lspSetJavaHome, lspSetJavaVmargs, type LspServerStatus } from "../../lib/editor/lsp";
+import {
+  lspDetectServers,
+  lspSetJavaHome,
+  lspSetJavaSettings,
+  lspSetJavaVmargs,
+  type LspJavaSettings,
+  type LspServerStatus,
+} from "../../lib/editor/lsp";
 import { writeText } from "../../lib/clipboard";
 import { selectFolderPath } from "../../lib/ipc";
 import { useT } from "../../lib/i18n";
@@ -21,10 +28,12 @@ import {
   readLspCommandPrefs,
   readLspCustomCommands,
   readLspJavaHome,
+  readLspJavaSettings,
   readLspJavaVmargs,
   writeLspCommandPrefs,
   writeLspCustomCommands,
   writeLspJavaHome,
+  writeLspJavaSettings,
   writeLspJavaVmargs,
   type LspCustomCommandConfig,
 } from "../editor/workspace/codeWorkspaceModel";
@@ -45,6 +54,7 @@ export function LanguageServersSettings() {
   );
   const [javaHome, setJavaHome] = useState(() => readLspJavaHome());
   const [javaVmargs, setJavaVmargs] = useState(() => readLspJavaVmargs());
+  const [javaSettings, setJavaSettings] = useState<LspJavaSettings>(() => readLspJavaSettings());
   /** Expanded install panels keyed by presetId. */
   const [expandedInstall, setExpandedInstall] = useState<Record<string, boolean>>({});
   /** Brief highlight when deep-linked from a Code Workspace file. */
@@ -145,6 +155,21 @@ export function LanguageServersSettings() {
         setError(err instanceof Error ? err.message : String(err));
       }
     })();
+  }, []);
+
+  /** Merge a patch into the Java settings, persist, and hot-apply to jdtls. */
+  const commitJavaSettings = useCallback((patch: Partial<LspJavaSettings>) => {
+    setJavaSettings((current) => {
+      const next = writeLspJavaSettings({ ...current, ...patch });
+      void (async () => {
+        try {
+          await lspSetJavaSettings(next);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      })();
+      return next;
+    });
   }, []);
 
   const browseJavaHome = useCallback(async () => {
@@ -422,6 +447,99 @@ export function LanguageServersSettings() {
                           {t("settings.languageServersJavaVmargsHint")}
                         </div>
                       </label>
+                      <div className="mt-3 border-t border-[var(--taomni-border)] pt-2">
+                        <div className="text-[11px] font-medium text-[var(--taomni-text)]">
+                          {t("settings.languageServersJavaSettingsTitle")}
+                        </div>
+                        <label className="mt-1.5 flex items-center gap-2 text-[11px] text-[var(--taomni-text)]">
+                          <input
+                            type="checkbox"
+                            data-testid="language-servers-java-autobuild"
+                            checked={javaSettings.autobuildEnabled}
+                            onChange={(event) => commitJavaSettings({ autobuildEnabled: event.target.checked })}
+                          />
+                          {t("settings.languageServersJavaAutobuild")}
+                        </label>
+                        <label className="mt-1 flex items-center gap-2 text-[11px] text-[var(--taomni-text)]">
+                          <input
+                            type="checkbox"
+                            data-testid="language-servers-java-organize-imports"
+                            checked={javaSettings.saveActionsOrganizeImports}
+                            onChange={(event) =>
+                              commitJavaSettings({ saveActionsOrganizeImports: event.target.checked })}
+                          />
+                          {t("settings.languageServersJavaOrganizeImports")}
+                        </label>
+                        <label className="mt-1 flex items-center gap-2 text-[11px] text-[var(--taomni-text)]">
+                          <input
+                            type="checkbox"
+                            data-testid="language-servers-java-lombok"
+                            checked={javaSettings.lombokEnabled}
+                            onChange={(event) => commitJavaSettings({ lombokEnabled: event.target.checked })}
+                          />
+                          {t("settings.languageServersJavaLombok")}
+                        </label>
+                        {javaSettings.lombokEnabled && (
+                          <label className="mt-1 block text-[11px] text-[var(--taomni-text-muted)]">
+                            {t("settings.languageServersJavaLombokJar")}
+                            <input
+                              type="text"
+                              spellCheck={false}
+                              data-testid="language-servers-java-lombok-jar"
+                              className="mt-0.5 w-full rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-1 font-mono text-[11px] text-[var(--taomni-text)] outline-none"
+                              placeholder={t("settings.languageServersJavaLombokJarPlaceholder")}
+                              defaultValue={javaSettings.lombokJarPath}
+                              onBlur={(event) => {
+                                if (event.target.value.trim() !== javaSettings.lombokJarPath.trim()) {
+                                  commitJavaSettings({ lombokJarPath: event.target.value.trim() });
+                                }
+                              }}
+                            />
+                            <span className="mt-0.5 block text-[10px] leading-snug">
+                              {t("settings.languageServersJavaLombokHint")}
+                            </span>
+                          </label>
+                        )}
+                        <label className="mt-2 block text-[11px] text-[var(--taomni-text-muted)]">
+                          {t("settings.languageServersJavaFormatProfile")}
+                          <input
+                            type="text"
+                            spellCheck={false}
+                            data-testid="language-servers-java-format-profile"
+                            className="mt-0.5 w-full rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-1 font-mono text-[11px] text-[var(--taomni-text)] outline-none"
+                            placeholder={t("settings.languageServersJavaFormatProfilePlaceholder")}
+                            defaultValue={javaSettings.formatSettingsUrl}
+                            onBlur={(event) => {
+                              if (event.target.value.trim() !== javaSettings.formatSettingsUrl.trim()) {
+                                commitJavaSettings({ formatSettingsUrl: event.target.value.trim() });
+                              }
+                            }}
+                          />
+                        </label>
+                        <label className="mt-2 block text-[11px] text-[var(--taomni-text-muted)]">
+                          {t("settings.languageServersJavaImportOrder")}
+                          <input
+                            type="text"
+                            spellCheck={false}
+                            data-testid="language-servers-java-import-order"
+                            className="mt-0.5 w-full rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-1 font-mono text-[11px] text-[var(--taomni-text)] outline-none"
+                            placeholder="java, javax, jakarta, com, org"
+                            defaultValue={javaSettings.completionImportOrder.join(", ")}
+                            onBlur={(event) => {
+                              const next = event.target.value
+                                .split(",")
+                                .map((entry) => entry.trim())
+                                .filter((entry) => entry !== "");
+                              if (next.join(",") !== javaSettings.completionImportOrder.join(",")) {
+                                commitJavaSettings({ completionImportOrder: next });
+                              }
+                            }}
+                          />
+                          <span className="mt-0.5 block text-[10px] leading-snug">
+                            {t("settings.languageServersJavaImportOrderHint")}
+                          </span>
+                        </label>
+                      </div>
                     </>
                   )}
                 </div>

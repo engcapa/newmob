@@ -275,6 +275,36 @@ export function lspSetJavaVmargs(vmargs?: string | null): Promise<string> {
   return invoke<string>("lsp_set_java_vmargs", { vmargs: value });
 }
 
+/**
+ * jdtls `java.*` language settings mirrored to the backend. Field names match the
+ * Rust `JavaLanguageSettings` serde shape (camelCase); the backend fills any omitted
+ * field from its defaults, so partial payloads are safe.
+ */
+export interface LspJavaSettings {
+  autobuildEnabled: boolean;
+  lombokEnabled: boolean;
+  lombokJarPath: string;
+  saveActionsOrganizeImports: boolean;
+  formatSettingsUrl: string;
+  formatSettingsProfile: string;
+  guessMethodArguments: boolean;
+  completionImportOrder: string[];
+  organizeImportsStarThreshold: number;
+  organizeImportsStaticStarThreshold: number;
+  mavenImportEnabled: boolean;
+  gradleImportEnabled: boolean;
+}
+
+/**
+ * Apply jdtls `java.*` language settings (Lombok, autobuild, organize imports, …).
+ * Live settings hot-update running jdtls sessions via didChangeConfiguration; the
+ * Lombok `-javaagent` applies on the next workspace restart. `null` restores defaults.
+ * Returns the number of sessions that received the live update.
+ */
+export function lspSetJavaSettings(settings: LspJavaSettings | null): Promise<number> {
+  return invoke<number>("lsp_set_java_settings", { settings });
+}
+
 export function lspDocumentStatus(
   descriptor: LspDocumentDescriptor,
 ): Promise<LspDocumentStatus> {
