@@ -16,6 +16,8 @@ export interface OpenFileLibrarySource {
   originRootPath: string | null;
   /** File the jump started from; selects the language-server session. */
   originFilePath: string;
+  /** True when the buffer is decompiled bytecode — offer "Download sources". */
+  decompiled?: boolean;
 }
 
 /** View-model for an open buffer as seen by EditorGroup (presentation only). */

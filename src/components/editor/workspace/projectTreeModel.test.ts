@@ -120,7 +120,12 @@ describe("project tree model helpers", () => {
       container: "java.lang · java.base",
       originFilePath: "src/Main.java",
       originRootPath: "/repo",
+      decompiled: false,
     });
+
+    // A decompiled buffer carries the flag so the UI can offer "Download sources".
+    const decompiledFile = makeLibraryFile({ ...info, decompiled: true }, "class String {}");
+    expect(decompiledFile.library?.decompiled).toBe(true);
 
     // Same-named classes from different packages must not share a buffer.
     const other = makeLibraryFile({

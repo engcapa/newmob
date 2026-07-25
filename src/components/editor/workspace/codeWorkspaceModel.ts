@@ -222,6 +222,8 @@ export interface LibraryBufferInfo {
   /** Project file the jump started from; selects the language-server session. */
   originFilePath: string;
   originRootPath: string | null;
+  /** True when the buffer is decompiled bytecode (offer "Download sources"). */
+  decompiled?: boolean;
 }
 
 const LIBRARY_LANGUAGE_EXTENSIONS: Record<string, string> = {
@@ -284,6 +286,7 @@ export function makeLibraryFile(info: LibraryBufferInfo, text: string): OpenFile
       container: info.container,
       originFilePath: info.originFilePath,
       originRootPath: info.originRootPath,
+      decompiled: info.decompiled ?? false,
     },
   };
 }
