@@ -71,6 +71,7 @@ import {
   lspPrepareTypeHierarchy,
   lspRangeFormatting,
   lspDownloadSources,
+  lspReloadProject,
   lspReadUriContents,
   lspReferences,
   lspRename,
@@ -271,6 +272,16 @@ function initialInlayHintRange(text: string): LspRange {
     start: { line: 0, character: 0 },
     end: { line: endLine, character: lines[endLine]?.length ?? 0 },
   };
+}
+
+/** Maven / Gradle build descriptors that warrant a jdtls project reload on save. */
+function isJavaBuildFile(languagePath: string): boolean {
+  const name = languagePath.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  return name === "pom.xml"
+    || name === "build.gradle"
+    || name === "build.gradle.kts"
+    || name === "settings.gradle"
+    || name === "settings.gradle.kts";
 }
 
 // Keep document synchronization ahead of the comparatively expensive derived
@@ -2109,6 +2120,28 @@ export function CodeWorkspaceTab({
     return applyLspTextEditsToString(file.text, result.edits);
   }, [lspDescriptorForFile, updateLspStatusForFile]);
 
+  const promptReloadProject = useCallback(
+    async (key: string, subtitle: string) => {
+      const file = openFilesRef.current[key];
+      if (!file) return;
+      const descriptor = lspDescriptorForFile(file);
+      if (!descriptor) return;
+      const confirmed = await confirmAppDialog({
+        title: "Reload Java project",
+        message: `${subtitle} changed. Reload the project so the language server picks up dependency and classpath changes?`,
+        confirmLabel: "Reload",
+      });
+      if (!confirmed) return;
+      try {
+        await lspReloadProject(descriptor);
+        setStatusMessage("Reloading Java project…");
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+      }
+    },
+    [lspDescriptorForFile, setStatusMessage],
+  );
+
   const saveFile = useCallback(
     async (key: string | null = activeKey) => {
       if (!key) return;
@@ -2134,6 +2167,12 @@ export function CodeWorkspaceTab({
         setStatusMessage(formatError
           ? `Saved ${file.subtitle}; format on save failed: ${formatError}`
           : `Saved ${file.subtitle}`);
+        // A Maven/Gradle build file changed on disk: offer to re-import the
+        // project model so jdtls picks up dependency/classpath edits. Only when
+        // a jdtls session is actually up for this project (no prompt otherwise).
+        if (isJavaBuildFile(file.languagePath) && lspFilesRef.current[key]?.status?.active) {
+          void promptReloadProject(key, file.subtitle);
+        }
       } catch (err) {
         setStatusMessage(errorMessage(err));
       }
@@ -2142,6 +2181,7 @@ export function CodeWorkspaceTab({
       activeKey,
       formatFileText,
       intelligencePreferences.formatOnSave,
+      promptReloadProject,
       saveOpenBufferText,
       setStatusMessage,
     ],

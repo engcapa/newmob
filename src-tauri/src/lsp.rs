@@ -3819,6 +3819,45 @@ pub async fn lsp_download_sources(
     })
 }
 
+/// Reload the Java project configuration for the active jdtls session (IDEA's
+/// "Reload project"). Notifies `java/projectConfigurationUpdate` keyed on a build
+/// file (pom.xml / build.gradle) so jdtls re-imports the Maven/Gradle model after
+/// the user edits it. `file_path` should be the changed build file; any project
+/// file works since jdtls reconfigures the owning project.
+///
+/// Fire-and-forget: jdtls reconfigures asynchronously (progress arrives via its
+/// own status notifications), so this returns once the notify is delivered.
+#[tauri::command]
+pub async fn lsp_reload_project(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<(), String> {
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            "No language server session is active for this project; open a project file first"
+                .to_string()
+        })?;
+    session
+        .notify(
+            "java/projectConfigurationUpdate",
+            json!({ "uri": document.uri }),
+        )
+        .await
+}
+
 #[tauri::command]
 pub async fn lsp_workspace_symbols(
     state: State<'_, AppState>,

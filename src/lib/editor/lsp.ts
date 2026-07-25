@@ -802,6 +802,15 @@ export function lspDownloadSources(
   });
 }
 
+/**
+ * Reload the Java project model (IDEA "Reload project") after a build file
+ * (pom.xml / build.gradle) changed. Fire-and-forget: jdtls re-imports async.
+ * `descriptor` should target the changed build file (or any project file).
+ */
+export function lspReloadProject(descriptor: LspDocumentDescriptor): Promise<void> {
+  return invoke("lsp_reload_project", documentArgs(descriptor));
+}
+
 export function lspReferences(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,

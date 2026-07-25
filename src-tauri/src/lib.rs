@@ -488,6 +488,7 @@ pub fn run() {
             lsp::lsp_implementation,
             lsp::lsp_read_uri_contents,
             lsp::lsp_download_sources,
+            lsp::lsp_reload_project,
             lsp::lsp_references,
             lsp::lsp_document_symbols,
             lsp::lsp_completion,
