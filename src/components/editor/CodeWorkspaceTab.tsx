@@ -521,6 +521,8 @@ export function CodeWorkspaceTab({
   }, [patchWorkspaceUi, workspaceInstanceId]);
   const projectPanelRef = useRef<PanelImperativeHandle>(null);
   const lastProjectPanelSizeRef = useRef(24);
+  const rightPanelRef = useRef<PanelImperativeHandle>(null);
+  const lastRightPanelSizeRef = useRef(20);
   const setRightPaneOpen = useCallback((open: boolean | ((prev: boolean) => boolean)) => {
     const prev = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).rightPaneOpen;
     patchWorkspaceUi(workspaceInstanceId, { rightPaneOpen: typeof open === "function" ? open(prev) : open });
@@ -3713,6 +3715,32 @@ export function CodeWorkspaceTab({
     setRightPaneOpen(true);
   }, [rightPaneOpen, rightPaneTab, setRightPaneOpen, setRightPaneTab]);
 
+  // Keep the resizable right pane panel in sync with the persisted open flag.
+  // Follows the same collapse/expand pattern as the project tree panel.
+  useEffect(() => {
+    const panel = rightPanelRef.current;
+    if (!panel) return;
+    const frame = requestAnimationFrame(() => {
+      if (!rightPaneOpen) {
+        panel.collapse();
+      } else {
+        panel.resize(`${lastRightPanelSizeRef.current}%`);
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [rightPaneOpen]);
+
+  const handleRightPanelResize = useCallback((size: PanelSize) => {
+    const percentage = size.asPercentage;
+    if (percentage > 2) {
+      lastRightPanelSizeRef.current = percentage;
+    }
+    setRightPaneOpen((open) => {
+      const next = percentage > 2;
+      return open === next ? open : next;
+    });
+  }, [setRightPaneOpen]);
+
   const openTodosPane = useCallback(() => {
     setBottomDockTab("todos");
     setBottomDockOpen(true);
@@ -5176,12 +5204,8 @@ export function CodeWorkspaceTab({
           />
           <Panel
             id="editor"
-            defaultSize={
-              !languagePanelOpen
-                ? (rightPaneOpen ? "80%" : "100%")
-                : (rightPaneOpen ? "56%" : "76%")
-            }
-            minSize={languagePanelOpen ? "35%" : "50%"}
+            defaultSize={languagePanelOpen ? "56%" : "80%"}
+            minSize={languagePanelOpen ? "30%" : "40%"}
             className="min-w-0"
           >
           {splitOrientation ? (
@@ -5206,79 +5230,84 @@ export function CodeWorkspaceTab({
             </div>
           ) : renderEditorGroup("primary")}
         </Panel>
-        {rightPaneOpen && (
-          <>
-            <PanelResizeHandle className="w-1 bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)] transition-colors" />
-            <Panel
-              id="documentation"
-              defaultSize="20%"
-              minSize="12%"
-              maxSize="40%"
-              className="min-w-0"
+          <PanelResizeHandle
+            className={rightPaneOpen
+              ? "w-1 bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)] transition-colors cursor-col-resize"
+              : "hidden"}
+          />
+          <Panel
+            panelRef={rightPanelRef}
+            id="documentation"
+            defaultSize="20%"
+            minSize="12%"
+            maxSize="40%"
+            collapsible
+            collapsedSize={0}
+            onResize={handleRightPanelResize}
+            className="min-w-0"
+          >
+            <aside
+              data-testid="code-workspace-right-pane"
+              className="h-full min-h-0 flex flex-col border-l border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]"
+              style={rightPaneOpen ? undefined : { display: "none" }}
             >
-              <aside
-                data-testid="code-workspace-right-pane"
-                className="h-full min-h-0 flex flex-col border-l border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]"
-              >
-                <div role="tablist" aria-label="Right tool window" className="flex h-8 shrink-0 items-center border-b border-[var(--taomni-code-border)] px-1">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={rightPaneTab === "outline"}
-                    className="inline-flex h-7 items-center gap-1 rounded px-2 text-[10px] text-[var(--taomni-code-muted)] aria-selected:bg-[var(--taomni-code-active-line-bg)] aria-selected:text-[var(--taomni-code-text)]"
-                    onClick={() => setRightPaneTab("outline")}
-                  >
-                    <ListTree className="h-3.5 w-3.5" />
-                    Outline
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={rightPaneTab === "documentation"}
-                    className="inline-flex h-7 items-center gap-1 rounded px-2 text-[10px] text-[var(--taomni-code-muted)] aria-selected:bg-[var(--taomni-code-active-line-bg)] aria-selected:text-[var(--taomni-code-text)]"
-                    onClick={() => setRightPaneTab("documentation")}
-                  >
-                    <BookOpen className="h-3.5 w-3.5" />
-                    Documentation
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Close right pane"
-                    className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)]"
-                    onClick={() => setRightPaneOpen(false)}
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                <div role="tabpanel" className="min-h-0 flex-1">
-                  {rightPaneTab === "outline" ? (
-                    <OutlinePane
-                      symbols={breadcrumbSymbolsByGroup[activeEditorGroupId]}
-                      position={cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 }}
-                      loading={!!activeFile && (!!activeLspState?.syncing || (activeCapabilities?.documentSymbol === true && !activeLspState?.status))}
-                      unavailableReason={!activeFile
-                        ? "Open a file to view its outline"
-                        : activeCapabilities?.documentSymbol === false
-                          ? "Document symbols are not supported by this language server"
-                          : null}
-                      onPick={pickOutlineSymbol}
-                    />
-                  ) : (
-                    <DocumentationPane
-                      content={pinnedDoc}
-                      locked={pinnedDocLocked}
-                      onUnlock={() => setPinnedDocLocked(false)}
-                      onClear={() => {
-                        setPinnedDoc(null);
-                        setPinnedDocLocked(false);
-                      }}
-                    />
-                  )}
-                </div>
-              </aside>
-            </Panel>
-          </>
-        )}
+              <div role="tablist" aria-label="Right tool window" className="flex h-8 shrink-0 items-center border-b border-[var(--taomni-code-border)] px-1">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={rightPaneTab === "outline"}
+                  className="inline-flex h-7 items-center gap-1 rounded px-2 text-[10px] text-[var(--taomni-code-muted)] aria-selected:bg-[var(--taomni-code-active-line-bg)] aria-selected:text-[var(--taomni-code-text)]"
+                  onClick={() => setRightPaneTab("outline")}
+                >
+                  <ListTree className="h-3.5 w-3.5" />
+                  Outline
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={rightPaneTab === "documentation"}
+                  className="inline-flex h-7 items-center gap-1 rounded px-2 text-[10px] text-[var(--taomni-code-muted)] aria-selected:bg-[var(--taomni-code-active-line-bg)] aria-selected:text-[var(--taomni-code-text)]"
+                  onClick={() => setRightPaneTab("documentation")}
+                >
+                  <BookOpen className="h-3.5 w-3.5" />
+                  Documentation
+                </button>
+                <button
+                  type="button"
+                  aria-label="Close right pane"
+                  className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)]"
+                  onClick={() => setRightPaneOpen(false)}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div role="tabpanel" className="min-h-0 flex-1">
+                {rightPaneTab === "outline" ? (
+                  <OutlinePane
+                    symbols={breadcrumbSymbolsByGroup[activeEditorGroupId]}
+                    position={cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 }}
+                    loading={!!activeFile && (!!activeLspState?.syncing || (activeCapabilities?.documentSymbol === true && !activeLspState?.status))}
+                    unavailableReason={!activeFile
+                      ? "Open a file to view its outline"
+                      : activeCapabilities?.documentSymbol === false
+                        ? "Document symbols are not supported by this language server"
+                        : null}
+                    onPick={pickOutlineSymbol}
+                  />
+                ) : (
+                  <DocumentationPane
+                    content={pinnedDoc}
+                    locked={pinnedDocLocked}
+                    onUnlock={() => setPinnedDocLocked(false)}
+                    onClear={() => {
+                      setPinnedDoc(null);
+                      setPinnedDocLocked(false);
+                    }}
+                  />
+                )}
+              </div>
+            </aside>
+          </Panel>
       </PanelGroup>
       </div>
       <BottomDock
