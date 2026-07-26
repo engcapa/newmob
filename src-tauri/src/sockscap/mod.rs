@@ -24,6 +24,7 @@ pub mod recovery;
 pub mod relay;
 pub mod rules;
 pub mod stats;
+pub mod transparent;
 
 pub use config::{Decision, RuleMode, SocksCapConfig};
 pub use orchestrator::{Orchestrator, SocksCapStatus};

@@ -33,6 +33,10 @@ tauri-build = { version = "2", features = [] }
 prost-build = "0.14"
 
 [dependencies]
+# SocksCap capture-plane primitives (macOS transparent-proxy decision + control
+# protocol). Shared with the Network Extension appex via the same crate's
+# staticlib so the rule has one implementation. See sockscap-core/.
+sockscap-core = { path = "sockscap-core" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
 # In-app auto-update: pull signed bundles from GitHub Releases (see
@@ -190,6 +194,13 @@ xcap = { version = "0.9.6", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-dialog = "2.7.1"
 sqlparser = "0.62.0"
+
+[workspace]
+# sockscap-core is the single source of truth for the macOS transparent-proxy
+# per-flow decision + control protocol: the engine links it as an rlib and the
+# Network Extension appex links its staticlib and calls the C-ABI, so the rule
+# is never reimplemented (and cannot drift) in Swift.
+members = ["sockscap-core"]
 
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }

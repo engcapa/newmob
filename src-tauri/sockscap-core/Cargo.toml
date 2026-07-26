@@ -1,0 +1,18 @@
+[package]
+name = "sockscap-core"
+version = "0.1.0"
+description = "SocksCap capture-plane primitives shared by the Taomni engine and the macOS Network Extension provider (single source of truth for the per-flow decision + control protocol)."
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+
+[lib]
+name = "sockscap_core"
+# rlib: linked into the taomni engine so it runs the identical decision logic.
+# staticlib: linked into the macOS system-extension (appex) Xcode target, which
+# calls the C-ABI exports in `ffi` — the same code, never reimplemented in Swift.
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
