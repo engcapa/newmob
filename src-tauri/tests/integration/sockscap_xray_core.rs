@@ -193,6 +193,33 @@ async fn wait_port_open(port: u16, timeout: Duration) -> bool {
     false
 }
 
+/// A1: a bad config must fail with the xray log tail in the error, not a
+/// generic "not ready". Uses an invalid Shadowsocks cipher so xray rejects the
+/// outbound and exits at startup. Skips without a binary.
+#[tokio::test]
+async fn bad_config_surfaces_xray_log_tail() {
+    let Some(exe) = locate_xray() else {
+        eprintln!("SKIP bad_config_surfaces_xray_log_tail: no xray binary");
+        return;
+    };
+    let work = std::env::temp_dir().join(format!("xray-badcfg-{}", std::process::id()));
+    let mgr = XrayManager::new(Some(exe), work.clone());
+    let mut spec = ss_spec("127.0.0.1", 8388, "pw");
+    spec.params.method = "definitely-not-a-real-cipher".into();
+
+    let err = mgr
+        .ensure("bad", &spec)
+        .await
+        .expect_err("invalid cipher should fail to start");
+    // The error should carry xray's own diagnostics, not just "not ready".
+    assert!(
+        err.contains("xray log:"),
+        "expected xray log tail in error, got: {err}"
+    );
+    assert_eq!(mgr.running_count().await, 0, "failed core must not linger");
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// End-to-end: our generated Shadowsocks *client* config must interoperate with
 /// a real Shadowsocks server and carry bytes to a target — the exact path the
 /// relay uses (`socks5::dial` → xray core → node → target).

@@ -41,6 +41,9 @@ pub struct XrayCore {
     pub config_hash: String,
     /// Temp config file, removed on shutdown/Drop.
     config_file: PathBuf,
+    /// xray stderr log, removed on shutdown/Drop. Its tail is surfaced in the
+    /// error when a core fails to start (bad cipher/uuid/reality key/etc).
+    log_file: PathBuf,
 }
 
 impl std::fmt::Debug for XrayCore {
@@ -75,13 +78,19 @@ impl XrayCore {
         std::fs::write(&config_file, json.as_bytes())
             .map_err(|e| format!("write xray config: {e}"))?;
 
+        // Capture stderr so a failed/misbehaving core is diagnosable instead of
+        // a black box. xray logs config/handshake errors here.
+        let log_file = work_dir.join(format!("xray-{local_port}.log"));
+        let log_handle = std::fs::File::create(&log_file)
+            .map_err(|e| format!("create xray log: {e}"))?;
+
         let mut cmd = Command::new(exe);
         cmd.arg("run")
             .arg("-c")
             .arg(&config_file)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(log_handle))
             // Backstop: if taomni dies without calling shutdown, tokio's reaper
             // kills the child on drop rather than leaking it.
             .kill_on_drop(true);
@@ -101,14 +110,30 @@ impl XrayCore {
             local_port,
             config_hash,
             config_file,
+            log_file,
         };
 
         if let Err(e) = core.wait_until_ready().await {
-            // Ensure we don't leave a half-started process or its config behind.
+            // Surface the log tail so the caller/UI sees the real reason
+            // (bad cipher/uuid/reality key, unreachable node, etc).
+            let detail = core.log_tail(1024);
             core.shutdown().await;
-            return Err(e);
+            return Err(if detail.is_empty() {
+                e
+            } else {
+                format!("{e}\nxray log:\n{detail}")
+            });
         }
         Ok(core)
+    }
+
+    /// Last `max` bytes of the xray stderr log, trimmed. Empty if unreadable.
+    fn log_tail(&self, max: usize) -> String {
+        let Ok(bytes) = std::fs::read(&self.log_file) else {
+            return String::new();
+        };
+        let start = bytes.len().saturating_sub(max);
+        String::from_utf8_lossy(&bytes[start..]).trim().to_string()
     }
 
     async fn wait_until_ready(&mut self) -> Result<(), String> {
@@ -145,13 +170,14 @@ impl XrayCore {
         }
     }
 
-    /// Kill the process (awaits reaping) and remove the temp config.
+    /// Kill the process (awaits reaping) and remove the temp config + log.
     pub async fn shutdown(&mut self) {
         if let Err(e) = self.child.start_kill() {
             tracing::warn!("xray core kill (port {}): {e}", self.local_port);
         }
         let _ = self.child.wait().await;
         let _ = std::fs::remove_file(&self.config_file);
+        let _ = std::fs::remove_file(&self.log_file);
     }
 
     /// Best-effort synchronous kill for the app-exit hook (no async runtime
@@ -159,6 +185,7 @@ impl XrayCore {
     pub fn start_kill_blocking(&mut self) {
         let _ = self.child.start_kill();
         let _ = std::fs::remove_file(&self.config_file);
+        let _ = std::fs::remove_file(&self.log_file);
     }
 
     pub fn pid(&self) -> Option<u32> {
