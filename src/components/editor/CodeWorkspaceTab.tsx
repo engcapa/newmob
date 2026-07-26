@@ -72,6 +72,7 @@ import {
   lspInlayHints,
   lspJavaModules,
   javaTestDiscover,
+  javaTestResolveLaunch,
   lspPrepareCallHierarchy,
   lspPrepareRename,
   lspPrepareTypeHierarchy,
@@ -4953,8 +4954,43 @@ export function CodeWorkspaceTab({
     });
   }, [activeKey, findRoot, javaTestBuildTool, runWorkspaceTask]);
 
+  // M9 debug-test: resolve the test's JUnit launch config (java-test) and start
+  // a debug session through the DAP path.
+  const debugJavaTest = useCallback((item: JavaTestItem) => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root") return;
+    const root = findRoot(file.ref.rootId);
+    const descriptor = lspDescriptorForFile(file);
+    const absolute = absolutePathForOpenFile(file);
+    if (!root || !descriptor || !absolute) return;
+    void (async () => {
+      try {
+        const launch = await javaTestResolveLaunch(descriptor, item);
+        await debugRef.current.startDebug({
+          workspaceId: descriptor.workspaceId,
+          rootPath: root.path,
+          filePath: absolute,
+          cwd: root.path,
+          mainClass: launch.mainClass,
+          projectName: launch.projectName,
+          classPaths: launch.classPaths,
+          modulePaths: launch.modulePaths,
+          args: launch.args,
+          vmArgs: launch.vmArgs,
+        });
+        setBottomDockTab("debug");
+        setBottomDockOpen(true);
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+      }
+    })();
+  }, [activeKey, findRoot, lspDescriptorForFile, absolutePathForOpenFile, setBottomDockOpen, setBottomDockTab, setStatusMessage]);
+
   // M9: debug session (breakpoints, stepping, variables, watch, console).
   const debug = useCodeDebugSession(workspaceInstanceId);
+  // Ref so callbacks declared above the hook (debug-test) can reach it.
+  const debugRef = useRef(debug);
+  debugRef.current = debug;
   const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
   const activeDebugBreakpoints = useMemo<DebugBreakpointMarker[]>(() => {
     if (!activeFileAbsPath) return [];
@@ -4969,6 +5005,34 @@ export function CodeWorkspaceTab({
   }, [activeFileAbsPath, debug.currentLocation]);
   const toggleActiveBreakpoint = useCallback((line: number) => {
     if (activeFileAbsPath) debug.toggleBreakpoint(normalizeFsPath(activeFileAbsPath), line);
+  }, [activeFileAbsPath, debug]);
+
+  /** Right-click a breakpoint (D5): set a condition or a logpoint message. */
+  const editActiveBreakpoint = useCallback((line: number) => {
+    if (!activeFileAbsPath) return;
+    const key = normalizeFsPath(activeFileAbsPath);
+    const existing = (debug.breakpoints[key] ?? []).find((bp) => bp.line === line);
+    if (!existing) debug.toggleBreakpoint(key, line); // ensure the breakpoint exists first
+    void (async () => {
+      const condition = await promptAppDialog({
+        title: `Breakpoint at line ${line}`,
+        label: "Condition (break only when true) — blank for none",
+        initialValue: existing?.condition ?? "",
+        allowEmpty: true,
+      });
+      if (condition === null) return; // cancelled
+      const logMessage = await promptAppDialog({
+        title: `Breakpoint at line ${line}`,
+        label: "Logpoint message (logs instead of breaking; {expr} interpolates) — blank for none",
+        initialValue: existing?.logMessage ?? "",
+        allowEmpty: true,
+      });
+      if (logMessage === null) return;
+      debug.setBreakpointOptions(key, line, {
+        condition: condition.trim() || undefined,
+        logMessage: logMessage.trim() || undefined,
+      });
+    })();
   }, [activeFileAbsPath, debug]);
 
   /** Build a Java launch config for the active file and start debugging. */
@@ -5126,6 +5190,7 @@ export function CodeWorkspaceTab({
         activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
         activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
         onToggleBreakpoint={groupId === activeEditorGroupId ? toggleActiveBreakpoint : undefined}
+        onEditBreakpoint={groupId === activeEditorGroupId ? editActiveBreakpoint : undefined}
         activeCapabilities={groupCapabilities}
         activeLspSyncing={!!groupLspState?.syncing}
         lspStatusPill={(
@@ -5750,6 +5815,7 @@ export function CodeWorkspaceTab({
                 active={bottomDockOpen && bottomDockTab === "tests"}
                 onDiscover={discoverActiveJavaTests}
                 onRun={runJavaTest}
+                onDebug={debugJavaTest}
                 runDisabled={javaTestBuildTool === null}
               />
             ),

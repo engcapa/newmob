@@ -151,10 +151,98 @@ fn file_uri(root_path: Option<&str>, file_path: &str) -> Result<String, String> 
         .map_err(|_| format!("Cannot build file URI for {}", absolute.display()))
 }
 
+/// A launch config for debugging a test (M9 debug-test), resolved by java-test.
+/// Fed to the Java DAP adapter as a pre-resolved config (mainClass + classPaths
+/// already known, so the adapter skips its own classpath resolution).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaTestLaunch {
+    pub main_class: String,
+    pub project_name: String,
+    pub class_paths: Vec<String>,
+    pub module_paths: Vec<String>,
+    pub args: Vec<String>,
+    pub vm_args: Vec<String>,
+}
+
+fn string_list(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// Parse java-test's JUnit launch-argument response into a `JavaTestLaunch`.
+/// Field names vary across java-test versions, so accept the common aliases
+/// (`mainClass`, `classpath`/`classPaths`, `modulepath`/`modulePaths`,
+/// `programArguments`/`args`, `vmArguments`/`vmArgs`). The body may be the object
+/// directly or nested under `body`.
+fn parse_test_launch(value: &Value) -> Option<JavaTestLaunch> {
+    let obj = value.get("body").unwrap_or(value);
+    let main_class = obj.get("mainClass").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    Some(JavaTestLaunch {
+        main_class: main_class.to_string(),
+        project_name: obj.get("projectName").and_then(Value::as_str).unwrap_or("").to_string(),
+        class_paths: string_list(obj.get("classpath").or_else(|| obj.get("classPaths"))),
+        module_paths: string_list(obj.get("modulepath").or_else(|| obj.get("modulePaths"))),
+        args: string_list(obj.get("programArguments").or_else(|| obj.get("args"))),
+        vm_args: string_list(obj.get("vmArguments").or_else(|| obj.get("vmArgs"))),
+    })
+}
+
+/// Resolve a JUnit launch configuration for a test item so it can be debugged
+/// through the DAP path (M9 debug-test). `test` is the discovered item's
+/// identity (fullName + uri + level) java-test needs; the exact arg shape is
+/// version-dependent, so we pass it through and parse tolerantly.
+#[tauri::command]
+pub async fn java_test_resolve_launch(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    test: Value,
+) -> Result<JavaTestLaunch, String> {
+    let result = state
+        .lsp
+        .execute_java_command(
+            workspace_id,
+            root_path,
+            file_path,
+            "vscode.java.test.junit.argument",
+            vec![test],
+        )
+        .await?;
+    parse_test_launch(&result)
+        .ok_or_else(|| "java-test did not return a runnable launch configuration".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn parses_test_launch_with_aliases() {
+        let value = json!({
+            "mainClass": "org.junit.platform.console.ConsoleLauncher",
+            "projectName": "demo",
+            "classpath": ["/cp/a.jar", "/cp/b.jar"],
+            "programArguments": ["-c", "com.example.CalcTest"],
+            "vmArguments": ["-ea"]
+        });
+        let launch = parse_test_launch(&value).expect("resolves");
+        assert_eq!(launch.main_class, "org.junit.platform.console.ConsoleLauncher");
+        assert_eq!(launch.project_name, "demo");
+        assert_eq!(launch.class_paths, vec!["/cp/a.jar", "/cp/b.jar"]);
+        assert_eq!(launch.args, vec!["-c", "com.example.CalcTest"]);
+        assert_eq!(launch.vm_args, vec!["-ea"]);
+        // Nested under body, and missing mainClass → None.
+        assert!(parse_test_launch(&json!({ "body": { "projectName": "x" } })).is_none());
+        assert_eq!(
+            parse_test_launch(&json!({ "body": { "mainClass": "M" } })).unwrap().main_class,
+            "M",
+        );
+    }
 
     #[test]
     fn parses_class_with_method_children() {

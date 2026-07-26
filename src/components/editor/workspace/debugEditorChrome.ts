@@ -43,6 +43,7 @@ export function createDebugEditorChrome(
   markers: DebugBreakpointMarker[],
   currentLine: number | null,
   onToggle: (line: number) => void,
+  onEdit?: (line: number) => void,
 ): Extension {
   const byLine = new Map(markers.map((m) => [m.line, m]));
   const extensions: Extension[] = [
@@ -55,9 +56,21 @@ export function createDebugEditorChrome(
       },
       initialSpacer: () => new BreakpointGutterMarker(false),
       domEventHandlers: {
-        mousedown: (view, lineBlock) => {
+        mousedown: (view, lineBlock, event) => {
           const line = view.state.doc.lineAt(lineBlock.from).number;
-          onToggle(line);
+          // Right-click (or ctrl-click) edits a breakpoint's condition/logpoint;
+          // plain click toggles it (D5).
+          const mouse = event as MouseEvent;
+          if (mouse.button === 2 || mouse.ctrlKey) {
+            onEdit?.(line);
+          } else {
+            onToggle(line);
+          }
+          return true;
+        },
+        contextmenu: (view, lineBlock) => {
+          const line = view.state.doc.lineAt(lineBlock.from).number;
+          onEdit?.(line);
           return true;
         },
       },

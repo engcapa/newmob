@@ -38,6 +38,8 @@ export interface CodeDebugSession {
   setBreakpointOptions: (path: string, line: number, options: Partial<DebugBreakpoint>) => void;
   setExceptionFilters: (ids: string[]) => void;
   step: (action: DebugStepAction) => void;
+  /** Hot-reload changed classes (java-debug `redefineClasses`); best-effort (D5). */
+  hotReload: () => void;
   evaluate: (expression: string, context?: string) => Promise<string>;
   /** Fetch variables for a `variablesReference` (D4 lazy tree). */
   fetchVariables: (variablesReference: number) => Promise<unknown>;
@@ -212,6 +214,13 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     void dapSendRequest(id, command, threadId != null ? { threadId } : {}).catch(() => {});
   }, [state?.stoppedThreadId]);
 
+  const hotReload = useCallback(() => {
+    const id = sessionIdRef.current;
+    if (!id) return;
+    // java-debug custom request; adapters without it just error (swallowed).
+    void dapSendRequest(id, "redefineClasses", {}).catch(() => {});
+  }, []);
+
   const evaluate = useCallback(async (expression: string, context = "repl"): Promise<string> => {
     const id = sessionIdRef.current;
     if (!id) return "";
@@ -256,6 +265,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setBreakpointOptions,
     setExceptionFilters,
     step,
+    hotReload,
     evaluate,
     fetchVariables,
     fetchScopes,

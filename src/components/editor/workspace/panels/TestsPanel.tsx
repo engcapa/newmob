@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, FlaskConical, Loader2, Play, RefreshCw } from "lucide-react";
+import { Bug, ChevronDown, ChevronRight, FlaskConical, Loader2, Play, RefreshCw } from "lucide-react";
 import type { JavaTestItem } from "../../../../lib/editor/lsp";
 
 interface TestsPanelProps {
@@ -12,6 +12,8 @@ interface TestsPanelProps {
   onDiscover: () => Promise<JavaTestItem[]>;
   /** Run a single class/method through the integrated terminal. */
   onRun: (item: JavaTestItem) => void;
+  /** Debug a single class/method through the DAP path (M9 debug-test). */
+  onDebug: (item: JavaTestItem) => void;
   /** True when the workspace has no Maven/Gradle runner (run disabled). */
   runDisabled: boolean;
 }
@@ -20,11 +22,13 @@ function TestRow({
   item,
   depth,
   onRun,
+  onDebug,
   runDisabled,
 }: {
   item: JavaTestItem;
   depth: number;
   onRun: (item: JavaTestItem) => void;
+  onDebug: (item: JavaTestItem) => void;
   runDisabled: boolean;
 }) {
   const [open, setOpen] = useState(true);
@@ -54,9 +58,18 @@ function TestRow({
         >
           <Play className="h-3 w-3" />
         </button>
+        <button
+          type="button"
+          data-testid={`tests-debug-${item.fullName}`}
+          className="shrink-0 opacity-0 group-hover:opacity-100"
+          onClick={() => onDebug(item)}
+          title="Debug test (requires java-debug + java-test bundles)"
+        >
+          <Bug className="h-3 w-3" />
+        </button>
       </div>
       {open && hasChildren && item.children.map((child) => (
-        <TestRow key={child.fullName} item={child} depth={depth + 1} onRun={onRun} runDisabled={runDisabled} />
+        <TestRow key={child.fullName} item={child} depth={depth + 1} onRun={onRun} onDebug={onDebug} runDisabled={runDisabled} />
       ))}
     </>
   );
@@ -67,6 +80,7 @@ export function TestsPanel({
   active,
   onDiscover,
   onRun,
+  onDebug,
   runDisabled,
 }: TestsPanelProps) {
   const [items, setItems] = useState<JavaTestItem[]>([]);
@@ -126,7 +140,7 @@ export function TestsPanel({
           <div className="px-3 py-2 text-[var(--taomni-text-muted)]">No tests found in this file.</div>
         )}
         {items.map((item) => (
-          <TestRow key={item.fullName} item={item} depth={0} onRun={onRun} runDisabled={runDisabled} />
+          <TestRow key={item.fullName} item={item} depth={0} onRun={onRun} onDebug={onDebug} runDisabled={runDisabled} />
         ))}
       </div>
     </div>

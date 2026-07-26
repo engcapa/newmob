@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   CirclePlay,
+  FlameKindling,
   Pause,
   Square,
 } from "lucide-react";
@@ -216,6 +217,10 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
               <button type="button" data-testid="debug-step-out" className={controlBtn}
                 onClick={() => debug.step("stepOut")} disabled={!stopped} title="Step out">
                 <ArrowUpFromLine className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" data-testid="debug-hot-reload" className={controlBtn}
+                onClick={() => debug.hotReload()} title="Hot reload changed classes">
+                <FlameKindling className="h-3.5 w-3.5 text-orange-500" />
               </button>
               <button type="button" data-testid="debug-stop" className={controlBtn}
                 onClick={() => debug.terminate()} title="Stop">

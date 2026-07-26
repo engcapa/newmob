@@ -356,6 +356,29 @@ export function javaTestDiscover(descriptor: LspDocumentDescriptor): Promise<Jav
   });
 }
 
+/** A java-test-resolved launch config for debugging a test (M9 debug-test). */
+export interface JavaTestLaunch {
+  mainClass: string;
+  projectName: string;
+  classPaths: string[];
+  modulePaths: string[];
+  args: string[];
+  vmArgs: string[];
+}
+
+/** Resolve a JUnit launch config for a discovered test so it can be debugged. */
+export function javaTestResolveLaunch(
+  descriptor: LspDocumentDescriptor,
+  test: JavaTestItem,
+): Promise<JavaTestLaunch> {
+  return invoke<JavaTestLaunch>("java_test_resolve_launch", {
+    workspaceId: descriptor.workspaceId,
+    rootPath: descriptor.rootPath ?? null,
+    filePath: descriptor.filePath,
+    test,
+  });
+}
+
 export function lspDocumentStatus(
   descriptor: LspDocumentDescriptor,
 ): Promise<LspDocumentStatus> {

@@ -15,6 +15,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     setBreakpointOptions: vi.fn(),
     setExceptionFilters: vi.fn(),
     step: vi.fn(),
+    hotReload: vi.fn(),
     evaluate: vi.fn().mockResolvedValue(""),
     fetchVariables: vi.fn().mockResolvedValue({ variables: [] }),
     fetchScopes: vi.fn().mockResolvedValue({ scopes: [] }),

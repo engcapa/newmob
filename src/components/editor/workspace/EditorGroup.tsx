@@ -86,6 +86,7 @@ interface EditorGroupProps {
   /** 1-based current-execution line on the active file (or null). */
   activeDebugCurrentLine?: number | null;
   onToggleBreakpoint?: (line: number) => void;
+  onEditBreakpoint?: (line: number) => void;
   activeCapabilities: LspCapabilitySummary | null;
   activeLspSyncing: boolean;
   lspStatusPill: ReactNode;
@@ -167,6 +168,7 @@ export function EditorGroup({
   activeDebugBreakpoints,
   activeDebugCurrentLine,
   onToggleBreakpoint,
+  onEditBreakpoint,
   activeCapabilities,
   activeLspSyncing,
   lspStatusPill,
@@ -569,6 +571,7 @@ export function EditorGroup({
                     debugBreakpoints={activeDebugBreakpoints}
                     debugCurrentLine={activeDebugCurrentLine}
                     onToggleBreakpoint={onToggleBreakpoint}
+                    onEditBreakpoint={onEditBreakpoint}
                     reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                     onChange={(doc) => {
                       if (previewKey === activeFile.key) onPromotePreview(activeFile.key);

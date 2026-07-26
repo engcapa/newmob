@@ -505,6 +505,7 @@ pub fn run() {
             dap::dap_send,
             dap::dap_terminate,
             java_test::java_test_discover,
+            java_test::java_test_resolve_launch,
             lsp::lsp_references,
             lsp::lsp_document_symbols,
             lsp::lsp_completion,

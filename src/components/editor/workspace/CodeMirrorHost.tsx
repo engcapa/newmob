@@ -119,6 +119,8 @@ interface CodeMirrorHostProps {
   onGitChangeClick?: (change: GitLineChange) => void;
   /** Toggle a breakpoint at a 1-based line (breakpoint gutter click). */
   onToggleBreakpoint?: (line: number) => void;
+  /** Edit a breakpoint's condition/logpoint at a 1-based line (gutter right-click). */
+  onEditBreakpoint?: (line: number) => void;
   /** Editor-area right-click (symbol / buffer menu). */
   onContextMenu?: (info: EditorContextMenuRequest) => void;
   completionTriggers?: string[];
@@ -310,6 +312,7 @@ export function CodeMirrorHost({
   onLightbulb,
   onGitChangeClick,
   onToggleBreakpoint,
+  onEditBreakpoint,
   onContextMenu,
   completionTriggers,
   signatureTriggers,
@@ -339,6 +342,7 @@ export function CodeMirrorHost({
   const renderedGitRef = useRef({ changes: gitChanges, blame: gitBlame });
   const renderedDebugRef = useRef({ breakpoints: debugBreakpoints, currentLine: debugCurrentLine });
   const onToggleBreakpointRef = useRef(onToggleBreakpoint);
+  const onEditBreakpointRef = useRef(onEditBreakpoint);
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
   const onHoverRef = useRef(onHover);
@@ -370,6 +374,7 @@ export function CodeMirrorHost({
   onLightbulbRef.current = onLightbulb;
   onGitChangeClickRef.current = onGitChangeClick;
   onToggleBreakpointRef.current = onToggleBreakpoint;
+  onEditBreakpointRef.current = onEditBreakpoint;
   onContextMenuRef.current = onContextMenu;
   completionTriggersRef.current = completionTriggers ?? [];
   signatureTriggersRef.current = signatureTriggers ?? [];
@@ -598,6 +603,7 @@ export function CodeMirrorHost({
           debugBreakpoints ?? [],
           debugCurrentLine ?? null,
           (line) => onToggleBreakpointRef.current?.(line),
+          (line) => onEditBreakpointRef.current?.(line),
         )),
         signatureCompartment.current.of([]),
         readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
@@ -841,6 +847,7 @@ export function CodeMirrorHost({
         debugBreakpoints ?? [],
         debugCurrentLine ?? null,
         (line) => onToggleBreakpointRef.current?.(line),
+        (line) => onEditBreakpointRef.current?.(line),
       )),
     });
   }, [debugBreakpoints, debugCurrentLine]);

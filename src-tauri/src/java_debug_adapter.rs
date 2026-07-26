@@ -185,14 +185,33 @@ impl DebugAdapter for JavaDebugAdapter {
             }
         };
 
-        // 2) Classpath + java executable for the resolved main class.
-        let cp_args = vec![json!(main_class), json!(project_name)];
-        let classpath = run("vscode.java.resolveClasspath", cp_args.clone()).await?;
-        let (modulepaths, classpaths) = parse_classpath(&classpath);
-        let java_exec = run("vscode.java.resolveJavaExecutable", cp_args)
-            .await
-            .ok()
-            .and_then(|v| v.as_str().map(str::to_string));
+        // 2) Classpath + java executable. When the caller already resolved the
+        //    classpath (debug-test passes java-test's JUnit launch config), skip
+        //    jdtls resolution and use the provided paths.
+        let preset_classpaths = launch_config
+            .get("classPaths")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .filter(|paths| !paths.is_empty());
+        let (modulepaths, classpaths) = if let Some(classpaths) = preset_classpaths {
+            let modulepaths = launch_config
+                .get("modulePaths")
+                .and_then(Value::as_array)
+                .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            (modulepaths, classpaths)
+        } else {
+            let cp_args = vec![json!(main_class), json!(project_name)];
+            let classpath = run("vscode.java.resolveClasspath", cp_args).await?;
+            parse_classpath(&classpath)
+        };
+        let java_exec = run(
+            "vscode.java.resolveJavaExecutable",
+            vec![json!(main_class), json!(project_name)],
+        )
+        .await
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string));
 
         // 3) Ask java-debug to start listening; it returns the port we connect to.
         let port_value = run("vscode.java.startDebugSession", vec![]).await?;
