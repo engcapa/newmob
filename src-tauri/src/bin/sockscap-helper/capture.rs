@@ -203,6 +203,20 @@ impl CaptureEngine {
             )
         })?;
 
+        // Deepen the kernel queues before any traffic arrives. The NETWORK queue
+        // holds real packets so it gets the byte-size bump too; FLOW events are
+        // zero-length, so only its length matters.
+        let net_queue = api.tune_queue(net_h, true);
+        if let Some(h) = flow_h {
+            let _ = api.tune_queue(h, false);
+        }
+        tracing::info!(
+            "sockscap-helper: NETWORK queue length={} size={} time={}ms",
+            net_queue.length,
+            net_queue.size,
+            net_queue.time_ms
+        );
+
         // streamdump reflection delivers to client_lan:relay, not necessarily 127.0.0.1
         let relay_desc = format!("*:{}", plan.relay_port);
         let mode_apps = plan.mode_apps;
@@ -254,6 +268,11 @@ impl CaptureEngine {
             "flowNote": flow_note,
             "flowLayer": self.flow_handle.is_some(),
             "dll": api.dll_path.display().to_string(),
+            "queue": {
+                "length": net_queue.length,
+                "size": net_queue.size,
+                "timeMs": net_queue.time_ms,
+            },
         }))
     }
 
