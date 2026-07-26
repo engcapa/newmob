@@ -83,19 +83,24 @@ impl XrayCore {
         std::fs::write(&config_file, json.as_bytes())
             .map_err(|e| format!("write xray config: {e}"))?;
 
-        // Capture stderr so a failed/misbehaving core is diagnosable instead of
-        // a black box. xray logs config/handshake errors here.
+        // Capture output so a failed/misbehaving core is diagnosable instead of
+        // a black box. xray writes config errors to stdout and runtime/handshake
+        // errors to stderr, so route BOTH to the log (a null stdout is how a bad
+        // cipher/uuid used to vanish silently).
         let log_file = work_dir.join(format!("xray-{local_port}.log"));
-        let log_handle = std::fs::File::create(&log_file)
+        let log_out = std::fs::File::create(&log_file)
             .map_err(|e| format!("create xray log: {e}"))?;
+        let log_err = log_out
+            .try_clone()
+            .map_err(|e| format!("clone xray log handle: {e}"))?;
 
         let mut cmd = Command::new(exe);
         cmd.arg("run")
             .arg("-c")
             .arg(&config_file)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(log_handle))
+            .stdout(Stdio::from(log_out))
+            .stderr(Stdio::from(log_err))
             // Backstop: if taomni dies without calling shutdown, tokio's reaper
             // kills the child on drop rather than leaking it.
             .kill_on_drop(true);
@@ -119,10 +124,14 @@ impl XrayCore {
         };
 
         if let Err(e) = core.wait_until_ready().await {
-            // Surface the log tail so the caller/UI sees the real reason
-            // (bad cipher/uuid/reality key, unreachable node, etc).
+            // Reap the process first so its stdout/stderr are flushed and the
+            // log file is complete, THEN read the tail, THEN clean up. (Reading
+            // before the child is reaped can catch an empty/partial log.)
+            let _ = core.child.start_kill();
+            let _ = core.child.wait().await;
             let detail = core.log_tail(1024);
-            core.shutdown().await;
+            let _ = std::fs::remove_file(&core.config_file);
+            let _ = std::fs::remove_file(&core.log_file);
             return Err(if detail.is_empty() {
                 e
             } else {
