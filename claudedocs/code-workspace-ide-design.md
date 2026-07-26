@@ -587,7 +587,7 @@ src/stores/
 | **M5 差异化（P2）** | 本地历史、AI 集成入口、语义高亮、TODO/书签（可选）、远程工作区 spike | M–L | ✅ 5/5（代码已交付；真机冒烟后置） |
 | **M6 Java 基础对齐（P0，§11 A+B）** | jdtls 初始化 `java.*` 设置全集（含 Lombok/autobuild/organizeImports/codeGeneration）；大文件性能（大文件降级守卫、增量 diff 提速） | M | ✅ 代码已交付（`c35d963` A + `4a06f91` B；真机冒烟后置；ChangeSet→LSP 全量重写按风险显式后置，见 §11.B） |
 | **M7 工程智能（P1，§11 C+F）** | 全项目诊断（先 spike，后端聚合命令 + Problems 面板切换）；构建集成增强（依赖树、生命周期/任务树、项目重载、模块视图） | L | 🔶 F 构建集成 + C 全项目诊断基础设施代码已交付（`ba037ac` 重载 + `a0d209c` 任务树 + `f9abab5` 依赖树 + 模块视图 + `083999f` 全项目诊断后端 + 前端 Problems 切换）；C 的诊断刷新由 event 改为轮询（Windows 链接约束，见 §11.C），命中语义待用户真机 spike |
-| **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | 🔶 Bundle 基建（`4929467`）+ D1 通用 DAP 内核（`dap.rs`：分帧编解码/消息分类/session 泵/注册表/start·send·terminate 命令，语言无关、空注册表）代码已交付；D2 Java 适配器 + E 测试 run-only 后续；真机冒烟后置 |
+| **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | 🔶 代码已交付：Bundle 基建（`4929467`）+ D1 DAP 内核（`b432f0f`）+ D2 Java 适配器（`9edb7b7`：jdtls resolve + startDebugSession → DAP launch plan）+ E 测试探测/terminal 运行（`java_test.rs` + Tests 面板）；E 结构化结果树/debug-test + D3–D5 调试主线后续；真机冒烟后置（jdtls 已在 PATH，bundle jar 待配置） |
 | **M9 调试主线 + 收口（P1/P2，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载；debug-test；真机冒烟回填 | XL | ⬜ 未开工（依赖 M8 的 D1–D2） |
 
 依赖关系：M0 是一切前提；M1/M2 内部可并行（后端 LSP 扩展与搜索模块独立）；M3 依赖 M0 的 dock 容器；M4 的层级面板依赖 M0 dock + M2 的 LSP 请求管道。**M6 两条线（A/B）互相独立可并行，且不依赖 M1–M5 之外的新前提；M7 的全项目诊断（C）依赖 M6-A 的 `autobuild`，构建增强（F）独立；M8 的测试/调试依赖 Bundle 基建，DAP 内核（D1）可与 M7 并行起步；M9 的 debug-test 依赖 M8 的 D1–D2。** 每个里程碑独立可发布、可验收。M6–M9 的完整拆分见 §11。
@@ -876,6 +876,8 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
 - **运行**：非调试 run 经 launch（不依赖 D）；调试 run 经 D 的 DAP（依赖 D2）。结果 pass/fail/skip/耗时。
 - **前端**：测试树面板（按包/类/方法）、gutter run·debug 图标、结果状态、失败堆栈跳转、「重跑失败」。
 - **排期**：run-only 可先于 D 交付；debug-test 依赖 D2。
+
+**🔶 已交付（M8 E，探测 + terminal 运行）**：新 `java_test.rs`——`java_test_discover(workspace_id,root,file)` 走 jdtls `vscode.java.test.findTestTypesAndMethods`（file: URI 后端派生），容错解析（字段别名 fullName/jdtHandler/id、displayName/label/name、testLevel/level、children/tests）为 `JavaTestItem{name,fullName,kind,uri,range,children}` 树；复用 `LspManager::execute_java_command`。前端 `javaTestDiscover` 包装 + Tests 底部 dock 面板（按 class→method 树、run 图标、按活动 .java 文件自动探测）；**run-only 经集成终端**：`javaTestRunCommand`（Maven `-Dtest='Class#method'` / Gradle `--tests 'Class.method'`，构建工具由 `workspace_task_tree` 分组探测）复用 `runWorkspaceTask`（PTY）。单测：Rust 解析 4（class/method、结构推断 kind、空/畸形、location 别名）+ 前端 run 命令 5。**显式后置**：结构化 pass/fail/skip/耗时结果树 + 失败堆栈跳转 + debug-test（走 D2 DAP）——那是独立的 JUnit 结果 socket 协议大块、纯真机依赖。真机门槛：探测/运行需 jdtls + java-test bundle 加载 + Java 工程。
 
 ### 11.7 实施顺序与里程碑映射
 

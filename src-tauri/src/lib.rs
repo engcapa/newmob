@@ -12,6 +12,7 @@ mod hbase;
 mod history;
 mod java_bundles;
 mod java_debug_adapter;
+mod java_test;
 mod lanchat;
 mod lsp;
 pub mod llm;
@@ -502,6 +503,7 @@ pub fn run() {
             dap::dap_start_session,
             dap::dap_send_request,
             dap::dap_terminate,
+            java_test::java_test_discover,
             lsp::lsp_references,
             lsp::lsp_document_symbols,
             lsp::lsp_completion,

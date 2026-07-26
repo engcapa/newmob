@@ -37,6 +37,7 @@ import {
   TerminalSquare,
   Play,
   Hammer,
+  FlaskConical,
   Search,
   X,
   ZoomIn,
@@ -46,6 +47,7 @@ import {
   workspaceListDir,
   workspaceReadFile,
   workspaceReadLooseFile,
+  workspaceTaskTree,
   workspaceWriteFile,
   workspaceWriteLooseFile,
   type WorkspaceGitRoot,
@@ -68,6 +70,7 @@ import {
   lspImplementation,
   lspInlayHints,
   lspJavaModules,
+  javaTestDiscover,
   lspPrepareCallHierarchy,
   lspPrepareRename,
   lspPrepareTypeHierarchy,
@@ -85,6 +88,7 @@ import {
   lspTypeDefinition,
   lspWorkspaceSymbols,
   type LspCodeAction,
+  type JavaTestItem,
   type LspCompletionItem,
   type LspCompletionResult,
   type LspDiagnostic,
@@ -377,6 +381,8 @@ import {
 } from "./workspace/panels/TerminalDockPanel";
 import { RunPanel, type RunPanelHandle, type WorkspaceTaskItem } from "./workspace/panels/RunPanel";
 import { BuildPanel } from "./workspace/panels/BuildPanel";
+import { TestsPanel } from "./workspace/panels/TestsPanel";
+import { defaultRunner, javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
 import type { EditorRevealTarget } from "./workspace/EditorGroup";
 
 export function CodeWorkspaceTab({
@@ -4886,6 +4892,62 @@ export function CodeWorkspaceTab({
     },
     [openFile, problemPathToRef, revealEditorLocation],
   );
+
+  // M8 E: Java test discovery + terminal run. Discovery targets the active .java
+  // file; running builds a Maven/Gradle command and reuses the terminal runner.
+  const activeFileIsJava = !!activeFile
+    && !activeFile.library
+    && activeFile.languagePath.toLowerCase().endsWith(".java");
+  const [javaTestBuildTool, setJavaTestBuildTool] = useState<JavaTestBuildTool | null>(null);
+
+  const discoverActiveJavaTests = useCallback(async () => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file) return [];
+    const descriptor = lspDescriptorForFile(file);
+    if (!descriptor) return [];
+    return javaTestDiscover(descriptor);
+  }, [activeKey, lspDescriptorForFile]);
+
+  // Detect the active file's build tool (Maven/Gradle) for the run command; only
+  // while the Tests tab is open for a Java file. Cached per detection.
+  useEffect(() => {
+    if (!(bottomDockOpen && bottomDockTab === "tests" && activeFileIsJava && activeFile)) return;
+    if (activeFile.ref.kind !== "root") {
+      setJavaTestBuildTool(null);
+      return;
+    }
+    const root = findRoot(activeFile.ref.rootId);
+    if (!root) return;
+    let cancelled = false;
+    void workspaceTaskTree(root.path)
+      .then((groups) => {
+        if (cancelled) return;
+        const sources = new Set(groups.map((group) => group.source));
+        setJavaTestBuildTool(sources.has("Maven") ? "maven" : sources.has("Gradle") ? "gradle" : null);
+      })
+      .catch(() => {
+        if (!cancelled) setJavaTestBuildTool(null);
+      });
+    return () => { cancelled = true; };
+  }, [activeFile, activeFileIsJava, bottomDockOpen, bottomDockTab, findRoot]);
+
+  const runJavaTest = useCallback((item: JavaTestItem) => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root" || !javaTestBuildTool) return;
+    const root = findRoot(file.ref.rootId);
+    if (!root) return;
+    const command = javaTestRunCommand(javaTestBuildTool, item, defaultRunner(javaTestBuildTool));
+    runWorkspaceTask({
+      id: `java-test:${item.fullName}`,
+      label: `Test ${item.name}`,
+      command,
+      cwd: root.path,
+      source: "Test",
+      rootId: root.id,
+      rootName: root.name,
+    });
+  }, [activeKey, findRoot, javaTestBuildTool, runWorkspaceTask]);
+
   useEffect(() => {
     if (!onSyncGitManager) return;
     onSyncGitManager(gitManagerPayload);
@@ -5619,6 +5681,21 @@ export function CodeWorkspaceTab({
                   // A synthetic .java path selects the root's jdtls session
                   // (session keys on project scope, not on the file existing).
                   lspJavaModules(lspDescriptorForPath(rootPath, "__taomni_modules__.java"))}
+              />
+            ),
+          },
+          {
+            id: "tests",
+            label: "Tests",
+            icon: <FlaskConical className="h-3.5 w-3.5" />,
+            content: (
+              <TestsPanel
+                activeFileTitle={activeFileIsJava ? activeFile?.title ?? null : null}
+                canDiscover={activeFileIsJava}
+                active={bottomDockOpen && bottomDockTab === "tests"}
+                onDiscover={discoverActiveJavaTests}
+                onRun={runJavaTest}
+                runDisabled={javaTestBuildTool === null}
               />
             ),
           },

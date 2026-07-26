@@ -331,6 +331,31 @@ export function lspDetectJavaBundles(): Promise<LspBundleStatus[]> {
   return invoke<LspBundleStatus[]>("lsp_detect_java_bundles");
 }
 
+/** A discovered Java test node (class or method) from the java-test bundle (M8 E). */
+export interface JavaTestItem {
+  name: string;
+  fullName: string;
+  /** "class" | "method" | "other". */
+  kind: string;
+  uri: string | null;
+  range: LspRange | null;
+  children: JavaTestItem[];
+}
+
+/**
+ * Discover test classes/methods in a Java file via the java-test bundle.
+ * `descriptor` selects the jdtls session (its file URI is derived on the
+ * backend). Returns [] when the file has no tests; rejects when no session /
+ * bundle is available.
+ */
+export function javaTestDiscover(descriptor: LspDocumentDescriptor): Promise<JavaTestItem[]> {
+  return invoke<JavaTestItem[]>("java_test_discover", {
+    workspaceId: descriptor.workspaceId,
+    rootPath: descriptor.rootPath ?? null,
+    filePath: descriptor.filePath,
+  });
+}
+
 export function lspDocumentStatus(
   descriptor: LspDocumentDescriptor,
 ): Promise<LspDocumentStatus> {

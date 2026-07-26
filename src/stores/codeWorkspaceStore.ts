@@ -21,7 +21,8 @@ export type BottomDockTabId =
   | "todos"
   | "terminal"
   | "run"
-  | "build";
+  | "build"
+  | "tests";
 export type EditorGroupId = "primary" | "secondary";
 export type EditorSplitOrientation = "horizontal" | "vertical";
 export type RightPaneTabId = "outline" | "documentation";

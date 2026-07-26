@@ -49,6 +49,7 @@ const lspMocks = vi.hoisted(() => ({
   lspJavaModules: vi.fn(),
   lspWorkspaceDiagnostics: vi.fn(),
   lspBuildWorkspace: vi.fn(),
+  javaTestDiscover: vi.fn(),
   lspReferences: vi.fn(),
   lspPrepareCallHierarchy: vi.fn(),
   lspCallHierarchyIncoming: vi.fn(),
