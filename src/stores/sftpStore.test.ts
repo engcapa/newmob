@@ -126,6 +126,23 @@ describe("sftpStore", () => {
     expect(s.remote.error).toBe("socket closed");
   });
 
+  it("escalates 'session closed' (russh-sftp dropped transport) to session level error", async () => {
+    // Regression for #425: a dropped SFTP transport surfaces as
+    // "Failed to read <path>: session closed". Previously this did not match
+    // isConnectionError, so no reconnect banner appeared and the pane stayed
+    // wedged on every click.
+    vi.mocked(sftpListRemote).mockRejectedValue(
+      new Error("Failed to read /data/users/x/scripts: session closed"),
+    );
+
+    await useSftpStore.getState().navigate("sid", "remote", "/some/path");
+
+    const s = useSftpStore.getState().sessions.sid;
+    expect(s.attached).toBe(false);
+    expect(s.error).toContain("session closed");
+    expect(s.remote.error).toContain("session closed");
+  });
+
   it("does not escalate non-connection errors on remote navigation", async () => {
     vi.mocked(sftpListRemote).mockRejectedValue(new Error("Permission denied"));
 

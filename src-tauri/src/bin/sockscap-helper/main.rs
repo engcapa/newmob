@@ -89,6 +89,7 @@ mod windows_main {
         let mut port: u16 = 0;
         let mut ready_file: Option<PathBuf> = None;
         let mut windivert_dir: Option<PathBuf> = None;
+        let mut parent_pid: Option<u32> = None;
 
         let mut i = 0;
         while i < args.len() {
@@ -108,6 +109,10 @@ mod windows_main {
                 "--windivert-dir" => {
                     i += 1;
                     windivert_dir = args.get(i).map(PathBuf::from);
+                }
+                "--parent-pid" => {
+                    i += 1;
+                    parent_pid = args.get(i).and_then(|s| s.parse().ok());
                 }
                 other => eprintln!("unknown arg: {other}"),
             }
@@ -139,6 +144,21 @@ mod windows_main {
         let running = Arc::new(AtomicBool::new(true));
         let token = Arc::new(token);
         let engine = Arc::new(Mutex::new(CaptureEngine::new(windivert_dir)));
+
+        // Parent-death watchdog: if the main Taomni process exits without a
+        // clean shutdown RPC (crash, kill, forced logoff), tear down WinDivert
+        // and exit so an elevated helper + loaded driver never leak.
+        if let Some(ppid) = parent_pid {
+            let engine_wd = Arc::clone(&engine);
+            std::thread::spawn(move || {
+                wait_for_parent_exit(ppid);
+                if let Ok(mut eng) = engine_wd.lock() {
+                    eng.stop();
+                }
+                // Parent is gone; nothing left to serve.
+                std::process::exit(0);
+            });
+        }
 
         while running.load(Ordering::SeqCst) {
             let (stream, _) = match listener.accept() {
@@ -448,5 +468,29 @@ mod windows_main {
             fn IsUserAnAdmin() -> i32;
         }
         unsafe { IsUserAnAdmin() != 0 }
+    }
+
+    /// Block until the process `ppid` exits, then return. Uses a wait on the
+    /// process handle (no polling / PID-reuse race: the handle refers to the
+    /// exact process even if the pid is later recycled). If the handle cannot
+    /// be opened (already gone, or access denied), return promptly so the
+    /// caller shuts down rather than lingering forever.
+    fn wait_for_parent_exit(ppid: u32) {
+        use winapi::shared::minwindef::FALSE;
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::synchapi::WaitForSingleObject;
+        use winapi::um::winbase::INFINITE;
+        use winapi::um::winnt::SYNCHRONIZE;
+
+        unsafe {
+            let h = OpenProcess(SYNCHRONIZE, FALSE, ppid);
+            if h.is_null() {
+                // Parent already gone or not openable — do not hang.
+                return;
+            }
+            let _ = WaitForSingleObject(h, INFINITE);
+            CloseHandle(h);
+        }
     }
 }

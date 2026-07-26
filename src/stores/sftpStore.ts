@@ -173,8 +173,15 @@ export function isConnectionError(err: unknown): boolean {
     msg.includes("connection closed") ||
     msg.includes("socket closed") ||
     msg.includes("channel closed") ||
+    // russh-sftp raises this once its background I/O task ends (dropped
+    // connection / idle timeout); the backend attempts a transparent
+    // reconnect, but if that fails we still want the reconnect banner.
+    msg.includes("session closed") ||
+    msg.includes("sender dropped") ||
     msg.includes("broken pipe") ||
+    msg.includes("connection reset") ||
     msg.includes("not attached") ||
+    msg.includes("not connected") ||
     msg.includes("ssh error") ||
     msg.includes("io error") ||
     msg.includes("timed out") ||
