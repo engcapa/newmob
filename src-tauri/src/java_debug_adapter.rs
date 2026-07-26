@@ -57,9 +57,10 @@ fn session_scope(cfg: &Value) -> Result<SessionScope, String> {
 struct MainClassCandidate {
     main_class: String,
     project_name: String,
+    file_path: Option<String>,
 }
 
-/// Parse `vscode.java.resolveMainClass` output (`[{ mainClass, projectName }]`).
+/// Parse `vscode.java.resolveMainClass` output (`[{ mainClass, projectName, filePath }]`).
 fn parse_main_classes(value: &Value) -> Vec<MainClassCandidate> {
     value
         .as_array()
@@ -78,11 +79,39 @@ fn parse_main_classes(value: &Value) -> Vec<MainClassCandidate> {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string(),
+                        file_path: item
+                            .get("filePath")
+                            .and_then(Value::as_str)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Normalize a path for comparison: forward slashes + lowercase (Windows
+/// paths from jdtls and from the frontend differ in slash direction and
+/// drive-letter case).
+fn comparable_path(path: &str) -> String {
+    path.replace('\\', "/").to_lowercase()
+}
+
+/// Pick the main class to launch: the candidate declared in the active file
+/// ("debug the file I'm looking at", like IDEA's run gutter), else the first.
+/// jdtls returns the whole workspace's mains in arbitrary order, so taking the
+/// first blindly can launch a different class than the one on screen.
+fn pick_main_class(
+    candidates: Vec<MainClassCandidate>,
+    target_file: &str,
+) -> Option<MainClassCandidate> {
+    let target = comparable_path(target_file);
+    candidates
+        .iter()
+        .find(|c| c.file_path.as_deref().is_some_and(|p| comparable_path(p) == target))
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
 }
 
 /// Parse `vscode.java.resolveClasspath` output — a `[[modulepaths],[classpaths]]`
@@ -192,9 +221,7 @@ impl DebugAdapter for JavaDebugAdapter {
             }
             _ => {
                 let resolved = run("vscode.java.resolveMainClass", vec![]).await?;
-                let candidate = parse_main_classes(&resolved)
-                    .into_iter()
-                    .next()
+                let candidate = pick_main_class(parse_main_classes(&resolved), &scope.file_path)
                     .ok_or("No runnable main class found in this Java project")?;
                 (candidate.main_class, candidate.project_name)
             }
@@ -267,7 +294,31 @@ mod tests {
         assert_eq!(mains.len(), 1);
         assert_eq!(mains[0].main_class, "com.example.App");
         assert_eq!(mains[0].project_name, "demo");
+        assert_eq!(mains[0].file_path.as_deref(), Some("/x/App.java"));
         assert!(parse_main_classes(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn picks_the_main_class_declared_in_the_active_file() {
+        let candidates = vec![
+            MainClassCandidate {
+                main_class: "com.example.Other".into(),
+                project_name: "demo".into(),
+                file_path: Some("D:\\repo\\src\\Other.java".into()),
+            },
+            MainClassCandidate {
+                main_class: "com.example.App".into(),
+                project_name: "demo".into(),
+                file_path: Some("D:\\repo\\src\\App.java".into()),
+            },
+        ];
+        // Slash direction + drive-letter case differences must not break matching.
+        let picked = pick_main_class(candidates.clone(), "d:/repo/src/App.java").unwrap();
+        assert_eq!(picked.main_class, "com.example.App");
+        // No file match: fall back to the first candidate.
+        let fallback = pick_main_class(candidates, "/elsewhere/Main.java").unwrap();
+        assert_eq!(fallback.main_class, "com.example.Other");
+        assert!(pick_main_class(vec![], "/x.java").is_none());
     }
 
     #[test]
