@@ -39,6 +39,8 @@ export interface BuildEditorContextMenuInput {
   actions: EditorContextMenuActions;
   /** When true, LSP navigation items stay enabled even if capabilities are unknown. */
   lspAvailable?: boolean;
+  /** Present while a debug session is active — adds Run to Cursor (IDEA Alt+F9). */
+  debug?: { canRunToCursor: boolean; runToCursor: () => void } | null;
 }
 
 function capEnabled(
@@ -58,6 +60,19 @@ function capEnabled(
 export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput): MenuItem[] {
   const { capabilities, hasSelection, clientX, clientY, actions } = input;
   const lspAvailable = input.lspAvailable ?? true;
+
+  const debugItems: MenuItem[] = input.debug
+    ? [
+      { separator: true, label: "" },
+      {
+        label: "Run to Cursor",
+        shortcut: "Alt+F9",
+        testId: "editor-context-run-to-cursor",
+        disabled: !input.debug.canRunToCursor,
+        onClick: input.debug.runToCursor,
+      },
+    ]
+    : [];
 
   return [
     {
@@ -132,6 +147,7 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
         && !capEnabled(capabilities, "rangeFormatting", lspAvailable),
       onClick: actions.format,
     },
+    ...debugItems,
     { separator: true, label: "" },
     {
       label: "Cut",

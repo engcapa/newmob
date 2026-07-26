@@ -2,7 +2,8 @@
  * Pure debug-session model (M9). Argument builders, response parsers, and event
  * reducers for the DAP flow — all side-effect-free so they unit-test without a
  * live adapter. The orchestration hook (useCodeDebugSession) wires these to the
- * kernel commands + events.
+ * kernel commands + events. Everything here is DAP-standard and language-agnostic;
+ * language-specific behavior stays in the Rust adapters.
  */
 
 /** A user breakpoint on a source line (1-based), with optional D5 extras. */
@@ -10,6 +11,8 @@ export interface DebugBreakpoint {
   line: number;
   /** D5: only break when this expression is true. */
   condition?: string;
+  /** Break only when the hit count matches (DAP `hitCondition`, e.g. "5"). */
+  hitCondition?: string;
   /** D5: logpoint — log this message (with `{expr}` interpolation) instead of breaking. */
   logMessage?: string;
 }
@@ -30,6 +33,29 @@ export interface DebugThread {
 
 export type DebugStatus = "starting" | "running" | "stopped" | "terminated";
 
+/** One console line: a debuggee `output` event or a client-side REPL echo. */
+export interface DebugConsoleLine {
+  /** DAP output category (`stdout`/`stderr`/`console`…) or client-side `repl`/`result`. */
+  category: string;
+  text: string;
+}
+
+/** Parsed `exceptionInfo` response (shown when stopped on an exception). */
+export interface DebugExceptionInfo {
+  exceptionId: string;
+  description: string;
+  /** Full stack trace text when the adapter provides one. */
+  details: string | null;
+}
+
+/** Result of `evaluate` (and `setVariable`): display value + expandable ref. */
+export interface EvaluateResult {
+  value: string;
+  /** Non-zero when the value is structured and expandable via `variables`. */
+  variablesReference: number;
+  type: string | null;
+}
+
 export interface DebugSessionState {
   sessionId: string;
   status: DebugStatus;
@@ -38,8 +64,14 @@ export interface DebugSessionState {
   stoppedReason: string | null;
   threads: DebugThread[];
   frames: DebugStackFrame[];
-  /** Console/stdout/stderr lines from `output` events. */
-  output: string[];
+  /** Thread whose stack is displayed (defaults to the stopped thread). */
+  selectedThreadId: number | null;
+  /** Frame that variables / watches / evaluate target (defaults to the top frame). */
+  selectedFrameId: number | null;
+  /** Populated via `exceptionInfo` when stopped on an exception. */
+  exceptionInfo: DebugExceptionInfo | null;
+  /** Console lines from `output` events + client-side REPL echoes. */
+  output: DebugConsoleLine[];
 }
 
 export function initialDebugState(sessionId: string): DebugSessionState {
@@ -50,8 +82,43 @@ export function initialDebugState(sessionId: string): DebugSessionState {
     stoppedReason: null,
     threads: [],
     frames: [],
+    selectedThreadId: null,
+    selectedFrameId: null,
+    exceptionInfo: null,
     output: [],
   };
+}
+
+/**
+ * State transition when the debuggee resumes. Also applied optimistically after
+ * a successful continue/step response: adapters are not required to emit a
+ * `continued` event for explicit resumes, so waiting for one leaves the UI
+ * frozen on a stale stack.
+ */
+export function markResumed(state: DebugSessionState): DebugSessionState {
+  return {
+    ...state,
+    status: "running",
+    stoppedThreadId: null,
+    stoppedReason: null,
+    frames: [],
+    selectedThreadId: null,
+    selectedFrameId: null,
+    exceptionInfo: null,
+  };
+}
+
+/** Cap retained console lines so a chatty debuggee cannot grow the store unbounded. */
+const MAX_CONSOLE_LINES = 2000;
+
+/** Append a console line (no-op for empty text). */
+export function appendConsoleLine(
+  state: DebugSessionState,
+  category: string,
+  text: string,
+): DebugSessionState {
+  if (!text) return state;
+  return { ...state, output: [...state.output, { category, text }].slice(-MAX_CONSOLE_LINES) };
 }
 
 /** DAP `stepIn`/`stepOut`/`next`/`continue`/`pause` for a UI step action. */
@@ -66,21 +133,110 @@ export function stepCommandFor(action: DebugStepAction): string {
     case "stepOut": return "stepOut";
   }
 }
-/** Build DAP `setBreakpoints` arguments for one source file. */
+/**
+ * Normalize a source path to the OS-native form the debug adapter expects.
+ * On Windows, java-debug matches breakpoint source paths against JDT's records,
+ * which use a lowercase drive letter and backslashes — a forward-slash /
+ * uppercase-drive path (our internal normalized form) leaves breakpoints
+ * `verified: false` and they never bind. Detected by a `X:` drive prefix, so
+ * POSIX absolute paths (`/…`) are returned unchanged.
+ */
+export function toAdapterSourcePath(path: string): string {
+  if (!/^[A-Za-z]:/.test(path)) return path; // not a Windows drive path
+  return path
+    .replace(/^([A-Za-z]):/, (_m, drive) => `${drive.toLowerCase()}:`)
+    .replace(/\//g, "\\");
+}
+
+/** Breakpoints in the exact order sent to the adapter (sorted by line). */
+export function sortedBreakpoints(list: DebugBreakpoint[]): DebugBreakpoint[] {
+  return list.slice().sort((a, b) => a.line - b.line);
+}
+
+/**
+ * Build DAP `setBreakpoints` arguments for one source file. Entries are sorted
+ * by line; the response's `breakpoints` array corresponds 1:1, in order, to
+ * this sorted list (see parseSetBreakpointsResponse).
+ */
 export function buildSetBreakpointsArgs(path: string, breakpoints: DebugBreakpoint[]) {
   return {
     source: { path, name: path.split(/[\\/]/).pop() ?? path },
-    breakpoints: breakpoints
-      .slice()
-      .sort((a, b) => a.line - b.line)
-      .map((bp) => {
-        const entry: Record<string, unknown> = { line: bp.line };
-        if (bp.condition && bp.condition.trim()) entry.condition = bp.condition.trim();
-        if (bp.logMessage && bp.logMessage.trim()) entry.logMessage = bp.logMessage.trim();
-        return entry;
-      }),
+    breakpoints: sortedBreakpoints(breakpoints).map((bp) => {
+      const entry: Record<string, unknown> = { line: bp.line };
+      if (bp.condition && bp.condition.trim()) entry.condition = bp.condition.trim();
+      if (bp.hitCondition && bp.hitCondition.trim()) entry.hitCondition = bp.hitCondition.trim();
+      if (bp.logMessage && bp.logMessage.trim()) entry.logMessage = bp.logMessage.trim();
+      return entry;
+    }),
     // Ask the adapter to re-verify from source lines.
     sourceModified: false,
+  };
+}
+
+/** Adapter-reported binding of one requested breakpoint. */
+export interface BreakpointBinding {
+  /** Adapter breakpoint id (routes later `breakpoint` events), or null. */
+  id: number | null;
+  verified: boolean;
+  /** Line the adapter actually bound (requested line when it reports none). */
+  line: number;
+}
+
+/**
+ * Parse a `setBreakpoints` response. Per the DAP spec the response array
+ * corresponds 1:1, in order, to the requested breakpoints — `sortedRequested`
+ * must be the same sorted list the arguments were built from.
+ */
+export function parseSetBreakpointsResponse(
+  sortedRequested: DebugBreakpoint[],
+  body: unknown,
+): BreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return sortedRequested.map((bp, i) => {
+    const rec = asRecord(list[i]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      line: typeof rec.line === "number" && rec.line > 0 ? rec.line : bp.line,
+    };
+  });
+}
+
+/**
+ * Adopt adapter-adjusted lines: a breakpoint on a non-executable line gets
+ * moved to the line the adapter actually bound (IDEA/VS Code behavior). Only
+ * verified bindings move a breakpoint; entries collapsing onto an already-used
+ * line are dropped.
+ */
+export function reconcileBreakpointLines(
+  sortedRequested: DebugBreakpoint[],
+  bindings: BreakpointBinding[],
+): DebugBreakpoint[] {
+  const out: DebugBreakpoint[] = [];
+  const seen = new Set<number>();
+  sortedRequested.forEach((bp, i) => {
+    const binding = bindings[i];
+    const line = binding && binding.verified ? binding.line : bp.line;
+    if (seen.has(line)) return;
+    seen.add(line);
+    out.push(line === bp.line ? bp : { ...bp, line });
+  });
+  return out;
+}
+
+/** Parse a `breakpoint` event (adapters re-verify bindings as classes load). */
+export function parseBreakpointEvent(
+  message: unknown,
+): { reason: string; id: number | null; verified: boolean; line: number | null } | null {
+  const body = asRecord(asRecord(message).body);
+  const bp = asRecord(body.breakpoint);
+  if (Object.keys(bp).length === 0) return null;
+  return {
+    reason: typeof body.reason === "string" ? body.reason : "changed",
+    id: typeof bp.id === "number" ? bp.id : null,
+    verified: bp.verified === true,
+    line: typeof bp.line === "number" ? bp.line : null,
   };
 }
 
@@ -133,8 +289,42 @@ export function parseStackFrames(body: unknown): DebugStackFrame[] {
   });
 }
 
-/** The source location to highlight as "current" — the top frame that has a path. */
-export function currentLocation(frames: DebugStackFrame[]): { path: string; line: number } | null {
+/** Parse an `exceptionInfo` response body (null when the adapter has nothing). */
+export function parseExceptionInfo(body: unknown): DebugExceptionInfo | null {
+  const rec = asRecord(body);
+  const exceptionId = typeof rec.exceptionId === "string" ? rec.exceptionId : "";
+  const description = typeof rec.description === "string" ? rec.description : "";
+  if (!exceptionId && !description) return null;
+  const details = asRecord(rec.details);
+  return {
+    exceptionId: exceptionId || "Exception",
+    description,
+    details: typeof details.stackTrace === "string" ? details.stackTrace : null,
+  };
+}
+
+/** Parse an `evaluate` response body into display value + expandable ref. */
+export function parseEvaluate(body: unknown): EvaluateResult {
+  const rec = asRecord(body);
+  return {
+    value: typeof rec.result === "string" ? rec.result : "",
+    variablesReference: typeof rec.variablesReference === "number" ? rec.variablesReference : 0,
+    type: typeof rec.type === "string" ? rec.type : null,
+  };
+}
+
+/**
+ * The source location to highlight as "current" — the selected frame when set,
+ * else the top frame that has a path.
+ */
+export function currentLocation(
+  frames: DebugStackFrame[],
+  selectedFrameId?: number | null,
+): { path: string; line: number } | null {
+  if (selectedFrameId != null) {
+    const selected = frames.find((f) => f.id === selectedFrameId);
+    if (selected?.path) return { path: selected.path, line: selected.line };
+  }
   const frame = frames.find((f) => f.path);
   return frame && frame.path ? { path: frame.path, line: frame.line } : null;
 }
@@ -153,23 +343,43 @@ export function reduceDebugEvent(
         ...state,
         status: "stopped",
         stoppedThreadId: threadId,
+        selectedThreadId: threadId,
         stoppedReason: typeof body.reason === "string" ? body.reason : "stopped",
+        exceptionInfo: null,
       };
     }
     case "continued":
-      return { ...state, status: "running", stoppedThreadId: null, stoppedReason: null, frames: [] };
+      return markResumed(state);
+    case "exited": {
+      const next: DebugSessionState = {
+        ...state,
+        status: "terminated",
+        stoppedThreadId: null,
+        selectedThreadId: null,
+        selectedFrameId: null,
+        frames: [],
+      };
+      // IDEA-style closing line with the process exit code.
+      return typeof body.exitCode === "number"
+        ? appendConsoleLine(next, "console", `\nProcess finished with exit code ${body.exitCode}\n`)
+        : next;
+    }
     case "terminated":
-    case "exited":
-      return { ...state, status: "terminated", stoppedThreadId: null, frames: [] };
+      return {
+        ...state,
+        status: "terminated",
+        stoppedThreadId: null,
+        selectedThreadId: null,
+        selectedFrameId: null,
+        frames: [],
+      };
     case "output": {
       const text = typeof body.output === "string" ? body.output : "";
-      if (!text) return state;
-      // Cap retained output so a chatty debuggee cannot grow the store unbounded.
-      const output = [...state.output, text].slice(-2000);
-      return { ...state, output };
+      const category = typeof body.category === "string" && body.category ? body.category : "stdout";
+      if (!text || category === "telemetry") return state;
+      return appendConsoleLine(state, category, text);
     }
     default:
       return state;
   }
 }
-

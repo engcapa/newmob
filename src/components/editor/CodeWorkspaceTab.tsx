@@ -4739,6 +4739,19 @@ export function CodeWorkspaceTab({
         clientX: request.clientX,
         clientY: request.clientY,
         lspAvailable,
+        // Read through the ref: the debug hook is declared later in this
+        // component, and menu construction happens at click time.
+        debug: (() => {
+          const session = debugRef.current;
+          if (!session?.state || session.state.status === "terminated") return null;
+          return {
+            canRunToCursor: session.state.status === "stopped",
+            runToCursor: () => {
+              const absolute = absolutePathForOpenFile(file);
+              if (absolute) session.runToCursor(normalizeFsPath(absolute), request.position.line + 1);
+            },
+          };
+        })(),
         actions: {
           goToDefinition: () => { void goToDefinition(file, request.position); },
           goToTypeDefinition: () => { void goToTypeDefinition(file, request.position); },
@@ -4763,6 +4776,7 @@ export function CodeWorkspaceTab({
       }),
     );
   }, [
+    absolutePathForOpenFile,
     findReferences,
     formatActiveFile,
     goToDefinition,
@@ -4992,12 +5006,20 @@ export function CodeWorkspaceTab({
   const debugRef = useRef(debug);
   debugRef.current = debug;
   const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
+  const debugSessionActive = !!debug.state && debug.state.status !== "terminated";
   const activeDebugBreakpoints = useMemo<DebugBreakpointMarker[]>(() => {
     if (!activeFileAbsPath) return [];
     const key = normalizeFsPath(activeFileAbsPath);
     const list = debug.breakpoints[key] ?? debug.breakpoints[activeFileAbsPath] ?? [];
-    return list.map((bp) => ({ line: bp.line, conditional: !!(bp.condition || bp.logMessage) }));
-  }, [activeFileAbsPath, debug.breakpoints]);
+    const runtime = debug.breakpointRuntime[key] ?? debug.breakpointRuntime[activeFileAbsPath] ?? {};
+    return list.map((bp) => ({
+      line: bp.line,
+      conditional: !!(bp.condition || bp.hitCondition),
+      logpoint: !!bp.logMessage,
+      // Grey out breakpoints the adapter could not bind (only meaningful in-session).
+      verified: !debugSessionActive || runtime[bp.line] !== false,
+    }));
+  }, [activeFileAbsPath, debug.breakpoints, debug.breakpointRuntime, debugSessionActive]);
   const activeDebugCurrentLine = useMemo<number | null>(() => {
     const loc = debug.currentLocation;
     if (!loc || !activeFileAbsPath) return null;
@@ -5021,6 +5043,13 @@ export function CodeWorkspaceTab({
         allowEmpty: true,
       });
       if (condition === null) return; // cancelled
+      const hitCondition = await promptAppDialog({
+        title: `Breakpoint at line ${line}`,
+        label: "Hit count (e.g. 5 breaks on the 5th hit) — blank for none",
+        initialValue: existing?.hitCondition ?? "",
+        allowEmpty: true,
+      });
+      if (hitCondition === null) return;
       const logMessage = await promptAppDialog({
         title: `Breakpoint at line ${line}`,
         label: "Logpoint message (logs instead of breaking; {expr} interpolates) — blank for none",
@@ -5030,6 +5059,7 @@ export function CodeWorkspaceTab({
       if (logMessage === null) return;
       debug.setBreakpointOptions(key, line, {
         condition: condition.trim() || undefined,
+        hitCondition: hitCondition.trim() || undefined,
         logMessage: logMessage.trim() || undefined,
       });
     })();
@@ -5054,13 +5084,28 @@ export function CodeWorkspaceTab({
     setBottomDockOpen(true);
   }, [activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
 
-  const openDebugFrame = useCallback((frame: DebugStackFrame) => {
+  const openDebugFrame = useCallback((frame: Pick<DebugStackFrame, "path" | "line">) => {
     if (!frame.path) return;
     const ref = problemPathToRef(frame.path);
     if (!ref) return;
     const range = { start: { line: frame.line - 1, character: 0 }, end: { line: frame.line - 1, character: 0 } };
     void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
   }, [openFile, problemPathToRef, revealEditorLocation]);
+
+  // IDEA-style: jump to the stopped location (breakpoint hit / step landing)
+  // automatically, once per distinct location.
+  const debugRevealRef = useRef<string | null>(null);
+  useEffect(() => {
+    const loc = debug.currentLocation;
+    if (!loc || debug.state?.status !== "stopped") {
+      debugRevealRef.current = null;
+      return;
+    }
+    const key = `${loc.path}:${loc.line}`;
+    if (debugRevealRef.current === key) return;
+    debugRevealRef.current = key;
+    openDebugFrame({ path: loc.path, line: loc.line });
+  }, [debug.currentLocation, debug.state?.status, openDebugFrame]);
 
   const activeFileDebuggable = !!activeFileIsJava && !!activeFile && activeFile.ref.kind === "root";
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowRightToLine,
@@ -9,6 +9,7 @@ import {
   CirclePlay,
   FlameKindling,
   Pause,
+  RotateCcw,
   Square,
 } from "lucide-react";
 import type { CodeDebugSession } from "../useCodeDebugSession";
@@ -26,12 +27,15 @@ interface DebugPanelProps {
 interface VarNode {
   name: string;
   value: string;
+  type: string | null;
   variablesReference: number;
+  /** `variablesReference` of the container (scope/object) this node lives in. */
+  parentRef: number;
   children: VarNode[] | null; // null = not yet loaded
   expanded: boolean;
 }
 
-function parseVariables(body: unknown): VarNode[] {
+function parseVariables(body: unknown, parentRef: number): VarNode[] {
   const list = body && typeof body === "object" ? (body as { variables?: unknown }).variables : null;
   if (!Array.isArray(list)) return [];
   return list.flatMap((v) => {
@@ -40,26 +44,57 @@ function parseVariables(body: unknown): VarNode[] {
     return [{
       name: rec.name,
       value: typeof rec.value === "string" ? rec.value : "",
+      type: typeof rec.type === "string" ? rec.type : null,
       variablesReference: typeof rec.variablesReference === "number" ? rec.variablesReference : 0,
+      parentRef,
       children: null,
       expanded: false,
     }];
   });
 }
+
+/** Immutable tree update: replace `target` (by identity) via `update`. */
+function updateNode(nodes: VarNode[], target: VarNode, update: (n: VarNode) => VarNode): VarNode[] {
+  return nodes.map((n) => {
+    if (n === target) return update(n);
+    return n.children ? { ...n, children: updateNode(n.children, target, update) } : n;
+  });
+}
+
+interface VarEditState {
+  node: VarNode | null;
+  value: string;
+}
+
 function VariableRow({
   node,
   depth,
   onExpand,
+  onStartEdit,
+  edit,
+  onEditChange,
+  onEditSubmit,
+  onEditCancel,
+  onRemove,
 }: {
   node: VarNode;
   depth: number;
   onExpand: (node: VarNode) => void;
+  /** Present when the value is editable (DAP setVariable). */
+  onStartEdit?: (node: VarNode) => void;
+  edit?: VarEditState;
+  onEditChange?: (value: string) => void;
+  onEditSubmit?: () => void;
+  onEditCancel?: () => void;
+  /** Present on watch roots: remove the watch expression. */
+  onRemove?: () => void;
 }) {
   const expandable = node.variablesReference > 0;
+  const editing = edit?.node === node;
   return (
     <>
       <div
-        className="flex items-start gap-1 py-0.5 pr-2 hover:bg-[var(--taomni-hover-bg)]"
+        className="group flex items-start gap-1 py-0.5 pr-2 hover:bg-[var(--taomni-hover-bg)]"
         style={{ paddingLeft: `${8 + depth * 12}px` }}
       >
         {expandable ? (
@@ -69,35 +104,102 @@ function VariableRow({
         ) : (
           <span className="inline-block w-3 shrink-0" />
         )}
-        <span className="shrink-0 text-[var(--taomni-text)]">{node.name}</span>
-        <span className="truncate text-[var(--taomni-text-muted)]">= {node.value}</span>
+        <span className="shrink-0 text-[var(--taomni-text)]" title={node.type ?? undefined}>{node.name}</span>
+        {editing ? (
+          <input
+            autoFocus
+            data-testid="debug-variable-edit-input"
+            className="min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1 font-mono text-[11px] outline-none"
+            value={edit?.value ?? ""}
+            onChange={(e) => onEditChange?.(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onEditSubmit?.();
+              else if (e.key === "Escape") onEditCancel?.();
+            }}
+            onBlur={() => onEditCancel?.()}
+          />
+        ) : (
+          <span
+            className="truncate text-[var(--taomni-text-muted)]"
+            title={onStartEdit ? "Double-click to change the value" : undefined}
+            onDoubleClick={onStartEdit ? () => onStartEdit(node) : undefined}
+          >
+            = {node.value}
+          </span>
+        )}
+        {onRemove && (
+          <button
+            type="button"
+            className="ml-auto shrink-0 text-[var(--taomni-text-muted)] opacity-0 group-hover:opacity-100"
+            onClick={onRemove}
+            title="Remove watch"
+          >
+            ×
+          </button>
+        )}
       </div>
-      {node.expanded && node.children?.map((child) => (
-        <VariableRow key={`${child.name}:${child.variablesReference}`} node={child} depth={depth + 1} onExpand={onExpand} />
+      {node.expanded && node.children?.map((child, i) => (
+        <VariableRow
+          key={`${child.name}:${i}`}
+          node={child}
+          depth={depth + 1}
+          onExpand={onExpand}
+          onStartEdit={onStartEdit}
+          edit={edit}
+          onEditChange={onEditChange}
+          onEditSubmit={onEditSubmit}
+          onEditCancel={onEditCancel}
+        />
       ))}
     </>
   );
+}
+
+function consoleLineClass(category: string): string {
+  switch (category) {
+    case "stderr":
+    case "error":
+      return "text-rose-500 dark:text-rose-400";
+    case "repl":
+      return "text-sky-600 dark:text-sky-400";
+    case "console":
+    case "important":
+      return "text-[var(--taomni-text-muted)] italic";
+    default:
+      return "text-[var(--taomni-text)]";
+  }
 }
 
 export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
   const { state } = debug;
   const running = !!state && state.status !== "terminated";
   const stopped = state?.status === "stopped";
+  const canSetVariable = debug.capabilities.supportsSetVariable === true;
+  const canRestartFrame = debug.capabilities.supportsRestartFrame === true;
   const [variables, setVariables] = useState<VarNode[]>([]);
-  const [watch, setWatch] = useState<{ expr: string; value: string }[]>([]);
+  const [watchNodes, setWatchNodes] = useState<VarNode[]>([]);
+  const [watchTick, setWatchTick] = useState(0);
   const [watchInput, setWatchInput] = useState("");
   const [consoleInput, setConsoleInput] = useState("");
+  const [edit, setEdit] = useState<VarEditState>({ node: null, value: "" });
+  const consoleRef = useRef<HTMLDivElement | null>(null);
 
-  // On each stop, load the top frame's scopes → variables (D4).
-  const topFrameId = stopped ? state?.frames[0]?.id ?? null : null;
+  // Stable hook callbacks (useCallback in useCodeDebugSession) — effects key on
+  // these instead of the per-render `debug` object so a parent re-render does
+  // not re-fetch scopes / re-evaluate watches against the adapter.
+  const { fetchScopes, fetchVariables, evaluate, setVariable: sessionSetVariable } = debug;
+
+  // On each stop, load the selected frame's scopes → variables (D4).
+  const frameId = stopped ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
   useEffect(() => {
-    if (topFrameId == null) {
+    setEdit({ node: null, value: "" });
+    if (frameId == null) {
       setVariables([]);
       return;
     }
     let cancelled = false;
     void (async () => {
-      const scopesBody = await debug.fetchScopes(topFrameId);
+      const scopesBody = await fetchScopes(frameId);
       const scopes = (scopesBody && typeof scopesBody === "object"
         ? (scopesBody as { scopes?: unknown }).scopes
         : null);
@@ -111,120 +213,229 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
         : [];
       const roots: VarNode[] = [];
       for (const scope of refs) {
-        const vars = parseVariables(await debug.fetchVariables(scope.ref));
-        roots.push({ name: scope.name, value: "", variablesReference: scope.ref, children: vars, expanded: true });
+        const vars = parseVariables(await fetchVariables(scope.ref), scope.ref);
+        roots.push({
+          name: scope.name,
+          value: "",
+          type: null,
+          variablesReference: scope.ref,
+          parentRef: 0,
+          children: vars,
+          expanded: true,
+        });
       }
       if (!cancelled) setVariables(roots);
     })();
     return () => { cancelled = true; };
-  }, [debug, topFrameId]);
+  }, [fetchScopes, fetchVariables, frameId]);
 
-  // Re-evaluate watch expressions whenever we stop on a new frame.
+  // Re-evaluate watch expressions on each stop / frame change / edit.
+  const watchExpressions = debug.watchExpressions;
   useEffect(() => {
-    if (!stopped) return;
     let cancelled = false;
-    void (async () => {
-      const next = await Promise.all(watch.map(async (w) => ({
-        expr: w.expr,
-        value: await debug.evaluate(w.expr, "watch"),
+    if (!stopped || frameId == null) {
+      setWatchNodes(watchExpressions.map((expr) => ({
+        name: expr, value: "", type: null, variablesReference: 0, parentRef: 0, children: null, expanded: false,
       })));
-      if (!cancelled) setWatch(next);
+      return;
+    }
+    void (async () => {
+      const next = await Promise.all(watchExpressions.map(async (expr) => {
+        const result = await evaluate(expr, "watch");
+        return {
+          name: expr,
+          value: result.value,
+          type: result.type,
+          variablesReference: result.variablesReference,
+          parentRef: 0,
+          children: null,
+          expanded: false,
+        };
+      }));
+      if (!cancelled) setWatchNodes(next);
     })();
     return () => { cancelled = true; };
-    // Intentionally keyed on frame identity, not `watch`, to avoid a loop.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debug, stopped, topFrameId]);
+  }, [evaluate, stopped, frameId, watchExpressions, watchTick]);
 
-  const expandVariable = useCallback((node: VarNode) => {
-    const toggle = (nodes: VarNode[]): VarNode[] => nodes.map((n) => {
-      if (n !== node) return { ...n, children: n.children ? toggle(n.children) : n.children };
-      return { ...n, expanded: !n.expanded };
-    });
-    setVariables((current) => toggle(current));
+  // Keep the console pinned to the latest output.
+  const outputLength = state?.output.length ?? 0;
+  useEffect(() => {
+    const el = consoleRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [outputLength]);
+
+  const makeExpandHandler = useCallback((
+    setNodes: React.Dispatch<React.SetStateAction<VarNode[]>>,
+  ) => (node: VarNode) => {
+    setNodes((current) => updateNode(current, node, (n) => ({ ...n, expanded: !n.expanded })));
     if (!node.expanded && node.children === null && node.variablesReference > 0) {
-      void debug.fetchVariables(node.variablesReference).then((body) => {
-        const children = parseVariables(body);
-        const assign = (nodes: VarNode[]): VarNode[] => nodes.map((n) => {
-          if (n === node) return { ...n, children, expanded: true };
-          return { ...n, children: n.children ? assign(n.children) : n.children };
-        });
-        setVariables((current) => assign(current));
+      void fetchVariables(node.variablesReference).then((body) => {
+        const children = parseVariables(body, node.variablesReference);
+        setNodes((current) => updateNode(current, node, (n) => ({ ...n, children, expanded: true })));
       });
     }
-  }, [debug]);
+  }, [fetchVariables]);
+
+  const expandVariable = makeExpandHandler(setVariables);
+  const expandWatch = makeExpandHandler(setWatchNodes);
+
+  const startEdit = useCallback((node: VarNode) => {
+    setEdit({ node, value: node.value });
+  }, []);
+
+  const submitEdit = useCallback(() => {
+    const node = edit.node;
+    const value = edit.value;
+    setEdit({ node: null, value: "" });
+    if (!node) return;
+    void sessionSetVariable(node.parentRef, node.name, value).then((result) => {
+      if (!result) return;
+      setVariables((current) => updateNode(current, node, (n) => ({
+        ...n,
+        value: result.value,
+        type: result.type ?? n.type,
+        variablesReference: result.variablesReference,
+        children: null,
+        expanded: false,
+      })));
+      // Watch values may depend on the changed variable.
+      setWatchTick((tick) => tick + 1);
+    });
+  }, [sessionSetVariable, edit]);
+
+  const cancelEdit = useCallback(() => setEdit({ node: null, value: "" }), []);
 
   const addWatch = useCallback(() => {
     const expr = watchInput.trim();
     if (!expr) return;
     setWatchInput("");
-    void debug.evaluate(expr, "watch").then((value) => {
-      setWatch((current) => [...current, { expr, value }]);
-    });
+    debug.addWatchExpression(expr);
   }, [debug, watchInput]);
 
-  const [consoleLog, setConsoleLog] = useState<string[]>([]);
   const submitConsole = useCallback(() => {
     const expr = consoleInput.trim();
     if (!expr) return;
     setConsoleInput("");
-    setConsoleLog((current) => [...current, `> ${expr}`]);
-    void debug.evaluate(expr, "repl").then((value) => {
-      setConsoleLog((current) => [...current, value]);
+    debug.logConsole("repl", `> ${expr}\n`);
+    void debug.evaluate(expr, "repl").then((result) => {
+      debug.logConsole("result", `${result.value}\n`);
     });
   }, [debug, consoleInput]);
-  const controlBtn = "taomni-btn h-6 w-6 inline-flex items-center justify-center disabled:opacity-30";
+  const controlBtn = "h-7 w-7 inline-flex items-center justify-center rounded-md transition-colors disabled:opacity-30 disabled:pointer-events-none";
   return (
     <div data-testid="code-workspace-debug-panel" className="h-full min-h-0 flex flex-col text-[11px]">
       <div className="h-8 shrink-0 flex items-center gap-1 border-b border-[var(--taomni-code-border)] px-2">
-        <Bug className="h-3.5 w-3.5" />
+        <Bug className="h-4 w-4" />
         <span className="font-medium">Debug</span>
         {state && (
           <span className="ml-1 text-[10px] text-[var(--taomni-text-muted)]">
             {state.status}{state.stoppedReason ? ` · ${state.stoppedReason}` : ""}
           </span>
         )}
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-0.5 rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] p-0.5 shadow-xs">
           {!running && (
-            <button
-              type="button"
-              data-testid="debug-start"
-              className={controlBtn}
-              onClick={() => onStart?.()}
-              disabled={!onStart}
-              title="Start debugging the active file"
-            >
-              <CirclePlay className="h-3.5 w-3.5 text-emerald-500" />
-            </button>
+            <>
+              <button
+                type="button"
+                data-testid="debug-start"
+                className={`${controlBtn} hover:bg-emerald-500/15`}
+                onClick={() => onStart?.()}
+                disabled={!onStart}
+                title="Start debugging the active file"
+              >
+                <CirclePlay className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
+              </button>
+              {debug.canRestart && (
+                <button
+                  type="button"
+                  data-testid="debug-restart"
+                  className={`${controlBtn} hover:bg-emerald-500/15`}
+                  onClick={() => debug.restart()}
+                  title="Rerun the last debug session"
+                >
+                  <RotateCcw className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
+                </button>
+              )}
+            </>
           )}
           {running && (
             <>
-              <button type="button" data-testid="debug-continue" className={controlBtn}
-                onClick={() => debug.step("continue")} disabled={!stopped} title="Continue">
-                <CirclePlay className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                data-testid="debug-continue"
+                className={`${controlBtn} hover:bg-emerald-500/15`}
+                onClick={() => debug.step("continue")}
+                disabled={!stopped}
+                title="Continue"
+              >
+                <CirclePlay className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
               </button>
-              <button type="button" data-testid="debug-pause" className={controlBtn}
-                onClick={() => debug.step("pause")} disabled={stopped} title="Pause">
-                <Pause className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                data-testid="debug-pause"
+                className={`${controlBtn} hover:bg-amber-500/15`}
+                onClick={() => debug.step("pause")}
+                disabled={stopped}
+                title="Pause"
+              >
+                <Pause className="h-4 w-4 text-amber-500 dark:text-amber-400" />
               </button>
-              <button type="button" data-testid="debug-step-over" className={controlBtn}
-                onClick={() => debug.step("stepOver")} disabled={!stopped} title="Step over">
-                <ArrowRightToLine className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                data-testid="debug-step-over"
+                className={`${controlBtn} hover:bg-sky-500/15`}
+                onClick={() => debug.step("stepOver")}
+                disabled={!stopped}
+                title="Step over"
+              >
+                <ArrowRightToLine className="h-4 w-4 text-sky-500 dark:text-sky-400" />
               </button>
-              <button type="button" data-testid="debug-step-in" className={controlBtn}
-                onClick={() => debug.step("stepIn")} disabled={!stopped} title="Step into">
-                <ArrowDownToLine className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                data-testid="debug-step-in"
+                className={`${controlBtn} hover:bg-indigo-500/15`}
+                onClick={() => debug.step("stepIn")}
+                disabled={!stopped}
+                title="Step into"
+              >
+                <ArrowDownToLine className="h-4 w-4 text-indigo-500 dark:text-indigo-400" />
               </button>
-              <button type="button" data-testid="debug-step-out" className={controlBtn}
-                onClick={() => debug.step("stepOut")} disabled={!stopped} title="Step out">
-                <ArrowUpFromLine className="h-3.5 w-3.5" />
+              <button
+                type="button"
+                data-testid="debug-step-out"
+                className={`${controlBtn} hover:bg-violet-500/15`}
+                onClick={() => debug.step("stepOut")}
+                disabled={!stopped}
+                title="Step out"
+              >
+                <ArrowUpFromLine className="h-4 w-4 text-violet-500 dark:text-violet-400" />
               </button>
-              <button type="button" data-testid="debug-hot-reload" className={controlBtn}
-                onClick={() => debug.hotReload()} title="Hot reload changed classes">
-                <FlameKindling className="h-3.5 w-3.5 text-orange-500" />
+              <button
+                type="button"
+                data-testid="debug-hot-reload"
+                className={`${controlBtn} hover:bg-orange-500/15`}
+                onClick={() => debug.hotReload()}
+                title="Hot reload changed classes"
+              >
+                <FlameKindling className="h-4 w-4 text-orange-500 dark:text-orange-400" />
               </button>
-              <button type="button" data-testid="debug-stop" className={controlBtn}
-                onClick={() => debug.terminate()} title="Stop">
-                <Square className="h-3.5 w-3.5 text-red-500" />
+              <button
+                type="button"
+                data-testid="debug-restart"
+                className={`${controlBtn} hover:bg-emerald-500/15`}
+                onClick={() => debug.restart()}
+                title="Restart the debug session"
+              >
+                <RotateCcw className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
+              </button>
+              <button
+                type="button"
+                data-testid="debug-stop"
+                className={`${controlBtn} hover:bg-rose-500/15`}
+                onClick={() => debug.terminate()}
+                title="Stop"
+              >
+                <Square className="h-4 w-4 text-rose-500 dark:text-rose-400" />
               </button>
             </>
           )}
@@ -238,32 +449,100 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
         )}
         {state && (
           <>
+            {state.exceptionInfo && (
+              <div
+                data-testid="debug-exception-info"
+                className="border-b border-[var(--taomni-code-border)] bg-rose-500/10 px-3 py-2"
+              >
+                <div className="font-medium text-rose-600 dark:text-rose-400">{state.exceptionInfo.exceptionId}</div>
+                {state.exceptionInfo.description && (
+                  <div className="text-rose-600/90 dark:text-rose-400/90">{state.exceptionInfo.description}</div>
+                )}
+                {state.exceptionInfo.details && (
+                  <pre className="mt-1 max-h-28 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-[var(--taomni-text-muted)]">
+                    {state.exceptionInfo.details}
+                  </pre>
+                )}
+              </div>
+            )}
+            {state.threads.length > 0 && (
+              <Section title={`Threads (${state.threads.length})`} defaultOpen={false}>
+                {state.threads.map((thread) => (
+                  <button
+                    key={thread.id}
+                    type="button"
+                    data-testid={`debug-thread-${thread.id}`}
+                    className={`w-full flex items-center gap-2 px-3 py-0.5 text-left hover:bg-[var(--taomni-hover-bg)] ${
+                      thread.id === state.selectedThreadId ? "bg-[var(--taomni-hover-bg)]" : ""
+                    }`}
+                    onClick={() => debug.selectThread(thread.id)}
+                    disabled={!stopped}
+                  >
+                    <span className="truncate">{thread.name}</span>
+                    {thread.id === state.stoppedThreadId && (
+                      <Pause className="ml-auto h-3 w-3 shrink-0 text-amber-500" />
+                    )}
+                  </button>
+                ))}
+              </Section>
+            )}
             <Section title="Call Stack">
               {state.frames.length === 0
                 ? <Empty text={stopped ? "No frames" : "Running…"} />
                 : state.frames.map((frame) => (
-                  <button
+                  <div
                     key={frame.id}
-                    type="button"
-                    data-testid={`debug-frame-${frame.id}`}
-                    className="w-full flex items-center gap-2 px-3 py-0.5 text-left hover:bg-[var(--taomni-hover-bg)] disabled:opacity-50"
-                    onClick={() => onOpenFrame(frame)}
-                    disabled={!frame.path}
+                    className={`group flex items-center hover:bg-[var(--taomni-hover-bg)] ${
+                      frame.id === state.selectedFrameId ? "bg-[var(--taomni-hover-bg)]" : ""
+                    }`}
                   >
-                    <span className="truncate">{frame.name}</span>
-                    {frame.path && (
-                      <span className="ml-auto shrink-0 text-[10px] text-[var(--taomni-text-muted)]">
-                        {frame.path.split(/[\\/]/).pop()}:{frame.line}
+                    <button
+                      type="button"
+                      data-testid={`debug-frame-${frame.id}`}
+                      className="min-w-0 flex-1 flex items-center gap-2 px-3 py-0.5 text-left"
+                      onClick={() => {
+                        debug.selectFrame(frame.id);
+                        if (frame.path) onOpenFrame(frame);
+                      }}
+                    >
+                      <span className={`truncate ${frame.path ? "" : "text-[var(--taomni-text-muted)]"}`}>
+                        {frame.name}
                       </span>
+                      {frame.path && (
+                        <span className="ml-auto shrink-0 text-[10px] text-[var(--taomni-text-muted)]">
+                          {frame.path.split(/[\\/]/).pop()}:{frame.line}
+                        </span>
+                      )}
+                    </button>
+                    {canRestartFrame && stopped && (
+                      <button
+                        type="button"
+                        data-testid={`debug-restart-frame-${frame.id}`}
+                        className="shrink-0 px-1 opacity-0 group-hover:opacity-100 hover:text-emerald-500"
+                        onClick={() => debug.restartFrame(frame.id)}
+                        title="Restart frame (re-enter from its start)"
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                      </button>
                     )}
-                  </button>
+                  </div>
                 ))}
             </Section>
             <Section title="Variables">
               {variables.length === 0
                 ? <Empty text={stopped ? "No variables" : "Stopped only"} />
-                : variables.map((node) => (
-                  <VariableRow key={`${node.name}:${node.variablesReference}`} node={node} depth={0} onExpand={expandVariable} />
+                : variables.map((node, i) => (
+                  <VariableRow
+                    key={`${node.name}:${i}`}
+                    node={node}
+                    depth={0}
+                    onExpand={expandVariable}
+                    onStartEdit={canSetVariable && stopped ? startEdit : undefined}
+                    edit={edit}
+                    onEditChange={(value) => setEdit((current) => ({ ...current, value }))}
+                    onEditSubmit={submitEdit}
+                    onEditCancel={cancelEdit}
+                  />
                 ))}
             </Section>
             <Section title="Watch">
@@ -277,18 +556,27 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
                   onKeyDown={(e) => { if (e.key === "Enter") addWatch(); }}
                 />
               </div>
-              {watch.map((w, i) => (
-                <div key={`${w.expr}:${i}`} className="flex items-start gap-2 px-3 py-0.5">
-                  <span className="shrink-0 text-[var(--taomni-text)]">{w.expr}</span>
-                  <span className="truncate text-[var(--taomni-text-muted)]">= {w.value}</span>
-                  <button type="button" className="ml-auto shrink-0 text-[var(--taomni-text-muted)]"
-                    onClick={() => setWatch((c) => c.filter((_, j) => j !== i))}>×</button>
-                </div>
+              {watchNodes.map((node, i) => (
+                <VariableRow
+                  key={`${node.name}:${i}`}
+                  node={node}
+                  depth={0}
+                  onExpand={expandWatch}
+                  onRemove={() => debug.removeWatchExpression(i)}
+                />
               ))}
             </Section>
             <Section title="Console">
-              <div className="max-h-40 overflow-auto px-3 font-mono text-[10px] text-[var(--taomni-text-muted)]">
-                {consoleLog.map((line, i) => <div key={i} className="whitespace-pre-wrap">{line}</div>)}
+              <div
+                ref={consoleRef}
+                data-testid="debug-console-output"
+                className="max-h-40 overflow-auto px-3 font-mono text-[10px]"
+              >
+                {state.output.map((line, i) => (
+                  <span key={i} className={`whitespace-pre-wrap ${consoleLineClass(line.category)}`}>
+                    {line.text}
+                  </span>
+                ))}
               </div>
               <div className="flex items-center gap-1 px-3 py-1">
                 <input
@@ -329,8 +617,16 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(true);
+function Section({
+  title,
+  defaultOpen = true,
+  children,
+}: {
+  title: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="border-b border-[var(--taomni-code-border)]">
       <button

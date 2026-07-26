@@ -451,6 +451,12 @@ pub async fn dap_start_session(
     tokio::spawn(run_reader(reader, pending, session_id.clone(), emit));
 
     // DAP handshake: initialize, then hand the launch/attach config to the adapter.
+    // `supportsConfigurationDoneRequest: true` is REQUIRED — without it, adapters
+    // (java-debug) do not wait for `configurationDone` and resume the debuggee
+    // immediately after launch, so breakpoints set after the `initialized` event
+    // are armed too late and never hit. `supportsRunInTerminalRequest: false`:
+    // we do not implement the `runInTerminal` reverse request, so adapters must
+    // launch the debuggee themselves (console: internalConsole).
     let init = session
         .request(
             "initialize",
@@ -461,7 +467,11 @@ pub async fn dap_start_session(
                 "linesStartAt1": true,
                 "columnsStartAt1": true,
                 "pathFormat": "path",
-                "supportsRunInTerminalRequest": true,
+                "supportsConfigurationDoneRequest": true,
+                "supportsRunInTerminalRequest": false,
+                // Ask adapters to include `type` on variables/evaluate results
+                // (the variables view shows it as a tooltip).
+                "supportsVariableType": true,
             }),
         )
         .await?;

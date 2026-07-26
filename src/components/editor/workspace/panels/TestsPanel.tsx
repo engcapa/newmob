@@ -61,11 +61,11 @@ function TestRow({
         <button
           type="button"
           data-testid={`tests-debug-${item.fullName}`}
-          className="shrink-0 opacity-0 group-hover:opacity-100"
+          className="shrink-0 opacity-0 group-hover:opacity-100 hover:text-emerald-500 dark:hover:text-emerald-400 transition-colors"
           onClick={() => onDebug(item)}
           title="Debug test (requires java-debug + java-test bundles)"
         >
-          <Bug className="h-3 w-3" />
+          <Bug className="h-3.5 w-3.5" />
         </button>
       </div>
       {open && hasChildren && item.children.map((child) => (
