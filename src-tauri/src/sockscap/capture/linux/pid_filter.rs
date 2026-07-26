@@ -111,10 +111,11 @@ mod tests {
     #[test]
     fn handles_symlink_selectors_correctly() {
         let target = std::env::current_exe().unwrap();
-        let symlink = target.with_file_name("grok-symlink");
-        // Simulate symlink selector
-        std::fs::copy(&target, &symlink).unwrap();
-        // On Linux, we can make it a symlink
+        // Use a per-test-process unique name so parallel/repeated runs never collide.
+        let symlink = target.with_file_name(format!("grok-symlink-{}", std::process::id()));
+        // Clear any stale entry from a previous aborted run before creating the symlink.
+        let _ = std::fs::remove_file(&symlink);
+        // A selector pointing at a symlink of the process's real exe must still match.
         std::os::unix::fs::symlink(&target, &symlink).unwrap();
         assert!(selector_matches_process_path(
             target.to_str().unwrap(),
