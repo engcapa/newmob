@@ -48,6 +48,7 @@ import {
   workspaceListDir,
   workspaceReadFile,
   workspaceReadLooseFile,
+  workspaceJavaRunTarget,
   workspaceTaskTree,
   workspaceWriteFile,
   workspaceWriteLooseFile,
@@ -384,7 +385,7 @@ import {
 import { RunPanel, type RunPanelHandle, type WorkspaceTaskItem } from "./workspace/panels/RunPanel";
 import { BuildPanel } from "./workspace/panels/BuildPanel";
 import { TestsPanel } from "./workspace/panels/TestsPanel";
-import { defaultRunner, javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
+import { javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
 import { DebugPanel } from "./workspace/panels/DebugPanel";
 import { useCodeDebugSession } from "./workspace/useCodeDebugSession";
 import type { DebugStackFrame } from "./workspace/dapDebugModel";
@@ -855,6 +856,8 @@ export function CodeWorkspaceTab({
   const inactiveEditorPaneRef = useRef<HTMLElement | null>(null);
   const terminalDockRef = useRef<TerminalDockHandle | null>(null);
   const runPanelRef = useRef<RunPanelHandle | null>(null);
+  const runActiveJavaFileRef = useRef<() => void>(() => {});
+  const buildActiveProjectRef = useRef<(rebuild?: boolean) => void>(() => {});
 
   /** Run a workspace task in the integrated terminal (shared by Run + Build panels). */
   const runWorkspaceTask = useCallback(
@@ -4139,6 +4142,27 @@ export function CodeWorkspaceTab({
       },
     },
     {
+      id: "workspace.runActiveJavaFile",
+      title: "Run Current Java File",
+      category: "Run",
+      keybinding: "Shift+F10",
+      keywords: ["java", "main", "run", "application"],
+      when: () => !!activeFile
+        && activeFile.ref.kind === "root"
+        && !activeFile.library
+        && activeFile.languagePath.toLowerCase().endsWith(".java"),
+      run: () => runActiveJavaFileRef.current(),
+    },
+    {
+      id: "workspace.buildProject",
+      title: "Build Project",
+      category: "Build",
+      keybinding: "Ctrl+F9",
+      keywords: ["build", "compile", "maven", "gradle"],
+      when: () => roots.length > 0,
+      run: () => buildActiveProjectRef.current(false),
+    },
+    {
       id: "workspace.showRunTasks",
       title: "Show Run Tasks",
       category: "Run",
@@ -4364,6 +4388,7 @@ export function CodeWorkspaceTab({
     reloadFile,
     revealEditorTabInTree,
     renameSelected,
+    roots.length,
     saveFile,
     seSymbolsAvailable,
     selected,
@@ -4519,6 +4544,17 @@ export function CodeWorkspaceTab({
 
   const getLspHover = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
+      // While the debugger is stopped in this file, the hover belongs to the
+      // debugger (IDEA shows the value, not the javadoc). Read through the ref:
+      // the debug hook is declared later in this component.
+      const session = debugRef.current;
+      if (session?.state?.status === "stopped") {
+        const stoppedPath = session.currentLocation?.path;
+        const filePath = absolutePathForOpenFile(file);
+        if (stoppedPath && filePath && normalizeFsPath(stoppedPath) === normalizeFsPath(filePath)) {
+          return null;
+        }
+      }
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return null;
       try {
@@ -4536,7 +4572,7 @@ export function CodeWorkspaceTab({
         return null;
       }
     },
-    [lspDescriptorForFile, updateLspStatusForFile],
+    [absolutePathForOpenFile, lspDescriptorForFile, updateLspStatusForFile],
   );
 
   const navigateLocations = useCallback(async (
@@ -4918,7 +4954,125 @@ export function CodeWorkspaceTab({
   const activeFileIsJava = !!activeFile
     && !activeFile.library
     && activeFile.languagePath.toLowerCase().endsWith(".java");
+  const [javaRunBusy, setJavaRunBusy] = useState(false);
+  const [projectBuildBusy, setProjectBuildBusy] = useState(false);
+
+  const launchWorkspaceTask = useCallback((task: WorkspaceTaskItem) => {
+    if (runPanelRef.current) {
+      runPanelRef.current.run(task);
+    } else {
+      runWorkspaceTask(task);
+    }
+  }, [runWorkspaceTask]);
+
+  /** IDEA-style Shift+F10: save and run the main class declared by this file. */
+  const runActiveJavaFile = useCallback(() => {
+    if (javaRunBusy) return;
+    void (async () => {
+      const file = openFilesRef.current[activeKey ?? ""];
+      if (!file || file.ref.kind !== "root" || file.library) return;
+      const root = findRoot(file.ref.rootId);
+      if (!root) return;
+      setJavaRunBusy(true);
+      try {
+        // Java launch discovery intentionally reads the on-disk source so a
+        // dirty new main method must be persisted before resolving it.
+        if (file.dirty) {
+          await saveOpenBufferText(file.key, file.text);
+        }
+        const target = await workspaceJavaRunTarget(root.path, file.ref.path);
+        launchWorkspaceTask({
+          id: target.id,
+          label: target.label,
+          command: target.command,
+          cwd: target.cwd,
+          source: `Java · ${target.buildSystem === "source-file" ? "JDK" : target.buildSystem}`,
+          rootId: root.id,
+          rootName: root.name,
+        });
+        setStatusMessage(`Running ${target.mainClass}`);
+      } catch (error) {
+        setStatusMessage(errorMessage(error));
+        setBottomDockTab("run");
+        setBottomDockOpen(true);
+      } finally {
+        setJavaRunBusy(false);
+      }
+    })();
+  }, [
+    activeKey,
+    findRoot,
+    javaRunBusy,
+    launchWorkspaceTask,
+    saveOpenBufferText,
+    setBottomDockOpen,
+    setBottomDockTab,
+    setStatusMessage,
+  ]);
+
+  /** IDEA-style Ctrl+F9: compile the active root using its real build tool. */
+  const buildActiveProject = useCallback((rebuild = false) => {
+    if (projectBuildBusy) return;
+    void (async () => {
+      const file = openFilesRef.current[activeKey ?? ""];
+      const root = file?.ref.kind === "root"
+        ? findRoot(file.ref.rootId)
+        : rootsRef.current[0] ?? null;
+      if (!root) return;
+      setProjectBuildBusy(true);
+      try {
+        const groups = await workspaceTaskTree(root.path);
+        const preferred = rebuild
+          ? [["Maven", "rebuild"], ["Gradle", "rebuild"]]
+          : [
+              ["Maven", "compile"],
+              ["Gradle", "classes"],
+              ["Gradle", "build"],
+              ["Cargo.toml", "build"],
+              ["package.json", "build"],
+              ["Makefile", "build"],
+            ];
+        let selected: WorkspaceTaskItem | null = null;
+        for (const [source, label] of preferred) {
+          const task = groups
+            .find((group) => group.source === source)
+            ?.tasks.find((candidate) => candidate.label === label);
+          if (task) {
+            selected = { ...task, rootId: root.id, rootName: root.name };
+            break;
+          }
+        }
+        if (!selected) {
+          setStatusMessage(rebuild
+            ? "No Maven or Gradle rebuild task was detected for this project"
+            : "No build task was detected for this project");
+          setBottomDockTab("build");
+          setBottomDockOpen(true);
+          return;
+        }
+        launchWorkspaceTask(selected);
+        setStatusMessage(`${rebuild ? "Rebuilding" : "Building"} ${root.name}`);
+      } catch (error) {
+        setStatusMessage(errorMessage(error));
+        setBottomDockTab("build");
+        setBottomDockOpen(true);
+      } finally {
+        setProjectBuildBusy(false);
+      }
+    })();
+  }, [
+    activeKey,
+    findRoot,
+    launchWorkspaceTask,
+    projectBuildBusy,
+    setBottomDockOpen,
+    setBottomDockTab,
+    setStatusMessage,
+  ]);
+  runActiveJavaFileRef.current = runActiveJavaFile;
+  buildActiveProjectRef.current = buildActiveProject;
   const [javaTestBuildTool, setJavaTestBuildTool] = useState<JavaTestBuildTool | null>(null);
+  const [javaTestCommand, setJavaTestCommand] = useState<string | null>(null);
 
   const discoverActiveJavaTests = useCallback(async () => {
     const file = openFilesRef.current[activeKey ?? ""];
@@ -4934,6 +5088,7 @@ export function CodeWorkspaceTab({
     if (!(bottomDockOpen && bottomDockTab === "tests" && activeFileIsJava && activeFile)) return;
     if (activeFile.ref.kind !== "root") {
       setJavaTestBuildTool(null);
+      setJavaTestCommand(null);
       return;
     }
     const root = findRoot(activeFile.ref.rootId);
@@ -4942,21 +5097,31 @@ export function CodeWorkspaceTab({
     void workspaceTaskTree(root.path)
       .then((groups) => {
         if (cancelled) return;
-        const sources = new Set(groups.map((group) => group.source));
-        setJavaTestBuildTool(sources.has("Maven") ? "maven" : sources.has("Gradle") ? "gradle" : null);
+        const mavenTask = groups
+          .find((group) => group.source === "Maven")
+          ?.tasks.find((task) => task.label === "test");
+        const gradleTask = groups
+          .find((group) => group.source === "Gradle")
+          ?.tasks.find((task) => task.label === "test");
+        const task = mavenTask ?? gradleTask;
+        setJavaTestBuildTool(mavenTask ? "maven" : gradleTask ? "gradle" : null);
+        setJavaTestCommand(task?.command ?? null);
       })
       .catch(() => {
-        if (!cancelled) setJavaTestBuildTool(null);
+        if (!cancelled) {
+          setJavaTestBuildTool(null);
+          setJavaTestCommand(null);
+        }
       });
     return () => { cancelled = true; };
   }, [activeFile, activeFileIsJava, bottomDockOpen, bottomDockTab, findRoot]);
 
   const runJavaTest = useCallback((item: JavaTestItem) => {
     const file = openFilesRef.current[activeKey ?? ""];
-    if (!file || file.ref.kind !== "root" || !javaTestBuildTool) return;
+    if (!file || file.ref.kind !== "root" || !javaTestBuildTool || !javaTestCommand) return;
     const root = findRoot(file.ref.rootId);
     if (!root) return;
-    const command = javaTestRunCommand(javaTestBuildTool, item, defaultRunner(javaTestBuildTool));
+    const command = javaTestRunCommand(javaTestBuildTool, item, javaTestCommand);
     runWorkspaceTask({
       id: `java-test:${item.fullName}`,
       label: `Test ${item.name}`,
@@ -4966,7 +5131,7 @@ export function CodeWorkspaceTab({
       rootId: root.id,
       rootName: root.name,
     });
-  }, [activeKey, findRoot, javaTestBuildTool, runWorkspaceTask]);
+  }, [activeKey, findRoot, javaTestBuildTool, javaTestCommand, runWorkspaceTask]);
 
   // M9 debug-test: resolve the test's JUnit launch config (java-test) and start
   // a debug session through the DAP path.
@@ -5005,6 +5170,8 @@ export function CodeWorkspaceTab({
   // Ref so callbacks declared above the hook (debug-test) can reach it.
   const debugRef = useRef(debug);
   debugRef.current = debug;
+  /** Breakpoint whose editor is open in the Debug panel's breakpoints view. */
+  const [editingBreakpoint, setEditingBreakpoint] = useState<{ path: string; line: number } | null>(null);
   const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
   const debugSessionActive = !!debug.state && debug.state.status !== "terminated";
   const activeDebugBreakpoints = useMemo<DebugBreakpointMarker[]>(() => {
@@ -5025,45 +5192,32 @@ export function CodeWorkspaceTab({
     if (!loc || !activeFileAbsPath) return null;
     return normalizeFsPath(loc.path) === normalizeFsPath(activeFileAbsPath) ? loc.line : null;
   }, [activeFileAbsPath, debug.currentLocation]);
+  /** The editor is showing the stopped frame: inline values + hover apply here. */
+  const debugStoppedHere = debug.state?.status === "stopped" && activeDebugCurrentLine != null;
+  const activeDebugInlineValues = debugStoppedHere ? debug.frameVariables : undefined;
+  const debugRunToCursorLine = useCallback((line: number) => {
+    if (activeFileAbsPath) debug.runToCursor(normalizeFsPath(activeFileAbsPath), line);
+  }, [activeFileAbsPath, debug]);
   const toggleActiveBreakpoint = useCallback((line: number) => {
     if (activeFileAbsPath) debug.toggleBreakpoint(normalizeFsPath(activeFileAbsPath), line);
   }, [activeFileAbsPath, debug]);
 
-  /** Right-click a breakpoint (D5): set a condition or a logpoint message. */
+  /**
+   * Right-click a breakpoint gutter (or Ctrl+Shift+F8): create the breakpoint if
+   * needed and open the Debug panel's breakpoints view, where condition, hit
+   * count and log message are edited in one place — IDEA's breakpoint dialog,
+   * rather than a chain of modal prompts.
+   */
   const editActiveBreakpoint = useCallback((line: number) => {
     if (!activeFileAbsPath) return;
     const key = normalizeFsPath(activeFileAbsPath);
-    const existing = (debug.breakpoints[key] ?? []).find((bp) => bp.line === line);
-    if (!existing) debug.toggleBreakpoint(key, line); // ensure the breakpoint exists first
-    void (async () => {
-      const condition = await promptAppDialog({
-        title: `Breakpoint at line ${line}`,
-        label: "Condition (break only when true) — blank for none",
-        initialValue: existing?.condition ?? "",
-        allowEmpty: true,
-      });
-      if (condition === null) return; // cancelled
-      const hitCondition = await promptAppDialog({
-        title: `Breakpoint at line ${line}`,
-        label: "Hit count (e.g. 5 breaks on the 5th hit) — blank for none",
-        initialValue: existing?.hitCondition ?? "",
-        allowEmpty: true,
-      });
-      if (hitCondition === null) return;
-      const logMessage = await promptAppDialog({
-        title: `Breakpoint at line ${line}`,
-        label: "Logpoint message (logs instead of breaking; {expr} interpolates) — blank for none",
-        initialValue: existing?.logMessage ?? "",
-        allowEmpty: true,
-      });
-      if (logMessage === null) return;
-      debug.setBreakpointOptions(key, line, {
-        condition: condition.trim() || undefined,
-        hitCondition: hitCondition.trim() || undefined,
-        logMessage: logMessage.trim() || undefined,
-      });
-    })();
-  }, [activeFileAbsPath, debug]);
+    if (!(debug.breakpoints[key] ?? []).some((bp) => bp.line === line)) {
+      debug.toggleBreakpoint(key, line);
+    }
+    setEditingBreakpoint({ path: key, line });
+    setBottomDockTab("debug");
+    setBottomDockOpen(true);
+  }, [activeFileAbsPath, debug, setBottomDockOpen, setBottomDockTab]);
 
   /** Build a Java launch config for the active file and start debugging. */
   const startDebugActiveFile = useCallback(() => {
@@ -5084,13 +5238,98 @@ export function CodeWorkspaceTab({
     setBottomDockOpen(true);
   }, [activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
 
-  const openDebugFrame = useCallback((frame: Pick<DebugStackFrame, "path" | "line">) => {
-    if (!frame.path) return;
-    const ref = problemPathToRef(frame.path);
-    if (!ref) return;
+  /**
+   * Attach to a JVM already running with `-agentlib:jdwp=...,server=y,address=…`
+   * (IDEA's "Remote JVM Debug"). The active file still selects the jdtls session
+   * so breakpoints resolve against this project's sources.
+   */
+  const attachRemoteDebug = useCallback(() => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root") return;
+    const root = findRoot(file.ref.rootId);
+    const absolute = absolutePathForOpenFile(file);
+    if (!root || !absolute) return;
+    const descriptor = lspDescriptorForFile(file);
+    void (async () => {
+      const target = await promptAppDialog({
+        title: "Attach to remote JVM",
+        label: "Debug address — host:port, or just the port for localhost",
+        initialValue: "localhost:5005",
+      });
+      if (target === null) return;
+      const trimmed = target.trim();
+      if (!trimmed) return;
+      const [hostPart, portPart] = trimmed.includes(":")
+        ? [trimmed.slice(0, trimmed.lastIndexOf(":")), trimmed.slice(trimmed.lastIndexOf(":") + 1)]
+        : ["localhost", trimmed];
+      const port = Number.parseInt(portPart, 10);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        setStatusMessage(`Not a valid debug address: ${trimmed}`);
+        return;
+      }
+      try {
+        await debug.startDebug({
+          workspaceId: descriptor?.workspaceId ?? workspaceInstanceId,
+          rootPath: root.path,
+          filePath: absolute,
+          request: "attach",
+          hostName: hostPart || "localhost",
+          port,
+        });
+        setBottomDockTab("debug");
+        setBottomDockOpen(true);
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+      }
+    })();
+  }, [
+    activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile,
+    setBottomDockOpen, setBottomDockTab, setStatusMessage, workspaceInstanceId,
+  ]);
+
+  const openDebugFrame = useCallback((
+    frame: Pick<DebugStackFrame, "path" | "line"> & Partial<Pick<DebugStackFrame, "sourceReference" | "sourceName" | "name">>,
+  ) => {
     const range = { start: { line: frame.line - 1, character: 0 }, end: { line: frame.line - 1, character: 0 } };
-    void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
-  }, [openFile, problemPathToRef, revealEditorLocation]);
+    const ref = frame.path ? problemPathToRef(frame.path) : null;
+    if (ref) {
+      void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
+      return;
+    }
+    // Outside the workspace (JDK / a dependency JAR): ask the adapter for the
+    // attached or decompiled source and show it read-only, like IDEA does.
+    const sourceReference = frame.sourceReference ?? 0;
+    if (sourceReference <= 0) return;
+    const origin = openFilesRef.current[activeKey ?? ""]
+      ?? Object.values(openFilesRef.current).find((item) => !item.loading)
+      ?? null;
+    const descriptor = origin ? lspDescriptorForFile(origin) : null;
+    if (!descriptor) return;
+    void (async () => {
+      const text = await debugRef.current.fetchSource(sourceReference);
+      if (!text) {
+        setStatusMessage("No source available for this frame");
+        return;
+      }
+      const title = frame.sourceName ?? `${frame.name ?? "frame"}.java`;
+      await openLibraryBuffer(
+        {
+          uri: `dap-source:${sourceReference}/${title}`,
+          title,
+          container: frame.name ?? null,
+          languageId: "java",
+          originRootPath: descriptor.rootPath ?? null,
+          originFilePath: descriptor.filePath,
+          decompiled: true,
+        },
+        text,
+        range,
+      );
+    })();
+  }, [
+    activeKey, lspDescriptorForFile, openFile, openLibraryBuffer, problemPathToRef,
+    revealEditorLocation, setStatusMessage,
+  ]);
 
   // IDEA-style: jump to the stopped location (breakpoint hit / step landing)
   // automatically, once per distinct location.
@@ -5234,8 +5473,13 @@ export function CodeWorkspaceTab({
         activeGitBlame={gitBlameByGroup[groupId]}
         activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
         activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
+        activeDebugInlineValues={groupId === activeEditorGroupId ? activeDebugInlineValues : undefined}
         onToggleBreakpoint={groupId === activeEditorGroupId ? toggleActiveBreakpoint : undefined}
         onEditBreakpoint={groupId === activeEditorGroupId ? editActiveBreakpoint : undefined}
+        debugStep={groupId === activeEditorGroupId && debugSessionActive ? debug.step : null}
+        debugRunToCursor={groupId === activeEditorGroupId && debugSessionActive ? debugRunToCursorLine : null}
+        debugStop={groupId === activeEditorGroupId && debugSessionActive ? debug.terminate : null}
+        debugEvaluate={groupId === activeEditorGroupId && debugStoppedHere ? debug.hoverEvaluate : null}
         activeCapabilities={groupCapabilities}
         activeLspSyncing={!!groupLspState?.syncing}
         lspStatusPill={(
@@ -5430,6 +5674,31 @@ export function CodeWorkspaceTab({
           icon={<RotateCcw className="w-3.5 h-3.5" />}
           disabled={!activeFile || activeFile.loading}
           onClick={() => executeWorkspaceCommand("workspace.reload", { focus: "editor" })}
+        />
+        <IconButton
+          label="Build project (Ctrl+F9)"
+          testId="code-workspace-build-project"
+          icon={projectBuildBusy
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Hammer className="w-3.5 h-3.5" />}
+          disabled={roots.length === 0 || projectBuildBusy}
+          onClick={() => buildActiveProject(false)}
+        />
+        <IconButton
+          label="Run current Java file (Shift+F10)"
+          testId="code-workspace-run-java"
+          icon={javaRunBusy
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Play className="w-3.5 h-3.5" />}
+          disabled={!activeFileDebuggable || javaRunBusy}
+          onClick={runActiveJavaFile}
+        />
+        <IconButton
+          label="Debug current Java file"
+          testId="code-workspace-debug-java"
+          icon={<Bug className="w-3.5 h-3.5" />}
+          disabled={!activeFileDebuggable || debugSessionActive}
+          onClick={startDebugActiveFile}
         />
         <IconButton
           label="Refresh tree"
@@ -5873,7 +6142,11 @@ export function CodeWorkspaceTab({
               <DebugPanel
                 debug={debug}
                 onStart={activeFileDebuggable ? startDebugActiveFile : null}
+                onAttach={activeFileDebuggable ? attachRemoteDebug : null}
                 onOpenFrame={openDebugFrame}
+                onOpenBreakpoint={(path, line) => openDebugFrame({ path, line })}
+                editingBreakpoint={editingBreakpoint}
+                onEditingBreakpointChange={setEditingBreakpoint}
               />
             ),
           },

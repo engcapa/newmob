@@ -15,6 +15,17 @@ export interface DebugBreakpoint {
   hitCondition?: string;
   /** D5: logpoint — log this message (with `{expr}` interpolation) instead of breaking. */
   logMessage?: string;
+  /**
+   * IDEA-style disable: the breakpoint stays in the list and the gutter but is
+   * not sent to the adapter. `undefined` means enabled (breakpoints persisted
+   * before this field existed stay armed).
+   */
+  enabled?: boolean;
+}
+
+/** True unless the breakpoint was explicitly disabled. */
+export function isBreakpointEnabled(bp: DebugBreakpoint): boolean {
+  return bp.enabled !== false;
 }
 
 export interface DebugStackFrame {
@@ -24,6 +35,14 @@ export interface DebugStackFrame {
   path: string | null;
   line: number;
   column: number;
+  /**
+   * Non-zero when the source is not a file the client can read and must be
+   * fetched with the DAP `source` request — library / decompiled frames
+   * (java-debug hands back attached or decompiled sources this way).
+   */
+  sourceReference: number;
+  /** Display name from the adapter (`String.java`), for a library buffer's tab. */
+  sourceName: string | null;
 }
 
 export interface DebugThread {
@@ -154,14 +173,60 @@ export function sortedBreakpoints(list: DebugBreakpoint[]): DebugBreakpoint[] {
 }
 
 /**
- * Build DAP `setBreakpoints` arguments for one source file. Entries are sorted
- * by line; the response's `breakpoints` array corresponds 1:1, in order, to
- * this sorted list (see parseSetBreakpointsResponse).
+ * What one `setBreakpoints` call for a file will send. DAP has no "disabled"
+ * flag on a breakpoint, so disabled (and, when breakpoints are muted, all)
+ * entries are simply left out of the request while staying in the stored list —
+ * `indexes` maps each sent entry back to its slot in `sorted` so the positional
+ * response can be applied to the right stored breakpoint.
  */
-export function buildSetBreakpointsArgs(path: string, breakpoints: DebugBreakpoint[]) {
+export interface BreakpointSyncPlan {
+  /** The full stored set for the file, sorted by line. */
+  sorted: DebugBreakpoint[];
+  /** The subset actually sent, in request order. */
+  sent: DebugBreakpoint[];
+  /** `sent[k]` is `sorted[indexes[k]]`; -1 for a transient (run-to-cursor) entry. */
+  indexes: number[];
+}
+
+/**
+ * Decide which of a file's breakpoints go to the adapter.
+ * `muted` suppresses all of them (IDEA "Mute Breakpoints"); `extraLine` adds a
+ * transient run-to-cursor breakpoint that is never stored.
+ */
+export function planBreakpointSync(
+  list: DebugBreakpoint[],
+  options: { muted?: boolean; extraLine?: number } = {},
+): BreakpointSyncPlan {
+  const sorted = sortedBreakpoints(list);
+  const sent: DebugBreakpoint[] = [];
+  const indexes: number[] = [];
+  if (!options.muted) {
+    sorted.forEach((bp, index) => {
+      if (!isBreakpointEnabled(bp)) return;
+      sent.push(bp);
+      indexes.push(index);
+    });
+  }
+  const extra = options.extraLine;
+  if (extra != null && !sent.some((bp) => bp.line === extra)) {
+    // Keep the request sorted by line, as the response corresponds positionally.
+    const at = sent.findIndex((bp) => bp.line > extra);
+    const insertAt = at === -1 ? sent.length : at;
+    sent.splice(insertAt, 0, { line: extra });
+    indexes.splice(insertAt, 0, -1);
+  }
+  return { sorted, sent, indexes };
+}
+
+/**
+ * Build DAP `setBreakpoints` arguments for one source file from a sync plan.
+ * The response's `breakpoints` array corresponds 1:1, in order, to `plan.sent`
+ * (see parseSetBreakpointsResponse).
+ */
+export function buildSetBreakpointsArgs(path: string, plan: BreakpointSyncPlan) {
   return {
     source: { path, name: path.split(/[\\/]/).pop() ?? path },
-    breakpoints: sortedBreakpoints(breakpoints).map((bp) => {
+    breakpoints: plan.sent.map((bp) => {
       const entry: Record<string, unknown> = { line: bp.line };
       if (bp.condition && bp.condition.trim()) entry.condition = bp.condition.trim();
       if (bp.hitCondition && bp.hitCondition.trim()) entry.hitCondition = bp.hitCondition.trim();
@@ -184,16 +249,16 @@ export interface BreakpointBinding {
 
 /**
  * Parse a `setBreakpoints` response. Per the DAP spec the response array
- * corresponds 1:1, in order, to the requested breakpoints — `sortedRequested`
- * must be the same sorted list the arguments were built from.
+ * corresponds 1:1, in order, to the requested breakpoints — so it is indexed
+ * against `plan.sent`.
  */
 export function parseSetBreakpointsResponse(
-  sortedRequested: DebugBreakpoint[],
+  plan: BreakpointSyncPlan,
   body: unknown,
 ): BreakpointBinding[] {
   const reported = asRecord(body).breakpoints;
   const list = Array.isArray(reported) ? reported : [];
-  return sortedRequested.map((bp, i) => {
+  return plan.sent.map((bp, i) => {
     const rec = asRecord(list[i]);
     return {
       id: typeof rec.id === "number" ? rec.id : null,
@@ -207,20 +272,41 @@ export function parseSetBreakpointsResponse(
  * Adopt adapter-adjusted lines: a breakpoint on a non-executable line gets
  * moved to the line the adapter actually bound (IDEA/VS Code behavior). Only
  * verified bindings move a breakpoint; entries collapsing onto an already-used
- * line are dropped.
+ * line are dropped. Breakpoints the plan did not send (disabled / muted) are
+ * carried through untouched.
  */
 export function reconcileBreakpointLines(
-  sortedRequested: DebugBreakpoint[],
+  plan: BreakpointSyncPlan,
   bindings: BreakpointBinding[],
 ): DebugBreakpoint[] {
+  const boundLines = new Map<number, number>(); // index in `sorted` → bound line
+  plan.indexes.forEach((index, k) => {
+    const binding = bindings[k];
+    if (index >= 0 && binding && binding.verified) boundLines.set(index, binding.line);
+  });
   const out: DebugBreakpoint[] = [];
   const seen = new Set<number>();
-  sortedRequested.forEach((bp, i) => {
-    const binding = bindings[i];
-    const line = binding && binding.verified ? binding.line : bp.line;
+  plan.sorted.forEach((bp, index) => {
+    const line = boundLines.get(index) ?? bp.line;
     if (seen.has(line)) return;
     seen.add(line);
     out.push(line === bp.line ? bp : { ...bp, line });
+  });
+  return out;
+}
+
+/**
+ * Verification state per bound line, for the gutter. Only sent breakpoints have
+ * one — a disabled or muted breakpoint is rendered from its stored state.
+ */
+export function breakpointVerificationMap(
+  plan: BreakpointSyncPlan,
+  bindings: BreakpointBinding[],
+): Record<number, boolean> {
+  const out: Record<number, boolean> = {};
+  plan.sent.forEach((bp, k) => {
+    const binding = bindings[k];
+    out[binding?.line ?? bp.line] = binding?.verified ?? false;
   });
   return out;
 }
@@ -285,6 +371,8 @@ export function parseStackFrames(body: unknown): DebugStackFrame[] {
       path: typeof source.path === "string" && source.path ? source.path : null,
       line: typeof rec.line === "number" ? rec.line : 0,
       column: typeof rec.column === "number" ? rec.column : 0,
+      sourceReference: typeof source.sourceReference === "number" ? source.sourceReference : 0,
+      sourceName: typeof source.name === "string" && source.name ? source.name : null,
     }];
   });
 }
@@ -379,7 +467,76 @@ export function reduceDebugEvent(
       if (!text || category === "telemetry") return state;
       return appendConsoleLine(state, category, text);
     }
+    case "thread": {
+      // Keep the thread list live while running — adapters report starts/exits
+      // as they happen, and a `threads` request is only allowed while stopped.
+      const threadId = typeof body.threadId === "number" ? body.threadId : null;
+      if (threadId == null) return state;
+      if (body.reason === "exited") {
+        return { ...state, threads: state.threads.filter((t) => t.id !== threadId) };
+      }
+      if (state.threads.some((t) => t.id === threadId)) return state;
+      return { ...state, threads: [...state.threads, { id: threadId, name: `Thread ${threadId}` }] };
+    }
     default:
       return state;
   }
+}
+
+/**
+ * The expression under `pos` in a line of source, for hover evaluation: a
+ * dotted identifier chain (`order.items.size`) plus any trailing `[i]` index,
+ * which is what IDEA evaluates when you hover a variable. Returns null when the
+ * position is not on an identifier. Pure — deliberately syntax-free so it works
+ * for every language the DAP framework serves.
+ */
+export function hoverExpressionAt(lineText: string, pos: number): string | null {
+  if (pos < 0 || pos > lineText.length) return null;
+  const isWord = (ch: string) => /[A-Za-z0-9_$]/.test(ch);
+  // The character under the caret, or the one just before it at a boundary.
+  let end = pos;
+  if (end < lineText.length && isWord(lineText[end])) {
+    while (end < lineText.length && isWord(lineText[end])) end += 1;
+  } else if (pos > 0 && isWord(lineText[pos - 1])) {
+    end = pos;
+  } else {
+    return null;
+  }
+  let start = end;
+  while (start > 0 && (isWord(lineText[start - 1]) || lineText[start - 1] === ".")) start -= 1;
+  // A leading dot or a numeric literal is not something worth evaluating.
+  const expression = lineText.slice(start, end).replace(/^\.+/, "");
+  if (!expression || /^[0-9]/.test(expression)) return null;
+  // Include a simple array/list index directly after the identifier.
+  const rest = lineText.slice(end);
+  const index = /^\[[^[\]]*\]/.exec(rest);
+  return index ? `${expression}${index[0]}` : expression;
+}
+
+/**
+ * Inline value label for one source line (IDEA shows evaluated locals next to
+ * the code). Returns `name = value` pairs for every known variable mentioned on
+ * the line, in order of appearance, or null when none are.
+ */
+export function inlineValueLabel(
+  lineText: string,
+  variables: Record<string, string>,
+): string | null {
+  const names = Object.keys(variables);
+  if (names.length === 0) return null;
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  // Scan identifiers left to right so the label reads in source order. Skip
+  // anything after a line comment and inside string literals is out of scope
+  // for a syntax-free scan — a stale extra pair is harmless, a missing one is not.
+  const code = lineText.split("//")[0];
+  for (const match of code.matchAll(/[A-Za-z_$][A-Za-z0-9_$]*/g)) {
+    const name = match[0];
+    // A member access (`obj.field`) is not the local `field`.
+    if (match.index > 0 && code[match.index - 1] === ".") continue;
+    if (seen.has(name) || !(name in variables)) continue;
+    seen.add(name);
+    parts.push(`${name} = ${variables[name]}`);
+  }
+  return parts.length > 0 ? parts.join(", ") : null;
 }

@@ -9,6 +9,7 @@ import {
 import { Loader2, Play, Plus, RefreshCw } from "lucide-react";
 import {
   workspaceDetectTasks,
+  workspaceJavaRunTargets,
   type WorkspaceTask,
 } from "../../../../lib/editor/workspace";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
@@ -29,6 +30,8 @@ interface RunHistoryEntry {
 
 export interface RunPanelHandle {
   rerunLast: () => boolean;
+  run: (task: WorkspaceTaskItem) => void;
+  refresh: () => void;
 }
 
 interface RunPanelProps {
@@ -80,12 +83,25 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
     setError(null);
     try {
       const groups = await Promise.all(roots.map(async (root) => {
-        const tasks = await workspaceDetectTasks(root.path);
-        return tasks.map((task): WorkspaceTaskItem => ({
+        const [tasks, javaTargets] = await Promise.all([
+          workspaceDetectTasks(root.path),
+          workspaceJavaRunTargets(root.path),
+        ]);
+        const detected = tasks.map((task): WorkspaceTaskItem => ({
           ...task,
           rootId: root.id,
           rootName: root.name,
         }));
+        const java = javaTargets.map((target): WorkspaceTaskItem => ({
+          id: target.id,
+          label: target.label,
+          command: target.command,
+          cwd: target.cwd,
+          source: `Java · ${target.buildSystem === "source-file" ? "JDK" : target.buildSystem}`,
+          rootId: root.id,
+          rootName: root.name,
+        }));
+        return [...java, ...detected];
       }));
       setDetectedTasks(groups.flat());
       setLoaded(true);
@@ -129,13 +145,17 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
   }, [onRun]);
 
   useImperativeHandle(ref, () => ({
+    run: runTask,
+    refresh: () => {
+      void refresh();
+    },
     rerunLast: () => {
       const last = history[0]?.task;
       if (!last) return false;
       runTask(last);
       return true;
     },
-  }), [history, runTask]);
+  }), [history, refresh, runTask]);
 
   const grouped = useMemo(() => {
     const map = new Map<string, WorkspaceTaskItem[]>();

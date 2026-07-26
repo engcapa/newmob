@@ -2,9 +2,9 @@
 
 > 目标：在现有 Code Workspace 基础上做功能与交互完善，达到"日常代码开发够用"的 IntelliJ IDEA 级体验（非全量对标）。本文档为设计稿，不含实现代码。
 >
-> 日期：2026-07-26 · 版本：v3.2（**M6–M9 全部代码交付**于 `feat/code-workspace-m6-java`：M6 jdtls 设置/大文件、M7 全项目诊断/构建集成、M8 Bundle 基建/DAP 内核/Java 适配器/测试探测、M9 调试主线 D3–D5/debug-test。真机冒烟由用户统一验证；结构化测试结果树按 JUnit socket 协议真机依赖显式后置）· 状态：**实施中**（M0–M5 已合入 `main`；M6–M9 待真机冒烟 + 合并）
+> 日期：2026-07-26 · 版本：v3.3（在 M6–M9 基础上新增 **M10 Java Build/Run 可执行闭环**：主类发现、Maven/Gradle/单文件启动、多模块构建任务、项目 Build/Rebuild、顶部运行入口与 wrapper 跨平台修复；详见 §11.G。调试仍使用通用 DAP，普通 Run 不再依赖 java-debug bundle）· 状态：**实施中**（代码与聚焦自动化已交付，M6–M10 真机工程冒烟待回填）
 >
-> 早期版本：v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
+> 早期版本：v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
@@ -397,11 +397,20 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 | go.mod | build / test / vet |
 | pyproject.toml | scripts（若定义） |
 
+**Java 工程补充（v3.3）**：
+
+- `workspace_java_run_targets(root)` 有界扫描 `.java` 源码，识别真实 `static void main(String[]/String... args)`；扫描前去除注释、字符串、字符与 text block，避免把 Javadoc 示例误当入口。测试源和构建产物不进入应用主类列表。
+- Maven 主类运行使用最近的 `pom.xml` 与父级 `mvnw`，先 `compile` 再通过固定版本 `exec-maven-plugin` 启动；Gradle 使用临时目录中的只读 init script 为对应 Java module 注册 `JavaExec`，无需修改用户的 `build.gradle`；无构建系统时使用 JDK 11+ source-file mode。
+- `workspace_task_tree(root)` 递归发现 Maven/Gradle 子模块；任务带 `modulePath`，Gradle 子模块使用 `:module:task`，Maven 子模块在模块 cwd 执行并复用父级 wrapper。
+- Build 面板提供 **Build project / Rebuild**：Maven 分别为 `compile` / `clean compile`，Gradle分别为 `classes` / `clean classes`。顶部工具条提供 Build、Run current Java file、Debug；快捷键为 `Ctrl+F9`、`Shift+F10`。
+- Windows wrapper 显式使用 `.\mvnw.cmd` / `.\gradlew.bat`（PowerShell 默认不搜索当前目录）；测试运行从任务模型复用实际 wrapper，不再回退到全局 `mvn` / `gradle`。
+
 **运行：**
 
 - 底部 Run tab：任务列表（按根分组）+ 运行历史；点击任务 → 集成终端新实例以 PTY 运行（保留颜色与交互），Run tab 显示状态（运行中 / 退出码）。
 - `Ctrl+F5` 重跑上一个任务；自定义任务（命令 + cwd，持久化到工作区状态）。
-- 不做：运行配置对话框的复杂参数体系、环境变量管理 UI。
+- 普通 Java Run 复用工作区 PTY 与 SDK 环境（`JAVA_HOME`/`PATH` 由后端 workspace SDK resolution 注入），具有交互 stdin、彩色输出和真实退出码；它与 Debug 解耦，未安装 java-debug bundle 也可执行。
+- 当前边界：尚未提供 IDEA 完整 Run Configuration 对话框（VM options、program args、env 文件、Before launch 组合步骤）；自定义命令仍可覆盖特殊启动需求。
 
 ### 5.10 文件树交互完善（P0 部分 + P1 部分）
 
@@ -589,8 +598,9 @@ src/stores/
 | **M7 工程智能（P1，§11 C+F）** | 全项目诊断（先 spike，后端聚合命令 + Problems 面板切换）；构建集成增强（依赖树、生命周期/任务树、项目重载、模块视图） | L | 🔶 F 构建集成 + C 全项目诊断基础设施代码已交付（`ba037ac` 重载 + `a0d209c` 任务树 + `f9abab5` 依赖树 + 模块视图 + `083999f` 全项目诊断后端 + 前端 Problems 切换）；C 的诊断刷新由 event 改为轮询（Windows 链接约束，见 §11.C），命中语义待用户真机 spike |
 | **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | ✅ 代码已交付：Bundle 基建（`4929467`）+ D1 DAP 内核（`b432f0f`）+ D2 Java 适配器（`9edb7b7`）+ E 测试探测/terminal 运行（`daa20fd`）；真机冒烟后置（jdtls 已在 PATH，bundle jar 待配置） |
 | **M9 调试主线 + 收口（P1/P2，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载；debug-test；真机冒烟回填 | XL | ✅ 代码已交付：D3 断点/单步/调用栈/当前行 + D4 变量/监视/console（`b141bad`）+ D5 条件/logpoint/异常断点/热重载 + debug-test；结构化测试结果树（JUnit socket 协议）显式后置；真机冒烟由用户统一验证 |
+| **M10 Java Build/Run 闭环（P0，§11.G）** | 主类发现与普通运行、Maven/Gradle/单文件启动、多模块 task model、Build/Rebuild、wrapper 跨平台与测试运行修复 | M | ✅ 代码已交付：普通 Run 不依赖 java-debug；顶部 `Ctrl+F9` / `Shift+F10`、Run 主类列表、Build/Rebuild、多模块任务与聚焦 Rust/Vitest 覆盖；真实 Maven/Gradle/JDK 工程冒烟待回填 |
 
-依赖关系：M0 是一切前提；M1/M2 内部可并行（后端 LSP 扩展与搜索模块独立）；M3 依赖 M0 的 dock 容器；M4 的层级面板依赖 M0 dock + M2 的 LSP 请求管道。**M6 两条线（A/B）互相独立可并行，且不依赖 M1–M5 之外的新前提；M7 的全项目诊断（C）依赖 M6-A 的 `autobuild`，构建增强（F）独立；M8 的测试/调试依赖 Bundle 基建，DAP 内核（D1）可与 M7 并行起步；M9 的 debug-test 依赖 M8 的 D1–D2。** 每个里程碑独立可发布、可验收。M6–M9 的完整拆分见 §11。
+依赖关系：M0 是一切前提；M1/M2 内部可并行（后端 LSP 扩展与搜索模块独立）；M3 依赖 M0 的 dock 容器；M4 的层级面板依赖 M0 dock + M2 的 LSP 请求管道。**M6 两条线（A/B）互相独立可并行，且不依赖 M1–M5 之外的新前提；M7 的全项目诊断（C）依赖 M6-A 的 `autobuild`，构建增强（F）独立；M8 的测试/调试依赖 Bundle 基建，DAP 内核（D1）可与 M7 并行起步；M9 的 debug-test 依赖 M8 的 D1–D2；M10 普通 Run 只依赖 M3 PTY + workspace SDK，不依赖 DAP/bundle。** 每个里程碑独立可发布、可验收。M6–M10 的完整拆分见 §11。
 
 ### 8.1 进度明细（勾选清单）
 
@@ -649,6 +659,7 @@ src/stores/
 - [x] 面包屑（根/目录/文件路径 + 随光标更新的 documentSymbol 符号链）— `81a494b`
 - [x] 集成终端底部面板（复用 `TerminalPanel`、当前根 cwd、多实例/根选择、`Alt+F12`、工作区卸载清理）— `49c53fc`
 - [x] Run/Tasks（多生态 `workspace_detect_tasks`、按根分组、自定义任务持久化、运行历史、PTY 复用与真实退出码）— `da62223`
+- [x] Java Build/Run 可执行收口（v3.3）：主类发现、Maven/Gradle/单文件运行、多模块构建任务、Build/Rebuild、顶部入口、wrapper 与测试运行修复；普通 Run 与 java-debug bundle 解耦 — §11.G
 
 **M4 语言智能·下 + Git（P1）— ✅ 10/10（代码已交付；真机冒烟后置）**
 
@@ -751,7 +762,7 @@ src/stores/
 | 文档同步 | 已支持增量（`buildIncrementalContentChange` + `omitFullText`），但前端每键 `doc.toString()` 出全串、React 持全串、并用两份全串 diff 算增量 | `CodeMirrorHost.tsx:679`、`useWorkspaceLspSession.ts:455` |
 | 诊断 | 仅对**已打开文档**推送；Problems 面板只遍历 `openOrder` | `lsp.rs`（per-URI 存储）、`CodeWorkspaceTab.tsx:4669` |
 | 库源码 | jdt:// 反编译 + 按需 Download Sources（已实现） | `lsp.rs` `lsp_download_sources`（约 3502 行） |
-| Run/Tasks | 已探测 npm/Cargo/Make/Gradle/pom/go 任务，经 PTY 运行，扁平命令列表 | `workspace.rs` `workspace_detect_tasks`（约 115/286 行） |
+| Run/Tasks（v3.2 基线问题） | 只探测 npm/Cargo/Make/Gradle/pom/go 的固定任务，经 PTY 运行；Java 仅有 Maven `package/test` 或 Gradle `build/test`，无主类发现、无当前文件运行，Windows wrapper 与测试 runner 还可能绕开项目 wrapper，因此界面有 Run/Build 但 Java 应用实际无法可靠启动 | `workspace.rs` `workspace_detect_tasks`、`RunPanel.tsx`、`javaTestRun.ts` |
 | 调试 / 测试 | 无（原 §2.3 非目标） | — |
 
 ### 11.A jdtls 初始化设置补齐（M6，快赢，规模 S–M，风险低）
@@ -844,6 +855,64 @@ jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩
 - **模块视图（F-4）**：`lsp_java_modules` 走 jdtls `workspace/executeCommand: java.project.getAll` → `JavaModule{name,path,uri}`（解析器去重+按名排序，单测）；前端 Build 面板 Modules 区仅对含 Maven/Gradle 任务的根显示、按需加载（合成 `.java` 路径选中该根的 jdtls session）。
 - **边界确认**：均未做 IDEA facet 建模 / 运行配置参数体系。真机门槛：spawn `mvn`/`gradle` 与 jdtls `getAll`/`projectConfigurationUpdate` 的端到端结果由用户真机冒烟回填；本期单测覆盖纯解析 + graceful 错误路径。
 
+**v3.3 补强（与 §11.G 共用任务模型）**：
+
+- 固定的根目录 Maven/Gradle 任务扩展为有界递归发现；`WorkspaceTask.modulePath` 标明模块，Build 面板直接展示模块徽标。父工程 wrapper 可被子模块复用，Gradle 任务使用 module-qualified selector。
+- Maven 生命周期补 `rebuild = clean compile`；Gradle补 `classes` 与 `rebuild = clean classes`。Build 面板顶部把“展示任务”提升为可直接执行的 Build project / Rebuild。
+- 本节仍负责构建模型、依赖与模块视图；“找到并启动 Java 应用”由 §11.G 闭环。
+
+### 11.G Java Build/Run 可执行闭环（M10，P0，规模 M）
+
+#### 11.G.1 根因复盘
+
+v3.2 的功能命名超过了实际语义：Build 是静态生命周期列表，Run 是通用 shell task 列表；两者之间没有 Java application model。具体断点如下：
+
+1. 没有发现 `main` class，编辑器当前 `.java` 文件无法映射为可执行目标。
+2. 普通 Run 实际借不到 DAP 的 `resolveMainClass/resolveClasspath`；而 DAP 又依赖 jdtls + java-debug bundle，把“运行”错误地绑在“调试扩展安装完成”之后。
+3. Maven/Gradle 只检查 workspace 根，monorepo/多模块子工程没有正确 cwd/task path。
+4. Windows PowerShell 不搜索当前目录，原 `mvnw.cmd` / `gradlew.bat` 命令可能直接报“找不到命令”。
+5. Java test 虽然通过 task tree 判断构建系统，最后却重新写死全局 `mvn` / `gradle`，wrapper 探测结果被丢弃。
+6. 顶部没有 Build/Run 主要操作，用户必须先理解底部 dock 的内部结构；这不符合 IDE 高频操作路径。
+
+#### 11.G.2 As-Built 方案
+
+**主类模型与发现**
+
+- 新增 `JavaRunTarget { id, label, mainClass, filePath, command, cwd, buildSystem, modulePath }`。
+- `workspace_java_run_targets(root)` 在最多 25 层 / 5000 文件的受控索引内扫描 Java application 入口；单文件解析上限 2 MiB。
+- `workspace_java_run_target(root,file)` 为当前编辑器文件做精确解析，是 `Shift+F10` 的低延迟路径。
+- 解析器在匹配 main signature 前移除行/块注释、普通字符串、字符和 Java text block；接受 `String[] args`、`String args[]`、`String... args`，从 package declaration + 文件名形成 FQN。
+
+**三条普通 Run 路径**
+
+| 工程类型 | 启动方式 | 设计理由 |
+|----------|----------|----------|
+| Maven | 最近模块 cwd；最近父级 `mvnw`；`compile` → 固定版本 `exec-maven-plugin:java` | 不要求 java-debug；依赖与 classpath 交给 Maven |
+| Gradle | 最近 settings root + wrapper；临时目录 Groovy init script 注册 `taomniRun: JavaExec`；子模块用 `:module:taomniRun` | 不修改用户 build files，也不要求 application plugin 已声明 `run` |
+| 无构建系统 | `java <absolute-source.java>` | 使用 JDK 11+ source-file mode，覆盖教学/脚本型单文件 |
+
+Gradle init script 只写入系统临时目录 `taomni-code-workspace/java-run.init.gradle`，内容固定且按内容校验后覆盖，不在 workspace 产生 `.taomni`、class 或配置文件。实际进程仍运行在工作区集成 PTY 中，因此 stdin、ANSI、Ctrl+C 和 exit code 行为与终端一致。
+
+**Build 与 UI**
+
+- Build 面板：根/模块 Maven 全生命周期，Gradle常用任务；Build project 与 Rebuild 一键入口。
+- 编辑器 header：Build project（`Ctrl+F9`）、Run current Java file（`Shift+F10`）、Debug current Java file；运行前若当前 Java buffer dirty，先可靠保存再从磁盘解析。
+- Run 面板：Java mains 作为第一类任务列在通用 scripts 之前，运行历史沿用真实 OSC 633 exit marker。
+- workspace SDK environment 继续由 terminal backend 按 root + cwd 解析并注入，所以项目 JDK binding 对 `java`、wrapper 及其子进程一致生效。
+
+**跨平台与测试修复**
+
+- Windows 根 wrapper 使用 `.\mvnw.cmd` / `.\gradlew.bat`；父级绝对 wrapper 在 PowerShell 使用 call operator `& 'path'`，Unix 使用单引号安全转义。
+- Java test 直接扩展 `workspace_task_tree` 返回的完整 `test` command（再追加 class/method selector），因此同时保留 wrapper 与 Gradle module-qualified task，不再调用 `defaultRunner()` 回退全局工具。
+- Rust 单测覆盖：三种 main signature/注释误判、Maven wrapper、Gradle 子模块 selector/init script、test source 排除、多模块 task；Vitest 覆盖 Run target 渲染/启动、Build/Rebuild 选择与终端 exit 状态。
+
+#### 11.G.3 当前边界与后续
+
+- 本轮目标是“开箱可 Build/Run”，不是完整 IDEA Run Configuration。program args、VM options、env map、active profiles、Before launch、配置命名/共享仍应作为 M11 独立模型实现，不能继续拼接到 `WorkspaceTask.command`。
+- Maven 首次运行 exec plugin、Gradle首次解析依赖仍可能访问网络；离线行为由构建工具自身配置决定。
+- Android Gradle、JPMS module-path、定制 Gradle `projectDir` 映射、非文件名顶层 main class 属高级 project model；发现失败时明确报错并保留自定义 task 兜底。
+- Debug 仍走 DAP + java-debug bundle，以保留断点/变量能力；Run 与 Debug 的依赖边界刻意不同。
+
 ### 11.D 调试（DAP，M8–M9，最大新项目，规模 XL，风险高，分 D1–D5）
 
 原 §2.3 明确排除，现纳入。**决策（§10.7）：从 D1 起就抽通用 DAP 框架**——语言无关内核 + 适配器注册表；Java 只是首个适配器，D3–D5 的断点/单步/变量/求值全部走**语言无关**的会话状态与前端面板，不写 Java 特判。后续 Node/Go/LLDB 等只需新增一个适配器定义。
@@ -870,6 +939,12 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
 
 **前端**：底部 Debug 面板（调用栈/变量/监视/断点/console）+ 编辑器断点 gutter + 悬浮运行工具条，**均按 DAP 标准模型渲染，与语言无关**；适配器专属能力（如 Java 热重载）按 D1 下发的 capabilities/适配器能力位开关（沿用 §5.2.0 capability 驱动模式）。
 
+- **D6 IDEA 成熟度收口**（缺陷修复 + 补齐，规模 M）— **✅ 已交付**。
+  **缺陷（P0）**：① 会话中新增/改条件的断点**从不生效**——`toggleBreakpoint`/`setBreakpointOptions` 在 `setBreakpoints` 的 state updater 内同步调用 sync，读到的是**改动前**的 ref，推给适配器的是旧集合；改为「先算新集合 → 同步更新 ref → 显式传 list 给 sync」的单一变更入口（`mutateBreakpoints`），并加 per-path generation 防止旧响应覆盖新集合。② Windows 长 classpath 启动失败（`CreateProcess error=206`）——java-debug 默认不缩短命令行，现默认 `shortenCommandLine: "auto"`（可覆盖），对齐 IDEA 的 shorten command line。③ **stdio 适配器死锁**——`connect_transport` 管道化 stderr 却无人排空，管道写满后适配器永久阻塞；新增 `run_stderr_pump` 转成 `output` 事件（Java 走 TCP 不受影响，但这是多语言框架的通用缺陷）。④ **反向请求无人应答**——内核只转发不回复，发 `runInTerminal`/`startDebugging` 的适配器会一直等；`reverse_response` 统一回失败响应。⑤ `initialize` 无超时 → UI 永久卡「starting」；加 20s 上限。⑥ EOF 时后端会话从 map 移除，前端不在也不泄漏；Stop 优先走 `terminate`（capability 判定）再 `disconnect`。
+  **IDEA 对齐（均为语言无关 DAP 层）**：断点视图（全工作区列表 + 单个启用/禁用 + Mute All + Remove All + 点击跳转 + 条件/命中次数/logpoint 内联编辑，取代原先三连 modal prompt）；编辑器悬停求值（停驻时接管 LSP hover）；行尾 inline values（仅渲染到当前执行行）；调试快捷键 F9/F8/F7/Shift+F8/Ctrl+F8/Ctrl+Shift+F8/Alt+F9/Ctrl+F2；`thread` 事件维护线程列表；Stop 后保留 console（含 Clear）；库/反编译栈帧经 DAP `source` 请求打开只读缓冲区。
+  **Java 适配器**：远程 attach（IDEA Remote JVM Debug，`hostName`/`port`，跳过 mainClass/classpath 解析）；显式 mainClass 缺 projectName 时回填所属工程（多模块下避免解析错模块）；`sourcePaths`/`stopOnEntry`/`encoding`/`shortenCommandLine` 透传。
+  测试：Rust 24（新增 reverse-response、attach 参数、shortenCommandLine/透传）；前端新增 `useCodeDebugSession.test.tsx`（9，含旧缺陷回归）+ `debugEditorChrome.test.ts`（7）+ 模型/面板补充。**真机冒烟仍由用户验证**（需 jdtls + java-debug bundle + Java 工程）。
+
 ### 11.E 测试集成（M8–M9，依赖 Bundle 基建 + 部分 D，规模 L）
 
 - **探测**：java-test 命令 `java.test.findTestTypesAndMethods`（JUnit4/5、TestNG）。
@@ -886,9 +961,10 @@ M6 快赢(并行)      : A(jdtls 设置) ‖ B(大文件)                — 2 �
 M7 工程智能        : C(全项目诊断, 先 spike) ‖ F(构建增强)     — C 依赖 M6-A 的 autobuild
 M8 测试/调试基建    : Bundle 基建 → E(测试 run-only) ；D1→D2 起步(可与 M7 并行)
 M9 调试主线 + 收口  : D3→D4→D5 ；debug-test(E×D2) ；真机冒烟回填
+M10 Build/Run 闭环 : G(main 发现 + Maven/Gradle/单文件 Run + 多模块 Build) — 不依赖 DAP bundle
 ```
 
-硬依赖：C ← M6-A 的 `autobuild`；D/E ← Bundle 基建；debug-test ← D2。A、B、F 互相独立可并行。每个里程碑独立可发布、可验收。
+硬依赖：C ← M6-A 的 `autobuild`；D/E ← Bundle 基建；debug-test ← D2；G ← M3 的 PTY + workspace SDK environment。A、B、F、G 不依赖 DAP，可独立发布、验收。
 
 ### 11.8 后端新增 / 扩展命令清单
 
@@ -896,16 +972,17 @@ M9 调试主线 + 收口  : D3→D4→D5 ；debug-test(E×D2) ；真机冒烟回
 |------|-------------|--------|
 | lsp.rs | `lsp_initialization_options` 扩展 `settings.java` 全集 + bundles 注入 | M6-A / M8 |
 | lsp.rs | `lsp_set_java_settings`（热更新经 didChangeConfiguration） | M6-A |
-| lsp.rs | `lsp_workspace_diagnostics` + `lsp:diagnostics-updated` event + `java.buildWorkspace` 触发 | M7-C |
+| lsp.rs | `lsp_workspace_diagnostics` 轮询聚合 + `java.buildWorkspace` 触发 | M7-C |
 | 新 dap.rs | 通用内核：`dap_start_session` / `dap_send_request` / `dap_terminate` + DAP event 转发 + `DebugAdapterRegistry` 抽象（**语言无关**） | M8-D1 |
 | dap.rs registry | Java `DebugAdapterDescriptor`：resolveMainClass/Classpath/JavaExecutable + java-debug `startDebugSession`（**唯一语言相关处**） | M8-D2 |
 | 新 java_test.rs | `java_test_discover` / `java_test_run`（run-only）；debug 复用 dap | M8/M9-E |
-| workspace.rs | `workspace_dependency_tree` / `workspace_task_tree` / `workspace_reload_project` | M7-F |
+| workspace.rs / lsp.rs | `workspace_dependency_tree` / `workspace_task_tree` / `lsp_reload_project` | M7-F |
+| workspace.rs | `workspace_java_run_targets` / `workspace_java_run_target`；`WorkspaceTask.modulePath`；Maven/Gradle wrapper 与多模块 task command | M10-G |
 | 新 java_bundles.rs | bundle 路径解析 / 探测 / 下载 | M8-Bundle |
 
 依赖新增：DAP 用自实现 stdio 客户端（不引第三方 crate）；java-debug / java-test / lombok 为运行期加载的 JVM bundle（jar），非 Rust 依赖。
 
-### 11.9 风险与权衡（M6–M9）
+### 11.9 风险与权衡（M6–M10）
 
 | 风险 | 缓解 |
 |------|------|
@@ -916,5 +993,7 @@ M9 调试主线 + 收口  : D3→D4→D5 ；debug-test(E×D2) ；真机冒烟回
 | 大文件增量与 server 不同步 | ChangeSet 映射 + 全量兜底（已有 catch）+ 版本代际校验（已有 epoch guard） |
 | jdtls 内存（默认 1G） | M6-A 把建议 vmargs（如 `-Xmx2G -XX:+UseG1GC`）写入设置提示；大型工程引导上调 |
 | 冷启动慢 | 与本计划正交；可另做「导入进度」可视化（承接 jdtls `language/status` 通知） |
+| 静态 main 发现不是完整 Java AST | 先剥离注释/字面量并严格匹配合法 signature；jdtls/java-debug 可用时 Debug 仍走语义解析；后续 Run Configuration model 可增加 jdtls resolve 作为增强而非硬依赖 |
+| Gradle 工程高度可定制 | init script 不改工程且使用 sourceSets runtimeClasspath；标准多模块使用 qualified task；自定义 `projectDir`/Android 等明确降级到自定义 task，避免伪支持 |
+| Maven exec plugin 首次下载 | 固定 plugin 版本保证可重复；离线缓存缺失时在真实终端显示 Maven 原始错误，不吞错 |
 | 范围蔓延 | 修订后 §2.3 为新基线：不做 Profiler / IDEA facet 建模 / 远程 jdtls |
-

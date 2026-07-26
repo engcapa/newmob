@@ -1,4 +1,4 @@
-import { useEffect, useRef, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
 import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   EditorView,
@@ -58,6 +58,7 @@ import {
 import { createLspHyperlinkExtension } from "./lspHyperlink";
 import { createGitEditorChrome, type GitLineChange } from "./gitEditorChrome";
 import { createDebugEditorChrome, type DebugBreakpointMarker } from "./debugEditorChrome";
+import type { DebugStepAction } from "./dapDebugModel";
 import type { GitBlameLine } from "../../../lib/git";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import {
@@ -95,6 +96,14 @@ interface CodeMirrorHostProps {
   debugBreakpoints?: DebugBreakpointMarker[];
   /** 1-based line the debugger is currently stopped on for this file (or null). */
   debugCurrentLine?: number | null;
+  /** Selected-frame locals (`name → value`) rendered as inline values. */
+  debugInlineValues?: Record<string, string>;
+  /** Stepping / stop actions for the debugger keymap; null when no session runs. */
+  debugStep?: ((action: DebugStepAction) => void) | null;
+  debugRunToCursor?: ((line: number) => void) | null;
+  debugStop?: (() => void) | null;
+  /** Hover evaluation while stopped in this file (null disables the tooltip). */
+  debugEvaluate?: ((expression: string) => Promise<{ value: string; type: string | null } | null>) | null;
   reveal: EditorRevealTarget | null;
   /** Block edits (library / decompiled sources that have no file to write back to). */
   readOnly?: boolean;
@@ -198,6 +207,23 @@ const EMPTY_GIT_CHANGES: GitLineChange[] = [];
 /** New empty-array props are common while LSP requests are debounced. */
 function sameArrayOrBothEmpty<T>(previous: readonly T[], next: readonly T[]): boolean {
   return previous === next || (previous.length === 0 && next.length === 0);
+}
+
+/**
+ * Inline values are rebuilt on every stop, so identity comparison alone would
+ * reconfigure the editor even when the values did not change (stepping over a
+ * line that touches nothing).
+ */
+function sameInlineValues(
+  previous: Record<string, string> | undefined,
+  next: Record<string, string> | undefined,
+): boolean {
+  if (previous === next) return true;
+  const a = previous ?? {};
+  const b = next ?? {};
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => a[key] === b[key]);
 }
 
 function signatureTooltipDom(result: LspSignatureHelpResult): HTMLElement {
@@ -318,6 +344,11 @@ export function CodeMirrorHost({
   signatureTriggers,
   debugBreakpoints,
   debugCurrentLine,
+  debugInlineValues,
+  debugStep,
+  debugRunToCursor,
+  debugStop,
+  debugEvaluate,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -340,9 +371,20 @@ export function CodeMirrorHost({
   const renderedOverlayRef = useRef({ highlights, inlayHints });
   const renderedSemanticTokensRef = useRef(semanticTokens);
   const renderedGitRef = useRef({ changes: gitChanges, blame: gitBlame });
-  const renderedDebugRef = useRef({ breakpoints: debugBreakpoints, currentLine: debugCurrentLine });
+  const renderedDebugRef = useRef({
+    breakpoints: debugBreakpoints,
+    currentLine: debugCurrentLine,
+    inlineValues: debugInlineValues,
+    evaluating: !!debugEvaluate,
+  });
   const onToggleBreakpointRef = useRef(onToggleBreakpoint);
   const onEditBreakpointRef = useRef(onEditBreakpoint);
+  // Debug actions go through refs so a new session (or a step landing) does not
+  // force the whole editor extension set to be rebuilt.
+  const debugStepRef = useRef(debugStep);
+  const debugRunToCursorRef = useRef(debugRunToCursor);
+  const debugStopRef = useRef(debugStop);
+  const debugEvaluateRef = useRef(debugEvaluate);
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
   const onHoverRef = useRef(onHover);
@@ -375,7 +417,51 @@ export function CodeMirrorHost({
   onGitChangeClickRef.current = onGitChangeClick;
   onToggleBreakpointRef.current = onToggleBreakpoint;
   onEditBreakpointRef.current = onEditBreakpoint;
+  debugStepRef.current = debugStep;
+  debugRunToCursorRef.current = debugRunToCursor;
+  debugStopRef.current = debugStop;
+  debugEvaluateRef.current = debugEvaluate;
   onContextMenuRef.current = onContextMenu;
+
+  /**
+   * Build the debug compartment's extensions. Actions read through refs so the
+   * extension only has to be rebuilt when what is *rendered* changes; `evaluating`
+   * is a flag rather than the callback so a new function identity per render
+   * does not churn the editor.
+   */
+  const buildDebugChrome = useCallback((
+    markers: DebugBreakpointMarker[] | undefined,
+    currentLine: number | null | undefined,
+    inlineValues: Record<string, string> | undefined,
+    evaluating: boolean,
+  ) => createDebugEditorChrome({
+    markers: markers ?? [],
+    currentLine: currentLine ?? null,
+    inlineValues,
+    actions: {
+      toggleBreakpoint: (line) => onToggleBreakpointRef.current?.(line),
+      editBreakpoint: (line) => onEditBreakpointRef.current?.(line),
+      step: (action) => {
+        const step = debugStepRef.current;
+        if (!step) return false;
+        step(action);
+        return true;
+      },
+      runToCursor: (line) => {
+        const run = debugRunToCursorRef.current;
+        if (!run) return false;
+        run(line);
+        return true;
+      },
+      stop: () => {
+        const stop = debugStopRef.current;
+        if (!stop) return false;
+        stop();
+        return true;
+      },
+    },
+    evaluate: evaluating ? (expression) => debugEvaluateRef.current?.(expression) ?? Promise.resolve(null) : null,
+  }), []);
   completionTriggersRef.current = completionTriggers ?? [];
   signatureTriggersRef.current = signatureTriggers ?? [];
   pathRef.current = path;
@@ -599,11 +685,11 @@ export function CodeMirrorHost({
           gitBlame,
           (change) => onGitChangeClickRef.current?.(change),
         )),
-        debugCompartment.current.of(createDebugEditorChrome(
-          debugBreakpoints ?? [],
-          debugCurrentLine ?? null,
-          (line) => onToggleBreakpointRef.current?.(line),
-          (line) => onEditBreakpointRef.current?.(line),
+        debugCompartment.current.of(buildDebugChrome(
+          debugBreakpoints,
+          debugCurrentLine,
+          debugInlineValues,
+          !!debugEvaluate,
         )),
         signatureCompartment.current.of([]),
         readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
@@ -835,22 +921,30 @@ export function CodeMirrorHost({
     const view = viewRef.current;
     if (!view) return;
     const previous = renderedDebugRef.current;
+    const evaluating = !!debugEvaluate;
     if (
       sameArrayOrBothEmpty(previous.breakpoints ?? [], debugBreakpoints ?? [])
       && previous.currentLine === debugCurrentLine
+      && sameInlineValues(previous.inlineValues, debugInlineValues)
+      && previous.evaluating === evaluating
     ) {
       return;
     }
-    renderedDebugRef.current = { breakpoints: debugBreakpoints, currentLine: debugCurrentLine };
+    renderedDebugRef.current = {
+      breakpoints: debugBreakpoints,
+      currentLine: debugCurrentLine,
+      inlineValues: debugInlineValues,
+      evaluating,
+    };
     view.dispatch({
-      effects: debugCompartment.current.reconfigure(createDebugEditorChrome(
-        debugBreakpoints ?? [],
-        debugCurrentLine ?? null,
-        (line) => onToggleBreakpointRef.current?.(line),
-        (line) => onEditBreakpointRef.current?.(line),
+      effects: debugCompartment.current.reconfigure(buildDebugChrome(
+        debugBreakpoints,
+        debugCurrentLine,
+        debugInlineValues,
+        evaluating,
       )),
     });
-  }, [debugBreakpoints, debugCurrentLine]);
+  }, [buildDebugChrome, debugBreakpoints, debugCurrentLine, debugEvaluate, debugInlineValues]);
 
   useEffect(() => {
     const view = viewRef.current;

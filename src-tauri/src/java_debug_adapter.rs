@@ -145,6 +145,18 @@ fn parse_debug_port(value: &Value) -> Option<u16> {
         .and_then(|p| u16::try_from(p).ok())
 }
 
+/// IDEA-like stepping defaults: step-into skips JDK internals, synthetic/bridge
+/// methods, and static initializers ("$JDK" is java-debug's magic token for the
+/// JDK class set).
+fn default_step_filters() -> Value {
+    json!({
+        "skipClasses": ["$JDK"],
+        "skipSynthetics": true,
+        "skipStaticInitializers": true,
+        "skipConstructors": false,
+    })
+}
+
 /// Assemble the java-debug `launch` request arguments from the resolved pieces
 /// plus optional overrides in the launch config (`args`/`vmArgs`/`cwd`/`env`/
 /// `console`/`noDebug`). Pure — unit-tested.
@@ -171,26 +183,72 @@ fn build_launch_arguments(
         "console": cfg.get("console").and_then(Value::as_str).unwrap_or("internalConsole"),
     });
     // Optional passthroughs from the caller.
-    for key in ["args", "vmArgs", "cwd", "env", "noDebug", "stepFilters"] {
+    for key in [
+        "args",
+        "vmArgs",
+        "cwd",
+        "env",
+        "noDebug",
+        "stepFilters",
+        "stopOnEntry",
+        "sourcePaths",
+        "encoding",
+        "shortenCommandLine",
+    ] {
         if let Some(value) = cfg.get(key) {
             args[key] = value.clone();
         }
     }
-    // IDEA-like stepping defaults when the caller does not override: step-into
-    // skips JDK internals, synthetic/bridge methods, and static initializers
-    // ("$JDK" is java-debug's magic token for the JDK class set).
     if args.get("stepFilters").is_none() {
-        args["stepFilters"] = json!({
-            "skipClasses": ["$JDK"],
-            "skipSynthetics": true,
-            "skipStaticInitializers": true,
-            "skipConstructors": false,
-        });
+        args["stepFilters"] = default_step_filters();
+    }
+    // A resolved Maven/Gradle classpath easily exceeds the OS command-line limit
+    // (32 KB on Windows → "CreateProcess error=206"). java-debug defaults to no
+    // shortening; "auto" makes it fall back to an @argfile / jar manifest only
+    // when needed — the same thing IDEA's "shorten command line" does.
+    if args.get("shortenCommandLine").is_none() {
+        args["shortenCommandLine"] = json!("auto");
     }
     if let Some(java_exec) = java_exec.filter(|s| !s.is_empty()) {
         args["javaExec"] = json!(java_exec);
     }
     args
+}
+
+/// Assemble java-debug `attach` arguments (IDEA's "Remote JVM Debug"): connect
+/// to a JVM already running with `-agentlib:jdwp=...,server=y,address=<port>`.
+/// No main class or classpath resolution is involved — the debuggee exists — but
+/// `projectName` still scopes source lookup so breakpoints bind to workspace
+/// sources. Pure — unit-tested.
+fn build_attach_arguments(cfg: &Value) -> Result<Value, String> {
+    let port = cfg
+        .get("port")
+        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .filter(|p| *p > 0 && *p <= u16::MAX as u64)
+        .ok_or("Java attach needs a debug `port` (the JVM's jdwp address)")?;
+    let host = cfg
+        .get("hostName")
+        .or_else(|| cfg.get("host"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("localhost");
+    let mut args = json!({
+        "type": "java",
+        "name": format!("Attach {host}:{port}"),
+        "request": "attach",
+        "hostName": host,
+        "port": port,
+    });
+    for key in ["projectName", "sourcePaths", "timeout", "stepFilters", "processId"] {
+        if let Some(value) = cfg.get(key) {
+            args[key] = value.clone();
+        }
+    }
+    if args.get("stepFilters").is_none() {
+        args["stepFilters"] = default_step_filters();
+    }
+    Ok(args)
 }
 #[async_trait::async_trait]
 impl DebugAdapter for JavaDebugAdapter {
@@ -211,13 +269,45 @@ impl DebugAdapter for JavaDebugAdapter {
             }
         };
 
+        // 0) Attach (IDEA "Remote JVM Debug"): the debuggee already runs, so no
+        //    main class / classpath / JVM resolution — only the adapter port.
+        if launch_config.get("request").and_then(Value::as_str) == Some("attach") {
+            let arguments = build_attach_arguments(launch_config)?;
+            let port_value = run("vscode.java.startDebugSession", vec![]).await?;
+            let port = parse_debug_port(&port_value)
+                .ok_or("java-debug did not return a debug session port")?;
+            return Ok(DapLaunchPlan {
+                transport: DapTransport::Tcp { host: "127.0.0.1".into(), port },
+                request: "attach".into(),
+                arguments,
+            });
+        }
+
         // 1) Main class: honor an explicit one, else resolve the workspace's mains.
-        let (main_class, project_name) = match (
-            launch_config.get("mainClass").and_then(Value::as_str),
-            launch_config.get("projectName").and_then(Value::as_str),
-        ) {
-            (Some(main_class), project_name) if !main_class.is_empty() => {
-                (main_class.to_string(), project_name.unwrap_or("").to_string())
+        let explicit_main = launch_config
+            .get("mainClass")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let explicit_project = launch_config
+            .get("projectName")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty());
+        let (main_class, project_name) = match (explicit_main, explicit_project) {
+            (Some(main_class), Some(project_name)) => {
+                (main_class.to_string(), project_name.to_string())
+            }
+            // An explicit main class without a project: classpath resolution needs
+            // the owning project, so look it up among the workspace's mains rather
+            // than sending an empty projectName (which resolves the wrong module in
+            // multi-module builds).
+            (Some(main_class), None) => {
+                let resolved = run("vscode.java.resolveMainClass", vec![]).await.unwrap_or(Value::Null);
+                let project = parse_main_classes(&resolved)
+                    .into_iter()
+                    .find(|c| c.main_class == main_class)
+                    .map(|c| c.project_name)
+                    .unwrap_or_default();
+                (main_class.to_string(), project)
             }
             _ => {
                 let resolved = run("vscode.java.resolveMainClass", vec![]).await?;
@@ -369,6 +459,44 @@ mod tests {
         // Default console when unset: internalConsole (the kernel does not
         // implement the `runInTerminal` reverse request).
         assert_eq!(args["console"], "internalConsole");
+        // Long classpaths must not blow the OS command-line limit.
+        assert_eq!(args["shortenCommandLine"], "auto");
+    }
+
+    #[test]
+    fn honors_an_explicit_shorten_command_line_and_extra_passthroughs() {
+        let cfg = json!({
+            "shortenCommandLine": "argfile",
+            "stopOnEntry": true,
+            "sourcePaths": ["/repo/src/main/java"],
+            "encoding": "UTF-8",
+        });
+        let args = build_launch_arguments(&cfg, "App", "demo", &[], &[], None);
+        assert_eq!(args["shortenCommandLine"], "argfile");
+        assert_eq!(args["stopOnEntry"], json!(true));
+        assert_eq!(args["sourcePaths"], json!(["/repo/src/main/java"]));
+        assert_eq!(args["encoding"], "UTF-8");
+    }
+
+    #[test]
+    fn builds_attach_arguments_for_a_remote_jvm() {
+        let args = build_attach_arguments(&json!({
+            "hostName": "10.0.0.7", "port": 5005, "projectName": "demo",
+        }))
+        .unwrap();
+        assert_eq!(args["request"], "attach");
+        assert_eq!(args["hostName"], "10.0.0.7");
+        assert_eq!(args["port"], 5005);
+        assert_eq!(args["projectName"], "demo");
+        assert_eq!(args["stepFilters"]["skipSynthetics"], json!(true));
+        // The host defaults to localhost, and a string port is accepted.
+        let local = build_attach_arguments(&json!({ "port": "5005" })).unwrap();
+        assert_eq!(local["hostName"], "localhost");
+        assert_eq!(local["port"], 5005);
+        // A missing / unusable port is a clear error, not a bad attach.
+        assert!(build_attach_arguments(&json!({ "hostName": "h" })).is_err());
+        assert!(build_attach_arguments(&json!({ "port": 0 })).is_err());
+        assert!(build_attach_arguments(&json!({ "port": 99999 })).is_err());
     }
 
     #[test]

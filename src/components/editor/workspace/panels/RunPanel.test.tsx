@@ -5,6 +5,7 @@ import { RunPanel, type RunPanelHandle } from "./RunPanel";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceDetectTasks: vi.fn(),
+  workspaceJavaRunTargets: vi.fn(),
 }));
 
 vi.mock("../../../../lib/editor/workspace", () => workspaceMocks);
@@ -21,6 +22,7 @@ describe("RunPanel", () => {
       cwd: "/repo/app",
       source: "package.json",
     }]);
+    workspaceMocks.workspaceJavaRunTargets.mockReset().mockResolvedValue([]);
   });
 
   afterEach(cleanup);
@@ -70,5 +72,37 @@ describe("RunPanel", () => {
     fireEvent.click(screen.getByTitle("pnpm lint — /repo/app"));
     expect(handle.current?.rerunLast()).toBe(true);
     expect(onRun).toHaveBeenCalledTimes(2);
+  });
+
+  it("discovers Java main classes as first-class run targets", async () => {
+    workspaceMocks.workspaceJavaRunTargets.mockResolvedValue([{
+      id: "java-main:src/main/java/com/example/App.java",
+      label: "com.example.App",
+      mainClass: "com.example.App",
+      filePath: "/repo/app/src/main/java/com/example/App.java",
+      command: "./mvnw -q compile exec:java",
+      cwd: "/repo/app",
+      buildSystem: "maven",
+      modulePath: ".",
+    }]);
+    const onRun = vi.fn();
+    render(
+      <RunPanel
+        workspaceInstanceId="ws"
+        roots={roots}
+        active
+        onRun={onRun}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: /com\.example\.App/ }));
+    expect(onRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        label: "com.example.App",
+        command: "./mvnw -q compile exec:java",
+        source: "Java · maven",
+      }),
+      expect.any(Function),
+    );
   });
 });
