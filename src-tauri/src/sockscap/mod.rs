@@ -13,6 +13,7 @@ pub mod dns_win;
 pub mod egress;
 pub mod flow;
 pub mod helper;
+pub mod listener_pid;
 pub mod orchestrator;
 pub mod paths;
 pub mod policy;
@@ -926,6 +927,12 @@ async fn start_windows_capture(
 
     let active_profs = cfg.active_profiles();
     let mut profile_upstreams = std::collections::HashMap::new();
+    // Ports of native HTTP/SOCKS5 upstreams whose host is loopback (i.e. an
+    // external local proxy such as Clash/v2rayN). We resolve the PID listening
+    // on each and bypass it, so the proxy's own egress to its node isn't
+    // re-captured into a loop. Only native kinds: core (xray) upstreams dial via
+    // their sidecar (already PID-bypassed) and their host is the remote node.
+    let mut loopback_proxy_ports: Vec<u16> = Vec::new();
     for p in &active_profs {
         let (mut phost, mut pport, mut puser, mut ppass) =
             relay::upstream_from_config_ref(&p.upstream);
@@ -992,6 +999,18 @@ async fn start_windows_capture(
         let p_xray_port =
             ensure_core_port(state, &p.id, p.upstream.kind, &phost, pport, &p.upstream).await;
 
+        // Native loopback proxy? Remember its port for PID-bypass below.
+        if matches!(
+            p.upstream.kind,
+            crate::sockscap::config::UpstreamKind::Http
+                | crate::sockscap::config::UpstreamKind::Socks5
+        ) && pport != 0
+            && listener_pid::is_loopback(&phost)
+            && !loopback_proxy_ports.contains(&pport)
+        {
+            loopback_proxy_ports.push(pport);
+        }
+
         profile_upstreams.insert(
             p.id.clone(),
             relay::ResolvedUpstream {
@@ -1016,6 +1035,18 @@ async fn start_windows_capture(
         &cfg.upstream,
     )
     .await;
+
+    // Global native loopback proxy → remember its port for PID-bypass below.
+    if matches!(
+        cfg.upstream.kind,
+        crate::sockscap::config::UpstreamKind::Http
+            | crate::sockscap::config::UpstreamKind::Socks5
+    ) && up_port != 0
+        && listener_pid::is_loopback(&up_host)
+        && !loopback_proxy_ports.contains(&up_port)
+    {
+        loopback_proxy_ports.push(up_port);
+    }
 
     // Optional SSH pool for capture-path PROXY via direct-tcpip.
     let ssh_pool = if matches!(cfg.upstream.kind, crate::sockscap::config::UpstreamKind::Ssh)
@@ -1113,6 +1144,20 @@ async fn start_windows_capture(
     if let Some(mgr) = state.sockscap.xray() {
         for pid in mgr.pids().await {
             bypass_pids.push(pid);
+        }
+    }
+    // Bypass external local proxies used as loopback HTTP/SOCKS5 upstreams
+    // (Clash/v2rayN etc): the process listening on the configured port owns the
+    // egress to its node, which must not be re-captured into a loop. Snapshot at
+    // start — if the proxy restarts (new PID), Stop+Start re-resolves it.
+    for port in &loopback_proxy_ports {
+        for pid in listener_pid::resolve_listener_pids(*port) {
+            if !bypass_pids.contains(&pid) {
+                bypass_pids.push(pid);
+                tracing::info!(
+                    "sockscap: bypassing local proxy pid {pid} listening on 127.0.0.1:{port}"
+                );
+            }
         }
     }
     let mut bypass_endpoints = Vec::new();
