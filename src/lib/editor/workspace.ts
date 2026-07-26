@@ -45,6 +45,20 @@ export interface WorkspaceTask {
   command: string;
   cwd: string;
   source: string;
+  /** Workspace-relative Maven/Gradle module directory when applicable. */
+  modulePath?: string;
+}
+
+/** A Java `static void main` entry point with a ready-to-run terminal command. */
+export interface JavaRunTarget {
+  id: string;
+  label: string;
+  mainClass: string;
+  filePath: string;
+  command: string;
+  cwd: string;
+  buildSystem: "maven" | "gradle" | "source-file";
+  modulePath: string;
 }
 
 export function workspaceListDir(
@@ -88,6 +102,19 @@ export function workspaceDetectGitRoots(
 
 export function workspaceDetectTasks(repoRoot: string): Promise<WorkspaceTask[]> {
   return invoke<WorkspaceTask[]>("workspace_detect_tasks", { repoRoot });
+}
+
+/** Discover runnable Java main classes without requiring the java-debug bundle. */
+export function workspaceJavaRunTargets(repoRoot: string): Promise<JavaRunTarget[]> {
+  return invoke<JavaRunTarget[]>("workspace_java_run_targets", { repoRoot });
+}
+
+/** Resolve the Java main class declared in one workspace-relative source file. */
+export function workspaceJavaRunTarget(
+  repoRoot: string,
+  filePath: string,
+): Promise<JavaRunTarget> {
+  return invoke<JavaRunTarget>("workspace_java_run_target", { repoRoot, filePath });
 }
 
 /** A source-grouped bucket of tasks for the Build panel task tree (M7 F-2). */

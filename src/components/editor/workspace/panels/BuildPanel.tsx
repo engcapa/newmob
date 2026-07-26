@@ -154,11 +154,71 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPan
     [trees],
   );
   const showRootNames = trees.length > 1;
+  const preferredBuildTasks = useMemo(() => trees.flatMap((tree) => {
+    const preferred = [
+      ["Maven", "compile"],
+      ["Gradle", "classes"],
+      ["Gradle", "build"],
+      ["Cargo.toml", "build"],
+      ["package.json", "build"],
+      ["Makefile", "build"],
+    ] as const;
+    for (const [source, label] of preferred) {
+      const task = tree.groups
+        .find((group) => group.source === source)
+        ?.tasks.find((candidate) => candidate.label === label);
+      if (task) {
+        return [{
+          ...task,
+          rootId: tree.rootId,
+          rootName: tree.rootName,
+        }];
+      }
+    }
+    return [];
+  }), [trees]);
+  const preferredRebuildTasks = useMemo(() => trees.flatMap((tree) => {
+    for (const source of ["Maven", "Gradle"]) {
+      const task = tree.groups
+        .find((group) => group.source === source)
+        ?.tasks.find((candidate) => candidate.label === "rebuild");
+      if (task) {
+        return [{
+          ...task,
+          rootId: tree.rootId,
+          rootName: tree.rootName,
+        }];
+      }
+    }
+    return [];
+  }), [trees]);
 
   return (
     <div data-testid="code-workspace-build-panel" className="h-full min-h-0 flex flex-col text-[11px]">
       <div className="h-8 shrink-0 flex items-center gap-2 border-b border-[var(--taomni-code-border)] px-2">
         <span className="font-medium">Build</span>
+        <button
+          type="button"
+          data-testid="build-panel-build-project"
+          className="taomni-btn h-6 px-1.5 inline-flex items-center gap-1"
+          onClick={() => preferredBuildTasks.forEach((task) => onRunTask(task))}
+          disabled={loading || preferredBuildTasks.length === 0}
+          title="Compile all detected project roots"
+        >
+          <Play className="h-3 w-3" />
+          Build project
+        </button>
+        <button
+          type="button"
+          data-testid="build-panel-rebuild-project"
+          className="taomni-btn h-6 px-1.5 inline-flex items-center gap-1"
+          onClick={() => preferredRebuildTasks.forEach((task) => onRunTask(task))}
+          disabled={loading || preferredRebuildTasks.length === 0}
+          title="Clean and compile all detected Java project roots"
+        >
+          <RefreshCw className="h-3 w-3" />
+          Rebuild
+        </button>
         <button
           type="button"
           data-testid="build-panel-refresh"
@@ -208,6 +268,11 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPan
                   })}
                 >
                   <Play className="h-3 w-3 shrink-0 opacity-60 group-hover:opacity-100" />
+                  {task.modulePath && task.modulePath !== "." && (
+                    <span className="shrink-0 rounded bg-[var(--taomni-code-active-line-bg)] px-1 text-[9px] text-[var(--taomni-text-muted)]">
+                      {task.modulePath}
+                    </span>
+                  )}
                   <span className="truncate">{task.label}</span>
                   <span className="ml-auto truncate text-[10px] text-[var(--taomni-text-muted)]">{task.command}</span>
                 </button>

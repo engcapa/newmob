@@ -4,27 +4,23 @@ import type { JavaTestItem } from "../../../../lib/editor/lsp";
 export type JavaTestBuildTool = "maven" | "gradle";
 
 /**
- * Build a terminal command that runs a single test class/method (M8 E, run-only).
+ * Extend a detected build-tool `test` command to run one class/method (M8 E).
  * Maven uses `-Dtest=Class#method`; Gradle uses `--tests 'Class.method'`. This is
- * the pragmatic run path — structured pass/fail results + debug-test come later.
+ * deliberately based on the whole detected command so wrappers and module task
+ * selectors survive; structured pass/fail results remain a later enhancement.
  */
 export function javaTestRunCommand(
   tool: JavaTestBuildTool,
   item: JavaTestItem,
-  runner: string,
+  testCommand: string,
 ): string {
   // fullName is a class FQN, or `com.example.Class#method` for a method.
   const [className, method] = item.fullName.split("#");
   if (tool === "maven") {
     const selector = method ? `${className}#${method}` : className;
-    return `${runner} test -Dtest='${selector}'`;
+    return `${testCommand} -Dtest='${selector}'`;
   }
   // Gradle test filter uses dotted `Class.method`.
   const selector = method ? `${className}.${method}` : className;
-  return `${runner} test --tests '${selector}'`;
-}
-
-/** Wrapper-aware default runner name for a tool (frontend can't stat the FS). */
-export function defaultRunner(tool: JavaTestBuildTool): string {
-  return tool === "maven" ? "mvn" : "gradle";
+  return `${testCommand} --tests '${selector}'`;
 }

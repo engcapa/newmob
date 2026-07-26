@@ -468,6 +468,8 @@ pub fn run() {
             workspace::workspace_list_files_recursive,
             workspace::workspace_detect_git_roots,
             workspace::workspace_detect_tasks,
+            workspace::workspace_java_run_targets,
+            workspace::workspace_java_run_target,
             workspace::workspace_task_tree,
             workspace::workspace_dependency_tree,
             workspace::workspace_read_file,

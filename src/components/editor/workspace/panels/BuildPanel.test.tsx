@@ -18,7 +18,9 @@ describe("BuildPanel", () => {
         source: "Maven",
         tasks: [
           { id: "Maven:clean", label: "clean", command: "mvn clean", cwd: "/repo/app", source: "Maven" },
+          { id: "Maven:compile", label: "compile", command: "mvn compile", cwd: "/repo/app", source: "Maven" },
           { id: "Maven:package", label: "package", command: "mvn package", cwd: "/repo/app", source: "Maven" },
+          { id: "Maven:rebuild", label: "rebuild", command: "mvn clean compile", cwd: "/repo/app", source: "Maven" },
         ],
       },
       {
@@ -52,6 +54,23 @@ describe("BuildPanel", () => {
     // Collapsing the Maven group hides its tasks.
     fireEvent.click(screen.getByText("Maven"));
     await waitFor(() => expect(screen.queryByTestId("build-panel-task-Maven:clean")).toBeNull());
+  });
+
+  it("offers project build and rebuild actions with compile semantics", async () => {
+    const onRunTask = vi.fn();
+    render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={onRunTask} />);
+    await screen.findByTestId("build-panel-task-Maven:compile");
+
+    fireEvent.click(screen.getByTestId("build-panel-build-project"));
+    expect(onRunTask).toHaveBeenCalledWith(expect.objectContaining({
+      label: "compile",
+      command: "mvn compile",
+    }));
+    fireEvent.click(screen.getByTestId("build-panel-rebuild-project"));
+    expect(onRunTask).toHaveBeenCalledWith(expect.objectContaining({
+      label: "rebuild",
+      command: "mvn clean compile",
+    }));
   });
 
   it("shows an empty state when no tasks are detected", async () => {
