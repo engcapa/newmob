@@ -9,6 +9,7 @@ import {
   type DapEventPayload,
 } from "../../../lib/editor/dap";
 import {
+  appendConsoleLine,
   buildSetBreakpointsArgs,
   currentLocation,
   initialDebugState,
@@ -145,6 +146,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   /** Pending run-to-cursor: its transient breakpoint is removed on the next stop. */
   const tempRunToCursorRef = useRef<{ path: string } | null>(null);
   const lastLaunchRef = useRef<{ config: Record<string, unknown>; adapterId: string } | null>(null);
+  /** Whether the adapter has emitted `initialized` for the current session. */
+  const initializedRef = useRef(false);
   breakpointsRef.current = breakpoints;
   exceptionFiltersRef.current = exceptionFilters;
   stateRef.current = state;
@@ -272,6 +275,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     if (payload.sessionId !== sessionIdRef.current) return;
     setState((prev) => (prev ? reduceDebugEvent(prev, payload.event, payload.message) : prev));
     if (payload.event === "initialized") {
+      initializedRef.current = true;
       // Configure breakpoints before the debuggee runs, then release it.
       void (async () => {
         const id = sessionIdRef.current;
@@ -346,9 +350,39 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     // Listen before firing launch so the `initialized` event can't be missed.
     unlistenRef.current = await listenDapEvents(result.sessionId, handleEvent);
     setState((prev) => (prev ? { ...prev, status: "running" } : prev));
-    // Fire launch/attach without awaiting (its response trails configurationDone).
-    await dapSend(result.sessionId, result.request, result.arguments).catch(() => {});
-  }, [handleEvent]);
+    initializedRef.current = false;
+    // Fire launch/attach as a correlated request but do NOT await it here: the
+    // response only arrives after configurationDone (awaiting would deadlock
+    // the initialized → setBreakpoints → configurationDone sequence). The
+    // correlation exists to surface failures — when the launch fails the
+    // adapter never emits `initialized`, so without this the error response is
+    // silently dropped and the UI sits at "running" forever.
+    const launchedSession = result.sessionId;
+    void dapSendRequest(launchedSession, result.request, result.arguments).catch((error) => {
+      if (sessionIdRef.current !== launchedSession) return; // already torn down
+      const message = error instanceof Error ? error.message : String(error);
+      sessionIdRef.current = null;
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      void dapTerminate(launchedSession).catch(() => {});
+      if (mountedRef.current) {
+        setBreakpointRuntime({});
+        setState((prev) => (prev && prev.sessionId === launchedSession
+          ? appendConsoleLine({ ...prev, status: "terminated" }, "stderr", `Launch failed: ${message}\n`)
+          : prev));
+      }
+    });
+    // Watchdog: if the adapter never becomes ready, say so instead of showing
+    // an eternally-running empty session.
+    window.setTimeout(() => {
+      if (sessionIdRef.current !== launchedSession || initializedRef.current) return;
+      logConsole(
+        "console",
+        "Still waiting for the debug adapter to become ready (no 'initialized' event after 15s). "
+          + "The project may have build errors, or the launch is stalled.\n",
+      );
+    }, 15_000);
+  }, [handleEvent, logConsole]);
 
   const restart = useCallback(() => {
     const last = lastLaunchRef.current;

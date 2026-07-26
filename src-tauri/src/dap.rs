@@ -118,6 +118,35 @@ pub fn classify_message(message: &Value) -> InboundMessage {
     }
 }
 
+/// Extract the most useful error text from a failed DAP response. The spec's
+/// `ErrorResponse` carries a structured `body.error` message with a `format`
+/// template and `{key}` placeholders resolved from `variables`; the flat
+/// top-level `message` is often just a terse summary (java-debug puts the real
+/// reason — "Failed to launch debuggee VM. Reason: …" — in `body.error`).
+pub fn extract_error_message(message: &Value) -> String {
+    if let Some(error) = message.pointer("/body/error") {
+        if let Some(format) = error.get("format").and_then(Value::as_str) {
+            let mut text = format.to_string();
+            if let Some(variables) = error.get("variables").and_then(Value::as_object) {
+                for (key, value) in variables {
+                    if let Some(value) = value.as_str() {
+                        text = text.replace(&format!("{{{key}}}"), value);
+                    }
+                }
+            }
+            if !text.trim().is_empty() {
+                return text;
+            }
+        }
+    }
+    message
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("debug adapter request failed")
+        .to_string()
+}
+
 /// How the kernel reaches a debug adapter. `Stdio` spawns a process and speaks DAP
 /// over its stdin/stdout; `Tcp` connects to an already-listening adapter (java-debug
 /// hands back a port via jdtls, so the Java adapter, D2, will use `Tcp`).
@@ -362,11 +391,7 @@ async fn run_reader(
                         let payload = if ok {
                             Ok(message.get("body").cloned().unwrap_or(Value::Null))
                         } else {
-                            Err(message
-                                .get("message")
-                                .and_then(Value::as_str)
-                                .unwrap_or("debug adapter request failed")
-                                .to_string())
+                            Err(extract_error_message(&message))
                         };
                         let _ = tx.send(payload);
                     }
@@ -618,6 +643,31 @@ mod tests {
     fn empty_registry_returns_none() {
         let registry = DebugAdapterRegistry::new();
         assert!(registry.get("java").is_none());
+    }
+
+    #[test]
+    fn extracts_structured_error_details_with_variable_substitution() {
+        // ErrorResponse body.error wins over the terse top-level message.
+        let response = json!({
+            "type": "response", "success": false, "message": "launch failed",
+            "body": { "error": {
+                "format": "Failed to launch debuggee VM. Reason: {reason}",
+                "variables": { "reason": "mainClass not found" },
+            }},
+        });
+        assert_eq!(
+            extract_error_message(&response),
+            "Failed to launch debuggee VM. Reason: mainClass not found",
+        );
+        // Falls back to the flat message, then to a generic string.
+        assert_eq!(
+            extract_error_message(&json!({ "success": false, "message": "boom" })),
+            "boom",
+        );
+        assert_eq!(
+            extract_error_message(&json!({ "success": false })),
+            "debug adapter request failed",
+        );
     }
 
     #[test]
