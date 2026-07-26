@@ -1,7 +1,11 @@
 /**
- * SocksCap IPC surface (Phase 1: rules engine + lifecycle stubs).
- * Capture backends (WinDivert / Linux / macOS) report capabilities but are
- * not yet active — start() intentionally lands in a degraded state.
+ * SocksCap IPC surface.
+ *
+ * Capture backends differ per platform, so read `sockscapCapabilities()` before
+ * offering options: Windows uses the elevated WinDivert helper, Linux uses
+ * nftables + cgroup v2 transparent redirect, and macOS points the system SOCKS
+ * proxy at a loopback listener (not transparent, Global scope only). Platforms
+ * without a backend land in a degraded state on start().
  */
 import { invoke } from "@tauri-apps/api/core";
 

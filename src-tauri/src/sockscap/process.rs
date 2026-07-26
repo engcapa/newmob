@@ -18,17 +18,103 @@ pub fn list_processes() -> Result<Vec<ProcessInfo>, String> {
     {
         list_processes_windows()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        #[cfg(target_os = "linux")]
-        {
-            return list_processes_linux();
+        list_processes_linux()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        list_processes_macos()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        Ok(Vec::new())
+    }
+}
+
+/// Friendly label for a macOS executable path.
+///
+/// GUI apps live at `…/Foo.app/Contents/MacOS/Foo`, and for nested helpers the
+/// innermost bundle is the meaningful one (`Safari.app/…/Web Content.app` is
+/// reported as "Web Content"). Falls back to the file name for plain binaries.
+#[cfg(target_os = "macos")]
+fn bundle_display_name(path: &str) -> String {
+    let file_name = || {
+        path.rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unknown")
+            .to_string()
+    };
+    path.split('/')
+        .filter_map(|component| component.strip_suffix(".app"))
+        .next_back()
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(file_name)
+}
+
+#[cfg(target_os = "macos")]
+fn list_processes_macos() -> Result<Vec<ProcessInfo>, String> {
+    use std::collections::HashSet;
+    use std::mem::size_of;
+
+    // A null buffer asks only for the current size.
+    let reported = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if reported <= 0 {
+        return Err(format!(
+            "proc_listallpids failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Headroom for processes that start between the sizing and listing calls.
+    let mut pids = vec![0i32; reported as usize + 64];
+    let capacity = (pids.len() * size_of::<i32>()) as libc::c_int;
+    let written = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), capacity) };
+    if written <= 0 {
+        return Err(format!(
+            "proc_listallpids failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    pids.truncate(written as usize / size_of::<i32>());
+
+    let mut out: Vec<ProcessInfo> = Vec::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
+    for pid in pids {
+        if pid <= 0 {
+            continue;
         }
-        #[cfg(not(target_os = "linux"))]
-        {
-            Ok(Vec::new())
+        let mut buffer = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let length =
+            unsafe { libc::proc_pidpath(pid, buffer.as_mut_ptr().cast(), buffer.len() as u32) };
+        // Kernel tasks and processes owned by other users have no readable path.
+        if length <= 0 {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&buffer[..length as usize]).into_owned();
+        if path.is_empty() {
+            continue;
+        }
+        if !seen_paths.insert(normalize_exe_path(&path)) {
+            continue;
+        }
+        out.push(ProcessInfo {
+            pid: pid as u32,
+            name: bundle_display_name(&path),
+            path,
+        });
+        if out.len() >= 800 {
+            break;
         }
     }
+
+    out.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+    });
+    Ok(out)
 }
 
 #[cfg(windows)]
@@ -40,7 +126,7 @@ fn list_processes_windows() -> Result<Vec<ProcessInfo>, String> {
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
     use winapi::um::processthreadsapi::OpenProcess;
     use winapi::um::tlhelp32::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
     use winapi::um::winnt::{HANDLE, PROCESS_QUERY_LIMITED_INFORMATION};
@@ -193,5 +279,40 @@ mod tests {
             r"C:\Program Files\App\chrome.exe",
             r"chrome.exe"
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_apps_are_named_after_their_bundle() {
+        assert_eq!(
+            bundle_display_name("/Applications/Safari.app/Contents/MacOS/Safari"),
+            "Safari"
+        );
+        // The innermost bundle is the process that actually owns the socket.
+        assert_eq!(
+            bundle_display_name(
+                "/Applications/Safari.app/Contents/XPCServices/Web Content.app/Contents/MacOS/Web Content"
+            ),
+            "Web Content"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn plain_binaries_fall_back_to_the_file_name() {
+        assert_eq!(bundle_display_name("/usr/bin/curl"), "curl");
+        assert_eq!(bundle_display_name("curl"), "curl");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn enumerates_this_process_with_a_real_path() {
+        let processes = list_processes().expect("macOS process list");
+        assert!(!processes.is_empty());
+        assert!(
+            processes
+                .iter()
+                .all(|process| process.pid > 0 && !process.path.is_empty())
+        );
     }
 }

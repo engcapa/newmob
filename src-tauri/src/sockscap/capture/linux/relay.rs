@@ -154,11 +154,8 @@ async fn accept_loop(
         clients.spawn(async move {
             let _permit = permit;
             let flow = CapturedFlow {
-                destination,
-                process_path: None,
-                pid: None,
-                origin: peer,
                 profile_id_hint: profile_id_hint.as_deref().map(str::to_owned),
+                ..CapturedFlow::from_destination(destination, peer)
             };
             if let Err(error) =
                 crate::sockscap::relay::handle_captured_client(socket, flow, ctx).await

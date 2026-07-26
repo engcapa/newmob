@@ -7,6 +7,8 @@ interface SocksCapRootPromptProps {
   onCancel: () => void;
   error?: string | null;
   busy?: boolean;
+  /** Why elevation is needed; defaults to the Linux nftables explanation. */
+  subtitle?: string;
 }
 
 export function SocksCapRootPrompt({
@@ -14,6 +16,7 @@ export function SocksCapRootPrompt({
   onCancel,
   error,
   busy,
+  subtitle,
 }: SocksCapRootPromptProps) {
   const [password, setPassword] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
@@ -70,7 +73,7 @@ export function SocksCapRootPrompt({
 
         <div className="p-4">
           <div className="text-[12px] mb-3 text-[var(--taomni-text-muted)]">
-            {t("sockscap.rootPromptSubtitle")}
+            {subtitle ?? t("sockscap.rootPromptSubtitle")}
           </div>
 
           <label className="block text-[12px] mb-1 font-medium text-[var(--taomni-text)]">

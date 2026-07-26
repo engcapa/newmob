@@ -3,7 +3,8 @@
 //! OS capture adapters.
 //!
 //! Windows uses the elevated WinDivert helper. Linux uses nftables + cgroup v2
-//! transparent TCP redirect. macOS currently exposes the rules engine only.
+//! transparent TCP redirect. macOS points the system SOCKS proxy at a loopback
+//! proxy ingress, which is not transparent and is Global-scoped only.
 
 use serde::{Deserialize, Serialize};
 
@@ -12,6 +13,9 @@ pub use super::SocksCapCapabilities;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+
+#[cfg(target_os = "macos")]
+pub mod macos;
 
 /// Describe what this build/OS can do today.
 pub fn capabilities() -> SocksCapCapabilities {
@@ -45,11 +49,17 @@ pub fn capabilities() -> SocksCapCapabilities {
     {
         SocksCapCapabilities {
             platform: "macos".into(),
-            global_tcp: false,
+            global_tcp: true,
+            // Per-application routing needs the source app identity that only a
+            // NETransparentProxyProvider supplies.
             app_filter: false,
-            capture_backend: "network-extension-planned".into(),
+            capture_backend: "system-proxy".into(),
             notes: vec![
-                "macOS Network Extension / utun is planned; rules/egress engine is available now."
+                "macOS: system SOCKS proxy points applications at SocksCap's loopback listener. \
+                 Requires administrator rights to change the system proxy."
+                    .into(),
+                "Not transparent capture: applications that ignore the system proxy are not \
+                 routed, and scope is Global only."
                     .into(),
             ],
             privileged_required: true,
@@ -74,7 +84,14 @@ pub async fn recover_system() -> Result<(), String> {
     {
         return linux::recover_system(None);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // No stored credential is available here, so this succeeds only when the
+        // process is already privileged; otherwise the caller keeps the journal
+        // dirty and asks the user to Recover, exactly as on Linux.
+        return macos::recover_system(None);
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     Ok(())
 }
 

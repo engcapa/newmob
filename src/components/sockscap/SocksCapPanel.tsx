@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  Info,
   Layers,
   Loader2,
   PanelLeftClose,
@@ -138,13 +139,21 @@ function phaseTone(phase: string): string {
   }
 }
 
-function isLinuxRootRequiredError(message: string): boolean {
+/** Platforms whose capture backend asks for an elevation password up front. */
+function needsElevationPassword(platform: string | undefined): boolean {
+  return platform === "linux" || platform === "macos";
+}
+
+function isRootRequiredError(message: string): boolean {
   const lower = message.toLowerCase();
   return (
     lower.includes("cap_net_admin") ||
     lower.includes("linux capture requires") ||
     lower.includes("linux capture needs root") ||
-    lower.includes("permission to manage cgroup v2")
+    lower.includes("permission to manage cgroup v2") ||
+    // macOS needs admin rights for `networksetup`.
+    lower.includes("administrator rights") ||
+    lower.includes("administrator access")
   );
 }
 
@@ -568,8 +577,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       if (hp) setHelper(hp);
     } catch (e) {
       const errStr = String(e);
-      const isLinux = caps?.platform === "linux";
-      if (isLinux && !sudoPassword && isLinuxRootRequiredError(errStr)) {
+      const isLinux = needsElevationPassword(caps?.platform);
+      if (isLinux && !sudoPassword && isRootRequiredError(errStr)) {
         setShowRootPrompt(true);
         setRootPromptError(null);
       } else if (isLinux && sudoPassword && isSudoAuthenticationError(errStr)) {
@@ -862,6 +871,22 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         )}
       </div>
 
+      {/* Capture backend capabilities — the platform limits, stated up front. */}
+      {caps && caps.notes.length > 0 && (
+        <div
+          data-testid="sockscap-capability-notes"
+          className="px-4 py-2 border-b border-[var(--taomni-divider)] text-[11px] text-[var(--taomni-text-muted)] space-y-1"
+        >
+          <div className="flex items-center gap-1.5 font-medium text-[var(--taomni-text)]">
+            <Info className="w-3.5 h-3.5 text-[var(--taomni-accent)]" />
+            {t("sockscap.captureBackendLabel", { backend: caps.captureBackend })}
+          </div>
+          {caps.notes.map((note) => (
+            <p key={note}>{note}</p>
+          ))}
+        </div>
+      )}
+
       {/* Profile Active Summary Banner */}
       <div className="px-4 py-2 bg-[var(--taomni-bg)] border-b border-[var(--taomni-divider)] text-[11px] flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
@@ -1121,22 +1146,34 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           {/* Scope Mode */}
           <Section title={t("sockscap.section.scope")}>
             <div className="flex gap-2">
-              {(["global", "apps"] as ScopeMode[]).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  data-testid={`sockscap-mode-${m}`}
-                  className={`px-3 py-1.5 rounded text-[12px] border ${
-                    selectedProf.mode === m
-                      ? "border-[var(--taomni-accent)] bg-[var(--taomni-accent)]/15 text-[var(--taomni-accent)] font-medium"
-                      : "border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
-                  }`}
-                  onClick={() => void patchSelectedProfile({ mode: m })}
-                >
-                  {t(`sockscap.mode.${m}`)}
-                </button>
-              ))}
+              {(["global", "apps"] as ScopeMode[]).map((m) => {
+                // The backend refuses app scope when it cannot identify the
+                // source application, so do not offer it as a choice.
+                const unsupported = m === "apps" && caps !== null && !caps.appFilter;
+                return (
+                  <button
+                    key={m}
+                    type="button"
+                    data-testid={`sockscap-mode-${m}`}
+                    disabled={unsupported}
+                    title={unsupported ? t("sockscap.appModeUnsupported") : undefined}
+                    className={`px-3 py-1.5 rounded text-[12px] border ${
+                      selectedProf.mode === m
+                        ? "border-[var(--taomni-accent)] bg-[var(--taomni-accent)]/15 text-[var(--taomni-accent)] font-medium"
+                        : "border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                    } ${unsupported ? "opacity-40 cursor-not-allowed" : ""}`}
+                    onClick={() => void patchSelectedProfile({ mode: m })}
+                  >
+                    {t(`sockscap.mode.${m}`)}
+                  </button>
+                );
+              })}
             </div>
+            {caps !== null && !caps.appFilter && (
+              <p className="mt-2 text-[11px] text-[var(--taomni-text-muted)]">
+                {t("sockscap.appModeUnsupported")}
+              </p>
+            )}
             {selectedProf.mode === "apps" && (
               <div className="mt-3 space-y-2">
                 <div className="flex gap-2">
@@ -1725,6 +1762,11 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
       {showRootPrompt && (
         <SocksCapRootPrompt
+          subtitle={
+            caps?.platform === "macos"
+              ? t("sockscap.rootPromptSubtitleMacos")
+              : undefined
+          }
           onSubmit={(password) => void onStart(password)}
           onCancel={() => {
             setShowRootPrompt(false);
