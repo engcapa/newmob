@@ -104,6 +104,10 @@ pub struct ResolvedUpstream {
     pub user: String,
     pub pass: String,
     pub ssh_pool: Option<Arc<SshPool>>,
+    /// Loopback SOCKS port of this profile's xray-core sidecar, when the
+    /// upstream kind is core-backed (shadowsocks/trojan/vmess/vless/wireguard).
+    /// The relay dials this port through the plain socks5 egress.
+    pub xray_port: Option<u16>,
 }
 
 pub struct RelayContext {
@@ -118,6 +122,9 @@ pub struct RelayContext {
     pub self_pid: u32,
     /// Shared SSH session when upstream kind is SSH.
     pub ssh_pool: Option<Arc<SshPool>>,
+    /// Loopback SOCKS port of the global upstream's xray-core sidecar, when the
+    /// global upstream kind is core-backed.
+    pub xray_port: Option<u16>,
     pub profile_upstreams: std::collections::HashMap<String, ResolvedUpstream>,
     /// IP → hostname learned from SNI / HTTP Host.
     pub dns_map: Arc<Mutex<DnsMap>>,
@@ -299,28 +306,30 @@ pub(crate) async fn handle_captured_client(
         };
         let trace = engine.decide_with_profile_hint(&input, profile_id_hint.as_deref());
 
-        let (kind, up_host, up_port, up_user, up_pass, ssh_pool) = match trace.profile_id.as_deref()
-        {
-            Some(pid) if g.profile_upstreams.contains_key(pid) => {
-                let up = &g.profile_upstreams[pid];
-                (
-                    up.kind,
-                    up.host.clone(),
-                    up.port,
-                    up.user.clone(),
-                    up.pass.clone(),
-                    up.ssh_pool.clone(),
-                )
-            }
-            _ => (
-                g.config.upstream.kind,
-                g.upstream_host.clone(),
-                g.upstream_port,
-                g.upstream_user.clone(),
-                g.upstream_pass.clone(),
-                g.ssh_pool.clone(),
-            ),
-        };
+        let (kind, up_host, up_port, up_user, up_pass, ssh_pool, xray_port) =
+            match trace.profile_id.as_deref() {
+                Some(pid) if g.profile_upstreams.contains_key(pid) => {
+                    let up = &g.profile_upstreams[pid];
+                    (
+                        up.kind,
+                        up.host.clone(),
+                        up.port,
+                        up.user.clone(),
+                        up.pass.clone(),
+                        up.ssh_pool.clone(),
+                        up.xray_port,
+                    )
+                }
+                _ => (
+                    g.config.upstream.kind,
+                    g.upstream_host.clone(),
+                    g.upstream_port,
+                    g.upstream_user.clone(),
+                    g.upstream_pass.clone(),
+                    g.ssh_pool.clone(),
+                    g.xray_port,
+                ),
+            };
 
         (
             hostname,
@@ -333,11 +342,23 @@ pub(crate) async fn handle_captured_client(
             Arc::clone(&g.stats),
             ssh_pool,
             Arc::clone(&g.domains),
+            xray_port,
         )
     };
 
-    let (hostname, trace, kind, up_host, up_port, up_user, up_pass, stats, ssh_pool, domains) =
-        snap;
+    let (
+        hostname,
+        trace,
+        kind,
+        up_host,
+        up_port,
+        up_user,
+        up_pass,
+        stats,
+        ssh_pool,
+        domains,
+        xray_port,
+    ) = snap;
 
     // Prefer hostname for dial when known (proxy-side DNS).
     let dial_host = hostname.unwrap_or_else(|| destination.ip().to_string());
@@ -433,6 +454,37 @@ pub(crate) async fn handle_captured_client(
                     })??;
                     write_prefix(&mut remote, &prefix).await?;
                     bridge_any(&mut client, &mut remote).await
+                }
+                // xray-core–backed kinds (shadowsocks/trojan/vmess/vless/
+                // wireguard): dial the per-profile local SOCKS inbound the
+                // XrayManager opened for this upstream. All protocol/crypto/
+                // transport work happens inside xray; the relay just bridges.
+                other if other.requires_core() => {
+                    let port = xray_port.ok_or_else(|| {
+                        format!(
+                            "{} upstream has no running xray core (check core provisioning / config)",
+                            other.as_tag()
+                        )
+                    })?;
+                    let mut remote = tokio::time::timeout(
+                        RELAY_DIAL_TIMEOUT,
+                        egress::socks5::dial(
+                            "127.0.0.1", port, &dial_host, dest_port, "", "",
+                        ),
+                    )
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "{} core (127.0.0.1:{port}) connect to {dial_host}:{dest_port}: timed out after {}s",
+                            other.as_tag(),
+                            RELAY_DIAL_TIMEOUT.as_secs()
+                        )
+                    })??;
+                    write_prefix(&mut remote, &prefix).await?;
+                    bridge_tcp(&mut client, &mut remote).await
+                }
+                other => {
+                    return Err(format!("unhandled upstream kind {}", other.as_tag()));
                 }
             }
         }

@@ -85,6 +85,34 @@ def ssh_password():
     return getpass.getpass(f"Enter SSH password for {SSH_USER}@{SSH_HOST}: ")
 
 
+def ssh_askpass_env(password):
+    """Build an environment that lets Windows OpenSSH authenticate with a
+    password non-interactively, plus the temp askpass script path to delete.
+
+    OpenSSH uses SSH_ASKPASS (with SSH_ASKPASS_REQUIRE=force, OpenSSH >= 8.4,
+    which Windows 11 ships) whenever it has no console to prompt on. The askpass
+    script just echoes the password read from a private env var (kept out of the
+    file so a password with shell metacharacters is not embedded on disk).
+
+    Returns (env_dict, askpass_path) or (None, None) when no password is given.
+    The caller MUST launch ssh detached (CREATE_NO_WINDOW / stdin=DEVNULL) so it
+    can never fall back to a blocking console prompt, and delete askpass_path.
+    """
+    if not password:
+        return None, None
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".bat", prefix="sc-askpass-")
+    with os.fdopen(fd, "w") as f:
+        f.write("@echo %SC_SSH_PW%\r\n")
+    env = dict(os.environ)
+    env["SSH_ASKPASS"] = path
+    env["SSH_ASKPASS_REQUIRE"] = "force"
+    env["SC_SSH_PW"] = password
+    # Avoid a real DISPLAY dependency; force flag covers the no-tty case.
+    env.setdefault("DISPLAY", "localhost:0")
+    return env, path
+
+
 def http_reachable(code):
     """True if curl returned a real HTTP response (reachability check).
 

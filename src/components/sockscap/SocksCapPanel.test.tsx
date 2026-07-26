@@ -1,7 +1,13 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SocksCapPanel } from "./SocksCapPanel";
-import { sockscapStart, type SocksCapConfig } from "../../lib/sockscap";
+import {
+  sockscapStart,
+  sockscapParseShareLink,
+  sockscapImportSubscription,
+  type SocksCapConfig,
+} from "../../lib/sockscap";
+import { vaultStatus, vaultPut } from "../../lib/ipc";
 
 const defaultTestCfg: SocksCapConfig = {
   enabled: false,
@@ -90,6 +96,21 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
       pid: 1234,
     })),
     sockscapGetDomainRecords: vi.fn(async () => []),
+    sockscapParseShareLink: vi.fn(),
+    sockscapTestCoreUpstream: vi.fn(async () => "ok"),
+    sockscapDetectLocalProxies: vi.fn(async () => []),
+    sockscapDetectTunConflicts: vi.fn(async () => []),
+    sockscapImportSubscription: vi.fn(),
+  };
+});
+
+vi.mock("../../lib/ipc", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/ipc")>();
+  return {
+    ...actual,
+    listSessions: vi.fn(async () => []),
+    vaultStatus: vi.fn(async () => ({ state: "unlocked" })),
+    vaultPut: vi.fn(async () => ({ reference: "vault:test-ref" })),
   };
 });
 
@@ -134,6 +155,114 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       expect(currentCfg.profiles.length).toBe(2);
       expect(currentCfg.profiles[1].name).toBe("方案 2");
     });
+  });
+
+  it("reveals core-upstream fields (share link + cipher) when selecting Shadowsocks", async () => {
+    render(<SocksCapPanel />);
+    const kindSelect = await screen.findByTestId("sockscap-upstream-kind");
+
+    fireEvent.change(kindSelect, { target: { value: "shadowsocks" } });
+
+    await waitFor(() => {
+      expect(currentCfg.profiles[0].upstream.kind).toBe("shadowsocks");
+    });
+    // Share-link import field + the SS cipher select are now shown.
+    expect(await screen.findByTestId("sockscap-sharelink-input")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        screen.getByRole("option", { name: "chacha20-ietf-poly1305" }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("imports a VLESS share link, vaulting uuid and populating params", async () => {
+    vi.mocked(sockscapParseShareLink).mockResolvedValue({
+      kindTag: "vless",
+      name: "My VLESS",
+      host: "node.example.com",
+      port: 443,
+      params: {
+        flow: "xtls-rprx-vision",
+        tls: "reality",
+        realityPublicKey: "PUBKEY",
+        network: "tcp",
+        encryption: "none",
+      },
+      secret: "",
+      uuid: "11111111-2222-3333-4444-555555555555",
+    });
+
+    render(<SocksCapPanel />);
+    const kindSelect = await screen.findByTestId("sockscap-upstream-kind");
+    fireEvent.change(kindSelect, { target: { value: "vless" } });
+
+    const input = await screen.findByTestId("sockscap-sharelink-input");
+    fireEvent.change(input, {
+      target: { value: "vless://uuid@node.example.com:443?security=reality#My VLESS" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-sharelink-import"));
+
+    await waitFor(() => {
+      const up = currentCfg.profiles[0].upstream;
+      expect(up.kind).toBe("vless");
+      expect(up.host).toBe("node.example.com");
+      expect(up.port).toBe(443);
+      // uuid was vaulted into params.uuidRef (never stored plaintext).
+      expect(up.params?.uuidRef).toBe("vault:test-ref");
+      expect(up.params?.flow).toBe("xtls-rprx-vision");
+      expect(up.params?.realityPublicKey).toBe("PUBKEY");
+    });
+    // The uuid was sent to the vault, not written to config plaintext.
+    expect(vi.mocked(vaultPut)).toHaveBeenCalled();
+    expect(vi.mocked(vaultStatus)).toHaveBeenCalled();
+  });
+
+  it("imports a subscription into one profile per node, vaulting secrets", async () => {
+    vi.mocked(sockscapImportSubscription).mockResolvedValue([
+      {
+        kindTag: "trojan",
+        name: "Node A",
+        host: "a.example.com",
+        port: 443,
+        params: { tls: "tls" },
+        secret: "pwA",
+        uuid: "",
+      },
+      {
+        kindTag: "vless",
+        name: "Node B",
+        host: "b.example.com",
+        port: 443,
+        params: { flow: "xtls-rprx-vision" },
+        secret: "",
+        uuid: "uuid-b",
+      },
+    ]);
+
+    render(<SocksCapPanel />);
+    await waitFor(() => expect(screen.getByTestId("sockscap-panel")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("sockscap-sub-import-toggle"));
+    const input = await screen.findByTestId("sockscap-sub-input");
+    fireEvent.change(input, { target: { value: "https://sub.example.com/link" } });
+    fireEvent.click(screen.getByTestId("sockscap-sub-import"));
+
+    await waitFor(() => {
+      // Two profiles added beyond the default.
+      const names = currentCfg.profiles.map((p) => p.name);
+      expect(names).toContain("Node A");
+      expect(names).toContain("Node B");
+    });
+    const a = currentCfg.profiles.find((p) => p.name === "Node A")!;
+    const b = currentCfg.profiles.find((p) => p.name === "Node B")!;
+    expect(a.upstream.kind).toBe("trojan");
+    expect(a.upstream.host).toBe("a.example.com");
+    expect(a.upstream.passwordRef).toBe("vault:test-ref"); // secret vaulted
+    expect(b.upstream.kind).toBe("vless");
+    expect(b.upstream.params?.uuidRef).toBe("vault:test-ref"); // uuid vaulted
+    expect(b.upstream.params?.flow).toBe("xtls-rprx-vision");
+    // Imported profiles are not auto-activated.
+    expect(currentCfg.activeProfileIds).not.toContain(a.id);
   });
 
   it("prompts for sudo when Linux nftables reports missing CAP_NET_ADMIN", async () => {

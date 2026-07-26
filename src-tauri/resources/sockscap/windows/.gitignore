@@ -1,6 +1,7 @@
-# WinDivert redistributables (download from official releases; LGPLv3/GPLv2)
-# and the staged sockscap-helper build artifact (produced by
-# scripts/stage-sockscap-windows.ps1). None of these belong in git.
+# Third-party redistributables and staged build artifacts — none belong in git:
+#   - WinDivert.dll / WinDivert64.sys (LGPLv3/GPLv2; scripts/fetch-windivert.ps1)
+#   - sockscap-helper.exe (scripts/stage-sockscap-windows.ps1)
+#   - xray.exe (xray-core, MPL-2.0; scripts/fetch-xray.ps1)
 *.dll
 *.sys
 *.lib

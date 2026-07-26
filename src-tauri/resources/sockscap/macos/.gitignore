@@ -1,0 +1,6 @@
+# xray-core redistributable (MPL-2.0; staged by scripts/fetch-xray.ps1 -Platform macos[-arm64]).
+# Not committed to git.
+xray
+*.dylib
+!README.md
+!.gitignore

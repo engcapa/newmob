@@ -26,6 +26,8 @@ print("=" * 78)
 print(" Taomni SocksCap Linux — Direct Connectivity Smoke (no capture)")
 print("=" * 78)
 
+STEPS = 5
+
 results = {"total": 0, "passed": 0, "failed": 0}
 
 
@@ -80,12 +82,12 @@ def tls_via_socks5(proxy, host, port=443):
 
 
 # --- 1. Harness routing logic (always runs, no network) -------------------
-print("\n[1/4] GFWList decision logic")
+print(f"\n[1/{STEPS}] GFWList decision logic")
 record("google.com -> GFWList match", H.is_gfwlist_domain("www.google.com"))
 record("baidu.com  -> no match", not H.is_gfwlist_domain("www.baidu.com"))
 
 # --- 2. HTTP CONNECT upstream --------------------------------------------
-print(f"\n[2/4] HTTP CONNECT upstream ({ENV.HTTP_HOST}:{ENV.HTTP_PORT})")
+print(f"\n[2/{STEPS}] HTTP CONNECT upstream ({ENV.HTTP_HOST}:{ENV.HTTP_PORT})")
 try:
     tls_via_http_connect((ENV.HTTP_HOST, ENV.HTTP_PORT), "www.google.com")
     record("HTTP CONNECT -> www.google.com:443", True)
@@ -93,15 +95,28 @@ except Exception as e:
     record("HTTP CONNECT -> www.google.com:443", False, f"({e})")
 
 # --- 3. SOCKS5 upstream ---------------------------------------------------
-print(f"\n[3/4] SOCKS5 upstream ({ENV.SOCKS5_HOST}:{ENV.SOCKS5_PORT})")
+print(f"\n[3/{STEPS}] SOCKS5 upstream ({ENV.SOCKS5_HOST}:{ENV.SOCKS5_PORT})")
 try:
     tls_via_socks5((ENV.SOCKS5_HOST, ENV.SOCKS5_PORT), "en.wikipedia.org")
     record("SOCKS5 -> en.wikipedia.org:443", True)
 except Exception as e:
     record("SOCKS5 -> en.wikipedia.org:443", False, f"({e})")
 
-# --- 4. Direct egress (non-GFWList) --------------------------------------
-print("\n[4/4] Direct egress (non-GFWList)")
+# --- 4. SSH upstream reachability (banner) --------------------------------
+# Mirrors Windows test_sockscap_direct.py Scenario 1: prove the SSH egress
+# endpoint is reachable and speaks SSH. The full `ssh -D` egress data-path is
+# exercised by the soak test; here we only assert the server is up.
+print(f"\n[4/{STEPS}] SSH upstream ({ENV.SSH_USER}@{ENV.SSH_HOST}:{ENV.SSH_PORT})")
+try:
+    s = socket.create_connection((ENV.SSH_HOST, ENV.SSH_PORT), timeout=8)
+    banner = s.recv(256).decode("utf-8", errors="ignore").strip()
+    s.close()
+    record("SSH banner reachable", banner.startswith("SSH-"), f"({banner[:24]})")
+except Exception as e:
+    record("SSH banner reachable", False, f"({e})")
+
+# --- 5. Direct egress (non-GFWList) --------------------------------------
+print(f"\n[5/{STEPS}] Direct egress (non-GFWList)")
 try:
     s = socket.create_connection(("www.baidu.com", 443), timeout=8)
     s.close()

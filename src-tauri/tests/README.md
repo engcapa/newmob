@@ -49,6 +49,22 @@ drive the real client handshake through them. No configuration needed.
 - `terminal::network::tests::socks5_handshake_with_username_password_auth`
 - `database::forward::tests::loopback_forward_bridges_through_socks5_to_target`
 
+## SocksCap xray-core tests
+
+`integration/sockscap_xray_core.rs` has two tiers. The config-generation and
+manager-guard tests are pure and always run. The live lifecycle test
+(`xray_core_lifecycle_spawn_reuse_shutdown`) spawns a real `xray` process and
+**skips silently** unless a binary is locatable:
+
+| Variable | Purpose |
+| --- | --- |
+| `SOCKSCAP_XRAY_EXE` | Absolute path to an `xray` binary |
+| `SOCKSCAP_XRAY_DIR` | Directory containing `xray[.exe]` |
+
+If neither is set, it falls back to a staged
+`resources/sockscap/<platform>/xray[.exe]` (run `scripts/fetch-xray.ps1` to
+stage one). The live test uses an unreachable server, so it needs no network.
+
 ## Live tests (opt-in, real SSH server)
 
 Tests that reach a real SSH server are marked `#[ignore]` and **skip silently**
