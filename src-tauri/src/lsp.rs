@@ -914,6 +914,34 @@ impl LspManager {
         }
     }
 
+    /// Run a jdtls `workspace/executeCommand` on the active session for a project
+    /// file (M8): the shared jdtls access path for the Java debug adapter (D2,
+    /// `vscode.java.resolveClasspath` / `startDebugSession` …) and test discovery
+    /// (E, `vscode.java.test.*`). Errors when no jdtls session is active.
+    pub async fn execute_java_command(
+        &self,
+        workspace_id: String,
+        root_path: Option<String>,
+        file_path: String,
+        command: &str,
+        arguments: Vec<Value>,
+    ) -> Result<Value, String> {
+        let document = resolve_document(workspace_id, root_path, file_path, Some("java".into()), 0)?;
+        let session = self
+            .active_session(&document, None, None)
+            .await
+            .ok_or_else(|| {
+                "No Java language server session is active for this project; open a project file first"
+                    .to_string()
+            })?;
+        session
+            .request(
+                "workspace/executeCommand",
+                json!({ "command": command, "arguments": arguments }),
+            )
+            .await
+    }
+
     /// Push a `workspace/didChangeConfiguration` to every ready jdtls session so
     /// `java.*` settings changes take effect without restarting the servers.
     async fn notify_all_jdtls(&self, method: &str, params: Value) -> usize {

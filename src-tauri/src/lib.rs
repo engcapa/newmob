@@ -11,6 +11,7 @@ mod git;
 mod hbase;
 mod history;
 mod java_bundles;
+mod java_debug_adapter;
 mod lanchat;
 mod lsp;
 pub mod llm;

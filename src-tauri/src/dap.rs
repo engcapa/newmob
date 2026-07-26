@@ -141,17 +141,31 @@ pub enum DapTransport {
 fn default_host() -> String {
     "127.0.0.1".to_string()
 }
-/// A registered debug adapter: how to reach one for a given launch config. Java
-/// (D2) is the first implementation; others (Node/Go/LLDB) plug in the same way.
-/// `resolve_transport` is async because language adapters may need to talk to
+/// The kernel's plan for reaching + launching a debuggee, produced by an adapter
+/// from a launch config. `transport` says how to connect; `request` +
+/// `arguments` are the resolved `launch`/`attach` payload the client sends after
+/// `initialize` (the Java adapter fills these from jdtls — D2).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DapLaunchPlan {
+    pub transport: DapTransport,
+    /// `"launch"` or `"attach"`.
+    pub request: String,
+    /// Resolved launch/attach arguments (adapter-specific, opaque to the kernel).
+    pub arguments: Value,
+}
+
+/// A registered debug adapter: how to reach + launch a debuggee for a given
+/// config. Java (D2) is the first implementation; others (Node/Go/LLDB) plug in
+/// the same way. `resolve` is async because language adapters may need to talk to
 /// their language server first (jdtls hands java-debug a port).
 #[async_trait::async_trait]
 pub trait DebugAdapter: Send + Sync {
     /// Stable adapter id (e.g. `"java"`), matched against `dap_start_session`.
     fn id(&self) -> &str;
 
-    /// Resolve the transport for a launch/attach config (spawn args or a port).
-    async fn resolve_transport(&self, launch_config: &Value) -> Result<DapTransport, String>;
+    /// Resolve transport + launch/attach payload from a launch config.
+    async fn resolve(&self, launch_config: &Value) -> Result<DapLaunchPlan, String>;
 }
 
 /// Registry of debug adapters, keyed by id — analogous to `lsp_presets`. Empty in
@@ -255,6 +269,17 @@ impl Default for DapManager {
 impl DapManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build a manager with the language adapters that need `LspManager` access
+    /// registered (D2: Java, via jdtls executeCommand). Used from `AppState::new`.
+    pub fn with_lsp(lsp: Arc<crate::lsp::LspManager>) -> Self {
+        let mut registry = DebugAdapterRegistry::new();
+        registry.register(Arc::new(crate::java_debug_adapter::JavaDebugAdapter::new(lsp)));
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            registry,
+        }
     }
 
     async fn insert(&self, session_id: String, session: Arc<DapSession>) {
@@ -378,20 +403,34 @@ async fn run_reader(
 /// into the reader closure — never stored in `AppState` (M7-C safeguard).
 /// Returns the new `sessionId`. D1 ships an empty registry, so this reports
 /// "no adapter" until the Java adapter (D2) is registered.
+/// Result of starting a session: the id + adapter capabilities + the resolved
+/// launch/attach payload. The frontend (D3) drives the rest of the DAP handshake
+/// — send `request`/`arguments`, then on the `initialized` event set breakpoints
+/// and `configurationDone` — so breakpoints land before the debuggee runs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DapStartResult {
+    pub session_id: String,
+    pub capabilities: Value,
+    /// `"launch"` or `"attach"` — the request the frontend should send next.
+    pub request: String,
+    pub arguments: Value,
+}
+
 #[tauri::command]
 pub async fn dap_start_session(
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
     adapter_id: String,
     launch_config: Value,
-) -> Result<String, String> {
+) -> Result<DapStartResult, String> {
     let adapter = state
         .dap
         .registry
         .get(&adapter_id)
         .ok_or_else(|| format!("No debug adapter registered for `{adapter_id}`"))?;
-    let transport = adapter.resolve_transport(&launch_config).await?;
-    let (reader, writer, child) = connect_transport(&transport).await?;
+    let plan = adapter.resolve(&launch_config).await?;
+    let (reader, writer, child) = connect_transport(&plan.transport).await?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
@@ -426,10 +465,15 @@ pub async fn dap_start_session(
             }),
         )
         .await?;
-    *session.capabilities.lock().await = init;
+    *session.capabilities.lock().await = init.clone();
 
     state.dap.insert(session_id.clone(), session).await;
-    Ok(session_id)
+    Ok(DapStartResult {
+        session_id,
+        capabilities: init,
+        request: plan.request,
+        arguments: plan.arguments,
+    })
 }
 
 /// Send an arbitrary DAP request on a session and return its response body.
