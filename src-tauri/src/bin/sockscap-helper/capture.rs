@@ -72,6 +72,11 @@ fn flow_key(ip: IpAddr, port: u16) -> String {
     format!("{ip}:{port}")
 }
 
+/// NETWORK-layer capture filter. Outbound TCP only: the streamdump reflection
+/// reinjects packets as *inbound*, so an inbound clause would only re-feed our
+/// own rewrites back into this loop.
+const NETWORK_FILTER: &str = "tcp and outbound";
+
 pub struct CaptureEngine {
     windivert_dir: Option<PathBuf>,
     api: Option<Arc<WinDivertApi>>,
@@ -182,27 +187,19 @@ impl CaptureEngine {
         // NETWORK: outbound TCP only (streamdump). Reflected packets are
         // reinjected as inbound and are not recaptured by the same handle
         // (Impostor left clear, matching the official sample).
-        let filter_candidates = [
-            "tcp and outbound".to_string(),
-            "tcp".to_string(),
-        ];
-        let mut net_h = None;
-        let mut filter_used = String::new();
-        let mut last_net_err = String::new();
-        for f in &filter_candidates {
-            match api.open(f, LAYER_NETWORK, 0, 0) {
-                Ok(h) => {
-                    net_h = Some(h);
-                    filter_used = f.clone();
-                    break;
-                }
-                Err(e) => last_net_err = e,
-            }
-        }
-        let net_h = net_h.ok_or_else(|| {
+        //
+        // There is deliberately **no** fallback to a bare `"tcp"` filter. The
+        // `outbound` field is core WinDivert filter syntax (and `load()` has
+        // already rejected 1.x), so a parse failure here means the driver is not
+        // a supported build. Falling back would hand every *inbound* packet on
+        // the machine to this single-threaded loop as well, only for it to be
+        // passed straight through — doubling the load that already throttles
+        // system-wide throughput, while hiding the real problem.
+        let filter_used = NETWORK_FILTER.to_string();
+        let net_h = api.open(NETWORK_FILTER, LAYER_NETWORK, 0, 0).map_err(|e| {
             format!(
-                "WinDivert NETWORK open failed: {last_net_err}. \
-                 Ensure WinDivert.dll/sys match (x64) and helper is elevated."
+                "WinDivert NETWORK open failed for filter {NETWORK_FILTER:?}: {e}. \
+                 Ensure WinDivert.dll/sys match (2.2+ x64) and the helper is elevated."
             )
         })?;
 
@@ -439,6 +436,7 @@ fn network_loop(
     let mut app_port_keys: HashSet<String> = HashSet::new();
     let mut app_ports_refreshed = Instant::now() - Duration::from_secs(10);
     let mut matched_pids: HashSet<u32> = HashSet::new();
+    let mut recv_errors: u32 = 0;
 
     let refresh_app_index = |tree: &SharedTree,
                              plan: &CapturePlan,
@@ -485,10 +483,27 @@ fn network_loop(
         }
 
         let len = match api.recv(handle, &mut packet, &mut addr) {
-            Ok(n) => n,
-            Err(_) => {
+            Ok(n) => {
+                recv_errors = 0;
+                n
+            }
+            Err(e) => {
                 if stop.load(Ordering::SeqCst) {
                     break;
+                }
+                // Back off. `continue` alone spins this thread at 100% CPU for
+                // as long as the failure lasts — and a failure that lasts is
+                // exactly the likely case (handle closed underneath us, driver
+                // unloaded, device removed). The FLOW loop already sleeps here;
+                // only the NETWORK loop was missing it.
+                recv_errors = recv_errors.saturating_add(1);
+                if recv_errors >= 3 {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if recv_errors == 1 || recv_errors == 100 || recv_errors % 2000 == 0 {
+                    tracing::warn!(
+                        "sockscap-helper: NETWORK recv failed ({recv_errors} consecutive): {e}"
+                    );
                 }
                 continue;
             }
