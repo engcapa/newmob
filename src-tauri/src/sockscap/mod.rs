@@ -16,6 +16,7 @@ pub mod helper;
 pub mod listener_pid;
 pub mod orchestrator;
 pub mod paths;
+pub mod tun_detect;
 pub mod policy;
 pub mod process;
 pub mod recovery;
@@ -1679,6 +1680,14 @@ pub async fn sockscap_detect_local_proxies() -> Result<Vec<LocalProxyCandidate>,
         });
     }
     Ok(out)
+}
+
+/// Suspected proxy/VPN TUN adapters on this machine (Clash TUN, sing-box,
+/// Wintun/TAP, WireGuard). A running L3 TUN client collides with SocksCap's
+/// global capture, so the UI warns when this is non-empty. Empty = no conflict.
+#[tauri::command]
+pub async fn sockscap_detect_tun_conflicts() -> Result<Vec<String>, String> {
+    Ok(tun_detect::detect_tun_adapters())
 }
 
 /// App-exit hook (blocking): cleanly stop the elevated helper's WinDivert

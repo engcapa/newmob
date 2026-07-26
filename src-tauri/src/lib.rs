@@ -571,6 +571,7 @@ pub fn run() {
             sockscap::sockscap_parse_subscription,
             sockscap::sockscap_test_core_upstream,
             sockscap::sockscap_detect_local_proxies,
+            sockscap::sockscap_detect_tun_conflicts,
             sockscap::helper::sockscap_helper_start,
             sockscap::helper::sockscap_helper_stop,
             sockscap::helper::sockscap_helper_status,

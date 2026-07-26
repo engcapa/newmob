@@ -97,6 +97,8 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
     sockscapGetDomainRecords: vi.fn(async () => []),
     sockscapParseShareLink: vi.fn(),
     sockscapTestCoreUpstream: vi.fn(async () => "ok"),
+    sockscapDetectLocalProxies: vi.fn(async () => []),
+    sockscapDetectTunConflicts: vi.fn(async () => []),
   };
 });
 

@@ -273,6 +273,12 @@ export function sockscapDetectLocalProxies(): Promise<LocalProxyCandidate[]> {
   return invoke("sockscap_detect_local_proxies");
 }
 
+/** Suspected proxy/VPN TUN adapter names; non-empty means a global-capture
+ *  conflict with an L3 TUN client is likely. */
+export function sockscapDetectTunConflicts(): Promise<string[]> {
+  return invoke("sockscap_detect_tun_conflicts");
+}
+
 export function sockscapParseShareLink(link: string): Promise<ParsedShareLink> {
   return invoke("sockscap_parse_share_link", { link });
 }

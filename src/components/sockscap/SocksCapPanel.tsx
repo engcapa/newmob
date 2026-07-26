@@ -41,6 +41,7 @@ import {
   sockscapTestCoreUpstream,
   sockscapParseShareLink,
   sockscapDetectLocalProxies,
+  sockscapDetectTunConflicts,
   upstreamRequiresCore,
   type Decision,
   type DomainRecord,
@@ -230,6 +231,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [shareLink, setShareLink] = useState("");
   const [uuidInput, setUuidInput] = useState("");
   const [wgKeyInput, setWgKeyInput] = useState("");
+  const [tunConflicts, setTunConflicts] = useState<string[]>([]);
 
   // Linux sudo prompt modal state
   const [showRootPrompt, setShowRootPrompt] = useState(false);
@@ -327,6 +329,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         setSessions(mapped);
       })
       .catch(() => setSessions([]));
+    // Warn if a TUN-mode client is active (collides with global capture).
+    sockscapDetectTunConflicts()
+      .then(setTunConflicts)
+      .catch(() => setTunConflicts([]));
   }, [refresh]);
 
   useEffect(() => {
@@ -1655,6 +1661,17 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               </div>
             )}
           </Section>
+
+          {/* TUN-mode conflict warning: a local L3 TUN client collides with
+              SocksCap's global capture (double capture / routing loops). */}
+          {tunConflicts.length > 0 && (
+            <div
+              data-testid="sockscap-tun-warning"
+              className="mb-3 px-3 py-2 rounded text-[12px] border border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+            >
+              {t("sockscap.tunConflictWarning", { adapters: tunConflicts.join(", ") })}
+            </div>
+          )}
 
           {/* Upstream */}
           <Section title={t("sockscap.section.upstream")}>
