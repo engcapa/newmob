@@ -45,6 +45,7 @@ const BOTTOM_DOCK_TABS: BottomDockTabId[] = [
   "run",
   "build",
   "tests",
+  "debug",
 ];
 const RIGHT_PANE_TABS: RightPaneTabId[] = ["outline", "documentation"];
 const GROUP_IDS: EditorGroupId[] = ["primary", "secondary"];

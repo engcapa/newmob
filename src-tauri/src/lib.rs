@@ -502,6 +502,7 @@ pub fn run() {
             lsp::lsp_build_workspace,
             dap::dap_start_session,
             dap::dap_send_request,
+            dap::dap_send,
             dap::dap_terminate,
             java_test::java_test_discover,
             lsp::lsp_references,

@@ -493,6 +493,26 @@ pub async fn dap_send_request(
     session.request(&command, arguments.unwrap_or(Value::Null)).await
 }
 
+/// Fire a DAP request without awaiting its response. Needed for the launch
+/// handshake: `launch`'s response does not arrive until after `configurationDone`,
+/// so the frontend fires `launch`, reacts to the `initialized` event
+/// (setBreakpoints…), then fires `configurationDone` — awaiting `launch` would
+/// deadlock that sequence.
+#[tauri::command]
+pub async fn dap_send(
+    state: tauri::State<'_, crate::state::AppState>,
+    session_id: String,
+    command: String,
+    arguments: Option<Value>,
+) -> Result<(), String> {
+    let session = state
+        .dap
+        .get(&session_id)
+        .await
+        .ok_or_else(|| format!("No debug session `{session_id}`"))?;
+    session.notify(&command, arguments.unwrap_or(Value::Null)).await
+}
+
 /// Terminate a session: best-effort `disconnect`, then drop it (killing the
 /// spawned adapter for stdio transports via `kill_on_drop`).
 #[tauri::command]

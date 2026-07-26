@@ -38,6 +38,7 @@ import {
   Play,
   Hammer,
   FlaskConical,
+  Bug,
   Search,
   X,
   ZoomIn,
@@ -383,6 +384,10 @@ import { RunPanel, type RunPanelHandle, type WorkspaceTaskItem } from "./workspa
 import { BuildPanel } from "./workspace/panels/BuildPanel";
 import { TestsPanel } from "./workspace/panels/TestsPanel";
 import { defaultRunner, javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
+import { DebugPanel } from "./workspace/panels/DebugPanel";
+import { useCodeDebugSession } from "./workspace/useCodeDebugSession";
+import type { DebugStackFrame } from "./workspace/dapDebugModel";
+import type { DebugBreakpointMarker } from "./workspace/debugEditorChrome";
 import type { EditorRevealTarget } from "./workspace/EditorGroup";
 
 export function CodeWorkspaceTab({
@@ -4948,6 +4953,53 @@ export function CodeWorkspaceTab({
     });
   }, [activeKey, findRoot, javaTestBuildTool, runWorkspaceTask]);
 
+  // M9: debug session (breakpoints, stepping, variables, watch, console).
+  const debug = useCodeDebugSession(workspaceInstanceId);
+  const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
+  const activeDebugBreakpoints = useMemo<DebugBreakpointMarker[]>(() => {
+    if (!activeFileAbsPath) return [];
+    const key = normalizeFsPath(activeFileAbsPath);
+    const list = debug.breakpoints[key] ?? debug.breakpoints[activeFileAbsPath] ?? [];
+    return list.map((bp) => ({ line: bp.line, conditional: !!(bp.condition || bp.logMessage) }));
+  }, [activeFileAbsPath, debug.breakpoints]);
+  const activeDebugCurrentLine = useMemo<number | null>(() => {
+    const loc = debug.currentLocation;
+    if (!loc || !activeFileAbsPath) return null;
+    return normalizeFsPath(loc.path) === normalizeFsPath(activeFileAbsPath) ? loc.line : null;
+  }, [activeFileAbsPath, debug.currentLocation]);
+  const toggleActiveBreakpoint = useCallback((line: number) => {
+    if (activeFileAbsPath) debug.toggleBreakpoint(normalizeFsPath(activeFileAbsPath), line);
+  }, [activeFileAbsPath, debug]);
+
+  /** Build a Java launch config for the active file and start debugging. */
+  const startDebugActiveFile = useCallback(() => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root") return;
+    const root = findRoot(file.ref.rootId);
+    if (!root) return;
+    const absolute = absolutePathForOpenFile(file);
+    if (!absolute) return;
+    const descriptor = lspDescriptorForFile(file);
+    void debug.startDebug({
+      workspaceId: descriptor?.workspaceId ?? workspaceInstanceId,
+      rootPath: root.path,
+      filePath: absolute,
+      cwd: root.path,
+    }).catch((err) => setStatusMessage(errorMessage(err)));
+    setBottomDockTab("debug");
+    setBottomDockOpen(true);
+  }, [activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
+
+  const openDebugFrame = useCallback((frame: DebugStackFrame) => {
+    if (!frame.path) return;
+    const ref = problemPathToRef(frame.path);
+    if (!ref) return;
+    const range = { start: { line: frame.line - 1, character: 0 }, end: { line: frame.line - 1, character: 0 } };
+    void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
+  }, [openFile, problemPathToRef, revealEditorLocation]);
+
+  const activeFileDebuggable = !!activeFileIsJava && !!activeFile && activeFile.ref.kind === "root";
+
   useEffect(() => {
     if (!onSyncGitManager) return;
     onSyncGitManager(gitManagerPayload);
@@ -5071,6 +5123,9 @@ export function CodeWorkspaceTab({
         activeSemanticTokens={semanticTokensByGroup[groupId]}
         activeGitChanges={groupFile ? gitLineChangesByFile[groupFile.key] ?? [] : []}
         activeGitBlame={gitBlameByGroup[groupId]}
+        activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
+        activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
+        onToggleBreakpoint={groupId === activeEditorGroupId ? toggleActiveBreakpoint : undefined}
         activeCapabilities={groupCapabilities}
         activeLspSyncing={!!groupLspState?.syncing}
         lspStatusPill={(
@@ -5696,6 +5751,18 @@ export function CodeWorkspaceTab({
                 onDiscover={discoverActiveJavaTests}
                 onRun={runJavaTest}
                 runDisabled={javaTestBuildTool === null}
+              />
+            ),
+          },
+          {
+            id: "debug",
+            label: "Debug",
+            icon: <Bug className="h-3.5 w-3.5" />,
+            content: (
+              <DebugPanel
+                debug={debug}
+                onStart={activeFileDebuggable ? startDebugActiveFile : null}
+                onOpenFrame={openDebugFrame}
               />
             ),
           },

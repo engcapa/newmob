@@ -45,6 +45,7 @@ import { useContextMenu } from "../../ContextMenu";
 import type { EditorGroupId } from "../../../stores/codeWorkspaceStore";
 import type { GitBlameLine } from "../../../lib/git";
 import type { GitLineChange } from "./gitEditorChrome";
+import type { DebugBreakpointMarker } from "./debugEditorChrome";
 import { GitDiffPeek } from "./GitDiffPeek";
 import {
   computeEditorTabScrollState,
@@ -80,6 +81,11 @@ interface EditorGroupProps {
   activeSemanticTokens?: LspSemanticToken[];
   activeGitChanges: GitLineChange[];
   activeGitBlame: GitBlameLine | null;
+  /** Breakpoints on the active file (M9), for the breakpoint gutter. */
+  activeDebugBreakpoints?: DebugBreakpointMarker[];
+  /** 1-based current-execution line on the active file (or null). */
+  activeDebugCurrentLine?: number | null;
+  onToggleBreakpoint?: (line: number) => void;
   activeCapabilities: LspCapabilitySummary | null;
   activeLspSyncing: boolean;
   lspStatusPill: ReactNode;
@@ -158,6 +164,9 @@ export function EditorGroup({
   activeSemanticTokens = [],
   activeGitChanges,
   activeGitBlame,
+  activeDebugBreakpoints,
+  activeDebugCurrentLine,
+  onToggleBreakpoint,
   activeCapabilities,
   activeLspSyncing,
   lspStatusPill,
@@ -557,6 +566,9 @@ export function EditorGroup({
                     semanticTokens={activeSemanticTokens}
                     gitChanges={activeGitChanges}
                     gitBlame={activeGitBlame}
+                    debugBreakpoints={activeDebugBreakpoints}
+                    debugCurrentLine={activeDebugCurrentLine}
+                    onToggleBreakpoint={onToggleBreakpoint}
                     reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                     onChange={(doc) => {
                       if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
