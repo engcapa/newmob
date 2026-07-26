@@ -3,7 +3,24 @@
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
+/// Base filename of the elevated helper per platform.
+pub fn helper_exe_name() -> &'static str {
+    if cfg!(windows) {
+        "sockscap-helper.exe"
+    } else {
+        "sockscap-helper"
+    }
+}
+
 /// All candidate paths for the elevated helper binary (first existing wins).
+///
+/// `scripts/stage-sockscap-windows.ps1` stages the helper into
+/// `src-tauri/resources/sockscap/windows/`, and `tauri.conf.json` bundles
+/// `resources/sockscap/**/*` — so an installed build has it at
+/// `<install dir>\resources\sockscap\windows\sockscap-helper.exe`. Note that on
+/// Windows `resource_dir()` *is* the exe directory, so the `resources/` segment
+/// is part of the path and must be searched explicitly (this mirrors what
+/// [`windivert_dir_candidates`] and [`xray_exe_candidates`] already do).
 pub fn helper_exe_candidates(app: &AppHandle) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut push = |p: PathBuf| {
@@ -11,35 +28,49 @@ pub fn helper_exe_candidates(app: &AppHandle) -> Vec<PathBuf> {
             out.push(p);
         }
     };
+    let name = helper_exe_name();
+    let platform_dir = xray_platform_subdir();
+
+    // Explicit override (tests / CI / bespoke deployments).
+    if let Ok(exe) = std::env::var("SOCKSCAP_HELPER_EXE") {
+        push(PathBuf::from(exe));
+    }
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // Same directory as Taomni (release install layout).
-            push(dir.join("sockscap-helper.exe"));
-            push(dir.join("sockscap-helper"));
+            // Same directory as Taomni, and the cargo target dir under
+            // `tauri dev` (the exe lives in target/<profile> there too).
+            push(dir.join(name));
+            // Bundled resource layout (NSIS/MSI install, macOS Resources).
+            push(dir.join("resources").join("sockscap").join(platform_dir).join(name));
+            push(dir.join("sockscap").join(platform_dir).join(name));
             // Sidecar / externalBin style names.
-            push(dir.join("bin").join("sockscap-helper.exe"));
-            push(dir.join("sockscap").join("sockscap-helper.exe"));
-            // cargo target when running `tauri dev` (exe is in target/debug).
-            push(dir.join("sockscap-helper.exe"));
+            push(dir.join("bin").join(name));
+            push(dir.join("sockscap").join(name));
         }
     }
 
+    if let Ok(dir) = app.path().resource_dir() {
+        push(dir.join("resources").join("sockscap").join(platform_dir).join(name));
+        push(dir.join("sockscap").join(platform_dir).join(name));
+        push(dir.join(name));
+        push(dir.join("bin").join(name));
+    }
+
     // CWD-relative (dev from repo root or src-tauri).
+    push(PathBuf::from(format!(
+        "src-tauri/resources/sockscap/{platform_dir}/{name}"
+    )));
+    push(PathBuf::from(format!(
+        "resources/sockscap/{platform_dir}/{name}"
+    )));
     for base in [
         PathBuf::from("target/debug"),
         PathBuf::from("target/release"),
         PathBuf::from("src-tauri/target/debug"),
         PathBuf::from("src-tauri/target/release"),
     ] {
-        push(base.join("sockscap-helper.exe"));
-        push(base.join("sockscap-helper"));
-    }
-
-    if let Ok(dir) = app.path().resource_dir() {
-        push(dir.join("sockscap-helper.exe"));
-        push(dir.join("bin").join("sockscap-helper.exe"));
-        push(dir.join("sockscap").join("windows").join("sockscap-helper.exe"));
+        push(base.join(name));
     }
 
     out
@@ -61,15 +92,16 @@ pub fn resolve_helper_exe(app: &AppHandle) -> Result<PathBuf, String> {
             }));
         }
     }
+    // List every candidate: truncating hid the install-layout paths that
+    // matter most when diagnosing "helper not found" on a packaged build.
     let listed = candidates
         .iter()
-        .take(8)
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join("\n  ");
     Err(format!(
         "sockscap-helper not found. Build with:\n  cd src-tauri && cargo build --bin sockscap-helper\n\
-         Searched (first paths):\n  {listed}"
+         Searched:\n  {listed}"
     ))
 }
 
