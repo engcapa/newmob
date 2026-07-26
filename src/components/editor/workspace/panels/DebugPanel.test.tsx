@@ -13,11 +13,16 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     availableExceptionFilters: [],
     enabledExceptionFilters: [],
     watchExpressions: [],
+    breakpointsMuted: false,
+    setBreakpointsMuted: vi.fn(),
+    removeAllBreakpoints: vi.fn(),
+    frameVariables: {},
     startDebug: vi.fn().mockResolvedValue(undefined),
     restart: vi.fn(),
     canRestart: false,
     toggleBreakpoint: vi.fn(),
     setBreakpointOptions: vi.fn(),
+    removeBreakpoint: vi.fn(),
     setExceptionFilters: vi.fn(),
     addWatchExpression: vi.fn(),
     removeWatchExpression: vi.fn(),
@@ -28,10 +33,13 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     restartFrame: vi.fn(),
     hotReload: vi.fn(),
     evaluate: vi.fn().mockResolvedValue({ value: "", variablesReference: 0, type: null }),
+    hoverEvaluate: vi.fn().mockResolvedValue(null),
     setVariable: vi.fn().mockResolvedValue(null),
     logConsole: vi.fn(),
+    clearConsole: vi.fn(),
     fetchVariables: vi.fn().mockResolvedValue({ variables: [] }),
     fetchScopes: vi.fn().mockResolvedValue({ scopes: [] }),
+    fetchSource: vi.fn().mockResolvedValue(null),
     terminate: vi.fn(),
     currentLocation: null,
     ...overrides,
@@ -45,7 +53,7 @@ function stoppedState(): DebugSessionState {
     stoppedThreadId: 1,
     stoppedReason: "breakpoint",
     threads: [{ id: 1, name: "main" }, { id: 2, name: "worker" }],
-    frames: [{ id: 10, name: "App.main", path: "/repo/App.java", line: 9, column: 1 }],
+    frames: [{ id: 10, name: "App.main", path: "/repo/App.java", line: 9, column: 1, sourceReference: 0, sourceName: null }],
     selectedThreadId: 1,
     selectedFrameId: 10,
   };
@@ -185,5 +193,114 @@ describe("DebugPanel", () => {
     );
     fireEvent.click(screen.getByTestId("debug-exception-uncaught"));
     expect(setExceptionFilters).toHaveBeenCalledWith(["uncaught"]);
+  });
+
+  it("lists every workspace breakpoint and reveals one on click", () => {
+    const onOpenBreakpoint = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          breakpoints: {
+            "/repo/A.java": [{ line: 12, condition: "i > 3" }],
+            "/repo/B.java": [{ line: 4, enabled: false }],
+          },
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        onOpenBreakpoint={onOpenBreakpoint}
+      />,
+    );
+    expect(screen.getByTestId("debug-breakpoint-12")).toHaveTextContent("A.java:12");
+    expect(screen.getByTestId("debug-breakpoint-12")).toHaveTextContent("if i > 3");
+    fireEvent.click(screen.getByTestId("debug-breakpoint-4"));
+    expect(onOpenBreakpoint).toHaveBeenCalledWith("/repo/B.java", 4);
+  });
+
+  it("enables, disables and removes breakpoints from the breakpoints view", () => {
+    const setBreakpointOptions = vi.fn();
+    const removeBreakpoint = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          breakpoints: { "/repo/A.java": [{ line: 12 }] },
+          setBreakpointOptions,
+          removeBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("debug-breakpoint-enabled-12"));
+    expect(setBreakpointOptions).toHaveBeenCalledWith("/repo/A.java", 12, { enabled: false });
+    fireEvent.click(screen.getByTestId("debug-breakpoint-remove-12"));
+    expect(removeBreakpoint).toHaveBeenCalledWith("/repo/A.java", 12);
+  });
+
+  it("edits a breakpoint's condition inline instead of through modal prompts", () => {
+    const setBreakpointOptions = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          breakpoints: { "/repo/A.java": [{ line: 12 }] },
+          setBreakpointOptions,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        editingBreakpoint={{ path: "/repo/A.java", line: 12 }}
+      />,
+    );
+    const condition = screen.getByTestId("debug-breakpoint-condition-12");
+    fireEvent.change(condition, { target: { value: "i > 3" } });
+    fireEvent.keyDown(condition, { key: "Enter" });
+    expect(setBreakpointOptions).toHaveBeenCalledWith("/repo/A.java", 12, { condition: "i > 3" });
+    // Hit count and log message live in the same editor.
+    const hit = screen.getByTestId("debug-breakpoint-hit-12");
+    fireEvent.change(hit, { target: { value: "5" } });
+    fireEvent.keyDown(hit, { key: "Enter" });
+    expect(setBreakpointOptions).toHaveBeenCalledWith("/repo/A.java", 12, { hitCondition: "5" });
+  });
+
+  it("mutes and clears breakpoints from the section header", () => {
+    const setBreakpointsMuted = vi.fn();
+    const removeAllBreakpoints = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          breakpoints: { "/repo/A.java": [{ line: 12 }] },
+          setBreakpointsMuted,
+          removeAllBreakpoints,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("debug-mute-breakpoints"));
+    expect(setBreakpointsMuted).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByTestId("debug-remove-all-breakpoints"));
+    expect(removeAllBreakpoints).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers remote attach only when the parent supplies it", () => {
+    const onAttach = vi.fn();
+    const { rerender } = render(
+      <DebugPanel debug={makeSession()} onStart={null} onOpenFrame={vi.fn()} onAttach={onAttach} />,
+    );
+    fireEvent.click(screen.getByTestId("debug-attach"));
+    expect(onAttach).toHaveBeenCalledTimes(1);
+    rerender(<DebugPanel debug={makeSession()} onStart={null} onOpenFrame={vi.fn()} onAttach={null} />);
+    expect(screen.queryByTestId("debug-attach")).toBeNull();
+  });
+
+  it("clears the console from the section header", () => {
+    const clearConsole = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({ state: stoppedState(), clearConsole })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("debug-console-clear"));
+    expect(clearConsole).toHaveBeenCalledTimes(1);
   });
 });

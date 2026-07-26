@@ -870,6 +870,12 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
 
 **前端**：底部 Debug 面板（调用栈/变量/监视/断点/console）+ 编辑器断点 gutter + 悬浮运行工具条，**均按 DAP 标准模型渲染，与语言无关**；适配器专属能力（如 Java 热重载）按 D1 下发的 capabilities/适配器能力位开关（沿用 §5.2.0 capability 驱动模式）。
 
+- **D6 IDEA 成熟度收口**（缺陷修复 + 补齐，规模 M）— **✅ 已交付**。
+  **缺陷（P0）**：① 会话中新增/改条件的断点**从不生效**——`toggleBreakpoint`/`setBreakpointOptions` 在 `setBreakpoints` 的 state updater 内同步调用 sync，读到的是**改动前**的 ref，推给适配器的是旧集合；改为「先算新集合 → 同步更新 ref → 显式传 list 给 sync」的单一变更入口（`mutateBreakpoints`），并加 per-path generation 防止旧响应覆盖新集合。② Windows 长 classpath 启动失败（`CreateProcess error=206`）——java-debug 默认不缩短命令行，现默认 `shortenCommandLine: "auto"`（可覆盖），对齐 IDEA 的 shorten command line。③ **stdio 适配器死锁**——`connect_transport` 管道化 stderr 却无人排空，管道写满后适配器永久阻塞；新增 `run_stderr_pump` 转成 `output` 事件（Java 走 TCP 不受影响，但这是多语言框架的通用缺陷）。④ **反向请求无人应答**——内核只转发不回复，发 `runInTerminal`/`startDebugging` 的适配器会一直等；`reverse_response` 统一回失败响应。⑤ `initialize` 无超时 → UI 永久卡「starting」；加 20s 上限。⑥ EOF 时后端会话从 map 移除，前端不在也不泄漏；Stop 优先走 `terminate`（capability 判定）再 `disconnect`。
+  **IDEA 对齐（均为语言无关 DAP 层）**：断点视图（全工作区列表 + 单个启用/禁用 + Mute All + Remove All + 点击跳转 + 条件/命中次数/logpoint 内联编辑，取代原先三连 modal prompt）；编辑器悬停求值（停驻时接管 LSP hover）；行尾 inline values（仅渲染到当前执行行）；调试快捷键 F9/F8/F7/Shift+F8/Ctrl+F8/Ctrl+Shift+F8/Alt+F9/Ctrl+F2；`thread` 事件维护线程列表；Stop 后保留 console（含 Clear）；库/反编译栈帧经 DAP `source` 请求打开只读缓冲区。
+  **Java 适配器**：远程 attach（IDEA Remote JVM Debug，`hostName`/`port`，跳过 mainClass/classpath 解析）；显式 mainClass 缺 projectName 时回填所属工程（多模块下避免解析错模块）；`sourcePaths`/`stopOnEntry`/`encoding`/`shortenCommandLine` 透传。
+  测试：Rust 24（新增 reverse-response、attach 参数、shortenCommandLine/透传）；前端新增 `useCodeDebugSession.test.tsx`（9，含旧缺陷回归）+ `debugEditorChrome.test.ts`（7）+ 模型/面板补充。**真机冒烟仍由用户验证**（需 jdtls + java-debug bundle + Java 工程）。
+
 ### 11.E 测试集成（M8–M9，依赖 Bundle 基建 + 部分 D，规模 L）
 
 - **探测**：java-test 命令 `java.test.findTestTypesAndMethods`（JUnit4/5、TestNG）。

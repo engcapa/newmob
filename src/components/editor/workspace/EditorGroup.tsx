@@ -46,6 +46,7 @@ import type { EditorGroupId } from "../../../stores/codeWorkspaceStore";
 import type { GitBlameLine } from "../../../lib/git";
 import type { GitLineChange } from "./gitEditorChrome";
 import type { DebugBreakpointMarker } from "./debugEditorChrome";
+import type { DebugStepAction } from "./dapDebugModel";
 import { GitDiffPeek } from "./GitDiffPeek";
 import {
   computeEditorTabScrollState,
@@ -85,8 +86,16 @@ interface EditorGroupProps {
   activeDebugBreakpoints?: DebugBreakpointMarker[];
   /** 1-based current-execution line on the active file (or null). */
   activeDebugCurrentLine?: number | null;
+  /** Selected-frame locals rendered as inline values on the active file. */
+  activeDebugInlineValues?: Record<string, string>;
   onToggleBreakpoint?: (line: number) => void;
   onEditBreakpoint?: (line: number) => void;
+  /** Debugger keymap actions (F7/F8/F9/Ctrl+F2/Alt+F9); null when idle. */
+  debugStep?: ((action: DebugStepAction) => void) | null;
+  debugRunToCursor?: ((line: number) => void) | null;
+  debugStop?: (() => void) | null;
+  /** Hover evaluation on the active file while stopped there. */
+  debugEvaluate?: ((expression: string) => Promise<{ value: string; type: string | null } | null>) | null;
   activeCapabilities: LspCapabilitySummary | null;
   activeLspSyncing: boolean;
   lspStatusPill: ReactNode;
@@ -167,8 +176,13 @@ export function EditorGroup({
   activeGitBlame,
   activeDebugBreakpoints,
   activeDebugCurrentLine,
+  activeDebugInlineValues,
   onToggleBreakpoint,
   onEditBreakpoint,
+  debugStep,
+  debugRunToCursor,
+  debugStop,
+  debugEvaluate,
   activeCapabilities,
   activeLspSyncing,
   lspStatusPill,
@@ -570,6 +584,11 @@ export function EditorGroup({
                     gitBlame={activeGitBlame}
                     debugBreakpoints={activeDebugBreakpoints}
                     debugCurrentLine={activeDebugCurrentLine}
+                    debugInlineValues={activeDebugInlineValues}
+                    debugStep={debugStep}
+                    debugRunToCursor={debugRunToCursor}
+                    debugStop={debugStop}
+                    debugEvaluate={debugEvaluate}
                     onToggleBreakpoint={onToggleBreakpoint}
                     onEditBreakpoint={onEditBreakpoint}
                     reveal={revealTarget?.key === activeFile.key ? revealTarget : null}

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   appendConsoleLine,
+  breakpointVerificationMap,
   buildSetBreakpointsArgs,
   currentLocation,
+  hoverExpressionAt,
   initialDebugState,
+  inlineValueLabel,
   markResumed,
   parseBreakpointEvent,
   parseEvaluate,
@@ -11,12 +14,13 @@ import {
   parseSetBreakpointsResponse,
   parseStackFrames,
   parseThreads,
+  planBreakpointSync,
   reconcileBreakpointLines,
   reduceDebugEvent,
   selectExceptionFilters,
-  sortedBreakpoints,
   stepCommandFor,
   toAdapterSourcePath,
+  type DebugStackFrame,
 } from "./dapDebugModel";
 
 describe("dapDebugModel", () => {
@@ -40,12 +44,12 @@ describe("dapDebugModel", () => {
   });
 
   it("builds setBreakpoints args sorted, with condition + hitCondition + logMessage", () => {
-    const args = buildSetBreakpointsArgs("/repo/src/App.java", [
+    const args = buildSetBreakpointsArgs("/repo/src/App.java", planBreakpointSync([
       { line: 20 },
       { line: 5, condition: " x > 1 " },
       { line: 12, logMessage: "hit {x}" },
       { line: 8, hitCondition: " 5 " },
-    ]);
+    ]));
     expect(args.source).toEqual({ path: "/repo/src/App.java", name: "App.java" });
     expect(args.breakpoints).toEqual([
       { line: 5, condition: "x > 1" },
@@ -55,9 +59,34 @@ describe("dapDebugModel", () => {
     ]);
   });
 
+  it("omits disabled and muted breakpoints from the request but keeps them stored", () => {
+    const stored = [{ line: 5 }, { line: 9, enabled: false }, { line: 12 }];
+    const plan = planBreakpointSync(stored);
+    expect(plan.sent.map((bp) => bp.line)).toEqual([5, 12]);
+    // `indexes` maps each sent entry back to its slot in the stored, sorted list.
+    expect(plan.indexes).toEqual([0, 2]);
+    expect(plan.sorted.map((bp) => bp.line)).toEqual([5, 9, 12]);
+    // Muting suppresses every breakpoint without forgetting any of them.
+    const muted = planBreakpointSync(stored, { muted: true });
+    expect(muted.sent).toEqual([]);
+    expect(muted.sorted).toHaveLength(3);
+  });
+
+  it("inserts a run-to-cursor breakpoint in line order without storing it", () => {
+    const plan = planBreakpointSync([{ line: 3 }, { line: 20 }], { extraLine: 11 });
+    expect(plan.sent.map((bp) => bp.line)).toEqual([3, 11, 20]);
+    expect(plan.indexes).toEqual([0, -1, 1]);
+    expect(plan.sorted.map((bp) => bp.line)).toEqual([3, 20]);
+    // A transient line that already has a breakpoint is not duplicated.
+    expect(planBreakpointSync([{ line: 3 }], { extraLine: 3 }).sent).toHaveLength(1);
+    // Muted + run-to-cursor: only the transient one is armed.
+    const muted = planBreakpointSync([{ line: 3 }], { muted: true, extraLine: 8 });
+    expect(muted.sent.map((bp) => bp.line)).toEqual([8]);
+  });
+
   it("parses setBreakpoints responses aligned to the sorted request order", () => {
-    const requested = sortedBreakpoints([{ line: 9 }, { line: 3 }]);
-    const bindings = parseSetBreakpointsResponse(requested, {
+    const plan = planBreakpointSync([{ line: 9 }, { line: 3 }]);
+    const bindings = parseSetBreakpointsResponse(plan, {
       breakpoints: [
         { id: 1, verified: true, line: 4 },
         { id: 2, verified: false },
@@ -68,26 +97,47 @@ describe("dapDebugModel", () => {
       { id: 2, verified: false, line: 9 },
     ]);
     // Missing/short response arrays leave breakpoints unverified on their line.
-    expect(parseSetBreakpointsResponse(requested, null)).toEqual([
+    expect(parseSetBreakpointsResponse(plan, null)).toEqual([
       { id: null, verified: false, line: 3 },
       { id: null, verified: false, line: 9 },
     ]);
   });
 
   it("adopts adapter-adjusted breakpoint lines and drops collapsed duplicates", () => {
-    const requested = sortedBreakpoints([{ line: 3, condition: "x" }, { line: 5 }]);
+    const plan = planBreakpointSync([{ line: 3, condition: "x" }, { line: 5 }]);
     // The adapter moved line 3 → 5 (line 3 was not executable): both collapse to 5.
-    const moved = reconcileBreakpointLines(requested, [
+    const moved = reconcileBreakpointLines(plan, [
       { id: 1, verified: true, line: 5 },
       { id: 2, verified: true, line: 5 },
     ]);
     expect(moved).toEqual([{ line: 5, condition: "x" }]);
     // Unverified bindings do not move the breakpoint.
-    const kept = reconcileBreakpointLines(requested, [
+    const kept = reconcileBreakpointLines(plan, [
       { id: 1, verified: false, line: 7 },
       { id: 2, verified: true, line: 5 },
     ]);
     expect(kept).toEqual([{ line: 3, condition: "x" }, { line: 5 }]);
+  });
+
+  it("keeps unsent breakpoints intact when reconciling a partial request", () => {
+    // Disabled entries are not in the response; they must survive untouched and
+    // must not consume a binding meant for the next enabled breakpoint.
+    const plan = planBreakpointSync([{ line: 3 }, { line: 5, enabled: false }, { line: 9 }]);
+    const reconciled = reconcileBreakpointLines(plan, [
+      { id: 1, verified: true, line: 4 },
+      { id: 2, verified: true, line: 10 },
+    ]);
+    expect(reconciled).toEqual([{ line: 4 }, { line: 5, enabled: false }, { line: 10 }]);
+  });
+
+  it("reports verification per bound line for the gutter", () => {
+    const plan = planBreakpointSync([{ line: 3 }, { line: 5, enabled: false }, { line: 9 }]);
+    const map = breakpointVerificationMap(plan, [
+      { id: 1, verified: true, line: 4 },
+      { id: 2, verified: false, line: 9 },
+    ]);
+    // Keyed by the line the adapter bound; the disabled breakpoint has no entry.
+    expect(map).toEqual({ 4: true, 9: false });
   });
 
   it("parses breakpoint events (verification changes as classes load)", () => {
@@ -116,11 +166,25 @@ describe("dapDebugModel", () => {
       stackFrames: [
         { id: 3, name: "App.main", source: { path: "/repo/App.java" }, line: 9, column: 2 },
         { id: 4, name: "native", line: 0 },
+        // A library frame: no readable path, fetched via the `source` request.
+        {
+          id: 5,
+          name: "java.util.ArrayList.get",
+          source: { name: "ArrayList.java", sourceReference: 1001 },
+          line: 427,
+        },
       ],
     });
-    expect(frames).toHaveLength(2);
+    expect(frames).toHaveLength(3);
     expect(frames[0].path).toBe("/repo/App.java");
+    expect(frames[0].sourceReference).toBe(0);
     expect(frames[1].path).toBeNull();
+    expect(frames[2]).toMatchObject({
+      path: null,
+      sourceReference: 1001,
+      sourceName: "ArrayList.java",
+      line: 427,
+    });
   });
 
   it("parses exceptionInfo and evaluate responses", () => {
@@ -141,10 +205,10 @@ describe("dapDebugModel", () => {
   });
 
   it("derives the current highlight location from the selected frame, else the top frame", () => {
-    const frames = [
-      { id: 1, name: "native", path: null, line: 0, column: 0 },
-      { id: 2, name: "App.main", path: "/repo/App.java", line: 9, column: 1 },
-      { id: 3, name: "App.run", path: "/repo/Run.java", line: 30, column: 1 },
+    const frames: DebugStackFrame[] = [
+      { id: 1, name: "native", path: null, line: 0, column: 0, sourceReference: 0, sourceName: null },
+      { id: 2, name: "App.main", path: "/repo/App.java", line: 9, column: 1, sourceReference: 0, sourceName: null },
+      { id: 3, name: "App.run", path: "/repo/Run.java", line: 30, column: 1, sourceReference: 0, sourceName: null },
     ];
     expect(currentLocation(frames)).toEqual({ path: "/repo/App.java", line: 9 });
     expect(currentLocation(frames, 3)).toEqual({ path: "/repo/Run.java", line: 30 });
@@ -179,7 +243,7 @@ describe("dapDebugModel", () => {
       status: "stopped" as const,
       stoppedThreadId: 1,
       stoppedReason: "breakpoint",
-      frames: [{ id: 9, name: "f", path: "/a.java", line: 1, column: 1 }],
+      frames: [{ id: 9, name: "f", path: "/a.java", line: 1, column: 1, sourceReference: 0, sourceName: null }],
       selectedThreadId: 1,
       selectedFrameId: 9,
       exceptionInfo: { exceptionId: "E", description: "", details: null },
@@ -209,5 +273,44 @@ describe("dapDebugModel", () => {
     const state = initialDebugState("s1");
     expect(reduceDebugEvent(state, "module", {})).toBe(state);
     expect(reduceDebugEvent(state, "output", { body: { output: "" } })).toBe(state);
+  });
+
+  it("tracks threads as the adapter starts and exits them", () => {
+    // `threads` may only be requested while stopped, so the running thread list
+    // is maintained from the events.
+    let state = initialDebugState("s1");
+    state = reduceDebugEvent(state, "thread", { body: { reason: "started", threadId: 4 } });
+    state = reduceDebugEvent(state, "thread", { body: { reason: "started", threadId: 7 } });
+    expect(state.threads.map((t) => t.id)).toEqual([4, 7]);
+    // A repeated start is not a duplicate row.
+    expect(reduceDebugEvent(state, "thread", { body: { reason: "started", threadId: 4 } })).toBe(state);
+    state = reduceDebugEvent(state, "thread", { body: { reason: "exited", threadId: 4 } });
+    expect(state.threads.map((t) => t.id)).toEqual([7]);
+    // A malformed thread event changes nothing.
+    expect(reduceDebugEvent(state, "thread", { body: {} })).toBe(state);
+  });
+
+  it("extracts the hovered expression, including dotted chains and indexes", () => {
+    const line = "    total = order.items.get(i) + prices[i];";
+    expect(hoverExpressionAt(line, line.indexOf("total") + 2)).toBe("total");
+    // A dotted chain resolves to the full receiver path under the caret.
+    expect(hoverExpressionAt(line, line.indexOf("items") + 1)).toBe("order.items");
+    // An index directly after the identifier belongs to the expression.
+    expect(hoverExpressionAt(line, line.indexOf("prices") + 1)).toBe("prices[i]");
+    // Whitespace, operators and numeric literals are not expressions.
+    expect(hoverExpressionAt(line, 1)).toBeNull();
+    expect(hoverExpressionAt("x + 42", 4)).toBeNull();
+    expect(hoverExpressionAt("x", -1)).toBeNull();
+  });
+
+  it("builds an inline value label from the locals mentioned on a line", () => {
+    const variables = { sum: "10", i: "3", other: "9" };
+    expect(inlineValueLabel("sum += values[i];", variables)).toBe("sum = 10, i = 3");
+    // Field access is not the local of the same name, and comments are ignored.
+    expect(inlineValueLabel("node.sum = 1; // i", variables)).toBeNull();
+    // Each variable appears once even when mentioned twice.
+    expect(inlineValueLabel("i = i + 1;", variables)).toBe("i = 3");
+    expect(inlineValueLabel("System.out.println();", variables)).toBeNull();
+    expect(inlineValueLabel("sum = 1;", {})).toBeNull();
   });
 });

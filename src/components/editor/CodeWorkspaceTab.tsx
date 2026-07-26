@@ -4519,6 +4519,17 @@ export function CodeWorkspaceTab({
 
   const getLspHover = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
+      // While the debugger is stopped in this file, the hover belongs to the
+      // debugger (IDEA shows the value, not the javadoc). Read through the ref:
+      // the debug hook is declared later in this component.
+      const session = debugRef.current;
+      if (session?.state?.status === "stopped") {
+        const stoppedPath = session.currentLocation?.path;
+        const filePath = absolutePathForOpenFile(file);
+        if (stoppedPath && filePath && normalizeFsPath(stoppedPath) === normalizeFsPath(filePath)) {
+          return null;
+        }
+      }
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return null;
       try {
@@ -4536,7 +4547,7 @@ export function CodeWorkspaceTab({
         return null;
       }
     },
-    [lspDescriptorForFile, updateLspStatusForFile],
+    [absolutePathForOpenFile, lspDescriptorForFile, updateLspStatusForFile],
   );
 
   const navigateLocations = useCallback(async (
@@ -5005,6 +5016,8 @@ export function CodeWorkspaceTab({
   // Ref so callbacks declared above the hook (debug-test) can reach it.
   const debugRef = useRef(debug);
   debugRef.current = debug;
+  /** Breakpoint whose editor is open in the Debug panel's breakpoints view. */
+  const [editingBreakpoint, setEditingBreakpoint] = useState<{ path: string; line: number } | null>(null);
   const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
   const debugSessionActive = !!debug.state && debug.state.status !== "terminated";
   const activeDebugBreakpoints = useMemo<DebugBreakpointMarker[]>(() => {
@@ -5025,45 +5038,32 @@ export function CodeWorkspaceTab({
     if (!loc || !activeFileAbsPath) return null;
     return normalizeFsPath(loc.path) === normalizeFsPath(activeFileAbsPath) ? loc.line : null;
   }, [activeFileAbsPath, debug.currentLocation]);
+  /** The editor is showing the stopped frame: inline values + hover apply here. */
+  const debugStoppedHere = debug.state?.status === "stopped" && activeDebugCurrentLine != null;
+  const activeDebugInlineValues = debugStoppedHere ? debug.frameVariables : undefined;
+  const debugRunToCursorLine = useCallback((line: number) => {
+    if (activeFileAbsPath) debug.runToCursor(normalizeFsPath(activeFileAbsPath), line);
+  }, [activeFileAbsPath, debug]);
   const toggleActiveBreakpoint = useCallback((line: number) => {
     if (activeFileAbsPath) debug.toggleBreakpoint(normalizeFsPath(activeFileAbsPath), line);
   }, [activeFileAbsPath, debug]);
 
-  /** Right-click a breakpoint (D5): set a condition or a logpoint message. */
+  /**
+   * Right-click a breakpoint gutter (or Ctrl+Shift+F8): create the breakpoint if
+   * needed and open the Debug panel's breakpoints view, where condition, hit
+   * count and log message are edited in one place — IDEA's breakpoint dialog,
+   * rather than a chain of modal prompts.
+   */
   const editActiveBreakpoint = useCallback((line: number) => {
     if (!activeFileAbsPath) return;
     const key = normalizeFsPath(activeFileAbsPath);
-    const existing = (debug.breakpoints[key] ?? []).find((bp) => bp.line === line);
-    if (!existing) debug.toggleBreakpoint(key, line); // ensure the breakpoint exists first
-    void (async () => {
-      const condition = await promptAppDialog({
-        title: `Breakpoint at line ${line}`,
-        label: "Condition (break only when true) — blank for none",
-        initialValue: existing?.condition ?? "",
-        allowEmpty: true,
-      });
-      if (condition === null) return; // cancelled
-      const hitCondition = await promptAppDialog({
-        title: `Breakpoint at line ${line}`,
-        label: "Hit count (e.g. 5 breaks on the 5th hit) — blank for none",
-        initialValue: existing?.hitCondition ?? "",
-        allowEmpty: true,
-      });
-      if (hitCondition === null) return;
-      const logMessage = await promptAppDialog({
-        title: `Breakpoint at line ${line}`,
-        label: "Logpoint message (logs instead of breaking; {expr} interpolates) — blank for none",
-        initialValue: existing?.logMessage ?? "",
-        allowEmpty: true,
-      });
-      if (logMessage === null) return;
-      debug.setBreakpointOptions(key, line, {
-        condition: condition.trim() || undefined,
-        hitCondition: hitCondition.trim() || undefined,
-        logMessage: logMessage.trim() || undefined,
-      });
-    })();
-  }, [activeFileAbsPath, debug]);
+    if (!(debug.breakpoints[key] ?? []).some((bp) => bp.line === line)) {
+      debug.toggleBreakpoint(key, line);
+    }
+    setEditingBreakpoint({ path: key, line });
+    setBottomDockTab("debug");
+    setBottomDockOpen(true);
+  }, [activeFileAbsPath, debug, setBottomDockOpen, setBottomDockTab]);
 
   /** Build a Java launch config for the active file and start debugging. */
   const startDebugActiveFile = useCallback(() => {
@@ -5084,13 +5084,98 @@ export function CodeWorkspaceTab({
     setBottomDockOpen(true);
   }, [activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
 
-  const openDebugFrame = useCallback((frame: Pick<DebugStackFrame, "path" | "line">) => {
-    if (!frame.path) return;
-    const ref = problemPathToRef(frame.path);
-    if (!ref) return;
+  /**
+   * Attach to a JVM already running with `-agentlib:jdwp=...,server=y,address=…`
+   * (IDEA's "Remote JVM Debug"). The active file still selects the jdtls session
+   * so breakpoints resolve against this project's sources.
+   */
+  const attachRemoteDebug = useCallback(() => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root") return;
+    const root = findRoot(file.ref.rootId);
+    const absolute = absolutePathForOpenFile(file);
+    if (!root || !absolute) return;
+    const descriptor = lspDescriptorForFile(file);
+    void (async () => {
+      const target = await promptAppDialog({
+        title: "Attach to remote JVM",
+        label: "Debug address — host:port, or just the port for localhost",
+        initialValue: "localhost:5005",
+      });
+      if (target === null) return;
+      const trimmed = target.trim();
+      if (!trimmed) return;
+      const [hostPart, portPart] = trimmed.includes(":")
+        ? [trimmed.slice(0, trimmed.lastIndexOf(":")), trimmed.slice(trimmed.lastIndexOf(":") + 1)]
+        : ["localhost", trimmed];
+      const port = Number.parseInt(portPart, 10);
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+        setStatusMessage(`Not a valid debug address: ${trimmed}`);
+        return;
+      }
+      try {
+        await debug.startDebug({
+          workspaceId: descriptor?.workspaceId ?? workspaceInstanceId,
+          rootPath: root.path,
+          filePath: absolute,
+          request: "attach",
+          hostName: hostPart || "localhost",
+          port,
+        });
+        setBottomDockTab("debug");
+        setBottomDockOpen(true);
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+      }
+    })();
+  }, [
+    activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile,
+    setBottomDockOpen, setBottomDockTab, setStatusMessage, workspaceInstanceId,
+  ]);
+
+  const openDebugFrame = useCallback((
+    frame: Pick<DebugStackFrame, "path" | "line"> & Partial<Pick<DebugStackFrame, "sourceReference" | "sourceName" | "name">>,
+  ) => {
     const range = { start: { line: frame.line - 1, character: 0 }, end: { line: frame.line - 1, character: 0 } };
-    void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
-  }, [openFile, problemPathToRef, revealEditorLocation]);
+    const ref = frame.path ? problemPathToRef(frame.path) : null;
+    if (ref) {
+      void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
+      return;
+    }
+    // Outside the workspace (JDK / a dependency JAR): ask the adapter for the
+    // attached or decompiled source and show it read-only, like IDEA does.
+    const sourceReference = frame.sourceReference ?? 0;
+    if (sourceReference <= 0) return;
+    const origin = openFilesRef.current[activeKey ?? ""]
+      ?? Object.values(openFilesRef.current).find((item) => !item.loading)
+      ?? null;
+    const descriptor = origin ? lspDescriptorForFile(origin) : null;
+    if (!descriptor) return;
+    void (async () => {
+      const text = await debugRef.current.fetchSource(sourceReference);
+      if (!text) {
+        setStatusMessage("No source available for this frame");
+        return;
+      }
+      const title = frame.sourceName ?? `${frame.name ?? "frame"}.java`;
+      await openLibraryBuffer(
+        {
+          uri: `dap-source:${sourceReference}/${title}`,
+          title,
+          container: frame.name ?? null,
+          languageId: "java",
+          originRootPath: descriptor.rootPath ?? null,
+          originFilePath: descriptor.filePath,
+          decompiled: true,
+        },
+        text,
+        range,
+      );
+    })();
+  }, [
+    activeKey, lspDescriptorForFile, openFile, openLibraryBuffer, problemPathToRef,
+    revealEditorLocation, setStatusMessage,
+  ]);
 
   // IDEA-style: jump to the stopped location (breakpoint hit / step landing)
   // automatically, once per distinct location.
@@ -5234,8 +5319,13 @@ export function CodeWorkspaceTab({
         activeGitBlame={gitBlameByGroup[groupId]}
         activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
         activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
+        activeDebugInlineValues={groupId === activeEditorGroupId ? activeDebugInlineValues : undefined}
         onToggleBreakpoint={groupId === activeEditorGroupId ? toggleActiveBreakpoint : undefined}
         onEditBreakpoint={groupId === activeEditorGroupId ? editActiveBreakpoint : undefined}
+        debugStep={groupId === activeEditorGroupId && debugSessionActive ? debug.step : null}
+        debugRunToCursor={groupId === activeEditorGroupId && debugSessionActive ? debugRunToCursorLine : null}
+        debugStop={groupId === activeEditorGroupId && debugSessionActive ? debug.terminate : null}
+        debugEvaluate={groupId === activeEditorGroupId && debugStoppedHere ? debug.hoverEvaluate : null}
         activeCapabilities={groupCapabilities}
         activeLspSyncing={!!groupLspState?.syncing}
         lspStatusPill={(
@@ -5873,7 +5963,11 @@ export function CodeWorkspaceTab({
               <DebugPanel
                 debug={debug}
                 onStart={activeFileDebuggable ? startDebugActiveFile : null}
+                onAttach={activeFileDebuggable ? attachRemoteDebug : null}
                 onOpenFrame={openDebugFrame}
+                onOpenBreakpoint={(path, line) => openDebugFrame({ path, line })}
+                editingBreakpoint={editingBreakpoint}
+                onEditingBreakpointChange={setEditingBreakpoint}
               />
             ),
           },

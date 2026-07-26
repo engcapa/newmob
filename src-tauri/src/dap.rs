@@ -220,6 +220,12 @@ impl DebugAdapterRegistry {
 
 type PendingResponses = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
 
+/// How long `initialize` may take before the session is reported as unreachable.
+const INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Grace period for a graceful `terminate` before falling back to `disconnect`.
+const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// A live debug session. Holds the write half + pending-response correlation +
 /// child handle; **no `AppHandle`** — the reader task owns a cloned handle so this
 /// struct stays out of the AppState-reachable AppHandle trap (see M7-C).
@@ -237,6 +243,16 @@ pub struct DapSession {
 impl DapSession {
     fn next_seq(&self) -> i64 {
         self.next_seq.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Reply to an adapter-initiated (reverse) request. Every reverse request
+    /// MUST get a response or the adapter blocks waiting for one, so the reader
+    /// answers ones the kernel cannot serve with a failure (see
+    /// [`reverse_response`]).
+    pub async fn respond(&self, response: &Value) -> Result<(), String> {
+        let mut response = response.clone();
+        response["seq"] = json!(self.next_seq());
+        self.write_message(&response).await
     }
 
     /// Send a DAP request and await its response (correlated by `seq`).
@@ -324,15 +340,19 @@ impl DapManager {
     }
 }
 
-/// Establish the read/write streams for a transport (spawn a process or connect a
-/// socket). Returns the reader, writer, and (for stdio) the child to retain.
+/// A spawned stdio adapter: the child to retain plus its stderr pipe, which
+/// MUST be drained (see [`run_stderr_pump`]).
+type StdioChild = (tokio::process::Child, Option<tokio::process::ChildStderr>);
+
+/// Establish the read/write streams for a transport (spawn a process or connect
+/// a socket). Returns the reader, the writer, and — for stdio — the child.
 async fn connect_transport(
     transport: &DapTransport,
 ) -> Result<
     (
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
-        Option<tokio::process::Child>,
+        Option<StdioChild>,
     ),
     String,
 > {
@@ -352,7 +372,8 @@ async fn connect_transport(
                 .map_err(|e| format!("failed to start debug adapter `{command}`: {e}"))?;
             let stdout = child.stdout.take().ok_or("adapter has no stdout")?;
             let stdin = child.stdin.take().ok_or("adapter has no stdin")?;
-            Ok((Box::new(stdout), Box::new(stdin), Some(child)))
+            let stderr = child.stderr.take();
+            Ok((Box::new(stdout), Box::new(stdin), Some((child, stderr))))
         }
         DapTransport::Tcp { host, port } => {
             let stream = tokio::net::TcpStream::connect((host.as_str(), *port))
@@ -363,17 +384,68 @@ async fn connect_transport(
         }
     }
 }
-/// Pump the adapter's output stream: decode frames, resolve pending responses,
-/// and forward events + reverse-requests to the frontend. `emit` is a boxed
-/// closure that wraps a cloned `AppHandle` (kept out of this module's types so
-/// the AppState-reachable AppHandle link that broke M7-C never forms here).
-async fn run_reader(
-    mut reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
-    pending: PendingResponses,
+/// Build the response to an adapter-initiated (reverse) request. The DAP spec
+/// requires the client to answer *every* reverse request; an adapter that gets
+/// no answer blocks. The kernel implements none of them (`runInTerminal` is
+/// declined in `initialize`, `startDebugging` needs a child-session model), so
+/// it replies with a well-formed failure rather than leaving the adapter
+/// hanging. Pure — unit-tested.
+pub fn reverse_response(request: &Value) -> Value {
+    let command = request.get("command").and_then(Value::as_str).unwrap_or("");
+    let request_seq = request.get("seq").and_then(Value::as_i64).unwrap_or(-1);
+    json!({
+        "type": "response",
+        "request_seq": request_seq,
+        "success": false,
+        "command": command,
+        "message": format!("`{command}` is not supported by this debug client"),
+    })
+}
+
+/// Drain a stdio adapter's stderr and surface it as DAP `output` events. Without
+/// this the pipe fills (a few KB) and the adapter blocks forever mid-session —
+/// java-debug uses TCP so it is unaffected, but every stdio adapter (debugpy,
+/// delve, js-debug…) writes diagnostics there.
+async fn run_stderr_pump(
+    mut stderr: tokio::process::ChildStderr,
     session_id: String,
     emit: Arc<dyn Fn(&str, Value) + Send + Sync>,
 ) {
     use tokio::io::AsyncReadExt;
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        let text = String::from_utf8_lossy(&chunk[..read]).to_string();
+        emit(
+            &format!("dap:event:{session_id}"),
+            json!({
+                "sessionId": session_id,
+                "event": "output",
+                "message": { "type": "event", "event": "output",
+                    "body": { "category": "stderr", "output": text } },
+            }),
+        );
+    }
+}
+
+/// Pump the adapter's output stream: decode frames, resolve pending responses,
+/// forward events to the frontend, and answer reverse requests. `emit` is a
+/// boxed closure that wraps a cloned `AppHandle` (kept out of this module's
+/// types so the AppState-reachable AppHandle link that broke M7-C never forms
+/// here). On EOF the session is dropped from `manager` so a dead adapter cannot
+/// leak an entry even when the frontend never calls `dap_terminate`.
+async fn run_reader(
+    mut reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+    session: Arc<DapSession>,
+    manager: Arc<DapManager>,
+    session_id: String,
+    emit: Arc<dyn Fn(&str, Value) + Send + Sync>,
+) {
+    use tokio::io::AsyncReadExt;
+    let pending = session.pending.clone();
     let mut decoder = DapDecoder::default();
     let mut chunk = [0u8; 8192];
     loop {
@@ -403,6 +475,9 @@ async fn run_reader(
                     );
                 }
                 InboundMessage::ReverseRequest { command, seq } => {
+                    // Answer first (an unanswered reverse request stalls the
+                    // adapter), then report it for visibility.
+                    let _ = session.respond(&reverse_response(&message)).await;
                     emit(
                         &format!("dap:reverse-request:{session_id}"),
                         json!({ "sessionId": session_id, "command": command, "seq": seq, "message": message }),
@@ -417,6 +492,7 @@ async fn run_reader(
         &format!("dap:event:{session_id}"),
         json!({ "sessionId": session_id, "event": "terminated", "message": Value::Null }),
     );
+    manager.remove(&session_id).await;
     // Fail any still-pending requests so callers do not hang.
     let mut guard = pending.lock().await;
     for (_, tx) in guard.drain() {
@@ -456,12 +532,15 @@ pub async fn dap_start_session(
         .ok_or_else(|| format!("No debug adapter registered for `{adapter_id}`"))?;
     let plan = adapter.resolve(&launch_config).await?;
     let (reader, writer, child) = connect_transport(&plan.transport).await?;
+    let (child, stderr) = match child {
+        Some((child, stderr)) => (Some(child), stderr),
+        None => (None, None),
+    };
 
     let session_id = uuid::Uuid::new_v4().to_string();
-    let pending: PendingResponses = Arc::new(Mutex::new(HashMap::new()));
     let session = Arc::new(DapSession {
         next_seq: AtomicI64::new(1),
-        pending: pending.clone(),
+        pending: Arc::new(Mutex::new(HashMap::new())),
         writer: Mutex::new(writer),
         child: Mutex::new(child),
         capabilities: Mutex::new(Value::Null),
@@ -473,7 +552,16 @@ pub async fn dap_start_session(
         use tauri::Emitter;
         let _ = emit_app.emit(event, payload);
     });
-    tokio::spawn(run_reader(reader, pending, session_id.clone(), emit));
+    tokio::spawn(run_reader(
+        reader,
+        session.clone(),
+        state.dap.clone(),
+        session_id.clone(),
+        emit.clone(),
+    ));
+    if let Some(stderr) = stderr {
+        tokio::spawn(run_stderr_pump(stderr, session_id.clone(), emit));
+    }
 
     // DAP handshake: initialize, then hand the launch/attach config to the adapter.
     // `supportsConfigurationDoneRequest: true` is REQUIRED — without it, adapters
@@ -482,8 +570,12 @@ pub async fn dap_start_session(
     // are armed too late and never hit. `supportsRunInTerminalRequest: false`:
     // we do not implement the `runInTerminal` reverse request, so adapters must
     // launch the debuggee themselves (console: internalConsole).
-    let init = session
-        .request(
+    //
+    // Bounded: a wedged adapter that connects but never answers would otherwise
+    // leave this command pending forever and the UI stuck at "starting".
+    let init = tokio::time::timeout(
+        INITIALIZE_TIMEOUT,
+        session.request(
             "initialize",
             json!({
                 "clientID": "taomni",
@@ -498,8 +590,15 @@ pub async fn dap_start_session(
                 // (the variables view shows it as a tooltip).
                 "supportsVariableType": true,
             }),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "debug adapter `{adapter_id}` did not answer `initialize` within {}s",
+            INITIALIZE_TIMEOUT.as_secs()
         )
-        .await?;
+    })??;
     *session.capabilities.lock().await = init.clone();
 
     state.dap.insert(session_id.clone(), session).await;
@@ -548,14 +647,31 @@ pub async fn dap_send(
     session.notify(&command, arguments.unwrap_or(Value::Null)).await
 }
 
-/// Terminate a session: best-effort `disconnect`, then drop it (killing the
-/// spawned adapter for stdio transports via `kill_on_drop`).
+/// Terminate a session. Prefers the graceful `terminate` request when the
+/// adapter advertises it (the debuggee gets to run shutdown hooks — IDEA's and
+/// VS Code's Stop both do this), then always falls back to `disconnect` and
+/// kills a spawned stdio adapter.
 #[tauri::command]
 pub async fn dap_terminate(
     state: tauri::State<'_, crate::state::AppState>,
     session_id: String,
 ) -> Result<(), String> {
     if let Some(session) = state.dap.remove(&session_id).await {
+        let graceful = session
+            .capabilities
+            .lock()
+            .await
+            .get("supportsTerminateRequest")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if graceful {
+            // Bounded: a stuck adapter must not block the Stop button.
+            let _ = tokio::time::timeout(
+                TERMINATE_GRACE,
+                session.request("terminate", json!({ "restart": false })),
+            )
+            .await;
+        }
         let _ = session
             .notify("disconnect", json!({ "terminateDebuggee": true }))
             .await;
@@ -668,6 +784,25 @@ mod tests {
             extract_error_message(&json!({ "success": false })),
             "debug adapter request failed",
         );
+    }
+
+    #[test]
+    fn answers_reverse_requests_with_a_correlated_failure() {
+        // Every reverse request must get a response or the adapter blocks. The
+        // kernel implements none of them, so it declines by name.
+        let response = reverse_response(&json!({
+            "type": "request", "seq": 12, "command": "runInTerminal",
+            "arguments": { "args": ["java"] },
+        }));
+        assert_eq!(response["type"], "response");
+        assert_eq!(response["request_seq"], 12);
+        assert_eq!(response["command"], "runInTerminal");
+        assert_eq!(response["success"], json!(false));
+        assert!(response["message"].as_str().unwrap().contains("runInTerminal"));
+        // A malformed reverse request still yields a well-formed response.
+        let fallback = reverse_response(&json!({ "type": "request" }));
+        assert_eq!(fallback["request_seq"], -1);
+        assert_eq!(fallback["success"], json!(false));
     }
 
     #[test]

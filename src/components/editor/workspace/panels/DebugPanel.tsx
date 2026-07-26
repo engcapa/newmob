@@ -7,20 +7,33 @@ import {
   ChevronDown,
   ChevronRight,
   CirclePlay,
+  Eraser,
   FlameKindling,
   Pause,
+  Plug,
   RotateCcw,
   Square,
+  Trash2,
 } from "lucide-react";
 import type { CodeDebugSession } from "../useCodeDebugSession";
-import type { DebugStackFrame } from "../dapDebugModel";
+import { sortedBreakpoints, type DebugBreakpoint, type DebugStackFrame } from "../dapDebugModel";
 
 interface DebugPanelProps {
   debug: CodeDebugSession;
   /** Start debugging the active file (parent builds the launch config). */
   onStart: (() => void) | null;
+  /** Attach to a remote JVM (IDEA "Remote JVM Debug"); null when unavailable. */
+  onAttach?: (() => void) | null;
   /** Reveal a stack frame's source location. */
   onOpenFrame: (frame: DebugStackFrame) => void;
+  /** Reveal a breakpoint's line from the breakpoints view. */
+  onOpenBreakpoint?: (path: string, line: number) => void;
+  /**
+   * Breakpoint whose editor should be open (gutter right-click / Ctrl+Shift+F8
+   * routes here instead of opening a chain of modal prompts).
+   */
+  editingBreakpoint?: { path: string; line: number } | null;
+  onEditingBreakpointChange?: (target: { path: string; line: number } | null) => void;
 }
 
 /** One expandable variables node (D4) — children fetched lazily on expand. */
@@ -155,6 +168,166 @@ function VariableRow({
   );
 }
 
+/**
+ * Breakpoints view (IDEA's breakpoints dialog, inline): every breakpoint in the
+ * workspace with enable/disable, condition / hit count / log message editing,
+ * removal, and click-to-reveal. Language-agnostic — it renders the DAP fields.
+ */
+function BreakpointsView({
+  debug,
+  editing,
+  setEditing,
+  onOpenBreakpoint,
+}: {
+  debug: CodeDebugSession;
+  editing: { path: string; line: number } | null;
+  setEditing: (target: { path: string; line: number } | null) => void;
+  onOpenBreakpoint?: (path: string, line: number) => void;
+}) {
+  const entries = Object.entries(debug.breakpoints)
+    .flatMap(([path, list]) => sortedBreakpoints(list).map((bp) => ({ path, bp })))
+    .sort((a, b) => a.path.localeCompare(b.path) || a.bp.line - b.bp.line);
+
+  if (entries.length === 0) {
+    return <Empty text="No breakpoints. Click a line's gutter, or press Ctrl+F8." />;
+  }
+  return (
+    <>
+      {entries.map(({ path, bp }) => {
+        const open = editing?.path === path && editing.line === bp.line;
+        const disabled = bp.enabled === false;
+        return (
+          <div key={`${path}:${bp.line}`} className="border-b border-[var(--taomni-code-border)]/40 last:border-b-0">
+            <div className="group flex items-center gap-2 px-3 py-0.5 hover:bg-[var(--taomni-hover-bg)]">
+              <input
+                type="checkbox"
+                data-testid={`debug-breakpoint-enabled-${bp.line}`}
+                checked={!disabled}
+                title={disabled ? "Enable breakpoint" : "Disable breakpoint"}
+                onChange={(e) => debug.setBreakpointOptions(path, bp.line, { enabled: e.target.checked })}
+              />
+              <button
+                type="button"
+                data-testid={`debug-breakpoint-${bp.line}`}
+                className={`min-w-0 flex-1 truncate text-left ${disabled ? "text-[var(--taomni-text-muted)] line-through" : ""}`}
+                onClick={() => onOpenBreakpoint?.(path, bp.line)}
+                title={`${path}:${bp.line}`}
+              >
+                {path.split(/[\\/]/).pop()}:{bp.line}
+                {bp.condition && <span className="ml-2 text-amber-500">if {bp.condition}</span>}
+                {bp.hitCondition && <span className="ml-2 text-amber-500">hit {bp.hitCondition}</span>}
+                {bp.logMessage && <span className="ml-2 text-sky-500">log</span>}
+              </button>
+              <button
+                type="button"
+                data-testid={`debug-breakpoint-edit-${bp.line}`}
+                className="shrink-0 text-[10px] text-[var(--taomni-text-muted)] opacity-0 group-hover:opacity-100"
+                onClick={() => setEditing(open ? null : { path, line: bp.line })}
+              >
+                {open ? "Done" : "Edit"}
+              </button>
+              <button
+                type="button"
+                data-testid={`debug-breakpoint-remove-${bp.line}`}
+                className="shrink-0 opacity-0 group-hover:opacity-100 hover:text-rose-500"
+                onClick={() => debug.removeBreakpoint(path, bp.line)}
+                title="Remove breakpoint"
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+            {open && (
+              <BreakpointEditor
+                breakpoint={bp}
+                onChange={(options) => debug.setBreakpointOptions(path, bp.line, options)}
+              />
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+/** The condition / hit count / log message fields for one breakpoint. */
+function BreakpointEditor({
+  breakpoint,
+  onChange,
+}: {
+  breakpoint: DebugBreakpoint;
+  onChange: (options: Partial<DebugBreakpoint>) => void;
+}) {
+  const field = "min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none";
+  // Committed on blur / Enter so every keystroke does not re-push to the adapter.
+  const commit = (key: keyof DebugBreakpoint) => (value: string) => {
+    onChange({ [key]: value.trim() || undefined });
+  };
+  return (
+    <div className="space-y-1 bg-[var(--taomni-code-bg)] px-3 pb-1.5 pt-1">
+      <CommitField
+        label="Condition"
+        testId={`debug-breakpoint-condition-${breakpoint.line}`}
+        className={field}
+        placeholder="break only when true, e.g. i > 10"
+        initialValue={breakpoint.condition ?? ""}
+        onCommit={commit("condition")}
+      />
+      <CommitField
+        label="Hit count"
+        testId={`debug-breakpoint-hit-${breakpoint.line}`}
+        className={field}
+        placeholder="e.g. 5 — break on the 5th hit"
+        initialValue={breakpoint.hitCondition ?? ""}
+        onCommit={commit("hitCondition")}
+      />
+      <CommitField
+        label="Log message"
+        testId={`debug-breakpoint-log-${breakpoint.line}`}
+        className={field}
+        placeholder="log instead of breaking; {expr} interpolates"
+        initialValue={breakpoint.logMessage ?? ""}
+        onCommit={commit("logMessage")}
+      />
+    </div>
+  );
+}
+
+/** Text field that reports its value on Enter or blur, not per keystroke. */
+function CommitField({
+  label,
+  testId,
+  className,
+  placeholder,
+  initialValue,
+  onCommit,
+}: {
+  label: string;
+  testId: string;
+  className: string;
+  placeholder: string;
+  initialValue: string;
+  onCommit: (value: string) => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+  return (
+    <label className="flex items-center gap-2">
+      <span className="w-16 shrink-0 text-[var(--taomni-text-muted)]">{label}</span>
+      <input
+        data-testid={testId}
+        className={className}
+        placeholder={placeholder}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => { if (value !== initialValue) onCommit(value); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onCommit(value);
+          else if (e.key === "Escape") setValue(initialValue);
+        }}
+      />
+    </label>
+  );
+}
+
 function consoleLineClass(category: string): string {
   switch (category) {
     case "stderr":
@@ -170,7 +343,15 @@ function consoleLineClass(category: string): string {
   }
 }
 
-export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
+export function DebugPanel({
+  debug,
+  onStart,
+  onAttach,
+  onOpenFrame,
+  onOpenBreakpoint,
+  editingBreakpoint = null,
+  onEditingBreakpointChange,
+}: DebugPanelProps) {
   const { state } = debug;
   const running = !!state && state.status !== "terminated";
   const stopped = state?.status === "stopped";
@@ -345,6 +526,17 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
               >
                 <CirclePlay className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
               </button>
+              {onAttach && (
+                <button
+                  type="button"
+                  data-testid="debug-attach"
+                  className={`${controlBtn} hover:bg-sky-500/15`}
+                  onClick={() => onAttach()}
+                  title="Attach to a remote JVM (host:port)"
+                >
+                  <Plug className="h-4 w-4 text-sky-500 dark:text-sky-400" />
+                </button>
+              )}
               {debug.canRestart && (
                 <button
                   type="button"
@@ -447,6 +639,37 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
             No debug session. Open a Java file and press start (requires the java-debug bundle).
           </div>
         )}
+        <Section
+          title="Breakpoints"
+          defaultOpen={!state}
+          forceOpen={!!editingBreakpoint}
+          actions={(
+            <>
+              <SectionAction
+                testId="debug-mute-breakpoints"
+                label={debug.breakpointsMuted ? "Unmute breakpoints" : "Mute breakpoints"}
+                active={debug.breakpointsMuted}
+                onClick={() => debug.setBreakpointsMuted(!debug.breakpointsMuted)}
+              >
+                <Eraser className="h-3 w-3" />
+              </SectionAction>
+              <SectionAction
+                testId="debug-remove-all-breakpoints"
+                label="Remove all breakpoints"
+                onClick={() => debug.removeAllBreakpoints()}
+              >
+                <Trash2 className="h-3 w-3" />
+              </SectionAction>
+            </>
+          )}
+        >
+          <BreakpointsView
+            debug={debug}
+            editing={editingBreakpoint}
+            setEditing={(target) => onEditingBreakpointChange?.(target)}
+            onOpenBreakpoint={onOpenBreakpoint}
+          />
+        </Section>
         {state && (
           <>
             {state.exceptionInfo && (
@@ -502,15 +725,21 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
                       className="min-w-0 flex-1 flex items-center gap-2 px-3 py-0.5 text-left"
                       onClick={() => {
                         debug.selectFrame(frame.id);
-                        if (frame.path) onOpenFrame(frame);
+                        // Library frames have no readable path but can still be
+                        // opened via the adapter's `source` request.
+                        if (frame.path || frame.sourceReference > 0) onOpenFrame(frame);
                       }}
                     >
-                      <span className={`truncate ${frame.path ? "" : "text-[var(--taomni-text-muted)]"}`}>
+                      <span
+                        className={`truncate ${
+                          frame.path || frame.sourceReference > 0 ? "" : "text-[var(--taomni-text-muted)]"
+                        }`}
+                      >
                         {frame.name}
                       </span>
-                      {frame.path && (
+                      {(frame.path || frame.sourceName) && (
                         <span className="ml-auto shrink-0 text-[10px] text-[var(--taomni-text-muted)]">
-                          {frame.path.split(/[\\/]/).pop()}:{frame.line}
+                          {(frame.path?.split(/[\\/]/).pop()) ?? frame.sourceName}:{frame.line}
                         </span>
                       )}
                     </button>
@@ -566,7 +795,18 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
                 />
               ))}
             </Section>
-            <Section title="Console">
+            <Section
+              title="Console"
+              actions={(
+                <SectionAction
+                  testId="debug-console-clear"
+                  label="Clear console"
+                  onClick={() => debug.clearConsole()}
+                >
+                  <Eraser className="h-3 w-3" />
+                </SectionAction>
+              )}
+            >
               <div
                 ref={consoleRef}
                 data-testid="debug-console-output"
@@ -620,25 +860,70 @@ export function DebugPanel({ debug, onStart, onOpenFrame }: DebugPanelProps) {
 function Section({
   title,
   defaultOpen = true,
+  forceOpen = false,
+  actions,
   children,
 }: {
   title: string;
   defaultOpen?: boolean;
+  /** Keep the section expanded regardless of the user's toggle (e.g. editing). */
+  forceOpen?: boolean;
+  /** Header-right controls (mute / clear …); they do not toggle the section. */
+  actions?: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [expanded, setExpanded] = useState(defaultOpen);
+  const open = expanded || forceOpen;
+  // Toggling starts from the *visible* state, so collapsing a force-opened
+  // section works on the first click.
+  const setOpen = (next: boolean | ((v: boolean) => boolean)) => {
+    setExpanded(typeof next === "function" ? next(open) : next);
+  };
   return (
     <div className="border-b border-[var(--taomni-code-border)]">
-      <button
-        type="button"
-        className="w-full flex items-center gap-1 px-2 py-1 text-left font-medium text-[var(--taomni-text-muted)]"
-        onClick={() => setOpen((v) => !v)}
-      >
-        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        {title}
-      </button>
+      <div className="flex items-center pr-2">
+        <button
+          type="button"
+          className="min-w-0 flex-1 flex items-center gap-1 px-2 py-1 text-left font-medium text-[var(--taomni-text-muted)]"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          {title}
+        </button>
+        {actions && <div className="flex shrink-0 items-center gap-1">{actions}</div>}
+      </div>
       {open && <div className="pb-1">{children}</div>}
     </div>
+  );
+}
+
+function SectionAction({
+  testId,
+  label,
+  active = false,
+  onClick,
+  children,
+}: {
+  testId: string;
+  label: string;
+  active?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      className={`inline-flex h-5 w-5 items-center justify-center rounded ${
+        active ? "text-amber-500" : "text-[var(--taomni-text-muted)]"
+      } hover:bg-[var(--taomni-hover-bg)]`}
+      onClick={onClick}
+    >
+      {children}
+    </button>
   );
 }
 

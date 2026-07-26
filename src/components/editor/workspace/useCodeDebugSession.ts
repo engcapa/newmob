@@ -10,6 +10,7 @@ import {
 } from "../../../lib/editor/dap";
 import {
   appendConsoleLine,
+  breakpointVerificationMap,
   buildSetBreakpointsArgs,
   currentLocation,
   initialDebugState,
@@ -20,10 +21,10 @@ import {
   parseSetBreakpointsResponse,
   parseStackFrames,
   parseThreads,
+  planBreakpointSync,
   reconcileBreakpointLines,
   reduceDebugEvent,
   selectExceptionFilters,
-  sortedBreakpoints,
   stepCommandFor,
   toAdapterSourcePath,
   type DebugBreakpoint,
@@ -49,6 +50,13 @@ export interface CodeDebugSession {
   enabledExceptionFilters: string[];
   /** Persistent watch expressions (the panel evaluates them per stop). */
   watchExpressions: string[];
+  /** IDEA "Mute Breakpoints": keep them listed but stop arming them. */
+  breakpointsMuted: boolean;
+  setBreakpointsMuted: (muted: boolean) => void;
+  /** Remove every breakpoint in the workspace (IDEA's breakpoints dialog). */
+  removeAllBreakpoints: () => void;
+  /** Locals of the selected frame as `name → value`, for editor inline values. */
+  frameVariables: Record<string, string>;
   /** Start a debug session with a resolved launch config (adapter defaults to Java). */
   startDebug: (launchConfig: Record<string, unknown>, adapterId?: string) => Promise<void>;
   /** Re-run the last launch config (IDEA rerun). */
@@ -56,6 +64,8 @@ export interface CodeDebugSession {
   canRestart: boolean;
   toggleBreakpoint: (path: string, line: number) => void;
   setBreakpointOptions: (path: string, line: number, options: Partial<DebugBreakpoint>) => void;
+  /** Remove one breakpoint outright (breakpoints view). */
+  removeBreakpoint: (path: string, line: number) => void;
   setExceptionFilters: (ids: string[]) => void;
   addWatchExpression: (expr: string) => void;
   removeWatchExpression: (index: number) => void;
@@ -71,14 +81,28 @@ export interface CodeDebugSession {
   /** Hot-reload changed classes (java-debug `redefineClasses`); best-effort (D5). */
   hotReload: () => void;
   evaluate: (expression: string, context?: string) => Promise<EvaluateResult>;
+  /**
+   * Evaluate for an editor hover (IDEA's inspect-on-hover). Resolves to null
+   * when the session is not stopped or the expression cannot be evaluated, so
+   * the editor simply shows no tooltip.
+   */
+  hoverEvaluate: (expression: string) => Promise<EvaluateResult | null>;
   /** Change a variable's value (DAP `setVariable`; capability-gated). */
   setVariable: (variablesReference: number, name: string, value: string) => Promise<EvaluateResult | null>;
   /** Append a client-side line (REPL echo / result) to the session console. */
   logConsole: (category: string, text: string) => void;
+  /** Empty the console without touching the session. */
+  clearConsole: () => void;
   /** Fetch variables for a `variablesReference` (D4 lazy tree). */
   fetchVariables: (variablesReference: number) => Promise<unknown>;
   /** Fetch scopes for a stack frame (D4). */
   fetchScopes: (frameId: number) => Promise<unknown>;
+  /**
+   * Fetch a library / decompiled frame's source text (DAP `source`), so a stack
+   * frame outside the workspace still opens — IDEA's decompiled-source view.
+   * Null when the adapter cannot produce it.
+   */
+  fetchSource: (sourceReference: number) => Promise<string | null>;
   terminate: () => void;
   /** Source location to highlight as "current" (selected frame, else top frame). */
   currentLocation: { path: string; line: number } | null;
@@ -106,6 +130,7 @@ function readBreakpoints(workspaceInstanceId: string): BreakpointMap {
           condition: bp.condition,
           hitCondition: bp.hitCondition,
           logMessage: bp.logMessage,
+          enabled: bp.enabled,
         }));
     }
     return out;
@@ -131,10 +156,13 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const [availableFilters, setAvailableFilters] = useState<{ filter: string; label: string }[]>([]);
   const [watchExpressions, setWatchExpressions] = useState<string[]>(() => readWatches(workspaceInstanceId));
   const [canRestart, setCanRestart] = useState(false);
+  const [breakpointsMuted, setBreakpointsMutedState] = useState(false);
+  const [frameVariables, setFrameVariables] = useState<Record<string, string>>({});
 
   const sessionIdRef = useRef<string | null>(null);
   const capabilitiesRef = useRef<Record<string, unknown>>({});
   const breakpointsRef = useRef(breakpoints);
+  const mutedRef = useRef(breakpointsMuted);
   const exceptionFiltersRef = useRef(exceptionFilters);
   const stateRef = useRef<DebugSessionState | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
@@ -143,12 +171,15 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const stopEpochRef = useRef(0);
   /** Adapter breakpoint id → file path, to route `breakpoint` events. */
   const bpIdIndexRef = useRef(new Map<number, { path: string }>());
+  /** Per-path `setBreakpoints` generation, so a late response cannot win. */
+  const syncGenerationRef = useRef(new Map<string, number>());
   /** Pending run-to-cursor: its transient breakpoint is removed on the next stop. */
   const tempRunToCursorRef = useRef<{ path: string } | null>(null);
   const lastLaunchRef = useRef<{ config: Record<string, unknown>; adapterId: string } | null>(null);
   /** Whether the adapter has emitted `initialized` for the current session. */
   const initializedRef = useRef(false);
   breakpointsRef.current = breakpoints;
+  mutedRef.current = breakpointsMuted;
   exceptionFiltersRef.current = exceptionFilters;
   stateRef.current = state;
 
@@ -165,6 +196,14 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       if (id) void dapTerminate(id).catch(() => {});
     };
   }, []);
+
+  // Inline values are only meaningful while stopped: drop them the moment the
+  // debuggee resumes or the session ends, so stale numbers never sit in the
+  // editor gutter.
+  const debugStatus = state?.status ?? null;
+  useEffect(() => {
+    if (debugStatus !== "stopped") setFrameVariables({});
+  }, [debugStatus]);
 
   const persistBreakpoints = useCallback((next: BreakpointMap) => {
     try {
@@ -189,51 +228,115 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     });
   }, []);
 
+  const clearConsole = useCallback(() => {
+    setState((prev) => (prev && prev.output.length > 0 ? { ...prev, output: [] } : prev));
+  }, []);
+
   /**
-   * Push current breakpoints for a file to the adapter and record the bindings
-   * it reports: verified flags feed the gutter (grey = not bound), verified
-   * line adjustments are adopted back into the stored set (IDEA/VS Code move a
-   * breakpoint on a blank line to the next executable one). `extraTempLine`
-   * injects the transient run-to-cursor breakpoint without persisting it.
+   * Push a file's breakpoints to the adapter and record the bindings it
+   * reports: verified flags feed the gutter (grey = not bound), verified line
+   * adjustments are adopted back into the stored set (IDEA/VS Code move a
+   * breakpoint on a blank line to the next executable one).
+   *
+   * `list` MUST be passed by callers that just changed the set — React state
+   * (and the ref mirroring it) is not updated until the next render, so reading
+   * it here would send the pre-change set and the new breakpoint would never
+   * arm. `extraTempLine` injects the transient run-to-cursor breakpoint without
+   * persisting it.
    */
-  const syncBreakpointsForPath = useCallback(async (path: string, extraTempLine?: number) => {
+  const syncBreakpointsForPath = useCallback(async (
+    path: string,
+    options: { list?: DebugBreakpoint[]; extraTempLine?: number } = {},
+  ) => {
     const id = sessionIdRef.current;
     if (!id) return;
-    const stored = sortedBreakpoints(breakpointsRef.current[path] ?? []);
-    const requested = extraTempLine != null && !stored.some((bp) => bp.line === extraTempLine)
-      ? sortedBreakpoints([...stored, { line: extraTempLine }])
-      : stored;
+    const stored = options.list ?? breakpointsRef.current[path] ?? [];
+    const plan = planBreakpointSync(stored, {
+      muted: mutedRef.current,
+      extraLine: options.extraTempLine,
+    });
+    // Two quick toggles on the same file put two requests in flight; an older
+    // response landing last would otherwise re-apply the set it was built from
+    // and undo the newer change.
+    const generation = (syncGenerationRef.current.get(path) ?? 0) + 1;
+    syncGenerationRef.current.set(path, generation);
     // Breakpoints are keyed by our internal (forward-slash) path, but the adapter
     // needs the OS-native form (Windows: lowercase drive + backslashes) or it
     // leaves them unverified.
-    const args = buildSetBreakpointsArgs(path, requested);
+    const args = buildSetBreakpointsArgs(path, plan);
     args.source.path = toAdapterSourcePath(path);
     const body = await dapSendRequest(id, "setBreakpoints", args).catch(() => null);
     if (body == null || !mountedRef.current) return;
-    const bindings = parseSetBreakpointsResponse(requested, body);
+    if (syncGenerationRef.current.get(path) !== generation) return; // superseded
+    const bindings = parseSetBreakpointsResponse(plan, body);
     for (const binding of bindings) {
       if (binding.id != null) bpIdIndexRef.current.set(binding.id, { path });
     }
-    setBreakpointRuntime((prev) => ({
-      ...prev,
-      [path]: Object.fromEntries(requested.map((bp, i) => [
-        bindings[i]?.line ?? bp.line,
-        bindings[i]?.verified ?? false,
-      ])),
-    }));
-    if (extraTempLine == null) {
-      const reconciled = reconcileBreakpointLines(requested, bindings);
-      if (JSON.stringify(reconciled) !== JSON.stringify(stored)) {
-        setBreakpoints((current) => {
-          const next = { ...current };
-          if (reconciled.length > 0) next[path] = reconciled;
-          else delete next[path];
-          persistBreakpoints(next);
-          return next;
-        });
+    setBreakpointRuntime((prev) => ({ ...prev, [path]: breakpointVerificationMap(plan, bindings) }));
+    if (options.extraTempLine == null) {
+      const reconciled = reconcileBreakpointLines(plan, bindings);
+      if (JSON.stringify(reconciled) !== JSON.stringify(plan.sorted)) {
+        const next = { ...breakpointsRef.current };
+        if (reconciled.length > 0) next[path] = reconciled;
+        else delete next[path];
+        breakpointsRef.current = next;
+        setBreakpoints(next);
+        persistBreakpoints(next);
       }
     }
   }, [persistBreakpoints]);
+
+  /**
+   * Single mutation path for the breakpoint map. Updates the ref synchronously
+   * (so an immediately-following adapter sync sees the new set), persists, and
+   * pushes the changed file to a live adapter.
+   */
+  const mutateBreakpoints = useCallback((
+    path: string,
+    updater: (list: DebugBreakpoint[]) => DebugBreakpoint[],
+  ) => {
+    const nextList = updater(breakpointsRef.current[path] ?? []);
+    const next = { ...breakpointsRef.current };
+    if (nextList.length > 0) next[path] = nextList;
+    else delete next[path];
+    breakpointsRef.current = next;
+    setBreakpoints(next);
+    persistBreakpoints(next);
+    void syncBreakpointsForPath(path, { list: nextList });
+  }, [persistBreakpoints, syncBreakpointsForPath]);
+
+  /**
+   * Snapshot the frame's local variables as `name → value` for the editor's
+   * inline values (IDEA renders them next to the code). Only the first scope is
+   * read: adapters list locals first, and globals/statics are neither on screen
+   * nor worth an extra round trip on every step.
+   */
+  const refreshFrameVariables = useCallback(async (frameId: number, epoch: number) => {
+    const id = sessionIdRef.current;
+    if (!id) return;
+    const scopesBody = await dapSendRequest(id, "scopes", { frameId }).catch(() => null);
+    const scopes = (scopesBody as { scopes?: unknown } | null)?.scopes;
+    const localRef = Array.isArray(scopes)
+      ? scopes
+        .map((s) => (s && typeof s === "object" ? (s as Record<string, unknown>) : {}))
+        .find((s) => typeof s.variablesReference === "number" && s.variablesReference > 0)
+      : undefined;
+    const ref = typeof localRef?.variablesReference === "number" ? localRef.variablesReference : 0;
+    if (ref <= 0) {
+      if (mountedRef.current && stopEpochRef.current === epoch) setFrameVariables({});
+      return;
+    }
+    const body = await dapSendRequest(id, "variables", { variablesReference: ref }).catch(() => null);
+    const list = (body as { variables?: unknown } | null)?.variables;
+    const map: Record<string, string> = {};
+    if (Array.isArray(list)) {
+      for (const entry of list) {
+        const rec = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : {};
+        if (typeof rec.name === "string" && typeof rec.value === "string") map[rec.name] = rec.value;
+      }
+    }
+    if (mountedRef.current && stopEpochRef.current === epoch) setFrameVariables(map);
+  }, []);
 
   /** After a `stopped` event, pull threads + stack + exception details for the UI. */
   const refreshStoppedContext = useCallback(async (
@@ -256,6 +359,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setState((prev) => (prev && prev.status === "stopped"
       ? { ...prev, threads, frames, selectedThreadId: tid, selectedFrameId: frames[0]?.id ?? null }
       : prev));
+    if (frames[0]) void refreshFrameVariables(frames[0].id, epoch);
     // IDEA-style exception details when the stop is an exception break.
     if (
       tid != null
@@ -269,7 +373,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         setState((prev) => (prev && prev.status === "stopped" ? { ...prev, exceptionInfo: info } : prev));
       }
     }
-  }, []);
+  }, [refreshFrameVariables]);
 
   const handleEvent = useCallback((payload: DapEventPayload) => {
     if (payload.sessionId !== sessionIdRef.current) return;
@@ -390,29 +494,40 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   }, [startDebug]);
 
   const toggleBreakpoint = useCallback((path: string, line: number) => {
-    setBreakpoints((current) => {
-      const list = current[path] ?? [];
-      const exists = list.some((bp) => bp.line === line);
-      const nextList = exists ? list.filter((bp) => bp.line !== line) : [...list, { line }];
-      const next = { ...current };
-      if (nextList.length > 0) next[path] = nextList;
-      else delete next[path];
-      persistBreakpoints(next);
-      void syncBreakpointsForPath(path);
-      return next;
-    });
-  }, [persistBreakpoints, syncBreakpointsForPath]);
+    mutateBreakpoints(path, (list) => (
+      list.some((bp) => bp.line === line)
+        ? list.filter((bp) => bp.line !== line)
+        : [...list, { line }]
+    ));
+  }, [mutateBreakpoints]);
+
+  const removeBreakpoint = useCallback((path: string, line: number) => {
+    mutateBreakpoints(path, (list) => list.filter((bp) => bp.line !== line));
+  }, [mutateBreakpoints]);
 
   const setBreakpointOptions = useCallback((path: string, line: number, options: Partial<DebugBreakpoint>) => {
-    setBreakpoints((current) => {
-      const list = current[path] ?? [];
-      if (!list.some((bp) => bp.line === line)) return current;
-      const nextList = list.map((bp) => (bp.line === line ? { ...bp, ...options } : bp));
-      const next = { ...current, [path]: nextList };
-      persistBreakpoints(next);
+    mutateBreakpoints(path, (list) => (
+      list.some((bp) => bp.line === line)
+        ? list.map((bp) => (bp.line === line ? { ...bp, ...options } : bp))
+        : list
+    ));
+  }, [mutateBreakpoints]);
+
+  /** IDEA "Mute Breakpoints": re-push every file with the new suppression. */
+  const setBreakpointsMuted = useCallback((muted: boolean) => {
+    mutedRef.current = muted;
+    setBreakpointsMutedState(muted);
+    for (const path of Object.keys(breakpointsRef.current)) {
       void syncBreakpointsForPath(path);
-      return next;
-    });
+    }
+  }, [syncBreakpointsForPath]);
+
+  const removeAllBreakpoints = useCallback(() => {
+    const paths = Object.keys(breakpointsRef.current);
+    breakpointsRef.current = {};
+    setBreakpoints({});
+    persistBreakpoints({});
+    for (const path of paths) void syncBreakpointsForPath(path, { list: [] });
   }, [persistBreakpoints, syncBreakpointsForPath]);
 
   const setExceptionFilters = useCallback((ids: string[]) => {
@@ -477,10 +592,12 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     const current = stateRef.current;
     if (!id || !current || current.status !== "stopped") return;
     void (async () => {
-      const needsTemp = !(breakpointsRef.current[path] ?? []).some((bp) => bp.line === line);
+      const needsTemp = !(breakpointsRef.current[path] ?? []).some(
+        (bp) => bp.line === line && bp.enabled !== false,
+      ) || mutedRef.current;
       if (needsTemp) {
         tempRunToCursorRef.current = { path };
-        await syncBreakpointsForPath(path, line);
+        await syncBreakpointsForPath(path, { extraTempLine: line });
       }
       const epoch = stopEpochRef.current;
       const tid = current.selectedThreadId ?? current.stoppedThreadId;
@@ -511,12 +628,15 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       setState((prev) => (prev && prev.status === "stopped"
         ? { ...prev, selectedThreadId: threadId, frames, selectedFrameId: frames[0]?.id ?? null }
         : prev));
+      if (frames[0]) void refreshFrameVariables(frames[0].id, epoch);
     })();
-  }, []);
+  }, [refreshFrameVariables]);
 
   const selectFrame = useCallback((frameId: number) => {
     setState((prev) => (prev && prev.status === "stopped" ? { ...prev, selectedFrameId: frameId } : prev));
-  }, []);
+    // Inline values follow the frame the user is inspecting.
+    void refreshFrameVariables(frameId, stopEpochRef.current);
+  }, [refreshFrameVariables]);
 
   const restartFrame = useCallback((frameId: number) => {
     const id = sessionIdRef.current;
@@ -560,6 +680,21 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     }
   }, []);
 
+  const hoverEvaluate = useCallback(async (expression: string): Promise<EvaluateResult | null> => {
+    const id = sessionIdRef.current;
+    const current = stateRef.current;
+    if (!id || !expression.trim() || current?.status !== "stopped") return null;
+    const frameId = current.selectedFrameId ?? current.frames[0]?.id;
+    if (frameId == null) return null;
+    // A hover over a non-expression (a keyword, a type name) legitimately fails;
+    // resolve to null so the editor simply shows no tooltip.
+    const body = await dapSendRequest(id, "evaluate", { expression, frameId, context: "hover" })
+      .catch(() => null);
+    if (body == null) return null;
+    const result = parseEvaluate(body);
+    return result.value ? result : null;
+  }, []);
+
   const setVariable = useCallback(async (
     variablesReference: number,
     name: string,
@@ -593,6 +728,19 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     return dapSendRequest(id, "scopes", { frameId }).catch(() => ({ scopes: [] }));
   }, []);
 
+  const fetchSource = useCallback(async (sourceReference: number): Promise<string | null> => {
+    const id = sessionIdRef.current;
+    if (!id || sourceReference <= 0) return null;
+    // The spec wants both the shorthand and the full `source` object; adapters
+    // differ in which they read.
+    const body = await dapSendRequest(id, "source", {
+      sourceReference,
+      source: { sourceReference },
+    }).catch(() => null);
+    const content = (body as { content?: unknown } | null)?.content;
+    return typeof content === "string" && content ? content : null;
+  }, []);
+
   const terminate = useCallback(() => {
     const id = sessionIdRef.current;
     unlistenRef.current?.();
@@ -602,7 +750,19 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     tempRunToCursorRef.current = null;
     if (id) void dapTerminate(id).catch(() => {});
     if (mountedRef.current) {
-      setState(null);
+      // Mark terminated rather than clearing: IDEA keeps the console and the
+      // final state readable after Stop, until the next run replaces it.
+      setState((prev) => (prev
+        ? {
+          ...prev,
+          status: "terminated",
+          stoppedThreadId: null,
+          selectedThreadId: null,
+          selectedFrameId: null,
+          frames: [],
+          exceptionInfo: null,
+        }
+        : prev));
       setBreakpointRuntime({});
     }
   }, []);
@@ -615,11 +775,16 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     availableExceptionFilters: availableFilters,
     enabledExceptionFilters: exceptionFilters,
     watchExpressions,
+    breakpointsMuted,
+    setBreakpointsMuted,
+    removeAllBreakpoints,
+    frameVariables,
     startDebug,
     restart,
     canRestart,
     toggleBreakpoint,
     setBreakpointOptions,
+    removeBreakpoint,
     setExceptionFilters,
     addWatchExpression,
     removeWatchExpression,
@@ -630,10 +795,13 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     restartFrame,
     hotReload,
     evaluate,
+    hoverEvaluate,
     setVariable,
     logConsole,
+    clearConsole,
     fetchVariables,
     fetchScopes,
+    fetchSource,
     terminate,
     currentLocation: state ? currentLocation(state.frames, state.selectedFrameId) : null,
   };
