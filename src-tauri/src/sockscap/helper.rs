@@ -39,6 +39,17 @@ pub struct HelperSession {
     ready_file: PathBuf,
 }
 
+impl HelperSession {
+    /// Remove the ready file advertising this helper. Idempotent, best effort.
+    ///
+    /// Must run on every path that abandons a session: a ready file left behind
+    /// points at a helper that is dead (or wedged), and boot repair would treat
+    /// it as a live orphan.
+    pub fn remove_ready_file(&self) {
+        let _ = std::fs::remove_file(&self.ready_file);
+    }
+}
+
 /// In-process registry of the active helper session (if any).
 pub struct HelperRegistry {
     pub(crate) inner: Mutex<Option<HelperSession>>,
@@ -96,47 +107,90 @@ fn random_token() -> String {
     format!("sc-{:x}-{:x}", n, std::process::id())
 }
 
+/// Probe a session already held in the registry.
+///
+/// - `Ok(Some(status))` — healthy and reusable, no new UAC prompt needed.
+/// - `Ok(None)` — not usable; the caller should launch a fresh helper.
+/// - `Err(_)` — broken in a way the user needs to see (e.g. WinDivert missing).
+fn probe_existing_helper(
+    app: &AppHandle,
+    sess: &HelperSession,
+) -> Result<Option<HelperStatus>, String> {
+    let Ok(mut st) = request_status(sess) else {
+        return Ok(None);
+    };
+    if !st.running {
+        return Ok(None);
+    }
+    if !st.elevated {
+        let _ = send_cmd(sess, "shutdown", None);
+        return Ok(None);
+    }
+    // Re-probe WinDivert so a stale helper without driver is rejected.
+    match send_cmd(sess, "windivert_probe", Some("false".into())) {
+        Ok(resp) if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {
+            st.windivert = resp.get("result").cloned();
+            st.message = "helper elevated; WinDivert OK".into();
+            Ok(Some(st))
+        }
+        Ok(resp) => {
+            let err = resp
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("probe failed");
+            let _ = send_cmd(sess, "shutdown", None);
+            Err(format!(
+                "Existing helper cannot open WinDivert: {err}. {}",
+                windivert_missing_hint(app)
+            ))
+        }
+        Err(e) => {
+            let _ = send_cmd(sess, "shutdown", None);
+            Err(format!("Helper probe failed: {e}"))
+        }
+    }
+}
+
+/// Forget a session: clear the registry slot (only if it is still *this*
+/// session) and delete its ready file, so neither a retry nor boot repair can
+/// rediscover a helper we have given up on.
+fn discard_helper_session(state: &State<'_, AppState>, sess: &HelperSession) {
+    if let Ok(mut guard) = state.sockscap.helper.inner.lock() {
+        if guard.as_ref().map(|s| s.port) == Some(sess.port) {
+            *guard = None;
+        }
+    }
+    sess.remove_ready_file();
+}
+
 /// Start the helper elevated on Windows (UAC prompt). No-op error on other OS.
 #[tauri::command]
 pub async fn sockscap_helper_start(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<HelperStatus, String> {
-    // Already running and elevated?
-    if let Ok(guard) = state.sockscap.helper.inner.lock() {
-        if let Some(sess) = guard.as_ref() {
-            if let Ok(mut st) = request_status(sess) {
-                if st.running {
-                    if !st.elevated {
-                        let _ = send_cmd(sess, "shutdown", None);
-                    } else {
-                        // Re-probe WinDivert so a stale helper without driver is rejected.
-                        match send_cmd(sess, "windivert_probe", Some("false".into())) {
-                            Ok(resp)
-                                if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) =>
-                            {
-                                st.windivert = resp.get("result").cloned();
-                                st.message = "helper elevated; WinDivert OK".into();
-                                return Ok(st);
-                            }
-                            Ok(resp) => {
-                                let err = resp
-                                    .get("error")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("probe failed");
-                                let _ = send_cmd(sess, "shutdown", None);
-                                return Err(format!(
-                                    "Existing helper cannot open WinDivert: {err}. {}",
-                                    windivert_missing_hint(&app)
-                                ));
-                            }
-                            Err(e) => {
-                                let _ = send_cmd(sess, "shutdown", None);
-                                return Err(format!("Helper probe failed: {e}"));
-                            }
-                        }
-                    }
-                }
+    // Snapshot the registered session and release the lock before any blocking
+    // helper RPC — holding it across the network round-trips below would stall
+    // every other caller (relay lookups included) for the RPC timeout.
+    let existing = state
+        .sockscap
+        .helper
+        .inner
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().cloned());
+
+    if let Some(sess) = existing {
+        match probe_existing_helper(&app, &sess) {
+            Ok(Some(st)) => return Ok(st),
+            // Unusable but not worth surfacing — fall through to a fresh launch.
+            Ok(None) => discard_helper_session(&state, &sess),
+            Err(e) => {
+                // Drop the broken session *before* returning: leaving it in the
+                // registry meant a retry in the same run kept re-probing the
+                // very helper we just gave up on.
+                discard_helper_session(&state, &sess);
+                return Err(e);
             }
         }
     }
@@ -228,6 +282,9 @@ pub async fn sockscap_helper_start(
         )
         .is_err()
         {
+            // Abandon whatever half-started: a ready file for a helper we can
+            // no longer reach would otherwise linger for boot repair to find.
+            let _ = std::fs::remove_file(&ready_file);
             return Err(
                 "Helper did not become ready. If you cancelled the UAC prompt, try again and click Yes."
                     .into(),
@@ -254,7 +311,7 @@ pub async fn sockscap_helper_start(
 
         if !st.elevated {
             let _ = send_cmd(&sess, "shutdown", None);
-            let _ = std::fs::remove_file(&sess.ready_file);
+            sess.remove_ready_file();
             return Err(
                 "SocksCap helper is not elevated. Capture requires Administrator. Re-start and accept the UAC prompt."
                     .into(),
@@ -273,6 +330,7 @@ pub async fn sockscap_helper_start(
                     .and_then(|v| v.as_str())
                     .unwrap_or("WinDivert probe failed");
                 let _ = send_cmd(&sess, "shutdown", None);
+                sess.remove_ready_file();
                 return Err(format!(
                     "Elevated helper started but WinDivert failed: {err}. {}",
                     windivert_missing_hint(&app)
@@ -280,6 +338,7 @@ pub async fn sockscap_helper_start(
             }
             Err(e) => {
                 let _ = send_cmd(&sess, "shutdown", None);
+                sess.remove_ready_file();
                 return Err(format!("WinDivert probe error: {e}"));
             }
         }
@@ -336,7 +395,7 @@ pub async fn sockscap_helper_stop(state: State<'_, AppState>) -> Result<(), Stri
     };
     if let Some(sess) = sess {
         let _ = send_cmd(&sess, "shutdown", None);
-        let _ = std::fs::remove_file(&sess.ready_file);
+        sess.remove_ready_file();
     }
     Ok(())
 }

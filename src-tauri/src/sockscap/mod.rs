@@ -1773,6 +1773,10 @@ pub fn shutdown_on_exit(app: &AppHandle, state: &AppState) {
     if let Err(e) = helper::send_json(&sess, serde_json::json!({ "cmd": "shutdown" })) {
         tracing::warn!("sockscap: exit — helper shutdown RPC failed: {e}");
     }
+    // The helper removes its own ready file as it exits, but do it here too:
+    // if the shutdown RPC never landed, the stale file would otherwise advertise
+    // a helper that is gone (or wedged) to the next launch's boot repair.
+    sess.remove_ready_file();
 
     if stopped {
         if let Ok(dir) = data_dir(app) {
