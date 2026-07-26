@@ -481,6 +481,11 @@ static CONFIGURED_JAVA_HOME: OnceLock<StdMutex<Option<PathBuf>>> = OnceLock::new
 /// User-configured jdtls JVM args (space-separated). `None` / empty → [`DEFAULT_JDTLS_VMARGS`].
 static CONFIGURED_JAVA_VMARGS: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
 
+/// User-configured `java.*` language settings (Lombok, autobuild, organize imports,
+/// code generation, …). `None` → [`JavaLanguageSettings::default`]. Applied at jdtls
+/// `initialize` and hot-updated via `workspace/didChangeConfiguration`.
+static CONFIGURED_JAVA_SETTINGS: OnceLock<StdMutex<Option<JavaLanguageSettings>>> = OnceLock::new();
+
 #[derive(Clone, Debug)]
 struct SemanticTokensCache {
     result_id: String,
@@ -908,6 +913,120 @@ impl LspManager {
             Some(LspSessionEntry::Starting(_)) | None => None,
         }
     }
+
+    /// Run a jdtls `workspace/executeCommand` on the active session for a project
+    /// file (M8): the shared jdtls access path for the Java debug adapter (D2,
+    /// `vscode.java.resolveClasspath` / `startDebugSession` …) and test discovery
+    /// (E, `vscode.java.test.*`). Errors when no jdtls session is active.
+    pub async fn execute_java_command(
+        &self,
+        workspace_id: String,
+        root_path: Option<String>,
+        file_path: String,
+        command: &str,
+        arguments: Vec<Value>,
+    ) -> Result<Value, String> {
+        let document = resolve_document(workspace_id, root_path, file_path, Some("java".into()), 0)?;
+        let session = self
+            .active_session(&document, None, None)
+            .await
+            .ok_or_else(|| {
+                "No Java language server session is active for this project; open a project file first"
+                    .to_string()
+            })?;
+        session
+            .request(
+                "workspace/executeCommand",
+                json!({ "command": command, "arguments": arguments }),
+            )
+            .await
+    }
+
+    /// Push a `workspace/didChangeConfiguration` to every ready jdtls session so
+    /// `java.*` settings changes take effect without restarting the servers.
+    async fn notify_all_jdtls(&self, method: &str, params: Value) -> usize {
+        let sessions: Vec<Arc<LspSession>> = {
+            let guard = self.sessions.lock().await;
+            guard
+                .values()
+                .filter_map(|entry| match entry {
+                    LspSessionEntry::Ready(session) if command_is_jdtls(&session.command) => {
+                        Some(session.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut notified = 0;
+        for session in sessions {
+            if session.notify(method, params.clone()).await.is_ok() {
+                notified += 1;
+            }
+        }
+        notified
+    }
+
+    /// Collect every stored diagnostic across ready sessions for `workspace_id`
+    /// (M7-C). Includes files the user never opened — jdtls publishes project-wide
+    /// after a build — de-duplicated per file (later sessions win) and sorted by
+    /// path. Library / virtual (`jdt://`, non-`file:`) URIs are skipped.
+    async fn workspace_diagnostics(&self, workspace_id: &str) -> Vec<WorkspaceDiagnosticFile> {
+        let sessions: Vec<Arc<LspSession>> = {
+            let guard = self.sessions.lock().await;
+            guard
+                .values()
+                .filter_map(|entry| match entry {
+                    LspSessionEntry::Ready(session)
+                        if session.key.workspace_id == workspace_id =>
+                    {
+                        Some(session.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut by_path: HashMap<String, WorkspaceDiagnosticFile> = HashMap::new();
+        for session in sessions {
+            for (uri, diagnostics) in session.diagnostics.read().await.iter() {
+                if diagnostics.is_empty() {
+                    continue;
+                }
+                let Some(path) = file_path_from_uri(uri) else {
+                    continue;
+                };
+                by_path.insert(
+                    path.clone(),
+                    WorkspaceDiagnosticFile {
+                        path,
+                        uri: uri.clone(),
+                        diagnostics: diagnostics.clone(),
+                    },
+                );
+            }
+        }
+        let mut files: Vec<WorkspaceDiagnosticFile> = by_path.into_values().collect();
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        files
+    }
+}
+
+/// One file's diagnostics for the workspace-wide Problems view (M7-C).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDiagnosticFile {
+    /// Absolute filesystem path (from the `file:` URI).
+    pub path: String,
+    pub uri: String,
+    pub diagnostics: Vec<LspDiagnostic>,
+}
+
+/// Convert a `file:` URI to an absolute path; `None` for `jdt://` / non-file URIs.
+fn file_path_from_uri(uri: &str) -> Option<String> {
+    url::Url::parse(uri)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 impl LspSessionEntry {
@@ -1777,13 +1896,177 @@ fn split_jvm_args(raw: &str) -> Vec<String> {
 }
 
 fn jdtls_vmargs() -> Vec<String> {
-    split_jvm_args(&jdtls_vmargs_string())
+    let mut args = split_jvm_args(&jdtls_vmargs_string());
+    if let Some(agent) = lombok_javaagent_arg() {
+        args.push(agent);
+    }
+    args
 }
 
 /// Apply Settings JVM args as JAVA_OPTS for the jdtls wrapper (Linux/macOS).
 /// Settings win over a parent-shell JAVA_OPTS so heap/GC overrides are not ignored.
+/// Includes the Lombok `-javaagent` when configured so wrapper launches match the
+/// direct-launch path.
 fn apply_jdtls_vmargs_to_command(cmd: &mut Command) {
-    cmd.env("JAVA_OPTS", jdtls_vmargs_string());
+    cmd.env("JAVA_OPTS", jdtls_vmargs().join(" "));
+}
+
+/// Lombok `-javaagent:<jar>` when Lombok is enabled with a configured jar path.
+/// Short-term M6-A path (full bundle loading arrives with the jdtls bundle work).
+fn lombok_javaagent_arg() -> Option<String> {
+    let settings = get_configured_java_settings();
+    let jar = settings.lombok_jar_path.as_deref().map(str::trim)?;
+    if !settings.lombok_enabled || jar.is_empty() {
+        return None;
+    }
+    Some(format!("-javaagent:{jar}"))
+}
+
+/// User-configured `java.*` settings mirrored from Language Servers settings. Serde
+/// fills any omitted field from [`Self::default`] so partial payloads stay valid.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct JavaLanguageSettings {
+    /// Background compile the whole project (prerequisite for full-project diagnostics).
+    pub autobuild_enabled: bool,
+    /// Lombok `-javaagent` support toggle.
+    pub lombok_enabled: bool,
+    /// Absolute path to a `lombok.jar` used for the `-javaagent`.
+    pub lombok_jar_path: Option<String>,
+    /// Run `source.organizeImports` on save.
+    pub save_actions_organize_imports: bool,
+    /// Eclipse/Google formatter profile URL or file path (empty → jdtls default).
+    pub format_settings_url: Option<String>,
+    /// Named profile inside the formatter settings file.
+    pub format_settings_profile: Option<String>,
+    /// Guess method arguments when completing calls.
+    pub guess_method_arguments: bool,
+    /// Import groups in organize-imports order (e.g. `["java","javax","com","org"]`).
+    /// Empty → jdtls default order.
+    pub completion_import_order: Vec<String>,
+    /// Static members offered eagerly in completion (e.g. JUnit/Mockito).
+    pub favorite_static_members: Vec<String>,
+    /// `import` count before collapsing to `import a.*`.
+    pub organize_imports_star_threshold: u32,
+    /// static `import` count before collapsing to `import static a.*`.
+    pub organize_imports_static_star_threshold: u32,
+    /// Enable Maven importer.
+    pub maven_import_enabled: bool,
+    /// Enable Gradle importer.
+    pub gradle_import_enabled: bool,
+}
+
+impl Default for JavaLanguageSettings {
+    fn default() -> Self {
+        Self {
+            autobuild_enabled: true,
+            lombok_enabled: false,
+            lombok_jar_path: None,
+            save_actions_organize_imports: false,
+            format_settings_url: None,
+            format_settings_profile: None,
+            guess_method_arguments: true,
+            completion_import_order: Vec::new(),
+            favorite_static_members: vec![
+                "org.junit.Assert.*".into(),
+                "org.junit.Assume.*".into(),
+                "org.junit.jupiter.api.Assertions.*".into(),
+                "org.junit.jupiter.api.Assumptions.*".into(),
+                "org.mockito.Mockito.*".into(),
+                "org.mockito.ArgumentMatchers.*".into(),
+            ],
+            organize_imports_star_threshold: 99,
+            organize_imports_static_star_threshold: 99,
+            maven_import_enabled: true,
+            gradle_import_enabled: true,
+        }
+    }
+}
+
+/// Trim a string option to a JSON string value, or `Null` when empty/absent.
+fn non_empty_or_null(value: Option<&str>) -> Value {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => Value::String(value.to_string()),
+        None => Value::Null,
+    }
+}
+impl JavaLanguageSettings {
+    /// Build the `java` object for `settings.java` (initialize + didChangeConfiguration).
+    /// `runtimes` is threaded in separately because it is backend-owned per project.
+    fn to_java_settings(&self, runtimes: &[JavaRuntimeConfiguration]) -> Value {
+        // Only carry runtimes when we actually have them: a live
+        // didChangeConfiguration push sends `&[]` and must NOT clobber the JDK
+        // config jdtls already resolved at initialize with an empty array.
+        let mut configuration = json!({ "updateBuildConfiguration": "interactive" });
+        if !runtimes.is_empty() {
+            configuration["runtimes"] = json!(runtimes);
+        }
+        json!({
+            "autobuild": { "enabled": self.autobuild_enabled },
+            "maxConcurrentBuilds": 1,
+            "configuration": configuration,
+            "completion": {
+                "enabled": true,
+                "guessMethodArguments": self.guess_method_arguments,
+                "importOrder": self.completion_import_order,
+                "favoriteStaticMembers": self.favorite_static_members
+            },
+            "format": {
+                "enabled": true,
+                "settings": {
+                    "url": non_empty_or_null(self.format_settings_url.as_deref()),
+                    "profile": non_empty_or_null(self.format_settings_profile.as_deref())
+                },
+                "onType": { "enabled": true }
+            },
+            "import": {
+                "maven": { "enabled": self.maven_import_enabled },
+                "gradle": {
+                    "enabled": self.gradle_import_enabled,
+                    "wrapper": { "enabled": true },
+                    "offline": { "enabled": false }
+                }
+            },
+            "sources": {
+                "organizeImports": {
+                    "starThreshold": self.organize_imports_star_threshold,
+                    "staticStarThreshold": self.organize_imports_static_star_threshold
+                }
+            },
+            "saveActions": { "organizeImports": self.save_actions_organize_imports },
+            "codeGeneration": {
+                "hashCodeEquals": { "useJava7Objects": true },
+                "useBlocks": true,
+                "generateComments": false,
+                "toString": {
+                    "template": "${object.className} [${member.name()}=${member.value}, ${otherMembers}]"
+                }
+            },
+            "referencesCodeLens": { "enabled": false },
+            "implementationsCodeLens": { "enabled": false },
+            "signatureHelp": { "enabled": true },
+            "inlayHints": { "parameterNames": { "enabled": "all" } },
+            "errors": { "incompleteClasspath": { "severity": "warning" } }
+        })
+    }
+}
+fn configured_java_settings_lock() -> &'static StdMutex<Option<JavaLanguageSettings>> {
+    CONFIGURED_JAVA_SETTINGS.get_or_init(|| StdMutex::new(None))
+}
+
+fn set_configured_java_settings(settings: Option<JavaLanguageSettings>) {
+    if let Ok(mut guard) = configured_java_settings_lock().lock() {
+        *guard = settings;
+    }
+}
+
+/// Effective `java.*` settings (Settings override or defaults).
+fn get_configured_java_settings() -> JavaLanguageSettings {
+    configured_java_settings_lock()
+        .lock()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_default()
 }
 
 fn configured_java_home_lock() -> &'static StdMutex<Option<PathBuf>> {
@@ -2366,6 +2649,48 @@ pub fn lsp_set_java_vmargs(vmargs: Option<String>) -> Result<String, String> {
     Ok(jdtls_vmargs_string())
 }
 
+/// Persist the Settings-configured `java.*` language settings (Lombok, autobuild,
+/// organize imports, code generation, …) and hot-apply them to every ready jdtls
+/// session via `workspace/didChangeConfiguration`. `None` restores defaults.
+///
+/// Fields that only take effect at process start (Lombok `-javaagent`) apply on the
+/// next workspace restart; the rest update live. Returns the number of sessions
+/// that received the live update.
+#[tauri::command]
+pub async fn lsp_set_java_settings(
+    state: State<'_, AppState>,
+    settings: Option<JavaLanguageSettings>,
+) -> Result<usize, String> {
+    set_configured_java_settings(settings);
+    // Reuse the resolved settings (defaults when cleared). Runtimes are irrelevant
+    // to a live config push — jdtls keeps the ones from initialize.
+    let java_settings = get_configured_java_settings().to_java_settings(&[]);
+    let notified = state
+        .lsp
+        .notify_all_jdtls(
+            "workspace/didChangeConfiguration",
+            json!({ "settings": { "java": java_settings } }),
+        )
+        .await;
+    Ok(notified)
+}
+
+/// Persist the Settings-configured jdtls extension bundle paths (java-debug /
+/// java-test). Applied on the next jdtls start via `initializationOptions.bundles`
+/// (bundles cannot be hot-added). `None` fields clear that bundle.
+#[tauri::command]
+pub fn lsp_set_java_bundles(config: crate::java_bundles::JavaBundleConfig) -> Result<(), String> {
+    crate::java_bundles::set_configured_bundles(config);
+    Ok(())
+}
+
+/// Probe the configured jdtls extension bundles (java-debug / java-test) for the
+/// Settings UI: which are found and the resolved jar path.
+#[tauri::command]
+pub fn lsp_detect_java_bundles() -> Vec<crate::java_bundles::BundleStatus> {
+    crate::java_bundles::probe_bundles(&crate::java_bundles::get_configured_bundles())
+}
+
 #[tauri::command]
 pub fn lsp_detect_servers(java_home: Option<String>) -> Vec<LspServerStatus> {
     // Accept an optional override so Settings can probe without waiting for a
@@ -2715,6 +3040,57 @@ pub async fn lsp_get_diagnostics(
         status,
         diagnostics,
     })
+}
+
+/// All diagnostics stored across the workspace's ready sessions (M7-C), including
+/// files the user never opened (jdtls publishes project-wide after a build). The
+/// frontend uses this for the Problems panel's "whole project" mode and refreshes
+/// it on the `lsp:diagnostics-updated` event. Empty when no session is active.
+#[tauri::command]
+pub async fn lsp_workspace_diagnostics(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<WorkspaceDiagnosticFile>, String> {
+    let workspace_id = workspace_id.trim();
+    let workspace_id = if workspace_id.is_empty() { "default" } else { workspace_id };
+    Ok(state.lsp.workspace_diagnostics(workspace_id).await)
+}
+
+/// Trigger a full project build on the active jdtls session (M7-C "Rebuild
+/// project") via `workspace/executeCommand: java.buildWorkspace`. `full = true`
+/// forces a clean rebuild so diagnostics for unopened files are (re)published.
+#[tauri::command]
+pub async fn lsp_build_workspace(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<(), String> {
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            "No language server session is active for this project; open a project file first"
+                .to_string()
+        })?;
+    // jdtls's java.buildWorkspace takes a single boolean `full`.
+    session
+        .request(
+            "workspace/executeCommand",
+            json!({ "command": "java.buildWorkspace", "arguments": [true] }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Failed to rebuild project: {e}"))
 }
 
 #[tauri::command]
@@ -3598,6 +3974,131 @@ pub async fn lsp_download_sources(
                 .to_string(),
         ),
     })
+}
+
+/// Reload the Java project configuration for the active jdtls session (IDEA's
+/// "Reload project"). Notifies `java/projectConfigurationUpdate` keyed on a build
+/// file (pom.xml / build.gradle) so jdtls re-imports the Maven/Gradle model after
+/// the user edits it. `file_path` should be the changed build file; any project
+/// file works since jdtls reconfigures the owning project.
+///
+/// Fire-and-forget: jdtls reconfigures asynchronously (progress arrives via its
+/// own status notifications), so this returns once the notify is delivered.
+#[tauri::command]
+pub async fn lsp_reload_project(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<(), String> {
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            "No language server session is active for this project; open a project file first"
+                .to_string()
+        })?;
+    session
+        .notify(
+            "java/projectConfigurationUpdate",
+            json!({ "uri": document.uri }),
+        )
+        .await
+}
+
+/// A Java project/module discovered by jdtls (`java.project.getAll`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaModule {
+    /// Module name (last path segment of the project directory).
+    pub name: String,
+    /// Absolute filesystem path to the module root.
+    pub path: String,
+    /// Original project URI as reported by jdtls.
+    pub uri: String,
+}
+
+/// Turn jdtls `java.project.getAll` output (an array of `file://` project URIs)
+/// into module entries. Non-file / unparseable URIs are skipped; results are
+/// de-duplicated and sorted by name for a stable module view.
+fn parse_java_modules(value: &Value) -> Vec<JavaModule> {
+    let mut modules: Vec<JavaModule> = Vec::new();
+    let Some(items) = value.as_array() else {
+        return modules;
+    };
+    for item in items {
+        let Some(uri) = item.as_str() else {
+            continue;
+        };
+        let path = url::Url::parse(uri)
+            .ok()
+            .filter(|url| url.scheme() == "file")
+            .and_then(|url| url.to_file_path().ok());
+        let Some(path) = path else {
+            continue;
+        };
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("module")
+            .to_string();
+        let path_str = path.to_string_lossy().into_owned();
+        if modules.iter().any(|module| module.path == path_str) {
+            continue;
+        }
+        modules.push(JavaModule {
+            name,
+            path: path_str,
+            uri: uri.to_string(),
+        });
+    }
+    modules.sort_by(|a, b| a.name.cmp(&b.name));
+    modules
+}
+
+/// List the Java projects/modules in the workspace via jdtls
+/// `workspace/executeCommand: java.project.getAll` (M7 F-4). Returns an empty
+/// list when the session has no such command; errors when no session is active.
+#[tauri::command]
+pub async fn lsp_java_modules(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<Vec<JavaModule>, String> {
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            "No language server session is active for this project; open a project file first"
+                .to_string()
+        })?;
+    let result = session
+        .request(
+            "workspace/executeCommand",
+            json!({ "command": "java.project.getAll", "arguments": [] }),
+        )
+        .await
+        .map_err(|e| format!("Failed to list Java modules: {e}"))?;
+    Ok(parse_java_modules(&result))
 }
 
 #[tauri::command]
@@ -4554,13 +5055,10 @@ fn lsp_initialization_options(
         return Value::Null;
     }
     let runtimes: &[JavaRuntimeConfiguration] = &sdk_environment.java_runtimes;
-    json!({
+    let java_settings = get_configured_java_settings().to_java_settings(runtimes);
+    let mut options = json!({
         "settings": {
-            "java": {
-                "configuration": {
-                    "runtimes": runtimes
-                }
-            }
+            "java": java_settings
         },
         // JDT LS drops every location that resolves into a `.class` file unless the
         // client declares `classFileContentsSupport` (JDTUtils#toUri(IClassFile)
@@ -4570,7 +5068,15 @@ fn lsp_initialization_options(
         "extendedClientCapabilities": {
             "classFileContentsSupport": true
         }
-    })
+    });
+    // Load configured jdtls extension bundles (java-debug / java-test) so
+    // debugging + testing become available (M8). Omitted when none are configured.
+    // Lombok is NOT here — it loads as a `-javaagent`, not an OSGi bundle.
+    let bundles = crate::java_bundles::configured_bundle_jars();
+    if !bundles.is_empty() {
+        options["bundles"] = json!(bundles);
+    }
+    options
 }
 
 fn server_status(
@@ -6124,6 +6630,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Serializes tests that mutate the process-global jdtls vmargs / java settings
+    /// (both feed `jdtls_vmargs()`), so parallel runs do not clobber each other.
+    static JAVA_GLOBALS_LOCK: StdMutex<()> = StdMutex::new(());
+
     #[test]
     fn java_install_hint_is_platform_specific() {
         let hint = install_hint_for("jdtls");
@@ -6157,6 +6667,8 @@ mod tests {
             default: true,
         }];
 
+        let _guard = JAVA_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_configured_java_settings(None);
         let options = lsp_initialization_options(true, &environment);
 
         assert_eq!(
@@ -6168,7 +6680,143 @@ mod tests {
             options["extendedClientCapabilities"]["classFileContentsSupport"],
             json!(true)
         );
+        // Default settings widen jdtls beyond bare runtimes (M6-A): autobuild on,
+        // completion + format + import + code generation present.
+        assert_eq!(options["settings"]["java"]["autobuild"]["enabled"], json!(true));
+        assert_eq!(
+            options["settings"]["java"]["completion"]["guessMethodArguments"],
+            json!(true)
+        );
+        assert!(
+            options["settings"]["java"]["completion"]["favoriteStaticMembers"]
+                .as_array()
+                .is_some_and(|members| members.iter().any(|m| m == "org.junit.jupiter.api.Assertions.*")),
+            "JUnit 5 assertions should be a favorite static member by default"
+        );
+        assert_eq!(
+            options["settings"]["java"]["saveActions"]["organizeImports"],
+            json!(false)
+        );
         assert_eq!(lsp_initialization_options(false, &environment), Value::Null);
+    }
+
+    #[test]
+    fn java_settings_default_and_round_trip() {
+        let _guard = JAVA_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_configured_java_settings(None);
+        let defaults = get_configured_java_settings();
+        assert!(defaults.autobuild_enabled);
+        assert!(!defaults.lombok_enabled);
+        assert!(!defaults.save_actions_organize_imports);
+
+        // A partial JSON payload from the frontend fills omitted fields from Default.
+        let partial: JavaLanguageSettings = serde_json::from_value(json!({
+            "lombokEnabled": true,
+            "saveActionsOrganizeImports": true
+        }))
+        .expect("partial settings deserialize");
+        assert!(partial.lombok_enabled);
+        assert!(partial.save_actions_organize_imports);
+        // Untouched fields keep their defaults.
+        assert!(partial.autobuild_enabled);
+        assert!(partial.guess_method_arguments);
+
+        set_configured_java_settings(Some(partial.clone()));
+        assert_eq!(get_configured_java_settings(), partial);
+        set_configured_java_settings(None);
+    }
+
+    #[test]
+    fn lombok_javaagent_only_when_enabled_with_jar() {
+        let _guard = JAVA_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_configured_java_settings(None);
+        assert!(lombok_javaagent_arg().is_none());
+
+        set_configured_java_settings(Some(JavaLanguageSettings {
+            lombok_enabled: true,
+            lombok_jar_path: Some("  ".into()),
+            ..Default::default()
+        }));
+        assert!(
+            lombok_javaagent_arg().is_none(),
+            "blank jar path must not produce a -javaagent"
+        );
+
+        let jar = if cfg!(windows) {
+            r"C:\tools\lombok.jar"
+        } else {
+            "/opt/lombok.jar"
+        };
+        set_configured_java_settings(Some(JavaLanguageSettings {
+            lombok_enabled: true,
+            lombok_jar_path: Some(jar.into()),
+            ..Default::default()
+        }));
+        assert_eq!(lombok_javaagent_arg(), Some(format!("-javaagent:{jar}")));
+        assert!(
+            jdtls_vmargs().iter().any(|arg| arg == &format!("-javaagent:{jar}")),
+            "vmargs should carry the Lombok agent so both launch paths pick it up"
+        );
+        set_configured_java_settings(None);
+    }
+
+    #[test]
+    fn file_path_from_uri_maps_file_and_skips_virtual() {
+        let (uri, expected_suffix) = if cfg!(windows) {
+            ("file:///C:/repo/src/Main.java", "Main.java")
+        } else {
+            ("file:///repo/src/Main.java", "Main.java")
+        };
+        let path = file_path_from_uri(uri).expect("file uri maps to a path");
+        assert!(path.ends_with(expected_suffix), "got {path}");
+        // Virtual / non-file URIs are skipped (library sources must not clutter Problems).
+        assert!(file_path_from_uri("jdt://contents/java.base/java.lang/String.class?=x").is_none());
+        assert!(file_path_from_uri("not a uri").is_none());
+    }
+
+    #[test]
+    fn parses_java_modules_from_project_uris() {
+        let (root_a, root_b) = if cfg!(windows) {
+            ("file:///C:/repo/app", "file:///C:/repo/lib")
+        } else {
+            ("file:///repo/app", "file:///repo/lib")
+        };
+        // Out of order + a duplicate + a non-file URI that must be skipped.
+        let value = json!([root_b, root_a, root_b, "jdt://contents/foo"]);
+        let modules = parse_java_modules(&value);
+        assert_eq!(modules.len(), 2, "dedup + skip non-file, got {modules:?}");
+        // Sorted by name: app before lib.
+        assert_eq!(modules[0].name, "app");
+        assert_eq!(modules[1].name, "lib");
+        assert_eq!(modules[0].uri, root_a);
+        assert!(modules[0].path.ends_with("app"));
+
+        assert!(parse_java_modules(&json!(null)).is_empty());
+        assert!(parse_java_modules(&json!([])).is_empty());
+    }
+
+    #[test]
+    fn hot_update_settings_omit_runtimes() {
+        let _guard = JAVA_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_configured_java_settings(None);
+        // A live didChangeConfiguration push must not send an empty runtimes array
+        // (that would clobber the JDK config jdtls resolved at initialize).
+        let java = get_configured_java_settings().to_java_settings(&[]);
+        assert!(
+            java["configuration"].get("runtimes").is_none(),
+            "empty runtimes must be omitted, got: {java:#}"
+        );
+        assert_eq!(java["configuration"]["updateBuildConfiguration"], json!("interactive"));
+
+        // Whereas initialize carries them.
+        let with_runtimes = get_configured_java_settings().to_java_settings(&[
+            JavaRuntimeConfiguration {
+                name: "JavaSE-21".into(),
+                path: "/sdk/jdk-21".into(),
+                default: true,
+            },
+        ]);
+        assert_eq!(with_runtimes["configuration"]["runtimes"][0]["name"], json!("JavaSE-21"));
     }
 
     #[test]
@@ -6302,6 +6950,10 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
 
     #[test]
     fn configured_java_vmargs_defaults_and_round_trips() {
+        let _guard = JAVA_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Lombok can append a -javaagent to jdtls_vmargs(); keep it off here so the
+        // vec assertion below sees only the configured args.
+        set_configured_java_settings(None);
         set_configured_java_vmargs(None);
         assert_eq!(jdtls_vmargs_string(), DEFAULT_JDTLS_VMARGS);
         assert!(get_configured_java_vmargs().is_none());

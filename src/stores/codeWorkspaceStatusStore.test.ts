@@ -20,6 +20,7 @@ function sample(overrides: Partial<CodeWorkspaceStatusSegments> = {}): CodeWorks
     gitAhead: 0,
     gitBehind: 0,
     fontSize: 13,
+    largeFile: false,
     ...overrides,
   };
 }

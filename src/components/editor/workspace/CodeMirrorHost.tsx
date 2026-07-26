@@ -57,6 +57,7 @@ import {
 } from "./lspIntelligenceChrome";
 import { createLspHyperlinkExtension } from "./lspHyperlink";
 import { createGitEditorChrome, type GitLineChange } from "./gitEditorChrome";
+import { createDebugEditorChrome, type DebugBreakpointMarker } from "./debugEditorChrome";
 import type { GitBlameLine } from "../../../lib/git";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import {
@@ -90,6 +91,10 @@ interface CodeMirrorHostProps {
   semanticTokens?: LspSemanticToken[];
   gitChanges?: GitLineChange[];
   gitBlame?: GitBlameLine | null;
+  /** Debug breakpoints on this file (M9) — rendered in the breakpoint gutter. */
+  debugBreakpoints?: DebugBreakpointMarker[];
+  /** 1-based line the debugger is currently stopped on for this file (or null). */
+  debugCurrentLine?: number | null;
   reveal: EditorRevealTarget | null;
   /** Block edits (library / decompiled sources that have no file to write back to). */
   readOnly?: boolean;
@@ -112,6 +117,10 @@ interface CodeMirrorHostProps {
   onExpandSelection?: (selection: EditorSelectionRange) => Promise<LspRange[] | null>;
   onLightbulb?: (line: number) => void;
   onGitChangeClick?: (change: GitLineChange) => void;
+  /** Toggle a breakpoint at a 1-based line (breakpoint gutter click). */
+  onToggleBreakpoint?: (line: number) => void;
+  /** Edit a breakpoint's condition/logpoint at a 1-based line (gutter right-click). */
+  onEditBreakpoint?: (line: number) => void;
   /** Editor-area right-click (symbol / buffer menu). */
   onContextMenu?: (info: EditorContextMenuRequest) => void;
   completionTriggers?: string[];
@@ -302,9 +311,13 @@ export function CodeMirrorHost({
   onExpandSelection,
   onLightbulb,
   onGitChangeClick,
+  onToggleBreakpoint,
+  onEditBreakpoint,
   onContextMenu,
   completionTriggers,
   signatureTriggers,
+  debugBreakpoints,
+  debugCurrentLine,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -313,6 +326,7 @@ export function CodeMirrorHost({
   const overlayCompartment = useRef(new Compartment());
   const semanticTokensCompartment = useRef(new Compartment());
   const gitCompartment = useRef(new Compartment());
+  const debugCompartment = useRef(new Compartment());
   const signatureCompartment = useRef(new Compartment());
   const readOnlyCompartment = useRef(new Compartment());
   const signatureShownRef = useRef(false);
@@ -326,6 +340,9 @@ export function CodeMirrorHost({
   const renderedOverlayRef = useRef({ highlights, inlayHints });
   const renderedSemanticTokensRef = useRef(semanticTokens);
   const renderedGitRef = useRef({ changes: gitChanges, blame: gitBlame });
+  const renderedDebugRef = useRef({ breakpoints: debugBreakpoints, currentLine: debugCurrentLine });
+  const onToggleBreakpointRef = useRef(onToggleBreakpoint);
+  const onEditBreakpointRef = useRef(onEditBreakpoint);
   const onChangeRef = useRef(onChange);
   const onSaveRef = useRef(onSave);
   const onHoverRef = useRef(onHover);
@@ -356,6 +373,8 @@ export function CodeMirrorHost({
   onExpandSelectionRef.current = onExpandSelection;
   onLightbulbRef.current = onLightbulb;
   onGitChangeClickRef.current = onGitChangeClick;
+  onToggleBreakpointRef.current = onToggleBreakpoint;
+  onEditBreakpointRef.current = onEditBreakpoint;
   onContextMenuRef.current = onContextMenu;
   completionTriggersRef.current = completionTriggers ?? [];
   signatureTriggersRef.current = signatureTriggers ?? [];
@@ -579,6 +598,12 @@ export function CodeMirrorHost({
           gitChanges,
           gitBlame,
           (change) => onGitChangeClickRef.current?.(change),
+        )),
+        debugCompartment.current.of(createDebugEditorChrome(
+          debugBreakpoints ?? [],
+          debugCurrentLine ?? null,
+          (line) => onToggleBreakpointRef.current?.(line),
+          (line) => onEditBreakpointRef.current?.(line),
         )),
         signatureCompartment.current.of([]),
         readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
@@ -805,6 +830,27 @@ export function CodeMirrorHost({
       )),
     });
   }, [gitBlame, gitChanges]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const previous = renderedDebugRef.current;
+    if (
+      sameArrayOrBothEmpty(previous.breakpoints ?? [], debugBreakpoints ?? [])
+      && previous.currentLine === debugCurrentLine
+    ) {
+      return;
+    }
+    renderedDebugRef.current = { breakpoints: debugBreakpoints, currentLine: debugCurrentLine };
+    view.dispatch({
+      effects: debugCompartment.current.reconfigure(createDebugEditorChrome(
+        debugBreakpoints ?? [],
+        debugCurrentLine ?? null,
+        (line) => onToggleBreakpointRef.current?.(line),
+        (line) => onEditBreakpointRef.current?.(line),
+      )),
+    });
+  }, [debugBreakpoints, debugCurrentLine]);
 
   useEffect(() => {
     const view = viewRef.current;

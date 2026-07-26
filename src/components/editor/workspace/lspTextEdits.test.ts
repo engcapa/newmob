@@ -96,4 +96,34 @@ describe("lspTextEdits", () => {
   it("returns null when the text is unchanged", () => {
     expect(buildIncrementalContentChange("same", "same")).toBeNull();
   });
+
+  it("positions an edit deep in a multi-line document (single-pass end offset)", () => {
+    // 2000 identical lines; edit the last one. The end position must still be
+    // correct even though the change span is far from offset 0.
+    const lines = Array.from({ length: 2000 }, (_, i) => `line ${i}`);
+    const previous = lines.join("\n");
+    const next = `${previous}!`;
+    expect(buildIncrementalContentChange(previous, next)).toEqual({
+      range: {
+        start: { line: 1999, character: 9 },
+        end: { line: 1999, character: 9 },
+      },
+      rangeLength: 0,
+      text: "!",
+    });
+  });
+
+  it("computes a multi-line deletion range across the changed span", () => {
+    // Delete two whole middle lines; end position spans multiple newlines from start.
+    const previous = "a\nbbb\nccc\nd";
+    const next = "a\nd";
+    expect(buildIncrementalContentChange(previous, next)).toEqual({
+      range: {
+        start: { line: 1, character: 0 },
+        end: { line: 3, character: 0 },
+      },
+      rangeLength: 8,
+      text: "",
+    });
+  });
 });

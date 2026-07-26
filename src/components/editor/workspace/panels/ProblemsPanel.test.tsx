@@ -76,4 +76,46 @@ describe("ProblemsPanel", () => {
     render(<ProblemsPanel files={[]} onOpenProblem={vi.fn()} />);
     expect(screen.getByText("No problems in open files")).toBeInTheDocument();
   });
+
+  it("switches scope and triggers a rebuild in project mode (M7-C)", () => {
+    const onScopeChange = vi.fn();
+    const onRebuild = vi.fn();
+    const { rerender } = render(
+      <ProblemsPanel
+        files={files}
+        onOpenProblem={vi.fn()}
+        scope="open"
+        onScopeChange={onScopeChange}
+        onRebuild={onRebuild}
+      />,
+    );
+    // Rebuild button is hidden in "open files" scope.
+    expect(screen.queryByTestId("problems-rebuild")).toBeNull();
+    fireEvent.click(screen.getByTestId("problems-scope-project"));
+    expect(onScopeChange).toHaveBeenCalledWith("project");
+
+    // Re-render in project scope: rebuild button appears and fires.
+    rerender(
+      <ProblemsPanel
+        files={files}
+        onOpenProblem={vi.fn()}
+        scope="project"
+        onScopeChange={onScopeChange}
+        onRebuild={onRebuild}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("problems-rebuild"));
+    expect(onRebuild).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a project-scope empty state and loading text", () => {
+    const { rerender } = render(
+      <ProblemsPanel files={[]} onOpenProblem={vi.fn()} scope="project" onScopeChange={vi.fn()} />,
+    );
+    expect(screen.getByText("No problems in the project")).toBeInTheDocument();
+    rerender(
+      <ProblemsPanel files={[]} onOpenProblem={vi.fn()} scope="project" onScopeChange={vi.fn()} loading />,
+    );
+    expect(screen.getByText("Loading project problems…")).toBeInTheDocument();
+  });
 });

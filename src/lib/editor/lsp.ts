@@ -275,6 +275,110 @@ export function lspSetJavaVmargs(vmargs?: string | null): Promise<string> {
   return invoke<string>("lsp_set_java_vmargs", { vmargs: value });
 }
 
+/**
+ * jdtls `java.*` language settings mirrored to the backend. Field names match the
+ * Rust `JavaLanguageSettings` serde shape (camelCase); the backend fills any omitted
+ * field from its defaults, so partial payloads are safe.
+ */
+export interface LspJavaSettings {
+  autobuildEnabled: boolean;
+  lombokEnabled: boolean;
+  lombokJarPath: string;
+  saveActionsOrganizeImports: boolean;
+  formatSettingsUrl: string;
+  formatSettingsProfile: string;
+  guessMethodArguments: boolean;
+  completionImportOrder: string[];
+  organizeImportsStarThreshold: number;
+  organizeImportsStaticStarThreshold: number;
+  mavenImportEnabled: boolean;
+  gradleImportEnabled: boolean;
+}
+
+/**
+ * Apply jdtls `java.*` language settings (Lombok, autobuild, organize imports, …).
+ * Live settings hot-update running jdtls sessions via didChangeConfiguration; the
+ * Lombok `-javaagent` applies on the next workspace restart. `null` restores defaults.
+ * Returns the number of sessions that received the live update.
+ */
+export function lspSetJavaSettings(settings: LspJavaSettings | null): Promise<number> {
+  return invoke<number>("lsp_set_java_settings", { settings });
+}
+
+/**
+ * jdtls extension bundle paths (M8). Each is a directory holding the versioned
+ * jar, or the jar path itself. Lombok is NOT here — it loads as a `-javaagent`.
+ */
+export interface LspJavaBundleConfig {
+  javaDebugPath: string;
+  javaTestPath: string;
+}
+
+/** Probe result for one jdtls extension bundle. */
+export interface LspBundleStatus {
+  id: string;
+  path: string | null;
+  available: boolean;
+}
+
+/** Persist jdtls extension bundle paths (applied on the next jdtls start). */
+export function lspSetJavaBundles(config: LspJavaBundleConfig): Promise<void> {
+  return invoke("lsp_set_java_bundles", { config });
+}
+
+/** Probe configured jdtls extension bundles (java-debug / java-test). */
+export function lspDetectJavaBundles(): Promise<LspBundleStatus[]> {
+  return invoke<LspBundleStatus[]>("lsp_detect_java_bundles");
+}
+
+/** A discovered Java test node (class or method) from the java-test bundle (M8 E). */
+export interface JavaTestItem {
+  name: string;
+  fullName: string;
+  /** "class" | "method" | "other". */
+  kind: string;
+  uri: string | null;
+  range: LspRange | null;
+  children: JavaTestItem[];
+}
+
+/**
+ * Discover test classes/methods in a Java file via the java-test bundle.
+ * `descriptor` selects the jdtls session (its file URI is derived on the
+ * backend). Returns [] when the file has no tests; rejects when no session /
+ * bundle is available.
+ */
+export function javaTestDiscover(descriptor: LspDocumentDescriptor): Promise<JavaTestItem[]> {
+  return invoke<JavaTestItem[]>("java_test_discover", {
+    workspaceId: descriptor.workspaceId,
+    rootPath: descriptor.rootPath ?? null,
+    filePath: descriptor.filePath,
+  });
+}
+
+/** A java-test-resolved launch config for debugging a test (M9 debug-test). */
+export interface JavaTestLaunch {
+  mainClass: string;
+  projectName: string;
+  classPaths: string[];
+  modulePaths: string[];
+  args: string[];
+  vmArgs: string[];
+}
+
+/** Resolve a JUnit launch config for a discovered test so it can be debugged. */
+export function javaTestResolveLaunch(
+  descriptor: LspDocumentDescriptor,
+  test: JavaTestItem,
+): Promise<JavaTestLaunch> {
+  return invoke<JavaTestLaunch>("java_test_resolve_launch", {
+    workspaceId: descriptor.workspaceId,
+    rootPath: descriptor.rootPath ?? null,
+    filePath: descriptor.filePath,
+    test,
+  });
+}
+
 export function lspDocumentStatus(
   descriptor: LspDocumentDescriptor,
 ): Promise<LspDocumentStatus> {
@@ -333,6 +437,30 @@ export function lspGetDiagnostics(
   descriptor: LspDocumentDescriptor,
 ): Promise<LspDiagnosticsResult> {
   return invoke<LspDiagnosticsResult>("lsp_get_diagnostics", documentArgs(descriptor));
+}
+
+/** One file's diagnostics in the workspace-wide Problems view (M7-C). */
+export interface WorkspaceDiagnosticFile {
+  path: string;
+  uri: string;
+  diagnostics: LspDiagnostic[];
+}
+
+/**
+ * All diagnostics stored across the workspace's active sessions, including files
+ * the user never opened (jdtls publishes project-wide after a build). Used by the
+ * Problems panel's "whole project" mode; the panel polls this while open.
+ */
+export function lspWorkspaceDiagnostics(workspaceId: string): Promise<WorkspaceDiagnosticFile[]> {
+  return invoke<WorkspaceDiagnosticFile[]>("lsp_workspace_diagnostics", { workspaceId });
+}
+
+/**
+ * Trigger a full jdtls project rebuild (java.buildWorkspace) so diagnostics for
+ * unopened files are (re)published. `descriptor` selects the jdtls session.
+ */
+export function lspBuildWorkspace(descriptor: LspDocumentDescriptor): Promise<void> {
+  return invoke("lsp_build_workspace", documentArgs(descriptor));
 }
 
 export function lspDocumentSymbols(
@@ -770,6 +898,31 @@ export function lspDownloadSources(
     ...documentArgs(descriptor),
     uri,
   });
+}
+
+/**
+ * Reload the Java project model (IDEA "Reload project") after a build file
+ * (pom.xml / build.gradle) changed. Fire-and-forget: jdtls re-imports async.
+ * `descriptor` should target the changed build file (or any project file).
+ */
+export function lspReloadProject(descriptor: LspDocumentDescriptor): Promise<void> {
+  return invoke("lsp_reload_project", documentArgs(descriptor));
+}
+
+/** A Java project/module discovered by jdtls `java.project.getAll` (M7 F-4). */
+export interface JavaModule {
+  name: string;
+  path: string;
+  uri: string;
+}
+
+/**
+ * List the Java projects/modules via jdtls `java.project.getAll`. `descriptor`
+ * selects the jdtls session (any project file works). Returns [] when the server
+ * lacks the command; rejects when no session is active.
+ */
+export function lspJavaModules(descriptor: LspDocumentDescriptor): Promise<JavaModule[]> {
+  return invoke<JavaModule[]>("lsp_java_modules", documentArgs(descriptor));
 }
 
 export function lspReferences(

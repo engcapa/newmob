@@ -36,6 +36,9 @@ import {
   Rows2,
   TerminalSquare,
   Play,
+  Hammer,
+  FlaskConical,
+  Bug,
   Search,
   X,
   ZoomIn,
@@ -45,6 +48,7 @@ import {
   workspaceListDir,
   workspaceReadFile,
   workspaceReadLooseFile,
+  workspaceTaskTree,
   workspaceWriteFile,
   workspaceWriteLooseFile,
   type WorkspaceGitRoot,
@@ -66,11 +70,17 @@ import {
   lspHover,
   lspImplementation,
   lspInlayHints,
+  lspJavaModules,
+  javaTestDiscover,
+  javaTestResolveLaunch,
   lspPrepareCallHierarchy,
   lspPrepareRename,
   lspPrepareTypeHierarchy,
   lspRangeFormatting,
   lspDownloadSources,
+  lspReloadProject,
+  lspBuildWorkspace,
+  lspWorkspaceDiagnostics,
   lspReadUriContents,
   lspReferences,
   lspRename,
@@ -80,6 +90,7 @@ import {
   lspTypeDefinition,
   lspWorkspaceSymbols,
   type LspCodeAction,
+  type JavaTestItem,
   type LspCompletionItem,
   type LspCompletionResult,
   type LspDiagnostic,
@@ -148,6 +159,7 @@ import {
   type WorkspaceIntelligencePreferences,
 } from "./workspace/intelligencePreferences";
 import { applyLspTextEditsToString } from "./workspace/lspTextEdits";
+import { isLargeFileContent } from "./workspace/largeFile";
 import {
   applyWorkspaceEdit,
   summarizeWorkspaceEditOutcomes,
@@ -161,6 +173,7 @@ import {
 import {
   ProblemsPanel,
   type ProblemFileGroup,
+  type ProblemsScope,
 } from "./workspace/panels/ProblemsPanel";
 import { FindInFilesPanel } from "./workspace/panels/FindInFilesPanel";
 import { DocumentationPane } from "./workspace/panels/DocumentationPane";
@@ -272,6 +285,16 @@ function initialInlayHintRange(text: string): LspRange {
   };
 }
 
+/** Maven / Gradle build descriptors that warrant a jdtls project reload on save. */
+function isJavaBuildFile(languagePath: string): boolean {
+  const name = languagePath.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  return name === "pom.xml"
+    || name === "build.gradle"
+    || name === "build.gradle.kts"
+    || name === "settings.gradle"
+    || name === "settings.gradle.kts";
+}
+
 // Keep document synchronization ahead of the comparatively expensive derived
 // LSP features.  In particular, rust-analyzer semantic tokens can be large
 // enough that applying them while somebody is still typing is noticeable.
@@ -358,7 +381,14 @@ import {
   TerminalDockPanel,
   type TerminalDockHandle,
 } from "./workspace/panels/TerminalDockPanel";
-import { RunPanel, type RunPanelHandle } from "./workspace/panels/RunPanel";
+import { RunPanel, type RunPanelHandle, type WorkspaceTaskItem } from "./workspace/panels/RunPanel";
+import { BuildPanel } from "./workspace/panels/BuildPanel";
+import { TestsPanel } from "./workspace/panels/TestsPanel";
+import { defaultRunner, javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
+import { DebugPanel } from "./workspace/panels/DebugPanel";
+import { useCodeDebugSession } from "./workspace/useCodeDebugSession";
+import type { DebugStackFrame } from "./workspace/dapDebugModel";
+import type { DebugBreakpointMarker } from "./workspace/debugEditorChrome";
 import type { EditorRevealTarget } from "./workspace/EditorGroup";
 
 export function CodeWorkspaceTab({
@@ -500,6 +530,9 @@ export function CodeWorkspaceTab({
   const openFilesRef = useRef(openFiles);
   const openOrderRef = useRef(openOrder);
   const lspFilesRef = useRef(lspFiles);
+  /** False after unmount so async project-diagnostics callbacks skip setState. */
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const pendingEditorTextByFileRef = useRef(new Map<string, OpenFileState>());
   const pendingEditorTextTimerRef = useRef<number | null>(null);
   /** Debounced didChange timers keyed by open-file key (live buffer path). */
@@ -822,6 +855,21 @@ export function CodeWorkspaceTab({
   const inactiveEditorPaneRef = useRef<HTMLElement | null>(null);
   const terminalDockRef = useRef<TerminalDockHandle | null>(null);
   const runPanelRef = useRef<RunPanelHandle | null>(null);
+
+  /** Run a workspace task in the integrated terminal (shared by Run + Build panels). */
+  const runWorkspaceTask = useCallback(
+    (task: WorkspaceTaskItem, onExit?: (exitCode: number) => void) => {
+      terminalDockRef.current?.runCommand(
+        task.command,
+        task.cwd,
+        `Run: ${task.label}`,
+        onExit,
+      );
+      setBottomDockTab("terminal");
+      setBottomDockOpen(true);
+    },
+    [setBottomDockOpen, setBottomDockTab],
+  );
   const {
     descriptorForFile: lspDescriptorForFile,
     descriptorForPath: lspDescriptorForPath,
@@ -2108,6 +2156,28 @@ export function CodeWorkspaceTab({
     return applyLspTextEditsToString(file.text, result.edits);
   }, [lspDescriptorForFile, updateLspStatusForFile]);
 
+  const promptReloadProject = useCallback(
+    async (key: string, subtitle: string) => {
+      const file = openFilesRef.current[key];
+      if (!file) return;
+      const descriptor = lspDescriptorForFile(file);
+      if (!descriptor) return;
+      const confirmed = await confirmAppDialog({
+        title: "Reload Java project",
+        message: `${subtitle} changed. Reload the project so the language server picks up dependency and classpath changes?`,
+        confirmLabel: "Reload",
+      });
+      if (!confirmed) return;
+      try {
+        await lspReloadProject(descriptor);
+        setStatusMessage("Reloading Java project…");
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+      }
+    },
+    [lspDescriptorForFile, setStatusMessage],
+  );
+
   const saveFile = useCallback(
     async (key: string | null = activeKey) => {
       if (!key) return;
@@ -2133,6 +2203,12 @@ export function CodeWorkspaceTab({
         setStatusMessage(formatError
           ? `Saved ${file.subtitle}; format on save failed: ${formatError}`
           : `Saved ${file.subtitle}`);
+        // A Maven/Gradle build file changed on disk: offer to re-import the
+        // project model so jdtls picks up dependency/classpath edits. Only when
+        // a jdtls session is actually up for this project (no prompt otherwise).
+        if (isJavaBuildFile(file.languagePath) && lspFilesRef.current[key]?.status?.active) {
+          void promptReloadProject(key, file.subtitle);
+        }
       } catch (err) {
         setStatusMessage(errorMessage(err));
       }
@@ -2141,6 +2217,7 @@ export function CodeWorkspaceTab({
       activeKey,
       formatFileText,
       intelligencePreferences.formatOnSave,
+      promptReloadProject,
       saveOpenBufferText,
       setStatusMessage,
     ],
@@ -2345,6 +2422,13 @@ export function CodeWorkspaceTab({
   }, [activateEditorGroup, editorGroups, setStoreSplitOrientation, splitOrientation, updateEditorGroup, workspaceInstanceId]);
 
   const activeFile = activeKey ? openFiles[activeKey] ?? null : null;
+  // Large-file mode (M6-B): above the size/line threshold, skip the per-edit
+  // semantic-tokens / inlay-hint / document-highlight storm and their decoration
+  // rebuilds. Lezer highlighting and on-demand features stay available.
+  const activeFileIsLarge = useMemo(
+    () => (activeFile && !activeFile.loading ? isLargeFileContent(activeFile.text) : false),
+    [activeFile],
+  );
   // Metadata panels and AI workspace context do not need a new snapshot for
   // every character.  Let React publish that non-interactive work after the
   // input update has painted.
@@ -2522,7 +2606,8 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
-    if (!file || file.loading) {
+    // Large-file mode: no per-cursor highlight (LSP request nor text-scan fallback).
+    if (!file || file.loading || activeFileIsLarge) {
       setHighlightsByGroup((current) => (
         current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
       ));
@@ -2576,6 +2661,7 @@ export function CodeWorkspaceTab({
     activeCapabilities?.documentHighlight,
     activeEditorGroupId,
     activeFile,
+    activeFileIsLarge,
     activeLspDocumentIsSynced,
     cursorPositions,
     isCurrentLspDocumentRequest,
@@ -2586,7 +2672,7 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
-    if (!file || file.loading || !activeInlayHintsEnabled || !activeCapabilities?.inlayHint) {
+    if (!file || file.loading || activeFileIsLarge || !activeInlayHintsEnabled || !activeCapabilities?.inlayHint) {
       setInlayHintsByGroup((current) => (
         current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
       ));
@@ -2626,6 +2712,7 @@ export function CodeWorkspaceTab({
     activeCapabilities?.inlayHint,
     activeEditorGroupId,
     activeFile,
+    activeFileIsLarge,
     activeInlayHintsEnabled,
     activeLspDocumentIsSynced,
     isCurrentLspDocumentRequest,
@@ -2637,7 +2724,7 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     const groupId = activeEditorGroupId;
     const file = activeFile;
-    if (!file || file.loading || !activeCapabilities?.semanticTokens) {
+    if (!file || file.loading || activeFileIsLarge || !activeCapabilities?.semanticTokens) {
       setSemanticTokensByGroup((current) => (
         current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
       ));
@@ -2676,6 +2763,7 @@ export function CodeWorkspaceTab({
     activeCapabilities?.semanticTokens,
     activeEditorGroupId,
     activeFile,
+    activeFileIsLarge,
     activeLspDocumentIsSynced,
     isCurrentLspDocumentRequest,
     lspDescriptorForFile,
@@ -2801,10 +2889,12 @@ export function CodeWorkspaceTab({
       gitAhead: gitSnapshot?.ahead ?? 0,
       gitBehind: gitSnapshot?.behind ?? 0,
       fontSize: codeViewProfile.fontSize,
+      largeFile: activeFileIsLarge,
     });
   }, [
     activeEditorGroupId,
     activeFile?.eol,
+    activeFileIsLarge,
     activeGitRoot,
     activeLanguageId,
     activeLspState,
@@ -4704,8 +4794,82 @@ export function CodeWorkspaceTab({
     }),
     [deferredOpenFiles, lspFiles, openOrder],
   );
-  const problemCounts = useMemo(
-    () => problemFiles.reduce(
+  // M7-C: whole-project Problems. jdtls stores diagnostics for unopened files
+  // after a build; we poll the aggregate while the panel is in "project" scope
+  // (push events were dropped — see lsp.rs C-1). `key` is the absolute path.
+  const [problemsScope, setProblemsScope] = useState<ProblemsScope>("open");
+  const [projectProblemFiles, setProjectProblemFiles] = useState<ProblemFileGroup[]>([]);
+  const [projectProblemsLoading, setProjectProblemsLoading] = useState(false);
+  const [rebuildingProject, setRebuildingProject] = useState(false);
+
+  const problemPathToRef = useCallback((absPath: string): CodeWorkspaceFileRef | null => {
+    for (const root of rootsRef.current) {
+      const rel = relativePathWithinRoot(root.path, absPath);
+      if (rel !== null && rel !== "") {
+        return { kind: "root", rootId: root.id, path: rel };
+      }
+    }
+    return null;
+  }, []);
+
+  const refreshProjectProblems = useCallback(async () => {
+    try {
+      const files = await lspWorkspaceDiagnostics(workspaceInstanceId);
+      if (!mountedRef.current) return;
+      setProjectProblemFiles(files.map((entry): ProblemFileGroup => {
+        const ref = problemPathToRef(entry.path);
+        const rootName = ref?.kind === "root" ? findRoot(ref.rootId)?.name : undefined;
+        const subtitle = ref?.kind === "root"
+          ? (rootName ? `${rootName} / ${ref.path}` : ref.path)
+          : entry.path;
+        return {
+          key: entry.path,
+          title: basename(entry.path),
+          subtitle,
+          diagnostics: entry.diagnostics,
+        };
+      }));
+    } catch {
+      // No active jdtls session / command unsupported: leave the list as-is.
+    }
+  }, [findRoot, problemPathToRef, workspaceInstanceId]);
+
+  // Poll project diagnostics while the Problems panel is open in project scope.
+  useEffect(() => {
+    if (!(bottomDockOpen && bottomDockTab === "problems" && problemsScope === "project")) return;
+    let cancelled = false;
+    setProjectProblemsLoading(true);
+    void refreshProjectProblems().finally(() => {
+      if (!cancelled && mountedRef.current) setProjectProblemsLoading(false);
+    });
+    const timer = window.setInterval(() => void refreshProjectProblems(), 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [bottomDockOpen, bottomDockTab, problemsScope, refreshProjectProblems]);
+
+  const rebuildProject = useCallback(async () => {
+    const root = rootsRef.current[0];
+    if (!root) return;
+    // A synthetic .java path selects the root's jdtls session (keyed on scope).
+    const descriptor = lspDescriptorForPath(root.path, "__taomni_build__.java");
+    setRebuildingProject(true);
+    try {
+      await lspBuildWorkspace(descriptor);
+      setStatusMessage("Rebuilding project…");
+    } catch (err) {
+      setStatusMessage(errorMessage(err));
+    } finally {
+      if (mountedRef.current) setRebuildingProject(false);
+    }
+    // Give jdtls a beat to publish, then refresh.
+    window.setTimeout(() => void refreshProjectProblems(), 1200);
+  }, [lspDescriptorForPath, refreshProjectProblems, setStatusMessage]);
+
+  const problemsScopeFiles = problemsScope === "project" ? projectProblemFiles : problemFiles;
+  const activeProblemCounts = useMemo(
+    () => problemsScopeFiles.reduce(
       (counts, file) => {
         for (const diagnostic of file.diagnostics) {
           if (diagnostic.severity === 1) counts.errors += 1;
@@ -4715,17 +4879,191 @@ export function CodeWorkspaceTab({
       },
       { errors: 0, warnings: 0 },
     ),
-    [problemFiles],
+    [problemsScopeFiles],
   );
+
   const openProblem = useCallback(
     (fileKeyValue: string, diagnostic: LspDiagnostic) => {
-      const file = openFilesRef.current[fileKeyValue];
-      if (!file) return;
-      revealEditorLocation(file.key, diagnostic.range);
-      void openFile(file.ref);
+      // Open-file key (open scope) → reveal in place.
+      const openState = openFilesRef.current[fileKeyValue];
+      if (openState) {
+        revealEditorLocation(openState.key, diagnostic.range);
+        void openFile(openState.ref);
+        return;
+      }
+      // Project scope: the key is an absolute path to a (possibly unopened) file.
+      const ref = problemPathToRef(fileKeyValue);
+      if (!ref) return;
+      void openFile(ref).then(() => revealEditorLocation(fileKey(ref), diagnostic.range));
     },
-    [openFile, revealEditorLocation],
+    [openFile, problemPathToRef, revealEditorLocation],
   );
+
+  // M8 E: Java test discovery + terminal run. Discovery targets the active .java
+  // file; running builds a Maven/Gradle command and reuses the terminal runner.
+  const activeFileIsJava = !!activeFile
+    && !activeFile.library
+    && activeFile.languagePath.toLowerCase().endsWith(".java");
+  const [javaTestBuildTool, setJavaTestBuildTool] = useState<JavaTestBuildTool | null>(null);
+
+  const discoverActiveJavaTests = useCallback(async () => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file) return [];
+    const descriptor = lspDescriptorForFile(file);
+    if (!descriptor) return [];
+    return javaTestDiscover(descriptor);
+  }, [activeKey, lspDescriptorForFile]);
+
+  // Detect the active file's build tool (Maven/Gradle) for the run command; only
+  // while the Tests tab is open for a Java file. Cached per detection.
+  useEffect(() => {
+    if (!(bottomDockOpen && bottomDockTab === "tests" && activeFileIsJava && activeFile)) return;
+    if (activeFile.ref.kind !== "root") {
+      setJavaTestBuildTool(null);
+      return;
+    }
+    const root = findRoot(activeFile.ref.rootId);
+    if (!root) return;
+    let cancelled = false;
+    void workspaceTaskTree(root.path)
+      .then((groups) => {
+        if (cancelled) return;
+        const sources = new Set(groups.map((group) => group.source));
+        setJavaTestBuildTool(sources.has("Maven") ? "maven" : sources.has("Gradle") ? "gradle" : null);
+      })
+      .catch(() => {
+        if (!cancelled) setJavaTestBuildTool(null);
+      });
+    return () => { cancelled = true; };
+  }, [activeFile, activeFileIsJava, bottomDockOpen, bottomDockTab, findRoot]);
+
+  const runJavaTest = useCallback((item: JavaTestItem) => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root" || !javaTestBuildTool) return;
+    const root = findRoot(file.ref.rootId);
+    if (!root) return;
+    const command = javaTestRunCommand(javaTestBuildTool, item, defaultRunner(javaTestBuildTool));
+    runWorkspaceTask({
+      id: `java-test:${item.fullName}`,
+      label: `Test ${item.name}`,
+      command,
+      cwd: root.path,
+      source: "Test",
+      rootId: root.id,
+      rootName: root.name,
+    });
+  }, [activeKey, findRoot, javaTestBuildTool, runWorkspaceTask]);
+
+  // M9 debug-test: resolve the test's JUnit launch config (java-test) and start
+  // a debug session through the DAP path.
+  const debugJavaTest = useCallback((item: JavaTestItem) => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root") return;
+    const root = findRoot(file.ref.rootId);
+    const descriptor = lspDescriptorForFile(file);
+    const absolute = absolutePathForOpenFile(file);
+    if (!root || !descriptor || !absolute) return;
+    void (async () => {
+      try {
+        const launch = await javaTestResolveLaunch(descriptor, item);
+        await debugRef.current.startDebug({
+          workspaceId: descriptor.workspaceId,
+          rootPath: root.path,
+          filePath: absolute,
+          cwd: root.path,
+          mainClass: launch.mainClass,
+          projectName: launch.projectName,
+          classPaths: launch.classPaths,
+          modulePaths: launch.modulePaths,
+          args: launch.args,
+          vmArgs: launch.vmArgs,
+        });
+        setBottomDockTab("debug");
+        setBottomDockOpen(true);
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+      }
+    })();
+  }, [activeKey, findRoot, lspDescriptorForFile, absolutePathForOpenFile, setBottomDockOpen, setBottomDockTab, setStatusMessage]);
+
+  // M9: debug session (breakpoints, stepping, variables, watch, console).
+  const debug = useCodeDebugSession(workspaceInstanceId);
+  // Ref so callbacks declared above the hook (debug-test) can reach it.
+  const debugRef = useRef(debug);
+  debugRef.current = debug;
+  const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
+  const activeDebugBreakpoints = useMemo<DebugBreakpointMarker[]>(() => {
+    if (!activeFileAbsPath) return [];
+    const key = normalizeFsPath(activeFileAbsPath);
+    const list = debug.breakpoints[key] ?? debug.breakpoints[activeFileAbsPath] ?? [];
+    return list.map((bp) => ({ line: bp.line, conditional: !!(bp.condition || bp.logMessage) }));
+  }, [activeFileAbsPath, debug.breakpoints]);
+  const activeDebugCurrentLine = useMemo<number | null>(() => {
+    const loc = debug.currentLocation;
+    if (!loc || !activeFileAbsPath) return null;
+    return normalizeFsPath(loc.path) === normalizeFsPath(activeFileAbsPath) ? loc.line : null;
+  }, [activeFileAbsPath, debug.currentLocation]);
+  const toggleActiveBreakpoint = useCallback((line: number) => {
+    if (activeFileAbsPath) debug.toggleBreakpoint(normalizeFsPath(activeFileAbsPath), line);
+  }, [activeFileAbsPath, debug]);
+
+  /** Right-click a breakpoint (D5): set a condition or a logpoint message. */
+  const editActiveBreakpoint = useCallback((line: number) => {
+    if (!activeFileAbsPath) return;
+    const key = normalizeFsPath(activeFileAbsPath);
+    const existing = (debug.breakpoints[key] ?? []).find((bp) => bp.line === line);
+    if (!existing) debug.toggleBreakpoint(key, line); // ensure the breakpoint exists first
+    void (async () => {
+      const condition = await promptAppDialog({
+        title: `Breakpoint at line ${line}`,
+        label: "Condition (break only when true) — blank for none",
+        initialValue: existing?.condition ?? "",
+        allowEmpty: true,
+      });
+      if (condition === null) return; // cancelled
+      const logMessage = await promptAppDialog({
+        title: `Breakpoint at line ${line}`,
+        label: "Logpoint message (logs instead of breaking; {expr} interpolates) — blank for none",
+        initialValue: existing?.logMessage ?? "",
+        allowEmpty: true,
+      });
+      if (logMessage === null) return;
+      debug.setBreakpointOptions(key, line, {
+        condition: condition.trim() || undefined,
+        logMessage: logMessage.trim() || undefined,
+      });
+    })();
+  }, [activeFileAbsPath, debug]);
+
+  /** Build a Java launch config for the active file and start debugging. */
+  const startDebugActiveFile = useCallback(() => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root") return;
+    const root = findRoot(file.ref.rootId);
+    if (!root) return;
+    const absolute = absolutePathForOpenFile(file);
+    if (!absolute) return;
+    const descriptor = lspDescriptorForFile(file);
+    void debug.startDebug({
+      workspaceId: descriptor?.workspaceId ?? workspaceInstanceId,
+      rootPath: root.path,
+      filePath: absolute,
+      cwd: root.path,
+    }).catch((err) => setStatusMessage(errorMessage(err)));
+    setBottomDockTab("debug");
+    setBottomDockOpen(true);
+  }, [activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
+
+  const openDebugFrame = useCallback((frame: DebugStackFrame) => {
+    if (!frame.path) return;
+    const ref = problemPathToRef(frame.path);
+    if (!ref) return;
+    const range = { start: { line: frame.line - 1, character: 0 }, end: { line: frame.line - 1, character: 0 } };
+    void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
+  }, [openFile, problemPathToRef, revealEditorLocation]);
+
+  const activeFileDebuggable = !!activeFileIsJava && !!activeFile && activeFile.ref.kind === "root";
+
   useEffect(() => {
     if (!onSyncGitManager) return;
     onSyncGitManager(gitManagerPayload);
@@ -4849,6 +5187,10 @@ export function CodeWorkspaceTab({
         activeSemanticTokens={semanticTokensByGroup[groupId]}
         activeGitChanges={groupFile ? gitLineChangesByFile[groupFile.key] ?? [] : []}
         activeGitBlame={gitBlameByGroup[groupId]}
+        activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
+        activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
+        onToggleBreakpoint={groupId === activeEditorGroupId ? toggleActiveBreakpoint : undefined}
+        onEditBreakpoint={groupId === activeEditorGroupId ? editActiveBreakpoint : undefined}
         activeCapabilities={groupCapabilities}
         activeLspSyncing={!!groupLspState?.syncing}
         lspStatusPill={(
@@ -5318,17 +5660,22 @@ export function CodeWorkspaceTab({
             id: "problems",
             label: "Problems",
             icon: <AlertTriangle className="h-3.5 w-3.5" />,
-            badge: problemCounts.errors > 0 || problemCounts.warnings > 0 ? (
+            badge: activeProblemCounts.errors > 0 || activeProblemCounts.warnings > 0 ? (
               <span className="inline-flex items-center gap-1">
-                {problemCounts.errors > 0 && <span className="text-red-500">{problemCounts.errors}</span>}
-                {problemCounts.warnings > 0 && <span className="text-amber-500">{problemCounts.warnings}</span>}
+                {activeProblemCounts.errors > 0 && <span className="text-red-500">{activeProblemCounts.errors}</span>}
+                {activeProblemCounts.warnings > 0 && <span className="text-amber-500">{activeProblemCounts.warnings}</span>}
               </span>
             ) : undefined,
             content: (
               <ProblemsPanel
-                files={problemFiles}
+                files={problemsScopeFiles}
                 onOpenProblem={openProblem}
                 onQuickFix={(fileKey, diagnostic) => void openQuickFixForProblem(fileKey, diagnostic)}
+                scope={problemsScope}
+                onScopeChange={setProblemsScope}
+                onRebuild={() => void rebuildProject()}
+                rebuilding={rebuildingProject}
+                loading={problemsScope === "project" && projectProblemsLoading}
               />
             ),
           },
@@ -5436,16 +5783,52 @@ export function CodeWorkspaceTab({
                 workspaceInstanceId={workspaceInstanceId}
                 roots={roots}
                 active={bottomDockOpen && bottomDockTab === "run"}
-                onRun={(task, onExit) => {
-                  terminalDockRef.current?.runCommand(
-                    task.command,
-                    task.cwd,
-                    `Run: ${task.label}`,
-                    onExit,
-                  );
-                  setBottomDockTab("terminal");
-                  setBottomDockOpen(true);
-                }}
+                onRun={runWorkspaceTask}
+              />
+            ),
+          },
+          {
+            id: "build",
+            label: "Build",
+            icon: <Hammer className="h-3.5 w-3.5" />,
+            content: (
+              <BuildPanel
+                workspaceInstanceId={workspaceInstanceId}
+                roots={roots}
+                active={bottomDockOpen && bottomDockTab === "build"}
+                onRunTask={(task) => runWorkspaceTask(task)}
+                onLoadModules={(rootPath) =>
+                  // A synthetic .java path selects the root's jdtls session
+                  // (session keys on project scope, not on the file existing).
+                  lspJavaModules(lspDescriptorForPath(rootPath, "__taomni_modules__.java"))}
+              />
+            ),
+          },
+          {
+            id: "tests",
+            label: "Tests",
+            icon: <FlaskConical className="h-3.5 w-3.5" />,
+            content: (
+              <TestsPanel
+                activeFileTitle={activeFileIsJava ? activeFile?.title ?? null : null}
+                canDiscover={activeFileIsJava}
+                active={bottomDockOpen && bottomDockTab === "tests"}
+                onDiscover={discoverActiveJavaTests}
+                onRun={runJavaTest}
+                onDebug={debugJavaTest}
+                runDisabled={javaTestBuildTool === null}
+              />
+            ),
+          },
+          {
+            id: "debug",
+            label: "Debug",
+            icon: <Bug className="h-3.5 w-3.5" />,
+            content: (
+              <DebugPanel
+                debug={debug}
+                onStart={activeFileDebuggable ? startDebugActiveFile : null}
+                onOpenFrame={openDebugFrame}
               />
             ),
           },

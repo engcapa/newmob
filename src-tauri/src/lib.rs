@@ -4,11 +4,15 @@ mod appearance;
 mod asr;
 mod chat;
 mod config;
+mod dap;
 mod database;
 mod filebrowser;
 mod git;
 mod hbase;
 mod history;
+mod java_bundles;
+mod java_debug_adapter;
+mod java_test;
 mod lanchat;
 mod lsp;
 pub mod llm;
@@ -456,6 +460,8 @@ pub fn run() {
             workspace::workspace_list_files_recursive,
             workspace::workspace_detect_git_roots,
             workspace::workspace_detect_tasks,
+            workspace::workspace_task_tree,
+            workspace::workspace_dependency_tree,
             workspace::workspace_read_file,
             workspace::workspace_read_loose_file,
             workspace::workspace_write_file,
@@ -473,6 +479,9 @@ pub fn run() {
             lsp::lsp_list_presets,
             lsp::lsp_set_java_home,
             lsp::lsp_set_java_vmargs,
+            lsp::lsp_set_java_settings,
+            lsp::lsp_set_java_bundles,
+            lsp::lsp_detect_java_bundles,
             lsp::lsp_detect_servers,
             lsp::lsp_document_status,
             lsp::lsp_open_document,
@@ -487,6 +496,16 @@ pub fn run() {
             lsp::lsp_implementation,
             lsp::lsp_read_uri_contents,
             lsp::lsp_download_sources,
+            lsp::lsp_reload_project,
+            lsp::lsp_java_modules,
+            lsp::lsp_workspace_diagnostics,
+            lsp::lsp_build_workspace,
+            dap::dap_start_session,
+            dap::dap_send_request,
+            dap::dap_send,
+            dap::dap_terminate,
+            java_test::java_test_discover,
+            java_test::java_test_resolve_launch,
             lsp::lsp_references,
             lsp::lsp_document_symbols,
             lsp::lsp_completion,

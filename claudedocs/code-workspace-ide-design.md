@@ -2,7 +2,9 @@
 
 > 目标：在现有 Code Workspace 基础上做功能与交互完善，达到"日常代码开发够用"的 IntelliJ IDEA 级体验（非全量对标）。本文档为设计稿，不含实现代码。
 >
-> 日期：2026-07-25 · 版本：v3.0（新增 §11 Java 深度支持完善计划 M6–M9，并据此修订 §2.3 非目标；M0–M5 交付情况见 §8.1–8.2）· 状态：**实施中**（M0–M5 已合入 `main`；M6–M9 为 Java 工程能力深化——jdtls 设置补齐、大文件性能、全项目诊断、构建集成、测试与调试(DAP)，详见 §11，尚未开工）
+> 日期：2026-07-26 · 版本：v3.2（**M6–M9 全部代码交付**于 `feat/code-workspace-m6-java`：M6 jdtls 设置/大文件、M7 全项目诊断/构建集成、M8 Bundle 基建/DAP 内核/Java 适配器/测试探测、M9 调试主线 D3–D5/debug-test。真机冒烟由用户统一验证；结构化测试结果树按 JUnit socket 协议真机依赖显式后置）· 状态：**实施中**（M0–M5 已合入 `main`；M6–M9 待真机冒烟 + 合并）
+>
+> 早期版本：v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
@@ -583,10 +585,10 @@ src/stores/
 | **M3 布局与终端（P1）** | 分屏、tab 管理/预览 tab、面包屑、集成终端、Run/Tasks | L | ✅ 5/5 |
 | **M4 语言智能·下 + Git（P1）** | 调用层级、类型层级、用法高亮、inlay hints、智能选区(LSP)、Git gutter、inline blame、状态栏分段、持久化增强 | L | ✅ 10/10（代码已交付；真机冒烟后置） |
 | **M5 差异化（P2）** | 本地历史、AI 集成入口、语义高亮、TODO/书签（可选）、远程工作区 spike | M–L | ✅ 5/5（代码已交付；真机冒烟后置） |
-| **M6 Java 基础对齐（P0，§11 A+B）** | jdtls 初始化 `java.*` 设置全集（含 Lombok/autobuild/organizeImports/codeGeneration）；大文件性能（ChangeSet→LSP 增量、大文件降级守卫） | M | ⬜ 未开工 |
-| **M7 工程智能（P1，§11 C+F）** | 全项目诊断（先 spike，后端聚合命令 + event + Problems 面板切换）；构建集成增强（依赖树、生命周期/任务树、项目重载、模块视图） | L | ⬜ 未开工（C 需 spike 前置） |
-| **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test/lombok 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | ⬜ 未开工（依赖 Bundle 基建） |
-| **M9 调试主线 + 收口（P1/P2，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载；debug-test；真机冒烟回填 | XL | ⬜ 未开工（依赖 M8 的 D1–D2） |
+| **M6 Java 基础对齐（P0，§11 A+B）** | jdtls 初始化 `java.*` 设置全集（含 Lombok/autobuild/organizeImports/codeGeneration）；大文件性能（大文件降级守卫、增量 diff 提速） | M | ✅ 代码已交付（`c35d963` A + `4a06f91` B；真机冒烟后置；ChangeSet→LSP 全量重写按风险显式后置，见 §11.B） |
+| **M7 工程智能（P1，§11 C+F）** | 全项目诊断（先 spike，后端聚合命令 + Problems 面板切换）；构建集成增强（依赖树、生命周期/任务树、项目重载、模块视图） | L | 🔶 F 构建集成 + C 全项目诊断基础设施代码已交付（`ba037ac` 重载 + `a0d209c` 任务树 + `f9abab5` 依赖树 + 模块视图 + `083999f` 全项目诊断后端 + 前端 Problems 切换）；C 的诊断刷新由 event 改为轮询（Windows 链接约束，见 §11.C），命中语义待用户真机 spike |
+| **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | ✅ 代码已交付：Bundle 基建（`4929467`）+ D1 DAP 内核（`b432f0f`）+ D2 Java 适配器（`9edb7b7`）+ E 测试探测/terminal 运行（`daa20fd`）；真机冒烟后置（jdtls 已在 PATH，bundle jar 待配置） |
+| **M9 调试主线 + 收口（P1/P2，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载；debug-test；真机冒烟回填 | XL | ✅ 代码已交付：D3 断点/单步/调用栈/当前行 + D4 变量/监视/console（`b141bad`）+ D5 条件/logpoint/异常断点/热重载 + debug-test；结构化测试结果树（JUnit socket 协议）显式后置；真机冒烟由用户统一验证 |
 
 依赖关系：M0 是一切前提；M1/M2 内部可并行（后端 LSP 扩展与搜索模块独立）；M3 依赖 M0 的 dock 容器；M4 的层级面板依赖 M0 dock + M2 的 LSP 请求管道。**M6 两条线（A/B）互相独立可并行，且不依赖 M1–M5 之外的新前提；M7 的全项目诊断（C）依赖 M6-A 的 `autobuild`，构建增强（F）独立；M8 的测试/调试依赖 Bundle 基建，DAP 内核（D1）可与 M7 并行起步；M9 的 debug-test 依赖 M8 的 D1–D2。** 每个里程碑独立可发布、可验收。M6–M9 的完整拆分见 §11。
 
@@ -700,8 +702,8 @@ src/stores/
 5. **✅ 合入主干**
    M0–M5 已由 PR #361 合入 `main`；后续收口分支待独立合并，真机冒烟结果可在后续独立补录。
 
-6. **⬜ Java 深度支持（M6–M9，§11 新增）**
-   突破原 §2.3 非目标，深化 Java 工程能力：先并行 **M6**（jdtls `java.*` 设置补齐 + 大文件性能，快赢）；再 **M7** 工程智能（全项目诊断需先 spike jdtls `buildWorkspace` 推送语义 + 构建集成增强）；**M8/M9** 为测试与调试（DAP）——分 D1–D5 阶段推进，通用 DAP 框架而非 Java 特判。完整方案、命令清单与风险见 §11。
+6. **🔶 Java 深度支持（M6–M9，§11 新增）**
+   突破原 §2.3 非目标，深化 Java 工程能力。**M6 代码已交付**（`c35d963` A：jdtls `java.*` 设置全集 + 热更新 + Lombok；`4a06f91` B：大文件降级守卫 + 增量 diff 提速；ChangeSet→LSP 全量重写按失步风险显式后置，见 §11.B）——真机冒烟随 M0–M5 一并后置。下一步 **M7** 工程智能：全项目诊断需**先 spike** jdtls `java.buildWorkspace` 是否对未打开含错文件推送 `publishDiagnostics`（§11.C 硬门槛），构建集成增强（§11.F）独立可并行；**M8/M9** 为测试与调试（DAP）——分 D1–D5 阶段推进，通用 DAP 框架而非 Java 特判。完整方案、命令清单与风险见 §11。
 
 ---
 
@@ -770,7 +772,7 @@ src/stores/
 
 **前端 / 设置页**：Settings → Language Servers → Java 增子项（Lombok 开关、保存时组织导入、格式化 profile 路径、导入顺序、autobuild 开关）；复用现有 `workspace/didChangeConfiguration` 通道（`lsp.rs:3536` Download Sources 已用）做**热更新**，无需重启会话。
 
-**交付物**：`java.*` 设置全集 + 设置 UI + 单测（扩展 `jdtls_initialization_*`）。
+**交付物**：`java.*` 设置全集 + 设置 UI + 单测（扩展 `jdtls_initialization_*`）。**✅ 已交付 `c35d963`**：`JavaLanguageSettings` 进程级 blob（serde 默认；autobuild/completion/format/import/organizeImports+saveActions/codeGeneration/codeLens/signatureHelp/inlayHints/incompleteClasspath），`lsp_initialization_options` 输出完整 `settings.java` 树；`lsp_set_java_settings` 命令走 `workspace/didChangeConfiguration` 热更新（空 runtimes 省略以免覆盖 initialize 的 JDK 配置）；Lombok 短期经 `-javaagent` 注入 `jdtls_vmargs()`（直连 + JAVA_OPTS 两路径）；前端 `LSP_JAVA_SETTINGS_KEY` 持久化 + Language Servers 设置子区（autobuild/保存组织导入/Lombok+jar/格式化 profile/导入顺序）+ en/zh i18n；Rust 4 新测（全树、默认往返、Lombok 门禁、热更新省 runtimes，共享全局锁串行）+ 前端设置/持久化测试。
 
 ### 11.B 大文件性能（M6，快赢，规模 M，风险中）
 
@@ -784,6 +786,12 @@ src/stores/
 4. **保存回传去全量**：补齐 controlled-doc effect 的二次全串转换消除（`lastDocumentTextRef` 已部分缓解）。
 
 **交付物**：ChangeSet→LSP 增量适配、大文件降级 compartment、阈值配置、大文件基准测试。**兜底**：增量与 server 版本不一致时回退全量（已有 catch 路径）+ 版本代际校验（已有 epoch guard）。
+
+**✅ 已交付 `4a06f91`（部分，含一处显式后置）**：
+- **大文件降级守卫（本项主干、性能主因）**：`largeFile.ts` 阈值（>1.5 MB 或 >20k 行，字节判定 O(1) + 有界行扫描）；`CodeWorkspaceTab` 的 `activeFileIsLarge` memo 关停 semanticTokens / inlayHints / documentHighlight 三个 per-edit effect（含 documentHighlight 的文本兜底扫描）及其装饰重建，保留 Lezer 高亮与按需补全/悬停/跳转；状态栏「大文件模式」分段（`codeWorkspaceStatusStore.largeFile` + `StatusBar` + en/zh i18n）。
+- **增量 diff 提速（安全等价优化）**：`buildIncrementalContentChange` 的变更结束位置改为从 `start` 沿变更跨度续扫，不再对 `previousText` 从 0 再扫一遍——输出完全等价，大文件尾部编辑的端点定位成本约减半。
+- **增量默认开 + 全量兜底**：`textDocumentSyncKind===2 → omitFullText` 与失败回退已由既有 `useWorkspaceLspSession` 测试覆盖，本次未改其语义。
+- **⏸ 显式后置：ChangeSet→LSP 数组全量重写（彻底去掉「两份全串 diff」）**。原方案的兜底仅捕获 server 报错，无法捕获「静默接受但错误」的增量；要真正安全需一次 O(n) 校验（apply→比对），成本与现有 O(n) 全串 diff 相当，抵消收益。其非安全形态存在静默 LSP 失步风险：外部/程序化编辑（格式化、Git 回滚、WorkspaceEdit）经 `applyingExternalDocRef` 绕过 `onChange`、分屏共享单 buffer、多光标需降序处理——这些只能靠真机 jdtls 冒烟验证（正是本方案尚欠的真机项）。故保留全串 diff 为权威来源（现已更省），把数组重写留作独立决策项。测试：largeFile 阈值、diff 单遍端点等价（深处编辑 + 跨行删除）、StatusBar 大文件分段；`pnpm build` + 相关 vitest 全绿。
 
 ### 11.C 全项目诊断（M7，攻坚，规模 L，风险中高，需 spike 前置）
 
@@ -802,6 +810,12 @@ src/stores/
 
 **交付物**：spike 报告 → 后端全项目诊断命令 + event → Problems 面板切换 + 构建触发入口。
 
+**🔶 已交付基础设施（M7-C，`083999f` 后端 + C-2 前端提交）——spike 无关、优雅降级**：
+- **后端 `083999f`**：`lsp_workspace_diagnostics(workspace_id)` 聚合该 workspace 全部 ready session 已收到的诊断（含未打开文件,按 path 去重排序,跳过 `jdt://`/非 file URI）→ `WorkspaceDiagnosticFile{path,uri,diagnostics}`;`lsp_build_workspace(descriptor)` 走 `workspace/executeCommand: java.buildWorkspace(full=true)` 触发「重新构建项目」。诊断本就按 URI 全量存储,故此为纯读聚合——**对 spike 结果不敏感**:命中则「全项目」显示未打开文件诊断,未命中则等同「打开的文件」。
+- **⚠ 事件推送改为轮询(架构变更)**：原计划的 `lsp:diagnostics-updated` event push **已放弃**——在 LSP session 的 stdout 后台任务里持有 `AppHandle`/`Emitter` 会确定性触发 Windows 测试二进制启动失败(`STATUS_ENTRYPOINT_NOT_FOUND` 0xC0000139,与 emit 调用无关,移除 AppHandle 字段即恢复)。改为**前端轮询**:Problems 面板处于「全项目」且打开时每 ~1.5s 拉 `lsp_workspace_diagnostics` + 重建后重取。与既有按文件诊断同为 pull 式,无功能损失。
+- **前端 C-2**：Problems 面板「全项目 / 打开的文件」切换;「全项目」轮询聚合诊断;点未打开文件诊断即 `problemPathToRef`(复用 `relativePathWithinRoot`)映射回 `{kind:root,rootId,path}` → openFile + reveal;徽标随激活 scope 计数;「Rebuild」按钮(仅全项目)→ `lspBuildWorkspace`。文案沿用 ProblemsPanel 既有硬编码英文约定(不引 i18n)。
+- **⬜ 仍待你真机 spike**:验证 jdtls `java.buildWorkspace` 是否对**未打开含错文件**推送 `publishDiagnostics`。`pnpm tauri dev` → Maven/Gradle 工程含 A.java(有错,不打开)/B.java(打开) → 点「Rebuild」→ 看「全项目」是否列出 A.java 的错。**命中**:C 完整可用。**未命中**:补 LSP 3.17 pull 诊断 `workspace/diagnostic` 回退(需 server 声明 `diagnosticProvider.workspaceDiagnostics`)。测试:后端 `file_path_from_uri`;前端 ProblemsPanel scope 切换/rebuild/空态/加载态。`cargo test` 902、`pnpm test` 205 文件 / 1633 全绿。
+
 ### 11.Bundle jdtls 扩展加载基建（M8，D/E 共享硬前提，规模 M）
 
 jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩展。**新增**：
@@ -809,6 +823,8 @@ jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩
 - 后端 bundle 路径解析（用户配置或随发行下载）：`java-debug`（`com.microsoft.java.debug.plugin-*.jar`）、`java-test`（`com.microsoft.java.test.plugin-*.jar`）、`lombok`。
 - 注入 `lsp_initialization_options` 的 `bundles`；Settings 暴露路径 + 「自动下载」入口 + 可用性探测（复用现有 jdtls 探测/版本校验模式）。
 - 复用 `cc_bridge` 的 oneshot HITL 管道模式处理 server 回推的 `workspace/executeCommand` 结果与 `applyEdit`。
+
+**✅ 已交付（`4929467`）**：新 `java_bundles.rs`——`resolve_bundle_jars`/`probe_bundles` 从配置目录按版本号（数值比较,非字典序）选最高版 `com.microsoft.java.{debug,test}.plugin-*.jar`,或接受显式 jar 路径;进程级 `CONFIGURED_JAVA_BUNDLES`。`lsp_initialization_options` 在配置存在时注入 `"bundles":[…]`（否则省略）。命令 `lsp_set_java_bundles`/`lsp_detect_java_bundles`;前端 `LSP_JAVA_BUNDLES_KEY` 持久化 + 启动推送 + Settings「调试与测试扩展」子区（路径输入 + detected/not-found 探测）+ en/zh。**修订**:Lombok **不是 bundle**——仍走 `-javaagent`(§11.A);bundles 只装 java-debug/java-test。**范围**:本期做路径配置 + 探测,自动下载留作发行打包决策(§10.8)。单测 5(版本选择/显式 jar/探测/空);jdtls 实际加载 jar 为真机项。
 
 ### 11.F 构建集成（M7，增强现有 Run/Tasks，规模 M–L，风险中）
 
@@ -820,6 +836,13 @@ jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩
 - **模块/源集视图**：多模块工程 module 结构（jdtls `java.project.getAll`）。
 
 **不做**：IDEA 级 facet 建模、复杂运行配置参数体系（承接 §5.9 边界）。
+
+**✅ 已交付（M7-F，`ba037ac` + `a0d209c` + `f9abab5` + 模块视图提交）**：
+- **项目重载（F-3，`ba037ac`）**：`lsp_reload_project` 走 active jdtls session 发 `java/projectConfigurationUpdate`（复用 download_sources 管道）；前端保存 pom.xml/build.gradle[.kts]/settings.gradle[.kts] 且 jdtls 活跃时弹「Reload Java project」确认。
+- **任务树（F-2，`a0d209c`）**：`workspace_task_tree` 按 source 分组，Maven 全生命周期（clean…install）、Gradle 常用任务（clean/build/assemble/check/test/jar），其余生态按来源归组——纯离线（不 spawn，`gradle tasks --all` 实时枚举留作后续）；前端 Build 底部 dock 面板渲染可点击树，复用 `runWorkspaceTask`（PTY），原 Run tab 不动。
+- **依赖树（F-1，`f9abab5`）**：`workspace_dependency_tree` spawn `mvn dependency:tree` / `gradle dependencies --configuration runtimeClasspath`，解析为 `DependencyNode` 森林并标版本冲突（Maven verbose `(omitted for conflict…)`、Gradle `req -> resolved` 仲裁）；解析器纯函数单测（spawn 为真机项）；前端 Build 面板 Dependencies 区按需加载、懒展开、冲突徽标。**安全**：树装配用索引路径栈，无裸指针（避免 Vec 扩容悬垂）。
+- **模块视图（F-4）**：`lsp_java_modules` 走 jdtls `workspace/executeCommand: java.project.getAll` → `JavaModule{name,path,uri}`（解析器去重+按名排序，单测）；前端 Build 面板 Modules 区仅对含 Maven/Gradle 任务的根显示、按需加载（合成 `.java` 路径选中该根的 jdtls session）。
+- **边界确认**：均未做 IDEA facet 建模 / 运行配置参数体系。真机门槛：spawn `mvn`/`gradle` 与 jdtls `getAll`/`projectConfigurationUpdate` 的端到端结果由用户真机冒烟回填；本期单测覆盖纯解析 + graceful 错误路径。
 
 ### 11.D 调试（DAP，M8–M9，最大新项目，规模 XL，风险高，分 D1–D5）
 
@@ -839,11 +862,11 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
        └─ 首个：Java 适配器（见 D2）；后续语言追加 descriptor 即可
 ```
 
-- **D1 通用 DAP 内核 + 适配器注册表**（新 `src-tauri/src/dap.rs`）：DAP 分帧/收发/事件泵、会话状态机（全 DAP 标准类型）、`DebugAdapterRegistry` 抽象与命令骨架（`dap_start_session`/`dap_send_request`/`dap_terminate` + event 转发）。**不含任何语言特判。规模 L。**
-- **D2 Java 适配器（首个 registry 插入）**：实现 Java `DebugAdapterDescriptor`——jdtls 命令 `java.resolveMainClass`/`java.resolveClasspath`/`java.resolveJavaExecutable` 组装 launch config；经 java-debug bundle 的 `vscode.java.startDebugSession` 拿到 adapter 端口/句柄交给 D1 内核。**语言相关代码集中于此一处。规模 M。**
-- **D3 断点 + 单步**：gutter 断点、run/pause/step in·over·out/continue、当前行高亮、调用栈面板——**经 D1 内核的 setBreakpoints/continue/stepIn… 通用请求，不碰适配器**。**规模 M。**
-- **D4 变量 / 监视 / 求值**：variables·scopes 树、watch、debug console `evaluate`、悬停求值——同样走 D1 通用请求。**规模 M。**
-- **D5 进阶**：条件断点、logpoint、异常断点（DAP `setExceptionBreakpoints`，通用）；热重载为 Java 适配器可选扩展（jdtls `redefineClasses`，经 registry 的适配器能力位声明，非内核必备）。**规模 M。**
+- **D1 通用 DAP 内核 + 适配器注册表**（新 `src-tauri/src/dap.rs`）：DAP 分帧/收发/事件泵、会话状态机（全 DAP 标准类型）、`DebugAdapterRegistry` 抽象与命令骨架（`dap_start_session`/`dap_send_request`/`dap_terminate` + event 转发）。**不含任何语言特判。规模 L。** — **✅ 已交付**：`Content-Length` 分帧 `encode_message`/`DapDecoder`(粘包/半包/坏帧跳过)、`classify_message`(response/event/reverse-request/unknown)、`DapSession`(seq 管理 + pending oneshot 关联 + `initialize` 握手)、`DapTransport`(Stdio spawn / Tcp connect——java-debug 走 Tcp)、`DebugAdapterRegistry`(空,D2 注册 Java)、`DapManager`(AppState 字段)、三命令。**事件安全**:`AppHandle` 作为命令参数克隆进 reader 闭包,`DapManager`/`DapSession` **不持 AppHandle**——规避 M7-C 的 `STATUS_ENTRYPOINT_NOT_FOUND`(测试二进制启动正常)。单测 8(编解码往返/半包/多帧/坏帧/分类/空注册表/大小写头)。spawn 真实 adapter 的端到端待 D2 + 真机。
+- **D2 Java 适配器（首个 registry 插入）**：实现 Java `DebugAdapterDescriptor`——jdtls 命令 `java.resolveMainClass`/`java.resolveClasspath`/`java.resolveJavaExecutable` 组装 launch config；经 java-debug bundle 的 `vscode.java.startDebugSession` 拿到 adapter 端口/句柄交给 D1 内核。**语言相关代码集中于此一处。规模 M。** — **✅ 已交付 `9edb7b7`**（`java_debug_adapter.rs`）：resolve → `DapLaunchPlan{Tcp{port},launch,args}`;`dap_start_session` 返回 `DapStartResult{sessionId,capabilities,request,arguments}`（前端/D3 驱动 launch 时序）;`LspManager::execute_java_command` 共享 jdtls 访问;`DapManager::with_lsp` 注册 Java 适配器。单测 5（mainClass/classpath/port/launch-args/scope）。
+- **D3 断点 + 单步**：gutter 断点、run/pause/step in·over·out/continue、当前行高亮、调用栈面板——**经 D1 内核的 setBreakpoints/continue/stepIn… 通用请求，不碰适配器**。**规模 M。** — **✅ 已交付 `b141bad`**：`dap_send`（fire-and-forget，launch 握手需要）;`dapDebugModel`（纯：setBreakpoints/异常过滤 arg、threads/stackTrace 解析、step→command、event reducer，单测 6）;`useCodeDebugSession`（launch→initialized→setBreakpoints→configurationDone 编排、断点持久化、stopped 后 threads+stackTrace）;`debugEditorChrome` 断点 gutter + 当前行高亮;`DebugPanel` 控制条+调用栈。
+- **D4 变量 / 监视 / 求值**：variables·scopes 树、watch、debug console `evaluate`、悬停求值——同样走 D1 通用请求。**规模 M。** — **✅ 已交付 `b141bad`（随 D3 hook/panel）**：stopped 后 scopes→variables 懒展开树、watch 表达式（context=watch）、console（context=repl）。
+- **D5 进阶**：条件断点、logpoint、异常断点（DAP `setExceptionBreakpoints`，通用）；热重载为 Java 适配器可选扩展（jdtls `redefineClasses`，经 registry 的适配器能力位声明，非内核必备）。**规模 M。** — **✅ 已交付**：条件断点/logpoint（gutter 右键 → 条件/日志消息 prompt → `setBreakpointOptions` 走 `setBreakpoints` 的 condition/logMessage）;异常断点（面板按 `capabilities.exceptionBreakpointFilters` 勾选 → `setExceptionBreakpoints`）;热重载按钮（`redefineClasses`，best-effort）。
 
 **前端**：底部 Debug 面板（调用栈/变量/监视/断点/console）+ 编辑器断点 gutter + 悬浮运行工具条，**均按 DAP 标准模型渲染，与语言无关**；适配器专属能力（如 Java 热重载）按 D1 下发的 capabilities/适配器能力位开关（沿用 §5.2.0 capability 驱动模式）。
 
@@ -853,6 +876,8 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
 - **运行**：非调试 run 经 launch（不依赖 D）；调试 run 经 D 的 DAP（依赖 D2）。结果 pass/fail/skip/耗时。
 - **前端**：测试树面板（按包/类/方法）、gutter run·debug 图标、结果状态、失败堆栈跳转、「重跑失败」。
 - **排期**：run-only 可先于 D 交付；debug-test 依赖 D2。
+
+**🔶 已交付（M8 E，探测 + terminal 运行）**：新 `java_test.rs`——`java_test_discover(workspace_id,root,file)` 走 jdtls `vscode.java.test.findTestTypesAndMethods`（file: URI 后端派生），容错解析（字段别名 fullName/jdtHandler/id、displayName/label/name、testLevel/level、children/tests）为 `JavaTestItem{name,fullName,kind,uri,range,children}` 树；复用 `LspManager::execute_java_command`。前端 `javaTestDiscover` 包装 + Tests 底部 dock 面板（按 class→method 树、run 图标、按活动 .java 文件自动探测）；**run-only 经集成终端**：`javaTestRunCommand`（Maven `-Dtest='Class#method'` / Gradle `--tests 'Class.method'`，构建工具由 `workspace_task_tree` 分组探测）复用 `runWorkspaceTask`（PTY）。单测：Rust 解析 4（class/method、结构推断 kind、空/畸形、location 别名）+ 前端 run 命令 5。**debug-test（M9 补齐）**：Tests 面板每项加 Debug 图标 → `java_test_resolve_launch`（java-test `vscode.java.test.junit.argument`，容错解析 mainClass/classpath/args）→ 以预解析 launch config 走 D2 DAP（Java 适配器识别已给的 `classPaths` 则跳过自身 classpath 解析）。单测:launch 解析别名。**仍显式后置**:结构化 pass/fail/skip/耗时结果树 + 失败堆栈跳转——那是独立的 JUnit 结果 socket 协议大块、纯真机依赖。真机门槛:探测/运行/调试需 jdtls + java-test/java-debug bundle 加载 + Java 工程。
 
 ### 11.7 实施顺序与里程碑映射
 

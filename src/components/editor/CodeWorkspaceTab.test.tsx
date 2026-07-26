@@ -33,6 +33,8 @@ const lspMocks = vi.hoisted(() => ({
   lspDetectServers: vi.fn(),
   lspSetJavaHome: vi.fn(),
   lspSetJavaVmargs: vi.fn(),
+  lspSetJavaSettings: vi.fn(),
+  lspSetJavaBundles: vi.fn(),
   lspOpenDocument: vi.fn(),
   lspChangeDocument: vi.fn(),
   lspSaveDocument: vi.fn(),
@@ -43,6 +45,11 @@ const lspMocks = vi.hoisted(() => ({
   lspDefinition: vi.fn(),
   lspReadUriContents: vi.fn(),
   lspDownloadSources: vi.fn(),
+  lspReloadProject: vi.fn(),
+  lspJavaModules: vi.fn(),
+  lspWorkspaceDiagnostics: vi.fn(),
+  lspBuildWorkspace: vi.fn(),
+  javaTestDiscover: vi.fn(),
   lspReferences: vi.fn(),
   lspPrepareCallHierarchy: vi.fn(),
   lspCallHierarchyIncoming: vi.fn(),
@@ -231,12 +238,16 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspDetectServers.mockReset();
     lspMocks.lspSetJavaHome.mockReset().mockResolvedValue(undefined);
     lspMocks.lspSetJavaVmargs.mockReset().mockResolvedValue("-Xms1024m -Xmx1024m");
+    lspMocks.lspSetJavaSettings.mockReset().mockResolvedValue(0);
+    lspMocks.lspSetJavaBundles.mockReset().mockResolvedValue(undefined);
     lspMocks.lspOpenDocument.mockReset();
     lspMocks.lspChangeDocument.mockReset();
     lspMocks.lspSaveDocument.mockReset();
     lspMocks.lspCloseDocument.mockReset();
     lspMocks.lspStopWorkspace.mockReset().mockResolvedValue(0);
     lspMocks.lspGetDiagnostics.mockReset();
+    lspMocks.lspWorkspaceDiagnostics.mockReset().mockResolvedValue([]);
+    lspMocks.lspBuildWorkspace.mockReset().mockResolvedValue(undefined);
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
     lspMocks.lspReadUriContents.mockReset();

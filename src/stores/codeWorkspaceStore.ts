@@ -20,7 +20,10 @@ export type BottomDockTabId =
   | "type-hierarchy"
   | "todos"
   | "terminal"
-  | "run";
+  | "run"
+  | "build"
+  | "tests"
+  | "debug";
 export type EditorGroupId = "primary" | "secondary";
 export type EditorSplitOrientation = "horizontal" | "vertical";
 export type RightPaneTabId = "outline" | "documentation";
