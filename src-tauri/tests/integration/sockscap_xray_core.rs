@@ -193,6 +193,58 @@ async fn wait_port_open(port: u16, timeout: Duration) -> bool {
     false
 }
 
+/// Kill a process by PID (external kill, simulating a crash).
+fn kill_pid(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .output();
+    }
+}
+
+/// A2: a crashed core must be respawned by the health check on the SAME local
+/// port, so the relay's cached xray_port keeps working. Skips without a binary.
+#[tokio::test]
+async fn health_check_respawns_dead_core_on_same_port() {
+    let Some(exe) = locate_xray() else {
+        eprintln!("SKIP health_check_respawns_dead_core_on_same_port: no xray binary");
+        return;
+    };
+    let work = std::env::temp_dir().join(format!("xray-hc-{}", std::process::id()));
+    let mgr = XrayManager::new(Some(exe), work.clone());
+    let spec = ss_spec("127.0.0.1", 1, "pw");
+
+    let port = mgr.ensure("hc", &spec).await.expect("spawn");
+    let old_pid = mgr.pids().await.first().copied().expect("a pid");
+
+    // Simulate a crash: kill the process out from under the manager.
+    kill_pid(old_pid);
+    // Give the OS a moment to reap and free the port.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let respawned = mgr.health_check_once().await;
+    assert_eq!(respawned, 1, "health check should respawn the dead core");
+
+    // Same port preserved (relay's cached xray_port stays valid).
+    assert_eq!(mgr.local_port("hc").await, Some(port));
+    // New process, and it speaks SOCKS5 again on that port.
+    let new_pid = mgr.pids().await.first().copied().expect("new pid");
+    assert_ne!(new_pid, old_pid, "respawn should be a new process");
+    socks5_greeting_ok(port)
+        .await
+        .expect("respawned core should speak SOCKS5 on the same port");
+
+    mgr.shutdown_all().await;
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// A1: a bad config must fail with the xray log tail in the error, not a
 /// generic "not ready". Uses an invalid Shadowsocks cipher so xray rejects the
 /// outbound and exits at startup. Skips without a binary.

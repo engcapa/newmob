@@ -64,11 +64,16 @@ impl XrayCore {
         work_dir: &Path,
         spec: &ResolvedCoreUpstream,
         config_hash: String,
+        preferred_port: Option<u16>,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(work_dir)
             .map_err(|e| format!("create xray work dir: {e}"))?;
 
-        let local_port = pick_free_loopback_port()?;
+        // A respawn (health-check restart) reuses the dead core's port so the
+        // relay's cached xray_port stays valid; first spawn picks a free one.
+        let local_port = preferred_port
+            .map(Ok)
+            .unwrap_or_else(pick_free_loopback_port)?;
         let config = spec.to_xray_config(local_port)?;
         let json = serde_json::to_string_pretty(&config)
             .map_err(|e| format!("serialize xray config: {e}"))?;
@@ -191,6 +196,12 @@ impl XrayCore {
     pub fn pid(&self) -> Option<u32> {
         self.child.id()
     }
+
+    /// True while the process is still running. `try_wait` is non-blocking; a
+    /// reaped/exited child (crash, OOM, external kill) returns false.
+    pub fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
 }
 
 /// Stable hash of the outbound-relevant parts of a spec, so the manager can
@@ -218,11 +229,21 @@ pub fn spec_config_hash(spec: &ResolvedCoreUpstream) -> String {
 /// Held on [`crate::sockscap::SocksCapRuntime`] alongside the elevated helper.
 /// Keyed by profile id so multiple profiles with different nodes run
 /// side-by-side, exactly like the per-profile `ssh_pool` entries.
+/// A running core plus the spec it was spawned from, so a crashed core can be
+/// respawned (on the same local port) without the relay re-resolving anything.
+struct ManagedCore {
+    core: XrayCore,
+    spec: ResolvedCoreUpstream,
+}
+
 pub struct XrayManager {
-    inner: Mutex<HashMap<String, XrayCore>>,
+    inner: Mutex<HashMap<String, ManagedCore>>,
     /// xray executable (resolved once at construction; None = not provisioned).
     exe: Option<PathBuf>,
     work_dir: PathBuf,
+    /// Health-check monitor task handle (started at capture start, aborted on
+    /// teardown). Behind a std Mutex so the sync exit-hook can stop it too.
+    monitor: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl XrayManager {
@@ -231,6 +252,7 @@ impl XrayManager {
             inner: Mutex::new(HashMap::new()),
             exe,
             work_dir,
+            monitor: std::sync::Mutex::new(None),
         }
     }
 
@@ -257,17 +279,23 @@ impl XrayManager {
 
         let mut guard = self.inner.lock().await;
         if let Some(existing) = guard.get(profile_id) {
-            if existing.config_hash == want_hash {
-                return Ok(existing.local_port);
+            if existing.core.config_hash == want_hash {
+                return Ok(existing.core.local_port);
             }
         }
         // Spec changed (or first spawn): tear down any stale core first.
         if let Some(mut old) = guard.remove(profile_id) {
-            old.shutdown().await;
+            old.core.shutdown().await;
         }
-        let core = XrayCore::spawn(exe, &self.work_dir, spec, want_hash).await?;
+        let core = XrayCore::spawn(exe, &self.work_dir, spec, want_hash, None).await?;
         let port = core.local_port;
-        guard.insert(profile_id.to_string(), core);
+        guard.insert(
+            profile_id.to_string(),
+            ManagedCore {
+                core,
+                spec: spec.clone(),
+            },
+        );
         Ok(port)
     }
 
@@ -277,30 +305,33 @@ impl XrayManager {
             .lock()
             .await
             .get(profile_id)
-            .map(|c| c.local_port)
+            .map(|c| c.core.local_port)
     }
 
     /// Stop and remove one profile's core.
     pub async fn remove(&self, profile_id: &str) {
         let core = self.inner.lock().await.remove(profile_id);
-        if let Some(mut core) = core {
-            core.shutdown().await;
+        if let Some(mut managed) = core {
+            managed.core.shutdown().await;
         }
     }
 
-    /// Stop and remove every running core (async teardown path).
+    /// Stop and remove every running core (async teardown path). Also stops the
+    /// health monitor so it doesn't respawn cores mid-teardown.
     pub async fn shutdown_all(&self) {
+        self.stop_monitor();
         let mut guard = self.inner.lock().await;
-        for (_, mut core) in guard.drain() {
-            core.shutdown().await;
+        for (_, mut managed) in guard.drain() {
+            managed.core.shutdown().await;
         }
     }
 
     /// Synchronous best-effort kill of all cores for the app-exit hook.
     pub fn shutdown_all_blocking(&self) {
+        self.stop_monitor();
         if let Ok(mut guard) = self.inner.try_lock() {
-            for (_, mut core) in guard.drain() {
-                core.start_kill_blocking();
+            for (_, mut managed) in guard.drain() {
+                managed.core.start_kill_blocking();
             }
         }
     }
@@ -316,8 +347,82 @@ impl XrayManager {
             .lock()
             .await
             .values()
-            .filter_map(|c| c.pid())
+            .filter_map(|c| c.core.pid())
             .collect()
+    }
+
+    /// One health-check pass: respawn any core whose process has died (crash,
+    /// OOM, external kill) on its **same** local port, so the relay's cached
+    /// `xray_port` keeps working. Returns the number of cores respawned.
+    pub async fn health_check_once(&self) -> usize {
+        let Some(exe) = self.exe.as_ref() else {
+            return 0;
+        };
+        let mut guard = self.inner.lock().await;
+        // Collect dead profiles first (can't respawn while borrowing the map).
+        let mut dead: Vec<String> = Vec::new();
+        for (id, managed) in guard.iter_mut() {
+            if !managed.core.is_alive() {
+                dead.push(id.clone());
+            }
+        }
+        let mut respawned = 0;
+        for id in dead {
+            let Some(managed) = guard.get(&id) else {
+                continue;
+            };
+            let port = managed.core.local_port;
+            let spec = managed.spec.clone();
+            let hash = managed.core.config_hash.clone();
+            tracing::warn!(
+                "sockscap: xray core '{id}' ({}) died; respawning on port {port}",
+                spec.kind.as_tag()
+            );
+            match XrayCore::spawn(exe, &self.work_dir, &spec, hash, Some(port)).await {
+                Ok(core) => {
+                    guard.insert(id.clone(), ManagedCore { core, spec });
+                    respawned += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("sockscap: respawn of xray core '{id}' failed: {e}");
+                    // Drop the dead entry so a later flow gets a clear "no core"
+                    // error rather than dialing a permanently dead port.
+                    guard.remove(&id);
+                }
+            }
+        }
+        respawned
+    }
+
+    /// Start the periodic health monitor (idempotent). Runs until `stop_monitor`
+    /// / `shutdown_all` or the process exits. Takes `Arc<Self>` so the task can
+    /// call back into the manager.
+    pub fn start_monitor(self: &Arc<Self>, interval: Duration) {
+        let mut slot = match self.monitor.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if slot.as_ref().is_some_and(|h| !h.is_finished()) {
+            return; // already running
+        }
+        let mgr = Arc::clone(self);
+        *slot = Some(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let _ = mgr.health_check_once().await;
+            }
+        }));
+    }
+
+    /// Stop the health monitor task if running.
+    pub fn stop_monitor(&self) {
+        if let Ok(mut slot) = self.monitor.lock() {
+            if let Some(handle) = slot.take() {
+                handle.abort();
+            }
+        }
     }
 }
 
