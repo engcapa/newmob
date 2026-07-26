@@ -506,6 +506,17 @@ pub async fn sockscap_start(
         return Err(message);
     }
 
+    // Start the xray health monitor once capture is up, so a core that crashes
+    // mid-session is respawned on its same local port (keeps the relay working).
+    // Idempotent; stopped by full_teardown / shutdown_on_exit.
+    if status.is_ok() {
+        if let Some(mgr) = state.sockscap.xray() {
+            if mgr.running_count().await > 0 {
+                mgr.start_monitor(std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
     status
 }
 
@@ -1148,15 +1159,31 @@ async fn start_windows_capture(
     }
     // Bypass external local proxies used as loopback HTTP/SOCKS5 upstreams
     // (Clash/v2rayN etc): the process listening on the configured port owns the
-    // egress to its node, which must not be re-captured into a loop. Snapshot at
-    // start — if the proxy restarts (new PID), Stop+Start re-resolves it.
-    for port in &loopback_proxy_ports {
-        for pid in listener_pid::resolve_listener_pids(*port) {
-            if !bypass_pids.contains(&pid) {
-                bypass_pids.push(pid);
-                tracing::info!(
-                    "sockscap: bypassing local proxy pid {pid} listening on 127.0.0.1:{port}"
-                );
+    // egress to its node, which must not be re-captured into a loop. We bypass
+    // both its PID (immediate) and its exe path (restart-proof: survives the
+    // proxy restarting with a new PID, unlike the PID snapshot alone).
+    let mut bypass_paths: Vec<String> = Vec::new();
+    if !loopback_proxy_ports.is_empty() {
+        let procs = process::list_processes().unwrap_or_default();
+        for port in &loopback_proxy_ports {
+            for pid in listener_pid::resolve_listener_pids(*port) {
+                if !bypass_pids.contains(&pid) {
+                    bypass_pids.push(pid);
+                    tracing::info!(
+                        "sockscap: bypassing local proxy pid {pid} on 127.0.0.1:{port}"
+                    );
+                }
+                if let Some(path) = procs
+                    .iter()
+                    .find(|p| p.pid == pid)
+                    .map(|p| paths::normalize_exe_path(&p.path))
+                    .filter(|s| !s.is_empty())
+                {
+                    if !bypass_paths.contains(&path) {
+                        tracing::info!("sockscap: bypassing local proxy path {path}");
+                        bypass_paths.push(path);
+                    }
+                }
             }
         }
     }
@@ -1175,6 +1202,7 @@ async fn start_windows_capture(
         app_paths,
         bypass_cidrs: cfg.bypass_cidrs.clone(),
         bypass_pids,
+        bypass_paths,
         bypass_endpoints,
         // Unused for streamdump reflection dest (kept for helper JSON compat).
         relay_ip: "0.0.0.0".into(),

@@ -55,6 +55,8 @@ mod windows_main {
         bypass_cidrs: Option<Vec<String>>,
         #[serde(default, rename = "bypassPids")]
         bypass_pids: Option<Vec<u32>>,
+        #[serde(default, rename = "bypassPaths")]
+        bypass_paths: Option<Vec<String>>,
         #[serde(default, rename = "bypassEndpoints")]
         bypass_endpoints: Option<Vec<EndpointDto>>,
         #[serde(default, rename = "relayIp")]
@@ -296,6 +298,13 @@ mod windows_main {
                         p.push(std::process::id());
                         p
                     },
+                    bypass_paths: req
+                        .bypass_paths
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|p| p.replace('/', "\\").to_ascii_lowercase())
+                        .collect(),
                     bypass_endpoints: req
                         .bypass_endpoints
                         .as_ref()
