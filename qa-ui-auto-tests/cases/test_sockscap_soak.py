@@ -171,22 +171,91 @@ for cycle in range(1, SOAK_CYCLES + 1):
 
     time.sleep(0.5)
 
-# New Scenario: Full SSH-Tunnel Upstream (background -D proxy + curl.exe raw request)
-# Covers SSH as upstream in the 6-step driver flow (steps 4-5)
+# New Scenario: Full SSH-Tunnel Upstream (background `ssh -D` SOCKS + curl.exe).
+# Windows-safe & non-blocking: ssh is launched DETACHED with SSH_ASKPASS feeding
+# the password (never a console prompt that could hang), the local SOCKS port is
+# polled with a hard timeout, and the process tree is killed with taskkill.
 print(f"\n>>> Phase 3: Full SSH-Tunnel Upstream Automation ({SSH_USER}@{SSH_HOST}) <<<")
-for target in SSH_ONLY_TARGETS:
-    # Start SSH -D in background, wait, curl via socks5h, kill
-    cmd_start = f'ssh -D 1080 -N -p {SSH_PORT} -o StrictHostKeyChecking=no -o PasswordAuthentication=yes -o PubkeyAuthentication=no {SSH_USER}@{SSH_HOST} &'
-    cmd_curl = f'curl.exe -s -o NUL -w "%{{http_code}}" -x socks5h://127.0.0.1:1080 {target}'
-    cmd_kill = 'pkill -f "ssh -D 1080" || true'
-    
-    start = time.perf_counter()
-    subprocess.run(cmd_start, shell=True, capture_output=True, text=True)
-    time.sleep(3)
-    _, out, err, ms = run_command(cmd_curl)
-    subprocess.run(cmd_kill, shell=True)
-    success = ENV.http_reachable(out)
-    record_test(f"SSH-Tunnel-Proxy (via 127.0.0.1:1080) -> {target}", success, out, ms, f"(PID managed)")
+_ssh_pw = os.getenv("QA_SSH_PASSWORD")
+
+
+def _pick_free_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _port_open(host, port, timeout=1.0):
+    try:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+# A fresh ephemeral port avoids colliding with (or false-positiving on) any
+# leftover `ssh -D` from a prior interrupted run holding the old fixed 1080.
+SSH_LOCAL_SOCKS = _pick_free_port()
+
+
+if not _ssh_pw:
+    print("  SKIP: set QA_SSH_PASSWORD to run the SSH -D SOCKS tunnel scenario.")
+else:
+    ssh_env, askpass = ENV.ssh_askpass_env(_ssh_pw)
+    CREATE_NO_WINDOW = 0x08000000
+    for target in SSH_ONLY_TARGETS:
+        start = time.perf_counter()
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                ["ssh", "-D", str(SSH_LOCAL_SOCKS), "-N", "-p", str(SSH_PORT),
+                 "-o", "StrictHostKeyChecking=no", "-o", "PasswordAuthentication=yes",
+                 "-o", "PubkeyAuthentication=no", "-o", "NumberOfPasswordPrompts=1",
+                 f"{SSH_USER}@{SSH_HOST}"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=ssh_env,
+                creationflags=CREATE_NO_WINDOW,
+            )
+            # Bounded wait for the SOCKS port (never an unbounded hang).
+            ready = False
+            for _ in range(16):  # ~8s max
+                if _port_open("127.0.0.1", SSH_LOCAL_SOCKS):
+                    ready = True
+                    break
+                if proc.poll() is not None:
+                    break  # ssh already exited (auth fail etc.)
+                time.sleep(0.5)
+            if ready:
+                cmd_curl = f'curl.exe -s -o NUL -w "%{{http_code}}" --max-time 15 -x socks5h://127.0.0.1:{SSH_LOCAL_SOCKS} {target}'
+                _, out, err, ms = run_command(cmd_curl)
+                record_test(f"SSH-Tunnel-Proxy (via 127.0.0.1:{SSH_LOCAL_SOCKS}) -> {target}",
+                            ENV.http_reachable(out), out, ms)
+            else:
+                ms = (time.perf_counter() - start) * 1000.0
+                record_test(f"SSH-Tunnel-Proxy (via 127.0.0.1:{SSH_LOCAL_SOCKS}) -> {target}",
+                            False, "NO-TUNNEL", ms, "SOCKS port did not open in 8s")
+        except FileNotFoundError:
+            ms = (time.perf_counter() - start) * 1000.0
+            record_test(f"SSH-Tunnel-Proxy (via 127.0.0.1:{SSH_LOCAL_SOCKS}) -> {target}",
+                        False, "NO-SSH", ms, "ssh.exe not found on PATH")
+        except Exception as e:
+            ms = (time.perf_counter() - start) * 1000.0
+            record_test(f"SSH-Tunnel-Proxy (via 127.0.0.1:{SSH_LOCAL_SOCKS}) -> {target}",
+                        False, "ERR", ms, str(e))
+        finally:
+            if proc and proc.poll() is None:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if askpass:
+        try:
+            os.remove(askpass)
+        except Exception:
+            pass
 
 # --------------------------------------------------------------------------
 # Section 3: Final Aggregate Statistics & Summary Report

@@ -19,5 +19,6 @@ mod perf_baseline;
 mod router_routing;
 mod router_vault_lock;
 mod sockscap_win11_scenarios;
+mod sockscap_xray_core;
 mod three_source_probe;
 mod voice_intent_latency;

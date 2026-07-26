@@ -19,8 +19,8 @@ nft table and the cgroup tree in the same safe order the Rust backend uses
 (rules first, then cgroups). Nothing persists across a run.
 
 SECURITY: the sudo password is read once, held only in this process, and passed
-to `sudo -S` on stdin — never on argv and never into a redirected file the
-relay reads back.
+to `sudo -S -v` on stdin only — never on argv, never mixed into a command's
+stdin, and never into a redirected file the relay reads back.
 """
 import os
 import socket
@@ -91,10 +91,20 @@ def extract_tls_sni(data):
 
 
 # --------------------------------------------------------------------------
-# Privileged command runner (sudo -S, password on stdin only)
+# Privileged command runner (auth via `sudo -S -v`, exec via `sudo -n`)
 # --------------------------------------------------------------------------
 class Sudo:
-    """Run privileged commands via `sudo -S`, feeding the password on stdin.
+    """Run privileged commands via sudo, keeping the password off command stdin.
+
+    Authentication and execution are decoupled: the password is fed only to
+    `sudo -S -v` (which validates + caches the sudo timestamp and runs no child
+    command), then the real command runs under `sudo -n` (never reads a
+    password). This is what lets commands that themselves consume stdin — most
+    importantly `nft -f -` — receive their *own* input intact. The naive
+    "prepend the password to the command's stdin" trick is wrong: `sudo -S`
+    only eats the first stdin line when it actually needs to authenticate, so a
+    cached timestamp (e.g. from a preceding preflight call) makes it pass the
+    password line straight through to the child, corrupting the input.
 
     A blank password means passwordless sudo (or already root); we still use
     `sudo` so the tests behave identically to a delegated-permission host.
@@ -104,22 +114,49 @@ class Sudo:
         self._password = password if password is not None else ""
         self._is_root = os.geteuid() == 0
 
+    def _authenticate(self, timeout=15):
+        """Refresh the sudo timestamp by feeding the password to `sudo -S -v`.
+
+        Returns (ok, stderr). Runs no child command, so its stdin is only ever
+        the password — never mixed with a command's data. A no-op when root.
+        """
+        if self._is_root:
+            return True, ""
+        try:
+            proc = subprocess.run(
+                ["sudo", "-S", "-v", "-p", ""],
+                input=self._password + "\n",
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            return False, f"timeout after {timeout}s: {e}"
+        return proc.returncode == 0, proc.stderr
+
     def run(self, argv, input_text=None, timeout=20):
-        """Return (rc, stdout, stderr). `argv` is a list; never shell-quoted."""
+        """Return (rc, stdout, stderr). `argv` is a list; never shell-quoted.
+
+        Refreshes the sudo timestamp first (password on `sudo -S -v` stdin),
+        then runs `argv` under `sudo -n` so the command's own stdin (input_text)
+        is delivered untouched.
+        """
         if self._is_root:
             cmd = list(argv)
-            stdin_data = input_text
         else:
-            # -S read password from stdin; -p '' suppress the prompt text.
-            cmd = ["sudo", "-S", "-p", ""] + list(argv)
-            # When the command itself needs stdin (nft -f -, tee), sudo consumes
-            # the first line as the password, so prepend it.
-            pw_line = self._password + "\n"
-            stdin_data = pw_line + (input_text if input_text is not None else "")
+            ok, auth_err = self._authenticate()
+            if not ok:
+                return 1, "", (
+                    "sudo authentication failed (check QA_SUDO_PASSWORD or "
+                    f"passwordless sudo): {auth_err.strip()}"
+                )
+            # -n: never prompt/read a password; the timestamp above authorizes
+            # us. This keeps stdin exclusively for the command (nft -f -, tee).
+            cmd = ["sudo", "-n"] + list(argv)
         try:
             proc = subprocess.run(
                 cmd,
-                input=stdin_data,
+                input=input_text,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -138,11 +175,21 @@ class Sudo:
 
     def verify(self):
         """Prove sudo works before we start mutating the system."""
-        rc, _out, err = self.run(["true"], timeout=15)
-        if rc != 0:
+        ok, err = self._authenticate()
+        if not ok:
             raise RuntimeError(
                 "sudo authentication failed. Set QA_SUDO_PASSWORD or configure "
                 f"passwordless sudo. Detail: {err.strip()}"
+            )
+        # Confirm the cached timestamp actually authorizes `-n` execution; a
+        # sudoers `timestamp_timeout=0` would validate above yet still deny -n,
+        # which we could never satisfy for stdin-reading commands like nft -f -.
+        rc, _out, err = self.run(["true"], timeout=15)
+        if rc != 0:
+            raise RuntimeError(
+                "sudo credential caching appears disabled (timestamp_timeout=0?);"
+                " the SocksCap tests need a cacheable sudo session for `nft -f -`."
+                f" Detail: {err.strip()}"
             )
 
 

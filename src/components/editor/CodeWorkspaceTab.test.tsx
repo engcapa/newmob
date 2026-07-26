@@ -19,6 +19,10 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceListFilesRecursive: vi.fn(),
   workspaceDetectGitRoots: vi.fn(),
   workspaceDetectTasks: vi.fn(),
+  workspaceJavaRunTargets: vi.fn(),
+  workspaceJavaRunTarget: vi.fn(),
+  workspaceTaskTree: vi.fn(),
+  workspaceDependencyTree: vi.fn(),
   workspaceReadFile: vi.fn(),
   workspaceReadLooseFile: vi.fn(),
   workspaceWriteFile: vi.fn(),
@@ -227,6 +231,10 @@ describe("CodeWorkspaceTab", () => {
     workspaceMocks.workspaceListFilesRecursive.mockReset();
     workspaceMocks.workspaceDetectGitRoots.mockReset();
     workspaceMocks.workspaceDetectTasks.mockReset();
+    workspaceMocks.workspaceJavaRunTargets.mockReset().mockResolvedValue([]);
+    workspaceMocks.workspaceJavaRunTarget.mockReset();
+    workspaceMocks.workspaceTaskTree.mockReset().mockResolvedValue([]);
+    workspaceMocks.workspaceDependencyTree.mockReset().mockResolvedValue([]);
     workspaceMocks.workspaceReadFile.mockReset();
     workspaceMocks.workspaceReadLooseFile.mockReset();
     workspaceMocks.workspaceWriteFile.mockReset();
@@ -1561,6 +1569,7 @@ describe("CodeWorkspaceTab", () => {
 
     // Make the buffer dirty through the existing manual formatting path.
     fireEvent.keyDown(window, { key: "l", ctrlKey: true, altKey: true });
+    await waitFor(() => expect(lspMocks.lspFormatting).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(screen.getByText(/unsaved/)).toBeInTheDocument());
 
     fireEvent.keyDown(window, { key: "s", ctrlKey: true });
@@ -2213,6 +2222,46 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.click(await screen.findByRole("tab", { name: /Run/ }));
     fireEvent.click(await screen.findByTitle("pnpm run test — /repo/app"));
 
+    expect(screen.getByRole("tab", { name: /Terminal/, selected: true })).toBeInTheDocument();
+    expect(await screen.findByTestId("mock-workspace-terminal")).toHaveAttribute(
+      "data-initial-cwd",
+      "/repo/app",
+    );
+  });
+
+  it("resolves and runs the active Java main class from the workspace toolbar", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-run",
+      workspaceInstanceId: "instance-java-run",
+      name: "Java run",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    workspaceMocks.workspaceJavaRunTarget.mockResolvedValue({
+      id: "java-main:src/main/java/com/acme/App.java",
+      label: "com.acme.App",
+      mainClass: "com.acme.App",
+      filePath: "/repo/app/src/main/java/com/acme/App.java",
+      command: "./mvnw -q -Dexec.mainClass='com.acme.App' compile exec:java",
+      cwd: "/repo/app",
+      buildSystem: "maven",
+      modulePath: ".",
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-run-java"));
+
+    await waitFor(() => expect(workspaceMocks.workspaceJavaRunTarget).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/main/java/com/acme/App.java",
+    ));
     expect(screen.getByRole("tab", { name: /Terminal/, selected: true })).toBeInTheDocument();
     expect(await screen.findByTestId("mock-workspace-terminal")).toHaveAttribute(
       "data-initial-cwd",

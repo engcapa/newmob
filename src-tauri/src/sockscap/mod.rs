@@ -8,12 +8,15 @@
 
 pub mod capture;
 pub mod config;
+pub mod core;
 pub mod dns_win;
 pub mod egress;
 pub mod flow;
 pub mod helper;
+pub mod listener_pid;
 pub mod orchestrator;
 pub mod paths;
+pub mod tun_detect;
 pub mod policy;
 pub mod process;
 pub mod recovery;
@@ -42,6 +45,10 @@ use crate::state::AppState;
 pub struct SocksCapRuntime {
     pub orch: Arc<RwLock<Orchestrator>>,
     pub helper: Arc<helper::HelperRegistry>,
+    /// xray-core sidecar pool for core-backed upstreams. Initialized during
+    /// `setup()` once the `AppHandle` (resource dir / app data dir) is available
+    /// via [`init_xray_manager`]; `None` until then.
+    pub xray: std::sync::OnceLock<Arc<core::XrayManager>>,
 }
 
 impl SocksCapRuntime {
@@ -49,8 +56,33 @@ impl SocksCapRuntime {
         Self {
             orch: Arc::new(RwLock::new(Orchestrator::new())),
             helper: Arc::new(helper::HelperRegistry::new()),
+            xray: std::sync::OnceLock::new(),
         }
     }
+
+    /// The xray manager, if it has been initialized.
+    pub fn xray(&self) -> Option<&Arc<core::XrayManager>> {
+        self.xray.get()
+    }
+}
+
+/// Resolve the xray binary + work dir and install the [`core::XrayManager`] on
+/// the runtime. Idempotent (later calls are ignored by the `OnceLock`). Called
+/// from `setup()`; logs whether the binary was found so a missing provisioning
+/// step is visible without blocking startup.
+pub fn init_xray_manager(app: &AppHandle, state: &AppState) {
+    let exe = paths::resolve_xray_exe(app);
+    match &exe {
+        Some(p) => tracing::info!("sockscap: xray-core found at {}", p.display()),
+        None => tracing::info!(
+            "sockscap: xray-core binary not provisioned (core-backed upstreams unavailable; run scripts/fetch-xray.ps1)"
+        ),
+    }
+    let work_dir = data_dir(app)
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("xray");
+    let mgr = Arc::new(core::XrayManager::new(exe, work_dir));
+    let _ = state.sockscap.xray.set(mgr);
 }
 
 impl Default for SocksCapRuntime {
@@ -475,6 +507,17 @@ pub async fn sockscap_start(
         return Err(message);
     }
 
+    // Start the xray health monitor once capture is up, so a core that crashes
+    // mid-session is respawned on its same local port (keeps the relay working).
+    // Idempotent; stopped by full_teardown / shutdown_on_exit.
+    if status.is_ok() {
+        if let Some(mgr) = state.sockscap.xray() {
+            if mgr.running_count().await > 0 {
+                mgr.start_monitor(std::time::Duration::from_secs(5));
+            }
+        }
+    }
+
     status
 }
 
@@ -539,6 +582,72 @@ fn session_ssh_auth(
         },
     }
 }
+
+/// Resolve a `vault:<id>` reference to plaintext, treating a non-reference value
+/// as a literal (backwards compat, matching [`session_proxy_password`]). Blank
+/// refs and vault errors (e.g. locked) yield an empty string.
+fn resolve_secret_ref(vault: &crate::vault::Vault, reference: &str) -> String {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return String::new();
+    }
+    match vault.resolve(reference) {
+        Ok(Some(plain)) => (*plain).clone(),
+        Ok(None) => reference.to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Build a [`core::ResolvedCoreUpstream`] for a core-backed upstream, decrypting
+/// every `vault:<id>` secret to plaintext for the (short-lived) xray config.
+/// `host`/`port` are the node address the xray outbound dials.
+fn build_core_spec(
+    vault: &crate::vault::Vault,
+    kind: config::UpstreamKind,
+    host: String,
+    port: u16,
+    up: &config::UpstreamRef,
+) -> core::ResolvedCoreUpstream {
+    core::ResolvedCoreUpstream {
+        kind,
+        host,
+        port,
+        secret: resolve_secret_ref(vault, &up.password_ref),
+        uuid: resolve_secret_ref(vault, &up.params.uuid_ref),
+        private_key: resolve_secret_ref(vault, &up.params.private_key_ref),
+        pre_shared_key: resolve_secret_ref(vault, &up.params.pre_shared_key_ref),
+        params: up.params.clone(),
+    }
+}
+
+/// Ensure a core is running for a core-backed upstream and return its local
+/// SOCKS port. Non-core kinds return None immediately. Failures are logged and
+/// return None (the relay then emits a clear per-flow error) so one bad profile
+/// does not abort the whole capture start — mirrors the per-profile SSH policy.
+async fn ensure_core_port(
+    state: &State<'_, AppState>,
+    profile_key: &str,
+    kind: config::UpstreamKind,
+    host: &str,
+    port: u16,
+    up: &config::UpstreamRef,
+) -> Option<u16> {
+    if !kind.requires_core() {
+        return None;
+    }
+    let mgr = state.sockscap.xray()?;
+    let spec = build_core_spec(&state.vault, kind, host.to_string(), port, up);
+    match mgr.ensure(profile_key, &spec).await {
+        Ok(local_port) => Some(local_port),
+        Err(e) => {
+            tracing::warn!("sockscap: xray core for '{profile_key}' ({}) failed: {e}", kind.as_tag());
+            None
+        }
+    }
+}
+
+/// Synthetic manager key for the global (non-profile) upstream's core.
+const GLOBAL_CORE_KEY: &str = "__global__";
 
 #[cfg(target_os = "linux")]
 async fn build_linux_relay_context(
@@ -666,6 +775,20 @@ async fn build_linux_relay_context(
         } else {
             None
         };
+        // Core-backed profile: spawn/reuse an xray sidecar. NOTE: on Linux the
+        // capture backend is cgroup-based; ensuring the xray child is excluded
+        // from the taomni cgroup (so its node connection is not re-captured) is
+        // a Linux-capture follow-up. Windows (PID bypass) is the phase-1 target.
+        let profile_xray_port = ensure_core_port(
+            state,
+            &profile.id,
+            profile.upstream.kind,
+            &host,
+            port,
+            &profile.upstream,
+        )
+        .await;
+
         profile_upstreams.insert(
             profile.id.clone(),
             relay::ResolvedUpstream {
@@ -675,6 +798,7 @@ async fn build_linux_relay_context(
                 user,
                 pass: password,
                 ssh_pool: profile_ssh_pool,
+                xray_port: profile_xray_port,
             },
         );
     }
@@ -692,6 +816,17 @@ async fn build_linux_relay_context(
         std::time::Duration::from_secs(300),
     )));
 
+    // Optional global xray core (when the global upstream is core-backed).
+    let global_xray_port = ensure_core_port(
+        state,
+        GLOBAL_CORE_KEY,
+        cfg.upstream.kind,
+        &upstream_host,
+        upstream_port,
+        &cfg.upstream,
+    )
+    .await;
+
     Ok(Arc::new(RwLock::new(relay::RelayContext {
         config: cfg.clone(),
         rules,
@@ -703,6 +838,7 @@ async fn build_linux_relay_context(
         upstream_pass,
         self_pid: std::process::id(),
         ssh_pool,
+        xray_port: global_xray_port,
         profile_upstreams,
         dns_map,
         domains,
@@ -803,6 +939,12 @@ async fn start_windows_capture(
 
     let active_profs = cfg.active_profiles();
     let mut profile_upstreams = std::collections::HashMap::new();
+    // Ports of native HTTP/SOCKS5 upstreams whose host is loopback (i.e. an
+    // external local proxy such as Clash/v2rayN). We resolve the PID listening
+    // on each and bypass it, so the proxy's own egress to its node isn't
+    // re-captured into a loop. Only native kinds: core (xray) upstreams dial via
+    // their sidecar (already PID-bypassed) and their host is the remote node.
+    let mut loopback_proxy_ports: Vec<u16> = Vec::new();
     for p in &active_profs {
         let (mut phost, mut pport, mut puser, mut ppass) =
             relay::upstream_from_config_ref(&p.upstream);
@@ -864,6 +1006,23 @@ async fn start_windows_capture(
             None
         };
 
+        // Core-backed profile: spawn/reuse an xray sidecar and record its
+        // local SOCKS port for the relay to dial.
+        let p_xray_port =
+            ensure_core_port(state, &p.id, p.upstream.kind, &phost, pport, &p.upstream).await;
+
+        // Native loopback proxy? Remember its port for PID-bypass below.
+        if matches!(
+            p.upstream.kind,
+            crate::sockscap::config::UpstreamKind::Http
+                | crate::sockscap::config::UpstreamKind::Socks5
+        ) && pport != 0
+            && listener_pid::is_loopback(&phost)
+            && !loopback_proxy_ports.contains(&pport)
+        {
+            loopback_proxy_ports.push(pport);
+        }
+
         profile_upstreams.insert(
             p.id.clone(),
             relay::ResolvedUpstream {
@@ -873,8 +1032,32 @@ async fn start_windows_capture(
                 user: puser,
                 pass: ppass,
                 ssh_pool: p_ssh_pool,
+                xray_port: p_xray_port,
             },
         );
+    }
+
+    // Optional global xray core (when the global upstream is core-backed).
+    let global_xray_port = ensure_core_port(
+        state,
+        GLOBAL_CORE_KEY,
+        cfg.upstream.kind,
+        &up_host,
+        up_port,
+        &cfg.upstream,
+    )
+    .await;
+
+    // Global native loopback proxy → remember its port for PID-bypass below.
+    if matches!(
+        cfg.upstream.kind,
+        crate::sockscap::config::UpstreamKind::Http
+            | crate::sockscap::config::UpstreamKind::Socks5
+    ) && up_port != 0
+        && listener_pid::is_loopback(&up_host)
+        && !loopback_proxy_ports.contains(&up_port)
+    {
+        loopback_proxy_ports.push(up_port);
     }
 
     // Optional SSH pool for capture-path PROXY via direct-tcpip.
@@ -930,6 +1113,7 @@ async fn start_windows_capture(
         upstream_pass: up_pass,
         self_pid: std::process::id(),
         ssh_pool,
+        xray_port: global_xray_port,
         profile_upstreams,
         dns_map: Arc::clone(&dns_map),
         domains,
@@ -966,6 +1150,44 @@ async fn start_windows_capture(
     if let Some(pid) = helper_st.pid {
         bypass_pids.push(pid);
     }
+    // Bypass every xray core: its own connection to the remote node must not be
+    // re-captured (that would loop node traffic back into the relay). Robust for
+    // domain nodes / multi-IP resolution where endpoint bypass alone can miss.
+    if let Some(mgr) = state.sockscap.xray() {
+        for pid in mgr.pids().await {
+            bypass_pids.push(pid);
+        }
+    }
+    // Bypass external local proxies used as loopback HTTP/SOCKS5 upstreams
+    // (Clash/v2rayN etc): the process listening on the configured port owns the
+    // egress to its node, which must not be re-captured into a loop. We bypass
+    // both its PID (immediate) and its exe path (restart-proof: survives the
+    // proxy restarting with a new PID, unlike the PID snapshot alone).
+    let mut bypass_paths: Vec<String> = Vec::new();
+    if !loopback_proxy_ports.is_empty() {
+        let procs = process::list_processes().unwrap_or_default();
+        for port in &loopback_proxy_ports {
+            for pid in listener_pid::resolve_listener_pids(*port) {
+                if !bypass_pids.contains(&pid) {
+                    bypass_pids.push(pid);
+                    tracing::info!(
+                        "sockscap: bypassing local proxy pid {pid} on 127.0.0.1:{port}"
+                    );
+                }
+                if let Some(path) = procs
+                    .iter()
+                    .find(|p| p.pid == pid)
+                    .map(|p| paths::normalize_exe_path(&p.path))
+                    .filter(|s| !s.is_empty())
+                {
+                    if !bypass_paths.contains(&path) {
+                        tracing::info!("sockscap: bypassing local proxy path {path}");
+                        bypass_paths.push(path);
+                    }
+                }
+            }
+        }
+    }
     let mut bypass_endpoints = Vec::new();
     if !up_host.is_empty() && up_port > 0 {
         bypass_endpoints.push((up_host, up_port));
@@ -981,6 +1203,7 @@ async fn start_windows_capture(
         app_paths,
         bypass_cidrs: cfg.bypass_cidrs.clone(),
         bypass_pids,
+        bypass_paths,
         bypass_endpoints,
         // Unused for streamdump reflection dest (kept for helper JSON compat).
         relay_ip: "0.0.0.0".into(),
@@ -1153,6 +1376,12 @@ async fn full_teardown(
         relay.stop().await;
     }
 
+    // --- 3b) Stop all xray cores (all platforms). Their node connections are
+    //         now unnecessary; leaving them would leak processes on Stop.
+    if let Some(mgr) = state.sockscap.xray() {
+        mgr.shutdown_all().await;
+    }
+
     // --- 4) Finish engine state + DNS + journal ------------------------------
     {
         let mut orch = state.sockscap.orch.write().await;
@@ -1278,6 +1507,227 @@ pub async fn sockscap_test_upstream(
     }
 }
 
+/// Parse a single proxy share link (`ss://`/`trojan://`/`vmess://`/`vless://`)
+/// into upstream fields the UI can drop into a form. Secrets come back as
+/// plaintext for the frontend to store as `vault:<id>` refs.
+#[tauri::command]
+pub async fn sockscap_parse_share_link(
+    link: String,
+) -> Result<core::share_link::ParsedShareLink, String> {
+    core::share_link::parse(&link)
+}
+
+/// Parse a subscription blob (base64 or plain newline-separated links) into a
+/// list of upstreams. Unparseable lines are skipped.
+#[tauri::command]
+pub async fn sockscap_parse_subscription(
+    blob: String,
+) -> Result<Vec<core::share_link::ParsedShareLink>, String> {
+    Ok(core::share_link::parse_subscription(&blob))
+}
+
+/// Fetch a subscription and parse it into upstreams. `input` is either an
+/// http(s) subscription URL (fetched) or a pasted blob (base64 / newline links,
+/// used as-is). Returns the parsed nodes for the UI to turn into profiles.
+#[tauri::command]
+pub async fn sockscap_import_subscription(
+    input: String,
+) -> Result<Vec<core::share_link::ParsedShareLink>, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("subscription is empty".into());
+    }
+    let blob = if input.starts_with("http://") || input.starts_with("https://") {
+        let client = reqwest::Client::builder()
+            .user_agent("taomni-sockscap")
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        let resp = client
+            .get(input)
+            .send()
+            .await
+            .map_err(|e| format!("fetch subscription: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("subscription HTTP {}", resp.status()));
+        }
+        resp.text()
+            .await
+            .map_err(|e| format!("read subscription body: {e}"))?
+    } else {
+        input.to_string()
+    };
+    let nodes = core::share_link::parse_subscription(&blob);
+    if nodes.is_empty() {
+        return Err("no valid nodes found in subscription".into());
+    }
+    Ok(nodes)
+}
+
+/// Test a core-backed upstream (shadowsocks/trojan/vmess/vless/wireguard) by
+/// spawning a throwaway xray sidecar, dialing a probe target through it, and
+/// tearing it down. Secrets in `upstream` (password_ref / uuid_ref / wg key
+/// refs) are resolved from the vault, matching a real capture start.
+#[tauri::command]
+pub async fn sockscap_test_core_upstream(
+    state: State<'_, AppState>,
+    upstream: config::UpstreamRef,
+    test_host: Option<String>,
+    test_port: Option<u16>,
+) -> Result<String, String> {
+    if !upstream.kind.requires_core() {
+        return Err(format!(
+            "{} is not a core-backed upstream",
+            upstream.kind.as_tag()
+        ));
+    }
+    let target_host = test_host.unwrap_or_else(|| "www.google.com".into());
+    let target_port = test_port.unwrap_or(443);
+    if upstream.host.trim().is_empty() || upstream.port == 0 {
+        return Err("upstream host and port are required".into());
+    }
+
+    let mgr = state
+        .sockscap
+        .xray()
+        .ok_or_else(|| "xray manager not initialized".to_string())?;
+    if !mgr.has_exe() {
+        return Err("xray-core binary not provisioned; run scripts/fetch-xray.ps1".into());
+    }
+
+    let spec = build_core_spec(
+        &state.vault,
+        upstream.kind,
+        upstream.host.clone(),
+        upstream.port,
+        &upstream,
+    );
+    // Unique throwaway key so a concurrent Test never collides with a live
+    // profile's core or another Test in flight.
+    let key = format!(
+        "__test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let local_port = mgr.ensure(&key, &spec).await?;
+    let result =
+        egress::socks5::dial("127.0.0.1", local_port, &target_host, target_port, "", "").await;
+    mgr.remove(&key).await;
+    result.map(|_| {
+        format!(
+            "{} via {}:{} to {target_host}:{target_port} ok",
+            upstream.kind.as_tag(),
+            upstream.host,
+            upstream.port
+        )
+    })
+}
+
+/// A local proxy discovered on the machine, offered as a one-click upstream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProxyCandidate {
+    /// "socks5" | "http" — detected by a lightweight handshake probe.
+    pub kind: String,
+    pub host: String,
+    pub port: u16,
+    /// Listening process name (best-effort; empty if not resolvable).
+    pub process: String,
+}
+
+/// Common local-proxy listen ports for popular clients (Clash/Mihomo mixed,
+/// v2rayN/xray, generic SOCKS/HTTP). Probed on 127.0.0.1 only.
+const COMMON_PROXY_PORTS: &[u16] = &[
+    7890, 7891, 7892, 7897, // Clash / Mihomo (mixed / socks / http / verge)
+    10808, 10809, // v2rayN (socks / http)
+    2080, 2081, // sing-box / others
+    1080, 1081, // generic SOCKS
+    8889, 8080, // generic HTTP
+    20170, 20171, // Qv2ray defaults
+];
+
+/// Probe a loopback port: return Some("socks5"|"http") if it speaks one, else
+/// None. Sends a SOCKS5 no-auth greeting; on a valid `05 xx` reply it's SOCKS5.
+/// Otherwise tries an HTTP CONNECT and treats any HTTP status line as HTTP.
+async fn probe_local_proxy_kind(port: u16) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let connect = tokio::time::timeout(std::time::Duration::from_millis(300), TcpStream::connect(addr));
+    let mut s = connect.await.ok()?.ok()?;
+    // SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth).
+    if s.write_all(&[0x05, 0x01, 0x00]).await.is_ok() {
+        let mut buf = [0u8; 2];
+        if tokio::time::timeout(std::time::Duration::from_millis(300), s.read_exact(&mut buf))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .is_some()
+            && buf[0] == 0x05
+        {
+            return Some("socks5".into());
+        }
+    }
+    // Not SOCKS5 — try a fresh connection for an HTTP CONNECT probe.
+    let mut s = tokio::time::timeout(std::time::Duration::from_millis(300), TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+    let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+    s.write_all(req.as_bytes()).await.ok()?;
+    let mut buf = [0u8; 16];
+    let n = tokio::time::timeout(std::time::Duration::from_millis(300), s.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    let head = String::from_utf8_lossy(&buf[..n]);
+    if head.starts_with("HTTP/") {
+        return Some("http".into());
+    }
+    None
+}
+
+/// Scan common local-proxy ports and report those that answer, with the
+/// listening process name. Lets the UI offer a one-click "use local proxy"
+/// upstream instead of the user hand-filling host/port.
+#[tauri::command]
+pub async fn sockscap_detect_local_proxies() -> Result<Vec<LocalProxyCandidate>, String> {
+    let procs = process::list_processes().unwrap_or_default();
+    let mut out = Vec::new();
+    for &port in COMMON_PROXY_PORTS {
+        // Only probe ports something is actually listening on (cheap pre-check).
+        let pids = listener_pid::resolve_listener_pids(port);
+        if pids.is_empty() {
+            continue;
+        }
+        let Some(kind) = probe_local_proxy_kind(port).await else {
+            continue;
+        };
+        let process = pids
+            .iter()
+            .find_map(|pid| procs.iter().find(|p| p.pid == *pid))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        out.push(LocalProxyCandidate {
+            kind,
+            host: "127.0.0.1".into(),
+            port,
+            process,
+        });
+    }
+    Ok(out)
+}
+
+/// Suspected proxy/VPN TUN adapters on this machine (Clash TUN, sing-box,
+/// Wintun/TAP, WireGuard). A running L3 TUN client collides with SocksCap's
+/// global capture, so the UI warns when this is non-empty. Empty = no conflict.
+#[tauri::command]
+pub async fn sockscap_detect_tun_conflicts() -> Result<Vec<String>, String> {
+    Ok(tun_detect::detect_tun_adapters())
+}
+
 /// App-exit hook (blocking): cleanly stop the elevated helper's WinDivert
 /// capture and shut the helper down, then clear the recovery journal. Called
 /// from the Tauri `RunEvent::Exit` handler so a normal quit does not leave an
@@ -1289,6 +1739,13 @@ pub async fn sockscap_test_upstream(
 /// the helper confirmed capture stopped (so a failure still triggers
 /// `boot_repair` on the next launch).
 pub fn shutdown_on_exit(app: &AppHandle, state: &AppState) {
+    // Kill any xray-core sidecars first (all platforms). Best-effort, sync:
+    // start_kill without reaping, since no async runtime is guaranteed at exit.
+    // kill_on_drop is the further backstop for a hard crash.
+    if let Some(mgr) = state.sockscap.xray() {
+        mgr.shutdown_all_blocking();
+    }
+
     let sess = state
         .sockscap
         .helper

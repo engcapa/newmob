@@ -1,7 +1,9 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 const DEFAULT_MAX_TEXT_BYTES: u64 = 5 * 1024 * 1024;
@@ -67,6 +69,27 @@ pub struct WorkspaceTask {
     pub command: String,
     pub cwd: String,
     pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub module_path: Option<String>,
+}
+
+/// A runnable Java `public static void main` entry point discovered from source.
+///
+/// This is intentionally independent from java-debug/jdtls bundles: Run must
+/// keep working with only a JDK plus the project's Maven/Gradle wrapper.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaRunTarget {
+    pub id: String,
+    pub label: String,
+    pub main_class: String,
+    pub file_path: String,
+    pub command: String,
+    pub cwd: String,
+    /// `maven`, `gradle`, or `source-file`.
+    pub build_system: String,
+    /// Workspace-relative build/module directory (`.` for the root project).
+    pub module_path: String,
 }
 
 fn push_task(
@@ -83,6 +106,7 @@ fn push_task(
         command: command.into(),
         cwd: path_to_string(cwd),
         source: source.to_string(),
+        module_path: None,
     });
 }
 
@@ -212,11 +236,26 @@ fn parse_maven_coordinate(text: &str) -> Option<DependencyNode> {
     let parts: Vec<&str> = coord.split(':').collect();
     let (group, artifact, version, scope) = match parts.as_slice() {
         // group:artifact:packaging:version:scope
-        [g, a, _pkg, v, s] => ((*g).to_string(), (*a).to_string(), (*v).to_string(), (*s).to_string()),
+        [g, a, _pkg, v, s] => (
+            (*g).to_string(),
+            (*a).to_string(),
+            (*v).to_string(),
+            (*s).to_string(),
+        ),
         // group:artifact:packaging:classifier:version:scope
-        [g, a, _pkg, _cls, v, s] => ((*g).to_string(), (*a).to_string(), (*v).to_string(), (*s).to_string()),
+        [g, a, _pkg, _cls, v, s] => (
+            (*g).to_string(),
+            (*a).to_string(),
+            (*v).to_string(),
+            (*s).to_string(),
+        ),
         // group:artifact:packaging:version (root project — no scope)
-        [g, a, _pkg, v] => ((*g).to_string(), (*a).to_string(), (*v).to_string(), String::new()),
+        [g, a, _pkg, v] => (
+            (*g).to_string(),
+            (*a).to_string(),
+            (*v).to_string(),
+            String::new(),
+        ),
         _ => return None,
     };
     if group.is_empty() || artifact.is_empty() {
@@ -275,7 +314,11 @@ fn parse_gradle_coordinate(text: &str) -> Option<DependencyNode> {
     let (coord, conflict, resolved) = match text.split_once(" -> ") {
         Some((left, resolved)) => {
             let resolved = resolved.trim();
-            (left.trim(), Some(format!("{} -> {resolved}", left.trim())), Some(resolved.to_string()))
+            (
+                left.trim(),
+                Some(format!("{} -> {resolved}", left.trim())),
+                Some(resolved.to_string()),
+            )
         }
         None => (text, None, None),
     };
@@ -310,10 +353,12 @@ pub struct WorkspaceTaskGroup {
     pub tasks: Vec<WorkspaceTask>,
 }
 
-/// Wrapper-aware Gradle invocation for `root` (`./gradlew`, `gradlew.bat`, or `gradle`).
+/// Wrapper-aware Gradle invocation for `root` (`./gradlew`, `.\gradlew.bat`,
+/// or `gradle`). PowerShell does not search the current directory, hence the
+/// explicit `.\` on Windows.
 fn gradle_runner(root: &Path) -> &'static str {
     if cfg!(windows) && root.join("gradlew.bat").is_file() {
-        "gradlew.bat"
+        r".\gradlew.bat"
     } else if root.join("gradlew").is_file() {
         "./gradlew"
     } else {
@@ -321,10 +366,11 @@ fn gradle_runner(root: &Path) -> &'static str {
     }
 }
 
-/// Wrapper-aware Maven invocation for `root` (`mvnw.cmd`, `./mvnw`, or `mvn`).
+/// Wrapper-aware Maven invocation for `root` (`.\mvnw.cmd`, `./mvnw`, or
+/// `mvn`). PowerShell does not search the current directory.
 fn maven_runner(root: &Path) -> &'static str {
     if cfg!(windows) && root.join("mvnw.cmd").is_file() {
-        "mvnw.cmd"
+        r".\mvnw.cmd"
     } else if root.join("mvnw").is_file() {
         "./mvnw"
     } else {
@@ -340,7 +386,84 @@ const MAVEN_LIFECYCLE_PHASES: &[&str] = &[
 /// Gradle tasks common to the base/Java plugins (a fixed set — a live
 /// `gradle tasks --all` enumeration would require spawning Gradle and is left as
 /// a follow-up so this stays a pure, fast, offline function).
-const GRADLE_COMMON_TASKS: &[&str] = &["clean", "build", "assemble", "check", "test", "jar"];
+const GRADLE_COMMON_TASKS: &[&str] = &[
+    "clean", "classes", "build", "assemble", "check", "test", "jar",
+];
+
+fn discover_java_build_directories(
+    root: &Path,
+) -> Result<Vec<(JavaBuildSystem, PathBuf, String)>, String> {
+    let mut files = Vec::new();
+    collect_workspace_files(root, root, 0, 10, 3_000, &mut files)?;
+    let mut builds = Vec::new();
+    for entry in files {
+        let file_name = Path::new(&entry.path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let build_system = match file_name {
+            "pom.xml" => JavaBuildSystem::Maven,
+            "build.gradle" | "build.gradle.kts" => JavaBuildSystem::Gradle,
+            _ => continue,
+        };
+        let build_dir = root
+            .join(&entry.path)
+            .parent()
+            .unwrap_or(root)
+            .to_path_buf();
+        if builds
+            .iter()
+            .any(|(existing, dir, _)| *existing == build_system && *dir == build_dir)
+        {
+            continue;
+        }
+        let module_path = relative_path(root, &build_dir)?;
+        builds.push((
+            build_system,
+            build_dir,
+            if module_path.is_empty() {
+                ".".into()
+            } else {
+                module_path
+            },
+        ));
+    }
+    builds.sort_by(|left, right| {
+        left.2
+            .split('/')
+            .count()
+            .cmp(&right.2.split('/').count())
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| format!("{:?}", left.0).cmp(&format!("{:?}", right.0)))
+    });
+    Ok(builds)
+}
+
+fn build_task_id(source: &str, module_path: &str, task: &str) -> String {
+    if module_path == "." {
+        format!("{source}:{task}")
+    } else {
+        format!("{source}:{}:{task}", module_path.replace(['/', '\\'], ":"))
+    }
+}
+
+fn gradle_task_selector(invocation_root: &Path, build_dir: &Path, task: &str) -> String {
+    let Ok(relative) = build_dir.strip_prefix(invocation_root) else {
+        return task.into();
+    };
+    if relative.as_os_str().is_empty() {
+        return task.into();
+    }
+    let project = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(":");
+    format!(":{project}:{task}")
+}
 
 /// Build the grouped task tree: detected tasks bucketed by source (first-seen
 /// order preserved), with Maven/Gradle enriched to their full lifecycle / common
@@ -349,13 +472,13 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
     let detected = detect_workspace_tasks(root)?;
     let mut groups: Vec<WorkspaceTaskGroup> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut push = |groups: &mut Vec<WorkspaceTaskGroup>,
-                    index: &mut std::collections::HashMap<String, usize>,
-                    task: WorkspaceTask| {
+    let push = |groups: &mut Vec<WorkspaceTaskGroup>,
+                index: &mut std::collections::HashMap<String, usize>,
+                task: WorkspaceTask| {
         // Skip duplicate labels within a source (enrichment may overlap detection).
         if let Some(&i) = index.get(&task.source) {
             let group: &mut WorkspaceTaskGroup = &mut groups[i];
-            if group.tasks.iter().any(|existing| existing.label == task.label) {
+            if group.tasks.iter().any(|existing| existing.id == task.id) {
                 return;
             }
             group.tasks.push(task);
@@ -368,30 +491,78 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
         }
     };
 
-    // Maven / Gradle full lifecycle first (before the detected subset merges in),
-    // so lifecycle order is preserved in the tree.
-    if root.join("pom.xml").is_file() {
-        let runner = maven_runner(root);
-        for phase in MAVEN_LIFECYCLE_PHASES {
-            push(&mut groups, &mut index, WorkspaceTask {
-                id: format!("Maven:{phase}"),
-                label: (*phase).to_string(),
-                command: format!("{runner} {phase}"),
-                cwd: path_to_string(root),
-                source: "Maven".to_string(),
-            });
-        }
-    }
-    if root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file() {
-        let runner = gradle_runner(root);
-        for task in GRADLE_COMMON_TASKS {
-            push(&mut groups, &mut index, WorkspaceTask {
-                id: format!("Gradle:{task}"),
-                label: (*task).to_string(),
-                command: format!("{runner} {task}"),
-                cwd: path_to_string(root),
-                source: "Gradle".to_string(),
-            });
+    // Maven / Gradle full lifecycle first (before the detected subset merges
+    // in), including nested modules in a monorepo. Build commands use the
+    // nearest parent wrapper and a module-qualified Gradle task selector.
+    for (build_system, build_dir, module_path) in discover_java_build_directories(root)? {
+        match build_system {
+            JavaBuildSystem::Maven => {
+                let runner = find_wrapper(&build_dir, root, build_system);
+                for phase in MAVEN_LIFECYCLE_PHASES {
+                    push(
+                        &mut groups,
+                        &mut index,
+                        WorkspaceTask {
+                            id: build_task_id("Maven", &module_path, phase),
+                            label: (*phase).to_string(),
+                            command: format!("{runner} {phase}"),
+                            cwd: path_to_string(&build_dir),
+                            source: "Maven".into(),
+                            module_path: Some(module_path.clone()),
+                        },
+                    );
+                }
+                push(
+                    &mut groups,
+                    &mut index,
+                    WorkspaceTask {
+                        id: build_task_id("Maven", &module_path, "rebuild"),
+                        label: "rebuild".into(),
+                        command: format!("{runner} clean compile"),
+                        cwd: path_to_string(&build_dir),
+                        source: "Maven".into(),
+                        module_path: Some(module_path),
+                    },
+                );
+            }
+            JavaBuildSystem::Gradle => {
+                let invocation_root = gradle_invocation_root(root, &build_dir);
+                let runner = find_wrapper(&invocation_root, root, build_system);
+                for task in GRADLE_COMMON_TASKS {
+                    let selector = gradle_task_selector(&invocation_root, &build_dir, task);
+                    push(
+                        &mut groups,
+                        &mut index,
+                        WorkspaceTask {
+                            id: build_task_id("Gradle", &module_path, task),
+                            label: (*task).to_string(),
+                            command: format!("{runner} {}", shell_quote(&selector)),
+                            cwd: path_to_string(&invocation_root),
+                            source: "Gradle".into(),
+                            module_path: Some(module_path.clone()),
+                        },
+                    );
+                }
+                let clean = gradle_task_selector(&invocation_root, &build_dir, "clean");
+                let classes = gradle_task_selector(&invocation_root, &build_dir, "classes");
+                push(
+                    &mut groups,
+                    &mut index,
+                    WorkspaceTask {
+                        id: build_task_id("Gradle", &module_path, "rebuild"),
+                        label: "rebuild".into(),
+                        command: format!(
+                            "{runner} {} {}",
+                            shell_quote(&clean),
+                            shell_quote(&classes)
+                        ),
+                        cwd: path_to_string(&invocation_root),
+                        source: "Gradle".into(),
+                        module_path: Some(module_path),
+                    },
+                );
+            }
+            JavaBuildSystem::SourceFile => {}
         }
     }
 
@@ -472,13 +643,7 @@ fn detect_workspace_tasks(root: &Path) -> Result<Vec<WorkspaceTask>, String> {
     }
 
     if root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file() {
-        let runner = if cfg!(windows) && root.join("gradlew.bat").is_file() {
-            "gradlew.bat"
-        } else if root.join("gradlew").is_file() {
-            "./gradlew"
-        } else {
-            "gradle"
-        };
+        let runner = gradle_runner(root);
         for target in ["build", "test"] {
             push_task(
                 &mut tasks,
@@ -491,13 +656,7 @@ fn detect_workspace_tasks(root: &Path) -> Result<Vec<WorkspaceTask>, String> {
     }
 
     if root.join("pom.xml").is_file() {
-        let runner = if cfg!(windows) && root.join("mvnw.cmd").is_file() {
-            "mvnw.cmd"
-        } else if root.join("mvnw").is_file() {
-            "./mvnw"
-        } else {
-            "mvn"
-        };
+        let runner = maven_runner(root);
         for target in ["package", "test"] {
             push_task(
                 &mut tasks,
@@ -571,10 +730,416 @@ fn detect_workspace_tasks(root: &Path) -> Result<Vec<WorkspaceTask>, String> {
     Ok(tasks)
 }
 
+const JAVA_RUN_SCAN_MAX_FILES: usize = 5_000;
+const JAVA_RUN_SCAN_MAX_DEPTH: usize = 25;
+const JAVA_RUN_SOURCE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const GRADLE_JAVA_RUN_INIT: &str = r#"allprojects { project ->
+    project.afterEvaluate {
+        if (project.plugins.hasPlugin('java') && project.tasks.findByName('taomniRun') == null) {
+            project.tasks.register('taomniRun', JavaExec) {
+                group = 'application'
+                description = 'Run a Java main class selected by Taomni'
+                classpath = project.sourceSets.main.runtimeClasspath
+                def selectedMain = project.findProperty('taomniMainClass')
+                if (selectedMain == null || selectedMain.toString().trim().isEmpty()) {
+                    throw new GradleException('Missing -PtaomniMainClass')
+                }
+                if (delegate.hasProperty('mainClass')) {
+                    mainClass.set(selectedMain.toString())
+                } else {
+                    main = selectedMain.toString()
+                }
+                standardInput = System.in
+            }
+        }
+    }
+}
+"#;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavaBuildSystem {
+    Maven,
+    Gradle,
+    SourceFile,
+}
+
+fn java_main_regex() -> &'static Regex {
+    static MAIN: OnceLock<Regex> = OnceLock::new();
+    MAIN.get_or_init(|| {
+        Regex::new(
+            r"(?s)\b(?:public\s+)?static\s+void\s+main\s*\(\s*(?:final\s+)?(?:java\.lang\.)?String\s*(?:\[\s*\]\s*[A-Za-z_$][A-Za-z0-9_$]*|[A-Za-z_$][A-Za-z0-9_$]*\s*\[\s*\]|\.{3}\s*[A-Za-z_$][A-Za-z0-9_$]*)\s*\)",
+        )
+        .expect("valid Java main regex")
+    })
+}
+
+fn java_package_regex() -> &'static Regex {
+    static PACKAGE: OnceLock<Regex> = OnceLock::new();
+    PACKAGE.get_or_init(|| {
+        Regex::new(
+            r"(?m)^\s*package\s+([A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*;",
+        )
+        .expect("valid Java package regex")
+    })
+}
+
+/// Strip comments and string/char/text-block contents before looking for a
+/// main signature. This avoids presenting a Run action for examples embedded
+/// in Javadoc or string literals while keeping line structure irrelevant.
+fn java_code_only(source: &str) -> String {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum State {
+        Code,
+        LineComment,
+        BlockComment,
+        String,
+        Character,
+        TextBlock,
+    }
+
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(bytes.len());
+    let mut state = State::Code;
+    let mut i = 0;
+    while i < bytes.len() {
+        let current = bytes[i];
+        let next = bytes.get(i + 1).copied();
+        let third = bytes.get(i + 2).copied();
+        match state {
+            State::Code if current == b'/' && next == Some(b'/') => {
+                out.push_str("  ");
+                state = State::LineComment;
+                i += 2;
+            }
+            State::Code if current == b'/' && next == Some(b'*') => {
+                out.push_str("  ");
+                state = State::BlockComment;
+                i += 2;
+            }
+            State::Code if current == b'"' && next == Some(b'"') && third == Some(b'"') => {
+                out.push_str("   ");
+                state = State::TextBlock;
+                i += 3;
+            }
+            State::Code if current == b'"' => {
+                out.push(' ');
+                state = State::String;
+                i += 1;
+            }
+            State::Code if current == b'\'' => {
+                out.push(' ');
+                state = State::Character;
+                i += 1;
+            }
+            State::LineComment if current == b'\n' => {
+                out.push('\n');
+                state = State::Code;
+                i += 1;
+            }
+            State::BlockComment if current == b'*' && next == Some(b'/') => {
+                out.push_str("  ");
+                state = State::Code;
+                i += 2;
+            }
+            State::TextBlock if current == b'"' && next == Some(b'"') && third == Some(b'"') => {
+                out.push_str("   ");
+                state = State::Code;
+                i += 3;
+            }
+            State::String | State::Character if current == b'\\' && next.is_some() => {
+                out.push_str("  ");
+                i += 2;
+            }
+            State::String if current == b'"' => {
+                out.push(' ');
+                state = State::Code;
+                i += 1;
+            }
+            State::Character if current == b'\'' => {
+                out.push(' ');
+                state = State::Code;
+                i += 1;
+            }
+            State::Code => {
+                out.push(current as char);
+                i += 1;
+            }
+            _ => {
+                out.push(if current == b'\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+fn shell_quote(value: &str) -> String {
+    if cfg!(windows) {
+        format!("'{}'", value.replace('\'', "''"))
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn wrapper_command(path: &Path) -> String {
+    let quoted = shell_quote(&path_to_string(path));
+    if cfg!(windows) {
+        format!("& {quoted}")
+    } else {
+        quoted
+    }
+}
+
+fn find_wrapper(build_dir: &Path, workspace_root: &Path, tool: JavaBuildSystem) -> String {
+    let names: &[&str] = match tool {
+        JavaBuildSystem::Maven if cfg!(windows) => &["mvnw.cmd"],
+        JavaBuildSystem::Maven => &["mvnw"],
+        JavaBuildSystem::Gradle if cfg!(windows) => &["gradlew.bat"],
+        JavaBuildSystem::Gradle => &["gradlew"],
+        JavaBuildSystem::SourceFile => &[],
+    };
+    let mut current = Some(build_dir);
+    while let Some(dir) = current {
+        for name in names {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return wrapper_command(&candidate);
+            }
+        }
+        if dir == workspace_root {
+            break;
+        }
+        current = dir
+            .parent()
+            .filter(|parent| parent.starts_with(workspace_root));
+    }
+    match tool {
+        JavaBuildSystem::Maven => "mvn".into(),
+        JavaBuildSystem::Gradle => "gradle".into(),
+        JavaBuildSystem::SourceFile => "java".into(),
+    }
+}
+
+fn nearest_java_build(workspace_root: &Path, source_file: &Path) -> (JavaBuildSystem, PathBuf) {
+    let mut current = source_file.parent();
+    while let Some(dir) = current {
+        if dir.join("pom.xml").is_file() {
+            return (JavaBuildSystem::Maven, dir.to_path_buf());
+        }
+        if dir.join("build.gradle").is_file() || dir.join("build.gradle.kts").is_file() {
+            return (JavaBuildSystem::Gradle, dir.to_path_buf());
+        }
+        if dir == workspace_root {
+            break;
+        }
+        current = dir
+            .parent()
+            .filter(|parent| parent.starts_with(workspace_root));
+    }
+    (JavaBuildSystem::SourceFile, workspace_root.to_path_buf())
+}
+
+fn gradle_invocation_root(workspace_root: &Path, build_dir: &Path) -> PathBuf {
+    let mut result = build_dir.to_path_buf();
+    let mut current = Some(build_dir);
+    while let Some(dir) = current {
+        if dir.join("settings.gradle").is_file() || dir.join("settings.gradle.kts").is_file() {
+            result = dir.to_path_buf();
+            break;
+        }
+        if dir == workspace_root {
+            break;
+        }
+        current = dir
+            .parent()
+            .filter(|parent| parent.starts_with(workspace_root));
+    }
+    result
+}
+
+fn gradle_run_init_script() -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("taomni-code-workspace");
+    fs::create_dir_all(&dir).map_err(|error| {
+        format!(
+            "create Gradle run support directory {}: {error}",
+            dir.display()
+        )
+    })?;
+    let path = dir.join("java-run.init.gradle");
+    let should_write = fs::read_to_string(&path)
+        .map(|current| current != GRADLE_JAVA_RUN_INIT)
+        .unwrap_or(true);
+    if should_write {
+        fs::write(&path, GRADLE_JAVA_RUN_INIT)
+            .map_err(|error| format!("write Gradle run support {}: {error}", path.display()))?;
+    }
+    Ok(path)
+}
+
+fn java_run_target_for_path(
+    workspace_root: &Path,
+    source_file: &Path,
+) -> Result<JavaRunTarget, String> {
+    let metadata = fs::metadata(source_file)
+        .map_err(|error| format!("stat {}: {error}", source_file.display()))?;
+    if metadata.len() > JAVA_RUN_SOURCE_MAX_BYTES {
+        return Err(format!(
+            "Java source is too large to inspect for a main class: {}",
+            source_file.display()
+        ));
+    }
+    let source = fs::read_to_string(source_file)
+        .map_err(|error| format!("read {}: {error}", source_file.display()))?;
+    let code = java_code_only(&source);
+    if !java_main_regex().is_match(&code) {
+        return Err("No `static void main(String[] args)` entry point found in this file".into());
+    }
+    let class_name = source_file
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| format!("Invalid Java source file name: {}", source_file.display()))?;
+    let package_name = java_package_regex()
+        .captures(&code)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str());
+    let main_class = package_name
+        .map(|package| format!("{package}.{class_name}"))
+        .unwrap_or_else(|| class_name.to_string());
+    let relative_file = relative_path(workspace_root, source_file)?;
+    let (build_system, build_dir) = nearest_java_build(workspace_root, source_file);
+    let (command, cwd, module_path, build_system_name) = match build_system {
+        JavaBuildSystem::Maven => {
+            let runner = find_wrapper(&build_dir, workspace_root, build_system);
+            let command = format!(
+                "{runner} -q -DskipTests -Dexec.mainClass={} -Dexec.cleanupDaemonThreads=false compile org.codehaus.mojo:exec-maven-plugin:3.5.0:java",
+                shell_quote(&main_class),
+            );
+            (
+                command,
+                path_to_string(&build_dir),
+                relative_path(workspace_root, &build_dir).unwrap_or_else(|_| ".".into()),
+                "maven",
+            )
+        }
+        JavaBuildSystem::Gradle => {
+            let invocation_root = gradle_invocation_root(workspace_root, &build_dir);
+            let runner = find_wrapper(&invocation_root, workspace_root, build_system);
+            let init_script = gradle_run_init_script()?;
+            let module_relative = build_dir
+                .strip_prefix(&invocation_root)
+                .ok()
+                .filter(|path| !path.as_os_str().is_empty());
+            let task = module_relative
+                .map(|path| {
+                    let project = path
+                        .components()
+                        .filter_map(|component| match component {
+                            Component::Normal(value) => Some(value.to_string_lossy()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(":");
+                    format!(":{project}:taomniRun")
+                })
+                .unwrap_or_else(|| "taomniRun".into());
+            let command = format!(
+                "{runner} --console=plain -I {} -PtaomniMainClass={} {}",
+                shell_quote(&path_to_string(&init_script)),
+                shell_quote(&main_class),
+                shell_quote(&task),
+            );
+            (
+                command,
+                path_to_string(&invocation_root),
+                relative_path(workspace_root, &build_dir).unwrap_or_else(|_| ".".into()),
+                "gradle",
+            )
+        }
+        JavaBuildSystem::SourceFile => (
+            format!("java {}", shell_quote(&path_to_string(source_file))),
+            path_to_string(workspace_root),
+            ".".into(),
+            "source-file",
+        ),
+    };
+    let module_path = if module_path.is_empty() {
+        ".".into()
+    } else {
+        module_path
+    };
+    Ok(JavaRunTarget {
+        id: format!("java-main:{relative_file}"),
+        label: main_class.clone(),
+        main_class,
+        file_path: path_to_string(source_file),
+        command,
+        cwd,
+        build_system: build_system_name.into(),
+        module_path,
+    })
+}
+
+fn detect_java_run_targets(root: &Path) -> Result<Vec<JavaRunTarget>, String> {
+    let mut files = Vec::new();
+    collect_workspace_files(
+        root,
+        root,
+        0,
+        JAVA_RUN_SCAN_MAX_DEPTH,
+        JAVA_RUN_SCAN_MAX_FILES,
+        &mut files,
+    )?;
+    let mut targets = Vec::new();
+    for entry in files {
+        if !entry.path.to_ascii_lowercase().ends_with(".java")
+            || entry
+                .path
+                .split(['/', '\\'])
+                .any(|segment| segment.eq_ignore_ascii_case("test"))
+        {
+            continue;
+        }
+        let source_file = root.join(&entry.path);
+        match java_run_target_for_path(root, &source_file) {
+            Ok(target) => targets.push(target),
+            Err(error) if error.starts_with("No `static void main") => {}
+            Err(error) if error.starts_with("Java source is too large") => {}
+            Err(error) => return Err(error),
+        }
+    }
+    targets.sort_by(|left, right| {
+        left.main_class
+            .to_ascii_lowercase()
+            .cmp(&right.main_class.to_ascii_lowercase())
+            .then_with(|| left.file_path.cmp(&right.file_path))
+    });
+    Ok(targets)
+}
+
 #[tauri::command]
 pub fn workspace_detect_tasks(repo_root: String) -> Result<Vec<WorkspaceTask>, String> {
     let root = canonical_repo_root(&repo_root)?;
     detect_workspace_tasks(&root)
+}
+
+#[tauri::command]
+pub fn workspace_java_run_targets(repo_root: String) -> Result<Vec<JavaRunTarget>, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    detect_java_run_targets(&root)
+}
+
+#[tauri::command]
+pub fn workspace_java_run_target(
+    repo_root: String,
+    file_path: String,
+) -> Result<JavaRunTarget, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    let source_file = resolve_existing_path(&root, &file_path)?;
+    if source_file.extension().and_then(|value| value.to_str()) != Some("java") {
+        return Err("Run Java File requires a .java source file".into());
+    }
+    java_run_target_for_path(&root, &source_file)
 }
 
 /// Grouped task tree for the Build panel (M7 F-2). Maven/Gradle carry their full
@@ -611,18 +1176,17 @@ pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<Dependen
     let is_maven = root.join("pom.xml").is_file();
     let is_gradle = root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file();
     if !is_maven && !is_gradle {
-        return Err("No pom.xml or build.gradle found; dependency tree needs a Maven or Gradle project".into());
+        return Err(
+            "No pom.xml or build.gradle found; dependency tree needs a Maven or Gradle project"
+                .into(),
+        );
     }
 
     // Maven is preferred when both exist (rare); its tree carries scopes.
     let (program, args): (String, Vec<String>) = if is_maven {
         (
             maven_runner(&root).to_string(),
-            vec![
-                "-B".into(),
-                "-q".into(),
-                "dependency:tree".into(),
-            ],
+            vec!["-B".into(), "-q".into(), "dependency:tree".into()],
         )
     } else {
         (
@@ -637,10 +1201,7 @@ pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<Dependen
     };
 
     let mut command = tokio::process::Command::new(&program);
-    command
-        .args(&args)
-        .current_dir(&root)
-        .kill_on_drop(true);
+    command.args(&args).current_dir(&root).kill_on_drop(true);
     no_console_window(&mut command);
 
     let output = tokio::time::timeout(DEPENDENCY_TREE_TIMEOUT, command.output())
@@ -654,9 +1215,16 @@ pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<Dependen
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr.trim();
-        let detail = if detail.is_empty() { stdout.trim() } else { detail };
+        let detail = if detail.is_empty() {
+            stdout.trim()
+        } else {
+            detail
+        };
         let snippet: String = detail.chars().take(600).collect();
-        return Err(format!("`{program}` exited with {}: {snippet}", output.status));
+        return Err(format!(
+            "`{program}` exited with {}: {snippet}",
+            output.status
+        ));
     }
 
     let tree = if is_maven {
@@ -1637,7 +2205,11 @@ mod tests {
         fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
         fs::create_dir_all(dir.path().join("target/debug")).unwrap();
         fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
-        fs::write(dir.path().join("node_modules/pkg/index.js"), "module.exports=1").unwrap();
+        fs::write(
+            dir.path().join("node_modules/pkg/index.js"),
+            "module.exports=1",
+        )
+        .unwrap();
         fs::write(dir.path().join("target/debug/app"), "bin").unwrap();
 
         let files = workspace_list_files_recursive(root, None, Some(10), Some(100)).unwrap();
@@ -1937,11 +2509,147 @@ runtimeClasspath - Runtime classpath of source set 'main'.
 
         // No duplicate labels within a group (enrichment vs detection overlap).
         for group in &groups {
-            let mut labels: Vec<&str> = group.tasks.iter().map(|task| task.label.as_str()).collect();
+            let mut labels: Vec<&str> =
+                group.tasks.iter().map(|task| task.label.as_str()).collect();
             let count = labels.len();
             labels.sort_unstable();
             labels.dedup();
             assert_eq!(labels.len(), count, "duplicate label in {}", group.source);
         }
+    }
+
+    #[test]
+    fn discovers_plain_java_main_without_debug_bundles() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("src/com/example");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("App.java"),
+            r#"
+                package com.example;
+                // public static void main(String[] ignored) {}
+                public class App {
+                    String example = "static void main(String[] fake)";
+                    public static void main(final String[] args) {
+                        System.out.println("ok");
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let target = workspace_java_run_target(
+            dir.path().to_string_lossy().into_owned(),
+            "src/com/example/App.java".into(),
+        )
+        .unwrap();
+        assert_eq!(target.main_class, "com.example.App");
+        assert_eq!(target.build_system, "source-file");
+        assert!(target.command.starts_with("java "));
+        assert!(target.command.contains("App.java"));
+        assert_eq!(target.module_path, ".");
+    }
+
+    #[test]
+    fn rejects_java_file_with_main_only_in_comments_or_strings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Example.java"),
+            r#"
+                /** public static void main(String[] args) {} */
+                class Example {
+                    String sample = "public static void main(String[] args)";
+                }
+            "#,
+        )
+        .unwrap();
+
+        let error = workspace_java_run_target(
+            dir.path().to_string_lossy().into_owned(),
+            "Example.java".into(),
+        )
+        .unwrap_err();
+        assert!(error.contains("No `static void main"));
+    }
+
+    #[test]
+    fn builds_maven_main_command_with_project_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pom.xml"), "<project />").unwrap();
+        fs::write(dir.path().join("mvnw"), "#!/bin/sh").unwrap();
+        let source_dir = dir.path().join("src/main/java/demo");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("Main.java"),
+            "package demo; class Main { public static void main(String... args) {} }",
+        )
+        .unwrap();
+
+        let target = java_run_target_for_path(dir.path(), &source_dir.join("Main.java")).unwrap();
+        assert_eq!(target.build_system, "maven");
+        assert_eq!(target.main_class, "demo.Main");
+        assert_eq!(target.cwd, path_to_string(dir.path()));
+        assert!(target.command.contains("mvnw"));
+        assert!(target.command.contains("-Dexec.mainClass='demo.Main'"));
+        assert!(target.command.contains("exec-maven-plugin:3.5.0:java"));
+    }
+
+    #[test]
+    fn builds_gradle_subproject_main_command_and_module_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.gradle"), "include 'app'").unwrap();
+        fs::write(dir.path().join("build.gradle"), "plugins { id 'base' }").unwrap();
+        fs::write(dir.path().join("gradlew"), "#!/bin/sh").unwrap();
+        fs::create_dir_all(dir.path().join("app/src/main/java/demo")).unwrap();
+        fs::write(dir.path().join("app/build.gradle"), "plugins { id 'java' }").unwrap();
+        let source = dir.path().join("app/src/main/java/demo/App.java");
+        fs::write(
+            &source,
+            "package demo; class App { static void main(String args[]) {} }",
+        )
+        .unwrap();
+
+        let target = java_run_target_for_path(dir.path(), &source).unwrap();
+        assert_eq!(target.build_system, "gradle");
+        assert_eq!(target.module_path, "app");
+        assert_eq!(target.cwd, path_to_string(dir.path()));
+        assert!(target.command.contains(":app:taomniRun"));
+        assert!(target.command.contains("-PtaomniMainClass='demo.App'"));
+        assert!(target.command.contains("java-run.init.gradle"));
+
+        let groups = build_workspace_task_tree(dir.path()).unwrap();
+        let gradle = groups
+            .iter()
+            .find(|group| group.source == "Gradle")
+            .unwrap();
+        let module_compile = gradle
+            .tasks
+            .iter()
+            .find(|task| task.module_path.as_deref() == Some("app") && task.label == "classes")
+            .unwrap();
+        assert!(module_compile.command.contains(":app:classes"));
+        assert!(module_compile.command.contains("gradlew"));
+    }
+
+    #[test]
+    fn java_target_scan_skips_test_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        for (folder, name) in [
+            ("src/main/java/demo", "App"),
+            ("src/test/java/demo", "FixtureMain"),
+        ] {
+            let source_dir = dir.path().join(folder);
+            fs::create_dir_all(&source_dir).unwrap();
+            fs::write(
+                source_dir.join(format!("{name}.java")),
+                format!(
+                    "package demo; class {name} {{ public static void main(String[] args) {{}} }}"
+                ),
+            )
+            .unwrap();
+        }
+        let targets = detect_java_run_targets(dir.path()).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].main_class, "demo.App");
     }
 }

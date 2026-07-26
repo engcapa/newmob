@@ -48,6 +48,7 @@ import {
   workspaceListDir,
   workspaceReadFile,
   workspaceReadLooseFile,
+  workspaceJavaRunTarget,
   workspaceTaskTree,
   workspaceWriteFile,
   workspaceWriteLooseFile,
@@ -384,7 +385,7 @@ import {
 import { RunPanel, type RunPanelHandle, type WorkspaceTaskItem } from "./workspace/panels/RunPanel";
 import { BuildPanel } from "./workspace/panels/BuildPanel";
 import { TestsPanel } from "./workspace/panels/TestsPanel";
-import { defaultRunner, javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
+import { javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
 import { DebugPanel } from "./workspace/panels/DebugPanel";
 import { useCodeDebugSession } from "./workspace/useCodeDebugSession";
 import type { DebugStackFrame } from "./workspace/dapDebugModel";
@@ -855,6 +856,8 @@ export function CodeWorkspaceTab({
   const inactiveEditorPaneRef = useRef<HTMLElement | null>(null);
   const terminalDockRef = useRef<TerminalDockHandle | null>(null);
   const runPanelRef = useRef<RunPanelHandle | null>(null);
+  const runActiveJavaFileRef = useRef<() => void>(() => {});
+  const buildActiveProjectRef = useRef<(rebuild?: boolean) => void>(() => {});
 
   /** Run a workspace task in the integrated terminal (shared by Run + Build panels). */
   const runWorkspaceTask = useCallback(
@@ -4139,6 +4142,27 @@ export function CodeWorkspaceTab({
       },
     },
     {
+      id: "workspace.runActiveJavaFile",
+      title: "Run Current Java File",
+      category: "Run",
+      keybinding: "Shift+F10",
+      keywords: ["java", "main", "run", "application"],
+      when: () => !!activeFile
+        && activeFile.ref.kind === "root"
+        && !activeFile.library
+        && activeFile.languagePath.toLowerCase().endsWith(".java"),
+      run: () => runActiveJavaFileRef.current(),
+    },
+    {
+      id: "workspace.buildProject",
+      title: "Build Project",
+      category: "Build",
+      keybinding: "Ctrl+F9",
+      keywords: ["build", "compile", "maven", "gradle"],
+      when: () => roots.length > 0,
+      run: () => buildActiveProjectRef.current(false),
+    },
+    {
       id: "workspace.showRunTasks",
       title: "Show Run Tasks",
       category: "Run",
@@ -4364,6 +4388,7 @@ export function CodeWorkspaceTab({
     reloadFile,
     revealEditorTabInTree,
     renameSelected,
+    roots.length,
     saveFile,
     seSymbolsAvailable,
     selected,
@@ -4929,7 +4954,125 @@ export function CodeWorkspaceTab({
   const activeFileIsJava = !!activeFile
     && !activeFile.library
     && activeFile.languagePath.toLowerCase().endsWith(".java");
+  const [javaRunBusy, setJavaRunBusy] = useState(false);
+  const [projectBuildBusy, setProjectBuildBusy] = useState(false);
+
+  const launchWorkspaceTask = useCallback((task: WorkspaceTaskItem) => {
+    if (runPanelRef.current) {
+      runPanelRef.current.run(task);
+    } else {
+      runWorkspaceTask(task);
+    }
+  }, [runWorkspaceTask]);
+
+  /** IDEA-style Shift+F10: save and run the main class declared by this file. */
+  const runActiveJavaFile = useCallback(() => {
+    if (javaRunBusy) return;
+    void (async () => {
+      const file = openFilesRef.current[activeKey ?? ""];
+      if (!file || file.ref.kind !== "root" || file.library) return;
+      const root = findRoot(file.ref.rootId);
+      if (!root) return;
+      setJavaRunBusy(true);
+      try {
+        // Java launch discovery intentionally reads the on-disk source so a
+        // dirty new main method must be persisted before resolving it.
+        if (file.dirty) {
+          await saveOpenBufferText(file.key, file.text);
+        }
+        const target = await workspaceJavaRunTarget(root.path, file.ref.path);
+        launchWorkspaceTask({
+          id: target.id,
+          label: target.label,
+          command: target.command,
+          cwd: target.cwd,
+          source: `Java · ${target.buildSystem === "source-file" ? "JDK" : target.buildSystem}`,
+          rootId: root.id,
+          rootName: root.name,
+        });
+        setStatusMessage(`Running ${target.mainClass}`);
+      } catch (error) {
+        setStatusMessage(errorMessage(error));
+        setBottomDockTab("run");
+        setBottomDockOpen(true);
+      } finally {
+        setJavaRunBusy(false);
+      }
+    })();
+  }, [
+    activeKey,
+    findRoot,
+    javaRunBusy,
+    launchWorkspaceTask,
+    saveOpenBufferText,
+    setBottomDockOpen,
+    setBottomDockTab,
+    setStatusMessage,
+  ]);
+
+  /** IDEA-style Ctrl+F9: compile the active root using its real build tool. */
+  const buildActiveProject = useCallback((rebuild = false) => {
+    if (projectBuildBusy) return;
+    void (async () => {
+      const file = openFilesRef.current[activeKey ?? ""];
+      const root = file?.ref.kind === "root"
+        ? findRoot(file.ref.rootId)
+        : rootsRef.current[0] ?? null;
+      if (!root) return;
+      setProjectBuildBusy(true);
+      try {
+        const groups = await workspaceTaskTree(root.path);
+        const preferred = rebuild
+          ? [["Maven", "rebuild"], ["Gradle", "rebuild"]]
+          : [
+              ["Maven", "compile"],
+              ["Gradle", "classes"],
+              ["Gradle", "build"],
+              ["Cargo.toml", "build"],
+              ["package.json", "build"],
+              ["Makefile", "build"],
+            ];
+        let selected: WorkspaceTaskItem | null = null;
+        for (const [source, label] of preferred) {
+          const task = groups
+            .find((group) => group.source === source)
+            ?.tasks.find((candidate) => candidate.label === label);
+          if (task) {
+            selected = { ...task, rootId: root.id, rootName: root.name };
+            break;
+          }
+        }
+        if (!selected) {
+          setStatusMessage(rebuild
+            ? "No Maven or Gradle rebuild task was detected for this project"
+            : "No build task was detected for this project");
+          setBottomDockTab("build");
+          setBottomDockOpen(true);
+          return;
+        }
+        launchWorkspaceTask(selected);
+        setStatusMessage(`${rebuild ? "Rebuilding" : "Building"} ${root.name}`);
+      } catch (error) {
+        setStatusMessage(errorMessage(error));
+        setBottomDockTab("build");
+        setBottomDockOpen(true);
+      } finally {
+        setProjectBuildBusy(false);
+      }
+    })();
+  }, [
+    activeKey,
+    findRoot,
+    launchWorkspaceTask,
+    projectBuildBusy,
+    setBottomDockOpen,
+    setBottomDockTab,
+    setStatusMessage,
+  ]);
+  runActiveJavaFileRef.current = runActiveJavaFile;
+  buildActiveProjectRef.current = buildActiveProject;
   const [javaTestBuildTool, setJavaTestBuildTool] = useState<JavaTestBuildTool | null>(null);
+  const [javaTestCommand, setJavaTestCommand] = useState<string | null>(null);
 
   const discoverActiveJavaTests = useCallback(async () => {
     const file = openFilesRef.current[activeKey ?? ""];
@@ -4945,6 +5088,7 @@ export function CodeWorkspaceTab({
     if (!(bottomDockOpen && bottomDockTab === "tests" && activeFileIsJava && activeFile)) return;
     if (activeFile.ref.kind !== "root") {
       setJavaTestBuildTool(null);
+      setJavaTestCommand(null);
       return;
     }
     const root = findRoot(activeFile.ref.rootId);
@@ -4953,21 +5097,31 @@ export function CodeWorkspaceTab({
     void workspaceTaskTree(root.path)
       .then((groups) => {
         if (cancelled) return;
-        const sources = new Set(groups.map((group) => group.source));
-        setJavaTestBuildTool(sources.has("Maven") ? "maven" : sources.has("Gradle") ? "gradle" : null);
+        const mavenTask = groups
+          .find((group) => group.source === "Maven")
+          ?.tasks.find((task) => task.label === "test");
+        const gradleTask = groups
+          .find((group) => group.source === "Gradle")
+          ?.tasks.find((task) => task.label === "test");
+        const task = mavenTask ?? gradleTask;
+        setJavaTestBuildTool(mavenTask ? "maven" : gradleTask ? "gradle" : null);
+        setJavaTestCommand(task?.command ?? null);
       })
       .catch(() => {
-        if (!cancelled) setJavaTestBuildTool(null);
+        if (!cancelled) {
+          setJavaTestBuildTool(null);
+          setJavaTestCommand(null);
+        }
       });
     return () => { cancelled = true; };
   }, [activeFile, activeFileIsJava, bottomDockOpen, bottomDockTab, findRoot]);
 
   const runJavaTest = useCallback((item: JavaTestItem) => {
     const file = openFilesRef.current[activeKey ?? ""];
-    if (!file || file.ref.kind !== "root" || !javaTestBuildTool) return;
+    if (!file || file.ref.kind !== "root" || !javaTestBuildTool || !javaTestCommand) return;
     const root = findRoot(file.ref.rootId);
     if (!root) return;
-    const command = javaTestRunCommand(javaTestBuildTool, item, defaultRunner(javaTestBuildTool));
+    const command = javaTestRunCommand(javaTestBuildTool, item, javaTestCommand);
     runWorkspaceTask({
       id: `java-test:${item.fullName}`,
       label: `Test ${item.name}`,
@@ -4977,7 +5131,7 @@ export function CodeWorkspaceTab({
       rootId: root.id,
       rootName: root.name,
     });
-  }, [activeKey, findRoot, javaTestBuildTool, runWorkspaceTask]);
+  }, [activeKey, findRoot, javaTestBuildTool, javaTestCommand, runWorkspaceTask]);
 
   // M9 debug-test: resolve the test's JUnit launch config (java-test) and start
   // a debug session through the DAP path.
@@ -5520,6 +5674,31 @@ export function CodeWorkspaceTab({
           icon={<RotateCcw className="w-3.5 h-3.5" />}
           disabled={!activeFile || activeFile.loading}
           onClick={() => executeWorkspaceCommand("workspace.reload", { focus: "editor" })}
+        />
+        <IconButton
+          label="Build project (Ctrl+F9)"
+          testId="code-workspace-build-project"
+          icon={projectBuildBusy
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Hammer className="w-3.5 h-3.5" />}
+          disabled={roots.length === 0 || projectBuildBusy}
+          onClick={() => buildActiveProject(false)}
+        />
+        <IconButton
+          label="Run current Java file (Shift+F10)"
+          testId="code-workspace-run-java"
+          icon={javaRunBusy
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Play className="w-3.5 h-3.5" />}
+          disabled={!activeFileDebuggable || javaRunBusy}
+          onClick={runActiveJavaFile}
+        />
+        <IconButton
+          label="Debug current Java file"
+          testId="code-workspace-debug-java"
+          icon={<Bug className="w-3.5 h-3.5" />}
+          disabled={!activeFileDebuggable || debugSessionActive}
+          onClick={startDebugActiveFile}
         />
         <IconButton
           label="Refresh tree"

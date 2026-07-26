@@ -58,6 +58,8 @@ pub struct CaptureStartArgs {
     pub app_paths: Vec<String>,
     pub bypass_cidrs: Vec<String>,
     pub bypass_pids: Vec<u32>,
+    /// Executable paths to always bypass (restart-proof local-proxy exclusion).
+    pub bypass_paths: Vec<String>,
     pub bypass_endpoints: Vec<(String, u16)>,
     pub relay_ip: String,
     pub relay_port: u16,
@@ -503,6 +505,7 @@ pub fn capture_start(sess: &HelperSession, args: &CaptureStartArgs) -> Result<se
         "appPaths": args.app_paths,
         "bypassCidrs": args.bypass_cidrs,
         "bypassPids": args.bypass_pids,
+        "bypassPaths": args.bypass_paths,
         "bypassEndpoints": endpoints,
         "relayIp": args.relay_ip,
         "relayPort": args.relay_port,

@@ -39,6 +39,10 @@ pub struct CapturePlan {
     pub app_paths: Vec<String>,
     pub bypass_cidrs: Vec<String>,
     pub bypass_pids: Vec<u32>,
+    /// Executable paths to always exclude from capture (e.g. an external local
+    /// proxy used as a loopback upstream). Matched per-flow, so it survives the
+    /// proxy restarting with a new PID — unlike `bypass_pids`.
+    pub bypass_paths: Vec<String>,
     pub bypass_endpoints: Vec<Endpoint>,
     pub relay_ip: Ipv4Addr,
     pub relay_port: u16,
@@ -622,7 +626,7 @@ fn network_loop(
                 Some(f) => (f.pid, f.path),
                 None => (0, String::new()),
             };
-            if pid != 0 && plan.bypass_pids.contains(&pid) {
+            if (pid != 0 && plan.bypass_pids.contains(&pid)) || path_bypassed(&plan, &path) {
                 let _ = api.send(handle, pkt, &addr);
                 continue;
             }
@@ -768,7 +772,7 @@ fn should_bypass(
 ) -> bool {
     if let Ok(m) = flows.lock() {
         if let Some(f) = m.get(flow_key) {
-            if plan.bypass_pids.contains(&f.pid) {
+            if plan.bypass_pids.contains(&f.pid) || path_bypassed(plan, &f.path) {
                 return true;
             }
         }
@@ -836,8 +840,22 @@ fn process_in_scope(plan: &CapturePlan, pid: u32, path: &str, tree: &SharedTree)
         .unwrap_or(false)
 }
 
+/// True when a flow's process should be bypassed by executable path. Restart-
+/// proof (matches the current path, not a snapshot PID). Empty path never matches.
+fn path_bypassed(plan: &CapturePlan, path: &str) -> bool {
+    if path.is_empty() || plan.bypass_paths.is_empty() {
+        return false;
+    }
+    plan.bypass_paths
+        .iter()
+        .any(|sel| path_matches_selector(path, sel))
+}
+
 fn process_in_scope_tree(plan: &CapturePlan, pid: u32, path: &str, tree: &ProcessTree) -> bool {
     if plan.bypass_pids.contains(&pid) {
+        return false;
+    }
+    if path_bypassed(plan, path) {
         return false;
     }
     if !plan.mode_apps {
@@ -973,6 +991,40 @@ fn parse_ip_tcp(pkt: &[u8]) -> Option<(IpAddr, u16, IpAddr, u16, bool)> {
         Some((src, sport, dst, dport, true))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plan_with_bypass_paths(paths: Vec<&str>) -> CapturePlan {
+        CapturePlan {
+            mode_apps: false,
+            app_paths: vec![],
+            bypass_cidrs: vec![],
+            bypass_pids: vec![],
+            bypass_paths: paths.into_iter().map(|s| s.to_string()).collect(),
+            bypass_endpoints: vec![],
+            relay_ip: Ipv4Addr::LOCALHOST,
+            relay_port: 0,
+        }
+    }
+
+    #[test]
+    fn path_bypassed_matches_by_suffix_and_ignores_empty() {
+        // Selector normalization is lowercase; store as the helper receives it.
+        let plan = plan_with_bypass_paths(vec![r"clash.exe"]);
+        assert!(path_bypassed(&plan, r"C:\Program Files\Clash\Clash.exe"));
+        assert!(!path_bypassed(&plan, r"C:\Windows\System32\curl.exe"));
+        // Empty flow path never matches (don't bypass unknown-path flows).
+        assert!(!path_bypassed(&plan, ""));
+    }
+
+    #[test]
+    fn path_bypassed_empty_list_never_matches() {
+        let plan = plan_with_bypass_paths(vec![]);
+        assert!(!path_bypassed(&plan, r"C:\anything.exe"));
     }
 }
 
