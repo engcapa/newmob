@@ -135,13 +135,28 @@ fn build_launch_arguments(
         "projectName": project_name,
         "modulePaths": modulepaths,
         "classPaths": classpaths,
-        "console": cfg.get("console").and_then(Value::as_str).unwrap_or("integratedTerminal"),
+        // internalConsole: java-debug launches the debuggee itself and streams
+        // stdout/stderr via `output` events. We do NOT use integratedTerminal
+        // because that requires answering the `runInTerminal` reverse request,
+        // which the DAP kernel does not implement (see initialize capabilities).
+        "console": cfg.get("console").and_then(Value::as_str).unwrap_or("internalConsole"),
     });
     // Optional passthroughs from the caller.
     for key in ["args", "vmArgs", "cwd", "env", "noDebug", "stepFilters"] {
         if let Some(value) = cfg.get(key) {
             args[key] = value.clone();
         }
+    }
+    // IDEA-like stepping defaults when the caller does not override: step-into
+    // skips JDK internals, synthetic/bridge methods, and static initializers
+    // ("$JDK" is java-debug's magic token for the JDK class set).
+    if args.get("stepFilters").is_none() {
+        args["stepFilters"] = json!({
+            "skipClasses": ["$JDK"],
+            "skipSynthetics": true,
+            "skipStaticInitializers": true,
+            "skipConstructors": false,
+        });
     }
     if let Some(java_exec) = java_exec.filter(|s| !s.is_empty()) {
         args["javaExec"] = json!(java_exec);
@@ -300,8 +315,22 @@ mod tests {
         assert_eq!(args["vmArgs"], "-Xmx1g");
         assert_eq!(args["cwd"], "/repo");
         assert_eq!(args["javaExec"], "/jdk/bin/java");
-        // Default console when unset.
-        assert_eq!(args["console"], "integratedTerminal");
+        // Default console when unset: internalConsole (the kernel does not
+        // implement the `runInTerminal` reverse request).
+        assert_eq!(args["console"], "internalConsole");
+    }
+
+    #[test]
+    fn defaults_idea_like_step_filters_and_honors_overrides() {
+        let args = build_launch_arguments(&json!({}), "App", "demo", &[], &[], None);
+        assert_eq!(args["stepFilters"]["skipClasses"], json!(["$JDK"]));
+        assert_eq!(args["stepFilters"]["skipSynthetics"], json!(true));
+        assert_eq!(args["stepFilters"]["skipStaticInitializers"], json!(true));
+        assert_eq!(args["stepFilters"]["skipConstructors"], json!(false));
+
+        let cfg = json!({ "stepFilters": { "skipClasses": [], "skipSynthetics": false } });
+        let overridden = build_launch_arguments(&cfg, "App", "demo", &[], &[], None);
+        assert_eq!(overridden["stepFilters"], cfg["stepFilters"]);
     }
 
     #[test]

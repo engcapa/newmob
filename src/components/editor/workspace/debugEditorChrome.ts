@@ -17,19 +17,31 @@ import {
 export interface DebugBreakpointMarker {
   line: number; // 1-based
   conditional: boolean;
+  /** Logpoint (logs instead of breaking) — rendered as a diamond. */
+  logpoint?: boolean;
+  /** False when the adapter could not bind the line (grey hollow marker). */
+  verified?: boolean;
 }
 
 class BreakpointGutterMarker extends GutterMarker {
-  constructor(private readonly conditional: boolean) {
+  constructor(private readonly marker: DebugBreakpointMarker | null) {
     super();
   }
 
   override toDOM(): Node {
     const dot = document.createElement("span");
-    dot.textContent = "●";
-    dot.style.color = this.conditional ? "#f59e0b" : "#ef4444";
+    const marker = this.marker ?? { line: 0, conditional: false };
+    const verified = marker.verified !== false;
+    dot.textContent = marker.logpoint ? "◆" : verified ? "●" : "○";
+    dot.style.color = !verified ? "#9ca3af" : marker.conditional ? "#f59e0b" : "#ef4444";
     dot.style.fontSize = "12px";
-    dot.title = this.conditional ? "Conditional breakpoint" : "Breakpoint";
+    dot.title = !verified
+      ? "Breakpoint not bound (line not executable or class not loaded yet)"
+      : marker.logpoint
+        ? "Logpoint"
+        : marker.conditional
+          ? "Conditional breakpoint"
+          : "Breakpoint";
     return dot;
   }
 }
@@ -52,9 +64,9 @@ export function createDebugEditorChrome(
       lineMarker: (view, lineBlock) => {
         const line = view.state.doc.lineAt(lineBlock.from).number;
         const marker = byLine.get(line);
-        return marker ? new BreakpointGutterMarker(marker.conditional) : null;
+        return marker ? new BreakpointGutterMarker(marker) : null;
       },
-      initialSpacer: () => new BreakpointGutterMarker(false),
+      initialSpacer: () => new BreakpointGutterMarker(null),
       domEventHandlers: {
         mousedown: (view, lineBlock, event) => {
           const line = view.state.doc.lineAt(lineBlock.from).number;

@@ -76,4 +76,18 @@ describe("buildEditorContextMenuItems", () => {
     items.find((i) => i.testId === "editor-context-code-actions")?.onClick?.();
     expect(actions.codeActions).toHaveBeenCalledWith(42, 84);
   });
+
+  it("adds Run to Cursor only while a debug session is active, enabled when stopped", () => {
+    const base = { capabilities: null, hasSelection: false, clientX: 0, clientY: 0, actions };
+    expect(buildEditorContextMenuItems(base).find((i) => i.testId === "editor-context-run-to-cursor"))
+      .toBeUndefined();
+    const runToCursor = vi.fn();
+    const items = buildEditorContextMenuItems({ ...base, debug: { canRunToCursor: true, runToCursor } });
+    const item = items.find((i) => i.testId === "editor-context-run-to-cursor");
+    expect(item?.disabled).toBe(false);
+    item?.onClick?.();
+    expect(runToCursor).toHaveBeenCalledTimes(1);
+    const running = buildEditorContextMenuItems({ ...base, debug: { canRunToCursor: false, runToCursor } });
+    expect(running.find((i) => i.testId === "editor-context-run-to-cursor")?.disabled).toBe(true);
+  });
 });
