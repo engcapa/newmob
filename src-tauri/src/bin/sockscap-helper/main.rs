@@ -30,15 +30,31 @@ fn main() {
 #[cfg(windows)]
 mod windows_main {
     use std::io::{BufRead, BufReader, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use crate::capture::{CaptureEngine, CapturePlan, Endpoint};
+
+    /// Ready-file written at startup; removed on every controlled exit path so
+    /// the unelevated app never finds a ready file pointing at a dead helper.
+    static READY_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+    /// Remove the ready file (best effort) and terminate the process.
+    ///
+    /// The helper **must** actually exit rather than merely flipping a flag:
+    /// while it lives it keeps `sockscap-helper.exe` and the loaded
+    /// `WinDivert.dll` file-locked, which breaks in-place upgrades.
+    fn cleanup_and_exit(code: i32) -> ! {
+        if let Some(p) = READY_FILE.get() {
+            let _ = std::fs::remove_file(p);
+        }
+        std::process::exit(code);
+    }
 
     #[derive(Debug, Deserialize)]
     struct Request {
@@ -141,6 +157,7 @@ mod windows_main {
                 "elevated": is_elevated(),
             });
             let _ = std::fs::write(path, body.to_string());
+            let _ = READY_FILE.set(path.clone());
         }
 
         let running = Arc::new(AtomicBool::new(true));
@@ -158,7 +175,7 @@ mod windows_main {
                     eng.stop();
                 }
                 // Parent is gone; nothing left to serve.
-                std::process::exit(0);
+                cleanup_and_exit(0);
             });
         }
 
@@ -176,6 +193,7 @@ mod windows_main {
         if let Ok(mut eng) = engine.lock() {
             eng.stop();
         }
+        cleanup_and_exit(0);
     }
 
     fn handle_client(
@@ -234,7 +252,16 @@ mod windows_main {
             let resp = dispatch(&req, engine, running);
             let _ = write_resp(&mut writer, resp);
             if !running.load(Ordering::SeqCst) {
-                break;
+                // A `shutdown` RPC was served. The accept loop is parked inside
+                // a blocking `listener.accept()` and would never observe the
+                // flag, so terminate here — otherwise the helper lingers,
+                // keeping its exe and WinDivert.dll locked against upgrades.
+                // Half-close and pause briefly so the caller reads the reply
+                // before the socket goes away.
+                let _ = writer.flush();
+                let _ = writer.shutdown(Shutdown::Write);
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                cleanup_and_exit(0);
             }
         }
     }
@@ -442,6 +469,9 @@ mod windows_main {
                     },
                 }
             }
+            // Stop capture and mark the helper for termination. The actual
+            // `exit` happens in `handle_client` right after this response is
+            // written, so the caller always receives an ack.
             "shutdown" => {
                 if let Ok(mut eng) = engine.lock() {
                     eng.stop();
