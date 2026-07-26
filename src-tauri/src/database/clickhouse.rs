@@ -67,7 +67,15 @@ pub async fn connect(config: &DbConfig, password: Option<&str>) -> Result<DbHand
         Some(s) if s > 0 => s,
         _ => DEFAULT_TIMEOUT_SECS,
     });
+    // Disable reqwest's implicit system-proxy detection (env HTTP(S)_PROXY /
+    // ALL_PROXY, plus the Windows/macOS system proxy a corporate VPN installs).
+    // DB routing is explicit: a per-session proxy/jump host is handled upstream
+    // by `forward.rs`, which rewrites host/port to a loopback forwarder, so this
+    // client always dials directly (or the local forward). Without this an
+    // ambient VPN/shell proxy could silently reroute requests to a gateway that
+    // can't reach the server. Mirrors `presto::connect` and `objectstorage`.
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(timeout)
         .build()
         .map_err(|e| format!("ClickHouse client build failed: {e}"))?;
