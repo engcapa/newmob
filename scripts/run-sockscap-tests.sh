@@ -42,10 +42,34 @@ read_settings() {
     export "$name"="${inp:-$cur}"
   done
   # sudo password: silent; blank means passwordless sudo / root.
+  # Why it's needed: tests 2 & 3 install a temporary nft OUTPUT NAT redirect and
+  # a cgroup v2 tree (CAP_NET_ADMIN), then tear them down. Test 1 (direct smoke)
+  # does NOT use sudo, so a blank password there just makes it SKIP the rest.
+  echo
+  echo "  ${c_cyan}A sudo password is required for the privileged tests (2 & 3):${c_reset}"
+  echo "    they add/remove an nft redirect + cgroup v2 tree (CAP_NET_ADMIN)."
+  echo "    Leave blank if sudo is passwordless or you run as root; the direct"
+  echo "    smoke test (1) needs no sudo. Wrong/blank => privileged tests SKIP (77)."
   local pw
   read -r -s -p "  sudo password (blank = passwordless / root): " pw
   echo
   export QA_SUDO_PASSWORD="$pw"
+
+  # SSH password: only for the soak test's `ssh -D` egress leg (Phase 3). Read
+  # it here the same way Windows Read-Settings does. Blank => leave QA_SSH_PASSWORD
+  # untouched, so that leg SKIPs (the SSH *banner* probe elsewhere needs no
+  # password). Only export when non-empty so a blank never clobbers a value the
+  # environment already provided.
+  echo
+  echo "  ${c_cyan}An SSH password enables the soak test's real ssh -D egress leg:${c_reset}"
+  echo "    it curls through a background 'ssh -D' SOCKS tunnel to prove data"
+  echo "    actually leaves via the SSH upstream. Blank => that leg SKIPs."
+  local sshpw
+  read -r -s -p "  SSH password for ${QA_SSH_USER:-engcapa}@${QA_SSH_HOST:-<host>} (blank = skip ssh -D egress): " sshpw
+  echo
+  if [[ -n "$sshpw" ]]; then
+    export QA_SSH_PASSWORD="$sshpw"
+  fi
 }
 
 nft_bin() {
@@ -105,11 +129,13 @@ menu_file=(
   "test_sockscap_linux_direct.py"
   "test_sockscap_linux_e2e.py"
   "test_sockscap_linux_multiprofile_e2e.py"
+  "test_sockscap_linux_soak.py"
 )
 menu_desc=(
   "Direct connectivity smoke (no sudo/capture)"
   "Full-link app-mode E2E (nft + cgroup + soak)"
   "Multi-profile (2 cgroups -> 2 relay ports)"
+  "Extended matrix + soak + ssh -D egress (no sudo)"
 )
 
 run_case() {

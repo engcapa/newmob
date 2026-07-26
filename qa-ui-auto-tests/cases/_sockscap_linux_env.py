@@ -84,6 +84,37 @@ def sudo_password():
     return getpass.getpass("Enter sudo password (blank if passwordless / root): ")
 
 
+def ssh_askpass_env(password):
+    """Build an env that lets OpenSSH authenticate with a password headlessly,
+    plus the temp askpass script path to delete. POSIX analogue of the Windows
+    ssh_askpass_env in _sockscap_env.py.
+
+    OpenSSH >= 8.4 consults SSH_ASKPASS whenever SSH_ASKPASS_REQUIRE=force is
+    set, regardless of DISPLAY/tty. The askpass script echoes the password read
+    from a private env var (kept out of the file so a password with shell
+    metacharacters is never embedded on disk).
+
+    Returns (env_dict, askpass_path) or (None, None) when no password is given.
+    The caller MUST launch ssh with start_new_session=True and stdin=DEVNULL so
+    it has no controlling tty to fall back to, and delete askpass_path.
+    """
+    if not password:
+        return None, None
+    import stat
+    import tempfile
+    fd, path = tempfile.mkstemp(suffix=".sh", prefix="sc-askpass-")
+    with os.fdopen(fd, "w") as f:
+        f.write('#!/bin/sh\nprintf %s "$SC_SSH_PW"\n')
+    os.chmod(path, stat.S_IRWXU)  # 0700; askpass must be executable
+    env = dict(os.environ)
+    env["SSH_ASKPASS"] = path
+    env["SSH_ASKPASS_REQUIRE"] = "force"
+    env["SC_SSH_PW"] = password
+    # Belt-and-suspenders for OpenSSH builds that still gate on DISPLAY.
+    env.setdefault("DISPLAY", "localhost:0")
+    return env, path
+
+
 # --- nftables / cgroup identifiers (must match the Rust backend) ----------
 # src-tauri/src/sockscap/capture/linux/tunnel.rs
 NFT_TABLE = "taomni_sockscap"          # `table inet taomni_sockscap`
