@@ -226,7 +226,15 @@ pub async fn connect(config: &DbConfig, password: Option<&str>) -> Result<DbHand
         Some(s) if s > 0 => s,
         _ => DEFAULT_TIMEOUT_SECS,
     });
+    // reqwest enables implicit system-proxy detection by default
+    // (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY env vars, plus the Windows/macOS system
+    // proxy a corporate VPN installs). DB routing is explicit: a per-session
+    // proxy/jump host is handled upstream by `forward.rs` via a loopback
+    // forwarder, so this client always dials directly. Disable the implicit
+    // layer so an ambient VPN/shell proxy can't silently reroute `/v1/statement`
+    // and turn a healthy Trino into a 502 from some gateway that can't reach it.
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(timeout)
         .build()
         .map_err(|e| format!("Presto client build failed: {e}"))?;
@@ -1768,5 +1776,135 @@ mod tests {
         let result = execute(&client, "SELECT 2", &token).await.unwrap();
         server.await.unwrap();
         assert_eq!(result.rows, vec![vec![Some("2".to_string())]]);
+    }
+
+    /// Serializes tests that mutate the process-global proxy environment so a
+    /// concurrent client build in the same test binary can't observe a
+    /// half-set state. reqwest snapshots the env at `Client::build()`, so each
+    /// test only needs to hold this across `connect()`.
+    static PROXY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ProxyEnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl ProxyEnvGuard {
+        /// Point every proxy env var reqwest honors at `dead_proxy` and clear
+        /// NO_PROXY (so loopback isn't implicitly excluded). Restores the prior
+        /// values on drop.
+        fn install(dead_proxy: &str) -> Self {
+            let lock = PROXY_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let keys = [
+                "HTTP_PROXY",
+                "http_proxy",
+                "HTTPS_PROXY",
+                "https_proxy",
+                "ALL_PROXY",
+                "all_proxy",
+                "NO_PROXY",
+                "no_proxy",
+            ];
+            let saved = keys
+                .iter()
+                .map(|&k| (k, std::env::var(k).ok()))
+                .collect::<Vec<_>>();
+            // SAFETY: env mutation is process-global; PROXY_ENV_LOCK serializes
+            // these tests and no other unit test makes real non-proxied
+            // localhost reqwest calls (verified in the crate).
+            unsafe {
+                for k in [
+                    "HTTP_PROXY",
+                    "http_proxy",
+                    "HTTPS_PROXY",
+                    "https_proxy",
+                    "ALL_PROXY",
+                    "all_proxy",
+                ] {
+                    std::env::set_var(k, dead_proxy);
+                }
+                std::env::remove_var("NO_PROXY");
+                std::env::remove_var("no_proxy");
+            }
+            Self { saved, _lock: lock }
+        }
+    }
+
+    impl Drop for ProxyEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: still holding PROXY_ENV_LOCK; restore the exact prior env.
+            unsafe {
+                for (k, v) in &self.saved {
+                    match v {
+                        Some(val) => std::env::set_var(k, val),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Regression for the VPN/proxy 502: an ambient system/env proxy must not
+    /// hijack a Presto connection. `connect()` builds its client with
+    /// `.no_proxy()`, so even with HTTP(S)_PROXY/ALL_PROXY pointed at a dead
+    /// address it dials the target directly. Without `.no_proxy()` reqwest would
+    /// route `/v1/statement` through the dead proxy and `connect()` would error.
+    #[tokio::test]
+    async fn connect_ignores_ambient_env_proxy() {
+        // A proxy that accepts then instantly drops every connection — any
+        // request routed here fails fast (no hanging on a real timeout).
+        let dead = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = dead.accept().await {
+                drop(stream);
+            }
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(serve_expected_requests(
+            listener,
+            vec![ExpectedRequest {
+                method: "POST",
+                path: "/v1/statement".to_string(),
+                body_contains: None,
+                body_equals: Some("SELECT 1"),
+                headers: vec![("X-Presto-User", "taomni")],
+                response_headers: Vec::new(),
+                response_body:
+                    r#"{"id":"q1","columns":[{"name":"_col0","type":"integer"}],"data":[[1]]}"#
+                        .to_string(),
+            }],
+        ));
+
+        let config = DbConfig {
+            engine: "Presto".to_string(),
+            host: target_addr.ip().to_string(),
+            port: target_addr.port(),
+            username: None,
+            password: None,
+            database: None,
+            catalog: None,
+            ssl: false,
+            timeout_secs: Some(5),
+            http_port: None,
+            protocol: None,
+            presto_dialect: None,
+            db_index: None,
+            network_settings: None,
+        };
+
+        let result = {
+            let _guard = ProxyEnvGuard::install(&format!("http://{dead_addr}"));
+            // reqwest reads the env at build time (inside connect), so the guard
+            // only needs to span the connect() call.
+            connect(&config, None).await
+        };
+
+        result.expect("connect must bypass the ambient env proxy and dial the target directly");
+        server.await.unwrap();
     }
 }
