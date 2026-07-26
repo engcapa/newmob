@@ -1215,6 +1215,10 @@ export const zhCN: DeepPartial<typeof en> = {
     detectLocalProxy: "检测本地代理",
     noLocalProxy: "常见端口上未检测到本地代理(Clash/v2rayN 等)",
     localProxyDetected: "已使用本地 {kind} 代理 {host}:{port}({process})",
+    subImportToggle: "导入订阅",
+    subImportPlaceholder: "订阅链接(https://…)或粘贴节点/base64",
+    subImportBtn: "获取并导入",
+    subImported: "已导入 {count} 个节点为方案(未自动启用)",
     tunConflictWarning:
       "检测到 TUN 模式客户端正在运行({adapters})。它在网络层接管全部流量,会与 SocksCap 的全局捕获冲突。请将该客户端切换为代理模式(并使用\"检测本地代理\"),或让 SocksCap 使用 App 模式。",
     ssMethod: "加密方式",

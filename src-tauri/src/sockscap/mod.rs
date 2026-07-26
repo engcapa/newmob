@@ -1526,6 +1526,44 @@ pub async fn sockscap_parse_subscription(
     Ok(core::share_link::parse_subscription(&blob))
 }
 
+/// Fetch a subscription and parse it into upstreams. `input` is either an
+/// http(s) subscription URL (fetched) or a pasted blob (base64 / newline links,
+/// used as-is). Returns the parsed nodes for the UI to turn into profiles.
+#[tauri::command]
+pub async fn sockscap_import_subscription(
+    input: String,
+) -> Result<Vec<core::share_link::ParsedShareLink>, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("subscription is empty".into());
+    }
+    let blob = if input.starts_with("http://") || input.starts_with("https://") {
+        let client = reqwest::Client::builder()
+            .user_agent("taomni-sockscap")
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        let resp = client
+            .get(input)
+            .send()
+            .await
+            .map_err(|e| format!("fetch subscription: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("subscription HTTP {}", resp.status()));
+        }
+        resp.text()
+            .await
+            .map_err(|e| format!("read subscription body: {e}"))?
+    } else {
+        input.to_string()
+    };
+    let nodes = core::share_link::parse_subscription(&blob);
+    if nodes.is_empty() {
+        return Err("no valid nodes found in subscription".into());
+    }
+    Ok(nodes)
+}
+
 /// Test a core-backed upstream (shadowsocks/trojan/vmess/vless/wireguard) by
 /// spawning a throwaway xray sidecar, dialing a probe target through it, and
 /// tearing it down. Secrets in `upstream` (password_ref / uuid_ref / wg key

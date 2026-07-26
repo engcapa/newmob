@@ -42,6 +42,7 @@ import {
   sockscapParseShareLink,
   sockscapDetectLocalProxies,
   sockscapDetectTunConflicts,
+  sockscapImportSubscription,
   upstreamRequiresCore,
   type Decision,
   type DomainRecord,
@@ -232,6 +233,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [uuidInput, setUuidInput] = useState("");
   const [wgKeyInput, setWgKeyInput] = useState("");
   const [tunConflicts, setTunConflicts] = useState<string[]>([]);
+  const [subInput, setSubInput] = useState("");
+  const [showSubImport, setShowSubImport] = useState(false);
 
   // Linux sudo prompt modal state
   const [showRootPrompt, setShowRootPrompt] = useState(false);
@@ -497,6 +500,98 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     };
     await persistConfig(nextCfg);
     report(t("sockscap.profileCreated", { name: newProf.name }));
+  };
+
+  /** Import a subscription (URL or pasted blob): fetch+parse into nodes, vault
+   *  each node's secret/uuid, and create one profile per node. Imported profiles
+   *  are NOT auto-activated (avoids spawning many cores at once); the user
+   *  activates the one they want. Selects the first imported node. */
+  const onImportSubscription = async () => {
+    if (!cfg || !subInput.trim()) return;
+    setBusy(true);
+    try {
+      const nodes = await sockscapImportSubscription(subInput.trim());
+      // Vault status once up front (all nodes share the vault gate).
+      const vs = await vaultStatus().catch(() => null);
+      const needsVault = nodes.some((n) => n.secret || n.uuid);
+      if (needsVault && (!vs || vs.state !== "unlocked")) {
+        window.dispatchEvent(
+          new CustomEvent(VAULT_LOCKED_EVENT, {
+            detail: { reason: t("sockscap.vaultLocked") },
+          }),
+        );
+        report(t("sockscap.vaultLocked"), false);
+        return;
+      }
+
+      const newProfiles: SocksCapProfile[] = [];
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
+        const params: UpstreamParams = { ...n.params };
+        let passwordRef = "";
+        if (n.secret) {
+          const res = await vaultPut(
+            "sockscap_upstream_password",
+            "SocksCap Upstream Password",
+            n.secret,
+          );
+          passwordRef = res.reference;
+        }
+        if (n.uuid) {
+          const res = await vaultPut(
+            "sockscap_upstream_uuid",
+            "SocksCap Upstream UUID",
+            n.uuid,
+          );
+          params.uuidRef = res.reference;
+        }
+        newProfiles.push({
+          id: `prof-${Date.now().toString(36)}-${i}`,
+          name: n.name || `${n.host}:${n.port}`,
+          icon: "🌐",
+          color: null,
+          enabled: true,
+          priority: cfg.profiles.length + i,
+          mode: "global",
+          apps: [],
+          upstream: {
+            kind: n.kindTag as UpstreamKind,
+            sessionId: "",
+            host: n.host,
+            port: n.port,
+            username: "",
+            passwordRef,
+            params,
+          },
+          ruleMode: "gfwList",
+          userRules: [],
+          defaultAction: "direct",
+        });
+      }
+
+      const profiles = [...cfg.profiles, ...newProfiles];
+      const firstId = newProfiles[0].id;
+      const sel = profiles.find((p) => p.id === firstId) || profiles[0];
+      const nextCfg: SocksCapConfig = {
+        ...cfg,
+        profiles,
+        selectedProfileId: firstId,
+        mode: sel.mode,
+        apps: sel.apps,
+        upstream: sel.upstream,
+        ruleMode: sel.ruleMode,
+        userRules: sel.userRules,
+        defaultAction: sel.defaultAction,
+      };
+      await persistConfig(nextCfg);
+      setSubInput("");
+      setShowSubImport(false);
+      report(t("sockscap.subImported", { count: String(newProfiles.length) }));
+    } catch (e) {
+      report(String(e), false);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const duplicateProfile = async (prof: SocksCapProfile) => {
@@ -1484,6 +1579,38 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   <PanelLeftClose className="w-4 h-4" />
                 </button>
               </div>
+            </div>
+
+            {/* Subscription import: paste a URL or blob → one profile per node. */}
+            <div className="mb-1.5">
+              <button
+                type="button"
+                data-testid="sockscap-sub-import-toggle"
+                className="w-full text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)] transition-colors"
+                onClick={() => setShowSubImport((v) => !v)}
+              >
+                {t("sockscap.subImportToggle")}
+              </button>
+              {showSubImport && (
+                <div className="mt-1.5 space-y-1.5">
+                  <textarea
+                    data-testid="sockscap-sub-input"
+                    className="w-full text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] resize-y min-h-[48px]"
+                    placeholder={t("sockscap.subImportPlaceholder")}
+                    value={subInput}
+                    onChange={(e) => setSubInput(e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    data-testid="sockscap-sub-import"
+                    className="w-full text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                    onClick={() => void onImportSubscription()}
+                    disabled={busy || !subInput.trim()}
+                  >
+                    {t("sockscap.subImportBtn")}
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="space-y-1.5 flex-1 overflow-y-auto">

@@ -289,6 +289,13 @@ export function sockscapParseSubscription(
   return invoke("sockscap_parse_subscription", { blob });
 }
 
+/** Fetch (URL) or parse (pasted blob) a subscription into upstream nodes. */
+export function sockscapImportSubscription(
+  input: string,
+): Promise<ParsedShareLink[]> {
+  return invoke("sockscap_import_subscription", { input });
+}
+
 export function sockscapTestCoreUpstream(args: {
   upstream: UpstreamRef;
   testHost?: string;

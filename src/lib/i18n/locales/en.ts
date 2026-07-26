@@ -1220,6 +1220,10 @@ const dict = {
     detectLocalProxy: "Detect local proxy",
     noLocalProxy: "No local proxy detected on common ports (Clash/v2rayN etc)",
     localProxyDetected: "Using local {kind} proxy {host}:{port} ({process})",
+    subImportToggle: "Import subscription",
+    subImportPlaceholder: "Subscription URL (https://…) or pasted nodes/base64",
+    subImportBtn: "Fetch & import",
+    subImported: "Imported {count} node(s) as profiles (not auto-activated)",
     tunConflictWarning:
       "A TUN-mode client appears to be running ({adapters}). It captures all traffic at the network layer and conflicts with SocksCap's global capture. Switch that client to proxy mode (and use \"Detect local proxy\"), or run SocksCap in App mode.",
     ssMethod: "Cipher",

@@ -4,6 +4,7 @@ import { SocksCapPanel } from "./SocksCapPanel";
 import {
   sockscapStart,
   sockscapParseShareLink,
+  sockscapImportSubscription,
   type SocksCapConfig,
 } from "../../lib/sockscap";
 import { vaultStatus, vaultPut } from "../../lib/ipc";
@@ -99,6 +100,7 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
     sockscapTestCoreUpstream: vi.fn(async () => "ok"),
     sockscapDetectLocalProxies: vi.fn(async () => []),
     sockscapDetectTunConflicts: vi.fn(async () => []),
+    sockscapImportSubscription: vi.fn(),
   };
 });
 
@@ -213,6 +215,54 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     // The uuid was sent to the vault, not written to config plaintext.
     expect(vi.mocked(vaultPut)).toHaveBeenCalled();
     expect(vi.mocked(vaultStatus)).toHaveBeenCalled();
+  });
+
+  it("imports a subscription into one profile per node, vaulting secrets", async () => {
+    vi.mocked(sockscapImportSubscription).mockResolvedValue([
+      {
+        kindTag: "trojan",
+        name: "Node A",
+        host: "a.example.com",
+        port: 443,
+        params: { tls: "tls" },
+        secret: "pwA",
+        uuid: "",
+      },
+      {
+        kindTag: "vless",
+        name: "Node B",
+        host: "b.example.com",
+        port: 443,
+        params: { flow: "xtls-rprx-vision" },
+        secret: "",
+        uuid: "uuid-b",
+      },
+    ]);
+
+    render(<SocksCapPanel />);
+    await waitFor(() => expect(screen.getByTestId("sockscap-panel")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("sockscap-sub-import-toggle"));
+    const input = await screen.findByTestId("sockscap-sub-input");
+    fireEvent.change(input, { target: { value: "https://sub.example.com/link" } });
+    fireEvent.click(screen.getByTestId("sockscap-sub-import"));
+
+    await waitFor(() => {
+      // Two profiles added beyond the default.
+      const names = currentCfg.profiles.map((p) => p.name);
+      expect(names).toContain("Node A");
+      expect(names).toContain("Node B");
+    });
+    const a = currentCfg.profiles.find((p) => p.name === "Node A")!;
+    const b = currentCfg.profiles.find((p) => p.name === "Node B")!;
+    expect(a.upstream.kind).toBe("trojan");
+    expect(a.upstream.host).toBe("a.example.com");
+    expect(a.upstream.passwordRef).toBe("vault:test-ref"); // secret vaulted
+    expect(b.upstream.kind).toBe("vless");
+    expect(b.upstream.params?.uuidRef).toBe("vault:test-ref"); // uuid vaulted
+    expect(b.upstream.params?.flow).toBe("xtls-rprx-vision");
+    // Imported profiles are not auto-activated.
+    expect(currentCfg.activeProfileIds).not.toContain(a.id);
   });
 
   it("prompts for sudo when Linux nftables reports missing CAP_NET_ADMIN", async () => {
