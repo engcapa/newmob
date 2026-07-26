@@ -1586,6 +1586,101 @@ pub async fn sockscap_test_core_upstream(
     })
 }
 
+/// A local proxy discovered on the machine, offered as a one-click upstream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalProxyCandidate {
+    /// "socks5" | "http" — detected by a lightweight handshake probe.
+    pub kind: String,
+    pub host: String,
+    pub port: u16,
+    /// Listening process name (best-effort; empty if not resolvable).
+    pub process: String,
+}
+
+/// Common local-proxy listen ports for popular clients (Clash/Mihomo mixed,
+/// v2rayN/xray, generic SOCKS/HTTP). Probed on 127.0.0.1 only.
+const COMMON_PROXY_PORTS: &[u16] = &[
+    7890, 7891, 7892, 7897, // Clash / Mihomo (mixed / socks / http / verge)
+    10808, 10809, // v2rayN (socks / http)
+    2080, 2081, // sing-box / others
+    1080, 1081, // generic SOCKS
+    8889, 8080, // generic HTTP
+    20170, 20171, // Qv2ray defaults
+];
+
+/// Probe a loopback port: return Some("socks5"|"http") if it speaks one, else
+/// None. Sends a SOCKS5 no-auth greeting; on a valid `05 xx` reply it's SOCKS5.
+/// Otherwise tries an HTTP CONNECT and treats any HTTP status line as HTTP.
+async fn probe_local_proxy_kind(port: u16) -> Option<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let connect = tokio::time::timeout(std::time::Duration::from_millis(300), TcpStream::connect(addr));
+    let mut s = connect.await.ok()?.ok()?;
+    // SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth).
+    if s.write_all(&[0x05, 0x01, 0x00]).await.is_ok() {
+        let mut buf = [0u8; 2];
+        if tokio::time::timeout(std::time::Duration::from_millis(300), s.read_exact(&mut buf))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .is_some()
+            && buf[0] == 0x05
+        {
+            return Some("socks5".into());
+        }
+    }
+    // Not SOCKS5 — try a fresh connection for an HTTP CONNECT probe.
+    let mut s = tokio::time::timeout(std::time::Duration::from_millis(300), TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
+    let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+    s.write_all(req.as_bytes()).await.ok()?;
+    let mut buf = [0u8; 16];
+    let n = tokio::time::timeout(std::time::Duration::from_millis(300), s.read(&mut buf))
+        .await
+        .ok()?
+        .ok()?;
+    let head = String::from_utf8_lossy(&buf[..n]);
+    if head.starts_with("HTTP/") {
+        return Some("http".into());
+    }
+    None
+}
+
+/// Scan common local-proxy ports and report those that answer, with the
+/// listening process name. Lets the UI offer a one-click "use local proxy"
+/// upstream instead of the user hand-filling host/port.
+#[tauri::command]
+pub async fn sockscap_detect_local_proxies() -> Result<Vec<LocalProxyCandidate>, String> {
+    let procs = process::list_processes().unwrap_or_default();
+    let mut out = Vec::new();
+    for &port in COMMON_PROXY_PORTS {
+        // Only probe ports something is actually listening on (cheap pre-check).
+        let pids = listener_pid::resolve_listener_pids(port);
+        if pids.is_empty() {
+            continue;
+        }
+        let Some(kind) = probe_local_proxy_kind(port).await else {
+            continue;
+        };
+        let process = pids
+            .iter()
+            .find_map(|pid| procs.iter().find(|p| p.pid == *pid))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        out.push(LocalProxyCandidate {
+            kind,
+            host: "127.0.0.1".into(),
+            port,
+            process,
+        });
+    }
+    Ok(out)
+}
+
 /// App-exit hook (blocking): cleanly stop the elevated helper's WinDivert
 /// capture and shut the helper down, then clear the recovery journal. Called
 /// from the Tauri `RunEvent::Exit` handler so a normal quit does not leave an

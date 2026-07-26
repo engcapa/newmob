@@ -262,6 +262,17 @@ export function sockscapTestUpstream(args: {
   });
 }
 
+export interface LocalProxyCandidate {
+  kind: "socks5" | "http";
+  host: string;
+  port: number;
+  process: string;
+}
+
+export function sockscapDetectLocalProxies(): Promise<LocalProxyCandidate[]> {
+  return invoke("sockscap_detect_local_proxies");
+}
+
 export function sockscapParseShareLink(link: string): Promise<ParsedShareLink> {
   return invoke("sockscap_parse_share_link", { link });
 }

@@ -40,6 +40,7 @@ import {
   sockscapTestUpstream,
   sockscapTestCoreUpstream,
   sockscapParseShareLink,
+  sockscapDetectLocalProxies,
   upstreamRequiresCore,
   type Decision,
   type DomainRecord,
@@ -1151,6 +1152,42 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     );
   };
 
+  /** Detect a local proxy (Clash/v2rayN etc) and set it as the upstream in one
+   *  click — no hand-filling host/port. Uses the first candidate found. */
+  const onDetectLocalProxy = async () => {
+    if (!cfg) return;
+    setBusy(true);
+    try {
+      const found = await sockscapDetectLocalProxies();
+      if (found.length === 0) {
+        report(t("sockscap.noLocalProxy"), false);
+        return;
+      }
+      const c = found[0];
+      await patchSelectedProfile({
+        upstream: {
+          ...selectedProf.upstream,
+          kind: c.kind,
+          sessionId: "",
+          host: c.host,
+          port: c.port,
+        },
+      });
+      report(
+        t("sockscap.localProxyDetected", {
+          kind: c.kind.toUpperCase(),
+          host: c.host,
+          port: String(c.port),
+          process: c.process || "?",
+        }),
+      );
+    } catch (e) {
+      report(String(e), false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const loadProcesses = async () => {
     try {
       const list = await sockscapListProcesses();
@@ -1804,6 +1841,17 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               >
                 {t("sockscap.testUpstream")}
               </button>
+              {!upstreamRequiresCore(selectedProf.upstream.kind) && (
+                <button
+                  type="button"
+                  data-testid="sockscap-detect-local-proxy"
+                  className="px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                  onClick={() => void onDetectLocalProxy()}
+                  disabled={busy}
+                >
+                  {t("sockscap.detectLocalProxy")}
+                </button>
+              )}
             </div>
           </Section>
 
