@@ -1746,6 +1746,50 @@ pub struct LocalProxyCandidate {
     pub port: u16,
     /// Listening process name (best-effort; empty if not resolvable).
     pub process: String,
+    /// Owning pid of the listener (0 if unknown).
+    pub pid: u32,
+    /// Normalized client family id derived from the process name
+    /// ("clash" | "mihomo" | "sing-box" | "v2rayn" | "xray" | … | "unknown").
+    /// Lets the UI group candidates by client.
+    pub client: String,
+    /// Human-friendly client name for display ("Clash Verge", "sing-box", …).
+    /// Empty for the "unknown" family.
+    pub client_label: String,
+}
+
+/// Map a listening process's image name to a `(client_id, client_label)`.
+///
+/// Pure and case-insensitive so it unit-tests on any platform. Order matters:
+/// more specific families (mihomo, Clash Verge) are matched before the generic
+/// "clash" fallback. Returns `("unknown", "")` when nothing matches.
+pub(crate) fn classify_client(process_name: &str) -> (String, String) {
+    let n = process_name.to_ascii_lowercase();
+    let hit = |id: &str, label: &str| (id.to_string(), label.to_string());
+    if n.contains("mihomo") {
+        hit("mihomo", "Mihomo")
+    } else if n.contains("verge") {
+        hit("clash", "Clash Verge")
+    } else if n.contains("clash") {
+        hit("clash", "Clash")
+    } else if n.contains("sing-box") || n.contains("sing_box") || n.contains("singbox") {
+        hit("sing-box", "sing-box")
+    } else if n.contains("nekoray") || n.contains("nekobox") {
+        hit("nekoray", "NekoRay")
+    } else if n.contains("v2rayn") {
+        hit("v2rayn", "v2rayN")
+    } else if n.contains("qv2ray") {
+        hit("qv2ray", "Qv2ray")
+    } else if n.contains("hysteria") {
+        hit("hysteria", "Hysteria")
+    } else if n.contains("xray") {
+        hit("xray", "Xray")
+    } else if n.contains("v2ray") {
+        hit("v2ray", "V2Ray")
+    } else if n.contains("shadowsocks") || n.contains("ss-local") || n == "sslocal" {
+        hit("shadowsocks", "Shadowsocks")
+    } else {
+        ("unknown".to_string(), String::new())
+    }
 }
 
 /// Common local-proxy listen ports for popular clients (Clash/Mihomo mixed,
@@ -1800,34 +1844,120 @@ async fn probe_local_proxy_kind(port: u16) -> Option<String> {
     None
 }
 
-/// Scan common local-proxy ports and report those that answer, with the
-/// listening process name. Lets the UI offer a one-click "use local proxy"
-/// upstream instead of the user hand-filling host/port.
+/// Detect running local proxies to offer as one-click upstreams.
+///
+/// Two sources are merged so the UI can list *actual* running proxies rather
+/// than only a fixed port table:
+///  1. Every loopback/wildcard TCP listener owned by a recognized circumvention
+///     client (Clash/sing-box/Mihomo/v2rayN/xray/…), on whatever port it chose —
+///     this catches non-default ports the user configured.
+///  2. The `COMMON_PROXY_PORTS` fallback, so a proxy whose owning process we
+///     could not identify (or on a platform without pid resolution) is still
+///     surfaced when it sits on a well-known port.
+///
+/// Each port that passes a lightweight SOCKS5/HTTP handshake becomes a
+/// candidate carrying its detected kind, owning pid, process name, and client
+/// family (for grouping). Probing is restricted to identified-client ports plus
+/// the common table, so unrelated loopback listeners (dev servers, databases)
+/// are not probed.
 #[tauri::command]
 pub async fn sockscap_detect_local_proxies() -> Result<Vec<LocalProxyCandidate>, String> {
+    use std::collections::HashMap;
+
     let procs = process::list_processes().unwrap_or_default();
+    // pid -> display name. Prefer the (original-case) name from list_processes
+    // (Windows/Linux); fall back to process_image_name for platforms where
+    // list_processes is empty (macOS) or a pid it did not include.
+    let name_of = |pid: u32| -> String {
+        procs
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.name.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| process::process_image_name(pid))
+            .unwrap_or_default()
+    };
+
+    // Metadata for a port we know a process is listening on.
+    struct PortMeta {
+        pid: u32,
+        process: String,
+        client: String,
+        client_label: String,
+    }
+
+    // Build port -> metadata from the loopback listener enumeration. When two
+    // listeners share a port (v4 + v6), prefer the one we could identify.
+    let mut port_meta: HashMap<u16, PortMeta> = HashMap::new();
+    for l in listener_pid::list_loopback_listeners() {
+        let process = name_of(l.pid);
+        let (client, client_label) = classify_client(&process);
+        let meta = PortMeta {
+            pid: l.pid,
+            process,
+            client,
+            client_label,
+        };
+        match port_meta.get(&l.port) {
+            Some(existing) if existing.client != "unknown" => {}
+            _ => {
+                port_meta.insert(l.port, meta);
+            }
+        }
+    }
+
+    // Ports to probe: the common table, plus any identified-client listener
+    // ports not already in it (custom-port coverage).
+    let mut ports: Vec<u16> = COMMON_PROXY_PORTS.to_vec();
+    for (port, meta) in &port_meta {
+        if meta.client != "unknown" && !ports.contains(port) {
+            ports.push(*port);
+        }
+    }
+
     let mut out = Vec::new();
-    for &port in COMMON_PROXY_PORTS {
-        // Only probe ports something is actually listening on (cheap pre-check).
-        let pids = listener_pid::resolve_listener_pids(port);
-        if pids.is_empty() {
+    for port in ports {
+        // Something must be listening before we spend a handshake budget on it.
+        // `port_meta` (from the cross-OS loopback enumeration) is the primary
+        // gate on every platform; `resolve_listener_pids` is a Windows-only
+        // secondary check. Common-table ports with nothing listening are skipped
+        // rather than incurring a probe timeout each.
+        let has_meta = port_meta.contains_key(&port);
+        if !has_meta && listener_pid::resolve_listener_pids(port).is_empty() {
             continue;
         }
         let Some(kind) = probe_local_proxy_kind(port).await else {
             continue;
         };
-        let process = pids
-            .iter()
-            .find_map(|pid| procs.iter().find(|p| p.pid == *pid))
-            .map(|p| p.name.clone())
-            .unwrap_or_default();
+        let (pid, process, client, client_label) = match port_meta.get(&port) {
+            Some(m) => (m.pid, m.process.clone(), m.client.clone(), m.client_label.clone()),
+            None => {
+                let pid = listener_pid::resolve_listener_pids(port)
+                    .into_iter()
+                    .next()
+                    .unwrap_or(0);
+                let process = if pid != 0 { name_of(pid) } else { String::new() };
+                let (client, client_label) = classify_client(&process);
+                (pid, process, client, client_label)
+            }
+        };
         out.push(LocalProxyCandidate {
             kind,
             host: "127.0.0.1".into(),
             port,
             process,
+            pid,
+            client,
+            client_label,
         });
     }
+
+    // Identified clients first, then by port, so the UI's primary group leads.
+    out.sort_by(|a, b| {
+        let a_known = a.client != "unknown";
+        let b_known = b.client != "unknown";
+        b_known.cmp(&a_known).then(a.port.cmp(&b.port))
+    });
     Ok(out)
 }
 
@@ -2084,7 +2214,7 @@ pub async fn sockscap_clear_domain_records(
 
 #[cfg(test)]
 mod tests {
-    use super::{session_password_ref, session_proxy_password, session_ssh_auth};
+    use super::{classify_client, session_password_ref, session_proxy_password, session_ssh_auth};
     use crate::session::models::{AuthMethod, SessionConfig, SessionType};
     use crate::terminal::ssh::SshAuth;
     use crate::vault::Vault;
@@ -2249,6 +2379,42 @@ mod tests {
             SshAuth::Password(_) => "Password",
             SshAuth::PrivateKey(_) => "PrivateKey",
             SshAuth::Agent => "Agent",
+        }
+    }
+
+    #[test]
+    fn classify_client_maps_known_families() {
+        // (process image name, expected id, expected label)
+        let cases = [
+            ("Clash Verge.exe", "clash", "Clash Verge"),
+            ("clash-verge", "clash", "Clash Verge"),
+            ("Clash for Windows.exe", "clash", "Clash"),
+            ("clash-meta", "clash", "Clash"),
+            ("mihomo", "mihomo", "Mihomo"),
+            ("verge-mihomo.exe", "mihomo", "Mihomo"), // mihomo wins over verge
+            ("sing-box.exe", "sing-box", "sing-box"),
+            ("sing_box", "sing-box", "sing-box"),
+            ("v2rayN.exe", "v2rayn", "v2rayN"),
+            ("nekoray.exe", "nekoray", "NekoRay"),
+            ("qv2ray", "qv2ray", "Qv2ray"),
+            ("xray.exe", "xray", "Xray"),
+            ("v2ray", "v2ray", "V2Ray"),
+            ("hysteria.exe", "hysteria", "Hysteria"),
+            ("sslocal", "shadowsocks", "Shadowsocks"),
+        ];
+        for (name, id, label) in cases {
+            let (got_id, got_label) = classify_client(name);
+            assert_eq!(got_id, id, "id for {name}");
+            assert_eq!(got_label, label, "label for {name}");
+        }
+    }
+
+    #[test]
+    fn classify_client_unknown_has_empty_label() {
+        for name in ["chrome.exe", "node", "", "postgres", "svchost.exe"] {
+            let (id, label) = classify_client(name);
+            assert_eq!(id, "unknown", "unexpected id for {name}");
+            assert!(label.is_empty(), "unexpected label for {name}");
         }
     }
 }
