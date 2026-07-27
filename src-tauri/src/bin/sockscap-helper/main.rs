@@ -108,6 +108,7 @@ mod windows_main {
         let mut ready_file: Option<PathBuf> = None;
         let mut windivert_dir: Option<PathBuf> = None;
         let mut parent_pid: Option<u32> = None;
+        let mut parent_start: Option<u64> = None;
         let mut reap_pids: Vec<u32> = Vec::new();
 
         let mut i = 0;
@@ -132,6 +133,10 @@ mod windows_main {
                 "--parent-pid" => {
                     i += 1;
                     parent_pid = args.get(i).and_then(|s| s.parse().ok());
+                }
+                "--parent-start" => {
+                    i += 1;
+                    parent_start = args.get(i).and_then(|s| s.parse().ok());
                 }
                 "--reap-pids" => {
                     i += 1;
@@ -193,7 +198,7 @@ mod windows_main {
         if let Some(ppid) = parent_pid {
             let engine_wd = Arc::clone(&engine);
             std::thread::spawn(move || {
-                wait_for_parent_exit(ppid);
+                wait_for_parent_exit(ppid, parent_start);
                 if let Ok(mut eng) = engine_wd.lock() {
                     eng.stop();
                 }
@@ -570,27 +575,68 @@ mod windows_main {
         unsafe { IsUserAnAdmin() != 0 }
     }
 
-    /// Block until the process `ppid` exits, then return. Uses a wait on the
-    /// process handle (no polling / PID-reuse race: the handle refers to the
-    /// exact process even if the pid is later recycled). If the handle cannot
-    /// be opened (already gone, or access denied), return promptly so the
-    /// caller shuts down rather than lingering forever.
-    fn wait_for_parent_exit(ppid: u32) {
+    /// Block until the process `ppid` exits, then return.
+    ///
+    /// Once opened, the handle refers to that exact process, so the wait itself
+    /// is immune to pid recycling. The gap is *before* the open: the pid was
+    /// recorded by the app before it raised the UAC prompt, and a user can leave
+    /// that prompt sitting for minutes. If the app dies in the meantime and
+    /// Windows hands its pid to something else, this would attach to a stranger
+    /// and never fire — exactly the case where the watchdog is the last line of
+    /// defence against a leaked elevated helper.
+    ///
+    /// `expect_start` (the parent's creation FILETIME, captured alongside the
+    /// pid) closes that gap: pid plus creation time identifies a process
+    /// uniquely. A mismatch means the real parent is already gone, so return
+    /// immediately and let the caller shut down.
+    fn wait_for_parent_exit(ppid: u32, expect_start: Option<u64>) {
         use winapi::shared::minwindef::FALSE;
         use winapi::um::handleapi::CloseHandle;
         use winapi::um::processthreadsapi::OpenProcess;
         use winapi::um::synchapi::WaitForSingleObject;
         use winapi::um::winbase::INFINITE;
-        use winapi::um::winnt::SYNCHRONIZE;
+        use winapi::um::winnt::{PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE};
 
         unsafe {
-            let h = OpenProcess(SYNCHRONIZE, FALSE, ppid);
+            let h = OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                FALSE,
+                ppid,
+            );
             if h.is_null() {
                 // Parent already gone or not openable — do not hang.
                 return;
             }
+            if let Some(expected) = expect_start {
+                match process_start_filetime(h) {
+                    Some(actual) if actual == expected => {}
+                    _ => {
+                        eprintln!(
+                            "sockscap-helper: pid {ppid} is not the parent that launched us; \
+                             treating the parent as gone"
+                        );
+                        CloseHandle(h);
+                        return;
+                    }
+                }
+            }
             let _ = WaitForSingleObject(h, INFINITE);
             CloseHandle(h);
         }
+    }
+
+    /// Creation time of a process as a 64-bit FILETIME.
+    unsafe fn process_start_filetime(handle: winapi::um::winnt::HANDLE) -> Option<u64> {
+        use winapi::shared::minwindef::FILETIME;
+        use winapi::um::processthreadsapi::GetProcessTimes;
+
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        if GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) == 0 {
+            return None;
+        }
+        Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
     }
 }

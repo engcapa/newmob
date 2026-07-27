@@ -245,6 +245,14 @@ pub async fn sockscap_helper_start(
             "--parent-pid".into(),
             std::process::id().to_string(),
         ];
+        // The pid alone is not a stable identity across the UAC prompt, which
+        // the user may leave open for minutes. Pair it with this process's
+        // creation time so the helper can tell "my parent" from "whatever now
+        // holds that pid".
+        if let Some(start) = current_process_start_filetime() {
+            args.push("--parent-start".into());
+            args.push(start.to_string());
+        }
 
         // Hand over any orphaned helpers boot repair found but could not
         // terminate. This process is not elevated; the helper we are about to
@@ -382,6 +390,33 @@ pub async fn sockscap_helper_start(
             *guard = Some(sess);
         }
         Ok(st)
+    }
+}
+
+/// This process's creation time as a 64-bit FILETIME. Combined with the pid it
+/// identifies the process uniquely, which a pid alone does not once the pid can
+/// be recycled.
+#[cfg(windows)]
+fn current_process_start_filetime() -> Option<u64> {
+    use winapi::shared::minwindef::FILETIME;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, GetProcessTimes};
+
+    unsafe {
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        if GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        ) == 0
+        {
+            return None;
+        }
+        Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
     }
 }
 
