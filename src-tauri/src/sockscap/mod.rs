@@ -45,6 +45,10 @@ use crate::state::AppState;
 pub struct SocksCapRuntime {
     pub orch: Arc<RwLock<Orchestrator>>,
     pub helper: Arc<helper::HelperRegistry>,
+    /// Orphaned elevated helper pids that this (unelevated) process could not
+    /// terminate. Handed to the next helper launch, which runs under UAC and
+    /// can finish the job. See [`boot_repair`].
+    pub pending_reap: std::sync::Mutex<Vec<u32>>,
     /// xray-core sidecar pool for core-backed upstreams. Initialized during
     /// `setup()` once the `AppHandle` (resource dir / app data dir) is available
     /// via [`init_xray_manager`]; `None` until then.
@@ -56,6 +60,7 @@ impl SocksCapRuntime {
         Self {
             orch: Arc::new(RwLock::new(Orchestrator::new())),
             helper: Arc::new(helper::HelperRegistry::new()),
+            pending_reap: std::sync::Mutex::new(Vec::new()),
             xray: std::sync::OnceLock::new(),
         }
     }
@@ -1368,13 +1373,22 @@ pub async fn sockscap_recover(app: AppHandle, state: State<'_, AppState>) -> Res
     // more independent chance to remove the platform-owned state.
     let teardown_error = full_teardown(&app, &state, false).await.err();
     match capture::recover_system().await {
-        Ok(()) => {
+        Ok(needs_elevation) => {
+            // Queue anything only an elevated process can kill; the next Start
+            // hands the list to the helper it launches under UAC.
+            queue_reap(&state, &needs_elevation);
             state.sockscap.orch.write().await.force_idle();
             if let Ok(dir) = data_dir(&app) {
                 let _ = recovery::mark_clean_and_clear(&recovery::journal_path(&dir));
             }
             if let Some(error) = teardown_error {
                 tracing::info!("sockscap: Recover repaired incomplete teardown: {error}");
+            }
+            if !needs_elevation.is_empty() {
+                tracing::warn!(
+                    "sockscap: {} helper process(es) need Administrator; they will be reaped on the next Start",
+                    needs_elevation.len()
+                );
             }
             Ok(())
         }
@@ -1878,36 +1892,171 @@ pub fn shutdown_on_exit(app: &AppHandle, state: &AppState) {
     }
 }
 
-/// Boot-time hook: if the previous run left a dirty recovery journal, force
-/// platform recover so the OS is not left with half-installed capture rules.
-pub async fn boot_repair(app: &AppHandle) {
+/// A helper-ready file left in the sockscap data dir by some previous launch.
+#[derive(Debug)]
+struct StaleReadyFile {
+    path: PathBuf,
+    pid: Option<u32>,
+    parent_pid: Option<u32>,
+}
+
+fn read_ready_files(dir: &std::path::Path) -> Vec<StaleReadyFile> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_ready = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("helper-ready-") && n.ends_with(".json"));
+        if !is_ready {
+            continue;
+        }
+        let (mut pid, mut parent_pid) = (None, None);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                pid = v.get("pid").and_then(|x| x.as_u64()).map(|n| n as u32);
+                parent_pid = v.get("parentPid").and_then(|x| x.as_u64()).map(|n| n as u32);
+            }
+        }
+        out.push(StaleReadyFile {
+            path,
+            pid,
+            parent_pid,
+        });
+    }
+    out
+}
+
+/// Boot-time hook: reap helpers stranded by a previous run and repair any
+/// half-installed OS capture state.
+///
+/// Two things happen here that did not before.
+///
+/// First, ready files are actually inspected. They were written and never read
+/// back, so a helper stranded by a crash (or by a build with no exit hook at
+/// all) was invisible: it kept diverting every outbound packet on the machine
+/// toward a relay port that no longer existed, and contested the driver handle
+/// with the next session. A ready file is now classified as: the pid is gone or
+/// belongs to something else (delete the file); its owning app is still running
+/// (leave it alone — it belongs to a live instance, which matters when two
+/// copies of Taomni are open); or the owner is gone and the helper is not
+/// (an orphan: record its pid and take ownership of reaping it).
+///
+/// Second, orphans that cannot be terminated from here — the normal case, since
+/// they are elevated and this process is not — are queued for the next helper
+/// launch, which runs under UAC. Nothing else in the system can do it.
+pub async fn boot_repair(app: &AppHandle, state: &AppState) {
     let Ok(dir) = data_dir(app) else {
         return;
     };
+
+    let mut orphans: Vec<u32> = Vec::new();
+    for ready in read_ready_files(&dir) {
+        let alive_helper = ready.pid.is_some_and(|pid| {
+            process::process_image_name(pid).as_deref() == Some(capture::HELPER_IMAGE_NAME)
+        });
+        if !alive_helper {
+            tracing::info!(
+                "sockscap: removing stale ready file {} (helper pid {:?} is gone)",
+                ready.path.display(),
+                ready.pid
+            );
+            let _ = std::fs::remove_file(&ready.path);
+            continue;
+        }
+        // A live owner means this helper belongs to a running instance.
+        if ready
+            .parent_pid
+            .is_some_and(|ppid| process::process_image_name(ppid).is_some())
+        {
+            tracing::info!(
+                "sockscap: helper pid {:?} still owned by a running instance; leaving it",
+                ready.pid
+            );
+            continue;
+        }
+        if let Some(pid) = ready.pid {
+            tracing::warn!("sockscap: orphaned elevated helper pid {pid} — scheduling reap");
+            orphans.push(pid);
+            let _ = std::fs::remove_file(&ready.path);
+        }
+    }
+
     let journal_path = recovery::journal_path(&dir);
-    if !recovery::needs_repair(&journal_path) {
+    let dirty = recovery::needs_repair(&journal_path);
+    if !dirty && orphans.is_empty() {
         return;
     }
-    tracing::warn!("sockscap: dirty recovery journal — repairing network state");
-    if let Some(j) = recovery::read_journal(&journal_path) {
-        tracing::warn!(
-            "sockscap: dirty journal pid={} backend={} relay={:?} helper={:?}",
-            j.pid,
-            j.capture_backend,
-            j.relay_port,
-            j.helper_port
+
+    if dirty {
+        tracing::warn!("sockscap: dirty recovery journal — repairing network state");
+        if let Some(j) = recovery::read_journal(&journal_path) {
+            tracing::warn!(
+                "sockscap: dirty journal pid={} backend={} relay={:?} helper={:?}",
+                j.pid,
+                j.capture_backend,
+                j.relay_port,
+                j.helper_port
+            );
+        }
+    }
+
+    // The previous helper cannot be contacted without its token, so recovery
+    // terminates what it can and reports what needs elevation.
+    match capture::recover_system().await {
+        Ok(needs_elevation) => {
+            for pid in needs_elevation {
+                if !orphans.contains(&pid) {
+                    orphans.push(pid);
+                }
+            }
+        }
+        Err(e) => {
+            // Leave the journal dirty so a later boot retries instead of falsely
+            // declaring potentially-live nftables/cgroup state recovered.
+            tracing::warn!("sockscap: boot recover failed; leaving journal dirty: {e}");
+            queue_reap(state, &orphans);
+            return;
+        }
+    }
+
+    queue_reap(state, &orphans);
+    if orphans.is_empty() {
+        let _ = recovery::mark_clean_and_clear(&journal_path);
+        tracing::info!("sockscap: recovery complete");
+    } else {
+        // Do not declare success while an elevated orphan is still diverting
+        // packets. The journal stays dirty until a helper launch reaps it.
+        let backend = capture::capabilities().capture_backend;
+        let message = format!(
+            "{} orphaned elevated helper process(es) from a previous run need Administrator to \
+             clean up; they will be reaped when you next Start SocksCap (accept the UAC prompt)",
+            orphans.len()
         );
+        tracing::warn!("sockscap: {message}");
+        state
+            .sockscap
+            .orch
+            .write()
+            .await
+            .set_recovery_required(&backend, message);
     }
-    // Previous helper cannot be contacted without its token; platform recover
-    // + clear journal so the next Start opens a fresh elevated helper.
-    if let Err(e) = capture::recover_system().await {
-        // Leave the journal dirty so a later boot retries instead of falsely
-        // declaring potentially-live nftables/cgroup state recovered.
-        tracing::warn!("sockscap: boot recover failed; leaving journal dirty: {e}");
+}
+
+fn queue_reap(state: &AppState, pids: &[u32]) {
+    if pids.is_empty() {
         return;
     }
-    let _ = recovery::mark_clean_and_clear(&journal_path);
-    tracing::info!("sockscap: recovery complete");
+    if let Ok(mut slot) = state.sockscap.pending_reap.lock() {
+        for pid in pids {
+            if !slot.contains(pid) {
+                slot.push(*pid);
+            }
+        }
+    }
 }
 
 #[tauri::command]

@@ -149,6 +149,142 @@ fn list_processes_windows() -> Result<Vec<ProcessInfo>, String> {
     }
 }
 
+/// Image file name (e.g. `sockscap-helper.exe`) of a live process, lowercased.
+///
+/// Deliberately not built on [`list_processes`], which dedupes by path and caps
+/// its output — both fatal here, where the point is to confirm that one
+/// specific pid is still the process we believe it to be before acting on it.
+/// Returns `None` when the pid is not live.
+#[cfg(windows)]
+pub fn process_image_name(pid: u32) -> Option<String> {
+    use std::mem::{size_of, zeroed};
+    use winapi::shared::minwindef::{DWORD, FALSE};
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::tlhelp32::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut pe: PROCESSENTRY32W = zeroed();
+        pe.dwSize = size_of::<PROCESSENTRY32W>() as DWORD;
+        let mut found = None;
+        let mut ok = Process32FirstW(snap, &mut pe);
+        while ok != FALSE {
+            if pe.th32ProcessID == pid {
+                let len = pe
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(pe.szExeFile.len());
+                found = Some(String::from_utf16_lossy(&pe.szExeFile[..len]).to_ascii_lowercase());
+                break;
+            }
+            ok = Process32NextW(snap, &mut pe);
+        }
+        CloseHandle(snap);
+        found
+    }
+}
+
+#[cfg(not(windows))]
+pub fn process_image_name(_pid: u32) -> Option<String> {
+    None
+}
+
+/// Pids of every live process whose image name matches (case-insensitive).
+#[cfg(windows)]
+pub fn pids_by_image_name(image: &str) -> Vec<u32> {
+    use std::mem::{size_of, zeroed};
+    use winapi::shared::minwindef::{DWORD, FALSE};
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::tlhelp32::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let want = image.to_ascii_lowercase();
+    let mut out = Vec::new();
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut pe: PROCESSENTRY32W = zeroed();
+        pe.dwSize = size_of::<PROCESSENTRY32W>() as DWORD;
+        let mut ok = Process32FirstW(snap, &mut pe);
+        while ok != FALSE {
+            let len = pe
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(pe.szExeFile.len());
+            let name = String::from_utf16_lossy(&pe.szExeFile[..len]).to_ascii_lowercase();
+            if name == want && pe.th32ProcessID != 0 {
+                out.push(pe.th32ProcessID);
+            }
+            ok = Process32NextW(snap, &mut pe);
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn pids_by_image_name(_image: &str) -> Vec<u32> {
+    Vec::new()
+}
+
+/// Terminate `pid`, but only if it is still running `expect_image`.
+///
+/// The image check closes a real pid-reuse window: the identifier recorded in a
+/// stale ready file may by now belong to something else entirely.
+///
+/// `Ok(true)` terminated, `Ok(false)` already gone or a different process now,
+/// `Err(_)` refused — on Windows that is almost always because the target is
+/// elevated and the caller is not.
+#[cfg(windows)]
+pub fn terminate_if_image(pid: u32, expect_image: &str) -> Result<bool, String> {
+    use winapi::shared::minwindef::FALSE;
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{OpenProcess, TerminateProcess};
+    use winapi::um::winnt::PROCESS_TERMINATE;
+
+    match process_image_name(pid) {
+        Some(name) if name == expect_image.to_ascii_lowercase() => {}
+        _ => return Ok(false),
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if h.is_null() {
+            // Structured error, not a localized command-line message.
+            return Err(format!(
+                "OpenProcess({pid}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let ok = TerminateProcess(h, 1);
+        let err = std::io::Error::last_os_error();
+        CloseHandle(h);
+        if ok == 0 {
+            return Err(format!("TerminateProcess({pid}): {err}"));
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+pub fn terminate_if_image(_pid: u32, _expect_image: &str) -> Result<bool, String> {
+    Ok(false)
+}
+
 #[cfg(target_os = "linux")]
 fn list_processes_linux() -> Result<Vec<ProcessInfo>, String> {
     use std::fs;

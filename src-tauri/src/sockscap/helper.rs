@@ -234,6 +234,26 @@ pub async fn sockscap_helper_start(
             "--parent-pid".into(),
             std::process::id().to_string(),
         ];
+
+        // Hand over any orphaned helpers boot repair found but could not
+        // terminate. This process is not elevated; the helper we are about to
+        // launch is, so it is the only thing that can reap them.
+        let reap: Vec<u32> = state
+            .sockscap
+            .pending_reap
+            .lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default();
+        if !reap.is_empty() {
+            tracing::info!("sockscap: asking the new helper to reap orphan pids {reap:?}");
+            args.push("--reap-pids".into());
+            args.push(
+                reap.iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
         let Some(wd) = resolve_windivert_dir(&app) else {
             return Err(windivert_missing_hint(&app));
         };

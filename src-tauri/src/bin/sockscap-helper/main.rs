@@ -108,6 +108,7 @@ mod windows_main {
         let mut ready_file: Option<PathBuf> = None;
         let mut windivert_dir: Option<PathBuf> = None;
         let mut parent_pid: Option<u32> = None;
+        let mut reap_pids: Vec<u32> = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
@@ -132,6 +133,17 @@ mod windows_main {
                     i += 1;
                     parent_pid = args.get(i).and_then(|s| s.parse().ok());
                 }
+                "--reap-pids" => {
+                    i += 1;
+                    reap_pids = args
+                        .get(i)
+                        .map(|s| {
+                            s.split(',')
+                                .filter_map(|p| p.trim().parse::<u32>().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
                 other => eprintln!("unknown arg: {other}"),
             }
             i += 1;
@@ -141,6 +153,14 @@ mod windows_main {
             eprintln!("sockscap-helper: --token and --port are required");
             std::process::exit(2);
         }
+
+        // Reap orphaned helpers before touching WinDivert. This process is
+        // elevated and the app that launched it is not, so this is the only
+        // point in the system where an orphan can actually be terminated: the
+        // app's own attempt gets Access Denied. A surviving orphan keeps
+        // diverting every outbound packet on the machine toward a relay port
+        // that no longer exists, and fights this session for the driver handle.
+        reap_orphan_helpers(&reap_pids);
 
         let listener = match TcpListener::bind(("127.0.0.1", port)) {
             Ok(l) => l,
@@ -155,6 +175,9 @@ mod windows_main {
                 "pid": std::process::id(),
                 "port": port,
                 "elevated": is_elevated(),
+                // Recorded so a later launch can tell an orphan (owning app
+                // gone) from a helper belonging to a still-running instance.
+                "parentPid": parent_pid,
             });
             let _ = std::fs::write(path, body.to_string());
             let _ = READY_FILE.set(path.clone());
@@ -511,6 +534,32 @@ mod windows_main {
         line.push('\n');
         w.write_all(line.as_bytes())?;
         w.flush()
+    }
+
+    /// Terminate the given pids, but only those still running *this* image.
+    ///
+    /// The name check matters: the pids come from ready files that may be
+    /// arbitrarily old, and Windows recycles process identifiers.
+    fn reap_orphan_helpers(pids: &[u32]) {
+        if pids.is_empty() {
+            return;
+        }
+        let own = std::process::id();
+        let image = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()))
+            .unwrap_or_else(|| "sockscap-helper.exe".to_string());
+
+        for &pid in pids {
+            if pid == own {
+                continue;
+            }
+            match crate::proc_info::terminate_if_image(pid, &image) {
+                Ok(true) => eprintln!("sockscap-helper: reaped orphan helper pid {pid}"),
+                Ok(false) => {}
+                Err(e) => eprintln!("sockscap-helper: could not reap pid {pid}: {e}"),
+            }
+        }
     }
 
     fn is_elevated() -> bool {

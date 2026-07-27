@@ -333,6 +333,67 @@ pub fn port_owners_for_pids(
     ports
 }
 
+/// Image file name of a live process, lowercased. `None` if the pid is gone.
+pub fn process_image_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as DWORD;
+        let mut found = None;
+        let mut ok = Process32FirstW(snap, &mut pe);
+        while ok != FALSE {
+            if pe.th32ProcessID == pid {
+                let len = pe
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(pe.szExeFile.len());
+                found = Some(String::from_utf16_lossy(&pe.szExeFile[..len]).to_ascii_lowercase());
+                break;
+            }
+            ok = Process32NextW(snap, &mut pe);
+        }
+        CloseHandle(snap);
+        found
+    }
+}
+
+/// Terminate `pid`, but only while it is still running `expect_image`.
+///
+/// `Ok(true)` terminated, `Ok(false)` already gone or now a different process,
+/// `Err(_)` the OS refused.
+pub fn terminate_if_image(pid: u32, expect_image: &str) -> Result<bool, String> {
+    use winapi::um::processthreadsapi::TerminateProcess;
+    use winapi::um::winnt::PROCESS_TERMINATE;
+
+    match process_image_name(pid) {
+        Some(name) if name == expect_image.to_ascii_lowercase() => {}
+        _ => return Ok(false),
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if h.is_null() {
+            return Err(format!(
+                "OpenProcess({pid}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let ok = TerminateProcess(h, 1);
+        let err = std::io::Error::last_os_error();
+        CloseHandle(h);
+        if ok == 0 {
+            return Err(format!("TerminateProcess({pid}): {err}"));
+        }
+    }
+    Ok(true)
+}
+
 pub fn normalize_path(p: &str) -> String {
     let mut s = p.trim().replace('/', "\\").to_ascii_lowercase();
     while s.ends_with('\\') {
