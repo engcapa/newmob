@@ -268,20 +268,23 @@ pub fn tcp_owner_pid(local: IpAddr, local_port: u16) -> Option<u32> {
         .map(|r| r.pid)
 }
 
-/// Build set of "ip:port" keys owned by any of `pids`.
-pub fn port_keys_for_pids(pids: &std::collections::HashSet<u32>) -> std::collections::HashSet<String> {
-    let mut keys = std::collections::HashSet::new();
+/// Local TCP ports owned by any of `pids`.
+///
+/// Ports, not `"ip:port"` strings: a local port is unique per host, so the IP
+/// added nothing that the port-only entry did not already cover — while the
+/// two `format!`s per row made every refresh allocate twice per open socket on
+/// the machine, and forced the packet path to allocate again to look one up.
+pub fn ports_for_pids(pids: &std::collections::HashSet<u32>) -> std::collections::HashSet<u16> {
+    let mut ports = std::collections::HashSet::new();
     if pids.is_empty() {
-        return keys;
+        return ports;
     }
     for row in list_tcp_owner_rows() {
         if pids.contains(&row.pid) {
-            keys.insert(format!("{}:{}", row.local, row.local_port));
-            // Also index by port alone for matching when packet src is more specific.
-            keys.insert(format!("*:{}", row.local_port));
+            ports.insert(row.local_port);
         }
     }
-    keys
+    ports
 }
 
 pub fn normalize_path(p: &str) -> String {
