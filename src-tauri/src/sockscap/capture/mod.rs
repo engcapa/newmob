@@ -68,62 +68,67 @@ pub fn capabilities() -> SocksCapCapabilities {
     }
 }
 
+/// Base name of the elevated Windows helper.
+pub const HELPER_IMAGE_NAME: &str = "sockscap-helper.exe";
+
 /// Undo any residual OS capture state left by an unclean shutdown.
-pub async fn recover_system() -> Result<(), String> {
+///
+/// Returns the pids of leftover helpers this process was **not permitted** to
+/// terminate. They are elevated and we are (normally) not, so only another
+/// elevated process can reap them — the caller hands the list to the next
+/// helper launch, which runs under UAC and can finish the job.
+pub async fn recover_system() -> Result<Vec<u32>, String> {
     #[cfg(target_os = "linux")]
     {
-        return linux::recover_system(None);
+        return linux::recover_system(None).map(|()| Vec::new());
     }
     #[cfg(windows)]
     {
         return recover_system_windows();
     }
     #[cfg(all(not(target_os = "linux"), not(windows)))]
-    Ok(())
+    Ok(Vec::new())
 }
 
-/// Windows recovery: kill any leftover elevated `sockscap-helper.exe`. When the
-/// helper exits, its WinDivert handles close and the driver unloads on its own,
-/// so terminating a stranded helper is sufficient to release capture state.
+/// Windows recovery: terminate any leftover `sockscap-helper.exe`. When a helper
+/// exits, its WinDivert handles close and the driver unloads on its own, so
+/// terminating a stranded helper is sufficient to release capture state.
 ///
-/// Best-effort: the main app is typically **not** elevated, so it cannot kill
-/// the elevated helper directly — `taskkill` returns Access Denied. In that case
-/// the helper's own parent-death watchdog already handles the common crash/kill
-/// path; here we just surface a clear message and treat "no such process" and
-/// "access denied" as non-fatal (nothing this process can further clean up).
+/// Uses `OpenProcess` + `TerminateProcess` rather than shelling out to
+/// `taskkill`. The old code parsed `taskkill`'s **localized** output for the
+/// English substrings "not found" and "access is denied", so on a non-English
+/// Windows the benign "no such process" case was misread as a hard failure and
+/// SocksCap stayed stuck in `RecoveryRequired`. It also treated Access Denied as
+/// success, silently reporting a clean system while an orphaned helper was still
+/// diverting every packet on the machine.
 #[cfg(windows)]
-fn recover_system_windows() -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
+fn recover_system_windows() -> Result<Vec<u32>, String> {
+    use crate::sockscap::process::{pids_by_image_name, terminate_if_image};
 
-    let output = Command::new("taskkill.exe")
-        .args(["/F", "/IM", "sockscap-helper.exe"])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .map_err(|e| format!("taskkill sockscap-helper: {e}"))?;
-
-    if output.status.success() {
-        tracing::info!("sockscap: recover killed leftover sockscap-helper.exe");
-        return Ok(());
+    let pids = pids_by_image_name(HELPER_IMAGE_NAME);
+    if pids.is_empty() {
+        tracing::info!("sockscap: recover — no leftover helper processes");
+        return Ok(Vec::new());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        stderr
+
+    let mut killed = 0usize;
+    let mut needs_elevation = Vec::new();
+    for pid in pids {
+        match terminate_if_image(pid, HELPER_IMAGE_NAME) {
+            Ok(true) => killed += 1,
+            // Already gone, or the pid now belongs to something else.
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!("sockscap: cannot terminate helper pid {pid} ({e})");
+                needs_elevation.push(pid);
+            }
+        }
+    }
+    tracing::info!(
+        "sockscap: recover terminated {killed} leftover helper(s); {} need elevation",
+        needs_elevation.len()
     );
-    let lower = combined.to_ascii_lowercase();
-    // "not found" → nothing to clean. "access is denied" → elevated helper we
-    // can't touch from a non-elevated app; watchdog is the real safety net.
-    if lower.contains("not found")
-        || lower.contains("no running instance")
-        || lower.contains("access is denied")
-    {
-        tracing::info!("sockscap: recover — no killable leftover helper ({})", combined.trim());
-        return Ok(());
-    }
-    Err(format!("taskkill sockscap-helper failed: {}", combined.trim()))
+    Ok(needs_elevation)
 }
 
 /// Future trait for platform adapters.

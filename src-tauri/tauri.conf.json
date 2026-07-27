@@ -50,6 +50,11 @@
     "resources": [
       "resources/sockscap/**/*"
     ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./nsis/hooks.nsh"
+      }
+    },
     "linux": {
       "deb": {
         "depends": [

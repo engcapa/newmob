@@ -236,10 +236,14 @@ pub fn run() {
                 tunnel::autostart_tunnels(app_for_autostart).await;
             });
 
-            // SocksCap: repair residual OS capture state from a previous unclean exit.
+            // SocksCap: repair residual OS capture state from a previous unclean
+            // exit. Needs app state: orphaned elevated helpers can only be
+            // terminated by another elevated process, so their pids are queued
+            // there for the next (UAC-elevated) helper launch to reap.
             let app_for_sockscap = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                sockscap::boot_repair(&app_for_sockscap).await;
+                let state = app_for_sockscap.state::<AppState>();
+                sockscap::boot_repair(&app_for_sockscap, &state).await;
             });
 
             // SocksCap: resolve the bundled xray-core binary and install the

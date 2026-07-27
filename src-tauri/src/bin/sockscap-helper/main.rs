@@ -30,15 +30,31 @@ fn main() {
 #[cfg(windows)]
 mod windows_main {
     use std::io::{BufRead, BufReader, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use serde::{Deserialize, Serialize};
     use serde_json::json;
 
     use crate::capture::{CaptureEngine, CapturePlan, Endpoint};
+
+    /// Ready-file written at startup; removed on every controlled exit path so
+    /// the unelevated app never finds a ready file pointing at a dead helper.
+    static READY_FILE: OnceLock<PathBuf> = OnceLock::new();
+
+    /// Remove the ready file (best effort) and terminate the process.
+    ///
+    /// The helper **must** actually exit rather than merely flipping a flag:
+    /// while it lives it keeps `sockscap-helper.exe` and the loaded
+    /// `WinDivert.dll` file-locked, which breaks in-place upgrades.
+    fn cleanup_and_exit(code: i32) -> ! {
+        if let Some(p) = READY_FILE.get() {
+            let _ = std::fs::remove_file(p);
+        }
+        std::process::exit(code);
+    }
 
     #[derive(Debug, Deserialize)]
     struct Request {
@@ -92,6 +108,8 @@ mod windows_main {
         let mut ready_file: Option<PathBuf> = None;
         let mut windivert_dir: Option<PathBuf> = None;
         let mut parent_pid: Option<u32> = None;
+        let mut parent_start: Option<u64> = None;
+        let mut reap_pids: Vec<u32> = Vec::new();
 
         let mut i = 0;
         while i < args.len() {
@@ -116,6 +134,21 @@ mod windows_main {
                     i += 1;
                     parent_pid = args.get(i).and_then(|s| s.parse().ok());
                 }
+                "--parent-start" => {
+                    i += 1;
+                    parent_start = args.get(i).and_then(|s| s.parse().ok());
+                }
+                "--reap-pids" => {
+                    i += 1;
+                    reap_pids = args
+                        .get(i)
+                        .map(|s| {
+                            s.split(',')
+                                .filter_map(|p| p.trim().parse::<u32>().ok())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                }
                 other => eprintln!("unknown arg: {other}"),
             }
             i += 1;
@@ -125,6 +158,14 @@ mod windows_main {
             eprintln!("sockscap-helper: --token and --port are required");
             std::process::exit(2);
         }
+
+        // Reap orphaned helpers before touching WinDivert. This process is
+        // elevated and the app that launched it is not, so this is the only
+        // point in the system where an orphan can actually be terminated: the
+        // app's own attempt gets Access Denied. A surviving orphan keeps
+        // diverting every outbound packet on the machine toward a relay port
+        // that no longer exists, and fights this session for the driver handle.
+        reap_orphan_helpers(&reap_pids);
 
         let listener = match TcpListener::bind(("127.0.0.1", port)) {
             Ok(l) => l,
@@ -139,8 +180,12 @@ mod windows_main {
                 "pid": std::process::id(),
                 "port": port,
                 "elevated": is_elevated(),
+                // Recorded so a later launch can tell an orphan (owning app
+                // gone) from a helper belonging to a still-running instance.
+                "parentPid": parent_pid,
             });
             let _ = std::fs::write(path, body.to_string());
+            let _ = READY_FILE.set(path.clone());
         }
 
         let running = Arc::new(AtomicBool::new(true));
@@ -153,12 +198,12 @@ mod windows_main {
         if let Some(ppid) = parent_pid {
             let engine_wd = Arc::clone(&engine);
             std::thread::spawn(move || {
-                wait_for_parent_exit(ppid);
+                wait_for_parent_exit(ppid, parent_start);
                 if let Ok(mut eng) = engine_wd.lock() {
                     eng.stop();
                 }
                 // Parent is gone; nothing left to serve.
-                std::process::exit(0);
+                cleanup_and_exit(0);
             });
         }
 
@@ -176,6 +221,7 @@ mod windows_main {
         if let Ok(mut eng) = engine.lock() {
             eng.stop();
         }
+        cleanup_and_exit(0);
     }
 
     fn handle_client(
@@ -234,7 +280,16 @@ mod windows_main {
             let resp = dispatch(&req, engine, running);
             let _ = write_resp(&mut writer, resp);
             if !running.load(Ordering::SeqCst) {
-                break;
+                // A `shutdown` RPC was served. The accept loop is parked inside
+                // a blocking `listener.accept()` and would never observe the
+                // flag, so terminate here — otherwise the helper lingers,
+                // keeping its exe and WinDivert.dll locked against upgrades.
+                // Half-close and pause briefly so the caller reads the reply
+                // before the socket goes away.
+                let _ = writer.flush();
+                let _ = writer.shutdown(Shutdown::Write);
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                cleanup_and_exit(0);
             }
         }
     }
@@ -375,38 +430,50 @@ mod windows_main {
                     error: Some(e.to_string()),
                 },
             },
+            // Hot-update the running plan. Every field is optional; omitted
+            // fields are left as they are. Used both to re-point the relay port
+            // and to refresh the bypass lists when a bypassed process restarts
+            // with a new pid (an xray core respawn, most importantly).
             "capture_update" => {
-                let port = req.relay_port.unwrap_or(0);
-                if port == 0 {
-                    Response {
+                if req.relay_port.is_none()
+                    && req.bypass_pids.is_none()
+                    && req.bypass_paths.is_none()
+                {
+                    return Response {
                         id: req.id,
                         ok: false,
                         result: None,
-                        error: Some("relayPort required".into()),
-                    }
-                } else {
-                    match engine.lock() {
-                        Ok(mut eng) => match eng.update_relay_port(port) {
-                            Ok(v) => Response {
-                                id: req.id,
-                                ok: true,
-                                result: Some(v),
-                                error: None,
-                            },
-                            Err(e) => Response {
-                                id: req.id,
-                                ok: false,
-                                result: None,
-                                error: Some(e),
-                            },
+                        error: Some(
+                            "capture_update needs at least one of relayPort, bypassPids, bypassPaths"
+                                .into(),
+                        ),
+                    };
+                }
+                match engine.lock() {
+                    Ok(mut eng) => match eng.update_plan(
+                        req.relay_port,
+                        req.bypass_pids.clone(),
+                        req.bypass_paths.clone(),
+                    ) {
+                        Ok(v) => Response {
+                            id: req.id,
+                            ok: true,
+                            result: Some(v),
+                            error: None,
                         },
                         Err(e) => Response {
                             id: req.id,
                             ok: false,
                             result: None,
-                            error: Some(e.to_string()),
+                            error: Some(e),
                         },
-                    }
+                    },
+                    Err(e) => Response {
+                        id: req.id,
+                        ok: false,
+                        result: None,
+                        error: Some(e.to_string()),
+                    },
                 }
             }
             "lookup_orig" => {
@@ -442,6 +509,9 @@ mod windows_main {
                     },
                 }
             }
+            // Stop capture and mark the helper for termination. The actual
+            // `exit` happens in `handle_client` right after this response is
+            // written, so the caller always receives an ack.
             "shutdown" => {
                 if let Ok(mut eng) = engine.lock() {
                     eng.stop();
@@ -471,6 +541,32 @@ mod windows_main {
         w.flush()
     }
 
+    /// Terminate the given pids, but only those still running *this* image.
+    ///
+    /// The name check matters: the pids come from ready files that may be
+    /// arbitrarily old, and Windows recycles process identifiers.
+    fn reap_orphan_helpers(pids: &[u32]) {
+        if pids.is_empty() {
+            return;
+        }
+        let own = std::process::id();
+        let image = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()))
+            .unwrap_or_else(|| "sockscap-helper.exe".to_string());
+
+        for &pid in pids {
+            if pid == own {
+                continue;
+            }
+            match crate::proc_info::terminate_if_image(pid, &image) {
+                Ok(true) => eprintln!("sockscap-helper: reaped orphan helper pid {pid}"),
+                Ok(false) => {}
+                Err(e) => eprintln!("sockscap-helper: could not reap pid {pid}: {e}"),
+            }
+        }
+    }
+
     fn is_elevated() -> bool {
         #[link(name = "shell32")]
         unsafe extern "system" {
@@ -479,27 +575,68 @@ mod windows_main {
         unsafe { IsUserAnAdmin() != 0 }
     }
 
-    /// Block until the process `ppid` exits, then return. Uses a wait on the
-    /// process handle (no polling / PID-reuse race: the handle refers to the
-    /// exact process even if the pid is later recycled). If the handle cannot
-    /// be opened (already gone, or access denied), return promptly so the
-    /// caller shuts down rather than lingering forever.
-    fn wait_for_parent_exit(ppid: u32) {
+    /// Block until the process `ppid` exits, then return.
+    ///
+    /// Once opened, the handle refers to that exact process, so the wait itself
+    /// is immune to pid recycling. The gap is *before* the open: the pid was
+    /// recorded by the app before it raised the UAC prompt, and a user can leave
+    /// that prompt sitting for minutes. If the app dies in the meantime and
+    /// Windows hands its pid to something else, this would attach to a stranger
+    /// and never fire — exactly the case where the watchdog is the last line of
+    /// defence against a leaked elevated helper.
+    ///
+    /// `expect_start` (the parent's creation FILETIME, captured alongside the
+    /// pid) closes that gap: pid plus creation time identifies a process
+    /// uniquely. A mismatch means the real parent is already gone, so return
+    /// immediately and let the caller shut down.
+    fn wait_for_parent_exit(ppid: u32, expect_start: Option<u64>) {
         use winapi::shared::minwindef::FALSE;
         use winapi::um::handleapi::CloseHandle;
         use winapi::um::processthreadsapi::OpenProcess;
         use winapi::um::synchapi::WaitForSingleObject;
         use winapi::um::winbase::INFINITE;
-        use winapi::um::winnt::SYNCHRONIZE;
+        use winapi::um::winnt::{PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE};
 
         unsafe {
-            let h = OpenProcess(SYNCHRONIZE, FALSE, ppid);
+            let h = OpenProcess(
+                SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                FALSE,
+                ppid,
+            );
             if h.is_null() {
                 // Parent already gone or not openable — do not hang.
                 return;
             }
+            if let Some(expected) = expect_start {
+                match process_start_filetime(h) {
+                    Some(actual) if actual == expected => {}
+                    _ => {
+                        eprintln!(
+                            "sockscap-helper: pid {ppid} is not the parent that launched us; \
+                             treating the parent as gone"
+                        );
+                        CloseHandle(h);
+                        return;
+                    }
+                }
+            }
             let _ = WaitForSingleObject(h, INFINITE);
             CloseHandle(h);
         }
+    }
+
+    /// Creation time of a process as a 64-bit FILETIME.
+    unsafe fn process_start_filetime(handle: winapi::um::winnt::HANDLE) -> Option<u64> {
+        use winapi::shared::minwindef::FILETIME;
+        use winapi::um::processthreadsapi::GetProcessTimes;
+
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        if GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) == 0 {
+            return None;
+        }
+        Some(((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64)
     }
 }

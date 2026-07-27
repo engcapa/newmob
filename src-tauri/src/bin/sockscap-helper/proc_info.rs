@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use winapi::shared::minwindef::{DWORD, FALSE, MAX_PATH};
@@ -248,8 +248,37 @@ pub fn list_tcp_owner_rows() -> Vec<TcpOwnerRow> {
     out
 }
 
-pub fn tcp_owner_pid(local: IpAddr, local_port: u16) -> Option<u32> {
-    for row in list_tcp_owner_rows() {
+/// How long a TCP-table snapshot may be reused. Long enough that a burst of new
+/// connections shares one enumeration, short enough to stay current.
+const TCP_TABLE_CACHE_TTL: Duration = Duration::from_millis(100);
+
+static TCP_TABLE_CACHE: Mutex<Option<(Instant, Arc<Vec<TcpOwnerRow>>)>> = Mutex::new(None);
+
+/// Shared TCP-table snapshot, re-read only when older than `max_age`.
+///
+/// `GetExtendedTcpTable` walks every TCP endpoint on the machine, twice (v4 and
+/// v6). Calling it per connection — let alone the two calls the old
+/// `tcp_owner_pid` made on a miss — is what made connection setup expensive
+/// under load.
+pub fn tcp_owner_rows_cached(max_age: Duration) -> Arc<Vec<TcpOwnerRow>> {
+    let now = Instant::now();
+    if let Ok(guard) = TCP_TABLE_CACHE.lock() {
+        if let Some((at, rows)) = guard.as_ref() {
+            if now.duration_since(*at) <= max_age {
+                return Arc::clone(rows);
+            }
+        }
+    }
+    let rows = Arc::new(list_tcp_owner_rows());
+    if let Ok(mut guard) = TCP_TABLE_CACHE.lock() {
+        *guard = Some((now, Arc::clone(&rows)));
+    }
+    rows
+}
+
+fn find_owner(rows: &[TcpOwnerRow], local: IpAddr, local_port: u16) -> Option<u32> {
+    let mut port_only = None;
+    for row in rows {
         if row.local_port != local_port || row.pid == 0 {
             continue;
         }
@@ -260,28 +289,109 @@ pub fn tcp_owner_pid(local: IpAddr, local_port: u16) -> Option<u32> {
         {
             return Some(row.pid);
         }
+        // Port-only fallback (local ports are unique on a host for a given
+        // family). Remembered during the same pass rather than costing a
+        // second full enumeration.
+        port_only.get_or_insert(row.pid);
     }
-    // Port-only fallback (local ports are unique on a host for a given family).
-    list_tcp_owner_rows()
-        .into_iter()
-        .find(|r| r.local_port == local_port && r.pid != 0)
-        .map(|r| r.pid)
+    port_only
 }
 
-/// Build set of "ip:port" keys owned by any of `pids`.
-pub fn port_keys_for_pids(pids: &std::collections::HashSet<u32>) -> std::collections::HashSet<String> {
-    let mut keys = std::collections::HashSet::new();
+pub fn tcp_owner_pid(local: IpAddr, local_port: u16) -> Option<u32> {
+    if let Some(pid) = find_owner(&tcp_owner_rows_cached(TCP_TABLE_CACHE_TTL), local, local_port) {
+        return Some(pid);
+    }
+    // A miss may just mean the snapshot predates this socket. Force one re-read
+    // — the connection is new, so this is at most once per connection.
+    find_owner(&tcp_owner_rows_cached(Duration::ZERO), local, local_port)
+}
+
+/// Local TCP ports owned by any of `pids`, mapped to their owner.
+///
+/// Reads a fresh table: this runs on the maintenance thread, off the packet
+/// path, and its whole job is to be current.
+///
+/// Ports, not `"ip:port"` strings: a local port is unique per host, so the IP
+/// added nothing that the port-only entry did not already cover — while the
+/// two `format!`s per row made every refresh allocate twice per open socket on
+/// the machine, and forced the packet path to allocate again to look one up.
+///
+/// Carrying the pid means an index hit answers "which process" without a
+/// further `GetExtendedTcpTable` call on the packet path.
+pub fn port_owners_for_pids(
+    pids: &std::collections::HashSet<u32>,
+) -> std::collections::HashMap<u16, u32> {
+    let mut ports = std::collections::HashMap::new();
     if pids.is_empty() {
-        return keys;
+        return ports;
     }
     for row in list_tcp_owner_rows() {
         if pids.contains(&row.pid) {
-            keys.insert(format!("{}:{}", row.local, row.local_port));
-            // Also index by port alone for matching when packet src is more specific.
-            keys.insert(format!("*:{}", row.local_port));
+            ports.insert(row.local_port, row.pid);
         }
     }
-    keys
+    ports
+}
+
+/// Image file name of a live process, lowercased. `None` if the pid is gone.
+pub fn process_image_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snap == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut pe: PROCESSENTRY32W = std::mem::zeroed();
+        pe.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as DWORD;
+        let mut found = None;
+        let mut ok = Process32FirstW(snap, &mut pe);
+        while ok != FALSE {
+            if pe.th32ProcessID == pid {
+                let len = pe
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(pe.szExeFile.len());
+                found = Some(String::from_utf16_lossy(&pe.szExeFile[..len]).to_ascii_lowercase());
+                break;
+            }
+            ok = Process32NextW(snap, &mut pe);
+        }
+        CloseHandle(snap);
+        found
+    }
+}
+
+/// Terminate `pid`, but only while it is still running `expect_image`.
+///
+/// `Ok(true)` terminated, `Ok(false)` already gone or now a different process,
+/// `Err(_)` the OS refused.
+pub fn terminate_if_image(pid: u32, expect_image: &str) -> Result<bool, String> {
+    use winapi::um::processthreadsapi::TerminateProcess;
+    use winapi::um::winnt::PROCESS_TERMINATE;
+
+    match process_image_name(pid) {
+        Some(name) if name == expect_image.to_ascii_lowercase() => {}
+        _ => return Ok(false),
+    }
+    unsafe {
+        let h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if h.is_null() {
+            return Err(format!(
+                "OpenProcess({pid}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let ok = TerminateProcess(h, 1);
+        let err = std::io::Error::last_os_error();
+        CloseHandle(h);
+        if ok == 0 {
+            return Err(format!("TerminateProcess({pid}): {err}"));
+        }
+    }
+    Ok(true)
 }
 
 pub fn normalize_path(p: &str) -> String {
@@ -302,4 +412,77 @@ pub fn path_matches_selector(process_path: &str, selector: &str) -> bool {
         return false;
     }
     p == s || p.ends_with(&s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(ip: [u8; 4], port: u16, pid: u32) -> TcpOwnerRow {
+        TcpOwnerRow {
+            local: IpAddr::V4(Ipv4Addr::from(ip)),
+            local_port: port,
+            pid,
+        }
+    }
+
+    #[test]
+    fn exact_ip_match_wins_over_an_earlier_port_only_row() {
+        // The port-only fallback used to require a second full enumeration of
+        // the machine's TCP table; it is now collected in the same pass, so it
+        // must still lose to an exact match found later in the list.
+        let rows = vec![
+            row([10, 0, 0, 5], 50_000, 111),
+            row([192, 168, 1, 10], 50_000, 222),
+        ];
+        assert_eq!(
+            find_owner(&rows, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 50_000),
+            Some(222)
+        );
+    }
+
+    #[test]
+    fn port_only_fallback_applies_when_no_ip_matches() {
+        let rows = vec![row([10, 0, 0, 5], 50_000, 111)];
+        assert_eq!(
+            find_owner(&rows, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 50_000),
+            Some(111)
+        );
+    }
+
+    #[test]
+    fn wildcard_bind_matches_any_local_ip() {
+        let rows = vec![row([0, 0, 0, 0], 50_000, 333)];
+        assert_eq!(
+            find_owner(&rows, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 50_000),
+            Some(333)
+        );
+    }
+
+    #[test]
+    fn unknown_port_has_no_owner() {
+        let rows = vec![row([192, 168, 1, 10], 50_000, 222)];
+        assert_eq!(
+            find_owner(&rows, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 50_001),
+            None
+        );
+    }
+
+    #[test]
+    fn rows_with_no_owner_are_ignored() {
+        let rows = vec![row([192, 168, 1, 10], 50_000, 0)];
+        assert_eq!(
+            find_owner(&rows, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 50_000),
+            None
+        );
+    }
+
+    #[test]
+    fn port_owner_map_carries_the_owning_pid() {
+        // The packet path reads the pid straight out of the index instead of
+        // calling GetExtendedTcpTable again.
+        let pids = std::collections::HashSet::from([u32::MAX]);
+        assert!(port_owners_for_pids(&pids).is_empty());
+        assert!(port_owners_for_pids(&std::collections::HashSet::new()).is_empty());
+    }
 }

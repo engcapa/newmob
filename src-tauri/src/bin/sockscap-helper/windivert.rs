@@ -20,6 +20,11 @@ pub const LAYER_SOCKET: i32 = 3;
 pub const WINDIVERT_HELPER_NO_IP_CHECKSUM: u64 = 1;
 pub const WINDIVERT_HELPER_NO_TCP_CHECKSUM: u64 = 2;
 
+/// `WINDIVERT_PARAM` (windivert.h).
+pub const PARAM_QUEUE_LENGTH: i32 = 0;
+pub const PARAM_QUEUE_TIME: i32 = 1;
+pub const PARAM_QUEUE_SIZE: i32 = 2;
+
 type OpenFn = unsafe extern "C" fn(*const i8, i32, i16, u64) -> HANDLE;
 // WinDivert 2.x: Recv(handle, packet, packetLen, *recvLen, *addr)
 type RecvFn = unsafe extern "C" fn(HANDLE, *mut u8, u32, *mut u32, *mut u8) -> i32;
@@ -28,6 +33,16 @@ type SendFn = unsafe extern "C" fn(HANDLE, *const u8, u32, *mut u32, *const u8) 
 type CloseFn = unsafe extern "C" fn(HANDLE) -> i32;
 type CalcChecksumsFn = unsafe extern "C" fn(*mut u8, u32, *mut u8, u64) -> i32;
 type ShutdownFn = unsafe extern "C" fn(HANDLE, i32) -> i32;
+type SetParamFn = unsafe extern "C" fn(HANDLE, i32, u64) -> i32;
+type GetParamFn = unsafe extern "C" fn(HANDLE, i32, *mut u64) -> i32;
+
+/// Effective kernel queue limits for a handle (0 = could not be read).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueueParams {
+    pub length: u64,
+    pub size: u64,
+    pub time_ms: u64,
+}
 
 pub struct WinDivertApi {
     module: HMODULE,
@@ -38,6 +53,8 @@ pub struct WinDivertApi {
     close: CloseFn,
     calc_checksums: CalcChecksumsFn,
     shutdown: Option<ShutdownFn>,
+    set_param: Option<SetParamFn>,
+    get_param: Option<GetParamFn>,
 }
 
 // SAFETY: WinDivert handles are used from dedicated threads with external sync.
@@ -89,6 +106,12 @@ impl WinDivertApi {
             let close = load_sym(module, b"WinDivertClose\0")?;
             let calc = load_sym(module, b"WinDivertHelperCalcChecksums\0")?;
 
+            // Optional: queue tuning degrades to driver defaults if absent.
+            let set_param_ptr =
+                GetProcAddress(module, b"WinDivertSetParam\0".as_ptr() as *const i8);
+            let get_param_ptr =
+                GetProcAddress(module, b"WinDivertGetParam\0".as_ptr() as *const i8);
+
             let api = Self {
                 module,
                 dll_path: dll.clone(),
@@ -98,6 +121,10 @@ impl WinDivertApi {
                 close: std::mem::transmute::<FARPROC, CloseFn>(close),
                 calc_checksums: std::mem::transmute::<FARPROC, CalcChecksumsFn>(calc),
                 shutdown: Some(std::mem::transmute::<FARPROC, ShutdownFn>(shutdown_ptr)),
+                set_param: (!set_param_ptr.is_null())
+                    .then(|| std::mem::transmute::<FARPROC, SetParamFn>(set_param_ptr)),
+                get_param: (!get_param_ptr.is_null())
+                    .then(|| std::mem::transmute::<FARPROC, GetParamFn>(get_param_ptr)),
             };
 
             // Sanity: NETWORK open must work with 2.x ABI.
@@ -193,6 +220,62 @@ impl WinDivertApi {
                 addr.as_mut_ptr(),
                 0,
             );
+        }
+    }
+
+    pub fn set_param(&self, handle: HANDLE, param: i32, value: u64) -> bool {
+        match self.set_param {
+            Some(f) => unsafe { f(handle, param, value) != 0 },
+            None => false,
+        }
+    }
+
+    pub fn get_param(&self, handle: HANDLE, param: i32) -> u64 {
+        let Some(f) = self.get_param else {
+            return 0;
+        };
+        let mut v: u64 = 0;
+        if unsafe { f(handle, param, &mut v) } == 0 {
+            return 0;
+        }
+        v
+    }
+
+    /// Raise the kernel queue limits above the driver defaults (~4096 packets /
+    /// 4 MB) for a diverted handle.
+    ///
+    /// When the queue overflows, the driver **silently drops** packets. Because
+    /// the diverted flow owns every outbound TCP packet on the host, a drop
+    /// storm shows up as machine-wide retransmits and collapsed congestion
+    /// windows rather than as any error the helper can observe. A deeper queue
+    /// absorbs bursts and the occasional scheduling hiccup.
+    ///
+    /// Candidates are tried in descending order and the first accepted value
+    /// wins, so this does not depend on one WinDivert build's documented
+    /// maximum — an out-of-range value simply fails and the next is tried.
+    ///
+    /// `QUEUE_TIME` is deliberately left at the driver default. It caps how long
+    /// a packet may sit queued; raising it would let stale packets occupy queue
+    /// slots (making length overflow *more* likely) and inject multi-second-old
+    /// packets after TCP has already retransmitted them. Depth, not staleness,
+    /// is what we want more of.
+    pub fn tune_queue(&self, handle: HANDLE, with_size: bool) -> QueueParams {
+        for v in [16384u64, 8192, 4096] {
+            if self.set_param(handle, PARAM_QUEUE_LENGTH, v) {
+                break;
+            }
+        }
+        if with_size {
+            for v in [16u64 << 20, 8 << 20, 4 << 20] {
+                if self.set_param(handle, PARAM_QUEUE_SIZE, v) {
+                    break;
+                }
+            }
+        }
+        QueueParams {
+            length: self.get_param(handle, PARAM_QUEUE_LENGTH),
+            size: self.get_param(handle, PARAM_QUEUE_SIZE),
+            time_ms: self.get_param(handle, PARAM_QUEUE_TIME),
         }
     }
 

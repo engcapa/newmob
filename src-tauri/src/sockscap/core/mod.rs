@@ -253,6 +253,13 @@ pub struct XrayManager {
     /// Health-check monitor task handle (started at capture start, aborted on
     /// teardown). Behind a std Mutex so the sync exit-hook can stop it too.
     monitor: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Notified with the full live pid set whenever a core is respawned.
+    ///
+    /// A respawned core has a **new pid**, and the capture layer's bypass list
+    /// was captured at start. Until it is told, the new core's connection to its
+    /// node is captured and reflected into the relay, which then dials the
+    /// core's own SOCKS inbound: a loop that wedges all proxied traffic.
+    respawn_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u32>>>>,
 }
 
 impl XrayManager {
@@ -262,6 +269,15 @@ impl XrayManager {
             exe,
             work_dir,
             monitor: std::sync::Mutex::new(None),
+            respawn_tx: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Receive the live pid set after every respawn. Replaces any previous
+    /// subscriber (closing its channel, which ends its consumer task).
+    pub fn set_respawn_notifier(&self, tx: tokio::sync::mpsc::UnboundedSender<Vec<u32>>) {
+        if let Ok(mut slot) = self.respawn_tx.lock() {
+            *slot = Some(tx);
         }
     }
 
@@ -400,6 +416,16 @@ impl XrayManager {
                 }
             }
         }
+        if respawned > 0 {
+            // Publish the new pid set before returning, while the map is still
+            // locked, so the capture layer cannot observe a torn view.
+            let pids: Vec<u32> = guard.values().filter_map(|c| c.core.pid()).collect();
+            if let Ok(slot) = self.respawn_tx.lock() {
+                if let Some(tx) = slot.as_ref() {
+                    let _ = tx.send(pids);
+                }
+            }
+        }
         respawned
     }
 
@@ -425,12 +451,16 @@ impl XrayManager {
         }));
     }
 
-    /// Stop the health monitor task if running.
+    /// Stop the health monitor task if running, and drop the respawn subscriber
+    /// so its consumer task ends with this capture session.
     pub fn stop_monitor(&self) {
         if let Ok(mut slot) = self.monitor.lock() {
             if let Some(handle) = slot.take() {
                 handle.abort();
             }
+        }
+        if let Ok(mut slot) = self.respawn_tx.lock() {
+            *slot = None;
         }
     }
 }
