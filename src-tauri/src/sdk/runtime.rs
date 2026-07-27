@@ -126,23 +126,26 @@ pub fn build_workspace_environment(
     let (tooling_java, tooling_java_error) = select_tooling_java(registry, &requested_scope);
 
     let mut environment = BTreeMap::new();
-    let project_java_home = project_java.as_ref().map(|sdk| sdk.location.clone());
-    let launcher_java_home = launcher_java.as_ref().map(|sdk| sdk.location.clone());
+    // All home paths are normalized (verbatim prefix stripped) before they
+    // become environment values so a legacy `\\?\C:\...` registry entry can't
+    // poison JAVA_HOME/VIRTUAL_ENV for shells and batch launchers.
+    let project_java_home = project_java.as_ref().map(sdk_home);
+    let launcher_java_home = launcher_java.as_ref().map(sdk_home);
     if let Some(java_home) = launcher_java_home.as_ref().or(project_java_home.as_ref()) {
         environment.insert("JAVA_HOME".to_string(), java_home.clone());
     }
 
-    let python_home = python.as_ref().map(|sdk| sdk.location.clone());
+    let python_home = python.as_ref().map(sdk_home);
     if let Some(sdk) = python.as_ref()
         && is_python_environment(&sdk.location)
     {
-        environment.insert("VIRTUAL_ENV".to_string(), sdk.location.clone());
+        environment.insert("VIRTUAL_ENV".to_string(), sdk_home(sdk));
     }
-    let kotlin_home = kotlin.as_ref().map(|sdk| sdk.location.clone());
+    let kotlin_home = kotlin.as_ref().map(sdk_home);
     if let Some(home) = kotlin_home.as_ref() {
         environment.insert("KOTLIN_HOME".to_string(), home.clone());
     }
-    let scala_home = scala.as_ref().map(|sdk| sdk.location.clone());
+    let scala_home = scala.as_ref().map(sdk_home);
     if let Some(home) = scala_home.as_ref() {
         environment.insert("SCALA_HOME".to_string(), home.clone());
     }
@@ -156,7 +159,7 @@ pub fn build_workspace_environment(
     ];
     let path_entries = executable_directories(selected.into_iter().flatten());
     let java_runtimes = java_runtime_configurations(registry, project_java.as_ref());
-    let tooling_java_home = tooling_java.as_ref().map(|sdk| sdk.location.clone());
+    let tooling_java_home = tooling_java.as_ref().map(sdk_home);
     let workspace_root = path_string(&workspace_root);
     let scope_path = path_string(&requested_scope);
     let project_scope_path = path_string(&project_scope);
@@ -413,7 +416,8 @@ fn java_runtime_configurations(
             } else {
                 format!("JavaSE-{major}")
             },
-            path: sdk.location.clone(),
+            // jdtls writes this into runtime configs; keep it a plain path.
+            path: sdk_home(&sdk),
             default: project_java
                 .is_some_and(|project| paths_equal(&project.location, &sdk.location)),
         });
@@ -510,7 +514,16 @@ fn path_key(path: &Path) -> String {
 }
 
 fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    // Strip Windows `\\?\` verbatim prefixes (from `canonicalize`) so emitted
+    // scope paths and PATH entries work with cmd.exe / batch launchers.
+    super::strip_verbatim_prefix(&path.to_string_lossy())
+}
+
+/// An SDK's install location as a plain string for use as an environment value
+/// (`JAVA_HOME`, `VIRTUAL_ENV`, …). Strips any verbatim prefix so batch
+/// launchers resolving `%JAVA_HOME%\bin\java.exe` don't hit "path not found".
+fn sdk_home(installation: &SdkInstallation) -> String {
+    super::strip_verbatim_prefix(&installation.location)
 }
 
 fn fingerprint(parts: &[&str]) -> String {
@@ -656,6 +669,71 @@ mod tests {
                 .tooling_java_error
                 .as_deref()
                 .is_some_and(|error| error.contains("requires JDK 21+"))
+        );
+    }
+
+    #[test]
+    fn strips_verbatim_prefix_from_java_home_and_path_entries() {
+        // A registry entry saved with a Windows `\\?\` verbatim prefix must not
+        // reach JAVA_HOME / PATH: cmd.exe and batch launchers (mvn.cmd) resolve
+        // `%JAVA_HOME%\bin\java.exe` and fail with "path not found" on `\\?\`.
+        let root = if cfg!(windows) { r"C:\repo" } else { "/repo" };
+        let mut project = installation(
+            "jdk-21",
+            SdkKind::Java,
+            "21.0.4",
+            r"\\?\C:\Program Files\Java\jdk-21",
+        );
+        project.executables = BTreeMap::from([(
+            "java".to_string(),
+            r"\\?\C:\Program Files\Java\jdk-21\bin\java.exe".to_string(),
+        )]);
+        let registry = SdkRegistry {
+            installations: vec![project.clone()],
+            ..SdkRegistry::default()
+        };
+        let resolution = resolution(
+            root,
+            root,
+            vec![resolved(root, SdkKind::Java, SdkRole::Project, project)],
+        );
+
+        let environment = build_workspace_environment(&resolution, &registry, Path::new(root));
+
+        // Core of the bug: JAVA_HOME must be a plain path (pure string strip,
+        // identical on every host).
+        assert_eq!(
+            environment.environment.get("JAVA_HOME").map(String::as_str),
+            Some(r"C:\Program Files\Java\jdk-21")
+        );
+        assert_eq!(
+            environment.project_java_home.as_deref(),
+            Some(r"C:\Program Files\Java\jdk-21")
+        );
+        // Invariant that holds on every host: nothing emitted keeps a verbatim
+        // prefix (env values, PATH entries, runtime paths).
+        assert!(
+            environment
+                .environment
+                .values()
+                .chain(environment.path_entries.iter())
+                .chain(
+                    environment
+                        .java_runtimes
+                        .iter()
+                        .map(|runtime| &runtime.path)
+                )
+                .all(|value| !value.contains(r"\\?\") && !value.contains("//?/")),
+            "no emitted path may keep a verbatim prefix: env={:?} path={:?}",
+            environment.environment,
+            environment.path_entries,
+        );
+        // The executable-derived PATH entry maps to `<home>\bin` on Windows,
+        // where `\\?\...\bin\java.exe`'s parent resolves natively.
+        #[cfg(windows)]
+        assert_eq!(
+            environment.path_entries.first().map(String::as_str),
+            Some(r"C:\Program Files\Java\jdk-21\bin")
         );
     }
 

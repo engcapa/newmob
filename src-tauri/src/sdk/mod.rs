@@ -218,9 +218,10 @@ impl SdkManager {
         }
 
         let analysis_root = root.clone();
-        let analysis = tokio::task::spawn_blocking(move || detect::analyze_workspace(&analysis_root))
-            .await
-            .map_err(|error| format!("SDK workspace analysis task failed: {error}"))??;
+        let analysis =
+            tokio::task::spawn_blocking(move || detect::analyze_workspace(&analysis_root))
+                .await
+                .map_err(|error| format!("SDK workspace analysis task failed: {error}"))??;
         let registry = self.snapshot().await;
         let resolution = resolve::resolve_workspace(analysis, &registry).await;
         self.resolution_cache.lock().await.insert(
@@ -594,7 +595,7 @@ fn load_registry(path: &Path) -> Result<SdkRegistry, String> {
 fn read_registry(path: &Path) -> Result<SdkRegistry, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("read {}: {error}", path.display()))?;
-    let registry: SdkRegistry = serde_json::from_str(&text)
+    let mut registry: SdkRegistry = serde_json::from_str(&text)
         .map_err(|error| format!("parse {}: {error}", path.display()))?;
     if registry.schema_version != SDK_REGISTRY_SCHEMA_VERSION {
         return Err(format!(
@@ -602,7 +603,47 @@ fn read_registry(path: &Path) -> Result<SdkRegistry, String> {
             registry.schema_version
         ));
     }
+    // Heal registries written before verbatim-prefix stripping: a stored
+    // `\\?\C:\...` location becomes `JAVA_HOME` / a PATH entry that cmd.exe and
+    // batch launchers (mvn.cmd, gradlew.bat) cannot resolve. Strip on load so
+    // every downstream consumer — terminals, jdtls, the frontend — sees a plain
+    // path, and the next save persists the cleaned form.
+    normalize_registry_paths(&mut registry);
     Ok(registry)
+}
+
+/// Strip Windows verbatim/extended-length prefixes (`\\?\`, `\\?\UNC\`) from
+/// every stored path in the registry. A no-op for already-clean paths and on
+/// non-Windows hosts, so it is safe to run unconditionally on load.
+fn normalize_registry_paths(registry: &mut SdkRegistry) {
+    for installation in &mut registry.installations {
+        installation.location = strip_verbatim_prefix(&installation.location);
+        for executable in installation.executables.values_mut() {
+            *executable = strip_verbatim_prefix(executable);
+        }
+    }
+    for binding in &mut registry.bindings {
+        binding.scope_path = strip_verbatim_prefix(&binding.scope_path);
+    }
+}
+
+/// Remove a Windows verbatim path prefix so the result works with cmd.exe,
+/// batch scripts (`%JAVA_HOME%\bin\java.exe`), and PATH lookup — none of which
+/// accept `\\?\`. Mirrors `workspace.rs::path_to_string`. Returns the input
+/// unchanged when no such prefix is present (all Unix paths, clean Windows
+/// paths), converting a `\\?\UNC\server\share` path back to `\\server\share`.
+pub(crate) fn strip_verbatim_prefix(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = value.strip_prefix("//?/UNC/") {
+        return format!(r"\\{rest}");
+    }
+    value
+        .strip_prefix(r"\\?\")
+        .or_else(|| value.strip_prefix("//?/"))
+        .unwrap_or(value)
+        .to_string()
 }
 
 fn persist_registry(path: &Path, registry: &SdkRegistry) -> Result<(), String> {
@@ -685,7 +726,9 @@ fn normalize_scope_path(path: &str) -> Result<String, String> {
     }
     let expanded = PathBuf::from(shellexpand::tilde(trimmed).to_string());
     let normalized = std::fs::canonicalize(&expanded).unwrap_or(expanded);
-    Ok(normalized.to_string_lossy().into_owned())
+    // `canonicalize` yields a `\\?\` verbatim path on Windows; strip it so
+    // stored bindings and the resolution cache key match plain caller paths.
+    Ok(strip_verbatim_prefix(&normalized.to_string_lossy()))
 }
 
 fn paths_equal(left: &str, right: &str) -> bool {
@@ -843,6 +886,73 @@ mod tests {
         assert!(registry.installations.is_empty());
         assert!(registry.defaults.is_empty());
         assert!(registry.bindings.is_empty());
+    }
+
+    #[test]
+    fn strip_verbatim_prefix_cleans_windows_extended_paths() {
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\C:\Program Files\Java\jdk-21"),
+            r"C:\Program Files\Java\jdk-21"
+        );
+        assert_eq!(strip_verbatim_prefix(r"//?/C:/Tools/jdk"), "C:/Tools/jdk");
+        // UNC verbatim paths fold back to the `\\server\share` form.
+        assert_eq!(
+            strip_verbatim_prefix(r"\\?\UNC\server\share\jdk"),
+            r"\\server\share\jdk"
+        );
+        // Already-clean paths (and all Unix paths) pass through untouched.
+        assert_eq!(
+            strip_verbatim_prefix(r"C:\Program Files\Java\jdk-21"),
+            r"C:\Program Files\Java\jdk-21"
+        );
+        assert_eq!(
+            strip_verbatim_prefix("/usr/lib/jvm/jdk-21"),
+            "/usr/lib/jvm/jdk-21"
+        );
+    }
+
+    #[test]
+    fn normalize_registry_paths_heals_verbatim_locations_on_load() {
+        let mut registry = SdkRegistry {
+            installations: vec![SdkInstallation {
+                id: "jdk-21".into(),
+                kind: SdkKind::Java,
+                name: "java21".into(),
+                location: r"\\?\C:\Program Files\Java\jdk-21".into(),
+                executables: BTreeMap::from([(
+                    "java".to_string(),
+                    r"\\?\C:\Program Files\Java\jdk-21\bin\java.exe".to_string(),
+                )]),
+                version: Some("21.0.4".into()),
+                vendor: None,
+                architecture: None,
+                origin: SdkOrigin::Manual,
+                status: SdkStatus::Ready,
+                last_error: None,
+                last_probed_at: None,
+            }],
+            bindings: vec![WorkspaceSdkBinding {
+                scope_path: r"\\?\D:\code\ads\ique".into(),
+                kind: SdkKind::Java,
+                role: SdkRole::Project,
+                mode: SdkBindingMode::Manual,
+                sdk_id: Some("jdk-21".into()),
+                updated_at: "now".into(),
+            }],
+            ..SdkRegistry::default()
+        };
+
+        normalize_registry_paths(&mut registry);
+
+        assert_eq!(
+            registry.installations[0].location,
+            r"C:\Program Files\Java\jdk-21"
+        );
+        assert_eq!(
+            registry.installations[0].executables.get("java").unwrap(),
+            r"C:\Program Files\Java\jdk-21\bin\java.exe"
+        );
+        assert_eq!(registry.bindings[0].scope_path, r"D:\code\ads\ique");
     }
 
     #[tokio::test]
