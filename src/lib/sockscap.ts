@@ -266,7 +266,14 @@ export interface LocalProxyCandidate {
   kind: "socks5" | "http";
   host: string;
   port: number;
+  /** Listening process name (best-effort; empty if not resolvable). */
   process: string;
+  /** Owning pid of the listener (0 if unknown). */
+  pid: number;
+  /** Normalized client family id ("clash" | "mihomo" | "sing-box" | … | "unknown"). */
+  client: string;
+  /** Friendly client name for display ("Clash Verge", "sing-box", …); empty for "unknown". */
+  clientLabel: string;
 }
 
 export function sockscapDetectLocalProxies(): Promise<LocalProxyCandidate[]> {
