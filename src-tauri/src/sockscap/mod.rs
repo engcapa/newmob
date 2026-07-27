@@ -4,15 +4,19 @@
 //! - Windows capture: elevated `sockscap-helper` + WinDivert
 //!   FLOW (PID) + NETWORK (IPv4 TCP NAT → local relay → policy → upstream)
 //! - Linux capture: nftables OUTPUT redirect + cgroup v2 + loopback relay
-//! - macOS capture: not yet (capabilities report unavailable)
+//! - macOS capture: system SOCKS proxy → loopback proxy ingress (Global only;
+//!   transparent capture and app scoping need a Network Extension)
 
 pub mod capture;
 pub mod config;
 pub mod core;
 pub mod dns_win;
 pub mod egress;
+#[cfg(unix)]
+pub mod elevate;
 pub mod flow;
 pub mod helper;
+pub mod ingress;
 pub mod listener_pid;
 pub mod orchestrator;
 pub mod paths;
@@ -23,6 +27,7 @@ pub mod recovery;
 pub mod relay;
 pub mod rules;
 pub mod stats;
+pub mod transparent;
 
 pub use config::{Decision, RuleMode, SocksCapConfig};
 pub use orchestrator::{Orchestrator, SocksCapStatus};
@@ -369,7 +374,7 @@ pub async fn sockscap_start(
     state: State<'_, AppState>,
     sudo_password: Option<String>,
 ) -> Result<SocksCapStatus, String> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = sudo_password;
 
     let cfg_path = config_path(&app)?;
@@ -449,7 +454,11 @@ pub async fn sockscap_start(
     let status: Result<SocksCapStatus, String> =
         start_linux_capture(&state, &cfg, &caps, sudo_password).await;
 
-    #[cfg(all(not(windows), not(target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    let status: Result<SocksCapStatus, String> =
+        start_macos_capture(&state, &cfg, &caps, sudo_password).await;
+
+    #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
     let status: Result<SocksCapStatus, String> = {
         let mut orch = state.sockscap.orch.write().await;
         orch.apply_config(cfg.clone());
@@ -654,8 +663,10 @@ async fn ensure_core_port(
 /// Synthetic manager key for the global (non-profile) upstream's core.
 const GLOBAL_CORE_KEY: &str = "__global__";
 
-#[cfg(target_os = "linux")]
-async fn build_linux_relay_context(
+/// Resolve upstreams (including vault secrets, session-backed hosts, and SSH
+/// pools) into a relay context. Shared by the Unix capture backends.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn build_unix_relay_context(
     state: &State<'_, AppState>,
     cfg: &SocksCapConfig,
 ) -> Result<Arc<RwLock<relay::RelayContext>>, String> {
@@ -864,7 +875,7 @@ async fn start_linux_capture(
 ) -> Result<SocksCapStatus, String> {
     use crate::sockscap::capture::linux::{LinuxCapture, LinuxCaptureImpl};
 
-    let ctx = build_linux_relay_context(state, cfg).await?;
+    let ctx = build_unix_relay_context(state, cfg).await?;
     let backend = LinuxCaptureImpl;
     let capture = backend.start(cfg, Arc::clone(&ctx), sudo_password).await?;
     let relay_port = capture.relay_port();
@@ -892,6 +903,31 @@ async fn start_linux_capture(
     orch.set_active(
         &caps.capture_backend,
         format!("capture active (Linux nft+cgroup relay :{relay_port}{gfw_note}{app_watch_note})"),
+    );
+    Ok(orch.status())
+}
+
+#[cfg(target_os = "macos")]
+async fn start_macos_capture(
+    state: &State<'_, AppState>,
+    cfg: &SocksCapConfig,
+    caps: &capture::SocksCapCapabilities,
+    sudo_password: Option<String>,
+) -> Result<SocksCapStatus, String> {
+    let ctx = build_unix_relay_context(state, cfg).await?;
+    let capture = capture::macos::start(cfg, Arc::clone(&ctx), sudo_password).await?;
+    let ingress_port = capture.ingress_port();
+
+    let mut orch = state.sockscap.orch.write().await;
+    let gfw_note = orch
+        .gfwlist_meta()
+        .map(|meta| format!(", gfw={}", meta.rule_count))
+        .unwrap_or_default();
+    orch.relay_ctx = Some(ctx);
+    orch.set_macos_capture(capture);
+    orch.set_active(
+        &caps.capture_backend,
+        format!("capture active (macOS system SOCKS proxy → 127.0.0.1:{ingress_port}{gfw_note})"),
     );
     Ok(orch.status())
 }
@@ -1429,9 +1465,9 @@ async fn full_teardown(
 ) -> Result<(), String> {
     use std::time::Duration;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let mut errors = Vec::new();
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let errors: Vec<String> = Vec::new();
 
     // --- 1) Helper capture_stop (blocking RPC) off the async runtime ----------
@@ -1477,6 +1513,21 @@ async fn full_teardown(
         }
     }
 
+    // --- 2b) macOS restores the system proxy before its ingress stops ---------
+    #[cfg(target_os = "macos")]
+    {
+        let macos_capture = {
+            let mut orch = state.sockscap.orch.write().await;
+            orch.take_macos_capture_for_stop()
+        };
+        if let Some(capture) = macos_capture {
+            if let Err(error) = capture.stop().await {
+                tracing::warn!("sockscap: macOS capture teardown error: {error}");
+                errors.push(format!("macOS capture teardown failed: {error}"));
+            }
+        }
+    }
+
     // --- 3) Take any platform relay without holding write lock during await --
     let relay = {
         let mut orch = state.sockscap.orch.write().await;
@@ -1498,7 +1549,10 @@ async fn full_teardown(
         let mut orch = state.sockscap.orch.write().await;
         orch.finish_stop();
         if !errors.is_empty() {
-            orch.set_recovery_required("nft-cgroup-redirect", errors.join("; "));
+            orch.set_recovery_required(
+                &capture::capabilities().capture_backend,
+                errors.join("; "),
+            );
         }
     }
     if errors.is_empty() {
