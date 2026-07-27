@@ -1209,8 +1209,13 @@ export const zhCN: DeepPartial<typeof en> = {
       "Linux nftables 与 cgroup v2 透明捕获需要 Root (CAP_NET_ADMIN) 权限。请输入 sudo 密码以继续。",
     rootPasswordLabel: "Sudo 密码",
     rootPasswordPlaceholder: "请输入 root / sudo 密码",
+    rootPromptSubtitleMacos:
+      "修改 macOS 系统代理需要管理员权限。请输入密码以继续。",
     rootPromptIncorrectPassword: "Sudo 密码错误或验证失败，请重试。",
     authenticating: "验证中...",
+    captureBackendLabel: "捕获后端：{{backend}}",
+    appModeUnsupported:
+      "当前平台的捕获后端无法识别来源应用，因此仅支持全局范围。",
     section: {
       scope: "范围",
       upstream: "上游",

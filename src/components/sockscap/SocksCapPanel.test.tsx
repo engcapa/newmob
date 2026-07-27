@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SocksCapPanel } from "./SocksCapPanel";
 import {
+  sockscapCapabilities,
   sockscapStart,
   sockscapStatus,
   sockscapParseShareLink,
@@ -452,5 +453,50 @@ describe("SocksCapPanel Multi-Profile UI", () => {
 
     fireEvent.click(await screen.findByTestId("sockscap-probe-fail-force"));
     await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalled());
+  });
+
+  it("prompts for a password when macOS needs admin rights for the system proxy", async () => {
+    currentPlatform = "macos";
+    vi.mocked(sockscapCapabilities).mockResolvedValueOnce({
+      platform: "macos",
+      globalTcp: true,
+      appFilter: false,
+      captureBackend: "system-proxy",
+      notes: ["macOS: system SOCKS proxy points applications at the loopback listener."],
+      privilegedRequired: true,
+    });
+    vi.mocked(sockscapStart).mockRejectedValueOnce(
+      "macOS capture requires administrator rights to change the system proxy",
+    );
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-start"));
+
+    expect(await screen.findByTestId("sockscap-root-prompt-dialog")).toBeInTheDocument();
+  });
+
+  it("disables app scope and shows the backend notes when app filtering is unavailable", async () => {
+    currentPlatform = "macos";
+    vi.mocked(sockscapCapabilities).mockResolvedValueOnce({
+      platform: "macos",
+      globalTcp: true,
+      appFilter: false,
+      captureBackend: "system-proxy",
+      notes: ["Not transparent capture: scope is Global only."],
+      privilegedRequired: true,
+    });
+    render(<SocksCapPanel />);
+
+    expect(await screen.findByTestId("sockscap-mode-apps")).toBeDisabled();
+    expect(await screen.findByTestId("sockscap-capability-notes")).toHaveTextContent(
+      "Global only",
+    );
+  });
+
+  it("keeps app scope selectable where the backend can identify applications", async () => {
+    currentPlatform = "windows";
+    render(<SocksCapPanel />);
+
+    expect(await screen.findByTestId("sockscap-mode-apps")).not.toBeDisabled();
   });
 });

@@ -38,7 +38,7 @@ pub(crate) const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 const RELAY_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_PREFIX_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long an accepted connection waits for a flow slot before being refused.
-const RELAY_PERMIT_WAIT: Duration = Duration::from_secs(5);
+pub(crate) const RELAY_PERMIT_WAIT: Duration = Duration::from_secs(5);
 /// A bridged flow that moves no bytes in *either* direction within this window
 /// is treated as broken and torn down.
 ///
@@ -197,16 +197,39 @@ impl RelayContext {
     }
 }
 
-/// Metadata recovered by an OS capture backend before a redirected connection
-/// enters the shared policy relay. Windows obtains it from the WinDivert helper;
-/// Linux reads `SO_ORIGINAL_DST` from the nftables-redirected socket.
+/// Metadata recovered by a capture backend before a connection enters the
+/// shared policy relay. Windows obtains it from the WinDivert helper; Linux
+/// reads `SO_ORIGINAL_DST` from the nftables-redirected socket; the macOS proxy
+/// ingress reads it out of a SOCKS5 / HTTP CONNECT handshake.
+///
+/// Transparent backends only ever learn an address, while a proxy handshake
+/// carries the name the client actually asked for. `dest_host` therefore holds
+/// an authoritative hostname when one is known, and at least one of
+/// `dest_host` / `dest_ip` is always set.
 #[derive(Debug, Clone)]
 pub(crate) struct CapturedFlow {
-    pub destination: SocketAddr,
+    pub dest_ip: Option<IpAddr>,
+    pub dest_host: Option<String>,
+    pub dest_port: u16,
     pub process_path: Option<String>,
     pub pid: Option<u32>,
     pub origin: SocketAddr,
     pub profile_id_hint: Option<String>,
+}
+
+impl CapturedFlow {
+    /// Build a flow whose destination was recovered as an address.
+    pub(crate) fn from_destination(destination: SocketAddr, origin: SocketAddr) -> Self {
+        Self {
+            dest_ip: Some(destination.ip()),
+            dest_host: None,
+            dest_port: destination.port(),
+            process_path: None,
+            pid: None,
+            origin,
+            profile_id_hint: None,
+        }
+    }
 }
 
 /// Bind **0.0.0.0:0** (all interfaces) — required for WinDivert streamdump-style
@@ -339,11 +362,9 @@ async fn handle_client(
         .parse()
         .map_err(|e| format!("bad dst ip: {e}"))?;
     let flow = CapturedFlow {
-        destination: SocketAddr::new(dst_ip, mapping.dst_port),
         process_path: (!mapping.path.is_empty()).then_some(mapping.path),
         pid: (mapping.pid != 0).then_some(mapping.pid),
-        origin: peer,
-        profile_id_hint: None,
+        ..CapturedFlow::from_destination(SocketAddr::new(dst_ip, mapping.dst_port), peer)
     };
     handle_captured_client(client, flow, ctx).await
 }
@@ -355,7 +376,8 @@ pub(crate) async fn handle_captured_client(
     flow: CapturedFlow,
     ctx: Arc<RwLock<RelayContext>>,
 ) -> Result<(), String> {
-    let destination = flow.destination;
+    let dest_ip = flow.dest_ip;
+    let dest_port = flow.dest_port;
     let process_path = flow.process_path;
     let pid = flow.pid;
     let origin = flow.origin;
@@ -365,31 +387,38 @@ pub(crate) async fn handle_captured_client(
     // vanished client releases its flow slot.
     enable_keepalive(&client);
 
-    // Multi-read peek for SNI / HTTP Host (ClientHello may span packets).
-    let (prefix, hostname) = peek_for_hostname(&mut client, destination.port()).await;
+    if dest_ip.is_none() && flow.dest_host.is_none() {
+        return Err("captured flow carried neither a destination address nor a hostname".into());
+    }
+
+    let (prefix, hostname) = match flow.dest_host {
+        // A proxy handshake already named the target. Skipping the sniff also
+        // avoids stalling server-first protocols (SMTP, IMAP, SSH), where the
+        // client sends nothing until the server has greeted it.
+        Some(host) => (Vec::new(), Some(host)),
+        // Multi-read peek for SNI / HTTP Host (ClientHello may span packets).
+        None => peek_for_hostname(&mut client, dest_port).await,
+    };
 
     let snap = {
         let g = ctx.read().await;
         // Learn IP→host from this flow for later pure-IP connections.
-        if let Some(host) = hostname.as_ref() {
+        if let (Some(host), Some(ip)) = (hostname.as_ref(), dest_ip) {
             if let Ok(mut map) = g.dns_map.lock() {
-                map.insert(destination.ip(), host.clone(), None);
+                map.insert(ip, host.clone(), None);
             }
         }
 
         // Prefer live SNI/Host, then dns_map, then none.
         let host_for_policy = hostname.clone().or_else(|| {
-            g.dns_map
-                .lock()
-                .ok()
-                .and_then(|mut m| m.lookup(destination.ip()))
+            dest_ip.and_then(|ip| g.dns_map.lock().ok().and_then(|mut m| m.lookup(ip)))
         });
 
         let engine = Arc::clone(&g.engine);
         let input = PolicyInput {
             host: host_for_policy,
-            ip: Some(destination.ip()),
-            port: destination.port(),
+            ip: dest_ip,
+            port: dest_port,
             process_path: process_path.clone(),
             pid,
         };
@@ -450,8 +479,11 @@ pub(crate) async fn handle_captured_client(
     ) = snap;
 
     // Prefer hostname for dial when known (proxy-side DNS).
-    let dial_host = hostname.unwrap_or_else(|| destination.ip().to_string());
-    let dest_port = destination.port();
+    let dial_host = match (hostname, dest_ip) {
+        (Some(host), _) => host,
+        (None, Some(ip)) => ip.to_string(),
+        (None, None) => return Err("captured flow had no dialable destination".into()),
+    };
 
     let res = match trace.decision {
         Decision::Block => {

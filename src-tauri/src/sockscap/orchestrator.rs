@@ -3,6 +3,8 @@
 use crate::sockscap::capture::SocksCapCapabilities;
 #[cfg(target_os = "linux")]
 use crate::sockscap::capture::linux::LinuxCaptureHandle;
+#[cfg(target_os = "macos")]
+use crate::sockscap::capture::macos::MacosCaptureHandle;
 use crate::sockscap::config::SocksCapConfig;
 use crate::sockscap::relay::RelayHandle;
 use crate::sockscap::rules::{CompiledRules, GfwListMeta};
@@ -45,6 +47,10 @@ pub struct Orchestrator {
     /// lifecycle unit, so the two can be removed in the safe order.
     #[cfg(target_os = "linux")]
     linux_capture: Option<LinuxCaptureHandle>,
+    /// macOS owns the system-proxy settings and its loopback ingress as one
+    /// lifecycle unit, so the proxy is restored before the listener goes away.
+    #[cfg(target_os = "macos")]
+    macos_capture: Option<MacosCaptureHandle>,
     /// Shared with the relay task so config/rules can hot-reload while Active.
     pub relay_ctx:
         Option<std::sync::Arc<tokio::sync::RwLock<crate::sockscap::relay::RelayContext>>>,
@@ -67,6 +73,8 @@ impl Orchestrator {
             relay: None,
             #[cfg(target_os = "linux")]
             linux_capture: None,
+            #[cfg(target_os = "macos")]
+            macos_capture: None,
             relay_ctx: None,
             dns_stop: None,
         }
@@ -198,7 +206,30 @@ impl Orchestrator {
         })
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    pub fn set_macos_capture(&mut self, capture: MacosCaptureHandle) {
+        self.macos_capture = Some(capture);
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn take_macos_capture_for_stop(&mut self) -> Option<MacosCaptureHandle> {
+        if !matches!(self.phase, EnginePhase::Idle) {
+            self.phase = EnginePhase::Stopping;
+            self.message = "stopping".into();
+        }
+        self.macos_capture.take()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn relay_port(&self) -> Option<u16> {
+        self.relay.as_ref().map(|relay| relay.port).or_else(|| {
+            self.macos_capture
+                .as_ref()
+                .map(MacosCaptureHandle::ingress_port)
+        })
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn relay_port(&self) -> Option<u16> {
         self.relay.as_ref().map(|relay| relay.port)
     }
@@ -216,7 +247,9 @@ impl Orchestrator {
     pub async fn stop(&mut self) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         let no_platform_capture = self.linux_capture.is_none();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        let no_platform_capture = self.macos_capture.is_none();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let no_platform_capture = true;
 
         if matches!(self.phase, EnginePhase::Idle) && self.relay.is_none() && no_platform_capture {
@@ -224,12 +257,18 @@ impl Orchestrator {
         }
         self.phase = EnginePhase::Stopping;
         let capture_backend = self.capture_backend.clone();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         let mut errors = Vec::new();
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let errors: Vec<String> = Vec::new();
         #[cfg(target_os = "linux")]
         if let Some(capture) = self.linux_capture.take() {
+            if let Err(error) = capture.stop().await {
+                errors.push(error);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(capture) = self.macos_capture.take() {
             if let Err(error) = capture.stop().await {
                 errors.push(error);
             }
@@ -258,6 +297,10 @@ impl Orchestrator {
         {
             self.linux_capture = None;
         }
+        #[cfg(target_os = "macos")]
+        {
+            self.macos_capture = None;
+        }
         self.message = "stopped".into();
         self.phase = EnginePhase::Idle;
         self.capture_backend = "none".into();
@@ -275,6 +318,10 @@ impl Orchestrator {
         #[cfg(target_os = "linux")]
         {
             self.linux_capture = None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.macos_capture = None;
         }
     }
 
