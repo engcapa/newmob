@@ -1175,6 +1175,22 @@ const dict = {
       "Running — scope, upstream, and profile structure are locked. Only rules hot-reload. Stop capture to edit them (adding a new profile is still allowed).",
     lockedTooltip: "Locked while running — stop capture to edit.",
     testing: "Testing…",
+    probing: "Probing…",
+    configIssueTitle: "Upstream not configured",
+    configIssueIntro:
+      "These active profiles have no usable upstream, so capture cannot start. Configure or disable them first:",
+    issueHostEmpty: "upstream host is empty (pick a session or set a host)",
+    issuePortInvalid: "upstream port is invalid",
+    issueShareLinkMissing: "no node imported — paste a share link to set the server and secret",
+    issueUuidMissing: "UUID is missing — import a share link or store the UUID",
+    issueWgKeyMissing: "WireGuard private key is missing",
+    issueWgPeerMissing: "WireGuard peer public key is missing",
+    probeFailTitle: "Upstream unreachable",
+    probeFailIntro:
+      "Couldn't reach the upstream(s) below through a test connection:",
+    probeFailHint:
+      "Start anyway to route traffic through it regardless, or cancel and fix the upstream first.",
+    probeFailForce: "Start anyway",
     testTargetDetailTitle: "Test target · {host}",
     testUpstreamDetailTitle: "Test upstream · {kind}",
     testDecision: "Decision",

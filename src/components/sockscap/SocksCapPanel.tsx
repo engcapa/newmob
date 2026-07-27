@@ -65,6 +65,12 @@ import {
   type UserRule,
 } from "../../lib/sockscap";
 import { requiresRestart } from "../../lib/sockscapRestart";
+import {
+  collectProbeTargets,
+  collectUpstreamConfigIssues,
+  type ProbeTarget,
+  type UpstreamConfigIssue,
+} from "../../lib/sockscapPreflight";
 import { SocksCapRootPrompt } from "./SocksCapRootPrompt";
 import {
   UpstreamSourcePicker,
@@ -256,6 +262,15 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [showRootPrompt, setShowRootPrompt] = useState(false);
   const [rootPromptError, setRootPromptError] = useState<string | null>(null);
   const [rootPromptBusy, setRootPromptBusy] = useState(false);
+
+  // Start-time pre-flight: probing upstreams before capture rewires the OS.
+  const [probing, setProbing] = useState(false);
+  // Active profiles whose upstream is unconfigured — blocks start entirely.
+  const [configIssues, setConfigIssues] = useState<UpstreamConfigIssue[] | null>(null);
+  // Upstreams that failed their reachability probe — offer force/cancel.
+  const [probeFailures, setProbeFailures] = useState<
+    { profileName: string; kind: string; error: string }[] | null
+  >(null);
 
   // Traffic rates and domain tracking state
   const [domainRecords, setDomainRecords] = useState<DomainRecord[]>([]);
@@ -737,6 +752,79 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Probe a single upstream the same way the "Test upstream" button does —
+  // core kinds spin up a throwaway xray sidecar; native kinds dial directly.
+  // Uses the stored passwordRef (what a real start dials with), not the typed
+  // password. Throws on failure so the caller can collect it.
+  const probeUpstream = async (target: ProbeTarget): Promise<void> => {
+    const u = target.upstream;
+    if (upstreamRequiresCore(u.kind)) {
+      await sockscapTestCoreUpstream({
+        upstream: u,
+        testHost: "www.google.com",
+        testPort: 443,
+      });
+    } else {
+      await sockscapTestUpstream({
+        kind: u.kind,
+        host: u.host || "127.0.0.1",
+        port: u.port || 1080,
+        username: u.username,
+        password: u.passwordRef || undefined,
+        sessionId: u.sessionId || undefined,
+        testHost: "www.google.com",
+        testPort: 443,
+      });
+    }
+  };
+
+  // Start button entry point: reject unconfigured upstreams, probe configured
+  // ones, and only then start. A probe failure surfaces a force/cancel prompt.
+  const preflightAndStart = async () => {
+    if (!cfg || busy || probing) return;
+
+    // 1) Empty upstream(s) → block start, tell the user which profile.
+    const issues = collectUpstreamConfigIssues(cfg);
+    if (issues.length > 0) {
+      setConfigIssues(issues);
+      return;
+    }
+
+    // 2) Probe every configured active upstream in parallel.
+    const targets = collectProbeTargets(cfg);
+    if (targets.length === 0) {
+      await onStart();
+      return;
+    }
+    setProbing(true);
+    try {
+      const results = await Promise.all(
+        targets.map((tg) =>
+          probeUpstream(tg).then(
+            () => null,
+            (e) => ({
+              profileName: tg.profileName,
+              kind: tg.kind as string,
+              error: String(e),
+            }),
+          ),
+        ),
+      );
+      const failures = results.filter(
+        (r): r is { profileName: string; kind: string; error: string } => r !== null,
+      );
+      if (failures.length > 0) {
+        setProbeFailures(failures);
+        return;
+      }
+    } finally {
+      setProbing(false);
+    }
+
+    // 3) All probes passed → start.
+    await onStart();
   };
 
   const onStart = async (sudoPassword?: string) => {
@@ -1432,7 +1520,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   return (
     <div
-      className="relative h-full flex flex-col bg-[var(--taomni-panel)] text-[var(--taomni-text)]"
+      className="relative h-full flex flex-col bg-[var(--taomni-panel-bg)] text-[var(--taomni-text)]"
       data-testid="sockscap-panel"
     >
       {/* Header */}
@@ -1462,12 +1550,16 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           <button
             type="button"
             data-testid="sockscap-start"
-            className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-[12px] bg-[var(--taomni-accent)] text-white hover:opacity-90"
-            onClick={() => void onStart()}
-            disabled={busy}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-[12px] bg-[var(--taomni-accent)] text-white hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
+            onClick={() => void preflightAndStart()}
+            disabled={busy || probing}
           >
-            <Play className="w-3.5 h-3.5" />
-            {t("sockscap.start")}
+            {probing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Play className="w-3.5 h-3.5" />
+            )}
+            {probing ? t("sockscap.probing") : t("sockscap.start")}
           </button>
         )}
         <button
@@ -1597,7 +1689,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         {/* Left Column: Profile Manager Sidebar */}
         {isRibbon ? (
           <div
-            className="w-[52px] shrink-0 flex flex-col items-center bg-[var(--taomni-panel)] py-3 px-1 space-y-3 border-r border-[var(--taomni-divider)] select-none"
+            className="w-[52px] shrink-0 flex flex-col items-center bg-[var(--taomni-panel-bg)] py-3 px-1 space-y-3 border-r border-[var(--taomni-divider)] select-none"
             data-testid="sockscap-profile-list"
           >
             <div className="flex flex-col items-center gap-1 shrink-0 pb-2 border-b border-[var(--taomni-divider)] w-full">
@@ -1641,7 +1733,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   >
                     <span className="text-base select-none">{p.icon || "🛡️"}</span>
                     {isActive && (
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 absolute -top-0.5 -right-0.5 ring-2 ring-[var(--taomni-panel)]" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 absolute -top-0.5 -right-0.5 ring-2 ring-[var(--taomni-panel-bg)]" />
                     )}
                   </div>
                 );
@@ -1651,7 +1743,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         ) : (
           <div
             style={{ width: sidebarWidth }}
-            className="shrink-0 flex flex-col bg-[var(--taomni-panel)] p-3 space-y-3 overflow-y-auto border-r border-[var(--taomni-divider)] select-none relative"
+            className="shrink-0 flex flex-col bg-[var(--taomni-panel-bg)] p-3 space-y-3 overflow-y-auto border-r border-[var(--taomni-divider)] select-none relative"
             data-testid="sockscap-profile-list"
           >
             <div className="flex items-center justify-between gap-1">
@@ -2299,7 +2391,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                     <div className="relative flex-1">
                       <Search className="w-3.5 h-3.5 absolute left-2 top-2 text-[var(--taomni-text-muted)]" />
                       <input
-                        className="w-full text-[11px] pl-7 pr-2 py-1 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel)]"
+                        className="w-full text-[11px] pl-7 pr-2 py-1 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)]"
                         placeholder="Search domain, IP, profile or process..."
                         value={domainFilter}
                         onChange={(e) => setDomainFilter(e.target.value)}
@@ -2326,7 +2418,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                     </div>
 
                     <select
-                      className="text-[10px] px-2 py-1 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel)]"
+                      className="text-[10px] px-2 py-1 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)]"
                       value={topNLimit}
                       onChange={(e) => setTopNLimit(Number(e.target.value))}
                     >
@@ -2352,7 +2444,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                 {/* Table */}
                 <div className="max-h-[280px] overflow-auto rounded border border-[var(--taomni-divider)]">
                   <table className="w-full text-[11px] text-left border-collapse">
-                    <thead className="sticky top-0 bg-[var(--taomni-panel)] border-b border-[var(--taomni-divider)] text-[10px] text-[var(--taomni-text-muted)] uppercase">
+                    <thead className="sticky top-0 bg-[var(--taomni-panel-bg)] border-b border-[var(--taomni-divider)] text-[10px] text-[var(--taomni-text-muted)] uppercase">
                       <tr>
                         <th className="py-1.5 px-2">Domain / IP</th>
                         <th className="py-1.5 px-2">Decision</th>
@@ -2462,7 +2554,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
       {showProcPicker && (
         <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-20">
-          <div className="w-[min(520px,90vw)] max-h-[70vh] flex flex-col rounded-lg bg-[var(--taomni-panel)] border border-[var(--taomni-divider)] shadow-xl">
+          <div className="w-[min(520px,90vw)] max-h-[70vh] flex flex-col rounded-lg bg-[var(--taomni-panel-bg)] border border-[var(--taomni-divider)] shadow-xl">
             <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--taomni-divider)]">
               <div className="text-[13px] font-semibold">{t("sockscap.pickProcess")}</div>
               <button type="button" className="p-1" onClick={() => setShowProcPicker(false)}>
@@ -2507,6 +2599,117 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         />
       )}
 
+      {/* Pre-flight: an active profile's upstream is empty → cannot start. */}
+      {configIssues && (
+        <div
+          className="absolute inset-0 bg-black/40 flex items-center justify-center z-30"
+          data-testid="sockscap-config-issue-dialog"
+        >
+          <div className="w-[min(480px,92vw)] flex flex-col rounded-lg bg-[var(--taomni-panel-bg)] border border-[var(--taomni-divider)] shadow-xl">
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--taomni-divider)]">
+              <AlertCircle className="w-4 h-4 text-red-500 shrink-0" />
+              <div className="text-[13px] font-semibold">
+                {t("sockscap.configIssueTitle")}
+              </div>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-[12px]">
+              <div className="text-[var(--taomni-text-muted)]">
+                {t("sockscap.configIssueIntro")}
+              </div>
+              <ul className="space-y-1.5">
+                {configIssues.map((iss) => (
+                  <li
+                    key={iss.profileId}
+                    className="flex items-start gap-1.5 px-2 py-1.5 rounded bg-[var(--taomni-bg)] border border-[var(--taomni-divider)]"
+                  >
+                    <X className="w-3.5 h-3.5 text-red-500 mt-0.5 shrink-0" />
+                    <span>
+                      <span className="font-semibold">{iss.profileName}</span>
+                      {" — "}
+                      {t(`sockscap.${iss.reasonKey}`)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-[var(--taomni-divider)]">
+              <button
+                type="button"
+                data-testid="sockscap-config-issue-ok"
+                className="px-3 py-1.5 rounded text-[12px] bg-[var(--taomni-accent)] text-white hover:opacity-90"
+                onClick={() => setConfigIssues(null)}
+              >
+                {t("common.ok")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pre-flight: upstream probe failed → force start or cancel. */}
+      {probeFailures && (
+        <div
+          className="absolute inset-0 bg-black/40 flex items-center justify-center z-30"
+          data-testid="sockscap-probe-fail-dialog"
+        >
+          <div className="w-[min(560px,92vw)] max-h-[75vh] flex flex-col rounded-lg bg-[var(--taomni-panel-bg)] border border-[var(--taomni-divider)] shadow-xl">
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--taomni-divider)]">
+              <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
+              <div className="text-[13px] font-semibold">
+                {t("sockscap.probeFailTitle")}
+              </div>
+            </div>
+            <div className="px-4 py-3 space-y-2 text-[12px] overflow-auto">
+              <div className="text-[var(--taomni-text-muted)]">
+                {t("sockscap.probeFailIntro")}
+              </div>
+              <ul className="space-y-1.5">
+                {probeFailures.map((f, i) => (
+                  <li
+                    key={`${f.profileName}-${i}`}
+                    className="px-2 py-1.5 rounded bg-[var(--taomni-bg)] border border-[var(--taomni-divider)]"
+                  >
+                    <div className="font-semibold flex items-center gap-1.5">
+                      <span>{f.profileName}</span>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] uppercase bg-[var(--taomni-hover)] font-mono">
+                        {f.kind}
+                      </span>
+                    </div>
+                    <div className="mt-1 font-mono text-[11px] text-red-500 break-words whitespace-pre-wrap">
+                      {f.error}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <div className="text-[11px] text-[var(--taomni-text-muted)]">
+                {t("sockscap.probeFailHint")}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-[var(--taomni-divider)]">
+              <button
+                type="button"
+                data-testid="sockscap-probe-fail-cancel"
+                className="px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                onClick={() => setProbeFailures(null)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                data-testid="sockscap-probe-fail-force"
+                className="px-3 py-1.5 rounded text-[12px] bg-amber-600 text-white hover:bg-amber-500"
+                onClick={() => {
+                  setProbeFailures(null);
+                  void onStart();
+                }}
+              >
+                {t("sockscap.probeFailForce")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Full test result — status bar only shows a summary; this shows the
           complete text and lets the user copy it. */}
       {testDetail && (
@@ -2514,7 +2717,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           className="absolute inset-0 bg-black/40 flex items-center justify-center z-20"
           data-testid="sockscap-test-detail"
         >
-          <div className="w-[min(620px,92vw)] max-h-[75vh] flex flex-col rounded-lg bg-[var(--taomni-panel)] border border-[var(--taomni-divider)] shadow-xl">
+          <div className="w-[min(620px,92vw)] max-h-[75vh] flex flex-col rounded-lg bg-[var(--taomni-panel-bg)] border border-[var(--taomni-divider)] shadow-xl">
             <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--taomni-divider)]">
               <div className="text-[13px] font-semibold truncate">{testDetail.title}</div>
               <button
