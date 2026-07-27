@@ -46,6 +46,8 @@ const dict = {
     backToTop: "Back to top",
     error: "Error",
     message: "Message",
+    copy: "Copy",
+    copied: "Copied to clipboard",
   },
   git: {
     workspaceChanges: {
@@ -1169,6 +1171,23 @@ const dict = {
     restartNeeded:
       "Scope or upstream changes won't apply until capture restarts.",
     restartNow: "Restart capture",
+    lockedHint:
+      "Running — scope, upstream, and profile structure are locked. Only rules hot-reload. Stop capture to edit them (adding a new profile is still allowed).",
+    lockedTooltip: "Locked while running — stop capture to edit.",
+    testing: "Testing…",
+    testTargetDetailTitle: "Test target · {host}",
+    testUpstreamDetailTitle: "Test upstream · {kind}",
+    testDecision: "Decision",
+    testMatchedRule: "Matched rule",
+    noProxyHelpTitle: "No local proxy detected — how to get online",
+    noProxyHelpStep1:
+      "Start your proxy client (Clash / Mihomo / v2rayN / sing-box …) and connect to a node.",
+    noProxyHelpStep2:
+      "Enable only its proxy / SOCKS inbound. Turn OFF System Proxy (global) and TUN / virtual-adapter mode — those collide with SocksCap's capture.",
+    noProxyHelpStep3:
+      "Come back and click \"Rescan for local proxies\", then pick the detected proxy as the upstream.",
+    noProxyHelpStep4:
+      "Or switch the upstream type to Shadowsocks / VMess / VLESS / Trojan and use \"Import share link\" — SocksCap runs the node for you via the bundled core.",
     captureNotReady: "OS capture not active yet",
     captureNotReadyHint:
       "Rules engine and upstream dialers work now. WinDivert / platform capture is still being integrated.",

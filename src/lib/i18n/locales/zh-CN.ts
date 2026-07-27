@@ -45,6 +45,8 @@ export const zhCN: DeepPartial<typeof en> = {
     backToTop: "回到顶部",
     error: "错误",
     message: "消息",
+    copy: "复制",
+    copied: "已复制到剪贴板",
   },
   git: {
     workspaceChanges: {
@@ -1166,6 +1168,23 @@ export const zhCN: DeepPartial<typeof en> = {
     recovered: "已请求恢复网络",
     restartNeeded: "作用域或上游的修改需重启捕获后才会生效。",
     restartNow: "重启捕获",
+    lockedHint:
+      "运行中 — 作用域、上游与方案结构已锁定，仅规则可热更新。需先停止捕获再修改（仍可新增方案）。",
+    lockedTooltip: "运行中已锁定 — 请先停止捕获再修改。",
+    testing: "测试中…",
+    testTargetDetailTitle: "测试目标 · {host}",
+    testUpstreamDetailTitle: "测试上游 · {kind}",
+    testDecision: "判定",
+    testMatchedRule: "命中规则",
+    noProxyHelpTitle: "未检测到本地代理 — 如何先联网",
+    noProxyHelpStep1:
+      "先启动你的代理客户端(Clash / Mihomo / v2rayN / sing-box 等)并连接节点。",
+    noProxyHelpStep2:
+      "只开启它的 代理 / SOCKS 入站；关闭 系统代理(全局) 和 TUN / 虚拟网卡 模式 — 这两者会与 SocksCap 的捕获冲突。",
+    noProxyHelpStep3:
+      "回到这里点击「重新扫描本地代理」，然后选中检测到的代理作为上游。",
+    noProxyHelpStep4:
+      "或将上游类型改为 Shadowsocks / VMess / VLESS / Trojan 并使用「导入分享链接」— SocksCap 会用内置内核替你运行该节点。",
     captureNotReady: "系统捕获尚未就绪",
     captureNotReadyHint:
       "规则引擎与上游拨号已可用。WinDivert / 平台捕获仍在接入中。",

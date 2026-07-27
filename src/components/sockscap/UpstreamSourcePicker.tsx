@@ -34,6 +34,10 @@ export interface UpstreamSourcePickerProps {
   /** Re-run detection; the picker shows a spinner while awaited. */
   onRescan: () => Promise<void>;
   busy?: boolean;
+  /** Lock the trigger (e.g. capture running — upstream can't change live). */
+  disabled?: boolean;
+  /** Tooltip shown on the disabled trigger explaining why. */
+  lockedTooltip?: string;
   t: (key: string, vars?: Record<string, string>) => string;
   testId?: string;
 }
@@ -263,6 +267,8 @@ export function UpstreamSourcePicker({
   onSelect,
   onRescan,
   busy = false,
+  disabled = false,
+  lockedTooltip,
   t,
   testId = "sockscap-upstream-source",
 }: UpstreamSourcePickerProps) {
@@ -444,7 +450,9 @@ export function UpstreamSourcePicker({
         aria-haspopup="tree"
         aria-expanded={open}
         data-testid={testId}
-        className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] text-left inline-flex items-center gap-1"
+        disabled={disabled}
+        title={disabled ? lockedTooltip : undefined}
+        className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] text-left inline-flex items-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed"
         onClick={() => setOpen((v) => !v)}
       >
         <span className="min-w-0 flex-1 truncate">{selectedLabel}</span>
