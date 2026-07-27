@@ -133,7 +133,7 @@ const DEFAULT_CFG: SocksCapConfig = {
   restoreOnLogin: false,
 };
 
-type SessionOpt = { id: string; name: string; host: string; port: number; kind: "proxy" | "ssh" };
+type SessionOpt = { id: string; name: string; host: string; port: number; kind: "proxy" | "ssh"; groupPath?: string | null };
 
 function phaseTone(phase: string): string {
   switch (phase) {
@@ -344,7 +344,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       .then((arr) => {
         const mapped: SessionOpt[] = arr.map((s) => {
           const kind = (s.session_type === "ssh" ? "ssh" : "proxy") as "proxy" | "ssh";
-          return { id: s.id, name: s.name, host: s.host, port: s.port, kind };
+          return { id: s.id, name: s.name, host: s.host, port: s.port, kind, groupPath: s.group_path };
         });
         setSessions(mapped);
       })

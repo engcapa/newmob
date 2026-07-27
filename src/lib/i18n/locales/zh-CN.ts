@@ -1198,9 +1198,9 @@ export const zhCN: DeepPartial<typeof en> = {
     manualUpstream: "— 手动填写 —",
     picker: {
       otherLocal: "其它本地代理",
+      detectedGroup: "检测到的本地代理",
       sshSessions: "SSH 会话",
       proxySessions: "代理会话",
-      manualGroup: "手动",
       manualHint: "在下方填写主机/端口",
       filterPh: "按名称、主机、端口过滤…",
       rescan: "重新扫描本地代理",

@@ -1203,9 +1203,9 @@ const dict = {
     manualUpstream: "— Manual —",
     picker: {
       otherLocal: "Other local proxies",
+      detectedGroup: "Detected local proxies",
       sshSessions: "SSH sessions",
       proxySessions: "Proxy sessions",
-      manualGroup: "Manual",
       manualHint: "Enter host/port below",
       filterPh: "Filter by name, host, port…",
       rescan: "Rescan for local proxies",
