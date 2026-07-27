@@ -194,7 +194,48 @@ pub fn process_image_name(pid: u32) -> Option<String> {
     }
 }
 
-#[cfg(not(windows))]
+/// Linux: process image name from `/proc/<pid>/comm`, lowercased. `comm` is the
+/// kernel-truncated command name (max 15 chars) but that is enough to match a
+/// client family ("clash-verge", "sing-box", "mihomo", "xray").
+#[cfg(target_os = "linux")]
+pub fn process_image_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = comm.trim();
+    (!name.is_empty()).then(|| name.to_ascii_lowercase())
+}
+
+/// macOS: basename of the executable path from `proc_pidpath`, lowercased.
+///
+/// `proc_pidpath` is a stable single-pid libproc call (unlike the buffer-sizing
+/// dance of `proc_listallpids`), so this stays reliable. The basename may be an
+/// app binary like "Clash Verge"; lowercased substring matching downstream maps
+/// it to a client family.
+#[cfg(target_os = "macos")]
+pub fn process_image_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    // PROC_PIDPATHINFO_MAXSIZE = 4 * MAXPATHLEN (4096).
+    let mut buf = vec![0u8; 4096];
+    let ret = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as u32,
+        )
+    };
+    if ret <= 0 {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&buf[..ret as usize]).to_string();
+    let base = path.rsplit('/').next().unwrap_or("").trim();
+    (!base.is_empty()).then(|| base.to_ascii_lowercase())
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn process_image_name(_pid: u32) -> Option<String> {
     None
 }
