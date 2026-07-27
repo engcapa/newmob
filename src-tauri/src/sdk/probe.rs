@@ -488,7 +488,10 @@ fn canonical_or_original(path: &Path) -> PathBuf {
 }
 
 fn path_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+    // `canonical_or_original` returns a `\\?\` verbatim path on Windows; strip
+    // it so persisted locations/executables stay usable by cmd.exe, batch
+    // launchers, and PATH lookup rather than resolving to "path not found".
+    super::strip_verbatim_prefix(&path.to_string_lossy())
 }
 
 #[cfg(test)]
