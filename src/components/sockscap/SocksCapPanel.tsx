@@ -7,8 +7,10 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  HelpCircle,
   Layers,
   Loader2,
+  Lock,
   PanelLeftClose,
   PanelLeftOpen,
   Play,
@@ -76,6 +78,7 @@ import {
 } from "../../lib/ipc";
 import { useT } from "../../lib/i18n";
 import { isTauriRuntime } from "../../lib/runtime";
+import { writeText } from "../../lib/clipboard";
 import { open } from "@tauri-apps/plugin-dialog";
 
 interface Props {
@@ -227,6 +230,13 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [testHost, setTestHost] = useState("www.google.com");
   const [testResult, setTestResult] = useState<TargetTestResult | null>(null);
+  // Dedicated flag for in-flight tests so the test buttons lock (with a spinner)
+  // independently of the global `busy` and the background status poll.
+  const [testing, setTesting] = useState(false);
+  // Full text of the last test, shown in a copyable modal (the status bar only
+  // gets a short summary — long upstream diagnostics get truncated there).
+  const [testDetail, setTestDetail] = useState<{ title: string; body: string } | null>(null);
+  const [testCopied, setTestCopied] = useState(false);
   const [newRule, setNewRule] = useState<UserRule>({
     pattern: "",
     action: "direct",
@@ -303,6 +313,33 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     },
     [onStatusMessage],
   );
+
+  // Status bar / inline message is single-line and truncated, so collapse a
+  // multi-line test result to its first non-empty line for the summary. The
+  // full text goes to the copyable modal via openTestDetail.
+  const summarize = (text: string): string => {
+    const first = text
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0);
+    return first || text.trim();
+  };
+
+  const openTestDetail = (title: string, body: string) => {
+    setTestCopied(false);
+    setTestDetail({ title, body });
+  };
+
+  const copyTestDetail = async () => {
+    if (!testDetail) return;
+    try {
+      await writeText(testDetail.body);
+      setTestCopied(true);
+      report(t("common.copied"));
+    } catch (e) {
+      report(String(e), false);
+    }
+  };
 
   // Re-run local-proxy detection and refresh the picker's "detected" group.
   // Errors are reported but non-fatal (detection is best-effort). Declared here
@@ -404,6 +441,14 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     status?.phase === "active" ||
     status?.phase === "degraded" ||
     status?.phase === "preparing";
+
+  // While capture is running the backend only hot-reloads the rule surface
+  // (ruleMode / userRules / defaultAction / bypassCidrs / GFWList). Scope, app
+  // list, upstream, and the active-profile set are snapshotted at Start and
+  // ignored until the next Stop+Start (see lib/sockscapRestart + orchestrator
+  // hot_reload_policy). So lock every "needs restart" control while running and
+  // tell the user to stop first. Adding a NEW profile stays allowed.
+  const locked = running;
 
   const selectedProf = useMemo(() => {
     if (!cfg) return DEFAULT_PROFILE;
@@ -839,22 +884,30 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   };
 
   const onTestTarget = async () => {
-    setBusy(true);
+    setTesting(true);
     try {
       if (cfg) await sockscapSetConfig(cfg);
       const res = await sockscapTestTarget(testHost.trim(), 443);
       setTestResult(res);
-      report(
-        t("sockscap.testTargetResult", {
-          host: res.host,
-          decision: res.decision,
-          reason: res.reason,
-        }),
-      );
+      const summary = t("sockscap.testTargetResult", {
+        host: res.host,
+        decision: res.decision,
+        reason: res.reason,
+      });
+      report(summary);
+      const body = [
+        `${t("sockscap.host")}: ${res.host}:${res.port}`,
+        `${t("sockscap.testDecision")}: ${res.decision}`,
+        `${t("sockscap.testMatchedRule")}: ${res.matchedRule || "-"}`,
+        `${t("common.message")}: ${res.reason}`,
+      ].join("\n");
+      openTestDetail(t("sockscap.testTargetDetailTitle", { host: res.host }), body);
     } catch (e) {
-      report(String(e), false);
+      const err = String(e);
+      report(err, false);
+      openTestDetail(t("sockscap.testTargetDetailTitle", { host: testHost.trim() }), err);
     } finally {
-      setBusy(false);
+      setTesting(false);
     }
   };
 
@@ -898,34 +951,40 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   const onTestUpstream = async () => {
     if (!cfg) return;
-    setBusy(true);
+    setTesting(true);
+    const title = t("sockscap.testUpstreamDetailTitle", {
+      kind: selectedProf.upstream.kind,
+    });
     try {
       const u = selectedProf.upstream;
+      let text: string;
       // Core-backed kinds spawn a throwaway xray sidecar (secrets from vault).
       if (upstreamRequiresCore(u.kind)) {
-        const text = await sockscapTestCoreUpstream({
+        text = await sockscapTestCoreUpstream({
           upstream: u,
           testHost: "www.google.com",
           testPort: 443,
         });
-        report(text);
-        return;
+      } else {
+        text = await sockscapTestUpstream({
+          kind: u.kind,
+          host: u.host || "127.0.0.1",
+          port: u.port || 1080,
+          username: u.username,
+          password: password || u.passwordRef || undefined,
+          sessionId: u.sessionId || undefined,
+          testHost: "www.google.com",
+          testPort: 443,
+        });
       }
-      const text = await sockscapTestUpstream({
-        kind: u.kind,
-        host: u.host || "127.0.0.1",
-        port: u.port || 1080,
-        username: u.username,
-        password: password || u.passwordRef || undefined,
-        sessionId: u.sessionId || undefined,
-        testHost: "www.google.com",
-        testPort: 443,
-      });
-      report(text);
+      report(summarize(text));
+      openTestDetail(title, text);
     } catch (e) {
-      report(String(e), false);
+      const err = String(e);
+      report(summarize(err), false);
+      openTestDetail(title, err);
     } finally {
-      setBusy(false);
+      setTesting(false);
     }
   };
 
@@ -1249,7 +1308,14 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     );
 
     return (
-      <>
+      // A disabled <fieldset> natively disables every descendant control;
+      // `display:contents` keeps the parent grid layout intact. Lets us lock the
+      // whole protocol-params block while running without touching each field.
+      <fieldset
+        disabled={locked}
+        className="contents"
+        title={locked ? t("sockscap.lockedTooltip") : undefined}
+      >
         {kind === "shadowsocks" && (
           <Field label={t("sockscap.ssMethod")}>
             <select
@@ -1273,7 +1339,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         {transportFields}
         {tlsFields}
         {wgFields}
-      </>
+      </fieldset>
     );
   };
 
@@ -1490,6 +1556,19 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         </div>
       </div>
 
+      {/* Running → scope/upstream/profile-structure locked (backend snapshots
+          them at Start). Rules stay editable (hot-reloaded); new profiles can
+          still be added. */}
+      {locked && (
+        <div
+          data-testid="sockscap-locked-banner"
+          className="px-4 py-2 bg-sky-500/10 border-b border-sky-500/30 text-[11px] flex items-center gap-1.5 text-sky-700 dark:text-sky-400"
+        >
+          <Lock className="w-3.5 h-3.5 shrink-0" />
+          {t("sockscap.lockedHint")}
+        </div>
+      )}
+
       {/* Scope/upstream edited while running — needs Stop+Start to apply */}
       {needsRestart && running && (
         <div
@@ -1607,8 +1686,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               <button
                 type="button"
                 data-testid="sockscap-sub-import-toggle"
-                className="w-full text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)] transition-colors"
+                className="w-full text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => setShowSubImport((v) => !v)}
+                disabled={locked}
+                title={locked ? t("sockscap.lockedTooltip") : undefined}
               >
                 {t("sockscap.subImportToggle")}
               </button>
@@ -1624,9 +1705,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   <button
                     type="button"
                     data-testid="sockscap-sub-import"
-                    className="w-full text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                    className="w-full text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={() => void onImportSubscription()}
-                    disabled={busy || !subInput.trim()}
+                    disabled={busy || locked || !subInput.trim()}
                   >
                     {t("sockscap.subImportBtn")}
                   </button>
@@ -1655,12 +1736,19 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                           type="checkbox"
                           data-testid={`sockscap-profile-checkbox-${p.id}`}
                           checked={isActive}
+                          disabled={locked}
                           onChange={(e) => {
                             e.stopPropagation();
                             void toggleProfileActive(p.id);
                           }}
-                          className="rounded border-[var(--taomni-divider)] text-[var(--taomni-accent)] focus:ring-0 cursor-pointer"
-                          title={isActive ? t("sockscap.activeTooltipActive") : t("sockscap.activeTooltipInactive")}
+                          className="rounded border-[var(--taomni-divider)] text-[var(--taomni-accent)] focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={
+                            locked
+                              ? t("sockscap.lockedTooltip")
+                              : isActive
+                                ? t("sockscap.activeTooltipActive")
+                                : t("sockscap.activeTooltipInactive")
+                          }
                         />
                         <span className="text-[13px]">{p.icon || "🛡️"}</span>
                         <span className="font-semibold truncate">{p.name}</span>
@@ -1668,9 +1756,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                       <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
                         <button
                           type="button"
-                          className="p-1 text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] rounded"
-                          title={t("sockscap.duplicateProfileTooltip")}
+                          className="p-1 text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] rounded disabled:opacity-40 disabled:cursor-not-allowed"
+                          title={locked ? t("sockscap.lockedTooltip") : t("sockscap.duplicateProfileTooltip")}
                           onClick={() => void duplicateProfile(p)}
+                          disabled={locked}
                         >
                           <Copy className="w-3 h-3" />
                         </button>
@@ -1678,9 +1767,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                           <button
                             type="button"
                             data-testid={`sockscap-delete-profile-${p.id}`}
-                            className="p-1 text-[var(--taomni-text-muted)] hover:text-red-500 rounded"
-                            title={t("sockscap.deleteProfileTooltip")}
+                            className="p-1 text-[var(--taomni-text-muted)] hover:text-red-500 rounded disabled:opacity-40 disabled:cursor-not-allowed"
+                            title={locked ? t("sockscap.lockedTooltip") : t("sockscap.deleteProfileTooltip")}
                             onClick={() => void deleteProfile(p.id)}
+                            disabled={locked}
                           >
                             <Trash2 className="w-3 h-3" />
                           </button>
@@ -1721,8 +1811,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label={t("sockscap.profileNameLabel")}>
                 <input
-                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
                   value={selectedProf.name}
+                  disabled={locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
                   onChange={(e) => void patchSelectedProfile({ name: e.target.value })}
                 />
               </Field>
@@ -1732,7 +1824,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                     <button
                       key={ic}
                       type="button"
-                      className={`px-2 py-1 rounded text-[13px] border ${
+                      disabled={locked}
+                      title={locked ? t("sockscap.lockedTooltip") : undefined}
+                      className={`px-2 py-1 rounded text-[13px] border disabled:opacity-50 disabled:cursor-not-allowed ${
                         selectedProf.icon === ic
                           ? "border-[var(--taomni-accent)] bg-[var(--taomni-accent)]/20"
                           : "border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
@@ -1755,7 +1849,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   key={m}
                   type="button"
                   data-testid={`sockscap-mode-${m}`}
-                  className={`px-3 py-1.5 rounded text-[12px] border ${
+                  disabled={locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
+                  className={`px-3 py-1.5 rounded text-[12px] border disabled:opacity-50 disabled:cursor-not-allowed ${
                     selectedProf.mode === m
                       ? "border-[var(--taomni-accent)] bg-[var(--taomni-accent)]/15 text-[var(--taomni-accent)] font-medium"
                       : "border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
@@ -1771,13 +1867,15 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                 <div className="flex gap-2">
                   <button
                     type="button"
-                    className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={() => void loadProcesses()}
+                    disabled={locked}
+                    title={locked ? t("sockscap.lockedTooltip") : undefined}
                   >
                     <Plus className="w-3 h-3" />
                     {t("sockscap.pickProcess")}
                   </button>
-                  <ManualAppAdd onAdd={(path) => void addAppPath(path)} />
+                  <ManualAppAdd onAdd={(path) => void addAppPath(path)} disabled={locked} />
                 </div>
                 {selectedProf.apps.length === 0 ? (
                   <div className="text-[11px] text-[var(--taomni-text-muted)]">{t("sockscap.appsEmpty")}</div>
@@ -1793,7 +1891,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                         </span>
                         <button
                           type="button"
-                          className="p-1 hover:text-red-500"
+                          className="p-1 hover:text-red-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                          disabled={locked}
+                          title={locked ? t("sockscap.lockedTooltip") : undefined}
                           onClick={() =>
                             void patchSelectedProfile({
                               apps: selectedProf.apps.filter((x) => x.path !== a.path),
@@ -1823,12 +1923,38 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
           {/* Upstream */}
           <Section title={t("sockscap.section.upstream")}>
+            {/* No local proxy detected → guide the user to run one correctly
+                (proxy/SOCKS inbound only; NOT system-proxy/global, NOT TUN),
+                then rescan or import a share link. Only for native socks5/http
+                upstreams with no saved session picked. */}
+            {detectedProxies.length === 0 &&
+              (selectedProf.upstream.kind === "socks5" ||
+                selectedProf.upstream.kind === "http") &&
+              !selectedProf.upstream.sessionId && (
+                <div
+                  data-testid="sockscap-noproxy-help"
+                  className="mb-3 px-3 py-2 rounded text-[11px] border border-sky-500/40 bg-sky-500/10 text-sky-800 dark:text-sky-300"
+                >
+                  <div className="flex items-center gap-1.5 font-semibold mb-1">
+                    <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+                    {t("sockscap.noProxyHelpTitle")}
+                  </div>
+                  <ol className="list-decimal pl-4 space-y-0.5 text-[var(--taomni-text-muted)]">
+                    <li>{t("sockscap.noProxyHelpStep1")}</li>
+                    <li>{t("sockscap.noProxyHelpStep2")}</li>
+                    <li>{t("sockscap.noProxyHelpStep3")}</li>
+                    <li>{t("sockscap.noProxyHelpStep4")}</li>
+                  </ol>
+                </div>
+              )}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label={t("sockscap.upstreamKind")}>
                 <select
                   data-testid="sockscap-upstream-kind"
-                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
                   value={selectedProf.upstream.kind}
+                  disabled={locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
                   onChange={(e) =>
                     void patchSelectedProfile({
                       upstream: {
@@ -1854,17 +1980,19 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   <div className="flex gap-1.5">
                     <input
                       data-testid="sockscap-sharelink-input"
-                      className="flex-1 text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                      className="flex-1 text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
                       placeholder="ss:// vmess:// vless:// trojan://"
                       value={shareLink}
+                      disabled={locked}
+                      title={locked ? t("sockscap.lockedTooltip") : undefined}
                       onChange={(e) => setShareLink(e.target.value)}
                     />
                     <button
                       type="button"
                       data-testid="sockscap-sharelink-import"
-                      className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] shrink-0"
+                      className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                       onClick={() => void onImportShareLink()}
-                      disabled={busy || !shareLink.trim()}
+                      disabled={busy || locked || !shareLink.trim()}
                     >
                       {t("sockscap.shareLinkImportBtn")}
                     </button>
@@ -1881,6 +2009,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                     onSelect={onSelectUpstreamSource}
                     onRescan={rescanLocalProxies}
                     busy={busy}
+                    disabled={locked}
+                    lockedTooltip={locked ? t("sockscap.lockedTooltip") : undefined}
                     t={t}
                   />
                 </Field>
@@ -1888,8 +2018,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
               <Field label={t("sockscap.host")}>
                 <input
-                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
                   value={selectedProf.upstream.host}
+                  disabled={locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
                   onChange={(e) =>
                     void patchSelectedProfile({
                       upstream: { ...selectedProf.upstream, host: e.target.value },
@@ -1900,8 +2032,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               <Field label={t("sockscap.port")}>
                 <input
                   type="number"
-                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
                   value={selectedProf.upstream.port}
+                  disabled={locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
                   onChange={(e) =>
                     void patchSelectedProfile({
                       upstream: {
@@ -1914,8 +2048,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               </Field>
               <Field label={t("sockscap.username")}>
                 <input
-                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                  className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
                   value={selectedProf.upstream.username || ""}
+                  disabled={locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
                   onChange={(e) =>
                     void patchSelectedProfile({
                       upstream: { ...selectedProf.upstream, username: e.target.value },
@@ -1927,28 +2063,31 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                 <div className="flex gap-1.5">
                   <input
                     type="password"
-                    className="flex-1 text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+                    className="flex-1 text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
                     placeholder={
                       selectedProf.upstream.passwordRef
                         ? t("sockscap.passwordStored")
                         : t("sockscap.passwordPh")
                     }
                     value={password}
+                    disabled={locked}
+                    title={locked ? t("sockscap.lockedTooltip") : undefined}
                     onChange={(e) => setPassword(e.target.value)}
                   />
                   <button
                     type="button"
-                    className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] shrink-0"
+                    className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                     onClick={() => void storePassword()}
-                    disabled={storingPass || !password}
+                    disabled={storingPass || locked || !password}
                   >
                     {t("sockscap.passwordStore")}
                   </button>
                   {selectedProf.upstream.passwordRef && (
                     <button
                       type="button"
-                      className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] text-red-500 shrink-0"
+                      className="px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] text-red-500 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                       onClick={() => void clearPassword()}
+                      disabled={locked}
                     >
                       {t("common.clear")}
                     </button>
@@ -1961,11 +2100,13 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             <div className="mt-3 flex gap-2">
               <button
                 type="button"
-                className="px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                data-testid="sockscap-test-upstream"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
                 onClick={() => void onTestUpstream()}
-                disabled={busy}
+                disabled={busy || testing}
               >
-                {t("sockscap.testUpstream")}
+                {testing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {testing ? t("sockscap.testing") : t("sockscap.testUpstream")}
               </button>
             </div>
           </Section>
@@ -2076,11 +2217,12 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               <button
                 type="button"
                 data-testid="sockscap-test-target"
-                className="px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-60 disabled:cursor-not-allowed"
                 onClick={() => void onTestTarget()}
-                disabled={busy}
+                disabled={busy || testing}
               >
-                {t("sockscap.testTarget")}
+                {testing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                {testing ? t("sockscap.testing") : t("sockscap.testTarget")}
               </button>
             </div>
             {testResult && (
@@ -2364,6 +2506,59 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           busy={rootPromptBusy}
         />
       )}
+
+      {/* Full test result — status bar only shows a summary; this shows the
+          complete text and lets the user copy it. */}
+      {testDetail && (
+        <div
+          className="absolute inset-0 bg-black/40 flex items-center justify-center z-20"
+          data-testid="sockscap-test-detail"
+        >
+          <div className="w-[min(620px,92vw)] max-h-[75vh] flex flex-col rounded-lg bg-[var(--taomni-panel)] border border-[var(--taomni-divider)] shadow-xl">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--taomni-divider)]">
+              <div className="text-[13px] font-semibold truncate">{testDetail.title}</div>
+              <button
+                type="button"
+                className="p-1 rounded hover:bg-[var(--taomni-hover)]"
+                onClick={() => setTestDetail(null)}
+                aria-label={t("common.close")}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-3">
+              <pre
+                data-testid="sockscap-test-detail-body"
+                className="whitespace-pre-wrap break-words text-[11px] font-mono text-[var(--taomni-text)] leading-relaxed"
+              >
+                {testDetail.body}
+              </pre>
+            </div>
+            <div className="flex items-center justify-end gap-2 px-3 py-2 border-t border-[var(--taomni-divider)]">
+              <button
+                type="button"
+                data-testid="sockscap-test-detail-copy"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                onClick={() => void copyTestDetail()}
+              >
+                {testCopied ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                ) : (
+                  <Copy className="w-3.5 h-3.5" />
+                )}
+                {testCopied ? t("common.copied") : t("common.copy")}
+              </button>
+              <button
+                type="button"
+                className="px-3 py-1.5 rounded text-[12px] bg-[var(--taomni-accent)] text-white hover:opacity-90"
+                onClick={() => setTestDetail(null)}
+              >
+                {t("common.close")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2386,20 +2581,30 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function ManualAppAdd({ onAdd }: { onAdd: (path: string) => void }) {
+function ManualAppAdd({
+  onAdd,
+  disabled,
+}: {
+  onAdd: (path: string) => void;
+  disabled?: boolean;
+}) {
   const t = useT();
   const [path, setPath] = useState("");
   return (
     <div className="flex gap-1 flex-1 min-w-[200px]">
       <input
-        className="flex-1 text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
+        className="flex-1 text-[11px] px-2 py-1 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60 disabled:cursor-not-allowed"
         placeholder={t("sockscap.appPathPh")}
         value={path}
+        disabled={disabled}
+        title={disabled ? t("sockscap.lockedTooltip") : undefined}
         onChange={(e) => setPath(e.target.value)}
       />
       <button
         type="button"
-        className="px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+        className="px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+        disabled={disabled}
+        title={disabled ? t("sockscap.lockedTooltip") : undefined}
         onClick={() => {
           if (path.trim()) {
             onAdd(path.trim());

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SocksCapPanel } from "./SocksCapPanel";
 import {
   sockscapStart,
+  sockscapStatus,
   sockscapParseShareLink,
   sockscapImportSubscription,
   type SocksCapConfig,
@@ -124,6 +125,14 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       message: "active",
       ruleCount: 0,
       captureBackend: "test",
+    });
+    // Default to idle so the panel is unlocked; the lock test overrides this.
+    vi.mocked(sockscapStatus).mockReset();
+    vi.mocked(sockscapStatus).mockResolvedValue({
+      phase: "idle",
+      message: "idle",
+      ruleCount: 0,
+      captureBackend: "none",
     });
   });
 
@@ -308,6 +317,52 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     expect(b.upstream.params?.flow).toBe("xtls-rprx-vision");
     // Imported profiles are not auto-activated.
     expect(currentCfg.activeProfileIds).not.toContain(a.id);
+  });
+
+  it("locks scope/upstream/profile edits while running but keeps Add profile", async () => {
+    // Report the engine as Active so the panel enters the locked state.
+    vi.mocked(sockscapStatus).mockResolvedValue({
+      phase: "active",
+      message: "active",
+      ruleCount: 0,
+      captureBackend: "test",
+    });
+    render(<SocksCapPanel />);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("sockscap-locked-banner")).toBeInTheDocument(),
+    );
+    // Restart-requiring controls are disabled…
+    expect(screen.getByTestId("sockscap-upstream-kind")).toBeDisabled();
+    expect(screen.getByTestId("sockscap-mode-global")).toBeDisabled();
+    expect(screen.getByTestId("sockscap-upstream-source")).toBeDisabled();
+    expect(screen.getByTestId("sockscap-profile-checkbox-default")).toBeDisabled();
+    // …but adding a new profile is still allowed.
+    expect(screen.getByTestId("sockscap-add-profile")).not.toBeDisabled();
+  });
+
+  it("shows a copyable detail modal after testing the upstream", async () => {
+    const writeMock = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText: writeMock } });
+    render(<SocksCapPanel />);
+
+    // Shadowsocks routes the test through the mocked core-upstream tester.
+    const kindSelect = await screen.findByTestId("sockscap-upstream-kind");
+    fireEvent.change(kindSelect, { target: { value: "shadowsocks" } });
+
+    fireEvent.click(await screen.findByTestId("sockscap-test-upstream"));
+
+    const body = await screen.findByTestId("sockscap-test-detail-body");
+    expect(body).toHaveTextContent("ok");
+
+    fireEvent.click(screen.getByTestId("sockscap-test-detail-copy"));
+    await waitFor(() => expect(writeMock).toHaveBeenCalledWith("ok"));
+  });
+
+  it("shows the no-proxy help block when no local proxy is detected", async () => {
+    render(<SocksCapPanel />);
+    // Default upstream is socks5 with no detected proxies and no session.
+    expect(await screen.findByTestId("sockscap-noproxy-help")).toBeInTheDocument();
   });
 
   it("prompts for sudo when Linux nftables reports missing CAP_NET_ADMIN", async () => {
