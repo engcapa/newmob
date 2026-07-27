@@ -42,6 +42,12 @@ export interface TerminalRegistryEntry {
   /** Write text to the terminal's stdin (newlines flow as-is). */
   writeInput: (data: string) => void;
   /**
+   * Run a command as an integrated task using the registered local shell's
+   * syntax. The implementation reports completion through OSC 633 while
+   * leaving the interactive shell alive. Optional for legacy/test registrants.
+   */
+  runTask?: (command: string) => void;
+  /**
    * Write display-only text directly to the terminal screen (xterm `write`),
    * WITHOUT sending it to the backend pty/ssh stdin. Used to mirror Claude
    * Code's captured-run activity (`run_captured`, the independent-channel B

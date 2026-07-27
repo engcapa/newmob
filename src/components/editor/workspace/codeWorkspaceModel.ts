@@ -22,6 +22,18 @@ export interface LspCustomCommandConfig {
   args: string;
 }
 
+export interface WorkspaceBuildRunTool {
+  executable: string;
+}
+
+export interface WorkspaceBuildRunTools {
+  tools: Record<string, WorkspaceBuildRunTool>;
+}
+
+export const DEFAULT_WORKSPACE_BUILD_RUN_TOOLS: WorkspaceBuildRunTools = {
+  tools: {},
+};
+
 export interface DirectoryState {
   entries: WorkspaceEntry[];
   loaded: boolean;
@@ -72,6 +84,7 @@ export const DEFAULT_LSP_JAVA_VMARGS = "-Xms1024m -Xmx1024m";
 export const LSP_JAVA_SETTINGS_KEY = "taomni.codeWorkspace.lspJavaSettings.v1";
 /** jdtls extension bundle paths (java-debug / java-test) for debug + test (M8). */
 export const LSP_JAVA_BUNDLES_KEY = "taomni.codeWorkspace.lspJavaBundles.v1";
+export const WORKSPACE_BUILD_RUN_TOOLS_KEY_PREFIX = "taomni.codeWorkspace.buildRunTools.v1";
 export const CUSTOM_LSP_COMMAND_ID = "__custom__";
 export const TREE_FONT_SIZE_KEY = "taomni.codeWorkspace.treeFontSize.v1";
 export const TREE_VIEW_MODE_KEY = "taomni.codeWorkspace.treeViewMode.v1";
@@ -780,6 +793,55 @@ export function subscribeLspServerPrefs(listener: () => void): () => void {
     window.removeEventListener(LSP_PREFS_CHANGED_EVENT, onCustom);
     window.removeEventListener("storage", onStorage);
   };
+}
+
+export function normalizeWorkspaceBuildRunTools(raw: unknown): WorkspaceBuildRunTools {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { tools: {} };
+  }
+  const rawTools = (raw as { tools?: unknown }).tools;
+  if (!rawTools || typeof rawTools !== "object" || Array.isArray(rawTools)) {
+    return { tools: {} };
+  }
+  const tools: Record<string, WorkspaceBuildRunTool> = {};
+  for (const [toolId, value] of Object.entries(rawTools)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const executable = (value as { executable?: unknown }).executable;
+    if (typeof executable === "string" && executable.trim()) {
+      tools[toolId] = { executable: executable.trim() };
+    }
+  }
+  return { tools };
+}
+
+function workspaceBuildRunToolsKey(workspaceInstanceId: string): string {
+  return `${WORKSPACE_BUILD_RUN_TOOLS_KEY_PREFIX}.${workspaceInstanceId}`;
+}
+
+export function readWorkspaceBuildRunTools(workspaceInstanceId: string): WorkspaceBuildRunTools {
+  try {
+    const stored = window.localStorage.getItem(workspaceBuildRunToolsKey(workspaceInstanceId));
+    return stored ? normalizeWorkspaceBuildRunTools(JSON.parse(stored)) : { tools: {} };
+  } catch {
+    return { tools: {} };
+  }
+}
+
+export function writeWorkspaceBuildRunTools(
+  workspaceInstanceId: string,
+  config: WorkspaceBuildRunTools,
+): WorkspaceBuildRunTools {
+  const normalized = normalizeWorkspaceBuildRunTools(config);
+  try {
+    window.localStorage.setItem(workspaceBuildRunToolsKey(workspaceInstanceId), JSON.stringify(normalized));
+  } catch {
+    // Ignore storage failures.
+  }
+  return normalized;
+}
+
+export function workspaceToolExecutables(config: WorkspaceBuildRunTools): Record<string, string> {
+  return Object.fromEntries(Object.entries(config.tools).map(([id, tool]) => [id, tool.executable]));
 }
 
 export function readLspCommandPrefs(): Record<string, string> {

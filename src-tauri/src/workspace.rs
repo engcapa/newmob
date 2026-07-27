@@ -1,10 +1,13 @@
+use crate::state::AppState;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
+use tauri::State;
 
 const DEFAULT_MAX_TEXT_BYTES: u64 = 5 * 1024 * 1024;
 const DEFAULT_RECURSIVE_MAX_DEPTH: usize = 25;
@@ -63,6 +66,16 @@ pub struct WorkspaceGitRoot {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskExecution {
+    pub executable: String,
+    pub args: Vec<String>,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkspaceTask {
     pub id: String,
     pub label: String,
@@ -71,6 +84,8 @@ pub struct WorkspaceTask {
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<WorkspaceTaskExecution>,
 }
 
 /// A runnable Java `public static void main` entry point discovered from source.
@@ -90,6 +105,176 @@ pub struct JavaRunTarget {
     pub build_system: String,
     /// Workspace-relative build/module directory (`.` for the root project).
     pub module_path: String,
+    pub execution: WorkspaceTaskExecution,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceToolConfig {
+    #[serde(default, alias = "mvn", alias = "mavenExecutable")]
+    pub maven: Option<String>,
+    #[serde(default, alias = "gradleExecutable")]
+    pub gradle: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostPlatform {
+    Windows,
+    Unix,
+}
+
+impl HostPlatform {
+    fn current() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Unix
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildTool {
+    Maven,
+    Gradle,
+}
+
+impl BuildTool {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Maven => "Maven",
+            Self::Gradle => "Gradle",
+        }
+    }
+
+    fn path_command(self) -> &'static str {
+        match self {
+            Self::Maven => "mvn",
+            Self::Gradle => "gradle",
+        }
+    }
+
+    fn configured<'a>(self, config: Option<&'a WorkspaceToolConfig>) -> Option<&'a str> {
+        match self {
+            Self::Maven => config.and_then(|config| config.maven.as_deref()),
+            Self::Gradle => config.and_then(|config| config.gradle.as_deref()),
+        }
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    }
+
+    fn wrapper_names(self, platform: HostPlatform) -> &'static [&'static str] {
+        match (self, platform) {
+            (Self::Maven, HostPlatform::Windows) => &["mvnw.cmd", "mvnw.bat", "mvnw"],
+            (Self::Maven, HostPlatform::Unix) => &["mvnw"],
+            (Self::Gradle, HostPlatform::Windows) => &["gradlew.bat", "gradlew.cmd", "gradlew"],
+            (Self::Gradle, HostPlatform::Unix) => &["gradlew"],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolSource {
+    Wrapper,
+    Configured,
+    Path,
+}
+
+impl ToolSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Wrapper => "wrapper",
+            Self::Configured => "configured",
+            Self::Path => "path",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolResolution {
+    tool: BuildTool,
+    executable: PathBuf,
+    source: ToolSource,
+    available: bool,
+    diagnostic: Option<String>,
+}
+
+impl ToolResolution {
+    fn task_runner(&self, platform: HostPlatform) -> String {
+        if self.source == ToolSource::Path {
+            self.tool.path_command().to_string()
+        } else {
+            wrapper_command_for(&self.executable, platform)
+        }
+    }
+
+    fn execution(&self, args: &[&str]) -> WorkspaceTaskExecution {
+        self.execution_owned(args.iter().map(|arg| (*arg).to_string()).collect())
+    }
+
+    fn execution_owned(&self, args: Vec<String>) -> WorkspaceTaskExecution {
+        WorkspaceTaskExecution {
+            executable: path_to_string(&self.executable),
+            args,
+            source: self.source.as_str().to_string(),
+            error: self.diagnostic.clone(),
+        }
+    }
+
+    fn require_available(&self) -> Result<(), String> {
+        if self.available {
+            Ok(())
+        } else {
+            Err(self.diagnostic.clone().unwrap_or_else(|| {
+                format!("{} executable could not be resolved", self.tool.name())
+            }))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolLaunchPlan {
+    program: String,
+    args: Vec<String>,
+}
+
+fn is_windows_batch(path: &Path) -> bool {
+    path.extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+        })
+}
+
+fn plan_tool_launch(executable: &Path, args: &[String], platform: HostPlatform) -> ToolLaunchPlan {
+    if platform == HostPlatform::Windows && is_windows_batch(executable) {
+        let mut command_line = format!("\"{}\"", path_to_string(executable).replace('"', "\"\""));
+        for arg in args {
+            command_line.push(' ');
+            command_line.push_str(&quote_windows_cmd_arg(arg));
+        }
+        ToolLaunchPlan {
+            program: "cmd.exe".to_string(),
+            args: vec!["/D".into(), "/S".into(), "/C".into(), command_line],
+        }
+    } else {
+        ToolLaunchPlan {
+            program: path_to_string(executable),
+            args: args.to_vec(),
+        }
+    }
+}
+
+fn quote_windows_cmd_arg(value: &str) -> String {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|character| character.is_whitespace() || "&|<>()^\"".contains(character))
+    {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 fn push_task(
@@ -107,7 +292,22 @@ fn push_task(
         cwd: path_to_string(cwd),
         source: source.to_string(),
         module_path: None,
+        execution: None,
     });
+}
+
+fn push_tool_task(
+    tasks: &mut Vec<WorkspaceTask>,
+    source: &str,
+    label: &str,
+    resolution: &ToolResolution,
+    cwd: &Path,
+) {
+    let runner = resolution.task_runner(HostPlatform::current());
+    push_task(tasks, source, label, format!("{runner} {label}"), cwd);
+    if let Some(task) = tasks.last_mut() {
+        task.execution = Some(resolution.execution(&[label]));
+    }
 }
 
 fn parse_named_targets(contents: &str) -> Vec<String> {
@@ -353,29 +553,182 @@ pub struct WorkspaceTaskGroup {
     pub tasks: Vec<WorkspaceTask>,
 }
 
-/// Wrapper-aware Gradle invocation for `root` (`./gradlew`, `.\gradlew.bat`,
-/// or `gradle`). PowerShell does not search the current directory, hence the
-/// explicit `.\` on Windows.
-fn gradle_runner(root: &Path) -> &'static str {
-    if cfg!(windows) && root.join("gradlew.bat").is_file() {
-        r".\gradlew.bat"
-    } else if root.join("gradlew").is_file() {
-        "./gradlew"
+fn wrapper_command_for(path: &Path, platform: HostPlatform) -> String {
+    let quoted = shell_quote_for(&path_to_string(path), platform);
+    if platform == HostPlatform::Windows {
+        format!("& {quoted}")
     } else {
-        "gradle"
+        quoted
     }
 }
 
-/// Wrapper-aware Maven invocation for `root` (`.\mvnw.cmd`, `./mvnw`, or
-/// `mvn`). PowerShell does not search the current directory.
-fn maven_runner(root: &Path) -> &'static str {
-    if cfg!(windows) && root.join("mvnw.cmd").is_file() {
-        r".\mvnw.cmd"
-    } else if root.join("mvnw").is_file() {
-        "./mvnw"
+fn shell_quote_for(value: &str, platform: HostPlatform) -> String {
+    if platform == HostPlatform::Windows {
+        format!("'{}'", value.replace('\'', "''"))
     } else {
-        "mvn"
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
     }
+}
+
+fn find_on_path(command: &str, path: Option<&OsStr>, platform: HostPlatform) -> Option<PathBuf> {
+    let path = path?;
+    let names: Vec<String> = if platform == HostPlatform::Windows {
+        if Path::new(command).extension().is_some() {
+            vec![command.to_string()]
+        } else {
+            vec![
+                format!("{command}.exe"),
+                format!("{command}.cmd"),
+                format!("{command}.bat"),
+                command.to_string(),
+            ]
+        }
+    } else {
+        vec![command.to_string()]
+    };
+    std::env::split_paths(path)
+        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| fs::canonicalize(&candidate).ok().or(Some(candidate)))
+}
+
+fn resolve_configured_executable(
+    configured: &str,
+    workspace_root: &Path,
+    path: Option<&OsStr>,
+    platform: HostPlatform,
+) -> Option<PathBuf> {
+    let configured_path = Path::new(configured);
+    if configured_path.is_absolute()
+        || configured_path.components().count() > 1
+        || configured.contains(['/', '\\'])
+    {
+        let candidate = if configured_path.is_absolute() {
+            configured_path.to_path_buf()
+        } else {
+            workspace_root.join(configured_path)
+        };
+        return candidate
+            .is_file()
+            .then(|| fs::canonicalize(&candidate).unwrap_or(candidate));
+    }
+    find_on_path(configured, path, platform)
+}
+
+fn resolve_build_tool_with_path(
+    build_dir: &Path,
+    workspace_root: &Path,
+    tool: BuildTool,
+    config: Option<&WorkspaceToolConfig>,
+    platform: HostPlatform,
+    path: Option<&OsStr>,
+) -> ToolResolution {
+    let mut current = Some(build_dir);
+    while let Some(directory) = current {
+        for name in tool.wrapper_names(platform) {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                let executable = fs::canonicalize(&candidate).unwrap_or(candidate);
+                return ToolResolution {
+                    tool,
+                    executable,
+                    source: ToolSource::Wrapper,
+                    available: true,
+                    diagnostic: None,
+                };
+            }
+        }
+        if directory == workspace_root {
+            break;
+        }
+        current = directory
+            .parent()
+            .filter(|parent| parent.starts_with(workspace_root));
+    }
+
+    if let Some(configured) = tool.configured(config) {
+        if let Some(executable) =
+            resolve_configured_executable(configured, workspace_root, path, platform)
+        {
+            return ToolResolution {
+                tool,
+                executable,
+                source: ToolSource::Configured,
+                available: true,
+                diagnostic: None,
+            };
+        }
+        return ToolResolution {
+            tool,
+            executable: PathBuf::from(configured),
+            source: ToolSource::Configured,
+            available: false,
+            diagnostic: Some(format!(
+                "Configured {} executable was not found: {configured}. Add a project wrapper, correct the configured path, or put `{}` on PATH.",
+                tool.name(),
+                tool.path_command()
+            )),
+        };
+    }
+
+    if let Some(executable) = find_on_path(tool.path_command(), path, platform) {
+        return ToolResolution {
+            tool,
+            executable,
+            source: ToolSource::Path,
+            available: true,
+            diagnostic: None,
+        };
+    }
+
+    ToolResolution {
+        tool,
+        executable: PathBuf::from(tool.path_command()),
+        source: ToolSource::Path,
+        available: false,
+        diagnostic: Some(format!(
+            "{} executable was not found. Add a project wrapper ({}), configure an executable override, or put `{}` on PATH.",
+            tool.name(),
+            tool.wrapper_names(platform).join(" or "),
+            tool.path_command()
+        )),
+    }
+}
+
+fn resolve_build_tool(
+    build_dir: &Path,
+    workspace_root: &Path,
+    tool: BuildTool,
+    config: Option<&WorkspaceToolConfig>,
+) -> ToolResolution {
+    resolve_build_tool_with_path(
+        build_dir,
+        workspace_root,
+        tool,
+        config,
+        HostPlatform::current(),
+        std::env::var_os("PATH").as_deref(),
+    )
+}
+
+/// Like [`resolve_build_tool`] but searches an explicit `PATH` for the global
+/// (last-tier) fallback — used when spawning a build tool directly so the lookup
+/// matches the SDK-enhanced environment the process will actually run with.
+fn resolve_build_tool_on_path(
+    build_dir: &Path,
+    workspace_root: &Path,
+    tool: BuildTool,
+    config: Option<&WorkspaceToolConfig>,
+    path: Option<&OsStr>,
+) -> ToolResolution {
+    resolve_build_tool_with_path(
+        build_dir,
+        workspace_root,
+        tool,
+        config,
+        HostPlatform::current(),
+        path,
+    )
 }
 
 /// Maven's default lifecycle phases most people run, in lifecycle order.
@@ -468,8 +821,11 @@ fn gradle_task_selector(invocation_root: &Path, build_dir: &Path, task: &str) ->
 /// Build the grouped task tree: detected tasks bucketed by source (first-seen
 /// order preserved), with Maven/Gradle enriched to their full lifecycle / common
 /// tasks. Pure and offline — no build tool is spawned.
-fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, String> {
-    let detected = detect_workspace_tasks(root)?;
+fn build_workspace_task_tree(
+    root: &Path,
+    tool_config: Option<&WorkspaceToolConfig>,
+) -> Result<Vec<WorkspaceTaskGroup>, String> {
+    let detected = detect_workspace_tasks(root, tool_config)?;
     let mut groups: Vec<WorkspaceTaskGroup> = Vec::new();
     let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let push = |groups: &mut Vec<WorkspaceTaskGroup>,
@@ -497,7 +853,9 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
     for (build_system, build_dir, module_path) in discover_java_build_directories(root)? {
         match build_system {
             JavaBuildSystem::Maven => {
-                let runner = find_wrapper(&build_dir, root, build_system);
+                let resolution =
+                    resolve_build_tool(&build_dir, root, BuildTool::Maven, tool_config);
+                let runner = resolution.task_runner(HostPlatform::current());
                 for phase in MAVEN_LIFECYCLE_PHASES {
                     push(
                         &mut groups,
@@ -509,6 +867,7 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
                             cwd: path_to_string(&build_dir),
                             source: "Maven".into(),
                             module_path: Some(module_path.clone()),
+                            execution: Some(resolution.execution(&[phase])),
                         },
                     );
                 }
@@ -522,12 +881,15 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
                         cwd: path_to_string(&build_dir),
                         source: "Maven".into(),
                         module_path: Some(module_path),
+                        execution: Some(resolution.execution(&["clean", "compile"])),
                     },
                 );
             }
             JavaBuildSystem::Gradle => {
                 let invocation_root = gradle_invocation_root(root, &build_dir);
-                let runner = find_wrapper(&invocation_root, root, build_system);
+                let resolution =
+                    resolve_build_tool(&invocation_root, root, BuildTool::Gradle, tool_config);
+                let runner = resolution.task_runner(HostPlatform::current());
                 for task in GRADLE_COMMON_TASKS {
                     let selector = gradle_task_selector(&invocation_root, &build_dir, task);
                     push(
@@ -540,6 +902,7 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
                             cwd: path_to_string(&invocation_root),
                             source: "Gradle".into(),
                             module_path: Some(module_path.clone()),
+                            execution: Some(resolution.execution(&[&selector])),
                         },
                     );
                 }
@@ -559,6 +922,7 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
                         cwd: path_to_string(&invocation_root),
                         source: "Gradle".into(),
                         module_path: Some(module_path),
+                        execution: Some(resolution.execution(&[&clean, &classes])),
                     },
                 );
             }
@@ -572,7 +936,10 @@ fn build_workspace_task_tree(root: &Path) -> Result<Vec<WorkspaceTaskGroup>, Str
     Ok(groups)
 }
 
-fn detect_workspace_tasks(root: &Path) -> Result<Vec<WorkspaceTask>, String> {
+fn detect_workspace_tasks(
+    root: &Path,
+    tool_config: Option<&WorkspaceToolConfig>,
+) -> Result<Vec<WorkspaceTask>, String> {
     let mut tasks = Vec::new();
 
     let package_json = root.join("package.json");
@@ -643,28 +1010,16 @@ fn detect_workspace_tasks(root: &Path) -> Result<Vec<WorkspaceTask>, String> {
     }
 
     if root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file() {
-        let runner = gradle_runner(root);
+        let resolution = resolve_build_tool(root, root, BuildTool::Gradle, tool_config);
         for target in ["build", "test"] {
-            push_task(
-                &mut tasks,
-                "Gradle",
-                target,
-                format!("{runner} {target}"),
-                root,
-            );
+            push_tool_task(&mut tasks, "Gradle", target, &resolution, root);
         }
     }
 
     if root.join("pom.xml").is_file() {
-        let runner = maven_runner(root);
+        let resolution = resolve_build_tool(root, root, BuildTool::Maven, tool_config);
         for target in ["package", "test"] {
-            push_task(
-                &mut tasks,
-                "Maven",
-                target,
-                format!("{runner} {target}"),
-                root,
-            );
+            push_tool_task(&mut tasks, "Maven", target, &resolution, root);
         }
     }
 
@@ -881,45 +1236,6 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
-fn wrapper_command(path: &Path) -> String {
-    let quoted = shell_quote(&path_to_string(path));
-    if cfg!(windows) {
-        format!("& {quoted}")
-    } else {
-        quoted
-    }
-}
-
-fn find_wrapper(build_dir: &Path, workspace_root: &Path, tool: JavaBuildSystem) -> String {
-    let names: &[&str] = match tool {
-        JavaBuildSystem::Maven if cfg!(windows) => &["mvnw.cmd"],
-        JavaBuildSystem::Maven => &["mvnw"],
-        JavaBuildSystem::Gradle if cfg!(windows) => &["gradlew.bat"],
-        JavaBuildSystem::Gradle => &["gradlew"],
-        JavaBuildSystem::SourceFile => &[],
-    };
-    let mut current = Some(build_dir);
-    while let Some(dir) = current {
-        for name in names {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return wrapper_command(&candidate);
-            }
-        }
-        if dir == workspace_root {
-            break;
-        }
-        current = dir
-            .parent()
-            .filter(|parent| parent.starts_with(workspace_root));
-    }
-    match tool {
-        JavaBuildSystem::Maven => "mvn".into(),
-        JavaBuildSystem::Gradle => "gradle".into(),
-        JavaBuildSystem::SourceFile => "java".into(),
-    }
-}
-
 fn nearest_java_build(workspace_root: &Path, source_file: &Path) -> (JavaBuildSystem, PathBuf) {
     let mut current = source_file.parent();
     while let Some(dir) = current {
@@ -979,6 +1295,7 @@ fn gradle_run_init_script() -> Result<PathBuf, String> {
 fn java_run_target_for_path(
     workspace_root: &Path,
     source_file: &Path,
+    tool_config: Option<&WorkspaceToolConfig>,
 ) -> Result<JavaRunTarget, String> {
     let metadata = fs::metadata(source_file)
         .map_err(|error| format!("stat {}: {error}", source_file.display()))?;
@@ -1008,9 +1325,19 @@ fn java_run_target_for_path(
         .unwrap_or_else(|| class_name.to_string());
     let relative_file = relative_path(workspace_root, source_file)?;
     let (build_system, build_dir) = nearest_java_build(workspace_root, source_file);
-    let (command, cwd, module_path, build_system_name) = match build_system {
+    let (command, cwd, module_path, build_system_name, execution) = match build_system {
         JavaBuildSystem::Maven => {
-            let runner = find_wrapper(&build_dir, workspace_root, build_system);
+            let resolution =
+                resolve_build_tool(&build_dir, workspace_root, BuildTool::Maven, tool_config);
+            let runner = resolution.task_runner(HostPlatform::current());
+            let args = vec![
+                "-q".into(),
+                "-DskipTests".into(),
+                format!("-Dexec.mainClass={main_class}"),
+                "-Dexec.cleanupDaemonThreads=false".into(),
+                "compile".into(),
+                "org.codehaus.mojo:exec-maven-plugin:3.5.0:java".into(),
+            ];
             let command = format!(
                 "{runner} -q -DskipTests -Dexec.mainClass={} -Dexec.cleanupDaemonThreads=false compile org.codehaus.mojo:exec-maven-plugin:3.5.0:java",
                 shell_quote(&main_class),
@@ -1020,11 +1347,18 @@ fn java_run_target_for_path(
                 path_to_string(&build_dir),
                 relative_path(workspace_root, &build_dir).unwrap_or_else(|_| ".".into()),
                 "maven",
+                resolution.execution_owned(args),
             )
         }
         JavaBuildSystem::Gradle => {
             let invocation_root = gradle_invocation_root(workspace_root, &build_dir);
-            let runner = find_wrapper(&invocation_root, workspace_root, build_system);
+            let resolution = resolve_build_tool(
+                &invocation_root,
+                workspace_root,
+                BuildTool::Gradle,
+                tool_config,
+            );
+            let runner = resolution.task_runner(HostPlatform::current());
             let init_script = gradle_run_init_script()?;
             let module_relative = build_dir
                 .strip_prefix(&invocation_root)
@@ -1043,6 +1377,13 @@ fn java_run_target_for_path(
                     format!(":{project}:taomniRun")
                 })
                 .unwrap_or_else(|| "taomniRun".into());
+            let args = vec![
+                "--console=plain".into(),
+                "-I".into(),
+                path_to_string(&init_script),
+                format!("-PtaomniMainClass={main_class}"),
+                task.clone(),
+            ];
             let command = format!(
                 "{runner} --console=plain -I {} -PtaomniMainClass={} {}",
                 shell_quote(&path_to_string(&init_script)),
@@ -1054,14 +1395,24 @@ fn java_run_target_for_path(
                 path_to_string(&invocation_root),
                 relative_path(workspace_root, &build_dir).unwrap_or_else(|_| ".".into()),
                 "gradle",
+                resolution.execution_owned(args),
             )
         }
-        JavaBuildSystem::SourceFile => (
-            format!("java {}", shell_quote(&path_to_string(source_file))),
-            path_to_string(workspace_root),
-            ".".into(),
-            "source-file",
-        ),
+        JavaBuildSystem::SourceFile => {
+            let file_path = path_to_string(source_file);
+            (
+                format!("java {}", shell_quote(&file_path)),
+                path_to_string(workspace_root),
+                ".".into(),
+                "source-file",
+                WorkspaceTaskExecution {
+                    executable: "java".into(),
+                    args: vec![file_path],
+                    source: "path".into(),
+                    error: None,
+                },
+            )
+        }
     };
     let module_path = if module_path.is_empty() {
         ".".into()
@@ -1077,10 +1428,14 @@ fn java_run_target_for_path(
         cwd,
         build_system: build_system_name.into(),
         module_path,
+        execution,
     })
 }
 
-fn detect_java_run_targets(root: &Path) -> Result<Vec<JavaRunTarget>, String> {
+fn detect_java_run_targets(
+    root: &Path,
+    tool_config: Option<&WorkspaceToolConfig>,
+) -> Result<Vec<JavaRunTarget>, String> {
     let mut files = Vec::new();
     collect_workspace_files(
         root,
@@ -1101,7 +1456,7 @@ fn detect_java_run_targets(root: &Path) -> Result<Vec<JavaRunTarget>, String> {
             continue;
         }
         let source_file = root.join(&entry.path);
-        match java_run_target_for_path(root, &source_file) {
+        match java_run_target_for_path(root, &source_file, tool_config) {
             Ok(target) => targets.push(target),
             Err(error) if error.starts_with("No `static void main") => {}
             Err(error) if error.starts_with("Java source is too large") => {}
@@ -1118,36 +1473,46 @@ fn detect_java_run_targets(root: &Path) -> Result<Vec<JavaRunTarget>, String> {
 }
 
 #[tauri::command]
-pub fn workspace_detect_tasks(repo_root: String) -> Result<Vec<WorkspaceTask>, String> {
+pub fn workspace_detect_tasks(
+    repo_root: String,
+    tool_config: Option<WorkspaceToolConfig>,
+) -> Result<Vec<WorkspaceTask>, String> {
     let root = canonical_repo_root(&repo_root)?;
-    detect_workspace_tasks(&root)
+    detect_workspace_tasks(&root, tool_config.as_ref())
 }
 
 #[tauri::command]
-pub fn workspace_java_run_targets(repo_root: String) -> Result<Vec<JavaRunTarget>, String> {
+pub fn workspace_java_run_targets(
+    repo_root: String,
+    tool_config: Option<WorkspaceToolConfig>,
+) -> Result<Vec<JavaRunTarget>, String> {
     let root = canonical_repo_root(&repo_root)?;
-    detect_java_run_targets(&root)
+    detect_java_run_targets(&root, tool_config.as_ref())
 }
 
 #[tauri::command]
 pub fn workspace_java_run_target(
     repo_root: String,
     file_path: String,
+    tool_config: Option<WorkspaceToolConfig>,
 ) -> Result<JavaRunTarget, String> {
     let root = canonical_repo_root(&repo_root)?;
     let source_file = resolve_existing_path(&root, &file_path)?;
     if source_file.extension().and_then(|value| value.to_str()) != Some("java") {
         return Err("Run Java File requires a .java source file".into());
     }
-    java_run_target_for_path(&root, &source_file)
+    java_run_target_for_path(&root, &source_file, tool_config.as_ref())
 }
 
 /// Grouped task tree for the Build panel (M7 F-2). Maven/Gradle carry their full
 /// lifecycle / common tasks; other ecosystems group their detected tasks by source.
 #[tauri::command]
-pub fn workspace_task_tree(repo_root: String) -> Result<Vec<WorkspaceTaskGroup>, String> {
+pub fn workspace_task_tree(
+    repo_root: String,
+    tool_config: Option<WorkspaceToolConfig>,
+) -> Result<Vec<WorkspaceTaskGroup>, String> {
     let root = canonical_repo_root(&repo_root)?;
-    build_workspace_task_tree(&root)
+    build_workspace_task_tree(&root, tool_config.as_ref())
 }
 
 /// Suppress the transient console window when spawning `.cmd`/`.bat` wrappers
@@ -1171,7 +1536,11 @@ const DEPENDENCY_TREE_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// Requires the tool (or its wrapper) to be available; returns a clear error if
 /// the project is neither Maven nor Gradle, or the command fails / times out.
 #[tauri::command]
-pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<DependencyNode>, String> {
+pub async fn workspace_dependency_tree(
+    repo_root: String,
+    tool_config: Option<WorkspaceToolConfig>,
+    state: State<'_, AppState>,
+) -> Result<Vec<DependencyNode>, String> {
     let root = canonical_repo_root(&repo_root)?;
     let is_maven = root.join("pom.xml").is_file();
     let is_gradle = root.join("build.gradle").is_file() || root.join("build.gradle.kts").is_file();
@@ -1182,15 +1551,38 @@ pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<Dependen
         );
     }
 
-    // Maven is preferred when both exist (rare); its tree carries scopes.
-    let (program, args): (String, Vec<String>) = if is_maven {
+    // Resolve the workspace SDK environment so a directly-spawned build tool sees
+    // the same JAVA_HOME/PATH the integrated terminal injects. Best-effort — fall
+    // back to the inherited environment if resolution fails.
+    let sdk_environment = state.sdk.resolve_environment(&root, &root).await.ok();
+    let process_path = std::env::var_os("PATH");
+    let sdk_path: Option<OsString> = sdk_environment
+        .as_ref()
+        .and_then(|env| env.prepend_path(process_path.as_deref()));
+    let lookup_path = sdk_path.as_deref().or(process_path.as_deref());
+
+    // Maven is preferred when both exist (rare); its tree carries scopes. The
+    // global (PATH) fallback tier searches the SDK-enhanced PATH.
+    let (resolution, args): (ToolResolution, Vec<String>) = if is_maven {
         (
-            maven_runner(&root).to_string(),
+            resolve_build_tool_on_path(
+                &root,
+                &root,
+                BuildTool::Maven,
+                tool_config.as_ref(),
+                lookup_path,
+            ),
             vec!["-B".into(), "-q".into(), "dependency:tree".into()],
         )
     } else {
         (
-            gradle_runner(&root).to_string(),
+            resolve_build_tool_on_path(
+                &root,
+                &root,
+                BuildTool::Gradle,
+                tool_config.as_ref(),
+                lookup_path,
+            ),
             vec![
                 "-q".into(),
                 "dependencies".into(),
@@ -1199,16 +1591,37 @@ pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<Dependen
             ],
         )
     };
+    // Surface a clear diagnostic instead of spawning a runner we know is missing.
+    resolution.require_available()?;
 
-    let mut command = tokio::process::Command::new(&program);
-    command.args(&args).current_dir(&root).kill_on_drop(true);
+    // On Windows a `.cmd`/`.bat` wrapper cannot be launched directly by
+    // CreateProcess and needs `cmd.exe /D /S /C`. `plan_tool_launch` returns the
+    // correct program/args pair for the resolved executable.
+    let plan = plan_tool_launch(&resolution.executable, &args, HostPlatform::current());
+    let display = path_to_string(&resolution.executable);
+
+    let mut command = tokio::process::Command::new(&plan.program);
+    command
+        .args(&plan.args)
+        .current_dir(&root)
+        .kill_on_drop(true);
+    // Inject the SDK environment (JAVA_HOME etc. + prepended PATH) so the build
+    // tool resolves the workspace's configured JDK, matching the terminal.
+    if let Some(environment) = sdk_environment.as_ref() {
+        for (key, value) in &environment.environment {
+            command.env(key, value);
+        }
+        if let Some(path) = sdk_path.as_ref() {
+            command.env("PATH", path);
+        }
+    }
     no_console_window(&mut command);
 
     let output = tokio::time::timeout(DEPENDENCY_TREE_TIMEOUT, command.output())
         .await
         .map_err(|_| "Dependency resolution timed out".to_string())?
         .map_err(|error| {
-            format!("Failed to run `{program}` (is it installed / on PATH?): {error}")
+            format!("Failed to run `{display}` (is it installed / on PATH?): {error}")
         })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1222,7 +1635,7 @@ pub async fn workspace_dependency_tree(repo_root: String) -> Result<Vec<Dependen
         };
         let snippet: String = detail.chars().take(600).collect();
         return Err(format!(
-            "`{program}` exited with {}: {snippet}",
+            "`{display}` exited with {}: {snippet}",
             output.status
         ));
     }
@@ -2364,7 +2777,7 @@ mod tests {
         )
         .unwrap();
 
-        let tasks = detect_workspace_tasks(dir.path()).unwrap();
+        let tasks = detect_workspace_tasks(dir.path(), None).unwrap();
         assert!(tasks.iter().any(|task| {
             task.source == "package.json" && task.label == "dev" && task.command == "pnpm run dev"
         }));
@@ -2390,7 +2803,7 @@ mod tests {
         .unwrap();
         fs::write(dir.path().join("uv.lock"), "version = 1").unwrap();
 
-        let tasks = detect_workspace_tasks(dir.path()).unwrap();
+        let tasks = detect_workspace_tasks(dir.path(), None).unwrap();
         for command in [
             "go test ./...",
             "gradle build",
@@ -2483,7 +2896,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         fs::write(dir.path().join("pom.xml"), "<project />").unwrap();
         fs::write(dir.path().join("build.gradle"), "plugins {}").unwrap();
 
-        let groups = build_workspace_task_tree(dir.path()).unwrap();
+        let groups = build_workspace_task_tree(dir.path(), None).unwrap();
         let find = |source: &str| groups.iter().find(|group| group.source == source);
 
         // Maven carries the full lifecycle (not just the Run-tab package/test subset).
@@ -2541,6 +2954,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         let target = workspace_java_run_target(
             dir.path().to_string_lossy().into_owned(),
             "src/com/example/App.java".into(),
+            None,
         )
         .unwrap();
         assert_eq!(target.main_class, "com.example.App");
@@ -2567,6 +2981,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         let error = workspace_java_run_target(
             dir.path().to_string_lossy().into_owned(),
             "Example.java".into(),
+            None,
         )
         .unwrap_err();
         assert!(error.contains("No `static void main"));
@@ -2585,11 +3000,15 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         )
         .unwrap();
 
-        let target = java_run_target_for_path(dir.path(), &source_dir.join("Main.java")).unwrap();
+        let target =
+            java_run_target_for_path(dir.path(), &source_dir.join("Main.java"), None).unwrap();
         assert_eq!(target.build_system, "maven");
         assert_eq!(target.main_class, "demo.Main");
         assert_eq!(target.cwd, path_to_string(dir.path()));
         assert!(target.command.contains("mvnw"));
+        assert_eq!(target.execution.source, "wrapper");
+        assert!(target.execution.executable.contains("mvnw"));
+        assert!(target.execution.error.is_none());
         assert!(target.command.contains("-Dexec.mainClass='demo.Main'"));
         assert!(target.command.contains("exec-maven-plugin:3.5.0:java"));
     }
@@ -2609,7 +3028,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         )
         .unwrap();
 
-        let target = java_run_target_for_path(dir.path(), &source).unwrap();
+        let target = java_run_target_for_path(dir.path(), &source, None).unwrap();
         assert_eq!(target.build_system, "gradle");
         assert_eq!(target.module_path, "app");
         assert_eq!(target.cwd, path_to_string(dir.path()));
@@ -2617,7 +3036,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         assert!(target.command.contains("-PtaomniMainClass='demo.App'"));
         assert!(target.command.contains("java-run.init.gradle"));
 
-        let groups = build_workspace_task_tree(dir.path()).unwrap();
+        let groups = build_workspace_task_tree(dir.path(), None).unwrap();
         let gradle = groups
             .iter()
             .find(|group| group.source == "Gradle")
@@ -2648,8 +3067,173 @@ runtimeClasspath - Runtime classpath of source set 'main'.
             )
             .unwrap();
         }
-        let targets = detect_java_run_targets(dir.path()).unwrap();
+        let targets = detect_java_run_targets(dir.path(), None).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].main_class, "demo.App");
+    }
+
+    // ---- Cross-platform tool resolution (M11 build/run robustness) ----
+    //
+    // These tests inject `HostPlatform` and `PATH` explicitly so the Windows
+    // `.cmd`/`.bat` resolution and launch planning are exercised on non-Windows
+    // CI too (the production entry points use `HostPlatform::current()`).
+
+    #[test]
+    fn resolves_windows_batch_wrapper_before_configured_or_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pom.xml"), "<project />").unwrap();
+        fs::write(dir.path().join("mvnw.cmd"), "@echo off").unwrap();
+        let config = WorkspaceToolConfig {
+            maven: Some("C:/tools/mvn.cmd".into()),
+            gradle: None,
+        };
+        let resolution = resolve_build_tool_with_path(
+            dir.path(),
+            dir.path(),
+            BuildTool::Maven,
+            Some(&config),
+            HostPlatform::Windows,
+            None,
+        );
+        assert_eq!(resolution.source, ToolSource::Wrapper);
+        assert!(resolution.available);
+        assert!(resolution.executable.ends_with("mvnw.cmd"));
+        // PowerShell call operator + absolute path (never the fragile bare `.\mvnw.cmd`).
+        let runner = resolution.task_runner(HostPlatform::Windows);
+        assert!(runner.starts_with("& '"));
+        assert!(runner.contains("mvnw.cmd"));
+    }
+
+    #[test]
+    fn walks_up_to_find_wrapper_in_monorepo() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("mvnw"), "#!/bin/sh").unwrap();
+        let module = dir.path().join("services/api");
+        fs::create_dir_all(&module).unwrap();
+        let resolution = resolve_build_tool_with_path(
+            &module,
+            dir.path(),
+            BuildTool::Maven,
+            None,
+            HostPlatform::Unix,
+            None,
+        );
+        assert_eq!(resolution.source, ToolSource::Wrapper);
+        assert!(resolution.executable.ends_with("mvnw"));
+    }
+
+    #[test]
+    fn falls_back_to_configured_executable_then_reports_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pom.xml"), "<project />").unwrap();
+        let mvn = dir.path().join("custom-mvn");
+        fs::write(&mvn, "#!/bin/sh").unwrap();
+
+        // A configured path with a directory separator resolves relative to the
+        // workspace root; a bare name (no separator) is a PATH lookup instead.
+        let config = WorkspaceToolConfig {
+            maven: Some("./custom-mvn".into()),
+            gradle: None,
+        };
+        let resolution = resolve_build_tool_with_path(
+            dir.path(),
+            dir.path(),
+            BuildTool::Maven,
+            Some(&config),
+            HostPlatform::Unix,
+            None,
+        );
+        assert_eq!(resolution.source, ToolSource::Configured);
+        assert!(resolution.available);
+        assert_eq!(resolution.executable, fs::canonicalize(&mvn).unwrap_or(mvn));
+
+        // A configured executable that does not exist yields a clear diagnostic
+        // rather than a shell "not recognized" error at run time.
+        let missing = WorkspaceToolConfig {
+            maven: Some("nope-not-here".into()),
+            gradle: None,
+        };
+        let resolution = resolve_build_tool_with_path(
+            dir.path(),
+            dir.path(),
+            BuildTool::Maven,
+            Some(&missing),
+            HostPlatform::Unix,
+            None,
+        );
+        assert_eq!(resolution.source, ToolSource::Configured);
+        assert!(!resolution.available);
+        assert!(resolution.require_available().is_err());
+        assert!(
+            resolution
+                .diagnostic
+                .as_deref()
+                .unwrap()
+                .contains("nope-not-here")
+        );
+    }
+
+    #[test]
+    fn reports_missing_tool_when_no_wrapper_config_or_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("build.gradle"), "plugins {}").unwrap();
+        let resolution = resolve_build_tool_with_path(
+            dir.path(),
+            dir.path(),
+            BuildTool::Gradle,
+            None,
+            HostPlatform::Unix,
+            None,
+        );
+        assert_eq!(resolution.source, ToolSource::Path);
+        assert!(!resolution.available);
+        let error = resolution.require_available().unwrap_err();
+        assert!(error.contains("Gradle"));
+        assert!(error.contains("gradlew"));
+    }
+
+    #[test]
+    fn plans_windows_batch_launch_via_cmd_exe() {
+        let plan = plan_tool_launch(
+            Path::new(r"C:\proj\mvnw.cmd"),
+            &["-B".into(), "dependency:tree".into()],
+            HostPlatform::Windows,
+        );
+        assert_eq!(plan.program, "cmd.exe");
+        assert_eq!(plan.args[0], "/D");
+        assert_eq!(plan.args[1], "/S");
+        assert_eq!(plan.args[2], "/C");
+        // The whole command line is one argument, wrapper quoted, args appended.
+        assert!(plan.args[3].contains(r"C:\proj\mvnw.cmd"));
+        assert!(plan.args[3].contains("dependency:tree"));
+    }
+
+    #[test]
+    fn plans_direct_launch_for_plain_executable() {
+        let plan = plan_tool_launch(
+            Path::new("/usr/bin/gradle"),
+            &["dependencies".into()],
+            HostPlatform::Unix,
+        );
+        assert_eq!(plan.program, "/usr/bin/gradle");
+        assert_eq!(plan.args, vec!["dependencies".to_string()]);
+    }
+
+    #[test]
+    fn build_task_tree_surfaces_missing_tool_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pom.xml"), "<project />").unwrap();
+        // No wrapper, no config; PATH lookup disabled → execution carries the error.
+        let resolution = resolve_build_tool_with_path(
+            dir.path(),
+            dir.path(),
+            BuildTool::Maven,
+            None,
+            HostPlatform::Unix,
+            None,
+        );
+        let execution = resolution.execution(&["package"]);
+        assert_eq!(execution.args, vec!["package".to_string()]);
+        assert!(execution.error.is_some());
     }
 }

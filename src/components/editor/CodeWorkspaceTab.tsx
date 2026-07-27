@@ -53,6 +53,7 @@ import {
   workspaceWriteFile,
   workspaceWriteLooseFile,
   type WorkspaceGitRoot,
+  type WorkspaceToolConfig,
 } from "../../lib/editor/workspace";
 import {
   gitBlameLines,
@@ -200,6 +201,7 @@ import { type RecentFileEntry } from "./workspace/RecentFilesPopup";
 import { EditorGroup } from "./workspace/EditorGroup";
 import { WorkspacePopupsHost } from "./workspace/WorkspacePopupsHost";
 import { WorkspaceSdkStatus } from "./workspace/WorkspaceSdkStatus";
+import { WorkspaceBuildRunToolsDialog } from "./workspace/WorkspaceBuildRunToolsDialog";
 import { FileTreePane } from "./workspace/FileTreePane";
 import { ProjectTree } from "./workspace/ProjectTree";
 import { MarkdownPreview } from "./workspace/MarkdownPreview";
@@ -321,7 +323,11 @@ import {
   type OpenFileState,
   type TreeSelection,
   type TreeViewMode,
+  type WorkspaceBuildRunTools,
   type WorkspaceTreeCommandPayload,
+  readWorkspaceBuildRunTools,
+  writeWorkspaceBuildRunTools,
+  workspaceToolExecutables,
   CODE_WORKSPACE_DEFAULT_TREE_FONT_SIZE,
   CODE_WORKSPACE_MAX_FONT_SIZE,
   CODE_WORKSPACE_MAX_TREE_FONT_SIZE,
@@ -858,6 +864,23 @@ export function CodeWorkspaceTab({
   const runPanelRef = useRef<RunPanelHandle | null>(null);
   const runActiveJavaFileRef = useRef<() => void>(() => {});
   const buildActiveProjectRef = useRef<(rebuild?: boolean) => void>(() => {});
+
+  // Per-workspace Maven/Gradle executable overrides (project wrapper still wins;
+  // this is the "configured" tier between wrapper and PATH). Persisted per
+  // workspace instance and threaded into every task/dependency detector.
+  const [buildRunTools, setBuildRunTools] = useState<WorkspaceBuildRunTools>(
+    () => readWorkspaceBuildRunTools(workspaceInstanceId),
+  );
+  const [buildRunToolsOpen, setBuildRunToolsOpen] = useState(false);
+  useEffect(() => {
+    setBuildRunTools(readWorkspaceBuildRunTools(workspaceInstanceId));
+  }, [workspaceInstanceId]);
+  const toolConfig = useMemo<WorkspaceToolConfig | undefined>(() => {
+    const executables = workspaceToolExecutables(buildRunTools);
+    return Object.keys(executables).length > 0 ? executables : undefined;
+  }, [buildRunTools]);
+  const toolConfigRef = useRef(toolConfig);
+  toolConfigRef.current = toolConfig;
 
   /** Run a workspace task in the integrated terminal (shared by Run + Build panels). */
   const runWorkspaceTask = useCallback(
@@ -4980,7 +5003,7 @@ export function CodeWorkspaceTab({
         if (file.dirty) {
           await saveOpenBufferText(file.key, file.text);
         }
-        const target = await workspaceJavaRunTarget(root.path, file.ref.path);
+        const target = await workspaceJavaRunTarget(root.path, file.ref.path, toolConfigRef.current);
         launchWorkspaceTask({
           id: target.id,
           label: target.label,
@@ -4989,6 +5012,7 @@ export function CodeWorkspaceTab({
           source: `Java · ${target.buildSystem === "source-file" ? "JDK" : target.buildSystem}`,
           rootId: root.id,
           rootName: root.name,
+          execution: target.execution,
         });
         setStatusMessage(`Running ${target.mainClass}`);
       } catch (error) {
@@ -5021,7 +5045,7 @@ export function CodeWorkspaceTab({
       if (!root) return;
       setProjectBuildBusy(true);
       try {
-        const groups = await workspaceTaskTree(root.path);
+        const groups = await workspaceTaskTree(root.path, toolConfigRef.current);
         const preferred = rebuild
           ? [["Maven", "rebuild"], ["Gradle", "rebuild"]]
           : [
@@ -5094,7 +5118,7 @@ export function CodeWorkspaceTab({
     const root = findRoot(activeFile.ref.rootId);
     if (!root) return;
     let cancelled = false;
-    void workspaceTaskTree(root.path)
+    void workspaceTaskTree(root.path, toolConfigRef.current)
       .then((groups) => {
         if (cancelled) return;
         const mavenTask = groups
@@ -6098,6 +6122,8 @@ export function CodeWorkspaceTab({
                 roots={roots}
                 active={bottomDockOpen && bottomDockTab === "run"}
                 onRun={runWorkspaceTask}
+                toolConfig={toolConfig}
+                onConfigureTools={() => setBuildRunToolsOpen(true)}
               />
             ),
           },
@@ -6111,6 +6137,7 @@ export function CodeWorkspaceTab({
                 roots={roots}
                 active={bottomDockOpen && bottomDockTab === "build"}
                 onRunTask={(task) => runWorkspaceTask(task)}
+                toolConfig={toolConfig}
                 onLoadModules={(rootPath) =>
                   // A synthetic .java path selects the root's jdtls session
                   // (session keys on project scope, not on the file existing).
@@ -6247,6 +6274,17 @@ export function CodeWorkspaceTab({
             setAiRewriteState(null);
             setStatusMessage("Applied AI proposal to the selection");
           }}
+        />
+      )}
+      {buildRunToolsOpen && (
+        <WorkspaceBuildRunToolsDialog
+          config={buildRunTools}
+          onSave={(next) => {
+            setBuildRunTools(writeWorkspaceBuildRunTools(workspaceInstanceId, next));
+            setBuildRunToolsOpen(false);
+            setStatusMessage("Saved build and run tool settings");
+          }}
+          onClose={() => setBuildRunToolsOpen(false)}
         />
       )}
     </div>

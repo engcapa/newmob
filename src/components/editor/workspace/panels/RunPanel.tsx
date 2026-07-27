@@ -6,11 +6,12 @@ import {
   useMemo,
   useState,
 } from "react";
-import { Loader2, Play, Plus, RefreshCw } from "lucide-react";
+import { AlertTriangle, Loader2, Play, Plus, RefreshCw, Settings2 } from "lucide-react";
 import {
   workspaceDetectTasks,
   workspaceJavaRunTargets,
   type WorkspaceTask,
+  type WorkspaceToolConfig,
 } from "../../../../lib/editor/workspace";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
 
@@ -39,6 +40,10 @@ interface RunPanelProps {
   roots: CodeWorkspaceRootInfo[];
   active: boolean;
   onRun: (task: WorkspaceTaskItem, onExit: (exitCode: number) => void) => void;
+  /** Per-workspace Maven/Gradle executable overrides (wrapper still wins). */
+  toolConfig?: WorkspaceToolConfig;
+  /** Open the Build/Run tools settings dialog. */
+  onConfigureTools?: () => void;
 }
 
 function customTasksKey(workspaceInstanceId: string): string {
@@ -61,6 +66,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
   roots,
   active,
   onRun,
+  toolConfig,
+  onConfigureTools,
 }, ref) {
   const [detectedTasks, setDetectedTasks] = useState<WorkspaceTaskItem[]>([]);
   const [customTasks, setCustomTasks] = useState<WorkspaceTaskItem[]>(
@@ -84,8 +91,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
     try {
       const groups = await Promise.all(roots.map(async (root) => {
         const [tasks, javaTargets] = await Promise.all([
-          workspaceDetectTasks(root.path),
-          workspaceJavaRunTargets(root.path),
+          workspaceDetectTasks(root.path, toolConfig),
+          workspaceJavaRunTargets(root.path, toolConfig),
         ]);
         const detected = tasks.map((task): WorkspaceTaskItem => ({
           ...task,
@@ -100,6 +107,7 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
           source: `Java · ${target.buildSystem === "source-file" ? "JDK" : target.buildSystem}`,
           rootId: root.id,
           rootName: root.name,
+          execution: target.execution,
         }));
         return [...java, ...detected];
       }));
@@ -111,11 +119,18 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
     } finally {
       setLoading(false);
     }
-  }, [roots]);
+  }, [roots, toolConfig]);
 
   useEffect(() => {
     if (active && !loaded && !loading) void refresh();
   }, [active, loaded, loading, refresh]);
+
+  // Re-detect when the tool config changes so wrapper/executable resolution and
+  // any "tool not found" diagnostics reflect the new settings immediately.
+  useEffect(() => {
+    if (active && loaded) void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolConfig]);
 
   useEffect(() => {
     window.localStorage.setItem(customTasksKey(workspaceInstanceId), JSON.stringify(customTasks));
@@ -207,6 +222,17 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
         <button type="button" aria-label="Add custom task" onClick={addCustomTask} className="h-6 w-6 rounded">
           <Plus className="h-3.5 w-3.5" />
         </button>
+        {onConfigureTools && (
+          <button
+            type="button"
+            aria-label="Configure build and run tools"
+            title="Configure build and run tools (Maven / Gradle)"
+            onClick={onConfigureTools}
+            className="h-6 w-6 rounded"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button type="button" aria-label="Refresh tasks" onClick={() => void refresh()} className="h-6 w-6 rounded">
           {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </button>
@@ -221,15 +247,19 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
             return (
               <div key={root.id} className="mb-2">
                 <div className="mb-1 font-semibold">{root.name}</div>
-                {rootTasks.map((task) => (
+                {rootTasks.map((task) => {
+                  const toolError = task.execution?.error;
+                  return (
                   <div key={task.id} className="group flex items-center gap-1 rounded hover:bg-[var(--taomni-code-active-line-bg)]">
                     <button
                       type="button"
                       className="flex min-w-0 flex-1 items-center gap-1 px-1 py-1 text-left"
-                      title={`${task.command} — ${task.cwd}`}
+                      title={toolError ? toolError : `${task.command} — ${task.cwd}`}
                       onClick={() => runTask(task)}
                     >
-                      <Play className="h-3 w-3 shrink-0 text-emerald-500" />
+                      {toolError
+                        ? <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                        : <Play className="h-3 w-3 shrink-0 text-emerald-500" />}
                       <span className="truncate">{task.label}</span>
                       <span className="ml-auto shrink-0 text-[10px] text-[var(--taomni-code-muted)]">{task.source}</span>
                     </button>
@@ -244,7 +274,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                       </button>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             );
           })}

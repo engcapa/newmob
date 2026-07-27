@@ -69,6 +69,7 @@ import {
 import { Bot, ExternalLink, FolderOpen, Maximize2, Minimize2, X } from "lucide-react";
 import {
   createOsc7BlankingSuppressor,
+  createTaskStartOutputSuppressor,
   type InputEchoSuppressor,
 } from "../../lib/terminalOutputFilter";
 import { makeHostKey, useCommandHistory } from "../../lib/history";
@@ -108,6 +109,7 @@ import { extractTerminalCommand } from "../../lib/terminalCommand";
 import { normalizeLocalStartCwd } from "../../lib/terminalCwd";
 import { inferTerminalProgram } from "../../lib/terminalActivity";
 import { buildSshCwdIntegration } from "../../lib/terminalShellIntegration";
+import { buildInteractiveCommandInput, renderTerminalTask } from "../../lib/terminal/commandInput";
 import { registerTerminal, consumeTerminalDetachPending } from "../../lib/terminal/terminalRegistry";
 import {
   ZmodemSession,
@@ -3398,6 +3400,34 @@ export function TerminalPanel({
           }
         }
         writeTerminal(registeredSessionId, encodeBase64(data)).catch(console.error);
+      },
+      runTask: (command: string) => {
+        if (readOnlyRef.current) return;
+        const task = renderTerminalTask(command, {
+          platform: getAppPlatform(),
+          shellId: resolvedLocalShellId ?? localShell?.id ?? null,
+          shellName: localShell?.name ?? null,
+        });
+        const suppressor = createTaskStartOutputSuppressor(
+          task.startMarker,
+          task.displayCommand,
+        );
+        injectedInputEchoSuppressorRef.current = suppressor;
+        const program = inferTerminalProgram(task.displayCommand);
+        setTerminalRuntime(tabId, {
+          state: "running",
+          program: program ?? undefined,
+          activitySource: "input-heuristic",
+        });
+        writeTerminal(
+          registeredSessionId,
+          encodeBase64(buildInteractiveCommandInput(task.input)),
+        ).catch((err) => {
+          if (injectedInputEchoSuppressorRef.current === suppressor) {
+            injectedInputEchoSuppressorRef.current = null;
+          }
+          console.error(err);
+        });
       },
       // Display-only echo (xterm.write): mirror Claude Code's captured-run
       // activity into this terminal as a read-only trace. Intentionally NOT

@@ -108,7 +108,7 @@ describe("BuildPanel", () => {
     expect(workspaceMocks.workspaceDependencyTree).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByTestId("build-panel-deps-load-app"));
-    await waitFor(() => expect(workspaceMocks.workspaceDependencyTree).toHaveBeenCalledWith("/repo/app"));
+    await waitFor(() => expect(workspaceMocks.workspaceDependencyTree).toHaveBeenCalledWith("/repo/app", undefined));
     await screen.findByText("spring-core");
     // Arbitration conflict surfaces a badge.
     expect(screen.getByText("conflict")).toBeInTheDocument();

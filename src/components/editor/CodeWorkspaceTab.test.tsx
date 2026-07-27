@@ -2261,6 +2261,7 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(workspaceMocks.workspaceJavaRunTarget).toHaveBeenCalledWith(
       "/repo/app",
       "src/main/java/com/acme/App.java",
+      undefined,
     ));
     expect(screen.getByRole("tab", { name: /Terminal/, selected: true })).toBeInTheDocument();
     expect(await screen.findByTestId("mock-workspace-terminal")).toHaveAttribute(
