@@ -39,6 +39,18 @@ export interface WorkspaceGitRoot {
   isSubmodule?: boolean;
 }
 
+/**
+ * Structured execution for a Maven/Gradle task: the resolved absolute executable,
+ * its arguments, how it was resolved (wrapper/configured/path), and a diagnostic
+ * when the tool could not be resolved. Present only for build-tool tasks.
+ */
+export interface WorkspaceTaskExecution {
+  executable: string;
+  args: string[];
+  source: "wrapper" | "configured" | "path";
+  error?: string;
+}
+
 export interface WorkspaceTask {
   id: string;
   label: string;
@@ -47,6 +59,7 @@ export interface WorkspaceTask {
   source: string;
   /** Workspace-relative Maven/Gradle module directory when applicable. */
   modulePath?: string;
+  execution?: WorkspaceTaskExecution;
 }
 
 /** A Java `static void main` entry point with a ready-to-run terminal command. */
@@ -59,6 +72,16 @@ export interface JavaRunTarget {
   cwd: string;
   buildSystem: "maven" | "gradle" | "source-file";
   modulePath: string;
+  execution: WorkspaceTaskExecution;
+}
+
+/**
+ * Optional per-workspace build-tool executable overrides passed to the task
+ * detectors. Empty/omitted entries fall back to project wrapper then PATH.
+ */
+export interface WorkspaceToolConfig {
+  maven?: string;
+  gradle?: string;
 }
 
 export function workspaceListDir(
@@ -100,21 +123,32 @@ export function workspaceDetectGitRoots(
   return invoke<WorkspaceGitRoot[]>("workspace_detect_git_roots", { roots });
 }
 
-export function workspaceDetectTasks(repoRoot: string): Promise<WorkspaceTask[]> {
-  return invoke<WorkspaceTask[]>("workspace_detect_tasks", { repoRoot });
+export function workspaceDetectTasks(
+  repoRoot: string,
+  toolConfig?: WorkspaceToolConfig,
+): Promise<WorkspaceTask[]> {
+  return invoke<WorkspaceTask[]>("workspace_detect_tasks", { repoRoot, toolConfig: toolConfig ?? null });
 }
 
 /** Discover runnable Java main classes without requiring the java-debug bundle. */
-export function workspaceJavaRunTargets(repoRoot: string): Promise<JavaRunTarget[]> {
-  return invoke<JavaRunTarget[]>("workspace_java_run_targets", { repoRoot });
+export function workspaceJavaRunTargets(
+  repoRoot: string,
+  toolConfig?: WorkspaceToolConfig,
+): Promise<JavaRunTarget[]> {
+  return invoke<JavaRunTarget[]>("workspace_java_run_targets", { repoRoot, toolConfig: toolConfig ?? null });
 }
 
 /** Resolve the Java main class declared in one workspace-relative source file. */
 export function workspaceJavaRunTarget(
   repoRoot: string,
   filePath: string,
+  toolConfig?: WorkspaceToolConfig,
 ): Promise<JavaRunTarget> {
-  return invoke<JavaRunTarget>("workspace_java_run_target", { repoRoot, filePath });
+  return invoke<JavaRunTarget>("workspace_java_run_target", {
+    repoRoot,
+    filePath,
+    toolConfig: toolConfig ?? null,
+  });
 }
 
 /** A source-grouped bucket of tasks for the Build panel task tree (M7 F-2). */
@@ -128,8 +162,11 @@ export interface WorkspaceTaskGroup {
  * other ecosystems group their detected tasks by source. Pure/offline (no build
  * tool is spawned).
  */
-export function workspaceTaskTree(repoRoot: string): Promise<WorkspaceTaskGroup[]> {
-  return invoke<WorkspaceTaskGroup[]>("workspace_task_tree", { repoRoot });
+export function workspaceTaskTree(
+  repoRoot: string,
+  toolConfig?: WorkspaceToolConfig,
+): Promise<WorkspaceTaskGroup[]> {
+  return invoke<WorkspaceTaskGroup[]>("workspace_task_tree", { repoRoot, toolConfig: toolConfig ?? null });
 }
 
 /** A resolved dependency-tree node (Maven / Gradle) for the Build panel (M7 F-1). */
@@ -148,8 +185,11 @@ export interface DependencyNode {
  * (`mvn dependency:tree` / `gradle dependencies`). Slow on a cold cache; requires
  * the tool (or wrapper) present. Rejects for non-Maven/Gradle projects.
  */
-export function workspaceDependencyTree(repoRoot: string): Promise<DependencyNode[]> {
-  return invoke<DependencyNode[]>("workspace_dependency_tree", { repoRoot });
+export function workspaceDependencyTree(
+  repoRoot: string,
+  toolConfig?: WorkspaceToolConfig,
+): Promise<DependencyNode[]> {
+  return invoke<DependencyNode[]>("workspace_dependency_tree", { repoRoot, toolConfig: toolConfig ?? null });
 }
 
 export function workspaceReadFile(

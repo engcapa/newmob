@@ -5,6 +5,7 @@ import {
   workspaceTaskTree,
   type DependencyNode,
   type WorkspaceTaskGroup,
+  type WorkspaceToolConfig,
 } from "../../../../lib/editor/workspace";
 import type { JavaModule } from "../../../../lib/editor/lsp";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
@@ -63,13 +64,15 @@ interface BuildPanelProps {
   onRunTask: (task: WorkspaceTaskItem) => void;
   /** Resolve Java modules for a root via jdtls (M7 F-4); omitted → no Modules section. */
   onLoadModules?: (rootPath: string) => Promise<JavaModule[]>;
+  /** Per-workspace Maven/Gradle executable overrides (wrapper still wins). */
+  toolConfig?: WorkspaceToolConfig;
 }
 
 /**
  * Build panel (M7 F): the task tree (F-2) grouped root -> source -> task.
  * Dependency tree (F-1) and module view (F-4) attach as further sections.
  */
-export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPanelProps) {
+export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig }: BuildPanelProps) {
   const [trees, setTrees] = useState<RootTaskTree[]>([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -105,7 +108,7 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPan
     setDepsLoading((current) => ({ ...current, [rootId]: true }));
     setDepsError((current) => ({ ...current, [rootId]: null }));
     try {
-      const tree = await workspaceDependencyTree(rootPath);
+      const tree = await workspaceDependencyTree(rootPath, toolConfig);
       setDeps((current) => ({ ...current, [rootId]: tree }));
     } catch (reason) {
       setDepsError((current) => ({
@@ -115,7 +118,7 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPan
     } finally {
       setDepsLoading((current) => ({ ...current, [rootId]: false }));
     }
-  }, []);
+  }, [toolConfig]);
 
   const refresh = useCallback(async () => {
     if (roots.length === 0) {
@@ -130,7 +133,7 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPan
         rootId: root.id,
         rootName: root.name,
         rootPath: root.path,
-        groups: await workspaceTaskTree(root.path),
+        groups: await workspaceTaskTree(root.path, toolConfig),
       })));
       setTrees(next);
       setLoaded(true);
@@ -140,10 +143,18 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules }: BuildPan
     } finally {
       setLoading(false);
     }
-  }, [roots]);
+  }, [roots, toolConfig]);
   useEffect(() => {
     if (active && !loaded && !loading) void refresh();
   }, [active, loaded, loading, refresh]);
+
+  // Re-detect tasks (and clear resolved dependency trees) when the tool config
+  // changes so the Build panel reflects the new wrapper/executable resolution.
+  useEffect(() => {
+    if (active && loaded) void refresh();
+    setDeps({});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolConfig]);
 
   const toggle = useCallback((key: string) => {
     setCollapsed((current) => ({ ...current, [key]: !current[key] }));

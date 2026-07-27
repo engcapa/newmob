@@ -273,6 +273,94 @@ export function createOsc7BlankingSuppressor(
   return new Osc7BlankingSuppressor(ttlMs, now);
 }
 
+/**
+ * Hide an injected task wrapper until its real OSC start marker arrives.
+ * Shell line editors may colorize, wrap, or split the echo, so matching the
+ * echoed source is unreliable. The marker is emitted immediately before the
+ * real command; everything after it is genuine task output and passes through.
+ */
+class TaskStartOutputSuppressor implements InputEchoSuppressor {
+  private readonly marker: Uint8Array;
+  private readonly display: Uint8Array;
+  private readonly expiresAt: number;
+  private readonly held: number[] = [];
+  private finished = false;
+
+  constructor(marker: string, displayCommand: string, ttlMs: number, now: number) {
+    const encoder = new TextEncoder();
+    this.marker = encoder.encode(marker);
+    this.display = encoder.encode(displayCommand);
+    this.expiresAt = now + ttlMs;
+  }
+
+  get done(): boolean {
+    return this.finished;
+  }
+
+  filter(data: Uint8Array, now = Date.now()): Uint8Array {
+    if (this.finished || this.marker.length === 0) return data;
+    for (const byte of data) this.held.push(byte);
+
+    const markerAt = indexOfBytes(this.held, this.marker);
+    if (markerAt >= 0) {
+      const after = new Uint8Array(this.held.slice(markerAt + this.marker.length));
+      this.held.length = 0;
+      this.finished = true;
+      return concatManyBytes(
+        new Uint8Array(CLEAR_CURRENT_LINE),
+        this.display,
+        new Uint8Array([0x0d, 0x0a]),
+        after,
+      );
+    }
+
+    // Never hold an unbounded stream. On timeout or excessive preamble, fail
+    // open so no real terminal output can be lost.
+    if (now > this.expiresAt || this.held.length > 64 * 1024) {
+      const released = new Uint8Array(this.held);
+      this.held.length = 0;
+      this.finished = true;
+      return released;
+    }
+    return new Uint8Array();
+  }
+}
+
+export function createTaskStartOutputSuppressor(
+  marker: string,
+  displayCommand: string,
+  ttlMs = 5000,
+  now = Date.now(),
+): InputEchoSuppressor {
+  return new TaskStartOutputSuppressor(marker, displayCommand, ttlMs, now);
+}
+
+function indexOfBytes(haystack: number[], needle: Uint8Array): number {
+  const last = haystack.length - needle.length;
+  for (let start = 0; start <= last; start += 1) {
+    let matches = true;
+    for (let offset = 0; offset < needle.length; offset += 1) {
+      if (haystack[start + offset] !== needle[offset]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return start;
+  }
+  return -1;
+}
+
+function concatManyBytes(...parts: Uint8Array[]): Uint8Array {
+  const length = parts.reduce((total, part) => total + part.length, 0);
+  const out = new Uint8Array(length);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
+}
+
 function isPrefix(value: number[], prefix: Uint8Array): boolean {
   if (value.length > prefix.length) return false;
   for (let i = 0; i < value.length; i += 1) {

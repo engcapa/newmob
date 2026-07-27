@@ -10,6 +10,7 @@ import {
 import { Plus, TerminalSquare, X } from "lucide-react";
 import { TerminalPanel } from "../../../terminal/TerminalPanel";
 import { getTerminal } from "../../../../lib/terminal/terminalRegistry";
+import { buildInteractiveCommandInput, renderTerminalTask } from "../../../../lib/terminal/commandInput";
 import { getAppPlatform } from "../../../../lib/runtime";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
 
@@ -131,10 +132,16 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
         if (!instance?.pendingCommand) return;
         const terminal = getTerminal(id);
         if (terminal) {
-          const command = getAppPlatform() === "windows"
-            ? `& { ${instance.pendingCommand} }; $taomniStatus=$LASTEXITCODE; [Console]::Write([char]27+']633;TaomniTaskExit='+$taomniStatus+[char]7)\n`
-            : `${instance.pendingCommand}; __taomni_status=$?; printf '\\033]633;TaomniTaskExit=%s\\a' "$__taomni_status"\n`;
-          terminal.writeInput(command);
+          if (terminal.runTask) {
+            terminal.runTask(instance.pendingCommand);
+          } else {
+            // Backward-compatible path for lightweight registrants and tests.
+            const task = renderTerminalTask(
+              instance.pendingCommand,
+              terminal.localEnvironment ?? { platform: getAppPlatform() },
+            );
+            terminal.writeInput(buildInteractiveCommandInput(task.input));
+          }
           setInstances((current) => current.map((item) => item.id === id
             ? { ...item, pendingCommand: null }
             : item));

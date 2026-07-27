@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildInteractiveCommandInput } from "./commandInput";
+import { buildInteractiveCommandInput, renderTerminalTask, terminalTaskShell } from "./commandInput";
 
 describe("buildInteractiveCommandInput", () => {
   it("submits a single command with carriage return", () => {
@@ -21,5 +21,46 @@ describe("buildInteractiveCommandInput", () => {
 
   it("preserves intentional blank lines inside the command", () => {
     expect(buildInteractiveCommandInput("cat <<'EOF'\n\nEOF")).toBe("cat <<'EOF'\r\rEOF\r");
+  });
+});
+
+describe("terminal task rendering", () => {
+  it("uses the registered shell instead of the host platform", () => {
+    expect(terminalTaskShell({ platform: "windows", shellId: "git-bash" })).toBe("posix");
+    expect(terminalTaskShell({ platform: "linux", shellId: "powershell" })).toBe("powershell");
+    expect(terminalTaskShell({ platform: "windows", shellId: "command-prompt" })).toBe("cmd");
+  });
+
+  it("renders and escapes a PowerShell task", () => {
+    const task = renderTerminalTask("Write-Output 'it''s fine'", {
+      platform: "windows",
+      shellId: "powershell",
+    });
+    expect(task.shell).toBe("powershell");
+    expect(task.input).toContain("[scriptblock]::Create('Write-Output ''it''''s fine''')");
+    expect(task.input).toContain("TaomniTaskExit=");
+    expect(buildInteractiveCommandInput(task.input).endsWith("\r")).toBe(true);
+  });
+
+  it("renders POSIX and Git Bash tasks with single-quote escaping", () => {
+    const task = renderTerminalTask("printf '%s\\n' \"it's\"", {
+      platform: "windows",
+      shellId: "git-bash",
+    });
+    expect(task.shell).toBe("posix");
+    expect(task.input).toContain(`eval 'printf '"'"'%s\\n'"'"' "it'"'"'s"'`);
+    expect(task.input).toContain("__taomni_status=$?");
+  });
+
+  it("renders cmd with deferred status capture and protects outer metacharacters", () => {
+    const task = renderTerminalTask("echo one && echo 100%", {
+      platform: "windows",
+      shellId: "command-prompt",
+    });
+    expect(task.shell).toBe("cmd");
+    expect(task.input).toContain("echo one ^&^& echo 100%%");
+    expect(task.input).toContain('call set "taomniStatus=%%errorlevel%%"');
+    expect(task.input.split("\n")).toHaveLength(2);
+    expect(buildInteractiveCommandInput(task.input)).not.toContain("\n");
   });
 });

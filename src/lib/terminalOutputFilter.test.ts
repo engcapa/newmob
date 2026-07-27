@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { createInputEchoSuppressor, createOsc7BlankingSuppressor } from "./terminalOutputFilter";
+import {
+  createInputEchoSuppressor,
+  createOsc7BlankingSuppressor,
+  createTaskStartOutputSuppressor,
+} from "./terminalOutputFilter";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -115,6 +119,44 @@ describe("OSC 7 blanking suppressor", () => {
     const suppressor = createOsc7BlankingSuppressor(50, 100);
     expect(text(suppressor.filter(bytes("echoed command no osc7"), 120))).toBe(clearLine);
     expect(text(suppressor.filter(bytes("later real output"), 200))).toBe("later real output");
+    expect(suppressor.done).toBe(true);
+  });
+});
+
+describe("task start output suppressor", () => {
+  const clearLine = "\r\x1b[2K";
+  const marker = "\x1b]633;TaomniTaskStart\x07";
+
+  it("hides the echoed wrapper, shows the display command, keeps task output", () => {
+    const suppressor = createTaskStartOutputSuppressor(marker, "pnpm test", 5000, 100);
+    // The shell echoes the whole instrumented wrapper, then the marker fires,
+    // then real task output flows.
+    const echoed = "& ([scriptblock]::Create('pnpm test')); [Console]::Write(...)";
+    const output = text(
+      suppressor.filter(bytes(`${echoed}\r\n${marker}PASS  1 test\r\n`), 120),
+    );
+    expect(output).toBe(`${clearLine}pnpm test\r\nPASS  1 test\r\n`);
+    expect(output).not.toContain("scriptblock");
+    expect(suppressor.done).toBe(true);
+  });
+
+  it("finds the marker even when split across chunks with noisy ANSI echo", () => {
+    const suppressor = createTaskStartOutputSuppressor(marker, "mvn compile", 5000, 100);
+    // Noisy PSReadLine colouring precedes the marker, which itself is split.
+    const first = text(
+      suppressor.filter(bytes(`\x1b[93m& { mvn compile }\x1b[0m\r\n\x1b]633;Taomni`), 110),
+    );
+    const second = text(suppressor.filter(bytes(`TaskStart\x07[INFO] BUILD\r\n`), 120));
+    expect(first).toBe(""); // nothing shown until the marker completes
+    expect(second).toBe(`${clearLine}mvn compile\r\n[INFO] BUILD\r\n`);
+    expect(suppressor.done).toBe(true);
+  });
+
+  it("fails open when the marker never arrives before the window expires", () => {
+    const suppressor = createTaskStartOutputSuppressor(marker, "go build", 50, 100);
+    expect(text(suppressor.filter(bytes("partial wrapper echo"), 120))).toBe("");
+    // On timeout the held bytes are released rather than lost.
+    expect(text(suppressor.filter(bytes(" more"), 200))).toBe("partial wrapper echo more");
     expect(suppressor.done).toBe(true);
   });
 });
