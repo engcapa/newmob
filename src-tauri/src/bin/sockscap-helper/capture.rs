@@ -120,10 +120,71 @@ struct FlowEntry {
     expires_at: Instant,
 }
 
-/// NETWORK-layer capture filter. Outbound TCP only: the streamdump reflection
-/// reinjects packets as *inbound*, so an inbound clause would only re-feed our
-/// own rewrites back into this loop.
+/// Base NETWORK-layer capture filter. Outbound TCP only: the streamdump
+/// reflection reinjects packets as *inbound*, so an inbound clause would only
+/// re-feed our own rewrites back into this loop.
 const NETWORK_FILTER: &str = "tcp and outbound";
+
+/// Kernel filter excluding destinations the packet loop would unconditionally
+/// pass through anyway.
+///
+/// Every packet matching the filter costs a kernel↔user transition on the one
+/// thread that owns the machine's entire outbound TCP path, so the cheapest
+/// packet is one the driver never hands us. `bypass_cidrs` destinations qualify
+/// exactly: `should_bypass` passes them through unmodified with no other
+/// condition, so excluding them here is behaviour-preserving. On default
+/// settings that is loopback plus every RFC1918 and link-local range — local
+/// IPC, dev servers, containers, SMB, printers, VM traffic.
+///
+/// Note what is deliberately *not* narrowed: the selected applications' ports.
+/// Sockets open and close constantly, so a port-based filter would need
+/// reopening continuously, and a WinDivert filter cannot be changed on a live
+/// handle — the handle must be reopened, dropping whatever is queued. Worse,
+/// packets sent between a socket opening and the filter catching up would escape
+/// uncaptured, silently sending a connection direct that should have been
+/// proxied. With per-connection classification cached, an unselected flow now
+/// costs one hash lookup, so there is nothing left worth that risk.
+///
+/// Mixed address families are fine: an `ip.` test on an IPv6 packet (and vice
+/// versa) is simply false, so `not (…)` leaves the packet matched.
+fn build_network_filter(bypass_cidrs: &[String]) -> String {
+    let mut filter = String::from(NETWORK_FILTER);
+    for (net, prefix) in parse_cidrs(bypass_cidrs) {
+        let (lo, hi) = cidr_range(net, prefix);
+        let field = match net {
+            IpAddr::V4(_) => "ip.DstAddr",
+            IpAddr::V6(_) => "ipv6.DstAddr",
+        };
+        filter.push_str(&format!(
+            " and not ({field} >= {lo} and {field} <= {hi})"
+        ));
+    }
+    filter
+}
+
+/// First and last address of a CIDR block.
+fn cidr_range(net: IpAddr, prefix: u8) -> (IpAddr, IpAddr) {
+    match net {
+        IpAddr::V4(v4) => {
+            let bits = u32::from(v4);
+            let shift = 32u32.saturating_sub(prefix as u32);
+            let mask = if shift >= 32 { 0 } else { u32::MAX << shift };
+            (
+                IpAddr::V4(Ipv4Addr::from(bits & mask)),
+                IpAddr::V4(Ipv4Addr::from((bits & mask) | !mask)),
+            )
+        }
+        IpAddr::V6(v6) => {
+            let bits = u128::from(v6);
+            let shift = 128u32.saturating_sub(prefix as u32);
+            let mask = if shift >= 128 { 0 } else { u128::MAX << shift };
+            (
+                IpAddr::V6(Ipv6Addr::from(bits & mask)),
+                IpAddr::V6(Ipv6Addr::from((bits & mask) | !mask)),
+            )
+        }
+    }
+}
 
 const TCP_FIN: u8 = 0x01;
 const TCP_SYN: u8 = 0x02;
@@ -527,20 +588,28 @@ impl CaptureEngine {
         // reinjected as inbound and are not recaptured by the same handle
         // (Impostor left clear, matching the official sample).
         //
-        // There is deliberately **no** fallback to a bare `"tcp"` filter. The
-        // `outbound` field is core WinDivert filter syntax (and `load()` has
-        // already rejected 1.x), so a parse failure here means the driver is not
-        // a supported build. Falling back would hand every *inbound* packet on
-        // the machine to this single-threaded loop as well, only for it to be
-        // passed straight through — doubling the load that already throttles
-        // system-wide throughput, while hiding the real problem.
-        let filter_used = NETWORK_FILTER.to_string();
-        let net_h = api.open(NETWORK_FILTER, LAYER_NETWORK, 0, 0).map_err(|e| {
-            format!(
-                "WinDivert NETWORK open failed for filter {NETWORK_FILTER:?}: {e}. \
-                 Ensure WinDivert.dll/sys match (2.2+ x64) and the helper is elevated."
-            )
-        })?;
+        // Narrowed filter first, plain outbound TCP as a fallback. The fallback
+        // is a strict *superset*: it only means more packets reach the loop,
+        // which still classifies them correctly — unlike the bare `"tcp"`
+        // fallback this replaced, which also pulled in every inbound packet on
+        // the machine for no benefit at all.
+        let narrowed = build_network_filter(&plan.bypass_cidrs);
+        let (net_h, filter_used) = match api.open(&narrowed, LAYER_NETWORK, 0, 0) {
+            Ok(h) => (h, narrowed),
+            Err(narrow_err) => {
+                tracing::warn!(
+                    "sockscap-helper: narrowed filter rejected ({narrow_err}); \
+                     falling back to {NETWORK_FILTER:?}"
+                );
+                let h = api.open(NETWORK_FILTER, LAYER_NETWORK, 0, 0).map_err(|e| {
+                    format!(
+                        "WinDivert NETWORK open failed for filter {NETWORK_FILTER:?}: {e}. \
+                         Ensure WinDivert.dll/sys match (2.2+ x64) and the helper is elevated."
+                    )
+                })?;
+                (h, NETWORK_FILTER.to_string())
+            }
+        };
 
         // Deepen the kernel queues before any traffic arrives. The NETWORK queue
         // holds real packets so it gets the byte-size bump too; FLOW events are
@@ -1721,6 +1790,63 @@ mod tests {
         assert!(t.len() <= MAX_FLOW_ENTRIES);
         assert!(t.peer_index.len() <= MAX_FLOW_ENTRIES);
         assert!(t.sport_index.len() <= MAX_FLOW_ENTRIES);
+    }
+
+    #[test]
+    fn network_filter_excludes_bypassed_destinations() {
+        let f = build_network_filter(&[
+            "127.0.0.0/8".into(),
+            "192.168.0.0/16".into(),
+            "::1/128".into(),
+        ]);
+        assert!(f.starts_with("tcp and outbound"));
+        assert!(f.contains("not (ip.DstAddr >= 127.0.0.0 and ip.DstAddr <= 127.255.255.255)"));
+        assert!(f.contains("not (ip.DstAddr >= 192.168.0.0 and ip.DstAddr <= 192.168.255.255)"));
+        assert!(f.contains("ipv6.DstAddr >= ::1 and ipv6.DstAddr <= ::1"));
+    }
+
+    #[test]
+    fn network_filter_without_bypasses_is_the_base_filter() {
+        assert_eq!(build_network_filter(&[]), NETWORK_FILTER);
+        // Unparseable entries are skipped rather than producing broken syntax
+        // that would make WinDivertOpen fail.
+        assert_eq!(build_network_filter(&["not-an-address".into()]), NETWORK_FILTER);
+    }
+
+    #[test]
+    fn cidr_ranges_cover_exactly_the_block() {
+        let (lo, hi) = cidr_range(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 0)), 12);
+        assert_eq!(lo, IpAddr::V4(Ipv4Addr::new(172, 16, 0, 0)));
+        assert_eq!(hi, IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255)));
+
+        // A host route is a single address.
+        let (lo, hi) = cidr_range(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 32);
+        assert_eq!(lo, hi);
+
+        // /0 covers everything.
+        let (lo, hi) = cidr_range(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        assert_eq!(lo, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(hi, IpAddr::V4(Ipv4Addr::new(255, 255, 255, 255)));
+    }
+
+    #[test]
+    fn filter_exclusions_agree_with_the_runtime_bypass_check() {
+        // The kernel filter is only safe because it excludes exactly what
+        // `should_bypass` would have passed through anyway.
+        let cidrs = vec!["10.0.0.0/8".to_string(), "fc00::/7".to_string()];
+        let nets = parse_cidrs(&cidrs);
+        for (net, prefix) in &nets {
+            let (lo, hi) = cidr_range(*net, *prefix);
+            for probe in [lo, hi] {
+                assert!(
+                    ip_in_cidr(probe, *net, *prefix),
+                    "{probe} should be inside {net}/{prefix}"
+                );
+            }
+        }
+        // And a public address is outside every one of them.
+        let public: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(!nets.iter().any(|(n, p)| ip_in_cidr(public, *n, *p)));
     }
 
     #[test]
