@@ -152,6 +152,10 @@ pub struct RelayContext {
     pub config: SocksCapConfig,
     pub rules: Option<CompiledRules>,
     pub helper: Arc<HelperRegistry>,
+    /// Long-lived control channel to the elevated helper (Windows capture).
+    /// `None` on backends that recover the destination locally, such as Linux's
+    /// `SO_ORIGINAL_DST`.
+    pub helper_client: Option<Arc<helper::HelperClient>>,
     pub stats: Arc<StatsCounters>,
     pub upstream_host: String,
     pub upstream_port: u16,
@@ -295,15 +299,17 @@ async fn handle_client(
     let peer_port = peer.port();
     let peer_ip = peer.ip().to_string();
 
-    let mapping = {
-        let g = ctx.read().await;
-        let guard = g.helper.inner.lock().map_err(|e| e.to_string())?;
-        let sess = guard
-            .as_ref()
-            .ok_or_else(|| "helper session missing".to_string())?;
-        // Streamdump peer is orig_remote:client_sport — prefer exact ip:port key.
-        helper::lookup_orig_key(sess, &peer_ip, peer_port)
-            .or_else(|_| helper::lookup_orig(sess, peer_port))?
+    // Take a handle and release the context lock immediately. This lookup is a
+    // round trip to another process; the previous code held both this read lock
+    // and the helper registry's mutex across it, so every captured connection
+    // queued behind every other one.
+    let rpc = { ctx.read().await.helper_client.clone() };
+    let rpc = rpc.ok_or_else(|| "helper control channel missing".to_string())?;
+
+    // Streamdump peer is orig_remote:client_sport — prefer exact ip:port key.
+    let mapping = match rpc.lookup_orig(&peer_ip, peer_port).await {
+        Ok(m) => m,
+        Err(_) => rpc.lookup_orig("", peer_port).await?,
     };
     let dst_ip: IpAddr = mapping
         .dst_ip

@@ -831,6 +831,9 @@ async fn build_linux_relay_context(
         config: cfg.clone(),
         rules,
         helper: Arc::clone(&state.sockscap.helper),
+        // Linux recovers the original destination from the redirected socket
+        // itself (`SO_ORIGINAL_DST`); there is no privileged helper to ask.
+        helper_client: None,
         stats,
         upstream_host,
         upstream_port,
@@ -1102,10 +1105,22 @@ async fn start_windows_capture(
     // Seed from Windows DNS client cache (no admin).
     crate::sockscap::dns_win::refresh_dns_client_cache(&dns_map);
 
+    // One persistent control channel for the whole capture session, instead of
+    // a fresh blocking TCP connection per captured flow.
+    let helper_client = state
+        .sockscap
+        .helper
+        .inner
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().cloned())
+        .map(|sess| Arc::new(helper::HelperClient::spawn(sess)));
+
     let ctx = Arc::new(RwLock::new(RelayContext {
         config: cfg.clone(),
         rules,
         helper: Arc::clone(&state.sockscap.helper),
+        helper_client,
         stats,
         upstream_host: up_host.clone(),
         upstream_port: up_port,
