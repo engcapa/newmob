@@ -12,8 +12,9 @@ use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::sockscap::relay::{
-    ACCEPT_BACKOFF_INITIAL, ACCEPT_BACKOFF_MAX, CapturedFlow, RelayContext, RelayHandle,
-    acquire_relay_flow_permit, new_relay_flow_limiter,
+    ACCEPT_BACKOFF_INITIAL, ACCEPT_BACKOFF_MAX, CapturedFlow, MAX_ACTIVE_RELAY_FLOWS,
+    RELAY_PERMIT_WAIT, RelayContext, RelayHandle, acquire_relay_flow_permit,
+    new_relay_flow_limiter,
 };
 
 const SO_ORIGINAL_DST: libc::c_int = 80;
@@ -115,9 +116,6 @@ async fn accept_loop(
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let Some(permit) = acquire_relay_flow_permit(&limiter, &stop).await else {
-            break;
-        };
         let (socket, peer) = match listener.accept().await {
             Ok(connection) => {
                 accept_backoff = ACCEPT_BACKOFF_INITIAL;
@@ -139,6 +137,19 @@ async fn accept_loop(
         if stop.load(Ordering::SeqCst) {
             break;
         }
+        let Some(permit) = acquire_relay_flow_permit(&limiter, &stop, RELAY_PERMIT_WAIT).await
+        else {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            tracing::warn!(
+                "Linux SocksCap relay at capacity ({MAX_ACTIVE_RELAY_FLOWS} concurrent flows); \
+                 refusing {peer} after waiting {}s",
+                RELAY_PERMIT_WAIT.as_secs()
+            );
+            drop(socket);
+            continue;
+        };
 
         let destination = match original_destination(&socket) {
             Ok(destination) => destination,
