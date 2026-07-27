@@ -6,6 +6,7 @@ import {
   sockscapStatus,
   sockscapParseShareLink,
   sockscapImportSubscription,
+  sockscapTestUpstream,
   type SocksCapConfig,
 } from "../../lib/sockscap";
 import { vaultStatus, vaultPut, listSessions, type SessionConfig } from "../../lib/ipc";
@@ -98,6 +99,7 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
     })),
     sockscapGetDomainRecords: vi.fn(async () => []),
     sockscapParseShareLink: vi.fn(),
+    sockscapTestUpstream: vi.fn(async () => "SOCKS5 ok"),
     sockscapTestCoreUpstream: vi.fn(async () => "ok"),
     sockscapDetectLocalProxies: vi.fn(async () => []),
     sockscapDetectTunConflicts: vi.fn(async () => []),
@@ -134,6 +136,9 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       ruleCount: 0,
       captureBackend: "none",
     });
+    // Default: the pre-flight upstream probe passes.
+    vi.mocked(sockscapTestUpstream).mockReset();
+    vi.mocked(sockscapTestUpstream).mockResolvedValue("SOCKS5 ok");
   });
 
   afterEach(() => {
@@ -377,5 +382,75 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     fireEvent.click(startButton);
 
     expect(await screen.findByTestId("sockscap-root-prompt-dialog")).toBeInTheDocument();
+  });
+
+  it("blocks start and warns when the active upstream is unconfigured", async () => {
+    // Empty host → nothing to dial.
+    currentCfg.profiles[0].upstream = { kind: "socks5", sessionId: "", host: "", port: 0 };
+
+    render(<SocksCapPanel />);
+    const startButton = await screen.findByTestId("sockscap-start");
+    fireEvent.click(startButton);
+
+    expect(
+      await screen.findByTestId("sockscap-config-issue-dialog"),
+    ).toBeInTheDocument();
+    // Never probes or starts an unconfigured upstream.
+    expect(vi.mocked(sockscapTestUpstream)).not.toHaveBeenCalled();
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("sockscap-config-issue-ok"));
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("sockscap-config-issue-dialog"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("probes the upstream and starts directly when it is reachable", async () => {
+    render(<SocksCapPanel />);
+    const startButton = await screen.findByTestId("sockscap-start");
+    fireEvent.click(startButton);
+
+    await waitFor(() => expect(vi.mocked(sockscapTestUpstream)).toHaveBeenCalled());
+    await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalled());
+    // No prompt appears on a clean probe.
+    expect(
+      screen.queryByTestId("sockscap-probe-fail-dialog"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers force/cancel when the upstream probe fails", async () => {
+    vi.mocked(sockscapTestUpstream).mockRejectedValue("connection refused");
+
+    render(<SocksCapPanel />);
+    const startButton = await screen.findByTestId("sockscap-start");
+    fireEvent.click(startButton);
+
+    expect(
+      await screen.findByTestId("sockscap-probe-fail-dialog"),
+    ).toBeInTheDocument();
+    // Probe ran, but start was withheld pending the user's decision.
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+
+    // Cancel leaves capture stopped.
+    fireEvent.click(screen.getByTestId("sockscap-probe-fail-cancel"));
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("sockscap-probe-fail-dialog"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+  });
+
+  it("force-starts after a failed probe when the user confirms", async () => {
+    vi.mocked(sockscapTestUpstream).mockRejectedValue("connection refused");
+
+    render(<SocksCapPanel />);
+    const startButton = await screen.findByTestId("sockscap-start");
+    fireEvent.click(startButton);
+
+    fireEvent.click(await screen.findByTestId("sockscap-probe-fail-force"));
+    await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalled());
   });
 });
