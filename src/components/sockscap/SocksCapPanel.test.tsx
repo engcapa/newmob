@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SocksCapPanel } from "./SocksCapPanel";
 import {
@@ -7,7 +7,7 @@ import {
   sockscapImportSubscription,
   type SocksCapConfig,
 } from "../../lib/sockscap";
-import { vaultStatus, vaultPut } from "../../lib/ipc";
+import { vaultStatus, vaultPut, listSessions, type SessionConfig } from "../../lib/ipc";
 
 const defaultTestCfg: SocksCapConfig = {
   enabled: false,
@@ -155,6 +155,51 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       expect(currentCfg.profiles.length).toBe(2);
       expect(currentCfg.profiles[1].name).toBe("方案 2");
     });
+  });
+
+  it("offers only SSH and Proxy sessions as upstream sources", async () => {
+    const mkSession = (
+      id: string,
+      name: string,
+      session_type: string,
+    ): SessionConfig => ({
+      id,
+      name,
+      session_type,
+      group_path: null,
+      host: `${id}.example.com`,
+      port: 1080,
+      username: null,
+      auth_method: "Password" as SessionConfig["auth_method"],
+      options_json: "",
+      created_at: 0,
+      updated_at: 0,
+      last_connected_at: null,
+      sort_order: 0,
+    });
+    vi.mocked(listSessions).mockResolvedValueOnce([
+      mkSession("s1", "Bastion SSH", "SSH"),
+      mkSession("p1", "Office Proxy", "Proxy"),
+      mkSession("l1", "Local Shell", "LocalShell"),
+      mkSession("f1", "Local Folder", "File"),
+      mkSession("d1", "Prod DB", "MySQL"),
+      mkSession("r1", "Desktop", "RDP"),
+    ]);
+
+    render(<SocksCapPanel />);
+    const trigger = await screen.findByTestId("sockscap-upstream-source");
+    fireEvent.click(trigger);
+
+    const menu = await screen.findByTestId("sockscap-upstream-source-menu");
+    // The default upstream kind is socks5 → proxy mode, so proxy sessions show.
+    expect(within(menu).getByText("Office Proxy")).toBeInTheDocument();
+    // Non-proxy / non-SSH sessions must never appear.
+    expect(within(menu).queryByText("Local Shell")).not.toBeInTheDocument();
+    expect(within(menu).queryByText("Local Folder")).not.toBeInTheDocument();
+    expect(within(menu).queryByText("Prod DB")).not.toBeInTheDocument();
+    expect(within(menu).queryByText("Desktop")).not.toBeInTheDocument();
+    // SSH sessions are excluded from proxy mode too (only surface in ssh mode).
+    expect(within(menu).queryByText("Bastion SSH")).not.toBeInTheDocument();
   });
 
   it("reveals core-upstream fields (share link + cipher) when selecting Shadowsocks", async () => {
