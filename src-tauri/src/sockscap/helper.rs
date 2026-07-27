@@ -207,7 +207,18 @@ pub async fn sockscap_helper_start(
 
     #[cfg(windows)]
     {
-        let helper = resolve_helper_exe(&app)?;
+        // Run the privileged binaries from a per-version app-data copy rather
+        // than the install directory, so a live helper and a loaded WinDivert
+        // driver never hold install-directory files open against an upgrade.
+        // Falling back to running in place is no worse than before.
+        let staged = crate::sockscap::paths::stage_privileged_runtime(&app);
+        if let Err(e) = &staged {
+            tracing::warn!("sockscap: staging privileged runtime failed ({e}); running in place");
+        }
+        let helper = match &staged {
+            Ok((exe, _)) => exe.clone(),
+            Err(_) => resolve_helper_exe(&app)?,
+        };
         let token = random_token();
         let port = pick_free_port()?;
         let ready_dir = app
@@ -254,8 +265,12 @@ pub async fn sockscap_helper_start(
                     .join(","),
             );
         }
-        let Some(wd) = resolve_windivert_dir(&app) else {
-            return Err(windivert_missing_hint(&app));
+        let wd = match &staged {
+            Ok((_, dir)) => dir.clone(),
+            Err(_) => match resolve_windivert_dir(&app) {
+                Some(d) => d,
+                None => return Err(windivert_missing_hint(&app)),
+            },
         };
         // Absolute path required: elevated process cwd is typically System32.
         args.push("--windivert-dir".into());
