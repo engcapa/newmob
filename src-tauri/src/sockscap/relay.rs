@@ -1,12 +1,15 @@
 //! Local loopback relay: accept NAT'd connections from WinDivert helper,
 //! attribute hostname (SNI / HTTP Host), apply policy, dial egress, bridge.
 
+use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -22,13 +25,31 @@ use crate::sockscap::rules::sni::extract_hostname_from_prefix;
 use crate::sockscap::stats::StatsCounters;
 
 /// Each TCP relay consumes an accepted socket and normally one egress socket.
-/// Keep enough headroom below the common Linux soft RLIMIT_NOFILE of 1024 for
-/// the rest of the desktop application.
-pub(crate) const MAX_ACTIVE_RELAY_FLOWS: usize = 256;
+///
+/// Windows global capture funnels *every* TCP connection on the machine through
+/// here; a browser alone opens hundreds. 256 was far too low for that and made
+/// saturation a routine event rather than an emergency. Windows has no
+/// per-process descriptor limit worth defending against, so allow a real
+/// ceiling there; on Linux stay well below the common 1024 soft
+/// `RLIMIT_NOFILE`, which the rest of the desktop app also draws from.
+pub(crate) const MAX_ACTIVE_RELAY_FLOWS: usize = if cfg!(windows) { 2048 } else { 512 };
 pub(crate) const ACCEPT_BACKOFF_INITIAL: Duration = Duration::from_millis(50);
 pub(crate) const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(1);
 const RELAY_DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_PREFIX_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long an accepted connection waits for a flow slot before being refused.
+const RELAY_PERMIT_WAIT: Duration = Duration::from_secs(5);
+/// A bridged flow that moves no bytes in *either* direction within this window
+/// is treated as broken and torn down.
+///
+/// Deliberately only enforced before the first byte. Once a flow has carried
+/// data, going quiet is normal — an idle SSH session, a websocket with
+/// minute-scale pings — and tearing those down would be a regression. Keepalive
+/// is the right detector for a peer that dies mid-session.
+const RELAY_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Start probing an idle connection after this long, then every interval.
+const RELAY_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
+const RELAY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 pub struct RelayHandle {
     pub port: u16,
@@ -72,27 +93,44 @@ pub(crate) fn new_relay_flow_limiter() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(MAX_ACTIVE_RELAY_FLOWS))
 }
 
-/// Wait for relay capacity without making Stop wait indefinitely behind a full
-/// semaphore. The permit is owned by the spawned flow task and releases on
-/// every success, error, cancellation, or panic path.
+/// Wait up to `max_wait` for relay capacity, polling `stop` so Stop is never
+/// held up behind a full semaphore. The permit is owned by the spawned flow task
+/// and releases on every success, error, cancellation, or panic path.
+///
+/// Returns `None` when the relay is stopping, the semaphore is closed, or the
+/// wait elapsed; callers distinguish by testing `stop`.
 pub(crate) async fn acquire_relay_flow_permit(
     limiter: &Arc<Semaphore>,
     stop: &AtomicBool,
+    max_wait: Duration,
 ) -> Option<OwnedSemaphorePermit> {
+    let deadline = tokio::time::Instant::now() + max_wait;
     loop {
         if stop.load(Ordering::SeqCst) {
             return None;
         }
-        match tokio::time::timeout(
-            Duration::from_millis(100),
-            Arc::clone(limiter).acquire_owned(),
-        )
-        .await
-        {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
+        }
+        let slice = std::cmp::min(Duration::from_millis(100), deadline - now);
+        match tokio::time::timeout(slice, Arc::clone(limiter).acquire_owned()).await {
             Ok(Ok(permit)) => return Some(permit),
             Ok(Err(_)) => return None,
             Err(_) => {}
         }
+    }
+}
+
+/// Enable TCP keepalive so a peer that disappears silently — process killed,
+/// NAT idle timeout, laptop suspended, route withdrawn — is detected instead of
+/// holding a flow slot until the process restarts.
+fn enable_keepalive(stream: &TcpStream) {
+    let params = socket2::TcpKeepalive::new()
+        .with_time(RELAY_KEEPALIVE_IDLE)
+        .with_interval(RELAY_KEEPALIVE_INTERVAL);
+    if let Err(e) = socket2::SockRef::from(stream).set_tcp_keepalive(&params) {
+        tracing::debug!("sockscap relay: could not enable TCP keepalive: {e}");
     }
 }
 
@@ -194,9 +232,6 @@ async fn accept_loop(
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let Some(permit) = acquire_relay_flow_permit(&limiter, &stop).await else {
-            break;
-        };
         let (sock, peer) = match listener.accept().await {
             Ok(v) => {
                 accept_backoff = ACCEPT_BACKOFF_INITIAL;
@@ -219,6 +254,27 @@ async fn accept_loop(
         if stop.load(Ordering::SeqCst) {
             break;
         }
+
+        // Capacity is claimed *after* accepting, and never blocks the loop
+        // indefinitely. Waiting for a permit before `accept` left the listener
+        // un-drained: connections piled into the kernel backlog and, once it
+        // filled, further SYNs were dropped. Because the client's SYN had
+        // already been reflected toward the relay, the application saw an
+        // indefinite hang rather than a refusal — the whole machine looked
+        // wedged. Refusing promptly instead gives the app an error it can retry.
+        let Some(permit) = acquire_relay_flow_permit(&limiter, &stop, RELAY_PERMIT_WAIT).await
+        else {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            tracing::warn!(
+                "sockscap relay at capacity ({MAX_ACTIVE_RELAY_FLOWS} concurrent flows); \
+                 refusing {peer} after waiting {}s",
+                RELAY_PERMIT_WAIT.as_secs()
+            );
+            drop(sock);
+            continue;
+        };
         let ctx = Arc::clone(&ctx);
         clients.spawn(async move {
             let _permit = permit;
@@ -275,6 +331,10 @@ pub(crate) async fn handle_captured_client(
     let pid = flow.pid;
     let origin = flow.origin;
     let profile_id_hint = flow.profile_id_hint;
+
+    // The captured side is a real socket on every backend; keep it probed so a
+    // vanished client releases its flow slot.
+    enable_keepalive(&client);
 
     // Multi-read peek for SNI / HTTP Host (ClientHello may span packets).
     let (prefix, hostname) = peek_for_hostname(&mut client).await;
@@ -585,7 +645,52 @@ fn looks_like_incomplete_http(data: &[u8]) -> bool {
 }
 
 async fn bridge_tcp(a: &mut TcpStream, b: &mut TcpStream) -> Result<(u64, u64), String> {
+    // Both ends are real sockets here (direct, HTTP CONNECT, SOCKS5 and the
+    // xray-core inbound all return one), so both get keepalive.
+    enable_keepalive(b);
     bridge_any(a, b).await
+}
+
+/// Wraps a stream so the bridge can tell whether any data has moved, without
+/// giving up `copy_bidirectional`'s buffering. Only reads are counted: every
+/// byte that crosses the bridge is read from one side first.
+struct Activity<'a, S> {
+    inner: &'a mut S,
+    reads: Arc<AtomicU64>,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Activity<'_, S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let me = self.get_mut();
+        let before = buf.filled().len();
+        let r = Pin::new(&mut *me.inner).poll_read(cx, buf);
+        if matches!(r, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            me.reads.fetch_add(1, Ordering::Relaxed);
+        }
+        r
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Activity<'_, S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut *self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_shutdown(cx)
+    }
 }
 
 async fn bridge_any<A, B>(a: &mut A, b: &mut B) -> Result<(u64, u64), String>
@@ -593,9 +698,48 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    tokio::io::copy_bidirectional(a, b)
-        .await
-        .map_err(|e| format!("bridge: {e}"))
+    bridge_any_until(a, b, RELAY_FIRST_BYTE_TIMEOUT).await
+}
+
+async fn bridge_any_until<A, B>(
+    a: &mut A,
+    b: &mut B,
+    first_byte_timeout: Duration,
+) -> Result<(u64, u64), String>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let reads = Arc::new(AtomicU64::new(0));
+    let mut ta = Activity {
+        inner: a,
+        reads: Arc::clone(&reads),
+    };
+    let mut tb = Activity {
+        inner: b,
+        reads: Arc::clone(&reads),
+    };
+    let copy = tokio::io::copy_bidirectional(&mut ta, &mut tb);
+    tokio::pin!(copy);
+
+    // Guard only the establishment phase. A flow that has never moved a byte in
+    // either direction is not going to; one that has is a legitimate session
+    // whose quiet periods are none of our business. Without this, a flow that
+    // connected but never spoke held its slot for the lifetime of the process —
+    // which is how a handful of broken flows could exhaust capacity outright.
+    tokio::select! {
+        r = &mut copy => r.map_err(|e| format!("bridge: {e}")),
+        _ = tokio::time::sleep(first_byte_timeout) => {
+            if reads.load(Ordering::Relaxed) == 0 {
+                Err(format!(
+                    "no data in either direction within {:?}; abandoning flow",
+                    first_byte_timeout
+                ))
+            } else {
+                copy.await.map_err(|e| format!("bridge: {e}"))
+            }
+        }
+    }
 }
 
 /// Resolve manual upstream fields from config.
@@ -626,6 +770,9 @@ mod tests {
     fn relay_flow_limiter_reserves_fd_headroom() {
         let limiter = new_relay_flow_limiter();
         assert_eq!(limiter.available_permits(), MAX_ACTIVE_RELAY_FLOWS);
+        // Global capture funnels every TCP connection on the machine through
+        // here, so the ceiling has to be well above a single browser's usage.
+        assert!(MAX_ACTIVE_RELAY_FLOWS >= 512);
     }
 
     #[tokio::test]
@@ -633,7 +780,7 @@ mod tests {
         let limiter = Arc::new(Semaphore::new(1));
         let stop = AtomicBool::new(false);
 
-        let permit = acquire_relay_flow_permit(&limiter, &stop)
+        let permit = acquire_relay_flow_permit(&limiter, &stop, RELAY_PERMIT_WAIT)
             .await
             .expect("capacity should be available");
         assert_eq!(limiter.available_permits(), 0);
@@ -649,11 +796,91 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(50),
-            acquire_relay_flow_permit(&limiter, &stop),
+            acquire_relay_flow_permit(&limiter, &stop, RELAY_PERMIT_WAIT),
         )
         .await
         .expect("stop should be observed promptly");
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn saturated_relay_gives_up_instead_of_waiting_forever() {
+        // The accept loop relies on this returning: it has already accepted the
+        // connection and must get back to `accept()` rather than parking here
+        // while the kernel backlog fills and clients hang.
+        let limiter = Arc::new(Semaphore::new(0));
+        let stop = AtomicBool::new(false);
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            acquire_relay_flow_permit(&limiter, &stop, Duration::from_millis(250)),
+        )
+        .await
+        .expect("must not block past its own deadline");
+
+        assert!(result.is_none());
+        assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn capacity_freed_while_waiting_is_picked_up() {
+        let limiter = Arc::new(Semaphore::new(1));
+        let stop = AtomicBool::new(false);
+        let held = acquire_relay_flow_permit(&limiter, &stop, RELAY_PERMIT_WAIT)
+            .await
+            .expect("first permit");
+
+        let l2 = Arc::clone(&limiter);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            drop(held);
+            let _ = &l2;
+        });
+
+        let permit = acquire_relay_flow_permit(&limiter, &stop, Duration::from_secs(3)).await;
+        assert!(permit.is_some(), "should acquire once the holder releases");
+    }
+
+    const TEST_FIRST_BYTE: Duration = Duration::from_millis(150);
+
+    #[tokio::test]
+    async fn bridge_abandons_a_flow_that_never_moves_a_byte() {
+        // A flow that connects and then says nothing used to hold its slot for
+        // the lifetime of the process.
+        let (mut a, _a_peer) = tokio::io::duplex(64);
+        let (mut b, _b_peer) = tokio::io::duplex(64);
+
+        let err = bridge_any_until(&mut a, &mut b, TEST_FIRST_BYTE)
+            .await
+            .expect_err("should abandon");
+        assert!(err.contains("no data"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn bridge_leaves_an_active_flow_alone_after_it_goes_quiet() {
+        // Once data has flowed the connection is legitimate; quiet periods are
+        // normal for SSH sessions and websockets and must not be torn down.
+        let (mut a, mut a_peer) = tokio::io::duplex(64);
+        let (mut b, mut b_peer) = tokio::io::duplex(64);
+
+        let task =
+            tokio::spawn(async move { bridge_any_until(&mut a, &mut b, TEST_FIRST_BYTE).await });
+
+        a_peer.write_all(b"hello").await.expect("write");
+        let mut buf = [0u8; 5];
+        b_peer.read_exact(&mut buf).await.expect("read through");
+        assert_eq!(&buf, b"hello");
+
+        // Well past the first-byte window, with no further traffic.
+        tokio::time::sleep(TEST_FIRST_BYTE * 4).await;
+        assert!(!task.is_finished(), "active flow must not be abandoned");
+
+        // Closing both ends completes the copy normally.
+        drop(a_peer);
+        drop(b_peer);
+        let (up, _down) = task.await.expect("task").expect("clean finish");
+        assert_eq!(up, 5);
     }
 }
