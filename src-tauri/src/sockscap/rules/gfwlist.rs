@@ -127,12 +127,10 @@ impl CompiledRules {
         }
 
         // Whitelist first (@@ takes priority within GFWList).
-        for s in &self.direct_suffixes {
-            if host_matches_suffix(&h, s) {
-                return RuleMatch::Direct {
-                    rule: format!("@@||{s}"),
-                };
-            }
+        if let Some(s) = match_suffix_set(&h, &self.direct_suffixes) {
+            return RuleMatch::Direct {
+                rule: format!("@@||{s}"),
+            };
         }
         for n in &self.direct_contains {
             if h.contains(n) {
@@ -149,12 +147,10 @@ impl CompiledRules {
             }
         }
 
-        for s in &self.proxy_suffixes {
-            if host_matches_suffix(&h, s) {
-                return RuleMatch::Proxy {
-                    rule: format!("||{s}"),
-                };
-            }
+        if let Some(s) = match_suffix_set(&h, &self.proxy_suffixes) {
+            return RuleMatch::Proxy {
+                rule: format!("||{s}"),
+            };
         }
         for n in &self.proxy_contains {
             if h.contains(n) {
@@ -171,6 +167,36 @@ impl CompiledRules {
             }
         }
         RuleMatch::Miss
+    }
+}
+
+/// Most specific suffix rule matching `host`, if any.
+///
+/// Probes the host's own label suffixes against the set — `a.b.example.com`,
+/// then `b.example.com`, `example.com`, `com` — instead of testing the host
+/// against every rule. GFWList carries thousands of suffix rules, and the old
+/// linear scan additionally built a `format!(".{suffix}")` string *per rule*, so
+/// a single policy decision could mean thousands of allocations. This is a
+/// handful of hash lookups and no allocation, and it runs for every captured
+/// connection.
+///
+/// Equivalent by construction: `host_matches_suffix` accepts exactly the host
+/// itself and any suffix beginning at a label boundary, which is precisely the
+/// sequence probed here. Longest first, so the reported rule is now the most
+/// specific match rather than whichever the hash set happened to yield first.
+fn match_suffix_set(host: &str, set: &HashSet<String>) -> Option<String> {
+    if set.is_empty() {
+        return None;
+    }
+    let mut rest = host;
+    loop {
+        if set.contains(rest) {
+            return Some(rest.to_string());
+        }
+        match rest.find('.') {
+            Some(i) => rest = &rest[i + 1..],
+            None => return None,
+        }
     }
 }
 
@@ -255,5 +281,55 @@ twitter
             c.match_host("google.com"),
             RuleMatch::Proxy { .. }
         ));
+    }
+
+    #[test]
+    fn suffix_probe_agrees_with_pairwise_matching() {
+        // The label-suffix probe replaced a scan that tested every rule with
+        // `host_matches_suffix`; the two must accept exactly the same hosts.
+        let set: HashSet<String> = ["google.com", "b.example.com", "com"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for host in [
+            "google.com",
+            "www.google.com",
+            "a.b.example.com",
+            "b.example.com",
+            "example.com",
+            "notgoogle.com",
+            "google.com.cn",
+            "",
+        ] {
+            let probed = match_suffix_set(host, &set).is_some();
+            let pairwise = !host.is_empty()
+                && set.iter().any(|s| host_matches_suffix(host, s));
+            assert_eq!(probed, pairwise, "disagreement on {host:?}");
+        }
+    }
+
+    #[test]
+    fn suffix_probe_returns_the_most_specific_rule() {
+        let set: HashSet<String> = ["example.com", "cdn.example.com"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            match_suffix_set("a.cdn.example.com", &set).as_deref(),
+            Some("cdn.example.com")
+        );
+    }
+
+    #[test]
+    fn suffix_probe_does_not_match_across_label_boundaries() {
+        let set: HashSet<String> = ["google.com"].into_iter().map(String::from).collect();
+        assert!(match_suffix_set("notgoogle.com", &set).is_none());
+        assert!(match_suffix_set("google.com.evil.net", &set).is_none());
+    }
+
+    #[test]
+    fn empty_rule_set_is_a_miss() {
+        let set: HashSet<String> = HashSet::new();
+        assert!(match_suffix_set("anything.example", &set).is_none());
     }
 }

@@ -151,6 +151,13 @@ pub struct ResolvedUpstream {
 pub struct RelayContext {
     pub config: SocksCapConfig,
     pub rules: Option<CompiledRules>,
+    /// Policy engine compiled from `config` + `rules`.
+    ///
+    /// Built once per configuration, not once per connection. Building it clones
+    /// the entire compiled rule set — thousands of `String`s and every compiled
+    /// regex for a full GFWList — so doing it per flow was a large allocation
+    /// burst on the connection-setup path. Keep in sync via [`Self::rebuild_engine`].
+    pub engine: Arc<PolicyEngine>,
     pub helper: Arc<HelperRegistry>,
     /// Long-lived control channel to the elevated helper (Windows capture).
     /// `None` on backends that recover the destination locally, such as Linux's
@@ -172,6 +179,22 @@ pub struct RelayContext {
     pub dns_map: Arc<Mutex<DnsMap>>,
     /// Domain & flow traffic tracker
     pub domains: Arc<Mutex<crate::sockscap::stats::DomainTracker>>,
+}
+
+impl RelayContext {
+    /// Compile the policy engine for the current `config` + `rules`. Must be
+    /// called after either is replaced, or flows keep using the old policy.
+    pub fn rebuild_engine(&mut self) {
+        self.engine = Arc::new(PolicyEngine::from_config(&self.config, self.rules.as_ref()));
+    }
+
+    /// Engine for a freshly built context.
+    pub fn build_engine(
+        config: &SocksCapConfig,
+        rules: Option<&CompiledRules>,
+    ) -> Arc<PolicyEngine> {
+        Arc::new(PolicyEngine::from_config(config, rules))
+    }
 }
 
 /// Metadata recovered by an OS capture backend before a redirected connection
@@ -343,7 +366,7 @@ pub(crate) async fn handle_captured_client(
     enable_keepalive(&client);
 
     // Multi-read peek for SNI / HTTP Host (ClientHello may span packets).
-    let (prefix, hostname) = peek_for_hostname(&mut client).await;
+    let (prefix, hostname) = peek_for_hostname(&mut client, destination.port()).await;
 
     let snap = {
         let g = ctx.read().await;
@@ -362,7 +385,7 @@ pub(crate) async fn handle_captured_client(
                 .and_then(|mut m| m.lookup(destination.ip()))
         });
 
-        let engine = PolicyEngine::from_config(&g.config, g.rules.as_ref());
+        let engine = Arc::clone(&g.engine);
         let input = PolicyInput {
             host: host_for_policy,
             ip: Some(destination.ip()),
@@ -580,9 +603,33 @@ pub(crate) async fn handle_captured_client(
     Ok(())
 }
 
+/// Ports whose protocol has the **server** greet first.
+///
+/// On these the client will not send anything until it has heard from the
+/// server, so waiting for a client hello cannot succeed — it only adds its full
+/// budget to the latency of every such connection, and the server cannot greet
+/// because we have not dialled it yet. Deliberately conservative: implicit-TLS
+/// mail ports (465/993/995) are *client*-first and stay out, as do Postgres,
+/// Redis, Mongo and Oracle.
+fn server_speaks_first(port: u16) -> bool {
+    matches!(
+        port,
+        21    // FTP control
+        | 22  // SSH
+        | 23  // Telnet
+        | 25  // SMTP
+        | 110 // POP3
+        | 143 // IMAP
+        | 3306 // MySQL
+    )
+}
+
 /// Read until we extract a hostname, TLS record is complete, or budget exhausted.
-async fn peek_for_hostname(client: &mut TcpStream) -> (Vec<u8>, Option<String>) {
+async fn peek_for_hostname(client: &mut TcpStream, dest_port: u16) -> (Vec<u8>, Option<String>) {
     use std::time::{Duration, Instant};
+    if server_speaks_first(dest_port) {
+        return (Vec::new(), None);
+    }
     let deadline = Instant::now() + Duration::from_millis(900);
     let mut prefix: Vec<u8> = Vec::new();
     while Instant::now() < deadline && prefix.len() < 16 * 1024 {

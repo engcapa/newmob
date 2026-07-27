@@ -290,6 +290,9 @@ impl Orchestrator {
             if let Some(r) = rules {
                 g.rules = Some(r);
             }
+            // The engine is a compiled snapshot of both; without this, live
+            // flows would keep being judged by the previous configuration.
+            g.rebuild_engine();
         }
     }
 

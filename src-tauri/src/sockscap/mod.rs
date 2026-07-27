@@ -832,9 +832,11 @@ async fn build_linux_relay_context(
     )
     .await;
 
+    let engine = relay::RelayContext::build_engine(cfg, rules.as_ref());
     Ok(Arc::new(RwLock::new(relay::RelayContext {
         config: cfg.clone(),
         rules,
+        engine,
         helper: Arc::clone(&state.sockscap.helper),
         // Linux recovers the original destination from the redirected socket
         // itself (`SO_ORIGINAL_DST`); there is no privileged helper to ask.
@@ -1121,9 +1123,11 @@ async fn start_windows_capture(
         .and_then(|g| g.as_ref().cloned())
         .map(|sess| Arc::new(helper::HelperClient::spawn(sess)));
 
+    let engine = RelayContext::build_engine(cfg, rules.as_ref());
     let ctx = Arc::new(RwLock::new(RelayContext {
         config: cfg.clone(),
         rules,
+        engine,
         helper: Arc::clone(&state.sockscap.helper),
         helper_client,
         stats,
