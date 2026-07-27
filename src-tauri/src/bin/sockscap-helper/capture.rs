@@ -48,6 +48,23 @@ pub struct CapturePlan {
     pub relay_port: u16,
 }
 
+/// An inert plan: captures nothing. Only used as the initial value of the live
+/// plan slot, before `start` publishes a real one.
+impl Default for CapturePlan {
+    fn default() -> Self {
+        Self {
+            mode_apps: true,
+            app_paths: Vec::new(),
+            bypass_cidrs: Vec::new(),
+            bypass_pids: Vec::new(),
+            bypass_paths: Vec::new(),
+            bypass_endpoints: Vec::new(),
+            relay_ip: Ipv4Addr::LOCALHOST,
+            relay_port: 0,
+        }
+    }
+}
+
 /// Identifies a connection by its **client-side** `(ip, port)`.
 ///
 /// A tuple, not a `"ip:port"` string: the old string keys cost one heap
@@ -365,7 +382,10 @@ pub struct CaptureEngine {
     flows: Arc<Mutex<FlowMap>>,
     /// Client `(ip, port)` → the capture/bypass decision for its connection.
     redirects: Arc<Mutex<FlowTable>>,
-    plan: Option<CapturePlan>,
+    /// Live plan shared with the divert threads. Published as a whole `Arc` so
+    /// bypass lists can change mid-session (an xray core respawning with a new
+    /// pid, a local proxy restarting) without tearing capture down.
+    plan_live: PlanSlot,
     packets_seen: Arc<AtomicU64>,
     packets_redirected: Arc<AtomicU64>,
     active: bool,
@@ -384,7 +404,7 @@ impl CaptureEngine {
             net_handle: None,
             flows: Arc::new(Mutex::new(FlowMap::default())),
             redirects: Arc::new(Mutex::new(FlowTable::default())),
-            plan: None,
+            plan_live: Arc::new(Mutex::new(Arc::new(CapturePlan::default()))),
             packets_seen: Arc::new(AtomicU64::new(0)),
             packets_redirected: Arc::new(AtomicU64::new(0)),
             active: false,
@@ -392,27 +412,69 @@ impl CaptureEngine {
         }
     }
 
-    /// Hot-swap the relay port while capture is running.
-    /// Returns an error if capture is not currently active.
-    pub fn update_relay_port(&mut self, port: u16) -> Result<serde_json::Value, String> {
+    /// Hot-swap parts of the running plan. Every argument is optional; `None`
+    /// leaves that part alone. Errors if capture is not currently active.
+    ///
+    /// Bypass lists have to be updatable because the set of processes that must
+    /// not be captured changes while capture runs: an xray core respawns after
+    /// a crash with a **new pid**, and a local proxy can be restarted by the
+    /// user. With a start-time snapshot, the respawned core's connection to its
+    /// node got captured and reflected into the relay, which dialled the core's
+    /// own SOCKS inbound — a loop that wedges all proxied traffic.
+    ///
+    /// Cached flow verdicts are intentionally *not* discarded here. A process
+    /// that has just been added to the bypass list is new, so it has no prior
+    /// connections to re-judge, and dropping live redirect mappings would leave
+    /// established flows' reply packets untranslated.
+    pub fn update_plan(
+        &mut self,
+        relay_port: Option<u16>,
+        bypass_pids: Option<Vec<u32>>,
+        bypass_paths: Option<Vec<String>>,
+    ) -> Result<serde_json::Value, String> {
         if !self.active {
             return Err("capture not active".into());
         }
-        self.relay_port_live.store(port, Ordering::SeqCst);
-        if let Some(ref mut plan) = self.plan {
+        let mut plan = (*read_plan(&self.plan_live)).clone();
+        if let Some(port) = relay_port.filter(|p| *p != 0) {
+            self.relay_port_live.store(port, Ordering::SeqCst);
             plan.relay_port = port;
         }
-        Ok(serde_json::json!({ "relayPort": port }))
+        if let Some(mut pids) = bypass_pids {
+            // The helper must never capture itself.
+            if !pids.contains(&std::process::id()) {
+                pids.push(std::process::id());
+            }
+            plan.bypass_pids = pids;
+        }
+        if let Some(paths) = bypass_paths {
+            plan.bypass_paths = paths
+                .into_iter()
+                .map(|p| p.replace('/', "\\").to_ascii_lowercase())
+                .collect();
+        }
+        let out = json!({
+            "relayPort": plan.relay_port,
+            "bypassPids": plan.bypass_pids.len(),
+            "bypassPaths": plan.bypass_paths.len(),
+        });
+        if let Ok(mut slot) = self.plan_live.lock() {
+            *slot = Arc::new(plan);
+        }
+        Ok(out)
     }
 
     pub fn status_json(&self) -> serde_json::Value {
+        let plan = read_plan(&self.plan_live);
         json!({
             "active": self.active,
             "packetsSeen": self.packets_seen.load(Ordering::Relaxed),
             "packetsRedirected": self.packets_redirected.load(Ordering::Relaxed),
             "flowEntries": self.flows.lock().map(|m| m.len()).unwrap_or(0),
             "redirectEntries": self.redirects.lock().map(|m| m.len()).unwrap_or(0),
-            "relayPort": self.plan.as_ref().map(|p| p.relay_port),
+            "relayPort": self.active.then(|| plan.relay_port),
+            "bypassPids": plan.bypass_pids.len(),
+            "bypassPaths": plan.bypass_paths.len(),
             "ipv6": true,
         })
     }
@@ -434,7 +496,7 @@ impl CaptureEngine {
         let api = self.ensure_api()?;
         self.stop = Arc::new(AtomicBool::new(false));
         self.relay_port_live = Arc::new(AtomicU16::new(plan.relay_port));
-        self.plan = Some(plan.clone());
+        self.plan_live = Arc::new(Mutex::new(Arc::new(plan.clone())));
         self.packets_seen.store(0, Ordering::Relaxed);
         self.packets_redirected.store(0, Ordering::Relaxed);
 
@@ -531,9 +593,9 @@ impl CaptureEngine {
             let redirects = Arc::clone(&self.redirects);
             let tree = Arc::clone(&tree);
             let index_slot = Arc::clone(&index_slot);
-            let plan = plan.clone();
+            let plan_slot = Arc::clone(&self.plan_live);
             self.threads.push(std::thread::spawn(move || {
-                maintenance_loop(plan, tree, index_slot, flows, redirects, stop);
+                maintenance_loop(plan_slot, tree, index_slot, flows, redirects, stop);
             }));
         }
 
@@ -545,13 +607,14 @@ impl CaptureEngine {
         let seen = Arc::clone(&self.packets_seen);
         let redirected = Arc::clone(&self.packets_redirected);
         let relay_port_live = Arc::clone(&self.relay_port_live);
+        let plan_slot = Arc::clone(&self.plan_live);
         self.threads.push(std::thread::spawn(move || {
             network_loop(
                 api_net,
                 net_handle as HANDLE,
                 flows,
                 redirects,
-                plan,
+                plan_slot,
                 relay_port_live,
                 seen,
                 redirected,
@@ -616,7 +679,7 @@ impl CaptureEngine {
         }
         self.clear_tables();
         self.active = false;
-        self.plan = None;
+        self.plan_live = Arc::new(Mutex::new(Arc::new(CapturePlan::default())));
     }
 
     pub fn lookup_orig(&self, src_port: u16) -> Option<serde_json::Value> {
@@ -666,12 +729,23 @@ fn mapping_json(m: &RedirectMapping) -> serde_json::Value {
 }
 
 type IndexSlot = Arc<Mutex<Arc<AppIndex>>>;
+type PlanSlot = Arc<Mutex<Arc<CapturePlan>>>;
 
 fn read_index(slot: &IndexSlot) -> Arc<AppIndex> {
     slot.lock()
         .map(|g| Arc::clone(&g))
         .unwrap_or_else(|_| Arc::new(AppIndex::default()))
 }
+
+fn read_plan(slot: &PlanSlot) -> Arc<CapturePlan> {
+    slot.lock()
+        .map(|g| Arc::clone(&g))
+        .unwrap_or_else(|_| Arc::new(CapturePlan::default()))
+}
+
+/// How often the packet loop picks up a republished plan. Bypass changes are
+/// rare and never urgent to the microsecond, so this is cheap to keep coarse.
+const PLAN_SYNC_INTERVAL: Duration = Duration::from_millis(200);
 
 /// Everything periodic that used to run inline on the packet path.
 ///
@@ -681,7 +755,7 @@ fn read_index(slot: &IndexSlot) -> Arc<AppIndex> {
 /// table reads and table sweeps all live here instead, and the packet path only
 /// reads their results.
 fn maintenance_loop(
-    plan: CapturePlan,
+    plan_slot: PlanSlot,
     tree: Arc<SharedTree>,
     index: IndexSlot,
     flows: Arc<Mutex<FlowMap>>,
@@ -689,6 +763,7 @@ fn maintenance_loop(
     stop: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::SeqCst) {
+        let plan = read_plan(&plan_slot);
         if plan.mode_apps {
             let idx = Arc::new(compute_app_index(&tree, &plan));
             if let Ok(mut slot) = index.lock() {
@@ -840,7 +915,7 @@ fn network_loop(
     handle: HANDLE,
     flows: Arc<Mutex<FlowMap>>,
     redirects: Arc<Mutex<FlowTable>>,
-    plan: CapturePlan,
+    plan_slot: PlanSlot,
     relay_port_live: Arc<AtomicU16>,
     seen: Arc<AtomicU64>,
     redirected: Arc<AtomicU64>,
@@ -850,13 +925,15 @@ fn network_loop(
 ) {
     let mut packet = vec![0u8; 0xFFFF];
     let mut addr = vec![0u8; ADDR_LEN];
-    let bypass_nets = parse_cidrs(&plan.bypass_cidrs);
+    let mut plan = read_plan(&plan_slot);
+    let mut bypass_nets = parse_cidrs(&plan.bypass_cidrs);
     let relay_v4 = IpAddr::V4(plan.relay_ip);
     let relay_v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
 
     // App mode: inverted index, published by the maintenance thread.
     let mut app_index: Arc<AppIndex> = read_index(&index_slot);
     let mut index_synced = Instant::now();
+    let mut plan_synced = Instant::now();
     let mut recv_errors: u32 = 0;
 
     while !stop.load(Ordering::SeqCst) {
@@ -865,6 +942,14 @@ fn network_loop(
         if plan.mode_apps && index_synced.elapsed() >= Duration::from_millis(50) {
             app_index = read_index(&index_slot);
             index_synced = Instant::now();
+        }
+        if plan_synced.elapsed() >= PLAN_SYNC_INTERVAL {
+            let latest = read_plan(&plan_slot);
+            if !Arc::ptr_eq(&latest, &plan) {
+                bypass_nets = parse_cidrs(&latest.bypass_cidrs);
+                plan = latest;
+            }
+            plan_synced = Instant::now();
         }
 
         let len = match api.recv(handle, &mut packet, &mut addr) {

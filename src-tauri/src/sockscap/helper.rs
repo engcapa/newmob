@@ -589,6 +589,29 @@ pub fn capture_update_relay(sess: &HelperSession, relay_port: u16) -> Result<ser
     expect_ok(send_json(sess, json!({ "cmd": "capture_update", "relayPort": relay_port }))?)
 }
 
+/// Replace the running session's bypass lists.
+///
+/// Needed because the set of processes that must never be captured is not fixed
+/// at start: an xray core that crashes is respawned with a **new pid**, and a
+/// local proxy can be restarted by the user. Until the helper learns the new
+/// pid, that process's connection to its remote node is captured and reflected
+/// back into the relay, which dials the core's own inbound — a loop that wedges
+/// all proxied traffic.
+pub fn capture_update_bypass(
+    sess: &HelperSession,
+    bypass_pids: &[u32],
+    bypass_paths: &[String],
+) -> Result<serde_json::Value, String> {
+    expect_ok(send_json(
+        sess,
+        json!({
+            "cmd": "capture_update",
+            "bypassPids": bypass_pids,
+            "bypassPaths": bypass_paths,
+        }),
+    )?)
+}
+
 pub fn lookup_orig(sess: &HelperSession, src_port: u16) -> Result<OrigMapping, String> {
     lookup_orig_key(sess, "", src_port)
 }

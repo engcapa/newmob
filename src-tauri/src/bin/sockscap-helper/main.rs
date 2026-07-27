@@ -402,38 +402,50 @@ mod windows_main {
                     error: Some(e.to_string()),
                 },
             },
+            // Hot-update the running plan. Every field is optional; omitted
+            // fields are left as they are. Used both to re-point the relay port
+            // and to refresh the bypass lists when a bypassed process restarts
+            // with a new pid (an xray core respawn, most importantly).
             "capture_update" => {
-                let port = req.relay_port.unwrap_or(0);
-                if port == 0 {
-                    Response {
+                if req.relay_port.is_none()
+                    && req.bypass_pids.is_none()
+                    && req.bypass_paths.is_none()
+                {
+                    return Response {
                         id: req.id,
                         ok: false,
                         result: None,
-                        error: Some("relayPort required".into()),
-                    }
-                } else {
-                    match engine.lock() {
-                        Ok(mut eng) => match eng.update_relay_port(port) {
-                            Ok(v) => Response {
-                                id: req.id,
-                                ok: true,
-                                result: Some(v),
-                                error: None,
-                            },
-                            Err(e) => Response {
-                                id: req.id,
-                                ok: false,
-                                result: None,
-                                error: Some(e),
-                            },
+                        error: Some(
+                            "capture_update needs at least one of relayPort, bypassPids, bypassPaths"
+                                .into(),
+                        ),
+                    };
+                }
+                match engine.lock() {
+                    Ok(mut eng) => match eng.update_plan(
+                        req.relay_port,
+                        req.bypass_pids.clone(),
+                        req.bypass_paths.clone(),
+                    ) {
+                        Ok(v) => Response {
+                            id: req.id,
+                            ok: true,
+                            result: Some(v),
+                            error: None,
                         },
                         Err(e) => Response {
                             id: req.id,
                             ok: false,
                             result: None,
-                            error: Some(e.to_string()),
+                            error: Some(e),
                         },
-                    }
+                    },
+                    Err(e) => Response {
+                        id: req.id,
+                        ok: false,
+                        result: None,
+                        error: Some(e.to_string()),
+                    },
                 }
             }
             "lookup_orig" => {
