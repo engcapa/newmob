@@ -112,13 +112,32 @@ describe("UpstreamSourcePicker", () => {
     });
   });
 
-  it("emits a manual choice", () => {
-    const { onSelect } = setup();
+  it("emits a manual choice and keeps Manual selected for a detected address", () => {
+    const { onSelect } = setup({
+      current: { kind: "socks5", sessionId: "", host: "127.0.0.1", port: 7890 },
+    });
+    const trigger = screen.getByTestId("sockscap-upstream-source");
+    expect(trigger.textContent).toContain("127.0.0.1:7890");
+
     const menu = openMenu();
-    // The trigger label also reads "manual" when nothing is selected, so scope
-    // the click to the option inside the menu.
+    // The trigger label may also read "manual", so scope the click to the menu.
     fireEvent.click(within(menu).getByText("sockscap.manualUpstream"));
+
     expect(onSelect).toHaveBeenCalledWith({ source: "manual" });
+    expect(trigger.textContent).toContain("sockscap.manualUpstream");
+  });
+
+  it("portals the menu so pointer clicks can expand groups outside parent labels", () => {
+    setup();
+    const menu = openMenu();
+    expect(menu.parentElement).toBe(document.body);
+
+    const home = within(menu).getByText("Home");
+    fireEvent.mouseDown(home);
+    fireEvent.click(home);
+
+    expect(screen.getByTestId("sockscap-upstream-source-menu")).toBeInTheDocument();
+    expect(within(menu).getByText("Home SOCKS")).toBeTruthy();
   });
 
   it("auto-expands the folder holding the current selection", () => {

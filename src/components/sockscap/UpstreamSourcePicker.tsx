@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, ChevronRight, Search, RefreshCw } from "lucide-react";
 import type { LocalProxyCandidate } from "../../lib/sockscap";
 import { splitGroupPath } from "../../lib/sessionPaths";
@@ -270,7 +271,10 @@ export function UpstreamSourcePicker({
   const [activeIdx, setActiveIdx] = useState(0);
   const [rescanning, setRescanning] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [manualSelected, setManualSelected] = useState(false);
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: 0 });
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -279,7 +283,10 @@ export function UpstreamSourcePicker({
     [mode, detected, sessions, t],
   );
 
-  const curKey = useMemo(() => selectedKey(current, detected), [current, detected]);
+  const curKey = useMemo(
+    () => (manualSelected ? MANUAL_KEY : selectedKey(current, detected)),
+    [current, detected, manualSelected],
+  );
 
   const q = query.trim().toLowerCase();
   const pruned = useMemo(() => (q ? pruneTree(tree, q) : tree), [tree, q]);
@@ -319,9 +326,9 @@ export function UpstreamSourcePicker({
     const timer = window.setTimeout(() => inputRef.current?.focus(), 0);
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target;
-      if (!(target instanceof Node) || !rootRef.current?.contains(target)) {
-        setOpen(false);
-      }
+      if (!(target instanceof Node)) return;
+      if (rootRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", onPointerDown);
     return () => {
@@ -329,6 +336,28 @@ export function UpstreamSourcePicker({
       document.removeEventListener("mousedown", onPointerDown);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // The profile editor is scrollable, so render the popup in document.body and
+  // anchor it with viewport coordinates. Otherwise rows extending past the
+  // editor's overflow boundary are painted but do not receive pointer events.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const updatePosition = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const gutter = 4;
+      const width = Math.max(0, Math.min(rect.width, window.innerWidth - gutter * 2));
+      const left = Math.min(Math.max(gutter, rect.left), Math.max(gutter, window.innerWidth - width - gutter));
+      setMenuPos({ top: rect.bottom + gutter, left, width });
+    };
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
   }, [open]);
 
   // Keep the active index in range as rows appear/disappear (filter, collapse).
@@ -364,6 +393,7 @@ export function UpstreamSourcePicker({
       if (!q) toggleGroup(row.key);
       return;
     }
+    setManualSelected(row.choice.source === "manual");
     onSelect(row.choice);
     setOpen(false);
   };
@@ -420,13 +450,16 @@ export function UpstreamSourcePicker({
         <span className="min-w-0 flex-1 truncate">{selectedLabel}</span>
         <ChevronDown className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-text-muted)]" />
       </button>
-      {open && (
-        <div
-          role="tree"
-          data-testid={`${testId}-menu`}
-          className="absolute left-0 top-full z-50 mt-1 w-full max-h-72 flex flex-col overflow-hidden rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] shadow-lg"
-          onKeyDown={onKeyDown}
-        >
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            role="tree"
+            data-testid={`${testId}-menu`}
+            style={{ top: menuPos.top, left: menuPos.left, width: menuPos.width }}
+            className="fixed z-[100] max-h-72 flex flex-col overflow-hidden rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] shadow-lg"
+            onKeyDown={onKeyDown}
+          >
           <div className="shrink-0 border-b border-[var(--taomni-divider)] p-1.5 flex gap-1.5">
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--taomni-text-muted)]" />
@@ -510,8 +543,9 @@ export function UpstreamSourcePicker({
               })
             )}
           </div>
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

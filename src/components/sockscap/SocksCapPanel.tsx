@@ -342,9 +342,14 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     void refresh();
     listSessions()
       .then((arr) => {
-        const mapped: SessionOpt[] = arr.map((s) => {
-          const kind = (s.session_type === "ssh" ? "ssh" : "proxy") as "proxy" | "ssh";
-          return { id: s.id, name: s.name, host: s.host, port: s.port, kind, groupPath: s.group_path };
+        // Only SSH and Proxy sessions can serve as an upstream. Everything else
+        // (Local shells, File/folder, RDP/VNC, databases, object storage, mail…)
+        // has no proxy endpoint to dial, so keep them out of the picker.
+        const mapped: SessionOpt[] = arr.flatMap((s) => {
+          const kind: "ssh" | "proxy" | null =
+            s.session_type === "SSH" ? "ssh" : s.session_type === "Proxy" ? "proxy" : null;
+          if (!kind) return [];
+          return [{ id: s.id, name: s.name, host: s.host, port: s.port, kind, groupPath: s.group_path }];
         });
         setSessions(mapped);
       })
@@ -1868,6 +1873,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               ) : (
                 <Field label={t("sockscap.upstreamSource")}>
                   <UpstreamSourcePicker
+                    key={selectedProf.id}
                     mode={selectedProf.upstream.kind === "ssh" ? "ssh" : "proxy"}
                     detected={detectedProxies}
                     sessions={sessions}
