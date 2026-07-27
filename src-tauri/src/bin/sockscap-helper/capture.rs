@@ -20,7 +20,7 @@ use serde_json::json;
 use winapi::um::winnt::HANDLE;
 
 use crate::proc_info::{
-    path_matches_selector, ports_for_pids, tcp_owner_pid, ProcessTree, SharedTree,
+    path_matches_selector, port_owners_for_pids, tcp_owner_pid, ProcessTree, SharedTree,
 };
 use crate::windivert::{
     addr_event, addr_for_reflect_inbound, addr_is_outbound, addr_layer, flow_endpoints_ip,
@@ -298,6 +298,22 @@ impl FlowTable {
     }
 }
 
+/// Snapshot of which local TCP ports belong to in-scope applications.
+///
+/// Rebuilt on the maintenance thread and published wholesale, so the packet
+/// path only ever clones an `Arc`. Previously the packet path rebuilt this
+/// itself — enumerating every process on the machine (an `OpenProcess` +
+/// `QueryFullProcessImageNameW` each) and then the whole TCP table — while
+/// holding up every other packet on the host.
+#[derive(Debug, Default)]
+struct AppIndex {
+    /// local port → owning pid, for in-scope processes only.
+    ports: HashMap<u16, u32>,
+    /// pid → executable path, for in-scope processes only.
+    paths: HashMap<u32, String>,
+    pids: HashSet<u32>,
+}
+
 /// FLOW/SOCKET-layer PID associations, keyed by the socket's local `(ip, port)`.
 ///
 /// Delete events remove entries, but they can be missed (queue overflow, FLOW
@@ -497,6 +513,30 @@ impl CaptureEngine {
             }));
         }
 
+        let tree = Arc::new(SharedTree::new());
+        let index_slot: IndexSlot = Arc::new(Mutex::new(Arc::new(AppIndex::default())));
+
+        // Build the first App-mode index before any packet arrives, so the very
+        // first connection of an in-scope app is not missed while the
+        // maintenance thread is still spinning up.
+        if plan.mode_apps {
+            if let Ok(mut slot) = index_slot.lock() {
+                *slot = Arc::new(compute_app_index(&tree, &plan));
+            }
+        }
+
+        {
+            let stop = Arc::clone(&self.stop);
+            let flows = Arc::clone(&self.flows);
+            let redirects = Arc::clone(&self.redirects);
+            let tree = Arc::clone(&tree);
+            let index_slot = Arc::clone(&index_slot);
+            let plan = plan.clone();
+            self.threads.push(std::thread::spawn(move || {
+                maintenance_loop(plan, tree, index_slot, flows, redirects, stop);
+            }));
+        }
+
         let stop = Arc::clone(&self.stop);
         let flows = Arc::clone(&self.flows);
         let redirects = Arc::clone(&self.redirects);
@@ -505,7 +545,6 @@ impl CaptureEngine {
         let seen = Arc::clone(&self.packets_seen);
         let redirected = Arc::clone(&self.packets_redirected);
         let relay_port_live = Arc::clone(&self.relay_port_live);
-        let tree = Arc::new(SharedTree::new());
         self.threads.push(std::thread::spawn(move || {
             network_loop(
                 api_net,
@@ -518,6 +557,7 @@ impl CaptureEngine {
                 redirected,
                 stop,
                 tree,
+                index_slot,
             );
         }));
 
@@ -625,6 +665,96 @@ fn mapping_json(m: &RedirectMapping) -> serde_json::Value {
     })
 }
 
+type IndexSlot = Arc<Mutex<Arc<AppIndex>>>;
+
+fn read_index(slot: &IndexSlot) -> Arc<AppIndex> {
+    slot.lock()
+        .map(|g| Arc::clone(&g))
+        .unwrap_or_else(|_| Arc::new(AppIndex::default()))
+}
+
+/// Everything periodic that used to run inline on the packet path.
+///
+/// The divert loop handles every outbound TCP packet on the machine one at a
+/// time, so any work done there is charged to the whole host's throughput —
+/// including traffic SocksCap has no interest in. Process enumeration, TCP
+/// table reads and table sweeps all live here instead, and the packet path only
+/// reads their results.
+fn maintenance_loop(
+    plan: CapturePlan,
+    tree: Arc<SharedTree>,
+    index: IndexSlot,
+    flows: Arc<Mutex<FlowMap>>,
+    redirects: Arc<Mutex<FlowTable>>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::SeqCst) {
+        if plan.mode_apps {
+            let idx = Arc::new(compute_app_index(&tree, &plan));
+            if let Ok(mut slot) = index.lock() {
+                *slot = idx;
+            }
+        }
+        let now = Instant::now();
+        if let Ok(mut t) = redirects.lock() {
+            t.sweep_if_due(now);
+        }
+        if let Ok(mut m) = flows.lock() {
+            m.sweep_if_due(now);
+        }
+        // ~100 ms cadence, but notice `stop` promptly so `capture_stop` is not
+        // held up waiting for this thread to join.
+        for _ in 0..10 {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Ports and paths of every process currently in scope for App mode.
+fn compute_app_index(tree: &SharedTree, plan: &CapturePlan) -> AppIndex {
+    let mut idx = AppIndex::default();
+    // `with` refreshes the process tree only when it is older than its staleness
+    // window. The previous code forced a full re-enumeration on every call,
+    // ~10x more often than the data actually changes.
+    tree.with(|t| {
+        for (&pid, path) in t.path.iter() {
+            if plan.bypass_pids.contains(&pid) {
+                continue;
+            }
+            if process_in_scope_tree(plan, pid, path, t) {
+                idx.pids.insert(pid);
+            }
+        }
+        // Also include descendants of matched pids (a launcher's child may live
+        // at a different path).
+        for _ in 0..8 {
+            let mut changed = false;
+            for (&pid, &ppid) in t.parent.iter() {
+                if idx.pids.contains(&ppid)
+                    && !idx.pids.contains(&pid)
+                    && !plan.bypass_pids.contains(&pid)
+                {
+                    idx.pids.insert(pid);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for &pid in &idx.pids {
+            if let Some(p) = t.path_of(pid) {
+                idx.paths.insert(pid, p.to_string());
+            }
+        }
+    });
+    idx.ports = port_owners_for_pids(&idx.pids);
+    idx
+}
+
 fn flow_loop(
     api: Arc<WinDivertApi>,
     handle: HANDLE,
@@ -716,6 +846,7 @@ fn network_loop(
     redirected: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     tree: Arc<SharedTree>,
+    index_slot: IndexSlot,
 ) {
     let mut packet = vec![0u8; 0xFFFF];
     let mut addr = vec![0u8; ADDR_LEN];
@@ -723,54 +854,17 @@ fn network_loop(
     let relay_v4 = IpAddr::V4(plan.relay_ip);
     let relay_v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
 
-    // App mode: inverted index — ports owned by matching PIDs (works without FLOW).
-    let mut app_ports: HashSet<u16> = HashSet::new();
-    let mut app_ports_refreshed = Instant::now() - Duration::from_secs(10);
-    let mut matched_pids: HashSet<u32> = HashSet::new();
+    // App mode: inverted index, published by the maintenance thread.
+    let mut app_index: Arc<AppIndex> = read_index(&index_slot);
+    let mut index_synced = Instant::now();
     let mut recv_errors: u32 = 0;
 
-    let refresh_app_index = |tree: &SharedTree,
-                             plan: &CapturePlan,
-                             keys: &mut HashSet<u16>,
-                             pids: &mut HashSet<u32>| {
-        tree.with(|t| {
-            t.refresh();
-            pids.clear();
-            // Collect PIDs whose path (or ancestor) matches app list.
-            for (&pid, path) in t.path.iter() {
-                if plan.bypass_pids.contains(&pid) {
-                    continue;
-                }
-                if process_in_scope_tree(plan, pid, path, t) {
-                    pids.insert(pid);
-                }
-            }
-            // Also include children of matched pids (path may differ).
-            let parents = t.parent.clone();
-            for _ in 0..8 {
-                let mut changed = false;
-                for (&pid, &pp) in &parents {
-                    if pids.contains(&pp)
-                        && !pids.contains(&pid)
-                        && !plan.bypass_pids.contains(&pid)
-                    {
-                        pids.insert(pid);
-                        changed = true;
-                    }
-                }
-                if !changed {
-                    break;
-                }
-            }
-        });
-        *keys = ports_for_pids(pids);
-    };
-
     while !stop.load(Ordering::SeqCst) {
-        // Keep App port index warm (every 100ms).
-        if plan.mode_apps && app_ports_refreshed.elapsed() >= Duration::from_millis(100) {
-            refresh_app_index(&tree, &plan, &mut app_ports, &mut matched_pids);
-            app_ports_refreshed = Instant::now();
+        // Picking up a freshly published index is a lock plus an `Arc` clone;
+        // building it is somebody else's problem now.
+        if plan.mode_apps && index_synced.elapsed() >= Duration::from_millis(50) {
+            app_index = read_index(&index_slot);
+            index_synced = Instant::now();
         }
 
         let len = match api.recv(handle, &mut packet, &mut addr) {
@@ -904,29 +998,17 @@ fn network_loop(
         }
 
         // ---- first packet of a connection: classify, then remember ---------
-        // The port index may simply be stale — a process that started, or
-        // opened this socket, since the last refresh. Refreshing is expensive,
-        // but it now happens at most once per *connection* instead of once per
-        // packet of every un-captured flow.
-        if plan.mode_apps && !app_ports.contains(&sport) {
-            refresh_app_index(&tree, &plan, &mut app_ports, &mut matched_pids);
-            app_ports_refreshed = Instant::now();
+        // An index miss may just mean the socket opened since the last publish;
+        // re-read the slot (cheap) before falling back to the slower per-flow
+        // resolution.
+        if plan.mode_apps && !app_index.ports.contains_key(&sport) {
+            app_index = read_index(&index_slot);
+            index_synced = Instant::now();
         }
 
-        let verdict = classify_flow(
-            &plan,
-            &bypass_nets,
-            &flows,
-            &tree,
-            key,
-            dst,
-            dport,
-            &app_ports,
-            &matched_pids,
-        );
+        let verdict = classify_flow(&plan, &bypass_nets, &flows, &tree, key, dst, dport, &app_index);
 
         if let Ok(mut t) = redirects.lock() {
-            t.sweep_if_due(now);
             t.insert(key, dst, dport, verdict.clone(), now);
             if closing {
                 t.mark_closing(&key, now);
@@ -967,8 +1049,7 @@ fn classify_flow(
     key: FlowKey,
     dst: IpAddr,
     dport: u16,
-    app_ports: &HashSet<u16>,
-    matched_pids: &HashSet<u32>,
+    app_index: &AppIndex,
 ) -> FlowVerdict {
     let (src, sport) = key;
 
@@ -981,20 +1062,18 @@ fn classify_flow(
     }
 
     let (pid, path) = if plan.mode_apps {
-        if app_ports.contains(&sport) {
-            let pid = tcp_owner_pid(src, sport)
-                .or_else(|| matched_pids.iter().copied().next())
-                .unwrap_or(0);
-            let path = tree
-                .with(|t| t.path_of(pid).map(|s| s.to_string()))
-                .flatten()
-                .unwrap_or_default();
+        // Index hit answers both pid and path with no syscall at all — the old
+        // code still went to `GetExtendedTcpTable` here, on the hit path.
+        if let Some(&pid) = app_index.ports.get(&sport) {
+            let path = app_index.paths.get(&pid).cloned().unwrap_or_default();
             (pid, path)
         } else {
             let Some(f) = resolve_flow(flows, tree, key) else {
+                // Unattributable: leave App-mode traffic alone rather than
+                // capturing something that may not be in scope.
                 return FlowVerdict::Bypass;
             };
-            if !matched_pids.contains(&f.pid) && !process_in_scope(plan, f.pid, &f.path, tree) {
+            if !app_index.pids.contains(&f.pid) && !process_in_scope(plan, f.pid, &f.path, tree) {
                 return FlowVerdict::Bypass;
             }
             (f.pid, f.path.clone())
@@ -1154,8 +1233,12 @@ fn should_bypass(
 
 /// FLOW table miss → GetExtendedTcpTable owner PID + process tree path.
 ///
-/// When FLOW/SOCKET is unavailable, keep the wait short: long spins on every
-/// SYN stall the divert thread and cause app timeouts.
+/// Never sleeps. The previous version slept 1 ms hoping to win a race with the
+/// FLOW layer and then, on a miss, another 2 ms before retrying — up to 3 ms of
+/// the machine's *entire* outbound TCP path stalled, per unresolved connection.
+/// It was also unnecessary: `GetExtendedTcpTable(OWNER_PID_ALL)` lists sockets
+/// in `SYN_SENT`, so the row exists by the time the SYN reaches us, and
+/// `tcp_owner_pid` already forces one fresh read on a miss.
 fn resolve_flow(
     flows: &Arc<Mutex<FlowMap>>,
     tree: &SharedTree,
@@ -1165,17 +1248,7 @@ fn resolve_flow(
     if let Some(f) = flows.lock().ok().and_then(|m| m.get(&key).cloned()) {
         return Some(f);
     }
-    // One brief yield for FLOW race; then TCP table (OWNER_PID_ALL includes SYN_SENT).
-    if flows.lock().ok().and_then(|m| m.get(&key).cloned()).is_none() {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    if let Some(f) = flows.lock().ok().and_then(|m| m.get(&key).cloned()) {
-        return Some(f);
-    }
-    let pid = tcp_owner_pid(src, sport).or_else(|| {
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        tcp_owner_pid(src, sport)
-    })?;
+    let pid = tcp_owner_pid(src, sport)?;
     let path = tree
         .with(|t| {
             t.path_of(pid)
