@@ -44,6 +44,7 @@ import {
   sockscapDetectTunConflicts,
   sockscapImportSubscription,
   upstreamRequiresCore,
+  type LocalProxyCandidate,
   type Decision,
   type DomainRecord,
   type GfwListStatus,
@@ -63,6 +64,10 @@ import {
 } from "../../lib/sockscap";
 import { requiresRestart } from "../../lib/sockscapRestart";
 import { SocksCapRootPrompt } from "./SocksCapRootPrompt";
+import {
+  UpstreamSourcePicker,
+  type UpstreamChoice,
+} from "./UpstreamSourcePicker";
 import {
   listSessions,
   vaultPut,
@@ -216,6 +221,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [helper, setHelper] = useState<HelperStatus | null>(null);
   const [sessions, setSessions] = useState<SessionOpt[]>([]);
+  const [detectedProxies, setDetectedProxies] = useState<LocalProxyCandidate[]>([]);
   const [processes, setProcesses] = useState<ProcessInfo[]>([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
@@ -298,6 +304,17 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     [onStatusMessage],
   );
 
+  // Re-run local-proxy detection and refresh the picker's "detected" group.
+  // Errors are reported but non-fatal (detection is best-effort). Declared here
+  // (above the mount effect) so it can be an effect dependency.
+  const rescanLocalProxies = useCallback(async () => {
+    try {
+      setDetectedProxies(await sockscapDetectLocalProxies());
+    } catch (e) {
+      report(String(e), false);
+    }
+  }, [report]);
+
   const refresh = useCallback(async () => {
     try {
       const [c, cp, st, gf, sn, hp, drs] = await Promise.all([
@@ -336,7 +353,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     sockscapDetectTunConflicts()
       .then(setTunConflicts)
       .catch(() => setTunConflicts([]));
-  }, [refresh]);
+    // Populate the upstream picker's "detected local proxies" group.
+    void rescanLocalProxies();
+  }, [refresh, rescanLocalProxies]);
 
   useEffect(() => {
     if (!status || status.phase === "idle") {
@@ -1255,17 +1274,26 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   /** Detect a local proxy (Clash/v2rayN etc) and set it as the upstream in one
    *  click — no hand-filling host/port. Uses the first candidate found. */
-  const onDetectLocalProxy = async () => {
-    if (!cfg) return;
-    setBusy(true);
-    try {
-      const found = await sockscapDetectLocalProxies();
-      if (found.length === 0) {
-        report(t("sockscap.noLocalProxy"), false);
-        return;
-      }
-      const c = found[0];
-      await patchSelectedProfile({
+  // Apply a picker choice to the selected profile's upstream.
+  const onSelectUpstreamSource = (choice: UpstreamChoice) => {
+    if (choice.source === "manual") {
+      void patchSelectedProfile({
+        upstream: { ...selectedProf.upstream, sessionId: "" },
+      });
+    } else if (choice.source === "session") {
+      const s = choice.session;
+      void patchSelectedProfile({
+        upstream: {
+          ...selectedProf.upstream,
+          sessionId: s.id,
+          host: s.host,
+          port: s.port,
+        },
+      });
+    } else {
+      // Detected local proxy: adopt its detected kind + loopback host/port.
+      const c = choice.candidate;
+      void patchSelectedProfile({
         upstream: {
           ...selectedProf.upstream,
           kind: c.kind,
@@ -1274,18 +1302,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           port: c.port,
         },
       });
-      report(
-        t("sockscap.localProxyDetected", {
-          kind: c.kind.toUpperCase(),
-          host: c.host,
-          port: String(c.port),
-          process: c.process || "?",
-        }),
-      );
-    } catch (e) {
-      report(String(e), false);
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -1849,58 +1865,18 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                     </button>
                   </div>
                 </Field>
-              ) : selectedProf.upstream.kind === "ssh" ? (
-                <Field label={t("sockscap.upstreamSession")}>
-                  <select
-                    className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
-                    value={selectedProf.upstream.sessionId}
-                    onChange={(e) =>
-                      void patchSelectedProfile({
-                        upstream: { ...selectedProf.upstream, sessionId: e.target.value },
-                      })
-                    }
-                  >
-                    <option value="">{t("sockscap.manualUpstream")}</option>
-                    {sessions
-                      .filter((s) => s.kind === "ssh")
-                      .map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.host}:{s.port})
-                        </option>
-                      ))}
-                  </select>
-                </Field>
               ) : (
-                <Field label={t("sockscap.upstreamSession")}>
-                  <select
-                    className="w-full text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]"
-                    value={selectedProf.upstream.sessionId}
-                    onChange={(e) => {
-                      const sid = e.target.value;
-                      const match = sessions.find((x) => x.id === sid);
-                      if (match) {
-                        void patchSelectedProfile({
-                          upstream: {
-                            ...selectedProf.upstream,
-                            sessionId: sid,
-                            host: match.host,
-                            port: match.port,
-                          },
-                        });
-                      } else {
-                        void patchSelectedProfile({
-                          upstream: { ...selectedProf.upstream, sessionId: "" },
-                        });
-                      }
-                    }}
-                  >
-                    <option value="">{t("sockscap.manualUpstream")}</option>
-                    {sessions.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} ({s.host}:{s.port})
-                      </option>
-                    ))}
-                  </select>
+                <Field label={t("sockscap.upstreamSource")}>
+                  <UpstreamSourcePicker
+                    mode={selectedProf.upstream.kind === "ssh" ? "ssh" : "proxy"}
+                    detected={detectedProxies}
+                    sessions={sessions}
+                    current={selectedProf.upstream}
+                    onSelect={onSelectUpstreamSource}
+                    onRescan={rescanLocalProxies}
+                    busy={busy}
+                    t={t}
+                  />
                 </Field>
               )}
 
@@ -1985,17 +1961,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               >
                 {t("sockscap.testUpstream")}
               </button>
-              {!upstreamRequiresCore(selectedProf.upstream.kind) && (
-                <button
-                  type="button"
-                  data-testid="sockscap-detect-local-proxy"
-                  className="px-3 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
-                  onClick={() => void onDetectLocalProxy()}
-                  disabled={busy}
-                >
-                  {t("sockscap.detectLocalProxy")}
-                </button>
-              )}
             </div>
           </Section>
 
