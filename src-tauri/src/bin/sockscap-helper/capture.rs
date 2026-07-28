@@ -20,7 +20,8 @@ use serde_json::json;
 use winapi::um::winnt::HANDLE;
 
 use crate::proc_info::{
-    path_matches_selector, port_owners_for_pids, tcp_owner_pid, ProcessTree, SharedTree,
+    path_matches_selector, port_owners_for_pids, tcp_owner_pid, udp_owner_pid,
+    udp_port_owners_for_pids, ProcessTree, SharedTree,
 };
 use crate::windivert::{
     addr_event, addr_for_reflect_inbound, addr_is_outbound, addr_layer, flow_endpoints_ip,
@@ -46,6 +47,10 @@ pub struct CapturePlan {
     pub bypass_endpoints: Vec<Endpoint>,
     pub relay_ip: Ipv4Addr,
     pub relay_port: u16,
+    /// Drop in-scope outbound UDP 443 so QUIC falls back to TCP (which capture
+    /// can attribute and proxy). Widens the NETWORK filter to also match UDP 443
+    /// and enables the UDP-443 arm in the packet loop. See design doc.
+    pub block_quic: bool,
 }
 
 /// An inert plan: captures nothing. Only used as the initial value of the live
@@ -61,6 +66,7 @@ impl Default for CapturePlan {
             bypass_endpoints: Vec::new(),
             relay_ip: Ipv4Addr::LOCALHOST,
             relay_port: 0,
+            block_quic: false,
         }
     }
 }
@@ -125,6 +131,20 @@ struct FlowEntry {
 /// re-feed our own rewrites back into this loop.
 const NETWORK_FILTER: &str = "tcp and outbound";
 
+/// Base filter when QUIC blocking is on: also pull in outbound UDP 443 so the
+/// packet loop can drop in-scope QUIC and force a TCP fallback. UDP is only ever
+/// dropped or passed, never reflected, so there is no inbound-recapture concern.
+const NETWORK_FILTER_WITH_QUIC: &str = "outbound and (tcp or (udp and udp.DstPort == 443))";
+
+/// The base filter for the current plan (before per-CIDR exclusions).
+fn base_network_filter(block_quic: bool) -> &'static str {
+    if block_quic {
+        NETWORK_FILTER_WITH_QUIC
+    } else {
+        NETWORK_FILTER
+    }
+}
+
 /// Kernel filter excluding destinations the packet loop would unconditionally
 /// pass through anyway.
 ///
@@ -147,8 +167,8 @@ const NETWORK_FILTER: &str = "tcp and outbound";
 ///
 /// Mixed address families are fine: an `ip.` test on an IPv6 packet (and vice
 /// versa) is simply false, so `not (…)` leaves the packet matched.
-fn build_network_filter(bypass_cidrs: &[String]) -> String {
-    let mut filter = String::from(NETWORK_FILTER);
+fn build_network_filter(bypass_cidrs: &[String], block_quic: bool) -> String {
+    let mut filter = String::from(base_network_filter(block_quic));
     for (net, prefix) in parse_cidrs(bypass_cidrs) {
         let (lo, hi) = cidr_range(net, prefix);
         let field = match net {
@@ -385,8 +405,12 @@ impl FlowTable {
 /// holding up every other packet on the host.
 #[derive(Debug, Default)]
 struct AppIndex {
-    /// local port → owning pid, for in-scope processes only.
+    /// local TCP port → owning pid, for in-scope processes only.
     ports: HashMap<u16, u32>,
+    /// local UDP port → owning pid, for in-scope processes only. Populated only
+    /// when `block_quic` is on; used to attribute UDP 443 (QUIC) to an in-scope
+    /// app so its QUIC is dropped while other apps' QUIC passes untouched.
+    udp_ports: HashMap<u16, u32>,
     /// pid → executable path, for in-scope processes only.
     paths: HashMap<u32, String>,
     pids: HashSet<u32>,
@@ -443,6 +467,10 @@ pub struct CaptureEngine {
     flows: Arc<Mutex<FlowMap>>,
     /// Client `(ip, port)` → the capture/bypass decision for its connection.
     redirects: Arc<Mutex<FlowTable>>,
+    /// UDP 443 (QUIC) drop/pass verdicts, keyed by client `(ip, sport)`. Kept
+    /// separate from `redirects` so a UDP and a TCP flow sharing a local port
+    /// cannot clobber each other's verdict. Only used when `block_quic` is on.
+    udp_verdicts: Arc<Mutex<FlowTable>>,
     /// Live plan shared with the divert threads. Published as a whole `Arc` so
     /// bypass lists can change mid-session (an xray core respawning with a new
     /// pid, a local proxy restarting) without tearing capture down.
@@ -465,6 +493,7 @@ impl CaptureEngine {
             net_handle: None,
             flows: Arc::new(Mutex::new(FlowMap::default())),
             redirects: Arc::new(Mutex::new(FlowTable::default())),
+            udp_verdicts: Arc::new(Mutex::new(FlowTable::default())),
             plan_live: Arc::new(Mutex::new(Arc::new(CapturePlan::default()))),
             packets_seen: Arc::new(AtomicU64::new(0)),
             packets_redirected: Arc::new(AtomicU64::new(0)),
@@ -593,21 +622,22 @@ impl CaptureEngine {
         // which still classifies them correctly — unlike the bare `"tcp"`
         // fallback this replaced, which also pulled in every inbound packet on
         // the machine for no benefit at all.
-        let narrowed = build_network_filter(&plan.bypass_cidrs);
+        let narrowed = build_network_filter(&plan.bypass_cidrs, plan.block_quic);
+        let base_filter = base_network_filter(plan.block_quic);
         let (net_h, filter_used) = match api.open(&narrowed, LAYER_NETWORK, 0, 0) {
             Ok(h) => (h, narrowed),
             Err(narrow_err) => {
                 tracing::warn!(
                     "sockscap-helper: narrowed filter rejected ({narrow_err}); \
-                     falling back to {NETWORK_FILTER:?}"
+                     falling back to {base_filter:?}"
                 );
-                let h = api.open(NETWORK_FILTER, LAYER_NETWORK, 0, 0).map_err(|e| {
+                let h = api.open(base_filter, LAYER_NETWORK, 0, 0).map_err(|e| {
                     format!(
-                        "WinDivert NETWORK open failed for filter {NETWORK_FILTER:?}: {e}. \
+                        "WinDivert NETWORK open failed for filter {base_filter:?}: {e}. \
                          Ensure WinDivert.dll/sys match (2.2+ x64) and the helper is elevated."
                     )
                 })?;
-                (h, NETWORK_FILTER.to_string())
+                (h, base_filter.to_string())
             }
         };
 
@@ -671,6 +701,7 @@ impl CaptureEngine {
         let stop = Arc::clone(&self.stop);
         let flows = Arc::clone(&self.flows);
         let redirects = Arc::clone(&self.redirects);
+        let udp_verdicts = Arc::clone(&self.udp_verdicts);
         let api_net = Arc::clone(&api);
         let net_handle = net_h as usize;
         let seen = Arc::clone(&self.packets_seen);
@@ -683,6 +714,7 @@ impl CaptureEngine {
                 net_handle as HANDLE,
                 flows,
                 redirects,
+                udp_verdicts,
                 plan_slot,
                 relay_port_live,
                 seen,
@@ -717,6 +749,9 @@ impl CaptureEngine {
             *m = FlowMap::default();
         }
         if let Ok(mut m) = self.redirects.lock() {
+            *m = FlowTable::default();
+        }
+        if let Ok(mut m) = self.udp_verdicts.lock() {
             *m = FlowTable::default();
         }
     }
@@ -896,6 +931,9 @@ fn compute_app_index(tree: &SharedTree, plan: &CapturePlan) -> AppIndex {
         }
     });
     idx.ports = port_owners_for_pids(&idx.pids);
+    if plan.block_quic {
+        idx.udp_ports = udp_port_owners_for_pids(&idx.pids);
+    }
     idx
 }
 
@@ -979,11 +1017,13 @@ fn flow_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn network_loop(
     api: Arc<WinDivertApi>,
     handle: HANDLE,
     flows: Arc<Mutex<FlowMap>>,
     redirects: Arc<Mutex<FlowTable>>,
+    udp_verdicts: Arc<Mutex<FlowTable>>,
     plan_slot: PlanSlot,
     relay_port_live: Arc<AtomicU16>,
     seen: Arc<AtomicU64>,
@@ -1052,6 +1092,29 @@ fn network_loop(
         let outbound = addr_is_outbound(&addr);
 
         let Some(tcp) = parse_ip_tcp(pkt) else {
+            // QUIC blocking: drop in-scope outbound UDP 443 so the app marks
+            // HTTP/3 broken and falls back to TCP — which capture attributes by
+            // SNI and routes through the upstream. Non-443 UDP and out-of-scope
+            // UDP 443 pass untouched. We never reflect UDP, only drop or pass.
+            if plan.block_quic && outbound {
+                if let Some(udp) = parse_ip_udp(pkt) {
+                    if udp.dport == 443
+                        && udp_should_drop(
+                            &plan,
+                            &bypass_nets,
+                            &tree,
+                            &udp_verdicts,
+                            (udp.src, udp.sport),
+                            udp.dst,
+                            udp.dport,
+                            &app_index,
+                        )
+                    {
+                        // Not sending = dropping the datagram.
+                        continue;
+                    }
+                }
+            }
             let _ = api.send(handle, pkt, &addr);
             continue;
         };
@@ -1259,6 +1322,125 @@ fn is_loopback_ip(ip: IpAddr) -> bool {
         IpAddr::V4(v) => v.is_loopback(),
         IpAddr::V6(v) => v.is_loopback(),
     }
+}
+
+/// Whether an outbound UDP 443 datagram should be dropped to force QUIC→TCP.
+///
+/// Caches the per-flow verdict in `udp_verdicts` (separate from the TCP table so
+/// a shared local port can't clobber it). `Redirect` means "in scope, drop";
+/// `Bypass` means "pass". A QUIC connection is many datagrams, so this is one
+/// classification then hash lookups; once the app falls back to TCP it stops
+/// sending UDP 443 and the load collapses.
+#[allow(clippy::too_many_arguments)]
+fn udp_should_drop(
+    plan: &CapturePlan,
+    bypass_nets: &[(IpAddr, u8)],
+    tree: &SharedTree,
+    udp_verdicts: &Arc<Mutex<FlowTable>>,
+    key: FlowKey,
+    dst: IpAddr,
+    dport: u16,
+    app_index: &AppIndex,
+) -> bool {
+    let now = Instant::now();
+    let cached = udp_verdicts
+        .lock()
+        .ok()
+        .and_then(|mut t| t.lookup(key, dst, dport, now));
+    match cached {
+        Some(FlowAction::Redirect) => return true,
+        Some(FlowAction::Bypass) => return false,
+        None => {}
+    }
+    let verdict = classify_flow_udp(plan, bypass_nets, tree, key, dst, dport, app_index);
+    let drop = matches!(verdict, FlowVerdict::Redirect(_));
+    if let Ok(mut t) = udp_verdicts.lock() {
+        t.insert(key, dst, dport, verdict, now);
+    }
+    drop
+}
+
+/// Classify a UDP flow the same way `classify_flow` does for TCP, but attributing
+/// via `udp_owner_pid` / `app_index.udp_ports` (UDP sockets are absent from the
+/// FLOW-layer `flows` map, which only tracks TCP). `Redirect` = in scope → drop
+/// its QUIC; `Bypass` = pass.
+fn classify_flow_udp(
+    plan: &CapturePlan,
+    bypass_nets: &[(IpAddr, u8)],
+    tree: &SharedTree,
+    key: FlowKey,
+    dst: IpAddr,
+    dport: u16,
+    app_index: &AppIndex,
+) -> FlowVerdict {
+    let (src, sport) = key;
+
+    // Destination-based bypass (endpoints / CIDRs / loopback). Cannot reuse
+    // `should_bypass`: it resolves pid from the TCP `flows` map, which has no
+    // UDP entries.
+    for e in &plan.bypass_endpoints {
+        if e.ip == dst && (e.port == 0 || e.port == dport) {
+            return FlowVerdict::Bypass;
+        }
+    }
+    for (net, prefix) in bypass_nets {
+        if ip_in_cidr(dst, *net, *prefix) {
+            return FlowVerdict::Bypass;
+        }
+    }
+    if is_loopback_ip(dst) {
+        return FlowVerdict::Bypass;
+    }
+
+    let (pid, path) = if plan.mode_apps {
+        if let Some(&pid) = app_index.udp_ports.get(&sport) {
+            let path = app_index.paths.get(&pid).cloned().unwrap_or_default();
+            (pid, path)
+        } else {
+            // Miss: attribute directly. Unattributable App-mode traffic is left
+            // alone (passed) — never drop something we cannot scope.
+            let Some(pid) = udp_owner_pid(src, sport) else {
+                return FlowVerdict::Bypass;
+            };
+            let path = tree
+                .with(|t| t.path_of(pid).map(|s| s.to_string()))
+                .flatten()
+                .or_else(|| process_path(pid))
+                .unwrap_or_default();
+            if !app_index.pids.contains(&pid) && !process_in_scope(plan, pid, &path, tree) {
+                return FlowVerdict::Bypass;
+            }
+            (pid, path)
+        }
+    } else {
+        // Global: in scope unless explicitly bypassed by pid/path. This protects
+        // the bundled xray core's own UDP egress (e.g. a WireGuard upstream),
+        // whose pid + path are in the bypass lists. Unattributable → drop (same
+        // as TCP global capture); a UDP socket is bound before its first
+        // datagram so `udp_owner_pid`'s forced re-read normally resolves it.
+        let pid = udp_owner_pid(src, sport).unwrap_or(0);
+        let path = if pid != 0 {
+            tree.with(|t| t.path_of(pid).map(|s| s.to_string()))
+                .flatten()
+                .or_else(|| process_path(pid))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        if (pid != 0 && plan.bypass_pids.contains(&pid)) || path_bypassed(plan, &path) {
+            return FlowVerdict::Bypass;
+        }
+        (pid, path)
+    };
+
+    FlowVerdict::Redirect(RedirectMapping {
+        orig_src: src,
+        orig_sport: sport,
+        orig_dst: dst,
+        orig_port: dport,
+        pid,
+        path,
+    })
 }
 
 /// Streamdump PORT→PROXY:
@@ -1598,6 +1780,59 @@ fn parse_ip_tcp(pkt: &[u8]) -> Option<TcpMeta> {
     }
 }
 
+/// Addresses and ports of an IPv4/IPv6 UDP packet (QUIC blocking path).
+#[derive(Debug, Clone, Copy)]
+struct UdpMeta {
+    src: IpAddr,
+    sport: u16,
+    dst: IpAddr,
+    dport: u16,
+}
+
+/// Parse UDP header addressing. IPv6 with extension headers is not chased: a
+/// non-UDP next-header returns `None`, so the datagram passes (safe side —
+/// worst case a QUIC packet leaks rather than an unrelated one being dropped).
+fn parse_ip_udp(pkt: &[u8]) -> Option<UdpMeta> {
+    if pkt.is_empty() {
+        return None;
+    }
+    let ver = pkt[0] >> 4;
+    if ver == 4 {
+        if pkt.len() < 28 {
+            return None;
+        }
+        let ihl = (pkt[0] & 0x0f) as usize * 4;
+        if ihl < 20 || pkt.len() < ihl + 8 || pkt[9] != 17 {
+            return None;
+        }
+        Some(UdpMeta {
+            src: IpAddr::V4(Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15])),
+            sport: u16::from_be_bytes([pkt[ihl], pkt[ihl + 1]]),
+            dst: IpAddr::V4(Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19])),
+            dport: u16::from_be_bytes([pkt[ihl + 2], pkt[ihl + 3]]),
+        })
+    } else if ver == 6 {
+        if pkt.len() < 40 + 8 {
+            return None;
+        }
+        if pkt[6] != 17 {
+            return None; // next header must be UDP (no extension-header walk)
+        }
+        let mut s = [0u8; 16];
+        let mut d = [0u8; 16];
+        s.copy_from_slice(&pkt[8..24]);
+        d.copy_from_slice(&pkt[24..40]);
+        Some(UdpMeta {
+            src: IpAddr::V6(Ipv6Addr::from(s)),
+            sport: u16::from_be_bytes([pkt[40], pkt[41]]),
+            dst: IpAddr::V6(Ipv6Addr::from(d)),
+            dport: u16::from_be_bytes([pkt[42], pkt[43]]),
+        })
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1612,6 +1847,7 @@ mod tests {
             bypass_endpoints: vec![],
             relay_ip: Ipv4Addr::LOCALHOST,
             relay_port: 0,
+            block_quic: false,
         }
     }
 
@@ -1794,11 +2030,14 @@ mod tests {
 
     #[test]
     fn network_filter_excludes_bypassed_destinations() {
-        let f = build_network_filter(&[
-            "127.0.0.0/8".into(),
-            "192.168.0.0/16".into(),
-            "::1/128".into(),
-        ]);
+        let f = build_network_filter(
+            &[
+                "127.0.0.0/8".into(),
+                "192.168.0.0/16".into(),
+                "::1/128".into(),
+            ],
+            false,
+        );
         assert!(f.starts_with("tcp and outbound"));
         assert!(f.contains("not (ip.DstAddr >= 127.0.0.0 and ip.DstAddr <= 127.255.255.255)"));
         assert!(f.contains("not (ip.DstAddr >= 192.168.0.0 and ip.DstAddr <= 192.168.255.255)"));
@@ -1807,10 +2046,45 @@ mod tests {
 
     #[test]
     fn network_filter_without_bypasses_is_the_base_filter() {
-        assert_eq!(build_network_filter(&[]), NETWORK_FILTER);
+        // block_quic off must be byte-identical to the pre-QUIC behaviour.
+        assert_eq!(build_network_filter(&[], false), NETWORK_FILTER);
         // Unparseable entries are skipped rather than producing broken syntax
         // that would make WinDivertOpen fail.
-        assert_eq!(build_network_filter(&["not-an-address".into()]), NETWORK_FILTER);
+        assert_eq!(
+            build_network_filter(&["not-an-address".into()], false),
+            NETWORK_FILTER
+        );
+    }
+
+    #[test]
+    fn network_filter_widens_to_udp_443_when_blocking_quic() {
+        let f = build_network_filter(&[], true);
+        assert_eq!(f, NETWORK_FILTER_WITH_QUIC);
+        assert!(f.contains("udp.DstPort == 443"));
+        // TCP is still captured alongside UDP 443.
+        assert!(f.contains("tcp"));
+        // CIDR exclusions still append (and apply to both families via DstAddr).
+        let g = build_network_filter(&["10.0.0.0/8".into()], true);
+        assert!(g.starts_with(NETWORK_FILTER_WITH_QUIC));
+        assert!(g.contains("not (ip.DstAddr >= 10.0.0.0 and ip.DstAddr <= 10.255.255.255)"));
+    }
+
+    #[test]
+    fn parses_udp_443_from_ipv4() {
+        let mut pkt = vec![0u8; 28];
+        pkt[0] = 0x45; // IPv4, ihl=5
+        pkt[9] = 17; // UDP
+        pkt[12..16].copy_from_slice(&[192, 168, 1, 10]);
+        pkt[16..20].copy_from_slice(&[93, 184, 216, 34]);
+        pkt[20..22].copy_from_slice(&54_000u16.to_be_bytes());
+        pkt[22..24].copy_from_slice(&443u16.to_be_bytes());
+
+        let meta = parse_ip_udp(&pkt).expect("valid IPv4 UDP packet");
+        assert_eq!(meta.sport, 54_000);
+        assert_eq!(meta.dport, 443);
+        assert_eq!(meta.dst, remote(34));
+        // A TCP parse of the same packet must fail (proto mismatch).
+        assert!(parse_ip_tcp(&pkt).is_none());
     }
 
     #[test]

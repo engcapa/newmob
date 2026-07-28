@@ -139,6 +139,10 @@ export interface SocksCapConfig {
   bypassCidrs: string[];
   defaultAction: Decision;
   restoreOnLogin: boolean;
+  /** Drop in-scope outbound UDP 443 so QUIC/HTTP3 falls back to TCP, which
+   *  capture can attribute (SNI) and route through the upstream. Without it QUIC
+   *  bypasses capture and leaks the real IP. Session-level; default on. */
+  blockQuic: boolean;
 }
 
 export interface SocksCapCapabilities {

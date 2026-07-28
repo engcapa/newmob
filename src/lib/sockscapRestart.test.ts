@@ -46,6 +46,7 @@ function cfg(profiles: SocksCapProfile[], activeIds?: string[]): SocksCapConfig 
     bypassCidrs: [],
     defaultAction: "direct",
     restoreOnLogin: false,
+    blockQuic: true,
   };
 }
 

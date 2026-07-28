@@ -2080,6 +2080,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
           bypassCidrs: ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"],
           defaultAction: "direct",
           restoreOnLogin: false,
+          blockQuic: true,
         };
       }
       if (!Array.isArray(cfg.profiles) || cfg.profiles.length === 0) {

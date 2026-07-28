@@ -79,6 +79,8 @@ mod windows_main {
         relay_ip: Option<String>,
         #[serde(default, rename = "relayPort")]
         relay_port: Option<u16>,
+        #[serde(default, rename = "blockQuic")]
+        block_quic: Option<bool>,
         #[serde(default, rename = "srcIp")]
         src_ip: Option<String>,
         #[serde(default, rename = "srcPort")]
@@ -381,6 +383,7 @@ mod windows_main {
                         .parse()
                         .unwrap_or(std::net::Ipv4Addr::new(127, 0, 0, 1)),
                     relay_port: req.relay_port.unwrap_or(0),
+                    block_quic: req.block_quic.unwrap_or(false),
                 };
                 if plan.relay_port == 0 {
                     return Response {

@@ -29,6 +29,14 @@ unsafe extern "system" {
         tableClass: u32,
         reserved: u32,
     ) -> u32;
+    fn GetExtendedUdpTable(
+        pUdpTable: *mut u8,
+        pdwSize: *mut DWORD,
+        bOrder: i32,
+        ulAf: u32,
+        tableClass: u32,
+        reserved: u32,
+    ) -> u32;
 }
 
 const AF_INET: u32 = 2;
@@ -36,6 +44,8 @@ const AF_INET6: u32 = 23;
 // TCP_TABLE_CLASS (iphlpapi.h)
 // 4 = OWNER_PID_CONNECTIONS, 5 = OWNER_PID_ALL (includes SYN_SENT etc.)
 const TCP_TABLE_OWNER_PID_ALL: u32 = 5;
+// UDP_TABLE_CLASS (iphlpapi.h): 1 = OWNER_PID.
+const UDP_TABLE_OWNER_PID: u32 = 1;
 const NO_ERROR: u32 = 0;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
@@ -326,6 +336,148 @@ pub fn port_owners_for_pids(
         return ports;
     }
     for row in list_tcp_owner_rows() {
+        if pids.contains(&row.pid) {
+            ports.insert(row.local_port, row.pid);
+        }
+    }
+    ports
+}
+
+// --- UDP owner-PID (QUIC blocking) --------------------------------------
+//
+// Mirrors the TCP owner path so UDP 443 (QUIC) can be attributed to a process
+// exactly as TCP connections are. Reuses `TcpOwnerRow` — the shape (local addr,
+// local port, pid) is identical; only the source table differs.
+
+fn read_udp_table(af: u32) -> Option<Vec<u8>> {
+    unsafe {
+        let mut size: DWORD = 0;
+        let r = GetExtendedUdpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            1,
+            af,
+            UDP_TABLE_OWNER_PID,
+            0,
+        );
+        if r != ERROR_INSUFFICIENT_BUFFER || size == 0 {
+            return None;
+        }
+        let mut buf = vec![0u8; size as usize];
+        let r = GetExtendedUdpTable(
+            buf.as_mut_ptr(),
+            &mut size,
+            1,
+            af,
+            UDP_TABLE_OWNER_PID,
+            0,
+        );
+        if r != NO_ERROR || buf.len() < 4 {
+            return None;
+        }
+        Some(buf)
+    }
+}
+
+/// Enumerate all IPv4/IPv6 UDP endpoints with owning PID.
+///
+/// `MIB_UDPROW_OWNER_PID` (v4, 12B): localAddr[4] + localPort(dword, port in low
+/// 2 bytes network order) + pid. `MIB_UDP6ROW_OWNER_PID` (v6, 28B): localAddr[16]
+/// + scopeId + localPort + pid.
+pub fn list_udp_owner_rows() -> Vec<TcpOwnerRow> {
+    let mut out = Vec::new();
+    if let Some(buf) = read_udp_table(AF_INET) {
+        let n = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        let row_size = 12usize;
+        for i in 0..n {
+            let off = 4 + i * row_size;
+            if off + row_size > buf.len() {
+                break;
+            }
+            let ip = Ipv4Addr::new(buf[off], buf[off + 1], buf[off + 2], buf[off + 3]);
+            let port = u16::from_be_bytes([buf[off + 4], buf[off + 5]]);
+            let pid = u32::from_le_bytes([buf[off + 8], buf[off + 9], buf[off + 10], buf[off + 11]]);
+            if pid != 0 && port != 0 {
+                out.push(TcpOwnerRow {
+                    local: IpAddr::V4(ip),
+                    local_port: port,
+                    pid,
+                });
+            }
+        }
+    }
+    if let Some(buf) = read_udp_table(AF_INET6) {
+        let n = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        let row_size = 28usize;
+        for i in 0..n {
+            let off = 4 + i * row_size;
+            if off + row_size > buf.len() {
+                break;
+            }
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&buf[off..off + 16]);
+            let ip = Ipv6Addr::from(a);
+            // localAddr[16] + scopeId[4] → port at off+20.
+            let port = u16::from_be_bytes([buf[off + 20], buf[off + 21]]);
+            let pid = u32::from_le_bytes([
+                buf[off + 24],
+                buf[off + 25],
+                buf[off + 26],
+                buf[off + 27],
+            ]);
+            if pid != 0 && port != 0 {
+                out.push(TcpOwnerRow {
+                    local: IpAddr::V6(ip),
+                    local_port: port,
+                    pid,
+                });
+            }
+        }
+    }
+    out
+}
+
+static UDP_TABLE_CACHE: Mutex<Option<(Instant, Arc<Vec<TcpOwnerRow>>)>> = Mutex::new(None);
+
+/// Shared UDP-table snapshot, re-read only when older than `max_age`. Same
+/// caching contract as `tcp_owner_rows_cached` — one enumeration serves a burst
+/// of new QUIC flows rather than one call per datagram.
+pub fn udp_owner_rows_cached(max_age: Duration) -> Arc<Vec<TcpOwnerRow>> {
+    let now = Instant::now();
+    if let Ok(guard) = UDP_TABLE_CACHE.lock() {
+        if let Some((at, rows)) = guard.as_ref() {
+            if now.duration_since(*at) <= max_age {
+                return Arc::clone(rows);
+            }
+        }
+    }
+    let rows = Arc::new(list_udp_owner_rows());
+    if let Ok(mut guard) = UDP_TABLE_CACHE.lock() {
+        *guard = Some((now, Arc::clone(&rows)));
+    }
+    rows
+}
+
+/// Owning PID of a local UDP endpoint. A UDP socket is bound before its first
+/// datagram, so the row exists by the time the packet reaches us; a miss forces
+/// one fresh read (at most once per new flow).
+pub fn udp_owner_pid(local: IpAddr, local_port: u16) -> Option<u32> {
+    if let Some(pid) = find_owner(&udp_owner_rows_cached(TCP_TABLE_CACHE_TTL), local, local_port) {
+        return Some(pid);
+    }
+    find_owner(&udp_owner_rows_cached(Duration::ZERO), local, local_port)
+}
+
+/// Local UDP ports owned by any of `pids`, mapped to their owner. App-mode
+/// index counterpart of `port_owners_for_pids`, for QUIC (UDP 443) attribution.
+pub fn udp_port_owners_for_pids(
+    pids: &std::collections::HashSet<u32>,
+) -> std::collections::HashMap<u16, u32> {
+    let mut ports = std::collections::HashMap::new();
+    if pids.is_empty() {
+        return ports;
+    }
+    for row in list_udp_owner_rows() {
         if pids.contains(&row.pid) {
             ports.insert(row.local_port, row.pid);
         }

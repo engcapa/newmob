@@ -51,6 +51,14 @@ impl SystemProxyScope {
     ///
     /// A partial failure is rolled back: leaving some services aimed at a port
     /// we are about to abandon would black-hole the user's network.
+    //
+    // TODO(sockscap-quic): setting the SOCKS proxy does not steer UDP, so QUIC
+    // (UDP 443) bypasses SocksCap entirely and leaks the real IP — the exact leak
+    // Windows/Linux fix by dropping in-scope UDP 443 (see
+    // claudedocs/sockscap-quic-block-design.md §12.3). When honoring
+    // config.block_quic on macOS, add a `pf` anchor here (installed/removed with
+    // this scope) dropping outbound UDP 443, respecting the same bypass set as
+    // TCP capture (upstream endpoint, loopback, LAN CIDRs).
     pub fn apply(port: u16, sudo_password: Option<&str>) -> Result<Self, String> {
         preflight(sudo_password)?;
         let services = list_network_services(sudo_password)?;

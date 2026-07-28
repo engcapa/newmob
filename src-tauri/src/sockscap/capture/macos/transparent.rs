@@ -84,6 +84,14 @@ pub async fn start(
 ) -> Result<MacosTransparentCaptureHandle, String> {
     let sudo_password = sudo_password.map(|password| Arc::new(Zeroizing::new(password)));
 
+    // TODO(sockscap-quic): honor config.block_quic on the macOS transparent NE
+    // backend (see claudedocs/sockscap-quic-block-design.md §12.3). The provider
+    // could see UDP 443 and drop it (forcing QUIC→TCP fallback), but the current
+    // ingress only handles TCP (reads a SOCKS5/HTTP CONNECT handshake); no UDP
+    // path exists. When implemented, the drop must cover the same in-scope set as
+    // TCP capture and pass bypassed flows. `block_quic` is session-level in
+    // SocksCapConfig and is currently unused on macOS.
+
     // 1) Loopback ingress the provider relays handled flows into.
     let ingress = ingress::start_ingress(ctx, None).await?;
     let ingress_port = ingress.handle.port;

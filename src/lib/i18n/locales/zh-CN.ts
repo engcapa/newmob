@@ -1291,6 +1291,9 @@ export const zhCN: DeepPartial<typeof en> = {
     gfwUrl: "GFWList URL",
     refreshGfw: "刷新 GFWList",
     importGfw: "导入文件…",
+    blockQuic: "拦截 QUIC（强制 HTTP/3 回退 TCP）",
+    blockQuicHint:
+      "丢弃被捕获应用的 UDP 443，使 QUIC 回退到 TCP，SocksCap 才能经上游代理转发。否则 QUIC 绕过捕获、泄漏真实 IP（网站可能提示地区不允许）。关闭后，范围内应用将直接使用 QUIC。",
     importDesktopOnly: "导入本地规则文件需要桌面版。",
     gfwRefreshed: "GFWList 已加载（{count} 条）",
     gfwImported: "已导入规则（{count} 条）",

@@ -41,6 +41,7 @@ const defaultTestCfg: SocksCapConfig = {
   bypassCidrs: ["127.0.0.0/8"],
   defaultAction: "direct",
   restoreOnLogin: false,
+  blockQuic: true,
 };
 
 let currentCfg = { ...defaultTestCfg };

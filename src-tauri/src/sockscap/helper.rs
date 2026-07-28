@@ -74,6 +74,8 @@ pub struct CaptureStartArgs {
     pub bypass_endpoints: Vec<(String, u16)>,
     pub relay_ip: String,
     pub relay_port: u16,
+    /// Drop in-scope outbound UDP 443 so QUIC falls back to TCP (see design doc).
+    pub block_quic: bool,
 }
 
 impl HelperRegistry {
@@ -638,6 +640,7 @@ pub fn capture_start(sess: &HelperSession, args: &CaptureStartArgs) -> Result<se
         "bypassEndpoints": endpoints,
         "relayIp": args.relay_ip,
         "relayPort": args.relay_port,
+        "blockQuic": args.block_quic,
     });
     expect_ok(send_json(sess, body)?)
 }

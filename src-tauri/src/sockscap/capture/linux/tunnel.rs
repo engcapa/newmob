@@ -74,9 +74,14 @@ pub struct RedirectPlan {
     pub bypass_cgroup: Option<CgroupV2Match>,
     pub capture_cgroups: Vec<CgroupV2Match>,
     capture_relay_ports: Vec<u16>,
+    /// Drop in-scope outbound UDP 443 (QUIC) so it falls back to TCP, which the
+    /// redirect path attributes by SNI and proxies. Renders an extra filter-hook
+    /// chain in the same table. See claudedocs/sockscap-quic-block-design.md §12.2.
+    pub block_quic: bool,
 }
 
 impl RedirectPlan {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mode: ScopeMode,
         relay_port: u16,
@@ -84,6 +89,7 @@ impl RedirectPlan {
         bypass_cidrs: &[String],
         bypass_cgroup: Option<CgroupV2Match>,
         capture_cgroups: &[CgroupV2Match],
+        block_quic: bool,
     ) -> Result<Self, String> {
         if relay_port == 0 {
             return Err("Linux relay port must be non-zero".into());
@@ -100,6 +106,7 @@ impl RedirectPlan {
             bypass_cgroup,
             capture_cgroups: capture_cgroups.to_vec(),
             capture_relay_ports: vec![relay_port; capture_cgroups.len()],
+            block_quic,
         };
         plan.validate()?;
         Ok(plan)
@@ -109,6 +116,7 @@ impl RedirectPlan {
         redirect_ipv6: bool,
         bypass_cidrs: &[String],
         routes: &[(CgroupV2Match, u16)],
+        block_quic: bool,
     ) -> Result<Self, String> {
         let relay_port = routes
             .first()
@@ -130,6 +138,7 @@ impl RedirectPlan {
             bypass_cgroup: None,
             capture_cgroups,
             capture_relay_ports,
+            block_quic,
         };
         plan.validate()?;
         Ok(plan)
@@ -187,8 +196,54 @@ impl RedirectPlan {
             }
         }
 
-        script.push_str("  }\n}\n");
+        // Close the nat output chain.
+        script.push_str("  }\n");
+
+        // QUIC blocking lives in a separate filter-hook chain in the same table:
+        // a nat-type chain cannot `drop`. Same table → atomic install/remove and
+        // one ownership marker. nat (dstnat) runs before filter, so an in-scope
+        // TCP packet is already redirected (dport = relay) and never matches the
+        // udp/443 rule; an in-scope UDP 443 datagram passes nat untouched and is
+        // dropped here, forcing QUIC→TCP fallback.
+        if self.block_quic {
+            self.render_quic_block_chain(&mut script);
+        }
+
+        script.push_str("}\n");
         script
+    }
+
+    /// Render the `quic_block` filter chain. Places the same loopback / bypass
+    /// CIDR (and, in global mode, bypass-cgroup) returns as the redirect chain
+    /// *before* the drop, so any egress already protected from the redirect loop
+    /// (Taomni + its child xray cores) is equally protected here — QUIC blocking
+    /// adds no new bypass surface. App mode drops only per capture cgroup, so
+    /// out-of-scope apps' QUIC is untouched.
+    fn render_quic_block_chain(&self, script: &mut String) {
+        script.push_str("  chain quic_block {\n");
+        script.push_str("    type filter hook output priority filter; policy accept;\n");
+        script.push_str("    ip daddr 127.0.0.0/8 return\n");
+        script.push_str("    ip6 daddr ::1/128 return\n");
+        for cidr in &self.bypass_cidrs {
+            script.push_str(&cidr.render_return_rule());
+        }
+        match self.mode {
+            ScopeMode::Global => {
+                if let Some(cgroup) = self.bypass_cgroup.as_ref() {
+                    script.push_str(&format!("    {} return\n", cgroup.nft_expression()));
+                }
+                script.push_str("    udp dport 443 drop\n");
+            }
+            ScopeMode::Apps => {
+                for cgroup in &self.capture_cgroups {
+                    script.push_str(&format!(
+                        "    {} udp dport 443 drop\n",
+                        cgroup.nft_expression()
+                    ));
+                }
+            }
+        }
+        script.push_str("  }\n");
     }
 
     fn render_redirect_rule(&self, script: &mut String, prefix: &str, relay_port: u16) {
@@ -384,6 +439,7 @@ mod tests {
             &["10.0.0.0/8".into(), "fd00::/8".into()],
             Some(bypass),
             &[],
+            false,
         )
         .unwrap();
         let script = plan.render_nft_script();
@@ -405,7 +461,8 @@ mod tests {
             CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-11").unwrap(),
             CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-22").unwrap(),
         ];
-        let plan = RedirectPlan::new(ScopeMode::Apps, 15000, true, &[], None, &captures).unwrap();
+        let plan =
+            RedirectPlan::new(ScopeMode::Apps, 15000, true, &[], None, &captures, false).unwrap();
         let script = plan.render_nft_script();
         assert!(script.contains(
             "socket cgroupv2 level 2 \"taomni-sockscap-42/capture-11\" meta l4proto tcp redirect to :15000"
@@ -429,7 +486,7 @@ mod tests {
                 16000,
             ),
         ];
-        let plan = RedirectPlan::new_app_routes(true, &[], &routes).unwrap();
+        let plan = RedirectPlan::new_app_routes(true, &[], &routes, false).unwrap();
         let script = plan.render_nft_script();
         assert!(script.contains(
             "socket cgroupv2 level 2 \"taomni-sockscap-42/capture-profile-0\" meta l4proto tcp redirect to :15000"
@@ -451,12 +508,75 @@ mod tests {
     fn avoids_ipv6_redirect_when_the_loopback_listener_is_unavailable() {
         let captures =
             [CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-11").unwrap()];
-        let plan = RedirectPlan::new(ScopeMode::Apps, 15000, false, &[], None, &captures).unwrap();
+        let plan =
+            RedirectPlan::new(ScopeMode::Apps, 15000, false, &[], None, &captures, false).unwrap();
         assert!(
             plan.render_nft_script()
                 .contains(
                     "socket cgroupv2 level 2 \"taomni-sockscap-42/capture-11\" ip protocol tcp redirect to :15000"
                 )
         );
+    }
+
+    #[test]
+    fn no_quic_block_chain_when_block_quic_is_off() {
+        // Regression guard: block_quic=false must render exactly as before.
+        let bypass = CgroupV2Match::from_relative_path("taomni-sockscap-42/bypass").unwrap();
+        let plan =
+            RedirectPlan::new(ScopeMode::Global, 18443, true, &[], Some(bypass), &[], false)
+                .unwrap();
+        let script = plan.render_nft_script();
+        assert!(!script.contains("quic_block"));
+        assert!(!script.contains("udp dport 443"));
+    }
+
+    #[test]
+    fn global_quic_block_drops_after_bypass_returns() {
+        let bypass = CgroupV2Match::from_relative_path("taomni-sockscap-42/bypass").unwrap();
+        let plan = RedirectPlan::new(
+            ScopeMode::Global,
+            18443,
+            true,
+            &["10.0.0.0/8".into()],
+            Some(bypass),
+            &[],
+            true,
+        )
+        .unwrap();
+        let script = plan.render_nft_script();
+        assert!(script.contains("chain quic_block"));
+        assert!(script.contains("type filter hook output priority filter"));
+        assert!(script.contains("udp dport 443 drop"));
+        // The drop must come after the bypass-cgroup return, or the relay's own
+        // (and xray's) UDP egress would be dropped.
+        let bypass_return =
+            "socket cgroupv2 level 2 \"taomni-sockscap-42/bypass\" return";
+        let block_body = &script[script.find("chain quic_block").unwrap()..];
+        assert!(block_body.contains(bypass_return));
+        assert!(block_body.find(bypass_return).unwrap() < block_body.find("udp dport 443 drop").unwrap());
+        // Loopback + bypass CIDR returns are present in the block chain too.
+        assert!(block_body.contains("ip daddr 127.0.0.0/8 return"));
+        assert!(block_body.contains("ip daddr 10.0.0.0/8 return"));
+    }
+
+    #[test]
+    fn app_quic_block_drops_only_per_capture_cgroup() {
+        // Out-of-scope apps must keep QUIC: no bare `udp dport 443 drop`, only
+        // per-capture-cgroup drops.
+        let captures = [
+            CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-profile-0").unwrap(),
+            CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-profile-1").unwrap(),
+        ];
+        let plan =
+            RedirectPlan::new(ScopeMode::Apps, 15000, true, &[], None, &captures, true).unwrap();
+        let script = plan.render_nft_script();
+        assert!(script.contains(
+            "socket cgroupv2 level 2 \"taomni-sockscap-42/capture-profile-0\" udp dport 443 drop"
+        ));
+        assert!(script.contains(
+            "socket cgroupv2 level 2 \"taomni-sockscap-42/capture-profile-1\" udp dport 443 drop"
+        ));
+        // No unconditional drop that would hit out-of-scope apps.
+        assert!(!script.contains("\n    udp dport 443 drop\n"));
     }
 }
