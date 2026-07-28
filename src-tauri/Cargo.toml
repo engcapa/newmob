@@ -31,6 +31,9 @@ bench = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 prost-build = "0.14"
+# Compiles the macOS Network Extension activation shim (Objective-C) into the
+# binary on macOS only; see build.rs `compile_macos_ne_shim`.
+cc = "1"
 
 [dependencies]
 # SocksCap capture-plane primitives (macOS transparent-proxy decision + control
