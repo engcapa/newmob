@@ -18,10 +18,12 @@ describe("EditorSelectionAiToolbar", () => {
       />,
     );
     fireEvent.click(screen.getByText("Explain"));
+    fireEvent.click(screen.getByText("Syntax"));
     fireEvent.click(screen.getByText("Fix"));
     fireEvent.click(screen.getByText("Ask AI"));
     fireEvent.click(screen.getByTitle("Dismiss AI toolbar"));
     expect(onAction).toHaveBeenCalledWith("explain", "const value = 1;");
+    expect(onAction).toHaveBeenCalledWith("syntax", "const value = 1;");
     expect(onAction).toHaveBeenCalledWith("fix", "const value = 1;");
     expect(onAction).toHaveBeenCalledWith("rewrite", "const value = 1;");
     expect(onDismiss).toHaveBeenCalledTimes(1);

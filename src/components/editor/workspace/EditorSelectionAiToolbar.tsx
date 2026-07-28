@@ -1,6 +1,6 @@
-import { BookOpen, Sparkles, WandSparkles, X } from "lucide-react";
+import { BookOpen, GraduationCap, Sparkles, WandSparkles, X } from "lucide-react";
 
-export type EditorAiAction = "explain" | "fix" | "rewrite";
+export type EditorAiAction = "explain" | "syntax" | "fix" | "rewrite";
 
 interface EditorSelectionAiToolbarProps {
   visible: boolean;
@@ -25,7 +25,7 @@ export function EditorSelectionAiToolbar({
   const PADDING = 8;
   const placeAbove = rect.top > TOOLBAR_HEIGHT + PADDING;
   const top = placeAbove ? rect.top - TOOLBAR_HEIGHT - PADDING : rect.bottom + PADDING;
-  const left = Math.max(8, Math.min(rect.left, window.innerWidth - 320));
+  const left = Math.max(8, Math.min(rect.left, window.innerWidth - 420));
 
   return (
     <div
@@ -43,6 +43,16 @@ export function EditorSelectionAiToolbar({
       >
         <BookOpen className="h-3.5 w-3.5" />
         Explain
+      </button>
+      <button
+        type="button"
+        className="h-7 inline-flex items-center gap-1 rounded px-2 text-[11px] text-[var(--taomni-code-text)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-40"
+        disabled={busy}
+        title="Explain the language syntax used in the selection"
+        onClick={() => onAction("syntax", selectionText)}
+      >
+        <GraduationCap className="h-3.5 w-3.5" />
+        Syntax
       </button>
       <button
         type="button"
