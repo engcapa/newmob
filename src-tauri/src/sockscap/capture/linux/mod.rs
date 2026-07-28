@@ -242,6 +242,7 @@ impl LinuxCapture for LinuxCaptureImpl {
                     &config.bypass_cidrs,
                     session.bypass_match(),
                     &[],
+                    config.block_quic,
                 ),
                 CaptureScope::Apps(_) => {
                     let routes = session
@@ -254,6 +255,7 @@ impl LinuxCapture for LinuxCaptureImpl {
                         redirect_ipv6,
                         &config.bypass_cidrs,
                         &routes,
+                        config.block_quic,
                     )
                 }
             }

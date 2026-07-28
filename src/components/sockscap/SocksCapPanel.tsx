@@ -141,6 +141,7 @@ const DEFAULT_CFG: SocksCapConfig = {
   ],
   defaultAction: "direct",
   restoreOnLogin: false,
+  blockQuic: true,
 };
 
 type SessionOpt = { id: string; name: string; host: string; port: number; kind: "proxy" | "ssh"; groupPath?: string | null };
@@ -2404,6 +2405,32 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                 </button>
               </div>
             </div>
+
+            {/* Session-level QUIC blocking (forces QUIC→TCP so capture can proxy it). */}
+            <label
+              className="mt-3 flex items-start gap-2 text-[12px] cursor-pointer select-none"
+              title={locked ? t("sockscap.lockedTooltip") : undefined}
+            >
+              <input
+                type="checkbox"
+                data-testid="sockscap-block-quic"
+                checked={cfg.blockQuic ?? true}
+                disabled={locked || busy}
+                onChange={(e) => {
+                  if (!cfg) return;
+                  void persistConfig({ ...cfg, blockQuic: e.target.checked });
+                }}
+                className="mt-0.5 rounded border-[var(--taomni-divider)] text-[var(--taomni-accent)] focus:ring-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              />
+              <span className="flex-1">
+                <span className="font-medium text-[var(--taomni-text)]">
+                  {t("sockscap.blockQuic")}
+                </span>
+                <span className="block text-[11px] text-[var(--taomni-text-muted)]">
+                  {t("sockscap.blockQuicHint")}
+                </span>
+              </span>
+            </label>
           </Section>
 
           {/* Captured Domains & Traffic Table */}

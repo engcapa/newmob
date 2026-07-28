@@ -1298,6 +1298,9 @@ const dict = {
     gfwUrl: "GFWList URL",
     refreshGfw: "Refresh GFWList",
     importGfw: "Import file…",
+    blockQuic: "Block QUIC (force HTTP/3 → TCP)",
+    blockQuicHint:
+      "Drops captured apps' UDP 443 so QUIC falls back to TCP, which SocksCap can route through the upstream. Without it, QUIC bypasses capture and leaks your real IP (sites may report a disallowed region). Turning it off lets in-scope apps use QUIC directly.",
     importDesktopOnly: "Importing a local rules file requires the desktop app.",
     gfwRefreshed: "GFWList loaded ({count} rules)",
     gfwImported: "Imported rules ({count})",

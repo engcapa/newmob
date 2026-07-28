@@ -338,6 +338,15 @@ pub struct SocksCapConfig {
     pub bypass_cidrs: Vec<String>,
     #[serde(default)]
     pub restore_on_login: bool,
+    /// Drop outbound UDP 443 for in-scope flows so QUIC/HTTP3 falls back to TCP,
+    /// which the capture path can attribute (SNI) and proxy. Without this, QUIC
+    /// bypasses capture entirely (Windows filter is TCP-only, Linux redirect is
+    /// TCP-only) and leaks the real client IP — breaking geo-restricted sites
+    /// that the TCP path would have routed through the upstream. Session-level,
+    /// shared by all capture backends. Default on. See
+    /// claudedocs/sockscap-quic-block-design.md.
+    #[serde(default = "default_true")]
+    pub block_quic: bool,
 }
 
 fn default_bypass_cidrs() -> Vec<String> {
@@ -368,6 +377,7 @@ impl Default for SocksCapConfig {
             bypass_cidrs: default_bypass_cidrs(),
             default_action: Decision::Direct,
             restore_on_login: false,
+            block_quic: default_true(),
         };
         cfg.normalize();
         cfg
@@ -498,6 +508,29 @@ mod tests {
         assert!(!back.bypass_cidrs.is_empty());
         assert_eq!(back.profiles.len(), 1);
         assert_eq!(back.active_profile_ids, vec!["default"]);
+        assert!(back.block_quic, "block_quic defaults on");
+    }
+
+    #[test]
+    fn block_quic_defaults_on_for_configs_without_the_field() {
+        // Old configs predate block_quic; they must load with it enabled so the
+        // QUIC-leak fix applies on upgrade without a migration step.
+        let old_json = r#"{
+            "enabled": true,
+            "profiles": [{
+                "id": "p1", "name": "old",
+                "upstream": {"kind": "socks5", "host": "1.2.3.4", "port": 1080}
+            }],
+            "activeProfileIds": ["p1"],
+            "selectedProfileId": "p1"
+        }"#;
+        let mut cfg: SocksCapConfig = serde_json::from_str(old_json).unwrap();
+        cfg.normalize();
+        assert!(cfg.block_quic);
+        // And an explicit false is honored.
+        let off: SocksCapConfig =
+            serde_json::from_str(r#"{"enabled": true, "blockQuic": false}"#).unwrap();
+        assert!(!off.block_quic);
     }
 
     #[test]

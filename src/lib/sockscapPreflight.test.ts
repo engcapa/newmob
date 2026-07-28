@@ -47,6 +47,7 @@ function mkCfg(profiles: SocksCapProfile[]): SocksCapConfig {
     bypassCidrs: [],
     defaultAction: "direct",
     restoreOnLogin: false,
+    blockQuic: true,
   };
 }
 

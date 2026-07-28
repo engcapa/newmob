@@ -89,6 +89,15 @@ pub async fn start(
     let sudo_pw = sudo_password.as_deref().map(|password| password.as_str());
     preflight(config, sudo_pw)?;
 
+    // TODO(sockscap-quic): honor config.block_quic on macOS to force QUIC→TCP
+    // fallback (see claudedocs/sockscap-quic-block-design.md §12.3). Windows and
+    // Linux drop in-scope outbound UDP 443; the system-proxy backend does not
+    // capture UDP at all, so QUIC leaks the real IP here. Blocking would need a
+    // `pf` anchor dropping UDP 443 for in-scope traffic (respecting the same
+    // bypass set as TCP capture: upstream endpoint, loopback, LAN CIDRs), or
+    // moving to the transparent NE backend. `block_quic` is session-level in
+    // SocksCapConfig; it is currently unused on macOS.
+
     let ingress = ingress::start_ingress(ctx, None).await?;
     let ingress_port = ingress.handle.port;
 

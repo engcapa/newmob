@@ -1352,6 +1352,7 @@ async fn start_windows_capture(
         // Unused for streamdump reflection dest (kept for helper JSON compat).
         relay_ip: "0.0.0.0".into(),
         relay_port: relay_handle.port,
+        block_quic: cfg.block_quic,
     };
 
     if args.mode_apps && args.app_paths.is_empty() {
