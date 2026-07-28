@@ -298,6 +298,59 @@ function isJavaBuildFile(languagePath: string): boolean {
     || name === "settings.gradle.kts";
 }
 
+const LANGUAGE_DISPLAY_NAMES: Record<string, string> = {
+  js: "JavaScript",
+  jsx: "JavaScript (JSX)",
+  mjs: "JavaScript",
+  cjs: "JavaScript",
+  ts: "TypeScript",
+  tsx: "TypeScript (TSX)",
+  json: "JSON",
+  jsonc: "JSON",
+  py: "Python",
+  pyi: "Python",
+  rs: "Rust",
+  java: "Java",
+  kt: "Kotlin",
+  kts: "Kotlin",
+  go: "Go",
+  css: "CSS",
+  scss: "SCSS",
+  less: "Less",
+  html: "HTML",
+  htm: "HTML",
+  vue: "Vue",
+  svelte: "Svelte",
+  md: "Markdown",
+  markdown: "Markdown",
+  xml: "XML",
+  svg: "SVG",
+  yaml: "YAML",
+  yml: "YAML",
+  c: "C",
+  h: "C/C++",
+  cc: "C++",
+  cpp: "C++",
+  cxx: "C++",
+  hpp: "C++",
+  hxx: "C++",
+  php: "PHP",
+  sql: "SQL",
+  sh: "Shell",
+  bash: "Shell",
+  rb: "Ruby",
+  swift: "Swift",
+  cs: "C#",
+  toml: "TOML",
+};
+
+/** Best-effort human-readable language name for a path, used to focus AI syntax prompts. */
+function languageDisplayNameForPath(languagePath: string): string | null {
+  const name = languagePath.toLowerCase();
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : name;
+  return LANGUAGE_DISPLAY_NAMES[ext] ?? null;
+}
+
 // Keep document synchronization ahead of the comparatively expensive derived
 // LSP features.  In particular, rust-analyzer semantic tokens can be large
 // enough that applying them while somebody is still typing is noticeable.
@@ -2026,6 +2079,28 @@ export function CodeWorkspaceTab({
       ].join("\n"));
       setEditorAiSelection(null);
       setStatusMessage("Staged explain request in AI chat");
+      return;
+    }
+    if (action === "syntax") {
+      // Teaching-focused: explain the language syntax/grammar rather than what the code does.
+      const language = languageDisplayNameForPath(file.languagePath);
+      await attachToComposer([
+        `请把下面这段代码当作教学示例，讲解其中用到的语言语法与写法，帮助我打好语言基础。请覆盖：`,
+        `1. 逐一说明用到的语法结构、关键字和语言特性（例如声明方式、控制流、类型、作用域、异步、装饰器/宏、泛型等），解释它们的含义和规则；`,
+        `2. 为什么这里会这样写，这种写法解决了什么问题、有什么好处或注意事项（可读性、性能、安全、惯用法等）；`,
+        `3. 还有哪些等价的其它写法，并对比各自的优缺点；`,
+        `4. 在这个场景下哪种写法更合适，给出你的推荐和理由。`,
+        `请用通俗易懂的方式讲解，必要时配简短示例。`,
+        "",
+        ...(language ? [`语言: ${language}`] : []),
+        `文件: ${pathLabel}`,
+        "",
+        "```",
+        text,
+        "```",
+      ].join("\n"));
+      setEditorAiSelection(null);
+      setStatusMessage("Staged syntax explanation request in AI chat");
       return;
     }
     if (action === "fix") {
