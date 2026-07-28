@@ -586,6 +586,7 @@ pub fn run() {
             sockscap::sockscap_status,
             sockscap::sockscap_start,
             sockscap::sockscap_stop,
+            sockscap::sockscap_prepare_for_update,
             sockscap::sockscap_recover,
             sockscap::sockscap_stats_snapshot,
             sockscap::sockscap_get_domain_records,

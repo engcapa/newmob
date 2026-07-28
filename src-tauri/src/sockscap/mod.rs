@@ -1481,6 +1481,116 @@ pub async fn sockscap_stop(
     Ok(orch.status())
 }
 
+/// Release every privileged file the auto-updater is about to overwrite, so an
+/// in-place upgrade does not fail with "Error opening file for writing".
+///
+/// The lock the installer trips over is a kernel one: while SocksCap captures,
+/// WinDivert is loaded and Windows keeps `WinDivert64.sys` locked until the last
+/// handle to it closes and the driver unloads. `sockscap-helper.exe` and
+/// `WinDivert.dll` are locked too, as the running helper's own image.
+///
+/// The NSIS installer *cannot* release these on a per-user (`currentUser`)
+/// install: it runs unelevated, so its `taskkill /F` against the UAC-elevated
+/// helper and its `sc stop WinDivert` both get Access Denied. The app can,
+/// though — not by elevating itself, but by asking the helper (over the control
+/// channel it already owns) to close its WinDivert handles and exit. Closing the
+/// handles unloads the driver (freeing the `.sys`); exiting frees the exe/DLL.
+///
+/// Best-effort throughout: SocksCap not running, or the helper already gone, is
+/// the normal case and must not block the update. Windows-only work; a no-op
+/// elsewhere (returns immediately) since no other platform locks files this way.
+#[tauri::command]
+pub async fn sockscap_prepare_for_update(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // 1) Stop capture: closes WinDivert NETWORK/FLOW handles → driver unloads →
+    //    `WinDivert64.sys` becomes writable. Also stops relay + xray sidecars.
+    //    A teardown error here is not fatal to the update — the helper shutdown
+    //    below and the installer's own preinstall hook are the further backstops.
+    if let Err(e) = full_teardown(&app, &state, true).await {
+        tracing::warn!("sockscap: prepare-for-update teardown incomplete: {e}");
+    }
+
+    // 2) Ask the elevated helper to exit, freeing `sockscap-helper.exe` and
+    //    `WinDivert.dll`. Reuses the same shutdown path as the Stop button.
+    if let Err(e) = helper::sockscap_helper_stop(state.clone()).await {
+        tracing::warn!("sockscap: prepare-for-update helper stop failed: {e}");
+    }
+
+    // 3) The driver unload is asynchronous, so poll until the files the installer
+    //    overwrites are actually releasable (or a short deadline passes).
+    #[cfg(windows)]
+    wait_for_privileged_files_unlocked(&app).await;
+
+    Ok(())
+}
+
+/// Poll the bundled privileged files until each is openable for writing (i.e.
+/// no longer locked by a live driver/helper), or a short deadline elapses.
+///
+/// Only the install-directory copies matter: those are what the updater
+/// overwrites. When runtime staging is active the loaded driver's `.sys` lives
+/// under app-data instead, so the install-directory copy is never locked and
+/// this returns on the first probe.
+#[cfg(windows)]
+async fn wait_for_privileged_files_unlocked(app: &AppHandle) {
+    use std::time::{Duration, Instant};
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = paths::resolve_windivert_dir(app) {
+        files.push(dir.join("WinDivert64.sys"));
+        files.push(dir.join("WinDivert.dll"));
+    }
+    if let Ok(helper_exe) = paths::resolve_helper_exe(app) {
+        files.push(helper_exe);
+    }
+    if let Some(xray_exe) = paths::resolve_xray_exe(app) {
+        files.push(xray_exe);
+    }
+    files.retain(|p| p.is_file());
+    if files.is_empty() {
+        return;
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(6);
+    loop {
+        let still_locked: Vec<&PathBuf> = files.iter().filter(|p| is_file_locked(p)).collect();
+        if still_locked.is_empty() {
+            tracing::info!("sockscap: privileged files released; safe to upgrade");
+            return;
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                "sockscap: {} privileged file(s) still locked after wait; \
+                 the installer may prompt to retry/ignore: {:?}",
+                still_locked.len(),
+                still_locked
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+/// True when `path` cannot be opened for writing because something holds it with
+/// a sharing violation (a loaded driver or running image). An unrelated failure
+/// (access denied, not found) is treated as "not our lock" so we never wait on
+/// something stopping the helper would not fix.
+#[cfg(windows)]
+fn is_file_locked(path: &std::path::Path) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    // Open for write without truncation: probes the lock without altering bytes.
+    match std::fs::OpenOptions::new().write(true).open(path) {
+        Ok(_) => false,
+        Err(e) => matches!(
+            e.raw_os_error(),
+            Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+        ),
+    }
+}
+
 #[tauri::command]
 pub async fn sockscap_recover(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Even if stopping the active session was incomplete, recovery gets one

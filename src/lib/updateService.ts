@@ -113,9 +113,35 @@ export async function checkForUpdate(target?: string): Promise<AvailableUpdate |
 }
 
 /**
- * Download + install the update for `target`, then leave the app running until
- * the caller decides to relaunch (confirmation gate #2). Reuses the Update from
- * a prior checkForUpdate(target) when available.
+ * Release SocksCap's privileged files before the installer overwrites them.
+ *
+ * On Windows, while SocksCap captures, the WinDivert kernel driver keeps
+ * `WinDivert64.sys` locked and the elevated helper keeps its own exe + DLL
+ * locked. A per-user installer runs unelevated and cannot stop either, so the
+ * upgrade would fail with "Error opening file for writing". The app asks its
+ * elevated helper to close the driver handles and exit first. Best-effort: a
+ * failure here must not block the install (the installer's preinstall hook is a
+ * further backstop), and it is a Windows-only concern.
+ */
+async function prepareSocksCapForUpgrade(): Promise<void> {
+  if (!isTauriRuntime() || getAppPlatform() !== "windows") return;
+  try {
+    await invoke("sockscap_prepare_for_update");
+  } catch (e) {
+    // Non-fatal: proceed with the install regardless.
+    console.warn("sockscap prepare-for-update failed; continuing with install", e);
+  }
+}
+
+/**
+ * Download the update for `target`, release SocksCap's locked files (Windows),
+ * then install — leaving the app running until the caller decides to relaunch
+ * (confirmation gate #2). Reuses the Update from a prior checkForUpdate(target)
+ * when available.
+ *
+ * Download and install are run as separate steps (not `downloadAndInstall`) so
+ * SocksCap can be torn down in between: capture must keep working during the
+ * download, but the driver/helper must be gone before the installer writes.
  */
 export async function downloadAndInstall(
   target: string | undefined,
@@ -135,7 +161,7 @@ export async function downloadAndInstall(
 
   let total: number | null = null;
   let downloaded = 0;
-  await update.downloadAndInstall((event) => {
+  await update.download((event) => {
     switch (event.event) {
       case "Started":
         total = event.data.contentLength ?? null;
@@ -155,6 +181,13 @@ export async function downloadAndInstall(
         break;
     }
   });
+
+  // Download done → progress pinned at 100% (UI reads this as "installing").
+  // Stop SocksCap so the installer can overwrite the locked driver/helper.
+  onProgress({ downloaded, total, percent: 100 });
+  await prepareSocksCapForUpgrade();
+
+  await update.install();
 }
 
 /** Restart into the freshly installed version (confirmation gate #2). */
