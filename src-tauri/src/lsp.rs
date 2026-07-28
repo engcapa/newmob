@@ -785,7 +785,8 @@ impl LspManager {
             ));
         }
 
-        let session_root = PathBuf::from(&sdk_environment.project_scope_path);
+        let session_root =
+            lsp_session_root(&document.root_path, &sdk_environment.project_scope_path);
         let session_root_uri = match url::Url::from_directory_path(&session_root) {
             Ok(uri) => uri.to_string(),
             Err(_) => {
@@ -5032,6 +5033,44 @@ fn resolve_root_path(root_path: Option<&str>, file_path: &Path) -> Result<PathBu
     })
 }
 
+/// Pick the directory to hand a language server as its `rootUri` / working dir.
+///
+/// `project_scope_path` comes from the SDK resolver, which canonicalizes the
+/// workspace root (`std::fs::canonicalize`). Document URIs, however, are built
+/// from `document.root_path` — the exact (often un-canonicalized) path the user
+/// opened. When the workspace is reached through a symlink (e.g. the opened path
+/// `/data/foo` is a link to `/data-raw-ssd/foo`), those two namespaces diverge.
+///
+/// rust-analyzer maps files to crates by VFS **path prefix**: if the launch root
+/// is `/data-raw-ssd/foo` but a document opens as `file:///data/foo/src/main.rs`,
+/// the file falls outside the workspace and gets no crate, so hover/completion/
+/// goto/diagnostics all go silent even though the session initialized fine.
+///
+/// Re-express the scope in the opened path's namespace so the launch root shares
+/// a prefix with the document URIs:
+/// - scope canonically equals the opened root  → use the opened root verbatim;
+/// - scope is a canonical descendant of the opened root (nested subproject) →
+///   rebase that suffix onto the opened root;
+/// - otherwise (unrelated / no canonical form)  → fall back to the scope as-is.
+///
+/// The session *key* still uses the canonical `project_scope_path`, so dedup and
+/// fingerprinting remain stable regardless of which symlink alias was opened.
+fn lsp_session_root(document_root: &Path, project_scope_path: &str) -> PathBuf {
+    let scope = PathBuf::from(project_scope_path);
+    let canonical_root = canonicalize_or_original(document_root);
+    if scope == canonical_root {
+        return document_root.to_path_buf();
+    }
+    if let Ok(suffix) = scope.strip_prefix(&canonical_root) {
+        return document_root.join(suffix);
+    }
+    scope
+}
+
+fn canonicalize_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn session_key(
     document: &ResolvedDocument,
     preset: &LspServerPreset,
@@ -6844,6 +6883,77 @@ mod tests {
 
         assert_ne!(first_key.map_key(), second_key.map_key());
         assert_eq!(first_key.root_path, first.project_scope_path);
+    }
+
+    #[test]
+    fn lsp_session_root_is_a_noop_without_symlinks() {
+        // A plain (already-canonical) root that equals the scope is returned as-is.
+        let root = std::env::temp_dir().join(format!("taomni_ra_plain_{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let scope = canonical.to_string_lossy().into_owned();
+
+        let session_root = lsp_session_root(&canonical, &scope);
+        assert_eq!(session_root, canonical);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // The regression: the workspace is opened through a symlink, but the SDK
+    // resolver canonicalizes the scope. The launch root must stay in the opened
+    // (symlink) namespace so it shares a path prefix with the document URIs the
+    // frontend sends — otherwise rust-analyzer treats every file as detached and
+    // serves no intelligence while the session still reports "active".
+    #[cfg(unix)]
+    #[test]
+    fn lsp_session_root_stays_in_opened_symlink_namespace() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let unique = format!("taomni_ra_symlink_{}", std::process::id());
+        let real = base.join(format!("{unique}_real"));
+        let link = base.join(format!("{unique}_link"));
+        std::fs::create_dir_all(&real).unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // What the SDK resolver produces: the canonicalized real path.
+        let scope = std::fs::canonicalize(&link).unwrap().to_string_lossy().into_owned();
+        assert_eq!(scope, real.to_string_lossy());
+
+        // Opened via the symlink → launch root must be the symlink path, not `real`,
+        // so it prefixes `file://<link>/src/main.rs`.
+        let session_root = lsp_session_root(&link, &scope);
+        assert_eq!(session_root, link);
+        assert_ne!(session_root, real);
+
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&real).ok();
+    }
+
+    // A nested SDK subproject scope (e.g. a Java module) under a symlinked root
+    // must be rebased onto the opened path, preserving the nesting while keeping
+    // the opened namespace.
+    #[cfg(unix)]
+    #[test]
+    fn lsp_session_root_rebases_nested_scope_onto_symlink() {
+        let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        let unique = format!("taomni_ra_nested_{}", std::process::id());
+        let real = base.join(format!("{unique}_real"));
+        let link = base.join(format!("{unique}_link"));
+        std::fs::create_dir_all(real.join("module")).unwrap();
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Scope points at the canonical nested module.
+        let scope = std::fs::canonicalize(link.join("module"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let session_root = lsp_session_root(&link, &scope);
+        assert_eq!(session_root, link.join("module"));
+
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&real).ok();
     }
 
     #[test]
