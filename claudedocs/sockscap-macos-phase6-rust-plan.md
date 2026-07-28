@@ -79,6 +79,19 @@ pub fn macos_provider_decision(source_signing_id: &str, selected: &SelectedApps)
 - `cargo check --workspace`：**0 error**，`sockscap-core` 与 `transparent` 无新警告。
 - `rustfmt --edition 2024` 仅跑新增叶子文件；未跑项目级 `cargo fmt`（按 CLAUDE.md），既有文件零 churn。
 
-## 明确不做（仍被账号卡住）
+## 后续（运行时接线）已完成
 
-Xcode 系统扩展 target、entitlement、Developer ID 签名、公证、真机用户批准 / 版本升级验证、audit token→signing identifier 的实际内核派生、Swift `handleNewFlow` 改调 FFI（Swift 在设计分支）。这些是 ADR-0003 Blocked-on-infra 部分。拿到基建后剩余工作：建 Xcode target 链接 `libsockscap_core.a` + header、Swift 删本地判断改调 `sockscap_provider_decide`、把控制协议 JSON 帧接到 `sendProviderMessage`。
+上面的"待激活地基"已接入引擎运行时——见 `claudedocs/sockscap-macos-phase6-runtime-plan.md`。要点：
+
+- `transparent/adapter.rs` 的 `AF_UNIX` 控制服务改为 `#[cfg(unix)]` + tokio，**在 Linux 上真正编译+单测**（原先 macOS-gated，3 个 serve 测试从未在本机跑过）；新增 readiness watch + ApplyConfig 推送测试。
+- `transparent/activation.rs`：纯 `resolve_extension_bundle`/`extension_present`（全平台单测）+ macOS-only `OSSystemExtensionRequest` shim（`build.rs` 用 `cc` 编 `activation_shim.m`，`sockscap_ne_shim` cfg 门控，无扩展也能链接）。
+- `transparent/runtime.rs` + `provider_config.rs`：`choose_macos_backend`、`wait_for_provider`、`build_selection_json`、`ProviderConfig`（动态端口 + token + 自绕过），全部 Linux 单测。
+- `capture/macos/transparent.rs`：`MacosTransparentCaptureHandle`（ingress + 控制服务 + 提交激活 + 有界等待 provider 连回），薄胶水；`start_macos_capture` 按扩展是否存在选后端，失败回落 system-proxy。orchestrator 增 macOS 槽 + teardown。
+- `capabilities_for(app)`：装了扩展才报 `app_filter=true`/`ne-transparent`，否则 Phase 1。前端已按 `caps.appFilter` 放开 App 模式，无需改。
+- Swift provider 已落到 `resources/macos-provider/`，**删本地判断改调 `sockscap_provider_decide`**（身份取 `sourceAppAuditToken`），控制协议客户端 + 动态端口 + loopback 排除。
+
+验证（Linux）：`cargo test -p sockscap-core` 27 passed；`cargo test --lib sockscap` 131 passed（原 111 + 20 新）。
+
+## 仍被账号卡住（ADR-0003 Blocked-on-infra，本轮无法验证）
+
+Xcode 系统扩展 target 的构建、Developer ID 签名、公证、真机用户批准 / 版本升级验证、audit token→signing identifier 的实际内核派生，以及 **NE tunnel glue**（激活后用 `NEAppProxyProviderManager` 起 provider 并经 `sendProviderMessage` 下发 `ProviderConfig`——这是让 provider 连回控制 socket、把引擎翻到 Active 的最后一步；在它就绪前，Start 按设计回落 system-proxy）。所有此类文件均已撰写但标注 unverifiable（Swift provider、`activation_shim.m`、entitlements、Info.plist、module map、build 脚本）。

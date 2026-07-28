@@ -19,6 +19,7 @@
 //! no bypass rules for our own PID or the upstream endpoint are needed.
 
 pub mod system_proxy;
+pub mod transparent;
 
 use std::sync::Arc;
 

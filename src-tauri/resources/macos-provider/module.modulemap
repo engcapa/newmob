@@ -1,0 +1,10 @@
+// Exposes the sockscap-core C-ABI to the Swift provider as `import SockscapCore`.
+//
+// The Xcode system-extension target adds `sockscap-core/include` to its import
+// paths and links `libsockscap_core.a`, so `handleNewFlow` can call
+// `sockscap_provider_decide` — the same per-flow decision the Rust engine runs.
+// Point the header at the crate's hand-maintained C header.
+module SockscapCore {
+    header "../../sockscap-core/include/sockscap_core.h"
+    export *
+}

@@ -11,19 +11,31 @@
 //! * [`adapter`] — the macOS-only `AF_UNIX` server loop + the activation stub
 //!   that fails fast until the Network Extension bundle exists.
 //!
-//! It is deliberately dormant: nothing here is wired into
-//! [`sockscap_start`](crate::sockscap::sockscap_start) yet, and
-//! [`capabilities`](crate::sockscap::capture::capabilities) still reports the
-//! Phase 1 system-proxy backend with `app_filter=false`. What is blocked is
-//! external (entitlement / Developer ID / notarization); what is buildable —
-//! the shared crate, its C-ABI, and this glue — is done and tested, including a
-//! C program that links the staticlib and calls the decision (see
-//! `sockscap-core/tests/`).
+//! ## What runs where
+//!
+//! * [`decision`] / [`control`] — platform-independent, always built + tested.
+//! * [`adapter`] — the `AF_UNIX` control-server the engine runs so the provider
+//!   can authenticate and heartbeat. It needs only `std`/`tokio` Unix sockets,
+//!   so it builds and is unit-tested on **all Unix** (not just macOS); only the
+//!   thing it *cannot* fake — activating the system extension — is macOS-gated.
+//! * [`activation`] — locating the extension bundle (pure, tested everywhere)
+//!   and, on macOS only, submitting `OSSystemExtensionRequest` through a small
+//!   C shim. Bundle absent ⇒ [`activation::ENTITLEMENT_UNAVAILABLE`], so the
+//!   engine never reports Active for a capture plane that is not installed.
+//!
+//! Real activation is still **Blocked-on-infra** (Apple Network Extension
+//! entitlement, Developer ID, notarization, on-device approval). The runtime is
+//! wired to *use* the transparent backend when the signed extension is present
+//! and connects back over the control channel, and to fall back to the Phase 1
+//! system-proxy backend otherwise.
 
+pub mod activation;
 pub mod control;
 pub mod decision;
+pub mod provider_config;
+pub mod runtime;
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub mod adapter;
 
 pub use control::{
@@ -32,3 +44,4 @@ pub use control::{
 pub use decision::{
     ProviderFlowDecision, SelectedApps, macos_provider_decision, selected_from_config,
 };
+pub use runtime::{MacosBackend, choose_macos_backend, wait_for_provider};

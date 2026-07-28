@@ -47,6 +47,52 @@ pub fn capabilities() -> SocksCapCapabilities {
     }
     #[cfg(target_os = "macos")]
     {
+        // The plain (no-AppHandle) probe reports the always-available Phase 1
+        // backend. `capabilities_for` upgrades this to the transparent backend
+        // when a signed Network Extension bundle is actually present.
+        macos_capabilities(false)
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        SocksCapCapabilities {
+            platform: std::env::consts::OS.into(),
+            global_tcp: false,
+            app_filter: false,
+            capture_backend: "unsupported".into(),
+            notes: vec!["Unsupported platform for SocksCap capture.".into()],
+            privileged_required: false,
+        }
+    }
+}
+
+/// macOS capabilities, parameterized on whether a transparent-capture Network
+/// Extension is bundled. Pure (builds the struct only) so both branches are
+/// unit-tested on any host.
+///
+/// * `extension_present = true` — the signed `NETransparentProxyProvider` ships
+///   in this build: per-app capture is available (`app_filter=true`) through the
+///   `ne-transparent` backend.
+/// * `extension_present = false` — Phase 1 only: the system SOCKS proxy points
+///   apps at the loopback listener, Global scope, no per-app identity.
+#[cfg(any(target_os = "macos", test))]
+pub fn macos_capabilities(extension_present: bool) -> SocksCapCapabilities {
+    if extension_present {
+        SocksCapCapabilities {
+            platform: "macos".into(),
+            global_tcp: true,
+            app_filter: true,
+            capture_backend: "ne-transparent".into(),
+            notes: vec![
+                "macOS: transparent per-flow capture via a NETransparentProxyProvider system \
+                 extension; selected apps are routed by code-signing identity."
+                    .into(),
+                "Requires approving the system extension once (System Settings › Privacy & \
+                 Security) and, on first run, an administrator."
+                    .into(),
+            ],
+            privileged_required: true,
+        }
+    } else {
         SocksCapCapabilities {
             platform: "macos".into(),
             global_tcp: true,
@@ -59,22 +105,30 @@ pub fn capabilities() -> SocksCapCapabilities {
                  Requires administrator rights to change the system proxy."
                     .into(),
                 "Not transparent capture: applications that ignore the system proxy are not \
-                 routed, and scope is Global only."
+                 routed, and scope is Global only. Install the Network Extension for per-app \
+                 transparent capture."
                     .into(),
             ],
             privileged_required: true,
         }
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+}
+
+/// Capabilities for the running build, probing the app bundle so macOS reports
+/// the transparent backend (with `app_filter=true`) only when the Network
+/// Extension is actually present. Non-macOS platforms ignore `app` and match
+/// [`capabilities`].
+pub fn capabilities_for(app: &tauri::AppHandle) -> SocksCapCapabilities {
+    #[cfg(target_os = "macos")]
     {
-        SocksCapCapabilities {
-            platform: std::env::consts::OS.into(),
-            global_tcp: false,
-            app_filter: false,
-            capture_backend: "unsupported".into(),
-            notes: vec!["Unsupported platform for SocksCap capture.".into()],
-            privileged_required: false,
-        }
+        return macos_capabilities(crate::sockscap::transparent::activation::extension_present(
+            app,
+        ));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        capabilities()
     }
 }
 
@@ -161,4 +215,31 @@ pub trait CapturePlane: Send + Sync {
 pub struct CapturePlan {
     pub global: bool,
     pub app_paths: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_without_extension_is_phase1_system_proxy() {
+        let caps = macos_capabilities(false);
+        assert_eq!(caps.platform, "macos");
+        assert!(!caps.app_filter, "no NE bundle ⇒ Global-only");
+        assert_eq!(caps.capture_backend, "system-proxy");
+        assert!(caps.global_tcp);
+        assert!(caps.privileged_required);
+    }
+
+    #[test]
+    fn macos_with_extension_offers_transparent_per_app_capture() {
+        let caps = macos_capabilities(true);
+        assert_eq!(caps.platform, "macos");
+        assert!(caps.app_filter, "NE bundle present ⇒ per-app capture");
+        assert_eq!(caps.capture_backend, "ne-transparent");
+        assert!(caps.global_tcp);
+        assert!(caps.privileged_required);
+        // The user-facing note must explain the one-time approval step.
+        assert!(caps.notes.iter().any(|n| n.contains("system extension")));
+    }
 }

@@ -135,8 +135,10 @@ pub struct SocksCapCapabilities {
 }
 
 #[tauri::command]
-pub async fn sockscap_capabilities() -> Result<SocksCapCapabilities, String> {
-    Ok(capture::capabilities())
+pub async fn sockscap_capabilities(app: AppHandle) -> Result<SocksCapCapabilities, String> {
+    // Probe the app bundle so macOS reports the transparent (per-app) backend
+    // only when the Network Extension is actually installed.
+    Ok(capture::capabilities_for(&app))
 }
 
 /* ---------------------------- config ------------------------------------ */
@@ -456,7 +458,7 @@ pub async fn sockscap_start(
 
     #[cfg(target_os = "macos")]
     let status: Result<SocksCapStatus, String> =
-        start_macos_capture(&state, &cfg, &caps, sudo_password).await;
+        start_macos_capture(&app, &state, &cfg, &caps, sudo_password).await;
 
     #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
     let status: Result<SocksCapStatus, String> = {
@@ -907,27 +909,99 @@ async fn start_linux_capture(
     Ok(orch.status())
 }
 
+/// AF_UNIX control socket the Network Extension provider connects back on.
+///
+/// NOTE (infra): a shipped build must place this in the app-group container
+/// shared by the app and the system extension — the extension runs as root and
+/// cannot read the app's per-user data dir. Until the app group is provisioned
+/// this uses the sockscap data dir, which is correct for a same-user dev run.
+#[cfg(target_os = "macos")]
+fn macos_control_socket_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(data_dir(app)?.join("ne-control.sock"))
+}
+
 #[cfg(target_os = "macos")]
 async fn start_macos_capture(
+    app: &AppHandle,
     state: &State<'_, AppState>,
     cfg: &SocksCapConfig,
     caps: &capture::SocksCapCapabilities,
     sudo_password: Option<String>,
 ) -> Result<SocksCapStatus, String> {
+    let _ = caps;
     let ctx = build_unix_relay_context(state, cfg).await?;
-    let capture = capture::macos::start(cfg, Arc::clone(&ctx), sudo_password).await?;
-    let ingress_port = capture.ingress_port();
 
+    // Transparent (per-app) backend only when a signed extension is present;
+    // otherwise the always-available Phase 1 system-proxy backend.
+    let extension_present = transparent::activation::extension_present(app);
+    let mut transparent_error: Option<String> = None;
+    if matches!(
+        transparent::choose_macos_backend(extension_present),
+        transparent::MacosBackend::Transparent
+    ) {
+        let control_socket = macos_control_socket_path(app)?;
+        match capture::macos::transparent::start(
+            cfg,
+            Arc::clone(&ctx),
+            control_socket,
+            sudo_password.clone(),
+        )
+        .await
+        {
+            Ok(capture) => {
+                let ingress_port = capture.ingress_port();
+                let mut orch = state.sockscap.orch.write().await;
+                let gfw_note = orch
+                    .gfwlist_meta()
+                    .map(|meta| format!(", gfw={}", meta.rule_count))
+                    .unwrap_or_default();
+                orch.relay_ctx = Some(ctx);
+                orch.set_macos_transparent_capture(capture);
+                orch.set_active(
+                    "ne-transparent",
+                    format!(
+                        "capture active (macOS transparent Network Extension → 127.0.0.1:{ingress_port}{gfw_note})"
+                    ),
+                );
+                return Ok(orch.status());
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "sockscap: transparent backend unavailable, falling back to system-proxy: {error}"
+                );
+                transparent_error = Some(error);
+            }
+        }
+    }
+
+    // System-proxy backend (Phase 1), also the transparent fallback.
+    let capture = match capture::macos::start(cfg, Arc::clone(&ctx), sudo_password).await {
+        Ok(capture) => capture,
+        // If the transparent backend was chosen but failed, and system-proxy
+        // also can't run (e.g. it refuses App scope), the actionable message is
+        // the transparent one ("approve the extension"), not the fallback's.
+        Err(fallback_error) => {
+            return Err(transparent_error.unwrap_or(fallback_error));
+        }
+    };
+    let ingress_port = capture.ingress_port();
     let mut orch = state.sockscap.orch.write().await;
     let gfw_note = orch
         .gfwlist_meta()
         .map(|meta| format!(", gfw={}", meta.rule_count))
         .unwrap_or_default();
+    let fallback_note = if transparent_error.is_some() {
+        " (transparent capture pending extension approval)"
+    } else {
+        ""
+    };
     orch.relay_ctx = Some(ctx);
     orch.set_macos_capture(capture);
     orch.set_active(
-        &caps.capture_backend,
-        format!("capture active (macOS system SOCKS proxy → 127.0.0.1:{ingress_port}{gfw_note})"),
+        "system-proxy",
+        format!(
+            "capture active (macOS system SOCKS proxy → 127.0.0.1:{ingress_port}{gfw_note}){fallback_note}"
+        ),
     );
     Ok(orch.status())
 }
@@ -1524,6 +1598,18 @@ async fn full_teardown(
             if let Err(error) = capture.stop().await {
                 tracing::warn!("sockscap: macOS capture teardown error: {error}");
                 errors.push(format!("macOS capture teardown failed: {error}"));
+            }
+        }
+        // Transparent backend: stop the control channel (provider fails open to
+        // DIRECT) then the ingress. The system extension stays installed.
+        let macos_transparent = {
+            let mut orch = state.sockscap.orch.write().await;
+            orch.take_macos_transparent_capture_for_stop()
+        };
+        if let Some(capture) = macos_transparent {
+            if let Err(error) = capture.stop().await {
+                tracing::warn!("sockscap: macOS transparent capture teardown error: {error}");
+                errors.push(format!("macOS transparent capture teardown failed: {error}"));
             }
         }
     }
