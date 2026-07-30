@@ -7,6 +7,7 @@ import {
   sockscapStatus,
   sockscapParseShareLink,
   sockscapImportSubscription,
+  sockscapDetectTunConflicts,
   sockscapTestUpstream,
   type SocksCapConfig,
 } from "../../lib/sockscap";
@@ -141,6 +142,8 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     // Default: the pre-flight upstream probe passes.
     vi.mocked(sockscapTestUpstream).mockReset();
     vi.mocked(sockscapTestUpstream).mockResolvedValue("SOCKS5 ok");
+    vi.mocked(sockscapDetectTunConflicts).mockReset();
+    vi.mocked(sockscapDetectTunConflicts).mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -155,6 +158,52 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       expect(screen.getByTestId("sockscap-profile-list")).toBeInTheDocument();
       expect(screen.getByTestId("sockscap-add-profile")).toBeInTheDocument();
     });
+    expect(screen.getByTestId("sockscap-header-summary")).toHaveTextContent(
+      "1 active · 默认方案",
+    );
+    expect(screen.getByTestId("sockscap-header-summary")).toHaveTextContent(
+      "0 flows · 0 proxy · 0 direct",
+    );
+    expect(screen.getByTestId("sockscap-capability-notes")).toHaveTextContent(
+      "Backend · WinDivert",
+    );
+  });
+
+  it("renders detail sections collapsed by default and expands them on demand", async () => {
+    render(<SocksCapPanel />);
+
+    const upstreamToggle = await screen.findByTestId("sockscap-section-upstream-toggle");
+    expect(upstreamToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("sockscap-upstream-kind")).not.toBeVisible();
+
+    fireEvent.click(upstreamToggle);
+
+    expect(upstreamToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("sockscap-upstream-kind")).toBeVisible();
+    expect(screen.getByTestId("sockscap-domains-toggle")).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("shows a header warning icon for TUN conflicts and opens its detail dialog", async () => {
+    vi.mocked(sockscapDetectTunConflicts).mockResolvedValueOnce(["OpenVPN Wintun"]);
+    render(<SocksCapPanel />);
+
+    const warning = await screen.findByTestId("sockscap-tun-warning");
+    expect(within(screen.getByTestId("sockscap-header")).getByTestId("sockscap-tun-warning")).toBe(warning);
+    expect(warning.getAttribute("title")).toContain("OpenVPN Wintun");
+
+    fireEvent.click(warning);
+
+    expect(await screen.findByTestId("sockscap-tun-warning-dialog")).toHaveTextContent("OpenVPN Wintun");
+    fireEvent.click(screen.getByTestId("sockscap-tun-warning-close"));
+    expect(screen.queryByTestId("sockscap-tun-warning-dialog")).not.toBeInTheDocument();
+  });
+
+  it("treats an unavailable browser TUN probe as no conflict", async () => {
+    vi.mocked(sockscapDetectTunConflicts).mockResolvedValueOnce(undefined as unknown as string[]);
+    render(<SocksCapPanel />);
+
+    expect(await screen.findByTestId("sockscap-panel")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByTestId("sockscap-tun-warning")).not.toBeInTheDocument());
   });
 
   it("allows adding a new profile", async () => {
@@ -220,6 +269,7 @@ describe("SocksCapPanel Multi-Profile UI", () => {
 
   it("reveals core-upstream fields (share link + cipher) when selecting Shadowsocks", async () => {
     render(<SocksCapPanel />);
+    fireEvent.click(await screen.findByTestId("sockscap-section-upstream-toggle"));
     const kindSelect = await screen.findByTestId("sockscap-upstream-kind");
 
     fireEvent.change(kindSelect, { target: { value: "shadowsocks" } });
@@ -339,6 +389,7 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     await waitFor(() =>
       expect(screen.getByTestId("sockscap-locked-banner")).toBeInTheDocument(),
     );
+    expect(within(screen.getByTestId("sockscap-header")).getByTestId("sockscap-locked-banner")).toBeInTheDocument();
     // Restart-requiring controls are disabled…
     expect(screen.getByTestId("sockscap-upstream-kind")).toBeDisabled();
     expect(screen.getByTestId("sockscap-mode-global")).toBeDisabled();
@@ -489,9 +540,8 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     render(<SocksCapPanel />);
 
     expect(await screen.findByTestId("sockscap-mode-apps")).toBeDisabled();
-    expect(await screen.findByTestId("sockscap-capability-notes")).toHaveTextContent(
-      "Global only",
-    );
+    const capabilityNotes = await screen.findByTestId("sockscap-capability-notes");
+    expect(capabilityNotes.getAttribute("title")).toContain("Global only");
   });
 
   it("keeps app scope selectable where the backend can identify applications", async () => {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDownLeft,
   ArrowUpRight,
   CheckCircle2,
@@ -265,6 +266,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [uuidInput, setUuidInput] = useState("");
   const [wgKeyInput, setWgKeyInput] = useState("");
   const [tunConflicts, setTunConflicts] = useState<string[]>([]);
+  const [tunWarningOpen, setTunWarningOpen] = useState(false);
   const [subInput, setSubInput] = useState("");
   const [showSubImport, setShowSubImport] = useState(false);
 
@@ -284,7 +286,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   // Traffic rates and domain tracking state
   const [domainRecords, setDomainRecords] = useState<DomainRecord[]>([]);
-  const [domainsExpanded, setDomainsExpanded] = useState(true);
+  const [domainsExpanded, setDomainsExpanded] = useState(false);
   const [domainFilter, setDomainFilter] = useState("");
   const [decisionFilter, setDecisionFilter] = useState<"all" | "proxy" | "direct" | "block">("all");
   const [topNLimit, setTopNLimit] = useState(50);
@@ -371,7 +373,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   // (above the mount effect) so it can be an effect dependency.
   const rescanLocalProxies = useCallback(async () => {
     try {
-      setDetectedProxies(await sockscapDetectLocalProxies());
+      const detected = await sockscapDetectLocalProxies();
+      setDetectedProxies(Array.isArray(detected) ? detected : []);
     } catch (e) {
       report(String(e), false);
     }
@@ -418,11 +421,20 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       .catch(() => setSessions([]));
     // Warn if a TUN-mode client is active (collides with global capture).
     sockscapDetectTunConflicts()
-      .then(setTunConflicts)
+      .then((conflicts) => setTunConflicts(Array.isArray(conflicts) ? conflicts : []))
       .catch(() => setTunConflicts([]));
     // Populate the upstream picker's "detected local proxies" group.
     void rescanLocalProxies();
   }, [refresh, rescanLocalProxies]);
+
+  useEffect(() => {
+    if (!tunWarningOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setTunWarningOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [tunWarningOpen]);
 
   useEffect(() => {
     if (!status || status.phase === "idle") {
@@ -1534,15 +1546,97 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       data-testid="sockscap-panel"
     >
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-[var(--taomni-divider)] shrink-0">
-        <Shield className="w-5 h-5 text-[var(--taomni-accent)]" />
+      <div
+        data-testid="sockscap-header"
+        className="flex items-center gap-2.5 px-3 py-2 border-b border-[var(--taomni-divider)] shrink-0 min-h-[52px]"
+      >
+        <Shield className="w-4.5 h-4.5 shrink-0 text-[var(--taomni-accent)]" />
         <div className="flex-1 min-w-0">
-          <div className="text-[14px] font-semibold">{t("sockscap.title")}</div>
-          <div className="text-[11px] text-[var(--taomni-text-muted)]">{t("sockscap.subtitle")}</div>
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="text-[14px] font-semibold shrink-0">{t("sockscap.title")}</div>
+            {caps && (
+              <span
+                data-testid="sockscap-capability-notes"
+                className="inline-flex items-center gap-1 min-w-0 text-[10px] text-[var(--taomni-text-muted)]"
+                title={caps.notes.join("\n") || t("sockscap.captureBackendLabel", { backend: caps.captureBackend })}
+              >
+                {caps.notes.length > 0 && <Info className="w-3 h-3 shrink-0 text-[var(--taomni-accent)]" />}
+                <span className="truncate">
+                  {t("sockscap.backendCompact", { backend: caps.captureBackend })}
+                </span>
+              </span>
+            )}
+          </div>
+          <div
+            data-testid="sockscap-header-summary"
+            className="mt-0.5 flex items-center gap-2 min-w-0 text-[10px] text-[var(--taomni-text-muted)] whitespace-nowrap"
+          >
+            <span
+              className="inline-flex items-center gap-1 min-w-0"
+              title={activeProfiles
+                .map((p) => `${p.name} (${p.mode === "global" ? t("sockscap.badgeGlobal") : t("sockscap.badgeApps", { count: p.apps.length })})`)
+                .join(", ")}
+            >
+              <Layers className="w-3 h-3 shrink-0 text-[var(--taomni-accent)]" />
+              <span className="truncate">
+                {t("sockscap.activeProfilesCompact", {
+                  count: activeProfiles.length,
+                  names: activeProfiles.map((p) => p.name).join(", "),
+                })}
+              </span>
+            </span>
+            {stats && (
+              <span className="hidden xl:inline shrink-0">
+                {t("sockscap.trafficCompact", {
+                  total: stats.flowsTotal,
+                  proxy: stats.flowsProxy,
+                  direct: stats.flowsDirect,
+                })}
+              </span>
+            )}
+            {helper?.running && (
+              <span className="hidden 2xl:inline shrink-0 font-mono text-emerald-600 dark:text-emerald-400">
+                Helper {helper.pid}
+              </span>
+            )}
+            {running && (
+              <span className="hidden 2xl:inline-flex items-center gap-2 shrink-0 font-mono">
+                <span className="inline-flex items-center gap-0.5 text-emerald-500">
+                  <ArrowUpRight className="w-3 h-3" />
+                  {formatSpeed(upSpeed)}
+                </span>
+                <span className="inline-flex items-center gap-0.5 text-sky-500">
+                  <ArrowDownLeft className="w-3 h-3" />
+                  {formatSpeed(downSpeed)}
+                </span>
+              </span>
+            )}
+          </div>
         </div>
+        {locked && (
+          <div
+            data-testid="sockscap-locked-banner"
+            className="min-w-0 max-w-[400px] flex items-center gap-1.5 text-[11px] text-sky-700 dark:text-sky-400"
+            title={t("sockscap.lockedHint")}
+          >
+            <Lock className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden xl:block truncate">{t("sockscap.lockedHint")}</span>
+          </div>
+        )}
+        {tunConflicts.length > 0 && (
+          <button
+            type="button"
+            data-testid="sockscap-tun-warning"
+            className="p-1.5 rounded text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20"
+            title={t("sockscap.tunConflictWarning", { adapters: tunConflicts.join(", ") })}
+            aria-label={t("sockscap.tunConflictTitle")}
+            onClick={() => setTunWarningOpen(true)}
+          >
+            <AlertTriangle className="w-4 h-4" />
+          </button>
+        )}
         <div className={`text-[11px] font-medium ${phaseTone(status?.phase ?? "idle")}`}>
           {status ? t(`sockscap.phase.${status.phase}`) : t("sockscap.phase.idle")}
-          {status?.captureBackend ? ` · ${status.captureBackend}` : ""}
         </div>
         {busy && <Loader2 className="w-4 h-4 animate-spin text-[var(--taomni-text-muted)]" />}
         {running ? (
@@ -1603,89 +1697,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           </button>
         )}
       </div>
-
-      {/* Capture backend capabilities — the platform limits, stated up front. */}
-      {caps && caps.notes.length > 0 && (
-        <div
-          data-testid="sockscap-capability-notes"
-          className="px-4 py-2 border-b border-[var(--taomni-divider)] text-[11px] text-[var(--taomni-text-muted)] space-y-1"
-        >
-          <div className="flex items-center gap-1.5 font-medium text-[var(--taomni-text)]">
-            <Info className="w-3.5 h-3.5 text-[var(--taomni-accent)]" />
-            {t("sockscap.captureBackendLabel", { backend: caps.captureBackend })}
-          </div>
-          {caps.notes.map((note) => (
-            <p key={note}>{note}</p>
-          ))}
-        </div>
-      )}
-
-      {/* Profile Active Summary Banner */}
-      <div className="px-4 py-2 bg-[var(--taomni-bg)] border-b border-[var(--taomni-divider)] text-[11px] flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="font-semibold flex items-center gap-1">
-            <Layers className="w-3.5 h-3.5 text-[var(--taomni-accent)]" />
-            {t("sockscap.activeProfilesBanner", { count: activeProfiles.length })}
-          </span>
-          <div className="flex flex-wrap gap-1">
-            {activeProfiles.map((p) => (
-              <span
-                key={p.id}
-                className="px-2 py-0.5 rounded text-[10px] font-medium bg-[var(--taomni-accent)]/15 text-[var(--taomni-accent)] border border-[var(--taomni-accent)]/30 flex items-center gap-1"
-              >
-                <span>{p.icon || "🛡️"}</span>
-                <span>{p.name}</span>
-                <span className="opacity-75">
-                  ({p.mode === "global" ? t("sockscap.badgeGlobal") : t("sockscap.badgeApps", { count: p.apps.length })})
-                </span>
-              </span>
-            ))}
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          {stats && (
-            <div className="hidden sm:flex items-center gap-2 text-[10px] text-[var(--taomni-text-muted)]">
-              <span>
-                {t("sockscap.statsFlows", {
-                  total: stats.flowsTotal,
-                  proxy: stats.flowsProxy,
-                  direct: stats.flowsDirect,
-                })}
-              </span>
-            </div>
-          )}
-          {helper?.running && (
-            <span className="px-1.5 py-0.5 rounded text-[9px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-mono border border-emerald-500/20">
-              Helper PID: {helper.pid}
-            </span>
-          )}
-          {running && (
-            <div className="flex items-center gap-3 font-mono text-[10px] text-[var(--taomni-text-muted)]">
-              <span className="flex items-center gap-1 text-emerald-500">
-                <ArrowUpRight className="w-3 h-3" />
-                {formatSpeed(upSpeed)}
-              </span>
-              <span className="flex items-center gap-1 text-sky-500">
-                <ArrowDownLeft className="w-3 h-3" />
-                {formatSpeed(downSpeed)}
-              </span>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Running → scope/upstream/profile-structure locked (backend snapshots
-          them at Start). Rules stay editable (hot-reloaded); new profiles can
-          still be added. */}
-      {locked && (
-        <div
-          data-testid="sockscap-locked-banner"
-          className="px-4 py-2 bg-sky-500/10 border-b border-sky-500/30 text-[11px] flex items-center gap-1.5 text-sky-700 dark:text-sky-400"
-        >
-          <Lock className="w-3.5 h-3.5 shrink-0" />
-          {t("sockscap.lockedHint")}
-        </div>
-      )}
 
       {/* Scope/upstream edited while running — needs Stop+Start to apply */}
       {needsRestart && running && (
@@ -1925,7 +1936,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         {/* Right Column: Selected Profile Detail & Inspector */}
         <div className="flex-1 overflow-auto p-4 space-y-4">
           {/* Profile Basic info header */}
-          <Section title={t("sockscap.editProfileTitle", { name: selectedProf.name })}>
+          <Section sectionId="profile" title={t("sockscap.editProfileTitle", { name: selectedProf.name })}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label={t("sockscap.profileNameLabel")}>
                 <input
@@ -1960,7 +1971,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           </Section>
 
           {/* Scope Mode */}
-          <Section title={t("sockscap.section.scope")}>
+          <Section sectionId="scope" title={t("sockscap.section.scope")}>
             <div className="flex gap-2">
               {(["global", "apps"] as ScopeMode[]).map((m) => {
                 // The backend refuses app scope when it cannot identify the
@@ -2045,19 +2056,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             )}
           </Section>
 
-          {/* TUN-mode conflict warning: a local L3 TUN client collides with
-              SocksCap's global capture (double capture / routing loops). */}
-          {tunConflicts.length > 0 && (
-            <div
-              data-testid="sockscap-tun-warning"
-              className="mb-3 px-3 py-2 rounded text-[12px] border border-amber-500/50 bg-amber-500/10 text-amber-600 dark:text-amber-400"
-            >
-              {t("sockscap.tunConflictWarning", { adapters: tunConflicts.join(", ") })}
-            </div>
-          )}
-
           {/* Upstream */}
-          <Section title={t("sockscap.section.upstream")}>
+          <Section sectionId="upstream" title={t("sockscap.section.upstream")}>
             {/* No local proxy detected → guide the user to run one correctly
                 (proxy/SOCKS inbound only; NOT system-proxy/global, NOT TUN),
                 then rescan or import a share link. Only for native socks5/http
@@ -2247,7 +2247,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           </Section>
 
           {/* Rules Strategy */}
-          <Section title={t("sockscap.section.rules")}>
+          <Section sectionId="rules" title={t("sockscap.section.rules")}>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
               <Field label={t("sockscap.ruleMode")}>
                 <select
@@ -2341,7 +2341,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           </Section>
 
           {/* Test Target Dry-run */}
-          <Section title={t("sockscap.section.test")}>
+          <Section sectionId="test" title={t("sockscap.section.test")}>
             <div className="flex gap-2 items-center">
               <input
                 data-testid="sockscap-test-host"
@@ -2372,7 +2372,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           </Section>
 
           {/* Global GFWList & Shared Controls */}
-          <Section title={t("sockscap.gfwListTitle")}>
+          <Section sectionId="gfwlist" title={t("sockscap.gfwListTitle")}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-[11px] text-[var(--taomni-text-muted)]">
                 {gfw?.loaded
@@ -2437,7 +2437,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           <div className="rounded-lg border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] overflow-hidden">
             <button
               type="button"
+              data-testid="sockscap-domains-toggle"
               className="w-full px-3 py-2 text-left text-[11px] font-semibold flex items-center justify-between hover:bg-[var(--taomni-hover)] transition-colors"
+              aria-expanded={domainsExpanded}
+              aria-controls="sockscap-domains-content"
               onClick={() => setDomainsExpanded(!domainsExpanded)}
             >
               <div className="flex items-center gap-2">
@@ -2453,7 +2456,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             </button>
 
             {domainsExpanded && (
-              <div className="p-3 border-t border-[var(--taomni-divider)] space-y-3">
+              <div id="sockscap-domains-content" className="p-3 border-t border-[var(--taomni-divider)] space-y-3">
                 {/* Controls Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 flex-1 min-w-[220px]">
@@ -2656,6 +2659,41 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         </div>
       )}
 
+      {tunWarningOpen && (
+        <div
+          className="absolute inset-0 bg-black/40 flex items-center justify-center z-30"
+          onClick={() => setTunWarningOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sockscap-tun-warning-title"
+            data-testid="sockscap-tun-warning-dialog"
+            className="w-[min(520px,92vw)] rounded-lg bg-[var(--taomni-panel-bg)] border border-[var(--taomni-divider)] shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--taomni-divider)]">
+              <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+              <h2 id="sockscap-tun-warning-title" className="flex-1 text-[13px] font-semibold">
+                {t("sockscap.tunConflictTitle")}
+              </h2>
+              <button
+                type="button"
+                data-testid="sockscap-tun-warning-close"
+                className="p-1 rounded text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)]"
+                aria-label={t("common.close")}
+                onClick={() => setTunWarningOpen(false)}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="px-4 py-3 text-[12px] leading-5 text-[var(--taomni-text-muted)]">
+              {t("sockscap.tunConflictWarning", { adapters: tunConflicts.join(", ") })}
+            </p>
+          </div>
+        </div>
+      )}
+
       {showRootPrompt && (
         <SocksCapRootPrompt
           subtitle={
@@ -2840,11 +2878,37 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  sectionId,
+  title,
+  children,
+}: {
+  sectionId: string;
+  title: string;
+  children: React.ReactNode;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const contentId = `sockscap-section-${sectionId}-content`;
   return (
-    <section className="rounded-lg border border-[var(--taomni-divider)] p-3">
-      <h3 className="text-[12px] font-semibold mb-2">{title}</h3>
-      {children}
+    <section className="rounded-lg border border-[var(--taomni-divider)] overflow-hidden">
+      <button
+        type="button"
+        data-testid={`sockscap-section-${sectionId}-toggle`}
+        className="w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-[var(--taomni-hover)] transition-colors"
+        aria-expanded={expanded}
+        aria-controls={contentId}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <h3 className="text-[12px] font-semibold truncate">{title}</h3>
+        {expanded ? (
+          <ChevronDown className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-text-muted)]" />
+        ) : (
+          <ChevronRight className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-text-muted)]" />
+        )}
+      </button>
+      <div id={contentId} hidden={!expanded} className="border-t border-[var(--taomni-divider)] p-3">
+        {children}
+      </div>
     </section>
   );
 }

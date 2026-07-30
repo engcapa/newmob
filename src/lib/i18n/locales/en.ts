@@ -1221,12 +1221,16 @@ const dict = {
       "Sudo password incorrect or authentication failed. Please try again.",
     authenticating: "Authenticating...",
     captureBackendLabel: "Capture backend: {{backend}}",
+    backendCompact: "Backend · {backend}",
+    activeProfilesCompact: "{count} active · {names}",
+    trafficCompact: "{total} flows · {proxy} proxy · {direct} direct",
     appModeUnsupported:
       "This platform's capture backend cannot identify the source application, so scope is Global only.",
     section: {
       scope: "Scope",
       upstream: "Upstream",
       rules: "Rules (GFWList)",
+      test: "Test target",
       status: "Status",
     },
     mode: {
@@ -1278,6 +1282,7 @@ const dict = {
     subImported: "Imported {count} node(s) as profiles (not auto-activated)",
     tunConflictWarning:
       "A TUN-mode client appears to be running ({adapters}). It captures all traffic at the network layer and conflicts with SocksCap's global capture. Switch that client to proxy mode (and use \"Detect local proxy\"), or run SocksCap in App mode.",
+    tunConflictTitle: "TUN mode conflict detected",
     ssMethod: "Cipher",
     transport: "Transport",
     wsPath: "Path",

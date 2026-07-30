@@ -21,6 +21,47 @@ steps:
   - assert_visible: '[data-testid="sockscap-refresh-status"]'
   - assert_visible: '[data-testid="sockscap-recover"]'
   - click: '[data-testid="sockscap-refresh-status"]'
+  - assert_attribute:
+      selector: '[data-testid="sockscap-section-profile-toggle"]'
+      name: aria-expanded
+      equals: "false"
+  - click: '[data-testid="sockscap-section-profile-toggle"]'
+  - click: '[data-testid="sockscap-section-profile-toggle"]'
+  - assert_attribute:
+      selector: '[data-testid="sockscap-section-scope-toggle"]'
+      name: aria-expanded
+      equals: "false"
+  - click: '[data-testid="sockscap-section-scope-toggle"]'
+  - click: '[data-testid="sockscap-section-scope-toggle"]'
+  - assert_attribute:
+      selector: '[data-testid="sockscap-section-upstream-toggle"]'
+      name: aria-expanded
+      equals: "false"
+  - click: '[data-testid="sockscap-section-upstream-toggle"]'
+  - click: '[data-testid="sockscap-section-upstream-toggle"]'
+  - assert_attribute:
+      selector: '[data-testid="sockscap-section-rules-toggle"]'
+      name: aria-expanded
+      equals: "false"
+  - click: '[data-testid="sockscap-section-rules-toggle"]'
+  - click: '[data-testid="sockscap-section-rules-toggle"]'
+  - assert_attribute:
+      selector: '[data-testid="sockscap-section-gfwlist-toggle"]'
+      name: aria-expanded
+      equals: "false"
+  - click: '[data-testid="sockscap-section-gfwlist-toggle"]'
+  - click: '[data-testid="sockscap-section-gfwlist-toggle"]'
+  - assert_attribute:
+      selector: '[data-testid="sockscap-domains-toggle"]'
+      name: aria-expanded
+      equals: "false"
+  - click: '[data-testid="sockscap-domains-toggle"]'
+  - click: '[data-testid="sockscap-domains-toggle"]'
+  - assert_attribute:
+      selector: '[data-testid="sockscap-section-test-toggle"]'
+      name: aria-expanded
+      equals: "false"
+  - click: '[data-testid="sockscap-section-test-toggle"]'
   - fill:
       selector: '[data-testid="sockscap-test-host"]'
       value: www.google.com

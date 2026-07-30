@@ -1214,12 +1214,16 @@ export const zhCN: DeepPartial<typeof en> = {
     rootPromptIncorrectPassword: "Sudo 密码错误或验证失败，请重试。",
     authenticating: "验证中...",
     captureBackendLabel: "捕获后端：{{backend}}",
+    backendCompact: "后端 · {backend}",
+    activeProfilesCompact: "{count} 个方案生效 · {names}",
+    trafficCompact: "{total} 连接 · {proxy} 代理 · {direct} 直连",
     appModeUnsupported:
       "当前平台的捕获后端无法识别来源应用，因此仅支持全局范围。",
     section: {
       scope: "范围",
       upstream: "上游",
       rules: "规则（GFWList）",
+      test: "目标测试",
       status: "状态",
     },
     mode: {
@@ -1271,6 +1275,7 @@ export const zhCN: DeepPartial<typeof en> = {
     subImported: "已导入 {count} 个节点为方案(未自动启用)",
     tunConflictWarning:
       "检测到 TUN 模式客户端正在运行({adapters})。它在网络层接管全部流量,会与 SocksCap 的全局捕获冲突。请将该客户端切换为代理模式(并使用\"检测本地代理\"),或让 SocksCap 使用 App 模式。",
+    tunConflictTitle: "检测到 TUN 模式冲突",
     ssMethod: "加密方式",
     transport: "传输层",
     wsPath: "路径",
