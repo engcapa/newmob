@@ -1330,17 +1330,20 @@ fn java_run_target_for_path(
             let resolution =
                 resolve_build_tool(&build_dir, workspace_root, BuildTool::Maven, tool_config);
             let runner = resolution.task_runner(HostPlatform::current());
+            let main_class_arg = format!("-Dexec.mainClass={main_class}");
+            let cleanup_arg = "-Dexec.cleanupDaemonThreads=false".to_string();
             let args = vec![
                 "-q".into(),
                 "-DskipTests".into(),
-                format!("-Dexec.mainClass={main_class}"),
-                "-Dexec.cleanupDaemonThreads=false".into(),
+                main_class_arg.clone(),
+                cleanup_arg.clone(),
                 "compile".into(),
                 "org.codehaus.mojo:exec-maven-plugin:3.5.0:java".into(),
             ];
             let command = format!(
-                "{runner} -q -DskipTests -Dexec.mainClass={} -Dexec.cleanupDaemonThreads=false compile org.codehaus.mojo:exec-maven-plugin:3.5.0:java",
-                shell_quote(&main_class),
+                "{runner} -q -DskipTests {} {} compile org.codehaus.mojo:exec-maven-plugin:3.5.0:java",
+                shell_quote(&main_class_arg),
+                shell_quote(&cleanup_arg),
             );
             (
                 command,
@@ -3009,7 +3012,19 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         assert_eq!(target.execution.source, "wrapper");
         assert!(target.execution.executable.contains("mvnw"));
         assert!(target.execution.error.is_none());
-        assert!(target.command.contains("-Dexec.mainClass='demo.Main'"));
+        // PowerShell splits `-Dexec.mainClass='demo.Main'` at the property-name
+        // dot. Quoting the whole Maven property keeps it a single argument.
+        assert!(target.command.contains("'-Dexec.mainClass=demo.Main'"));
+        assert!(
+            target
+                .command
+                .contains("'-Dexec.cleanupDaemonThreads=false'")
+        );
+        assert_eq!(target.execution.args[2], "-Dexec.mainClass=demo.Main");
+        assert_eq!(
+            target.execution.args[3],
+            "-Dexec.cleanupDaemonThreads=false"
+        );
         assert!(target.command.contains("exec-maven-plugin:3.5.0:java"));
     }
 
