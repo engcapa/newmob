@@ -4353,6 +4353,39 @@ controls:
   - id: recover
     selector: '[data-testid="sockscap-recover"]'
     kind: interactive
+  - id: profile-section-toggle
+    selector: '[data-testid="sockscap-section-profile-toggle"]'
+    kind: interactive
+  - id: scope-section-toggle
+    selector: '[data-testid="sockscap-section-scope-toggle"]'
+    kind: interactive
+  - id: upstream-section-toggle
+    selector: '[data-testid="sockscap-section-upstream-toggle"]'
+    kind: interactive
+  - id: rules-section-toggle
+    selector: '[data-testid="sockscap-section-rules-toggle"]'
+    kind: interactive
+  - id: test-section-toggle
+    selector: '[data-testid="sockscap-section-test-toggle"]'
+    kind: interactive
+  - id: gfwlist-section-toggle
+    selector: '[data-testid="sockscap-section-gfwlist-toggle"]'
+    kind: interactive
+  - id: domains-toggle
+    selector: '[data-testid="sockscap-domains-toggle"]'
+    kind: interactive
+  - id: tun-warning
+    selector: '[data-testid="sockscap-tun-warning"]'
+    kind: interactive
+    optional: true       # only when a local TUN client is detected
+  - id: tun-warning-dialog
+    selector: '[data-testid="sockscap-tun-warning-dialog"]'
+    kind: display
+    optional: true       # opened from the conditional TUN warning icon
+  - id: tun-warning-close
+    selector: '[data-testid="sockscap-tun-warning-close"]'
+    kind: interactive
+    optional: true       # shown inside the conditional TUN warning dialog
   - id: linux-capture-state
     selector: '[data-testid="sockscap-linux-capture-state"]'
     kind: display

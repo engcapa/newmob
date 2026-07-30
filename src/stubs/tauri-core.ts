@@ -2188,6 +2188,9 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       return undefined as T;
     case "sockscap_list_processes":
       return [] as T;
+    case "sockscap_detect_local_proxies":
+    case "sockscap_detect_tun_conflicts":
+      return [] as T;
     case "sockscap_test_upstream":
       throw new Error("Upstream test is only available in the desktop build.");
     case "sockscap_helper_status":

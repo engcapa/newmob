@@ -348,6 +348,16 @@
 - `[data-testid="sockscap-stop"]` — interactive [optional] — F-Sockscap-1.stop
 - `[data-testid="sockscap-refresh-status"]` — interactive — F-Sockscap-1.refresh-status
 - `[data-testid="sockscap-recover"]` — interactive — F-Sockscap-1.recover
+- `[data-testid="sockscap-section-profile-toggle"]` — interactive — F-Sockscap-1.profile-section-toggle
+- `[data-testid="sockscap-section-scope-toggle"]` — interactive — F-Sockscap-1.scope-section-toggle
+- `[data-testid="sockscap-section-upstream-toggle"]` — interactive — F-Sockscap-1.upstream-section-toggle
+- `[data-testid="sockscap-section-rules-toggle"]` — interactive — F-Sockscap-1.rules-section-toggle
+- `[data-testid="sockscap-section-test-toggle"]` — interactive — F-Sockscap-1.test-section-toggle
+- `[data-testid="sockscap-section-gfwlist-toggle"]` — interactive — F-Sockscap-1.gfwlist-section-toggle
+- `[data-testid="sockscap-domains-toggle"]` — interactive — F-Sockscap-1.domains-toggle
+- `[data-testid="sockscap-tun-warning"]` — interactive [optional] — F-Sockscap-1.tun-warning
+- `[data-testid="sockscap-tun-warning-dialog"]` — display [optional] — F-Sockscap-1.tun-warning-dialog
+- `[data-testid="sockscap-tun-warning-close"]` — interactive [optional] — F-Sockscap-1.tun-warning-close
 - `[data-testid="sockscap-linux-capture-state"]` — display [optional] — F-Sockscap-1.linux-capture-state
 - `[data-testid="sockscap-root-prompt-dialog"]` — display [optional] — F-Sockscap-1.root-prompt-dialog
 - `[data-testid="sockscap-root-password-input"]` — interactive [optional] — F-Sockscap-1.root-password-input
