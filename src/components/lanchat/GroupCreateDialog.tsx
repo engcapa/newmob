@@ -45,7 +45,7 @@ export function GroupCreateDialog({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-[120] grid place-items-center" style={{ background: "rgba(0,0,0,.35)" }} onClick={onClose}>
       <div
-        className="flex max-h-[80vh] w-[360px] flex-col overflow-hidden rounded-xl"
+        className="flex max-h-[calc(100vh-24px)] w-[360px] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-xl"
         style={{ background: "var(--taomni-panel-bg)", border: "1px solid var(--taomni-chrome-border)", boxShadow: "var(--taomni-shadow-lg)" }}
         onClick={(e) => e.stopPropagation()}
       >

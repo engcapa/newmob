@@ -87,7 +87,7 @@ export function ExternalVaultUnlockDialog({
         aria-label={t("externalVault.ariaLabel", { tool: toolName })}
         aria-modal="true"
         data-testid="external-vault-unlock-dialog"
-        className="w-[460px] rounded shadow-lg p-4"
+        className="w-[460px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-y-auto rounded shadow-lg p-4"
         style={{
           background: "var(--taomni-bg)",
           border: "1px solid var(--taomni-card-border)",

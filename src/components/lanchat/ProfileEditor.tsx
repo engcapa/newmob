@@ -61,7 +61,7 @@ export function ProfileEditor({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
-        className="w-[360px] overflow-hidden rounded-xl"
+        className="w-[360px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-x-hidden overflow-y-auto rounded-xl"
         style={{ background: "var(--taomni-panel-bg)", border: "1px solid var(--taomni-chrome-border)", boxShadow: "var(--taomni-shadow-lg)" }}
         onClick={(e) => e.stopPropagation()}
       >

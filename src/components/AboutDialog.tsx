@@ -43,7 +43,7 @@ export function AboutDialog({ onClose }: AboutDialogProps) {
         aria-label={t("about.title")}
         aria-modal="true"
         data-testid="about-dialog"
-        className="w-[380px] rounded shadow-lg p-5"
+        className="w-[380px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-y-auto rounded shadow-lg p-5"
         style={{ background: "var(--taomni-bg)", border: "1px solid var(--taomni-card-border)" }}
         onClick={(e) => e.stopPropagation()}
       >

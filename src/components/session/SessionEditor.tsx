@@ -4056,7 +4056,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
       <div
         ref={containerRef}
         data-testid="session-editor"
-        className="w-[1020px] max-w-[96%] max-h-[92vh] flex flex-col rounded-[6px] shadow-2xl border overflow-hidden"
+        className="w-[1020px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] flex flex-col rounded-[6px] shadow-2xl border overflow-hidden"
         style={{ background: "var(--taomni-panel-bg)", borderColor: "var(--taomni-chrome-border)", color: "var(--taomni-text)" }}
       >
         {/* Modal title bar */}
@@ -4094,7 +4094,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
 
         {/* Protocol picker */}
         <div
-          className="px-3 pt-3 pb-2 border-b shrink-0"
+          className="max-h-[min(210px,32vh)] overflow-y-auto overscroll-contain px-3 pt-3 pb-2 border-b shrink-0 taomni-scroll-y"
           style={{ borderColor: "var(--taomni-divider)" }}
         >
           <div className="flex flex-wrap gap-1">
@@ -4671,115 +4671,120 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
 
         {/* Footer */}
         <div
-          className="h-12 flex items-center px-3 gap-2 border-t shrink-0"
+          className="min-h-12 flex flex-wrap items-center gap-2 px-3 py-2 border-t shrink-0"
           style={{ background: "var(--taomni-quick-bg)", borderColor: "var(--taomni-divider)" }}
         >
-          {isSSH && needsHost && (
-            <button
-              className="taomni-btn flex items-center gap-1.5"
-              onClick={handleTestConnection}
-              disabled={testing}
-              type="button"
-              aria-label={testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              {testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}{shortcuts.test}
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            {isSSH && needsHost && (
+              <button
+                className="taomni-btn shrink-0 flex items-center gap-1.5"
+                onClick={handleTestConnection}
+                disabled={testing}
+                type="button"
+                aria-label={testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}
+              >
+                <FlaskConical className="w-3.5 h-3.5" />
+                {testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}{shortcuts.test}
+              </button>
+            )}
+            {isDb && (
+              <button
+                className="taomni-btn shrink-0 flex items-center gap-1.5"
+                data-testid="db-test-connection"
+                onClick={() => void handleTestDbConnection()}
+                disabled={testing}
+                type="button"
+                aria-label={testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}
+              >
+                <FlaskConical className="w-3.5 h-3.5" />
+                {testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}{shortcuts.test}
+              </button>
+            )}
+            {isHBase && (
+              <button
+                className="taomni-btn shrink-0 flex items-center gap-1.5"
+                data-testid="hbase-test-connection"
+                onClick={() => void handleTestHBaseConnection()}
+                disabled={testing}
+                type="button"
+                aria-label={testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}
+              >
+                <FlaskConical className="w-3.5 h-3.5" />
+                {testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}{shortcuts.test}
+              </button>
+            )}
+            {isProxy && (
+              <button
+                className="taomni-btn shrink-0 flex items-center gap-1.5"
+                data-testid="proxy-test-connection"
+                onClick={() => void handleTestProxyConnection()}
+                disabled={testing}
+                type="button"
+                aria-label={testing ? t("sessionEditor2.proxyTestTesting") : t("sessionEditor2.proxyTestBtn")}
+              >
+                <FlaskConical className="w-3.5 h-3.5" />
+                {testing ? t("sessionEditor2.proxyTestTesting") : t("sessionEditor2.proxyTestBtn")}{shortcuts.test}
+              </button>
+            )}
+            <button className="taomni-btn shrink-0 flex items-center gap-1.5" type="button" onClick={() => void handleSaveTemplate()}>
+              <Save className="w-3.5 h-3.5" /> {t("sessionEditor2.saveTemplate")}
             </button>
-          )}
-          {isDb && (
-            <button
-              className="taomni-btn flex items-center gap-1.5"
-              data-testid="db-test-connection"
-              onClick={() => void handleTestDbConnection()}
-              disabled={testing}
-              type="button"
-              aria-label={testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              {testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}{shortcuts.test}
+            <button className="taomni-btn shrink-0 flex items-center gap-1.5" type="button" onClick={handleReset}>
+              <RotateCcw className="w-3.5 h-3.5" /> {t("sessionEditor2.reset")}
             </button>
-          )}
-          {isHBase && (
-            <button
-              className="taomni-btn flex items-center gap-1.5"
-              data-testid="hbase-test-connection"
-              onClick={() => void handleTestHBaseConnection()}
-              disabled={testing}
-              type="button"
-              aria-label={testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              {testing ? t("sessionEditor2.testing") : t("sessionEditor2.testConnection")}{shortcuts.test}
-            </button>
-          )}
-          {isProxy && (
-            <button
-              className="taomni-btn flex items-center gap-1.5"
-              data-testid="proxy-test-connection"
-              onClick={() => void handleTestProxyConnection()}
-              disabled={testing}
-              type="button"
-              aria-label={testing ? t("sessionEditor2.proxyTestTesting") : t("sessionEditor2.proxyTestBtn")}
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              {testing ? t("sessionEditor2.proxyTestTesting") : t("sessionEditor2.proxyTestBtn")}{shortcuts.test}
-            </button>
-          )}
-          <button className="taomni-btn flex items-center gap-1.5" type="button" onClick={() => void handleSaveTemplate()}>
-            <Save className="w-3.5 h-3.5" /> {t("sessionEditor2.saveTemplate")}
-          </button>
-          <button className="taomni-btn flex items-center gap-1.5" type="button" onClick={handleReset}>
-            <RotateCcw className="w-3.5 h-3.5" /> {t("sessionEditor2.reset")}
-          </button>
-          
-          {(testResult || saveError) && (
+
+            {(testResult || saveError) && (
+              <span
+                className="text-[11px] min-w-0 max-w-[280px] truncate"
+                title={saveError ?? testResult?.msg}
+                style={{ color: testResult?.ok && !saveError ? "#2f8a3e" : "#b22222" }}
+                data-testid="session-test-result-summary"
+              >
+                {saveError ?? testResult?.msg}
+              </span>
+            )}
+
             <span
-              className="text-[11px] min-w-0 max-w-[280px] truncate"
-              title={saveError ?? testResult?.msg}
-              style={{ color: testResult?.ok && !saveError ? "#2f8a3e" : "#b22222" }}
-              data-testid="session-test-result-summary"
+              className="min-w-0 basis-40 flex-1 truncate text-[11px] text-[var(--taomni-text-muted)]"
+              title={`${t("sessionEditor2.willBeSavedTo")} ${groupPath ? folderOptionLabel(groupPath) : SESSION_ROOT_LABEL} / ${name || host || "..."}`}
             >
-              {saveError ?? testResult?.msg}
+              {t("sessionEditor2.willBeSavedTo")}{" "}
+              <span className="taomni-mono">
+                {groupPath ? folderOptionLabel(groupPath) : SESSION_ROOT_LABEL} / {name || host || "..."}
+              </span>
             </span>
-          )}
+          </div>
 
-          <span className="ml-2 text-[11px] text-[var(--taomni-text-muted)]">
-            {t("sessionEditor2.willBeSavedTo")}{" "}
-            <span className="taomni-mono">
-              {groupPath ? folderOptionLabel(groupPath) : SESSION_ROOT_LABEL} / {name || host || "..."}
-            </span>
-          </span>
-
-          <div className="flex-1" />
-
-          {isEdit && (
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+            {isEdit && (
+              <button
+                className="taomni-btn"
+                onClick={handleDelete}
+                type="button"
+                style={{ color: "#b22222" }}
+              >
+                {t("sessionEditor2.delete")}
+              </button>
+            )}
             <button
               className="taomni-btn"
-              onClick={handleDelete}
+              onClick={onClose}
               type="button"
-              style={{ color: "#b22222" }}
+              aria-label={t("sessionEditor2.cancel")}
             >
-              {t("sessionEditor2.delete")}
+              {t("sessionEditor2.cancel")}{shortcuts.cancel}
             </button>
-          )}
-          <button
-            className="taomni-btn"
-            onClick={onClose}
-            type="button"
-            aria-label={t("sessionEditor2.cancel")}
-          >
-            {t("sessionEditor2.cancel")}{shortcuts.cancel}
-          </button>
-          <button
-            className="taomni-btn"
-            data-testid="session-save"
-            data-primary="true"
-            onClick={handleSave}
-            type="button"
-            aria-label={t("sessionEditor2.ok")}
-          >
-            {t("sessionEditor2.ok")}{shortcuts.save}
-          </button>
+            <button
+              className="taomni-btn"
+              data-testid="session-save"
+              data-primary="true"
+              onClick={handleSave}
+              type="button"
+              aria-label={t("sessionEditor2.ok")}
+            >
+              {t("sessionEditor2.ok")}{shortcuts.save}
+            </button>
+          </div>
         </div>
       </div>
     </div>

@@ -148,6 +148,25 @@ describe("SessionEditor SSH settings tabs", { timeout: 15_000 }, () => {
     cleanup();
   });
 
+  it("keeps primary actions reachable when UI text grows", () => {
+    renderEditor();
+
+    const editor = screen.getByTestId("session-editor");
+    expect(editor).toHaveClass("max-w-[calc(100vw-24px)]", "max-h-[calc(100vh-24px)]");
+
+    const protocolPicker = screen.getByTestId("session-proto-ssh").parentElement?.parentElement;
+    expect(protocolPicker).toHaveClass("overflow-y-auto");
+
+    const save = screen.getByTestId("session-save");
+    const primaryActions = save.parentElement;
+    expect(primaryActions).toHaveClass("shrink-0");
+
+    const footer = primaryActions?.parentElement;
+    expect(footer).toHaveClass("flex-wrap");
+    expect(footer?.firstElementChild).toHaveClass("min-w-0", "flex-wrap");
+    expect(screen.getByTitle(/Will be saved to/)).toHaveClass("min-w-0", "truncate");
+  });
+
   it("switches between all SSH settings sections", async () => {
     const user = userEvent.setup();
     renderEditor();

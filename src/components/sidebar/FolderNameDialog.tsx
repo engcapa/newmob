@@ -68,7 +68,7 @@ export function FolderNameDialog({
         aria-label={resolvedTitle}
         aria-modal="true"
         data-testid="folder-name-dialog"
-        className="w-[420px] rounded shadow-lg p-4"
+        className="w-[420px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-y-auto rounded shadow-lg p-4"
         style={{ background: "var(--taomni-bg)", border: "1px solid var(--taomni-card-border)" }}
         onClick={(event) => event.stopPropagation()}
       >

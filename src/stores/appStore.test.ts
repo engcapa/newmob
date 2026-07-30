@@ -3,6 +3,7 @@ import {
   VAULT_UNLOCK_MODE_KEY,
   computeNewTerminalTitle,
   recentWorkspaceIdFromParts,
+  subscribeUiAppearanceStorage,
   updateDuplicateAutoTitle,
   useAppStore,
   type CodeWorkspaceContext,
@@ -528,6 +529,34 @@ describe("appStore.uiAppearance", () => {
     useAppStore.getState().setUiFontSize(3);
     expect(useAppStore.getState().uiFontSize).toBe(10);
     expect(window.localStorage.getItem("taomni.uiFontSize")).toBe("10");
+  });
+
+  it("synchronizes UI appearance changes from another window", () => {
+    const unsubscribe = subscribeUiAppearanceStorage();
+    try {
+      window.localStorage.setItem("taomni.uiFontFamily", '"Segoe UI", sans-serif');
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "taomni.uiFontFamily",
+        newValue: '"Segoe UI", sans-serif',
+      }));
+      expect(useAppStore.getState().uiFontFamily).toBe('"Segoe UI", sans-serif');
+
+      window.localStorage.setItem("taomni.uiFontSize", "17");
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "taomni.uiFontSize",
+        newValue: "17",
+      }));
+      expect(useAppStore.getState().uiFontSize).toBe(17);
+
+      window.localStorage.removeItem("taomni.uiFontSize");
+      window.dispatchEvent(new StorageEvent("storage", {
+        key: "taomni.uiFontSize",
+        newValue: null,
+      }));
+      expect(useAppStore.getState().uiFontSize).toBe(12);
+    } finally {
+      unsubscribe();
+    }
   });
 
   it("allows setting and persisting the welcome recent session limit", () => {

@@ -312,7 +312,7 @@ function CommandsMenu({
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div
-        className="absolute left-2 top-9 z-50 w-[360px] max-h-[420px] overflow-auto taomni-scroll-y rounded shadow-lg py-1 text-[12px]"
+        className="absolute left-2 top-9 z-50 w-[360px] max-w-[calc(100vw-24px)] max-h-[min(420px,calc(100vh-48px))] overflow-auto taomni-scroll-y rounded shadow-lg py-1 text-[12px]"
         style={{ background: "var(--taomni-panel-bg)", border: "1px solid var(--taomni-divider)", color: "var(--taomni-text)" }}
       >
         {CATEGORY_ORDER.map((cat) => {
@@ -353,7 +353,7 @@ function HistoryDropdown({ history, onPick, onClose }: { history: string[]; onPi
   return (
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
-      <div className="absolute right-2 top-9 z-50 w-[420px] max-h-[300px] overflow-auto rounded shadow-lg taomni-scroll-y flex flex-col" style={{ background: "var(--taomni-panel-bg)", border: "1px solid var(--taomni-divider)" }}>
+      <div className="absolute right-2 top-9 z-50 w-[420px] max-w-[calc(100vw-24px)] max-h-[min(300px,calc(100vh-48px))] overflow-auto rounded shadow-lg taomni-scroll-y flex flex-col" style={{ background: "var(--taomni-panel-bg)", border: "1px solid var(--taomni-divider)" }}>
         {history.length === 0 ? (
           <div className="px-3 py-2 text-[11px] text-[var(--taomni-text-muted)]">No command history yet.</div>
         ) : (
@@ -377,7 +377,7 @@ function HelpDialog({ transport, onClose }: { transport: HBaseTransport; onClose
         aria-label={t("hbaseObjects.helpTitle")}
         aria-modal="true"
         data-testid="hbase-help-dialog"
-        className="w-[640px] max-h-[80vh] overflow-auto taomni-scroll-y rounded shadow-lg p-4"
+        className="w-[640px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-auto taomni-scroll-y rounded shadow-lg p-4"
         style={{ background: "var(--taomni-bg)", border: "1px solid var(--taomni-card-border)" }}
         onClick={(e) => e.stopPropagation()}
       >
