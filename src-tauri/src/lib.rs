@@ -19,6 +19,7 @@ pub mod llm;
 mod mail;
 mod migrate;
 pub mod models;
+mod module_lock;
 mod nettools;
 mod notes;
 mod objectstorage;
@@ -224,7 +225,9 @@ pub fn run() {
                     .get_start_on_launch()
                     .unwrap_or(false);
                 if start_on_launch {
-                    lanchat::start_service(app_for_lanchat).await;
+                    if let Err(error) = lanchat::start_service(app_for_lanchat).await {
+                        log::warn!("lanchat: autostart skipped: {error}");
+                    }
                 } else {
                     log::info!("lanchat: start_on_launch disabled; service idle until enabled");
                 }

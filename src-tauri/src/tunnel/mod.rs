@@ -23,6 +23,7 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 
+use crate::module_lock::ModuleLock;
 use crate::state::AppState;
 use crate::terminal::ssh::{connect_ssh_authenticated, SshAuth, SshHandler};
 
@@ -729,6 +730,12 @@ pub async fn start_tunnel(
         .cloned();
     resolve_tunnel_creds(&mut config, &state.vault, session_pwd)?;
 
+    // The same persisted tunnel may autostart in several Taomni processes.
+    // Own it by tunnel id for the task lifetime; a different tunnel id can run
+    // concurrently, with the OS listener still enforcing endpoint uniqueness.
+    let process_lock =
+        ModuleLock::try_acquire_for_app(&app, "tunnel", &id, &format!("Tunnel {id}"))?;
+
     let starting = TunnelStatusInfo {
         id: id.clone(),
         status: TunnelStatus::Starting,
@@ -745,6 +752,7 @@ pub async fn start_tunnel(
     let bridges: Arc<AsyncMutex<Vec<JoinHandle<()>>>> = Arc::new(AsyncMutex::new(Vec::new()));
     let bridges_for_task = bridges.clone();
     let task = tokio::spawn(async move {
+        let _process_lock = process_lock;
         let result = match kind {
             TunnelKind::Local => {
                 run_local_forward(

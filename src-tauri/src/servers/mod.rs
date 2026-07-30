@@ -33,6 +33,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::module_lock::ModuleLock;
 use crate::state::AppState;
 use engine::{set_status, ServerCtx};
 
@@ -206,6 +207,7 @@ pub struct ActiveServer {
     pub task: JoinHandle<()>,
     pub auto_stop_task: Option<JoinHandle<()>>,
     pub status: ServerStatus,
+    _process_lock: ModuleLock,
 }
 
 #[derive(Default)]
@@ -305,6 +307,14 @@ pub async fn start_local_server(
 
     let config: ServerConfig = serde_json::from_value(config)
         .map_err(|e| format!("invalid config for {}: {}", server_type, e))?;
+    // There is one persisted configuration per server type. Keep that type
+    // exclusive across Taomni processes; different server types may coexist.
+    let process_lock = ModuleLock::try_acquire_for_app(
+        &app,
+        "local-server",
+        st.as_str(),
+        &format!("{} server", st.as_str()),
+    )?;
 
     // Publish Starting.
     let starting = ServerStatus {
@@ -367,6 +377,7 @@ pub async fn start_local_server(
                 task: started.task,
                 auto_stop_task,
                 status: running_status.clone(),
+                _process_lock: process_lock,
             },
         );
     }
