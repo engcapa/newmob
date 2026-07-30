@@ -614,8 +614,8 @@ pub async fn lanchat_get_service_state(
 
 /// Start the background service on demand (manual enable from the chat UI).
 /// Idempotent and one-way: once started it runs until the app exits. The work
-/// is spawned so the command returns immediately rather than blocking on the
-/// discovery loop; the `lanchat://service` event reports when it is live.
+/// The service's long-running loops are spawned internally; lock or bind
+/// failures are returned to the caller and also published via the service event.
 #[tauri::command]
 pub async fn lanchat_start_service(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if state
@@ -625,11 +625,7 @@ pub async fn lanchat_start_service(app: AppHandle, state: State<'_, AppState>) -
     {
         return Ok(());
     }
-    ensure_ready(&state).await?;
-    tauri::async_runtime::spawn(async move {
-        crate::lanchat::start_service(app).await;
-    });
-    Ok(())
+    crate::lanchat::start_service(app).await
 }
 
 /// Set the "start LanChat on app launch" policy. Does not start/stop the

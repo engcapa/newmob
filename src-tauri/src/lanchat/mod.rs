@@ -39,6 +39,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
+use crate::module_lock::ModuleLock;
 use protocol::PeerRecord;
 
 const MSG_KEY_VAULT_ID: &str = "lanchat.message-key-v1";
@@ -98,6 +99,9 @@ pub struct LanChatState {
     /// cleared while the app runs (there is no runtime "stop"). Guards against
     /// double-start when both boot-autostart and a manual enable race.
     pub running: AtomicBool,
+    /// Cross-process ownership of the stable LanChat node identity, discovery
+    /// advertisements, listeners, and SQLite-backed message service.
+    _service_lock: StdMutex<Option<ModuleLock>>,
     /// Peers discovered via mDNS, keyed by node id.
     pub peers: RwLock<HashMap<String, PeerRecord>>,
     /// Live control-channel connections, keyed by remote node id.
@@ -137,6 +141,7 @@ impl LanChatState {
             init_lock: AsyncMutex::new(()),
             node_id: RwLock::new(node_id),
             running: AtomicBool::new(false),
+            _service_lock: StdMutex::new(None),
             peers: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             daemon: StdMutex::new(None),
@@ -253,29 +258,58 @@ impl LanChatState {
 /// Launch the LanChat background service (idempotent, one-way).
 ///
 /// Reserves the TCP control port, starts the transport accept loop over that
-/// listener, then runs mDNS discovery. Discovery + transport run concurrently
+/// listener, then starts mDNS discovery. Discovery + transport run concurrently
 /// for the lifetime of the app — there is no runtime "stop"; the only way to
 /// go dark is to not start (see the `start_on_launch` policy) or quit the app.
 ///
 /// Safe to call more than once: the first call latches `running` and proceeds;
 /// later calls return immediately. This lets boot-autostart and a manual
 /// `lanchat_start_service` from the UI race without double-binding the port.
-pub async fn start_service(app: AppHandle) {
+pub async fn start_service(app: AppHandle) -> Result<(), String> {
     use std::sync::atomic::Ordering;
     use tauri::{Emitter, Manager};
 
     let app_state = app.state::<crate::state::AppState>();
     let lanchat = app_state.lanchat.clone();
     let vault = app_state.vault.clone();
-    if let Err(e) = lanchat.ensure_unlocked(&vault).await {
-        log::warn!("lanchat: service start skipped; vault is not ready ({e})");
-        let _ = app.emit(events::SERVICE, serde_json::json!({ "running": false }));
-        return;
-    }
+    let app_data_dir = lanchat
+        .db_path
+        .parent()
+        .ok_or_else(|| "resolve LanChat app data directory".to_string())?;
 
     // One-way latch: if already started, do nothing.
     if lanchat.running.swap(true, Ordering::SeqCst) {
-        return;
+        return Ok(());
+    }
+
+    let process_lock = match ModuleLock::try_acquire(
+        app_data_dir,
+        "lanchat",
+        "service",
+        "LanChat service",
+    ) {
+        Ok(lock) => lock,
+        Err(error) => {
+            lanchat.running.store(false, Ordering::SeqCst);
+            let _ = app.emit(
+                events::SERVICE,
+                serde_json::json!({ "running": false, "error": error.clone() }),
+            );
+            return Err(error);
+        }
+    };
+
+    // Initialize the stable identity only while this process owns the service.
+    // This avoids two fresh instances racing to generate different node keys.
+    if let Err(e) = lanchat.ensure_unlocked(&vault).await {
+        log::warn!("lanchat: service start skipped; vault is not ready ({e})");
+        let error = format!("LanChat vault is not ready: {e}");
+        lanchat.running.store(false, Ordering::SeqCst);
+        let _ = app.emit(
+            events::SERVICE,
+            serde_json::json!({ "running": false, "error": error.clone() }),
+        );
+        return Err(error);
     }
 
     // Reserve an ephemeral control port now so the mDNS TXT can advertise it;
@@ -285,6 +319,10 @@ pub async fn start_service(app: AppHandle) {
             let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
             lanchat.control_port.store(port, Ordering::SeqCst);
             *lanchat.control_listener.lock().await = Some(listener);
+            *lanchat
+                ._service_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(process_lock);
             log::info!("lanchat: reserved control port {}", port);
 
             // Announce the service is now live to every window.
@@ -343,13 +381,21 @@ pub async fn start_service(app: AppHandle) {
             });
 
             // mDNS discovery (runs for the app lifetime).
-            discovery::run(app, lanchat, port).await;
+            tokio::spawn(async move {
+                discovery::run(app, lanchat, port).await;
+            });
+            Ok(())
         }
         Err(e) => {
-            log::error!("lanchat: failed to reserve control port: {e}");
+            let error = format!("LanChat failed to reserve control port: {e}");
+            log::error!("lanchat: {error}");
             // Roll back the latch so a later manual enable can retry.
             lanchat.running.store(false, Ordering::SeqCst);
-            let _ = app.emit(events::SERVICE, serde_json::json!({ "running": false }));
+            let _ = app.emit(
+                events::SERVICE,
+                serde_json::json!({ "running": false, "error": error.clone() }),
+            );
+            Err(error)
         }
     }
 }

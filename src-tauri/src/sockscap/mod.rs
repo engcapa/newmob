@@ -42,6 +42,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::RwLock;
 
+use crate::module_lock::ModuleLock;
 use crate::state::AppState;
 
 /* ---------------------------- runtime handle ---------------------------- */
@@ -54,6 +55,9 @@ pub struct SocksCapRuntime {
     /// terminate. Handed to the next helper launch, which runs under UAC and
     /// can finish the job. See [`boot_repair`].
     pub pending_reap: std::sync::Mutex<Vec<u32>>,
+    /// Cross-process ownership of the OS capture stack. SocksCap changes
+    /// machine-wide proxy/divert state, so only one Taomni process may own it.
+    activation_lock: std::sync::Mutex<Option<ModuleLock>>,
     /// xray-core sidecar pool for core-backed upstreams. Initialized during
     /// `setup()` once the `AppHandle` (resource dir / app data dir) is available
     /// via [`init_xray_manager`]; `None` until then.
@@ -66,6 +70,7 @@ impl SocksCapRuntime {
             orch: Arc::new(RwLock::new(Orchestrator::new())),
             helper: Arc::new(helper::HelperRegistry::new()),
             pending_reap: std::sync::Mutex::new(Vec::new()),
+            activation_lock: std::sync::Mutex::new(None),
             xray: std::sync::OnceLock::new(),
         }
     }
@@ -73,6 +78,27 @@ impl SocksCapRuntime {
     /// The xray manager, if it has been initialized.
     pub fn xray(&self) -> Option<&Arc<core::XrayManager>> {
         self.xray.get()
+    }
+
+    fn has_activation_lock(&self) -> bool {
+        self.activation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    fn install_activation_lock(&self, lock: ModuleLock) {
+        *self
+            .activation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(lock);
+    }
+
+    fn release_activation_lock(&self) {
+        self.activation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
     }
 }
 
@@ -383,9 +409,10 @@ pub async fn sockscap_start(
     let cfg = SocksCapConfig::load(&cfg_path);
     cfg.validate()?;
 
-    let dir = rules_dir(&app)?;
+    // Check the local runtime before attempting to lock again: re-locking the
+    // same file from one process has platform-specific semantics.
     {
-        let mut orch = state.sockscap.orch.write().await;
+        let orch = state.sockscap.orch.read().await;
         if matches!(
             orch.status().phase,
             orchestrator::EnginePhase::RecoveryRequired
@@ -395,6 +422,18 @@ pub async fn sockscap_start(
         if orch.is_running() {
             return Err("sockscap already running".into());
         }
+    }
+
+    let activation_lock = ModuleLock::try_acquire_for_app(
+        &app,
+        "sockscap",
+        "global",
+        "SocksCap",
+    )?;
+
+    let dir = rules_dir(&app)?;
+    {
+        let mut orch = state.sockscap.orch.write().await;
         orch.apply_config(cfg.clone());
         orch.set_preparing("starting");
     }
@@ -519,8 +558,16 @@ pub async fn sockscap_start(
                 .write()
                 .await
                 .set_start_failed(message.clone());
+        } else {
+            // Teardown could not prove the machine-wide state is clean. Keep
+            // ownership until Recover succeeds or this process exits.
+            state.sockscap.install_activation_lock(activation_lock);
         }
         return Err(message);
+    }
+
+    if status.is_ok() {
+        state.sockscap.install_activation_lock(activation_lock);
     }
 
     // Start the xray health monitor once capture is up, so a core that crashes
@@ -1477,7 +1524,12 @@ pub async fn sockscap_stop(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SocksCapStatus, String> {
+    if !state.sockscap.has_activation_lock() {
+        let orch = state.sockscap.orch.read().await;
+        return Ok(orch.status());
+    }
     full_teardown(&app, &state, true).await?;
+    state.sockscap.release_activation_lock();
     let orch = state.sockscap.orch.read().await;
     Ok(orch.status())
 }
@@ -1505,18 +1557,35 @@ pub async fn sockscap_prepare_for_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    if !state.sockscap.has_activation_lock() {
+        let lock = ModuleLock::try_acquire_for_app(
+            &app,
+            "sockscap",
+            "global",
+            "SocksCap update preparation",
+        )?;
+        state.sockscap.install_activation_lock(lock);
+    }
+
     // 1) Stop capture: closes WinDivert NETWORK/FLOW handles → driver unloads →
     //    `WinDivert64.sys` becomes writable. Also stops relay + xray sidecars.
     //    A teardown error here is not fatal to the update — the helper shutdown
     //    below and the installer's own preinstall hook are the further backstops.
-    if let Err(e) = full_teardown(&app, &state, true).await {
-        tracing::warn!("sockscap: prepare-for-update teardown incomplete: {e}");
-    }
+    let teardown_ok = match full_teardown(&app, &state, true).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("sockscap: prepare-for-update teardown incomplete: {e}");
+            false
+        }
+    };
 
     // 2) Ask the elevated helper to exit, freeing `sockscap-helper.exe` and
     //    `WinDivert.dll`. Reuses the same shutdown path as the Stop button.
     if let Err(e) = helper::sockscap_helper_stop(state.clone()).await {
         tracing::warn!("sockscap: prepare-for-update helper stop failed: {e}");
+    }
+    if teardown_ok {
+        state.sockscap.release_activation_lock();
     }
 
     // 3) The driver unload is asynchronous, so poll until the files the installer
@@ -1594,6 +1663,16 @@ fn is_file_locked(path: &std::path::Path) -> bool {
 
 #[tauri::command]
 pub async fn sockscap_recover(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if !state.sockscap.has_activation_lock() {
+        let lock = ModuleLock::try_acquire_for_app(
+            &app,
+            "sockscap",
+            "global",
+            "SocksCap recovery",
+        )?;
+        state.sockscap.install_activation_lock(lock);
+    }
+
     // Even if stopping the active session was incomplete, recovery gets one
     // more independent chance to remove the platform-owned state.
     let teardown_error = full_teardown(&app, &state, false).await.err();
@@ -1615,6 +1694,7 @@ pub async fn sockscap_recover(app: AppHandle, state: State<'_, AppState>) -> Res
                     needs_elevation.len()
                 );
             }
+            state.sockscap.release_activation_lock();
             Ok(())
         }
         Err(recovery_error) => {
@@ -2334,6 +2414,21 @@ fn read_ready_files(dir: &std::path::Path) -> Vec<StaleReadyFile> {
 /// they are elevated and this process is not — are queued for the next helper
 /// launch, which runs under UAC. Nothing else in the system can do it.
 pub async fn boot_repair(app: &AppHandle, state: &AppState) {
+    // Another live instance may own the dirty journal. Never repair global
+    // network state underneath its active capture session.
+    let _repair_lock = match ModuleLock::try_acquire_for_app(
+        app,
+        "sockscap",
+        "global",
+        "SocksCap recovery",
+    ) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::info!("sockscap: boot repair skipped: {error}");
+            return;
+        }
+    };
+
     let Ok(dir) = data_dir(app) else {
         return;
     };
