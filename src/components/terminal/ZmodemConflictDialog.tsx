@@ -39,7 +39,7 @@ export function ZmodemConflictDialog({ fileName, hasMore, mode, onResolve }: Zmo
         aria-label={title}
         aria-modal="true"
         data-testid="zmodem-conflict"
-        className="w-[400px] rounded shadow-lg p-4"
+        className="w-[400px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-y-auto rounded shadow-lg p-4"
         style={{ background: "var(--taomni-bg)", border: "1px solid var(--taomni-card-border)" }}
         onClick={(e) => e.stopPropagation()}
       >

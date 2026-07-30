@@ -62,7 +62,7 @@ export function VaultEntriesDialog({ onClose }: VaultEntriesDialogProps) {
     >
       <div
         ref={containerRef}
-        className="w-[640px] h-[500px] max-w-[96%] max-h-[92vh] flex flex-col rounded-[6px] shadow-2xl border overflow-hidden"
+        className="w-[640px] h-[500px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] flex flex-col rounded-[6px] shadow-2xl border overflow-hidden"
         style={{
           background: "var(--taomni-panel-bg)",
           borderColor: "var(--taomni-chrome-border)",

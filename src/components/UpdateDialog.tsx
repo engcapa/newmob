@@ -132,7 +132,7 @@ export function UpdateDialog() {
         aria-label={title}
         aria-modal={nonModal ? undefined : "true"}
         data-testid="update-dialog"
-        className={`w-[440px] rounded shadow-lg p-5${nonModal ? " pointer-events-auto" : ""}`}
+        className={`w-[440px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-y-auto rounded shadow-lg p-5${nonModal ? " pointer-events-auto" : ""}`}
         style={{
           background: "var(--taomni-bg)",
           border: "1px solid var(--taomni-card-border)",

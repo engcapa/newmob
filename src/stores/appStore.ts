@@ -1548,3 +1548,29 @@ export const useAppStore = create<AppState>((set) => ({
       return { sqlEcho: enabled };
     }),
 }));
+
+export function syncUiAppearanceFromStorage(event: Pick<StorageEvent, "key" | "newValue">): void {
+  if (event.key === null || event.key === UI_FONT_FAMILY_KEY) {
+    const uiFontFamily = event.key === UI_FONT_FAMILY_KEY && event.newValue
+      ? event.newValue
+      : readUiFontFamily();
+    useAppStore.setState({ uiFontFamily });
+  }
+
+  if (event.key === null || event.key === UI_FONT_SIZE_KEY) {
+    const parsed = event.key === UI_FONT_SIZE_KEY && event.newValue !== null
+      ? Number.parseInt(event.newValue, 10)
+      : readUiFontSize();
+    const uiFontSize = Number.isFinite(parsed)
+      ? clampUiFontSize(parsed)
+      : readUiFontSize();
+    useAppStore.setState({ uiFontSize });
+  }
+}
+
+export function subscribeUiAppearanceStorage(): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  const handleStorage = (event: StorageEvent) => syncUiAppearanceFromStorage(event);
+  window.addEventListener("storage", handleStorage);
+  return () => window.removeEventListener("storage", handleStorage);
+}

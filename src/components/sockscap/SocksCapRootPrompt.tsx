@@ -41,7 +41,7 @@ export function SocksCapRootPrompt({
       <form
         data-testid="sockscap-root-prompt-dialog"
         onSubmit={handleSubmit}
-        className="w-[420px] rounded-md shadow-2xl border overflow-hidden"
+        className="w-[420px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] flex flex-col rounded-md shadow-2xl border overflow-hidden"
         style={{
           background: "var(--taomni-panel-bg)",
           borderColor: "var(--taomni-chrome-border)",
@@ -49,7 +49,7 @@ export function SocksCapRootPrompt({
         }}
       >
         <div
-          className="h-8 flex items-center px-3"
+          className="h-8 flex shrink-0 items-center px-3"
           style={{
             background: "linear-gradient(to bottom, #5895c8, #2b5d8b)",
             color: "white",
@@ -71,7 +71,7 @@ export function SocksCapRootPrompt({
           </button>
         </div>
 
-        <div className="p-4">
+        <div className="min-h-0 overflow-y-auto p-4">
           <div className="text-[12px] mb-3 text-[var(--taomni-text-muted)]">
             {subtitle ?? t("sockscap.rootPromptSubtitle")}
           </div>
@@ -103,7 +103,7 @@ export function SocksCapRootPrompt({
         </div>
 
         <div
-          className="h-12 flex items-center justify-end px-3 gap-2 border-t"
+          className="min-h-12 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2"
           style={{
             background: "var(--taomni-quick-bg)",
             borderColor: "var(--taomni-divider)",

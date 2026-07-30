@@ -364,7 +364,7 @@ export function TransferTrayButton({
           <div className="fixed inset-0 z-[150]" onClick={() => setOpen(false)} />
           <div
             data-testid="lanchat-transfer-tray-popover"
-            className={`absolute right-0 z-[151] ${popoverPosition} w-[330px] rounded-lg p-2 text-[12px]`}
+            className={`absolute right-0 z-[151] ${popoverPosition} w-[330px] max-w-[calc(100vw-24px)] rounded-lg p-2 text-[12px]`}
             style={{
               background: "var(--taomni-card-bg)",
               border: "1px solid var(--taomni-card-border)",

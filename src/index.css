@@ -511,7 +511,9 @@ body.notes-detached-document,
  *   password fields — that can hide ::-ms-reveal.
  */
 .taomni-input {
-  height: 22px;
+  height: auto;
+  min-height: max(22px, calc(1em + 6px));
+  line-height: 1.25;
   font-size: var(--taomni-ui-font-size);
   border: 1px solid var(--taomni-input-border);
   background: var(--taomni-input-bg);
@@ -977,7 +979,9 @@ select.taomni-input:not(.appearance-none):not([multiple]) {
     align-items: center;
     justify-content: center;
     white-space: nowrap;
-    height: 26px;
+    height: auto;
+    min-height: max(26px, calc(1em + 8px));
+    line-height: 1.25;
     padding: 0 14px;
     font-size: var(--taomni-ui-font-size);
     background: linear-gradient(to bottom, var(--taomni-button-from), var(--taomni-button-to));

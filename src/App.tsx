@@ -15,7 +15,7 @@ import { attachSftpSync } from "./lib/sftpSync";
 import { sweepExpiredHandoffs } from "./components/filebrowser/SftpDetachedWindow";
 import { dispatchNativeFileDrop, isOsFileDrag } from "./lib/osFileDrop";
 import { isTauriRuntime, getAppPlatform } from "./lib/runtime";
-import { useAppStore } from "./stores/appStore";
+import { subscribeUiAppearanceStorage, useAppStore } from "./stores/appStore";
 import { AppDialogProvider } from "./lib/appDialogs";
 import { VaultGateProvider } from "./lib/vaultGate";
 import { StartupVaultUnlockGate } from "./components/vault/StartupVaultUnlockGate";
@@ -39,6 +39,8 @@ function App() {
     root.style.setProperty("--taomni-ui-font-family", uiFontFamily);
     root.style.setProperty("--taomni-ui-font-size", `${uiFontSize}px`);
   }, [uiFontFamily, uiFontSize]);
+
+  useEffect(() => subscribeUiAppearanceStorage(), []);
 
   useEffect(() => {
     applyCodeViewProfile(loadCodeViewProfile(), DEFAULT_TERMINAL_PROFILE, {

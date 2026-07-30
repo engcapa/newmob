@@ -98,7 +98,7 @@ function EnablePrompt({
     >
       <div
         data-testid="lanchat-enable-prompt"
-        className="w-[400px] overflow-hidden rounded-xl"
+        className="w-[400px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] overflow-x-hidden overflow-y-auto rounded-xl"
         style={{
           background: "var(--taomni-panel-bg)",
           border: "1px solid var(--taomni-chrome-border)",

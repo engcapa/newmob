@@ -42,7 +42,7 @@ export function MfaPrompt({ host, username, request, onSubmit, onCancel }: MfaPr
       <form
         data-testid="mfa-prompt"
         onSubmit={handleSubmit}
-        className="w-[420px] rounded-md shadow-2xl border overflow-hidden"
+        className="w-[420px] max-w-[calc(100vw-24px)] max-h-[calc(100vh-24px)] flex flex-col rounded-md shadow-2xl border overflow-hidden"
         style={{
           background: "var(--taomni-panel-bg)",
           borderColor: "var(--taomni-chrome-border)",
@@ -50,7 +50,7 @@ export function MfaPrompt({ host, username, request, onSubmit, onCancel }: MfaPr
         }}
       >
         <div
-          className="h-8 flex items-center px-3"
+          className="h-8 flex shrink-0 items-center px-3"
           style={{ background: "linear-gradient(to bottom, #5895c8, #2b5d8b)", color: "white" }}
         >
           <ShieldCheck className="w-3.5 h-3.5 mr-1.5" />
@@ -69,7 +69,7 @@ export function MfaPrompt({ host, username, request, onSubmit, onCancel }: MfaPr
           </button>
         </div>
 
-        <div className="p-4">
+        <div className="min-h-0 overflow-y-auto p-4">
           <div className="text-[12px] mb-2 text-[var(--taomni-text-muted)]">
             {t("mfaPrompt.subtitle", { user: username, host })}
           </div>
@@ -103,7 +103,7 @@ export function MfaPrompt({ host, username, request, onSubmit, onCancel }: MfaPr
         </div>
 
         <div
-          className="h-12 flex items-center justify-end px-3 gap-2 border-t"
+          className="min-h-12 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-3 py-2"
           style={{ background: "var(--taomni-quick-bg)", borderColor: "var(--taomni-divider)" }}
         >
           <button data-testid="mfa-cancel" type="button" onClick={onCancel} className="taomni-btn">
