@@ -49,6 +49,7 @@ const TUNNEL_STORAGE_KEY = "taomni.tunnels.v1";
 const CHAT_THREADS_STORAGE_KEY = "taomni.stub.chatThreads.v1";
 const CHAT_MESSAGES_STORAGE_KEY = "taomni.stub.chatMessages.v1";
 const DB_HISTORY_STORAGE_KEY = "taomni.stub.dbSqlHistory.v1";
+const DB_QUERY_WORKSPACES_STORAGE_KEY = "taomni.stub.dbQueryWorkspaces.v1";
 const NOTES_STORAGE_KEY = "taomni.stub.notes.v1";
 const NOTE_TAGS_STORAGE_KEY = "taomni.stub.noteTags.v1";
 const NOTE_PREFS_STORAGE_KEY = "taomni.stub.notePrefs.v1";
@@ -172,6 +173,40 @@ interface StubDbSqlHistoryEntry {
   hasResultSet: boolean;
   error?: string | null;
   createdAt: number;
+}
+
+interface StubDbQueryWorkspaceTab {
+  workspaceId: string;
+  panelId: string;
+  tabOrder: number;
+  content: string;
+  filePath?: string | null;
+  fileName?: string | null;
+  dirty: boolean;
+  isOpen: boolean;
+  closedAt?: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface StubDbQueryWorkspace {
+  workspaceId: string;
+  activePanelId?: string | null;
+  tabs: StubDbQueryWorkspaceTab[];
+  updatedAt: number;
+}
+
+function loadDbQueryWorkspaces(): Record<string, StubDbQueryWorkspace> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DB_QUERY_WORKSPACES_STORAGE_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDbQueryWorkspaces(workspaces: Record<string, StubDbQueryWorkspace>): void {
+  localStorage.setItem(DB_QUERY_WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
 }
 
 function loadDbSqlHistory(): StubDbSqlHistoryEntry[] {
@@ -2694,6 +2729,82 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
           : [],
       );
       return undefined as T;
+    }
+    case "db_load_query_workspace": {
+      const workspaceId = String((args as InvokeArgs | undefined)?.workspaceId ?? "");
+      const workspace = loadDbQueryWorkspaces()[workspaceId];
+      if (!workspace) return null as T;
+      return {
+        ...workspace,
+        tabs: workspace.tabs
+          .filter((tab) => tab.isOpen)
+          .sort((left, right) => left.tabOrder - right.tabOrder),
+      } as T;
+    }
+    case "db_save_query_workspace": {
+      const request = (args as InvokeArgs | undefined)?.request as StubDbQueryWorkspace | undefined;
+      if (!request?.workspaceId) return undefined as T;
+      const workspaces = loadDbQueryWorkspaces();
+      const previous = workspaces[request.workspaceId];
+      const previousTabs = new Map((previous?.tabs ?? []).map((tab) => [tab.panelId, tab]));
+      for (const tab of request.tabs) {
+        const existing = previousTabs.get(tab.panelId);
+        previousTabs.set(tab.panelId, {
+          ...tab,
+          createdAt: existing?.createdAt ?? tab.createdAt,
+          isOpen: true,
+          closedAt: null,
+        });
+      }
+      workspaces[request.workspaceId] = {
+        ...request,
+        tabs: [...previousTabs.values()],
+      };
+      saveDbQueryWorkspaces(workspaces);
+      return undefined as T;
+    }
+    case "db_close_query_workspace_tabs": {
+      const invokeArgs = args as InvokeArgs | undefined;
+      const workspaceId = String(invokeArgs?.workspaceId ?? "");
+      const panelIds = new Set(Array.isArray(invokeArgs?.panelIds) ? invokeArgs.panelIds.map(String) : []);
+      const closedAt = Number(invokeArgs?.closedAt ?? Date.now());
+      const workspaces = loadDbQueryWorkspaces();
+      const workspace = workspaces[workspaceId];
+      if (workspace) {
+        workspace.tabs = workspace.tabs.map((tab) => panelIds.has(tab.panelId)
+          ? { ...tab, isOpen: false, closedAt, updatedAt: closedAt }
+          : tab);
+        if (workspace.activePanelId && panelIds.has(workspace.activePanelId)) {
+          workspace.activePanelId = null;
+        }
+        workspace.updatedAt = closedAt;
+        saveDbQueryWorkspaces(workspaces);
+      }
+      return undefined as T;
+    }
+    case "db_list_closed_query_workspace_tabs": {
+      const invokeArgs = args as InvokeArgs | undefined;
+      const workspaceId = String(invokeArgs?.workspaceId ?? "");
+      const limit = Math.max(1, Math.min(200, Number(invokeArgs?.limit ?? 50)));
+      return (loadDbQueryWorkspaces()[workspaceId]?.tabs ?? [])
+        .filter((tab) => !tab.isOpen)
+        .sort((left, right) => (right.closedAt ?? 0) - (left.closedAt ?? 0))
+        .slice(0, limit) as T;
+    }
+    case "db_reopen_query_workspace_tab": {
+      const invokeArgs = args as InvokeArgs | undefined;
+      const workspaceId = String(invokeArgs?.workspaceId ?? "");
+      const panelId = String(invokeArgs?.panelId ?? "");
+      const workspaces = loadDbQueryWorkspaces();
+      const workspace = workspaces[workspaceId];
+      const tab = workspace?.tabs.find((candidate) => candidate.panelId === panelId);
+      if (!workspace || !tab) return false as T;
+      tab.isOpen = true;
+      tab.closedAt = null;
+      tab.tabOrder = Number(invokeArgs?.tabOrder ?? workspace.tabs.length);
+      tab.updatedAt = Number(invokeArgs?.updatedAt ?? Date.now());
+      saveDbQueryWorkspaces(workspaces);
+      return true as T;
     }
     // ---------- Database client commands (desktop-only) ----------
     case "db_connect":

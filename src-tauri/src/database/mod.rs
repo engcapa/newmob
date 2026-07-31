@@ -18,10 +18,12 @@ pub mod redis_ops;
 pub mod sql;
 pub mod bookmarks;
 pub mod history;
+pub mod query_workspace;
 pub mod sql_rewrite;
 
 pub use bookmarks::*;
 pub use history::*;
+pub use query_workspace::*;
 
 use serde::{Deserialize, Serialize};
 use sqlx_core::pool::Pool;
