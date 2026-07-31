@@ -46,7 +46,10 @@ export interface TerminalRegistryEntry {
    * syntax. The implementation reports completion through OSC 633 while
    * leaving the interactive shell alive. Optional for legacy/test registrants.
    */
-  runTask?: (command: string) => void;
+  runTask?: (
+    command: string,
+    environment?: import("./commandInput").TerminalTaskVariables,
+  ) => void;
   /**
    * Write display-only text directly to the terminal screen (xterm `write`),
    * WITHOUT sending it to the backend pty/ssh stdin. Used to mirror Claude

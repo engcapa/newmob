@@ -10,7 +10,11 @@ import {
 import { Plus, TerminalSquare, X } from "lucide-react";
 import { TerminalPanel } from "../../../terminal/TerminalPanel";
 import { getTerminal } from "../../../../lib/terminal/terminalRegistry";
-import { buildInteractiveCommandInput, renderTerminalTask } from "../../../../lib/terminal/commandInput";
+import {
+  buildInteractiveCommandInput,
+  renderTerminalTask,
+  type TerminalTaskVariables,
+} from "../../../../lib/terminal/commandInput";
 import { getAppPlatform } from "../../../../lib/runtime";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
 
@@ -21,6 +25,7 @@ interface WorkspaceTerminalInstance {
   workspaceRoot: string | null;
   cwd: string;
   pendingCommand: string | null;
+  pendingEnvironment: TerminalTaskVariables | undefined;
   onTaskExit: ((exitCode: number) => void) | null;
 }
 
@@ -46,6 +51,7 @@ export interface TerminalDockHandle {
     cwd: string,
     title?: string,
     onExit?: (exitCode: number) => void,
+    environment?: TerminalTaskVariables,
   ) => string;
   focus: () => void;
 }
@@ -79,6 +85,7 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
       title?: string,
       pendingCommand: string | null = null,
       onTaskExit: ((exitCode: number) => void) | null = null,
+      pendingEnvironment: TerminalTaskVariables | undefined = undefined,
     ) => {
       sequenceRef.current += 1;
       const id = terminalId(workspaceInstanceId, sequenceRef.current);
@@ -89,6 +96,7 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
         workspaceRoot: rootForCwd(roots, cwd),
         cwd,
         pendingCommand,
+        pendingEnvironment,
         onTaskExit,
       };
       setInstances((current) => [...current, next]);
@@ -103,11 +111,12 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
 
     useImperativeHandle(ref, () => ({
       openAt: (cwd, title) => createInstance(cwd, title),
-      runCommand: (command, cwd, title, onExit) => createInstance(
+      runCommand: (command, cwd, title, onExit, environment) => createInstance(
         cwd,
         title,
         command,
         onExit ?? null,
+        environment,
       ),
       focus: () => {
         if (instances.length > 0) setActiveId((current) => current ?? instances[0].id);
@@ -133,12 +142,13 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
         const terminal = getTerminal(id);
         if (terminal) {
           if (terminal.runTask) {
-            terminal.runTask(instance.pendingCommand);
+            terminal.runTask(instance.pendingCommand, instance.pendingEnvironment);
           } else {
             // Backward-compatible path for lightweight registrants and tests.
             const task = renderTerminalTask(
               instance.pendingCommand,
               terminal.localEnvironment ?? { platform: getAppPlatform() },
+              instance.pendingEnvironment,
             );
             terminal.writeInput(buildInteractiveCommandInput(task.input));
           }

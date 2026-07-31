@@ -383,7 +383,7 @@ import {
   type WorkspaceTreeCommandPayload,
   readWorkspaceBuildRunTools,
   writeWorkspaceBuildRunTools,
-  workspaceToolExecutables,
+  workspaceToolConfig,
   CODE_WORKSPACE_DEFAULT_TREE_FONT_SIZE,
   CODE_WORKSPACE_MAX_FONT_SIZE,
   CODE_WORKSPACE_MAX_TREE_FONT_SIZE,
@@ -969,10 +969,10 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     setBuildRunTools(readWorkspaceBuildRunTools(workspaceInstanceId));
   }, [workspaceInstanceId]);
-  const toolConfig = useMemo<WorkspaceToolConfig | undefined>(() => {
-    const executables = workspaceToolExecutables(buildRunTools);
-    return Object.keys(executables).length > 0 ? executables : undefined;
-  }, [buildRunTools]);
+  const toolConfig = useMemo<WorkspaceToolConfig | undefined>(
+    () => workspaceToolConfig(buildRunTools),
+    [buildRunTools],
+  );
   const toolConfigRef = useRef(toolConfig);
   toolConfigRef.current = toolConfig;
 
@@ -984,6 +984,7 @@ export function CodeWorkspaceTab({
         task.cwd,
         `Run: ${task.label}`,
         onExit,
+        task.environment,
       );
       setBottomDockTab("terminal");
       setBottomDockOpen(true);
@@ -5129,6 +5130,7 @@ export function CodeWorkspaceTab({
           rootId: root.id,
           rootName: root.name,
           execution: target.execution,
+          environment: target.environment,
         });
         setStatusMessage(`Running ${target.mainClass}`);
       } catch (error) {

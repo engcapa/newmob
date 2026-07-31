@@ -63,4 +63,45 @@ describe("terminal task rendering", () => {
     expect(task.input.split("\n")).toHaveLength(2);
     expect(buildInteractiveCommandInput(task.input)).not.toContain("\n");
   });
+
+  it("scopes appended task variables to a POSIX command", () => {
+    const task = renderTerminalTask("./mvnw exec:java", {
+      platform: "linux",
+      shellId: "bash",
+    }, {
+      MAVEN_OPTS: {
+        value: "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED 'quoted'",
+        mode: "append",
+      },
+      "invalid-name": { value: "ignored", mode: "replace" },
+    });
+    expect(task.input).toContain("( export MAVEN_OPTS=");
+    expect(task.input).toContain("${MAVEN_OPTS:+${MAVEN_OPTS} }");
+    expect(task.input).toContain(`'"'"'quoted'"'"'`);
+    expect(task.input).not.toContain("invalid-name");
+  });
+
+  it("restores PowerShell task variables and uses setlocal for cmd", () => {
+    const variables = {
+      MAVEN_OPTS: {
+        value: "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+        mode: "append" as const,
+      },
+    };
+    const powershell = renderTerminalTask("mvn.cmd exec:java", {
+      platform: "windows",
+      shellId: "powershell",
+    }, variables);
+    expect(powershell.input).toContain("$taomniEnvironment['MAVEN_OPTS']");
+    expect(powershell.input).toContain("$env:MAVEN_OPTS=");
+    expect(powershell.input).toContain("finally");
+
+    const cmd = renderTerminalTask("mvn.cmd exec:java", {
+      platform: "windows",
+      shellId: "command-prompt",
+    }, variables);
+    expect(cmd.input).toContain("setlocal DisableDelayedExpansion");
+    expect(cmd.input).toContain('set "MAVEN_OPTS=%MAVEN_OPTS% --add-opens=');
+    expect(cmd.input).toContain("endlocal");
+  });
 });

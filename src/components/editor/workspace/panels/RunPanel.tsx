@@ -108,6 +108,7 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
           rootId: root.id,
           rootName: root.name,
           execution: target.execution,
+          environment: target.environment,
         }));
         return [...java, ...detected];
       }));

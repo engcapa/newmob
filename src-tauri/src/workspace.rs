@@ -2,6 +2,7 @@ use crate::state::AppState;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -74,6 +75,18 @@ pub struct WorkspaceTaskExecution {
     pub error: Option<String>,
 }
 
+/// A task-scoped environment value. The terminal renderer applies it only to
+/// the launched task, rather than mutating the user's interactive shell.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTaskEnvironmentVariable {
+    pub value: String,
+    /// `append` preserves an existing value (used for MAVEN_OPTS).
+    pub mode: String,
+}
+
+type WorkspaceTaskEnvironment = BTreeMap<String, WorkspaceTaskEnvironmentVariable>;
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceTask {
@@ -86,6 +99,8 @@ pub struct WorkspaceTask {
     pub module_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution: Option<WorkspaceTaskExecution>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<WorkspaceTaskEnvironment>,
 }
 
 /// A runnable Java `public static void main` entry point discovered from source.
@@ -106,6 +121,8 @@ pub struct JavaRunTarget {
     /// Workspace-relative build/module directory (`.` for the root project).
     pub module_path: String,
     pub execution: WorkspaceTaskExecution,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<WorkspaceTaskEnvironment>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
@@ -115,6 +132,18 @@ pub struct WorkspaceToolConfig {
     pub maven: Option<String>,
     #[serde(default, alias = "gradleExecutable")]
     pub gradle: Option<String>,
+    /// Explicit JVM options for Maven `exec:java`, configured per workspace.
+    #[serde(default)]
+    pub maven_jvm_args: Vec<String>,
+    /// Omitted means enabled, preserving automatic support for existing users.
+    #[serde(default)]
+    pub inherit_maven_arg_line: Option<bool>,
+}
+
+impl WorkspaceToolConfig {
+    fn inherits_maven_arg_line(&self) -> bool {
+        self.inherit_maven_arg_line.unwrap_or(true)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -293,6 +322,7 @@ fn push_task(
         source: source.to_string(),
         module_path: None,
         execution: None,
+        environment: None,
     });
 }
 
@@ -868,6 +898,7 @@ fn build_workspace_task_tree(
                             source: "Maven".into(),
                             module_path: Some(module_path.clone()),
                             execution: Some(resolution.execution(&[phase])),
+                            environment: None,
                         },
                     );
                 }
@@ -882,6 +913,7 @@ fn build_workspace_task_tree(
                         source: "Maven".into(),
                         module_path: Some(module_path),
                         execution: Some(resolution.execution(&["clean", "compile"])),
+                        environment: None,
                     },
                 );
             }
@@ -903,6 +935,7 @@ fn build_workspace_task_tree(
                             source: "Gradle".into(),
                             module_path: Some(module_path.clone()),
                             execution: Some(resolution.execution(&[&selector])),
+                            environment: None,
                         },
                     );
                 }
@@ -923,6 +956,7 @@ fn build_workspace_task_tree(
                         source: "Gradle".into(),
                         module_path: Some(module_path),
                         execution: Some(resolution.execution(&[&clean, &classes])),
+                        environment: None,
                     },
                 );
             }
@@ -1138,6 +1172,140 @@ fn java_package_regex() -> &'static Regex {
     })
 }
 
+fn maven_arg_line_regex() -> &'static Regex {
+    static ARG_LINE: OnceLock<Regex> = OnceLock::new();
+    ARG_LINE.get_or_init(|| {
+        Regex::new(r"(?is)<argLine(?:\s[^>]*)?>(.*?)</argLine\s*>")
+            .expect("valid Maven argLine regex")
+    })
+}
+
+fn xml_comment_regex() -> &'static Regex {
+    static XML_COMMENT: OnceLock<Regex> = OnceLock::new();
+    XML_COMMENT.get_or_init(|| Regex::new(r"(?s)<!--.*?-->").expect("valid XML comment regex"))
+}
+
+fn is_inheritable_maven_jvm_option(value: &str) -> bool {
+    [
+        "--add-opens",
+        "--add-exports",
+        "--add-reads",
+        "--add-modules",
+        "--enable-native-access",
+    ]
+    .iter()
+    .any(|option| value == *option || value.starts_with(&format!("{option}=")))
+}
+
+/// Read JPMS/native-access options from Maven test-plugin `argLine` elements.
+///
+/// `exec:java` runs the application inside Maven's JVM, while Surefire/Failsafe
+/// normally fork a JVM and apply `argLine` only there. Reusing only these
+/// module-access options through MAVEN_OPTS makes Run behave like the project's
+/// tests without also inheriting agents, heap limits, or arbitrary properties.
+fn maven_inherited_jvm_args(workspace_root: &Path, build_dir: &Path) -> Vec<String> {
+    let mut directories = Vec::new();
+    let mut current = Some(build_dir);
+    while let Some(directory) = current {
+        if !directory.starts_with(workspace_root) {
+            break;
+        }
+        directories.push(directory.to_path_buf());
+        if directory == workspace_root {
+            break;
+        }
+        current = directory.parent();
+    }
+    directories.reverse();
+
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    for directory in directories {
+        let Ok(pom) = fs::read_to_string(directory.join("pom.xml")) else {
+            continue;
+        };
+        let pom = xml_comment_regex().replace_all(&pom, "");
+        for captures in maven_arg_line_regex().captures_iter(&pom) {
+            let Some(arg_line) = captures.get(1) else {
+                continue;
+            };
+            let tokens = arg_line
+                .as_str()
+                .replace("<![CDATA[", "")
+                .replace("]]>", "")
+                .replace("&quot;", "\"")
+                .replace("&apos;", "'")
+                .replace("&gt;", ">")
+                .replace("&lt;", "<")
+                .replace("&amp;", "&")
+                .split_whitespace()
+                .map(|value| value.trim_matches(['"', '\'']).to_string())
+                .collect::<Vec<_>>();
+            let mut index = 0;
+            while index < tokens.len() {
+                let token = &tokens[index];
+                if !is_inheritable_maven_jvm_option(token) {
+                    index += 1;
+                    continue;
+                }
+                let option = if token.contains('=') {
+                    token.clone()
+                } else if let Some(value) = tokens.get(index + 1).filter(|value| {
+                    !value.starts_with('-') && !value.starts_with('$') && !value.starts_with('@')
+                }) {
+                    index += 1;
+                    format!("{token}={value}")
+                } else {
+                    index += 1;
+                    continue;
+                };
+                if seen.insert(option.clone()) {
+                    result.push(option);
+                }
+                index += 1;
+            }
+        }
+    }
+    result
+}
+
+fn maven_run_environment(
+    workspace_root: &Path,
+    build_dir: &Path,
+    tool_config: Option<&WorkspaceToolConfig>,
+) -> Option<WorkspaceTaskEnvironment> {
+    let mut args = if tool_config
+        .map(WorkspaceToolConfig::inherits_maven_arg_line)
+        .unwrap_or(true)
+    {
+        maven_inherited_jvm_args(workspace_root, build_dir)
+    } else {
+        Vec::new()
+    };
+    if let Some(config) = tool_config {
+        args.extend(
+            config
+                .maven_jvm_args
+                .iter()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        );
+    }
+    let mut seen = HashSet::new();
+    args.retain(|value| seen.insert(value.clone()));
+    if args.is_empty() {
+        return None;
+    }
+    Some(BTreeMap::from([(
+        "MAVEN_OPTS".into(),
+        WorkspaceTaskEnvironmentVariable {
+            value: args.join(" "),
+            mode: "append".into(),
+        },
+    )]))
+}
+
 /// Strip comments and string/char/text-block contents before looking for a
 /// main signature. This avoids presenting a Run action for examples embedded
 /// in Javadoc or string literals while keeping line structure irrelevant.
@@ -1325,7 +1493,8 @@ fn java_run_target_for_path(
         .unwrap_or_else(|| class_name.to_string());
     let relative_file = relative_path(workspace_root, source_file)?;
     let (build_system, build_dir) = nearest_java_build(workspace_root, source_file);
-    let (command, cwd, module_path, build_system_name, execution) = match build_system {
+    let (command, cwd, module_path, build_system_name, execution, environment) = match build_system
+    {
         JavaBuildSystem::Maven => {
             let resolution =
                 resolve_build_tool(&build_dir, workspace_root, BuildTool::Maven, tool_config);
@@ -1351,6 +1520,7 @@ fn java_run_target_for_path(
                 relative_path(workspace_root, &build_dir).unwrap_or_else(|_| ".".into()),
                 "maven",
                 resolution.execution_owned(args),
+                maven_run_environment(workspace_root, &build_dir, tool_config),
             )
         }
         JavaBuildSystem::Gradle => {
@@ -1399,6 +1569,7 @@ fn java_run_target_for_path(
                 relative_path(workspace_root, &build_dir).unwrap_or_else(|_| ".".into()),
                 "gradle",
                 resolution.execution_owned(args),
+                None,
             )
         }
         JavaBuildSystem::SourceFile => {
@@ -1414,6 +1585,7 @@ fn java_run_target_for_path(
                     source: "path".into(),
                     error: None,
                 },
+                None,
             )
         }
     };
@@ -1432,6 +1604,7 @@ fn java_run_target_for_path(
         build_system: build_system_name.into(),
         module_path,
         execution,
+        environment,
     })
 }
 
@@ -3029,6 +3202,98 @@ runtimeClasspath - Runtime classpath of source set 'main'.
     }
 
     #[test]
+    fn applies_maven_run_jvm_options_through_task_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("pom.xml"),
+            r#"
+                <project>
+                  <build><plugins><plugin><configuration>
+                    <argLine>
+                      @{argLine}
+                      --add-exports java.base/sun.nio.ch=ALL-UNNAMED
+                      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+                      --enable-native-access=ALL-UNNAMED
+                      -javaagent:should-not-be-inherited.jar
+                      -Xmx512m
+                      --add-reads -Xms256m
+                    </argLine>
+                    <!-- <argLine>--add-opens=java.base/java.net=ALL-UNNAMED</argLine> -->
+                  </configuration></plugin></plugins></build>
+                </project>
+            "#,
+        )
+        .unwrap();
+        fs::write(dir.path().join("mvnw"), "#!/bin/sh").unwrap();
+        let module = dir.path().join("server");
+        let source_dir = module.join("src/main/java/demo");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(module.join("pom.xml"), "<project />").unwrap();
+        fs::write(
+            source_dir.join("Main.java"),
+            "package demo; class Main { public static void main(String... args) {} }",
+        )
+        .unwrap();
+
+        let target = java_run_target_for_path(
+            dir.path(),
+            &source_dir.join("Main.java"),
+            Some(&WorkspaceToolConfig {
+                maven_jvm_args: vec![
+                    "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED".into(),
+                    "--add-opens=java.base/java.lang.reflect=ALL-UNNAMED".into(),
+                ],
+                ..WorkspaceToolConfig::default()
+            }),
+        )
+        .unwrap();
+        let maven_opts = &target.environment.unwrap()["MAVEN_OPTS"];
+        assert_eq!(maven_opts.mode, "append");
+        assert_eq!(
+            maven_opts.value,
+            "--add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
+             --add-opens=java.base/java.lang.reflect=ALL-UNNAMED \
+             --enable-native-access=ALL-UNNAMED \
+             --add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+        );
+        assert!(!maven_opts.value.contains("-javaagent"));
+        assert!(!maven_opts.value.contains("-Xmx"));
+        assert!(!maven_opts.value.contains("java.net"));
+    }
+
+    #[test]
+    fn can_disable_maven_arg_line_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("pom.xml"),
+            "<project><argLine>--add-opens=java.base/java.io=ALL-UNNAMED</argLine></project>",
+        )
+        .unwrap();
+        let source_dir = dir.path().join("src/main/java/demo");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("Main.java"),
+            "package demo; class Main { public static void main(String... args) {} }",
+        )
+        .unwrap();
+
+        let target = java_run_target_for_path(
+            dir.path(),
+            &source_dir.join("Main.java"),
+            Some(&WorkspaceToolConfig {
+                maven_jvm_args: vec!["--add-opens=java.base/sun.nio.ch=ALL-UNNAMED".into()],
+                inherit_maven_arg_line: Some(false),
+                ..WorkspaceToolConfig::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            target.environment.unwrap()["MAVEN_OPTS"].value,
+            "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+        );
+    }
+
+    #[test]
     fn builds_gradle_subproject_main_command_and_module_tasks() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("settings.gradle"), "include 'app'").unwrap();
@@ -3101,6 +3366,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         let config = WorkspaceToolConfig {
             maven: Some("C:/tools/mvn.cmd".into()),
             gradle: None,
+            ..WorkspaceToolConfig::default()
         };
         let resolution = resolve_build_tool_with_path(
             dir.path(),
@@ -3149,6 +3415,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         let config = WorkspaceToolConfig {
             maven: Some("./custom-mvn".into()),
             gradle: None,
+            ..WorkspaceToolConfig::default()
         };
         let resolution = resolve_build_tool_with_path(
             dir.path(),
@@ -3167,6 +3434,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
         let missing = WorkspaceToolConfig {
             maven: Some("nope-not-here".into()),
             gradle: None,
+            ..WorkspaceToolConfig::default()
         };
         let resolution = resolve_build_tool_with_path(
             dir.path(),
