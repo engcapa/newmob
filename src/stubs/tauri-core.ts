@@ -183,6 +183,7 @@ interface StubDbQueryWorkspaceTab {
   content: string;
   filePath?: string | null;
   fileName?: string | null;
+  savedQueryId?: string | null;
   dirty: boolean;
   isOpen: boolean;
   closedAt?: number | null;
@@ -2868,6 +2869,10 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
           || !query.namespaceKey
           || query.namespaceKey === namespaceKey)
         .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" })) as T;
+    }
+    case "db_get_saved_query": {
+      const id = String((args as InvokeArgs | undefined)?.id ?? "");
+      return (loadDbSavedQueries().find((query) => query.id === id) ?? null) as T;
     }
     case "db_save_saved_query": {
       const query = (args as InvokeArgs | undefined)?.query as StubDbSavedQuery | undefined;

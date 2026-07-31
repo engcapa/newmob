@@ -650,6 +650,7 @@ pub fn run() {
             database::db_list_closed_query_workspace_tabs,
             database::db_reopen_query_workspace_tab,
             database::db_list_saved_queries,
+            database::db_get_saved_query,
             database::db_save_saved_query,
             database::db_archive_saved_query,
             database::db_delete_saved_query,

@@ -297,6 +297,15 @@ pub fn list_saved_queries(
     .collect::<SqlResult<Vec<_>>>()
 }
 
+pub fn get_saved_query(conn: &Connection, id: &str) -> SqlResult<Option<DbSavedQuery>> {
+    conn.query_row(
+        &format!("{SAVED_QUERY_SELECT} WHERE id = ?1"),
+        params![id],
+        row_to_saved_query,
+    )
+    .optional()
+}
+
 pub fn save_saved_query(
     conn: &mut Connection,
     query: &DbSavedQuery,
@@ -461,6 +470,15 @@ pub async fn db_list_saved_queries(
 }
 
 #[tauri::command]
+pub async fn db_get_saved_query(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<DbSavedQuery>, String> {
+    let db = state.db.lock().map_err(|error| error.to_string())?;
+    get_saved_query(&db, &id).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub async fn db_save_saved_query(
     query: DbSavedQuery,
     state: State<'_, AppState>,
@@ -549,6 +567,7 @@ mod tests {
         let mut conn = memory_db();
         let saved = save_saved_query(&mut conn, &query("q1", "PostgreSQL", "s1", "Users")).unwrap();
         assert_eq!(saved.revision, 1);
+        assert_eq!(get_saved_query(&conn, "q1").unwrap(), Some(saved.clone()));
         let mut edited = saved.clone();
         edited.content = "select * from users".to_string();
         edited.updated_at = 200;

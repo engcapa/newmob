@@ -86,4 +86,13 @@ describe("RedisClientTab query library", () => {
       }),
     );
   });
+
+  it("keeps the query library available after a Redis connection failure", async () => {
+    ipc.dbConnect.mockRejectedValueOnce(new Error("redis offline"));
+    render(<RedisClientTab tabId="redis-tab" info={info} visible />);
+
+    expect(await screen.findByTestId("redis-connection-error-banner")).toHaveTextContent("redis offline");
+    fireEvent.click(screen.getByRole("button", { name: "Queries" }));
+    expect(screen.getByTestId("query-library-panel")).toBeInTheDocument();
+  });
 });

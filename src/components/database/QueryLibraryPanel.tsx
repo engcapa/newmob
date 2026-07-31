@@ -43,7 +43,7 @@ export interface QueryLibraryPanelProps {
   contentLabel?: string;
   onOpenQuery: (query: DbSavedQuery) => void;
   onRunQuery: (query: DbSavedQuery) => void;
-  onSavedQuery?: (query: DbSavedQuery) => void;
+  onSavedQuery?: (query: DbSavedQuery, created: boolean) => void;
   onAddTriggerRef?: MutableRefObject<(() => void) | null>;
 }
 
@@ -228,7 +228,7 @@ export function QueryLibraryPanel({
       });
       setModalOpen(false);
       await loadQueries();
-      onSavedQuery?.(saved);
+      onSavedQuery?.(saved, editingQuery === null);
     } catch (saveError) {
       setError(errorMessage(saveError));
     } finally {

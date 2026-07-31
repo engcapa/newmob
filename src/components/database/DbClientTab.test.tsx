@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import DbClientTab from "./DbClientTab";
 import type { DbConnectInfo } from "../../types";
-import type { DbQueryWorkspace } from "../../lib/ipc";
+import type { DbQueryWorkspace, DbSavedQuery } from "../../lib/ipc";
 import { getQueryTab } from "../../lib/queryRegistry";
 
 const ipcMock = vi.hoisted(() => ({
@@ -33,6 +33,8 @@ const ipcMock = vi.hoisted(() => ({
   dbClearHistory: vi.fn(async () => undefined),
   dbLoadQueryWorkspace: vi.fn(async (): Promise<DbQueryWorkspace | null> => null),
   dbSaveQueryWorkspace: vi.fn(async () => undefined),
+  dbGetSavedQuery: vi.fn(async (): Promise<DbSavedQuery | null> => null),
+  dbSaveSavedQuery: vi.fn(),
   dbCloseQueryWorkspaceTabs: vi.fn(async () => undefined),
   dbListCatalogs: vi.fn(async () => []),
   dbListSchemas: vi.fn(async () => [{ name: "cdp" }]),
@@ -78,6 +80,8 @@ vi.mock("../../lib/ipc", () => ({
   dbClearHistory: ipcMock.dbClearHistory,
   dbLoadQueryWorkspace: ipcMock.dbLoadQueryWorkspace,
   dbSaveQueryWorkspace: ipcMock.dbSaveQueryWorkspace,
+  dbGetSavedQuery: ipcMock.dbGetSavedQuery,
+  dbSaveSavedQuery: ipcMock.dbSaveSavedQuery,
   dbCloseQueryWorkspaceTabs: ipcMock.dbCloseQueryWorkspaceTabs,
   dbListCatalogs: ipcMock.dbListCatalogs,
   dbListSchemas: ipcMock.dbListSchemas,
@@ -103,6 +107,7 @@ const dbChildProps = vi.hoisted(() => ({
     metadataCache?: unknown;
     onDocChange?: (doc: string) => void;
     initialDoc?: string;
+    setValue?: (doc: string) => void;
   },
   editorInitialDocFallback: "select 1",
   generatedSql: "select 1\nORDER BY \"one\" DESC;",
@@ -138,7 +143,6 @@ vi.mock("./SqlEditorPanel", () => ({
     metadataCache?: unknown;
     initialDoc?: string;
   }) => {
-    dbChildProps.sqlEditor = { metadataCache, onDocChange, initialDoc };
     useEffect(() => {
       let doc = initialDoc || dbChildProps.editorInitialDocFallback;
       const handle = {
@@ -156,6 +160,7 @@ vi.mock("./SqlEditorPanel", () => ({
         }),
         focus: vi.fn(),
       };
+      dbChildProps.sqlEditor = { metadataCache, onDocChange, initialDoc, setValue: handle.setValue };
       handleRef(handle);
       return () => handleRef(null);
     }, [handleRef, initialDoc]);
@@ -320,6 +325,17 @@ describe("DbClientTab connection lifecycle", () => {
     });
   });
 
+  it("keeps query drafts and the library available when the connection fails", async () => {
+    ipcMock.dbConnect.mockRejectedValueOnce(new Error("database offline"));
+
+    render(<DbClientTab tabId="tab-1" info={postgresInfo} visible />);
+
+    expect(await screen.findByTestId("db-connection-error-banner")).toHaveTextContent("database offline");
+    fireEvent.click(screen.getByRole("button", { name: "Queries" }));
+    expect(screen.getByTestId("query-library-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("mock-sql-editor")).toBeInTheDocument();
+  });
+
   it("restores SQL editor content from the SQLite query workspace", async () => {
     ipcMock.dbConnect.mockResolvedValue({ ok: true });
     ipcMock.dbLoadQueryWorkspace.mockResolvedValueOnce({
@@ -365,6 +381,76 @@ describe("DbClientTab connection lifecycle", () => {
       workspaceId: "saved-pg",
       activePanelId: expect.any(String),
       tabs: [expect.objectContaining({ content: "select persisted_buffer" })],
+    }));
+  });
+
+  it("restores a saved-query link and flushes edits to both repositories", async () => {
+    const savedQuery: DbSavedQuery = {
+      id: "saved-query-1",
+      scopeType: "connection",
+      scopeId: "saved-pg",
+      engine: "PostgreSQL",
+      catalogName: null,
+      databaseName: "cdp",
+      schemaName: "public",
+      namespaceKey: "namespace",
+      name: "Linked query",
+      content: "select original",
+      remarks: null,
+      tags: [],
+      revision: 1,
+      archivedAt: null,
+      createdAt: 100,
+      updatedAt: 100,
+    };
+    ipcMock.dbConnect.mockResolvedValue({ ok: true });
+    ipcMock.dbGetSavedQuery.mockResolvedValueOnce(savedQuery);
+    ipcMock.dbSaveSavedQuery.mockImplementation(async (query: DbSavedQuery) => ({
+      ...query,
+      revision: query.revision + 1,
+    }));
+    ipcMock.dbLoadQueryWorkspace.mockResolvedValueOnce({
+      workspaceId: "saved-pg",
+      activePanelId: "linked-panel",
+      updatedAt: 200,
+      tabs: [{
+        workspaceId: "saved-pg",
+        panelId: "linked-panel",
+        tabOrder: 0,
+        content: "select original",
+        filePath: null,
+        fileName: null,
+        savedQueryId: "saved-query-1",
+        dirty: false,
+        isOpen: true,
+        closedAt: null,
+        createdAt: 100,
+        updatedAt: 200,
+      }],
+    });
+
+    render(<DbClientTab tabId="tab-1" info={postgresInfo} visible />);
+    await waitFor(() => expect(dbChildProps.sqlEditor?.initialDoc).toBe("select original"));
+
+    act(() => {
+      dbChildProps.sqlEditor?.setValue?.("select changed");
+      dbChildProps.sqlEditor?.onDocChange?.("select changed");
+    });
+    await act(async () => {
+      await getQueryTab("tab-1")?.flushWorkspace?.();
+    });
+
+    expect(ipcMock.dbSaveSavedQuery).toHaveBeenCalledWith(expect.objectContaining({
+      id: "saved-query-1",
+      revision: 1,
+      content: "select changed",
+    }));
+    expect(ipcMock.dbSaveQueryWorkspace).toHaveBeenCalledWith(expect.objectContaining({
+      tabs: [expect.objectContaining({
+        savedQueryId: "saved-query-1",
+        content: "select changed",
+        dirty: false,
+      })],
     }));
   });
 

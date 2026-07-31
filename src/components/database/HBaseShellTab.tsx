@@ -46,7 +46,10 @@ import {
   hbaseDisconnect,
   hbaseExecute,
   hbaseCancel,
+  dbGetSavedQuery,
+  dbSaveSavedQuery,
   type DbQueryResult,
+  type DbSavedQuery,
 } from "../../lib/ipc";
 import { useAppStore } from "../../stores/appStore";
 import { useT } from "../../lib/i18n";
@@ -60,6 +63,7 @@ import { SqlEditorPanel, type SqlEditorHandle } from "./SqlEditorPanel";
 import { HBaseSchemaTree } from "./HBaseSchemaTree";
 import { useDbSessionFontSize } from "./useDbSessionFontSize";
 import { QueryLibraryPanel } from "./QueryLibraryPanel";
+import { registerQueryTab } from "../../lib/queryRegistry";
 
 interface HBaseShellTabProps {
   tabId: string;
@@ -91,6 +95,8 @@ interface ResultSheet {
 interface PanelState {
   id: string;
   doc: string;
+  savedQueryId: string | null;
+  savedQuery: DbSavedQuery | null;
   sheets: ResultSheet[];
   activeSheetId: string | null;
 }
@@ -119,8 +125,15 @@ function newSheet(command: string, ordinal: number): ResultSheet {
   };
 }
 
-function newPanel(doc = "list"): PanelState {
-  return { id: uid(), doc, sheets: [], activeSheetId: null };
+function newPanel(doc = "list", savedQuery: DbSavedQuery | null = null): PanelState {
+  return {
+    id: uid(),
+    doc,
+    savedQueryId: savedQuery?.id ?? null,
+    savedQuery,
+    sheets: [],
+    activeSheetId: null,
+  };
 }
 
 function activeSheet(panel: PanelState): ResultSheet | null {
@@ -441,7 +454,16 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
     try {
       const raw = localStorage.getItem(workspaceKey);
       if (raw) {
-        const parsed = JSON.parse(raw) as { docs?: string[] };
+        const parsed = JSON.parse(raw) as {
+          docs?: string[];
+          panels?: Array<{ doc?: string; savedQueryId?: string | null }>;
+        };
+        if (Array.isArray(parsed.panels) && parsed.panels.length > 0) {
+          return parsed.panels.slice(0, MAX_PANELS).map((panel) => ({
+            ...newPanel(typeof panel.doc === "string" ? panel.doc : ""),
+            savedQueryId: panel.savedQueryId ?? null,
+          }));
+        }
         if (Array.isArray(parsed.docs) && parsed.docs.length > 0) {
           return parsed.docs.slice(0, MAX_PANELS).map((doc) => newPanel(doc));
         }
@@ -463,6 +485,8 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
   const editorHandles = useRef<Record<string, SqlEditorHandle | null>>({});
   const historyRef = useRef<Record<string, string[]>>({});
   const queryTriggerRef = useRef<(() => void) | null>(null);
+  const panelsRef = useRef(panels);
+  const savedQueryFlushRef = useRef<Promise<void> | null>(null);
 
   useEffect(
     () => subscribeSqlExecutionPreferences(setExecutionPreferences),
@@ -474,14 +498,48 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
     [panels, activePanelId],
   );
 
+  useEffect(() => {
+    panelsRef.current = panels;
+  }, [panels]);
+
   // Persist panel docs + active panel for restore-on-mount.
   useEffect(() => {
     try {
-      localStorage.setItem(workspaceKey, JSON.stringify({ docs: panels.map((p) => p.doc) }));
+      localStorage.setItem(workspaceKey, JSON.stringify({
+        panels: panels.map((panel) => ({
+          doc: panel.doc,
+          savedQueryId: panel.savedQueryId,
+        })),
+      }));
     } catch {
       /* ignore quota */
     }
   }, [panels, workspaceKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const linkedPanels = panels.filter((panel) => panel.savedQueryId && !panel.savedQuery);
+    if (linkedPanels.length === 0) return;
+    void Promise.all(
+      linkedPanels.map(async (panel) => ({
+        panelId: panel.id,
+        query: panel.savedQueryId
+          ? await dbGetSavedQuery(panel.savedQueryId).catch(() => null)
+          : null,
+      })),
+    ).then((loaded) => {
+      if (cancelled) return;
+      setPanels((current) => current.map((panel) => {
+        const match = loaded.find((item) => item.panelId === panel.id)?.query;
+        return match ? { ...panel, savedQueryId: match.id, savedQuery: match } : panel;
+      }));
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Query links are loaded from the initial workspace snapshot once per stable session.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceKey]);
 
   useEffect(() => {
     if (visible) setHasBeenVisible(true);
@@ -677,9 +735,9 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
   );
 
   const addPanel = useCallback(
-    (doc = "") => {
+    (doc = "", savedQuery: DbSavedQuery | null = null) => {
       if (panels.length >= MAX_PANELS) return null;
-      const panel = newPanel(doc);
+      const panel = newPanel(doc, savedQuery);
       setPanels((prev) => [...prev, panel]);
       setActivePanelId(panel.id);
       return panel.id;
@@ -691,6 +749,97 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
     setLeftPanelTab("queries");
     setTimeout(() => queryTriggerRef.current?.(), 0);
   }, []);
+
+  const flushSavedQueries = useCallback(async () => {
+    if (savedQueryFlushRef.current) return savedQueryFlushRef.current;
+    const save = (async () => {
+      const updates = new Map<string, DbSavedQuery>();
+      const errors: string[] = [];
+      for (const panel of panelsRef.current) {
+        const query = panel.savedQuery;
+        const content = editorHandles.current[panel.id]?.getValue() ?? panel.doc;
+        if (!query || query.content === content) continue;
+        try {
+          updates.set(panel.id, await dbSaveSavedQuery({
+            ...query,
+            content,
+            updatedAt: Date.now(),
+          }));
+        } catch (error) {
+          errors.push(`${query.name}: ${String(error)}`);
+        }
+      }
+      if (updates.size > 0) {
+        setPanels((current) => {
+          const next = current.map((panel) => {
+            const query = updates.get(panel.id);
+            return query
+              ? { ...panel, doc: query.content, savedQueryId: query.id, savedQuery: query }
+              : panel;
+          });
+          panelsRef.current = next;
+          return next;
+        });
+      }
+      if (errors.length > 0) {
+        setStatusMessage(`HBase saved query auto-save failed: ${errors.join("; ")}`);
+      }
+    })();
+    savedQueryFlushRef.current = save;
+    try {
+      await save;
+    } finally {
+      if (savedQueryFlushRef.current === save) savedQueryFlushRef.current = null;
+    }
+  }, [setStatusMessage]);
+
+  useEffect(() => {
+    const hasChanges = panels.some((panel) => {
+      const content = editorHandles.current[panel.id]?.getValue() ?? panel.doc;
+      return panel.savedQuery && panel.savedQuery.content !== content;
+    });
+    if (!hasChanges) return;
+    const timer = setTimeout(() => void flushSavedQueries(), 2000);
+    return () => clearTimeout(timer);
+  }, [flushSavedQueries, panels]);
+
+  useEffect(() => () => {
+    void flushSavedQueries();
+  }, [flushSavedQueries]);
+
+  useEffect(() => registerQueryTab({
+    tabId,
+    title: `HBase ${info.host}:${info.port}`,
+    engine: "HBaseShell",
+    insertQuery: (command, options) => {
+      if (options?.destination === "current") {
+        editorHandles.current[activePanelId]?.setValue(command);
+        patchPanel(activePanelId, {
+          doc: command,
+          savedQueryId: null,
+          savedQuery: null,
+        });
+        if (options.run) void runStatements(activePanelId, command);
+        return;
+      }
+      const panelId = addPanel(command);
+      if (panelId && options?.run) setTimeout(() => void runStatements(panelId, command), 0);
+    },
+    appendEchoSql: (command, note) => {
+      const current = editorHandles.current[activePanelId]?.getValue()
+        ?? panelsRef.current.find((panel) => panel.id === activePanelId)?.doc
+        ?? "";
+      const prefix = note ? `# ${note}\n` : "";
+      const next = `${current}${current.trim() ? "\n" : ""}${prefix}${command}`;
+      editorHandles.current[activePanelId]?.setValue(next);
+      patchPanel(activePanelId, {
+        doc: next,
+        savedQueryId: null,
+        savedQuery: null,
+      });
+    },
+    flushWorkspace: flushSavedQueries,
+  }), [activePanelId, addPanel, flushSavedQueries, info.host, info.port, patchPanel, runStatements, tabId]);
 
   const closePanel = useCallback(
     (panelId: string) => {
@@ -779,17 +928,6 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
     setSidebarCollapsed(percentage === 0);
   };
 
-  if (connError) {
-    return (
-      <div className="h-full w-full flex items-center justify-center p-6" style={{ background: "var(--taomni-bg)", color: "var(--taomni-text)" }}>
-        <div className="max-w-md text-center">
-          <AlertTriangle className="w-6 h-6 mx-auto mb-2" style={{ color: "#d9534f" }} />
-          <div className="font-semibold mb-1">HBase connection failed</div>
-          <div className="text-[12px] text-[var(--taomni-text-muted)] break-words">{connError}</div>
-        </div>
-      </div>
-    );
-  }
   if (!hasBeenVisible) {
     return (
       <div className="h-full w-full flex items-center justify-center" style={{ background: "var(--taomni-bg)" }}>
@@ -803,6 +941,18 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
 
   return (
     <div ref={rootRef} className="h-full w-full flex flex-col relative" style={{ background: "var(--taomni-bg)", color: "var(--taomni-text)" }}>
+      {connError && (
+        <div
+          className="h-7 shrink-0 px-2 flex items-center gap-2 text-[11px] border-b"
+          style={{ color: "#d9534f", borderColor: "var(--taomni-divider)", background: "var(--taomni-quick-bg)" }}
+          title={connError}
+          data-testid="hbase-connection-error-banner"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span className="font-semibold">HBase connection failed.</span>
+          <span className="truncate text-[var(--taomni-text-muted)]">The Query Library remains available. {connError}</span>
+        </div>
+      )}
       {sidebarCollapsed && (
         <button
           type="button"
@@ -867,10 +1017,27 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
                   schemaName={info.namespace}
                   activeContent={editorHandles.current[activePanel.id]?.getValue() ?? activePanel.doc}
                   contentLabel="HBase command"
-                  onOpenQuery={(query) => addPanel(query.content)}
+                  onOpenQuery={(query) => addPanel(query.content, query)}
                   onRunQuery={(query) => {
-                    const panelId = addPanel(query.content);
+                    const panelId = addPanel(query.content, query);
                     if (panelId) setTimeout(() => void runStatements(panelId, query.content), 0);
+                  }}
+                  onSavedQuery={(query, created) => {
+                    const targetPanelId = created ? activePanel.id : null;
+                    setPanels((current) => {
+                      const next = current.map((panel) => {
+                        if (panel.id !== targetPanelId && panel.savedQueryId !== query.id) return panel;
+                        if (!created) editorHandles.current[panel.id]?.setValue(query.content);
+                        return {
+                          ...panel,
+                          doc: created ? panel.doc : query.content,
+                          savedQueryId: query.id,
+                          savedQuery: query,
+                        };
+                      });
+                      panelsRef.current = next;
+                      return next;
+                    });
                   }}
                   onAddTriggerRef={queryTriggerRef}
                 />
@@ -895,9 +1062,9 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
                       color: p.id === activePanelId ? "var(--taomni-accent)" : "var(--taomni-text-muted)",
                     }}
                     onClick={() => setActivePanelId(p.id)}
-                    title={`Query ${i + 1}`}
+                    title={p.savedQuery?.name ?? `Query ${i + 1}`}
                   >
-                    <span className="truncate">Query {i + 1}</span>
+                    <span className="truncate">{p.savedQuery?.name ?? `Query ${i + 1}`}</span>
                     {running && <Loader2 className="w-3 h-3 shrink-0 animate-spin" />}
                     {panels.length > 1 && (
                       <X className="w-3 h-3 shrink-0 hover:text-[var(--taomni-text)]" onClick={(e) => { e.stopPropagation(); closePanel(p.id); }} />

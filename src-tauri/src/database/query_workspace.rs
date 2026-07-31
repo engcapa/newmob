@@ -17,6 +17,7 @@ pub struct DbQueryWorkspaceTab {
     pub content: String,
     pub file_path: Option<String>,
     pub file_name: Option<String>,
+    pub saved_query_id: Option<String>,
     pub dirty: bool,
     pub is_open: bool,
     pub closed_at: Option<i64>,
@@ -50,6 +51,7 @@ fn row_to_workspace_tab(row: &rusqlite::Row<'_>) -> SqlResult<DbQueryWorkspaceTa
         content: row.get(3)?,
         file_path: row.get(4)?,
         file_name: row.get(5)?,
+        saved_query_id: row.get(11)?,
         dirty: row.get::<_, i64>(6)? != 0,
         is_open: row.get::<_, i64>(7)? != 0,
         closed_at: row.get(8)?,
@@ -73,6 +75,7 @@ pub fn init_query_workspace_tables(conn: &Connection) -> SqlResult<()> {
             content TEXT NOT NULL DEFAULT '',
             file_path TEXT,
             file_name TEXT,
+            saved_query_id TEXT,
             dirty INTEGER NOT NULL DEFAULT 1,
             is_open INTEGER NOT NULL DEFAULT 1,
             closed_at INTEGER,
@@ -85,7 +88,21 @@ pub fn init_query_workspace_tables(conn: &Connection) -> SqlResult<()> {
             ON sql_query_workspace_tabs(workspace_id, is_open, tab_order);
         CREATE INDEX IF NOT EXISTS idx_sql_query_workspace_tabs_closed
             ON sql_query_workspace_tabs(workspace_id, is_open, closed_at DESC);",
-    )
+    )?;
+    let has_saved_query_id = {
+        let mut stmt = conn.prepare("PRAGMA table_info(sql_query_workspace_tabs)")?;
+        stmt.query_map([], |row| row.get::<_, String>(1))?
+            .collect::<SqlResult<Vec<_>>>()?
+            .iter()
+            .any(|column| column == "saved_query_id")
+    };
+    if !has_saved_query_id {
+        conn.execute(
+            "ALTER TABLE sql_query_workspace_tabs ADD COLUMN saved_query_id TEXT",
+            [],
+        )?;
+    }
+    Ok(())
 }
 
 pub fn load_query_workspace(
@@ -106,7 +123,7 @@ pub fn load_query_workspace(
 
     let mut stmt = conn.prepare(
         "SELECT workspace_id, panel_id, tab_order, content, file_path, file_name,
-                dirty, is_open, closed_at, created_at, updated_at
+                dirty, is_open, closed_at, created_at, updated_at, saved_query_id
          FROM sql_query_workspace_tabs
          WHERE workspace_id = ?1 AND is_open = 1
          ORDER BY tab_order ASC, created_at ASC",
@@ -150,14 +167,15 @@ pub fn save_query_workspace(
         }
         transaction.execute(
             "INSERT INTO sql_query_workspace_tabs
-             (workspace_id, panel_id, tab_order, content, file_path, file_name, dirty,
-              is_open, closed_at, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, NULL, ?8, ?9)
+             (workspace_id, panel_id, tab_order, content, file_path, file_name, saved_query_id,
+              dirty, is_open, closed_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, NULL, ?9, ?10)
              ON CONFLICT(workspace_id, panel_id) DO UPDATE SET
                  tab_order = excluded.tab_order,
                  content = excluded.content,
                  file_path = excluded.file_path,
                  file_name = excluded.file_name,
+                 saved_query_id = excluded.saved_query_id,
                  dirty = excluded.dirty,
                  is_open = 1,
                  closed_at = NULL,
@@ -169,6 +187,7 @@ pub fn save_query_workspace(
                 tab.content,
                 tab.file_path,
                 tab.file_name,
+                tab.saved_query_id,
                 if tab.dirty { 1 } else { 0 },
                 tab.created_at,
                 tab.updated_at,
@@ -214,7 +233,7 @@ pub fn list_closed_query_workspace_tabs(
 ) -> SqlResult<Vec<DbQueryWorkspaceTab>> {
     let mut stmt = conn.prepare(
         "SELECT workspace_id, panel_id, tab_order, content, file_path, file_name,
-                dirty, is_open, closed_at, created_at, updated_at
+                dirty, is_open, closed_at, created_at, updated_at, saved_query_id
          FROM sql_query_workspace_tabs
          WHERE workspace_id = ?1 AND is_open = 0
          ORDER BY closed_at DESC, updated_at DESC
@@ -323,6 +342,7 @@ mod tests {
             content: format!("select {tab_order}"),
             file_path: None,
             file_name: None,
+            saved_query_id: None,
             dirty: true,
             is_open: true,
             closed_at: None,
@@ -360,6 +380,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["first", "second"]
         );
+    }
+
+    #[test]
+    fn adds_saved_query_link_to_existing_workspace_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sql_query_workspace_state (
+                workspace_id TEXT PRIMARY KEY,
+                active_panel_id TEXT,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE sql_query_workspace_tabs (
+                workspace_id TEXT NOT NULL,
+                panel_id TEXT NOT NULL,
+                tab_order INTEGER NOT NULL,
+                content TEXT NOT NULL DEFAULT '',
+                file_path TEXT,
+                file_name TEXT,
+                dirty INTEGER NOT NULL DEFAULT 1,
+                is_open INTEGER NOT NULL DEFAULT 1,
+                closed_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (workspace_id, panel_id)
+            );",
+        )
+        .unwrap();
+
+        init_query_workspace_tables(&conn).unwrap();
+
+        let columns = conn
+            .prepare("PRAGMA table_info(sql_query_workspace_tabs)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<SqlResult<Vec<_>>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "saved_query_id"));
     }
 
     #[test]

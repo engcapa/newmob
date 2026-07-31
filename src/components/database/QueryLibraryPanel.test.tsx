@@ -120,7 +120,7 @@ describe("QueryLibraryPanel", () => {
         schemaName: "public",
       }),
     );
-    expect(onSavedQuery).toHaveBeenCalledWith(saved);
+    expect(onSavedQuery).toHaveBeenCalledWith(saved, true);
   });
 
   it("opens on click and runs on double click", async () => {

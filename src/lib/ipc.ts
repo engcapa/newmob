@@ -1292,6 +1292,7 @@ export interface DbQueryWorkspaceTab {
   content: string;
   filePath?: string | null;
   fileName?: string | null;
+  savedQueryId?: string | null;
   dirty: boolean;
   isOpen: boolean;
   closedAt?: number | null;
@@ -1387,6 +1388,10 @@ export async function dbListSavedQueries(
   request: DbListSavedQueriesRequest,
 ): Promise<DbSavedQuery[]> {
   return invoke<DbSavedQuery[]>("db_list_saved_queries", { request });
+}
+
+export async function dbGetSavedQuery(id: string): Promise<DbSavedQuery | null> {
+  return invoke<DbSavedQuery | null>("db_get_saved_query", { id });
 }
 
 export async function dbSaveSavedQuery(query: DbSavedQuery): Promise<DbSavedQuery> {
