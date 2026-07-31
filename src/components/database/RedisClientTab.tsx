@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Group as PanelGroup, Panel, Separator as PanelResizeHandle } from "react-resizable-panels";
-import { AlertTriangle, ChevronDown, Bot } from "lucide-react";
+import { AlertTriangle, Bot, ChevronDown, Files, KeyRound } from "lucide-react";
 import type { DbConnectInfo } from "../../types";
 import { dbConnect, dbDisconnect, redisDelKey, redisExec } from "../../lib/ipc";
 import { RedisKeyBrowser } from "./RedisKeyBrowser";
 import { RedisValuePanel } from "./RedisValuePanel";
-import { RedisCli } from "./RedisCli";
+import { RedisCli, type RedisCliHandle } from "./RedisCli";
 import { RedisNewKeyDialog } from "./RedisNewKeyDialog";
 import { useDbSessionFontSize } from "./useDbSessionFontSize";
 import { confirmAppDialog, promptAppDialog } from "../../lib/appDialogs";
@@ -14,6 +14,7 @@ import { useAppStore } from "../../stores/appStore";
 import { TabActions } from "../tabbar/TabActionSlot";
 import { FT_BUTTON_ACTIVE_OVERRIDE, FT_ICON_BUTTON_STYLE } from "../floating-toolbar/floatingToolbarStyles";
 import { useT } from "../../lib/i18n";
+import { QueryLibraryPanel } from "./QueryLibraryPanel";
 
 function createRuntimeDbSessionId(baseSessionId: string): string {
   const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -42,6 +43,10 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
   const [reloadToken, setReloadToken] = useState(0);
   const [showNewKey, setShowNewKey] = useState(false);
   const [cliCollapsed, setCliCollapsed] = useState(false);
+  const [leftPanelTab, setLeftPanelTab] = useState<"keys" | "queries">("keys");
+  const [commandDraft, setCommandDraft] = useState("");
+  const queryTriggerRef = useRef<(() => void) | null>(null);
+  const cliRef = useRef<RedisCliHandle | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const { fontSize: dbFontSize } = useDbSessionFontSize(visible, rootRef);
   const dbFontStyle = useMemo(
@@ -79,6 +84,11 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
   }, [sessionId]);
 
   const reload = useCallback(() => setReloadToken((t) => t + 1), []);
+
+  const openQuerySave = useCallback(() => {
+    setLeftPanelTab("queries");
+    setTimeout(() => queryTriggerRef.current?.(), 0);
+  }, []);
 
   const switchDbIndex = async (idx: number) => {
     if (!connectionSessionId) return;
@@ -162,44 +172,84 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
             className="h-full"
           >
             <Panel id="keys" defaultSize="32%" minSize="18%" maxSize="55%">
-              <div className="h-full" style={{ borderRight: "1px solid var(--taomni-divider)" }}>
-                {connectionSessionId && (
-                  <RedisKeyBrowser
-                    sessionId={connectionSessionId}
-                    separator=":"
-                    reloadToken={reloadToken}
-                    selectedKey={selectedKey}
-                    onSelectKey={setSelectedKey}
-                    onAddKey={() => setShowNewKey(true)}
-                    onDeleteKey={async (key) => {
-                      const confirmed = await confirmAppDialog({
-                        message: `Delete key "${key}"?`,
-                        confirmLabel: "Delete",
-                        danger: true,
-                      });
-                      if (!confirmed) return;
-                      if (!connectionSessionId) return;
-                      await redisDelKey(connectionSessionId, key).catch(() => undefined);
-                      if (selectedKey === key) setSelectedKey(null);
-                      reload();
-                    }}
-                    onSetTtl={async (key) => {
-                      const input = await promptAppDialog({
-                        title: "Set TTL",
-                        label: `Set TTL (seconds) for "${key}" (-1 = persist):`,
-                        initialValue: "60",
-                        allowEmpty: true,
-                      });
-                      if (input === null) return;
-                      const secs = parseInt(input, 10);
-                      if (Number.isNaN(secs)) return;
-                      if (!connectionSessionId) return;
-                      if (secs === -1) await redisExec(connectionSessionId, `PERSIST ${key}`).catch(() => undefined);
-                      else await redisExec(connectionSessionId, `EXPIRE ${key} ${secs}`).catch(() => undefined);
-                      reload();
-                    }}
-                  />
-                )}
+              <div className="h-full flex flex-col" style={{ borderRight: "1px solid var(--taomni-divider)" }}>
+                <div className="h-7 shrink-0 flex border-b border-[var(--taomni-divider)] bg-[var(--taomni-quick-bg)]">
+                  <button
+                    type="button"
+                    className="flex-1 text-[11px] font-semibold inline-flex items-center justify-center gap-1"
+                    style={{ color: leftPanelTab === "keys" ? "var(--taomni-accent)" : "var(--taomni-text-muted)" }}
+                    onClick={() => setLeftPanelTab("keys")}
+                  >
+                    <KeyRound className="w-3.5 h-3.5" /> Keys
+                  </button>
+                  <button
+                    type="button"
+                    className="flex-1 text-[11px] font-semibold inline-flex items-center justify-center gap-1 border-l border-[var(--taomni-divider)]"
+                    style={{ color: leftPanelTab === "queries" ? "var(--taomni-accent)" : "var(--taomni-text-muted)" }}
+                    onClick={() => setLeftPanelTab("queries")}
+                  >
+                    <Files className="w-3.5 h-3.5" /> Queries
+                  </button>
+                </div>
+                <div className="flex-1 min-h-0">
+                  {leftPanelTab === "keys" ? (
+                    connectionSessionId && (
+                      <RedisKeyBrowser
+                        sessionId={connectionSessionId}
+                        separator=":"
+                        reloadToken={reloadToken}
+                        selectedKey={selectedKey}
+                        onSelectKey={setSelectedKey}
+                        onAddKey={() => setShowNewKey(true)}
+                        onDeleteKey={async (key) => {
+                          const confirmed = await confirmAppDialog({
+                            message: `Delete key "${key}"?`,
+                            confirmLabel: "Delete",
+                            danger: true,
+                          });
+                          if (!confirmed) return;
+                          if (!connectionSessionId) return;
+                          await redisDelKey(connectionSessionId, key).catch(() => undefined);
+                          if (selectedKey === key) setSelectedKey(null);
+                          reload();
+                        }}
+                        onSetTtl={async (key) => {
+                          const input = await promptAppDialog({
+                            title: "Set TTL",
+                            label: `Set TTL (seconds) for "${key}" (-1 = persist):`,
+                            initialValue: "60",
+                            allowEmpty: true,
+                          });
+                          if (input === null) return;
+                          const secs = parseInt(input, 10);
+                          if (Number.isNaN(secs)) return;
+                          if (!connectionSessionId) return;
+                          if (secs === -1) await redisExec(connectionSessionId, `PERSIST ${key}`).catch(() => undefined);
+                          else await redisExec(connectionSessionId, `EXPIRE ${key} ${secs}`).catch(() => undefined);
+                          reload();
+                        }}
+                      />
+                    )
+                  ) : (
+                    <QueryLibraryPanel
+                      engine="Redis"
+                      connectionId={info.workspaceSessionId ?? info.sessionId}
+                      databaseName={String(dbIndex)}
+                      activeContent={commandDraft}
+                      contentLabel="Redis command"
+                      onOpenQuery={(query) => {
+                        setCliCollapsed(false);
+                        setCommandDraft(query.content);
+                      }}
+                      onRunQuery={(query) => {
+                        setCliCollapsed(false);
+                        setCommandDraft("");
+                        void cliRef.current?.runCommand(query.content);
+                      }}
+                      onAddTriggerRef={queryTriggerRef}
+                    />
+                  )}
+                </div>
               </div>
             </Panel>
             <PanelResizeHandle className="w-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] transition-colors cursor-col-resize" />
@@ -225,9 +275,13 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
           maxSize={`${cliCollapsed ? 8 : 70}%`}
         >
           <RedisCli
+            ref={cliRef}
             sessionId={connectionSessionId ?? ""}
             collapsed={cliCollapsed}
             onToggleCollapse={() => setCliCollapsed((v) => !v)}
+            input={commandDraft}
+            onInputChange={setCommandDraft}
+            onSaveQuery={openQuerySave}
           />
         </Panel>
       </PanelGroup>

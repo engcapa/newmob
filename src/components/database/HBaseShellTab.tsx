@@ -6,11 +6,14 @@ import {
   ChevronRight,
   Clock,
   Crosshair,
+  Database,
+  Files,
   HelpCircle,
   Loader2,
   Play,
   Plus,
   SquareDashedMousePointer,
+  Star,
   Trash2,
   X,
 } from "lucide-react";
@@ -56,6 +59,7 @@ import {
 import { SqlEditorPanel, type SqlEditorHandle } from "./SqlEditorPanel";
 import { HBaseSchemaTree } from "./HBaseSchemaTree";
 import { useDbSessionFontSize } from "./useDbSessionFontSize";
+import { QueryLibraryPanel } from "./QueryLibraryPanel";
 
 interface HBaseShellTabProps {
   tabId: string;
@@ -453,10 +457,12 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
   const [showCommands, setShowCommands] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [leftPanelTab, setLeftPanelTab] = useState<"objects" | "queries">("objects");
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
 
   const editorHandles = useRef<Record<string, SqlEditorHandle | null>>({});
   const historyRef = useRef<Record<string, string[]>>({});
+  const queryTriggerRef = useRef<(() => void) | null>(null);
 
   useEffect(
     () => subscribeSqlExecutionPreferences(setExecutionPreferences),
@@ -672,13 +678,19 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
 
   const addPanel = useCallback(
     (doc = "") => {
-      if (panels.length >= MAX_PANELS) return;
+      if (panels.length >= MAX_PANELS) return null;
       const panel = newPanel(doc);
       setPanels((prev) => [...prev, panel]);
       setActivePanelId(panel.id);
+      return panel.id;
     },
     [panels.length],
   );
+
+  const openQuerySave = useCallback(() => {
+    setLeftPanelTab("queries");
+    setTimeout(() => queryTriggerRef.current?.(), 0);
+  }, []);
 
   const closePanel = useCallback(
     (panelId: string) => {
@@ -813,21 +825,57 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
         className="flex-1 min-h-0"
       >
         <Panel panelRef={sidebarPanelRef} id="sidebar" defaultSize="20%" minSize="15%" maxSize="40%" collapsible collapsedSize={0} onResize={handleSidebarResize}>
-          <div className="h-full border-r" style={{ borderColor: "var(--taomni-divider)" }}>
-            <HBaseSchemaTree
-              sessionId={connectionSessionId}
-              transport={transport}
-              namespace={info.namespace}
-              endpoint={endpoint}
-              refreshSignal={refreshSignal}
-              scanLimit={rowLimit}
-              onRunCommand={onRunCommand}
-              onInsert={onInsert}
-              onNewQuery={() => addPanel("")}
-              onStatus={setStatusMessage}
-              onTablesLoaded={onTablesLoaded}
-              onFamiliesLoaded={onFamiliesLoaded}
-            />
+          <div className="h-full flex flex-col border-r" style={{ borderColor: "var(--taomni-divider)" }}>
+            <div className="h-7 shrink-0 flex border-b border-[var(--taomni-divider)] bg-[var(--taomni-quick-bg)]">
+              <button
+                type="button"
+                className="flex-1 text-[11px] font-semibold inline-flex items-center justify-center gap-1"
+                style={{ color: leftPanelTab === "objects" ? "var(--taomni-accent)" : "var(--taomni-text-muted)" }}
+                onClick={() => setLeftPanelTab("objects")}
+              >
+                <Database className="w-3.5 h-3.5" /> Objects
+              </button>
+              <button
+                type="button"
+                className="flex-1 text-[11px] font-semibold inline-flex items-center justify-center gap-1 border-l border-[var(--taomni-divider)]"
+                style={{ color: leftPanelTab === "queries" ? "var(--taomni-accent)" : "var(--taomni-text-muted)" }}
+                onClick={() => setLeftPanelTab("queries")}
+              >
+                <Files className="w-3.5 h-3.5" /> Queries
+              </button>
+            </div>
+            <div className="flex-1 min-h-0">
+              {leftPanelTab === "objects" ? (
+                <HBaseSchemaTree
+                  sessionId={connectionSessionId}
+                  transport={transport}
+                  namespace={info.namespace}
+                  endpoint={endpoint}
+                  refreshSignal={refreshSignal}
+                  scanLimit={rowLimit}
+                  onRunCommand={onRunCommand}
+                  onInsert={onInsert}
+                  onNewQuery={() => addPanel("")}
+                  onStatus={setStatusMessage}
+                  onTablesLoaded={onTablesLoaded}
+                  onFamiliesLoaded={onFamiliesLoaded}
+                />
+              ) : (
+                <QueryLibraryPanel
+                  engine="HBaseShell"
+                  connectionId={info.sessionId}
+                  schemaName={info.namespace}
+                  activeContent={editorHandles.current[activePanel.id]?.getValue() ?? activePanel.doc}
+                  contentLabel="HBase command"
+                  onOpenQuery={(query) => addPanel(query.content)}
+                  onRunQuery={(query) => {
+                    const panelId = addPanel(query.content);
+                    if (panelId) setTimeout(() => void runStatements(panelId, query.content), 0);
+                  }}
+                  onAddTriggerRef={queryTriggerRef}
+                />
+              )}
+            </div>
           </div>
         </Panel>
         <PanelResizeHandle className="w-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] transition-colors cursor-col-resize" />
@@ -904,6 +952,9 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
                 </button>
                 <button type="button" className={btn} title="Command history" onClick={() => { setShowHistory((v) => !v); setShowCommands(false); }}>
                   <Clock className="w-3.5 h-3.5" /> History
+                </button>
+                <button type="button" className={btn} title="Save to query library" onClick={openQuerySave}>
+                  <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query
                 </button>
                 <button type="button" className={btn} title={t("hbaseObjects.helpTitle")} onClick={() => setShowHelp(true)}>
                   <HelpCircle className="w-3.5 h-3.5" /> {t("hbaseObjects.help")}

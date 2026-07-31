@@ -18,6 +18,10 @@ const ipcMock = vi.hoisted(() => ({
     warnings: [],
     durationMs: 5,
   })),
+  dbListSavedQueries: vi.fn(async () => []),
+  dbSaveSavedQuery: vi.fn(),
+  dbArchiveSavedQuery: vi.fn(),
+  dbDeleteSavedQuery: vi.fn(),
 }));
 
 vi.mock("react-resizable-panels", () => {
@@ -41,6 +45,10 @@ vi.mock("../../lib/ipc", () => ({
   hbaseDisconnect: ipcMock.hbaseDisconnect,
   hbaseCancel: ipcMock.hbaseCancel,
   hbaseExecute: ipcMock.hbaseExecute,
+  dbListSavedQueries: ipcMock.dbListSavedQueries,
+  dbSaveSavedQuery: ipcMock.dbSaveSavedQuery,
+  dbArchiveSavedQuery: ipcMock.dbArchiveSavedQuery,
+  dbDeleteSavedQuery: ipcMock.dbDeleteSavedQuery,
 }));
 
 vi.mock("./HBaseSchemaTree", () => ({
@@ -147,5 +155,24 @@ describe("HBaseShellTab workspace", () => {
     expect(dialog).toHaveTextContent("enable");
     // REST transport => admin verbs carry the unsupported note.
     expect(dialog).toHaveTextContent("Not available on the REST transport");
+  });
+
+  it("opens the shared query library with the stable HBase session scope", async () => {
+    render(<HBaseShellTab tabId="t1" info={{ ...info, namespace: "prod" }} visible />);
+    await waitFor(() => expect(ipcMock.hbaseConnect).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Queries" }));
+
+    await waitFor(() =>
+      expect(ipcMock.dbListSavedQueries).toHaveBeenCalledWith({
+        connectionId: "hb1",
+        engine: "HBaseShell",
+        catalogName: undefined,
+        databaseName: undefined,
+        schemaName: "prod",
+        includeAllNamespaces: false,
+        includeArchived: false,
+      }),
+    );
   });
 });
