@@ -3,11 +3,13 @@ import { ChevronDown, ChevronRight, Copy, FolderOpen, RefreshCw, Server } from "
 import {
   lspDetectJavaBundles,
   lspDetectServers,
+  lspDiscoverJavaBundles,
   lspSetJavaBundles,
   lspSetJavaHome,
   lspSetJavaSettings,
   lspSetJavaVmargs,
   type LspBundleStatus,
+  type LspDiscoveredBundle,
   type LspJavaBundleConfig,
   type LspJavaSettings,
   type LspServerStatus,
@@ -63,6 +65,7 @@ export function LanguageServersSettings() {
   const [javaSettings, setJavaSettings] = useState<LspJavaSettings>(() => readLspJavaSettings());
   const [javaBundles, setJavaBundles] = useState<LspJavaBundleConfig>(() => readLspJavaBundles());
   const [bundleStatuses, setBundleStatuses] = useState<LspBundleStatus[]>([]);
+  const [discoveredBundles, setDiscoveredBundles] = useState<LspDiscoveredBundle[]>([]);
   /** Expanded install panels keyed by presetId. */
   const [expandedInstall, setExpandedInstall] = useState<Record<string, boolean>>({});
   /** Brief highlight when deep-linked from a Code Workspace file. */
@@ -93,7 +96,8 @@ export function LanguageServersSettings() {
     void refresh();
   }, [refresh]);
 
-  // Sync persisted bundle paths to the backend once, then probe for availability.
+  // Sync persisted bundle paths to the backend once, then probe for availability
+  // and scan installed editor extensions so the user can adopt a found jar.
   useEffect(() => {
     void (async () => {
       try {
@@ -101,6 +105,11 @@ export function LanguageServersSettings() {
         setBundleStatuses(await lspDetectJavaBundles());
       } catch {
         // Non-fatal: the bundle status simply stays unknown.
+      }
+      try {
+        setDiscoveredBundles(await lspDiscoverJavaBundles());
+      } catch {
+        // Non-fatal: discovery just yields nothing (browser preview, no editors).
       }
     })();
   }, []);
@@ -591,6 +600,9 @@ export function LanguageServersSettings() {
                           ["javaTest", "javaTestPath", "settings.languageServersJavaTestBundle"],
                         ] as const).map(([id, field, labelKey]) => {
                           const probe = bundleStatuses.find((entry) => entry.id === id);
+                          const found = discoveredBundles.filter((entry) => entry.id === id);
+                          // Only offer adoption when the current path is not already this jar.
+                          const adoptable = found.filter((entry) => entry.path !== javaBundles[field].trim());
                           return (
                             <label key={id} className="mt-1.5 block text-[11px] text-[var(--taomni-text-muted)]">
                               <span className="flex items-center gap-1.5">
@@ -606,6 +618,9 @@ export function LanguageServersSettings() {
                                 )}
                               </span>
                               <input
+                                // Remount on external change (e.g. "use detected") so the
+                                // uncontrolled field reflects the adopted path.
+                                key={javaBundles[field]}
                                 type="text"
                                 spellCheck={false}
                                 data-testid={`language-servers-bundle-${id}`}
@@ -618,6 +633,21 @@ export function LanguageServersSettings() {
                                   }
                                 }}
                               />
+                              {adoptable.map((entry) => (
+                                <button
+                                  key={`${entry.source}:${entry.path}`}
+                                  type="button"
+                                  data-testid={`language-servers-bundle-use-${id}`}
+                                  className="taomni-btn mt-1 inline-flex h-6 items-center gap-1 px-2 text-[10px]"
+                                  title={entry.path}
+                                  onClick={() => commitJavaBundles({ [field]: entry.path })}
+                                >
+                                  {t("settings.languageServersJavaBundleUseDetected", {
+                                    version: entry.version,
+                                    source: entry.source,
+                                  })}
+                                </button>
+                              ))}
                             </label>
                           );
                         })}

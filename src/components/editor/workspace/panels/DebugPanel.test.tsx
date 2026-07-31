@@ -37,6 +37,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     setVariable: vi.fn().mockResolvedValue(null),
     logConsole: vi.fn(),
     clearConsole: vi.fn(),
+    reportStartupFailure: vi.fn(),
     fetchVariables: vi.fn().mockResolvedValue({ variables: [] }),
     fetchScopes: vi.fn().mockResolvedValue({ scopes: [] }),
     fetchSource: vi.fn().mockResolvedValue(null),
@@ -68,6 +69,22 @@ describe("DebugPanel", () => {
     expect(screen.getByText(/No debug session/)).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("debug-start"));
     expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains the desktop requirement in the browser preview", () => {
+    render(
+      <DebugPanel
+        debug={makeSession()}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        runtimeAvailable={false}
+      />,
+    );
+    // The empty state must say debugging is desktop-only, not the generic
+    // "press start" hint that implies it would work here.
+    const empty = screen.getByTestId("debug-empty-state");
+    expect(empty.textContent).toMatch(/desktop app only/i);
+    expect(empty.textContent).not.toMatch(/press start/i);
   });
 
   it("renders the call stack and dispatches step controls when stopped", () => {

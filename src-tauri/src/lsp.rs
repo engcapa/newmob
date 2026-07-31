@@ -59,6 +59,32 @@ pub struct LspCustomServerCommand {
     pub args: Vec<String>,
 }
 
+/// Which jdtls command the caller's editor session is bound to, so Java debug /
+/// test `executeCommand` calls resolve the *same* session (matters when the user
+/// configured a custom jdtls command or a non-default preset binary). Empty =
+/// default preset lookup, matching the pre-identity behavior.
+#[derive(Clone, Debug, Default)]
+pub struct JavaSessionIdentity {
+    pub preferred_command_id: Option<String>,
+    pub custom_command: Option<LspCustomServerCommand>,
+}
+
+impl JavaSessionIdentity {
+    /// Build from the frontend's optional command-id + custom-command pair,
+    /// trimming blanks so an empty string does not shadow the preset default.
+    pub fn new(
+        preferred_command_id: Option<String>,
+        custom_command: Option<LspCustomServerCommand>,
+    ) -> Self {
+        Self {
+            preferred_command_id: preferred_command_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty()),
+            custom_command: custom_command.filter(|cmd| !cmd.command.trim().is_empty()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LspServerPreset {
@@ -926,10 +952,21 @@ impl LspManager {
         file_path: String,
         command: &str,
         arguments: Vec<Value>,
+        identity: JavaSessionIdentity,
     ) -> Result<Value, String> {
         let document = resolve_document(workspace_id, root_path, file_path, Some("java".into()), 0)?;
+        // Debug + test must target the SAME jdtls session the editor uses. When a
+        // custom jdtls command is configured, the default `active_session(None,
+        // None)` lookup recomputes the default `jdtls` session key and misses the
+        // custom one — so intelligence works while debug/test report "no active
+        // Java language server". Forward the caller's command identity so the
+        // session key matches the editor's.
         let session = self
-            .active_session(&document, None, None)
+            .active_session(
+                &document,
+                identity.preferred_command_id.as_deref(),
+                identity.custom_command.as_ref(),
+            )
             .await
             .ok_or_else(|| {
                 "No Java language server session is active for this project; open a project file first"
@@ -2690,6 +2727,15 @@ pub fn lsp_set_java_bundles(config: crate::java_bundles::JavaBundleConfig) -> Re
 #[tauri::command]
 pub fn lsp_detect_java_bundles() -> Vec<crate::java_bundles::BundleStatus> {
     crate::java_bundles::probe_bundles(&crate::java_bundles::get_configured_bundles())
+}
+
+/// Scan installed VS Code / Cursor / VSCodium extensions for the java-debug and
+/// java-test plugin jars so the user can adopt them in one click instead of
+/// hunting for a path or downloading anything (the common "setup is complex"
+/// case — the jar already ships with a Java extension they have installed).
+#[tauri::command]
+pub fn lsp_discover_java_bundles() -> Vec<crate::java_bundles::DiscoveredBundle> {
+    crate::java_bundles::discover_bundles()
 }
 
 #[tauri::command]

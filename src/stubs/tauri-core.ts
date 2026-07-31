@@ -1502,6 +1502,48 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         tokens: [],
       } as T;
     }
+    // Java debug + extension bundles + java-tools provisioning have no
+    // browser-preview backend: there is no JVM, jdtls session, or DAP adapter.
+    // Answer the read-only status probes with "unavailable" shapes so Settings
+    // and the workspace render, and hard-fail the action commands with a clear
+    // desktop-only message instead of returning undefined (which crashed the
+    // debug hook when it read `.sessionId`).
+    case "lsp_set_java_bundles": {
+      return undefined as T;
+    }
+    case "lsp_detect_java_bundles": {
+      return [
+        { id: "javaDebug", path: null, available: false },
+        { id: "javaTest", path: null, available: false },
+      ] as T;
+    }
+    case "lsp_discover_java_bundles": {
+      // Browser preview has no filesystem scan; nothing discovered.
+      return [] as T;
+    }
+    case "java_tools_status": {
+      return {
+        jdtls: { id: "jdtls", state: "missing", path: null, version: null },
+        javaDebug: { id: "javaDebug", state: "missing", path: null, version: null },
+        jdk: { compatible: false, version: null, path: null },
+        desktopOnly: true,
+      } as T;
+    }
+    case "java_tools_discover": {
+      return [] as T;
+    }
+    case "dap_start_session":
+    case "dap_send_request":
+    case "dap_send":
+    case "dap_terminate":
+    case "java_debug_resolve_main_classes":
+    case "java_tools_install":
+    case "java_test_discover":
+    case "java_test_resolve_launch": {
+      throw new Error(
+        `${cmd} is only available in the Taomni desktop app; the browser preview has no Java debug backend`,
+      );
+    }
     case "workspace_list_dir": {
       const repoRoot = (args?.repoRoot as string) || VFS_ROOT;
       const path = (args?.path as string) || "";

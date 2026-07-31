@@ -2192,6 +2192,7 @@ const dict = {
     languageServersJavaDebugBundle: "java-debug bundle",
     languageServersJavaTestBundle: "java-test bundle",
     languageServersJavaBundlePlaceholder: "Directory or jar path",
+    languageServersJavaBundleUseDetected: "Use {version} from {source}",
     languageServersInstall: "Install",
     languageServersCopyInstall: "Copy install instructions",
     languageServersCopy: "Copy",

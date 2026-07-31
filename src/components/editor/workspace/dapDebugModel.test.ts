@@ -93,14 +93,28 @@ describe("dapDebugModel", () => {
       ],
     });
     expect(bindings).toEqual([
-      { id: 1, verified: true, line: 4 },
-      { id: 2, verified: false, line: 9 },
+      { id: 1, verified: true, line: 4, message: null, reason: null },
+      { id: 2, verified: false, line: 9, message: null, reason: null },
     ]);
     // Missing/short response arrays leave breakpoints unverified on their line.
     expect(parseSetBreakpointsResponse(plan, null)).toEqual([
-      { id: null, verified: false, line: 3 },
-      { id: null, verified: false, line: 9 },
+      { id: null, verified: false, line: 3, message: null, reason: null },
+      { id: null, verified: false, line: 9, message: null, reason: null },
     ]);
+  });
+
+  it("captures the adapter's message + reason for an unverified breakpoint", () => {
+    const plan = planBreakpointSync([{ line: 7 }]);
+    const [binding] = parseSetBreakpointsResponse(plan, {
+      breakpoints: [{ id: 3, verified: false, line: 7, message: "No code at line 7", reason: "failed" }],
+    });
+    expect(binding).toEqual({
+      id: 3,
+      verified: false,
+      line: 7,
+      message: "No code at line 7",
+      reason: "failed",
+    });
   });
 
   it("adopts adapter-adjusted breakpoint lines and drops collapsed duplicates", () => {
@@ -134,16 +148,34 @@ describe("dapDebugModel", () => {
     const plan = planBreakpointSync([{ line: 3 }, { line: 5, enabled: false }, { line: 9 }]);
     const map = breakpointVerificationMap(plan, [
       { id: 1, verified: true, line: 4 },
-      { id: 2, verified: false, line: 9 },
+      { id: 2, verified: false, line: 9, reason: "failed", message: "no code" },
     ]);
     // Keyed by the line the adapter bound; the disabled breakpoint has no entry.
-    expect(map).toEqual({ 4: true, 9: false });
+    // Verified → verified; unverified+failed → failed (carries the reason).
+    expect(map).toEqual({
+      4: { status: "verified", message: null },
+      9: { status: "failed", message: "no code" },
+    });
   });
 
   it("parses breakpoint events (verification changes as classes load)", () => {
     expect(parseBreakpointEvent({
       body: { reason: "changed", breakpoint: { id: 7, verified: true, line: 12 } },
-    })).toEqual({ reason: "changed", id: 7, verified: true, line: 12 });
+    })).toEqual({ reason: "changed", id: 7, verified: true, line: 12, message: null, bindReason: null });
+    // An unverified re-bind carries the adapter's reason + message for the UI.
+    expect(parseBreakpointEvent({
+      body: {
+        reason: "changed",
+        breakpoint: { id: 8, verified: false, line: 20, reason: "failed", message: "class not loaded" },
+      },
+    })).toEqual({
+      reason: "changed",
+      id: 8,
+      verified: false,
+      line: 20,
+      message: "class not loaded",
+      bindReason: "failed",
+    });
     expect(parseBreakpointEvent({ body: {} })).toBeNull();
     expect(parseBreakpointEvent(null)).toBeNull();
   });

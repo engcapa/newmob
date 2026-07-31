@@ -331,6 +331,24 @@ export function lspDetectJavaBundles(): Promise<LspBundleStatus[]> {
   return invoke<LspBundleStatus[]>("lsp_detect_java_bundles");
 }
 
+/** A jdtls extension jar found inside an installed VS Code / Cursor extension. */
+export interface LspDiscoveredBundle {
+  /** "javaDebug" | "javaTest". */
+  id: string;
+  path: string;
+  version: string;
+  /** Where it was found, e.g. "vscode: vscjava.vscode-java-debug-0.58.0". */
+  source: string;
+}
+
+/**
+ * Scan installed editor extensions for java-debug / java-test plugin jars so the
+ * user can adopt one without hunting for a path or downloading anything.
+ */
+export function lspDiscoverJavaBundles(): Promise<LspDiscoveredBundle[]> {
+  return invoke<LspDiscoveredBundle[]>("lsp_discover_java_bundles");
+}
+
 /** A discovered Java test node (class or method) from the java-test bundle (M8 E). */
 export interface JavaTestItem {
   name: string;
@@ -353,6 +371,9 @@ export function javaTestDiscover(descriptor: LspDocumentDescriptor): Promise<Jav
     workspaceId: descriptor.workspaceId,
     rootPath: descriptor.rootPath ?? null,
     filePath: descriptor.filePath,
+    // Bind discovery to the same jdtls session the editor uses (custom command).
+    serverCommandId: descriptor.serverCommandId ?? null,
+    customServerCommand: descriptor.customServerCommand ?? null,
   });
 }
 
@@ -376,6 +397,8 @@ export function javaTestResolveLaunch(
     rootPath: descriptor.rootPath ?? null,
     filePath: descriptor.filePath,
     test,
+    serverCommandId: descriptor.serverCommandId ?? null,
+    customServerCommand: descriptor.customServerCommand ?? null,
   });
 }
 

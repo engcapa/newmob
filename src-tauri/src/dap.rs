@@ -226,6 +226,14 @@ const INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 /// Grace period for a graceful `terminate` before falling back to `disconnect`.
 const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// Upper bound on an ordinary DAP request/response round-trip. A wedged adapter
+/// that connected but stopped answering must not leave a command (setBreakpoints,
+/// stackTrace, evaluate…) pending forever — the UI would sit "running" with no
+/// error. Generous so a slow-but-live adapter is not cut off; `launch` is fired
+/// fire-and-forget (its response legitimately trails configurationDone) so this
+/// does not apply to it.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A live debug session. Holds the write half + pending-response correlation +
 /// child handle; **no `AppHandle`** — the reader task owns a cloned handle so this
 /// struct stays out of the AppState-reachable AppHandle trap (see M7-C).
@@ -267,8 +275,18 @@ impl DapSession {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(seq, tx);
         self.write_message(&message).await?;
-        rx.await
-            .map_err(|_| "DAP session closed before response".to_string())?
+        // Bound the wait: a wedged adapter must not hang the command forever.
+        // On timeout, drop the pending slot so a late reply is discarded cleanly.
+        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+            Ok(result) => result.map_err(|_| "DAP session closed before response".to_string())?,
+            Err(_) => {
+                self.pending.lock().await.remove(&seq);
+                Err(format!(
+                    "debug adapter did not answer `{command}` within {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                ))
+            }
+        }
     }
 
     /// Fire a DAP request without awaiting a response (e.g. `disconnect`).

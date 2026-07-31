@@ -245,6 +245,22 @@ export interface BreakpointBinding {
   verified: boolean;
   /** Line the adapter actually bound (requested line when it reports none). */
   line: number;
+  /** DAP `message`: why a breakpoint could not be verified (shown to the user). */
+  message?: string | null;
+  /** DAP `reason`: `"pending"` (may verify later) or `"failed"` (needs action). */
+  reason?: "pending" | "failed" | null;
+}
+
+/**
+ * Runtime state of one armed breakpoint for the gutter + breakpoints view.
+ * `verified` = bound in the running VM; `pending` = sent but the class is not
+ * loaded / not yet confirmed (grey, may still hit); `failed` = the adapter
+ * cannot bind it (grey, carries a reason). A breakpoint with no entry while a
+ * session is active is treated as pending, never as verified.
+ */
+export interface BreakpointRuntimeState {
+  status: "verified" | "pending" | "failed";
+  message: string | null;
 }
 
 /**
@@ -264,8 +280,20 @@ export function parseSetBreakpointsResponse(
       id: typeof rec.id === "number" ? rec.id : null,
       verified: rec.verified === true,
       line: typeof rec.line === "number" && rec.line > 0 ? rec.line : bp.line,
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
     };
   });
+}
+
+/** Map a raw binding's `verified`/`reason` to a display runtime status. */
+export function bindingRuntimeStatus(binding: BreakpointBinding): BreakpointRuntimeState {
+  if (binding.verified) return { status: "verified", message: null };
+  // Unverified: `failed` means the adapter gave up; anything else (incl. an
+  // explicit `pending`, or no reason yet) is treated as pending so the gutter
+  // shows "not bound yet" rather than a hard failure.
+  const status = binding.reason === "failed" ? "failed" : "pending";
+  return { status, message: binding.message ?? null };
 }
 
 /**
@@ -302,11 +330,15 @@ export function reconcileBreakpointLines(
 export function breakpointVerificationMap(
   plan: BreakpointSyncPlan,
   bindings: BreakpointBinding[],
-): Record<number, boolean> {
-  const out: Record<number, boolean> = {};
+): Record<number, BreakpointRuntimeState> {
+  const out: Record<number, BreakpointRuntimeState> = {};
   plan.sent.forEach((bp, k) => {
     const binding = bindings[k];
-    out[binding?.line ?? bp.line] = binding?.verified ?? false;
+    const line = binding?.line ?? bp.line;
+    out[line] = binding
+      ? bindingRuntimeStatus(binding)
+      // No binding element at all (short/missing response) → not yet confirmed.
+      : { status: "pending", message: null };
   });
   return out;
 }
@@ -314,7 +346,16 @@ export function breakpointVerificationMap(
 /** Parse a `breakpoint` event (adapters re-verify bindings as classes load). */
 export function parseBreakpointEvent(
   message: unknown,
-): { reason: string; id: number | null; verified: boolean; line: number | null } | null {
+): {
+  reason: string;
+  id: number | null;
+  verified: boolean;
+  line: number | null;
+  /** Adapter explanation for an unverified breakpoint, when provided. */
+  message: string | null;
+  /** DAP breakpoint `reason` field (distinct from the event's `reason`). */
+  bindReason: "pending" | "failed" | null;
+} | null {
   const body = asRecord(asRecord(message).body);
   const bp = asRecord(body.breakpoint);
   if (Object.keys(bp).length === 0) return null;
@@ -323,6 +364,8 @@ export function parseBreakpointEvent(
     id: typeof bp.id === "number" ? bp.id : null,
     verified: bp.verified === true,
     line: typeof bp.line === "number" ? bp.line : null,
+    message: typeof bp.message === "string" && bp.message ? bp.message : null,
+    bindReason: bp.reason === "pending" || bp.reason === "failed" ? bp.reason : null,
   };
 }
 

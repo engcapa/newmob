@@ -34,6 +34,12 @@ interface DebugPanelProps {
    */
   editingBreakpoint?: { path: string; line: number } | null;
   onEditingBreakpointChange?: (target: { path: string; line: number } | null) => void;
+  /**
+   * False in the browser dev-preview, where the DAP backend is unavailable.
+   * The panel then explains the desktop requirement instead of implying that
+   * pressing start would work.
+   */
+  runtimeAvailable?: boolean;
 }
 
 /** One expandable variables node (D4) — children fetched lazily on expand. */
@@ -196,6 +202,13 @@ function BreakpointsView({
       {entries.map(({ path, bp }) => {
         const open = editing?.path === path && editing.line === bp.line;
         const disabled = bp.enabled === false;
+        // Adapter binding state for this line (in-session only): surface a
+        // pending/failed reason so an unhittable breakpoint is not silent.
+        const runtime = debug.breakpointRuntime[path]?.[bp.line];
+        const sessionRunning = !!debug.state && debug.state.status !== "terminated";
+        const bindingHint = sessionRunning && !disabled && runtime && runtime.status !== "verified"
+          ? { status: runtime.status, message: runtime.message }
+          : null;
         return (
           <div key={`${path}:${bp.line}`} className="border-b border-[var(--taomni-code-border)]/40 last:border-b-0">
             <div className="group flex items-center gap-2 px-3 py-0.5 hover:bg-[var(--taomni-hover-bg)]">
@@ -217,6 +230,15 @@ function BreakpointsView({
                 {bp.condition && <span className="ml-2 text-amber-500">if {bp.condition}</span>}
                 {bp.hitCondition && <span className="ml-2 text-amber-500">hit {bp.hitCondition}</span>}
                 {bp.logMessage && <span className="ml-2 text-sky-500">log</span>}
+                {bindingHint && (
+                  <span
+                    data-testid={`debug-breakpoint-binding-${bp.line}`}
+                    className={`ml-2 ${bindingHint.status === "failed" ? "text-rose-500" : "text-[var(--taomni-text-muted)]"}`}
+                    title={bindingHint.message ?? undefined}
+                  >
+                    {bindingHint.status === "failed" ? "not bound" : "pending"}
+                  </span>
+                )}
               </button>
               <button
                 type="button"
@@ -351,6 +373,7 @@ export function DebugPanel({
   onOpenBreakpoint,
   editingBreakpoint = null,
   onEditingBreakpointChange,
+  runtimeAvailable = true,
 }: DebugPanelProps) {
   const { state } = debug;
   const running = !!state && state.status !== "terminated";
@@ -635,8 +658,10 @@ export function DebugPanel({
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         {!state && (
-          <div className="px-3 py-2 text-[var(--taomni-text-muted)]">
-            No debug session. Open a Java file and press start (requires the java-debug bundle).
+          <div className="px-3 py-2 text-[var(--taomni-text-muted)]" data-testid="debug-empty-state">
+            {runtimeAvailable
+              ? "No debug session. Open a Java file and press start (requires the java-debug bundle)."
+              : "Java debugging runs in the desktop app only. Start Taomni with the desktop runtime (pnpm tauri dev) to debug; the browser preview has no debug adapter."}
           </div>
         )}
         <Section

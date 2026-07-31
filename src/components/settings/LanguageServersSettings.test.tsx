@@ -10,6 +10,7 @@ const setJavaVmargsMock = vi.fn(async (vmargs?: string | null) => vmargs?.trim()
 const setJavaSettingsMock = vi.fn(async (_settings: unknown) => 0);
 const setJavaBundlesMock = vi.fn(async (_config: unknown) => {});
 const detectJavaBundlesMock = vi.fn(async () => [] as unknown[]);
+const discoverJavaBundlesMock = vi.fn(async () => [] as unknown[]);
 const selectFolderPathMock = vi.fn(async (_current?: string) => null as string | null);
 
 vi.mock("../../lib/clipboard", () => ({
@@ -23,6 +24,7 @@ vi.mock("../../lib/editor/lsp", () => ({
   lspSetJavaSettings: (settings: unknown) => setJavaSettingsMock(settings),
   lspSetJavaBundles: (config: unknown) => setJavaBundlesMock(config),
   lspDetectJavaBundles: () => detectJavaBundlesMock(),
+  lspDiscoverJavaBundles: () => discoverJavaBundlesMock(),
 }));
 
 vi.mock("../../lib/ipc", () => ({
@@ -94,6 +96,9 @@ beforeEach(() => {
       ],
     },
   ]);
+  detectJavaBundlesMock.mockReset().mockResolvedValue([]);
+  discoverJavaBundlesMock.mockReset().mockResolvedValue([]);
+  setJavaBundlesMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("LanguageServersSettings", () => {
@@ -334,5 +339,32 @@ describe("LanguageServersSettings", () => {
     ));
     // Probe status renders after the commit re-probe.
     await screen.findByTestId("language-servers-bundle-status-javaDebug");
+  });
+
+  it("offers a discovered java-debug jar for one-click adoption (Phase 1)", async () => {
+    discoverJavaBundlesMock.mockResolvedValue([
+      {
+        id: "javaDebug",
+        path: "/home/u/.vscode/extensions/vscjava.vscode-java-debug-0.58.0/server/com.microsoft.java.debug.plugin-0.53.2.jar",
+        version: "0.53.2",
+        source: "vscode: vscjava.vscode-java-debug-0.58.0",
+      },
+    ]);
+    render(<LanguageServersSettings />);
+
+    // The discovered jar surfaces as a one-click "use it" button (no path hunting).
+    const useBtn = await screen.findByTestId("language-servers-bundle-use-javaDebug");
+    fireEvent.click(useBtn);
+
+    await waitFor(() => expect(setJavaBundlesMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        javaDebugPath:
+          "/home/u/.vscode/extensions/vscjava.vscode-java-debug-0.58.0/server/com.microsoft.java.debug.plugin-0.53.2.jar",
+      }),
+    ));
+    const parsed = JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.lspJavaBundles.v1") ?? "{}",
+    );
+    expect(parsed.javaDebugPath).toContain("com.microsoft.java.debug.plugin-0.53.2.jar");
   });
 });
