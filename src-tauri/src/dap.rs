@@ -270,7 +270,7 @@ impl DapSession {
             "seq": seq,
             "type": "request",
             "command": command,
-            "arguments": arguments,
+            "arguments": normalize_request_arguments(arguments),
         });
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(seq, tx);
@@ -296,7 +296,7 @@ impl DapSession {
             "seq": seq,
             "type": "request",
             "command": command,
-            "arguments": arguments,
+            "arguments": normalize_request_arguments(arguments),
         }))
         .await
     }
@@ -312,6 +312,21 @@ impl DapSession {
         writer.flush().await.map_err(|e| format!("DAP flush failed: {e}"))
     }
 }
+
+/// DAP declares request arguments optional, but some adapters deserialize the
+/// field directly as an object. In particular java-debug rejects an explicit
+/// JSON `null` with `Expected JsonObject but was JsonNull`, closes the socket,
+/// and tears down an otherwise successfully launched debuggee. Tauri maps an
+/// omitted/`null` command argument to `Value::Null`, so normalize it at the
+/// protocol boundary for every request (`configurationDone`, `threads`, ...).
+fn normalize_request_arguments(arguments: Value) -> Value {
+    if arguments.is_null() {
+        json!({})
+    } else {
+        arguments
+    }
+}
+
 /// Holds live sessions + the adapter registry. Lives in `AppState`; holds **no
 /// `AppHandle`** (event emission uses a handle cloned into the reader task).
 pub struct DapManager {
@@ -722,6 +737,15 @@ mod tests {
         let declared: usize = header.trim_start_matches("Content-Length: ").parse().unwrap();
         assert_eq!(declared, body.len());
         assert!(body.contains("\"command\":\"next\""));
+    }
+
+    #[test]
+    fn normalizes_null_request_arguments_to_an_object() {
+        assert_eq!(normalize_request_arguments(Value::Null), json!({}));
+        assert_eq!(
+            normalize_request_arguments(json!({ "threadId": 7 })),
+            json!({ "threadId": 7 })
+        );
     }
 
     #[test]
