@@ -113,4 +113,28 @@ describe("TerminalDockPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "task-exit" }));
     expect(onExit).toHaveBeenCalledWith(0);
   });
+
+  it("forwards task-scoped environment values to registered terminals", async () => {
+    const runTask = vi.fn();
+    registryMocks.getTerminal.mockReturnValue({ runTask });
+    const handle = createRef<TerminalDockHandle>();
+    render(
+      <TerminalDockPanel
+        ref={handle}
+        workspaceInstanceId="ws"
+        roots={roots}
+        defaultCwd="/repo/app"
+        active={false}
+      />,
+    );
+    const environment = {
+      MAVEN_OPTS: {
+        value: "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED",
+        mode: "append" as const,
+      },
+    };
+    handle.current?.runCommand("./mvnw exec:java", "/repo/app", "run", undefined, environment);
+    fireEvent.click(await screen.findByRole("button", { name: "ready" }));
+    await waitFor(() => expect(runTask).toHaveBeenCalledWith("./mvnw exec:java", environment));
+  });
 });

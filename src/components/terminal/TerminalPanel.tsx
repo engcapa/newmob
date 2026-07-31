@@ -3401,13 +3401,13 @@ export function TerminalPanel({
         }
         writeTerminal(registeredSessionId, encodeBase64(data)).catch(console.error);
       },
-      runTask: (command: string) => {
+      runTask: (command: string, taskVariables) => {
         if (readOnlyRef.current) return;
         const task = renderTerminalTask(command, {
           platform: getAppPlatform(),
           shellId: resolvedLocalShellId ?? localShell?.id ?? null,
           shellName: localShell?.name ?? null,
-        });
+        }, taskVariables);
         const suppressor = createTaskStartOutputSuppressor(
           task.startMarker,
           task.displayCommand,

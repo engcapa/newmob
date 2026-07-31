@@ -51,6 +51,14 @@ export interface WorkspaceTaskExecution {
   error?: string;
 }
 
+/** A temporary environment variable applied only while a workspace task runs. */
+export interface WorkspaceTaskEnvironmentVariable {
+  value: string;
+  mode: "append" | "replace";
+}
+
+export type WorkspaceTaskEnvironment = Record<string, WorkspaceTaskEnvironmentVariable>;
+
 export interface WorkspaceTask {
   id: string;
   label: string;
@@ -60,6 +68,7 @@ export interface WorkspaceTask {
   /** Workspace-relative Maven/Gradle module directory when applicable. */
   modulePath?: string;
   execution?: WorkspaceTaskExecution;
+  environment?: WorkspaceTaskEnvironment;
 }
 
 /** A Java `static void main` entry point with a ready-to-run terminal command. */
@@ -73,6 +82,7 @@ export interface JavaRunTarget {
   buildSystem: "maven" | "gradle" | "source-file";
   modulePath: string;
   execution: WorkspaceTaskExecution;
+  environment?: WorkspaceTaskEnvironment;
 }
 
 /**
@@ -82,6 +92,10 @@ export interface JavaRunTarget {
 export interface WorkspaceToolConfig {
   maven?: string;
   gradle?: string;
+  /** Explicit JVM options applied to Maven `exec:java` through MAVEN_OPTS. */
+  mavenJvmArgs?: string[];
+  /** Auto-inherit safe runtime options from Maven test plugin `argLine`. */
+  inheritMavenArgLine?: boolean;
 }
 
 export function workspaceListDir(

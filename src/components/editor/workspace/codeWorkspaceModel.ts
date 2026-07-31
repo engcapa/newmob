@@ -3,7 +3,7 @@
  * Extracted from CodeWorkspaceTab to shrink the shell and share with store/UI units.
  */
 import type { CodeWorkspaceFileRef, CodeWorkspaceLooseFileInfo, CodeWorkspaceRootInfo, CodeWorkspaceTabInfo } from "../../../types";
-import type { WorkspaceEntry, WorkspaceGitRoot } from "../../../lib/editor/workspace";
+import type { WorkspaceEntry, WorkspaceGitRoot, WorkspaceToolConfig } from "../../../lib/editor/workspace";
 import type { LspCustomServerCommand, LspDocumentStatus, LspDiagnostic, LspJavaSettings, LspJavaBundleConfig } from "../../../lib/editor/lsp";
 import type { GitChange } from "../../../lib/git";
 import { DEFAULT_CODE_VIEW_PROFILE } from "../../../lib/codeViewProfile";
@@ -26,12 +26,24 @@ export interface WorkspaceBuildRunTool {
   executable: string;
 }
 
+export interface WorkspaceMavenRunOptions {
+  /** Extra JVM options, one option per item, used only by Maven Java Run tasks. */
+  jvmArgs: string[];
+  /** Inherit safe JPMS options declared in the Maven test-plugin argLine. */
+  inheritProjectJvmArgs: boolean;
+}
+
 export interface WorkspaceBuildRunTools {
   tools: Record<string, WorkspaceBuildRunTool>;
+  mavenRun: WorkspaceMavenRunOptions;
 }
 
 export const DEFAULT_WORKSPACE_BUILD_RUN_TOOLS: WorkspaceBuildRunTools = {
   tools: {},
+  mavenRun: {
+    jvmArgs: [],
+    inheritProjectJvmArgs: true,
+  },
 };
 
 export interface DirectoryState {
@@ -797,21 +809,38 @@ export function subscribeLspServerPrefs(listener: () => void): () => void {
 
 export function normalizeWorkspaceBuildRunTools(raw: unknown): WorkspaceBuildRunTools {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { tools: {} };
+    return DEFAULT_WORKSPACE_BUILD_RUN_TOOLS;
   }
-  const rawTools = (raw as { tools?: unknown }).tools;
-  if (!rawTools || typeof rawTools !== "object" || Array.isArray(rawTools)) {
-    return { tools: {} };
-  }
+  const config = raw as {
+    tools?: unknown;
+    mavenRun?: { jvmArgs?: unknown; inheritProjectJvmArgs?: unknown };
+  };
+  const rawTools = config.tools;
   const tools: Record<string, WorkspaceBuildRunTool> = {};
-  for (const [toolId, value] of Object.entries(rawTools)) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
-    const executable = (value as { executable?: unknown }).executable;
-    if (typeof executable === "string" && executable.trim()) {
-      tools[toolId] = { executable: executable.trim() };
+  if (rawTools && typeof rawTools === "object" && !Array.isArray(rawTools)) {
+    for (const [toolId, value] of Object.entries(rawTools)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const executable = (value as { executable?: unknown }).executable;
+      if (typeof executable === "string" && executable.trim()) {
+        tools[toolId] = { executable: executable.trim() };
+      }
     }
   }
-  return { tools };
+  const rawJvmArgs = config.mavenRun?.jvmArgs;
+  const jvmArgs = Array.isArray(rawJvmArgs)
+    ? rawJvmArgs.filter((value): value is string => typeof value === "string")
+      .map((value) => value.trim())
+      .filter(Boolean)
+    : [];
+  return {
+    tools,
+    mavenRun: {
+      jvmArgs,
+      inheritProjectJvmArgs: typeof config.mavenRun?.inheritProjectJvmArgs === "boolean"
+        ? config.mavenRun.inheritProjectJvmArgs
+        : true,
+    },
+  };
 }
 
 function workspaceBuildRunToolsKey(workspaceInstanceId: string): string {
@@ -821,9 +850,9 @@ function workspaceBuildRunToolsKey(workspaceInstanceId: string): string {
 export function readWorkspaceBuildRunTools(workspaceInstanceId: string): WorkspaceBuildRunTools {
   try {
     const stored = window.localStorage.getItem(workspaceBuildRunToolsKey(workspaceInstanceId));
-    return stored ? normalizeWorkspaceBuildRunTools(JSON.parse(stored)) : { tools: {} };
+    return stored ? normalizeWorkspaceBuildRunTools(JSON.parse(stored)) : DEFAULT_WORKSPACE_BUILD_RUN_TOOLS;
   } catch {
-    return { tools: {} };
+    return DEFAULT_WORKSPACE_BUILD_RUN_TOOLS;
   }
 }
 
@@ -842,6 +871,24 @@ export function writeWorkspaceBuildRunTools(
 
 export function workspaceToolExecutables(config: WorkspaceBuildRunTools): Record<string, string> {
   return Object.fromEntries(Object.entries(config.tools).map(([id, tool]) => [id, tool.executable]));
+}
+
+/**
+ * Omit the default-only shape to preserve the existing wrapper/PATH-only IPC
+ * contract. The backend treats an omitted config as project-argument inheritance
+ * enabled, so Java Run gets safe Maven module flags without changing Build tasks.
+ */
+export function workspaceToolConfig(config: WorkspaceBuildRunTools): WorkspaceToolConfig | undefined {
+  const executables = workspaceToolExecutables(config);
+  const { jvmArgs, inheritProjectJvmArgs } = config.mavenRun;
+  if (Object.keys(executables).length === 0 && jvmArgs.length === 0 && inheritProjectJvmArgs) {
+    return undefined;
+  }
+  return {
+    ...executables,
+    mavenJvmArgs: jvmArgs,
+    inheritMavenArgLine: inheritProjectJvmArgs,
+  };
 }
 
 export function readLspCommandPrefs(): Record<string, string> {
