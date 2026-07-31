@@ -15,6 +15,15 @@ use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot};
 
 const REQUEST_TIMEOUT_SECS: u64 = 8;
+/// Project-scope jdtls `executeCommand`s (java-debug's `resolveMainClass` /
+/// `resolveClasspath` / `startDebugSession`, java-test discovery) search or
+/// resolve the whole project and activate an OSGi bundle on first use, so they
+/// routinely need more than the interactive [`REQUEST_TIMEOUT_SECS`] budget that
+/// suits hover/completion. Too short a budget here reads to the user as "Debug
+/// does nothing": the command is still running server-side when we give up.
+const JAVA_COMMAND_TIMEOUT_SECS: u64 = 60;
+/// A workspace build is minutes-scale on a cold multi-module project.
+const BUILD_WORKSPACE_TIMEOUT_SECS: u64 = 600;
 const INITIALIZE_TIMEOUT_SECS: u64 = 20;
 /// Eclipse JDT LS cold-start (especially on Windows) routinely exceeds 20s.
 const JDTLS_INITIALIZE_TIMEOUT_SECS: u64 = 120;
@@ -57,6 +66,32 @@ pub struct LspCustomServerCommand {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+/// Which jdtls command the caller's editor session is bound to, so Java debug /
+/// test `executeCommand` calls resolve the *same* session (matters when the user
+/// configured a custom jdtls command or a non-default preset binary). Empty =
+/// default preset lookup, matching the pre-identity behavior.
+#[derive(Clone, Debug, Default)]
+pub struct JavaSessionIdentity {
+    pub preferred_command_id: Option<String>,
+    pub custom_command: Option<LspCustomServerCommand>,
+}
+
+impl JavaSessionIdentity {
+    /// Build from the frontend's optional command-id + custom-command pair,
+    /// trimming blanks so an empty string does not shadow the preset default.
+    pub fn new(
+        preferred_command_id: Option<String>,
+        custom_command: Option<LspCustomServerCommand>,
+    ) -> Self {
+        Self {
+            preferred_command_id: preferred_command_id
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty()),
+            custom_command: custom_command.filter(|cmd| !cmd.command.trim().is_empty()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -926,21 +961,39 @@ impl LspManager {
         file_path: String,
         command: &str,
         arguments: Vec<Value>,
+        identity: JavaSessionIdentity,
     ) -> Result<Value, String> {
         let document = resolve_document(workspace_id, root_path, file_path, Some("java".into()), 0)?;
+        // Debug + test must target the SAME jdtls session the editor uses. When a
+        // custom jdtls command is configured, the default `active_session(None,
+        // None)` lookup recomputes the default `jdtls` session key and misses the
+        // custom one — so intelligence works while debug/test report "no active
+        // Java language server". Forward the caller's command identity so the
+        // session key matches the editor's.
         let session = self
-            .active_session(&document, None, None)
+            .active_session(
+                &document,
+                identity.preferred_command_id.as_deref(),
+                identity.custom_command.as_ref(),
+            )
             .await
             .ok_or_else(|| {
                 "No Java language server session is active for this project; open a project file first"
                     .to_string()
             })?;
-        session
-            .request(
+        let started = Instant::now();
+        let result = session
+            .request_with_timeout(
                 "workspace/executeCommand",
                 json!({ "command": command, "arguments": arguments }),
+                JAVA_COMMAND_TIMEOUT_SECS,
             )
-            .await
+            .await;
+        match &result {
+            Ok(_) => log::info!("lsp: {command} ok in {:?}", started.elapsed()),
+            Err(error) => log::warn!("lsp: {command} failed after {:?}: {error}", started.elapsed()),
+        }
+        result
     }
 
     /// Push a `workspace/didChangeConfiguration` to every ready jdtls session so
@@ -2692,6 +2745,15 @@ pub fn lsp_detect_java_bundles() -> Vec<crate::java_bundles::BundleStatus> {
     crate::java_bundles::probe_bundles(&crate::java_bundles::get_configured_bundles())
 }
 
+/// Scan installed VS Code / Cursor / VSCodium extensions for the java-debug and
+/// java-test plugin jars so the user can adopt them in one click instead of
+/// hunting for a path or downloading anything (the common "setup is complex"
+/// case — the jar already ships with a Java extension they have installed).
+#[tauri::command]
+pub fn lsp_discover_java_bundles() -> Vec<crate::java_bundles::DiscoveredBundle> {
+    crate::java_bundles::discover_bundles()
+}
+
 #[tauri::command]
 pub fn lsp_detect_servers(java_home: Option<String>) -> Vec<LspServerStatus> {
     // Accept an optional override so Settings can probe without waiting for a
@@ -3057,9 +3119,43 @@ pub async fn lsp_workspace_diagnostics(
     Ok(state.lsp.workspace_diagnostics(workspace_id).await)
 }
 
-/// Trigger a full project build on the active jdtls session (M7-C "Rebuild
-/// project") via `workspace/executeCommand: java.buildWorkspace`. `full = true`
-/// forces a clean rebuild so diagnostics for unopened files are (re)published.
+/// Outcome of a jdtls workspace build, mirroring JDT LS's `BuildWorkspaceStatus`
+/// so the caller can tell "built clean" from "built, but the project has compile
+/// errors" without a second diagnostics sweep.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LspBuildStatus {
+    Failed,
+    Succeed,
+    WithError,
+    Cancelled,
+}
+
+/// Map JDT LS's `BuildWorkspaceStatus` ordinal (`java/buildWorkspace` result).
+fn build_status_from_result(value: &Value) -> LspBuildStatus {
+    match value.as_u64() {
+        Some(0) => LspBuildStatus::Failed,
+        Some(2) => LspBuildStatus::WithError,
+        Some(3) => LspBuildStatus::Cancelled,
+        // 1 = SUCCEED. Anything unexpected is treated as a plain success: the
+        // build ran, and blocking a launch on an unknown enum value would be
+        // worse than trusting the diagnostics the caller checks next.
+        _ => LspBuildStatus::Succeed,
+    }
+}
+
+/// Build the project on the active jdtls session (M7-C "Rebuild project" and the
+/// make-before-launch barrier of a Java debug start).
+///
+/// This is JDT LS's custom **`java/buildWorkspace` request** — NOT a
+/// `workspace/executeCommand`. jdtls registers no `java.buildWorkspace` command
+/// (it answers "No delegateCommandHandler for java.buildWorkspace"), and
+/// java-debug's `vscode.java.buildWorkspace` takes a String argument, so both
+/// executeCommand spellings fail outright — silently turning make-before-launch
+/// into a no-op and leaving the debuggee to run stale bytecode.
+///
+/// `full = true` forces a clean rebuild (so diagnostics for unopened files are
+/// republished); the launch barrier passes `false` for an incremental build.
 #[tauri::command]
 pub async fn lsp_build_workspace(
     state: State<'_, AppState>,
@@ -3069,7 +3165,8 @@ pub async fn lsp_build_workspace(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
-) -> Result<(), String> {
+    full: Option<bool>,
+) -> Result<LspBuildStatus, String> {
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
     let session = state
         .lsp
@@ -3083,15 +3180,19 @@ pub async fn lsp_build_workspace(
             "No language server session is active for this project; open a project file first"
                 .to_string()
         })?;
-    // jdtls's java.buildWorkspace takes a single boolean `full`.
-    session
-        .request(
-            "workspace/executeCommand",
-            json!({ "command": "java.buildWorkspace", "arguments": [true] }),
-        )
+    // `java/buildWorkspace` takes the `forceReBuild` flag as a bare boolean.
+    let full = full.unwrap_or(true);
+    let started = Instant::now();
+    let result = session
+        .request_with_timeout("java/buildWorkspace", json!(full), BUILD_WORKSPACE_TIMEOUT_SECS)
         .await
-        .map(|_| ())
-        .map_err(|e| format!("Failed to rebuild project: {e}"))
+        .map_err(|e| format!("Failed to build project: {e}"))?;
+    let status = build_status_from_result(&result);
+    log::info!(
+        "lsp: java/buildWorkspace(full={full}) → {status:?} in {:?}",
+        started.elapsed()
+    );
+    Ok(status)
 }
 
 #[tauri::command]
@@ -7116,6 +7217,27 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             None,
         )
         .expect("command builder");
+    }
+
+    #[test]
+    fn maps_jdtls_build_workspace_status_ordinals() {
+        // JDT LS answers `java/buildWorkspace` with a BuildWorkspaceStatus ordinal.
+        assert_eq!(build_status_from_result(&json!(0)), LspBuildStatus::Failed);
+        assert_eq!(build_status_from_result(&json!(1)), LspBuildStatus::Succeed);
+        assert_eq!(build_status_from_result(&json!(2)), LspBuildStatus::WithError);
+        assert_eq!(build_status_from_result(&json!(3)), LspBuildStatus::Cancelled);
+        // Unknown / absent payloads must not block a launch.
+        assert_eq!(build_status_from_result(&Value::Null), LspBuildStatus::Succeed);
+        assert_eq!(build_status_from_result(&json!("done")), LspBuildStatus::Succeed);
+    }
+
+    #[test]
+    fn java_project_commands_get_a_longer_budget_than_interactive_requests() {
+        // resolveMainClass / resolveClasspath / startDebugSession search the whole
+        // project and activate an OSGi bundle on first use; the interactive budget
+        // cuts them off mid-flight and the Debug button then looks like a no-op.
+        assert!(JAVA_COMMAND_TIMEOUT_SECS > REQUEST_TIMEOUT_SECS);
+        assert!(BUILD_WORKSPACE_TIMEOUT_SECS > JAVA_COMMAND_TIMEOUT_SECS);
     }
 
     #[test]

@@ -187,6 +187,133 @@ pub fn configured_bundle_jars() -> Vec<String> {
     resolve_bundle_jars(&get_configured_bundles())
 }
 
+/// A jdtls extension jar found on disk that the user could adopt without any
+/// manual path hunting or download (the 80% "install is complex" case: the jar
+/// already ships inside a VS Code / Cursor / VSCodium extension).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredBundle {
+    /// `javaDebug` | `javaTest`, matching `BundleStatus.id`.
+    pub id: String,
+    /// Absolute path to the versioned plugin jar.
+    pub path: String,
+    /// Parsed dotted version (`0.53.2`) for display / picking the newest.
+    pub version: String,
+    /// Human label for where it came from (e.g. `vscode: vscjava.vscode-java-debug`).
+    pub source: String,
+}
+
+/// Editor extension roots that commonly contain the java-debug / java-test
+/// plugin jars, cross-platform. VS Code, VSCodium, Cursor, and the Insiders
+/// build all use `<home>/.<editor>/extensions` on every OS.
+fn editor_extension_roots() -> Vec<(&'static str, PathBuf)> {
+    let mut out = Vec::new();
+    let Some(home) = dirs::home_dir() else {
+        return out;
+    };
+    for (label, rel) in [
+        ("vscode", ".vscode/extensions"),
+        ("vscode-insiders", ".vscode-insiders/extensions"),
+        ("vscode-server", ".vscode-server/extensions"),
+        ("cursor", ".cursor/extensions"),
+        ("vscodium", ".vscode-oss/extensions"),
+        ("windsurf", ".windsurf/extensions"),
+    ] {
+        out.push((label, home.join(rel)));
+    }
+    out
+}
+
+/// Scan the known editor extension roots for the newest plugin jar of each
+/// bundle kind. One entry per (source, kind); newest version per source wins.
+/// Pure filesystem scan — never downloads, never mutates config.
+pub fn discover_bundles() -> Vec<DiscoveredBundle> {
+    let mut out: Vec<DiscoveredBundle> = Vec::new();
+    for (label, root) in editor_extension_roots() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let ext_dir = entry.path();
+            if !ext_dir.is_dir() {
+                continue;
+            }
+            // Extension dirs are named `publisher.name-version`; the jars live
+            // under `server/`. Only the java debug/test extensions carry them.
+            let server_dir = ext_dir.join("server");
+            if !server_dir.is_dir() {
+                continue;
+            }
+            let ext_name = ext_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            for kind in [BundleKind::JavaDebug, BundleKind::JavaTest] {
+                if let Some((version, path)) =
+                    newest_jar_in_dir(&server_dir, kind.jar_prefix())
+                {
+                    let source = format!("{label}: {ext_name}");
+                    push_newest_discovery(&mut out, kind, version, path, source);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Highest-versioned `<prefix><version>.jar` in `dir`, or None.
+fn newest_jar_in_dir(dir: &Path, prefix: &str) -> Option<(String, PathBuf)> {
+    let mut best: Option<(String, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(version) = rest.strip_suffix(".jar") else {
+            continue;
+        };
+        let better = match &best {
+            Some((best_version, _)) => compare_versions(version, best_version) == Ordering::Greater,
+            None => true,
+        };
+        if better {
+            best = Some((version.to_string(), path));
+        }
+    }
+    best
+}
+
+/// Insert a discovery, keeping only the newest jar per (id, source).
+fn push_newest_discovery(
+    out: &mut Vec<DiscoveredBundle>,
+    kind: BundleKind,
+    version: String,
+    path: PathBuf,
+    source: String,
+) {
+    let id = kind.config_key().to_string();
+    if let Some(existing) = out
+        .iter_mut()
+        .find(|d| d.id == id && d.source == source)
+    {
+        if compare_versions(&version, &existing.version) == Ordering::Greater {
+            existing.version = version;
+            existing.path = path.to_string_lossy().into_owned();
+        }
+        return;
+    }
+    out.push(DiscoveredBundle {
+        id,
+        path: path.to_string_lossy().into_owned(),
+        version,
+        source,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +378,54 @@ mod tests {
         assert!(resolve_bundle_jars(&JavaBundleConfig::default()).is_empty());
         assert!(resolve_bundle_jar(BundleKind::JavaDebug, None).is_none());
         assert!(resolve_bundle_jar(BundleKind::JavaDebug, Some("/no/such/dir")).is_none());
+    }
+
+    #[test]
+    fn newest_jar_in_dir_picks_highest_and_ignores_others() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "com.microsoft.java.debug.plugin-0.40.0.jar");
+        touch(dir.path(), "com.microsoft.java.debug.plugin-0.53.2.jar");
+        touch(dir.path(), "com.microsoft.java.test.plugin-0.43.1.jar");
+        touch(dir.path(), "noise.jar");
+
+        let (version, path) =
+            newest_jar_in_dir(dir.path(), BundleKind::JavaDebug.jar_prefix()).expect("finds debug jar");
+        assert_eq!(version, "0.53.2");
+        assert!(path.to_string_lossy().ends_with("com.microsoft.java.debug.plugin-0.53.2.jar"));
+
+        // A prefix with no match yields nothing rather than a wrong jar.
+        assert!(newest_jar_in_dir(dir.path(), "com.example.absent-").is_none());
+    }
+
+    #[test]
+    fn push_newest_discovery_keeps_newest_per_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        push_newest_discovery(
+            &mut out,
+            BundleKind::JavaDebug,
+            "0.52.0".into(),
+            dir.path().join("com.microsoft.java.debug.plugin-0.52.0.jar"),
+            "vscode: vscjava.vscode-java-debug-0.58.0".into(),
+        );
+        // Same source, newer version → replaces in place (no duplicate row).
+        push_newest_discovery(
+            &mut out,
+            BundleKind::JavaDebug,
+            "0.53.2".into(),
+            dir.path().join("com.microsoft.java.debug.plugin-0.53.2.jar"),
+            "vscode: vscjava.vscode-java-debug-0.58.0".into(),
+        );
+        // A different source is a distinct row the user can choose between.
+        push_newest_discovery(
+            &mut out,
+            BundleKind::JavaDebug,
+            "0.53.2".into(),
+            dir.path().join("com.microsoft.java.debug.plugin-0.53.2.jar"),
+            "cursor: vscjava.vscode-java-debug-0.58.5".into(),
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|d| d.id == "javaDebug" && d.version == "0.53.2"));
     }
 }
 

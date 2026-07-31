@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { useMountedRef } from "../../../hooks/useMountedRef";
 import {
   dapSend,
   dapSendRequest,
@@ -27,6 +28,7 @@ import {
   selectExceptionFilters,
   stepCommandFor,
   toAdapterSourcePath,
+  type BreakpointRuntimeState,
   type DebugBreakpoint,
   type DebugSessionState,
   type DebugStackFrame,
@@ -37,12 +39,17 @@ import {
 /** Breakpoints keyed by absolute file path. */
 export type BreakpointMap = Record<string, DebugBreakpoint[]>;
 
+/** Message text from a rejected DAP request, for console surfacing. */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export interface CodeDebugSession {
   /** Current session state (null when no debug session is active). */
   state: DebugSessionState | null;
   breakpoints: BreakpointMap;
-  /** Adapter verification per path → line → verified (session-scoped). */
-  breakpointRuntime: Record<string, Record<number, boolean>>;
+  /** Adapter binding state per path → line → runtime status (session-scoped). */
+  breakpointRuntime: Record<string, Record<number, BreakpointRuntimeState>>;
   /** Adapter capabilities from `initialize` — gates optional UI (restartFrame, setVariable…). */
   capabilities: Record<string, unknown>;
   /** Exception-breakpoint filter ids the adapter advertised (D5). */
@@ -93,6 +100,20 @@ export interface CodeDebugSession {
   logConsole: (category: string, text: string) => void;
   /** Empty the console without touching the session. */
   clearConsole: () => void;
+  /**
+   * Surface a launch/pre-launch failure in the Debug panel (not just the status
+   * bar) so a debug attempt that dies before a session exists is visible rather
+   * than looking like "nothing happened". Seeds a `terminated` session carrying
+   * the message on the console when there is none yet.
+   */
+  reportStartupFailure: (message: string) => void;
+  /**
+   * Report a pre-launch step (save → build → resolve main class) in the Debug
+   * panel. The phase before the adapter exists can take tens of seconds on a
+   * cold project; without this the panel shows its "no debug session"
+   * placeholder the whole time and the click looks ignored.
+   */
+  reportStartupProgress: (message: string) => void;
   /** Fetch variables for a `variablesReference` (D4 lazy tree). */
   fetchVariables: (variablesReference: number) => Promise<unknown>;
   /** Fetch scopes for a stack frame (D4). */
@@ -150,7 +171,7 @@ function readWatches(workspaceInstanceId: string): string[] {
 export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSession {
   const [state, setState] = useState<DebugSessionState | null>(null);
   const [breakpoints, setBreakpoints] = useState<BreakpointMap>(() => readBreakpoints(workspaceInstanceId));
-  const [breakpointRuntime, setBreakpointRuntime] = useState<Record<string, Record<number, boolean>>>({});
+  const [breakpointRuntime, setBreakpointRuntime] = useState<Record<string, Record<number, BreakpointRuntimeState>>>({});
   const [capabilities, setCapabilities] = useState<Record<string, unknown>>({});
   const [exceptionFilters, setExceptionFiltersState] = useState<string[]>([]);
   const [availableFilters, setAvailableFilters] = useState<{ filter: string; label: string }[]>([]);
@@ -166,7 +187,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const exceptionFiltersRef = useRef(exceptionFilters);
   const stateRef = useRef<DebugSessionState | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
-  const mountedRef = useRef(true);
+  const mountedRef = useMountedRef();
   /** Bumped on every `stopped` event; async work checks it to drop stale results. */
   const stopEpochRef = useRef(0);
   /** Adapter breakpoint id → file path, to route `breakpoint` events. */
@@ -183,18 +204,12 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   exceptionFiltersRef.current = exceptionFilters;
   stateRef.current = state;
 
-  useEffect(() => {
-    // Set true on (re)mount: React 18 StrictMode runs mount→cleanup→remount, so
-    // the cleanup below fires once during dev double-invoke. Without resetting to
-    // true here, mountedRef stays false forever and every mounted-guarded setState
-    // (e.g. initialDebugState in startDebug) is silently skipped.
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      unlistenRef.current?.();
-      const id = sessionIdRef.current;
-      if (id) void dapTerminate(id).catch(() => {});
-    };
+  // Drop the adapter session with the hook. `mountedRef` re-arms itself (see
+  // useMountedRef) so the StrictMode dev double-invoke cannot leave it false.
+  useEffect(() => () => {
+    unlistenRef.current?.();
+    const id = sessionIdRef.current;
+    if (id) void dapTerminate(id).catch(() => {});
   }, []);
 
   // Inline values are only meaningful while stopped: drop them the moment the
@@ -233,6 +248,44 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   }, []);
 
   /**
+   * Show a launch failure in the Debug panel. When a session is already present
+   * (e.g. `dapStartSession` succeeded but `launch` was rejected) the message is
+   * appended and the session marked terminated; otherwise a minimal terminated
+   * session is seeded so the panel renders its console instead of the empty
+   * "no debug session" placeholder. The seeded session has an empty id, so it is
+   * inert (no adapter events match it, terminate is a no-op) and the next Start
+   * replaces it.
+   */
+  const reportStartupFailure = useCallback((message: string) => {
+    if (!mountedRef.current) return;
+    const text = message.endsWith("\n") ? message : `${message}\n`;
+    setState((prev) => appendConsoleLine(
+      prev
+        ? { ...prev, status: "terminated" }
+        : { ...initialDebugState(""), status: "terminated" },
+      "stderr",
+      text,
+    ));
+  }, []);
+
+  /**
+   * Show a pre-launch step in the panel. Seeds a `starting` session (empty id →
+   * inert: no adapter events match it and terminate is a no-op) so the console
+   * is on screen from the first click; a prior terminated session is replaced
+   * rather than appended to, so stale output from the last run is not mistaken
+   * for this one.
+   */
+  const reportStartupProgress = useCallback((message: string) => {
+    if (!mountedRef.current) return;
+    const text = message.endsWith("\n") ? message : `${message}\n`;
+    setState((prev) => appendConsoleLine(
+      prev && prev.status !== "terminated" ? prev : initialDebugState(""),
+      "console",
+      text,
+    ));
+  }, []);
+
+  /**
    * Push a file's breakpoints to the adapter and record the bindings it
    * reports: verified flags feed the gutter (grey = not bound), verified line
    * adjustments are adopted back into the stored set (IDEA/VS Code move a
@@ -265,7 +318,12 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     // leaves them unverified.
     const args = buildSetBreakpointsArgs(path, plan);
     args.source.path = toAdapterSourcePath(path);
-    const body = await dapSendRequest(id, "setBreakpoints", args).catch(() => null);
+    const body = await dapSendRequest(id, "setBreakpoints", args).catch((error) => {
+      // A failed setBreakpoints means the file's breakpoints are NOT armed —
+      // previously silent, so the user saw red dots that could never bind.
+      logConsole("stderr", `setBreakpoints for ${path.split(/[\\/]/).pop() ?? path} failed: ${errorText(error)}\n`);
+      return null;
+    });
     if (body == null || !mountedRef.current) return;
     if (syncGenerationRef.current.get(path) !== generation) return; // superseded
     const bindings = parseSetBreakpointsResponse(plan, body);
@@ -284,7 +342,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         persistBreakpoints(next);
       }
     }
-  }, [persistBreakpoints]);
+  }, [persistBreakpoints, logConsole]);
 
   /**
    * Single mutation path for the breakpoint map. Updates the ref synchronously
@@ -388,8 +446,15 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
           if ((breakpointsRef.current[path] ?? []).length > 0) await syncBreakpointsForPath(path);
         }
         const filters = selectExceptionFilters(capabilitiesRef.current, exceptionFiltersRef.current);
-        await dapSendRequest(id, "setExceptionBreakpoints", { filters }).catch(() => {});
-        await dapSend(id, "configurationDone").catch(() => {});
+        // Configuration-step failures used to be swallowed, leaving the session
+        // stuck "running" with no clue why. Surface them on the console so the
+        // user (and support) can see where setup broke.
+        await dapSendRequest(id, "setExceptionBreakpoints", { filters }).catch((error) => {
+          logConsole("stderr", `setExceptionBreakpoints failed: ${errorText(error)}\n`);
+        });
+        await dapSend(id, "configurationDone").catch((error) => {
+          logConsole("stderr", `configurationDone failed: ${errorText(error)}\n`);
+        });
       })();
     } else if (payload.event === "stopped") {
       stopEpochRef.current += 1;
@@ -405,9 +470,12 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       if (parsed && parsed.line != null && entry) {
         const { path } = entry;
         const { line, verified } = parsed;
+        const runtime: BreakpointRuntimeState = verified
+          ? { status: "verified", message: null }
+          : { status: parsed.bindReason === "failed" ? "failed" : "pending", message: parsed.message };
         setBreakpointRuntime((prev) => ({
           ...prev,
-          [path]: { ...(prev[path] ?? {}), [line]: verified },
+          [path]: { ...(prev[path] ?? {}), [line]: runtime },
         }));
       }
     } else if (payload.event === "terminated" || payload.event === "exited") {
@@ -422,7 +490,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       tempRunToCursorRef.current = null;
       if (mountedRef.current) setBreakpointRuntime({});
     }
-  }, [refreshStoppedContext, syncBreakpointsForPath]);
+  }, [refreshStoppedContext, syncBreakpointsForPath, logConsole]);
   const startDebug = useCallback(async (
     launchConfig: Record<string, unknown>,
     adapterId = "java",
@@ -438,7 +506,17 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     if (mountedRef.current) setBreakpointRuntime({});
 
     lastLaunchRef.current = { config: launchConfig, adapterId };
-    const result = await dapStartSession(adapterId, launchConfig);
+    let result: Awaited<ReturnType<typeof dapStartSession>>;
+    try {
+      result = await dapStartSession(adapterId, launchConfig);
+    } catch (error) {
+      // Adapter resolution failures (no jdtls session, no main class, no
+      // debug bundle, classpath/port resolution) reject here. Surface them in
+      // the Debug panel — not just the caller's status bar — then rethrow so
+      // existing callers keep their behavior.
+      reportStartupFailure(`Debug failed to start: ${errorText(error)}`);
+      throw error;
+    }
     sessionIdRef.current = result.sessionId;
     capabilitiesRef.current = result.capabilities;
     const filters = Array.isArray(result.capabilities.exceptionBreakpointFilters)
@@ -449,7 +527,14 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       setAvailableFilters(filters);
       setCapabilities(result.capabilities);
       setCanRestart(true);
-      setState(initialDebugState(result.sessionId));
+      // Carry the pre-launch progress lines (reportStartupProgress seeds an
+      // inert session with an empty id) into the real session so the console
+      // reads as one continuous startup log instead of resetting on launch.
+      setState((prev) => {
+        const carried = prev && prev.sessionId === "" ? prev.output : [];
+        const fresh = initialDebugState(result.sessionId);
+        return carried.length > 0 ? { ...fresh, output: carried } : fresh;
+      });
     }
     // Listen before firing launch so the `initialized` event can't be missed.
     unlistenRef.current = await listenDapEvents(result.sessionId, handleEvent);
@@ -486,7 +571,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
           + "The project may have build errors, or the launch is stalled.\n",
       );
     }, 15_000);
-  }, [handleEvent, logConsole]);
+  }, [handleEvent, logConsole, reportStartupFailure]);
 
   const restart = useCallback(() => {
     const last = lastLaunchRef.current;
@@ -799,6 +884,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setVariable,
     logConsole,
     clearConsole,
+    reportStartupFailure,
+    reportStartupProgress,
     fetchVariables,
     fetchScopes,
     fetchSource,

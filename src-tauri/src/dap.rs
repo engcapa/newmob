@@ -226,6 +226,14 @@ const INITIALIZE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2
 /// Grace period for a graceful `terminate` before falling back to `disconnect`.
 const TERMINATE_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
 
+/// Upper bound on an ordinary DAP request/response round-trip. A wedged adapter
+/// that connected but stopped answering must not leave a command (setBreakpoints,
+/// stackTrace, evaluate…) pending forever — the UI would sit "running" with no
+/// error. Generous so a slow-but-live adapter is not cut off; `launch` is fired
+/// fire-and-forget (its response legitimately trails configurationDone) so this
+/// does not apply to it.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A live debug session. Holds the write half + pending-response correlation +
 /// child handle; **no `AppHandle`** — the reader task owns a cloned handle so this
 /// struct stays out of the AppState-reachable AppHandle trap (see M7-C).
@@ -262,13 +270,23 @@ impl DapSession {
             "seq": seq,
             "type": "request",
             "command": command,
-            "arguments": arguments,
+            "arguments": normalize_request_arguments(arguments),
         });
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(seq, tx);
         self.write_message(&message).await?;
-        rx.await
-            .map_err(|_| "DAP session closed before response".to_string())?
+        // Bound the wait: a wedged adapter must not hang the command forever.
+        // On timeout, drop the pending slot so a late reply is discarded cleanly.
+        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+            Ok(result) => result.map_err(|_| "DAP session closed before response".to_string())?,
+            Err(_) => {
+                self.pending.lock().await.remove(&seq);
+                Err(format!(
+                    "debug adapter did not answer `{command}` within {}s",
+                    REQUEST_TIMEOUT.as_secs()
+                ))
+            }
+        }
     }
 
     /// Fire a DAP request without awaiting a response (e.g. `disconnect`).
@@ -278,7 +296,7 @@ impl DapSession {
             "seq": seq,
             "type": "request",
             "command": command,
-            "arguments": arguments,
+            "arguments": normalize_request_arguments(arguments),
         }))
         .await
     }
@@ -294,6 +312,21 @@ impl DapSession {
         writer.flush().await.map_err(|e| format!("DAP flush failed: {e}"))
     }
 }
+
+/// DAP declares request arguments optional, but some adapters deserialize the
+/// field directly as an object. In particular java-debug rejects an explicit
+/// JSON `null` with `Expected JsonObject but was JsonNull`, closes the socket,
+/// and tears down an otherwise successfully launched debuggee. Tauri maps an
+/// omitted/`null` command argument to `Value::Null`, so normalize it at the
+/// protocol boundary for every request (`configurationDone`, `threads`, ...).
+fn normalize_request_arguments(arguments: Value) -> Value {
+    if arguments.is_null() {
+        json!({})
+    } else {
+        arguments
+    }
+}
+
 /// Holds live sessions + the adapter registry. Lives in `AppState`; holds **no
 /// `AppHandle`** (event emission uses a handle cloned into the reader task).
 pub struct DapManager {
@@ -530,8 +563,12 @@ pub async fn dap_start_session(
         .registry
         .get(&adapter_id)
         .ok_or_else(|| format!("No debug adapter registered for `{adapter_id}`"))?;
-    let plan = adapter.resolve(&launch_config).await?;
-    let (reader, writer, child) = connect_transport(&plan.transport).await?;
+    let plan = adapter.resolve(&launch_config).await.inspect_err(|error| {
+        log::warn!("dap: `{adapter_id}` could not resolve a launch plan: {error}");
+    })?;
+    let (reader, writer, child) = connect_transport(&plan.transport)
+        .await
+        .inspect_err(|error| log::warn!("dap: transport connect failed: {error}"))?;
     let (child, stderr) = match child {
         Some((child, stderr)) => (Some(child), stderr),
         None => (None, None),
@@ -598,8 +635,13 @@ pub async fn dap_start_session(
             "debug adapter `{adapter_id}` did not answer `initialize` within {}s",
             INITIALIZE_TIMEOUT.as_secs()
         )
-    })??;
+    })?
+    .inspect_err(|error| log::warn!("dap: `{adapter_id}` rejected `initialize`: {error}"))?;
     *session.capabilities.lock().await = init.clone();
+    log::info!(
+        "dap: session {session_id} ready on `{adapter_id}` ({} request pending)",
+        plan.request
+    );
 
     state.dap.insert(session_id.clone(), session).await;
     Ok(DapStartResult {
@@ -695,6 +737,15 @@ mod tests {
         let declared: usize = header.trim_start_matches("Content-Length: ").parse().unwrap();
         assert_eq!(declared, body.len());
         assert!(body.contains("\"command\":\"next\""));
+    }
+
+    #[test]
+    fn normalizes_null_request_arguments_to_an_object() {
+        assert_eq!(normalize_request_arguments(Value::Null), json!({}));
+        assert_eq!(
+            normalize_request_arguments(json!({ "threadId": 7 })),
+            json!({ "threadId": 7 })
+        );
     }
 
     #[test]

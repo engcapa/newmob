@@ -331,6 +331,24 @@ export function lspDetectJavaBundles(): Promise<LspBundleStatus[]> {
   return invoke<LspBundleStatus[]>("lsp_detect_java_bundles");
 }
 
+/** A jdtls extension jar found inside an installed VS Code / Cursor extension. */
+export interface LspDiscoveredBundle {
+  /** "javaDebug" | "javaTest". */
+  id: string;
+  path: string;
+  version: string;
+  /** Where it was found, e.g. "vscode: vscjava.vscode-java-debug-0.58.0". */
+  source: string;
+}
+
+/**
+ * Scan installed editor extensions for java-debug / java-test plugin jars so the
+ * user can adopt one without hunting for a path or downloading anything.
+ */
+export function lspDiscoverJavaBundles(): Promise<LspDiscoveredBundle[]> {
+  return invoke<LspDiscoveredBundle[]>("lsp_discover_java_bundles");
+}
+
 /** A discovered Java test node (class or method) from the java-test bundle (M8 E). */
 export interface JavaTestItem {
   name: string;
@@ -353,6 +371,9 @@ export function javaTestDiscover(descriptor: LspDocumentDescriptor): Promise<Jav
     workspaceId: descriptor.workspaceId,
     rootPath: descriptor.rootPath ?? null,
     filePath: descriptor.filePath,
+    // Bind discovery to the same jdtls session the editor uses (custom command).
+    serverCommandId: descriptor.serverCommandId ?? null,
+    customServerCommand: descriptor.customServerCommand ?? null,
   });
 }
 
@@ -376,6 +397,8 @@ export function javaTestResolveLaunch(
     rootPath: descriptor.rootPath ?? null,
     filePath: descriptor.filePath,
     test,
+    serverCommandId: descriptor.serverCommandId ?? null,
+    customServerCommand: descriptor.customServerCommand ?? null,
   });
 }
 
@@ -455,12 +478,20 @@ export function lspWorkspaceDiagnostics(workspaceId: string): Promise<WorkspaceD
   return invoke<WorkspaceDiagnosticFile[]>("lsp_workspace_diagnostics", { workspaceId });
 }
 
+/** jdtls `BuildWorkspaceStatus`, so callers can distinguish "built with compile errors". */
+export type LspBuildStatus = "failed" | "succeed" | "withError" | "cancelled";
+
 /**
- * Trigger a full jdtls project rebuild (java.buildWorkspace) so diagnostics for
- * unopened files are (re)published. `descriptor` selects the jdtls session.
+ * Build the project on the active language-server session (jdtls's
+ * `java/buildWorkspace`). `descriptor` selects the session; `full` forces a clean
+ * rebuild so diagnostics for unopened files are (re)published, while the debug
+ * make-before-launch barrier passes `false` for an incremental build.
  */
-export function lspBuildWorkspace(descriptor: LspDocumentDescriptor): Promise<void> {
-  return invoke("lsp_build_workspace", documentArgs(descriptor));
+export function lspBuildWorkspace(
+  descriptor: LspDocumentDescriptor,
+  full = true,
+): Promise<LspBuildStatus> {
+  return invoke<LspBuildStatus>("lsp_build_workspace", { ...documentArgs(descriptor), full });
 }
 
 export function lspDocumentSymbols(

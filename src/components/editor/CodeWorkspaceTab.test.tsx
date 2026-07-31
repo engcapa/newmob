@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import mermaid from "mermaid";
-import { useCallback, useRef, useState, type ComponentProps } from "react";
+import { StrictMode, useCallback, useRef, useState, type ComponentProps } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { selectCodeWorkspaceUi, useCodeWorkspaceStore } from "../../stores/codeWorkspaceStore";
 import { DEFAULT_CODE_VIEW_PROFILE, saveCodeViewProfile } from "../../lib/codeViewProfile";
@@ -78,6 +78,29 @@ const lspMocks = vi.hoisted(() => ({
 const ipcMocks = vi.hoisted(() => ({
   selectFilePath: vi.fn(),
   selectFolderPath: vi.fn(),
+}));
+
+const dapMocks = vi.hoisted(() => ({
+  dapStartSession: vi.fn(),
+  dapSendRequest: vi.fn(),
+  dapSend: vi.fn(),
+  dapTerminate: vi.fn(),
+  listenDapEvents: vi.fn(),
+  dapResolveJavaMainClasses: vi.fn(),
+}));
+
+vi.mock("../../lib/editor/dap", () => dapMocks);
+
+/**
+ * Whether the component sees the desktop runtime. Defaults to false (the value
+ * every other test in this file has always run with); the Java debug test opts
+ * in, since the Debug button is disabled outside the Tauri webview.
+ */
+const runtimeState = vi.hoisted(() => ({ tauri: false }));
+
+vi.mock("../../lib/runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/runtime")>()),
+  isTauriRuntime: () => runtimeState.tauri,
 }));
 
 const clipboardMocks = vi.hoisted(() => ({
@@ -214,8 +237,13 @@ function documentStatus(overrides: Partial<LspDocumentStatus> = {}): LspDocument
 function renderWorkspace(
   workspace: CodeWorkspaceTabInfo,
   props: Partial<ComponentProps<typeof CodeWorkspaceTab>> = {},
+  options: { strict?: boolean } = {},
 ) {
-  return render(<CodeWorkspaceTab tabId="tab-code" workspace={workspace} visible {...props} />);
+  const element = <CodeWorkspaceTab tabId="tab-code" workspace={workspace} visible {...props} />;
+  // `strict` reproduces how the app actually mounts (src/main.tsx wraps the tree
+  // in React.StrictMode): mount → effect cleanups → effects again. Anything that
+  // latches state in an effect cleanup behaves differently there.
+  return render(options.strict ? <StrictMode>{element}</StrictMode> : element);
 }
 
 describe("CodeWorkspaceTab", () => {
@@ -255,7 +283,14 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspStopWorkspace.mockReset().mockResolvedValue(0);
     lspMocks.lspGetDiagnostics.mockReset();
     lspMocks.lspWorkspaceDiagnostics.mockReset().mockResolvedValue([]);
-    lspMocks.lspBuildWorkspace.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspBuildWorkspace.mockReset().mockResolvedValue("succeed");
+    runtimeState.tauri = false;
+    dapMocks.dapStartSession.mockReset();
+    dapMocks.dapSendRequest.mockReset().mockResolvedValue({});
+    dapMocks.dapSend.mockReset().mockResolvedValue(undefined);
+    dapMocks.dapTerminate.mockReset().mockResolvedValue(undefined);
+    dapMocks.listenDapEvents.mockReset().mockResolvedValue(() => {});
+    dapMocks.dapResolveJavaMainClasses.mockReset();
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
     lspMocks.lspReadUriContents.mockReset();
@@ -2268,6 +2303,138 @@ describe("CodeWorkspaceTab", () => {
       "data-initial-cwd",
       "/repo/app",
     );
+  });
+
+  it("starts a Java debug session from the toolbar under StrictMode", async () => {
+    // Regression: the tab's mounted-guard ref was cleared by StrictMode's dev
+    // double-invoke and never re-armed, so `if (!mountedRef.current) return`
+    // aborted the launch right after the main class was resolved — the click
+    // resolved the class, then silently did nothing (no session, no message).
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-debug",
+      workspaceInstanceId: "instance-java-debug",
+      name: "Java debug",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    dapMocks.dapResolveJavaMainClasses.mockResolvedValue({
+      kind: "resolved",
+      main: {
+        mainClass: "com.acme.App",
+        projectName: "app",
+        filePath: "/repo/app/src/main/java/com/acme/App.java",
+      },
+    });
+    dapMocks.dapStartSession.mockResolvedValue({
+      sessionId: "sess-1",
+      capabilities: {},
+      request: "launch",
+      arguments: { mainClass: "com.acme.App" },
+    });
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-debug-java"));
+
+    await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalledWith(
+      "java",
+      expect.objectContaining({
+        rootPath: "/repo/app",
+        filePath: "/repo/app/src/main/java/com/acme/App.java",
+        mainClass: "com.acme.App",
+        projectName: "app",
+      }),
+    ));
+    // Make-before-launch must run as an incremental build (jdtls autobuilds on
+    // save; a clean rebuild would add minutes to every debug start) and must
+    // target the file being launched: the jdtls session key includes the
+    // nearest module walking up from the path, so a synthetic root-level path
+    // misses the module session in a multi-module build and the build is
+    // skipped with "no language server session is active".
+    expect(lspMocks.lspBuildWorkspace).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rootPath: "/repo/app",
+        filePath: "src/main/java/com/acme/App.java",
+      }),
+      false,
+    );
+    // The panel reports each pre-launch step, so a slow start is never blank.
+    const consoleOutput = await screen.findByTestId("debug-console-output");
+    expect(consoleOutput.textContent).toContain("Starting debug for App.java");
+    expect(consoleOutput.textContent).toContain("Building project…");
+    expect(consoleOutput.textContent).toContain("Launching com.acme.App…");
+  });
+
+  it("releases a workspace's store instance when the tab is rebound to another", async () => {
+    // The StrictMode-safe teardown defers disposal by a macrotask so a remount
+    // can cancel it. Only a remount of the SAME workspace may cancel: rebinding
+    // the tab to a different workspace must still release the old instance, or
+    // its entry (open files, editor groups, LSP state) leaks for the session.
+    const first: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/one",
+      workspaceId: "ws-rebind-1",
+      workspaceInstanceId: "instance-rebind-1",
+      name: "One",
+      roots: [{ id: "one", name: "one", path: "/repo/one", kind: "git" }],
+      looseFiles: [],
+    };
+    const second: CodeWorkspaceTabInfo = {
+      ...first,
+      repoRoot: "/repo/two",
+      workspaceId: "ws-rebind-2",
+      workspaceInstanceId: "instance-rebind-2",
+      name: "Two",
+      roots: [{ id: "two", name: "two", path: "/repo/two", kind: "git" }],
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([]);
+
+    const view = render(<CodeWorkspaceTab tabId="tab-code" workspace={first} visible />);
+    await waitFor(() => expect(
+      useCodeWorkspaceStore.getState().byInstanceId["instance-rebind-1"],
+    ).toBeTruthy());
+
+    view.rerender(<CodeWorkspaceTab tabId="tab-code" workspace={second} visible />);
+    await waitFor(() => expect(
+      useCodeWorkspaceStore.getState().byInstanceId["instance-rebind-1"],
+    ).toBeUndefined());
+    expect(useCodeWorkspaceStore.getState().byInstanceId["instance-rebind-2"]).toBeTruthy();
+  });
+
+  it("blocks a Java debug launch when the pre-launch build fails", async () => {
+    // A failed build must say so rather than launching stale bytecode.
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-debug-build-fail",
+      workspaceInstanceId: "instance-java-debug-build-fail",
+      name: "Java debug build fail",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    lspMocks.lspBuildWorkspace.mockResolvedValue("failed");
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-debug-java"));
+
+    const consoleOutput = await screen.findByTestId("debug-console-output");
+    await waitFor(() => expect(consoleOutput.textContent).toContain(
+      "Cannot start debug: the project build failed",
+    ));
+    expect(dapMocks.dapResolveJavaMainClasses).not.toHaveBeenCalled();
+    expect(dapMocks.dapStartSession).not.toHaveBeenCalled();
   });
 
   it("opens a shared buffer in a resizable editor split and collapses it", async () => {

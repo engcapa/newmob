@@ -2187,6 +2187,7 @@ export const zhCN: DeepPartial<typeof en> = {
     languageServersJavaDebugBundle: "java-debug 扩展",
     languageServersJavaTestBundle: "java-test 扩展",
     languageServersJavaBundlePlaceholder: "目录或 jar 路径",
+    languageServersJavaBundleUseDetected: "使用来自 {source} 的 {version}",
     languageServersInstall: "安装",
     languageServersCopyInstall: "复制安装说明",
     languageServersCopy: "复制",

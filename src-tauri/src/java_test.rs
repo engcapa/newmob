@@ -118,10 +118,15 @@ pub async fn java_test_discover(
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    // Optional jdtls command identity so discovery targets the same session the
+    // editor uses (custom / non-default jdtls command). Absent → default preset.
+    server_command_id: Option<String>,
+    custom_server_command: Option<crate::lsp::LspCustomServerCommand>,
 ) -> Result<Vec<JavaTestItem>, String> {
     // The java-test command keys on the file's own URI; derive it from the path
     // (same file: URI the language server sees) so the frontend need not build it.
     let uri = crate::java_test::file_uri(root_path.as_deref(), &file_path)?;
+    let identity = crate::lsp::JavaSessionIdentity::new(server_command_id, custom_server_command);
     let result = state
         .lsp
         .execute_java_command(
@@ -130,6 +135,7 @@ pub async fn java_test_discover(
             file_path,
             "vscode.java.test.findTestTypesAndMethods",
             vec![Value::String(uri)],
+            identity,
         )
         .await?;
     Ok(parse_test_items(&result))
@@ -201,7 +207,10 @@ pub async fn java_test_resolve_launch(
     root_path: Option<String>,
     file_path: String,
     test: Value,
+    server_command_id: Option<String>,
+    custom_server_command: Option<crate::lsp::LspCustomServerCommand>,
 ) -> Result<JavaTestLaunch, String> {
+    let identity = crate::lsp::JavaSessionIdentity::new(server_command_id, custom_server_command);
     let result = state
         .lsp
         .execute_java_command(
@@ -210,6 +219,7 @@ pub async fn java_test_resolve_launch(
             file_path,
             "vscode.java.test.junit.argument",
             vec![test],
+            identity,
         )
         .await?;
     parse_test_launch(&result)

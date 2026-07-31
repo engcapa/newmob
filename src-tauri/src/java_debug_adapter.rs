@@ -11,6 +11,7 @@
 
 use crate::dap::{DapLaunchPlan, DapTransport, DebugAdapter};
 use crate::lsp::LspManager;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -29,6 +30,27 @@ struct SessionScope {
     workspace_id: String,
     root_path: Option<String>,
     file_path: String,
+    /// The jdtls command identity the editor bound to, so the debug session's
+    /// `executeCommand` calls hit the same jdtls the editor uses (a custom
+    /// command otherwise resolves the wrong / no session — see
+    /// `LspManager::execute_java_command`).
+    identity: crate::lsp::JavaSessionIdentity,
+}
+
+/// Parse the `serverCommandId` + `customServerCommand` the frontend threads into
+/// the launch config so debug binds to the editor's jdtls session.
+fn session_identity(cfg: &Value) -> crate::lsp::JavaSessionIdentity {
+    let preferred = cfg
+        .get("serverCommandId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let custom = cfg
+        .get("customServerCommand")
+        .filter(|value| value.is_object())
+        .and_then(|value| {
+            serde_json::from_value::<crate::lsp::LspCustomServerCommand>(value.clone()).ok()
+        });
+    crate::lsp::JavaSessionIdentity::new(preferred, custom)
 }
 
 fn session_scope(cfg: &Value) -> Result<SessionScope, String> {
@@ -50,6 +72,7 @@ fn session_scope(cfg: &Value) -> Result<SessionScope, String> {
             .filter(|s| !s.trim().is_empty())
             .map(str::to_string),
         file_path,
+        identity: session_identity(cfg),
     })
 }
 /// A resolved main class candidate from `vscode.java.resolveMainClass`.
@@ -98,20 +121,50 @@ fn comparable_path(path: &str) -> String {
     path.replace('\\', "/").to_lowercase()
 }
 
-/// Pick the main class to launch: the candidate declared in the active file
-/// ("debug the file I'm looking at", like IDEA's run gutter), else the first.
-/// jdtls returns the whole workspace's mains in arbitrary order, so taking the
-/// first blindly can launch a different class than the one on screen.
-fn pick_main_class(
-    candidates: Vec<MainClassCandidate>,
-    target_file: &str,
-) -> Option<MainClassCandidate> {
-    let target = comparable_path(target_file);
-    candidates
+/// Canonicalize a path for comparison so a symlinked workspace (opened path) and
+/// jdtls's returned (often canonical) path still match. Falls back to the
+/// slash/case-normalized string when the path does not exist on disk (tests,
+/// deleted files), so behavior is stable off-disk.
+fn canonical_comparable(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .ok()
+        .map(|p| comparable_path(&p.to_string_lossy()))
+        .unwrap_or_else(|| comparable_path(path))
+}
+
+/// The outcome of choosing which main class to debug for the active file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MainClassSelection {
+    /// Exactly the class declared in the active file, or the sole workspace main.
+    Resolved(MainClassCandidate),
+    /// Several mains and none is the active file: the user must choose. Never
+    /// launch an arbitrary one (that silently debugs a different program).
+    Ambiguous(Vec<MainClassCandidate>),
+    /// No runnable main anywhere in the project.
+    None,
+}
+
+/// Choose the main class to launch: the candidate declared in the active file
+/// ("debug the file I'm looking at", like IDEA's run gutter); the sole candidate
+/// when there is only one; otherwise ambiguous (caller must prompt). jdtls
+/// returns the whole workspace's mains in arbitrary order, so taking the first
+/// blindly can launch a different class than the one on screen — we never do
+/// that.
+fn select_main_class(candidates: Vec<MainClassCandidate>, target_file: &str) -> MainClassSelection {
+    if candidates.is_empty() {
+        return MainClassSelection::None;
+    }
+    let target = canonical_comparable(target_file);
+    if let Some(exact) = candidates
         .iter()
-        .find(|c| c.file_path.as_deref().is_some_and(|p| comparable_path(p) == target))
-        .cloned()
-        .or_else(|| candidates.into_iter().next())
+        .find(|c| c.file_path.as_deref().is_some_and(|p| canonical_comparable(p) == target))
+    {
+        return MainClassSelection::Resolved(exact.clone());
+    }
+    if candidates.len() == 1 {
+        return MainClassSelection::Resolved(candidates.into_iter().next().unwrap());
+    }
+    MainClassSelection::Ambiguous(candidates)
 }
 
 /// Parse `vscode.java.resolveClasspath` output — a `[[modulepaths],[classpaths]]`
@@ -263,9 +316,17 @@ impl DebugAdapter for JavaDebugAdapter {
             let workspace_id = scope.workspace_id.clone();
             let root_path = scope.root_path.clone();
             let file_path = scope.file_path.clone();
+            let identity = scope.identity.clone();
             async move {
-                lsp.execute_java_command(workspace_id, root_path, file_path, command, arguments)
-                    .await
+                lsp.execute_java_command(
+                    workspace_id,
+                    root_path,
+                    file_path,
+                    command,
+                    arguments,
+                    identity,
+                )
+                .await
             }
         };
 
@@ -311,9 +372,23 @@ impl DebugAdapter for JavaDebugAdapter {
             }
             _ => {
                 let resolved = run("vscode.java.resolveMainClass", vec![]).await?;
-                let candidate = pick_main_class(parse_main_classes(&resolved), &scope.file_path)
-                    .ok_or("No runnable main class found in this Java project")?;
-                (candidate.main_class, candidate.project_name)
+                match select_main_class(parse_main_classes(&resolved), &scope.file_path) {
+                    MainClassSelection::Resolved(candidate) => {
+                        (candidate.main_class, candidate.project_name)
+                    }
+                    // The frontend resolves candidates up front and prompts, so a
+                    // launch reaching the adapter ambiguous means it was invoked
+                    // without a choice — refuse rather than debug a random main.
+                    MainClassSelection::Ambiguous(_) => {
+                        return Err(
+                            "Multiple runnable main classes; pick one to debug (no active-file match)"
+                                .into(),
+                        );
+                    }
+                    MainClassSelection::None => {
+                        return Err("No runnable main class found in this Java project".into());
+                    }
+                }
             }
         };
 
@@ -349,6 +424,12 @@ impl DebugAdapter for JavaDebugAdapter {
         let port_value = run("vscode.java.startDebugSession", vec![]).await?;
         let port = parse_debug_port(&port_value)
             .ok_or("java-debug did not return a debug session port")?;
+        log::info!(
+            "java-debug: launch plan ready mainClass={main_class} project={project_name} \
+             classpath_entries={} modulepath_entries={} port={port}",
+            classpaths.len(),
+            modulepaths.len()
+        );
 
         let arguments = build_launch_arguments(
             launch_config,
@@ -367,6 +448,69 @@ impl DebugAdapter for JavaDebugAdapter {
             arguments,
         })
     }
+}
+
+/// One runnable main-class option for the frontend picker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JavaMainClassOption {
+    pub main_class: String,
+    pub project_name: String,
+    pub file_path: Option<String>,
+}
+
+/// What the frontend should do before starting a Java debug session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum JavaMainClassResolution {
+    /// A single main class is implied (active file, or the only one): launch it.
+    Resolved { main: JavaMainClassOption },
+    /// Several mains and none matches the active file: show the picker.
+    Choose { candidates: Vec<JavaMainClassOption> },
+    /// No runnable main in the project.
+    None,
+}
+
+impl From<MainClassCandidate> for JavaMainClassOption {
+    fn from(c: MainClassCandidate) -> Self {
+        Self {
+            main_class: c.main_class,
+            project_name: c.project_name,
+            file_path: c.file_path,
+        }
+    }
+}
+
+/// Resolve runnable main classes for the active file so the frontend can launch
+/// directly (single/active-file match) or present a picker (ambiguous) instead
+/// of the adapter silently debugging an arbitrary class. Reuses the same jdtls
+/// session identity as the debug launch.
+#[tauri::command]
+pub async fn java_debug_resolve_main_classes(
+    state: tauri::State<'_, crate::state::AppState>,
+    launch_config: Value,
+) -> Result<JavaMainClassResolution, String> {
+    let scope = session_scope(&launch_config)?;
+    let resolved = state
+        .lsp
+        .execute_java_command(
+            scope.workspace_id.clone(),
+            scope.root_path.clone(),
+            scope.file_path.clone(),
+            "vscode.java.resolveMainClass",
+            vec![],
+            scope.identity.clone(),
+        )
+        .await?;
+    Ok(match select_main_class(parse_main_classes(&resolved), &scope.file_path) {
+        MainClassSelection::Resolved(candidate) => JavaMainClassResolution::Resolved {
+            main: candidate.into(),
+        },
+        MainClassSelection::Ambiguous(candidates) => JavaMainClassResolution::Choose {
+            candidates: candidates.into_iter().map(Into::into).collect(),
+        },
+        MainClassSelection::None => JavaMainClassResolution::None,
+    })
 }
 
 #[cfg(test)]
@@ -403,12 +547,26 @@ mod tests {
             },
         ];
         // Slash direction + drive-letter case differences must not break matching.
-        let picked = pick_main_class(candidates.clone(), "d:/repo/src/App.java").unwrap();
-        assert_eq!(picked.main_class, "com.example.App");
-        // No file match: fall back to the first candidate.
-        let fallback = pick_main_class(candidates, "/elsewhere/Main.java").unwrap();
-        assert_eq!(fallback.main_class, "com.example.Other");
-        assert!(pick_main_class(vec![], "/x.java").is_none());
+        match select_main_class(candidates.clone(), "d:/repo/src/App.java") {
+            MainClassSelection::Resolved(picked) => assert_eq!(picked.main_class, "com.example.App"),
+            other => panic!("expected active-file match, got {other:?}"),
+        }
+        // No active-file match with several mains → ambiguous (never arbitrary).
+        match select_main_class(candidates, "/elsewhere/Main.java") {
+            MainClassSelection::Ambiguous(list) => assert_eq!(list.len(), 2),
+            other => panic!("expected ambiguous, got {other:?}"),
+        }
+        // A single candidate resolves even without an active-file match.
+        let one = vec![MainClassCandidate {
+            main_class: "com.example.Only".into(),
+            project_name: "demo".into(),
+            file_path: Some("/repo/src/Only.java".into()),
+        }];
+        match select_main_class(one, "/elsewhere/Main.java") {
+            MainClassSelection::Resolved(picked) => assert_eq!(picked.main_class, "com.example.Only"),
+            other => panic!("expected sole-candidate resolve, got {other:?}"),
+        }
+        assert_eq!(select_main_class(vec![], "/x.java"), MainClassSelection::None);
     }
 
     #[test]
@@ -522,5 +680,41 @@ mod tests {
         assert_eq!(scope.workspace_id, "w");
         assert_eq!(scope.root_path.as_deref(), Some("/r"));
         assert_eq!(scope.file_path, "/r/App.java");
+        // No identity fields in the config → default preset lookup.
+        assert!(scope.identity.preferred_command_id.is_none());
+        assert!(scope.identity.custom_command.is_none());
+    }
+
+    #[test]
+    fn session_scope_threads_jdtls_command_identity() {
+        // A preferred command id reaches the identity so debug binds to the
+        // editor's chosen jdtls, not the default preset.
+        let scope = session_scope(&json!({
+            "filePath": "/r/App.java",
+            "serverCommandId": "jdtls-custom",
+        }))
+        .unwrap();
+        assert_eq!(scope.identity.preferred_command_id.as_deref(), Some("jdtls-custom"));
+
+        // A custom command object is parsed through so a bespoke jdtls launch
+        // resolves the same session key the editor uses.
+        let scope = session_scope(&json!({
+            "filePath": "/r/App.java",
+            "customServerCommand": { "command": "/opt/jdtls/bin/jdtls", "args": ["--stdio"] },
+        }))
+        .unwrap();
+        let custom = scope.identity.custom_command.expect("custom command parsed");
+        assert_eq!(custom.command, "/opt/jdtls/bin/jdtls");
+        assert_eq!(custom.args, vec!["--stdio"]);
+
+        // Blank identity fields fall back to the default preset lookup.
+        let scope = session_scope(&json!({
+            "filePath": "/r/App.java",
+            "serverCommandId": "   ",
+            "customServerCommand": { "command": "" },
+        }))
+        .unwrap();
+        assert!(scope.identity.preferred_command_id.is_none());
+        assert!(scope.identity.custom_command.is_none());
     }
 }

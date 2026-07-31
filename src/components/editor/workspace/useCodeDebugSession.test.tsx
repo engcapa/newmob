@@ -160,7 +160,26 @@ describe("useCodeDebugSession", () => {
     act(() => result.current.toggleBreakpoint("/repo/App.java", 12));
 
     await waitFor(() => expect(result.current.breakpoints["/repo/App.java"]).toEqual([{ line: 14 }]));
-    expect(result.current.breakpointRuntime["/repo/App.java"]).toEqual({ 14: true });
+    expect(result.current.breakpointRuntime["/repo/App.java"]).toEqual({
+      14: { status: "verified", message: null },
+    });
+  });
+
+  it("marks an unbindable breakpoint failed with the adapter's reason", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command !== "setBreakpoints") return Promise.resolve({});
+      return Promise.resolve({
+        breakpoints: [{ id: 6, verified: false, line: 12, reason: "failed", message: "No executable code" }],
+      });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    await startSession(result.current.startDebug);
+    act(() => result.current.toggleBreakpoint("/repo/App.java", 12));
+
+    // Unverified must NOT read as verified: it carries a failed status + reason.
+    await waitFor(() => expect(result.current.breakpointRuntime["/repo/App.java"]).toEqual({
+      12: { status: "failed", message: "No executable code" },
+    }));
   });
 
   it("configures breakpoints before releasing the debuggee on `initialized`", async () => {
@@ -180,6 +199,98 @@ describe("useCodeDebugSession", () => {
     const commands = dapSendRequest.mock.calls.map((call) => call[1]);
     expect(commands.indexOf("setBreakpoints")).toBeLessThan(commands.indexOf("setExceptionBreakpoints"));
     expect(breakpointCalls()[0].lines).toEqual([4]);
+  });
+
+  it("surfaces a failed configuration step on the console instead of swallowing it", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "setExceptionBreakpoints") return Promise.reject(new Error("adapter rejected filters"));
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug);
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    // The failure is visible in the debug console (was previously silent).
+    await waitFor(() =>
+      expect(result.current.state?.output.some(
+        (line) => line.category === "stderr" && line.text.includes("setExceptionBreakpoints failed"),
+      )).toBe(true));
+  });
+
+  it("seeds a visible terminated session when a pre-launch failure is reported", async () => {
+    // A failure before any session exists (no active jdtls / no main class /
+    // no debug bundle) must render in the Debug panel, not vanish — the panel
+    // only shows its console when `state` is non-null.
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    expect(result.current.state).toBeNull();
+
+    act(() => result.current.reportStartupFailure("No runnable main class found"));
+
+    expect(result.current.state?.status).toBe("terminated");
+    expect(result.current.state?.output).toEqual([
+      { category: "stderr", text: "No runnable main class found\n" },
+    ]);
+  });
+
+  it("shows pre-launch progress before an adapter session exists", async () => {
+    // Save → build → resolve-main-class all run before `dapStartSession`, and on
+    // a cold project that is tens of seconds. Without a seeded session the panel
+    // shows its "no debug session" placeholder and the click looks ignored.
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.reportStartupProgress("Building project…"));
+    expect(result.current.state?.status).toBe("starting");
+    expect(result.current.state?.output).toEqual([
+      { category: "console", text: "Building project…\n" },
+    ]);
+
+    act(() => result.current.reportStartupProgress("Resolving main class…"));
+    expect(result.current.state?.output.map((line) => line.text)).toEqual([
+      "Building project…\n",
+      "Resolving main class…\n",
+    ]);
+
+    // The real session adopts those lines, so the console reads as one log.
+    await startSession(result.current.startDebug);
+    expect(result.current.state?.sessionId).toBe("sess-1");
+    expect(result.current.state?.output.map((line) => line.text)).toEqual([
+      "Building project…\n",
+      "Resolving main class…\n",
+    ]);
+  });
+
+  it("replaces a terminated run's console when the next start reports progress", () => {
+    // Progress from a new attempt must not read as output of the finished one.
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.reportStartupFailure("Launch failed: boom"));
+    expect(result.current.state?.status).toBe("terminated");
+
+    act(() => result.current.reportStartupProgress("Starting debug for App.java"));
+    expect(result.current.state?.status).toBe("starting");
+    expect(result.current.state?.output).toEqual([
+      { category: "console", text: "Starting debug for App.java\n" },
+    ]);
+  });
+
+  it("surfaces a dapStartSession rejection in the debug console", async () => {
+    // Adapter resolution failures reject `dapStartSession`; the panel must show
+    // the reason (previously only the transient status bar did) and the call
+    // must still reject so callers keep their existing error handling.
+    dapStartSession.mockRejectedValue(new Error("No Java language server session is active"));
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+
+    await act(async () => {
+      await expect(result.current.startDebug({ filePath: "/repo/App.java" })).rejects.toThrow(
+        "No Java language server session is active",
+      );
+    });
+
+    expect(result.current.state?.status).toBe("terminated");
+    expect(result.current.state?.output.some(
+      (line) => line.category === "stderr" && line.text.includes("Debug failed to start")
+        && line.text.includes("No Java language server session is active"),
+    )).toBe(true);
   });
 
   it("keeps the console readable after an explicit stop", async () => {
