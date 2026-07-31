@@ -961,6 +961,9 @@ select.taomni-input:not(.appearance-none):not([multiple]) {
   border-top: 1px solid var(--taomni-divider);
   color: var(--taomni-status-text);
   font-size: calc(var(--taomni-ui-font-size) - 1px);
+  /* Keep the 24px bar tall enough even at the max UI font size (text stays
+     inside the bar instead of spilling over the border). */
+  line-height: 1.3;
 }
 
 .taomni-divider-h { height: 1px; background: var(--taomni-divider); }
