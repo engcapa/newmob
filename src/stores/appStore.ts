@@ -12,6 +12,7 @@ import { t as tr } from "../lib/i18n";
 import { detectXServer, type XServerStatus } from "../lib/ipc";
 import type { TabFilter } from "../lib/tabFilter";
 import { terminalCwdTitlePrefix } from "../lib/terminalCwd";
+import { getQueryTab } from "../lib/queryRegistry";
 
 export type SideTab = "sessions" | "tools";
 export type TerminalSplitLayout = "horizontal" | "vertical" | "grid";
@@ -1000,7 +1001,8 @@ export const useAppStore = create<AppState>((set) => ({
       };
     }),
 
-  removeTab: (id) =>
+  removeTab: (id) => {
+    void getQueryTab(id)?.flushWorkspace?.();
     set((s) => {
       const idx = s.tabs.findIndex((t) => t.id === id);
       const tab = idx >= 0 ? s.tabs[idx] : undefined;
@@ -1033,7 +1035,8 @@ export const useAppStore = create<AppState>((set) => ({
         terminalRuntimeByTab: omitRecordKeys(s.terminalRuntimeByTab, new Set([id])),
         statusMessage: tr("status.closedTab"),
       };
-    }),
+    });
+  },
 
   removeTabs: (ids) =>
     set((s) => {

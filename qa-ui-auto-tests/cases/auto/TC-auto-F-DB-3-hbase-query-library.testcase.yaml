@@ -1,0 +1,43 @@
+id: TC-auto-F-DB-3-hbase-query-library
+title: HBase Shell keeps its query library available offline
+description: |
+  Creates and opens an HBase Shell session in browser mode. The browser stub
+  rejects the native connection, so this verifies the failure banner does not
+  replace the shell workspace and that the shared Query Library can persist the
+  default HBase command under the stable session and namespace scope.
+covers: [F-DB-3, F-DB-4, F6.3]
+tags: [auto-generated, smoke, needs-review, database, hbase, query-library, no-connect]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 45
+steps:
+  - open: ${cfg.app.base_url}
+  - wait_for: '[data-testid="sidebar"]'
+  - click: '[data-testid="session-new"]'
+  - wait_for: '[data-testid="session-editor"]'
+  - click: '[data-testid="session-proto-hbaseshell"]'
+  - wait_for: '[data-testid="session-hbase-section"]'
+  - fill:
+      selector: 'input[aria-label="Remote host"]'
+      value: hbase-host.example.test
+  - fill:
+      selector: 'input[aria-label="HBase namespace"]'
+      value: qa
+  - click: '[data-testid="session-section-bookmark"]'
+  - wait_for: '[data-testid="bookmark-settings"]'
+  - fill:
+      selector: '[data-testid="session-name"]'
+      value: qa-ui-auto-hbase
+  - click: '[data-testid="session-save"]'
+  - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-hbase"]'
+  - open_session: { name: qa-ui-auto-hbase, double_click: true }
+  - wait_for: '[data-testid="hbase-connection-error-banner"]'
+  - assert_visible: '[data-testid="hbase-schema-tree"]'
+  - click: '[data-testid="hbase-save-query"]'
+  - wait_for: '[data-testid="query-library-dialog"]'
+  - fill:
+      selector: '[data-testid="query-library-name"]'
+      value: qa-ui-auto-hbase-list
+  - click: '[data-testid="query-library-save"]'
+  - wait_for: '[data-testid^="saved-query-"]'
+  - screenshot: db-3-hbase-query-library.png

@@ -117,7 +117,7 @@ import { useChatStore, isChatCapableTabType } from "../stores/chatStore";
 import { useAiStore } from "../stores/aiStore";
 import { useLanChatStore, totalUnread } from "../stores/lanChatStore";
 import { setActiveTerminalTab, getTerminal, markTerminalDetachPending, clearTerminalDetachPending } from "../lib/terminal/terminalRegistry";
-import { setActiveQueryTab } from "../lib/queryRegistry";
+import { listQueryTabs, setActiveQueryTab } from "../lib/queryRegistry";
 import { t as tr, useT } from "../lib/i18n";
 import { gitInitRepo, gitProbePath, gitRepoName } from "../lib/git";
 import { alertAppDialog, confirmAppDialog } from "../lib/appDialogs";
@@ -1536,6 +1536,9 @@ export function MainLayout() {
     void (async () => {
       try {
         if (await confirmExitWithOpenTabs()) {
+          await Promise.allSettled(
+            listQueryTabs().map((entry) => entry.flushWorkspace?.()),
+          );
           await exitApp();
         }
       } catch {

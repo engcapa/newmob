@@ -23,7 +23,7 @@ import {
   Minimize2,
   ChevronRight,
   Star,
-  BookMarked,
+  Files,
   Database,
   FileJson,
   MessageSquare,
@@ -43,11 +43,15 @@ import {
   dbClearHistory,
   dbDeleteHistory,
   dbDescribeTable,
+  dbGetSavedQuery,
+  dbCloseQueryWorkspaceTabs,
   dbListHistory,
+  dbLoadQueryWorkspace,
   dbRewriteResultSql,
+  dbSaveQueryWorkspace,
+  dbSaveSavedQuery,
   readFileBytes,
   selectSaveFilePath,
-  temporaryFilePath,
   writeStreamAbort,
   writeStreamAppend,
   writeStreamClose,
@@ -55,10 +59,12 @@ import {
   type DbColumnDescription,
   type DbQueryResult,
   type DbResultSqlRewriteRequest,
+  type DbQueryWorkspaceTab,
+  type DbSavedQuery,
   type DbSqlHistoryEntry,
 } from "../../lib/ipc";
 import { SchemaTree, type SchemaTreeSelectedObject } from "./SchemaTree";
-import { BookmarksPanel } from "./BookmarksPanel";
+import { QueryLibraryPanel } from "./QueryLibraryPanel";
 import { SqlEditorPanel, type SqlEditorHandle, type SqlEditorRunContext } from "./SqlEditorPanel";
 import {
   QueryResultGrid,
@@ -186,8 +192,9 @@ interface PanelState {
   activeSheetId: string | null;
   filePath: string | null;
   fileName: string | null;
-  cachePath: string | null;
+  savedQuery: DbSavedQuery | null;
   dirty: boolean;
+  createdAt: number;
 }
 
 interface QueryWorkspacePanelCache {
@@ -262,21 +269,6 @@ function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
-function sanitizeFilePart(value: string): string {
-  return value
-    .replace(/[\\/:*?"<>|]+/g, "_")
-    .replace(/\s+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 80);
-}
-
-function defaultQueryCacheName(info: DbConnectInfo, ordinal: number): string {
-  const catalog = info.catalog ? `-${info.catalog}` : "";
-  const database = info.database ? `-${info.database}` : "";
-  const stem = sanitizeFilePart(`${info.engine}-${info.host}-${info.port}${catalog}${database}`) || "query";
-  return `${stem}-query-${ordinal}.sql`;
-}
-
 function pad2(value: number): string {
   return String(value).padStart(2, "0");
 }
@@ -347,7 +339,7 @@ function resultSheetTimingTitle(sheet: ResultSheet): string {
   return lines.join("\n");
 }
 
-function readWorkspaceCache(sessionId: string): QueryWorkspaceCache | null {
+function readLegacyWorkspaceCache(sessionId: string): QueryWorkspaceCache | null {
   try {
     const raw = localStorage.getItem(workspaceKey(sessionId));
     if (!raw) return null;
@@ -369,26 +361,6 @@ function readWorkspaceCache(sessionId: string): QueryWorkspaceCache | null {
     };
   } catch {
     return null;
-  }
-}
-
-function writeWorkspaceCache(sessionId: string, panels: PanelState[], activePanelId: string | null): void {
-  try {
-    const cache: QueryWorkspaceCache = {
-      version: QUERY_WORKSPACE_CACHE_VERSION,
-      activePanelId,
-      panels: panels
-        .filter((panel) => panel.filePath || panel.cachePath)
-        .map((panel) => ({
-          id: panel.id,
-          filePath: panel.filePath,
-          fileName: panel.fileName,
-          cachePath: panel.cachePath,
-        })),
-    };
-    localStorage.setItem(workspaceKey(sessionId), JSON.stringify(cache));
-  } catch {
-    /* ignore */
   }
 }
 
@@ -479,9 +451,34 @@ function newPanel(patch: Partial<PanelState> = {}): PanelState {
     activeSheetId: null,
     filePath: null,
     fileName: null,
-    cachePath: null,
+    savedQuery: null,
     dirty: false,
+    createdAt: Date.now(),
     ...patch,
+  };
+}
+
+function workspaceTabFromPanel(
+  workspaceId: string,
+  panel: PanelState,
+  tabOrder: number,
+  content: string,
+  updatedAt: number,
+  dirty = panel.dirty,
+): DbQueryWorkspaceTab {
+  return {
+    workspaceId,
+    panelId: panel.id,
+    tabOrder,
+    content,
+    filePath: panel.filePath,
+    fileName: panel.fileName,
+    savedQueryId: panel.savedQuery?.id ?? null,
+    dirty,
+    isOpen: true,
+    closedAt: null,
+    createdAt: panel.createdAt,
+    updatedAt,
   };
 }
 
@@ -582,8 +579,8 @@ export default function DbClientTab({
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
   const [historyEntries, setHistoryEntries] = useState<DbSqlHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [leftPanelTab, setLeftPanelTab] = useState<"schema" | "bookmarks">("schema");
-  const addBookmarkTriggerRef = useRef<(() => void) | null>(null);
+  const [leftPanelTab, setLeftPanelTab] = useState<"schema" | "queries">("schema");
+  const addQueryTriggerRef = useRef<(() => void) | null>(null);
   const historyRef = useRef<Record<string, string[]>>({});
   const editorHandles = useRef<Record<string, SqlEditorHandle | null>>({});
   // Stable "echo target" panel for AI/Claude Code SQL echo (queryRegistry
@@ -593,8 +590,10 @@ export default function DbClientTab({
   const timersRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const panelsRef = useRef<PanelState[]>(panels);
   const activePanelIdRef = useRef(activePanelId);
-  const autoSaveInFlightRef = useRef(false);
+  const autoSaveInFlightRef = useRef<Promise<void> | null>(null);
+  const autoSaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoSavedDocRef = useRef<Record<string, string>>({});
+  const savedQueriesRef = useRef<Record<string, DbSavedQuery>>({});
   const rootRef = useRef<HTMLDivElement>(null);
   const schemaPanelRef = useRef<PanelImperativeHandle | null>(null);
   const lastVisibleSchemaWidthRef = useRef(24);
@@ -641,13 +640,13 @@ export default function DbClientTab({
     });
   }, [metadataCache]);
 
-  // Global keyboard shortcut to add a bookmark: Ctrl+Alt+B / Cmd+Alt+B
+  // Global keyboard shortcut to save the active editor as a query: Ctrl+Alt+B / Cmd+Alt+B
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === "b") {
         e.preventDefault();
         e.stopPropagation();
-        addBookmarkTriggerRef.current?.();
+        addQueryTriggerRef.current?.();
       }
     };
     window.addEventListener("keydown", handleGlobalKeyDown);
@@ -688,15 +687,49 @@ export default function DbClientTab({
   useEffect(() => {
     let cancelled = false;
     setWorkspaceReady(false);
-    const cache = readWorkspaceCache(workspaceSessionId);
-    if (!cache || cache.panels.length === 0) {
-      setWorkspaceReady(true);
-      return () => {
-        cancelled = true;
-      };
-    }
-
     void (async () => {
+      const workspace = await dbLoadQueryWorkspace(workspaceSessionId);
+      if (cancelled) return;
+      if (workspace) {
+        if (workspace.tabs.length === 0) {
+          setWorkspaceReady(true);
+          return;
+        }
+        const restored = await Promise.all(
+          workspace.tabs.slice(0, MAX_PANELS).map(async (entry) => {
+            const savedQuery = entry.savedQueryId
+              ? await dbGetSavedQuery(entry.savedQueryId).catch(() => null)
+              : null;
+            if (savedQuery) savedQueriesRef.current[entry.panelId] = savedQuery;
+            return newPanel({
+              id: entry.panelId,
+              doc: entry.content,
+              filePath: entry.filePath ?? null,
+              fileName: entry.fileName ?? (entry.filePath ? basename(entry.filePath) : null),
+              savedQuery,
+              dirty: entry.dirty,
+              createdAt: entry.createdAt,
+            });
+          }),
+        );
+        lastAutoSavedDocRef.current = Object.fromEntries(
+          restored.map((panel) => [panel.id, panel.doc]),
+        );
+        setPanels(restored);
+        setActivePanelId(
+          workspace.activePanelId && restored.some((panel) => panel.id === workspace.activePanelId)
+            ? workspace.activePanelId
+            : restored[0].id,
+        );
+        setWorkspaceReady(true);
+        return;
+      }
+
+      const cache = readLegacyWorkspaceCache(workspaceSessionId);
+      if (!cache || cache.panels.length === 0) {
+        setWorkspaceReady(true);
+        return;
+      }
       const restored: PanelState[] = [];
       const restoredDocs: Record<string, string> = {};
       for (const [index, entry] of cache.panels.entries()) {
@@ -713,8 +746,8 @@ export default function DbClientTab({
             doc,
             filePath: entry.filePath,
             fileName: entry.filePath ? basename(entry.filePath) : entry.fileName,
-            cachePath: entry.filePath ? null : entry.cachePath,
             dirty: !entry.filePath,
+            createdAt: Date.now() + index,
           }),
         );
         if (restored.length >= MAX_PANELS) break;
@@ -725,13 +758,29 @@ export default function DbClientTab({
         setWorkspaceReady(true);
         return;
       }
-      lastAutoSavedDocRef.current = restoredDocs;
-      setPanels(restored);
-      setActivePanelId(
+      const activePanelId =
         cache.activePanelId && restored.some((panel) => panel.id === cache.activePanelId)
           ? cache.activePanelId
-          : restored[0].id,
-      );
+          : restored[0].id;
+      const importedAt = Date.now();
+      await dbSaveQueryWorkspace({
+        workspaceId: workspaceSessionId,
+        activePanelId,
+        tabs: restored.map((panel, index) =>
+          workspaceTabFromPanel(
+            workspaceSessionId,
+            panel,
+            index,
+            panel.doc,
+            importedAt,
+          ),
+        ),
+        updatedAt: importedAt,
+      });
+      if (cancelled) return;
+      lastAutoSavedDocRef.current = restoredDocs;
+      setPanels(restored);
+      setActivePanelId(activePanelId);
       setWorkspaceReady(true);
     })().catch((err) => {
       if (!cancelled) {
@@ -752,15 +801,6 @@ export default function DbClientTab({
   useEffect(() => {
     writeIntSetting(info.engine, "maxResultSheets", maxResultSheets);
   }, [info.engine, maxResultSheets]);
-
-  const workspaceCacheSignature = JSON.stringify(
-    panels.map(({ id, filePath, fileName, cachePath }) => ({ id, filePath, fileName, cachePath })),
-  );
-
-  useEffect(() => {
-    if (!workspaceReady) return;
-    writeWorkspaceCache(workspaceSessionId, panelsRef.current, activePanelId);
-  }, [activePanelId, workspaceCacheSignature, workspaceReady, workspaceSessionId]);
 
   const patchPanel = useCallback((id: string, patch: Partial<PanelState>) => {
     setPanels((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
@@ -787,49 +827,119 @@ export default function DbClientTab({
     [updatePanel],
   );
 
-  const autoSaveWorkspace = useCallback(async () => {
-    if (!workspaceReady || autoSaveInFlightRef.current) return;
-    autoSaveInFlightRef.current = true;
-    try {
-      const currentPanels = panelsRef.current;
-      const patches: Record<string, Partial<PanelState>> = {};
+  const persistWorkspaceSnapshot = useCallback(
+    async (sourcePanels: PanelState[], snapshotActivePanelId: string | null) => {
+      const savedAt = Date.now();
+      const dirtyUpdates: Record<string, boolean> = {};
+      const savedQueryUpdates: Record<string, DbSavedQuery> = {};
+      const savedQueryErrors: string[] = [];
+      const tabs: DbQueryWorkspaceTab[] = [];
+      const panelDocuments = sourcePanels.map((panel) => ({
+        panel,
+        content: editorHandles.current[panel.id]?.getValue() ?? panel.doc,
+      }));
 
-      for (const [index, panel] of currentPanels.entries()) {
-        const doc = editorHandles.current[panel.id]?.getValue() ?? panel.doc;
-        const hasTarget = !!panel.filePath || !!panel.cachePath;
-        if (!hasTarget && !doc.trim()) continue;
-        if (hasTarget && lastAutoSavedDocRef.current[panel.id] === doc) continue;
-
-        let targetPath = panel.filePath ?? panel.cachePath;
-        if (!targetPath) {
-          targetPath = await temporaryFilePath(defaultQueryCacheName(info, index + 1));
-          patches[panel.id] = { ...patches[panel.id], cachePath: targetPath };
+      for (const [index, { panel, content }] of panelDocuments.entries()) {
+        let dirty = panel.dirty;
+        let savedQuery = savedQueriesRef.current[panel.id] ?? panel.savedQuery;
+        if (panel.filePath && lastAutoSavedDocRef.current[panel.id] !== content) {
+          await writeTextFile(panel.filePath, content);
+          dirty = false;
+          dirtyUpdates[panel.id] = false;
         }
-
-        await writeTextFile(targetPath, doc);
-        lastAutoSavedDocRef.current[panel.id] = doc;
-
-        if (panel.filePath) {
-          patches[panel.id] = { ...patches[panel.id], dirty: false };
+        if (savedQuery && savedQuery.content !== content) {
+          try {
+            savedQuery = await dbSaveSavedQuery({
+              ...savedQuery,
+              content,
+              updatedAt: savedAt,
+            });
+            savedQueriesRef.current[panel.id] = savedQuery;
+            savedQueryUpdates[panel.id] = savedQuery;
+            dirty = false;
+            dirtyUpdates[panel.id] = false;
+          } catch (error) {
+            dirty = true;
+            dirtyUpdates[panel.id] = true;
+            savedQueryErrors.push(`${savedQuery.name}: ${String(error)}`);
+          }
         }
+        tabs.push(
+          workspaceTabFromPanel(
+            workspaceSessionId,
+            savedQuery === panel.savedQuery ? panel : { ...panel, savedQuery },
+            index,
+            content,
+            savedAt,
+            dirty,
+          ),
+        );
       }
 
-      const patchedIds = Object.keys(patches);
-      if (patchedIds.length === 0) return;
-      const nextPanels = currentPanels.map((panel) =>
-        patches[panel.id] ? { ...panel, ...patches[panel.id] } : panel,
-      );
-      panelsRef.current = nextPanels;
-      setPanels((prev) => prev.map((panel) =>
-        patches[panel.id] ? { ...panel, ...patches[panel.id] } : panel,
-      ));
-      writeWorkspaceCache(workspaceSessionId, nextPanels, activePanelIdRef.current);
-    } catch (err) {
-      setStatusMessage(`Query auto-save failed: ${String(err)}`);
+      await dbSaveQueryWorkspace({
+        workspaceId: workspaceSessionId,
+        activePanelId: snapshotActivePanelId,
+        tabs,
+        updatedAt: savedAt,
+      });
+      for (const tab of tabs) {
+        lastAutoSavedDocRef.current[tab.panelId] = tab.content;
+      }
+      return { dirtyUpdates, savedQueryUpdates, savedQueryErrors };
+    },
+    [workspaceSessionId],
+  );
+
+  const autoSaveWorkspace = useCallback(async () => {
+    if (!workspaceReady) return;
+    if (autoSaveInFlightRef.current) return autoSaveInFlightRef.current;
+    const save = (async () => {
+      try {
+        const currentPanels = panelsRef.current;
+        const { dirtyUpdates, savedQueryUpdates, savedQueryErrors } =
+          await persistWorkspaceSnapshot(currentPanels, activePanelIdRef.current);
+        if (Object.keys(dirtyUpdates).length > 0 || Object.keys(savedQueryUpdates).length > 0) {
+          setPanels((prev) => {
+            const next = prev.map((panel) =>
+              dirtyUpdates[panel.id] === undefined && savedQueryUpdates[panel.id] === undefined
+                ? panel
+                : {
+                    ...panel,
+                    dirty: dirtyUpdates[panel.id] ?? panel.dirty,
+                    savedQuery: savedQueryUpdates[panel.id] ?? panel.savedQuery,
+                  },
+            );
+            panelsRef.current = next;
+            return next;
+          });
+        }
+        if (savedQueryErrors.length > 0) {
+          setStatusMessage(`Saved query auto-save failed: ${savedQueryErrors.join("; ")}`);
+        }
+      } catch (err) {
+        setStatusMessage(`Query auto-save failed: ${String(err)}`);
+      }
+    })();
+    autoSaveInFlightRef.current = save;
+    try {
+      await save;
     } finally {
-      autoSaveInFlightRef.current = false;
+      if (autoSaveInFlightRef.current === save) autoSaveInFlightRef.current = null;
     }
-  }, [info, setStatusMessage, workspaceReady, workspaceSessionId]);
+  }, [persistWorkspaceSnapshot, setStatusMessage, workspaceReady]);
+
+  const flushWorkspace = useCallback(async () => {
+    await autoSaveWorkspace();
+    await autoSaveWorkspace();
+  }, [autoSaveWorkspace]);
+
+  const scheduleWorkspaceSave = useCallback(() => {
+    if (autoSaveDebounceRef.current) clearTimeout(autoSaveDebounceRef.current);
+    autoSaveDebounceRef.current = setTimeout(() => {
+      autoSaveDebounceRef.current = null;
+      void autoSaveWorkspace();
+    }, 1000);
+  }, [autoSaveWorkspace]);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -837,9 +947,13 @@ export default function DbClientTab({
     }, QUERY_AUTO_SAVE_MS);
     return () => {
       clearInterval(timer);
-      void autoSaveWorkspace();
+      if (autoSaveDebounceRef.current) {
+        clearTimeout(autoSaveDebounceRef.current);
+        autoSaveDebounceRef.current = null;
+      }
+      void flushWorkspace();
     };
-  }, [autoSaveWorkspace]);
+  }, [autoSaveWorkspace, flushWorkspace]);
 
   const anyRunning = panels.some((p) => p.sheets.some((sheet) => sheet.running));
   useEffect(() => {
@@ -1201,8 +1315,9 @@ export default function DbClientTab({
       engine: info.engine,
       insertQuery: insertQueryFromOutside,
       appendEchoSql: appendEchoSqlFromOutside,
+      flushWorkspace,
     });
-  }, [appendEchoSqlFromOutside, info.engine, insertQueryFromOutside, queryRegistryTitle, tabId]);
+  }, [appendEchoSqlFromOutside, flushWorkspace, info.engine, insertQueryFromOutside, queryRegistryTitle, tabId]);
 
   const captureDbFrame = useCallback(async () => {
     if (!rootRef.current) return null;
@@ -1496,33 +1611,76 @@ export default function DbClientTab({
       delete editorHandles.current[panel.id];
       delete historyRef.current[panel.id];
       delete lastAutoSavedDocRef.current[panel.id];
+      delete savedQueriesRef.current[panel.id];
     });
   };
 
-  const closePanel = (id: string) => {
+  const closePanel = async (id: string) => {
     if (panels.length <= 1) return;
     const closing = panels.find((p) => p.id === id);
     if (!closing) return;
-    cleanupClosedPanels([closing]);
     const next = panels.filter((p) => p.id !== id);
+    const nextActivePanelId = activePanelId === id ? next[0].id : activePanelId;
+    try {
+      await persistWorkspaceSnapshot(panels, activePanelId);
+      await dbCloseQueryWorkspaceTabs(workspaceSessionId, [id], Date.now());
+    } catch (err) {
+      setStatusMessage(`Query tab close failed: ${String(err)}`);
+      return;
+    }
+    cleanupClosedPanels([closing]);
+    panelsRef.current = next;
     setPanels(next);
-    if (activePanelId === id) setActivePanelId(next[0].id);
+    if (activePanelId === id) setActivePanelId(nextActivePanelId);
+    void persistWorkspaceSnapshot(next, nextActivePanelId).catch((err) => {
+      setStatusMessage(`Query workspace save failed: ${String(err)}`);
+    });
   };
 
-  const closeOtherPanels = (id: string) => {
+  const closeOtherPanels = async (id: string) => {
     const target = panels.find((p) => p.id === id);
     if (!target || panels.length <= 1) return;
     const closing = panels.filter((p) => p.id !== id);
+    try {
+      await persistWorkspaceSnapshot(panels, activePanelId);
+      await dbCloseQueryWorkspaceTabs(
+        workspaceSessionId,
+        closing.map((panel) => panel.id),
+        Date.now(),
+      );
+    } catch (err) {
+      setStatusMessage(`Query tabs close failed: ${String(err)}`);
+      return;
+    }
     cleanupClosedPanels(closing);
+    panelsRef.current = [target];
     setPanels([target]);
     setActivePanelId(id);
+    void persistWorkspaceSnapshot([target], id).catch((err) => {
+      setStatusMessage(`Query workspace save failed: ${String(err)}`);
+    });
   };
 
-  const closeAllPanels = () => {
+  const closeAllPanels = async () => {
+    try {
+      await persistWorkspaceSnapshot(panels, activePanelId);
+      await dbCloseQueryWorkspaceTabs(
+        workspaceSessionId,
+        panels.map((panel) => panel.id),
+        Date.now(),
+      );
+    } catch (err) {
+      setStatusMessage(`Query tabs close failed: ${String(err)}`);
+      return;
+    }
     cleanupClosedPanels(panels);
     const p = newPanel();
+    panelsRef.current = [p];
     setPanels([p]);
     setActivePanelId(p.id);
+    void persistWorkspaceSnapshot([p], p.id).catch((err) => {
+      setStatusMessage(`Query workspace save failed: ${String(err)}`);
+    });
   };
 
   const panelSql = (panel: PanelState) => editorHandles.current[panel.id]?.getValue() ?? panel.doc;
@@ -1606,19 +1764,19 @@ export default function DbClientTab({
       {
         label: "Close",
         icon: <X className="w-3 h-3" />,
-        onClick: () => closePanel(panel.id),
+        onClick: () => void closePanel(panel.id),
         disabled: panels.length <= 1,
       },
       {
         label: "Close others",
         icon: <X className="w-3 h-3" />,
-        onClick: () => closeOtherPanels(panel.id),
+        onClick: () => void closeOtherPanels(panel.id),
         disabled: panels.length <= 1,
       },
       {
         label: "Close all",
         icon: <X className="w-3 h-3" />,
-        onClick: closeAllPanels,
+        onClick: () => void closeAllPanels(),
       },
     ];
     queryTabMenu.show(event, items);
@@ -1689,18 +1847,15 @@ export default function DbClientTab({
       patchPanel(panel.id, {
         filePath: path,
         fileName: basename(path) || defaultName,
-        cachePath: null,
         dirty: false,
       });
-      writeWorkspaceCache(
-        workspaceSessionId,
-        panels.map((candidate) =>
-          candidate.id === panel.id
-            ? { ...candidate, filePath: path, fileName: basename(path) || defaultName, cachePath: null, dirty: false }
-            : candidate,
-        ),
-        activePanelId,
+      const nextPanels = panels.map((candidate) =>
+        candidate.id === panel.id
+          ? { ...candidate, filePath: path, fileName: basename(path) || defaultName, dirty: false }
+          : candidate,
       );
+      panelsRef.current = nextPanels;
+      await persistWorkspaceSnapshot(nextPanels, activePanelId);
     } catch (err) {
       showPanelError(panel.id, String(err));
     }
@@ -1956,12 +2111,18 @@ export default function DbClientTab({
     setHistoryPanelId(null);
   };
 
-  const openSqlInNewPanel = (sql: string, run = false, origin: SqlStatementSourceRef["origin"] = "history") => {
+  const openSqlInNewPanel = (
+    sql: string,
+    run = false,
+    origin: SqlStatementSourceRef["origin"] = "history",
+    savedQuery: DbSavedQuery | null = null,
+  ) => {
     if (panelsRef.current.length >= MAX_PANELS) {
       setStatusMessage(`Maximum query panels reached (${MAX_PANELS}).`);
       return;
     }
-    const panel = newPanel({ doc: sql, dirty: true });
+    const panel = newPanel({ doc: sql, savedQuery, dirty: !savedQuery });
+    if (savedQuery) savedQueriesRef.current[panel.id] = savedQuery;
     setPanels((prev) => {
       const next = [...prev, panel];
       panelsRef.current = next;
@@ -1974,6 +2135,30 @@ export default function DbClientTab({
         void runQuery(panel.id, sql, { origin });
       }, 0);
     }
+  };
+
+  const handleSavedQuery = (query: DbSavedQuery, created: boolean) => {
+    const targetPanelId = created ? activePanel.id : null;
+    setPanels((prev) => {
+      const next = prev.map((panel) => {
+        const matches = panel.id === targetPanelId || panel.savedQuery?.id === query.id;
+        if (!matches) return panel;
+        savedQueriesRef.current[panel.id] = query;
+        if (!created && panel.doc !== query.content) {
+          editorHandles.current[panel.id]?.setValue(query.content);
+        }
+        lastAutoSavedDocRef.current[panel.id] = query.content;
+        return {
+          ...panel,
+          doc: created ? panel.doc : query.content,
+          savedQuery: query,
+          dirty: false,
+        };
+      });
+      panelsRef.current = next;
+      return next;
+    });
+    scheduleWorkspaceSave();
   };
 
   useEffect(
@@ -2175,22 +2360,6 @@ export default function DbClientTab({
     }
   };
 
-  if (connError) {
-    return (
-      <div
-        ref={rootRef}
-        className="h-full w-full flex items-center justify-center p-6"
-        style={{ ...dbFontStyle, background: "var(--taomni-bg)", color: "var(--taomni-text)" }}
-      >
-        <div className="max-w-md text-center">
-          <AlertTriangle className="w-6 h-6 mx-auto mb-2" style={{ color: "#d9534f" }} />
-          <div className="font-semibold mb-1">Connection failed</div>
-          <div className="text-[12px] text-[var(--taomni-text-muted)] break-words">{connError}</div>
-        </div>
-      </div>
-    );
-  }
-
   if (!workspaceReady) {
     return (
       <div
@@ -2210,6 +2379,18 @@ export default function DbClientTab({
       style={{ ...dbFontStyle, background: "var(--taomni-bg)", color: "var(--taomni-text)" }}
     >
       {queryTabMenu.render}
+      {connError && (
+        <div
+          className="h-7 shrink-0 px-2 flex items-center gap-2 text-[11px] border-b"
+          style={{ color: "#d9534f", borderColor: "var(--taomni-divider)", background: "var(--taomni-quick-bg)" }}
+          title={connError}
+          data-testid="db-connection-error-banner"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+          <span className="font-semibold">Connection failed.</span>
+          <span className="truncate text-[var(--taomni-text-muted)]">Query drafts and the Query Library remain available. {connError}</span>
+        </div>
+      )}
       <TabActions active={visible}>
         {chatToggle && (
           <button
@@ -2316,13 +2497,14 @@ export default function DbClientTab({
                 type="button"
                 className="flex-1 text-[11px] font-semibold flex items-center justify-center gap-1.5 h-full transition-colors"
                 style={{
-                  color: leftPanelTab === "bookmarks" ? "var(--taomni-accent)" : "var(--taomni-text-muted)",
-                  background: leftPanelTab === "bookmarks" ? "var(--taomni-bg)" : "transparent",
+                  color: leftPanelTab === "queries" ? "var(--taomni-accent)" : "var(--taomni-text-muted)",
+                  background: leftPanelTab === "queries" ? "var(--taomni-bg)" : "transparent",
                 }}
-                onClick={() => setLeftPanelTab("bookmarks")}
+                onClick={() => setLeftPanelTab("queries")}
+                data-testid="db-query-library-tab"
               >
-                <BookMarked className="w-3.5 h-3.5" />
-                Bookmarks
+                <Files className="w-3.5 h-3.5" />
+                Queries
               </button>
             </div>
             {/* Tab Body */}
@@ -2349,20 +2531,17 @@ export default function DbClientTab({
                   />
                 )
               ) : (
-                <BookmarksPanel
+                <QueryLibraryPanel
                   engine={info.engine}
-                  activeSql={activePanel.doc}
-                  activeDatabase={activeSchema}
-                  onSelectBookmark={(sql) => {
-                    editorHandles.current[activePanel.id]?.setValue(sql);
-                    patchPanel(activePanel.id, { doc: sql, dirty: true });
-                  }}
-                  onRunBookmark={(sql) => {
-                    editorHandles.current[activePanel.id]?.setValue(sql);
-                    patchPanel(activePanel.id, { doc: sql, dirty: true });
-                    void runQuery(activePanel.id, sql);
-                  }}
-                  onAddTriggerRef={addBookmarkTriggerRef}
+                  connectionId={workspaceSessionId}
+                  activeContent={editorHandles.current[activePanel.id]?.getValue() ?? activePanel.doc}
+                  catalogName={info.catalog}
+                  databaseName={info.database}
+                  schemaName={activeSchema}
+                  onOpenQuery={(query) => openSqlInNewPanel(query.content, false, "generated", query)}
+                  onRunQuery={(query) => openSqlInNewPanel(query.content, true, "generated", query)}
+                  onSavedQuery={handleSavedQuery}
+                  onAddTriggerRef={addQueryTriggerRef}
                 />
               )}
             </div>
@@ -2378,7 +2557,7 @@ export default function DbClientTab({
             >
               {panels.map((p, i) => {
                 const panelRunning = p.sheets.some((sheet) => sheet.running);
-                const label = p.fileName ?? `Query ${i + 1}`;
+                const label = p.fileName ?? p.savedQuery?.name ?? `Query ${i + 1}`;
                 return (
                   <button
                     key={p.id}
@@ -2399,7 +2578,7 @@ export default function DbClientTab({
                         className="w-3 h-3 shrink-0 hover:text-[var(--taomni-text)]"
                         onClick={(e) => {
                           e.stopPropagation();
-                          closePanel(p.id);
+                          void closePanel(p.id);
                         }}
                       />
                     )}
@@ -2445,7 +2624,7 @@ export default function DbClientTab({
                 onToggleStatement={toggleStatementPanel}
                 onToggleHistory={toggleHistoryPanel}
                 onSave={() => void saveQueryFile(activePanel)}
-                onBookmark={() => addBookmarkTriggerRef.current?.()}
+                onSaveQuery={() => addQueryTriggerRef.current?.()}
                 onSchemaChange={(schema) => void switchSchema(schema)}
                 rowLimit={rowLimit}
                 maxResultSheets={maxResultSheets}
@@ -2500,7 +2679,10 @@ export default function DbClientTab({
                       handleRef={(h) => {
                         editorHandles.current[activePanel.id] = h;
                       }}
-                      onDocChange={(doc) => patchPanel(activePanel.id, { doc, dirty: true })}
+                      onDocChange={(doc) => {
+                        patchPanel(activePanel.id, { doc, dirty: true });
+                        scheduleWorkspaceSave();
+                      }}
                       onFocus={() => setActivePanelId(activePanel.id)}
                       onRun={(sql, context) => void runQuery(activePanel.id, sql, { context })}
                       onRunCurrent={() => runCurrentStatement()}
@@ -2554,7 +2736,7 @@ function EditorToolbar({
   onToggleStatement,
   onToggleHistory,
   onSave,
-  onBookmark,
+  onSaveQuery,
   onSchemaChange,
   rowLimit,
   maxResultSheets,
@@ -2576,7 +2758,7 @@ function EditorToolbar({
   onToggleStatement: () => void;
   onToggleHistory: () => void;
   onSave: () => void;
-  onBookmark: () => void;
+  onSaveQuery: () => void;
   onSchemaChange: (schema: string) => void;
   rowLimit: number;
   maxResultSheets: number;
@@ -2622,8 +2804,8 @@ function EditorToolbar({
       <button type="button" className={btn} onClick={onSave} title="Save query tab as SQL file">
         <Save className="w-3.5 h-3.5" /> Save
       </button>
-      <button type="button" className={btn} onClick={onBookmark} title="Bookmark query">
-        <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Bookmark
+      <button type="button" className={btn} onClick={onSaveQuery} title="Save to query library" data-testid="db-save-query">
+        <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query
       </button>
       <span className="w-px h-4 mx-1" style={{ background: "var(--taomni-divider)" }} />
       <label className="h-6 inline-flex items-center gap-1 text-[11px] text-[var(--taomni-text-muted)]">
