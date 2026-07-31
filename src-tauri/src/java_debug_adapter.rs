@@ -424,6 +424,12 @@ impl DebugAdapter for JavaDebugAdapter {
         let port_value = run("vscode.java.startDebugSession", vec![]).await?;
         let port = parse_debug_port(&port_value)
             .ok_or("java-debug did not return a debug session port")?;
+        log::info!(
+            "java-debug: launch plan ready mainClass={main_class} project={project_name} \
+             classpath_entries={} modulepath_entries={} port={port}",
+            classpaths.len(),
+            modulepaths.len()
+        );
 
         let arguments = build_launch_arguments(
             launch_config,

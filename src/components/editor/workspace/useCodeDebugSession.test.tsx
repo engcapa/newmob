@@ -234,6 +234,45 @@ describe("useCodeDebugSession", () => {
     ]);
   });
 
+  it("shows pre-launch progress before an adapter session exists", async () => {
+    // Save → build → resolve-main-class all run before `dapStartSession`, and on
+    // a cold project that is tens of seconds. Without a seeded session the panel
+    // shows its "no debug session" placeholder and the click looks ignored.
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.reportStartupProgress("Building project…"));
+    expect(result.current.state?.status).toBe("starting");
+    expect(result.current.state?.output).toEqual([
+      { category: "console", text: "Building project…\n" },
+    ]);
+
+    act(() => result.current.reportStartupProgress("Resolving main class…"));
+    expect(result.current.state?.output.map((line) => line.text)).toEqual([
+      "Building project…\n",
+      "Resolving main class…\n",
+    ]);
+
+    // The real session adopts those lines, so the console reads as one log.
+    await startSession(result.current.startDebug);
+    expect(result.current.state?.sessionId).toBe("sess-1");
+    expect(result.current.state?.output.map((line) => line.text)).toEqual([
+      "Building project…\n",
+      "Resolving main class…\n",
+    ]);
+  });
+
+  it("replaces a terminated run's console when the next start reports progress", () => {
+    // Progress from a new attempt must not read as output of the finished one.
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.reportStartupFailure("Launch failed: boom"));
+    expect(result.current.state?.status).toBe("terminated");
+
+    act(() => result.current.reportStartupProgress("Starting debug for App.java"));
+    expect(result.current.state?.status).toBe("starting");
+    expect(result.current.state?.output).toEqual([
+      { category: "console", text: "Starting debug for App.java\n" },
+    ]);
+  });
+
   it("surfaces a dapStartSession rejection in the debug console", async () => {
     // Adapter resolution failures reject `dapStartSession`; the panel must show
     // the reason (previously only the transient status bar did) and the call

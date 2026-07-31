@@ -548,8 +548,12 @@ pub async fn dap_start_session(
         .registry
         .get(&adapter_id)
         .ok_or_else(|| format!("No debug adapter registered for `{adapter_id}`"))?;
-    let plan = adapter.resolve(&launch_config).await?;
-    let (reader, writer, child) = connect_transport(&plan.transport).await?;
+    let plan = adapter.resolve(&launch_config).await.inspect_err(|error| {
+        log::warn!("dap: `{adapter_id}` could not resolve a launch plan: {error}");
+    })?;
+    let (reader, writer, child) = connect_transport(&plan.transport)
+        .await
+        .inspect_err(|error| log::warn!("dap: transport connect failed: {error}"))?;
     let (child, stderr) = match child {
         Some((child, stderr)) => (Some(child), stderr),
         None => (None, None),
@@ -616,8 +620,13 @@ pub async fn dap_start_session(
             "debug adapter `{adapter_id}` did not answer `initialize` within {}s",
             INITIALIZE_TIMEOUT.as_secs()
         )
-    })??;
+    })?
+    .inspect_err(|error| log::warn!("dap: `{adapter_id}` rejected `initialize`: {error}"))?;
     *session.capabilities.lock().await = init.clone();
+    log::info!(
+        "dap: session {session_id} ready on `{adapter_id}` ({} request pending)",
+        plan.request
+    );
 
     state.dap.insert(session_id.clone(), session).await;
     Ok(DapStartResult {

@@ -478,12 +478,20 @@ export function lspWorkspaceDiagnostics(workspaceId: string): Promise<WorkspaceD
   return invoke<WorkspaceDiagnosticFile[]>("lsp_workspace_diagnostics", { workspaceId });
 }
 
+/** jdtls `BuildWorkspaceStatus`, so callers can distinguish "built with compile errors". */
+export type LspBuildStatus = "failed" | "succeed" | "withError" | "cancelled";
+
 /**
- * Trigger a full jdtls project rebuild (java.buildWorkspace) so diagnostics for
- * unopened files are (re)published. `descriptor` selects the jdtls session.
+ * Build the project on the active language-server session (jdtls's
+ * `java/buildWorkspace`). `descriptor` selects the session; `full` forces a clean
+ * rebuild so diagnostics for unopened files are (re)published, while the debug
+ * make-before-launch barrier passes `false` for an incremental build.
  */
-export function lspBuildWorkspace(descriptor: LspDocumentDescriptor): Promise<void> {
-  return invoke("lsp_build_workspace", documentArgs(descriptor));
+export function lspBuildWorkspace(
+  descriptor: LspDocumentDescriptor,
+  full = true,
+): Promise<LspBuildStatus> {
+  return invoke<LspBuildStatus>("lsp_build_workspace", { ...documentArgs(descriptor), full });
 }
 
 export function lspDocumentSymbols(

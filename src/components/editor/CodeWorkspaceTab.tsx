@@ -96,6 +96,7 @@ import {
   type LspCompletionItem,
   type LspCompletionResult,
   type LspDiagnostic,
+  type LspDocumentDescriptor,
   type LspDocumentSymbol,
   type LspDocumentHighlight,
   type LspInlayHint,
@@ -154,6 +155,7 @@ import {
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
 import { openSettingsSection } from "../../lib/settingsNavigation";
 import { isTauriRuntime } from "../../lib/runtime";
+import { useMountedRef } from "../../hooks/useMountedRef";
 import { fallbackWordHighlights } from "./workspace/lspIntelligenceChrome";
 import {
   inlayHintsEnabledForLanguage,
@@ -597,9 +599,13 @@ export function CodeWorkspaceTab({
   const openFilesRef = useRef(openFiles);
   const openOrderRef = useRef(openOrder);
   const lspFilesRef = useRef(lspFiles);
-  /** False after unmount so async project-diagnostics callbacks skip setState. */
-  const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  /**
+   * False after unmount so async callbacks skip setState. MUST come from
+   * `useMountedRef`: the inline `useEffect(() => () => { ref.current = false })`
+   * spelling stays false forever under StrictMode's dev double-invoke, which
+   * silently aborted the Java debug launch right after main-class resolution.
+   */
+  const mountedRef = useMountedRef();
   const pendingEditorTextByFileRef = useRef(new Map<string, OpenFileState>());
   const pendingEditorTextTimerRef = useRef<number | null>(null);
   /** Debounced didChange timers keyed by open-file key (live buffer path). */
@@ -780,16 +786,44 @@ export function CodeWorkspaceTab({
     updateStoreOpenFiles(workspaceInstanceId, next);
   }, [flushPendingEditorText, updateStoreOpenFiles, workspaceInstanceId]);
 
-  useEffect(() => () => {
-    // Capture this workspace's flush callback in the effect closure. A tab can
-    // be rebound to a different workspace without unmounting, and a ref read
-    // during cleanup would then point at the new instance.
-    flushPendingEditorText();
-    for (const timer of Object.values(liveLspSyncTimersRef.current)) {
-      window.clearTimeout(timer);
+  /** Pending store teardown, so a StrictMode remount can cancel it (below). */
+  const disposeTimerRef = useRef<{ timer: number; instanceId: string } | null>(null);
+  useEffect(() => {
+    // A remount of the SAME workspace cancels a teardown scheduled by the
+    // previous cleanup. React StrictMode runs mount → cleanup → mount in
+    // development, and disposing the store instance is NOT idempotent: it
+    // deletes openOrder / activeKey / editorGroups outright. Running it
+    // mid-mount dropped the writes the first pass had already made, so the
+    // restored initial file sat in `openFiles` but in no editor group — the tab
+    // rendered with no editor at all (and with no active file the Java Debug
+    // button stays disabled). Deferring the teardown by a macrotask lets the
+    // remount cancel it; a real unmount has no remount to cancel, so the
+    // instance is still released a tick later.
+    //
+    // Only a matching instance id may cancel: a tab can be rebound to a
+    // different workspace without unmounting, and cancelling there would leak
+    // the previous instance's entry forever.
+    const pending = disposeTimerRef.current;
+    if (pending != null && pending.instanceId === workspaceInstanceId) {
+      window.clearTimeout(pending.timer);
+      disposeTimerRef.current = null;
     }
-    liveLspSyncTimersRef.current = {};
-    disposeWorkspaceUi(workspaceInstanceId);
+    return () => {
+      // Capture this workspace's flush callback in the effect closure. A tab can
+      // be rebound to a different workspace without unmounting, and a ref read
+      // during cleanup would then point at the new instance.
+      flushPendingEditorText();
+      for (const timer of Object.values(liveLspSyncTimersRef.current)) {
+        window.clearTimeout(timer);
+      }
+      liveLspSyncTimersRef.current = {};
+      const instanceId = workspaceInstanceId;
+      const timer = window.setTimeout(() => {
+        if (disposeTimerRef.current?.timer === timer) disposeTimerRef.current = null;
+        disposeWorkspaceUi(instanceId);
+      }, 0);
+      disposeTimerRef.current = { timer, instanceId };
+    };
   }, [disposeWorkspaceUi, flushPendingEditorText, workspaceInstanceId]);
 
   const setLspFiles = useCallback((
@@ -5253,7 +5287,7 @@ export function CodeWorkspaceTab({
         setBottomDockTab("debug");
         setBottomDockOpen(true);
         // Make-before-launch: save + build + block on compile errors.
-        if (!(await prepareJavaLaunchRef.current(root.id))) return;
+        if (!(await prepareJavaLaunchRef.current(root.id, descriptor))) return;
         const launch = await javaTestResolveLaunch(descriptor, item);
         await debugRef.current.startDebug({
           workspaceId: descriptor.workspaceId,
@@ -5284,7 +5318,9 @@ export function CodeWorkspaceTab({
   debugRef.current = debug;
   // Ref so debug-test (declared above prepareJavaLaunch) can reach the pre-launch
   // save+build gate without a forward reference.
-  const prepareJavaLaunchRef = useRef<(rootId: string) => Promise<boolean>>(() => Promise.resolve(true));
+  const prepareJavaLaunchRef = useRef<
+    (rootId: string, launchDescriptor?: LspDocumentDescriptor | null) => Promise<boolean>
+  >(() => Promise.resolve(true));
   /** Breakpoint whose editor is open in the Debug panel's breakpoints view. */
   const [editingBreakpoint, setEditingBreakpoint] = useState<{ path: string; line: number } | null>(null);
   const activeFileAbsPath = activeFile ? absolutePathForOpenFile(activeFile) : null;
@@ -5351,7 +5387,10 @@ export function CodeWorkspaceTab({
    * launch. jdtls / build being unavailable is NOT a block here (the DAP path
    * surfaces those); only real compiler errors stop the launch.
    */
-  const prepareJavaLaunch = useCallback(async (rootId: string): Promise<boolean> => {
+  const prepareJavaLaunch = useCallback(async (
+    rootId: string,
+    launchDescriptor?: LspDocumentDescriptor | null,
+  ): Promise<boolean> => {
     const root = findRoot(rootId);
     if (!root) return true;
     // Save every dirty file in this root that jdtls builds from: .java sources
@@ -5375,13 +5414,31 @@ export function CodeWorkspaceTab({
         return false;
       }
     }
-    // Build barrier: a synthetic .java path selects the root's jdtls session.
-    const descriptor = lspDescriptorForPath(root.path, "__taomni_debug_build__.java");
+    // Build barrier. Use the descriptor of the file being launched, NOT a
+    // synthetic path at the root: the jdtls session key includes the SDK
+    // resolver's `project_scope_path` (the nearest module walking up from the
+    // file), so in a multi-module build a root-level path keys the aggregator
+    // and misses the module session the launch itself uses — the build then
+    // reports "no language server session is active" and gets skipped.
+    // Incremental (full = false): jdtls autobuilds on save, so a clean rebuild
+    // would add minutes to every debug start for no benefit.
+    const descriptor = launchDescriptor
+      ?? lspDescriptorForPath(root.path, "__taomni_debug_build__.java");
+    debug.reportStartupProgress("Building project…");
     try {
-      await lspBuildWorkspace(descriptor);
-    } catch {
+      const status = await lspBuildWorkspace(descriptor, false);
+      if (status === "failed") {
+        // The build itself broke (not "compiled with errors" — that is the
+        // diagnostics check below). Say so instead of launching stale bytecode.
+        const message = "Cannot start debug: the project build failed";
+        setStatusMessage(message);
+        debug.reportStartupFailure(message);
+        return false;
+      }
+    } catch (err) {
       // No jdtls session / build unsupported: don't block. The adapter's own
       // main-class / classpath resolution will report a clear error if needed.
+      debug.reportStartupProgress(`Skipping pre-launch build: ${errorMessage(err)}`);
       return true;
     }
     if (!mountedRef.current) return false;
@@ -5427,6 +5484,12 @@ export function CodeWorkspaceTab({
       const config = main
         ? { ...launch, mainClass: main.mainClass, projectName: main.projectName }
         : launch;
+      if (main) {
+        // Resolving the classpath + asking java-debug for a port is another
+        // multi-second server round trip: name the target so the panel is not
+        // blank while it runs.
+        debug.reportStartupProgress(`Launching ${main.mainClass}…`);
+      }
       void debug.startDebug(config).catch((err) => setStatusMessage(errorMessage(err)));
     },
     [debug, setStatusMessage],
@@ -5453,11 +5516,16 @@ export function CodeWorkspaceTab({
     };
     setBottomDockTab("debug");
     setBottomDockOpen(true);
+    // Show the session console from the first click: everything below (save,
+    // build, main-class resolution) happens before an adapter exists and can
+    // take tens of seconds on a cold project.
+    debug.reportStartupProgress(`Starting debug for ${file.title}`);
     void (async () => {
       // Save + build before launching so breakpoints bind to current bytecode.
-      if (!(await prepareJavaLaunch(rootId))) return;
+      if (!(await prepareJavaLaunch(rootId, descriptor))) return;
       // Resolve the runnable main up front: launch the active-file / sole main
       // directly, or prompt when several mains exist (never run an arbitrary one).
+      debug.reportStartupProgress("Resolving main class…");
       let resolution: JavaMainClassResolution;
       try {
         resolution = await dapResolveJavaMainClasses(launch);
@@ -5478,6 +5546,7 @@ export function CodeWorkspaceTab({
         return;
       }
       if (resolution.kind === "choose") {
+        debug.reportStartupProgress("Waiting for a main class to be picked…");
         setJavaMainCandidates({ candidates: resolution.candidates, launch });
         return;
       }

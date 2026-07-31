@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { useMountedRef } from "../../../hooks/useMountedRef";
 import {
   dapSend,
   dapSendRequest,
@@ -106,6 +107,13 @@ export interface CodeDebugSession {
    * the message on the console when there is none yet.
    */
   reportStartupFailure: (message: string) => void;
+  /**
+   * Report a pre-launch step (save → build → resolve main class) in the Debug
+   * panel. The phase before the adapter exists can take tens of seconds on a
+   * cold project; without this the panel shows its "no debug session"
+   * placeholder the whole time and the click looks ignored.
+   */
+  reportStartupProgress: (message: string) => void;
   /** Fetch variables for a `variablesReference` (D4 lazy tree). */
   fetchVariables: (variablesReference: number) => Promise<unknown>;
   /** Fetch scopes for a stack frame (D4). */
@@ -179,7 +187,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const exceptionFiltersRef = useRef(exceptionFilters);
   const stateRef = useRef<DebugSessionState | null>(null);
   const unlistenRef = useRef<UnlistenFn | null>(null);
-  const mountedRef = useRef(true);
+  const mountedRef = useMountedRef();
   /** Bumped on every `stopped` event; async work checks it to drop stale results. */
   const stopEpochRef = useRef(0);
   /** Adapter breakpoint id → file path, to route `breakpoint` events. */
@@ -196,18 +204,12 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   exceptionFiltersRef.current = exceptionFilters;
   stateRef.current = state;
 
-  useEffect(() => {
-    // Set true on (re)mount: React 18 StrictMode runs mount→cleanup→remount, so
-    // the cleanup below fires once during dev double-invoke. Without resetting to
-    // true here, mountedRef stays false forever and every mounted-guarded setState
-    // (e.g. initialDebugState in startDebug) is silently skipped.
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      unlistenRef.current?.();
-      const id = sessionIdRef.current;
-      if (id) void dapTerminate(id).catch(() => {});
-    };
+  // Drop the adapter session with the hook. `mountedRef` re-arms itself (see
+  // useMountedRef) so the StrictMode dev double-invoke cannot leave it false.
+  useEffect(() => () => {
+    unlistenRef.current?.();
+    const id = sessionIdRef.current;
+    if (id) void dapTerminate(id).catch(() => {});
   }, []);
 
   // Inline values are only meaningful while stopped: drop them the moment the
@@ -262,6 +264,23 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         ? { ...prev, status: "terminated" }
         : { ...initialDebugState(""), status: "terminated" },
       "stderr",
+      text,
+    ));
+  }, []);
+
+  /**
+   * Show a pre-launch step in the panel. Seeds a `starting` session (empty id →
+   * inert: no adapter events match it and terminate is a no-op) so the console
+   * is on screen from the first click; a prior terminated session is replaced
+   * rather than appended to, so stale output from the last run is not mistaken
+   * for this one.
+   */
+  const reportStartupProgress = useCallback((message: string) => {
+    if (!mountedRef.current) return;
+    const text = message.endsWith("\n") ? message : `${message}\n`;
+    setState((prev) => appendConsoleLine(
+      prev && prev.status !== "terminated" ? prev : initialDebugState(""),
+      "console",
       text,
     ));
   }, []);
@@ -508,7 +527,14 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       setAvailableFilters(filters);
       setCapabilities(result.capabilities);
       setCanRestart(true);
-      setState(initialDebugState(result.sessionId));
+      // Carry the pre-launch progress lines (reportStartupProgress seeds an
+      // inert session with an empty id) into the real session so the console
+      // reads as one continuous startup log instead of resetting on launch.
+      setState((prev) => {
+        const carried = prev && prev.sessionId === "" ? prev.output : [];
+        const fresh = initialDebugState(result.sessionId);
+        return carried.length > 0 ? { ...fresh, output: carried } : fresh;
+      });
     }
     // Listen before firing launch so the `initialized` event can't be missed.
     unlistenRef.current = await listenDapEvents(result.sessionId, handleEvent);
@@ -859,6 +885,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     logConsole,
     clearConsole,
     reportStartupFailure,
+    reportStartupProgress,
     fetchVariables,
     fetchScopes,
     fetchSource,
