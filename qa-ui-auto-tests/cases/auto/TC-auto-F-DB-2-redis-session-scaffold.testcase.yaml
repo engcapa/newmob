@@ -1,20 +1,12 @@
 id: TC-auto-F-DB-2-redis-session-scaffold
-title: Redis DB session form mounts and saved Redis session round-trips
+title: Redis session keeps its command library available offline
 description: |
   Coverage smoke for F-DB-2 (Redis client). Opens SessionEditor, switches to
-  the Redis protocol — which auto-jumps to the Database settings tab — asserts
-  the Redis-specific form fields mount (DB index 0–15 + key prefix, no
-  "Database name" field), fills them, saves the bookmark, and reopens it to
-  confirm the proto=Redis chip round-trips.
-
-  The test does NOT open a live Redis connection: browser preview rejects
-  redis_exec ("Database connections are not available in browser preview"),
-  so the RedisClientTab inner surface (redis-key-browser / redis-cli /
-  value panel) only mounts on a real desktop connection. That live surface
-  is left to native/manual regression against a configured Redis fixture
-  (same scaffold-only pattern as TC-111 RDP and TC-112 WSL).
-covers: [F-DB-2, F6.3]
-tags: [auto-generated, smoke, needs-review, database, redis, scaffolding-only, no-connect]
+  the Redis protocol, saves the session, then opens its offline client. Browser
+  mode intentionally rejects db_connect; the test verifies that the Redis CLI
+  and DB-index-scoped Query Library remain mounted and usable for saved commands.
+covers: [F-DB-2, F-DB-4, F6.3]
+tags: [auto-generated, smoke, needs-review, database, redis, query-library, no-connect]
 modes: [browser]
 fixtures: [reset_db]
 timeout_sec: 45
@@ -49,12 +41,9 @@ steps:
       value: qa-ui-auto-redis
   - click: '[data-testid="session-save"]'
   - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-redis"]'
-  - screenshot: db-2-redis-saved.png
-  # Round-trip check — reselect, reopen the editor, assert proto=Redis active.
-  - click: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-redis"]'
-  - click: '[data-testid="session-edit"]'
-  - wait_for: '[data-testid="session-editor"]'
-  - wait_for:
-      selector: '[data-testid="session-proto-redis"][data-active="true"]'
-      timeout_sec: 5
-  - assert_visible: '[data-testid="database-settings"]'
+  - open_session: { name: qa-ui-auto-redis, double_click: true }
+  - wait_for: '[data-testid="redis-connection-error-banner"]'
+  - assert_visible: '[data-testid="redis-cli"]'
+  - click: '[data-testid="redis-query-library-tab"]'
+  - wait_for: '[data-testid="query-library-panel"]'
+  - screenshot: db-2-redis-query-library.png

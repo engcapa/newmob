@@ -2501,6 +2501,7 @@ export default function DbClientTab({
                   background: leftPanelTab === "queries" ? "var(--taomni-bg)" : "transparent",
                 }}
                 onClick={() => setLeftPanelTab("queries")}
+                data-testid="db-query-library-tab"
               >
                 <Files className="w-3.5 h-3.5" />
                 Queries
@@ -2803,7 +2804,7 @@ function EditorToolbar({
       <button type="button" className={btn} onClick={onSave} title="Save query tab as SQL file">
         <Save className="w-3.5 h-3.5" /> Save
       </button>
-      <button type="button" className={btn} onClick={onSaveQuery} title="Save to query library">
+      <button type="button" className={btn} onClick={onSaveQuery} title="Save to query library" data-testid="db-save-query">
         <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query
       </button>
       <span className="w-px h-4 mx-1" style={{ background: "var(--taomni-divider)" }} />

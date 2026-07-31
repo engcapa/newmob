@@ -990,6 +990,7 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
                 className="flex-1 text-[11px] font-semibold inline-flex items-center justify-center gap-1 border-l border-[var(--taomni-divider)]"
                 style={{ color: leftPanelTab === "queries" ? "var(--taomni-accent)" : "var(--taomni-text-muted)" }}
                 onClick={() => setLeftPanelTab("queries")}
+                data-testid="hbase-query-library-tab"
               >
                 <Files className="w-3.5 h-3.5" /> Queries
               </button>
@@ -1120,7 +1121,7 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
                 <button type="button" className={btn} title="Command history" onClick={() => { setShowHistory((v) => !v); setShowCommands(false); }}>
                   <Clock className="w-3.5 h-3.5" /> History
                 </button>
-                <button type="button" className={btn} title="Save to query library" onClick={openQuerySave}>
+                <button type="button" className={btn} title="Save to query library" onClick={openQuerySave} data-testid="hbase-save-query">
                   <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query
                 </button>
                 <button type="button" className={btn} title={t("hbaseObjects.helpTitle")} onClick={() => setShowHelp(true)}>

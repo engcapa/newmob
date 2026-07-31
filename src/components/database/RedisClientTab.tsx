@@ -255,6 +255,7 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
                     className="flex-1 text-[11px] font-semibold inline-flex items-center justify-center gap-1 border-l border-[var(--taomni-divider)]"
                     style={{ color: leftPanelTab === "queries" ? "var(--taomni-accent)" : "var(--taomni-text-muted)" }}
                     onClick={() => setLeftPanelTab("queries")}
+                    data-testid="redis-query-library-tab"
                   >
                     <Files className="w-3.5 h-3.5" /> Queries
                   </button>

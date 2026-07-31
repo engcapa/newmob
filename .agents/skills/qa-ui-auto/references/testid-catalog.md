@@ -102,6 +102,34 @@
 - `[data-testid="capture-stop-scroll"]` — interactive [optional] — F4.13.stop-scroll-pill
 - `[data-testid="capture-stop-gif"]` — interactive [optional] — F4.13.stop-gif-pill
 
+## database/hbase (F-DB-3)
+
+- `input[aria-label="Remote host"]` — interactive [optional] — F-DB-3.remote-host
+- `input[aria-label="HBase namespace"]` — interactive [optional] — F-DB-3.namespace
+- `[data-testid="hbase-schema-tree"]` — display [optional] — F-DB-3.schema-tree
+- `[data-testid="hbase-schema-tree-filter"]` — interactive [optional] — F-DB-3.schema-filter
+- `[data-testid="hbase-query-library-tab"]` — interactive [optional] — F-DB-3.query-library-tab
+- `[data-testid="hbase-save-query"]` — interactive [optional] — F-DB-3.save-query
+- `[data-testid="hbase-run-current-statement"]` — interactive [optional] — F-DB-3.run-current
+- `[data-testid="hbase-help-dialog"]` — display [optional] — F-DB-3.help-dialog
+- `[data-testid="hbase-sidebar-drawer-handle"]` — interactive [optional] — F-DB-3.sidebar-drawer
+- `[data-testid="hbase-connection-error-banner"]` — display [optional] — F-DB-3.connection-error-banner
+
+## database/queries (F-DB-4)
+
+- `[data-testid="query-library-panel"]` — display [optional] — F-DB-4.panel
+- `[data-testid="query-library-search"]` — interactive [optional] — F-DB-4.search
+- `[data-testid="query-library-create"]` — interactive [optional] — F-DB-4.create
+- `[data-testid="query-library-current-namespace"]` — interactive [optional] — F-DB-4.current-namespace
+- `[data-testid="query-library-all-namespaces"]` — interactive [optional] — F-DB-4.all-namespaces
+- `[data-testid="query-library-show-archived"]` — interactive [optional] — F-DB-4.show-archived
+- `[data-testid="query-library-dialog"]` — display [optional] — F-DB-4.dialog
+- `[data-testid="query-library-name"]` — interactive [optional] — F-DB-4.name
+- `[data-testid="query-library-scope"]` — interactive [optional] — F-DB-4.scope
+- `[data-testid="query-library-content"]` — interactive [optional] — F-DB-4.content
+- `[data-testid="query-library-save"]` — interactive [optional] — F-DB-4.save
+- `[data-testid^="saved-query-"]` — display [optional] — F-DB-4.saved-query
+
 ## database/redis (F-DB-2)
 
 - `input[aria-label="Redis DB index"]` — interactive [optional] — F-DB-2.form-db-index
@@ -111,6 +139,9 @@
 - `input[aria-label="Key pattern"]` — interactive [optional] — F-DB-2.key-pattern
 - `[data-testid="redis-cli"]` — display [optional] — F-DB-2.cli
 - `input[aria-label="Redis command"]` — interactive [optional] — F-DB-2.cli-command
+- `[data-testid="redis-query-library-tab"]` — interactive [optional] — F-DB-2.query-library-tab
+- `[data-testid="redis-save-query"]` — interactive [optional] — F-DB-2.save-query
+- `[data-testid="redis-connection-error-banner"]` — display [optional] — F-DB-2.connection-error-banner
 - `input[aria-label="Key name"]` — interactive [optional] — F-DB-2.new-key-name
 - `select[aria-label="Key type"]` — interactive [optional] — F-DB-2.new-key-type
 - `input[aria-label="Initial value"]` — interactive [optional] — F-DB-2.new-key-value
@@ -153,6 +184,9 @@
 - `[data-testid="query-cell-value-wrap"]` — interactive [optional] — F-DB-1.query-cell-value-wrap
 - `select[aria-label="Schema"]` — interactive [optional] — F-DB-1.schema-select
 - `[data-testid="db-schema-drawer-handle"]` — interactive [optional] — F-DB-1.schema-drawer-handle
+- `[data-testid="db-query-library-tab"]` — interactive [optional] — F-DB-1.query-library-tab
+- `[data-testid="db-save-query"]` — interactive [optional] — F-DB-1.save-query
+- `[data-testid="db-connection-error-banner"]` — display [optional] — F-DB-1.connection-error-banner
 - `[data-testid="db-chat-toggle"]` — interactive [optional] — F-DB-1.chat-toggle
 - `[data-testid="db-detach"]` — interactive [optional] — F-DB-1.detach
 
@@ -477,6 +511,7 @@
 - `[data-testid="session-proto-panweidb"]` — interactive [optional] — F6.3.proto-panweidb
 - `[data-testid="session-proto-clickhouse"]` — interactive [optional] — F6.3.proto-clickhouse
 - `[data-testid="session-proto-redis"]` — interactive [optional] — F6.3.proto-redis
+- `[data-testid="session-proto-hbaseshell"]` — interactive [optional] — F6.3.proto-hbaseshell
 - `[data-testid="session-host"]` — interactive — F6.3.host
 - `[data-testid="session-user"]` — interactive — F6.3.user
 - `[data-testid="session-port"]` — interactive — F6.3.port
@@ -495,6 +530,7 @@
 - `[data-testid="session-section-appearance"]` — interactive [optional] — F6.3.section-appearance
 - `[data-testid="session-section-network"]` — interactive — F6.3.section-network
 - `[data-testid="session-section-database"]` — interactive [optional] — F6.3.section-database
+- `[data-testid="session-hbase-section"]` — display [optional] — F6.3.hbase-section
 - `[data-testid="advanced-ssh-settings"]` — display — F6.3.advanced-body
 - `[data-testid="terminal-settings"]` — display [optional] — F6.3.terminal-body
 - `[data-testid="network-settings"]` — display — F6.3.network-body

@@ -160,6 +160,7 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
           type="button"
           className="inline-flex items-center gap-1 px-1.5 rounded hover:bg-[var(--taomni-hover)]"
           title="Save command to query library"
+          data-testid="redis-save-query"
           onClick={onSaveQuery}
         >
           <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query

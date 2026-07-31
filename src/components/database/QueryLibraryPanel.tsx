@@ -318,6 +318,7 @@ export function QueryLibraryPanel({
             <input
               type="search"
               aria-label="Search saved queries"
+              data-testid="query-library-search"
               placeholder="Search queries..."
               className="taomni-input w-full h-6 text-[11px]"
               style={{ paddingLeft: "24px" }}
@@ -330,6 +331,7 @@ export function QueryLibraryPanel({
             className="h-6 w-6 inline-flex items-center justify-center rounded hover:bg-[var(--taomni-hover)] border border-[var(--taomni-tab-border)]"
             title="Save current editor as query"
             aria-label="Save current editor as query"
+            data-testid="query-library-create"
             onClick={openCreate}
           >
             <Plus className="w-3.5 h-3.5" />
@@ -345,6 +347,7 @@ export function QueryLibraryPanel({
               color: !allNamespaces ? "var(--taomni-accent)" : "var(--taomni-text-muted)",
             }}
             onClick={() => setAllNamespaces(false)}
+            data-testid="query-library-current-namespace"
           >
             Current namespace
           </button>
@@ -356,12 +359,14 @@ export function QueryLibraryPanel({
               color: allNamespaces ? "var(--taomni-accent)" : "var(--taomni-text-muted)",
             }}
             onClick={() => setAllNamespaces(true)}
+            data-testid="query-library-all-namespaces"
           >
             All
           </button>
           <label className="ml-auto inline-flex items-center gap-1 text-[var(--taomni-text-muted)]">
             <input
               type="checkbox"
+              data-testid="query-library-show-archived"
               checked={showArchived}
               onChange={(event) => setShowArchived(event.target.checked)}
             />
@@ -485,6 +490,7 @@ export function QueryLibraryPanel({
             role="dialog"
             aria-modal="true"
             aria-label={editingQuery ? "Edit saved query" : "Save query"}
+            data-testid="query-library-dialog"
             className="rounded shadow-lg p-4 flex flex-col gap-3 w-[520px] h-[560px] max-h-[90vh] max-w-[95vw] overflow-hidden"
             style={{
               background: "var(--taomni-bg)",
@@ -506,6 +512,7 @@ export function QueryLibraryPanel({
                   <input
                     type="text"
                     aria-label="Query name"
+                    data-testid="query-library-name"
                     placeholder="Automatic: Query-N"
                     className="taomni-input h-7 w-full text-[12px] px-2"
                     value={modalName}
@@ -516,6 +523,7 @@ export function QueryLibraryPanel({
                   Scope
                   <select
                     aria-label="Query scope"
+                    data-testid="query-library-scope"
                     className="taomni-input h-7 w-full text-[12px] px-2"
                     value={modalScope}
                     onChange={(event) => setModalScope(event.target.value as DbSavedQueryScope)}
@@ -546,6 +554,7 @@ export function QueryLibraryPanel({
                 {contentLabel} content
                 <textarea
                   aria-label={`${contentLabel} content`}
+                  data-testid="query-library-content"
                   className="taomni-input w-full flex-1 text-[11px] taomni-mono p-2 resize-none taomni-scroll-y"
                   value={modalContent}
                   onChange={(event) => setModalContent(event.target.value)}
@@ -558,6 +567,7 @@ export function QueryLibraryPanel({
                 </button>
                 <button
                   type="submit"
+                  data-testid="query-library-save"
                   className="taomni-btn h-8 px-4"
                   style={{ background: "var(--taomni-accent)", color: "white" }}
                   disabled={saving}
