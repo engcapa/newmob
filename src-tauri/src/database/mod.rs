@@ -19,11 +19,13 @@ pub mod sql;
 pub mod bookmarks;
 pub mod history;
 pub mod query_workspace;
+pub mod saved_queries;
 pub mod sql_rewrite;
 
 pub use bookmarks::*;
 pub use history::*;
 pub use query_workspace::*;
+pub use saved_queries::*;
 
 use serde::{Deserialize, Serialize};
 use sqlx_core::pool::Pool;
