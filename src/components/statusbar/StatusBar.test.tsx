@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StatusBar } from "./StatusBar";
 import { useAppStore } from "../../stores/appStore";
+import { useSessionStore } from "../../stores/sessionStore";
 import { useCodeWorkspaceStatusStore } from "../../stores/codeWorkspaceStatusStore";
 
 vi.mock("../../lib/i18n", async (importOriginal) => {
@@ -34,7 +35,7 @@ vi.mock("../../lib/appTheme", () => ({
 }));
 
 vi.mock("../../stores/sessionStore", () => ({
-  useSessionStore: () => ({ sessions: [], selectedSessionId: null }),
+  useSessionStore: vi.fn(() => ({ sessions: [], selectedSessionId: null })),
 }));
 
 vi.mock("../../stores/aiStore", () => ({
@@ -138,5 +139,107 @@ describe("StatusBar code-workspace segments", () => {
 
     render(<StatusBar />);
     expect(screen.getByTestId("status-bar-workspace-large-file")).toBeInTheDocument();
+  });
+});
+
+describe("StatusBar copyable/truncated text", () => {
+  afterEach(() => {
+    cleanup();
+    Reflect.deleteProperty(navigator, "clipboard");
+  });
+
+  function mockClipboard() {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    return writeText;
+  }
+
+  beforeEach(() => {
+    useAppStore.setState({
+      tabs: [],
+      activeTabId: null,
+      xServerEnabled: false,
+      xServerStatus: null,
+      statusMessage: "",
+    } as never);
+    useCodeWorkspaceStatusStore.setState({ status: null, actions: null });
+  });
+
+  it("shows the full status message as tooltip and copies it on click", async () => {
+    const writeText = mockClipboard();
+    const message = "a long status message that would be ellipsized in a narrow window";
+    useAppStore.setState({ statusMessage: message } as never);
+
+    render(<StatusBar />);
+
+    const el = screen.getByTestId("status-bar-message");
+    expect(el).toHaveAttribute("title", message);
+
+    fireEvent.click(el);
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(message));
+  });
+
+  it("does not render the message segment when the status message is empty", () => {
+    render(<StatusBar />);
+    expect(screen.queryByTestId("status-bar-message")).toBeNull();
+  });
+
+  it("copies the selected session name on click", async () => {
+    const writeText = mockClipboard();
+    vi.mocked(useSessionStore).mockReturnValue({
+      sessions: [{ id: "s1", name: "my-very-long-session-name" } as never],
+      selectedSessionId: "s1",
+    });
+
+    render(<StatusBar />);
+
+    fireEvent.click(screen.getByTestId("status-bar-selected-session"));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("my-very-long-session-name"));
+  });
+
+  it("copies truncated workspace text on right-click when the segment has a click action", async () => {
+    const writeText = mockClipboard();
+    const openGitManager = vi.fn();
+    useAppStore.setState({
+      tabs: [{
+        id: "ws-tab",
+        type: "code-workspace",
+        title: "Workspace",
+        codeWorkspace: { repoRoot: "/repo", workspaceId: "ws", workspaceInstanceId: "i", name: "W", roots: [], looseFiles: [] },
+      } as never],
+      activeTabId: "ws-tab",
+    } as never);
+    useCodeWorkspaceStatusStore.setState({
+      status: {
+        tabId: "ws-tab",
+        line: 1,
+        column: 1,
+        encoding: "UTF-8",
+        eol: "LF",
+        languageId: "typescript",
+        lspActive: true,
+        lspLabel: "typescript-language-server",
+        lspError: false,
+        gitBranch: "feature/a-very-long-branch-name",
+        gitAhead: 1,
+        gitBehind: 0,
+        fontSize: 14,
+        largeFile: false,
+      },
+      actions: { openLanguagePanel: vi.fn(), openGitManager },
+    });
+
+    render(<StatusBar />);
+
+    fireEvent.contextMenu(screen.getByTestId("status-bar-workspace-git"));
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("feature/a-very-long-branch-name"));
+    // Right-click copies but does not trigger the segment's primary click.
+    expect(openGitManager).not.toHaveBeenCalled();
+    // The segment's primary click still opens the Git manager.
+    fireEvent.click(screen.getByTestId("status-bar-workspace-git"));
+    expect(openGitManager).toHaveBeenCalledTimes(1);
   });
 });
