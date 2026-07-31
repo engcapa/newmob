@@ -23,7 +23,7 @@ import {
   Minimize2,
   ChevronRight,
   Star,
-  BookMarked,
+  Files,
   Database,
   FileJson,
   MessageSquare,
@@ -61,7 +61,7 @@ import {
   type DbSqlHistoryEntry,
 } from "../../lib/ipc";
 import { SchemaTree, type SchemaTreeSelectedObject } from "./SchemaTree";
-import { BookmarksPanel } from "./BookmarksPanel";
+import { QueryLibraryPanel } from "./QueryLibraryPanel";
 import { SqlEditorPanel, type SqlEditorHandle, type SqlEditorRunContext } from "./SqlEditorPanel";
 import {
   QueryResultGrid,
@@ -573,8 +573,8 @@ export default function DbClientTab({
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
   const [historyEntries, setHistoryEntries] = useState<DbSqlHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
-  const [leftPanelTab, setLeftPanelTab] = useState<"schema" | "bookmarks">("schema");
-  const addBookmarkTriggerRef = useRef<(() => void) | null>(null);
+  const [leftPanelTab, setLeftPanelTab] = useState<"schema" | "queries">("schema");
+  const addQueryTriggerRef = useRef<(() => void) | null>(null);
   const historyRef = useRef<Record<string, string[]>>({});
   const editorHandles = useRef<Record<string, SqlEditorHandle | null>>({});
   // Stable "echo target" panel for AI/Claude Code SQL echo (queryRegistry
@@ -633,13 +633,13 @@ export default function DbClientTab({
     });
   }, [metadataCache]);
 
-  // Global keyboard shortcut to add a bookmark: Ctrl+Alt+B / Cmd+Alt+B
+  // Global keyboard shortcut to save the active editor as a query: Ctrl+Alt+B / Cmd+Alt+B
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.altKey && e.key.toLowerCase() === "b") {
         e.preventDefault();
         e.stopPropagation();
-        addBookmarkTriggerRef.current?.();
+        addQueryTriggerRef.current?.();
       }
     };
     window.addEventListener("keydown", handleGlobalKeyDown);
@@ -2428,13 +2428,13 @@ export default function DbClientTab({
                 type="button"
                 className="flex-1 text-[11px] font-semibold flex items-center justify-center gap-1.5 h-full transition-colors"
                 style={{
-                  color: leftPanelTab === "bookmarks" ? "var(--taomni-accent)" : "var(--taomni-text-muted)",
-                  background: leftPanelTab === "bookmarks" ? "var(--taomni-bg)" : "transparent",
+                  color: leftPanelTab === "queries" ? "var(--taomni-accent)" : "var(--taomni-text-muted)",
+                  background: leftPanelTab === "queries" ? "var(--taomni-bg)" : "transparent",
                 }}
-                onClick={() => setLeftPanelTab("bookmarks")}
+                onClick={() => setLeftPanelTab("queries")}
               >
-                <BookMarked className="w-3.5 h-3.5" />
-                Bookmarks
+                <Files className="w-3.5 h-3.5" />
+                Queries
               </button>
             </div>
             {/* Tab Body */}
@@ -2461,20 +2461,16 @@ export default function DbClientTab({
                   />
                 )
               ) : (
-                <BookmarksPanel
+                <QueryLibraryPanel
                   engine={info.engine}
-                  activeSql={activePanel.doc}
-                  activeDatabase={activeSchema}
-                  onSelectBookmark={(sql) => {
-                    editorHandles.current[activePanel.id]?.setValue(sql);
-                    patchPanel(activePanel.id, { doc: sql, dirty: true });
-                  }}
-                  onRunBookmark={(sql) => {
-                    editorHandles.current[activePanel.id]?.setValue(sql);
-                    patchPanel(activePanel.id, { doc: sql, dirty: true });
-                    void runQuery(activePanel.id, sql);
-                  }}
-                  onAddTriggerRef={addBookmarkTriggerRef}
+                  connectionId={workspaceSessionId}
+                  activeContent={editorHandles.current[activePanel.id]?.getValue() ?? activePanel.doc}
+                  catalogName={info.catalog}
+                  databaseName={info.database}
+                  schemaName={activeSchema}
+                  onOpenQuery={(query) => openSqlInNewPanel(query.content)}
+                  onRunQuery={(query) => openSqlInNewPanel(query.content, true, "generated")}
+                  onAddTriggerRef={addQueryTriggerRef}
                 />
               )}
             </div>
@@ -2557,7 +2553,7 @@ export default function DbClientTab({
                 onToggleStatement={toggleStatementPanel}
                 onToggleHistory={toggleHistoryPanel}
                 onSave={() => void saveQueryFile(activePanel)}
-                onBookmark={() => addBookmarkTriggerRef.current?.()}
+                onSaveQuery={() => addQueryTriggerRef.current?.()}
                 onSchemaChange={(schema) => void switchSchema(schema)}
                 rowLimit={rowLimit}
                 maxResultSheets={maxResultSheets}
@@ -2669,7 +2665,7 @@ function EditorToolbar({
   onToggleStatement,
   onToggleHistory,
   onSave,
-  onBookmark,
+  onSaveQuery,
   onSchemaChange,
   rowLimit,
   maxResultSheets,
@@ -2691,7 +2687,7 @@ function EditorToolbar({
   onToggleStatement: () => void;
   onToggleHistory: () => void;
   onSave: () => void;
-  onBookmark: () => void;
+  onSaveQuery: () => void;
   onSchemaChange: (schema: string) => void;
   rowLimit: number;
   maxResultSheets: number;
@@ -2737,8 +2733,8 @@ function EditorToolbar({
       <button type="button" className={btn} onClick={onSave} title="Save query tab as SQL file">
         <Save className="w-3.5 h-3.5" /> Save
       </button>
-      <button type="button" className={btn} onClick={onBookmark} title="Bookmark query">
-        <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Bookmark
+      <button type="button" className={btn} onClick={onSaveQuery} title="Save to query library">
+        <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query
       </button>
       <span className="w-px h-4 mx-1" style={{ background: "var(--taomni-divider)" }} />
       <label className="h-6 inline-flex items-center gap-1 text-[11px] text-[var(--taomni-text-muted)]">
