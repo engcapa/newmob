@@ -161,6 +161,11 @@ import {
   readEditorAiPreferences,
   writeEditorAiPreferences,
 } from "./workspace/editorAiPreferences";
+import {
+  AI_ANSWER_LANGUAGES,
+  answerLanguageLabelKey,
+  type AiAnswerLanguage,
+} from "../../lib/ai/answerLanguage";
 import { EditorAiRewriteDialog } from "./workspace/EditorAiRewriteDialog";
 import { confirmAppDialog, promptAppDialog } from "../../lib/appDialogs";
 import { writeText } from "../../lib/clipboard";
@@ -450,6 +455,18 @@ export function CodeWorkspaceTab({
   const [editorAiPreferences, setEditorAiPreferences] = useState(
     () => readEditorAiPreferences(workspaceInstanceId),
   );
+  // Read through a ref inside the context-menu builder so a language change
+  // does not have to rebuild that callback.
+  const editorAiPreferencesRef = useRef(editorAiPreferences);
+  editorAiPreferencesRef.current = editorAiPreferences;
+  const setAiAnswerLanguage = useCallback((answerLanguage: AiAnswerLanguage) => {
+    setEditorAiPreferences((current) => {
+      const next = { ...current, answerLanguage };
+      writeEditorAiPreferences(workspaceInstanceId, next);
+      return next;
+    });
+  }, [workspaceInstanceId]);
+  /** Keyboard/command path — steps through the options without opening a menu. */
   const cycleAiAnswerLanguage = useCallback(() => {
     setEditorAiPreferences((current) => {
       const next = { ...current, answerLanguage: nextAnswerLanguage(current.answerLanguage) };
@@ -4343,6 +4360,18 @@ export function CodeWorkspaceTab({
       run: () => void runEditorAiActionAtCursor("rewrite"),
     },
     {
+      // The keyboard path to the explain actions bypasses the selection
+      // toolbar, so without this there is no way to change the answer language
+      // without reaching for the mouse.
+      id: "workspace.aiCycleAnswerLanguage",
+      title: t("codeWorkspaceAi.commandCycleAnswerLanguage", {
+        current: t(answerLanguageLabelKey(editorAiPreferences.answerLanguage)),
+      }),
+      category: "AI",
+      keywords: ["ai", "language", "answer", "chinese", "english", "语言", "回答", "中文", "英文"],
+      run: cycleAiAnswerLanguage,
+    },
+    {
       id: "workspace.toggleProjectTree",
       title: languagePanelOpen ? "Hide Project Tree" : "Show Project Tree",
       category: "View",
@@ -5088,6 +5117,15 @@ export function CodeWorkspaceTab({
           explainCodeLabel: t("codeWorkspaceAi.contextExplainCode"),
           explainSyntax: () => { void runEditorAiActionAtCursor("syntax"); },
           explainCode: () => { void runEditorAiActionAtCursor("explain"); },
+          answerLanguage: {
+            label: t("codeWorkspaceAi.answerLanguageMenu"),
+            current: editorAiPreferencesRef.current.answerLanguage,
+            options: AI_ANSWER_LANGUAGES.map((language) => ({
+              value: language,
+              label: t(answerLanguageLabelKey(language)),
+            })),
+            onSelect: (value) => setAiAnswerLanguage(value as AiAnswerLanguage),
+          },
         },
         actions: {
           goToDefinition: () => { void goToDefinition(file, request.position); },
@@ -6713,7 +6751,7 @@ export function CodeWorkspaceTab({
         onAction={(action, text) => {
           void handleEditorAiAction(action, text);
         }}
-        onCycleAnswerLanguage={cycleAiAnswerLanguage}
+        onSetAnswerLanguage={setAiAnswerLanguage}
         onDismiss={() => setEditorAiSelection(null)}
       />
       {aiRewriteState && (

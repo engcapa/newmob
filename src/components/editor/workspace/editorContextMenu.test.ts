@@ -119,4 +119,84 @@ describe("buildEditorContextMenuItems", () => {
     expect(explainSyntax).toHaveBeenCalledTimes(1);
     expect(explainCode).toHaveBeenCalledTimes(1);
   });
+
+  it("offers the answer-language submenu with the current value checked", () => {
+    const onSelect = vi.fn();
+    const items = buildEditorContextMenuItems({
+      capabilities: null,
+      hasSelection: false,
+      clientX: 0,
+      clientY: 0,
+      actions,
+      ai: {
+        explainSyntaxLabel: "Explain Syntax…",
+        explainCodeLabel: "Explain Code…",
+        explainSyntax: vi.fn(),
+        explainCode: vi.fn(),
+        answerLanguage: {
+          label: "AI Answer Language",
+          current: "zh-CN",
+          options: [
+            { value: "inherit", label: "Default" },
+            { value: "auto", label: "Auto" },
+            { value: "zh-CN", label: "中文" },
+            { value: "en", label: "EN" },
+          ],
+          onSelect,
+        },
+      },
+    });
+
+    const entry = items.find((i) => i.testId === "editor-context-ai-answer-language");
+    expect(entry?.label).toBe("AI Answer Language");
+    expect(entry?.children).toHaveLength(4);
+    expect(entry?.children?.find((c) => c.label === "中文")?.checked).toBe(true);
+    expect(entry?.children?.find((c) => c.label === "Auto")?.checked).toBe(false);
+
+    entry?.children?.find((c) => c.label === "EN")?.onClick?.();
+    expect(onSelect).toHaveBeenCalledWith("en");
+  });
+
+  it("sits with the explain actions, after them", () => {
+    const items = buildEditorContextMenuItems({
+      capabilities: null,
+      hasSelection: false,
+      clientX: 0,
+      clientY: 0,
+      actions,
+      ai: {
+        explainSyntaxLabel: "Explain Syntax…",
+        explainCodeLabel: "Explain Code…",
+        explainSyntax: vi.fn(),
+        explainCode: vi.fn(),
+        answerLanguage: {
+          label: "AI Answer Language",
+          current: "inherit",
+          options: [{ value: "inherit", label: "Default" }],
+          onSelect: vi.fn(),
+        },
+      },
+    });
+
+    const codeIndex = items.findIndex((i) => i.testId === "editor-context-ai-explain-code");
+    const languageIndex = items.findIndex((i) => i.testId === "editor-context-ai-answer-language");
+    expect(languageIndex).toBe(codeIndex + 1);
+  });
+
+  it("omits the submenu when the host passes no answer-language config", () => {
+    const items = buildEditorContextMenuItems({
+      capabilities: null,
+      hasSelection: false,
+      clientX: 0,
+      clientY: 0,
+      actions,
+      ai: {
+        explainSyntaxLabel: "Explain Syntax…",
+        explainCodeLabel: "Explain Code…",
+        explainSyntax: vi.fn(),
+        explainCode: vi.fn(),
+      },
+    });
+    expect(items.find((i) => i.testId === "editor-context-ai-answer-language")).toBeUndefined();
+  });
 });

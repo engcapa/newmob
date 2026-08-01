@@ -1,6 +1,7 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { ChevronUp, ChevronDown, Crosshair, Trash2, Radio, Star } from "lucide-react";
+import { BookOpen, ChevronUp, ChevronDown, Crosshair, Trash2, Radio, Star } from "lucide-react";
 import { redisExec } from "../../lib/ipc";
+import { useT } from "../../lib/i18n";
 import {
   displaySqlShortcut,
   loadSqlExecutionPreferences,
@@ -14,6 +15,13 @@ interface RedisCliProps {
   input: string;
   onInputChange: (value: string) => void;
   onSaveQuery: () => void;
+  /**
+   * Ask AI to explain a command. `reply` is the server's response when the
+   * command has already run, which lets the answer address what actually came
+   * back rather than only what was asked for. Omitted when the host does not
+   * wire up chat.
+   */
+  onExplain?: (command: string, reply?: string) => void;
 }
 
 export interface RedisCliHandle {
@@ -41,7 +49,9 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
   input,
   onInputChange,
   onSaveQuery,
+  onExplain,
 }, ref) {
+  const t = useT();
   const [lines, setLines] = useState<CliLine[]>([]);
   const [monitoring, setMonitoring] = useState(false);
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
@@ -156,6 +166,18 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
         >
           <Crosshair className="w-3.5 h-3.5" /> Current
         </button>
+        {onExplain && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 px-1.5 rounded hover:bg-[var(--taomni-hover)] disabled:opacity-40"
+            data-testid="redis-explain-current"
+            title={t("dbAi.explainCommandTooltip")}
+            disabled={!input.trim()}
+            onClick={() => onExplain(input)}
+          >
+            <BookOpen className="w-3.5 h-3.5" /> {t("dbAi.explainStatement")}
+          </button>
+        )}
         <button
           type="button"
           className="inline-flex items-center gap-1 px-1.5 rounded hover:bg-[var(--taomni-hover)]"
@@ -194,8 +216,23 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
         }}
       >
         {lines.map((line, i) => (
-          <div key={i}>
-            {line.cmd && <div style={{ color: "var(--taomni-accent)" }}>&gt; {line.cmd}</div>}
+          <div key={i} className="group relative">
+            {line.cmd && (
+              <div className="flex items-start gap-1">
+                <span className="flex-1" style={{ color: "var(--taomni-accent)" }}>&gt; {line.cmd}</span>
+                {onExplain && (
+                  <button
+                    type="button"
+                    className="shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100 inline-flex items-center gap-1 rounded px-1 text-[10px] text-[var(--taomni-text-muted)] hover:bg-[var(--taomni-hover)] hover:text-[var(--taomni-text)] transition-opacity"
+                    data-testid="redis-explain-line"
+                    title={t("dbAi.explainReplyTooltip")}
+                    onClick={() => onExplain(line.cmd!, line.reply)}
+                  >
+                    <BookOpen className="w-3 h-3" /> {t("dbAi.explainStatement")}
+                  </button>
+                )}
+              </div>
+            )}
             <pre className="whitespace-pre-wrap" style={{ color: line.error ? "#ff6b6b" : undefined, margin: 0 }}>
               {line.reply}
             </pre>

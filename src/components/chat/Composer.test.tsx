@@ -230,3 +230,107 @@ describe("Composer attachments", () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledWith("keep drafting", undefined, []));
   });
 });
+
+describe("Composer send queue", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    invokeMock.mockReset();
+    invokeMock.mockResolvedValue(null);
+    useChatStore.setState({
+      pendingComposerText: "",
+      composerDrafts: {},
+      consumePendingComposerText: () => "",
+    });
+    useAiStore.setState({ config: null });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  function queued(id: string, content: string) {
+    return { id, content };
+  }
+
+  it("sends while a turn is in flight once the host opts into a queue", async () => {
+    const onSend = vi.fn().mockResolvedValue({ status: "queued", position: 1 });
+    render(<Composer onSend={onSend} sending={true} queueLimit={5} queuedItems={[]} />);
+
+    const textarea = screen.getByPlaceholderText(/Type a message/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "ask while busy" } });
+
+    const sendButton = screen.getByTestId("ai-chat-send-button");
+    expect(sendButton).not.toBeDisabled();
+    fireEvent.click(sendButton);
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("ask while busy", undefined, []));
+    // Accepted, so the box is cleared and ready for the next one.
+    await waitFor(() => expect(textarea.value).toBe(""));
+  });
+
+  it("keeps the text and explains why when the queue is full", async () => {
+    const onSend = vi.fn().mockResolvedValue({ status: "rejected", limit: 5 });
+    render(
+      <Composer
+        onSend={onSend}
+        sending={true}
+        queueLimit={5}
+        queuedItems={[1, 2, 3, 4].map((n) => queued(`q${n}`, `queued ${n}`))}
+      />,
+    );
+
+    const textarea = screen.getByPlaceholderText(/Type a message/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "one too many" } });
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+
+    // Losing the text on a refusal would mean losing a message the user
+    // believed was accepted.
+    await waitFor(() => expect(textarea.value).toBe("one too many"));
+    expect(await screen.findByTestId("ai-chat-attachment-error")).toHaveTextContent(/Queue is full/);
+  });
+
+  it("blocks the send outright once the queue is at its limit", () => {
+    const onSend = vi.fn().mockResolvedValue({ status: "sent" });
+    render(
+      <Composer
+        onSend={onSend}
+        sending={true}
+        queueLimit={3}
+        queuedItems={[1, 2, 3].map((n) => queued(`q${n}`, `queued ${n}`))}
+      />,
+    );
+
+    const textarea = screen.getByPlaceholderText(/Type a message/) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "no room" } });
+
+    expect(screen.getByTestId("ai-chat-send-button")).toBeDisabled();
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("lists queued sends and removes one on request", () => {
+    const onRemoveQueued = vi.fn();
+    render(
+      <Composer
+        onSend={vi.fn()}
+        sending={true}
+        queueLimit={5}
+        queuedItems={[queued("q1", "first queued"), queued("q2", "second queued")]}
+        onRemoveQueued={onRemoveQueued}
+      />,
+    );
+
+    const items = screen.getAllByTestId("ai-chat-queue-item");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent("first queued");
+
+    fireEvent.click(screen.getAllByTestId("ai-chat-queue-remove")[1]);
+    expect(onRemoveQueued).toHaveBeenCalledWith("q2");
+  });
+
+  it("hides the queue list when nothing is parked", () => {
+    render(<Composer onSend={vi.fn()} sending={true} queueLimit={5} queuedItems={[]} />);
+    expect(screen.queryByTestId("ai-chat-queue")).not.toBeInTheDocument();
+  });
+});

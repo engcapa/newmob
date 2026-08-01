@@ -47,6 +47,7 @@ import { AcpAgentsPanel } from "./AcpAgentsPanel";
 import { ChatHistoryPanel } from "./ChatHistoryPanel";
 import { ChatOutputFormatPanel } from "./ChatOutputFormatPanel";
 import { ChatSendShortcutPanel } from "./ChatSendShortcutPanel";
+import { EditorAiLanguagePanel } from "./EditorAiLanguagePanel";
 import { ModelsAdvancedPanel } from "./ModelsAdvancedPanel";
 import { useAiStore } from "../../stores/aiStore";
 import {
@@ -863,6 +864,12 @@ export function SettingsPanel() {
               <SettingsAnchor id="ai-chatsend">
                 <div className="pt-3 border-t border-[var(--taomni-divider)]">
                   <ChatSendShortcutPanel />
+                </div>
+              </SettingsAnchor>
+
+              <SettingsAnchor id="ai-answerlang">
+                <div className="pt-3 border-t border-[var(--taomni-divider)]">
+                  <EditorAiLanguagePanel />
                 </div>
               </SettingsAnchor>
 

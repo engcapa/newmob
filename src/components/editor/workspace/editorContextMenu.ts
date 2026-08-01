@@ -37,6 +37,17 @@ export interface EditorContextMenuAiSection {
   explainCodeLabel: string;
   explainSyntax: () => void;
   explainCode: () => void;
+  /**
+   * Answer-language picker. Present here as well as on the selection toolbar
+   * because the context menu is reachable without a selection, and was
+   * previously the one path with no way to change the language.
+   */
+  answerLanguage?: {
+    label: string;
+    current: string;
+    options: Array<{ value: string; label: string }>;
+    onSelect: (value: string) => void;
+  };
 }
 
 export interface BuildEditorContextMenuInput {
@@ -86,6 +97,7 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
 
   // AI actions work without a selection (they fall back to the enclosing symbol
   // at the caret), so these are never capability- or selection-gated.
+  const answerLanguage = input.ai?.answerLanguage;
   const aiItems: MenuItem[] = input.ai
     ? [
       { separator: true, label: "" },
@@ -101,6 +113,18 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
         testId: "editor-context-ai-explain-code",
         onClick: input.ai.explainCode,
       },
+      ...(answerLanguage
+        ? [{
+          label: answerLanguage.label,
+          testId: "editor-context-ai-answer-language",
+          children: answerLanguage.options.map((option) => ({
+            label: option.label,
+            testId: `editor-context-ai-answer-language-${option.value}`,
+            checked: option.value === answerLanguage.current,
+            onClick: () => answerLanguage.onSelect(option.value),
+          })),
+        }]
+        : []),
     ]
     : [];
 

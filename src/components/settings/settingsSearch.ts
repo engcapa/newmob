@@ -210,6 +210,15 @@ export const SETTINGS_SEARCH_ENTRIES: SettingsSearchEntry[] = [
     ],
   },
   {
+    id: "ai-answerlang",
+    titleKeys: ["settings.answerLanguage", "aiSettings.answerLanguageTitle"],
+    terms: [
+      "answer language", "reply language", "explain language", "chinese", "english",
+      "editor ai", "explain", "syntax",
+      "回答语言", "答复语言", "解释语言", "中文", "英文", "语言", "编辑器 ai",
+    ],
+  },
+  {
     id: "ai-chathistory",
     titleKeys: ["aiSettings.chatHistoryTitle", "settings.chatHistory"],
     terms: ["chat history", "retention", "clear history", "对话历史", "聊天记录", "保留", "清除"],
@@ -269,6 +278,7 @@ export const SETTINGS_GROUPS: SettingsGroupDef[] = [
       "ai-acp",
       "ai-chatformat",
       "ai-chatsend",
+      "ai-answerlang",
       "ai-chathistory",
       "ai-models",
     ],

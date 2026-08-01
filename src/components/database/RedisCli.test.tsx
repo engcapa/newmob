@@ -65,3 +65,80 @@ describe("RedisCli query library bridge", () => {
     expect(screen.getByText("PONG")).toBeInTheDocument();
   });
 });
+
+describe("RedisCli explain action", () => {
+  beforeEach(() => {
+    redisExec.mockReset();
+    redisExec.mockResolvedValue("PONG");
+  });
+
+  afterEach(cleanup);
+
+  function renderCli(props: {
+    input?: string;
+    onExplain?: (command: string, reply?: string) => void;
+    ref?: React.Ref<RedisCliHandle>;
+  } = {}) {
+    return render(
+      <RedisCli
+        ref={props.ref}
+        sessionId="redis-runtime"
+        collapsed={false}
+        onToggleCollapse={vi.fn()}
+        input={props.input ?? ""}
+        onInputChange={vi.fn()}
+        onSaveQuery={vi.fn()}
+        onExplain={props.onExplain}
+      />,
+    );
+  }
+
+  it("explains the drafted command", () => {
+    const onExplain = vi.fn();
+    renderCli({ input: "KEYS *", onExplain });
+
+    fireEvent.click(screen.getByTestId("redis-explain-current"));
+
+    expect(onExplain).toHaveBeenCalledWith("KEYS *");
+  });
+
+  it("disables explain with nothing to explain", () => {
+    renderCli({ input: "   ", onExplain: vi.fn() });
+    expect(screen.getByTestId("redis-explain-current")).toBeDisabled();
+  });
+
+  it("hides the explain affordances when the host wires no handler", () => {
+    renderCli({ input: "KEYS *" });
+    expect(screen.queryByTestId("redis-explain-current")).not.toBeInTheDocument();
+  });
+
+  it("explains an executed command together with its reply", async () => {
+    const onExplain = vi.fn();
+    const ref = createRef<RedisCliHandle>();
+    renderCli({ onExplain, ref });
+
+    await act(async () => {
+      await ref.current?.runCommand("PING");
+    });
+
+    fireEvent.click(screen.getByTestId("redis-explain-line"));
+
+    // The reply rides along so the answer can address what actually came back.
+    expect(onExplain).toHaveBeenCalledWith("PING", "PONG");
+  });
+
+  it("passes the error text as the reply for a failed command", async () => {
+    redisExec.mockRejectedValue(new Error("WRONGTYPE"));
+    const onExplain = vi.fn();
+    const ref = createRef<RedisCliHandle>();
+    renderCli({ onExplain, ref });
+
+    await act(async () => {
+      await ref.current?.runCommand("LPUSH mykey v");
+    });
+
+    fireEvent.click(screen.getByTestId("redis-explain-line"));
+
+    expect(onExplain).toHaveBeenCalledWith("LPUSH mykey v", expect.stringContaining("WRONGTYPE"));
+  });
+});

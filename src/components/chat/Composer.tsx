@@ -8,8 +8,8 @@ import {
   type DragEvent as ReactDragEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Loader2, Paperclip, Send } from "lucide-react";
-import { useChatStore } from "../../stores/chatStore";
+import { ListPlus, Loader2, Paperclip, Send, X } from "lucide-react";
+import { useChatStore, type EnqueueResult, type QueuedSend } from "../../stores/chatStore";
 import { parseComposerInput, type AttachmentRef } from "../../lib/chat/composerRefs";
 import {
   CHAT_MAX_ATTACHMENT_BYTES,
@@ -37,12 +37,27 @@ import { useAiStore } from "../../stores/aiStore";
 import { useT } from "../../lib/i18n";
 
 interface ComposerProps {
-  onSend: (content: string, terminalContext?: string, attachments?: ChatAttachment[]) => Promise<void>;
+  /**
+   * Hands the message off. Returning an `EnqueueResult` lets the composer keep
+   * the user's text when the send was refused (a full queue) instead of
+   * clearing the box on a message that never went anywhere.
+   */
+  onSend: (
+    content: string,
+    terminalContext?: string,
+    attachments?: ChatAttachment[],
+  ) => Promise<EnqueueResult | void>;
   sending: boolean;
   disabled?: boolean;
   attachmentsEnabled?: boolean;
   placeholder?: string;
   draftKey?: string | null;
+  /** Sends parked behind the in-flight turn, oldest first. */
+  queuedItems?: QueuedSend[];
+  /** Cap on parked sends. Omit to leave the queue affordances hidden. */
+  queueLimit?: number;
+  /** Drop one parked send. */
+  onRemoveQueued?: (itemId: string) => void;
   /**
    * Optional resolver: turns AttachmentRefs into LLM-ready text before send.
    * Currently only `terminal` refs surface to the existing terminal_context
@@ -63,6 +78,9 @@ export function Composer({
   attachmentsEnabled = true,
   placeholder,
   draftKey,
+  queuedItems,
+  queueLimit,
+  onRemoveQueued,
   resolveTerminalContext,
 }: ComposerProps) {
   const t = useT();
@@ -105,6 +123,15 @@ export function Composer({
       setTimeout(() => textareaRef.current?.focus(), 0);
     }
   }, [pending, consumePending]);
+
+  // Queue affordances stay hidden until a host opts in by passing a limit, so
+  // composers rendered outside the drawer keep their previous behaviour.
+  const queue = queuedItems ?? [];
+  const queueDepth = queue.length;
+  const queueEnabled = typeof queueLimit === "number" && queueLimit > 0;
+  const queueFull = queueEnabled && queueDepth >= queueLimit;
+  /** A send right now would park rather than go out immediately. */
+  const willQueue = queueEnabled && sending && !queueFull;
 
   // Live parse @-references so we can show chips and remove them.
   const parsed = useMemo(() => parseComposerInput(text), [text]);
@@ -190,7 +217,11 @@ export function Composer({
   };
 
   const handleSend = async () => {
-    if (sending || draftDisabled) return;
+    // Mirrors the send button's disabled condition — the keyboard path must
+    // block on exactly the same rules. A mid-turn send is queued rather than
+    // dropped, but only where the host opted into a queue; without one,
+    // `sending` still blocks as it always did.
+    if (draftDisabled || queueFull || (!queueEnabled && sending)) return;
 
     // Resolve terminal references to terminal_context. Multiple @terminal
     // refs are merged; we take the largest line count.
@@ -230,10 +261,18 @@ export function Composer({
       || (terminalCtx ? t("chat.contextOnlyPrompt") : "");
     if (!content.trim()) return;
 
+    // Clear optimistically so the box is ready for the next message, then put
+    // the text back if the send was refused — the alternative (awaiting first)
+    // leaves the sent text sitting in the box for the whole round trip.
     setText("");
     setSelectedAttachments([]);
     setAttachmentError(null);
-    await onSend(content, terminalCtx, sendAttachments);
+    const result = await onSend(content, terminalCtx, sendAttachments);
+    if (result?.status === "rejected") {
+      setText(content);
+      setSelectedAttachments(sendAttachments);
+      setAttachmentError(t("chat.queueFull", { limit: result.limit }));
+    }
     textareaRef.current?.focus();
   };
 
@@ -318,6 +357,12 @@ export function Composer({
     || (attachmentsEnabled && selectedAttachments.length > 0)
     || (attachmentsEnabled && referenceAttachments.some((att) => att.kind === "file" || att.kind === "terminal"));
 
+  const sendButtonTitle = queueFull
+    ? t("chat.queueFull", { limit: queueDepth })
+    : willQueue
+      ? t("chat.willQueue", { position: queueDepth + 1 })
+      : t("chat.sendShortcutTitle", { shortcut: sendShortcutLabel });
+
   return (
     <div
       ref={rootRef}
@@ -349,6 +394,37 @@ export function Composer({
       {attachmentError && (
         <div className="mb-1.5 text-[10px] text-red-400" data-testid="ai-chat-attachment-error">
           {attachmentError}
+        </div>
+      )}
+      {queueDepth > 0 && (
+        <div className="mb-1.5 space-y-1" data-testid="ai-chat-queue">
+          <div className="text-[10px] text-[var(--taomni-text-muted)]">
+            {t("chat.queuedHint", { count: queueDepth, limit: queueLimit ?? queueDepth })}
+          </div>
+          {queue.map((item, index) => (
+            <div
+              key={item.id}
+              className="flex items-center gap-1 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)]/50 px-1.5 py-1"
+              data-testid="ai-chat-queue-item"
+            >
+              <span className="shrink-0 text-[10px] text-[var(--taomni-accent)]">{index + 1}</span>
+              <span className="flex-1 truncate text-[10px] text-[var(--taomni-text-muted)]" title={item.content}>
+                {item.content.replace(/\s+/g, " ").trim()}
+              </span>
+              {onRemoveQueued && (
+                <button
+                  type="button"
+                  className="shrink-0 rounded p-0.5 text-[var(--taomni-text-muted)] hover:bg-[var(--taomni-hover)] hover:text-red-400"
+                  onClick={() => onRemoveQueued(item.id)}
+                  title={t("chat.queuedRemove")}
+                  aria-label={t("chat.queuedRemove")}
+                  data-testid="ai-chat-queue-remove"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
       <div className="flex gap-2 items-end">
@@ -392,10 +468,16 @@ export function Composer({
           type="button"
           className="taomni-btn h-8 w-8 p-0 inline-flex items-center justify-center shrink-0"
           onClick={handleSend}
-          disabled={!canSend || sending || draftDisabled}
-          title={t("chat.sendShortcutTitle", { shortcut: sendShortcutLabel })}
+          // Stays enabled mid-turn so the next message can be queued; only a
+          // full queue (or a queue-less host, where `sending` still blocks)
+          // disables it.
+          disabled={!canSend || draftDisabled || queueFull || (!queueEnabled && sending)}
+          title={sendButtonTitle}
+          data-testid="ai-chat-send-button"
         >
-          {sending ? (
+          {willQueue ? (
+            <ListPlus className="w-3.5 h-3.5" />
+          ) : sending ? (
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
           ) : (
             <Send className="w-3.5 h-3.5" />
