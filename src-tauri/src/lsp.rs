@@ -5397,10 +5397,69 @@ fn command_available(command: &str) -> bool {
 
 fn command_available_uncached(command: &str) -> bool {
     let path = Path::new(command);
-    if path.is_absolute() || command.contains('/') || command.contains('\\') {
-        return path.is_file();
+    let resolved = if path.is_absolute() || command.contains('/') || command.contains('\\') {
+        if !path.is_file() {
+            return false;
+        }
+        path.to_path_buf()
+    } else {
+        match which::which(command) {
+            Ok(resolved) => resolved,
+            Err(_) => return false,
+        }
+    };
+    // A resolved path is not proof the tool runs: rustup installs *proxy shims*
+    // into `~/.cargo/bin` when rustup itself is installed, independent of which
+    // components exist. `rust-analyzer.exe` is therefore always on PATH, and
+    // `which` reports it available even when the component was never added — the
+    // shim then fails at spawn with `error: Unknown binary 'rust-analyzer' in
+    // official toolchain '…'`. That turned a missing component into a raw stderr
+    // string in the editor instead of the `rustup component add` install hint.
+    if is_rustup_shim(&resolved) {
+        return binary_runs(&resolved);
     }
-    which::which(command).is_ok()
+    true
+}
+
+/// Names rustup proxies out of `<cargo home>/bin` that can appear as a language
+/// server command. A shim is only distinguishable from a real binary by living
+/// next to rustup's own proxy, so require `rustup` as a sibling.
+const RUSTUP_SHIMMED_LSP_BINARIES: &[&str] = &["rust-analyzer"];
+
+fn is_rustup_shim(resolved: &Path) -> bool {
+    let Some(stem) = resolved.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    if !RUSTUP_SHIMMED_LSP_BINARIES
+        .iter()
+        .any(|name| stem.eq_ignore_ascii_case(name))
+    {
+        return false;
+    }
+    let Some(parent) = resolved.parent() else {
+        return false;
+    };
+    parent
+        .join(format!("rustup{}", std::env::consts::EXE_SUFFIX))
+        .is_file()
+}
+
+/// Spawn `<binary> --version` to confirm the tool actually starts. Only used for
+/// shims, so this costs one short-lived process per [`COMMAND_AVAILABILITY_TTL`]
+/// window rather than on every availability query.
+fn binary_runs(binary: &Path) -> bool {
+    let mut cmd = std::process::Command::new(binary);
+    cmd.arg("--version");
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());
+    cmd.stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.status().is_ok_and(|status| status.success())
 }
 
 fn command_availability_cache() -> &'static StdMutex<HashMap<String, CachedCommandAvailability>> {
@@ -7640,6 +7699,59 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         std::fs::remove_file(&command_path).unwrap();
         assert!(command_available(&command));
 
+        command_availability_cache()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&command);
+        assert!(!command_available(&command));
+    }
+
+    #[test]
+    fn treats_rust_analyzer_next_to_rustup_as_a_shim() {
+        let directory = tempfile::tempdir().unwrap();
+        let shim = directory
+            .path()
+            .join(format!("rust-analyzer{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&shim, b"test").unwrap();
+
+        // No sibling rustup: a plain binary, taken at face value.
+        assert!(!is_rustup_shim(&shim));
+
+        std::fs::write(
+            directory
+                .path()
+                .join(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
+            b"test",
+        )
+        .unwrap();
+        assert!(is_rustup_shim(&shim));
+
+        // Other binaries in the same directory are not rustup proxies.
+        let other = directory
+            .path()
+            .join(format!("gopls{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&other, b"test").unwrap();
+        assert!(!is_rustup_shim(&other));
+    }
+
+    #[test]
+    fn reports_unrunnable_rustup_shim_as_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        // Not a real executable, so `--version` cannot succeed — stands in for a
+        // shim whose component was never added.
+        let shim = directory
+            .path()
+            .join(format!("rust-analyzer{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&shim, b"test").unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(format!("rustup{}", std::env::consts::EXE_SUFFIX)),
+            b"test",
+        )
+        .unwrap();
+
+        let command = shim.to_string_lossy().into_owned();
         command_availability_cache()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
