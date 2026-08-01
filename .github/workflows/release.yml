@@ -395,6 +395,11 @@ jobs:
           LIBGSSAPI_PREFIX: /opt/homebrew/opt/krb5
           PKG_CONFIG_PATH: /opt/homebrew/opt/krb5/lib/pkgconfig
         run: |
+          set -euo pipefail
+          # cargo test invokes Taomni's build.rs directly, before Tauri gets a
+          # chance to run beforeBuildCommand. Stage the configured frameworks
+          # first so tauri-build can resolve bundle.macOS.frameworks.
+          bash scripts/bundle-krb5-macos.sh stage
           cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::redirector -- --test-threads=1
           cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::recovery -- --test-threads=1
 
