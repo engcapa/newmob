@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import {
   AlertTriangle,
   Ban,
+  BookOpen,
+  Bot,
   ChevronDown,
   ChevronRight,
   Clock,
@@ -52,7 +54,12 @@ import {
   type DbSavedQuery,
 } from "../../lib/ipc";
 import { useAppStore } from "../../stores/appStore";
+import { useChatStore } from "../../stores/chatStore";
 import { useT } from "../../lib/i18n";
+import { readGlobalAnswerLanguage } from "../../lib/ai/answerLanguage";
+import { buildDbAiPrompt, truncateStatement } from "../../lib/database/dbAiPrompts";
+import { TabActions } from "../tabbar/TabActionSlot";
+import { FT_BUTTON_ACTIVE_OVERRIDE, FT_ICON_BUTTON_STYLE } from "../floating-toolbar/floatingToolbarStyles";
 import { useConfirmDialog } from "../sidebar/ConfirmDialog";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
 import {
@@ -69,6 +76,11 @@ interface HBaseShellTabProps {
   tabId: string;
   info: HBaseConnectInfo;
   visible: boolean;
+  /** Toggle the per-tab chat drawer bound to this HBase session. */
+  chatToggle?: {
+    open: boolean;
+    onToggle: () => void;
+  };
 }
 
 const MAX_PANELS = 4;
@@ -434,7 +446,7 @@ function HelpDialog({ transport, onClose }: { transport: HBaseTransport; onClose
   );
 }
 
-export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabProps) {
+export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBaseShellTabProps) {
   const t = useT();
   const setStatusMessage = useAppStore((s) => s.setStatusMessage);
   const setTabHasNewOutput = useAppStore((s) => s.setTabHasNewOutput);
@@ -689,6 +701,61 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
     [panels, runStatements],
   );
 
+  /**
+   * Explain the statement at the cursor. Reuses the same range resolution as
+   * Run, so "Explain" and "Run" always act on the statement the user believes
+   * is current. Pulls in the latest result sheet for that command when there is
+   * one, so a failed run gets diagnosed rather than described.
+   */
+  const explainCurrentStatement = useCallback(
+    async (panelId: string) => {
+      const panel = panels.find((p) => p.id === panelId);
+      if (!panel) return;
+      const handle = editorHandles.current[panelId];
+      const doc = handle?.getValue() ?? panel.doc;
+      const selection = handle?.getSelectionRange() ?? null;
+      const position = selection && selection.from !== selection.to
+        ? selection.from
+        : handle?.getCursorPosition() ?? doc.length;
+      const range = hbaseStatementRangeAt(doc, position);
+      if (!range) {
+        setStatusMessage(t("dbAi.noStatement"));
+        return;
+      }
+
+      const target = range.sql.trim();
+      const sheet = [...panel.sheets].reverse().find((s) => s.command.trim() === target && !s.running);
+      const { text, truncated } = truncateStatement(target);
+      const prompt = buildDbAiPrompt(
+        {
+          action: "explain",
+          dialect: "hbase",
+          engine: "HBase",
+          statement: text,
+          truncated,
+          database: info.namespace,
+          transport,
+          durationMs: sheet?.elapsedMs ?? null,
+          rowCount: sheet?.result?.rows.length ?? null,
+          error: sheet?.error ?? null,
+        },
+        readGlobalAnswerLanguage(),
+      );
+
+      const chat = useChatStore.getState();
+      await chat.openTabChat(tabId);
+      const outcome = await chat.sendPromptToTabChat(prompt);
+      if (outcome.status === "rejected") {
+        setStatusMessage(t("dbAi.queueFull", { limit: outcome.limit }));
+      } else if (outcome.status === "queued") {
+        setStatusMessage(t("dbAi.queued", { position: outcome.position }));
+      } else {
+        setStatusMessage(t("dbAi.sent"));
+      }
+    },
+    [info.namespace, panels, setStatusMessage, t, tabId, transport],
+  );
+
   const cancelQuery = useCallback(
     (panelId: string) => {
       setPanels((prev) =>
@@ -941,6 +1008,23 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
 
   return (
     <div ref={rootRef} className="h-full w-full flex flex-col relative" style={{ background: "var(--taomni-bg)", color: "var(--taomni-text)" }}>
+      {chatToggle && (
+        <TabActions active={visible}>
+          <button
+            type="button"
+            data-testid="hbase-chat-toggle"
+            onClick={chatToggle.onToggle}
+            title={chatToggle.open ? t("terminal.chatFloatingTitleClose") : t("terminal.chatFloatingTitleOpen")}
+            aria-label={chatToggle.open ? t("terminal.chatFloatingLabelClose") : t("terminal.chatFloatingLabelOpen")}
+            style={{
+              ...FT_ICON_BUTTON_STYLE,
+              ...(chatToggle.open ? FT_BUTTON_ACTIVE_OVERRIDE : {}),
+            }}
+          >
+            <Bot size={14} />
+          </button>
+        </TabActions>
+      )}
       {connError && (
         <div
           className="h-7 shrink-0 px-2 flex items-center gap-2 text-[11px] border-b"
@@ -1110,6 +1194,15 @@ export default function HBaseShellTab({ tabId, info, visible }: HBaseShellTabPro
                   onClick={() => runCurrentStatement(activePanel.id)}
                 >
                   <Crosshair className="w-3.5 h-3.5" /> Current
+                </button>
+                <button
+                  type="button"
+                  className={btn}
+                  title={t("dbAi.explainStatementTooltip")}
+                  data-testid="hbase-explain-current-statement"
+                  onClick={() => void explainCurrentStatement(activePanel.id)}
+                >
+                  <BookOpen className="w-3.5 h-3.5" /> {t("dbAi.explainStatement")}
                 </button>
                 <button type="button" className={btn} disabled={!panelRunning} title="Cancel query" onClick={() => cancelQuery(activePanel.id)}>
                   <Ban className="w-3.5 h-3.5" style={{ color: "#d9534f" }} /> Cancel

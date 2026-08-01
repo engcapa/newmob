@@ -10,18 +10,25 @@
 // this module keyed by answer language rather than in the i18n dictionaries.
 
 import type { LspDocumentSymbol } from "../../../lib/editor/lsp";
-import { getLocale } from "../../../lib/i18n";
+import {
+  AI_ANSWER_LANGUAGES,
+  resolveAnswerLanguage,
+  type AiAnswerLanguage,
+  type ResolvedAnswerLanguage,
+} from "../../../lib/ai/answerLanguage";
 import { symbolKindLabel } from "./symbolKinds";
 
 export type EditorAiAction = "explain" | "syntax" | "fix" | "rewrite";
 
-/** Answer language preference. `auto` follows the app locale. */
-export type AiAnswerLanguage = "auto" | "zh-CN" | "en";
-
-/** Resolved answer language — what the templates are actually keyed by. */
-export type ResolvedAnswerLanguage = "zh-CN" | "en";
-
-export const AI_ANSWER_LANGUAGES: AiAnswerLanguage[] = ["auto", "zh-CN", "en"];
+// The answer-language machinery is shared with the database explain prompts, so
+// it lives in `lib/ai/answerLanguage`. Re-exported here because this module is
+// the prompt-building entry point every editor call site already imports.
+export {
+  AI_ANSWER_LANGUAGES,
+  resolveAnswerLanguage,
+  type AiAnswerLanguage,
+  type ResolvedAnswerLanguage,
+};
 
 /**
  * Everything the prompt builder is allowed to know. The tab component fills
@@ -72,12 +79,6 @@ export const MAX_IMPORT_LINES = 40;
 export const MAX_DIAGNOSTICS = 10;
 /** Max characters of LSP hover text carried over. */
 export const MAX_HOVER_CHARS = 1200;
-
-/** Resolve an answer-language preference, following the app locale for `auto`. */
-export function resolveAnswerLanguage(preference: AiAnswerLanguage): ResolvedAnswerLanguage {
-  if (preference === "zh-CN" || preference === "en") return preference;
-  return getLocale() === "zh-CN" ? "zh-CN" : "en";
-}
 
 /**
  * Clip `text` to the selection budget, keeping the head and the tail so both

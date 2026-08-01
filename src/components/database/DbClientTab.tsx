@@ -91,6 +91,8 @@ import {
 } from "../floating-toolbar/floatingToolbarStyles";
 import { captureElementPng, renderElementToCanvas, safeFilePart } from "../../lib/capture";
 import { useT } from "../../lib/i18n";
+import { readGlobalAnswerLanguage } from "../../lib/ai/answerLanguage";
+import { buildDbAiPrompt, truncateStatement } from "../../lib/database/dbAiPrompts";
 import { registerQueryTab } from "../../lib/queryRegistry";
 import { useDbSessionFontSize } from "./useDbSessionFontSize";
 import { splitSqlStatementRanges, sqlStatementRangesForExecution, type SqlStatementRange } from "../../lib/sqlStatements";
@@ -2264,52 +2266,68 @@ export default function DbClientTab({
     }
   };
 
-  const askAiAboutHistory = async (entry: DbSqlHistoryEntry) => {
-    const result = latestResultForSql(entry.sqlContent);
-    const resultSummary = result
-      ? `\n\nResult summary: ${result.rows.length} row(s), ${result.columns.length} column(s).`
-      : "";
-    const prompt = [
-      "请分析这条数据库 SQL，并结合执行信息说明含义、潜在问题和可优化点：",
-      "",
-      "```sql",
-      entry.sqlContent,
-      "```",
-      "",
-      `Engine: ${entry.engine}`,
-      `Database: ${entry.databaseName ?? "-"}`,
-      `Schema: ${entry.schemaName ?? "-"}`,
-      `Duration: ${formatDurationMs(entry.durationMs) ?? "-"}`,
-      `Rows: ${entry.rowCount ?? "-"}`,
-      entry.error ? `Error: ${entry.error}` : null,
-      resultSummary,
-    ].filter((line): line is string => line !== null).join("\n");
+  /** Row/column shape of an in-memory result, for the prompt's context block. */
+  const resultShape = (result: DbQueryResult | null): string | null => (
+    result ? `${result.rows.length} row(s), ${result.columns.length} column(s)` : null
+  );
+
+  /**
+   * Hand a built prompt to the tab's chat thread and report what happened. The
+   * queue can refuse when it is full, and silently dropping the prompt would
+   * look like the button did nothing.
+   */
+  const sendDbAiPrompt = async (prompt: string) => {
     await useChatStore.getState().openTabChat(tabId);
     // A complete prompt, not a quoted selection — attachToComposer's blockquote
     // prefix would fold the instructions and the SQL fence together.
-    await useChatStore.getState().sendPromptToTabChat(prompt);
+    const outcome = await useChatStore.getState().sendPromptToTabChat(prompt);
+    if (outcome.status === "rejected") {
+      setStatusMessage(t("dbAi.queueFull", { limit: outcome.limit }));
+    } else if (outcome.status === "queued") {
+      setStatusMessage(t("dbAi.queued", { position: outcome.position }));
+    } else {
+      setStatusMessage(t("dbAi.sent"));
+    }
+  };
+
+  const askAiAboutHistory = async (entry: DbSqlHistoryEntry) => {
+    const { text, truncated } = truncateStatement(entry.sqlContent);
+    const prompt = buildDbAiPrompt(
+      {
+        action: "explain",
+        dialect: "sql",
+        engine: entry.engine,
+        statement: text,
+        truncated,
+        database: entry.databaseName,
+        schema: entry.schemaName,
+        durationMs: entry.durationMs,
+        rowCount: entry.rowCount,
+        error: entry.error,
+        resultSummary: resultShape(latestResultForSql(entry.sqlContent)),
+      },
+      readGlobalAnswerLanguage(),
+    );
+    await sendDbAiPrompt(prompt);
     setHistoryPanelId(null);
   };
 
   const askAiAboutStatement = async (action: EditorStatementAction) => {
-    const result = latestResultForSql(action.range.sql);
-    const resultSummary = result
-      ? `\n\nResult summary: ${result.rows.length} row(s), ${result.columns.length} column(s).`
-      : "";
-    const prompt = [
-      "请分析当前编辑器中的这条数据库 SQL，并说明含义、潜在问题和可优化点：",
-      "",
-      "```sql",
-      action.range.sql,
-      "```",
-      "",
-      `Engine: ${info.engine}`,
-      `Database: ${info.database ?? "-"}`,
-      `Schema: ${activeSchema ?? "-"}`,
-      resultSummary,
-    ].join("\n");
-    await useChatStore.getState().openTabChat(tabId);
-    await useChatStore.getState().sendPromptToTabChat(prompt);
+    const { text, truncated } = truncateStatement(action.range.sql);
+    const prompt = buildDbAiPrompt(
+      {
+        action: "explain",
+        dialect: "sql",
+        engine: info.engine,
+        statement: text,
+        truncated,
+        database: info.database,
+        schema: activeSchema,
+        resultSummary: resultShape(latestResultForSql(action.range.sql)),
+      },
+      readGlobalAnswerLanguage(),
+    );
+    await sendDbAiPrompt(prompt);
     setStatementAction(null);
   };
 

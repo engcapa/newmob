@@ -25,11 +25,13 @@ import {
   X,
 } from "lucide-react";
 import {
+  MAX_QUEUED_SENDS,
   normalizeChatThreadMode,
   useChatStore,
   isChatCapableTabType,
   type ChatDrawerPosition,
   type ChatThreadMode,
+  type QueuedSend,
 } from "../../stores/chatStore";
 import {
   chatDrawerProviderIds,
@@ -66,6 +68,9 @@ import { notesThemeStyle } from "../../lib/notes/notesTheme";
 import { TaoAlertInbox } from "../tao/TaoAlertInbox";
 import { alertColorBucket, buildTaoAlerts, topAlertKind, type TaoAlert } from "../../lib/tao/taoAlerts";
 
+/** Stable empty array so a thread with no queue does not churn renders. */
+const EMPTY_QUEUE: QueuedSend[] = [];
+
 const DRAWER_POSITIONS: ChatDrawerPosition[] = ["left", "right", "top", "bottom"];
 const CHAT_THREAD_MODES: ChatThreadMode[] = ["chat", "image", "video"];
 const SIDE_RIBBON_HOVER_OPEN_DELAY_MS = 260;
@@ -83,10 +88,10 @@ interface ChatDrawerProps {
 export function ChatDrawer({ terminalContext }: ChatDrawerProps) {
   const t = useT();
   const {
-    threads, activeThreadId, messages, sendingByThreadId, drawerOpen, drawerWidth,
+    threads, activeThreadId, messages, sendingByThreadId, sendQueues, drawerOpen, drawerWidth,
     drawerHeight, drawerPosition, drawerPinned, drawerFloatingOpacity, drawerTabId,
     loadThreads, newThread, deleteThread, setActiveThread, loadMessages,
-    sendMessage, hideDrawer, setDrawerWidth, setDrawerHeight, setDrawerPosition,
+    enqueueMessage, dequeueSend, hideDrawer, setDrawerWidth, setDrawerHeight, setDrawerPosition,
     setDrawerPinned, setDrawerFloatingOpacity, dismissDrawer, purgeOldThreads, stopSending,
   } = useChatStore();
 
@@ -155,6 +160,7 @@ export function ChatDrawer({ terminalContext }: ChatDrawerProps) {
 
   const activeMessages = activeThreadId ? (messages[activeThreadId] ?? []) : [];
   const sending = activeThreadId ? sendingByThreadId[activeThreadId] === true : false;
+  const queuedSends = activeThreadId ? sendQueues[activeThreadId] ?? EMPTY_QUEUE : EMPTY_QUEUE;
   const activeThread = (threads ?? []).find((t) => t.id === activeThreadId);
   const linkedTab = useAppStore((s) =>
     activeThread?.linked_session_id
@@ -529,7 +535,13 @@ export function ChatDrawer({ terminalContext }: ChatDrawerProps) {
         const thread = await newThread(providerId, linked, newThreadMode);
         threadId = thread.id;
       }
-      await sendMessage(threadId, content, ctx, attachments);
+      // Queued rather than sent directly, so typing ahead of a running turn
+      // parks the message instead of racing it into the same transcript.
+      const result = await enqueueMessage(threadId, content, ctx, attachments);
+      if (result.status === "rejected") {
+        setError(t("chat.queueFull", { limit: result.limit }));
+      }
+      return result;
     } catch (e) {
       setError(String(e));
     }
@@ -1194,10 +1206,18 @@ export function ChatDrawer({ terminalContext }: ChatDrawerProps) {
                   ))}
                 </div>
                 <span>{sendingLabel}</span>
+                {queuedSends.length > 0 && (
+                  <span className="text-[10px] text-[var(--taomni-accent)]" data-testid="ai-chat-queue-badge">
+                    {t("chat.queuedBadge", { count: queuedSends.length })}
+                  </span>
+                )}
               </div>
               <button
                 type="button"
                 className="taomni-btn h-5 px-2 text-[10px] flex items-center gap-1 hover:text-red-400 border border-[var(--taomni-divider)] rounded hover:bg-[var(--taomni-hover)] transition-colors"
+                // Stops this turn only — the queue keeps draining, so this is
+                // "skip this answer" rather than "abandon everything".
+                title={queuedSends.length > 0 ? t("chat.stopKeepsQueue") : undefined}
                 onClick={() => {
                   if (activeThreadId) {
                     void stopSending(activeThreadId);
@@ -1224,6 +1244,11 @@ export function ChatDrawer({ terminalContext }: ChatDrawerProps) {
           onSend={handleSend}
           sending={sending}
           disabled={false}
+          queuedItems={queuedSends}
+          queueLimit={MAX_QUEUED_SENDS}
+          onRemoveQueued={(itemId) => {
+            if (activeThreadId) dequeueSend(activeThreadId, itemId);
+          }}
           attachmentsEnabled={attachmentsEnabled}
           placeholder={composerPlaceholder}
           // Use the active terminal registry when available — that's what

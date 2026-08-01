@@ -3,26 +3,30 @@
 // Mirrors `intelligencePreferences.ts`: localStorage-backed, keyed by workspace
 // instance, and tolerant of missing or corrupt payloads so a bad value can
 // never keep the workspace from opening.
+//
+// `answerLanguage` defaults to `inherit`, which follows the global default in
+// Settings → AI. A stored value other than `inherit` means the user pinned this
+// one workspace, and the global setting no longer moves it.
 
-import { AI_ANSWER_LANGUAGES, type AiAnswerLanguage } from "./editorAiPrompts";
+import {
+  nextAnswerLanguage,
+  normalizeAnswerLanguage,
+  type AiAnswerLanguage,
+} from "../../../lib/ai/answerLanguage";
+
+export { nextAnswerLanguage };
 
 export interface EditorAiPreferences {
-  /** Language the AI should answer in. `auto` follows the app locale. */
+  /** Language the AI should answer in. `inherit` follows the global default. */
   answerLanguage: AiAnswerLanguage;
 }
 
 export const DEFAULT_EDITOR_AI_PREFERENCES: EditorAiPreferences = {
-  answerLanguage: "auto",
+  answerLanguage: "inherit",
 };
 
 function storageKey(workspaceInstanceId: string): string {
   return `taomni.codeWorkspace.editorAi.v1.${workspaceInstanceId}`;
-}
-
-function normalizeAnswerLanguage(value: unknown): AiAnswerLanguage {
-  return AI_ANSWER_LANGUAGES.includes(value as AiAnswerLanguage)
-    ? value as AiAnswerLanguage
-    : DEFAULT_EDITOR_AI_PREFERENCES.answerLanguage;
 }
 
 export function readEditorAiPreferences(workspaceInstanceId: string): EditorAiPreferences {
@@ -46,10 +50,4 @@ export function writeEditorAiPreferences(
     // Ignore storage failures — the preference is a convenience, not state we
     // can block the editor on.
   }
-}
-
-/** Next value in the Auto → 中文 → English cycle. */
-export function nextAnswerLanguage(current: AiAnswerLanguage): AiAnswerLanguage {
-  const index = AI_ANSWER_LANGUAGES.indexOf(current);
-  return AI_ANSWER_LANGUAGES[(index + 1) % AI_ANSWER_LANGUAGES.length];
 }

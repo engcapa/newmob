@@ -100,6 +100,43 @@ type StreamEvent =
 type DrawerScope = "tab" | null;
 export type ChatDrawerPosition = "left" | "right" | "top" | "bottom";
 
+/**
+ * A send waiting behind the thread's in-flight turn.
+ *
+ * Queued rather than sent concurrently because a thread is a conversation: two
+ * turns racing would interleave their tokens in one transcript and give the
+ * model a history that never happened.
+ */
+export interface QueuedSend {
+  id: string;
+  content: string;
+  terminalContext?: string;
+  attachments?: ChatAttachment[];
+}
+
+/**
+ * Cap on sends waiting behind the current turn, per thread. Small on purpose:
+ * a deep queue means the user is typing far ahead of answers they have not read
+ * yet, and each queued turn was written without the context of the replies that
+ * will land before it.
+ */
+export const MAX_QUEUED_SENDS = 5;
+
+/** What `enqueueMessage` did with the request. */
+export type EnqueueResult =
+  /** The thread was idle — sent immediately. */
+  | { status: "sent" }
+  /** A turn was in flight — parked at position `position` (1-based). */
+  | { status: "queued"; position: number }
+  /** The queue was already full; nothing was sent or stored. */
+  | { status: "rejected"; limit: number }
+  /** No thread could be resolved or the content was blank. */
+  | { status: "skipped" };
+
+function queueId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `q-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 const CHAT_DRAWER_LAYOUT_STORAGE_KEY = "taomni.chatDrawer.layout.v1";
 const MIN_DRAWER_FLOATING_OPACITY = 0.65;
 const MAX_DRAWER_FLOATING_OPACITY = 1;
@@ -121,6 +158,9 @@ export function isChatCapableTabType(type: string | null | undefined): boolean {
     type === "rdp" ||
     type === "database" ||
     type === "redis" ||
+    // Without this, an HBase shell's explain prompt resolves to the welcome tab
+    // and lands in an unrelated thread.
+    type === "hbase-shell" ||
     type === "mail" ||
     type === "git" ||
     type === "code-workspace"
@@ -268,6 +308,10 @@ interface ChatStore {
   /// In-flight send state by thread. A tab switch can change `activeThreadId`
   /// while the original turn keeps running, so lifecycle must stay thread-bound.
   sendingByThreadId: Record<string, boolean>;
+  /// Sends parked behind each thread's in-flight turn, oldest first. Keyed by
+  /// thread for the same reason as `sendingByThreadId`: one busy conversation
+  /// must not hold up a different tab's.
+  sendQueues: Record<string, QueuedSend[]>;
   /// Back-compat aggregate used by older call sites/tests. Prefer
   /// `sendingByThreadId[threadId]` when a specific drawer/thread is rendered.
   sending: boolean;
@@ -309,6 +353,25 @@ interface ChatStore {
   setActiveThread: (threadId: string | null) => void;
   loadMessages: (threadId: string) => Promise<void>;
   sendMessage: (threadId: string, content: string, terminalContext?: string, attachments?: ChatAttachment[]) => Promise<void>;
+  /// Send now if the thread is idle, otherwise park behind the running turn.
+  /// Every user-facing send path goes through here — the composer and the
+  /// programmatic prompts from the editor / DB explain actions share one queue
+  /// and one limit, so a burst of "Explain" clicks cannot jump the line ahead
+  /// of something typed by hand.
+  ///
+  /// Resolves as soon as the request is placed, not when the turn finishes.
+  enqueueMessage: (
+    threadId: string,
+    content: string,
+    terminalContext?: string,
+    attachments?: ChatAttachment[],
+  ) => Promise<EnqueueResult>;
+  /// Drop one parked send. No effect once it has started.
+  dequeueSend: (threadId: string, itemId: string) => void;
+  /// Drop every parked send for a thread. Does not touch the running turn.
+  clearQueue: (threadId: string) => void;
+  /// Stop the running turn. The queue keeps draining — this means "skip this
+  /// answer", not "abandon everything". Use `clearQueue` for the latter.
   stopSending: (threadId: string) => Promise<void>;
   /// Open the drawer (creating a thread if needed) and stage `text` in the
   /// composer as a blockquote. For raw *selections* the user will write around
@@ -319,7 +382,9 @@ interface ChatStore {
   /// Send an already-composed prompt to the active tab's chat thread verbatim.
   /// Reuses (or creates) the tab-bound thread so follow-up questions stay in the
   /// same context, and auto-sends rather than staging.
-  sendPromptToTabChat: (prompt: string) => Promise<void>;
+  /// Returns the queue outcome so callers can tell the user their prompt was
+  /// parked rather than sent, or rejected because the queue was full.
+  sendPromptToTabChat: (prompt: string) => Promise<EnqueueResult>;
   consumePendingComposerText: () => string;
   setComposerDraft: (key: string, draft: ChatComposerDraft) => void;
   clearComposerDraft: (key: string) => void;
@@ -399,6 +464,56 @@ function nextThreadSendingState(
   };
 }
 
+/** Drop a thread's queue key entirely when it empties, so the map stays clean. */
+function pruneQueue(
+  queues: Record<string, QueuedSend[]>,
+  threadId: string,
+  next: QueuedSend[],
+): Record<string, QueuedSend[]> {
+  const result = { ...queues };
+  if (next.length === 0) {
+    delete result[threadId];
+  } else {
+    result[threadId] = next;
+  }
+  return result;
+}
+
+/**
+ * Run one send, then pull the thread's next parked send and repeat.
+ *
+ * The recursion lives in `finally`, so the chain advances whether the turn
+ * succeeded, threw, or was cut short by `stopSending` — a failed turn must not
+ * strand everything behind it. Errors are logged rather than rethrown: the user
+ * already sees them in the transcript (`sendMessage` writes an error message
+ * into the stream), and this is a detached background chain with no caller left
+ * to catch.
+ *
+ * Defined outside the store so it can reference `useChatStore` lazily and stay
+ * off the public interface — callers use `enqueueMessage`.
+ */
+async function runQueuedSend(threadId: string, item: QueuedSend): Promise<void> {
+  try {
+    await useChatStore.getState().sendMessage(
+      threadId,
+      item.content,
+      item.terminalContext,
+      item.attachments,
+    );
+  } catch (e) {
+    console.error("queued chat send failed:", e);
+  } finally {
+    let next: QueuedSend | undefined;
+    useChatStore.setState((s) => {
+      const queued = s.sendQueues[threadId];
+      if (!queued || queued.length === 0) return s;
+      [next] = queued;
+      return { sendQueues: pruneQueue(s.sendQueues, threadId, queued.slice(1)) };
+    });
+    if (next) void runQueuedSend(threadId, next);
+  }
+}
+
 async function resolveDefaultProviderId(capability: LlmProviderCapability = "chat"): Promise<string | null> {
   try {
     const { chatDrawerProviderIds, defaultChatProviderId, useAiStore } = await import("./aiStore");
@@ -428,6 +543,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   ccToolCards: {},
   ccUsage: {},
   sendingByThreadId: {},
+  sendQueues: {},
   sending: false,
   drawerOpen: false,
   drawerScope: null,
@@ -488,6 +604,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       ),
       composerDrafts: Object.fromEntries(
         Object.entries(s.composerDrafts).filter(([key]) => key !== `thread:${threadId}`),
+      ),
+      // A deleted thread has nowhere left to send — drop anything parked for it
+      // so it cannot be delivered to a thread that no longer exists.
+      sendQueues: Object.fromEntries(
+        Object.entries(s.sendQueues).filter(([key]) => key !== threadId),
       ),
       ...(active ? { drawerScope: null, drawerTabId: null } : {}),
     }));
@@ -870,12 +991,56 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
   },
 
+  enqueueMessage: async (threadId, content, terminalContext, attachments) => {
+    const trimmed = content.trim();
+    if (!threadId || !trimmed) return { status: "skipped" };
+
+    // Idle thread: nothing to wait behind. Run it through the same executor as
+    // queued items so a send that arrives mid-flight is picked up when this one
+    // finishes, no matter which path put it there.
+    if (get().sendingByThreadId[threadId] !== true) {
+      void runQueuedSend(threadId, { id: queueId(), content: trimmed, terminalContext, attachments });
+      return { status: "sent" };
+    }
+
+    const queued = get().sendQueues[threadId] ?? [];
+    if (queued.length >= MAX_QUEUED_SENDS) {
+      // Rejected outright rather than dropping the oldest: the caller still
+      // holds the text and can resend, whereas a silent eviction would lose a
+      // message the user believed was accepted.
+      return { status: "rejected", limit: MAX_QUEUED_SENDS };
+    }
+
+    const item: QueuedSend = { id: queueId(), content: trimmed, terminalContext, attachments };
+    set((s) => ({
+      sendQueues: { ...s.sendQueues, [threadId]: [...(s.sendQueues[threadId] ?? []), item] },
+    }));
+    return { status: "queued", position: queued.length + 1 };
+  },
+
+  dequeueSend: (threadId, itemId) => {
+    set((s) => {
+      const queued = s.sendQueues[threadId];
+      if (!queued) return s;
+      const next = queued.filter((item) => item.id !== itemId);
+      if (next.length === queued.length) return s;
+      return { sendQueues: pruneQueue(s.sendQueues, threadId, next) };
+    });
+  },
+
+  clearQueue: (threadId) => {
+    set((s) => (s.sendQueues[threadId] ? { sendQueues: pruneQueue(s.sendQueues, threadId, []) } : s));
+  },
+
   stopSending: async (threadId: string) => {
     try {
       await invoke("chat_stop_stream", { threadId });
     } catch (e) {
       console.error("chat_stop_stream failed:", e);
     }
+    // Deliberately leaves `sendQueues` alone: stopping is "skip this answer".
+    // `runQueuedSend`'s finally block picks up the next parked send, so the
+    // queue keeps moving. Callers wanting a full abort call `clearQueue` too.
     set((s) => nextThreadSendingState(s.sendingByThreadId, threadId, false));
   },
 
@@ -1012,7 +1177,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   sendPromptToTabChat: async (prompt: string) => {
     const trimmed = prompt.trim();
-    if (!trimmed) return;
+    if (!trimmed) return { status: "skipped" };
     const { getActiveTerminalTabId } = await import("../lib/terminal/terminalRegistry");
     const tabId = getActiveTerminalTabId() ?? (await resolveActiveChatTabId());
     let threadId: string | null = null;
@@ -1033,8 +1198,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       threadId = thread.id;
     }
     set({ drawerOpen: true });
-    // Fire-and-forget — sendMessage owns its own loading state.
-    void get().sendMessage(threadId, trimmed);
+    // Queues behind an in-flight turn instead of racing it. The outcome goes
+    // back to the caller so an editor/DB action can tell the user their prompt
+    // was parked, or refused because the queue is full.
+    return await get().enqueueMessage(threadId, trimmed);
   },
 
   consumePendingComposerText: () => {

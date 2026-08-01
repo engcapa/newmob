@@ -18,9 +18,12 @@ import { useDbSessionFontSize } from "./useDbSessionFontSize";
 import { confirmAppDialog, promptAppDialog } from "../../lib/appDialogs";
 import { loadResizableLayout, saveResizableLayout } from "../../lib/resizableLayout";
 import { useAppStore } from "../../stores/appStore";
+import { useChatStore } from "../../stores/chatStore";
 import { TabActions } from "../tabbar/TabActionSlot";
 import { FT_BUTTON_ACTIVE_OVERRIDE, FT_ICON_BUTTON_STYLE } from "../floating-toolbar/floatingToolbarStyles";
 import { useT } from "../../lib/i18n";
+import { readGlobalAnswerLanguage } from "../../lib/ai/answerLanguage";
+import { buildDbAiPrompt, truncateStatement } from "../../lib/database/dbAiPrompts";
 import { QueryLibraryPanel } from "./QueryLibraryPanel";
 import { registerQueryTab } from "../../lib/queryRegistry";
 
@@ -160,6 +163,37 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
     setLeftPanelTab("queries");
     setTimeout(() => queryTriggerRef.current?.(), 0);
   }, []);
+
+  const explainCommand = useCallback(async (command: string, reply?: string) => {
+    const trimmed = command.trim();
+    if (!trimmed) {
+      setStatusMessage(t("dbAi.noCommand"));
+      return;
+    }
+    const { text, truncated } = truncateStatement(trimmed);
+    const prompt = buildDbAiPrompt(
+      {
+        action: "explain",
+        dialect: "redis",
+        engine: "Redis",
+        statement: text,
+        truncated,
+        database: `DB ${dbIndex}`,
+        resultSummary: reply ?? null,
+      },
+      readGlobalAnswerLanguage(),
+    );
+    const chat = useChatStore.getState();
+    await chat.openTabChat(tabId);
+    const outcome = await chat.sendPromptToTabChat(prompt);
+    if (outcome.status === "rejected") {
+      setStatusMessage(t("dbAi.queueFull", { limit: outcome.limit }));
+    } else if (outcome.status === "queued") {
+      setStatusMessage(t("dbAi.queued", { position: outcome.position }));
+    } else {
+      setStatusMessage(t("dbAi.sent"));
+    }
+  }, [dbIndex, setStatusMessage, t, tabId]);
 
   const switchDbIndex = async (idx: number) => {
     if (!connectionSessionId) return;
@@ -357,6 +391,7 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
             input={commandDraft}
             onInputChange={updateCommandDraft}
             onSaveQuery={openQuerySave}
+            onExplain={(command, reply) => void explainCommand(command, reply)}
           />
         </Panel>
       </PanelGroup>
