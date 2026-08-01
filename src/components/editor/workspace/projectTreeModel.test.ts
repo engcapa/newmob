@@ -136,6 +136,9 @@ describe("project tree model helpers", () => {
     expect(other.key).not.toBe(file.key);
 
     expect(libraryLanguagePath({ ...info, title: "String", languageId: "kotlin" })).toBe("String.kt");
+    expect(libraryLanguagePath({ ...info, title: "String", languageId: "csharp" })).toBe("String.cs");
+    expect(libraryLanguagePath({ ...info, title: "Vector", languageId: "swift" })).toBe("Vector.swift");
+    expect(libraryLanguagePath({ ...info, title: "lib", languageId: "typescript" })).toBe("lib.ts");
   });
 
   it("looksLikeDocumentUri separates URIs from filesystem paths", () => {

@@ -656,7 +656,7 @@ const STUB_LSP_PRESETS = [
     fileExtensions: ["cs", "csx"],
     fileNames: [],
     commands: [
-      { id: "csharp-ls", label: "csharp-ls", command: "csharp-ls", args: [], installHint: "dotnet tool install -g csharp-ls", fallback: false },
+      { id: "csharp-ls", label: "csharp-ls", command: "csharp-ls", args: ["--features", "metadata-uris"], installHint: "dotnet tool install -g csharp-ls", fallback: false },
       { id: "omnisharp", label: "OmniSharp", command: "omnisharp", args: ["--languageserver"], installHint: "Install OmniSharp and ensure `omnisharp` is on PATH", fallback: true },
     ],
   },

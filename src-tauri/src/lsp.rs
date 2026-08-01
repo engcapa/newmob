@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
@@ -40,6 +41,9 @@ const JDTLS_WORKSPACE_MARKER: &str = ".taomni-workspace";
 /// budget covers a cold Maven/Gradle source fetch without hanging the UI forever.
 const DOWNLOAD_SOURCES_POLL_ATTEMPTS: u32 = 20;
 const DOWNLOAD_SOURCES_POLL_INTERVAL_MS: u64 = 1200;
+/// Bound archive/virtual source reads so a corrupt server URI or compressed
+/// dependency cannot turn a navigation action into an unbounded allocation.
+const MAX_VIRTUAL_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 3;
 const EXIT_TIMEOUT_SECS: u64 = 2;
 const COMMAND_AVAILABILITY_TTL: Duration = Duration::from_secs(30);
@@ -679,9 +683,7 @@ impl LspManager {
         };
         let using_custom = custom_command_to_preset(custom_command).is_some();
         let binary_available = command.is_some();
-        let jdtls_runtime_error = if !active
-            && command.as_ref().is_some_and(command_is_jdtls)
-        {
+        let jdtls_runtime_error = if !active && command.as_ref().is_some_and(command_is_jdtls) {
             resolve_java_for_jdtls_with_sdk(
                 sdk_environment.tooling_java_home.as_deref().map(Path::new),
                 sdk_environment.tooling_java_error.as_deref(),
@@ -833,7 +835,9 @@ impl LspManager {
                     .finish_session_start(&map_key, &start, Err(error.clone()))
                     .await;
                 self.remember_error(&map_key, error.clone()).await;
-                return Err(session_start_error_status(document, preset, &command, error));
+                return Err(session_start_error_status(
+                    document, preset, &command, error,
+                ));
             }
         };
         let result = LspSession::spawn(
@@ -963,7 +967,8 @@ impl LspManager {
         arguments: Vec<Value>,
         identity: JavaSessionIdentity,
     ) -> Result<Value, String> {
-        let document = resolve_document(workspace_id, root_path, file_path, Some("java".into()), 0)?;
+        let document =
+            resolve_document(workspace_id, root_path, file_path, Some("java".into()), 0)?;
         // Debug + test must target the SAME jdtls session the editor uses. When a
         // custom jdtls command is configured, the default `active_session(None,
         // None)` lookup recomputes the default `jdtls` session key and misses the
@@ -991,7 +996,10 @@ impl LspManager {
             .await;
         match &result {
             Ok(_) => log::info!("lsp: {command} ok in {:?}", started.elapsed()),
-            Err(error) => log::warn!("lsp: {command} failed after {:?}: {error}", started.elapsed()),
+            Err(error) => log::warn!(
+                "lsp: {command} failed after {:?}: {error}",
+                started.elapsed()
+            ),
         }
         result
     }
@@ -1030,9 +1038,7 @@ impl LspManager {
             guard
                 .values()
                 .filter_map(|entry| match entry {
-                    LspSessionEntry::Ready(session)
-                        if session.key.workspace_id == workspace_id =>
-                    {
+                    LspSessionEntry::Ready(session) if session.key.workspace_id == workspace_id => {
                         Some(session.clone())
                     }
                     _ => None,
@@ -1211,7 +1217,8 @@ impl LspSession {
         if is_jdtls {
             apply_jdtls_vmargs_to_command(&mut process);
         }
-        let initialization_options = lsp_initialization_options(is_jdtls, &sdk_environment);
+        let initialization_options =
+            lsp_initialization_options(&preset, &command, &sdk_environment);
         process
             .current_dir(&root_path)
             .stdin(Stdio::piped())
@@ -1367,7 +1374,10 @@ impl LspSession {
                 return Err(error);
             }
         };
-        let server_caps = initialize_result.get("capabilities").cloned().unwrap_or(Value::Null);
+        let server_caps = initialize_result
+            .get("capabilities")
+            .cloned()
+            .unwrap_or(Value::Null);
         *session.capabilities.write().await = Some(capability_summary_from(&server_caps));
         session
             .text_document_sync_kind
@@ -1491,10 +1501,7 @@ impl LspSession {
 
             // Server → client request. Always answer so servers that wait on
             // registerCapability / configuration do not stall after initialize.
-            let method = message
-                .get("method")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let method = message.get("method").and_then(Value::as_str).unwrap_or("");
             let result = server_request_result(method, message.get("params"));
             let _ = self
                 .write_message(&json!({
@@ -1535,7 +1542,14 @@ impl LspSession {
             None
         } else {
             // Keep the error toast readable; full log is still in debug logs.
-            let snippet: String = trimmed.chars().rev().take(400).collect::<String>().chars().rev().collect();
+            let snippet: String = trimmed
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
             Some(snippet)
         }
     }
@@ -1637,9 +1651,7 @@ fn build_lsp_server_command(
         let is_batch = resolved
             .extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| {
-                ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat")
-            });
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
         if is_batch {
             let mut cmd = Command::new("cmd.exe");
             // /D skips AutoRun; /S keeps the quoted command line intact so paths
@@ -2163,7 +2175,11 @@ fn resolve_java_binary_from_user_path(path: &Path) -> Option<PathBuf> {
         return Some(in_bin);
     }
     // macOS `.jdk` bundles: Contents/Home/bin/java
-    let mac = path.join("Contents").join("Home").join("bin").join(bin_name);
+    let mac = path
+        .join("Contents")
+        .join("Home")
+        .join("bin")
+        .join(bin_name);
     if mac.is_file() {
         return Some(mac);
     }
@@ -2248,7 +2264,13 @@ fn resolve_java_for_jdtls_with_sdk(
         .into_iter()
         .flatten()
         {
-            for vendor in ["Java", "Eclipse Adoptium", "Microsoft", "Amazon Corretto", "Semeru"] {
+            for vendor in [
+                "Java",
+                "Eclipse Adoptium",
+                "Microsoft",
+                "Amazon Corretto",
+                "Semeru",
+            ] {
                 let root = PathBuf::from(&base).join(vendor);
                 if let Ok(entries) = std::fs::read_dir(&root) {
                     for entry in entries.flatten() {
@@ -2317,19 +2339,11 @@ fn resolve_java_for_jdtls_with_sdk(
         match java_major_version(&path) {
             Ok(major) => {
                 if major >= JDTLS_MIN_JAVA_MAJOR {
-                    if best_ok
-                        .as_ref()
-                        .map(|(_, m)| major > *m)
-                        .unwrap_or(true)
-                    {
+                    if best_ok.as_ref().map(|(_, m)| major > *m).unwrap_or(true) {
                         best_ok = Some((path.clone(), major));
                     }
                 }
-                if best_any
-                    .as_ref()
-                    .map(|(_, m)| major > *m)
-                    .unwrap_or(true)
-                {
+                if best_any.as_ref().map(|(_, m)| major > *m).unwrap_or(true) {
                     best_any = Some((path, major));
                 }
             }
@@ -2379,14 +2393,14 @@ fn jdtls_runtime_probe() -> (Option<String>, Option<String>) {
                 Some(format!(
                     "Java {major} — need JDK {JDTLS_MIN_JAVA_MAJOR}+ for current JDT LS"
                 ))
-            } else if error.contains("java not found")
-                || error.contains("invalid")
-            {
+            } else if error.contains("java not found") || error.contains("invalid") {
                 Some(format!(
                     "Java not found — need JDK {JDTLS_MIN_JAVA_MAJOR}+ for jdtls"
                 ))
             } else {
-                Some(format!("Java runtime issue (need JDK {JDTLS_MIN_JAVA_MAJOR}+)"))
+                Some(format!(
+                    "Java runtime issue (need JDK {JDTLS_MIN_JAVA_MAJOR}+)"
+                ))
             };
             (status, Some(error))
         }
@@ -2398,15 +2412,11 @@ fn command_is_jdtls(command: &LspServerCommandPreset) -> bool {
         || command.command.to_ascii_lowercase().contains("jdtls")
 }
 
-fn preset_uses_jdtls(
-    preset: &LspServerPreset,
-    command: Option<&LspServerCommandPreset>,
-) -> bool {
+fn preset_uses_jdtls(preset: &LspServerPreset, command: Option<&LspServerCommandPreset>) -> bool {
     if preset.id == "java" {
         return true;
     }
-    command.is_some_and(command_is_jdtls)
-        || preset.commands.iter().any(command_is_jdtls)
+    command.is_some_and(command_is_jdtls) || preset.commands.iter().any(command_is_jdtls)
 }
 
 /// Parse `java -version` output (`openjdk version "17.0.4"` / `"21.0.2"` / `"1.8.0_xxx"`).
@@ -3115,7 +3125,11 @@ pub async fn lsp_workspace_diagnostics(
     workspace_id: String,
 ) -> Result<Vec<WorkspaceDiagnosticFile>, String> {
     let workspace_id = workspace_id.trim();
-    let workspace_id = if workspace_id.is_empty() { "default" } else { workspace_id };
+    let workspace_id = if workspace_id.is_empty() {
+        "default"
+    } else {
+        workspace_id
+    };
     Ok(state.lsp.workspace_diagnostics(workspace_id).await)
 }
 
@@ -3184,7 +3198,11 @@ pub async fn lsp_build_workspace(
     let full = full.unwrap_or(true);
     let started = Instant::now();
     let result = session
-        .request_with_timeout("java/buildWorkspace", json!(full), BUILD_WORKSPACE_TIMEOUT_SECS)
+        .request_with_timeout(
+            "java/buildWorkspace",
+            json!(full),
+            BUILD_WORKSPACE_TIMEOUT_SECS,
+        )
         .await
         .map_err(|e| format!("Failed to build project: {e}"))?;
     let status = build_status_from_result(&result);
@@ -3832,9 +3850,222 @@ pub async fn lsp_implementation(
     .await
 }
 
-/// Open library / virtual LSP locations (JDK classes, dependency JARs, jdt://).
-/// Prefer a real filesystem path when the URI maps to one; otherwise ask JDT LS
-/// for decompiled or attached source via `java/classFileContents`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ServerVirtualDocument {
+    text: String,
+    title: String,
+    container: Option<String>,
+    language_id: String,
+    decompiled: bool,
+}
+
+fn source_extension_for_language(language_id: &str) -> &'static str {
+    match language_id {
+        "kotlin" => "kt",
+        "scala" => "scala",
+        "csharp" => "cs",
+        "swift" => "swift",
+        "cpp" | "c" => "cpp",
+        "python" => "py",
+        "rust" => "rs",
+        "go" => "go",
+        "typescript" | "typescriptreact" => "ts",
+        "javascript" | "javascriptreact" => "js",
+        _ => "java",
+    }
+}
+
+fn title_from_virtual_uri(uri: &str, language_id: &str) -> String {
+    let clean = uri
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(uri)
+        .trim_end_matches('/');
+    let name = clean
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("Library");
+    if name.to_ascii_lowercase().ends_with(".class") {
+        return format!(
+            "{}.{}",
+            &name[..name.len() - ".class".len()],
+            source_extension_for_language(language_id)
+        );
+    }
+    name.to_string()
+}
+
+fn response_string<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_str))
+}
+
+async fn read_server_virtual_document(
+    session: &Arc<LspSession>,
+    uri: &str,
+) -> Result<ServerVirtualDocument, String> {
+    match session.key.preset_id.as_str() {
+        "java" if is_virtual_class_uri(uri) => {
+            let result = session
+                .request_with_timeout(
+                    "java/classFileContents",
+                    json!({ "uri": uri }),
+                    REQUEST_TIMEOUT_SECS.max(20),
+                )
+                .await
+                .map_err(|error| format!("Failed to load Java class contents: {error}"))?;
+            let text = result
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| {
+                    format!(
+                        "Java language server returned no source for {}: attach a sources JAR or install a decompiler",
+                        title_from_class_uri(uri)
+                    )
+                })?
+                .to_string();
+            Ok(ServerVirtualDocument {
+                title: title_from_class_uri(uri),
+                container: container_from_class_uri(uri),
+                language_id: "java".into(),
+                decompiled: is_decompiled_contents(&text),
+                text,
+            })
+        }
+        "kotlin" if uri.to_ascii_lowercase().starts_with("kls:") => {
+            let result = session
+                .request_with_timeout(
+                    "kotlin/jarClassContents",
+                    json!({ "uri": uri }),
+                    REQUEST_TIMEOUT_SECS.max(20),
+                )
+                .await
+                .map_err(|error| format!("Failed to load Kotlin library contents: {error}"))?;
+            let text = result
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| "Kotlin language server returned no library source".to_string())?
+                .to_string();
+            let language_id = language_id_from_uri(uri);
+            Ok(ServerVirtualDocument {
+                title: title_from_virtual_uri(uri, &language_id),
+                container: archive_document_uri(uri).and_then(|document| {
+                    document
+                        .archive_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                }),
+                language_id,
+                // This provider may decompile, but only jdtls supports Taomni's
+                // on-demand source attachment action.
+                decompiled: false,
+                text,
+            })
+        }
+        "kotlin" => {
+            let result = session
+                .request_with_timeout(
+                    "workspace/executeCommand",
+                    json!({ "command": "decompile", "arguments": [uri] }),
+                    REQUEST_TIMEOUT_SECS.max(20),
+                )
+                .await
+                .map_err(|error| format!("Failed to decompile Kotlin library source: {error}"))?;
+            let text = response_string(&result, &["code", "Code"])
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| "Kotlin language server returned no decompiled source".to_string())?
+                .to_string();
+            let language_id = response_string(&result, &["language", "Language"])
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("kotlin")
+                .to_ascii_lowercase();
+            Ok(ServerVirtualDocument {
+                title: title_from_virtual_uri(uri, &language_id),
+                container: archive_document_uri(uri).and_then(|document| {
+                    document
+                        .archive_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                }),
+                language_id,
+                decompiled: false,
+                text,
+            })
+        }
+        "scala" => {
+            let result = session
+                .request_with_timeout(
+                    "workspace/executeCommand",
+                    json!({ "command": "file-decode", "arguments": [uri] }),
+                    REQUEST_TIMEOUT_SECS.max(20),
+                )
+                .await
+                .map_err(|error| format!("Failed to decode Scala library source: {error}"))?;
+            let text = response_string(&result, &["value", "Value"])
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| {
+                    response_string(&result, &["error", "Error"])
+                        .unwrap_or("Metals returned no library source")
+                        .to_string()
+                })?
+                .to_string();
+            Ok(ServerVirtualDocument {
+                title: title_from_virtual_uri(uri, "scala"),
+                container: archive_document_uri(uri).and_then(|document| {
+                    document
+                        .archive_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                }),
+                language_id: "scala".into(),
+                decompiled: false,
+                text,
+            })
+        }
+        "csharp" if uri.to_ascii_lowercase().starts_with("csharp:") => {
+            let result = session
+                .request_with_timeout(
+                    "csharp/metadata",
+                    json!({ "textDocument": { "uri": uri } }),
+                    REQUEST_TIMEOUT_SECS.max(20),
+                )
+                .await
+                .map_err(|error| format!("Failed to load C# metadata source: {error}"))?;
+            let text = response_string(&result, &["source", "Source"])
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| "C# language server returned no metadata source".to_string())?
+                .to_string();
+            let assembly = response_string(&result, &["assemblyName", "AssemblyName"]);
+            let project = response_string(&result, &["projectName", "ProjectName"]);
+            let title = response_string(&result, &["symbolName", "SymbolName"])
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| format!("{value}.cs"))
+                .unwrap_or_else(|| title_from_virtual_uri(uri, "csharp"));
+            let container = match (assembly, project) {
+                (Some(assembly), Some(project)) => Some(format!("{assembly} · {project}")),
+                (Some(assembly), None) => Some(assembly.to_string()),
+                (None, Some(project)) => Some(project.to_string()),
+                (None, None) => None,
+            };
+            Ok(ServerVirtualDocument {
+                title,
+                container,
+                language_id: "csharp".into(),
+                decompiled: false,
+                text,
+            })
+        }
+        preset => Err(format!(
+            "{preset} language server returned an unsupported virtual document URI: {uri}"
+        )),
+    }
+}
+
+/// Open library / virtual LSP locations. Real files cover most SDKs (Rust,
+/// TypeScript, Python, Go, clangd, Swift). Archive and server-owned documents
+/// cover Kotlin, Scala, C#, and Java dependency/JDK definitions.
 #[tauri::command]
 pub async fn lsp_read_uri_contents(
     state: State<'_, AppState>,
@@ -3888,61 +4119,59 @@ pub async fn lsp_read_uri_contents(
         }
     }
 
-    // Virtual class-file URIs from Eclipse JDT LS (JDK + third-party JARs).
-    if is_virtual_class_uri(&uri) {
-        let session = state
-            .lsp
-            .active_session(
-                &document,
-                server_command_id.as_deref(),
-                custom_server_command.as_ref(),
-            )
-            .await
-            .ok_or_else(|| {
+    // Attached sources in JAR/ZIP files need no server-specific extension.
+    // Keep a read error as context, then let the server decompile/fetch instead.
+    let archive_error = match read_archive_source_contents(&uri) {
+        Ok(Some(contents)) => {
+            return Ok(LspUriContentsResult {
+                status,
+                uri,
+                path: None,
+                title: contents.title,
+                container: contents.container,
+                language_id: contents.language_id,
+                text: contents.text,
+                read_only: true,
+                decompiled: false,
+            });
+        }
+        Ok(None) => None,
+        Err(error) => Some(error),
+    };
+
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| {
+            archive_error.clone().unwrap_or_else(|| {
                 "No language server session is active for this file; cannot open library source"
                     .to_string()
-            })?;
-        let result = session
-            .request_with_timeout(
-                "java/classFileContents",
-                json!({ "uri": uri }),
-                REQUEST_TIMEOUT_SECS.max(20),
-            )
-            .await
-            .map_err(|e| format!("Failed to load class contents: {e}"))?;
-        // jdtls answers with an empty string when neither attached sources nor the
-        // bundled decompiler could produce anything for this class.
-        let text = result
-            .as_str()
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "{} returned no source for {}: attach a sources JAR or install a decompiler",
-                    document
-                        .preset
-                        .as_ref()
-                        .map(|preset| preset.display_name.clone())
-                        .unwrap_or_else(|| "The language server".to_string()),
-                    title_from_class_uri(&uri),
-                )
-            })?
-            .to_string();
-        return Ok(LspUriContentsResult {
-            status,
-            uri: uri.clone(),
-            path: None,
-            title: title_from_class_uri(&uri),
-            container: container_from_class_uri(&uri),
-            language_id: "java".to_string(),
-            decompiled: is_decompiled_contents(&text),
-            text,
-            read_only: true,
-        });
-    }
-
-    Err(format!(
-        "Cannot open location URI (not a readable file path and not a class-file URI): {uri}"
-    ))
+            })
+        })?;
+    let contents = read_server_virtual_document(&session, &uri)
+        .await
+        .map_err(|error| match archive_error {
+            Some(archive_error) => {
+                format!("{error}; direct archive read also failed: {archive_error}")
+            }
+            None => error,
+        })?;
+    Ok(LspUriContentsResult {
+        status,
+        uri,
+        path: None,
+        title: contents.title,
+        container: contents.container,
+        language_id: contents.language_id,
+        text: contents.text,
+        read_only: true,
+        decompiled: contents.decompiled,
+    })
 }
 
 /// Result of an on-demand source-attachment request.
@@ -3995,6 +4224,9 @@ pub async fn lsp_download_sources(
         return Err("Download sources is only available for library class files".into());
     }
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    if document.preset.as_ref().map(|preset| preset.id.as_str()) != Some("java") {
+        return Err("Download sources is only available for Java class files".into());
+    }
     let session = state
         .lsp
         .active_session(
@@ -5188,10 +5420,16 @@ fn session_key(
 }
 
 fn lsp_initialization_options(
-    is_jdtls: bool,
+    preset: &LspServerPreset,
+    command: &LspServerCommandPreset,
     sdk_environment: &WorkspaceSdkEnvironment,
 ) -> Value {
-    if !is_jdtls {
+    if preset.id == "scala" {
+        // Metals emits jar: locations for standard-library/dependency sources
+        // only when the client promises it can resolve virtual documents.
+        return json!({ "isVirtualDocumentSupported": true });
+    }
+    if !command_is_jdtls(command) {
         return Value::Null;
     }
     let runtimes: &[JavaRuntimeConfiguration] = &sdk_environment.java_runtimes;
@@ -6180,10 +6418,29 @@ fn semantic_token_legend_from(capabilities: &Value) -> (Vec<String>, Vec<String>
         })
         .unwrap_or_else(|| {
             vec![
-                "namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
-                "parameter", "variable", "property", "enumMember", "event", "function",
-                "method", "macro", "keyword", "modifier", "comment", "string", "number",
-                "regexp", "operator", "decorator",
+                "namespace",
+                "type",
+                "class",
+                "enum",
+                "interface",
+                "struct",
+                "typeParameter",
+                "parameter",
+                "variable",
+                "property",
+                "enumMember",
+                "event",
+                "function",
+                "method",
+                "macro",
+                "keyword",
+                "modifier",
+                "comment",
+                "string",
+                "number",
+                "regexp",
+                "operator",
+                "decorator",
             ]
             .into_iter()
             .map(str::to_string)
@@ -6201,8 +6458,16 @@ fn semantic_token_legend_from(capabilities: &Value) -> (Vec<String>, Vec<String>
         })
         .unwrap_or_else(|| {
             vec![
-                "declaration", "definition", "readonly", "static", "deprecated",
-                "abstract", "async", "modification", "documentation", "defaultLibrary",
+                "declaration",
+                "definition",
+                "readonly",
+                "static",
+                "deprecated",
+                "abstract",
+                "async",
+                "modification",
+                "documentation",
+                "defaultLibrary",
             ]
             .into_iter()
             .map(str::to_string)
@@ -6387,6 +6652,159 @@ fn path_from_file_uri(uri: &str) -> Option<String> {
         .map(|path| normalize_os_path_string(path.to_string_lossy().into_owned()))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArchiveDocumentUri {
+    archive_path: PathBuf,
+    entry_path: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArchiveSourceContents {
+    text: String,
+    title: String,
+    container: Option<String>,
+    language_id: String,
+}
+
+/// Parse the archive URI shapes emitted by Metals and Kotlin language servers:
+/// `jar:file:///.../sources.jar!/pkg/Foo.scala`, `jar:///...`, and
+/// `kls:file:///.../library.jar!/pkg/Foo.kt?source=true`.
+fn archive_document_uri(uri: &str) -> Option<ArchiveDocumentUri> {
+    let trimmed = uri.trim();
+    let scheme_end = trimmed.find(':')?;
+    let scheme = trimmed[..scheme_end].to_ascii_lowercase();
+    if scheme != "jar" && scheme != "kls" {
+        return None;
+    }
+    let nested = &trimmed[scheme_end + 1..];
+    let (archive_uri, entry) = nested.split_once("!/").or_else(|| nested.split_once('!'))?;
+    let archive_path = if archive_uri.to_ascii_lowercase().starts_with("file:") {
+        PathBuf::from(path_from_file_uri(archive_uri)?)
+    } else if archive_uri.starts_with('/') {
+        PathBuf::from(path_from_file_uri(&format!("file:{archive_uri}"))?)
+    } else {
+        let path = PathBuf::from(archive_uri);
+        path.is_absolute().then_some(path)?
+    };
+    let encoded_entry = entry
+        .split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    let entry_path = urlencoding::decode(encoded_entry).ok()?.replace('\\', "/");
+    (!entry_path.is_empty()).then_some(ArchiveDocumentUri {
+        archive_path,
+        entry_path,
+    })
+}
+
+fn is_archive_source_path(path: &str) -> bool {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "java"
+            | "kt"
+            | "kts"
+            | "scala"
+            | "sc"
+            | "sbt"
+            | "groovy"
+            | "clj"
+            | "cs"
+            | "swift"
+            | "swiftinterface"
+            | "c"
+            | "h"
+            | "cc"
+            | "cpp"
+            | "cxx"
+            | "hpp"
+            | "hh"
+            | "hxx"
+            | "py"
+            | "pyi"
+            | "ts"
+            | "tsx"
+            | "js"
+            | "jsx"
+    )
+}
+
+/// Read a source entry directly from an SDK/dependency archive. Binary `.class`,
+/// `.tasty`, and JDK module entries deliberately fall through to the language
+/// server's virtual-document/decompiler extension.
+fn read_archive_source_contents(uri: &str) -> Result<Option<ArchiveSourceContents>, String> {
+    let Some(document) = archive_document_uri(uri) else {
+        return Ok(None);
+    };
+    if !is_archive_source_path(&document.entry_path) {
+        return Ok(None);
+    }
+    let file = std::fs::File::open(&document.archive_path).map_err(|error| {
+        format!(
+            "open source archive {}: {error}",
+            document.archive_path.display()
+        )
+    })?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+        format!(
+            "read source archive {}: {error}",
+            document.archive_path.display()
+        )
+    })?;
+    let mut entry = archive.by_name(&document.entry_path).map_err(|error| {
+        format!(
+            "read {} from {}: {error}",
+            document.entry_path,
+            document.archive_path.display()
+        )
+    })?;
+    if entry.size() > MAX_VIRTUAL_DOCUMENT_BYTES {
+        return Err(format!(
+            "Archive source {} is too large ({} bytes; limit {} bytes)",
+            document.entry_path,
+            entry.size(),
+            MAX_VIRTUAL_DOCUMENT_BYTES
+        ));
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry
+        .by_ref()
+        .take(MAX_VIRTUAL_DOCUMENT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("read archive source {}: {error}", document.entry_path))?;
+    if bytes.len() as u64 > MAX_VIRTUAL_DOCUMENT_BYTES {
+        return Err(format!(
+            "Archive source {} exceeds the {} byte limit",
+            document.entry_path, MAX_VIRTUAL_DOCUMENT_BYTES
+        ));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| {
+        format!(
+            "Archive entry {} is not UTF-8 source text",
+            document.entry_path
+        )
+    })?;
+    let title = Path::new(&document.entry_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| document.entry_path.clone());
+    let container = document
+        .archive_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    Ok(Some(ArchiveSourceContents {
+        language_id: language_id_from_uri(&document.entry_path),
+        text,
+        title,
+        container,
+    }))
+}
+
 fn normalize_os_path_string(path: String) -> String {
     // Windows extended-length prefix breaks relativePathWithinRoot comparisons.
     path.strip_prefix(r"\\?\")
@@ -6403,19 +6821,38 @@ fn is_virtual_class_uri(uri: &str) -> bool {
 }
 
 fn language_id_from_uri(uri: &str) -> String {
-    let lower = uri.to_ascii_lowercase();
-    if lower.contains(".kt") {
-        "kotlin".into()
-    } else if lower.contains(".scala") {
-        "scala".into()
-    } else if lower.contains(".rs") {
-        "rust".into()
-    } else if lower.contains(".ts") {
+    let lower = uri
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(uri)
+        .to_ascii_lowercase();
+    if lower.ends_with(".tsx") {
+        "typescriptreact".into()
+    } else if lower.ends_with(".ts") || lower.ends_with(".mts") || lower.ends_with(".cts") {
         "typescript".into()
-    } else if lower.contains(".js") {
+    } else if lower.ends_with(".jsx") {
+        "javascriptreact".into()
+    } else if lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs") {
         "javascript".into()
-    } else if lower.contains(".py") {
+    } else if lower.ends_with(".kt") || lower.ends_with(".kts") {
+        "kotlin".into()
+    } else if lower.ends_with(".scala") || lower.ends_with(".sc") {
+        "scala".into()
+    } else if lower.ends_with(".rs") {
+        "rust".into()
+    } else if lower.ends_with(".py") || lower.ends_with(".pyi") {
         "python".into()
+    } else if lower.ends_with(".go") {
+        "go".into()
+    } else if lower.ends_with(".cs") || lower.ends_with(".csx") {
+        "csharp".into()
+    } else if lower.ends_with(".swift") || lower.ends_with(".swiftinterface") {
+        "swift".into()
+    } else if [".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx"]
+        .iter()
+        .any(|extension| lower.ends_with(extension))
+    {
+        "cpp".into()
     } else {
         "java".into()
     }
@@ -6792,7 +7229,7 @@ pub fn lsp_presets() -> Vec<LspServerPreset> {
                     "csharp-ls",
                     "csharp-ls",
                     "csharp-ls",
-                    &[],
+                    &["--features", "metadata-uris"],
                     "dotnet tool install -g csharp-ls",
                     false,
                 ),
@@ -6853,7 +7290,10 @@ mod tests {
             "jdtls needs a long initialize window"
         );
         let rust = find_preset("rust").expect("rust preset");
-        assert_eq!(initialize_timeout_secs(&rust.commands[0]), INITIALIZE_TIMEOUT_SECS);
+        assert_eq!(
+            initialize_timeout_secs(&rust.commands[0]),
+            INITIALIZE_TIMEOUT_SECS
+        );
     }
 
     #[test]
@@ -6868,7 +7308,8 @@ mod tests {
 
         let _guard = JAVA_GLOBALS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_configured_java_settings(None);
-        let options = lsp_initialization_options(true, &environment);
+        let java = find_preset("java").expect("java preset");
+        let options = lsp_initialization_options(&java, &java.commands[0], &environment);
 
         assert_eq!(
             options["settings"]["java"]["configuration"]["runtimes"][0],
@@ -6881,7 +7322,10 @@ mod tests {
         );
         // Default settings widen jdtls beyond bare runtimes (M6-A): autobuild on,
         // completion + format + import + code generation present.
-        assert_eq!(options["settings"]["java"]["autobuild"]["enabled"], json!(true));
+        assert_eq!(
+            options["settings"]["java"]["autobuild"]["enabled"],
+            json!(true)
+        );
         assert_eq!(
             options["settings"]["java"]["completion"]["guessMethodArguments"],
             json!(true)
@@ -6889,14 +7333,31 @@ mod tests {
         assert!(
             options["settings"]["java"]["completion"]["favoriteStaticMembers"]
                 .as_array()
-                .is_some_and(|members| members.iter().any(|m| m == "org.junit.jupiter.api.Assertions.*")),
+                .is_some_and(|members| members
+                    .iter()
+                    .any(|m| m == "org.junit.jupiter.api.Assertions.*")),
             "JUnit 5 assertions should be a favorite static member by default"
         );
         assert_eq!(
             options["settings"]["java"]["saveActions"]["organizeImports"],
             json!(false)
         );
-        assert_eq!(lsp_initialization_options(false, &environment), Value::Null);
+        let rust = find_preset("rust").expect("rust preset");
+        assert_eq!(
+            lsp_initialization_options(&rust, &rust.commands[0], &environment),
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn metals_initialization_enables_virtual_documents() {
+        let root = PathBuf::from(if cfg!(windows) { r"C:\repo" } else { "/repo" });
+        let environment = WorkspaceSdkEnvironment::passthrough(&root, &root);
+        let scala = find_preset("scala").expect("scala preset");
+        assert_eq!(
+            lsp_initialization_options(&scala, &scala.commands[0], &environment),
+            json!({ "isVirtualDocumentSupported": true })
+        );
     }
 
     #[test]
@@ -6953,7 +7414,9 @@ mod tests {
         }));
         assert_eq!(lombok_javaagent_arg(), Some(format!("-javaagent:{jar}")));
         assert!(
-            jdtls_vmargs().iter().any(|arg| arg == &format!("-javaagent:{jar}")),
+            jdtls_vmargs()
+                .iter()
+                .any(|arg| arg == &format!("-javaagent:{jar}")),
             "vmargs should carry the Lombok agent so both launch paths pick it up"
         );
         set_configured_java_settings(None);
@@ -7005,17 +7468,22 @@ mod tests {
             java["configuration"].get("runtimes").is_none(),
             "empty runtimes must be omitted, got: {java:#}"
         );
-        assert_eq!(java["configuration"]["updateBuildConfiguration"], json!("interactive"));
+        assert_eq!(
+            java["configuration"]["updateBuildConfiguration"],
+            json!("interactive")
+        );
 
         // Whereas initialize carries them.
-        let with_runtimes = get_configured_java_settings().to_java_settings(&[
-            JavaRuntimeConfiguration {
+        let with_runtimes =
+            get_configured_java_settings().to_java_settings(&[JavaRuntimeConfiguration {
                 name: "JavaSE-21".into(),
                 path: "/sdk/jdk-21".into(),
                 default: true,
-            },
-        ]);
-        assert_eq!(with_runtimes["configuration"]["runtimes"][0]["name"], json!("JavaSE-21"));
+            }]);
+        assert_eq!(
+            with_runtimes["configuration"]["runtimes"][0]["name"],
+            json!("JavaSE-21")
+        );
     }
 
     #[test]
@@ -7076,7 +7544,10 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         // What the SDK resolver produces: the canonicalized real path.
-        let scope = std::fs::canonicalize(&link).unwrap().to_string_lossy().into_owned();
+        let scope = std::fs::canonicalize(&link)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(scope, real.to_string_lossy());
 
         // Opened via the symlink → launch root must be the symlink path, not `real`,
@@ -7169,10 +7640,8 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
 
     #[test]
     fn resolve_java_binary_from_user_path_accepts_home_or_binary_shape() {
-        let temp = std::env::temp_dir().join(format!(
-            "taomni-jdtls-java-home-{}",
-            std::process::id()
-        ));
+        let temp =
+            std::env::temp_dir().join(format!("taomni-jdtls-java-home-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
         let bin_dir = temp.join("bin");
         std::fs::create_dir_all(&bin_dir).expect("mkdir");
@@ -7232,10 +7701,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert_eq!(jdtls_vmargs_string(), DEFAULT_JDTLS_VMARGS);
 
         set_configured_java_vmargs(Some("-Xmx2G -XX:+UseG1GC -Dfoo=bar"));
-        assert_eq!(
-            jdtls_vmargs_string(),
-            "-Xmx2G -XX:+UseG1GC -Dfoo=bar"
-        );
+        assert_eq!(jdtls_vmargs_string(), "-Xmx2G -XX:+UseG1GC -Dfoo=bar");
         assert_eq!(
             jdtls_vmargs(),
             vec![
@@ -7268,14 +7734,9 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         // Windows batch routing is covered by platform integration; here we only
         // assert the builder returns a Command without panicking for a plain binary.
         let root = PathBuf::from("/tmp/workspace");
-        let _cmd = build_lsp_server_command(
-            "rust-analyzer",
-            &["--version".into()],
-            &root,
-            None,
-            None,
-        )
-        .expect("command builder");
+        let _cmd =
+            build_lsp_server_command("rust-analyzer", &["--version".into()], &root, None, None)
+                .expect("command builder");
     }
 
     #[test]
@@ -7283,11 +7744,23 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         // JDT LS answers `java/buildWorkspace` with a BuildWorkspaceStatus ordinal.
         assert_eq!(build_status_from_result(&json!(0)), LspBuildStatus::Failed);
         assert_eq!(build_status_from_result(&json!(1)), LspBuildStatus::Succeed);
-        assert_eq!(build_status_from_result(&json!(2)), LspBuildStatus::WithError);
-        assert_eq!(build_status_from_result(&json!(3)), LspBuildStatus::Cancelled);
+        assert_eq!(
+            build_status_from_result(&json!(2)),
+            LspBuildStatus::WithError
+        );
+        assert_eq!(
+            build_status_from_result(&json!(3)),
+            LspBuildStatus::Cancelled
+        );
         // Unknown / absent payloads must not block a launch.
-        assert_eq!(build_status_from_result(&Value::Null), LspBuildStatus::Succeed);
-        assert_eq!(build_status_from_result(&json!("done")), LspBuildStatus::Succeed);
+        assert_eq!(
+            build_status_from_result(&Value::Null),
+            LspBuildStatus::Succeed
+        );
+        assert_eq!(
+            build_status_from_result(&json!("done")),
+            LspBuildStatus::Succeed
+        );
     }
 
     #[test]
@@ -7317,13 +7790,14 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
 
     #[test]
     fn detects_fernflower_decompiler_banner() {
-        let decompiled = format!(
-            "{JDTLS_DECOMPILER_HEADER} (from Intellij IDEA).\npackage java.lang;\n"
-        );
+        let decompiled =
+            format!("{JDTLS_DECOMPILER_HEADER} (from Intellij IDEA).\npackage java.lang;\n");
         assert!(is_decompiled_contents(&decompiled));
         // Leading blank lines still count (jdtls hands us the banner verbatim).
         assert!(is_decompiled_contents(&format!("\n{decompiled}")));
-        assert!(!is_decompiled_contents("package java.lang;\npublic class String {}\n"));
+        assert!(!is_decompiled_contents(
+            "package java.lang;\npublic class String {}\n"
+        ));
         assert!(!is_decompiled_contents(""));
     }
 
@@ -7378,7 +7852,10 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         }
 
         assert!(live_index.is_dir(), "index of a live project must be kept");
-        assert!(!gone_index.is_dir(), "index of a deleted project must be pruned");
+        assert!(
+            !gone_index.is_dir(),
+            "index of a deleted project must be pruned"
+        );
         assert!(no_marker.is_dir(), "unmarked dirs are left untouched");
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -8088,7 +8565,10 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         #[cfg(windows)]
         {
             let path = path_from_uri("file:///C:/Users/test/Project/Main.java").unwrap();
-            assert!(path.replace('\\', "/").ends_with("Users/test/Project/Main.java"));
+            assert!(
+                path.replace('\\', "/")
+                    .ends_with("Users/test/Project/Main.java")
+            );
         }
         #[cfg(not(windows))]
         {
@@ -8106,6 +8586,79 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             title_from_class_uri("jdt://contents/java.base/java.lang/String.class?=x"),
             "String.java"
         );
+    }
+
+    #[test]
+    fn reads_percent_encoded_source_from_archive_uri() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let archive_path = directory.path().join("demo sources.jar");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "com/acme/Hello World.kt",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated),
+            )
+            .unwrap();
+        archive
+            .write_all(b"package com.acme\nclass HelloWorld\n")
+            .unwrap();
+        archive.finish().unwrap();
+
+        let file_uri = url::Url::from_file_path(&archive_path).unwrap();
+        let uri = format!("jar:{file_uri}!/com/acme/Hello%20World.kt");
+        let parsed = archive_document_uri(&uri).expect("archive URI");
+        assert_eq!(parsed.archive_path, archive_path);
+        assert_eq!(parsed.entry_path, "com/acme/Hello World.kt");
+
+        let contents = read_archive_source_contents(&uri)
+            .unwrap()
+            .expect("archive source");
+        assert_eq!(contents.title, "Hello World.kt");
+        assert_eq!(contents.container.as_deref(), Some("demo sources.jar"));
+        assert_eq!(contents.language_id, "kotlin");
+        assert!(contents.text.contains("class HelloWorld"));
+    }
+
+    #[test]
+    fn binary_archive_locations_fall_through_to_language_server() {
+        let uri = if cfg!(windows) {
+            "kls:file:///C:/sdk/kotlin.jar!/kotlin/String.class?source=false"
+        } else {
+            "kls:file:///sdk/kotlin.jar!/kotlin/String.class?source=false"
+        };
+        let parsed = archive_document_uri(uri).expect("kls URI");
+        assert_eq!(parsed.entry_path, "kotlin/String.class");
+        assert!(read_archive_source_contents(uri).unwrap().is_none());
+    }
+
+    #[test]
+    fn maps_library_source_extensions_to_editor_languages() {
+        for (uri, expected) in [
+            ("file:///sdk/lib.d.ts", "typescript"),
+            ("file:///sdk/lib.mjs", "javascript"),
+            ("file:///sdk/types.pyi", "python"),
+            ("file:///sdk/runtime.go", "go"),
+            ("file:///sdk/System.String.cs", "csharp"),
+            ("file:///sdk/UIKit.swiftinterface", "swift"),
+            ("file:///sdk/vector.hpp", "cpp"),
+        ] {
+            assert_eq!(language_id_from_uri(uri), expected, "{uri}");
+        }
+    }
+
+    #[test]
+    fn csharp_ls_preset_enables_metadata_uris() {
+        let csharp = find_preset("csharp").expect("csharp preset");
+        let server = csharp
+            .commands
+            .iter()
+            .find(|command| command.id == "csharp-ls")
+            .expect("csharp-ls command");
+        assert_eq!(server.args, ["--features", "metadata-uris"]);
     }
 
     #[test]
@@ -8151,7 +8704,10 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             document,
             Some("jdt://contents/java.base/java.lang/String.class?=x".to_string()),
         );
-        assert_eq!(library.uri, "jdt://contents/java.base/java.lang/String.class?=x");
+        assert_eq!(
+            library.uri,
+            "jdt://contents/java.base/java.lang/String.class?=x"
+        );
         // Session / SDK resolution still keys off the origin project file.
         assert!(library.path.ends_with("Main.java"));
     }
