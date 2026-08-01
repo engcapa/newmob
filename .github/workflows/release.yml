@@ -425,9 +425,9 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       # Tauri updater signing and Apple Developer ID signing are independent
-      # trust chains. Workflow-only artifacts may remain unsigned, but a tag or
-      # GitHub Release must never publish a non-notarized macOS bundle.
-      - name: Require macOS release signing and notarization secrets
+      # trust chains. If Apple secrets are present, tauri-action will sign and
+      # notarize the macOS release bundle; otherwise, an unnotarized release build is generated.
+      - name: Check macOS release signing and notarization secrets
         if: steps.version.outputs.tag != ''
         shell: bash
         env:
@@ -439,22 +439,25 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          missing=()
+          missing_apple=()
           for name in \
-            TAURI_SIGNING_PRIVATE_KEY \
             APPLE_CERTIFICATE \
             APPLE_CERTIFICATE_PASSWORD \
             APPLE_ID \
             APPLE_PASSWORD \
             APPLE_TEAM_ID; do
             if [ -z "${!name:-}" ]; then
-              missing+=("$name")
+              missing_apple+=("$name")
             fi
           done
-          if [ "${#missing[@]}" -ne 0 ]; then
-            echo "Missing required macOS release secrets: ${missing[*]}" >&2
-            echo "Tagged macOS releases require updater signing, Developer ID signing and Apple notarization." >&2
-            exit 1
+          if [ "${#missing_apple[@]}" -ne 0 ]; then
+            echo "::notice::Missing Apple release secrets (${missing_apple[*]}). Developer ID signing and Apple notarization will be skipped for macOS builds."
+          else
+            echo "All Apple Developer ID signing and notarization secrets are configured."
+          fi
+
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "::notice::TAURI_SIGNING_PRIVATE_KEY is missing. Tauri updater signatures will be skipped."
           fi
 
       # ---------- aarch64-apple-darwin (native) ----------

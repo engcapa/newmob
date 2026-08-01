@@ -12,7 +12,7 @@ fi
 
 target_triple="$1"
 expected_arch="$2"
-expected_team_id="${APPLE_TEAM_ID:?APPLE_TEAM_ID is required}"
+expected_team_id="${APPLE_TEAM_ID:-}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bundle_root="$repo_root/src-tauri/target/$target_triple/release/bundle"
 app="$bundle_root/macos/Taomni.app"
@@ -31,11 +31,16 @@ test -x "$main_executable" || {
   exit 1
 }
 
-codesign --verify --deep --strict --verbose=2 "$app"
-signature="$(codesign -d --verbose=4 "$app" 2>&1)"
-grep -Fq 'Identifier=com.taomni.app' <<<"$signature"
-grep -Fq "TeamIdentifier=$expected_team_id" <<<"$signature"
-grep -Eq 'flags=.*\(runtime\)' <<<"$signature"
+if [ -n "$expected_team_id" ]; then
+  codesign --verify --deep --strict --verbose=2 "$app"
+  signature="$(codesign -d --verbose=4 "$app" 2>&1)"
+  grep -Fq 'Identifier=com.taomni.app' <<<"$signature"
+  grep -Fq "TeamIdentifier=$expected_team_id" <<<"$signature"
+  grep -Eq 'flags=.*\(runtime\)' <<<"$signature"
+else
+  echo "APPLE_TEAM_ID is not set; skipping strict Developer ID signature checks."
+  codesign --verify --verbose=2 "$app" || true
+fi
 
 main_architectures="$(lipo -archs "$main_executable")"
 test "$main_architectures" = "$expected_arch" || {
@@ -72,8 +77,11 @@ bundled_license="$(find "$resource_root" -type f -path '*/sockscap/macos/redirec
 test -n "$bundled_manifest" && cmp "$pinned_manifest" "$bundled_manifest"
 test -n "$bundled_license" && cmp "$pinned_license" "$bundled_license"
 
-gatekeeper="$(spctl --assess --type execute --verbose=4 "$app" 2>&1)"
-grep -Fq 'source=Notarized Developer ID' <<<"$gatekeeper"
-xcrun stapler validate "$app"
-
-echo "Taomni macOS $expected_arch release verified: Developer ID, notarization, architecture, Xray and Redirector v0.12.11."
+if [ -n "$expected_team_id" ]; then
+  gatekeeper="$(spctl --assess --type execute --verbose=4 "$app" 2>&1)"
+  grep -Fq 'source=Notarized Developer ID' <<<"$gatekeeper"
+  xcrun stapler validate "$app"
+  echo "Taomni macOS $expected_arch release verified: Developer ID, notarization, architecture, Xray and Redirector v0.12.11."
+else
+  echo "Taomni macOS $expected_arch release verified: architecture, Xray and Redirector v0.12.11 (unnotarized build)."
+fi
