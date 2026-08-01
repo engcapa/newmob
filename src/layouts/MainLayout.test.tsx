@@ -400,7 +400,8 @@ describe("MainLayout attached SFTP sidebar", () => {
     vaultMock.state = "empty";
     vaultMock.refresh.mockClear();
     vaultMock.unlock.mockClear();
-    vi.mocked(exitApp).mockClear();
+    vi.mocked(exitApp).mockReset();
+    vi.mocked(exitApp).mockResolvedValue(undefined);
     vi.mocked(markSessionConnected).mockClear();
     vi.mocked(tauriInvoke).mockClear();
     vi.mocked(listSessions).mockResolvedValue([]);
@@ -644,6 +645,27 @@ describe("MainLayout attached SFTP sidebar", () => {
 
     await waitFor(() => {
       expect(exitApp).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("keeps Taomni open and offers a graceful-shutdown retry when cleanup fails", async () => {
+    vi.mocked(exitApp)
+      .mockRejectedValueOnce("Linux capture teardown failed: Operation not permitted")
+      .mockResolvedValueOnce(undefined);
+    render(<MainLayout />);
+
+    fireEvent.click(screen.getByTestId("window-close"));
+    fireEvent.click(screen.getByTestId("confirm-dialog-confirm"));
+
+    expect(await screen.findByText("SocksCap cleanup failed")).toBeInTheDocument();
+    expect(screen.getByTestId("confirm-dialog-message")).toHaveTextContent(
+      "Taomni stayed open because SocksCap could not safely restore the network",
+    );
+    expect(exitApp).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("confirm-dialog-confirm"));
+    await waitFor(() => {
+      expect(exitApp).toHaveBeenCalledTimes(2);
     });
   });
 

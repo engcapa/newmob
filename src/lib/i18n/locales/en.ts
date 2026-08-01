@@ -422,6 +422,11 @@ const dict = {
     promptOneTerminal: "There is {count} open tab, including {terminals} terminal session. Exit Taomni and close them?",
     promptMany: "There are {count} open tabs. Exit Taomni and close them?",
     promptManyTerminals: "There are {count} open tabs, including {terminals} terminal sessions. Exit Taomni and close them?",
+    cleanupFailedTitle: "SocksCap cleanup failed",
+    cleanupFailedMessage:
+      "Taomni stayed open because SocksCap could not safely restore the network. Retry cleanup, or cancel exit and use Recover network.\n\n{error}",
+    retryCleanup: "Retry cleanup",
+    cancelExit: "Cancel exit",
   },
   about: {
     title: "About Taomni",
@@ -1217,6 +1222,10 @@ const dict = {
     rootPasswordPlaceholder: "Enter root / sudo password",
     rootPromptSubtitleMacos:
       "Changing the macOS system proxy requires administrator rights. Please enter your password to proceed.",
+    rootPromptRecoverSubtitle:
+      "Removing residual Linux nftables and cgroup state requires Root privileges. Enter your sudo password to recover the network.",
+    rootPromptRecoverSubtitleMacos:
+      "Restoring residual macOS system proxy state requires administrator rights. Enter your password to recover the network.",
     rootPromptIncorrectPassword:
       "Sudo password incorrect or authentication failed. Please try again.",
     authenticating: "Authenticating...",

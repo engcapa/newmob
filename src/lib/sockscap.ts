@@ -236,8 +236,8 @@ export function sockscapStop(): Promise<SocksCapStatus> {
   return invoke("sockscap_stop");
 }
 
-export function sockscapRecover(): Promise<void> {
-  return invoke("sockscap_recover");
+export function sockscapRecover(sudoPassword?: string): Promise<void> {
+  return invoke("sockscap_recover", { sudoPassword });
 }
 
 export function sockscapStatsSnapshot(): Promise<StatsSnapshot> {

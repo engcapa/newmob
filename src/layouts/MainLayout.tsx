@@ -1535,16 +1535,27 @@ export function MainLayout() {
     exitRequestInFlightRef.current = true;
     void (async () => {
       try {
-        if (await confirmExitWithOpenTabs()) {
-          await exitApp();
+        if (!(await confirmExitWithOpenTabs())) return;
+        for (;;) {
+          try {
+            await exitApp();
+            return;
+          } catch (error) {
+            const retry = await confirmAppExit({
+              title: tr("exit.cleanupFailedTitle"),
+              message: tr("exit.cleanupFailedMessage", { error: String(error) }),
+              confirmLabel: tr("exit.retryCleanup"),
+              cancelLabel: tr("exit.cancelExit"),
+              danger: true,
+            });
+            if (!retry) return;
+          }
         }
-      } catch {
-        // Keep exit failure non-fatal; the user stays in the app.
       } finally {
         exitRequestInFlightRef.current = false;
       }
     })();
-  }, [confirmExitWithOpenTabs]);
+  }, [confirmAppExit, confirmExitWithOpenTabs]);
 
   useEffect(() => {
     const appWindow = getCurrentWindow();

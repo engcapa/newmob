@@ -371,6 +371,12 @@ fn remove_cgroup_dir(path: &Path, sudo_password: Option<&str>) -> Result<(), Str
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => {
+            if !is_effective_root() && sudo_password.is_none() {
+                return Err(format!(
+                    "remove {}: {error}. Linux cgroup cleanup requires root or delegated cgroup v2 permissions",
+                    path.display()
+                ));
+            }
             let path_string = path.display().to_string();
             match run_command_elevated("rmdir", &[&path_string], None, sudo_password) {
                 Ok(output) if output.status.success() => Ok(()),
@@ -457,8 +463,12 @@ fn command_error(output: &std::process::Output) -> String {
 
 /// Best-effort cleanup used by Recover / boot repair. It intentionally removes
 /// only empty cgroups with the generated prefix; it never moves live processes.
-pub fn cleanup_empty_sessions() -> Result<(), String> {
+pub fn cleanup_empty_sessions(sudo_password: Option<&str>) -> Result<(), String> {
     let root = Path::new(CGROUP_ROOT);
+    cleanup_empty_sessions_in(root, sudo_password)
+}
+
+fn cleanup_empty_sessions_in(root: &Path, sudo_password: Option<&str>) -> Result<(), String> {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -472,7 +482,7 @@ pub fn cleanup_empty_sessions() -> Result<(), String> {
             continue;
         }
         let path = entry.path();
-        if let Err(error) = remove_empty_tree(&path) {
+        if let Err(error) = remove_empty_tree(&path, sudo_password) {
             errors.push(format!("{}: {error}", path.display()));
         }
     }
@@ -484,14 +494,14 @@ pub fn cleanup_empty_sessions() -> Result<(), String> {
     }
 }
 
-fn remove_empty_tree(path: &Path) -> Result<(), String> {
+fn remove_empty_tree(path: &Path, sudo_password: Option<&str>) -> Result<(), String> {
     for entry in fs::read_dir(path).map_err(|e| e.to_string())?.flatten() {
         let child = entry.path();
         if child.is_dir() {
-            remove_empty_tree(&child)?;
+            remove_empty_tree(&child, sudo_password)?;
         }
     }
-    fs::remove_dir(path).map_err(|e| e.to_string())
+    remove_cgroup_dir(path, sudo_password)
 }
 
 fn cgroup_dir_for_pid(pid: u32) -> Result<PathBuf, String> {
@@ -556,5 +566,33 @@ mod tests {
     fn parses_direct_cgroup_members() {
         let members = parse_cgroup_processes("42\n1001\n", Path::new("/test")).unwrap();
         assert_eq!(members, vec![42, 1001]);
+    }
+
+    #[test]
+    fn recovery_removes_only_empty_generated_trees() {
+        let directory = tempfile::tempdir().unwrap();
+        let managed = directory.path().join(format!("{SESSION_PREFIX}42"));
+        let nested = managed.join("capture-profile-0").join("process-1-99");
+        let unrelated = directory.path().join("unrelated-service");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir(&unrelated).unwrap();
+
+        cleanup_empty_sessions_in(directory.path(), None).unwrap();
+
+        assert!(!managed.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn recovery_does_not_remove_nonempty_generated_trees() {
+        let directory = tempfile::tempdir().unwrap();
+        let managed = directory.path().join(format!("{SESSION_PREFIX}43"));
+        fs::create_dir(&managed).unwrap();
+        fs::write(managed.join("unexpected-file"), "keep").unwrap();
+
+        let result = cleanup_empty_sessions_in(directory.path(), None);
+
+        assert!(result.is_err());
+        assert!(managed.exists());
     }
 }
