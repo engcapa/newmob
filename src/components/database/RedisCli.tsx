@@ -1,7 +1,13 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { BookOpen, ChevronUp, ChevronDown, Crosshair, Trash2, Radio, Star } from "lucide-react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { BookOpen, Check, ChevronUp, ChevronDown, Crosshair, Languages, Trash2, Radio, Sparkles, Star } from "lucide-react";
 import { redisExec } from "../../lib/ipc";
 import { useT } from "../../lib/i18n";
+import {
+  AI_ANSWER_LANGUAGES,
+  answerLanguageLabelKey,
+  type AiAnswerLanguage,
+} from "../../lib/ai/answerLanguage";
+import { useContextMenu, type MenuItem } from "../ContextMenu";
 import {
   displaySqlShortcut,
   loadSqlExecutionPreferences,
@@ -22,6 +28,8 @@ interface RedisCliProps {
    * wire up chat.
    */
   onExplain?: (command: string, reply?: string) => void;
+  answerLanguage?: AiAnswerLanguage;
+  onSetAnswerLanguage?: (language: AiAnswerLanguage) => void;
 }
 
 export interface RedisCliHandle {
@@ -50,8 +58,12 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
   onInputChange,
   onSaveQuery,
   onExplain,
+  answerLanguage = "inherit",
+  onSetAnswerLanguage,
 }, ref) {
   const t = useT();
+  const cliMenu = useContextMenu();
+  const [langMenuOpen, setLangMenuOpen] = useState(false);
   const [lines, setLines] = useState<CliLine[]>([]);
   const [monitoring, setMonitoring] = useState(false);
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
@@ -122,6 +134,35 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
     }, 2000);
   };
 
+  const openCliContextMenu = (event: ReactMouseEvent) => {
+    if (!onExplain && !onSetAnswerLanguage) return;
+    const items: MenuItem[] = [];
+    if (onExplain) {
+      items.push({
+        label: t("dbAi.askAiExplainSyntax"),
+        icon: <Sparkles className="w-3.5 h-3.5" />,
+        testId: "redis-context-ai-explain-syntax",
+        disabled: !input.trim(),
+        onClick: () => onExplain(input),
+      });
+    }
+    if (onSetAnswerLanguage && answerLanguage) {
+      items.push({
+        label: t("codeWorkspaceAi.answerLanguageMenu"),
+        testId: "redis-context-ai-answer-language",
+        children: AI_ANSWER_LANGUAGES.map((lang) => ({
+          label: t(answerLanguageLabelKey(lang)),
+          testId: `redis-context-ai-answer-language-${lang}`,
+          checked: lang === answerLanguage,
+          onClick: () => onSetAnswerLanguage(lang),
+        })),
+      });
+    }
+    if (items.length > 0) {
+      cliMenu.show(event, items);
+    }
+  };
+
   if (collapsed) {
     return (
       <button
@@ -140,7 +181,8 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
   }
 
   return (
-    <div className="h-full flex flex-col min-h-0" data-testid="redis-cli">
+    <div className="h-full flex flex-col min-h-0" data-testid="redis-cli" onContextMenu={openCliContextMenu}>
+      {cliMenu.render}
       <div
         className="h-7 shrink-0 flex items-center gap-2 px-2 text-[11px]"
         style={{
@@ -177,6 +219,43 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
           >
             <BookOpen className="w-3.5 h-3.5" /> {t("dbAi.explainStatement")}
           </button>
+        )}
+        {onSetAnswerLanguage && (
+          <div className="relative">
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 px-1.5 rounded hover:bg-[var(--taomni-hover)] text-[11px]"
+              data-testid="redis-ai-answer-language-toggle"
+              title={t("codeWorkspaceAi.answerLanguageTooltip", { current: t(answerLanguageLabelKey(answerLanguage)) })}
+              onClick={() => setLangMenuOpen((v) => !v)}
+            >
+              <Languages className="w-3.5 h-3.5" />
+              <span>{t(answerLanguageLabelKey(answerLanguage))}</span>
+              <ChevronDown className="w-3 h-3 opacity-60" />
+            </button>
+            {langMenuOpen && (
+              <div
+                className="absolute left-0 top-full mt-1 z-50 py-1 rounded shadow-lg border text-[11px] min-w-[120px]"
+                style={{ background: "var(--taomni-panel-bg)", borderColor: "var(--taomni-divider)", color: "var(--taomni-text)" }}
+              >
+                {AI_ANSWER_LANGUAGES.map((lang) => (
+                  <button
+                    key={lang}
+                    type="button"
+                    data-testid={`redis-ai-answer-language-option-${lang}`}
+                    className="w-full px-2 py-1 text-left flex items-center justify-between hover:bg-[var(--taomni-hover)]"
+                    onClick={() => {
+                      onSetAnswerLanguage(lang);
+                      setLangMenuOpen(false);
+                    }}
+                  >
+                    <span>{t(answerLanguageLabelKey(lang))}</span>
+                    {lang === answerLanguage && <Check className="w-3 h-3 text-[var(--taomni-accent)]" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         )}
         <button
           type="button"

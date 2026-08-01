@@ -4,6 +4,7 @@ import {
   Ban,
   BookOpen,
   Bot,
+  Check,
   ChevronDown,
   ChevronRight,
   Clock,
@@ -11,9 +12,11 @@ import {
   Database,
   Files,
   HelpCircle,
+  Languages,
   Loader2,
   Play,
   Plus,
+  Sparkles,
   SquareDashedMousePointer,
   Star,
   Trash2,
@@ -56,7 +59,11 @@ import {
 import { useAppStore } from "../../stores/appStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useT } from "../../lib/i18n";
-import { readGlobalAnswerLanguage } from "../../lib/ai/answerLanguage";
+import {
+  AI_ANSWER_LANGUAGES,
+  answerLanguageLabelKey,
+  type AiAnswerLanguage,
+} from "../../lib/ai/answerLanguage";
 import { buildDbAiPrompt, truncateStatement } from "../../lib/database/dbAiPrompts";
 import { TabActions } from "../tabbar/TabActionSlot";
 import { FT_BUTTON_ACTIVE_OVERRIDE, FT_ICON_BUTTON_STYLE } from "../floating-toolbar/floatingToolbarStyles";
@@ -492,6 +499,9 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
   const [showHistory, setShowHistory] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [leftPanelTab, setLeftPanelTab] = useState<"objects" | "queries">("objects");
+  const editorMenu = useContextMenu();
+  const [langMenuOpen, setLangMenuOpen] = useState(false);
+  const [aiAnswerLanguage, setAiAnswerLanguage] = useState<AiAnswerLanguage>("inherit");
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
 
   const editorHandles = useRef<Record<string, SqlEditorHandle | null>>({});
@@ -739,7 +749,7 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
           rowCount: sheet?.result?.rows.length ?? null,
           error: sheet?.error ?? null,
         },
-        readGlobalAnswerLanguage(),
+        aiAnswerLanguage,
       );
 
       const chat = useChatStore.getState();
@@ -753,8 +763,54 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
         setStatusMessage(t("dbAi.sent"));
       }
     },
-    [info.namespace, panels, setStatusMessage, t, tabId, transport],
+    [aiAnswerLanguage, info.namespace, panels, setStatusMessage, t, tabId, transport],
   );
+
+  const openEditorContextMenu = (event: ReactMouseEvent) => {
+    setActivePanelId(activePanel.id);
+    const handle = editorHandles.current[activePanel.id];
+    const doc = handle?.getValue() ?? activePanel.doc;
+    const selection = handle?.getSelectionRange() ?? null;
+    const position = selection && selection.from !== selection.to
+      ? selection.from
+      : handle?.getCursorPosition() ?? doc.length;
+    const range = hbaseStatementRangeAt(doc, position);
+    const items: MenuItem[] = [
+      {
+        label: t("dbAi.askAiExplainSyntax"),
+        icon: <Sparkles className="w-3.5 h-3.5" />,
+        testId: "hbase-context-ai-explain-syntax",
+        disabled: !range,
+        onClick: () => {
+          if (range) void explainCurrentStatement(activePanel.id);
+        },
+      },
+      {
+        label: t("codeWorkspaceAi.answerLanguageMenu"),
+        testId: "hbase-context-ai-answer-language",
+        children: AI_ANSWER_LANGUAGES.map((lang) => ({
+          label: t(answerLanguageLabelKey(lang)),
+          testId: `hbase-context-ai-answer-language-${lang}`,
+          checked: lang === aiAnswerLanguage,
+          onClick: () => setAiAnswerLanguage(lang),
+        })),
+      },
+      { separator: true, label: "" },
+      {
+        label: "Run all commands",
+        icon: <Play className="w-3 h-3" style={{ color: "#62d36f" }} />,
+        onClick: () => void runStatements(activePanel.id, handle?.getValue() ?? activePanel.doc),
+        disabled: !connectionSessionId || panelRunning,
+      },
+      {
+        label: "Run current command",
+        icon: <Crosshair className="w-3 h-3" />,
+        onClick: () => runCurrentStatement(activePanel.id),
+        disabled: !connectionSessionId || panelRunning,
+      },
+    ];
+    editorMenu.show(event, items);
+  };
 
   const cancelQuery = useCallback(
     (panelId: string) => {
@@ -1204,6 +1260,41 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
                 >
                   <BookOpen className="w-3.5 h-3.5" /> {t("dbAi.explainStatement")}
                 </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    className={btn}
+                    data-testid="hbase-ai-answer-language-toggle"
+                    title={t("codeWorkspaceAi.answerLanguageTooltip", { current: t(answerLanguageLabelKey(aiAnswerLanguage)) })}
+                    onClick={() => setLangMenuOpen((v) => !v)}
+                  >
+                    <Languages className="w-3.5 h-3.5" />
+                    <span>{t(answerLanguageLabelKey(aiAnswerLanguage))}</span>
+                    <ChevronDown className="w-3 h-3 opacity-60" />
+                  </button>
+                  {langMenuOpen && (
+                    <div
+                      className="absolute left-0 top-full mt-1 z-50 py-1 rounded shadow-lg border text-[11px] min-w-[120px]"
+                      style={{ background: "var(--taomni-panel-bg)", borderColor: "var(--taomni-divider)", color: "var(--taomni-text)" }}
+                    >
+                      {AI_ANSWER_LANGUAGES.map((lang) => (
+                        <button
+                          key={lang}
+                          type="button"
+                          data-testid={`hbase-ai-answer-language-option-${lang}`}
+                          className="w-full px-2 py-1 text-left flex items-center justify-between hover:bg-[var(--taomni-hover)]"
+                          onClick={() => {
+                            setAiAnswerLanguage(lang);
+                            setLangMenuOpen(false);
+                          }}
+                        >
+                          <span>{t(answerLanguageLabelKey(lang))}</span>
+                          {lang === aiAnswerLanguage && <Check className="w-3 h-3 text-[var(--taomni-accent)]" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
                 <button type="button" className={btn} disabled={!panelRunning} title="Cancel query" onClick={() => cancelQuery(activePanel.id)}>
                   <Ban className="w-3.5 h-3.5" style={{ color: "#d9534f" }} /> Cancel
                 </button>
@@ -1239,16 +1330,19 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
                 className="flex-1 min-h-0"
               >
                 <Panel id="editor" defaultSize="35%" minSize="15%">
-                  <SqlEditorPanel
-                    engine="HBase"
-                    initialDoc={activePanel.doc}
-                    completionSources={completionSources}
-                    handleRef={(h) => { editorHandles.current[activePanel.id] = h; }}
-                    onDocChange={(doc) => patchPanel(activePanel.id, { doc })}
-                    onFocus={() => setActivePanelId(activePanel.id)}
-                    onRun={(sql) => void runStatements(activePanel.id, sql)}
-                    onRunCurrent={() => runCurrentStatement(activePanel.id)}
-                  />
+                  <div className="h-full w-full" onContextMenu={openEditorContextMenu}>
+                    {editorMenu.render}
+                    <SqlEditorPanel
+                      engine="HBase"
+                      initialDoc={activePanel.doc}
+                      completionSources={completionSources}
+                      handleRef={(h) => { editorHandles.current[activePanel.id] = h; }}
+                      onDocChange={(doc) => patchPanel(activePanel.id, { doc })}
+                      onFocus={() => setActivePanelId(activePanel.id)}
+                      onRun={(sql) => void runStatements(activePanel.id, sql)}
+                      onRunCurrent={() => runCurrentStatement(activePanel.id)}
+                    />
+                  </div>
                 </Panel>
                 <PanelResizeHandle className="h-[3px] bg-[var(--taomni-divider)] hover:bg-[var(--taomni-accent)] transition-colors cursor-row-resize" />
                 <Panel id="results" minSize="15%">

@@ -3045,6 +3045,7 @@ const dict = {
     explainStatementTooltip: "Ask AI to explain this statement — what it does, its syntax, and its risks",
     explainCommandTooltip: "Ask AI to explain this command — what it does, its syntax, and its risks",
     explainReplyTooltip: "Explain this command and its reply",
+    askAiExplainSyntax: "Ask AI (Explain Syntax)",
     noStatement: "Put the cursor on a statement first",
     noCommand: "Type a command first",
     sent: "Sent explain request to AI chat",
