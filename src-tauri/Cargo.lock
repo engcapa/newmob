@@ -9582,14 +9582,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sockscap-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "softbuffer"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10232,7 +10224,6 @@ dependencies = [
  "byteorder",
  "bytes",
  "cbc 0.2.1",
- "cc",
  "chrono",
  "cpal",
  "cross-krb5",
@@ -10300,7 +10291,6 @@ dependencies = [
  "sha2 0.11.0",
  "shellexpand",
  "socket2 0.6.4",
- "sockscap-core",
  "sqlparser",
  "sqlx-core",
  "sqlx-mysql",

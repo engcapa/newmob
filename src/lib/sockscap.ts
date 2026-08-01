@@ -3,9 +3,9 @@
  *
  * Capture backends differ per platform, so read `sockscapCapabilities()` before
  * offering options: Windows uses the elevated WinDivert helper, Linux uses
- * nftables + cgroup v2 transparent redirect, and macOS points the system SOCKS
- * proxy at a loopback listener (not transparent, Global scope only). Platforms
- * without a backend land in a degraded state on start().
+ * nftables + cgroup v2 transparent redirect, and macOS bridges the separately
+ * installed, signed Mitmproxy Redirector over Unix IPC (Global scope today).
+ * There is no macOS system-proxy fallback.
  */
 import { invoke } from "@tauri-apps/api/core";
 

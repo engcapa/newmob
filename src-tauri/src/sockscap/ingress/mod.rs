@@ -1,9 +1,9 @@
 //! Local proxy **ingress**: a loopback SOCKS5 / HTTP-CONNECT front end.
 //!
 //! Windows and Linux capture transparently, so their relays recover the target
-//! from the OS (WinDivert's NAT table, `SO_ORIGINAL_DST`). macOS Phase 1 has no
-//! transparent capture, so instead the OS system-proxy setting points clients
-//! here and they *tell* us the target through a proxy handshake.
+//! from the OS (WinDivert's NAT table, `SO_ORIGINAL_DST`). macOS transparent
+//! flows arrive through the separate Redirector IPC bridge and do not use this
+//! listener. The ingress remains useful for explicit local proxy entry points.
 //!
 //! Everything after the handshake is identical to the other platforms: the flow
 //! is handed to [`crate::sockscap::relay::handle_captured_client`], which owns
@@ -208,8 +208,8 @@ async fn serve_client(
         dest_ip: target.ip,
         dest_host: target.host,
         dest_port: target.port,
-        // Phase 1 has no per-flow process attribution on macOS; the loopback peer
-        // port would have to be mapped back to its owning process.
+        // An explicit local proxy client does not provide process identity; its
+        // loopback peer port would have to be mapped back to an owning process.
         process_path: None,
         pid: None,
         origin: peer,

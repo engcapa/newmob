@@ -560,24 +560,28 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalled());
   });
 
-  it("prompts for a password when macOS needs admin rights for the system proxy", async () => {
+  it("does not request a sudo password for macOS Redirector errors", async () => {
     currentPlatform = "macos";
     vi.mocked(sockscapCapabilities).mockResolvedValueOnce({
       platform: "macos",
       globalTcp: true,
       appFilter: false,
-      captureBackend: "system-proxy",
-      notes: ["macOS: system SOCKS proxy points applications at the loopback listener."],
-      privilegedRequired: true,
+      captureBackend: "mitmproxy-redirector",
+      notes: ["Global capture is available through Mitmproxy Redirector."],
+      privilegedRequired: false,
     });
     vi.mocked(sockscapStart).mockRejectedValueOnce(
-      "macOS capture requires administrator rights to change the system proxy",
+      "approve the Mitmproxy Redirector System Extension and network configuration",
     );
     render(<SocksCapPanel />);
 
     fireEvent.click(await screen.findByTestId("sockscap-start"));
 
-    expect(await screen.findByTestId("sockscap-root-prompt-dialog")).toBeInTheDocument();
+    expect(
+      await screen.findByText(/approve the Mitmproxy Redirector System Extension/),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("sockscap-root-prompt-dialog")).not.toBeInTheDocument();
+    expect(vi.mocked(sockscapStart)).toHaveBeenCalledWith(undefined);
   });
 
   it("disables app scope and shows the backend notes when app filtering is unavailable", async () => {
@@ -586,15 +590,15 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       platform: "macos",
       globalTcp: true,
       appFilter: false,
-      captureBackend: "system-proxy",
-      notes: ["Not transparent capture: scope is Global only."],
-      privilegedRequired: true,
+      captureBackend: "mitmproxy-redirector",
+      notes: ["Global capture is available. Application scope remains disabled."],
+      privilegedRequired: false,
     });
     render(<SocksCapPanel />);
 
     expect(await screen.findByTestId("sockscap-mode-apps")).toBeDisabled();
     const capabilityNotes = await screen.findByTestId("sockscap-capability-notes");
-    expect(capabilityNotes.getAttribute("title")).toContain("Global only");
+    expect(capabilityNotes.getAttribute("title")).toContain("Application scope remains disabled");
   });
 
   it("keeps app scope selectable where the backend can identify applications", async () => {

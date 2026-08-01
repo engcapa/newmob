@@ -1220,12 +1220,8 @@ const dict = {
       "Linux nftables & cgroup v2 transparent capture requires Root (CAP_NET_ADMIN) privileges. Please enter your sudo password to proceed.",
     rootPasswordLabel: "Sudo Password",
     rootPasswordPlaceholder: "Enter root / sudo password",
-    rootPromptSubtitleMacos:
-      "Changing the macOS system proxy requires administrator rights. Please enter your password to proceed.",
     rootPromptRecoverSubtitle:
       "Removing residual Linux nftables and cgroup state requires Root privileges. Enter your sudo password to recover the network.",
-    rootPromptRecoverSubtitleMacos:
-      "Restoring residual macOS system proxy state requires administrator rights. Enter your password to recover the network.",
     rootPromptIncorrectPassword:
       "Sudo password incorrect or authentication failed. Please try again.",
     authenticating: "Authenticating...",

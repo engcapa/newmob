@@ -4,8 +4,8 @@
 //! - Windows capture: elevated `sockscap-helper` + WinDivert
 //!   FLOW (PID) + NETWORK (IPv4 TCP NAT → local relay → policy → upstream)
 //! - Linux capture: nftables OUTPUT redirect + cgroup v2 + loopback relay
-//! - macOS capture: system SOCKS proxy → loopback proxy ingress (Global only;
-//!   transparent capture and app scoping need a Network Extension)
+//! - macOS capture: signed Mitmproxy Redirector → Unix IPC → shared relay
+//!   (transparent Global; application identity gate follows on the same engine)
 
 pub mod capture;
 pub mod config;
@@ -24,10 +24,10 @@ pub mod tun_detect;
 pub mod policy;
 pub mod process;
 pub mod recovery;
+pub mod redirector;
 pub mod relay;
 pub mod rules;
 pub mod stats;
-pub mod transparent;
 
 pub use config::{Decision, RuleMode, SocksCapConfig};
 pub use orchestrator::{Orchestrator, SocksCapStatus};
@@ -57,7 +57,7 @@ pub struct SocksCapRuntime {
     /// can finish the job. See [`boot_repair`].
     pub pending_reap: std::sync::Mutex<Vec<u32>>,
     /// Cross-process ownership of the OS capture stack. SocksCap changes
-    /// machine-wide proxy/divert state, so only one Taomni process may own it.
+    /// machine-wide capture state, so only one Taomni process may own it.
     activation_lock: std::sync::Mutex<Option<ModuleLock>>,
     /// xray-core sidecar pool for core-backed upstreams. Initialized during
     /// `setup()` once the `AppHandle` (resource dir / app data dir) is available
@@ -163,8 +163,6 @@ pub struct SocksCapCapabilities {
 
 #[tauri::command]
 pub async fn sockscap_capabilities(app: AppHandle) -> Result<SocksCapCapabilities, String> {
-    // Probe the app bundle so macOS reports the transparent (per-app) backend
-    // only when the Network Extension is actually installed.
     Ok(capture::capabilities_for(&app))
 }
 
@@ -403,7 +401,7 @@ pub async fn sockscap_start(
     state: State<'_, AppState>,
     sudo_password: Option<String>,
 ) -> Result<SocksCapStatus, String> {
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     let _ = sudo_password;
 
     let cfg_path = config_path(&app)?;
@@ -498,7 +496,7 @@ pub async fn sockscap_start(
 
     #[cfg(target_os = "macos")]
     let status: Result<SocksCapStatus, String> =
-        start_macos_capture(&app, &state, &cfg, &caps, sudo_password).await;
+        start_macos_capture(&app, &state, &cfg, &caps).await;
 
     #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
     let status: Result<SocksCapStatus, String> = {
@@ -957,99 +955,42 @@ async fn start_linux_capture(
     Ok(orch.status())
 }
 
-/// AF_UNIX control socket the Network Extension provider connects back on.
-///
-/// NOTE (infra): a shipped build must place this in the app-group container
-/// shared by the app and the system extension — the extension runs as root and
-/// cannot read the app's per-user data dir. Until the app group is provisioned
-/// this uses the sockscap data dir, which is correct for a same-user dev run.
-#[cfg(target_os = "macos")]
-fn macos_control_socket_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(data_dir(app)?.join("ne-control.sock"))
-}
-
 #[cfg(target_os = "macos")]
 async fn start_macos_capture(
     app: &AppHandle,
     state: &State<'_, AppState>,
     cfg: &SocksCapConfig,
     caps: &capture::SocksCapCapabilities,
-    sudo_password: Option<String>,
 ) -> Result<SocksCapStatus, String> {
-    let _ = caps;
-    let ctx = build_unix_relay_context(state, cfg).await?;
-
-    // Transparent (per-app) backend only when a signed extension is present;
-    // otherwise the always-available Phase 1 system-proxy backend.
-    let extension_present = transparent::activation::extension_present(app);
-    let mut transparent_error: Option<String> = None;
-    if matches!(
-        transparent::choose_macos_backend(extension_present),
-        transparent::MacosBackend::Transparent
-    ) {
-        let control_socket = macos_control_socket_path(app)?;
-        match capture::macos::transparent::start(
-            cfg,
-            Arc::clone(&ctx),
-            control_socket,
-            sudo_password.clone(),
-        )
-        .await
-        {
-            Ok(capture) => {
-                let ingress_port = capture.ingress_port();
-                let mut orch = state.sockscap.orch.write().await;
-                let gfw_note = orch
-                    .gfwlist_meta()
-                    .map(|meta| format!(", gfw={}", meta.rule_count))
-                    .unwrap_or_default();
-                orch.relay_ctx = Some(ctx);
-                orch.set_macos_transparent_capture(capture);
-                orch.set_active(
-                    "ne-transparent",
-                    format!(
-                        "capture active (macOS transparent Network Extension → 127.0.0.1:{ingress_port}{gfw_note})"
-                    ),
-                );
-                return Ok(orch.status());
+    capture::macos::preflight(cfg)?;
+    let ctx = match build_unix_relay_context(state, cfg).await {
+        Ok(ctx) => ctx,
+        Err(error) => {
+            if let Some(manager) = state.sockscap.xray() {
+                manager.shutdown_all().await;
             }
-            Err(error) => {
-                tracing::warn!(
-                    "sockscap: transparent backend unavailable, falling back to system-proxy: {error}"
-                );
-                transparent_error = Some(error);
-            }
-        }
-    }
-
-    // System-proxy backend (Phase 1), also the transparent fallback.
-    let capture = match capture::macos::start(cfg, Arc::clone(&ctx), sudo_password).await {
-        Ok(capture) => capture,
-        // If the transparent backend was chosen but failed, and system-proxy
-        // also can't run (e.g. it refuses App scope), the actionable message is
-        // the transparent one ("approve the extension"), not the fallback's.
-        Err(fallback_error) => {
-            return Err(transparent_error.unwrap_or(fallback_error));
+            return Err(error);
         }
     };
-    let ingress_port = capture.ingress_port();
+    let capture = match capture::macos::start(app, cfg, Arc::clone(&ctx)).await {
+        Ok(capture) => capture,
+        Err(error) => {
+            if let Some(manager) = state.sockscap.xray() {
+                manager.shutdown_all().await;
+            }
+            return Err(error);
+        }
+    };
     let mut orch = state.sockscap.orch.write().await;
     let gfw_note = orch
         .gfwlist_meta()
         .map(|meta| format!(", gfw={}", meta.rule_count))
         .unwrap_or_default();
-    let fallback_note = if transparent_error.is_some() {
-        " (transparent capture pending extension approval)"
-    } else {
-        ""
-    };
     orch.relay_ctx = Some(ctx);
     orch.set_macos_capture(capture);
     orch.set_active(
-        "system-proxy",
-        format!(
-            "capture active (macOS system SOCKS proxy → 127.0.0.1:{ingress_port}{gfw_note}){fallback_note}"
-        ),
+        &caps.capture_backend,
+        format!("capture active (macOS Mitmproxy Redirector IPC{gfw_note})"),
     );
     Ok(orch.status())
 }
@@ -1639,8 +1580,8 @@ pub async fn sockscap_prepare_for_update(
     }
 
     // 1) Stop capture before the installer or relaunch can terminate the
-    //    process. The running handle retains the sudo credential needed to
-    //    remove Linux nftables/cgroups or restore the macOS system proxy.
+    //    process. The running handle retains the credential needed to remove
+    //    Linux nftables/cgroups; macOS disables Redirector interception over IPC.
     let teardown_error = if owned_capture {
         full_teardown(&app, &state, true).await.err()
     } else {
@@ -1867,7 +1808,7 @@ async fn full_teardown(
         }
     }
 
-    // --- 2b) macOS restores the system proxy before its ingress stops ---------
+    // --- 2b) macOS first sends Redirector's inert scope, then closes IPC ------
     #[cfg(target_os = "macos")]
     {
         let macos_capture = {
@@ -1878,18 +1819,6 @@ async fn full_teardown(
             if let Err(error) = capture.stop().await {
                 tracing::warn!("sockscap: macOS capture teardown error: {error}");
                 errors.push(format!("macOS capture teardown failed: {error}"));
-            }
-        }
-        // Transparent backend: stop the control channel (provider fails open to
-        // DIRECT) then the ingress. The system extension stays installed.
-        let macos_transparent = {
-            let mut orch = state.sockscap.orch.write().await;
-            orch.take_macos_transparent_capture_for_stop()
-        };
-        if let Some(capture) = macos_transparent {
-            if let Err(error) = capture.stop().await {
-                tracing::warn!("sockscap: macOS transparent capture teardown error: {error}");
-                errors.push(format!("macOS transparent capture teardown failed: {error}"));
             }
         }
     }

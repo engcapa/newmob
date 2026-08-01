@@ -31,15 +31,8 @@ bench = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 prost-build = "0.14"
-# Compiles the macOS Network Extension activation shim (Objective-C) into the
-# binary on macOS only; see build.rs `compile_macos_ne_shim`.
-cc = "1"
 
 [dependencies]
-# SocksCap capture-plane primitives (macOS transparent-proxy decision + control
-# protocol). Shared with the Network Extension appex via the same crate's
-# staticlib so the rule has one implementation. See sockscap-core/.
-sockscap-core = { path = "sockscap-core" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
 # In-app auto-update: pull signed bundles from GitHub Releases (see
@@ -198,13 +191,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-dialog = "2.7.1"
 sqlparser = "0.62.0"
 
-[workspace]
-# sockscap-core is the single source of truth for the macOS transparent-proxy
-# per-flow decision + control protocol: the engine links it as an rlib and the
-# Network Extension appex links its staticlib and calls the C-ABI, so the rule
-# is never reimplemented (and cannot drift) in Swift.
-members = ["sockscap-core"]
-
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 picky = { path = "vendor/picky" }
@@ -279,4 +265,3 @@ debug = false
 # so test binaries stay small even if someone overrides profile.dev later.
 [profile.test]
 debug = 1
-

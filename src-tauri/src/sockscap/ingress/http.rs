@@ -3,9 +3,9 @@
 //! The mirror image of [`crate::sockscap::egress::http_connect`]. Only the
 //! CONNECT tunnel form is handled: an HTTP proxy is also expected to serve
 //! absolute-form requests (`GET http://host/path`), which would require
-//! rewriting and re-framing every request rather than bridging bytes. macOS
-//! Phase 1 therefore points the system **SOCKS** proxy at the ingress, and
-//! absolute-form arrivals get an explicit, actionable refusal.
+//! rewriting and re-framing every request rather than bridging bytes. This
+//! explicit local ingress only accepts CONNECT, so absolute-form arrivals get
+//! an explicit, actionable refusal.
 
 use std::net::IpAddr;
 

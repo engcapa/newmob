@@ -165,7 +165,7 @@ function phaseTone(phase: string): string {
 
 /** Platforms whose capture backend asks for an elevation password up front. */
 function needsElevationPassword(platform: string | undefined): boolean {
-  return platform === "linux" || platform === "macos";
+  return platform === "linux";
 }
 
 function isRootRequiredError(message: string): boolean {
@@ -175,10 +175,7 @@ function isRootRequiredError(message: string): boolean {
     lower.includes("linux capture requires") ||
     lower.includes("linux capture needs root") ||
     lower.includes("linux cgroup cleanup requires") ||
-    lower.includes("permission to manage cgroup v2") ||
-    // macOS needs admin rights for `networksetup`.
-    lower.includes("administrator rights") ||
-    lower.includes("administrator access")
+    lower.includes("permission to manage cgroup v2")
   );
 }
 
@@ -271,7 +268,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [subInput, setSubInput] = useState("");
   const [showSubImport, setShowSubImport] = useState(false);
 
-  // Linux/macOS sudo prompt state. Keep the intent explicit so submitting a
+  // Linux sudo prompt state. Keep the intent explicit so submitting a
   // recovery password can never accidentally start a new capture session.
   const [rootPromptIntent, setRootPromptIntent] = useState<"start" | "recover" | null>(null);
   const [rootPromptError, setRootPromptError] = useState<string | null>(null);
@@ -879,11 +876,11 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       if (hp) setHelper(hp);
     } catch (e) {
       const errStr = String(e);
-      const isLinux = needsElevationPassword(caps?.platform);
-      if (isLinux && !sudoPassword && isRootRequiredError(errStr)) {
+      const needsPassword = needsElevationPassword(caps?.platform);
+      if (needsPassword && !sudoPassword && isRootRequiredError(errStr)) {
         setRootPromptIntent("start");
         setRootPromptError(null);
-      } else if (isLinux && sudoPassword && isSudoAuthenticationError(errStr)) {
+      } else if (needsPassword && sudoPassword && isSudoAuthenticationError(errStr)) {
         setRootPromptIntent("start");
         setRootPromptError(t("sockscap.rootPromptIncorrectPassword"));
       } else {
@@ -2719,12 +2716,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         <SocksCapRootPrompt
           subtitle={
             rootPromptIntent === "recover"
-              ? caps?.platform === "macos"
-                ? t("sockscap.rootPromptRecoverSubtitleMacos")
-                : t("sockscap.rootPromptRecoverSubtitle")
-              : caps?.platform === "macos"
-                ? t("sockscap.rootPromptSubtitleMacos")
-                : undefined
+              ? t("sockscap.rootPromptRecoverSubtitle")
+              : undefined
           }
           onSubmit={(password) => {
             if (rootPromptIntent === "recover") void onRecover(password);
