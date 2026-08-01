@@ -1,20 +1,12 @@
 id: TC-auto-F-DB-1-sql-session-scaffold
-title: SQL DB session form mounts and saved MySQL session round-trips
+title: SQL session opens its offline query library and saves a query
 description: |
-  Coverage smoke for F-DB-1 (SQL client: MySQL / PostgreSQL / ClickHouse).
-  Opens SessionEditor, switches to the MySQL protocol — which auto-jumps to
-  the dedicated Database settings tab — asserts the DB settings form mounts
-  with its engine-specific fields, fills them, saves the bookmark, and
-  reopens it to confirm the proto=MySQL chip round-trips.
-
-  The test does NOT open a live SQL connection: browser preview rejects
-  db_connect ("Database connections are not available in browser preview"),
-  so the DbClientTab inner surface (schema-tree / sql-editor /
-  query-result-grid) only mounts on a real desktop connection. That live
-  surface is left to native/manual regression against a configured DB
-  fixture (same scaffold-only pattern as TC-111 RDP and TC-112 WSL).
-covers: [F-DB-1, F6.3]
-tags: [auto-generated, smoke, needs-review, database, sql, scaffolding-only, no-connect]
+  Creates a MySQL session in browser mode, opens it into the expected offline
+  state, and verifies that the SQL editor and shared Query Library remain
+  available even though db_connect is unavailable. Saves a connection-scoped
+  query through the browser SQLite stub and exercises namespace/search filters.
+covers: [F-DB-1, F-DB-4, F6.3]
+tags: [auto-generated, smoke, needs-review, database, sql, query-library, no-connect]
 modes: [browser]
 fixtures: [reset_db]
 timeout_sec: 45
@@ -51,14 +43,36 @@ steps:
       value: qa-ui-auto-mysql
   - click: '[data-testid="session-save"]'
   - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-mysql"]'
-  - screenshot: db-1-sql-saved.png
-  # Round-trip check — reselect the tree item, reopen the editor, and assert
-  # the proto=MySQL chip is active. (Double-clicking would open the live DB
-  # tab, which cannot connect in browser preview.)
-  - click: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-mysql"]'
-  - click: '[data-testid="session-edit"]'
-  - wait_for: '[data-testid="session-editor"]'
-  - wait_for:
-      selector: '[data-testid="session-proto-mysql"][data-active="true"]'
-      timeout_sec: 5
-  - assert_visible: '[data-testid="database-settings"]'
+  - open_session: { name: qa-ui-auto-mysql, double_click: true }
+  - wait_for: '[data-testid="db-connection-error-banner"]'
+  - assert_visible: '[data-testid="sql-editor"]'
+  - click: '[data-testid="db-query-library-tab"]'
+  - wait_for: '[data-testid="query-library-panel"]'
+  - click: '[data-testid="query-library-all-namespaces"]'
+  - click: '[data-testid="query-library-current-namespace"]'
+  - set_check:
+      selector: '[data-testid="query-library-show-archived"]'
+      checked: true
+  - set_check:
+      selector: '[data-testid="query-library-show-archived"]'
+      checked: false
+  - click: '[data-testid="query-library-create"]'
+  - wait_for: '[data-testid="query-library-dialog"]'
+  - fill:
+      selector: '[data-testid="query-library-name"]'
+      value: qa-ui-auto-query
+  - fill:
+      selector: '[data-testid="query-library-content"]'
+      value: SELECT 42;
+  - select_option:
+      selector: '[data-testid="query-library-scope"]'
+      value: connection
+  - click: '[data-testid="query-library-save"]'
+  - wait_for: '[data-testid^="saved-query-"]'
+  - fill:
+      selector: '[data-testid="query-library-search"]'
+      value: qa-ui-auto-query
+  - assert_count:
+      selector: '[data-testid^="saved-query-"]'
+      equal: 1
+  - screenshot: db-1-query-library.png

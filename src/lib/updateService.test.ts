@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  invoke: vi.fn(async () => undefined),
+  invoke: vi.fn(
+    async (_command: string, _args?: Record<string, unknown>): Promise<unknown> => undefined,
+  ),
   relaunch: vi.fn(async () => undefined),
   check: vi.fn(),
   download: vi.fn(async () => undefined),

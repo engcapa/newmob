@@ -49,6 +49,8 @@ const TUNNEL_STORAGE_KEY = "taomni.tunnels.v1";
 const CHAT_THREADS_STORAGE_KEY = "taomni.stub.chatThreads.v1";
 const CHAT_MESSAGES_STORAGE_KEY = "taomni.stub.chatMessages.v1";
 const DB_HISTORY_STORAGE_KEY = "taomni.stub.dbSqlHistory.v1";
+const DB_QUERY_WORKSPACES_STORAGE_KEY = "taomni.stub.dbQueryWorkspaces.v1";
+const DB_SAVED_QUERIES_STORAGE_KEY = "taomni.stub.dbSavedQueries.v1";
 const NOTES_STORAGE_KEY = "taomni.stub.notes.v1";
 const NOTE_TAGS_STORAGE_KEY = "taomni.stub.noteTags.v1";
 const NOTE_PREFS_STORAGE_KEY = "taomni.stub.notePrefs.v1";
@@ -172,6 +174,82 @@ interface StubDbSqlHistoryEntry {
   hasResultSet: boolean;
   error?: string | null;
   createdAt: number;
+}
+
+interface StubDbQueryWorkspaceTab {
+  workspaceId: string;
+  panelId: string;
+  tabOrder: number;
+  content: string;
+  filePath?: string | null;
+  fileName?: string | null;
+  savedQueryId?: string | null;
+  dirty: boolean;
+  isOpen: boolean;
+  closedAt?: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface StubDbQueryWorkspace {
+  workspaceId: string;
+  activePanelId?: string | null;
+  tabs: StubDbQueryWorkspaceTab[];
+  updatedAt: number;
+}
+
+interface StubDbSavedQuery {
+  id: string;
+  scopeType: "connection" | "engine";
+  scopeId: string;
+  engine: string;
+  catalogName?: string | null;
+  databaseName?: string | null;
+  schemaName?: string | null;
+  namespaceKey: string;
+  name: string;
+  content: string;
+  remarks?: string | null;
+  tags: string[];
+  revision: number;
+  archivedAt?: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+function loadDbSavedQueries(): StubDbSavedQuery[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DB_SAVED_QUERIES_STORAGE_KEY) ?? "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveDbSavedQueries(queries: StubDbSavedQuery[]): void {
+  localStorage.setItem(DB_SAVED_QUERIES_STORAGE_KEY, JSON.stringify(queries));
+}
+
+function stubSavedQueryNamespaceKey(
+  catalogName?: string | null,
+  databaseName?: string | null,
+  schemaName?: string | null,
+): string {
+  const values = [catalogName, databaseName, schemaName].map((value) => value?.trim() ?? "");
+  return values.every((value) => !value) ? "" : JSON.stringify(values);
+}
+
+function loadDbQueryWorkspaces(): Record<string, StubDbQueryWorkspace> {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DB_QUERY_WORKSPACES_STORAGE_KEY) ?? "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveDbQueryWorkspaces(workspaces: Record<string, StubDbQueryWorkspace>): void {
+  localStorage.setItem(DB_QUERY_WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
 }
 
 function loadDbSqlHistory(): StubDbSqlHistoryEntry[] {
@@ -2694,6 +2772,172 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
           : [],
       );
       return undefined as T;
+    }
+    case "db_load_query_workspace": {
+      const workspaceId = String((args as InvokeArgs | undefined)?.workspaceId ?? "");
+      const workspace = loadDbQueryWorkspaces()[workspaceId];
+      if (!workspace) return null as T;
+      return {
+        ...workspace,
+        tabs: workspace.tabs
+          .filter((tab) => tab.isOpen)
+          .sort((left, right) => left.tabOrder - right.tabOrder),
+      } as T;
+    }
+    case "db_save_query_workspace": {
+      const request = (args as InvokeArgs | undefined)?.request as StubDbQueryWorkspace | undefined;
+      if (!request?.workspaceId) return undefined as T;
+      const workspaces = loadDbQueryWorkspaces();
+      const previous = workspaces[request.workspaceId];
+      const previousTabs = new Map((previous?.tabs ?? []).map((tab) => [tab.panelId, tab]));
+      for (const tab of request.tabs) {
+        const existing = previousTabs.get(tab.panelId);
+        previousTabs.set(tab.panelId, {
+          ...tab,
+          createdAt: existing?.createdAt ?? tab.createdAt,
+          isOpen: true,
+          closedAt: null,
+        });
+      }
+      workspaces[request.workspaceId] = {
+        ...request,
+        tabs: [...previousTabs.values()],
+      };
+      saveDbQueryWorkspaces(workspaces);
+      return undefined as T;
+    }
+    case "db_close_query_workspace_tabs": {
+      const invokeArgs = args as InvokeArgs | undefined;
+      const workspaceId = String(invokeArgs?.workspaceId ?? "");
+      const panelIds = new Set(Array.isArray(invokeArgs?.panelIds) ? invokeArgs.panelIds.map(String) : []);
+      const closedAt = Number(invokeArgs?.closedAt ?? Date.now());
+      const workspaces = loadDbQueryWorkspaces();
+      const workspace = workspaces[workspaceId];
+      if (workspace) {
+        workspace.tabs = workspace.tabs.map((tab) => panelIds.has(tab.panelId)
+          ? { ...tab, isOpen: false, closedAt, updatedAt: closedAt }
+          : tab);
+        if (workspace.activePanelId && panelIds.has(workspace.activePanelId)) {
+          workspace.activePanelId = null;
+        }
+        workspace.updatedAt = closedAt;
+        saveDbQueryWorkspaces(workspaces);
+      }
+      return undefined as T;
+    }
+    case "db_list_closed_query_workspace_tabs": {
+      const invokeArgs = args as InvokeArgs | undefined;
+      const workspaceId = String(invokeArgs?.workspaceId ?? "");
+      const limit = Math.max(1, Math.min(200, Number(invokeArgs?.limit ?? 50)));
+      return (loadDbQueryWorkspaces()[workspaceId]?.tabs ?? [])
+        .filter((tab) => !tab.isOpen)
+        .sort((left, right) => (right.closedAt ?? 0) - (left.closedAt ?? 0))
+        .slice(0, limit) as T;
+    }
+    case "db_reopen_query_workspace_tab": {
+      const invokeArgs = args as InvokeArgs | undefined;
+      const workspaceId = String(invokeArgs?.workspaceId ?? "");
+      const panelId = String(invokeArgs?.panelId ?? "");
+      const workspaces = loadDbQueryWorkspaces();
+      const workspace = workspaces[workspaceId];
+      const tab = workspace?.tabs.find((candidate) => candidate.panelId === panelId);
+      if (!workspace || !tab) return false as T;
+      tab.isOpen = true;
+      tab.closedAt = null;
+      tab.tabOrder = Number(invokeArgs?.tabOrder ?? workspace.tabs.length);
+      tab.updatedAt = Number(invokeArgs?.updatedAt ?? Date.now());
+      saveDbQueryWorkspaces(workspaces);
+      return true as T;
+    }
+    case "db_list_saved_queries": {
+      const request = ((args as InvokeArgs | undefined)?.request ?? {}) as Record<string, unknown>;
+      const connectionId = typeof request.connectionId === "string" ? request.connectionId : null;
+      const engine = typeof request.engine === "string" ? request.engine : null;
+      const namespaceKey = stubSavedQueryNamespaceKey(
+        typeof request.catalogName === "string" ? request.catalogName : null,
+        typeof request.databaseName === "string" ? request.databaseName : null,
+        typeof request.schemaName === "string" ? request.schemaName : null,
+      );
+      return loadDbSavedQueries()
+        .filter((query) => Boolean(request.includeArchived) || query.archivedAt == null)
+        .filter((query) => (
+          (connectionId && query.scopeType === "connection" && query.scopeId === connectionId)
+          || (engine && query.scopeType === "engine" && query.scopeId === engine)
+          || (!connectionId && !engine)
+        ))
+        .filter((query) => Boolean(request.includeAllNamespaces)
+          || !query.namespaceKey
+          || query.namespaceKey === namespaceKey)
+        .sort((left, right) => left.name.localeCompare(right.name, undefined, { sensitivity: "base" })) as T;
+    }
+    case "db_get_saved_query": {
+      const id = String((args as InvokeArgs | undefined)?.id ?? "");
+      return (loadDbSavedQueries().find((query) => query.id === id) ?? null) as T;
+    }
+    case "db_save_saved_query": {
+      const query = (args as InvokeArgs | undefined)?.query as StubDbSavedQuery | undefined;
+      if (!query?.id) throw new Error("saved query id is required");
+      const queries = loadDbSavedQueries();
+      const existingIndex = queries.findIndex((candidate) => candidate.id === query.id);
+      const namespaceKey = stubSavedQueryNamespaceKey(
+        query.catalogName,
+        query.databaseName,
+        query.schemaName,
+      );
+      const nameConflict = queries.some((candidate) => candidate.id !== query.id
+        && candidate.scopeType === query.scopeType
+        && candidate.scopeId === query.scopeId
+        && candidate.namespaceKey === namespaceKey
+        && candidate.name.localeCompare(query.name, undefined, { sensitivity: "base" }) === 0);
+      if (nameConflict) throw new Error(`saved_query_name_conflict:${query.name}`);
+      let name = query.name.trim();
+      if (!name) {
+        let ordinal = 1;
+        do {
+          name = `Query-${ordinal}`;
+          ordinal += 1;
+        } while (queries.some((candidate) => candidate.scopeType === query.scopeType
+          && candidate.scopeId === query.scopeId
+          && candidate.namespaceKey === namespaceKey
+          && candidate.name.localeCompare(name, undefined, { sensitivity: "base" }) === 0));
+      }
+      const existing = existingIndex >= 0 ? queries[existingIndex] : null;
+      if (existing && existing.revision !== query.revision) {
+        throw new Error(`saved_query_revision_conflict:${query.id}:${query.revision}:${existing.revision}`);
+      }
+      const saved: StubDbSavedQuery = {
+        ...query,
+        name,
+        namespaceKey,
+        revision: existing ? existing.revision + 1 : 1,
+        createdAt: existing?.createdAt ?? query.createdAt,
+      };
+      if (existingIndex >= 0) queries[existingIndex] = saved;
+      else queries.push(saved);
+      saveDbSavedQueries(queries);
+      return saved as T;
+    }
+    case "db_archive_saved_query": {
+      const invokeArgs = args as InvokeArgs | undefined;
+      const id = String(invokeArgs?.id ?? "");
+      const revision = Number(invokeArgs?.revision ?? 0);
+      const queries = loadDbSavedQueries();
+      const query = queries.find((candidate) => candidate.id === id);
+      if (!query || query.revision !== revision) {
+        throw new Error(`saved_query_revision_conflict:${id}:${revision}`);
+      }
+      query.archivedAt = typeof invokeArgs?.archivedAt === "number" ? invokeArgs.archivedAt : null;
+      query.updatedAt = Number(invokeArgs?.updatedAt ?? Date.now());
+      query.revision += 1;
+      saveDbSavedQueries(queries);
+      return query.revision as T;
+    }
+    case "db_delete_saved_query": {
+      const id = String((args as InvokeArgs | undefined)?.id ?? "");
+      const queries = loadDbSavedQueries();
+      const next = queries.filter((query) => query.id !== id);
+      saveDbSavedQueries(next);
+      return (next.length !== queries.length) as T;
     }
     // ---------- Database client commands (desktop-only) ----------
     case "db_connect":

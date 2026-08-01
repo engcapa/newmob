@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ChevronUp, ChevronDown, Crosshair, Trash2, Radio } from "lucide-react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { ChevronUp, ChevronDown, Crosshair, Trash2, Radio, Star } from "lucide-react";
 import { redisExec } from "../../lib/ipc";
 import {
   displaySqlShortcut,
@@ -11,6 +11,13 @@ interface RedisCliProps {
   sessionId: string;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  input: string;
+  onInputChange: (value: string) => void;
+  onSaveQuery: () => void;
+}
+
+export interface RedisCliHandle {
+  runCommand: (command: string) => Promise<void>;
 }
 
 interface CliLine {
@@ -27,8 +34,14 @@ const KNOWN_COMMANDS = [
   "OBJECT", "MEMORY", "MONITOR",
 ];
 
-export function RedisCli({ sessionId, collapsed, onToggleCollapse }: RedisCliProps) {
-  const [input, setInput] = useState("");
+export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function RedisCli({
+  sessionId,
+  collapsed,
+  onToggleCollapse,
+  input,
+  onInputChange,
+  onSaveQuery,
+}, ref) {
   const [lines, setLines] = useState<CliLine[]>([]);
   const [monitoring, setMonitoring] = useState(false);
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
@@ -52,9 +65,9 @@ export function RedisCli({ sessionId, collapsed, onToggleCollapse }: RedisCliPro
     [],
   );
 
-  const append = (line: CliLine) => setLines((prev) => [...prev, line].slice(-500));
+  const append = useCallback((line: CliLine) => setLines((prev) => [...prev, line].slice(-500)), []);
 
-  const runCommand = async (raw: string) => {
+  const runCommand = useCallback(async (raw: string) => {
     const cmd = raw.trim();
     if (!cmd) return;
     historyRef.current = [cmd, ...historyRef.current].slice(0, 200);
@@ -65,12 +78,14 @@ export function RedisCli({ sessionId, collapsed, onToggleCollapse }: RedisCliPro
     } catch (err) {
       append({ cmd, reply: String(err), error: true });
     }
-  };
+  }, [append, sessionId]);
+
+  useImperativeHandle(ref, () => ({ runCommand }), [runCommand]);
 
   const tabComplete = () => {
     const upper = input.toUpperCase();
     const match = KNOWN_COMMANDS.find((c) => c.startsWith(upper) && c !== upper);
-    if (match) setInput(match + " ");
+    if (match) onInputChange(match + " ");
   };
 
   const toggleMonitor = () => {
@@ -136,10 +151,19 @@ export function RedisCli({ sessionId, collapsed, onToggleCollapse }: RedisCliPro
           disabled={!input.trim()}
           onClick={() => {
             void runCommand(input);
-            setInput("");
+            onInputChange("");
           }}
         >
           <Crosshair className="w-3.5 h-3.5" /> Current
+        </button>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 px-1.5 rounded hover:bg-[var(--taomni-hover)]"
+          title="Save command to query library"
+          data-testid="redis-save-query"
+          onClick={onSaveQuery}
+        >
+          <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query
         </button>
         <div className="flex-1" />
         <button
@@ -191,11 +215,11 @@ export function RedisCli({ sessionId, collapsed, onToggleCollapse }: RedisCliPro
           value={input}
           placeholder="Type a Redis command and press Enter"
           aria-label="Redis command"
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => onInputChange(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               void runCommand(input);
-              setInput("");
+              onInputChange("");
             } else if (e.key === "Tab") {
               e.preventDefault();
               tabComplete();
@@ -203,16 +227,16 @@ export function RedisCli({ sessionId, collapsed, onToggleCollapse }: RedisCliPro
               e.preventDefault();
               if (historyIdx.current < historyRef.current.length - 1) {
                 historyIdx.current += 1;
-                setInput(historyRef.current[historyIdx.current] ?? "");
+                onInputChange(historyRef.current[historyIdx.current] ?? "");
               }
             } else if (e.key === "ArrowDown") {
               e.preventDefault();
               if (historyIdx.current > 0) {
                 historyIdx.current -= 1;
-                setInput(historyRef.current[historyIdx.current] ?? "");
+                onInputChange(historyRef.current[historyIdx.current] ?? "");
               } else {
                 historyIdx.current = -1;
-                setInput("");
+                onInputChange("");
               }
             }
           }}
@@ -220,4 +244,4 @@ export function RedisCli({ sessionId, collapsed, onToggleCollapse }: RedisCliPro
       </div>
     </div>
   );
-}
+});

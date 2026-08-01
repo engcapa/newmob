@@ -1303,6 +1303,10 @@ controls:
     selector: '[data-testid="session-proto-redis"]'
     kind: interactive
     optional: true        # Redis session type — form body owned by F-DB-2
+  - id: proto-hbaseshell
+    selector: '[data-testid="session-proto-hbaseshell"]'
+    kind: interactive
+    optional: true        # HBase session type — form body owned by F-DB-3
   # Top-level connection fields (visible when SSH/SFTP/VNC/RDP)
   - id: host
     selector: '[data-testid="session-host"]'
@@ -1370,6 +1374,10 @@ controls:
     selector: '[data-testid="session-section-database"]'
     kind: interactive
     optional: true        # only present for DB protos; body owned by F-DB-1/F-DB-2
+  - id: hbase-section
+    selector: '[data-testid="session-hbase-section"]'
+    kind: display
+    optional: true        # only present for HBaseShell; body owned by F-DB-3
   # Section bodies
   - id: advanced-body
     selector: '[data-testid="advanced-ssh-settings"]'
@@ -3805,6 +3813,18 @@ controls:
     selector: '[data-testid="db-schema-drawer-handle"]'
     kind: interactive
     optional: true
+  - id: query-library-tab
+    selector: '[data-testid="db-query-library-tab"]'
+    kind: interactive
+    optional: true       # opened SQL tab, including connection-error mode
+  - id: save-query
+    selector: '[data-testid="db-save-query"]'
+    kind: interactive
+    optional: true
+  - id: connection-error-banner
+    selector: '[data-testid="db-connection-error-banner"]'
+    kind: display
+    optional: true       # connection failed; editor and Query Library remain mounted
   # Shared tab actions — chat / detach.
   - id: chat-toggle
     selector: '[data-testid="db-chat-toggle"]'
@@ -3882,6 +3902,18 @@ controls:
     selector: 'input[aria-label="Redis command"]'
     kind: interactive
     optional: true
+  - id: query-library-tab
+    selector: '[data-testid="redis-query-library-tab"]'
+    kind: interactive
+    optional: true
+  - id: save-query
+    selector: '[data-testid="redis-save-query"]'
+    kind: interactive
+    optional: true
+  - id: connection-error-banner
+    selector: '[data-testid="redis-connection-error-banner"]'
+    kind: display
+    optional: true
   # RedisNewKeyDialog fields (aria-label only — modal opened by the key browser "Add" button).
   - id: new-key-name
     selector: 'input[aria-label="Key name"]'
@@ -3903,6 +3935,132 @@ controls:
 - 底部可折叠 `RedisCli`：命令历史、Tab 补全、Monitor 开关（轮询 `INFO commandstats`）；DB-index 切换（`Redis DB index`）发 `SELECT n`
 - `RedisNewKeyDialog` 模态：Key name / type / 初始值 / TTL 等字段（均 aria-label）
 - **e2e 测试限制**：实际 key 操作需活的 Redis fixture，浏览器冒烟无法连接；smoke 只覆盖「SessionEditor 选 Redis proto → 保存 → 打开标签 → redis-key-browser / redis-cli 挂载」的路由路径，真实 SCAN/读写留待配置 Redis fixture 的手动/native 回归
+
+### 24.2 HBase Shell 客户端 ✅
+
+<!-- feature
+id: F-DB-3
+status: done
+area: database/hbase
+components: [HBaseShellTab, HBaseSchemaTree]
+files:
+  - src/components/database/HBaseShellTab.tsx
+  - src/components/database/HBaseSchemaTree.tsx
+  - src/lib/hbaseCommands.ts
+  - src/lib/hbaseCompletions.ts
+  - src/lib/hbaseStatements.ts
+controls:
+  - id: remote-host
+    selector: 'input[aria-label="Remote host"]'
+    kind: interactive
+    optional: true
+  - id: namespace
+    selector: 'input[aria-label="HBase namespace"]'
+    kind: interactive
+    optional: true
+  - id: schema-tree
+    selector: '[data-testid="hbase-schema-tree"]'
+    kind: display
+    optional: true
+  - id: schema-filter
+    selector: '[data-testid="hbase-schema-tree-filter"]'
+    kind: interactive
+    optional: true
+  - id: query-library-tab
+    selector: '[data-testid="hbase-query-library-tab"]'
+    kind: interactive
+    optional: true
+  - id: save-query
+    selector: '[data-testid="hbase-save-query"]'
+    kind: interactive
+    optional: true
+  - id: run-current
+    selector: '[data-testid="hbase-run-current-statement"]'
+    kind: interactive
+    optional: true
+  - id: help-dialog
+    selector: '[data-testid="hbase-help-dialog"]'
+    kind: display
+    optional: true
+  - id: sidebar-drawer
+    selector: '[data-testid="hbase-sidebar-drawer-handle"]'
+    kind: interactive
+    optional: true
+  - id: connection-error-banner
+    selector: '[data-testid="hbase-connection-error-banner"]'
+    kind: display
+    optional: true
+-->
+
+- HBase REST/native/thrift 会话使用同一多面板 shell 工作区、命令补全、写操作确认与结果表格；连接失败时工作区和 Query Library 继续可用。
+- Query Library 以稳定 HBase session id + namespace 过滤命令，打开后仍通过原 HBase statement runner 执行并参与退出 flush。
+
+### 24.3 数据库 Query Library 与草稿持久化 ✅
+
+<!-- feature
+id: F-DB-4
+status: done
+area: database/queries
+components: [QueryLibraryPanel]
+files:
+  - src/components/database/QueryLibraryPanel.tsx
+  - src-tauri/src/database/query_workspace.rs
+  - src-tauri/src/database/saved_queries.rs
+  - src/lib/ipc.ts
+  - src/stubs/tauri-core.ts
+controls:
+  - id: panel
+    selector: '[data-testid="query-library-panel"]'
+    kind: display
+    optional: true
+  - id: search
+    selector: '[data-testid="query-library-search"]'
+    kind: interactive
+    optional: true
+  - id: create
+    selector: '[data-testid="query-library-create"]'
+    kind: interactive
+    optional: true
+  - id: current-namespace
+    selector: '[data-testid="query-library-current-namespace"]'
+    kind: interactive
+    optional: true
+  - id: all-namespaces
+    selector: '[data-testid="query-library-all-namespaces"]'
+    kind: interactive
+    optional: true
+  - id: show-archived
+    selector: '[data-testid="query-library-show-archived"]'
+    kind: interactive
+    optional: true
+  - id: dialog
+    selector: '[data-testid="query-library-dialog"]'
+    kind: display
+    optional: true
+  - id: name
+    selector: '[data-testid="query-library-name"]'
+    kind: interactive
+    optional: true
+  - id: scope
+    selector: '[data-testid="query-library-scope"]'
+    kind: interactive
+    optional: true
+  - id: content
+    selector: '[data-testid="query-library-content"]'
+    kind: interactive
+    optional: true
+  - id: save
+    selector: '[data-testid="query-library-save"]'
+    kind: interactive
+    optional: true
+  - id: saved-query
+    selector: '[data-testid^="saved-query-"]'
+    kind: display
+    optional: true
+-->
+
+- 匿名 SQL 草稿与 tab 顺序写入 SQLite workspace；已命名 Query 支持 connection/engine scope、catalog/database/schema namespace、搜索/标签、revision 冲突、归档与旧 Bookmark 幂等迁移。
+- SQL、Redis 与 HBase 共用 Query Library。已保存 Query 与打开的编辑器保持 `savedQueryId` 链接，变更 debounce 落盘，关闭 tab/退出应用时 flush 最后一版。
 
 ## 15. Tao Notes 与 Tao Hub
 
