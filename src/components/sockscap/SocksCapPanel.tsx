@@ -27,6 +27,7 @@ import {
 import {
   sockscapCapabilities,
   sockscapGetConfig,
+  sockscapValidateMacosApp,
   sockscapGfwlistStatus,
   sockscapImportRules,
   sockscapListProcesses,
@@ -46,14 +47,19 @@ import {
   sockscapParseShareLink,
   sockscapDetectLocalProxies,
   sockscapDetectTunConflicts,
+  sockscapDiagnostics,
   sockscapImportSubscription,
+  sockscapInstallRedirector,
+  sockscapRedirectorInstallStatus,
   upstreamRequiresCore,
+  type AppSelector,
   type LocalProxyCandidate,
   type Decision,
   type DomainRecord,
   type GfwListStatus,
   type HelperStatus,
   type ProcessInfo,
+  type RedirectorInstallStatus,
   type RuleMode,
   type ScopeMode,
   type SocksCapCapabilities,
@@ -165,7 +171,7 @@ function phaseTone(phase: string): string {
 
 /** Platforms whose capture backend asks for an elevation password up front. */
 function needsElevationPassword(platform: string | undefined): boolean {
-  return platform === "linux" || platform === "macos";
+  return platform === "linux";
 }
 
 function isRootRequiredError(message: string): boolean {
@@ -175,10 +181,7 @@ function isRootRequiredError(message: string): boolean {
     lower.includes("linux capture requires") ||
     lower.includes("linux capture needs root") ||
     lower.includes("linux cgroup cleanup requires") ||
-    lower.includes("permission to manage cgroup v2") ||
-    // macOS needs admin rights for `networksetup`.
-    lower.includes("administrator rights") ||
-    lower.includes("administrator access")
+    lower.includes("permission to manage cgroup v2")
   );
 }
 
@@ -241,6 +244,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [gfw, setGfw] = useState<GfwListStatus | null>(null);
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [helper, setHelper] = useState<HelperStatus | null>(null);
+  const [redirectorInstall, setRedirectorInstall] = useState<RedirectorInstallStatus | null>(null);
   const [sessions, setSessions] = useState<SessionOpt[]>([]);
   const [detectedProxies, setDetectedProxies] = useState<LocalProxyCandidate[]>([]);
   const [processes, setProcesses] = useState<ProcessInfo[]>([]);
@@ -271,7 +275,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [subInput, setSubInput] = useState("");
   const [showSubImport, setShowSubImport] = useState(false);
 
-  // Linux/macOS sudo prompt state. Keep the intent explicit so submitting a
+  // Linux sudo prompt state. Keep the intent explicit so submitting a
   // recovery password can never accidentally start a new capture session.
   const [rootPromptIntent, setRootPromptIntent] = useState<"start" | "recover" | null>(null);
   const [rootPromptError, setRootPromptError] = useState<string | null>(null);
@@ -384,7 +388,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   const refresh = useCallback(async () => {
     try {
-      const [c, cp, st, gf, sn, hp, drs] = await Promise.all([
+      const [c, cp, st, gf, sn, hp, drs, ri] = await Promise.all([
         sockscapGetConfig().then(normalizeFrontendConfig).catch(() => DEFAULT_CFG),
         sockscapCapabilities().catch(() => null),
         sockscapStatus().catch(() => null),
@@ -392,6 +396,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         sockscapStatsSnapshot().catch(() => null),
         sockscapHelperStatus().catch(() => null),
         sockscapGetDomainRecords().catch(() => null),
+        sockscapRedirectorInstallStatus().catch(() => null),
       ]);
       setCfg(c);
       setCaps(cp);
@@ -400,6 +405,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       if (sn) setStats(sn);
       if (hp) setHelper(hp);
       if (drs) setDomainRecords(drs);
+      setRedirectorInstall(ri);
     } catch (e) {
       report(String(e), false);
     }
@@ -879,11 +885,11 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       if (hp) setHelper(hp);
     } catch (e) {
       const errStr = String(e);
-      const isLinux = needsElevationPassword(caps?.platform);
-      if (isLinux && !sudoPassword && isRootRequiredError(errStr)) {
+      const needsPassword = needsElevationPassword(caps?.platform);
+      if (needsPassword && !sudoPassword && isRootRequiredError(errStr)) {
         setRootPromptIntent("start");
         setRootPromptError(null);
-      } else if (isLinux && sudoPassword && isSudoAuthenticationError(errStr)) {
+      } else if (needsPassword && sudoPassword && isSudoAuthenticationError(errStr)) {
         setRootPromptIntent("start");
         setRootPromptError(t("sockscap.rootPromptIncorrectPassword"));
       } else {
@@ -972,6 +978,30 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     } finally {
       setBusy(false);
       setRootPromptBusy(false);
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    try {
+      const diagnostics = await sockscapDiagnostics();
+      await writeText(JSON.stringify(diagnostics, null, 2));
+      report(t("sockscap.diagnosticsCopied"));
+    } catch (e) {
+      report(String(e), false);
+    }
+  };
+
+  const installRedirector = async () => {
+    setBusy(true);
+    try {
+      const install = await sockscapInstallRedirector();
+      setRedirectorInstall(install);
+      await refresh();
+      report(install.message);
+    } catch (e) {
+      report(String(e), false);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1519,10 +1549,33 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   const addAppPath = async (path: string, name?: string) => {
     if (!cfg || !path.trim()) return;
+    let candidate: AppSelector;
+    try {
+      candidate =
+        caps?.platform === "macos"
+          ? await sockscapValidateMacosApp(path)
+          : { path, name: name || path.split(/[/\\]/).pop() || path };
+    } catch (e) {
+      report(String(e), false);
+      return;
+    }
     const apps = [...selectedProf.apps];
-    if (apps.some((a) => a.path.toLowerCase() === path.toLowerCase())) return;
-    apps.push({ path, name: name || path.split(/[/\\]/).pop() || path });
+    if (apps.some((a) => a.path.toLowerCase() === candidate.path.toLowerCase())) return;
+    apps.push(candidate);
     await patchSelectedProfile({ apps });
+  };
+
+  const pickMacosApplication = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "macOS Application", extensions: ["app"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      await addAppPath(selected);
+    } catch (e) {
+      report(String(e), false);
+    }
   };
 
   const addUserRule = async () => {
@@ -1607,7 +1660,17 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               </span>
             </span>
             {stats && (
-              <span className="hidden xl:inline shrink-0">
+              <span
+                className="hidden xl:inline shrink-0"
+                title={t("sockscap.trafficDiagnostics", {
+                  lastFlow: stats.lastFlowAt
+                    ? new Date(stats.lastFlowAt * 1000).toLocaleString()
+                    : "-",
+                  quic: stats.quicFlowsDropped ?? 0,
+                  udp: stats.udpDirectDatagrams ?? 0,
+                  mismatch: stats.scopeMismatchFlows ?? 0,
+                })}
+              >
                 {t("sockscap.trafficCompact", {
                   total: stats.flowsTotal,
                   proxy: stats.flowsProxy,
@@ -1718,6 +1781,46 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           </button>
         )}
       </div>
+
+      {status?.phase === "recoveryRequired" && caps?.platform === "macos" && (
+        <div className="px-4 py-3 bg-red-500/10 border-b border-red-500/30 text-[11px] text-red-700 dark:text-red-300">
+          <div className="font-semibold">{t("sockscap.manualRecoveryTitle")}</div>
+          <div className="mt-1">{status.message}</div>
+          <ol className="mt-2 ml-4 list-decimal space-y-1">
+            <li>{t("sockscap.manualRecoveryStep1")}</li>
+            <li>{t("sockscap.manualRecoveryStep2")}</li>
+            <li>{t("sockscap.manualRecoveryStep3")}</li>
+          </ol>
+          <button
+            type="button"
+            className="mt-2 inline-flex items-center gap-1 px-2 py-1 rounded border border-red-500/40 hover:bg-red-500/10"
+            onClick={() => void copyDiagnostics()}
+          >
+            <Copy className="w-3 h-3" />
+            {t("sockscap.copyDiagnostics")}
+          </button>
+        </div>
+      )}
+
+      {caps?.platform === "macos" && redirectorInstall?.state !== "ready" && (
+        <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-[11px] flex flex-wrap items-center justify-between gap-2 text-amber-800 dark:text-amber-300">
+          <span>{redirectorInstall?.message || t("sockscap.redirectorMissing")}</span>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 px-2 py-1 rounded border border-amber-500/40 hover:bg-amber-500/10 disabled:opacity-50"
+            disabled={
+              busy ||
+              !redirectorInstall?.resourceAvailable ||
+              redirectorInstall?.state === "conflict" ||
+              redirectorInstall?.state === "pendingSystemApproval"
+            }
+            onClick={() => void installRedirector()}
+          >
+            {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
+            {t("sockscap.installRedirector")}
+          </button>
+        </div>
+      )}
 
       {/* Scope/upstream edited while running — needs Stop+Start to apply */}
       {needsRestart && running && (
@@ -2032,6 +2135,18 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             {selectedProf.mode === "apps" && (
               <div className="mt-3 space-y-2">
                 <div className="flex gap-2">
+                  {caps?.platform === "macos" && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={() => void pickMacosApplication()}
+                      disabled={locked}
+                      title={locked ? t("sockscap.lockedTooltip") : undefined}
+                    >
+                      <Plus className="w-3 h-3" />
+                      {t("sockscap.pickApplication")}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
@@ -2053,9 +2168,22 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                         key={a.path}
                         className="flex items-center gap-2 text-[12px] px-2 py-1 rounded bg-[var(--taomni-bg)] border border-[var(--taomni-divider)]"
                       >
-                        <span className="flex-1 truncate" title={a.path}>
-                          {a.name || a.path}
+                        <span className="flex-1 min-w-0" title={a.path}>
+                          <span className="block truncate">{a.name || a.path}</span>
+                          {a.macosIdentity && (
+                            <span className="block truncate text-[10px] text-[var(--taomni-text-muted)]">
+                              {a.macosIdentity.mainExecutablePath} · {t("sockscap.bundleFamilyCoverage")}
+                            </span>
+                          )}
                         </span>
+                        {a.macosIdentity?.teamId && (
+                          <span
+                            className="text-[10px] text-[var(--taomni-text-muted)]"
+                            title={a.macosIdentity.designatedRequirement}
+                          >
+                            {a.macosIdentity.teamId}
+                          </span>
+                        )}
                         <button
                           type="button"
                           className="p-1 hover:text-red-500 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -2719,12 +2847,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         <SocksCapRootPrompt
           subtitle={
             rootPromptIntent === "recover"
-              ? caps?.platform === "macos"
-                ? t("sockscap.rootPromptRecoverSubtitleMacos")
-                : t("sockscap.rootPromptRecoverSubtitle")
-              : caps?.platform === "macos"
-                ? t("sockscap.rootPromptSubtitleMacos")
-                : undefined
+              ? t("sockscap.rootPromptRecoverSubtitle")
+              : undefined
           }
           onSubmit={(password) => {
             if (rootPromptIntent === "recover") void onRecover(password);

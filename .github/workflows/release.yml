@@ -383,6 +383,9 @@ jobs:
       - name: Stage xray-core (macos arm64)
         run: pwsh scripts/fetch-xray.ps1 -Platform macos-arm64
 
+      - name: Stage and verify signed Mitmproxy Redirector
+        run: bash scripts/stage-mitmproxy-redirector-macos.sh --stage
+
       - name: Resolve release version
         id: version
         shell: bash

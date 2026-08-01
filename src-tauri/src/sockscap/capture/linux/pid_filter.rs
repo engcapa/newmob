@@ -130,6 +130,7 @@ mod tests {
             path: "/opt/example/example".into(),
             bundle_id: String::new(),
             name: "Example".into(),
+            macos_identity: None,
         }]];
         let initial_groups = match_processes_to_groups(&selectors, &[]).unwrap();
         assert_eq!(initial_groups, vec![BTreeSet::new()]);
@@ -150,11 +151,13 @@ mod tests {
                 path: "/opt/example/example".into(),
                 bundle_id: String::new(),
                 name: "Primary".into(),
+                macos_identity: None,
             }],
             vec![AppSelector {
                 path: "example".into(),
                 bundle_id: String::new(),
                 name: "Fallback".into(),
+                macos_identity: None,
             }],
         ];
         let processes = vec![ProcessInfo {

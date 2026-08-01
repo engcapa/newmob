@@ -3,8 +3,8 @@
 //! OS capture adapters.
 //!
 //! Windows uses the elevated WinDivert helper. Linux uses nftables + cgroup v2
-//! transparent TCP redirect. macOS points the system SOCKS proxy at a loopback
-//! proxy ingress, which is not transparent and is Global-scoped only.
+//! transparent TCP redirect. macOS uses mitmproxy's signed Redirector over its
+//! Unix IPC bridge; no system-proxy fallback exists.
 
 use serde::{Deserialize, Serialize};
 
@@ -47,10 +47,7 @@ pub fn capabilities() -> SocksCapCapabilities {
     }
     #[cfg(target_os = "macos")]
     {
-        // The plain (no-AppHandle) probe reports the always-available Phase 1
-        // backend. `capabilities_for` upgrades this to the transparent backend
-        // when a signed Network Extension bundle is actually present.
-        macos_capabilities(false)
+        macos_capabilities(crate::sockscap::redirector::is_installed())
     }
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
@@ -65,65 +62,45 @@ pub fn capabilities() -> SocksCapCapabilities {
     }
 }
 
-/// macOS capabilities, parameterized on whether a transparent-capture Network
-/// Extension is bundled. Pure (builds the struct only) so both branches are
-/// unit-tested on any host.
-///
-/// * `extension_present = true` — the signed `NETransparentProxyProvider` ships
-///   in this build: per-app capture is available (`app_filter=true`) through the
-///   `ne-transparent` backend.
-/// * `extension_present = false` — Phase 1 only: the system SOCKS proxy points
-///   apps at the loopback listener, Global scope, no per-app identity.
+/// macOS capabilities, parameterized on whether the pinned, signed Redirector
+/// is installed.
 #[cfg(any(target_os = "macos", test))]
-pub fn macos_capabilities(extension_present: bool) -> SocksCapCapabilities {
-    if extension_present {
+pub fn macos_capabilities(redirector_installed: bool) -> SocksCapCapabilities {
+    if redirector_installed {
         SocksCapCapabilities {
             platform: "macos".into(),
             global_tcp: true,
             app_filter: true,
-            capture_backend: "ne-transparent".into(),
+            capture_backend: "mitmproxy-redirector".into(),
             notes: vec![
-                "macOS: transparent per-flow capture via a NETransparentProxyProvider system \
-                 extension; selected apps are routed by code-signing identity."
-                    .into(),
-                "Requires approving the system extension once (System Settings › Privacy & \
-                 Security) and, on first run, an administrator."
-                    .into(),
+                "macOS: transparent TCP/UDP flow capture via the signed Mitmproxy Redirector; system proxy settings are never changed.".into(),
+                "The first use may require approving Mitmproxy Redirector's System Extension and network configuration in System Settings.".into(),
+                "Global and signed-application capture are available. Application identities are revalidated before each activation.".into(),
             ],
-            privileged_required: true,
+            privileged_required: false,
         }
     } else {
         SocksCapCapabilities {
             platform: "macos".into(),
-            global_tcp: true,
-            // Per-application routing needs the source app identity that only a
-            // NETransparentProxyProvider supplies.
+            global_tcp: false,
             app_filter: false,
-            capture_backend: "system-proxy".into(),
-            notes: vec![
-                "macOS: system SOCKS proxy points applications at SocksCap's loopback listener. \
-                 Requires administrator rights to change the system proxy."
-                    .into(),
-                "Not transparent capture: applications that ignore the system proxy are not \
-                 routed, and scope is Global only. Install the Network Extension for per-app \
-                 transparent capture."
-                    .into(),
-            ],
-            privileged_required: true,
+            capture_backend: "unavailable".into(),
+            notes: vec![format!(
+                "macOS: Mitmproxy Redirector {} is not installed; SocksCap has no system-proxy fallback.",
+                crate::sockscap::redirector::REDIRECTOR_VERSION
+            )],
+            privileged_required: false,
         }
     }
 }
 
-/// Capabilities for the running build, probing the app bundle so macOS reports
-/// the transparent backend (with `app_filter=true`) only when the Network
-/// Extension is actually present. Non-macOS platforms ignore `app` and match
-/// [`capabilities`].
+/// Capabilities for the running build. Non-macOS platforms ignore `app` and
+/// match [`capabilities`].
 pub fn capabilities_for(app: &tauri::AppHandle) -> SocksCapCapabilities {
     #[cfg(target_os = "macos")]
     {
-        return macos_capabilities(crate::sockscap::transparent::activation::extension_present(
-            app,
-        ));
+        let _ = app;
+        return macos_capabilities(crate::sockscap::redirector::is_installed());
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -153,7 +130,8 @@ pub async fn recover_system(sudo_password: Option<&str>) -> Result<Vec<u32>, Str
     }
     #[cfg(target_os = "macos")]
     {
-        return macos::recover_system(sudo_password).map(|()| Vec::new());
+        let _ = sudo_password;
+        return macos::recover_system().await.map(|()| Vec::new());
     }
     #[cfg(all(not(target_os = "linux"), not(windows), not(target_os = "macos")))]
     {
@@ -223,24 +201,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn macos_without_extension_is_phase1_system_proxy() {
+    fn macos_without_redirector_is_unavailable_without_fallback() {
         let caps = macos_capabilities(false);
         assert_eq!(caps.platform, "macos");
-        assert!(!caps.app_filter, "no NE bundle ⇒ Global-only");
-        assert_eq!(caps.capture_backend, "system-proxy");
-        assert!(caps.global_tcp);
-        assert!(caps.privileged_required);
+        assert!(!caps.app_filter);
+        assert_eq!(caps.capture_backend, "unavailable");
+        assert!(!caps.global_tcp);
+        assert!(!caps.privileged_required);
+        assert!(
+            caps.notes
+                .iter()
+                .any(|note| note.contains("no system-proxy fallback"))
+        );
     }
 
     #[test]
-    fn macos_with_extension_offers_transparent_per_app_capture() {
+    fn macos_with_redirector_offers_global_and_application_capture() {
         let caps = macos_capabilities(true);
         assert_eq!(caps.platform, "macos");
-        assert!(caps.app_filter, "NE bundle present ⇒ per-app capture");
-        assert_eq!(caps.capture_backend, "ne-transparent");
+        assert!(caps.app_filter);
+        assert_eq!(caps.capture_backend, "mitmproxy-redirector");
         assert!(caps.global_tcp);
-        assert!(caps.privileged_required);
-        // The user-facing note must explain the one-time approval step.
-        assert!(caps.notes.iter().any(|n| n.contains("system extension")));
+        assert!(!caps.privileged_required);
+        assert!(
+            caps.notes
+                .iter()
+                .any(|n| n.contains("system proxy settings are never changed"))
+        );
     }
 }

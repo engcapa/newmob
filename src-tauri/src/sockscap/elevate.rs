@@ -1,9 +1,8 @@
 //! Elevated command execution shared by the Unix capture backends.
 //!
-//! Linux needs it for `nft` and cgroup writes; macOS needs it for
-//! `networksetup`. The delicate part is keeping sudo's password and the target
-//! command's stdin on separate pipes, so this lives in one place rather than
-//! being reimplemented per platform.
+//! Linux needs it for `nft` and cgroup writes. The delicate part is keeping
+//! sudo's password and the target command's stdin on separate pipes, so this
+//! lives in one place rather than being reimplemented by each Linux operation.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};

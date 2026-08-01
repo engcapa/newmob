@@ -406,7 +406,12 @@ mod tests {
             enabled: true,
             priority: 0,
             mode: ScopeMode::Apps,
-            apps: vec![AppSelector { path: "C:\\Apex.exe".into(), bundle_id: "".into(), name: "Apex".into() }],
+            apps: vec![AppSelector {
+                path: "C:\\Apex.exe".into(),
+                bundle_id: "".into(),
+                name: "Apex".into(),
+                macos_identity: None,
+            }],
             upstream: Default::default(),
             rule_mode: RuleMode::ProxyAll,
             user_rules: vec![],
@@ -420,7 +425,12 @@ mod tests {
             enabled: true,
             priority: 1,
             mode: ScopeMode::Apps,
-            apps: vec![AppSelector { path: "C:\\VSCode.exe".into(), bundle_id: "".into(), name: "VSCode".into() }],
+            apps: vec![AppSelector {
+                path: "C:\\VSCode.exe".into(),
+                bundle_id: "".into(),
+                name: "VSCode".into(),
+                macos_identity: None,
+            }],
             upstream: Default::default(),
             rule_mode: RuleMode::Off,
             user_rules: vec![],
@@ -473,6 +483,7 @@ mod tests {
             path: "/opt/example/example".into(),
             bundle_id: String::new(),
             name: "Example".into(),
+            macos_identity: None,
         }];
         config.profiles[0].rule_mode = RuleMode::ProxyAll;
         let engine = PolicyEngine::from_config(&config, None);

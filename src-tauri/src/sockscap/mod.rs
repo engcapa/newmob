@@ -4,8 +4,8 @@
 //! - Windows capture: elevated `sockscap-helper` + WinDivert
 //!   FLOW (PID) + NETWORK (IPv4 TCP NAT → local relay → policy → upstream)
 //! - Linux capture: nftables OUTPUT redirect + cgroup v2 + loopback relay
-//! - macOS capture: system SOCKS proxy → loopback proxy ingress (Global only;
-//!   transparent capture and app scoping need a Network Extension)
+//! - macOS capture: signed Mitmproxy Redirector → Unix IPC → shared relay
+//!   (transparent Global; application identity gate follows on the same engine)
 
 pub mod capture;
 pub mod config;
@@ -24,10 +24,10 @@ pub mod tun_detect;
 pub mod policy;
 pub mod process;
 pub mod recovery;
+pub mod redirector;
 pub mod relay;
 pub mod rules;
 pub mod stats;
-pub mod transparent;
 
 pub use config::{Decision, RuleMode, SocksCapConfig};
 pub use orchestrator::{Orchestrator, SocksCapStatus};
@@ -37,6 +37,8 @@ pub use stats::DomainRecord;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -57,8 +59,13 @@ pub struct SocksCapRuntime {
     /// can finish the job. See [`boot_repair`].
     pub pending_reap: std::sync::Mutex<Vec<u32>>,
     /// Cross-process ownership of the OS capture stack. SocksCap changes
-    /// machine-wide proxy/divert state, so only one Taomni process may own it.
+    /// machine-wide capture state, so only one Taomni process may own it.
     activation_lock: std::sync::Mutex<Option<ModuleLock>>,
+    /// macOS starts boot recovery asynchronously. Start remains blocked until
+    /// that audit has finished so a user click cannot race a dirty-journal
+    /// recovery and replace its inert-only scope with a business scope.
+    #[cfg(target_os = "macos")]
+    recovery_ready: AtomicBool,
     /// xray-core sidecar pool for core-backed upstreams. Initialized during
     /// `setup()` once the `AppHandle` (resource dir / app data dir) is available
     /// via [`init_xray_manager`]; `None` until then.
@@ -72,6 +79,8 @@ impl SocksCapRuntime {
             helper: Arc::new(helper::HelperRegistry::new()),
             pending_reap: std::sync::Mutex::new(Vec::new()),
             activation_lock: std::sync::Mutex::new(None),
+            #[cfg(target_os = "macos")]
+            recovery_ready: AtomicBool::new(false),
             xray: std::sync::OnceLock::new(),
         }
     }
@@ -100,6 +109,26 @@ impl SocksCapRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn recovery_ready(&self) -> bool {
+        self.recovery_ready.load(Ordering::Acquire)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn mark_recovery_ready(&self) {
+        self.recovery_ready.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct RecoveryReadyGuard<'a>(&'a SocksCapRuntime);
+
+#[cfg(target_os = "macos")]
+impl Drop for RecoveryReadyGuard<'_> {
+    fn drop(&mut self) {
+        self.0.mark_recovery_ready();
     }
 }
 
@@ -163,9 +192,42 @@ pub struct SocksCapCapabilities {
 
 #[tauri::command]
 pub async fn sockscap_capabilities(app: AppHandle) -> Result<SocksCapCapabilities, String> {
-    // Probe the app bundle so macOS reports the transparent (per-app) backend
-    // only when the Network Extension is actually installed.
     Ok(capture::capabilities_for(&app))
+}
+
+#[tauri::command]
+pub async fn sockscap_redirector_install_status(
+    app: AppHandle,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        serde_json::to_value(redirector::installer::status(&app))
+            .map_err(|error| format!("serialize Redirector install status: {error}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Mitmproxy Redirector installation is only available on macOS".into())
+    }
+}
+
+#[tauri::command]
+pub async fn sockscap_install_redirector(app: AppHandle) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let install_app = app.clone();
+        let status =
+            tokio::task::spawn_blocking(move || redirector::installer::install(&install_app))
+                .await
+                .map_err(|error| format!("Redirector installer task failed: {error}"))??;
+        serde_json::to_value(status)
+            .map_err(|error| format!("serialize Redirector install status: {error}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Err("Mitmproxy Redirector installation is only available on macOS".into())
+    }
 }
 
 /* ---------------------------- config ------------------------------------ */
@@ -174,6 +236,25 @@ pub async fn sockscap_capabilities(app: AppHandle) -> Result<SocksCapCapabilitie
 pub async fn sockscap_get_config(app: AppHandle) -> Result<SocksCapConfig, String> {
     let path = config_path(&app)?;
     Ok(SocksCapConfig::load(&path))
+}
+
+/// Resolve and validate a macOS application selector before it is persisted.
+/// Other platforms expose the same IPC shape so frontend code stays portable,
+/// but reject the command without changing their capture behavior.
+#[tauri::command]
+pub async fn sockscap_validate_macos_app(
+    path: String,
+    allow_unsigned: Option<bool>,
+) -> Result<config::AppSelector, String> {
+    #[cfg(target_os = "macos")]
+    {
+        redirector::app_identity::validate_application(&path, allow_unsigned.unwrap_or(false))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (path, allow_unsigned);
+        Err("macOS application validation is only available on macOS".into())
+    }
 }
 
 #[tauri::command]
@@ -393,8 +474,70 @@ pub async fn sockscap_test_target(
 
 #[tauri::command]
 pub async fn sockscap_status(state: State<'_, AppState>) -> Result<SocksCapStatus, String> {
+    #[cfg(target_os = "macos")]
+    let mut orch = state.sockscap.orch.write().await;
+    #[cfg(target_os = "macos")]
+    orch.refresh_macos_capture_health();
+    #[cfg(not(target_os = "macos"))]
     let orch = state.sockscap.orch.read().await;
     Ok(orch.status())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SocksCapDiagnostics {
+    pub generated_at: u64,
+    pub status: SocksCapStatus,
+    pub capabilities: SocksCapCapabilities,
+    pub stats: stats::StatsSnapshot,
+    pub recovery_journal: Option<recovery::RecoveryJournal>,
+    pub redirector: Option<serde_json::Value>,
+    pub manual_recovery_steps: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn sockscap_diagnostics(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<SocksCapDiagnostics, String> {
+    #[cfg(target_os = "macos")]
+    let mut orch = state.sockscap.orch.write().await;
+    #[cfg(target_os = "macos")]
+    orch.refresh_macos_capture_health();
+    #[cfg(not(target_os = "macos"))]
+    let orch = state.sockscap.orch.read().await;
+
+    #[cfg(target_os = "macos")]
+    let redirector = orch
+        .macos_telemetry()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(|error| format!("serialize Redirector telemetry: {error}"))?;
+    #[cfg(not(target_os = "macos"))]
+    let redirector = None;
+
+    #[cfg(target_os = "macos")]
+    let manual_recovery_steps = vec![
+        "Quit Taomni and Mitmproxy Redirector if they are still running.".into(),
+        "Open System Settings > Network > VPN & Filters and disable the Mitmproxy Redirector network configuration.".into(),
+        "If recovery still fails, open System Settings > General > Login Items & Extensions > Network Extensions and disable Mitmproxy Redirector, then restart macOS.".into(),
+        "Reopen Taomni, run Recover, and only start SocksCap after RecoveryRequired clears.".into(),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let manual_recovery_steps = Vec::new();
+
+    Ok(SocksCapDiagnostics {
+        generated_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0),
+        status: orch.status(),
+        capabilities: capture::capabilities_for(&app),
+        stats: orch.stats_snapshot(),
+        recovery_journal: recovery::read_journal(&recovery::journal_path(&data_dir(&app)?)),
+        redirector,
+        manual_recovery_steps,
+    })
 }
 
 #[tauri::command]
@@ -403,12 +546,29 @@ pub async fn sockscap_start(
     state: State<'_, AppState>,
     sudo_password: Option<String>,
 ) -> Result<SocksCapStatus, String> {
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     let _ = sudo_password;
 
     let cfg_path = config_path(&app)?;
+    #[cfg(target_os = "macos")]
+    let mut cfg = SocksCapConfig::load(&cfg_path);
+    #[cfg(not(target_os = "macos"))]
     let cfg = SocksCapConfig::load(&cfg_path);
+
+    #[cfg(target_os = "macos")]
+    if redirector::app_identity::revalidate_configuration(&mut cfg)? {
+        cfg.save(&cfg_path)
+            .map_err(|error| format!("save refreshed macOS application identity: {error}"))?;
+    }
     cfg.validate()?;
+
+    #[cfg(target_os = "macos")]
+    if !state.sockscap.recovery_ready() {
+        return Err(
+            "macOS SocksCap startup recovery is still running; wait for it to finish before starting capture"
+                .into(),
+        );
+    }
 
     // Check the local runtime before attempting to lock again: re-locking the
     // same file from one process has platform-specific semantics.
@@ -498,7 +658,7 @@ pub async fn sockscap_start(
 
     #[cfg(target_os = "macos")]
     let status: Result<SocksCapStatus, String> =
-        start_macos_capture(&app, &state, &cfg, &caps, sudo_password).await;
+        start_macos_capture(&app, &state, &cfg, &caps, &journal_path).await;
 
     #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
     let status: Result<SocksCapStatus, String> = {
@@ -508,6 +668,7 @@ pub async fn sockscap_start(
         Ok(orch.status())
     };
 
+    #[cfg(not(target_os = "macos"))]
     let journal_result = match &status {
         Ok(st) => {
             let helper_port = state
@@ -526,6 +687,12 @@ pub async fn sockscap_start(
                     config_hash: cfg.content_hash(),
                     pid: std::process::id(),
                     clean: false,
+                    phase: recovery::RecoveryPhase::Active,
+                    session_id: uuid::Uuid::new_v4().to_string(),
+                    backend_version: None,
+                    scope_hash: None,
+                    bridge_pid: None,
+                    provider_pid: None,
                     relay_port,
                     helper_port,
                 },
@@ -536,6 +703,22 @@ pub async fn sockscap_start(
             orch.set_start_failed(e.clone());
             Ok(())
         }
+    };
+
+    // macOS uses a durable write-ahead journal inside start_macos_capture so no
+    // business scope can become active before its recovery record exists.
+    #[cfg(target_os = "macos")]
+    let journal_result: Result<(), String> = {
+        if let Err(error) = &status {
+            let mut orch = state.sockscap.orch.write().await;
+            if !matches!(
+                orch.status().phase,
+                orchestrator::EnginePhase::RecoveryRequired
+            ) {
+                orch.set_start_failed(error.clone());
+            }
+        }
+        Ok(())
     };
 
     if let Err(journal_error) = journal_result {
@@ -957,99 +1140,101 @@ async fn start_linux_capture(
     Ok(orch.status())
 }
 
-/// AF_UNIX control socket the Network Extension provider connects back on.
-///
-/// NOTE (infra): a shipped build must place this in the app-group container
-/// shared by the app and the system extension — the extension runs as root and
-/// cannot read the app's per-user data dir. Until the app group is provisioned
-/// this uses the sockscap data dir, which is correct for a same-user dev run.
-#[cfg(target_os = "macos")]
-fn macos_control_socket_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(data_dir(app)?.join("ne-control.sock"))
-}
-
 #[cfg(target_os = "macos")]
 async fn start_macos_capture(
     app: &AppHandle,
     state: &State<'_, AppState>,
     cfg: &SocksCapConfig,
     caps: &capture::SocksCapCapabilities,
-    sudo_password: Option<String>,
+    journal_path: &std::path::Path,
 ) -> Result<SocksCapStatus, String> {
-    let _ = caps;
-    let ctx = build_unix_relay_context(state, cfg).await?;
-
-    // Transparent (per-app) backend only when a signed extension is present;
-    // otherwise the always-available Phase 1 system-proxy backend.
-    let extension_present = transparent::activation::extension_present(app);
-    let mut transparent_error: Option<String> = None;
-    if matches!(
-        transparent::choose_macos_backend(extension_present),
-        transparent::MacosBackend::Transparent
-    ) {
-        let control_socket = macos_control_socket_path(app)?;
-        match capture::macos::transparent::start(
-            cfg,
-            Arc::clone(&ctx),
-            control_socket,
-            sudo_password.clone(),
-        )
-        .await
-        {
-            Ok(capture) => {
-                let ingress_port = capture.ingress_port();
-                let mut orch = state.sockscap.orch.write().await;
-                let gfw_note = orch
-                    .gfwlist_meta()
-                    .map(|meta| format!(", gfw={}", meta.rule_count))
-                    .unwrap_or_default();
-                orch.relay_ctx = Some(ctx);
-                orch.set_macos_transparent_capture(capture);
-                orch.set_active(
-                    "ne-transparent",
-                    format!(
-                        "capture active (macOS transparent Network Extension → 127.0.0.1:{ingress_port}{gfw_note})"
-                    ),
-                );
-                return Ok(orch.status());
+    capture::macos::preflight(cfg)?;
+    let ctx = match build_unix_relay_context(state, cfg).await {
+        Ok(ctx) => ctx,
+        Err(error) => {
+            if let Some(manager) = state.sockscap.xray() {
+                manager.shutdown_all().await;
             }
-            Err(error) => {
-                tracing::warn!(
-                    "sockscap: transparent backend unavailable, falling back to system-proxy: {error}"
-                );
-                transparent_error = Some(error);
-            }
-        }
-    }
-
-    // System-proxy backend (Phase 1), also the transparent fallback.
-    let capture = match capture::macos::start(cfg, Arc::clone(&ctx), sudo_password).await {
-        Ok(capture) => capture,
-        // If the transparent backend was chosen but failed, and system-proxy
-        // also can't run (e.g. it refuses App scope), the actionable message is
-        // the transparent one ("approve the extension"), not the fallback's.
-        Err(fallback_error) => {
-            return Err(transparent_error.unwrap_or(fallback_error));
+            return Err(error);
         }
     };
-    let ingress_port = capture.ingress_port();
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let mut journal = recovery::RecoveryJournal {
+        platform: "macos".into(),
+        capture_backend: caps.capture_backend.clone(),
+        config_hash: cfg.content_hash(),
+        pid: std::process::id(),
+        clean: false,
+        phase: recovery::RecoveryPhase::Preparing,
+        session_id: session_id.clone(),
+        backend_version: Some(redirector::REDIRECTOR_VERSION.into()),
+        scope_hash: None,
+        bridge_pid: None,
+        provider_pid: None,
+        relay_port: None,
+        helper_port: None,
+    };
+    recovery::write_journal_durable(journal_path, &journal)
+        .map_err(|error| format!("persist macOS SocksCap write-ahead journal: {error}"))?;
+
+    let capture = match capture::macos::start(app, cfg, Arc::clone(&ctx), &session_id).await {
+        Ok(capture) => capture,
+        Err(error) => {
+            if let Some(manager) = state.sockscap.xray() {
+                manager.shutdown_all().await;
+            }
+            state.sockscap.orch.write().await.set_recovery_required(
+                &caps.capture_backend,
+                format!(
+                    "macOS Redirector start did not complete after the dirty journal was written: {error}; run Recover before retrying"
+                ),
+            );
+            return Err(error);
+        }
+    };
+
+    let telemetry = capture.telemetry();
+    journal.phase = recovery::RecoveryPhase::Active;
+    journal.scope_hash = Some(telemetry.scope_hash.clone());
+    journal.bridge_pid = Some(telemetry.bridge_pid);
+    journal.provider_pid = Some(telemetry.provider_pid);
+    if let Err(journal_error) = recovery::write_journal_durable(journal_path, &journal) {
+        let stop_error = capture.stop().await.err();
+        if let Some(manager) = state.sockscap.xray() {
+            manager.shutdown_all().await;
+        }
+        if stop_error.is_none() {
+            if let Err(clear_error) = recovery::mark_clean_and_clear(journal_path) {
+                state.sockscap.orch.write().await.set_recovery_required(
+                    &caps.capture_backend,
+                    format!(
+                        "capture stopped after journal update failure, but the recovery journal could not be cleared: {clear_error}"
+                    ),
+                );
+            }
+        } else {
+            state.sockscap.orch.write().await.set_recovery_required(
+                &caps.capture_backend,
+                format!(
+                    "activate journal update failed: {journal_error}; Redirector stop also failed: {}",
+                    stop_error.as_deref().unwrap_or("unknown error")
+                ),
+            );
+        }
+        return Err(format!(
+            "persist active macOS SocksCap journal: {journal_error}"
+        ));
+    }
     let mut orch = state.sockscap.orch.write().await;
     let gfw_note = orch
         .gfwlist_meta()
         .map(|meta| format!(", gfw={}", meta.rule_count))
         .unwrap_or_default();
-    let fallback_note = if transparent_error.is_some() {
-        " (transparent capture pending extension approval)"
-    } else {
-        ""
-    };
     orch.relay_ctx = Some(ctx);
     orch.set_macos_capture(capture);
     orch.set_active(
-        "system-proxy",
-        format!(
-            "capture active (macOS system SOCKS proxy → 127.0.0.1:{ingress_port}{gfw_note}){fallback_note}"
-        ),
+        &caps.capture_backend,
+        format!("capture active (macOS Mitmproxy Redirector IPC{gfw_note})"),
     );
     Ok(orch.status())
 }
@@ -1639,8 +1824,8 @@ pub async fn sockscap_prepare_for_update(
     }
 
     // 1) Stop capture before the installer or relaunch can terminate the
-    //    process. The running handle retains the sudo credential needed to
-    //    remove Linux nftables/cgroups or restore the macOS system proxy.
+    //    process. The running handle retains the credential needed to remove
+    //    Linux nftables/cgroups; macOS disables Redirector interception over IPC.
     let teardown_error = if owned_capture {
         full_teardown(&app, &state, true).await.err()
     } else {
@@ -1770,10 +1955,24 @@ pub async fn sockscap_recover(
             // Queue anything only an elevated process can kill; the next Start
             // hands the list to the helper it launches under UAC.
             queue_reap(&state, &needs_elevation);
-            state.sockscap.orch.write().await.force_idle();
+            #[cfg(target_os = "macos")]
+            if let Ok(dir) = data_dir(&app) {
+                if let Err(error) = recovery::mark_clean_and_clear(&recovery::journal_path(&dir)) {
+                    let message = format!(
+                        "network recovery succeeded, but the durable recovery journal could not be cleared: {error}"
+                    );
+                    state.sockscap.orch.write().await.set_recovery_required(
+                        &capture::capabilities().capture_backend,
+                        message.clone(),
+                    );
+                    return Err(message);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             if let Ok(dir) = data_dir(&app) {
                 let _ = recovery::mark_clean_and_clear(&recovery::journal_path(&dir));
             }
+            state.sockscap.orch.write().await.force_idle();
             if let Some(error) = teardown_error {
                 tracing::info!("sockscap: Recover repaired incomplete teardown: {error}");
             }
@@ -1867,9 +2066,21 @@ async fn full_teardown(
         }
     }
 
-    // --- 2b) macOS restores the system proxy before its ingress stops ---------
+    // --- 2b) macOS first sends Redirector's inert scope, then closes IPC ------
     #[cfg(target_os = "macos")]
     {
+        if let Ok(dir) = data_dir(app) {
+            let journal = recovery::journal_path(&dir);
+            if recovery::needs_repair(&journal) {
+                if let Err(error) =
+                    recovery::update_phase_durable(&journal, recovery::RecoveryPhase::Stopping)
+                {
+                    tracing::warn!(
+                        "sockscap: could not persist macOS Stopping journal phase: {error}"
+                    );
+                }
+            }
+        }
         let macos_capture = {
             let mut orch = state.sockscap.orch.write().await;
             orch.take_macos_capture_for_stop()
@@ -1878,18 +2089,6 @@ async fn full_teardown(
             if let Err(error) = capture.stop().await {
                 tracing::warn!("sockscap: macOS capture teardown error: {error}");
                 errors.push(format!("macOS capture teardown failed: {error}"));
-            }
-        }
-        // Transparent backend: stop the control channel (provider fails open to
-        // DIRECT) then the ingress. The system extension stays installed.
-        let macos_transparent = {
-            let mut orch = state.sockscap.orch.write().await;
-            orch.take_macos_transparent_capture_for_stop()
-        };
-        if let Some(capture) = macos_transparent {
-            if let Err(error) = capture.stop().await {
-                tracing::warn!("sockscap: macOS transparent capture teardown error: {error}");
-                errors.push(format!("macOS transparent capture teardown failed: {error}"));
             }
         }
     }
@@ -1923,6 +2122,20 @@ async fn full_teardown(
     }
     if errors.is_empty() {
         if clear_journal {
+            #[cfg(target_os = "macos")]
+            if let Ok(dir) = data_dir(app) {
+                if let Err(error) = recovery::mark_clean_and_clear(&recovery::journal_path(&dir)) {
+                    let message = format!(
+                        "capture stopped, but the recovery journal could not be cleared: {error}"
+                    );
+                    state.sockscap.orch.write().await.set_recovery_required(
+                        &capture::capabilities().capture_backend,
+                        message.clone(),
+                    );
+                    return Err(message);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             if let Ok(dir) = data_dir(app) {
                 let _ = recovery::mark_clean_and_clear(&recovery::journal_path(&dir));
             }
@@ -2503,6 +2716,9 @@ fn read_ready_files(dir: &std::path::Path) -> Vec<StaleReadyFile> {
 /// they are elevated and this process is not — are queued for the next helper
 /// launch, which runs under UAC. Nothing else in the system can do it.
 pub async fn boot_repair(app: &AppHandle, state: &AppState) {
+    #[cfg(target_os = "macos")]
+    let _ready = RecoveryReadyGuard(&state.sockscap);
+
     // Another live instance may own the dirty journal. Never repair global
     // network state underneath its active capture session.
     let _repair_lock = match ModuleLock::try_acquire_for_app(
@@ -2521,6 +2737,15 @@ pub async fn boot_repair(app: &AppHandle, state: &AppState) {
     let Ok(dir) = data_dir(app) else {
         return;
     };
+
+    #[cfg(target_os = "macos")]
+    match redirector::cleanup_stale_sockets() {
+        Ok(count) if count > 0 => {
+            tracing::info!(count, "sockscap: removed stale Redirector Unix sockets")
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("sockscap: stale Redirector socket cleanup failed: {error}"),
+    }
 
     let mut orphans: Vec<u32> = Vec::new();
     for ready in read_ready_files(&dir) {
@@ -2588,14 +2813,36 @@ pub async fn boot_repair(app: &AppHandle, state: &AppState) {
             // declaring potentially-live nftables/cgroup state recovered.
             tracing::warn!("sockscap: boot recover failed; leaving journal dirty: {e}");
             queue_reap(state, &orphans);
+            #[cfg(target_os = "macos")]
+            state.sockscap.orch.write().await.set_recovery_required(
+                "mitmproxy-redirector",
+                format!("macOS Redirector recovery failed: {e}"),
+            );
             return;
         }
     }
 
     queue_reap(state, &orphans);
     if orphans.is_empty() {
-        let _ = recovery::mark_clean_and_clear(&journal_path);
-        tracing::info!("sockscap: recovery complete");
+        #[cfg(target_os = "macos")]
+        match recovery::mark_clean_and_clear(&journal_path) {
+            Ok(()) => tracing::info!("sockscap: recovery complete"),
+            Err(error) => {
+                tracing::warn!("sockscap: recovery journal cleanup failed: {error}");
+                #[cfg(target_os = "macos")]
+                state.sockscap.orch.write().await.set_recovery_required(
+                    "mitmproxy-redirector",
+                    format!(
+                        "macOS network recovery succeeded, but journal cleanup failed: {error}"
+                    ),
+                );
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = recovery::mark_clean_and_clear(&journal_path);
+            tracing::info!("sockscap: recovery complete");
+        }
     } else {
         // Do not declare success while an elevated orphan is still diverting
         // packets. The journal stays dirty until a helper launch reaps it.

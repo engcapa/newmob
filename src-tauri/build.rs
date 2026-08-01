@@ -5,47 +5,7 @@ fn main() {
     enforce_asr_llm_isolation();
     compile_hbase_protos();
     configure_macos_rpath();
-    compile_macos_ne_shim();
     tauri_build::build();
-}
-
-/// On macOS, compile the Network Extension activation shim
-/// (`resources/macos-provider/activation_shim.m`) and link the SystemExtensions
-/// + Foundation frameworks. The shim exposes `sockscap_ne_activate`, called by
-/// `sockscap::transparent::activation` to submit an `OSSystemExtensionRequest`.
-///
-/// macOS only: on every other target this is a no-op, and the Rust side provides
-/// a fallback `request_activation` that returns the infrastructure error.
-fn compile_macos_ne_shim() {
-    // Declare the cfg unconditionally so `#[cfg(sockscap_ne_shim)]` never trips
-    // the unexpected-cfg lint, regardless of target or whether the shim built.
-    println!("cargo:rustc-check-cfg=cfg(sockscap_ne_shim)");
-
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        return;
-    }
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-    let shim = Path::new(&manifest_dir).join("resources/macos-provider/activation_shim.m");
-    // The shim ships with the provider scaffolding; if it is absent (e.g. a
-    // stripped checkout) the crate must still link, so the `sockscap_ne_shim`
-    // cfg is only set when the object is actually compiled in. The Rust side
-    // gates the `extern` binding on that cfg and otherwise reports the gap.
-    if !shim.exists() {
-        println!(
-            "cargo:warning=macOS NE activation shim not found at {}; \
-             transparent capture activation will report unavailable",
-            shim.display()
-        );
-        return;
-    }
-    println!("cargo:rerun-if-changed=resources/macos-provider/activation_shim.m");
-    cc::Build::new()
-        .file(&shim)
-        .flag("-fobjc-arc")
-        .compile("sockscap_ne_shim");
-    println!("cargo:rustc-link-lib=framework=SystemExtensions");
-    println!("cargo:rustc-link-lib=framework=Foundation");
-    println!("cargo:rustc-cfg=sockscap_ne_shim");
 }
 
 /// On macOS, add an `@executable_path/../Frameworks` rpath so the krb5 dylibs

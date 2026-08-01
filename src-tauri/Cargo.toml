@@ -31,15 +31,8 @@ bench = false
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 prost-build = "0.14"
-# Compiles the macOS Network Extension activation shim (Objective-C) into the
-# binary on macOS only; see build.rs `compile_macos_ne_shim`.
-cc = "1"
 
 [dependencies]
-# SocksCap capture-plane primitives (macOS transparent-proxy decision + control
-# protocol). Shared with the Network Extension appex via the same crate's
-# staticlib so the rule has one implementation. See sockscap-core/.
-sockscap-core = { path = "sockscap-core" }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
 # In-app auto-update: pull signed bundles from GitHub Releases (see
@@ -198,13 +191,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 tauri-plugin-dialog = "2.7.1"
 sqlparser = "0.62.0"
 
-[workspace]
-# sockscap-core is the single source of truth for the macOS transparent-proxy
-# per-flow decision + control protocol: the engine links it as an rlib and the
-# Network Extension appex links its staticlib and calls the C-ABI, so the rule
-# is never reimplemented (and cannot drift) in Swift.
-members = ["sockscap-core"]
-
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
 picky = { path = "vendor/picky" }
@@ -241,6 +227,12 @@ winreg = "0.55"
 # Always on for macOS so Local RDP server can mirror the desktop without needing
 # the optional `screen-capture` feature used by LanChat screenshots.
 xcap = "0.9.6"
+# SocksCap application identity validation uses Apple's Security.framework
+# static-code API; codesign output is used only to extract the persisted
+# designated requirement/Team/signing metadata after the seal is validated.
+security-framework = "3.7.0"
+core-foundation = "0.10.1"
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # RDP server X11 screen capture (XShm / MIT-SHM via libxcb) plus the DAMAGE
@@ -279,4 +271,3 @@ debug = false
 # so test binaries stay small even if someone overrides profile.dev later.
 [profile.test]
 debug = 1
-

@@ -3,9 +3,10 @@
  *
  * Capture backends differ per platform, so read `sockscapCapabilities()` before
  * offering options: Windows uses the elevated WinDivert helper, Linux uses
- * nftables + cgroup v2 transparent redirect, and macOS points the system SOCKS
- * proxy at a loopback listener (not transparent, Global scope only). Platforms
- * without a backend land in a degraded state on start().
+ * nftables + cgroup v2 transparent redirect, and macOS bridges the separately
+ * installed, signed Mitmproxy Redirector over isolated Unix IPC (Global and
+ * validated Application scopes).
+ * There is no macOS system-proxy fallback.
  */
 import { invoke } from "@tauri-apps/api/core";
 
@@ -46,6 +47,20 @@ export interface AppSelector {
   path: string;
   bundleId?: string;
   name?: string;
+  macosIdentity?: MacosAppIdentity | null;
+}
+
+export interface MacosAppIdentity {
+  bundlePath: string;
+  canonicalBundlePath: string;
+  mainExecutablePath: string;
+  bundleId: string;
+  teamId: string;
+  signingId: string;
+  designatedRequirement: string;
+  lastValidatedCdHash: string;
+  supplementalExecutables: string[];
+  allowUnsigned: boolean;
 }
 
 export interface SocksCapProfile {
@@ -154,11 +169,34 @@ export interface SocksCapCapabilities {
   privilegedRequired: boolean;
 }
 
+export interface RedirectorInstallStatus {
+  state:
+    | "ready"
+    | "missing"
+    | "upgradeAvailable"
+    | "pendingSystemApproval"
+    | "conflict"
+    | "resourceMissing";
+  packageVersion: string;
+  resourceAvailable: boolean;
+  message: string;
+}
+
 export interface SocksCapStatus {
   phase: EnginePhase;
   message: string;
   ruleCount: number;
   captureBackend: string;
+}
+
+export interface SocksCapDiagnostics {
+  generatedAt: number;
+  status: SocksCapStatus;
+  capabilities: SocksCapCapabilities;
+  stats: StatsSnapshot;
+  recoveryJournal: Record<string, unknown> | null;
+  redirector: Record<string, unknown> | null;
+  manualRecoverySteps: string[];
 }
 
 export interface GfwListStatus {
@@ -185,6 +223,12 @@ export interface StatsSnapshot {
   flowsBlock: number;
   bytesUp: number;
   bytesDown: number;
+  lastFlowAt?: number | null;
+  quicFlowsDropped?: number;
+  udpDirectDatagrams?: number;
+  lastQuicDropAt?: number | null;
+  scopeMismatchFlows?: number;
+  lastScopeMismatchAt?: number | null;
 }
 
 export interface ProcessInfo {
@@ -197,8 +241,23 @@ export function sockscapCapabilities(): Promise<SocksCapCapabilities> {
   return invoke("sockscap_capabilities");
 }
 
+export function sockscapRedirectorInstallStatus(): Promise<RedirectorInstallStatus> {
+  return invoke("sockscap_redirector_install_status");
+}
+
+export function sockscapInstallRedirector(): Promise<RedirectorInstallStatus> {
+  return invoke("sockscap_install_redirector");
+}
+
 export function sockscapGetConfig(): Promise<SocksCapConfig> {
   return invoke("sockscap_get_config");
+}
+
+export function sockscapValidateMacosApp(
+  path: string,
+  allowUnsigned = false,
+): Promise<AppSelector> {
+  return invoke("sockscap_validate_macos_app", { path, allowUnsigned });
 }
 
 export function sockscapSetConfig(config: SocksCapConfig): Promise<void> {
@@ -226,6 +285,10 @@ export function sockscapTestTarget(
 
 export function sockscapStatus(): Promise<SocksCapStatus> {
   return invoke("sockscap_status");
+}
+
+export function sockscapDiagnostics(): Promise<SocksCapDiagnostics> {
+  return invoke("sockscap_diagnostics");
 }
 
 export function sockscapStart(sudoPassword?: string): Promise<SocksCapStatus> {

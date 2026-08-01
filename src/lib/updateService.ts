@@ -119,9 +119,9 @@ export async function checkForUpdate(target?: string): Promise<AvailableUpdate |
  * `WinDivert64.sys` locked and the elevated helper keeps its own exe + DLL
  * locked. A per-user installer runs unelevated and cannot stop either, so the
  * upgrade would fail with "Error opening file for writing". The app asks its
- * elevated helper to close the driver handles and exit first. Linux/macOS must
- * also restore nftables/cgroups or the system proxy while the async runtime and
- * stored sudo credential are still available. A cleanup failure blocks the
+ * elevated helper to close the driver handles and exit first. Linux must also
+ * restore nftables/cgroups while its async runtime and stored sudo credential
+ * are still available; macOS disables Redirector interception over IPC. A cleanup failure blocks the
  * transition so the app cannot silently strand network state.
  */
 async function prepareSocksCapForUpgrade(): Promise<void> {

@@ -199,8 +199,8 @@ impl RelayContext {
 
 /// Metadata recovered by a capture backend before a connection enters the
 /// shared policy relay. Windows obtains it from the WinDivert helper; Linux
-/// reads `SO_ORIGINAL_DST` from the nftables-redirected socket; the macOS proxy
-/// ingress reads it out of a SOCKS5 / HTTP CONNECT handshake.
+/// reads `SO_ORIGINAL_DST` from the nftables-redirected socket; macOS receives
+/// the destination and process identity in Redirector's `NewFlow` frame.
 ///
 /// Transparent backends only ever learn an address, while a proxy handshake
 /// carries the name the client actually asked for. `dest_host` therefore holds
@@ -372,20 +372,37 @@ async fn handle_client(
 /// Apply shared hostname/policy/egress processing to a flow whose original
 /// destination was recovered by a platform capture backend.
 pub(crate) async fn handle_captured_client(
-    mut client: TcpStream,
+    client: TcpStream,
     flow: CapturedFlow,
     ctx: Arc<RwLock<RelayContext>>,
 ) -> Result<(), String> {
+    // The captured side is a real TCP socket on the Windows/Linux backends;
+    // keep it probed so a vanished client releases its flow slot. macOS's
+    // Redirector supplies a UnixStream and enters through
+    // `handle_captured_stream`, where TCP keepalive is not applicable.
+    enable_keepalive(&client);
+    handle_captured_stream(client, flow, ctx).await
+}
+
+/// Apply shared hostname/policy/egress processing to any captured byte stream.
+///
+/// Redirector hands macOS flows over AF_UNIX after its protobuf handshake, so
+/// requiring `TcpStream` here would force the backend to wrap the flow in a
+/// fake local SOCKS connection and lose its process metadata.
+pub(crate) async fn handle_captured_stream<S>(
+    mut client: S,
+    flow: CapturedFlow,
+    ctx: Arc<RwLock<RelayContext>>,
+) -> Result<(), String>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let dest_ip = flow.dest_ip;
     let dest_port = flow.dest_port;
     let process_path = flow.process_path;
     let pid = flow.pid;
     let origin = flow.origin;
     let profile_id_hint = flow.profile_id_hint;
-
-    // The captured side is a real socket on every backend; keep it probed so a
-    // vanished client releases its flow slot.
-    enable_keepalive(&client);
 
     if dest_ip.is_none() && flow.dest_host.is_none() {
         return Err("captured flow carried neither a destination address nor a hostname".into());
@@ -657,7 +674,10 @@ fn server_speaks_first(port: u16) -> bool {
 }
 
 /// Read until we extract a hostname, TLS record is complete, or budget exhausted.
-async fn peek_for_hostname(client: &mut TcpStream, dest_port: u16) -> (Vec<u8>, Option<String>) {
+async fn peek_for_hostname<S>(client: &mut S, dest_port: u16) -> (Vec<u8>, Option<String>)
+where
+    S: AsyncRead + Unpin,
+{
     use std::time::{Duration, Instant};
     if server_speaks_first(dest_port) {
         return (Vec::new(), None);
@@ -729,7 +749,10 @@ fn looks_like_incomplete_http(data: &[u8]) -> bool {
         && !s.contains("\r\n\r\n")
 }
 
-async fn bridge_tcp(a: &mut TcpStream, b: &mut TcpStream) -> Result<(u64, u64), String> {
+async fn bridge_tcp<A>(a: &mut A, b: &mut TcpStream) -> Result<(u64, u64), String>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+{
     // Both ends are real sockets here (direct, HTTP CONNECT, SOCKS5 and the
     // xray-core inbound all return one), so both get keepalive.
     enable_keepalive(b);

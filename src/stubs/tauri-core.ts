@@ -2159,6 +2159,12 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         privilegedRequired: false,
       } as T;
     }
+    case "sockscap_redirector_install_status": {
+      throw new Error("Mitmproxy Redirector installation is only available on macOS.");
+    }
+    case "sockscap_install_redirector": {
+      throw new Error("Mitmproxy Redirector installation is only available on macOS.");
+    }
     case "sockscap_get_config": {
       let cfg: Record<string, unknown> | null = null;
       try {
@@ -2230,6 +2236,9 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       }
       return cfg as T;
     }
+    case "sockscap_validate_macos_app": {
+      throw new Error("macOS application validation requires the desktop build.");
+    }
     case "sockscap_set_config": {
       localStorage.setItem("taomni.sockscap.config.v1", JSON.stringify(args?.config ?? {}));
       return undefined as T;
@@ -2274,6 +2283,31 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         captureBackend: "none",
       } as T;
     }
+    case "sockscap_diagnostics": {
+      return {
+        generatedAt: Math.floor(Date.now() / 1000),
+        status: { phase: "idle", message: "browser preview", ruleCount: 0, captureBackend: "none" },
+        capabilities: {
+          platform: "browser",
+          globalTcp: false,
+          appFilter: false,
+          captureBackend: "none",
+          notes: ["Browser preview"],
+          privilegedRequired: false,
+        },
+        stats: {
+          flowsTotal: 0,
+          flowsProxy: 0,
+          flowsDirect: 0,
+          flowsBlock: 0,
+          bytesUp: 0,
+          bytesDown: 0,
+        },
+        recoveryJournal: null,
+        redirector: null,
+        manualRecoverySteps: [],
+      } as T;
+    }
     case "sockscap_start": {
       return {
         phase: "degraded",
@@ -2300,6 +2334,12 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         flowsBlock: 0,
         bytesUp: 0,
         bytesDown: 0,
+        lastFlowAt: null,
+        quicFlowsDropped: 0,
+        udpDirectDatagrams: 0,
+        lastQuicDropAt: null,
+        scopeMismatchFlows: 0,
+        lastScopeMismatchAt: null,
       } as T;
     }
     case "sockscap_get_domain_records":

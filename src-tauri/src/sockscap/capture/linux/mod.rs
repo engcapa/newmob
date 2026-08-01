@@ -368,6 +368,7 @@ mod tests {
             path: "/opt/example/example".into(),
             bundle_id: String::new(),
             name: "Example".into(),
+            macos_identity: None,
         }];
         let CaptureScope::Apps(profiles) = capture_scope(&config).unwrap() else {
             panic!("expected app capture scope");

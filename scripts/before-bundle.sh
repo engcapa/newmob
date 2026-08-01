@@ -14,6 +14,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 case "$(uname -s)" in
   Darwin)
+    bash scripts/stage-mitmproxy-redirector-macos.sh --check
     # Rewrite the compiled binary's krb5 load commands to @rpath + re-sign.
     bash scripts/bundle-krb5-macos.sh fixbin
     ;;
