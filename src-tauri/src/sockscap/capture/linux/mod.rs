@@ -314,7 +314,7 @@ async fn stop_relays(relays: Vec<relay::LinuxRelay>) {
 
 pub fn recover_system(sudo_password: Option<&str>) -> Result<(), String> {
     tunnel::recover_rules(sudo_password)?;
-    match cgroup::cleanup_empty_sessions() {
+    match cgroup::cleanup_empty_sessions(sudo_password) {
         Ok(()) => Ok(()),
         // The nft table is already removed. A live cgroup cannot be safely
         // moved by recovery, so leave it for the owning process and explain it.

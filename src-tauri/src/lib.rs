@@ -49,7 +49,7 @@ mod wsl;
 use state::AppState;
 use std::collections::HashSet;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State, WebviewWindowBuilder};
 
 const AI_PROCESS_REAPER_INTERVAL_SECS: u64 = 30;
 const AI_PROCESS_IDLE_REAP_SECS: u64 = 300;
@@ -63,8 +63,10 @@ fn should_reap_ai_process(
 }
 
 #[tauri::command]
-fn exit_app(app_handle: AppHandle) {
+async fn exit_app(app_handle: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    sockscap::prepare_for_exit(&app_handle, state).await?;
     app_handle.exit(0);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

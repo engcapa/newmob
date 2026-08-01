@@ -41,6 +41,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tokio::sync::RwLock;
+use zeroize::Zeroizing;
 
 use crate::module_lock::ModuleLock;
 use crate::state::AppState;
@@ -1534,8 +1535,55 @@ pub async fn sockscap_stop(
     Ok(orch.status())
 }
 
-/// Release every privileged file the auto-updater is about to overwrite, so an
-/// in-place upgrade does not fail with "Error opening file for writing".
+/// Gracefully release capture state owned by this process before the app exits.
+///
+/// The final [`tauri::RunEvent::Exit`] callback is synchronous, so Linux and
+/// macOS teardown must happen while the async runtime and the stored sudo
+/// credential are still available. If teardown fails, the exit command returns
+/// an error and the UI keeps the process alive so the user can retry or Recover.
+pub async fn prepare_for_exit(
+    app: &AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let owns_capture = state.sockscap.has_activation_lock();
+    let recovery_required = matches!(
+        state.sockscap.orch.read().await.status().phase,
+        orchestrator::EnginePhase::RecoveryRequired
+    );
+    if recovery_required {
+        return Err(
+            "SocksCap network recovery is required before Taomni can exit safely; use Recover network first"
+                .into(),
+        );
+    }
+    let mut errors = Vec::new();
+
+    if owns_capture {
+        if let Err(error) = full_teardown(app, &state, true).await {
+            errors.push(error);
+        }
+    } else if let Some(manager) = state.sockscap.xray() {
+        // Core probes can exist without an active OS-capture lock.
+        manager.shutdown_all().await;
+    }
+
+    if let Err(error) = helper::sockscap_helper_stop(state.clone()).await {
+        errors.push(format!("SocksCap helper shutdown failed: {error}"));
+    }
+
+    if errors.is_empty() {
+        if owns_capture {
+            state.sockscap.release_activation_lock();
+        }
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Release SocksCap's OS capture state and every privileged file the updater is
+/// about to overwrite. Linux/macOS need the network teardown; Windows also
+/// needs the helper and WinDivert image files to become writable.
 ///
 /// The lock the installer trips over is a kernel one: while SocksCap captures,
 /// WinDivert is loaded and Windows keeps `WinDivert64.sys` locked until the last
@@ -1548,15 +1596,22 @@ pub async fn sockscap_stop(
 /// though — not by elevating itself, but by asking the helper (over the control
 /// channel it already owns) to close its WinDivert handles and exit. Closing the
 /// handles unloads the driver (freeing the `.sys`); exiting frees the exe/DLL.
-///
-/// Best-effort throughout: SocksCap not running, or the helper already gone, is
-/// the normal case and must not block the update. Windows-only work; a no-op
-/// elsewhere (returns immediately) since no other platform locks files this way.
 #[tauri::command]
 pub async fn sockscap_prepare_for_update(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let owned_capture = state.sockscap.has_activation_lock();
+    let recovery_required = matches!(
+        state.sockscap.orch.read().await.status().phase,
+        orchestrator::EnginePhase::RecoveryRequired
+    );
+    if recovery_required {
+        return Err(
+            "SocksCap network recovery is required before updating; use Recover network first"
+                .into(),
+        );
+    }
     if !state.sockscap.has_activation_lock() {
         let lock = ModuleLock::try_acquire_for_app(
             &app,
@@ -1567,33 +1622,61 @@ pub async fn sockscap_prepare_for_update(
         state.sockscap.install_activation_lock(lock);
     }
 
-    // 1) Stop capture: closes WinDivert NETWORK/FLOW handles → driver unloads →
-    //    `WinDivert64.sys` becomes writable. Also stops relay + xray sidecars.
-    //    A teardown error here is not fatal to the update — the helper shutdown
-    //    below and the installer's own preinstall hook are the further backstops.
-    let teardown_ok = match full_teardown(&app, &state, true).await {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!("sockscap: prepare-for-update teardown incomplete: {e}");
-            false
+    // A dirty journal not owned by this runtime means a previous process left
+    // machine-wide state behind. Do not erase the journal or install an update
+    // over it: the user must run Recover with elevation first.
+    if !owned_capture {
+        if let Ok(dir) = data_dir(&app) {
+            let journal = recovery::journal_path(&dir);
+            if recovery::needs_repair(&journal) {
+                state.sockscap.release_activation_lock();
+                return Err(
+                    "SocksCap recovery is required before updating; use Recover network first"
+                        .into(),
+                );
+            }
         }
+    }
+
+    // 1) Stop capture before the installer or relaunch can terminate the
+    //    process. The running handle retains the sudo credential needed to
+    //    remove Linux nftables/cgroups or restore the macOS system proxy.
+    let teardown_error = if owned_capture {
+        full_teardown(&app, &state, true).await.err()
+    } else {
+        if let Some(manager) = state.sockscap.xray() {
+            manager.shutdown_all().await;
+        }
+        None
     };
 
     // 2) Ask the elevated helper to exit, freeing `sockscap-helper.exe` and
     //    `WinDivert.dll`. Reuses the same shutdown path as the Stop button.
-    if let Err(e) = helper::sockscap_helper_stop(state.clone()).await {
-        tracing::warn!("sockscap: prepare-for-update helper stop failed: {e}");
-    }
-    if teardown_ok {
-        state.sockscap.release_activation_lock();
-    }
+    let helper_error = helper::sockscap_helper_stop(state.clone())
+        .await
+        .err()
+        .map(|error| format!("SocksCap helper shutdown failed: {error}"));
 
     // 3) The driver unload is asynchronous, so poll until the files the installer
     //    overwrites are actually releasable (or a short deadline passes).
     #[cfg(windows)]
     wait_for_privileged_files_unlocked(&app).await;
 
-    Ok(())
+    let mut errors = Vec::new();
+    if let Some(error) = teardown_error {
+        tracing::warn!("sockscap: prepare-for-update teardown incomplete: {error}");
+        errors.push(error);
+    }
+    if let Some(error) = helper_error {
+        tracing::warn!("sockscap: prepare-for-update helper stop failed: {error}");
+        errors.push(error);
+    }
+    if errors.is_empty() {
+        state.sockscap.release_activation_lock();
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 /// Poll the bundled privileged files until each is openable for writing (i.e.
@@ -1662,7 +1745,11 @@ fn is_file_locked(path: &std::path::Path) -> bool {
 }
 
 #[tauri::command]
-pub async fn sockscap_recover(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn sockscap_recover(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    sudo_password: Option<String>,
+) -> Result<(), String> {
     if !state.sockscap.has_activation_lock() {
         let lock = ModuleLock::try_acquire_for_app(
             &app,
@@ -1676,7 +1763,9 @@ pub async fn sockscap_recover(app: AppHandle, state: State<'_, AppState>) -> Res
     // Even if stopping the active session was incomplete, recovery gets one
     // more independent chance to remove the platform-owned state.
     let teardown_error = full_teardown(&app, &state, false).await.err();
-    match capture::recover_system().await {
+    let sudo_password = sudo_password.map(Zeroizing::new);
+    let sudo_pw = sudo_password.as_deref().map(|password| password.as_str());
+    match capture::recover_system(sudo_pw).await {
         Ok(needs_elevation) => {
             // Queue anything only an elevated process can kill; the next Start
             // hands the list to the helper it launches under UAC.
@@ -2486,7 +2575,7 @@ pub async fn boot_repair(app: &AppHandle, state: &AppState) {
 
     // The previous helper cannot be contacted without its token, so recovery
     // terminates what it can and reports what needs elevation.
-    match capture::recover_system().await {
+    match capture::recover_system(None).await {
         Ok(needs_elevation) => {
             for pid in needs_elevation {
                 if !orphans.contains(&pid) {

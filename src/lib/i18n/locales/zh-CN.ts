@@ -421,6 +421,11 @@ export const zhCN: DeepPartial<typeof en> = {
     promptOneTerminal: "当前有 {count} 个打开的标签页，其中包含 {terminals} 个终端会话。确认退出 Taomni 并关闭它们？",
     promptMany: "当前有 {count} 个打开的标签页。确认退出 Taomni 并关闭它们？",
     promptManyTerminals: "当前有 {count} 个打开的标签页，其中包含 {terminals} 个终端会话。确认退出 Taomni 并关闭它们？",
+    cleanupFailedTitle: "SocksCap 清理失败",
+    cleanupFailedMessage:
+      "为避免遗留网络状态，Taomni 已取消退出。请重试清理，或取消退出后使用“恢复网络”。\n\n{error}",
+    retryCleanup: "重试清理",
+    cancelExit: "取消退出",
   },
   about: {
     title: "关于 Taomni",
@@ -1211,6 +1216,10 @@ export const zhCN: DeepPartial<typeof en> = {
     rootPasswordPlaceholder: "请输入 root / sudo 密码",
     rootPromptSubtitleMacos:
       "修改 macOS 系统代理需要管理员权限。请输入密码以继续。",
+    rootPromptRecoverSubtitle:
+      "清理 Linux 残留的 nftables 与 cgroup 状态需要 Root 权限。请输入 sudo 密码以恢复网络。",
+    rootPromptRecoverSubtitleMacos:
+      "恢复 macOS 残留的系统代理状态需要管理员权限。请输入密码以恢复网络。",
     rootPromptIncorrectPassword: "Sudo 密码错误或验证失败，请重试。",
     authenticating: "验证中...",
     captureBackendLabel: "捕获后端：{{backend}}",

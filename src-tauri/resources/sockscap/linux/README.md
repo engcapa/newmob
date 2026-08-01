@@ -24,9 +24,14 @@ privilege mechanism appropriate for their desktop policy rather than applying
 While active, SocksCap owns only its marked `inet taomni_sockscap` nftables
 table and creates cgroups named `taomni-sockscap-<pid>`. Stop removes the table
 before the relay and restores moved processes to their original cgroups.
+Normal application exit and updater relaunch run the same teardown before the
+process terminates; if cleanup fails, the transition is blocked so the user can
+retry or run **Recover network**.
+
 **Recover network** removes a residual table after an unclean shutdown only
 when its ownership marker is present, and only deletes empty generated cgroups;
-it never moves an unrelated live process.
+it never moves an unrelated live process. Desktop sessions request sudo
+authorization when that recovery needs `CAP_NET_ADMIN` or cgroup permissions.
 
 ## xray-core (core-backed upstreams)
 

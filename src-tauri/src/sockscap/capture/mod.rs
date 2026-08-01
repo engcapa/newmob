@@ -141,24 +141,25 @@ pub const HELPER_IMAGE_NAME: &str = "sockscap-helper.exe";
 /// terminate. They are elevated and we are (normally) not, so only another
 /// elevated process can reap them — the caller hands the list to the next
 /// helper launch, which runs under UAC and can finish the job.
-pub async fn recover_system() -> Result<Vec<u32>, String> {
+pub async fn recover_system(sudo_password: Option<&str>) -> Result<Vec<u32>, String> {
     #[cfg(target_os = "linux")]
     {
-        return linux::recover_system(None).map(|()| Vec::new());
+        return linux::recover_system(sudo_password).map(|()| Vec::new());
     }
     #[cfg(windows)]
     {
+        let _ = sudo_password;
         return recover_system_windows();
     }
     #[cfg(target_os = "macos")]
     {
-        // No stored credential is available here, so this succeeds only when the
-        // process is already privileged; otherwise the caller keeps the journal
-        // dirty and asks the user to Recover, exactly as on Linux.
-        return macos::recover_system(None).map(|()| Vec::new());
+        return macos::recover_system(sudo_password).map(|()| Vec::new());
     }
     #[cfg(all(not(target_os = "linux"), not(windows), not(target_os = "macos")))]
-    Ok(Vec::new())
+    {
+        let _ = sudo_password;
+        Ok(Vec::new())
+    }
 }
 
 /// Windows recovery: terminate any leftover `sockscap-helper.exe`. When a helper

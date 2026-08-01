@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SocksCapPanel } from "./SocksCapPanel";
 import {
   sockscapCapabilities,
+  sockscapRecover,
   sockscapStart,
   sockscapStatus,
   sockscapParseShareLink,
@@ -70,6 +71,7 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
       ruleCount: 0,
       captureBackend: "test",
     })),
+    sockscapRecover: vi.fn(async () => undefined),
     sockscapStatus: vi.fn(async () => ({
       phase: "idle",
       message: "idle",
@@ -131,6 +133,8 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       ruleCount: 0,
       captureBackend: "test",
     });
+    vi.mocked(sockscapRecover).mockReset();
+    vi.mocked(sockscapRecover).mockResolvedValue(undefined);
     // Default to idle so the panel is unlocked; the lock test overrides this.
     vi.mocked(sockscapStatus).mockReset();
     vi.mocked(sockscapStatus).mockResolvedValue({
@@ -435,6 +439,55 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     fireEvent.click(startButton);
 
     expect(await screen.findByTestId("sockscap-root-prompt-dialog")).toBeInTheDocument();
+  });
+
+  it("retries Recover with sudo without accidentally starting capture", async () => {
+    currentPlatform = "linux";
+    vi.mocked(sockscapRecover).mockRejectedValueOnce(
+      "query nftables table failed: Operation not permitted. Linux capture requires CAP_NET_ADMIN",
+    );
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-recover"));
+    expect(await screen.findByTestId("sockscap-root-prompt-dialog")).toHaveTextContent(
+      "Removing residual Linux nftables and cgroup state requires Root privileges",
+    );
+
+    fireEvent.change(screen.getByTestId("sockscap-root-password-input"), {
+      target: { value: "sudo-secret" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-root-prompt-submit"));
+
+    await waitFor(() => {
+      expect(vi.mocked(sockscapRecover)).toHaveBeenNthCalledWith(1, undefined);
+      expect(vi.mocked(sockscapRecover)).toHaveBeenNthCalledWith(2, "sudo-secret");
+    });
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.queryByTestId("sockscap-root-prompt-dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps the Recover sudo prompt open after authentication fails", async () => {
+    currentPlatform = "linux";
+    vi.mocked(sockscapRecover)
+      .mockRejectedValueOnce(
+        "query nftables table failed: Operation not permitted. Linux capture requires CAP_NET_ADMIN",
+      )
+      .mockRejectedValueOnce("sudo authentication failed: Sorry, try again");
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-recover"));
+    fireEvent.change(await screen.findByTestId("sockscap-root-password-input"), {
+      target: { value: "wrong-password" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-root-prompt-submit"));
+
+    expect(await screen.findByTestId("sockscap-root-prompt-error")).toHaveTextContent(
+      "Sudo password incorrect or authentication failed",
+    );
+    expect(screen.getByTestId("sockscap-root-prompt-dialog")).toBeInTheDocument();
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
   });
 
   it("blocks start and warns when the active upstream is unconfigured", async () => {

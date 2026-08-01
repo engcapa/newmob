@@ -113,29 +113,25 @@ export async function checkForUpdate(target?: string): Promise<AvailableUpdate |
 }
 
 /**
- * Release SocksCap's privileged files before the installer overwrites them.
+ * Release SocksCap's OS capture state before install/relaunch.
  *
  * On Windows, while SocksCap captures, the WinDivert kernel driver keeps
  * `WinDivert64.sys` locked and the elevated helper keeps its own exe + DLL
  * locked. A per-user installer runs unelevated and cannot stop either, so the
  * upgrade would fail with "Error opening file for writing". The app asks its
- * elevated helper to close the driver handles and exit first. Best-effort: a
- * failure here must not block the install (the installer's preinstall hook is a
- * further backstop), and it is a Windows-only concern.
+ * elevated helper to close the driver handles and exit first. Linux/macOS must
+ * also restore nftables/cgroups or the system proxy while the async runtime and
+ * stored sudo credential are still available. A cleanup failure blocks the
+ * transition so the app cannot silently strand network state.
  */
 async function prepareSocksCapForUpgrade(): Promise<void> {
-  if (!isTauriRuntime() || getAppPlatform() !== "windows") return;
-  try {
-    await invoke("sockscap_prepare_for_update");
-  } catch (e) {
-    // Non-fatal: proceed with the install regardless.
-    console.warn("sockscap prepare-for-update failed; continuing with install", e);
-  }
+  if (!isTauriRuntime()) return;
+  await invoke("sockscap_prepare_for_update");
 }
 
 /**
- * Download the update for `target`, release SocksCap's locked files (Windows),
- * then install — leaving the app running until the caller decides to relaunch
+ * Download the update for `target`, release SocksCap's OS capture state, then
+ * install — leaving the app running until the caller decides to relaunch
  * (confirmation gate #2). Reuses the Update from a prior checkForUpdate(target)
  * when available.
  *
@@ -183,7 +179,8 @@ export async function downloadAndInstall(
   });
 
   // Download done → progress pinned at 100% (UI reads this as "installing").
-  // Stop SocksCap so the installer can overwrite the locked driver/helper.
+  // Stop SocksCap before installation can replace files or a later relaunch can
+  // terminate the process with machine-wide capture state still installed.
   onProgress({ downloaded, total, percent: 100 });
   await prepareSocksCapForUpgrade();
 
@@ -193,6 +190,9 @@ export async function downloadAndInstall(
 /** Restart into the freshly installed version (confirmation gate #2). */
 export async function relaunchApp(): Promise<void> {
   if (!isTauriRuntime()) return;
+  // The user can start SocksCap again after installation but before accepting
+  // the relaunch prompt, so teardown once more immediately before exit.
+  await prepareSocksCapForUpgrade();
   const { relaunch } = await import("@tauri-apps/plugin-process");
   await relaunch();
 }
