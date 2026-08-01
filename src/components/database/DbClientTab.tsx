@@ -30,6 +30,9 @@ import {
   RefreshCw,
   Trash2,
   Crosshair,
+  Check,
+  ChevronDown,
+  Languages,
 } from "lucide-react";
 import type { DbConnectInfo } from "../../types";
 import {
@@ -91,7 +94,11 @@ import {
 } from "../floating-toolbar/floatingToolbarStyles";
 import { captureElementPng, renderElementToCanvas, safeFilePart } from "../../lib/capture";
 import { useT } from "../../lib/i18n";
-import { readGlobalAnswerLanguage } from "../../lib/ai/answerLanguage";
+import {
+  AI_ANSWER_LANGUAGES,
+  answerLanguageLabelKey,
+  type AiAnswerLanguage,
+} from "../../lib/ai/answerLanguage";
 import { buildDbAiPrompt, truncateStatement } from "../../lib/database/dbAiPrompts";
 import { registerQueryTab } from "../../lib/queryRegistry";
 import { useDbSessionFontSize } from "./useDbSessionFontSize";
@@ -578,6 +585,7 @@ export default function DbClientTab({
   const [metadataVersion, setMetadataVersion] = useState(0);
   const [historyPanelId, setHistoryPanelId] = useState<string | null>(null);
   const [statementAction, setStatementAction] = useState<EditorStatementAction | null>(null);
+  const [aiAnswerLanguage, setAiAnswerLanguage] = useState<AiAnswerLanguage>("inherit");
   const [executionPreferences, setExecutionPreferences] = useState(loadSqlExecutionPreferences);
   const [historyEntries, setHistoryEntries] = useState<DbSqlHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -1717,7 +1725,28 @@ export default function DbClientTab({
     const running = panel.sheets.some((sheet) => sheet.running);
     const sqlText = panelSql(panel);
     const hasEditor = !!editorHandles.current[panel.id];
+    const currentStmt = currentEditorStatement(panel.id);
     const items: MenuItem[] = [
+      {
+        label: t("dbAi.askAiExplainSyntax"),
+        icon: <Sparkles className="w-3.5 h-3.5" />,
+        testId: "db-context-ai-explain-syntax",
+        disabled: !currentStmt,
+        onClick: () => {
+          if (currentStmt) void askAiAboutStatement(currentStmt);
+        },
+      },
+      {
+        label: t("codeWorkspaceAi.answerLanguageMenu"),
+        testId: "db-context-ai-answer-language",
+        children: AI_ANSWER_LANGUAGES.map((lang) => ({
+          label: t(answerLanguageLabelKey(lang)),
+          testId: `db-context-ai-answer-language-${lang}`,
+          checked: lang === aiAnswerLanguage,
+          onClick: () => setAiAnswerLanguage(lang),
+        })),
+      },
+      { separator: true, label: "" },
       {
         label: "Run query",
         icon: <Play className="w-3 h-3" />,
@@ -2306,7 +2335,7 @@ export default function DbClientTab({
         error: entry.error,
         resultSummary: resultShape(latestResultForSql(entry.sqlContent)),
       },
-      readGlobalAnswerLanguage(),
+      aiAnswerLanguage,
     );
     await sendDbAiPrompt(prompt);
     setHistoryPanelId(null);
@@ -2325,7 +2354,7 @@ export default function DbClientTab({
         schema: activeSchema,
         resultSummary: resultShape(latestResultForSql(action.range.sql)),
       },
-      readGlobalAnswerLanguage(),
+      aiAnswerLanguage,
     );
     await sendDbAiPrompt(prompt);
     setStatementAction(null);
@@ -2630,6 +2659,8 @@ export default function DbClientTab({
                 runAllTitle={`Run (${displaySqlShortcut(executionPreferences.runAll)})`}
                 runSelectionTitle={`Run selection (${displaySqlShortcut(executionPreferences.runSelection)})`}
                 runCurrentTitle={`Run current statement (${displaySqlShortcut(executionPreferences.runCurrent)})`}
+                aiAnswerLanguage={aiAnswerLanguage}
+                onSetAiAnswerLanguage={setAiAnswerLanguage}
                 onRun={() => {
                   const payload = editorRunPayload(activePanel, false);
                   void runQuery(activePanel.id, payload.sql, { context: payload.context });
@@ -2748,6 +2779,8 @@ function EditorToolbar({
   runAllTitle,
   runSelectionTitle,
   runCurrentTitle,
+  aiAnswerLanguage = "inherit",
+  onSetAiAnswerLanguage,
   onRun,
   onRunSelection,
   onRunCurrent,
@@ -2770,6 +2803,8 @@ function EditorToolbar({
   runAllTitle: string;
   runSelectionTitle: string;
   runCurrentTitle: string;
+  aiAnswerLanguage?: AiAnswerLanguage;
+  onSetAiAnswerLanguage?: (lang: AiAnswerLanguage) => void;
   onRun: () => void;
   onRunSelection: () => void;
   onRunCurrent: () => void;
@@ -2785,6 +2820,8 @@ function EditorToolbar({
   onRowLimitChange: (value: number) => void;
   onMaxResultSheetsChange: (value: number) => void;
 }) {
+  const t = useT();
+  const [langMenuOpen, setLangMenuOpen] = useState(false);
   const btn = "h-6 px-2 inline-flex items-center gap-1 rounded text-[11px] hover:bg-[var(--taomni-hover)] disabled:opacity-40";
   const input = "taomni-input h-6 w-[68px] text-[11px]";
   return (
@@ -2827,6 +2864,43 @@ function EditorToolbar({
       <button type="button" className={btn} onClick={onSaveQuery} title="Save to query library" data-testid="db-save-query">
         <Star className="w-3.5 h-3.5 text-[var(--taomni-accent)]" /> Save Query
       </button>
+      {onSetAiAnswerLanguage && (
+        <div className="relative">
+          <button
+            type="button"
+            className={btn}
+            data-testid="db-ai-answer-language-toggle"
+            title={t("codeWorkspaceAi.answerLanguageTooltip", { current: t(answerLanguageLabelKey(aiAnswerLanguage)) })}
+            onClick={() => setLangMenuOpen((v) => !v)}
+          >
+            <Languages className="w-3.5 h-3.5" />
+            <span>{t(answerLanguageLabelKey(aiAnswerLanguage))}</span>
+            <ChevronDown className="w-3 h-3 opacity-60" />
+          </button>
+          {langMenuOpen && (
+            <div
+              className="absolute right-0 top-full mt-1 z-50 py-1 rounded shadow-lg border text-[11px] min-w-[120px]"
+              style={{ background: "var(--taomni-panel-bg)", borderColor: "var(--taomni-divider)", color: "var(--taomni-text)" }}
+            >
+              {AI_ANSWER_LANGUAGES.map((lang) => (
+                <button
+                  key={lang}
+                  type="button"
+                  data-testid={`db-ai-answer-language-option-${lang}`}
+                  className="w-full px-2 py-1 text-left flex items-center justify-between hover:bg-[var(--taomni-hover)]"
+                  onClick={() => {
+                    onSetAiAnswerLanguage(lang);
+                    setLangMenuOpen(false);
+                  }}
+                >
+                  <span>{t(answerLanguageLabelKey(lang))}</span>
+                  {lang === aiAnswerLanguage && <Check className="w-3 h-3 text-[var(--taomni-accent)]" />}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       <span className="w-px h-4 mx-1" style={{ background: "var(--taomni-divider)" }} />
       <label className="h-6 inline-flex items-center gap-1 text-[11px] text-[var(--taomni-text-muted)]">
         Rows

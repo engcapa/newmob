@@ -1,6 +1,7 @@
 import { createRef, useState } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AiAnswerLanguage } from "../../lib/ai/answerLanguage";
 import { RedisCli, type RedisCliHandle } from "./RedisCli";
 
 const redisExec = vi.hoisted(() => vi.fn());
@@ -77,6 +78,8 @@ describe("RedisCli explain action", () => {
   function renderCli(props: {
     input?: string;
     onExplain?: (command: string, reply?: string) => void;
+    answerLanguage?: AiAnswerLanguage;
+    onSetAnswerLanguage?: (language: AiAnswerLanguage) => void;
     ref?: React.Ref<RedisCliHandle>;
   } = {}) {
     return render(
@@ -89,6 +92,8 @@ describe("RedisCli explain action", () => {
         onInputChange={vi.fn()}
         onSaveQuery={vi.fn()}
         onExplain={props.onExplain}
+        answerLanguage={props.answerLanguage}
+        onSetAnswerLanguage={props.onSetAnswerLanguage}
       />,
     );
   }
@@ -125,6 +130,59 @@ describe("RedisCli explain action", () => {
 
     // The reply rides along so the answer can address what actually came back.
     expect(onExplain).toHaveBeenCalledWith("PING", "PONG");
+  });
+
+  it("uses the clicked output line for the context-menu explanation", async () => {
+    const onExplain = vi.fn();
+    const ref = createRef<RedisCliHandle>();
+    renderCli({ input: "GET another-key", onExplain, ref });
+
+    await act(async () => {
+      await ref.current?.runCommand("PING");
+    });
+
+    fireEvent.contextMenu(screen.getByText("> PING"));
+    fireEvent.click(screen.getByTestId("redis-context-ai-explain-syntax"));
+
+    expect(onExplain).toHaveBeenCalledWith("PING", "PONG");
+  });
+
+  it("uses the current draft for the input context-menu explanation", () => {
+    const onExplain = vi.fn();
+    renderCli({ input: "KEYS *", onExplain });
+
+    fireEvent.contextMenu(screen.getByRole("textbox", { name: "Redis command" }));
+    fireEvent.click(screen.getByTestId("redis-context-ai-explain-syntax"));
+
+    expect(onExplain).toHaveBeenCalledWith("KEYS *", undefined);
+  });
+
+  it("changes the session answer language from the toolbar", () => {
+    const onSetAnswerLanguage = vi.fn();
+    renderCli({
+      answerLanguage: "inherit",
+      onSetAnswerLanguage,
+    });
+
+    fireEvent.click(screen.getByTestId("redis-ai-answer-language-toggle"));
+    fireEvent.click(screen.getByTestId("redis-ai-answer-language-option-zh-CN"));
+
+    expect(onSetAnswerLanguage).toHaveBeenCalledWith("zh-CN");
+  });
+
+  it("changes the session answer language from the context menu", async () => {
+    const onSetAnswerLanguage = vi.fn();
+    renderCli({
+      input: "PING",
+      answerLanguage: "inherit",
+      onSetAnswerLanguage,
+    });
+
+    fireEvent.contextMenu(screen.getByRole("textbox", { name: "Redis command" }));
+    fireEvent.mouseEnter(screen.getByTestId("redis-context-ai-answer-language"));
+    fireEvent.click(await screen.findByTestId("redis-context-ai-answer-language-en"));
+
+    expect(onSetAnswerLanguage).toHaveBeenCalledWith("en");
   });
 
   it("passes the error text as the reply for a failed command", async () => {

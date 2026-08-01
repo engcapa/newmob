@@ -22,7 +22,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { TabActions } from "../tabbar/TabActionSlot";
 import { FT_BUTTON_ACTIVE_OVERRIDE, FT_ICON_BUTTON_STYLE } from "../floating-toolbar/floatingToolbarStyles";
 import { useT } from "../../lib/i18n";
-import { readGlobalAnswerLanguage } from "../../lib/ai/answerLanguage";
+import { type AiAnswerLanguage } from "../../lib/ai/answerLanguage";
 import { buildDbAiPrompt, truncateStatement } from "../../lib/database/dbAiPrompts";
 import { QueryLibraryPanel } from "./QueryLibraryPanel";
 import { registerQueryTab } from "../../lib/queryRegistry";
@@ -55,6 +55,7 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
   const [reloadToken, setReloadToken] = useState(0);
   const [showNewKey, setShowNewKey] = useState(false);
   const [cliCollapsed, setCliCollapsed] = useState(false);
+  const [aiAnswerLanguage, setAiAnswerLanguage] = useState<AiAnswerLanguage>("inherit");
   const [leftPanelTab, setLeftPanelTab] = useState<"keys" | "queries">("keys");
   const [commandDraft, setCommandDraft] = useState("");
   const [linkedQuery, setLinkedQuery] = useState<DbSavedQuery | null>(null);
@@ -181,7 +182,7 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
         database: `DB ${dbIndex}`,
         resultSummary: reply ?? null,
       },
-      readGlobalAnswerLanguage(),
+      aiAnswerLanguage,
     );
     const chat = useChatStore.getState();
     await chat.openTabChat(tabId);
@@ -193,7 +194,7 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
     } else {
       setStatusMessage(t("dbAi.sent"));
     }
-  }, [dbIndex, setStatusMessage, t, tabId]);
+  }, [aiAnswerLanguage, dbIndex, setStatusMessage, t, tabId]);
 
   const switchDbIndex = async (idx: number) => {
     if (!connectionSessionId) return;
@@ -392,6 +393,8 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
             onInputChange={updateCommandDraft}
             onSaveQuery={openQuerySave}
             onExplain={(command, reply) => void explainCommand(command, reply)}
+            answerLanguage={aiAnswerLanguage}
+            onSetAnswerLanguage={setAiAnswerLanguage}
           />
         </Panel>
       </PanelGroup>

@@ -3045,6 +3045,7 @@ export const zhCN: DeepPartial<typeof en> = {
     explainStatementTooltip: "让 AI 解释这条语句：它在做什么、用到的语法、有什么风险",
     explainCommandTooltip: "让 AI 解释这条命令：它在做什么、用到的语法、有什么风险",
     explainReplyTooltip: "解释这条命令和它的返回结果",
+    askAiExplainSyntax: "Ask AI (解释语法)",
     noStatement: "请先把光标放在一条语句上",
     noCommand: "请先输入命令",
     sent: "已把解释请求发给 AI 对话",
