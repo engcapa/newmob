@@ -3902,6 +3902,58 @@ controls:
     selector: 'input[aria-label="Redis command"]'
     kind: interactive
     optional: true
+  - id: explain-current
+    selector: '[data-testid="redis-explain-current"]'
+    kind: interactive
+    optional: true
+  - id: explain-line
+    selector: '[data-testid="redis-explain-line"]'
+    kind: interactive
+    optional: true
+  - id: ai-answer-language-toggle
+    selector: '[data-testid="redis-ai-answer-language-toggle"]'
+    kind: interactive
+    optional: true
+  - id: ai-answer-language-option-inherit
+    selector: '[data-testid="redis-ai-answer-language-option-inherit"]'
+    kind: interactive
+    optional: true
+  - id: ai-answer-language-option-auto
+    selector: '[data-testid="redis-ai-answer-language-option-auto"]'
+    kind: interactive
+    optional: true
+  - id: ai-answer-language-option-zh-cn
+    selector: '[data-testid="redis-ai-answer-language-option-zh-CN"]'
+    kind: interactive
+    optional: true
+  - id: ai-answer-language-option-en
+    selector: '[data-testid="redis-ai-answer-language-option-en"]'
+    kind: interactive
+    optional: true
+  - id: context-ai-explain-syntax
+    selector: '[data-testid="redis-context-ai-explain-syntax"]'
+    kind: interactive
+    optional: true
+  - id: context-ai-answer-language
+    selector: '[data-testid="redis-context-ai-answer-language"]'
+    kind: interactive
+    optional: true
+  - id: context-ai-answer-language-inherit
+    selector: '[data-testid="redis-context-ai-answer-language-inherit"]'
+    kind: interactive
+    optional: true
+  - id: context-ai-answer-language-auto
+    selector: '[data-testid="redis-context-ai-answer-language-auto"]'
+    kind: interactive
+    optional: true
+  - id: context-ai-answer-language-zh-cn
+    selector: '[data-testid="redis-context-ai-answer-language-zh-CN"]'
+    kind: interactive
+    optional: true
+  - id: context-ai-answer-language-en
+    selector: '[data-testid="redis-context-ai-answer-language-en"]'
+    kind: interactive
+    optional: true
   - id: query-library-tab
     selector: '[data-testid="redis-query-library-tab"]'
     kind: interactive
@@ -3932,7 +3984,7 @@ controls:
 - Redis 会话经 `SessionEditor`（`session-proto-redis` 由 F6.3 拥有）创建，打开后挂载 `RedisClientTab`（`type:"redis"`），常驻挂载
 - 左侧 `RedisKeyBrowser`：SCAN 游标分页（Load more…）、`:`-前缀文件夹树、类型徽标、TTL pill（每 10s 自动刷新），顶部 `Key pattern` glob 输入 + Scan，下方 Add/Delete/TTL 操作
 - 右侧 `RedisValuePanel`：按 key 类型分别渲染 String/Hash/List/Set/ZSet/Stream 编辑器 + 元数据栏
-- 底部可折叠 `RedisCli`：命令历史、Tab 补全、Monitor 开关（轮询 `INFO commandstats`）；DB-index 切换（`Redis DB index`）发 `SELECT n`
+- 底部可折叠 `RedisCli`：命令历史、Tab 补全、Monitor 开关（轮询 `INFO commandstats`）；输入区和历史输出行右键可 Ask AI 解释当前命令及返回值，工具栏/右键菜单可为当前 Redis Tab 独立选择 AI 回答语言；DB-index 切换（`Redis DB index`）发 `SELECT n`
 - `RedisNewKeyDialog` 模态：Key name / type / 初始值 / TTL 等字段（均 aria-label）
 - **e2e 测试限制**：实际 key 操作需活的 Redis fixture，浏览器冒烟无法连接；smoke 只覆盖「SessionEditor 选 Redis proto → 保存 → 打开标签 → redis-key-browser / redis-cli 挂载」的路由路径，真实 SCAN/读写留待配置 Redis fixture 的手动/native 回归
 

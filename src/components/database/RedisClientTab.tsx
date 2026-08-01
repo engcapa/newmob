@@ -194,7 +194,7 @@ export default function RedisClientTab({ tabId, info, visible, chatToggle }: Red
     } else {
       setStatusMessage(t("dbAi.sent"));
     }
-  }, [dbIndex, setStatusMessage, t, tabId]);
+  }, [aiAnswerLanguage, dbIndex, setStatusMessage, t, tabId]);
 
   const switchDbIndex = async (idx: number) => {
     if (!connectionSessionId) return;

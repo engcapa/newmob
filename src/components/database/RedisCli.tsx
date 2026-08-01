@@ -42,6 +42,11 @@ interface CliLine {
   error?: boolean;
 }
 
+interface CliExplainTarget {
+  command: string;
+  reply?: string;
+}
+
 const KNOWN_COMMANDS = [
   "GET", "SET", "DEL", "EXPIRE", "TTL", "PERSIST", "KEYS", "SCAN", "TYPE",
   "HGET", "HSET", "HGETALL", "HDEL", "LPUSH", "RPUSH", "LRANGE", "LREM",
@@ -134,16 +139,17 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
     }, 2000);
   };
 
-  const openCliContextMenu = (event: ReactMouseEvent) => {
+  const openCliContextMenu = (event: ReactMouseEvent, target?: CliExplainTarget) => {
     if (!onExplain && !onSetAnswerLanguage) return;
+    const command = target?.command ?? "";
     const items: MenuItem[] = [];
     if (onExplain) {
       items.push({
         label: t("dbAi.askAiExplainSyntax"),
         icon: <Sparkles className="w-3.5 h-3.5" />,
         testId: "redis-context-ai-explain-syntax",
-        disabled: !input.trim(),
-        onClick: () => onExplain(input),
+        disabled: !command.trim(),
+        onClick: () => onExplain(command, target?.reply),
       });
     }
     if (onSetAnswerLanguage && answerLanguage) {
@@ -181,7 +187,7 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
   }
 
   return (
-    <div className="h-full flex flex-col min-h-0" data-testid="redis-cli" onContextMenu={openCliContextMenu}>
+    <div className="h-full flex flex-col min-h-0" data-testid="redis-cli">
       {cliMenu.render}
       <div
         className="h-7 shrink-0 flex items-center gap-2 px-2 text-[11px]"
@@ -288,6 +294,7 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
       <div
         ref={outputRef}
         className="flex-1 min-h-0 overflow-auto taomni-scroll-y p-2 font-mono text-[12px]"
+        onContextMenu={(event) => openCliContextMenu(event)}
         style={{
           background: "var(--taomni-term-bg)",
           color: "var(--taomni-term-text)",
@@ -295,7 +302,14 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
         }}
       >
         {lines.map((line, i) => (
-          <div key={i} className="group relative">
+          <div
+            key={i}
+            className="group relative"
+            onContextMenu={(event) => openCliContextMenu(
+              event,
+              line.cmd ? { command: line.cmd, reply: line.reply } : undefined,
+            )}
+          >
             {line.cmd && (
               <div className="flex items-start gap-1">
                 <span className="flex-1" style={{ color: "var(--taomni-accent)" }}>&gt; {line.cmd}</span>
@@ -318,7 +332,11 @@ export const RedisCli = forwardRef<RedisCliHandle, RedisCliProps>(function Redis
           </div>
         ))}
       </div>
-      <div className="shrink-0 flex items-center gap-1 px-2 py-1" style={{ borderTop: "1px solid var(--taomni-divider)" }}>
+      <div
+        className="shrink-0 flex items-center gap-1 px-2 py-1"
+        style={{ borderTop: "1px solid var(--taomni-divider)" }}
+        onContextMenu={(event) => openCliContextMenu(event, { command: input })}
+      >
         <span
           className="text-[var(--taomni-accent)] font-mono text-[12px]"
           style={{ fontSize: "var(--taomni-db-font-size, 12px)" }}
