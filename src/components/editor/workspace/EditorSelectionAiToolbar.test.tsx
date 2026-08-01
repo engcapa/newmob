@@ -41,4 +41,64 @@ describe("EditorSelectionAiToolbar", () => {
     );
     expect(screen.queryByTestId("code-workspace-ai-selection-toolbar")).toBeNull();
   });
+
+  it("shows the answer language and routes the cycle click", () => {
+    const onCycleAnswerLanguage = vi.fn();
+    render(
+      <EditorSelectionAiToolbar
+        visible
+        rect={{ top: 40, left: 20, right: 120, bottom: 60 }}
+        selectionText="const value = 1;"
+        answerLanguage="zh-CN"
+        onAction={vi.fn()}
+        onCycleAnswerLanguage={onCycleAnswerLanguage}
+        onDismiss={vi.fn()}
+      />,
+    );
+    const toggle = screen.getByTestId("code-workspace-ai-answer-language");
+    expect(toggle.textContent).toContain("中文");
+    fireEvent.click(toggle);
+    expect(onCycleAnswerLanguage).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels auto and English preferences", () => {
+    const { rerender } = render(
+      <EditorSelectionAiToolbar
+        visible
+        rect={{ top: 40, left: 20, right: 120, bottom: 60 }}
+        selectionText="const value = 1;"
+        answerLanguage="auto"
+        onAction={vi.fn()}
+        onCycleAnswerLanguage={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("code-workspace-ai-answer-language").textContent).toContain("Auto");
+
+    rerender(
+      <EditorSelectionAiToolbar
+        visible
+        rect={{ top: 40, left: 20, right: 120, bottom: 60 }}
+        selectionText="const value = 1;"
+        answerLanguage="en"
+        onAction={vi.fn()}
+        onCycleAnswerLanguage={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("code-workspace-ai-answer-language").textContent).toContain("EN");
+  });
+
+  it("omits the language toggle when the host does not handle it", () => {
+    render(
+      <EditorSelectionAiToolbar
+        visible
+        rect={{ top: 40, left: 20, right: 120, bottom: 60 }}
+        selectionText="const value = 1;"
+        onAction={vi.fn()}
+        onDismiss={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("code-workspace-ai-answer-language")).toBeNull();
+  });
 });

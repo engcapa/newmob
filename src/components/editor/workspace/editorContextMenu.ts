@@ -31,6 +31,14 @@ export interface EditorContextMenuActions {
   paste: () => void;
 }
 
+/** AI entry points. Omitted entirely when AI is unavailable/disabled. */
+export interface EditorContextMenuAiSection {
+  explainSyntaxLabel: string;
+  explainCodeLabel: string;
+  explainSyntax: () => void;
+  explainCode: () => void;
+}
+
 export interface BuildEditorContextMenuInput {
   capabilities: EditorContextMenuCapabilities | LspCapabilitySummary | null | undefined;
   hasSelection: boolean;
@@ -41,6 +49,8 @@ export interface BuildEditorContextMenuInput {
   lspAvailable?: boolean;
   /** Present while a debug session is active — adds Run to Cursor (IDEA Alt+F9). */
   debug?: { canRunToCursor: boolean; runToCursor: () => void } | null;
+  /** Present when AI is available — adds the Explain Syntax / Explain Code pair. */
+  ai?: EditorContextMenuAiSection | null;
 }
 
 function capEnabled(
@@ -70,6 +80,26 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
         testId: "editor-context-run-to-cursor",
         disabled: !input.debug.canRunToCursor,
         onClick: input.debug.runToCursor,
+      },
+    ]
+    : [];
+
+  // AI actions work without a selection (they fall back to the enclosing symbol
+  // at the caret), so these are never capability- or selection-gated.
+  const aiItems: MenuItem[] = input.ai
+    ? [
+      { separator: true, label: "" },
+      {
+        label: input.ai.explainSyntaxLabel,
+        shortcut: "Ctrl+Alt+S",
+        testId: "editor-context-ai-explain-syntax",
+        onClick: input.ai.explainSyntax,
+      },
+      {
+        label: input.ai.explainCodeLabel,
+        shortcut: "Ctrl+Alt+E",
+        testId: "editor-context-ai-explain-code",
+        onClick: input.ai.explainCode,
       },
     ]
     : [];
@@ -148,6 +178,7 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
       onClick: actions.format,
     },
     ...debugItems,
+    ...aiItems,
     { separator: true, label: "" },
     {
       label: "Cut",

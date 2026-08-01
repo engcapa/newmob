@@ -311,8 +311,15 @@ interface ChatStore {
   sendMessage: (threadId: string, content: string, terminalContext?: string, attachments?: ChatAttachment[]) => Promise<void>;
   stopSending: (threadId: string) => Promise<void>;
   /// Open the drawer (creating a thread if needed) and stage `text` in the
-  /// composer. Used by the Selection toolbar's "Send to AI" action.
+  /// composer as a blockquote. For raw *selections* the user will write around
+  /// — terminal output, a voice transcript. Callers that have already built a
+  /// complete prompt want `sendPromptToTabChat` instead: the blockquote prefix
+  /// would swallow their instructions and code fences.
   attachToComposer: (text: string) => Promise<void>;
+  /// Send an already-composed prompt to the active tab's chat thread verbatim.
+  /// Reuses (or creates) the tab-bound thread so follow-up questions stay in the
+  /// same context, and auto-sends rather than staging.
+  sendPromptToTabChat: (prompt: string) => Promise<void>;
   consumePendingComposerText: () => string;
   setComposerDraft: (key: string, draft: ChatComposerDraft) => void;
   clearComposerDraft: (key: string) => void;
@@ -1001,6 +1008,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       drawerOpen: true,
       pendingComposerText: `> ${text.replace(/\n+/g, "\n> ")}\n\n`,
     });
+  },
+
+  sendPromptToTabChat: async (prompt: string) => {
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
+    const { getActiveTerminalTabId } = await import("../lib/terminal/terminalRegistry");
+    const tabId = getActiveTerminalTabId() ?? (await resolveActiveChatTabId());
+    let threadId: string | null = null;
+    if (tabId) {
+      // Resolves the remembered/latest thread for this tab, or creates one.
+      await get().openTabChat(tabId);
+      threadId = get().activeThreadId;
+    }
+    if (!threadId) {
+      const thread = await get().newThread(undefined, tabId ?? undefined);
+      set((s) => ({
+        activeThreadId: thread.id,
+        ...scopeForThread(thread),
+        tabDrawerOpenByTabId: tabId
+          ? { ...s.tabDrawerOpenByTabId, [tabId]: true }
+          : s.tabDrawerOpenByTabId,
+      }));
+      threadId = thread.id;
+    }
+    set({ drawerOpen: true });
+    // Fire-and-forget — sendMessage owns its own loading state.
+    void get().sendMessage(threadId, trimmed);
   },
 
   consumePendingComposerText: () => {

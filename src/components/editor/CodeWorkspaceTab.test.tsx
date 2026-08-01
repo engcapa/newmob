@@ -136,6 +136,7 @@ vi.mock("../../lib/git", () => gitMocks);
 const chatMocks = vi.hoisted(() => ({
   attachToComposer: vi.fn(async () => undefined),
   explainSelection: vi.fn(async () => undefined),
+  sendPromptToTabChat: vi.fn(async () => undefined),
 }));
 
 vi.mock("../../stores/chatStore", () => ({

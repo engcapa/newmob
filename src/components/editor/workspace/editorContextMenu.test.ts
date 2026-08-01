@@ -90,4 +90,33 @@ describe("buildEditorContextMenuItems", () => {
     const running = buildEditorContextMenuItems({ ...base, debug: { canRunToCursor: false, runToCursor } });
     expect(running.find((i) => i.testId === "editor-context-run-to-cursor")?.disabled).toBe(true);
   });
+
+  it("adds the AI section only when a host supplies it", () => {
+    const base = { capabilities: null, hasSelection: false, clientX: 0, clientY: 0, actions };
+    expect(buildEditorContextMenuItems(base).find((i) => i.testId === "editor-context-ai-explain-syntax"))
+      .toBeUndefined();
+
+    const explainSyntax = vi.fn();
+    const explainCode = vi.fn();
+    const items = buildEditorContextMenuItems({
+      ...base,
+      ai: {
+        explainSyntaxLabel: "Explain Syntax…",
+        explainCodeLabel: "Explain Code…",
+        explainSyntax,
+        explainCode,
+      },
+    });
+    const syntax = items.find((i) => i.testId === "editor-context-ai-explain-syntax");
+    const code = items.find((i) => i.testId === "editor-context-ai-explain-code");
+    expect(syntax?.label).toBe("Explain Syntax…");
+    expect(syntax?.shortcut).toBe("Ctrl+Alt+S");
+    // AI actions fall back to the enclosing symbol, so no selection is required.
+    expect(syntax?.disabled).toBeFalsy();
+    expect(code?.disabled).toBeFalsy();
+    syntax?.onClick?.();
+    code?.onClick?.();
+    expect(explainSyntax).toHaveBeenCalledTimes(1);
+    expect(explainCode).toHaveBeenCalledTimes(1);
+  });
 });

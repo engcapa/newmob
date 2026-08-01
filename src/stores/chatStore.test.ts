@@ -542,6 +542,137 @@ describe("chatStore code workspace context bridge", () => {
   });
 });
 
+describe("chatStore sendPromptToTabChat", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    vi.mocked(listen).mockResolvedValue(() => undefined);
+    useAiStore.setState({
+      config: makeConfig(),
+      loading: false,
+      saving: false,
+      testResults: {},
+      voiceShellEnabled: false,
+    });
+    const thread = makeThread({
+      id: "thread-code",
+      provider_id: "deepseek",
+      linked_session_id: "code-tab",
+    });
+    useChatStore.setState({
+      threads: [thread],
+      threadsLoaded: true,
+      activeThreadId: thread.id,
+      messages: { [thread.id]: [] },
+      streamingId: {},
+      ccToolCards: {},
+      ccUsage: {},
+      sendingByThreadId: {},
+      sending: false,
+      drawerOpen: false,
+      drawerScope: "tab",
+      drawerTabId: "code-tab",
+      tabDrawerOpenByTabId: {},
+      activeThreadIdByTabId: { "code-tab": thread.id },
+      drawerWidth: 380,
+      drawerHeight: 420,
+      drawerPosition: "right",
+      drawerPinned: true,
+      drawerFloatingOpacity: 1,
+      pendingComposerText: "",
+      composerDrafts: {},
+    });
+    useAppStore.setState({
+      tabs: [
+        {
+          id: "code-tab",
+          type: "code-workspace",
+          title: "Code · app",
+          closable: true,
+          codeWorkspace: { repoRoot: "/repo/app" },
+        } as Tab,
+      ],
+      activeTabId: "code-tab",
+      codeWorkspaceByTab: {},
+    });
+    invokeMock.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const PROMPT = [
+    "请把下面这段代码当作教学示例，讲解其中用到的语言语法与写法。",
+    "",
+    "## 上下文",
+    "- 文件: src/lib.rs",
+    "",
+    "```rust",
+    "impl Foo {}",
+    "```",
+  ].join("\n");
+
+  // sendPromptToTabChat hands the prompt to sendMessage without awaiting it (the
+  // send owns its own loading state). Spy on that boundary: what reaches
+  // sendMessage is this method's contract, and sendMessage's own path to
+  // chat_stream is covered by the context-bridge suite above.
+  function spyOnSendMessage() {
+    const sendMessage = vi.fn(async (_threadId: string, _content: string) => undefined);
+    useChatStore.setState({ sendMessage });
+    return sendMessage;
+  }
+
+  it("sends the prompt verbatim, without blockquote prefixes", async () => {
+    const sendMessage = spyOnSendMessage();
+    await useChatStore.getState().sendPromptToTabChat(PROMPT);
+
+    expect(sendMessage).toHaveBeenCalledWith("thread-code", PROMPT);
+    // Regression guard: attachToComposer's "> " prefix would fold the
+    // instructions and the code fence into a single quoted block.
+    const sent = sendMessage.mock.calls[0]?.[1] ?? "";
+    expect(sent.split("\n").some((line) => line.startsWith(">"))).toBe(false);
+    expect(sent).toContain("```rust");
+  });
+
+  it("auto-sends instead of staging in the composer", async () => {
+    const sendMessage = spyOnSendMessage();
+    await useChatStore.getState().sendPromptToTabChat(PROMPT);
+
+    expect(useChatStore.getState().pendingComposerText).toBe("");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses the tab's thread so follow-ups stay in context", async () => {
+    spyOnSendMessage();
+    await useChatStore.getState().sendPromptToTabChat(PROMPT);
+
+    expect(invokeMock).not.toHaveBeenCalledWith("chat_new_thread", expect.anything());
+    expect(useChatStore.getState().threads).toHaveLength(1);
+    expect(useChatStore.getState().activeThreadId).toBe("thread-code");
+  });
+
+  it("opens the drawer for the bound tab", async () => {
+    spyOnSendMessage();
+    await useChatStore.getState().sendPromptToTabChat(PROMPT);
+
+    expect(useChatStore.getState()).toMatchObject({
+      drawerOpen: true,
+      drawerScope: "tab",
+      drawerTabId: "code-tab",
+    });
+    expect(useChatStore.getState().tabDrawerOpenByTabId["code-tab"]).toBe(true);
+  });
+
+  it("ignores a blank prompt", async () => {
+    const sendMessage = spyOnSendMessage();
+    await useChatStore.getState().sendPromptToTabChat("   \n  ");
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(useChatStore.getState().drawerOpen).toBe(false);
+  });
+});
+
 describe("chatStore drawer lifecycle", () => {
   beforeEach(() => {
     invokeMock.mockReset();
