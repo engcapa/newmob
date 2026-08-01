@@ -133,6 +133,7 @@ export function BottomDock({
               key={tab.id}
               type="button"
               role="tab"
+              data-testid={`code-workspace-bottom-tab-${tab.id}`}
               aria-selected={selected && open}
               data-active={(selected && open) || undefined}
               className="h-7 shrink-0 inline-flex items-center gap-1.5 rounded px-2 text-[11px] font-medium text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] data-[active=true]:bg-[var(--taomni-code-selection-match-bg)] data-[active=true]:text-[var(--taomni-code-text)]"

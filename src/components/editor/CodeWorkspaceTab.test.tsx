@@ -19,6 +19,7 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceListFilesRecursive: vi.fn(),
   workspaceDetectGitRoots: vi.fn(),
   workspaceDetectTasks: vi.fn(),
+  workspaceExecutionModel: vi.fn(),
   workspaceJavaRunTargets: vi.fn(),
   workspaceJavaRunTarget: vi.fn(),
   workspaceTaskTree: vi.fn(),
@@ -261,6 +262,13 @@ describe("CodeWorkspaceTab", () => {
     workspaceMocks.workspaceDetectGitRoots.mockReset();
     workspaceMocks.workspaceDetectTasks.mockReset();
     workspaceMocks.workspaceJavaRunTargets.mockReset().mockResolvedValue([]);
+    workspaceMocks.workspaceExecutionModel.mockReset().mockResolvedValue({
+      projects: [],
+      buildTargets: [],
+      runConfigurations: [],
+      debugConfigurations: [],
+      tools: [],
+    });
     workspaceMocks.workspaceJavaRunTarget.mockReset();
     workspaceMocks.workspaceTaskTree.mockReset().mockResolvedValue([]);
     workspaceMocks.workspaceDependencyTree.mockReset().mockResolvedValue([]);
@@ -2292,7 +2300,7 @@ describe("CodeWorkspaceTab", () => {
 
     renderWorkspace(workspace);
     await screen.findByTitle("app / src/main/java/com/acme/App.java");
-    fireEvent.click(screen.getByTestId("code-workspace-run-java"));
+    fireEvent.click(screen.getByTestId("code-workspace-run-target"));
 
     await waitFor(() => expect(workspaceMocks.workspaceJavaRunTarget).toHaveBeenCalledWith(
       "/repo/app",
@@ -2304,6 +2312,88 @@ describe("CodeWorkspaceTab", () => {
       "data-initial-cwd",
       "/repo/app",
     );
+  });
+
+  it("uses provider capabilities to run and debug an active non-Java target", async () => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-go-run",
+      workspaceInstanceId: "instance-go-run",
+      name: "Go run",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "cmd/demo/main.go" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "cmd/demo/main.go",
+      "package main\nfunc main() {}\n",
+    ));
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [{
+        id: "project:go",
+        provider: "go",
+        root: "/repo/app",
+        manifest: "/repo/app/go.mod",
+        module: "app",
+        languages: ["go"],
+        toolchain: "go",
+        diagnostics: [],
+      }],
+      buildTargets: [],
+      runConfigurations: [{
+        id: "run:go",
+        projectId: "project:go",
+        label: "Run ./cmd/demo",
+        kind: "main-package",
+        sourceFile: "/repo/app/cmd/demo/main.go",
+        preLaunchTargets: [],
+        debugConfigurationId: "debug:go",
+        command: {
+          executable: "go",
+          args: ["run", "./cmd/demo", "--"],
+          cwd: "/repo/app",
+          env: {},
+          display: "go run ./cmd/demo --",
+          source: "path",
+        },
+      }],
+      debugConfigurations: [{
+        id: "debug:go",
+        projectId: "project:go",
+        label: "Debug ./cmd/demo",
+        adapterId: "delve",
+        request: "launch",
+        available: true,
+        preLaunchTargets: [],
+        sourceFile: "/repo/app/cmd/demo/main.go",
+        launchConfig: {
+          adapterCommand: "dlv",
+          adapterCwd: "/repo/app",
+          mode: { kind: "managedTcp", args: ["dap", "--listen=127.0.0.1:${port}"] },
+          arguments: { mode: "debug", program: "/repo/app/cmd/demo" },
+        },
+      }],
+      tools: [],
+    });
+    dapMocks.dapStartSession.mockResolvedValue({
+      sessionId: "go-session",
+      capabilities: {},
+      request: "launch",
+      arguments: { mode: "debug", program: "/repo/app/cmd/demo" },
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / cmd/demo/main.go");
+    await waitFor(() => expect(screen.getByTestId("code-workspace-run-target")).toBeEnabled());
+    fireEvent.click(screen.getByTestId("code-workspace-run-target"));
+    expect(await screen.findByTestId("mock-workspace-terminal")).toHaveAttribute("data-initial-cwd", "/repo/app");
+
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+    await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalledWith(
+      "delve",
+      expect.objectContaining({ adapterCommand: "dlv", adapterCwd: "/repo/app" }),
+    ));
   });
 
   it("starts a Java debug session from the toolbar under StrictMode", async () => {
@@ -2342,7 +2432,7 @@ describe("CodeWorkspaceTab", () => {
 
     renderWorkspace(workspace, {}, { strict: true });
     await screen.findByTitle("app / src/main/java/com/acme/App.java");
-    fireEvent.click(screen.getByTestId("code-workspace-debug-java"));
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
 
     await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalledWith(
       "java",
@@ -2428,7 +2518,7 @@ describe("CodeWorkspaceTab", () => {
 
     renderWorkspace(workspace, {}, { strict: true });
     await screen.findByTitle("app / src/main/java/com/acme/App.java");
-    fireEvent.click(screen.getByTestId("code-workspace-debug-java"));
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
 
     const consoleOutput = await screen.findByTestId("debug-console-output");
     await waitFor(() => expect(consoleOutput.textContent).toContain(

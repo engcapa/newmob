@@ -4544,6 +4544,12 @@ files:
   - src/lib/sockscap.ts
   - src/stubs/tauri-core.ts
 controls:
+  - id: tools-side-tab
+    selector: '[data-testid="side-tab-tools"]'
+    kind: interactive
+  - id: tools-panel
+    selector: '[data-testid="sidebar-tools-panel"]'
+    kind: display
   - id: sidebar-entry
     selector: '[data-testid="sidebar-tool-sockscap"]'
     kind: interactive
@@ -4643,6 +4649,211 @@ controls:
 - 提供全局/按应用 TCP 路由、上游代理、GFWList、规则 dry-run、状态与流量统计的控制面板。
 - Linux 后端通过 nftables + cgroup v2 做透明 TCP 重定向；实际启用需要受管理员策略授权的网络与 cgroup 权限，因此该特性保持部分完成状态直到真实特权环境验证完成。
 - 浏览器预览覆盖控制面板状态流转；内核捕获和原始目标恢复由 Rust 单元/集成验证覆盖。
+
+---
+
+## 25. Code Workspace 多语言 Build / Run / Debug
+
+### 25.1 结构化执行目标与工具配置 🟡
+
+<!-- feature
+id: F25.1
+status: partial
+area: code-workspace/execution
+components: [CodeWorkspaceTab, RunPanel, BuildPanel, BottomDock, WorkspaceBuildRunToolsDialog]
+files:
+  - src/components/sidebar/Sidebar.tsx
+  - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/panels/RunPanel.tsx
+  - src/components/editor/workspace/panels/BuildPanel.tsx
+  - src/components/editor/workspace/panels/BottomDock.tsx
+  - src/components/editor/workspace/WorkspaceBuildRunToolsDialog.tsx
+  - src/components/editor/workspace/panels/DebugPanel.tsx
+  - src/lib/terminal/commandInput.ts
+  - src-tauri/src/workspace_execution.rs
+  - src-tauri/src/dap.rs
+controls:
+  - id: sidebar-entry
+    selector: '[data-testid="sidebar-tool-code-workspace"]'
+    kind: interactive
+  - id: workspace
+    selector: '[data-testid="code-workspace-tab"]'
+    kind: display
+  - id: build-current-project
+    selector: '[data-testid="code-workspace-build-project"]'
+    kind: interactive
+    optional: true       # enabled only when the workspace has a project root
+  - id: run-current-target
+    selector: '[data-testid="code-workspace-run-target"]'
+    kind: interactive
+    optional: true       # enabled only when the active file maps to a run configuration
+  - id: debug-current-target
+    selector: '[data-testid="code-workspace-debug-target"]'
+    kind: interactive
+    optional: true       # desktop-only and requires an available adapter
+  - id: run-tab
+    selector: '[data-testid="code-workspace-bottom-tab-run"]'
+    kind: interactive
+  - id: build-tab
+    selector: '[data-testid="code-workspace-bottom-tab-build"]'
+    kind: interactive
+  - id: debug-tab
+    selector: '[data-testid="code-workspace-bottom-tab-debug"]'
+    kind: interactive
+  - id: run-panel
+    selector: '[data-testid="code-workspace-run-panel"]'
+    kind: display
+  - id: custom-command
+    selector: '[data-testid="run-panel-custom-command"]'
+    kind: interactive
+  - id: add-custom-task
+    selector: '[data-testid="run-panel-add-custom-task"]'
+    kind: interactive
+  - id: custom-root
+    selector: '[data-testid="run-panel-custom-root"]'
+    kind: interactive
+    optional: true       # rendered only for a multi-root workspace
+  - id: configure-tools
+    selector: '[data-testid="run-panel-configure-tools"]'
+    kind: interactive
+  - id: refresh-run-targets
+    selector: '[data-testid="run-panel-refresh"]'
+    kind: interactive
+  - id: run-configuration
+    selector: '[data-testid^="run-panel-configuration-run:"]'
+    kind: interactive
+    optional: true       # requires a language fixture with a detected run target
+  - id: run-configuration-edit
+    selector: '[data-testid^="run-panel-configuration-edit-run:"]'
+    kind: interactive
+    optional: true       # requires a language fixture with a detected run target
+  - id: run-configuration-editor
+    selector: '[data-testid="run-configuration-editor"]'
+    kind: display
+    optional: true
+  - id: run-configuration-cwd
+    selector: '[data-testid="run-configuration-cwd"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-args
+    selector: '[data-testid="run-configuration-args"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-env
+    selector: '[data-testid="run-configuration-env"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-save
+    selector: '[data-testid="run-configuration-save"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-reset
+    selector: '[data-testid="run-configuration-reset"]'
+    kind: interactive
+    optional: true
+  - id: build-panel
+    selector: '[data-testid="code-workspace-build-panel"]'
+    kind: display
+  - id: build-error
+    selector: '[data-testid="build-panel-error"]'
+    kind: display
+    optional: true       # rendered only when target discovery fails
+  - id: build-project
+    selector: '[data-testid="build-panel-build-project"]'
+    kind: interactive
+    optional: true       # enabled only after a build target is detected
+  - id: rebuild-project
+    selector: '[data-testid="build-panel-rebuild-project"]'
+    kind: interactive
+    optional: true       # currently available only for compatible Java tasks
+  - id: refresh-build-targets
+    selector: '[data-testid="build-panel-refresh"]'
+    kind: interactive
+  - id: build-target
+    selector: '[data-testid^="build-panel-target-build:"]'
+    kind: interactive
+    optional: true       # requires a language fixture with a detected build target
+  - id: debug-panel
+    selector: '[data-testid="code-workspace-debug-panel"]'
+    kind: display
+  - id: tools-dialog
+    selector: '[data-testid="workspace-build-run-tools-dialog"]'
+    kind: display
+  - id: tools-close
+    selector: '[data-testid="workspace-build-run-tools-close"]'
+    kind: interactive
+  - id: tools-cancel
+    selector: '[data-testid="workspace-build-run-tools-cancel"]'
+    kind: interactive
+  - id: tools-save
+    selector: '[data-testid="workspace-build-run-tools-save"]'
+    kind: interactive
+  - id: tool-cargo
+    selector: '[data-testid="workspace-tool-cargo"]'
+    kind: interactive
+  - id: tool-go
+    selector: '[data-testid="workspace-tool-go"]'
+    kind: interactive
+  - id: tool-node
+    selector: '[data-testid="workspace-tool-node"]'
+    kind: interactive
+  - id: tool-npm
+    selector: '[data-testid="workspace-tool-npm"]'
+    kind: interactive
+  - id: tool-pnpm
+    selector: '[data-testid="workspace-tool-pnpm"]'
+    kind: interactive
+  - id: tool-yarn
+    selector: '[data-testid="workspace-tool-yarn"]'
+    kind: interactive
+  - id: tool-python
+    selector: '[data-testid="workspace-tool-python"]'
+    kind: interactive
+  - id: tool-cmake
+    selector: '[data-testid="workspace-tool-cmake"]'
+    kind: interactive
+  - id: tool-dotnet
+    selector: '[data-testid="workspace-tool-dotnet"]'
+    kind: interactive
+  - id: tool-maven
+    selector: '[data-testid="workspace-tool-maven"]'
+    kind: interactive
+  - id: tool-gradle
+    selector: '[data-testid="workspace-tool-gradle"]'
+    kind: interactive
+  - id: tool-sbt
+    selector: '[data-testid="workspace-tool-sbt"]'
+    kind: interactive
+  - id: tool-swift
+    selector: '[data-testid="workspace-tool-swift"]'
+    kind: interactive
+  - id: tool-lldb-dap
+    selector: '[data-testid="workspace-tool-lldbDap"]'
+    kind: interactive
+  - id: tool-delve
+    selector: '[data-testid="workspace-tool-delve"]'
+    kind: interactive
+  - id: tool-debugpy
+    selector: '[data-testid="workspace-tool-debugpy"]'
+    kind: interactive
+  - id: tool-js-debug
+    selector: '[data-testid="workspace-tool-jsDebug"]'
+    kind: interactive
+  - id: tool-netcoredbg
+    selector: '[data-testid="workspace-tool-netcoredbg"]'
+    kind: interactive
+  - id: maven-jvm-args
+    selector: '[data-testid="workspace-maven-run-jvm-args"]'
+    kind: interactive
+  - id: inherit-maven-argline
+    selector: '[data-testid="workspace-maven-inherit-argline"]'
+    kind: interactive
+-->
+
+- 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
+- Run/Build 面板区分一等运行配置/构建目标与兼容任务；运行配置的 args、env、cwd 按 workspace 和 stable id 本地保存。
+- 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补。
 
 ---
 

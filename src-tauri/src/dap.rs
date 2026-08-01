@@ -97,7 +97,10 @@ pub enum InboundMessage {
 pub fn classify_message(message: &Value) -> InboundMessage {
     match message.get("type").and_then(Value::as_str) {
         Some("response") => InboundMessage::Response {
-            request_seq: message.get("request_seq").and_then(Value::as_i64).unwrap_or(-1),
+            request_seq: message
+                .get("request_seq")
+                .and_then(Value::as_i64)
+                .unwrap_or(-1),
         },
         Some("event") => InboundMessage::Event {
             event: message
@@ -165,10 +168,27 @@ pub enum DapTransport {
         host: String,
         port: u16,
     },
+    /// Spawn an adapter-owned TCP server, substitute `${port}` in its argv,
+    /// wait until it accepts connections, and retain the child for cleanup.
+    ManagedTcp {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default = "default_host")]
+        host: String,
+        #[serde(default = "default_ready_timeout_ms")]
+        ready_timeout_ms: u64,
+    },
 }
 
 fn default_host() -> String {
     "127.0.0.1".to_string()
+}
+
+fn default_ready_timeout_ms() -> u64 {
+    10_000
 }
 /// The kernel's plan for reaching + launching a debuggee, produced by an adapter
 /// from a launch config. `transport` says how to connect; `request` +
@@ -216,6 +236,218 @@ impl DebugAdapterRegistry {
     pub fn get(&self, id: &str) -> Option<Arc<dyn DebugAdapter>> {
         self.adapters.get(id).cloned()
     }
+}
+
+/// Resolver for adapters whose executable and launch payload were produced by
+/// the trusted workspace execution provider. The adapter id remains registered
+/// explicitly, so arbitrary ids cannot spawn a process through DAP IPC.
+struct ConfiguredDebugAdapter {
+    id: &'static str,
+}
+
+impl ConfiguredDebugAdapter {
+    fn new(id: &'static str) -> Self {
+        Self { id }
+    }
+}
+
+#[async_trait::async_trait]
+impl DebugAdapter for ConfiguredDebugAdapter {
+    fn id(&self) -> &str {
+        self.id
+    }
+
+    async fn resolve(&self, launch_config: &Value) -> Result<DapLaunchPlan, String> {
+        let command = launch_config
+            .get("adapterCommand")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "No executable was configured for the `{}` debug adapter",
+                    self.id
+                )
+            })?;
+        let cwd = launch_config
+            .get("adapterCwd")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let request = launch_config
+            .get("request")
+            .and_then(Value::as_str)
+            .unwrap_or("launch")
+            .to_string();
+        if request != "launch" && request != "attach" {
+            return Err(format!("Unsupported DAP request `{request}`"));
+        }
+        let mut arguments = launch_config
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let mode = launch_config
+            .get("mode")
+            .cloned()
+            .unwrap_or_else(|| json!({ "kind": "stdio" }));
+        let kind = mode.get("kind").and_then(Value::as_str).unwrap_or("stdio");
+        let transport = match kind {
+            "stdio" => DapTransport::Stdio {
+                command: command.to_string(),
+                args: string_array(mode.get("args"))?,
+                cwd,
+            },
+            "managedTcp" => DapTransport::ManagedTcp {
+                command: command.to_string(),
+                args: string_array(mode.get("args"))?,
+                cwd,
+                host: "127.0.0.1".to_string(),
+                ready_timeout_ms: default_ready_timeout_ms(),
+            },
+            "cargo" if self.id == "lldb" => {
+                let executable = resolve_cargo_debug_artifact(&mode, cwd.as_deref()).await?;
+                arguments["program"] = json!(executable);
+                DapTransport::Stdio {
+                    command: command.to_string(),
+                    args: Vec::new(),
+                    cwd,
+                }
+            }
+            "swift" if self.id == "lldb" => {
+                let executable = resolve_swift_debug_artifact(&mode, cwd.as_deref()).await?;
+                arguments["program"] = json!(executable);
+                DapTransport::Stdio {
+                    command: command.to_string(),
+                    args: Vec::new(),
+                    cwd,
+                }
+            }
+            _ => return Err(format!("Unsupported `{}` transport mode `{kind}`", self.id)),
+        };
+        Ok(DapLaunchPlan {
+            transport,
+            request,
+            arguments,
+        })
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Result<Vec<String>, String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "debug adapter args must be strings".to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| Ok(Vec::new()))
+}
+
+async fn command_output(
+    executable: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    operation: &str,
+) -> Result<std::process::Output, String> {
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    let output = tokio::time::timeout(std::time::Duration::from_secs(180), command.output())
+        .await
+        .map_err(|_| format!("{operation} timed out after 180s"))?
+        .map_err(|error| format!("failed to start `{executable}` for {operation}: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "{operation} failed with {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        ));
+    }
+    Ok(output)
+}
+
+async fn resolve_cargo_debug_artifact(mode: &Value, cwd: Option<&str>) -> Result<String, String> {
+    let command = mode
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("cargo");
+    let args = string_array(mode.get("args"))?;
+    let target_name = mode.get("targetName").and_then(Value::as_str);
+    let output = command_output(command, &args, cwd, "Cargo pre-launch build").await?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut executable = None;
+    for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if message.get("reason").and_then(Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        if target_name.is_some()
+            && message.pointer("/target/name").and_then(Value::as_str) != target_name
+        {
+            continue;
+        }
+        if let Some(path) = message.get("executable").and_then(Value::as_str) {
+            executable = Some(path.to_string());
+        }
+    }
+    executable.ok_or_else(|| "Cargo completed but did not report an executable compiler artifact for the selected target".to_string())
+}
+
+async fn resolve_swift_debug_artifact(mode: &Value, cwd: Option<&str>) -> Result<String, String> {
+    let command = mode
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or("swift");
+    let product = mode
+        .get("product")
+        .and_then(Value::as_str)
+        .ok_or("Swift debug configuration has no executable product")?;
+    command_output(
+        command,
+        &[
+            "build".to_string(),
+            "--configuration".to_string(),
+            "debug".to_string(),
+        ],
+        cwd,
+        "Swift pre-launch build",
+    )
+    .await?;
+    let output = command_output(
+        command,
+        &["build".to_string(), "--show-bin-path".to_string()],
+        cwd,
+        "Swift product resolution",
+    )
+    .await?;
+    let bin_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if bin_path.is_empty() {
+        return Err("SwiftPM returned an empty binary path".to_string());
+    }
+    let executable = std::path::Path::new(&bin_path).join(product);
+    if !executable.is_file() {
+        return Err(format!(
+            "SwiftPM did not produce `{}` at {}",
+            product,
+            executable.display()
+        ));
+    }
+    Ok(executable.to_string_lossy().to_string())
 }
 
 type PendingResponses = Arc<Mutex<HashMap<i64, oneshot::Sender<Result<Value, String>>>>>;
@@ -309,7 +541,10 @@ impl DapSession {
             .write_all(&framed)
             .await
             .map_err(|e| format!("DAP write failed: {e}"))?;
-        writer.flush().await.map_err(|e| format!("DAP flush failed: {e}"))
+        writer
+            .flush()
+            .await
+            .map_err(|e| format!("DAP flush failed: {e}"))
     }
 }
 
@@ -353,7 +588,12 @@ impl DapManager {
     /// registered (D2: Java, via jdtls executeCommand). Used from `AppState::new`.
     pub fn with_lsp(lsp: Arc<crate::lsp::LspManager>) -> Self {
         let mut registry = DebugAdapterRegistry::new();
-        registry.register(Arc::new(crate::java_debug_adapter::JavaDebugAdapter::new(lsp)));
+        registry.register(Arc::new(crate::java_debug_adapter::JavaDebugAdapter::new(
+            lsp,
+        )));
+        for adapter_id in ["lldb", "delve", "python", "node", "coreclr"] {
+            registry.register(Arc::new(ConfiguredDebugAdapter::new(adapter_id)));
+        }
         Self {
             sessions: Mutex::new(HashMap::new()),
             registry,
@@ -373,9 +613,9 @@ impl DapManager {
     }
 }
 
-/// A spawned stdio adapter: the child to retain plus its stderr pipe, which
+/// A spawned adapter: the child to retain plus its stderr pipe, which
 /// MUST be drained (see [`run_stderr_pump`]).
-type StdioChild = (tokio::process::Child, Option<tokio::process::ChildStderr>);
+type AdapterChild = (tokio::process::Child, Option<tokio::process::ChildStderr>);
 
 /// Establish the read/write streams for a transport (spawn a process or connect
 /// a socket). Returns the reader, the writer, and — for stdio — the child.
@@ -385,7 +625,7 @@ async fn connect_transport(
     (
         Box<dyn tokio::io::AsyncRead + Send + Unpin>,
         Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
-        Option<StdioChild>,
+        Option<AdapterChild>,
     ),
     String,
 > {
@@ -414,6 +654,66 @@ async fn connect_transport(
                 .map_err(|e| format!("failed to connect to debug adapter {host}:{port}: {e}"))?;
             let (read, write) = stream.into_split();
             Ok((Box::new(read), Box::new(write), None))
+        }
+        DapTransport::ManagedTcp {
+            command,
+            args,
+            cwd,
+            host,
+            ready_timeout_ms,
+        } => {
+            let listener = tokio::net::TcpListener::bind((host.as_str(), 0))
+                .await
+                .map_err(|error| format!("failed to allocate a debug adapter port: {error}"))?;
+            let port = listener
+                .local_addr()
+                .map_err(|error| format!("failed to inspect debug adapter port: {error}"))?
+                .port();
+            drop(listener);
+            let resolved_args = args
+                .iter()
+                .map(|arg| arg.replace("${port}", &port.to_string()))
+                .collect::<Vec<_>>();
+            let mut process = tokio::process::Command::new(command);
+            process
+                .args(&resolved_args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            if let Some(cwd) = cwd {
+                process.current_dir(cwd);
+            }
+            let mut child = process.spawn().map_err(|error| {
+                format!("failed to start managed debug adapter `{command}`: {error}")
+            })?;
+            let stderr = child.stderr.take();
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(*ready_timeout_ms);
+            loop {
+                match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                    Ok(stream) => {
+                        let (read, write) = stream.into_split();
+                        break Ok((Box::new(read), Box::new(write), Some((child, stderr))));
+                    }
+                    Err(error) if tokio::time::Instant::now() >= deadline => {
+                        let _ = child.start_kill();
+                        break Err(format!(
+                            "debug adapter `{command}` did not listen on {host}:{port} within {ready_timeout_ms}ms: {error}"
+                        ));
+                    }
+                    Err(_) => {
+                        if let Some(status) = child.try_wait().map_err(|error| {
+                            format!("failed to inspect debug adapter `{command}`: {error}")
+                        })? {
+                            break Err(format!(
+                                "debug adapter `{command}` exited with {status} before listening on {host}:{port}"
+                            ));
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                }
+            }
         }
     }
 }
@@ -492,7 +792,10 @@ async fn run_reader(
             match classify_message(&message) {
                 InboundMessage::Response { request_seq } => {
                     if let Some(tx) = pending.lock().await.remove(&request_seq) {
-                        let ok = message.get("success").and_then(Value::as_bool).unwrap_or(false);
+                        let ok = message
+                            .get("success")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         let payload = if ok {
                             Ok(message.get("body").cloned().unwrap_or(Value::Null))
                         } else {
@@ -585,10 +888,11 @@ pub async fn dap_start_session(
 
     // Clone the AppHandle into the reader task's emitter closure only.
     let emit_app = app.clone();
-    let emit: Arc<dyn Fn(&str, Value) + Send + Sync> = Arc::new(move |event: &str, payload: Value| {
-        use tauri::Emitter;
-        let _ = emit_app.emit(event, payload);
-    });
+    let emit: Arc<dyn Fn(&str, Value) + Send + Sync> =
+        Arc::new(move |event: &str, payload: Value| {
+            use tauri::Emitter;
+            let _ = emit_app.emit(event, payload);
+        });
     tokio::spawn(run_reader(
         reader,
         session.clone(),
@@ -666,7 +970,9 @@ pub async fn dap_send_request(
         .get(&session_id)
         .await
         .ok_or_else(|| format!("No debug session `{session_id}`"))?;
-    session.request(&command, arguments.unwrap_or(Value::Null)).await
+    session
+        .request(&command, arguments.unwrap_or(Value::Null))
+        .await
 }
 
 /// Fire a DAP request without awaiting its response. Needed for the launch
@@ -686,7 +992,9 @@ pub async fn dap_send(
         .get(&session_id)
         .await
         .ok_or_else(|| format!("No debug session `{session_id}`"))?;
-    session.notify(&command, arguments.unwrap_or(Value::Null)).await
+    session
+        .notify(&command, arguments.unwrap_or(Value::Null))
+        .await
 }
 
 /// Terminate a session. Prefers the graceful `terminate` request when the
@@ -734,7 +1042,10 @@ mod tests {
         let text = String::from_utf8(framed).unwrap();
         let (header, body) = text.split_once("\r\n\r\n").expect("header/body split");
         assert!(header.starts_with("Content-Length: "));
-        let declared: usize = header.trim_start_matches("Content-Length: ").parse().unwrap();
+        let declared: usize = header
+            .trim_start_matches("Content-Length: ")
+            .parse()
+            .unwrap();
         assert_eq!(declared, body.len());
         assert!(body.contains("\"command\":\"next\""));
     }
@@ -751,7 +1062,9 @@ mod tests {
     #[test]
     fn decodes_a_single_message() {
         let mut decoder = DapDecoder::default();
-        decoder.push(&encode_message(&json!({ "type": "event", "event": "stopped" })));
+        decoder.push(&encode_message(
+            &json!({ "type": "event", "event": "stopped" }),
+        ));
         let message = decoder.next_message().expect("one message");
         assert_eq!(message["event"], "stopped");
         assert!(decoder.next_message().is_none());
@@ -763,9 +1076,15 @@ mod tests {
         let (head, tail) = framed.split_at(framed.len() / 2);
         let mut decoder = DapDecoder::default();
         decoder.push(head);
-        assert!(decoder.next_message().is_none(), "incomplete frame yields nothing");
+        assert!(
+            decoder.next_message().is_none(),
+            "incomplete frame yields nothing"
+        );
         decoder.push(tail);
-        assert_eq!(decoder.next_message().expect("completed")["event"], "output");
+        assert_eq!(
+            decoder.next_message().expect("completed")["event"],
+            "output"
+        );
     }
 
     #[test]
@@ -782,7 +1101,9 @@ mod tests {
     #[test]
     fn skips_a_frame_with_invalid_json_body() {
         let mut buf = b"Content-Length: 3\r\n\r\n{[}".to_vec();
-        buf.extend(encode_message(&json!({ "type": "event", "event": "recovered" })));
+        buf.extend(encode_message(
+            &json!({ "type": "event", "event": "recovered" }),
+        ));
         let mut decoder = DapDecoder::default();
         decoder.push(&buf);
         // The bad frame is dropped; the next valid one is returned.
@@ -797,19 +1118,60 @@ mod tests {
         );
         assert_eq!(
             classify_message(&json!({ "type": "event", "event": "stopped" })),
-            InboundMessage::Event { event: "stopped".into() },
+            InboundMessage::Event {
+                event: "stopped".into()
+            },
         );
         assert_eq!(
             classify_message(&json!({ "type": "request", "command": "runInTerminal", "seq": 4 })),
-            InboundMessage::ReverseRequest { command: "runInTerminal".into(), seq: 4 },
+            InboundMessage::ReverseRequest {
+                command: "runInTerminal".into(),
+                seq: 4
+            },
         );
-        assert_eq!(classify_message(&json!({ "type": "bogus" })), InboundMessage::Unknown);
+        assert_eq!(
+            classify_message(&json!({ "type": "bogus" })),
+            InboundMessage::Unknown
+        );
     }
 
     #[test]
     fn empty_registry_returns_none() {
         let registry = DebugAdapterRegistry::new();
         assert!(registry.get("java").is_none());
+    }
+
+    #[tokio::test]
+    async fn configured_adapter_resolves_stdio_and_managed_tcp_plans() {
+        let adapter = ConfiguredDebugAdapter::new("python");
+        let stdio = adapter
+            .resolve(&json!({
+                "adapterCommand": "debugpy-adapter",
+                "adapterCwd": "/workspace",
+                "arguments": { "program": "/workspace/main.py" },
+                "mode": { "kind": "stdio", "args": ["--log-stderr"] },
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            stdio.transport,
+            DapTransport::Stdio {
+                command: "debugpy-adapter".into(),
+                args: vec!["--log-stderr".into()],
+                cwd: Some("/workspace".into()),
+            }
+        );
+        assert_eq!(stdio.arguments["program"], "/workspace/main.py");
+
+        let delve = ConfiguredDebugAdapter::new("delve")
+            .resolve(&json!({
+                "adapterCommand": "dlv",
+                "mode": { "kind": "managedTcp", "args": ["dap", "--listen=127.0.0.1:${port}"] },
+                "arguments": { "mode": "debug", "program": "." },
+            }))
+            .await
+            .unwrap();
+        assert!(matches!(delve.transport, DapTransport::ManagedTcp { .. }));
     }
 
     #[test]
@@ -849,7 +1211,12 @@ mod tests {
         assert_eq!(response["request_seq"], 12);
         assert_eq!(response["command"], "runInTerminal");
         assert_eq!(response["success"], json!(false));
-        assert!(response["message"].as_str().unwrap().contains("runInTerminal"));
+        assert!(
+            response["message"]
+                .as_str()
+                .unwrap()
+                .contains("runInTerminal")
+        );
         // A malformed reverse request still yields a well-formed response.
         let fallback = reverse_response(&json!({ "type": "request" }));
         assert_eq!(fallback["request_seq"], -1);

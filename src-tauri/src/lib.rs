@@ -41,6 +41,7 @@ mod vnc;
 mod voice;
 mod windowing;
 mod workspace;
+mod workspace_execution;
 mod workspace_fs;
 mod workspace_search;
 mod local_history;
@@ -480,6 +481,7 @@ pub fn run() {
             workspace::workspace_java_run_targets,
             workspace::workspace_java_run_target,
             workspace::workspace_task_tree,
+            workspace_execution::workspace_execution_model,
             workspace::workspace_dependency_tree,
             workspace::workspace_read_file,
             workspace::workspace_read_loose_file,

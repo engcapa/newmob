@@ -138,6 +138,42 @@ pub struct WorkspaceToolConfig {
     /// Omitted means enabled, preserving automatic support for existing users.
     #[serde(default)]
     pub inherit_maven_arg_line: Option<bool>,
+    #[serde(default)]
+    pub cargo: Option<String>,
+    #[serde(default)]
+    pub go: Option<String>,
+    #[serde(default)]
+    pub node: Option<String>,
+    #[serde(default)]
+    pub npm: Option<String>,
+    #[serde(default)]
+    pub pnpm: Option<String>,
+    #[serde(default)]
+    pub yarn: Option<String>,
+    #[serde(default)]
+    pub python: Option<String>,
+    #[serde(default)]
+    pub uv: Option<String>,
+    #[serde(default)]
+    pub poetry: Option<String>,
+    #[serde(default)]
+    pub cmake: Option<String>,
+    #[serde(default)]
+    pub dotnet: Option<String>,
+    #[serde(default)]
+    pub sbt: Option<String>,
+    #[serde(default)]
+    pub swift: Option<String>,
+    #[serde(default)]
+    pub lldb_dap: Option<String>,
+    #[serde(default)]
+    pub delve: Option<String>,
+    #[serde(default)]
+    pub debugpy: Option<String>,
+    #[serde(default)]
+    pub js_debug: Option<String>,
+    #[serde(default)]
+    pub netcoredbg: Option<String>,
 }
 
 impl WorkspaceToolConfig {

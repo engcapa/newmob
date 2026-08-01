@@ -5,6 +5,7 @@ import { RunPanel, type RunPanelHandle } from "./RunPanel";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceDetectTasks: vi.fn(),
+  workspaceExecutionModel: vi.fn(),
   workspaceJavaRunTargets: vi.fn(),
 }));
 
@@ -23,6 +24,13 @@ describe("RunPanel", () => {
       source: "package.json",
     }]);
     workspaceMocks.workspaceJavaRunTargets.mockReset().mockResolvedValue([]);
+    workspaceMocks.workspaceExecutionModel.mockReset().mockResolvedValue({
+      projects: [],
+      buildTargets: [],
+      runConfigurations: [],
+      debugConfigurations: [],
+      tools: [],
+    });
   });
 
   afterEach(cleanup);
@@ -104,5 +112,48 @@ describe("RunPanel", () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it("separates structured run configurations from compatibility tasks", async () => {
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [{
+        id: "project:rust",
+        provider: "cargo",
+        root: "/repo/app",
+        manifest: "/repo/app/Cargo.toml",
+        module: "app",
+        languages: ["rust"],
+        toolchain: "cargo",
+        diagnostics: [],
+      }],
+      buildTargets: [],
+      runConfigurations: [{
+        id: "run:app",
+        projectId: "project:rust",
+        label: "Run app",
+        kind: "bin",
+        command: {
+          executable: "cargo",
+          args: ["run", "--bin", "app", "--"],
+          cwd: "/repo/app",
+          env: {},
+          display: "cargo run --bin app --",
+          source: "path",
+        },
+        preLaunchTargets: [],
+      }],
+      debugConfigurations: [],
+      tools: [],
+    });
+    const onRun = vi.fn();
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={onRun} />);
+
+    expect(await screen.findByText("Run configurations")).toBeInTheDocument();
+    expect(screen.getByText("Tasks")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Run app"));
+    expect(onRun).toHaveBeenCalledWith(expect.objectContaining({
+      command: "cargo run --bin app --",
+      configuration: true,
+    }), expect.any(Function));
   });
 });

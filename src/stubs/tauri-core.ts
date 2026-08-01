@@ -1781,6 +1781,15 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     case "workspace_detect_tasks": {
       return [] as T;
     }
+    case "workspace_execution_model": {
+      return {
+        projects: [],
+        buildTargets: [],
+        runConfigurations: [],
+        debugConfigurations: [],
+        tools: [],
+      } as T;
+    }
     case "create_ssh_terminal": {
       const cols = (args?.cols as number) ?? 80;
       const rows = (args?.rows as number) ?? 24;

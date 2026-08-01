@@ -1,7 +1,7 @@
 # Code Workspace 多语言 SDK 导航与 Build/Run/Debug 计划
 
 > 日期：2026-08-01  
-> 状态：SDK/依赖源码导航适配已实现并完成自动化验证；多语言 Build/Run/Debug 为实施计划，尚未宣称完成。  
+> 状态：SDK/依赖源码导航适配已实现并完成自动化验证；多语言 Build/Run/Debug 已接入共享模型和首批 provider，仍按各 Wave 的剩余项推进，不宣称完整矩阵完成。
 > 关联设计：`claudedocs/code-workspace-ide-design.md` 的 M3、M7、M8-M10。
 
 ## 1. 目标与结论
@@ -14,6 +14,18 @@
 SDK 导航不能只判断 LSP 是否返回 `Location`。定义目标可能是普通 `file:` 文件，也可能是归档条目、反编译文档或 metadata URI；Taomni 必须能读取该目标并为只读编辑器选择正确语言模式。本轮已补齐后者。
 
 “跳到 SDK 源码”在不同生态中的含义不同：TypeScript 常见目标是 `.d.ts`，Python 可能是 `.pyi`，C/C++ 通常只能到头文件，Swift 可能是 `.swiftinterface`，C# 可能是从程序集生成的 metadata source。这些都属于有效的定义导航，但不等同于运行时实现源码。
+
+### 1.1 当前实施状态（2026-08-01）
+
+本轮已落地可增量扩展的第一阶段，而不是一次性关闭 Wave 0-5：
+
+- 已新增统一 `ProjectModel`、`BuildTarget`、`RunConfiguration`、`DebugConfiguration`、`ToolProbe` 和 `workspace_execution_model` IPC；stable id 不依赖返回顺序，内置命令保留结构化 `executable + args + cwd + env`，终端按实际 POSIX/PowerShell/cmd shell 对 argv 逐项转义。
+- 已接入 Cargo、Go、Python、Node、CMake、.NET、Maven/Gradle、sbt、SwiftPM 的首批 evidence-based provider；Run/Build 面板分别展示结构化配置/目标和兼容任务，args/env/cwd 覆盖按 workspace + stable configuration id 持久化。
+- 顶部 Run/Debug 已由 active-file capability 驱动；Java 保留既有成熟 save/build/main-class 路径。Rust、Go、Python、Node、Swift 已生成首批 DAP 配置，缺 adapter 时显示可操作诊断，不虚假启用。
+- DAP 已增加 managed TCP server 生命周期、`${port}` 替换、ready timeout 和 child cleanup，并注册 LLDB、Delve、debugpy、js-debug、CoreCLR adapter id；Rust 通过 Cargo JSON compiler artifact 解析可执行文件，Swift 通过 `swift build --show-bin-path` 定位 bin directory。
+- 当前自动化覆盖模型稳定性、目标命令、缺工具诊断、adapter plan、前端 Run/Build/toolbar 流程和运行配置持久化。真实 adapter/toolchain 的跨平台 native smoke 尚未完成。
+
+各 Wave 仍未关闭的关键项：Wave 0 的通用 pre-launch orchestrator/fake managed-TCP 全链路；Wave 1 的 `cargo metadata`、`go env/go list` 和 test/attach；Wave 2 的 Node workspace/js-debug 分发与 source-map 真机验证、Python 环境解析；Wave 3 的 CMake file-api executable 和 .NET MSBuild artifact/CoreCLR；Wave 4 的 Kotlin/Scala BSP/DAP；Wave 5 的 `swift package describe`、test debug 和平台 smoke。
 
 ## 2. SDK/标准库导航支持矩阵
 
@@ -66,15 +78,15 @@ SDK 导航不能只判断 LSP 是否返回 `Location`。定义目标可能是普
 
 | 语言 | Build 现状 | Run 现状 | Debug 现状 | 主要缺口 |
 |---|---|---|---|---|
-| Rust | Cargo build/test/clippy | 固定 `cargo run` | 无 | bin/example/package/feature 目标发现；产物解析；LLDB adapter |
-| Go | go build/test/vet | 无一等 `go run` 目标 | 无 | main package/测试目标发现；Delve server 生命周期 |
-| Python | 只列 pyproject scripts，支持 uv/Poetry 前缀 | entry script/custom task | 无 | 当前文件/module/console；解释器与 args/env；debugpy |
-| TypeScript / JavaScript | package scripts | package/custom task | 无 | npm workspace/package 目标；Node/browser 配置；js-debug |
-| C / C++ | Make/just 的命名任务 | 无 executable target model | 无 | CMake/compile database/产物发现；LLDB；多配置 build dir |
-| C# | 无 `.sln`/`.csproj` 探测 | 无 | 无 | dotnet project/TFM/launchSettings；netcoredbg |
-| Kotlin | Maven/Gradle 通用 build/test 可用 | Java main scanner 忽略 `.kt` | 无 | Kotlin main/模块发现；JVM debug adapter/source mapping |
-| Scala | Maven/Gradle 工程可用；无 sbt | 无一等 main | 无 | sbt/BSP target；Metals run/debug session |
-| Swift | 无 `Package.swift` 探测 | 无 | 无 | SwiftPM target/product；lldb-dap |
+| Rust | 结构化 Cargo check/build/test/clippy/clean | bin/example 精确 `cargo run` | LLDB 配置；Cargo JSON 解析产物 | 改用 `cargo metadata`；workspace package/features/profile/test/bench；native smoke |
+| Go | 结构化 build/test/vet/clean | main package与当前单文件 | Delve managed TCP launch | 改用 `go env/go list`；test/attach；native smoke |
+| Python | 声明 build-system/pytest 时提供 build/test | active file、module、pyproject entry point | debugpy file launch | uv/Poetry 环境解析；entry point debug；attach/subprocess smoke |
+| TypeScript / JavaScript | 语义化 package scripts | Node active file、项目 runner 下的 TS active file、start/dev/serve script | js-debug Node launch 配置 | workspace package；adapter 分发/真实 executable；source map/child/attach smoke |
+| C / C++ | CMake configure/build/test/clean，build 依赖 configure | 尚无 executable target | 尚无 | presets/file-api target/artifact；LLDB launch/attach；多配置验证 |
+| C# | `.csproj` restore/build/test/clean | `dotnet run --project` | 尚未启用 | solution/TFM/launchSettings；MSBuild artifact；netcoredbg launch/attach |
+| Kotlin | Maven/Gradle build/test；有界 main 扫描 | Maven main/Gradle application | 尚无 | 正确 package/main model；JVM adapter/source mapping 真机验证 |
+| Scala | Maven/Gradle + sbt compile/test/clean | Maven/Gradle application 与 sbt `runMain` 首批配置 | 尚无 | Metals/BSP targets 与 debug session；main/test 真机验证 |
+| Swift | SwiftPM build/test/clean | executable product `swift run` | lldb-dap 配置与 bin-path 解析 | 改用 package describe；test debug/runtime env；跨平台 smoke |
 | Java | Maven/Gradle/单文件 Build/Run 已有 | main target、普通 Run 已有 | java-debug DAP 已有 | 继续作为共享模型迁移与回归基线 |
 
 ## 4. 目标架构

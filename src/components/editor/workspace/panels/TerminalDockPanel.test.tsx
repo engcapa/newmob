@@ -137,4 +137,39 @@ describe("TerminalDockPanel", () => {
     fireEvent.click(await screen.findByRole("button", { name: "ready" }));
     await waitFor(() => expect(runTask).toHaveBeenCalledWith("./mvnw exec:java", environment));
   });
+
+  it("renders structured workspace execution with the terminal shell", async () => {
+    const runTask = vi.fn();
+    registryMocks.getTerminal.mockReturnValue({
+      runTask,
+      localEnvironment: { platform: "windows", shellId: "powershell" },
+    });
+    const handle = createRef<TerminalDockHandle>();
+    render(
+      <TerminalDockPanel
+        ref={handle}
+        workspaceInstanceId="ws"
+        roots={roots}
+        defaultCwd="/repo/app"
+        active={false}
+      />,
+    );
+    handle.current?.runCommand(
+      "display-only command",
+      "/repo/app",
+      "run",
+      undefined,
+      undefined,
+      {
+        executable: "C:\\Program Files\\dotnet\\dotnet.exe",
+        args: ["run", "hello world"],
+        source: "configured",
+      },
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "ready" }));
+    await waitFor(() => expect(runTask).toHaveBeenCalledWith(
+      "& 'C:\\Program Files\\dotnet\\dotnet.exe' 'run' 'hello world'",
+      undefined,
+    ));
+  });
 });
