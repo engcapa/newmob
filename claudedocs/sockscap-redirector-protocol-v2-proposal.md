@@ -1,6 +1,6 @@
 # Mitmproxy macOS Redirector protocol v2 proposal
 
-> Taomni tracking draft, 2026-08-01. This is an upstream design proposal, not a claim that Redirector v0.12.11 implements these fields.
+> Taomni tracking draft, 2026-08-01. This is a non-blocking upstream roadmap, not a claim that Redirector v0.12.11 implements these fields. Redirector v0.12.11 remains Taomni's supported, pinned production baseline and does not depend on this proposal to ship.
 
 ## Goals
 
@@ -83,9 +83,9 @@ message NewFlowIdentity {
 ## Compatibility and rollout
 
 1. Add a version negotiation/status exchange without changing the v1 frame type. A v1-only peer closes or rejects the v2 probe; the client then uses the existing v1 path-family adapter only when the user selected that compatibility mode.
-2. Publish v2 as a newly signed Redirector release. Taomni pins its version, app/extension hashes, Team/bundle identity and golden fixtures; it never patches or re-signs the Provider.
+2. If upstream accepts v2, publish it as a newly built and officially signed Redirector release. Taomni pins its version, app/extension hashes, Team/bundle identity and golden fixtures; it never patches or re-signs the Provider.
 3. Migrate stored selectors by revalidating the `.app`, then emit a v2 `BundleIdentity`. Preserve canonical paths only as diagnostic/fail-open constraints.
-4. Prefer v2 for Global and Applications. Keep v1 recovery support long enough to disable a residual v1 scope, but never translate an ambiguous v1 substring into a broader v2 selector.
+4. If Taomni later adopts that release, prefer v2 for Global and Applications. Keep v1 recovery support long enough to disable a residual v1 scope, but never translate an ambiguous v1 substring into a broader v2 selector.
 5. Remove the v1 compatibility path only after signed Intel and Apple Silicon fault-injection, update/move, EOF and selected/unselected matrices pass.
 
 ## Required upstream tests
@@ -97,4 +97,4 @@ message NewFlowIdentity {
 - Unknown fields, malformed and oversized frames, action/selector limits.
 - 1/32/256 concurrent flows, 1,000–5,000 long-lived flows, UDP flood and sleep/network transitions on arm64 and x86_64.
 
-External submission and the signed upstream release remain outside this repository; Taomni can only integrate v2 after mitmproxy accepts and ships it.
+External submission and an officially signed upstream release remain outside this repository. Taomni can only integrate v2 after mitmproxy accepts and ships it, but neither event blocks the pinned Redirector v0.12.11 release line.

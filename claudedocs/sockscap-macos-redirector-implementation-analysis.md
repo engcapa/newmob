@@ -2,7 +2,7 @@
 
 > 日期：2026-08-01
 >
-> 状态：P0–P2 代码切片已实现；真实双架构故障注入/soak 与上游 v2 发布仍是 release gate
+> 状态：P0–P2 代码切片已实现；Redirector v0.12.11 是当前受支持且固定的生产基线版本；真实双架构故障注入/soak 等仍是 release gate，上游 v2 是非阻塞路线图
 >
 > 目标方案：[`sockscap-macos-transparent-only-plan.md`](./sockscap-macos-transparent-only-plan.md)
 >
@@ -108,7 +108,13 @@
 - 启动恢复仅删除当前用户、固定命名、类型为 Unix socket 且已经无法连接的遗留节点；不会删除普通文件、外来 owner 或活跃 socket。
 - UI 提供 Recover、macOS 系统设置手动关闭步骤和去敏诊断复制；恢复失败会阻止 Start、更新和静默宣称成功。
 
-仍有一个无法在 Taomni v1 适配层内消除的上游边界：Redirector v0.12.11 没有 Provider applied ACK、typed identity selector 或 control EOF atomic fail-open。因此本地 `Applied/Active` 只表示 bridge 已把完整 v1 frame 写入经验证的 Provider control；真正 Provider ACK 需要上游 protocol v2。完整异常注入矩阵仍是 production release gate。
+仍有一个无法在 Taomni v1 适配层内消除的上游边界：Redirector v0.12.11 没有 Provider applied ACK、typed identity selector 或 control EOF atomic fail-open。因此本地 `Applied/Active` 只表示 bridge 已把完整 v1 frame 写入经验证的 Provider control；真正 Provider ACK 需要上游 protocol v2。
+
+这里的“强应用身份隔离”是指 Provider 在每条新 flow 进入时，依据系统观察到的 audit token、bundle ID、Team ID、signing ID/designated requirement 独立验明进程身份，而不是仅判断可执行文件路径是否包含某段字符串。当前 v0.12.11 路径由 Taomni 在 Start 前验签、编译 canonical app path-family，并由 bridge 对 flow 再匹配；它能够支持当前 Application 功能，但不等同于 Provider 内部的不可伪造身份授权。
+
+“任何崩溃均原子 fail-open”是指 control EOF、Provider/bridge crash 或进程被 `SIGKILL` 的同一状态转换中，Provider 立即停止把新连接导向旧 listener，让新连接直接联网，不存在中间残留拦截窗口。当前实现对正常退出、可处理信号、父进程消失和心跳中断执行 `inert -> drain -> close`，并用 dirty journal 在下次启动恢复；但 v0.12.11 不承诺 control EOF 原子 fail-open，所以极端 crash 到下次恢复/手动关闭之间仍可能存在残留窗口。
+
+这些是 v0.12.11 的已知协议边界，不阻塞当前固定版本发布。当前 production release gate 是完整异常注入、双架构/Application 真机矩阵、稳定性、供应链和 Taomni 自身签名公证；如果产品未来要求 Provider 级强身份授权或协议层零残留窗口，再推进 protocol v2。
 
 ## 9. 后续待办清单
 
@@ -184,7 +190,7 @@ Application v1 的真实能力边界是“经签名重验证的 canonical app pa
 - [x] 已安装正确版本时幂等；同签名旧版本使用随机 stage/backup 和失败回滚升级；同名但 bundle/Team/签名不匹配时拒绝覆盖并提示冲突。
 - [ ] 把“缺失”、“待 System Extension 批准”、“待 Network Configuration 批准”、“签名错误”和“版本不支持”建模为不同状态和 UI 操作，而不是统一 Start 错误。
 - [x] 在 staging/release 脚本的固定下载、hash、签名、universal arch 和 MIT notice 检查上补齐 entitlement/Gatekeeper、双架构与 stapler gate；协议 golden fixture 进入 Rust 测试。
-- [ ] 明确 Taomni updater 签名与 Apple Developer ID/notarization 是两套独立信任链；正式 Gatekeeper 分发前完成 Taomni 自身签名和公证。
+- [ ] Taomni updater 签名与 Apple Developer ID/notarization 是两套独立信任链；release workflow 已要求两套 secrets，并在两个架构构建后验证 Taomni Developer ID、Team ID、Gatekeeper notarization 和 stapled ticket。正式 Gatekeeper 分发仍需配置真实 Apple 凭据并让首个 tag 构建通过该 gate。
 
 ### 9.8 P1/P2：数据面、可观测性和稳定性
 
@@ -195,12 +201,14 @@ Application v1 的真实能力边界是“经签名重验证的 canonical app pa
 - [ ] 在 Intel/Apple Silicon、IPv4/IPv6、Safari/Chrome/curl/原始 socket client 上完成 Global 矩阵，并验证 Start/Stop 前后 `scutil --proxy` 完全不变。
 - [x] 将当前与本改动无关的全量 Rust 测试失败单独记录；聚焦 macOS Redirector 新增回归必须独立全绿，不得被既有失败掩盖。
 
-### 9.9 P2：推动上游协议 v2
+### 9.9 P2：上游协议 v2 非阻塞路线图
+
+本节不属于 Redirector v0.12.11 的当前发布 gate。v0.12.11 继续作为受支持且固定的生产基线；只有决定采用上游未来版本时，才执行提交、迁移和升级。
 
 - [x] 在仓库内完成 typed selector、identity、version/generation/request、applied ACK、显式 disable、atomic EOF、迁移与测试矩阵的具体提案：[`sockscap-redirector-protocol-v2-proposal.md`](./sockscap-redirector-protocol-v2-proposal.md)。
 - [ ] 向 mitmproxy 上游提交 typed selector（exact path/bundle/signing ID/PID）和 `NewFlow` 身份字段扩展。
 - [ ] 提交 protocol version、generation/applied ACK、显式 disable/stop 和 control EOF 原子 fail-open。
-- [ ] 只接入由上游重新签名发布的 Redirector；固定新版本/hash/协议 fixture，保留 v1 path-family 配置迁移并优先使用 v2 signing identity。
+- [ ] 若未来采用 v2，只接入由 mitmproxy 上游构建、签名并发布的新 Redirector；固定新版本/hash/协议 fixture，保留 v1 path-family 配置迁移并优先使用 v2 signing identity，不修改或自行重签 Provider。
 
 ## 10. 建议实施顺序与发布 gate
 
@@ -208,9 +216,9 @@ Application v1 的真实能力边界是“经签名重验证的 canonical app pa
 2. 完成 §9.2–§9.4，把 control 所有权从 Tauri 迁入 bridge，建立父进程监控和启动前 recovery-only 闭环。
 3. 通过 §9.5 全部 fault injection 后，才允许 Global 进入 production-ready。
 4. 在 P0 生命周期基础上完成 §9.6；identity 和 selected/unselected 矩阵全部通过后才开启 `app_filter=true`。
-5. §9.7–§9.9 可与 Application 工作并行，但安装/升级、供应链、双架构和稳定性验收仍是正式发布的必要条件。
+5. §9.7–§9.8 可与 Application 工作并行；安装/升级、供应链、双架构和稳定性验收仍是正式发布的必要条件。§9.9 v2 是非阻塞路线图，不影响固定 v0.12.11 发布。
 
-任何单元测试或 PoC 成功都不能单独解锁上述 gate；Global/Application 的生产能力以真实已签名 Redirector、已批准 System Extension 和故障注入结果为准。
+任何单元测试或 PoC 成功都不能单独解锁上述 gate；Global/Application 的生产能力以固定且验证通过的官方签名 Redirector v0.12.11、已批准 System Extension 和故障注入结果为准，不依赖上游 v2 发布。
 
 ## 11. P0–P2 本轮交付与验证记录
 
@@ -225,4 +233,4 @@ Application v1 的真实能力边界是“经签名重验证的 canonical app pa
 - Redirector app/extension 都确认是 `x86_64 arm64`，System Extension 为 `[activated enabled]`；验证后 `scutil --proxy` 的 `HTTPEnable`、`HTTPSEnable`、`SOCKSEnable` 仍全部为 `0`。
 - `bash scripts/stage-mitmproxy-redirector-macos.sh --check` 在可访问 macOS 安全服务的环境中通过：app/extension nested codesign、Designated Requirement、entitlement、固定 hash、双架构、Gatekeeper Notarized Developer ID 和 stapled ticket 均验证成功。
 
-本轮没有伪造以下外部结果：Apple Silicon 实机、完整 §9.5 fault injection、Application 多浏览器/Helper/XPC selected-unselected、1–4 小时 soak/高并发，以及 mitmproxy 上游 v2 PR/重新签名发布仍未执行。它们保持未勾选 release gate。
+本轮没有伪造以下外部结果：Apple Silicon 实机、完整 §9.5 fault injection、Application 多浏览器/Helper/XPC selected-unselected、1–4 小时 soak/高并发仍未执行，并保持未勾选 release gate。mitmproxy 上游 v2 PR/官方签名新版本也未执行，但它属于非阻塞路线图，不是 v0.12.11 的当前 release gate。
