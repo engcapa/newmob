@@ -142,7 +142,25 @@ import {
   writeWorkspaceLayoutSnapshot,
 } from "./workspace/workspaceLayoutPersistence";
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
-import { EditorSelectionAiToolbar, type EditorAiAction } from "./workspace/EditorSelectionAiToolbar";
+import { EditorSelectionAiToolbar } from "./workspace/EditorSelectionAiToolbar";
+import {
+  CONTEXT_LINE_RADIUS,
+  MAX_DIAGNOSTICS,
+  buildEditorAiPrompt,
+  describeScopeChain,
+  extractImports,
+  fenceLanguageFor,
+  languageLabelFor,
+  surroundingLines,
+  truncateSelection,
+  type EditorAiAction,
+  type EditorAiContext,
+} from "./workspace/editorAiPrompts";
+import {
+  nextAnswerLanguage,
+  readEditorAiPreferences,
+  writeEditorAiPreferences,
+} from "./workspace/editorAiPreferences";
 import { EditorAiRewriteDialog } from "./workspace/EditorAiRewriteDialog";
 import { confirmAppDialog, promptAppDialog } from "../../lib/appDialogs";
 import { writeText } from "../../lib/clipboard";
@@ -301,58 +319,6 @@ function isJavaBuildFile(languagePath: string): boolean {
     || name === "settings.gradle.kts";
 }
 
-const LANGUAGE_DISPLAY_NAMES: Record<string, string> = {
-  js: "JavaScript",
-  jsx: "JavaScript (JSX)",
-  mjs: "JavaScript",
-  cjs: "JavaScript",
-  ts: "TypeScript",
-  tsx: "TypeScript (TSX)",
-  json: "JSON",
-  jsonc: "JSON",
-  py: "Python",
-  pyi: "Python",
-  rs: "Rust",
-  java: "Java",
-  kt: "Kotlin",
-  kts: "Kotlin",
-  go: "Go",
-  css: "CSS",
-  scss: "SCSS",
-  less: "Less",
-  html: "HTML",
-  htm: "HTML",
-  vue: "Vue",
-  svelte: "Svelte",
-  md: "Markdown",
-  markdown: "Markdown",
-  xml: "XML",
-  svg: "SVG",
-  yaml: "YAML",
-  yml: "YAML",
-  c: "C",
-  h: "C/C++",
-  cc: "C++",
-  cpp: "C++",
-  cxx: "C++",
-  hpp: "C++",
-  hxx: "C++",
-  php: "PHP",
-  sql: "SQL",
-  sh: "Shell",
-  bash: "Shell",
-  rb: "Ruby",
-  swift: "Swift",
-  cs: "C#",
-  toml: "TOML",
-};
-
-/** Best-effort human-readable language name for a path, used to focus AI syntax prompts. */
-function languageDisplayNameForPath(languagePath: string): string | null {
-  const name = languagePath.toLowerCase();
-  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : name;
-  return LANGUAGE_DISPLAY_NAMES[ext] ?? null;
-}
 
 // Keep document synchronization ahead of the comparatively expensive derived
 // LSP features.  In particular, rust-analyzer semantic tokens can be large
@@ -436,10 +402,12 @@ import { useWorkspaceNavigation } from "./workspace/useWorkspaceNavigation";
 import { useWorkspaceFileActions } from "./workspace/useWorkspaceFileActions";
 import {
   Breadcrumbs,
+  symbolChainAtPosition,
   type BreadcrumbPathAction,
   type BreadcrumbPathChild,
   type BreadcrumbPathSegment,
 } from "./workspace/Breadcrumbs";
+import { useT } from "../../lib/i18n";
 import {
   TerminalDockPanel,
   type TerminalDockHandle,
@@ -473,11 +441,22 @@ export function CodeWorkspaceTab({
   const setWorkspaceStatusSegments = useCodeWorkspaceStatusStore((s) => s.setStatus);
   const setWorkspaceStatusActions = useCodeWorkspaceStatusStore((s) => s.setActions);
   const clearWorkspaceStatus = useCodeWorkspaceStatusStore((s) => s.clearForTab);
-  const attachToComposer = useChatStore((s) => s.attachToComposer);
+  const sendPromptToTabChat = useChatStore((s) => s.sendPromptToTabChat);
+  const t = useT();
   const workspaceInstanceId = useMemo(
     () => workspace.workspaceInstanceId ?? workspace.workspaceId ?? workspace.repoRoot?.trim() ?? tabId,
     [tabId, workspace.repoRoot, workspace.workspaceId, workspace.workspaceInstanceId],
   );
+  const [editorAiPreferences, setEditorAiPreferences] = useState(
+    () => readEditorAiPreferences(workspaceInstanceId),
+  );
+  const cycleAiAnswerLanguage = useCallback(() => {
+    setEditorAiPreferences((current) => {
+      const next = { ...current, answerLanguage: nextAnswerLanguage(current.answerLanguage) };
+      writeEditorAiPreferences(workspaceInstanceId, next);
+      return next;
+    });
+  }, [workspaceInstanceId]);
   const [bookmarks, setBookmarks] = useState<WorkspaceBookmark[]>(
     () => readWorkspaceBookmarks(workspaceInstanceId),
   );
@@ -945,10 +924,23 @@ export function CodeWorkspaceTab({
     instruction: string;
     range: EditorSelectionRange;
   } | null>(null);
+  // Read by the dialog's Restage action, which re-asks with the edited instruction.
+  const aiRewriteStateRef = useRef(aiRewriteState);
+  aiRewriteStateRef.current = aiRewriteState;
   const workspaceCommandRunnerRef = useRef<(commandId: string, context?: WorkspaceCommandContext) => boolean>(() => false);
   const goToTypeDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToImplementationRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const renameSymbolRef = useRef<() => Promise<void>>(async () => {});
+  // Hover enriches the AI prompt with type information. The LSP hover callback
+  // is declared further down, so read it through a ref.
+  const getLspHoverRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<string | null>>(
+    async () => null,
+  );
+  const breadcrumbSymbolsRef = useRef<Record<EditorGroupId, LspDocumentSymbol[]>>({
+    primary: [],
+    secondary: [],
+  });
+  const activeEditorGroupIdRef = useRef<EditorGroupId>("primary");
   const initialOpenedKeyRef = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const treePaneRef = useRef<HTMLElement | null>(null);
@@ -1047,6 +1039,16 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     lspFilesRef.current = lspFiles;
   }, [lspFiles]);
+
+  // Mirrored for the AI prompt builders, which run from callbacks declared
+  // before these values are in scope.
+  useEffect(() => {
+    breadcrumbSymbolsRef.current = breadcrumbSymbolsByGroup;
+  }, [breadcrumbSymbolsByGroup]);
+
+  useEffect(() => {
+    activeEditorGroupIdRef.current = activeEditorGroupId;
+  }, [activeEditorGroupId]);
 
   useEffect(() => {
     codeViewProfileRef.current = codeViewProfile;
@@ -2104,91 +2106,207 @@ export function CodeWorkspaceTab({
     updateFileText(key, replaced);
   }, [updateFileText]);
 
+  /**
+   * Gather everything the AI prompt builder needs for a selection: language,
+   * enclosing scope, imports, neighbouring lines, diagnostics, and LSP type
+   * info. A bare selection is often only a fragment (an `impl` header, a
+   * signature), so the surrounding facts are what make the answer accurate.
+   */
+  const buildEditorAiContext = useCallback(async (
+    action: EditorAiAction,
+    file: OpenFileState,
+    selection: EditorSelectionRange,
+    text: string,
+    instruction?: string,
+  ): Promise<EditorAiContext> => {
+    const pathLabel = file.subtitle || file.path;
+    const languageId = lspFilesRef.current[file.key]?.status?.languageId ?? null;
+    const fenceLanguage = fenceLanguageFor(languageId, file.languagePath);
+    const { text: selectionText, truncated } = truncateSelection(text);
+    // LSP positions are 0-based; the prompt reports 1-based lines to match the
+    // gutter the user is looking at.
+    const startLine = selection.start.line + 1;
+    const endLine = selection.end.line + 1;
+
+    const scopeChain = describeScopeChain(
+      symbolChainAtPosition(
+        breadcrumbSymbolsRef.current[activeEditorGroupIdRef.current] ?? [],
+        selection.start,
+      ),
+    );
+
+    const diagnostics = (lspFilesRef.current[file.key]?.diagnostics ?? [])
+      .filter((item) => (
+        item.range.end.line >= selection.start.line
+        && item.range.start.line <= selection.end.line
+      ))
+      .slice(0, MAX_DIAGNOSTICS)
+      .map((item) => {
+        const where = `L${item.range.start.line + 1}`;
+        const code = item.code ? ` [${item.code}]` : "";
+        const source = item.source ? `${item.source}: ` : "";
+        return `${where} ${source}${item.message}${code}`;
+      });
+
+    const { before, after } = surroundingLines(file.text, startLine, endLine, CONTEXT_LINE_RADIUS);
+
+    // Hover is best-effort: a cold or unsupported server must not block the ask.
+    let hover: string | null = null;
+    try {
+      hover = await getLspHoverRef.current(file, selection.start);
+    } catch {
+      hover = null;
+    }
+
+    return {
+      action,
+      filePath: pathLabel,
+      languageLabel: languageLabelFor(languageId, file.languagePath),
+      fenceLanguage,
+      selection: selectionText,
+      selectionStartLine: startLine,
+      selectionEndLine: endLine,
+      scopeChain,
+      imports: extractImports(file.text, fenceLanguage),
+      linesBefore: before,
+      linesAfter: after,
+      hover,
+      diagnostics,
+      instruction,
+      truncated,
+    };
+  }, []);
+
+  /** Default rewrite/fix instruction shown in the proposal dialog. */
+  const defaultAiInstruction = useCallback((action: EditorAiAction): string | undefined => (
+    action === "fix"
+      ? "Fix issues in the selected code"
+      : action === "rewrite"
+        ? "Rewrite the selected code"
+        : undefined
+  ), []);
+
+  const aiSentStatusKey = useCallback((action: EditorAiAction): string => (
+    action === "explain"
+      ? "codeWorkspaceAi.sentExplain"
+      : action === "syntax"
+        ? "codeWorkspaceAi.sentSyntax"
+        : action === "fix"
+          ? "codeWorkspaceAi.sentFix"
+          : "codeWorkspaceAi.sentRewrite"
+  ), []);
+
+  /**
+   * Shared tail for every AI selection action: build the prompt, send it, and —
+   * for the code-producing actions — open the proposal dialog so the answer can
+   * be diffed against the selection before it is applied.
+   */
+  const dispatchEditorAiAction = useCallback(async (
+    action: EditorAiAction,
+    file: OpenFileState,
+    selection: EditorSelectionRange,
+    text: string,
+  ) => {
+    const instruction = defaultAiInstruction(action);
+    const context = await buildEditorAiContext(action, file, selection, text, instruction);
+    const prompt = buildEditorAiPrompt(context, editorAiPreferences.answerLanguage);
+    await sendPromptToTabChat(prompt);
+
+    if (action === "fix" || action === "rewrite") {
+      setAiRewriteState({
+        key: file.key,
+        path: file.subtitle || file.path,
+        original: text,
+        proposal: text,
+        instruction: instruction ?? "",
+        range: selection,
+      });
+    }
+
+    setEditorAiSelection(null);
+    setStatusMessage(t(aiSentStatusKey(action)));
+  }, [
+    aiSentStatusKey,
+    buildEditorAiContext,
+    defaultAiInstruction,
+    editorAiPreferences.answerLanguage,
+    sendPromptToTabChat,
+    setStatusMessage,
+    t,
+  ]);
+
+  /** Selection-toolbar entry point: the user has already highlighted the code. */
   const handleEditorAiAction = useCallback(async (action: EditorAiAction, text: string) => {
     const selection = editorSelectionRef.current;
     const file = activeKey ? openFilesRef.current[activeKey] ?? null : null;
     if (!file || selection.empty || !text.trim()) return;
-    const pathLabel = file.subtitle || file.path;
-    if (action === "explain") {
-      // explainSelection wraps the payload as terminal output; stage a code-specific prompt instead.
-      await attachToComposer([
-        `请解释下面这段代码的作用、关键逻辑和潜在问题：`,
-        `文件: ${pathLabel}`,
-        "",
-        "```",
-        text,
-        "```",
-      ].join("\n"));
-      setEditorAiSelection(null);
-      setStatusMessage("Staged explain request in AI chat");
+    await dispatchEditorAiAction(action, file, selection, text);
+  }, [activeKey, dispatchEditorAiAction]);
+
+  /**
+   * Command-palette / context-menu entry point, where there may be no selection.
+   * Falls back to the enclosing symbol at the caret, then to the current line, so
+   * "put the caret on it and ask" works without selecting anything by hand.
+   */
+  const runEditorAiActionAtCursor = useCallback(async (action: EditorAiAction) => {
+    const file = activeKey ? openFilesRef.current[activeKey] ?? null : null;
+    if (!file) return;
+    const selection = editorSelectionRef.current;
+    if (!selection.empty && selection.text.trim().length >= 2) {
+      await dispatchEditorAiAction(action, file, selection, selection.text);
       return;
     }
-    if (action === "syntax") {
-      // Teaching-focused: explain the language syntax/grammar rather than what the code does.
-      const language = languageDisplayNameForPath(file.languagePath);
-      await attachToComposer([
-        `请把下面这段代码当作教学示例，讲解其中用到的语言语法与写法，帮助我打好语言基础。请覆盖：`,
-        `1. 逐一说明用到的语法结构、关键字和语言特性（例如声明方式、控制流、类型、作用域、异步、装饰器/宏、泛型等），解释它们的含义和规则；`,
-        `2. 为什么这里会这样写，这种写法解决了什么问题、有什么好处或注意事项（可读性、性能、安全、惯用法等）；`,
-        `3. 还有哪些等价的其它写法，并对比各自的优缺点；`,
-        `4. 在这个场景下哪种写法更合适，给出你的推荐和理由。`,
-        `请用通俗易懂的方式讲解，必要时配简短示例。`,
-        "",
-        ...(language ? [`语言: ${language}`] : []),
-        `文件: ${pathLabel}`,
-        "",
-        "```",
-        text,
-        "```",
-      ].join("\n"));
-      setEditorAiSelection(null);
-      setStatusMessage("Staged syntax explanation request in AI chat");
+
+    const lines = file.text.split("\n");
+    const chain = symbolChainAtPosition(
+      breadcrumbSymbolsRef.current[activeEditorGroupIdRef.current] ?? [],
+      selection.start,
+    );
+    const enclosing = chain[chain.length - 1]?.range;
+    const startLine = enclosing ? enclosing.start.line : selection.start.line;
+    const endLine = enclosing ? enclosing.end.line : selection.start.line;
+    const text = lines.slice(startLine, endLine + 1).join("\n");
+    if (text.trim().length < 2) {
+      setStatusMessage(t("codeWorkspaceAi.noSelection"));
       return;
     }
-    if (action === "fix") {
-      const prompt = [
-        `请修复下面这段代码中的问题，保持原有意图，并只返回修复后的完整代码块。`,
-        `文件: ${pathLabel}`,
-        "",
-        "```",
-        text,
-        "```",
-      ].join("\n");
-      await attachToComposer(prompt);
-      setAiRewriteState({
-        key: file.key,
-        path: pathLabel,
-        original: text,
-        proposal: text,
-        instruction: "Fix issues in the selected code",
-        range: selection,
-      });
-      setEditorAiSelection(null);
-      setStatusMessage("Staged fix request in AI chat — paste the result into the proposal or apply after editing");
-      return;
-    }
-    const instruction = "Rewrite the selected code";
-    const prompt = [
-      `请按指令改写下面的代码，只返回改写后的完整代码块。`,
-      `文件: ${pathLabel}`,
-      `指令: ${instruction}`,
-      "",
-      "```",
+
+    // Synthesize the range so the prompt reports the lines it actually sent.
+    const synthetic: EditorSelectionRange = {
+      start: { line: startLine, character: 0 },
+      end: { line: endLine, character: (lines[endLine] ?? "").length },
+      empty: false,
       text,
-      "```",
-    ].join("\n");
-    await attachToComposer(prompt);
-    setAiRewriteState({
-      key: file.key,
-      path: pathLabel,
-      original: text,
-      proposal: text,
+      rect: null,
+    };
+    await dispatchEditorAiAction(action, file, synthetic, text);
+  }, [activeKey, dispatchEditorAiAction, setStatusMessage, t]);
+
+  /** Re-ask with the instruction the user edited in the proposal dialog. */
+  const regenerateAiRewrite = useCallback(async () => {
+    const state = aiRewriteStateRef.current;
+    if (!state) return;
+    const file = openFilesRef.current[state.key] ?? null;
+    if (!file) return;
+    const instruction = state.instruction.trim() || defaultAiInstruction("rewrite");
+    const context = await buildEditorAiContext(
+      "rewrite",
+      file,
+      state.range,
+      state.original,
       instruction,
-      range: selection,
-    });
-    setEditorAiSelection(null);
-    setStatusMessage("Staged rewrite request in AI chat");
-  }, [activeKey, attachToComposer, setStatusMessage]);
+    );
+    const prompt = buildEditorAiPrompt(context, editorAiPreferences.answerLanguage);
+    await sendPromptToTabChat(prompt);
+    setStatusMessage(t("codeWorkspaceAi.resentRewrite"));
+  }, [
+    buildEditorAiContext,
+    defaultAiInstruction,
+    editorAiPreferences.answerLanguage,
+    sendPromptToTabChat,
+    setStatusMessage,
+    t,
+  ]);
 
   const saveOpenBufferText = useCallback(async (key: string, textToSave: string) => {
     const file = openFilesRef.current[key];
@@ -4191,6 +4309,40 @@ export function CodeWorkspaceTab({
       run: () => void renameSymbolRef.current(),
     },
     {
+      id: "workspace.aiExplainSyntax",
+      title: t("codeWorkspaceAi.commandExplainSyntax"),
+      category: "AI",
+      keybinding: "Ctrl+Alt+S",
+      keywords: ["ai", "syntax", "grammar", "teach", "learn", "explain", "语法", "讲解"],
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading,
+      run: () => void runEditorAiActionAtCursor("syntax"),
+    },
+    {
+      id: "workspace.aiExplainCode",
+      title: t("codeWorkspaceAi.commandExplainCode"),
+      category: "AI",
+      keybinding: "Ctrl+Alt+E",
+      keywords: ["ai", "explain", "describe", "解释"],
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading,
+      run: () => void runEditorAiActionAtCursor("explain"),
+    },
+    {
+      id: "workspace.aiFixSelection",
+      title: t("codeWorkspaceAi.commandFix"),
+      category: "AI",
+      keywords: ["ai", "fix", "repair", "修复"],
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading,
+      run: () => void runEditorAiActionAtCursor("fix"),
+    },
+    {
+      id: "workspace.aiAskSelection",
+      title: t("codeWorkspaceAi.commandAsk"),
+      category: "AI",
+      keywords: ["ai", "ask", "rewrite", "改写", "询问"],
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading,
+      run: () => void runEditorAiActionAtCursor("rewrite"),
+    },
+    {
       id: "workspace.toggleProjectTree",
       title: languagePanelOpen ? "Hide Project Tree" : "Show Project Tree",
       category: "View",
@@ -4542,6 +4694,8 @@ export function CodeWorkspaceTab({
     toggleInlineBlame,
     toggleBookmarkAtCursor,
     languagePanelOpen,
+    runEditorAiActionAtCursor,
+    t,
     toggleProjectTree,
     toggleOutlinePane,
     toggleTodosPane,
@@ -4714,6 +4868,7 @@ export function CodeWorkspaceTab({
     },
     [absolutePathForOpenFile, lspDescriptorForFile, updateLspStatusForFile],
   );
+  getLspHoverRef.current = getLspHover;
 
   const navigateLocations = useCallback(async (
     title: string,
@@ -4928,6 +5083,12 @@ export function CodeWorkspaceTab({
             },
           };
         })(),
+        ai: {
+          explainSyntaxLabel: t("codeWorkspaceAi.contextExplainSyntax"),
+          explainCodeLabel: t("codeWorkspaceAi.contextExplainCode"),
+          explainSyntax: () => { void runEditorAiActionAtCursor("syntax"); },
+          explainCode: () => { void runEditorAiActionAtCursor("explain"); },
+        },
         actions: {
           goToDefinition: () => { void goToDefinition(file, request.position); },
           goToTypeDefinition: () => { void goToTypeDefinition(file, request.position); },
@@ -4962,7 +5123,9 @@ export function CodeWorkspaceTab({
     openHierarchy,
     openQuickDocumentation,
     renameSymbolAtCursor,
+    runEditorAiActionAtCursor,
     showCodeActionsMenu,
+    t,
   ]);
 
   const deferredActiveFile = activeKey ? deferredOpenFiles[activeKey] ?? activeFile : null;
@@ -6546,9 +6709,11 @@ export function CodeWorkspaceTab({
         visible={!!editorAiSelection && !aiRewriteState}
         rect={editorAiSelection?.rect ?? null}
         selectionText={editorAiSelection?.text ?? ""}
+        answerLanguage={editorAiPreferences.answerLanguage}
         onAction={(action, text) => {
           void handleEditorAiAction(action, text);
         }}
+        onCycleAnswerLanguage={cycleAiAnswerLanguage}
         onDismiss={() => setEditorAiSelection(null)}
       />
       {aiRewriteState && (
@@ -6564,19 +6729,7 @@ export function CodeWorkspaceTab({
             current ? { ...current, proposal: value } : current
           ))}
           onClose={() => setAiRewriteState(null)}
-          onRegenerate={() => {
-            const prompt = [
-              `请按指令改写下面的代码，只返回改写后的完整代码块。`,
-              `文件: ${aiRewriteState.path}`,
-              `指令: ${aiRewriteState.instruction || "Rewrite the selected code"}`,
-              "",
-              "```",
-              aiRewriteState.original,
-              "```",
-            ].join("\n");
-            void attachToComposer(prompt);
-            setStatusMessage("Re-staged rewrite prompt in AI chat");
-          }}
+          onRegenerate={() => void regenerateAiRewrite()}
           onApply={() => {
             applySelectionReplacement(aiRewriteState.key, aiRewriteState.range, aiRewriteState.proposal);
             setAiRewriteState(null);

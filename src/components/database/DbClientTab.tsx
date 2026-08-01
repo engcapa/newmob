@@ -2285,7 +2285,9 @@ export default function DbClientTab({
       resultSummary,
     ].filter((line): line is string => line !== null).join("\n");
     await useChatStore.getState().openTabChat(tabId);
-    await useChatStore.getState().attachToComposer(prompt);
+    // A complete prompt, not a quoted selection — attachToComposer's blockquote
+    // prefix would fold the instructions and the SQL fence together.
+    await useChatStore.getState().sendPromptToTabChat(prompt);
     setHistoryPanelId(null);
   };
 
@@ -2307,7 +2309,7 @@ export default function DbClientTab({
       resultSummary,
     ].join("\n");
     await useChatStore.getState().openTabChat(tabId);
-    await useChatStore.getState().attachToComposer(prompt);
+    await useChatStore.getState().sendPromptToTabChat(prompt);
     setStatementAction(null);
   };
 
