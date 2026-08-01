@@ -45,12 +45,21 @@ verify_staged() {
   extension="$app/Contents/Library/SystemExtensions/org.mitmproxy.macos-redirector.network-extension.systemextension"
 
   codesign --verify --deep --strict --verbose=2 "$app"
+  codesign --verify --deep --strict --verbose=2 "$extension"
   app_signature="$(codesign -d --verbose=4 "$app" 2>&1)"
   extension_signature="$(codesign -d --verbose=4 "$extension" 2>&1)"
   grep -Fq 'Identifier=org.mitmproxy.macos-redirector' <<<"$app_signature"
   grep -Fq 'TeamIdentifier=S8XHQB96PW' <<<"$app_signature"
   grep -Fq 'Identifier=org.mitmproxy.macos-redirector.network-extension' <<<"$extension_signature"
   grep -Fq 'TeamIdentifier=S8XHQB96PW' <<<"$extension_signature"
+  app_entitlements="$(codesign -d --entitlements - "$app" 2>&1)"
+  extension_entitlements="$(codesign -d --entitlements - "$extension" 2>&1)"
+  grep -Fq 'com.apple.developer.system-extension.install' <<<"$app_entitlements"
+  grep -Fq 'app-proxy-provider-systemextension' <<<"$app_entitlements"
+  grep -Fq 'app-proxy-provider-systemextension' <<<"$extension_entitlements"
+
+  test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" = "2.0"
+  test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" = "1"
 
   executable="$app/Contents/MacOS/Mitmproxy Redirector"
   extension_executable="$extension/Contents/MacOS/org.mitmproxy.macos-redirector.network-extension"
@@ -59,6 +68,20 @@ verify_staged() {
   architectures="$(lipo -archs "$executable")"
   grep -Eq '(^| )arm64( |$)' <<<"$architectures"
   grep -Eq '(^| )x86_64( |$)' <<<"$architectures"
+  extension_architectures="$(lipo -archs "$extension_executable")"
+  grep -Eq '(^| )arm64( |$)' <<<"$extension_architectures"
+  grep -Eq '(^| )x86_64( |$)' <<<"$extension_architectures"
+
+  gatekeeper="$(spctl --assess --type execute --verbose=4 "$app" 2>&1)"
+  grep -Fq 'source=Notarized Developer ID' <<<"$gatekeeper"
+  if xcrun --find stapler >/dev/null 2>&1; then
+    xcrun stapler validate "$app"
+  elif [[ "${CI:-}" == "true" ]]; then
+    echo "Xcode stapler is required for the macOS release gate" >&2
+    exit 1
+  else
+    echo "warning: Xcode stapler unavailable; Gatekeeper notarization passed, staple validation skipped" >&2
+  fi
   rm -rf "$verify_dir"
   trap - RETURN
   echo "Mitmproxy Redirector $version resource verified (signed universal app tar)."

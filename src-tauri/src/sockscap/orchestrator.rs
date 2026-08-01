@@ -113,6 +113,32 @@ impl Orchestrator {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn refresh_macos_capture_health(&mut self) {
+        if !matches!(self.phase, EnginePhase::Active | EnginePhase::Degraded) {
+            return;
+        }
+        let error = self
+            .macos_capture
+            .as_ref()
+            .and_then(|capture| capture.telemetry().last_error);
+        if let Some(error) = error {
+            self.set_recovery_required(
+                "mitmproxy-redirector",
+                format!("macOS Redirector bridge exited unexpectedly: {error}; run Recover"),
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn macos_telemetry(
+        &self,
+    ) -> Option<crate::sockscap::redirector::runtime::RedirectorTelemetrySnapshot> {
+        self.macos_capture
+            .as_ref()
+            .map(MacosCaptureHandle::telemetry)
+    }
+
     pub fn stats_snapshot(&self) -> StatsSnapshot {
         self.stats.snapshot()
     }

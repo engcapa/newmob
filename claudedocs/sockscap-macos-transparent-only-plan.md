@@ -1,6 +1,6 @@
 # SocksCap macOS：mitmproxy Redirector Transparent-Only 方案
 
-> 状态：实施中（Phase 0 与 Global bridge 第一切片已落地，生产 gate 仍未全部完成）
+> 状态：P0–P2 代码切片已落地；真实双架构故障注入、selected/unselected 与 soak gate 尚待执行
 >
 > 日期：2026-08-01
 >
@@ -9,6 +9,10 @@
 > 取代：本文旧版“Taomni 自建 `NETransparentProxyProvider`”方案，以及 Phase 6 中的 system-proxy fallback 设计
 >
 > 验证依据：[`sockscap-macos-mitmproxy-redirector-ipc-poc.md`](./sockscap-macos-mitmproxy-redirector-ipc-poc.md)
+>
+> 当前代码审计、P0/P1/P2 待办和发布 gate：[`sockscap-macos-redirector-implementation-analysis.md` §8–§10](./sockscap-macos-redirector-implementation-analysis.md#8-当前恢复机制审计)
+>
+> 上游 protocol v2 提案：[`sockscap-redirector-protocol-v2-proposal.md`](./sockscap-redirector-protocol-v2-proposal.md)
 
 ## 1. 已锁定的产品决策
 
@@ -40,14 +44,18 @@
 - 正式模块已接入固定 protobuf framing、Global/Applications scope compiler、非空 inert stop、TCP shared relay、非 443 UDP direct 和 in-scope UDP/443 drop。
 - Global capability 只在 `/Applications/Mitmproxy Redirector.app` 通过嵌套 codesign、Team/bundle identity 与 v0.12.11 可执行文件 hash 校验后开放。
 - release workflow 固定下载 wheel、校验 wheel/app tar hash、原样 stage signed universal app tar 与 MIT notice；GitHub Runner 不编译 Xcode extension。
-- Applications compiler/profile 映射已进入代码，但任何含 Applications profile 的 macOS Start 仍会明确拒绝，`app_filter=false`。
+- 独立 bridge 模式已持有 Provider control，使用 version/session/generation/request-id 管理协议、父进程/心跳 watchdog 与 signal inert cleanup；Provider 和 bridge flow 两端均校验 Darwin peer PID/audit token，Provider control 额外校验固定签名和可执行文件 hash。
+- write-ahead recovery journal、启动 readiness barrier、dirty recovery-only、独立 `/usr/bin/nc` 直连证明和 `RecoveryRequired` UI/诊断已经接通；v1 仍只能证明 frame 完整写入，不能声称 Provider ACK。
+- Applications 已接入 `.app` Picker、Security.framework seal/designated-requirement 校验、启动前重验/移动与升级连续性、bundle family 和 fail-open 二次匹配，macOS `app_filter=true`。
+- bundled tar 安装/升级 UI 已实现固定 hash、签名、版本、entitlement、双架构、Gatekeeper 校验、授权 staging/backup/rollback 和同名冲突拒绝。
+- UDP direct 已增加 idle/并发/速率限制与 datagram、QUIC、scope mismatch 统计；P2 protocol v2 的 typed selector、ACK 和 atomic EOF 提案已形成仓库内草案。
 
 尚未完成、因此当前不能标记 production-ready：
 
-- 从 bundled tar 安装/升级到 `/Applications` 的授权 UI 与回滚。
-- 独立 `taomni-redirector-bridge` sidecar、Unix peer PID/codesign 校验。
-- bridge `SIGKILL`、控制通道断裂和 Provider 残留规则的完整恢复闭环。
-- Applications 的 AppCatalog/Security.framework 身份验证、重绑定与 selected/unselected 真机矩阵。
+- Intel/Apple Silicon 上的完整异常注入、Application selected/unselected 与长期 soak/性能矩阵。
+- 对 System Extension 与 Network Configuration 批准状态做稳定、可区分的系统 API 探测；当前安装状态只能可靠识别 extension 是否 `[activated enabled]`，Start 超时信息覆盖两种批准入口。
+- Taomni 自身 Developer ID 签名、公证及 release blocking gate 的实际发布凭据验证。
+- mitmproxy 上游接受 protocol v2 并发布重新签名的 Redirector；本仓库不能替代上游完成该项。
 
 ## 2. 已验证基线与生产边界
 

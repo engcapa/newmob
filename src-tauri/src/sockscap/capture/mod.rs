@@ -63,20 +63,19 @@ pub fn capabilities() -> SocksCapCapabilities {
 }
 
 /// macOS capabilities, parameterized on whether the pinned, signed Redirector
-/// is installed. Application scope stays gated until path identity validation
-/// and the selected/unselected E2E matrix are complete.
+/// is installed.
 #[cfg(any(target_os = "macos", test))]
 pub fn macos_capabilities(redirector_installed: bool) -> SocksCapCapabilities {
     if redirector_installed {
         SocksCapCapabilities {
             platform: "macos".into(),
             global_tcp: true,
-            app_filter: false,
+            app_filter: true,
             capture_backend: "mitmproxy-redirector".into(),
             notes: vec![
                 "macOS: transparent TCP/UDP flow capture via the signed Mitmproxy Redirector; system proxy settings are never changed.".into(),
                 "The first use may require approving Mitmproxy Redirector's System Extension and network configuration in System Settings.".into(),
-                "Global capture is available. Application scope remains disabled until app identity validation is production-ready.".into(),
+                "Global and signed-application capture are available. Application identities are revalidated before each activation.".into(),
             ],
             privileged_required: false,
         }
@@ -132,7 +131,7 @@ pub async fn recover_system(sudo_password: Option<&str>) -> Result<Vec<u32>, Str
     #[cfg(target_os = "macos")]
     {
         let _ = sudo_password;
-        return macos::recover_system().map(|()| Vec::new());
+        return macos::recover_system().await.map(|()| Vec::new());
     }
     #[cfg(all(not(target_os = "linux"), not(windows), not(target_os = "macos")))]
     {
@@ -217,13 +216,10 @@ mod tests {
     }
 
     #[test]
-    fn macos_with_redirector_offers_global_transparent_capture_only() {
+    fn macos_with_redirector_offers_global_and_application_capture() {
         let caps = macos_capabilities(true);
         assert_eq!(caps.platform, "macos");
-        assert!(
-            !caps.app_filter,
-            "application identity gate is still pending"
-        );
+        assert!(caps.app_filter);
         assert_eq!(caps.capture_backend, "mitmproxy-redirector");
         assert!(caps.global_tcp);
         assert!(!caps.privileged_required);

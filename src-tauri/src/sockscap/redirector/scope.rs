@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::sockscap::config::{ScopeMode, SocksCapConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +126,15 @@ impl ScopeSnapshot {
         &self.actions
     }
 
+    pub fn scope_hash(&self) -> String {
+        let mut hasher = Sha256::new();
+        for action in &self.actions {
+            hasher.update((action.len() as u64).to_be_bytes());
+            hasher.update(action.as_bytes());
+        }
+        hex::encode(&hasher.finalize()[..8])
+    }
+
     pub fn matches_process(&self, process_path: Option<&str>) -> bool {
         if let Some(path) = process_path {
             if self.excludes.iter().any(|pattern| path.contains(pattern)) {
@@ -219,6 +230,7 @@ mod tests {
             path: path.into(),
             bundle_id: String::new(),
             name: path.into(),
+            macos_identity: None,
         }
     }
 

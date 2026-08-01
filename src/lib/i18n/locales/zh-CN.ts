@@ -1164,6 +1164,16 @@ export const zhCN: DeepPartial<typeof en> = {
     stop: "停止",
     recover: "恢复网络",
     recoverHint: "停止捕获并清理 SocksCap 残留状态（不会结束已提权的 helper 进程）。",
+    manualRecoveryTitle: "手动恢复 macOS 网络",
+    manualRecoveryStep1: "退出 Taomni 和 Mitmproxy Redirector。",
+    manualRecoveryStep2:
+      "打开“系统设置 > 网络 > VPN 与过滤器”，停用 Mitmproxy Redirector 网络配置。",
+    manualRecoveryStep3:
+      "如仍未恢复，在“通用 > 登录项与扩展 > 网络扩展”停用其扩展并重启 macOS；重新打开 Taomni 后再执行“恢复”。",
+    copyDiagnostics: "复制诊断信息",
+    diagnosticsCopied: "已复制 SocksCap 诊断信息。",
+    redirectorMissing: "macOS 捕获需要安装 Mitmproxy Redirector。",
+    installRedirector: "安装 Redirector…",
     refreshStatus: "刷新状态与流量计数",
     statusRefreshed: "状态已刷新",
     saved: "配置已保存",
@@ -1222,6 +1232,8 @@ export const zhCN: DeepPartial<typeof en> = {
     backendCompact: "后端 · {backend}",
     activeProfilesCompact: "{count} 个方案生效 · {names}",
     trafficCompact: "{total} 连接 · {proxy} 代理 · {direct} 直连",
+    trafficDiagnostics:
+      "最近连接：{lastFlow} · QUIC 丢弃：{quic} · UDP 直连报文：{udp} · 作用域不匹配：{mismatch}",
     appModeUnsupported:
       "当前平台的捕获后端无法识别来源应用，因此仅支持全局范围。",
     section: {
@@ -1236,7 +1248,9 @@ export const zhCN: DeepPartial<typeof en> = {
       apps: "应用程序",
     },
     pickProcess: "选择进程…",
-    appsEmpty: "尚未选择应用 — 请添加可执行路径或选择进程。",
+    pickApplication: "选择应用程序…",
+    bundleFamilyCoverage: "应用包路径族（含 Helper/XPC）",
+    appsEmpty: "尚未选择应用 — 请选择应用程序或进程。",
     appPathPh: "可执行路径（如 C:\\…\\chrome.exe）",
     processesEmpty: "当前平台暂无进程列表。",
     upstreamKind: "上游类型",

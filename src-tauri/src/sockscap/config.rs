@@ -191,6 +191,31 @@ pub struct UpstreamRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MacosAppIdentity {
+    #[serde(default)]
+    pub bundle_path: String,
+    #[serde(default)]
+    pub canonical_bundle_path: String,
+    #[serde(default)]
+    pub main_executable_path: String,
+    #[serde(default)]
+    pub bundle_id: String,
+    #[serde(default)]
+    pub team_id: String,
+    #[serde(default)]
+    pub signing_id: String,
+    #[serde(default)]
+    pub designated_requirement: String,
+    #[serde(default)]
+    pub last_validated_cd_hash: String,
+    #[serde(default)]
+    pub supplemental_executables: Vec<String>,
+    #[serde(default)]
+    pub allow_unsigned: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppSelector {
     /// Absolute or normalized executable path (Windows/Linux).
     #[serde(default)]
@@ -201,6 +226,9 @@ pub struct AppSelector {
     /// Display name for the UI.
     #[serde(default)]
     pub name: String,
+    /// macOS path-family identity. Other platforms preserve but ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macos_identity: Option<MacosAppIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -615,4 +643,3 @@ mod tests {
         assert!(loaded.validate().is_ok());
     }
 }
-

@@ -11,6 +11,12 @@ pub struct StatsCounters {
     pub flows_block: AtomicU64,
     pub bytes_up: AtomicU64,
     pub bytes_down: AtomicU64,
+    pub last_flow_at: AtomicU64,
+    pub quic_flows_dropped: AtomicU64,
+    pub udp_direct_datagrams: AtomicU64,
+    pub last_quic_drop_at: AtomicU64,
+    pub scope_mismatch_flows: AtomicU64,
+    pub last_scope_mismatch_at: AtomicU64,
 }
 
 impl StatsCounters {
@@ -22,6 +28,14 @@ impl StatsCounters {
             flows_block: self.flows_block.load(Ordering::Relaxed),
             bytes_up: self.bytes_up.load(Ordering::Relaxed),
             bytes_down: self.bytes_down.load(Ordering::Relaxed),
+            last_flow_at: nonzero_timestamp(self.last_flow_at.load(Ordering::Relaxed)),
+            quic_flows_dropped: self.quic_flows_dropped.load(Ordering::Relaxed),
+            udp_direct_datagrams: self.udp_direct_datagrams.load(Ordering::Relaxed),
+            last_quic_drop_at: nonzero_timestamp(self.last_quic_drop_at.load(Ordering::Relaxed)),
+            scope_mismatch_flows: self.scope_mismatch_flows.load(Ordering::Relaxed),
+            last_scope_mismatch_at: nonzero_timestamp(
+                self.last_scope_mismatch_at.load(Ordering::Relaxed),
+            ),
         }
     }
 
@@ -45,6 +59,25 @@ impl StatsCounters {
         }
     }
 
+    pub fn record_flow_seen(&self) {
+        self.last_flow_at.store(now_unix(), Ordering::Relaxed);
+    }
+
+    pub fn record_quic_drop(&self) {
+        self.quic_flows_dropped.fetch_add(1, Ordering::Relaxed);
+        self.last_quic_drop_at.store(now_unix(), Ordering::Relaxed);
+    }
+
+    pub fn record_udp_direct_datagram(&self) {
+        self.udp_direct_datagrams.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_scope_mismatch(&self) {
+        self.scope_mismatch_flows.fetch_add(1, Ordering::Relaxed);
+        self.last_scope_mismatch_at
+            .store(now_unix(), Ordering::Relaxed);
+    }
+
     pub fn reset(&self) {
         self.flows_total.store(0, Ordering::Relaxed);
         self.flows_proxy.store(0, Ordering::Relaxed);
@@ -52,6 +85,12 @@ impl StatsCounters {
         self.flows_block.store(0, Ordering::Relaxed);
         self.bytes_up.store(0, Ordering::Relaxed);
         self.bytes_down.store(0, Ordering::Relaxed);
+        self.last_flow_at.store(0, Ordering::Relaxed);
+        self.quic_flows_dropped.store(0, Ordering::Relaxed);
+        self.udp_direct_datagrams.store(0, Ordering::Relaxed);
+        self.last_quic_drop_at.store(0, Ordering::Relaxed);
+        self.scope_mismatch_flows.store(0, Ordering::Relaxed);
+        self.last_scope_mismatch_at.store(0, Ordering::Relaxed);
     }
 }
 
@@ -64,6 +103,35 @@ pub struct StatsSnapshot {
     pub flows_block: u64,
     pub bytes_up: u64,
     pub bytes_down: u64,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), serde(skip_serializing))]
+    pub last_flow_at: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), serde(skip_serializing))]
+    pub quic_flows_dropped: u64,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), serde(skip_serializing))]
+    pub udp_direct_datagrams: u64,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), serde(skip_serializing))]
+    pub last_quic_drop_at: Option<u64>,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), serde(skip_serializing))]
+    pub scope_mismatch_flows: u64,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "macos"), serde(skip_serializing))]
+    pub last_scope_mismatch_at: Option<u64>,
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn nonzero_timestamp(value: u64) -> Option<u64> {
+    (value > 0).then_some(value)
 }
 
 use crate::sockscap::config::Decision;
@@ -191,4 +259,3 @@ impl DomainTracker {
         self.records.clear();
     }
 }
-

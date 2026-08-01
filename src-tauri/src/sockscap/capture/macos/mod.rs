@@ -22,13 +22,14 @@ pub async fn start(
     app: &AppHandle,
     config: &SocksCapConfig,
     ctx: Arc<RwLock<RelayContext>>,
+    session_id: &str,
 ) -> Result<MacosCaptureHandle, String> {
-    runtime::start(app, config, ctx).await
+    runtime::start(app, config, ctx, session_id).await
 }
 
-/// Redirector recovery is handled by its control-channel inert configuration.
-/// There is deliberately no legacy proxy cleanup here: new Taomni versions do
-/// not own or mutate the user's system proxy state.
-pub fn recover_system() -> Result<(), String> {
-    Ok(())
+/// Reacquire Redirector control and replace any scope stranded by an unclean
+/// shutdown with a fresh inert sentinel. There is deliberately no legacy proxy
+/// cleanup: new Taomni versions do not own or mutate system proxy settings.
+pub async fn recover_system() -> Result<(), String> {
+    runtime::recover().await
 }

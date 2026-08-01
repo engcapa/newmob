@@ -227,6 +227,12 @@ winreg = "0.55"
 # Always on for macOS so Local RDP server can mirror the desktop without needing
 # the optional `screen-capture` feature used by LanChat screenshots.
 xcap = "0.9.6"
+# SocksCap application identity validation uses Apple's Security.framework
+# static-code API; codesign output is used only to extract the persisted
+# designated requirement/Team/signing metadata after the seal is validated.
+security-framework = "3.7.0"
+core-foundation = "0.10.1"
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # RDP server X11 screen capture (XShm / MIT-SHM via libxcb) plus the DAMAGE

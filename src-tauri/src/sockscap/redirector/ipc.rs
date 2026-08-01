@@ -163,6 +163,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn intercept_config_matches_pinned_v0_12_11_golden_frame() {
+        // u32be length + protobuf repeated string fields. This fixture is kept
+        // literal so an accidental tag/framing change cannot update both the
+        // implementation and expectation together.
+        const GOLDEN: &[u8] = &[
+            0x00, 0x00, 0x00, 0x0d, 0x0a, 0x04, b'c', b'u', b'r', b'l', 0x0a, 0x05, b'!', b'x',
+            b'r', b'a', b'y',
+        ];
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        write_frame(
+            &mut writer,
+            &InterceptConf {
+                actions: vec!["curl".into(), "!xray".into()],
+            },
+        )
+        .await
+        .unwrap();
+        let mut actual = vec![0u8; GOLDEN.len()];
+        reader.read_exact(&mut actual).await.unwrap();
+        assert_eq!(actual, GOLDEN);
+    }
+
+    #[test]
+    fn unknown_protobuf_fields_are_ignored_for_v2_forward_compatibility() {
+        let mut payload = InterceptConf {
+            actions: vec!["curl".into()],
+        }
+        .encode_to_vec();
+        // Unknown field 99, varint value 1.
+        payload.extend_from_slice(&[0x98, 0x06, 0x01]);
+        let decoded = InterceptConf::decode(payload.as_slice()).unwrap();
+        assert_eq!(decoded.actions, vec!["curl"]);
+    }
+
+    #[tokio::test]
     async fn empty_intercept_config_is_rejected_before_swift_can_index_it() {
         let (mut writer, _reader) = tokio::io::duplex(64);
         let error = send_intercept_config(&mut writer, &[]).await.unwrap_err();

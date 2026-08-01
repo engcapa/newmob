@@ -1166,6 +1166,16 @@ const dict = {
     recover: "Recover network",
     recoverHint:
       "Stop capture and clear residual SocksCap state (does not kill the elevated helper process).",
+    manualRecoveryTitle: "Manual macOS network recovery",
+    manualRecoveryStep1: "Quit Taomni and Mitmproxy Redirector.",
+    manualRecoveryStep2:
+      "In System Settings > Network > VPN & Filters, disable the Mitmproxy Redirector network configuration.",
+    manualRecoveryStep3:
+      "If needed, disable its Network Extension under General > Login Items & Extensions, restart macOS, then reopen Taomni and run Recover.",
+    copyDiagnostics: "Copy diagnostics",
+    diagnosticsCopied: "SocksCap diagnostics copied.",
+    redirectorMissing: "Mitmproxy Redirector is required for macOS capture.",
+    installRedirector: "Install Redirector…",
     refreshStatus: "Refresh status & traffic counters",
     statusRefreshed: "Status refreshed",
     saved: "Configuration saved",
@@ -1229,6 +1239,8 @@ const dict = {
     backendCompact: "Backend · {backend}",
     activeProfilesCompact: "{count} active · {names}",
     trafficCompact: "{total} flows · {proxy} proxy · {direct} direct",
+    trafficDiagnostics:
+      "Last flow: {lastFlow} · QUIC drops: {quic} · UDP direct datagrams: {udp} · Scope mismatches: {mismatch}",
     appModeUnsupported:
       "This platform's capture backend cannot identify the source application, so scope is Global only.",
     section: {
@@ -1243,7 +1255,9 @@ const dict = {
       apps: "Applications",
     },
     pickProcess: "Pick process…",
-    appsEmpty: "No apps selected — add an executable path or pick a process.",
+    pickApplication: "Pick application…",
+    bundleFamilyCoverage: "bundle family (Helpers/XPC included)",
+    appsEmpty: "No apps selected — pick an application or process.",
     appPathPh: "Executable path (e.g. C:\\…\\chrome.exe)",
     processesEmpty: "No processes listed on this platform yet.",
     upstreamKind: "Upstream type",
