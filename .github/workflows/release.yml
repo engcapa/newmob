@@ -319,7 +319,9 @@ jobs:
   # ---------------------------------------------------------------------------
   build-macos:
     name: Bundle (macOS)
-    runs-on: macos-latest          # arm64 (Apple Silicon) runner
+    # Pin the major runner image instead of following the moving `macos-latest`
+    # label. GitHub's macos-15 standard image is arm64 (Apple Silicon).
+    runs-on: macos-15
 
     steps:
       - name: Checkout
@@ -368,6 +370,10 @@ jobs:
 
       - name: Install MIT Kerberos (x86_64 – Rosetta 2)
         run: |
+          set -euo pipefail
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
           # Bootstrap x86_64 Homebrew if it isn't already present
           if [ ! -x /usr/local/bin/brew ]; then
             arch -x86_64 /bin/bash -c \
@@ -378,13 +384,19 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      # Stage xray-core (MPL-2.0, Apple silicon) into resources so the macOS
-      # bundle can serve core-backed upstreams. Runner has pwsh preinstalled.
-      - name: Stage xray-core (macos arm64)
-        run: pwsh scripts/fetch-xray.ps1 -Platform macos-arm64
-
-      - name: Stage and verify signed Mitmproxy Redirector
+      # Keep Redirector v0.12.11 as an opaque, upstream-signed universal app
+      # archive. Taomni never rebuilds or re-signs its nested System Extension.
+      - name: Stage and verify signed Mitmproxy Redirector v0.12.11
         run: bash scripts/stage-mitmproxy-redirector-macos.sh --stage
+
+      - name: Verify macOS Redirector protocol and recovery gates
+        env:
+          LIBGSSAPI_IMPL: mit
+          LIBGSSAPI_PREFIX: /opt/homebrew/opt/krb5
+          PKG_CONFIG_PATH: /opt/homebrew/opt/krb5/lib/pkgconfig
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::redirector -- --test-threads=1
+          cargo test --manifest-path src-tauri/Cargo.toml --lib sockscap::recovery -- --test-threads=1
 
       - name: Resolve release version
         id: version
@@ -407,7 +419,47 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
+      # Tauri updater signing and Apple Developer ID signing are independent
+      # trust chains. Workflow-only artifacts may remain unsigned, but a tag or
+      # GitHub Release must never publish a non-notarized macOS bundle.
+      - name: Require macOS release signing and notarization secrets
+        if: steps.version.outputs.tag != ''
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            TAURI_SIGNING_PRIVATE_KEY \
+            APPLE_CERTIFICATE \
+            APPLE_CERTIFICATE_PASSWORD \
+            APPLE_ID \
+            APPLE_PASSWORD \
+            APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing required macOS release secrets: ${missing[*]}" >&2
+            echo "Tagged macOS releases require updater signing, Developer ID signing and Apple notarization." >&2
+            exit 1
+          fi
+
       # ---------- aarch64-apple-darwin (native) ----------
+      - name: Stage and verify xray-core (aarch64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwsh scripts/fetch-xray.ps1 -Platform macos-arm64 -Force
+          test "$(lipo -archs src-tauri/resources/sockscap/macos/xray)" = "arm64"
+
       - name: Build and upload release bundle (aarch64)
         id: tauri_macos_aarch64_release
         if: steps.version.outputs.tag != ''
@@ -416,6 +468,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Point libgssapi-sys at Homebrew MIT Kerberos (arm64)
           LIBGSSAPI_IMPL: mit
           LIBGSSAPI_PREFIX: /opt/homebrew/opt/krb5
@@ -427,6 +484,12 @@ jobs:
           generateReleaseNotes: true
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           args: --target aarch64-apple-darwin
+
+      - name: Verify signed and notarized release bundle (aarch64)
+        if: steps.version.outputs.tag != ''
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash scripts/verify-macos-release-bundle.sh aarch64-apple-darwin arm64
 
       - name: Collect release workflow artifacts (aarch64)
         if: steps.version.outputs.tag != ''
@@ -475,6 +538,13 @@ jobs:
           if-no-files-found: error
 
       # ---------- x86_64-apple-darwin (cross-compile) ----------
+      - name: Stage and verify xray-core (x86_64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          pwsh scripts/fetch-xray.ps1 -Platform macos -Force
+          test "$(lipo -archs src-tauri/resources/sockscap/macos/xray)" = "x86_64"
+
       - name: Build and upload release bundle (x86_64)
         id: tauri_macos_x86_64_release
         if: steps.version.outputs.tag != ''
@@ -483,6 +553,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           # Point libgssapi-sys at x86_64 MIT Kerberos under /usr/local
           LIBGSSAPI_IMPL: mit
           LIBGSSAPI_PREFIX: /usr/local/opt/krb5
@@ -495,6 +570,12 @@ jobs:
           generateReleaseNotes: true
           prerelease: ${{ contains(steps.version.outputs.version, '-') }}
           args: --target x86_64-apple-darwin
+
+      - name: Verify signed and notarized release bundle (x86_64)
+        if: steps.version.outputs.tag != ''
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash scripts/verify-macos-release-bundle.sh x86_64-apple-darwin x86_64
 
       - name: Collect release workflow artifacts (x86_64)
         if: steps.version.outputs.tag != ''

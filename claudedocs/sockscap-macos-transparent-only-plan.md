@@ -239,7 +239,7 @@ Hosted macOS Runner 可以完成：
 
 Hosted Runner 不能完成首次 System Extension 人工批准或可靠的持久化真机 E2E。运行态回归使用预批准的 self-hosted Mac 或发布前人工测试。
 
-`TAURI_SIGNING_PRIVATE_KEY` 只负责 Tauri updater，不等于 Apple Developer ID。Taomni 的正式 Gatekeeper 分发仍需要自己的 Developer ID 和 notarization secrets；没有账户时只能发布需要用户手动确认的 Taomni 包，Redirector 本身仍保持上游签名、公证。
+`TAURI_SIGNING_PRIVATE_KEY` 只负责 Tauri updater，不等于 Apple Developer ID。Taomni 的正式 Gatekeeper 分发使用 GitHub Secrets `APPLE_CERTIFICATE`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_ID`、`APPLE_PASSWORD` 和 `APPLE_TEAM_ID` 完成 Developer ID 签名与公证。无 tag 的 workflow artifact 可以不使用正式 Apple 凭据；tag/GitHub Release 缺少任一 updater/Apple 必需 secret 时必须提前失败，不发布需要用户手动放行的降级包。Redirector 始终保持独立的上游签名、公证和固定 hash。
 
 ## 7. CaptureScopeCompiler
 
