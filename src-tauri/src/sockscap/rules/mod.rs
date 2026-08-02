@@ -1,6 +1,7 @@
 //! Rule compilation and matching (GFWList / AutoProxy + user helpers).
 
 mod autopxy;
+pub mod dns;
 pub mod dns_map;
 mod gfwlist;
 pub mod source;

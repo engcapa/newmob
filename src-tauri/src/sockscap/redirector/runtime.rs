@@ -34,6 +34,7 @@ use crate::sockscap::paths;
 use crate::sockscap::relay::{
     CapturedFlow, MAX_ACTIVE_RELAY_FLOWS, RelayContext, handle_captured_stream,
 };
+use crate::sockscap::rules::dns::extract_ip_answers;
 
 const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(180);
 const FLOW_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
@@ -44,8 +45,13 @@ const BRIDGE_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_PENDING_HEARTBEATS: usize = 3;
 const UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const DNS_UDP_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const UDP_DATAGRAM_RATE_PER_SECOND: u64 = 2_048;
 const UDP_DATAGRAM_BURST: u64 = 4_096;
+const TARGET_NOFILE_LIMIT: libc::rlim_t = 4_096;
+const RESERVED_FILE_DESCRIPTORS: u64 = 128;
+const FILE_DESCRIPTORS_PER_FLOW: u64 = 2;
+const MIN_RELAY_FLOW_CAPACITY: usize = 32;
 
 struct SocketCleanup(PathBuf);
 
@@ -74,6 +80,8 @@ pub struct RedirectorTelemetrySnapshot {
     pub started_at: u64,
     pub last_heartbeat_at: Option<u64>,
     pub last_error: Option<String>,
+    pub file_descriptor_limit: u64,
+    pub flow_capacity: usize,
 }
 
 struct RuntimeTelemetry {
@@ -85,6 +93,8 @@ struct RuntimeTelemetry {
     started_at: u64,
     last_heartbeat_at: AtomicU64,
     last_error: Mutex<Option<String>>,
+    file_descriptor_limit: u64,
+    flow_capacity: usize,
 }
 
 impl RuntimeTelemetry {
@@ -103,6 +113,8 @@ impl RuntimeTelemetry {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone(),
+            file_descriptor_limit: self.file_descriptor_limit,
+            flow_capacity: self.flow_capacity,
         }
     }
 
@@ -161,6 +173,8 @@ pub async fn start(
     session_id: &str,
 ) -> Result<RedirectorCaptureHandle, String> {
     preflight(config)?;
+    let file_descriptor_limit = prepare_file_descriptor_budget()?;
+    let flow_capacity = relay_flow_capacity(file_descriptor_limit);
 
     let executable = installed_executable_path();
     let mut exclusions = vec![
@@ -193,6 +207,8 @@ pub async fn start(
         started_at: now_unix(),
         last_heartbeat_at: AtomicU64::new(now_unix()),
         last_error: Mutex::new(None),
+        file_descriptor_limit,
+        flow_capacity,
     });
 
     tracing::info!(
@@ -201,6 +217,8 @@ pub async fn start(
         provider_pid = bridge.provider_pid,
         provider_socket = %provider_socket_path.display(),
         flow_socket = %flow_socket_path.display(),
+        file_descriptor_limit,
+        flow_capacity,
         "sockscap: isolated Redirector bridge active"
     );
 
@@ -213,6 +231,7 @@ pub async fn start(
             bridge,
             scope,
             block_quic,
+            flow_capacity,
             ctx,
             stop_rx,
             cleanup,
@@ -325,7 +344,49 @@ pub fn preflight(config: &SocksCapConfig) -> Result<(), String> {
     let _ = config;
     super::verify_installed()
         .map_err(|error| format!("{error}; no system-proxy fallback is available"))?;
+    prepare_file_descriptor_budget()?;
     Ok(())
+}
+
+/// Raise launchd's conservative per-process soft limit before global capture.
+/// A macOS GUI app commonly starts at 256 descriptors, while every active flow
+/// needs one Redirector IPC socket and one egress socket in addition to the
+/// desktop app's normal files, terminals, and database handles.
+fn prepare_file_descriptor_budget() -> Result<u64, String> {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        return Err(format!(
+            "read macOS file descriptor limit: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let desired = TARGET_NOFILE_LIMIT.min(limit.rlim_max);
+    if limit.rlim_cur < desired {
+        let raised = libc::rlimit {
+            rlim_cur: desired,
+            rlim_max: limit.rlim_max,
+        };
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
+            return Err(format!(
+                "raise macOS file descriptor limit from {} to {desired}: {}",
+                limit.rlim_cur,
+                std::io::Error::last_os_error()
+            ));
+        }
+        limit.rlim_cur = desired;
+    }
+    Ok(limit.rlim_cur)
+}
+
+fn relay_flow_capacity(file_descriptor_limit: u64) -> usize {
+    let descriptor_capacity =
+        file_descriptor_limit.saturating_sub(RESERVED_FILE_DESCRIPTORS) / FILE_DESCRIPTORS_PER_FLOW;
+    usize::try_from(descriptor_capacity)
+        .unwrap_or(MAX_ACTIVE_RELAY_FLOWS)
+        .clamp(MIN_RELAY_FLOW_CAPACITY, MAX_ACTIVE_RELAY_FLOWS)
 }
 
 async fn run_capture(
@@ -333,13 +394,15 @@ async fn run_capture(
     mut bridge: BridgeSession,
     scope: Arc<ScopeSnapshot>,
     block_quic: bool,
+    flow_capacity: usize,
     ctx: Arc<RwLock<RelayContext>>,
     mut stop_rx: oneshot::Receiver<()>,
     _cleanup: SocketCleanup,
     telemetry: Arc<RuntimeTelemetry>,
 ) -> Result<(), String> {
     let mut flows = JoinSet::new();
-    let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_ACTIVE_RELAY_FLOWS));
+    let limiter = Arc::new(tokio::sync::Semaphore::new(flow_capacity));
+    let stats = Arc::clone(&ctx.read().await.stats);
     let mut accept_error = None;
     let mut pending_heartbeats = BTreeSet::new();
     let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
@@ -406,11 +469,11 @@ async fn run_capture(
                     }
                 }
             }
-            accepted = listener.accept() => {
-                let (stream, _) = match accepted {
+            accepted = accept_with_capacity(&listener, Arc::clone(&limiter)) => {
+                let (stream, permit) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => {
-                        accept_error = Some(format!("accept Redirector flow: {error}"));
+                        accept_error = Some(error);
                         break;
                     }
                 };
@@ -429,22 +492,13 @@ async fn run_capture(
                         continue;
                     }
                 }
-                let permit = match Arc::clone(&limiter).try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        tracing::warn!(
-                            max_flows = MAX_ACTIVE_RELAY_FLOWS,
-                            "sockscap: Redirector flow limit reached; refusing flow"
-                        );
-                        drop(stream);
-                        continue;
-                    }
-                };
                 let scope = Arc::clone(&scope);
                 let ctx = Arc::clone(&ctx);
+                let flow_stats = Arc::clone(&stats);
                 flows.spawn(async move {
                     let _permit = permit;
                     if let Err(error) = serve_flow(stream, scope, block_quic, ctx).await {
+                        flow_stats.record_flow_failure();
                         tracing::warn!("sockscap: Redirector flow failed: {error}");
                     }
                 });
@@ -461,6 +515,24 @@ async fn run_capture(
     }
     tracing::info!("sockscap: Redirector bridge disabled interception with inert scope");
     Ok(())
+}
+
+/// Apply backpressure at the Unix listener instead of accepting and then
+/// refusing excess flows. Redirector can keep the connection in its socket
+/// backlog briefly while an existing browser flow releases a permit.
+async fn accept_with_capacity(
+    listener: &UnixListener,
+    limiter: Arc<tokio::sync::Semaphore>,
+) -> Result<(UnixStream, tokio::sync::OwnedSemaphorePermit), String> {
+    let permit = limiter
+        .acquire_owned()
+        .await
+        .map_err(|_| "Redirector flow limiter closed".to_string())?;
+    let (stream, _) = listener
+        .accept()
+        .await
+        .map_err(|error| format!("accept Redirector flow: {error}"))?;
+    Ok((stream, permit))
 }
 
 fn random_socket_path(label: &str) -> PathBuf {
@@ -819,7 +891,10 @@ async fn serve_udp(
         return Ok(());
     };
     let remote = resolve_required_address(first.remote_address.as_ref(), "UDP remote").await?;
-    let stats = Arc::clone(&ctx.read().await.stats);
+    let (stats, dns_map) = {
+        let context = ctx.read().await;
+        (Arc::clone(&context.stats), Arc::clone(&context.dns_map))
+    };
     if !in_scope {
         stats.record_scope_mismatch();
         tracing::warn!(
@@ -859,7 +934,15 @@ async fn serve_udp(
     let (mut reader, mut writer) = ipc.into_split();
     let mut receive_buf = vec![0u8; 65_535];
     let mut rate_limiter = DatagramRateLimiter::new();
-    let idle = tokio::time::sleep(UDP_IDLE_TIMEOUT);
+    // macOS commonly opens a fresh UDP socket for each DNS lookup. Keeping
+    // those one-shot Redirector flows for a full minute amplifies startup DNS
+    // bursts and needlessly consumes IPC/file-descriptor capacity.
+    let idle_timeout = if remote.port() == 53 {
+        DNS_UDP_IDLE_TIMEOUT
+    } else {
+        UDP_IDLE_TIMEOUT
+    };
+    let idle = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle);
     loop {
         tokio::select! {
@@ -871,7 +954,7 @@ async fn serve_udp(
                 let Some(packet) = packet.map_err(|error| format!("read Redirector UDP packet: {error}"))? else {
                     break;
                 };
-                idle.as_mut().reset(tokio::time::Instant::now() + UDP_IDLE_TIMEOUT);
+                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                 if !rate_limiter.allow() {
                     tracing::warn!(?pid, "sockscap: UDP source rate limit reached; dropping datagram");
                     continue;
@@ -891,7 +974,18 @@ async fn serve_udp(
             }
             received = udp.recv_from(&mut receive_buf) => {
                 let (size, peer) = received.map_err(|error| format!("receive relayed UDP: {error}"))?;
-                idle.as_mut().reset(tokio::time::Instant::now() + UDP_IDLE_TIMEOUT);
+                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
+                if remote.port() == 53 || peer.port() == 53 {
+                    let answers = extract_ip_answers(&receive_buf[..size]);
+                    if !answers.is_empty()
+                        && let Ok(mut map) = dns_map.lock()
+                    {
+                        for answer in &answers {
+                            map.insert(answer.ip, answer.host.clone(), Some(answer.ttl));
+                        }
+                        stats.record_dns_answers(answers.len() as u64);
+                    }
+                }
                 let response = UdpPacket {
                     data: bytes::Bytes::copy_from_slice(&receive_buf[..size]),
                     remote_address: Some(Address {
@@ -1016,5 +1110,13 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(parse_recovery_probe_targets("example.com:443").is_err());
         assert!(parse_recovery_probe_targets("  ").is_err());
+    }
+
+    #[test]
+    fn relay_capacity_reserves_descriptors_for_the_desktop_app() {
+        assert_eq!(relay_flow_capacity(256), 64);
+        assert_eq!(relay_flow_capacity(1_024), 448);
+        assert_eq!(relay_flow_capacity(4_096), MAX_ACTIVE_RELAY_FLOWS);
+        assert_eq!(relay_flow_capacity(u64::MAX), MAX_ACTIVE_RELAY_FLOWS);
     }
 }

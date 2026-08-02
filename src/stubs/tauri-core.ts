@@ -2348,6 +2348,8 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         udpDirectDatagrams: 0,
         lastQuicDropAt: null,
         scopeMismatchFlows: 0,
+        flowFailures: 0,
+        dnsAnswersLearned: 0,
         lastScopeMismatchAt: null,
       } as T;
     }

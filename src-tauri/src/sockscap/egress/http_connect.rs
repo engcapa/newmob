@@ -70,8 +70,12 @@ async fn handshake_inner(
     user: &str,
     pass: &str,
 ) -> Result<(), String> {
+    let authority = match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(ip)) => format!("[{ip}]:{port}"),
+        _ => format!("{host}:{port}"),
+    };
     let mut req = format!(
-        "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Connection: keep-alive\r\n"
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: keep-alive\r\n"
     );
     if !user.is_empty() {
         let token = B64.encode(format!("{user}:{pass}"));
@@ -137,5 +141,33 @@ mod tests {
 
         assert!(error.contains("timed out"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn ipv6_connect_authority_is_bracketed() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+
+        handshake(&mut client, "2001:db8::1", 443, "", "")
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+        assert!(request.starts_with("CONNECT [2001:db8::1]:443 HTTP/1.1\r\n"));
+        assert!(request.contains("\r\nHost: [2001:db8::1]:443\r\n"));
     }
 }
