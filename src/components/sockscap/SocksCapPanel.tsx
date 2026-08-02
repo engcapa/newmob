@@ -2,7 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowDown,
   ArrowDownLeft,
+  ArrowUp,
   ArrowUpRight,
   CheckCircle2,
   ChevronDown,
@@ -150,6 +152,21 @@ const DEFAULT_CFG: SocksCapConfig = {
   restoreOnLogin: false,
   blockQuic: true,
 };
+
+const MIN_PROFILE_PRIORITY = -2_147_483_648;
+const MAX_PROFILE_PRIORITY = 2_147_483_647;
+
+type IndexedProfile = {
+  profile: SocksCapProfile;
+  index: number;
+};
+
+/** Match the backend's ascending, stable priority order for presentation. */
+function profilesByPriority(profiles: SocksCapProfile[]): IndexedProfile[] {
+  return profiles
+    .map((profile, index) => ({ profile, index }))
+    .sort((a, b) => a.profile.priority - b.profile.priority || a.index - b.index);
+}
 
 type SessionOpt = { id: string; name: string; host: string; port: number; kind: "proxy" | "ssh"; groupPath?: string | null };
 
@@ -502,8 +519,15 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   const activeProfiles = useMemo(() => {
     if (!cfg) return [DEFAULT_PROFILE];
-    return cfg.profiles.filter((p) => p.enabled && cfg.activeProfileIds.includes(p.id));
+    return profilesByPriority(
+      cfg.profiles.filter((p) => p.enabled && cfg.activeProfileIds.includes(p.id)),
+    ).map(({ profile }) => profile);
   }, [cfg]);
+
+  const priorityOrderedProfiles = useMemo(
+    () => (cfg ? profilesByPriority(cfg.profiles) : []),
+    [cfg],
+  );
 
   // While capture is running, editing scope/upstream (mode, apps, active
   // profiles, upstream) does not take effect until Stop+Start — the backend
@@ -546,6 +570,42 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       defaultAction: updatedSelected.defaultAction,
     };
     await persistConfig(nextCfg);
+  };
+
+  const setProfilePriority = async (id: string, value: number) => {
+    if (!cfg || !Number.isFinite(value)) return;
+    const priority = Math.max(
+      MIN_PROFILE_PRIORITY,
+      Math.min(MAX_PROFILE_PRIORITY, Math.trunc(value)),
+    );
+    const profile = cfg.profiles.find((p) => p.id === id);
+    if (!profile || profile.priority === priority) return;
+    await persistConfig({
+      ...cfg,
+      profiles: cfg.profiles.map((p) => (p.id === id ? { ...p, priority } : p)),
+    });
+  };
+
+  const moveProfilePriority = async (id: string, direction: -1 | 1) => {
+    if (!cfg) return;
+    const from = priorityOrderedProfiles.findIndex(({ profile }) => profile.id === id);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= priorityOrderedProfiles.length) return;
+
+    const targetPriority = priorityOrderedProfiles[to].profile.priority;
+    const reordered = [...priorityOrderedProfiles];
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+
+    // Preserve the manually chosen values on every other profile. The moved
+    // profile adopts its new neighbour's value; persisting the display order
+    // also makes equal-priority ties deterministic (the backend is stable).
+    await persistConfig({
+      ...cfg,
+      profiles: reordered.map(({ profile }) =>
+        profile.id === id ? { ...profile, priority: targetPriority } : profile,
+      ),
+    });
   };
 
   const toggleProfileActive = async (id: string) => {
@@ -1876,7 +1936,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             </div>
 
             <div className="space-y-2 flex-1 overflow-y-auto w-full flex flex-col items-center">
-              {cfg.profiles.map((p) => {
+              {priorityOrderedProfiles.map(({ profile: p }) => {
                 const isSelected = p.id === cfg.selectedProfileId;
                 const isActive = p.enabled && cfg.activeProfileIds.includes(p.id);
                 return (
@@ -1969,9 +2029,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             </div>
 
             <div className="space-y-1.5 flex-1 overflow-y-auto">
-              {cfg.profiles.map((p) => {
+              {priorityOrderedProfiles.map(({ profile: p }, priorityIndex) => {
                 const isSelected = p.id === cfg.selectedProfileId;
                 const isActive = p.enabled && cfg.activeProfileIds.includes(p.id);
+                const priorityHint = t("sockscap.priorityHint");
                 return (
                   <div
                     key={p.id}
@@ -2040,6 +2101,63 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                       <span className="px-1.5 py-0.2 rounded bg-[var(--taomni-hover)] font-mono">
                         {p.ruleMode}
                       </span>
+                    </div>
+                    <div className="mt-1.5 flex items-center gap-1 text-[10px] text-[var(--taomni-text-muted)]">
+                      <span title={priorityHint}>{t("sockscap.priorityLabel")}</span>
+                      <button
+                        type="button"
+                        data-testid={`sockscap-profile-priority-up-${p.id}`}
+                        className="p-0.5 rounded hover:bg-[var(--taomni-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={locked || priorityIndex === 0}
+                        title={locked ? t("sockscap.lockedTooltip") : t("sockscap.raisePriorityTooltip")}
+                        aria-label={t("sockscap.raisePriorityTooltip")}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void moveProfilePriority(p.id, -1);
+                        }}
+                      >
+                        <ArrowUp className="w-3 h-3" />
+                      </button>
+                      <input
+                        type="number"
+                        step={1}
+                        min={MIN_PROFILE_PRIORITY}
+                        max={MAX_PROFILE_PRIORITY}
+                        data-testid={`sockscap-profile-priority-input-${p.id}`}
+                        className="w-12 px-1 py-0.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] text-center font-mono disabled:opacity-50 disabled:cursor-not-allowed"
+                        value={p.priority}
+                        disabled={locked}
+                        title={locked ? t("sockscap.lockedTooltip") : priorityHint}
+                        aria-label={t("sockscap.priorityInputLabel", { name: p.name })}
+                        onClick={(event) => event.stopPropagation()}
+                        onChange={(event) => {
+                          const raw = event.target.value.trim();
+                          if (!raw) return;
+                          const value = Number(raw);
+                          if (Number.isFinite(value)) {
+                            void setProfilePriority(p.id, value);
+                          }
+                        }}
+                        onBlur={(event) => {
+                          if (!event.currentTarget.value.trim()) {
+                            event.currentTarget.value = String(p.priority);
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        data-testid={`sockscap-profile-priority-down-${p.id}`}
+                        className="p-0.5 rounded hover:bg-[var(--taomni-hover)] disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={locked || priorityIndex === priorityOrderedProfiles.length - 1}
+                        title={locked ? t("sockscap.lockedTooltip") : t("sockscap.lowerPriorityTooltip")}
+                        aria-label={t("sockscap.lowerPriorityTooltip")}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          void moveProfilePriority(p.id, 1);
+                        }}
+                      >
+                        <ArrowDown className="w-3 h-3" />
+                      </button>
                     </div>
                   </div>
                 );
