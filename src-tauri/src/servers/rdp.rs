@@ -16,6 +16,7 @@
 //!   - `passwordRef`  (string) encrypted-vault reference resolved at startup
 //!   - `domain`       (string) optional NLA domain
 //!   - `viewOnly`     (bool)   ignore client keyboard/mouse input (default false)
+//!   - `displayId`    (string) optional macOS display id; empty selects primary
 //!   - `securityMode` (string) "hybrid" (NLA/CredSSP; the only production mode)
 //!
 //! ## Security
@@ -81,6 +82,8 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
     let bind = config.bind_address.clone();
 
     let view_only = config.bool_field("viewOnly", false);
+    let display_id = config.str_field("displayId", "").trim().to_string();
+    let display_id = (!display_id.is_empty()).then_some(display_id);
     let security = SecurityMode::parse(config.str_field("securityMode", "hybrid"))?;
 
     let auth = AuthConfig::from_fields(
@@ -156,6 +159,7 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
         security,
         identity,
         credentials: auth.to_credentials(),
+        display_id,
     };
     let task = spawn_server(params, ctx.cancel.clone(), ctx.log.clone()).await?;
     Ok(ServerStarted { pid: None, task })
@@ -168,6 +172,7 @@ struct ServerParams {
     security: SecurityMode,
     identity: TlsIdentityCtx,
     credentials: Credentials,
+    display_id: Option<String>,
 }
 
 /// Drive `RdpServer::run()` and bridge `cancel` → clean shutdown.
@@ -296,7 +301,7 @@ fn log_ready(addr: SocketAddr) {
 /// the input/display/build tail is repeated per branch.
 fn build_server(params: &ServerParams, log: &LogEmitter) -> anyhow::Result<RdpServer> {
     let input = RdpInput::new(log.clone(), params.view_only);
-    let display = RdpDisplay::new(log.clone())?;
+    let display = RdpDisplay::new(log.clone(), params.display_id.clone())?;
     let cliprdr: Box<dyn ironrdp::server::CliprdrServerFactory> =
         Box::new(ClipboardFactory::new(log.clone()));
 

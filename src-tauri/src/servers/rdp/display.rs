@@ -20,7 +20,7 @@ use ironrdp::server::{
 };
 use tokio::sync::mpsc;
 
-use super::capture::{Capturer, Frame, create_capturer};
+use super::capture::{Capturer, Frame, create_capturer_for_display};
 use crate::servers::engine::LogEmitter;
 
 /// Display handler handed to the IronRDP builder. Probes the capture backend to
@@ -30,14 +30,15 @@ pub(crate) struct RdpDisplay {
     /// Desktop size reported to the client. Set from the capture backend when
     /// available, else the fallback size passed in at construction.
     size: DesktopSize,
+    display_id: Option<String>,
 }
 
 impl RdpDisplay {
-    pub(crate) fn new(log: LogEmitter) -> anyhow::Result<Self> {
+    pub(crate) fn new(log: LogEmitter, display_id: Option<String>) -> anyhow::Result<Self> {
         // Probe once up front (on this caller's thread) only to learn the size;
         // the real capturer is created again inside the capture thread, which is
         // where it must live. Probing here keeps `size()` honest for the client.
-        let size = match create_capturer(&log) {
+        let size = match create_capturer_for_display(&log, display_id.as_deref()) {
             Ok(cap) => {
                 let (w, h) = cap.desktop_size();
                 match (NonZeroU16::new(w), NonZeroU16::new(h)) {
@@ -51,7 +52,11 @@ impl RdpDisplay {
             Err(e) => anyhow::bail!("screen capture unavailable: {e}"),
         };
 
-        Ok(Self { log, size })
+        Ok(Self {
+            log,
+            size,
+            display_id,
+        })
     }
 }
 
@@ -66,6 +71,7 @@ impl RdpServerDisplay for RdpDisplay {
         Ok(Box::new(DisplayUpdatesImpl::with_capture(
             self.log.clone(),
             self.size,
+            self.display_id.clone(),
         )))
     }
 }
@@ -77,7 +83,7 @@ pub(crate) struct DisplayUpdatesImpl {
 
 impl DisplayUpdatesImpl {
     /// Spawn the capture thread and return an updater draining its frames.
-    fn with_capture(log: LogEmitter, _size: DesktopSize) -> Self {
+    fn with_capture(log: LogEmitter, _size: DesktopSize, display_id: Option<String>) -> Self {
         // Bounded channel: capacity 1 keeps only the freshest frame in flight,
         // applying natural backpressure (slow client → capture thread blocks on
         // send rather than building an unbounded backlog of stale frames).
@@ -85,7 +91,7 @@ impl DisplayUpdatesImpl {
 
         std::thread::Builder::new()
             .name("rdp-capture".to_string())
-            .spawn(move || capture_loop(log, tx))
+            .spawn(move || capture_loop(log, tx, display_id))
             .ok();
 
         Self { rx }
@@ -138,8 +144,8 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
 ///   byte-identical frames with a cheap FNV-1a hash so a static desktop still
 ///   costs near-zero downstream. The IronRDP encoder diffs the frames we DO
 ///   send and only encodes changed rectangles.
-fn capture_loop(log: LogEmitter, tx: mpsc::Sender<Frame>) {
-    let mut capturer = match create_capturer(&log) {
+fn capture_loop(log: LogEmitter, tx: mpsc::Sender<Frame>, display_id: Option<String>) {
+    let mut capturer = match create_capturer_for_display(&log, display_id.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             log.line(format!("capture thread: {}", e));

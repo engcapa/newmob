@@ -231,6 +231,10 @@ winreg = "0.55"
 # Always on for macOS so Local RDP server can mirror the desktop without needing
 # the optional `screen-capture` feature used by LanChat screenshots.
 xcap = "0.9.6"
+# Explicit Screen Recording permission preflight/request used by the RDP
+# server settings probe. xcap also uses CoreGraphics internally, but keeping
+# this direct dependency makes our permission boundary intentional.
+objc2-core-graphics = { version = "0.3.2", features = ["CGWindow"] }
 # SocksCap application identity validation uses Apple's Security.framework
 # static-code API; codesign output is used only to extract the persisted
 # designated requirement/Team/signing metadata after the seal is validated.

@@ -33,6 +33,20 @@ export interface ServerStatus {
   error?: string;
 }
 
+export interface RdpCaptureDisplay {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+}
+
+export interface RdpCaptureProbe {
+  permission: "granted" | "denied" | "notRequired";
+  displays: RdpCaptureDisplay[];
+  summary: string;
+}
+
 /**
  * Static metadata for each server type. `labelKey`/`descKey` are i18n keys
  * resolved at render time via `useT()`. This array is the source of truth for
@@ -115,6 +129,7 @@ export function defaultConfig(type: ServerType): ServerConfig {
         domain: "",
         securityMode: "hybrid",
         viewOnly: false,
+        displayId: "",
       };
     default:
       return base;
@@ -159,6 +174,12 @@ export async function getServerStatus(serverType: ServerType): Promise<ServerSta
 
 export async function listServerStatuses(): Promise<ServerStatus[]> {
   return invoke<ServerStatus[]>("list_server_statuses", {});
+}
+
+export async function probeRdpCapture(
+  requestPermission = false,
+): Promise<RdpCaptureProbe> {
+  return invoke<RdpCaptureProbe>("probe_rdp_capture", { requestPermission });
 }
 
 export async function saveServerConfig(

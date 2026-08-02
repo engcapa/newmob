@@ -4,7 +4,7 @@
 //! platform:
 //! - **Linux X11**: MIT-SHM + XDamage via `x11rb` (`x11.rs`)
 //! - **Linux Wayland**: `xcap` portal fallback when X11 is unreachable (`wayland.rs`)
-//! - **macOS**: `xcap` / CGDisplay path (`mac.rs` + `xcap_backend.rs`)
+//! - **macOS**: persistent native display stream via `xcap` (`mac.rs`)
 //! - **Windows**: still a placeholder (DXGI/WGC not in this branch)
 //!
 //! A captured [`Frame`] is BGRA8888 (`PixelFormat::BgrA32`), top-down, tightly
@@ -12,6 +12,7 @@
 //! display layer can wrap it with zero pixel conversion.
 
 use crate::servers::engine::LogEmitter;
+use serde::Serialize;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod xcap_backend;
@@ -76,6 +77,25 @@ pub(crate) trait Capturer {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CaptureDisplay {
+    pub id: String,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CaptureProbe {
+    /// `granted`, `denied`, or `notRequired`.
+    pub permission: String,
+    pub displays: Vec<CaptureDisplay>,
+    pub summary: String,
+}
+
 /// Human-readable capture capability for this OS / session (used by start logs
 /// and the settings UI probe). Does not create a long-lived capturer.
 pub(crate) fn capture_capability_summary() -> String {
@@ -94,7 +114,8 @@ pub(crate) fn capture_capability_summary() -> String {
     }
     #[cfg(target_os = "macos")]
     {
-        return "macOS: xcap capture (requires Screen Recording permission)".into();
+        return "macOS: persistent native display capture (requires Screen Recording permission)"
+            .into();
     }
     #[cfg(target_os = "windows")]
     {
@@ -111,6 +132,15 @@ pub(crate) fn capture_capability_summary() -> String {
 /// reason. MUST be called on the thread that will own/drive the capturer, since
 /// backends are not `Send`.
 pub(crate) fn create_capturer(log: &LogEmitter) -> anyhow::Result<Box<dyn Capturer>> {
+    create_capturer_for_display(log, None)
+}
+
+/// Build a capturer for an explicitly selected display. The selector is used
+/// on macOS; other platforms retain their existing desktop-selection policy.
+pub(crate) fn create_capturer_for_display(
+    log: &LogEmitter,
+    display_id: Option<&str>,
+) -> anyhow::Result<Box<dyn Capturer>> {
     #[cfg(target_os = "linux")]
     {
         // Try X11 first whenever an X server is reachable. This is authoritative:
@@ -143,12 +173,31 @@ pub(crate) fn create_capturer(log: &LogEmitter) -> anyhow::Result<Box<dyn Captur
 
     #[cfg(target_os = "macos")]
     {
-        mac::try_new(log)
+        mac::try_new(log, display_id)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         let _ = log;
         anyhow::bail!("screen capture is not supported on this platform")
+    }
+}
+
+/// Return the permission/display state surfaced by the RDP Server settings.
+/// This probe never prompts. The explicit request action is implemented by
+/// [`mac::request_permission`] and run on Tauri's main thread.
+pub(crate) fn probe() -> anyhow::Result<CaptureProbe> {
+    #[cfg(target_os = "macos")]
+    {
+        return mac::probe();
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(CaptureProbe {
+            permission: "notRequired".to_string(),
+            displays: Vec::new(),
+            summary: capture_capability_summary(),
+        })
     }
 }

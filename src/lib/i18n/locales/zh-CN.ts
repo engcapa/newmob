@@ -1611,6 +1611,12 @@ export const zhCN: DeepPartial<typeof en> = {
       rdpSecNone: "无（不安全）",
       rdpPasswordStored: "已安全保存——输入新密码可替换",
       rdpPublicBind: "允许绑定所有网络接口",
+      rdpDisplay: "共享显示器",
+      rdpDisplayPrimary: "主显示器（自动）",
+      rdpDisplayPrimaryBadge: "主显示器",
+      rdpCapturePermission: "屏幕录制权限",
+      rdpGrantCapture: "授予权限……",
+      rdpRefreshDisplays: "刷新显示器",
       optional: "可选",
     },
     notes: {
@@ -1627,7 +1633,9 @@ export const zhCN: DeepPartial<typeof en> = {
       rdpCapLinux:
         "桌面采集：Linux X11/XWayland 已完整支持。纯 Wayland 使用门户截屏（需在弹窗中授权）。键鼠注入通过 enigo。",
       rdpCapMacos:
-        "桌面采集：macOS 使用系统捕获（xcap）。请在「系统设置 → 隐私与安全性 → 屏幕录制」中授权本应用；失败后可重启 Taomni 再试。",
+        "桌面采集：macOS 使用持久原生显示流。请授予屏幕录制权限，并选择要共享的显示器。",
+      rdpCaptureGranted: "权限已授予",
+      rdpCaptureRequired: "启动服务器前必须授予权限",
       rdpCapWindows:
         "桌面采集：本构建尚未实现 Windows DXGI/WGC，客户端将看到占位棋盘格画面。真实桌面共享请用 Linux/macOS，或等待 Windows 后端。",
       rdpCapUnknown:

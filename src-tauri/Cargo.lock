@@ -10250,6 +10250,7 @@ dependencies = [
  "mdns-sd",
  "native-tls",
  "nokhwa",
+ "objc2-core-graphics",
  "openh264",
  "oracle",
  "pbkdf2",

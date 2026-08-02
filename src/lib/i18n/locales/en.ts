@@ -1618,6 +1618,12 @@ const dict = {
       rdpSecNone: "None (insecure)",
       rdpPasswordStored: "Stored securely — type to replace",
       rdpPublicBind: "Allow binding all interfaces",
+      rdpDisplay: "Shared display",
+      rdpDisplayPrimary: "Primary display (automatic)",
+      rdpDisplayPrimaryBadge: "primary",
+      rdpCapturePermission: "Screen Recording",
+      rdpGrantCapture: "Grant permission…",
+      rdpRefreshDisplays: "Refresh displays",
       optional: "optional",
     },
     notes: {
@@ -1639,7 +1645,9 @@ const dict = {
       rdpCapLinux:
         "Desktop capture: Linux X11/XWayland is fully supported. On pure Wayland, capture uses the portal (accept the ScreenCast prompt). Input works via enigo.",
       rdpCapMacos:
-        "Desktop capture: macOS uses system capture (xcap). Grant Screen Recording permission under System Settings → Privacy & Security, then restart Taomni if capture fails.",
+        "Desktop capture: macOS uses a persistent native display stream. Grant Screen Recording permission and select the display to share.",
+      rdpCaptureGranted: "Permission granted",
+      rdpCaptureRequired: "Permission required before the server can start",
       rdpCapWindows:
         "Desktop capture: Windows DXGI/WGC is not implemented in this build — clients see a placeholder checkerboard. Use Linux/macOS for real desktop sharing, or wait for the Windows backend.",
       rdpCapUnknown:
