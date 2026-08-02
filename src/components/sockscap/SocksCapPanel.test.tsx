@@ -226,6 +226,65 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     });
   });
 
+  it("sorts profiles by priority and lets the user raise, lower, or edit it", async () => {
+    const base = defaultTestCfg.profiles[0];
+    currentCfg = {
+      ...defaultTestCfg,
+      activeProfileIds: ["default", "middle", "highest"],
+      profiles: [
+        { ...base, id: "default", name: "Default", priority: 10 },
+        { ...base, id: "middle", name: "Middle", priority: 20 },
+        { ...base, id: "highest", name: "Highest", priority: 0 },
+      ],
+    };
+    render(<SocksCapPanel />);
+
+    await screen.findByTestId("sockscap-profile-priority-input-default");
+    const listedIds = () =>
+      Array.from(
+        screen
+          .getByTestId("sockscap-profile-list")
+          .querySelectorAll<HTMLElement>("[data-testid^='sockscap-profile-item-']"),
+      ).map((element) => element.dataset.testid);
+
+    expect(listedIds()).toEqual([
+      "sockscap-profile-item-highest",
+      "sockscap-profile-item-default",
+      "sockscap-profile-item-middle",
+    ]);
+    expect(screen.getByTestId("sockscap-profile-priority-input-default")).toHaveAttribute(
+      "title",
+      expect.stringContaining("Smaller values have higher priority"),
+    );
+
+    const raiseDefault = screen.getByTestId("sockscap-profile-priority-up-default");
+    expect(raiseDefault).not.toBeDisabled();
+    fireEvent.click(raiseDefault);
+    await waitFor(() => {
+      expect(currentCfg.profiles.find((p) => p.id === "default")?.priority).toBe(0);
+      expect(listedIds().slice(0, 2)).toEqual([
+        "sockscap-profile-item-default",
+        "sockscap-profile-item-highest",
+      ]);
+    });
+
+    fireEvent.change(screen.getByTestId("sockscap-profile-priority-input-middle"), {
+      target: { value: "-5" },
+    });
+    await waitFor(() => {
+      expect(currentCfg.profiles.find((p) => p.id === "middle")?.priority).toBe(-5);
+      expect(listedIds()[0]).toBe("sockscap-profile-item-middle");
+    });
+
+    fireEvent.click(screen.getByTestId("sockscap-profile-priority-down-middle"));
+    await waitFor(() => {
+      expect(listedIds().slice(0, 2)).toEqual([
+        "sockscap-profile-item-default",
+        "sockscap-profile-item-middle",
+      ]);
+    });
+  });
+
   it("offers only SSH and Proxy sessions as upstream sources", async () => {
     const mkSession = (
       id: string,
@@ -399,6 +458,7 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     expect(screen.getByTestId("sockscap-mode-global")).toBeDisabled();
     expect(screen.getByTestId("sockscap-upstream-source")).toBeDisabled();
     expect(screen.getByTestId("sockscap-profile-checkbox-default")).toBeDisabled();
+    expect(screen.getByTestId("sockscap-profile-priority-input-default")).toBeDisabled();
     // …but adding a new profile is still allowed.
     expect(screen.getByTestId("sockscap-add-profile")).not.toBeDisabled();
   });
