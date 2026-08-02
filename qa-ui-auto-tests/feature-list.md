@@ -4556,6 +4556,13 @@ controls:
   - id: panel
     selector: '[data-testid="sockscap-panel"]'
     kind: display
+  - id: locked-banner
+    selector: '[data-testid="sockscap-locked-banner"]'
+    kind: display
+    optional: true       # shown only while capture is preparing/running/stopping
+  - id: add-profile
+    selector: '[data-testid="sockscap-add-profile"]'
+    kind: interactive
   - id: start
     selector: '[data-testid="sockscap-start"]'
     kind: interactive
@@ -4630,6 +4637,18 @@ controls:
     selector: '[data-testid="sockscap-refresh-gfw"]'
     kind: interactive
     optional: true       # shown only while the GFWList rule mode is selected
+  - id: import-gfw
+    selector: '[data-testid="sockscap-import-gfw"]'
+    kind: interactive
+    optional: true       # shown inside the collapsible GFWList section
+  - id: rules-editor
+    selector: '[data-testid="sockscap-rules-editor"]'
+    kind: display
+    optional: true       # shown inside the collapsible rules section
+  - id: block-quic
+    selector: '[data-testid="sockscap-block-quic"]'
+    kind: interactive
+    optional: true       # shown inside the collapsible GFWList section
   - id: test-host
     selector: '[data-testid="sockscap-test-host"]'
     kind: interactive

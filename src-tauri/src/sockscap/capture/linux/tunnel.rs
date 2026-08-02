@@ -144,6 +144,46 @@ impl RedirectPlan {
         Ok(plan)
     }
 
+    pub fn new_mixed_routes(
+        global_relay_port: u16,
+        redirect_ipv6: bool,
+        bypass_cidrs: &[String],
+        bypass_cgroup: Option<CgroupV2Match>,
+        app_routes: &[(CgroupV2Match, u16)],
+        block_quic: bool,
+    ) -> Result<Self, String> {
+        if global_relay_port == 0 {
+            return Err("Linux relay port must be non-zero".into());
+        }
+        if app_routes.is_empty() {
+            return Err("mixed Linux capture requires at least one application route".into());
+        }
+        let capture_cgroups = app_routes
+            .iter()
+            .map(|(cgroup, _)| cgroup.clone())
+            .collect();
+        let capture_relay_ports = app_routes
+            .iter()
+            .map(|(_, relay_port)| *relay_port)
+            .collect();
+        let bypass_cidrs = bypass_cidrs
+            .iter()
+            .map(|cidr| ValidatedCidr::parse(cidr))
+            .collect::<Result<Vec<_>, _>>()?;
+        let plan = Self {
+            mode: ScopeMode::Global,
+            relay_port: global_relay_port,
+            redirect_ipv6,
+            bypass_cidrs,
+            bypass_cgroup,
+            capture_cgroups,
+            capture_relay_ports,
+            block_quic,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.capture_cgroups.len() != self.capture_relay_ports.len() {
             return Err("Linux app capture cgroup/relay route count mismatch".into());
@@ -181,6 +221,15 @@ impl RedirectPlan {
                     .as_ref()
                     .expect("validated global cgroup");
                 script.push_str(&format!("    {} return\n", cgroup.nft_expression()));
+                for (cgroup, relay_port) in
+                    self.capture_cgroups.iter().zip(&self.capture_relay_ports)
+                {
+                    self.render_redirect_rule(
+                        &mut script,
+                        &format!("{} ", cgroup.nft_expression()),
+                        *relay_port,
+                    );
+                }
                 self.render_redirect_rule(&mut script, "", self.relay_port);
             }
             ScopeMode::Apps => {
@@ -497,6 +546,49 @@ mod tests {
     }
 
     #[test]
+    fn mixed_routes_apps_in_priority_order_before_global_fallback() {
+        let bypass = CgroupV2Match::from_relative_path("taomni-sockscap-42/bypass").unwrap();
+        let routes = [
+            (
+                CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-profile-0").unwrap(),
+                15000,
+            ),
+            (
+                CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-profile-1").unwrap(),
+                16000,
+            ),
+        ];
+        let plan =
+            RedirectPlan::new_mixed_routes(17000, true, &[], Some(bypass), &routes, false).unwrap();
+        let script = plan.render_nft_script();
+        let bypass_rule = "socket cgroupv2 level 2 \"taomni-sockscap-42/bypass\" return";
+        let first_app = "socket cgroupv2 level 2 \"taomni-sockscap-42/capture-profile-0\" meta l4proto tcp redirect to :15000";
+        let second_app = "socket cgroupv2 level 2 \"taomni-sockscap-42/capture-profile-1\" meta l4proto tcp redirect to :16000";
+        let global = "    meta l4proto tcp redirect to :17000";
+
+        assert!(script.find(bypass_rule).unwrap() < script.find(first_app).unwrap());
+        assert!(script.find(first_app).unwrap() < script.find(second_app).unwrap());
+        assert!(script.find(second_app).unwrap() < script.find(global).unwrap());
+    }
+
+    #[test]
+    fn mixed_routes_require_an_application_route() {
+        let bypass = CgroupV2Match::from_relative_path("taomni-sockscap-42/bypass").unwrap();
+        assert!(
+            RedirectPlan::new_mixed_routes(17000, true, &[], Some(bypass.clone()), &[], false)
+                .is_err()
+        );
+        let route = CgroupV2Match::from_relative_path(
+            "taomni-sockscap-42/capture-profile-0",
+        )
+        .unwrap();
+        assert!(
+            RedirectPlan::new_mixed_routes(0, true, &[], Some(bypass), &[(route, 15000)], false)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn recognizes_only_marked_tables_as_managed() {
         assert!(managed_table_output(
             b"table inet taomni_sockscap {\n  comment \"taomni-sockscap-managed-v1\"\n}"
@@ -522,9 +614,16 @@ mod tests {
     fn no_quic_block_chain_when_block_quic_is_off() {
         // Regression guard: block_quic=false must render exactly as before.
         let bypass = CgroupV2Match::from_relative_path("taomni-sockscap-42/bypass").unwrap();
-        let plan =
-            RedirectPlan::new(ScopeMode::Global, 18443, true, &[], Some(bypass), &[], false)
-                .unwrap();
+        let plan = RedirectPlan::new(
+            ScopeMode::Global,
+            18443,
+            true,
+            &[],
+            Some(bypass),
+            &[],
+            false,
+        )
+        .unwrap();
         let script = plan.render_nft_script();
         assert!(!script.contains("quic_block"));
         assert!(!script.contains("udp dport 443"));
@@ -549,11 +648,13 @@ mod tests {
         assert!(script.contains("udp dport 443 drop"));
         // The drop must come after the bypass-cgroup return, or the relay's own
         // (and xray's) UDP egress would be dropped.
-        let bypass_return =
-            "socket cgroupv2 level 2 \"taomni-sockscap-42/bypass\" return";
+        let bypass_return = "socket cgroupv2 level 2 \"taomni-sockscap-42/bypass\" return";
         let block_body = &script[script.find("chain quic_block").unwrap()..];
         assert!(block_body.contains(bypass_return));
-        assert!(block_body.find(bypass_return).unwrap() < block_body.find("udp dport 443 drop").unwrap());
+        assert!(
+            block_body.find(bypass_return).unwrap()
+                < block_body.find("udp dport 443 drop").unwrap()
+        );
         // Loopback + bypass CIDR returns are present in the block chain too.
         assert!(block_body.contains("ip daddr 127.0.0.0/8 return"));
         assert!(block_body.contains("ip daddr 10.0.0.0/8 return"));

@@ -227,8 +227,10 @@ class CaptureSession:
     against it) are identical:
 
         /sys/fs/cgroup/taomni-sockscap-<pid>/
+            bypass/             <- harness + relay sockets in mixed/global mode
             capture-profile-0/   <- curl for profile 0 goes here
             capture-profile-1/   <- (multiprofile)
+            global-test/         <- unmatched curl used to exercise catch-all
     """
 
     def __init__(self, sudo, session_pid=None):
@@ -239,6 +241,10 @@ class CaptureSession:
         )
         self.profile_dirs = []      # index -> absolute cgroup dir
         self.profile_matches = []   # index -> (relative_path, level)
+        self.bypass_dir = None
+        self.bypass_match = None
+        self.global_test_dir = None
+        self.original_dir = None
         self._nft_installed = False
 
     # --- cgroup ---------------------------------------------------------
@@ -247,7 +253,7 @@ class CaptureSession:
         level = len([c for c in rel.split("/") if c])
         return rel, level
 
-    def create_cgroups(self, profile_count):
+    def create_cgroups(self, profile_count, mixed=False):
         if os.path.exists(self.root):
             raise RuntimeError(
                 f"stale cgroup session at {self.root}; run recover first"
@@ -258,14 +264,33 @@ class CaptureSession:
             self.sudo.check(["mkdir", "-p", group_dir])
             self.profile_dirs.append(group_dir)
             self.profile_matches.append(self._relative_match(group_dir))
+        if mixed:
+            self.bypass_dir = os.path.join(self.root, "bypass")
+            self.global_test_dir = os.path.join(self.root, "global-test")
+            self.sudo.check(["mkdir", "-p", self.bypass_dir])
+            self.sudo.check(["mkdir", "-p", self.global_test_dir])
+            self.bypass_match = self._relative_match(self.bypass_dir)
+            with open(f"/proc/{self.session_pid}/cgroup", encoding="utf-8") as handle:
+                unified = next(
+                    (line.split(":", 2)[2].strip() for line in handle if line.startswith("0::")),
+                    None,
+                )
+            if unified is None:
+                raise RuntimeError("cannot resolve the harness cgroup v2 path")
+            self.original_dir = os.path.join(ENV.CGROUP_ROOT, unified.lstrip("/"))
+            self.sudo.check(
+                ["tee", os.path.join(self.bypass_dir, "cgroup.procs")],
+                input_text=f"{self.session_pid}\n",
+            )
 
     # --- nft ------------------------------------------------------------
-    def _render_nft(self, routes, bypass_cidrs):
+    def _render_nft(self, routes, bypass_cidrs, global_relay_port=None):
         """Render the same inet table the Rust `RedirectPlan` produces.
 
-        `routes` is a list of (profile_index, relay_port). App mode only: each
-        capture cgroup redirects to its relay port. IPv4-only (`ip protocol
-        tcp`) keeps the test deterministic; curl is pinned to -4.
+        `routes` is a list of (profile_index, relay_port). In mixed mode the
+        app routes are followed by `global_relay_port` as the catch-all.
+        IPv4-only (`ip protocol tcp`) keeps the test deterministic; curl is
+        pinned to -4.
         """
         lines = [f"table {ENV.NFT_FAMILY} {ENV.NFT_TABLE} {{",
                  "  chain output {",
@@ -275,17 +300,27 @@ class CaptureSession:
         for cidr in bypass_cidrs:
             fam = "ip6" if ":" in cidr else "ip"
             lines.append(f"    {fam} daddr {cidr} return")
+        if global_relay_port is not None:
+            if self.bypass_match is None:
+                raise RuntimeError("mixed capture requires a bypass cgroup")
+            rel, level = self.bypass_match
+            lines.append(f'    socket cgroupv2 level {level} "{rel}" return')
         for index, relay_port in routes:
             rel, level = self.profile_matches[index]
             lines.append(
                 f'    socket cgroupv2 level {level} "{rel}" ip protocol tcp '
                 f'redirect to :{relay_port} comment "{ENV.OWNERSHIP_MARKER}"'
             )
+        if global_relay_port is not None:
+            lines.append(
+                f'    ip protocol tcp redirect to :{global_relay_port} '
+                f'comment "{ENV.OWNERSHIP_MARKER}"'
+            )
         lines += ["  }", "}", ""]
         return "\n".join(lines)
 
-    def install_nft(self, routes, bypass_cidrs):
-        script = self._render_nft(routes, bypass_cidrs)
+    def install_nft(self, routes, bypass_cidrs, global_relay_port=None):
+        script = self._render_nft(routes, bypass_cidrs, global_relay_port)
         self.sudo.check([ENV.NFT, "-f", "-"], input_text=script)
         self._nft_installed = True
         return script
@@ -305,6 +340,15 @@ class CaptureSession:
         shell = f'echo $$ > "{procs}" && exec {quoted}'
         return self.sudo.run(["sh", "-c", shell], timeout=timeout)
 
+    def run_global(self, argv, timeout=25):
+        """Run `argv` outside app and bypass cgroups to hit the catch-all."""
+        if self.global_test_dir is None:
+            raise RuntimeError("global test cgroup is unavailable outside mixed mode")
+        procs = os.path.join(self.global_test_dir, "cgroup.procs")
+        quoted = " ".join("'" + a.replace("'", "'\\''") + "'" for a in argv)
+        shell = f'echo $$ > "{procs}" && exec {quoted}'
+        return self.sudo.run(["sh", "-c", shell], timeout=timeout)
+
     # --- teardown -------------------------------------------------------
     def cleanup(self):
         """Rules first, then cgroups — the safe order the Rust backend uses."""
@@ -317,8 +361,16 @@ class CaptureSession:
                 errors.append(f"nft delete: {err.strip()}")
             else:
                 self._nft_installed = False
+        if self.bypass_dir is not None and self.original_dir is not None:
+            rc, _o, err = self.sudo.run(
+                ["tee", os.path.join(self.original_dir, "cgroup.procs")],
+                input_text=f"{self.session_pid}\n",
+            )
+            if rc != 0:
+                errors.append(f"restore harness cgroup: {err.strip()}")
         # Remove leaf profile dirs then the session root (must be empty).
-        for group_dir in reversed(self.profile_dirs):
+        extra_dirs = [d for d in [self.global_test_dir, self.bypass_dir] if d]
+        for group_dir in reversed(self.profile_dirs + extra_dirs):
             rc, _o, err = self.sudo.run(["rmdir", group_dir])
             if rc != 0 and "No such file" not in err:
                 errors.append(f"rmdir {group_dir}: {err.strip()}")
@@ -327,6 +379,10 @@ class CaptureSession:
             errors.append(f"rmdir {self.root}: {err.strip()}")
         self.profile_dirs = []
         self.profile_matches = []
+        self.bypass_dir = None
+        self.bypass_match = None
+        self.global_test_dir = None
+        self.original_dir = None
         return errors
 
     def residue(self):
@@ -415,10 +471,11 @@ class Relay:
     routed connection appends to `audit` for the test to assert against.
     """
 
-    def __init__(self, http=None, socks5=None):
+    def __init__(self, http=None, socks5=None, rule_mode="gfwList"):
         self.http = http        # (host, port) or None
         self.socks5 = socks5    # (host, port) or None
         self.upstream_mode = "HTTP"
+        self.rule_mode = rule_mode
         self.audit = []
         self.port = pick_free_port()
         self._stop = threading.Event()
@@ -478,7 +535,7 @@ class Relay:
             mode = self.upstream_mode
             target_host = sni if sni else orig_ip
 
-            if is_gfw:
+            if self.rule_mode == "proxyAll" or is_gfw:
                 decision = "PROXY"
                 upstream = self._connect_upstream(mode, target_host, orig_port)
             else:
@@ -527,6 +584,5 @@ class Relay:
                 break
             resp += c
         return up
-
 
 

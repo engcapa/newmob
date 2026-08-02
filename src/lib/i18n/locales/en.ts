@@ -1187,7 +1187,7 @@ const dict = {
       "Scope or upstream changes won't apply until capture restarts.",
     restartNow: "Restart capture",
     lockedHint:
-      "Running — scope, upstream, and profile structure are locked. Only rules hot-reload. Stop capture to edit them (adding a new profile is still allowed).",
+      "Running — profiles, routing rules, upstreams, and shared settings are locked. Stop capture to edit.",
     lockedTooltip: "Locked while running — stop capture to edit.",
     testing: "Testing…",
     probing: "Probing…",

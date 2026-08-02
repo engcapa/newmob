@@ -57,7 +57,7 @@ describe("requiresRestart", () => {
     expect(requiresRestart(a, b)).toBe(false);
   });
 
-  it("is false for hot-reloadable rule changes (ruleMode/userRules/defaultAction)", () => {
+  it("keeps routing-policy changes outside the topology-only signature", () => {
     const a = cfg([profile()]);
     const b = cfg([
       profile({

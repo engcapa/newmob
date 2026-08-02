@@ -612,4 +612,47 @@ mod tests {
         assert_eq!(trace.decision, Decision::Proxy);
         assert_eq!(trace.profile_id.as_deref(), Some("default"));
     }
+
+    #[test]
+    fn linux_mixed_relays_preserve_app_priority_and_global_fallback() {
+        let mut config = SocksCapConfig::default();
+        config.profiles[0].id = "agy".into();
+        config.profiles[0].name = "agy".into();
+        config.profiles[0].mode = ScopeMode::Apps;
+        config.profiles[0].apps = vec![AppSelector {
+            path: "/opt/agy/agy".into(),
+            bundle_id: String::new(),
+            name: "agy".into(),
+            macos_identity: None,
+        }];
+        config.profiles[0].rule_mode = RuleMode::ProxyAll;
+
+        let mut global = config.profiles[0].clone();
+        global.id = "global".into();
+        global.name = "Global GFWList".into();
+        global.priority = 1;
+        global.mode = ScopeMode::Global;
+        global.apps.clear();
+        global.rule_mode = RuleMode::GfwList;
+        config.profiles.push(global);
+        config.active_profile_ids = vec!["agy".into(), "global".into()];
+
+        let rules = CompiledRules::compile("||wikipedia.org\n", "test").unwrap();
+        let engine = PolicyEngine::from_config(&config, Some(&rules));
+        let input = PolicyInput {
+            host: Some("en.wikipedia.org".into()),
+            ip: None,
+            port: 443,
+            process_path: None,
+            pid: None,
+        };
+
+        let app = engine.decide_with_profile_hint(&input, Some("agy"));
+        assert_eq!(app.decision, Decision::Proxy);
+        assert_eq!(app.profile_id.as_deref(), Some("agy"));
+
+        let fallback = engine.decide_with_profile_hint(&input, None);
+        assert_eq!(fallback.decision, Decision::Proxy);
+        assert_eq!(fallback.profile_id.as_deref(), Some("global"));
+    }
 }

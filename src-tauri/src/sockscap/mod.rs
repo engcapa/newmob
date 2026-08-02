@@ -20,7 +20,6 @@ pub mod ingress;
 pub mod listener_pid;
 pub mod orchestrator;
 pub mod paths;
-pub mod tun_detect;
 pub mod policy;
 pub mod process;
 pub mod recovery;
@@ -28,6 +27,7 @@ pub mod redirector;
 pub mod relay;
 pub mod rules;
 pub mod stats;
+pub mod tun_detect;
 
 pub use config::{Decision, RuleMode, SocksCapConfig};
 pub use orchestrator::{Orchestrator, SocksCapStatus};
@@ -265,13 +265,19 @@ pub async fn sockscap_set_config(
 ) -> Result<(), String> {
     config.validate()?;
     let path = config_path(&app)?;
-    config.save(&path)?;
     let mut orch = state.sockscap.orch.write().await;
-    orch.apply_config(config.clone());
-    // Hot-reload into running relay without restarting capture.
-    let rules = orch.rules().map(|r| r.clone());
-    orch.hot_reload_policy(config, rules).await;
+    ensure_configuration_unlocked(&orch)?;
+    config.save(&path)?;
+    orch.apply_config(config);
     Ok(())
+}
+
+fn ensure_configuration_unlocked(orch: &Orchestrator) -> Result<(), String> {
+    if orch.configuration_locked() {
+        Err("SocksCap configuration is locked while capture is running; stop capture before making changes".into())
+    } else {
+        Ok(())
+    }
 }
 
 /* ---------------------------- rules ------------------------------------- */
@@ -331,6 +337,10 @@ pub async fn sockscap_refresh_gfwlist(
     state: State<'_, AppState>,
     url: Option<String>,
 ) -> Result<GfwListStatus, String> {
+    // Hold the write lock for the complete mutation so Start cannot snapshot
+    // the old rules while a refresh is being committed.
+    let mut orch = state.sockscap.orch.write().await;
+    ensure_configuration_unlocked(&orch)?;
     let cfg_path = config_path(&app)?;
     let mut cfg = SocksCapConfig::load(&cfg_path);
     let fetch_url = url
@@ -346,10 +356,8 @@ pub async fn sockscap_refresh_gfwlist(
         Ok(compiled) => {
             let meta = compiled.meta.clone();
             cfg.save(&cfg_path)?;
-            let mut orch = state.sockscap.orch.write().await;
-            orch.apply_config(cfg.clone());
-            orch.set_rules(compiled.clone());
-            orch.hot_reload_policy(cfg, Some(compiled)).await;
+            orch.apply_config(cfg);
+            orch.set_rules(compiled);
             Ok(GfwListStatus {
                 loaded: true,
                 rule_count: meta.rule_count,
@@ -361,7 +369,6 @@ pub async fn sockscap_refresh_gfwlist(
         }
         Err(e) => {
             // Keep previous rules if any; surface error for UI.
-            let orch = state.sockscap.orch.read().await;
             if let Some(meta) = orch.gfwlist_meta() {
                 Ok(GfwListStatus {
                     loaded: true,
@@ -391,14 +398,12 @@ pub async fn sockscap_import_rules(
     state: State<'_, AppState>,
     path: String,
 ) -> Result<GfwListStatus, String> {
+    let mut orch = state.sockscap.orch.write().await;
+    ensure_configuration_unlocked(&orch)?;
     let dir = rules_dir(&app)?;
     let compiled = rules::source::import_from_path(std::path::Path::new(&path), &dir)?;
     let meta = compiled.meta.clone();
-    let mut orch = state.sockscap.orch.write().await;
-    orch.set_rules(compiled.clone());
-    if let Some(cfg) = orch.config().cloned() {
-        orch.hot_reload_policy(cfg, Some(compiled)).await;
-    }
+    orch.set_rules(compiled);
     Ok(GfwListStatus {
         loaded: true,
         rule_count: meta.rule_count,
@@ -585,12 +590,7 @@ pub async fn sockscap_start(
         }
     }
 
-    let activation_lock = ModuleLock::try_acquire_for_app(
-        &app,
-        "sockscap",
-        "global",
-        "SocksCap",
-    )?;
+    let activation_lock = ModuleLock::try_acquire_for_app(&app, "sockscap", "global", "SocksCap")?;
 
     let dir = rules_dir(&app)?;
     {
@@ -605,20 +605,15 @@ pub async fn sockscap_start(
         let mut orch = state.sockscap.orch.write().await;
         if orch.rules().is_none() {
             if let Some(c) = rules::source::load_cached(&dir) {
-                gfw_start_note = format!(
-                    "using cached GFWList ({} rules)",
-                    c.meta.rule_count
-                );
+                gfw_start_note = format!("using cached GFWList ({} rules)", c.meta.rule_count);
                 orch.set_rules(c);
             } else if !cfg.gfwlist.url.trim().is_empty() {
                 let url = cfg.gfwlist.url.clone();
                 drop(orch);
                 match rules::source::refresh_from_url(&url, &dir).await {
                     Ok(compiled) => {
-                        gfw_start_note = format!(
-                            "downloaded GFWList ({} rules)",
-                            compiled.meta.rule_count
-                        );
+                        gfw_start_note =
+                            format!("downloaded GFWList ({} rules)", compiled.meta.rule_count);
                         state.sockscap.orch.write().await.set_rules(compiled);
                     }
                     Err(e) => {
@@ -887,7 +882,10 @@ async fn ensure_core_port(
     match mgr.ensure(profile_key, &spec).await {
         Ok(local_port) => Some(local_port),
         Err(e) => {
-            tracing::warn!("sockscap: xray core for '{profile_key}' ({}) failed: {e}", kind.as_tag());
+            tracing::warn!(
+                "sockscap: xray core for '{profile_key}' ({}) failed: {e}",
+                kind.as_tag()
+            );
             None
         }
     }
@@ -914,9 +912,7 @@ async fn build_unix_relay_context(
     if !cfg.upstream.session_id.is_empty() {
         let session = {
             let db = state.db.lock().ok();
-            db.and_then(|db| {
-                crate::session::db::get_session(&db, &cfg.upstream.session_id).ok()
-            })
+            db.and_then(|db| crate::session::db::get_session(&db, &cfg.upstream.session_id).ok())
         };
         if let Some(session) = session {
             upstream_host = session.host.clone();
@@ -986,9 +982,7 @@ async fn build_unix_relay_context(
                 if let Some(session) = session {
                     host = session.host.clone();
                     port = session.port;
-                    if let Some(username) =
-                        session.username.clone().filter(|u| !u.is_empty())
-                    {
+                    if let Some(username) = session.username.clone().filter(|u| !u.is_empty()) {
                         user = username;
                     }
                     if let Some(pass) = session_proxy_password(&state.vault, &session) {
@@ -1119,14 +1113,12 @@ async fn start_linux_capture(
         .map(|meta| format!(", gfw={}", meta.rule_count))
         .unwrap_or_default();
     let active_profiles = cfg.active_profiles();
-    let app_watch_note = if active_profiles
+    let application_count = active_profiles
         .iter()
-        .all(|profile| matches!(profile.mode, config::ScopeMode::Apps))
-    {
-        let application_count = active_profiles
-            .iter()
-            .map(|profile| profile.apps.len())
-            .sum::<usize>();
+        .take_while(|profile| matches!(profile.mode, config::ScopeMode::Apps))
+        .map(|profile| profile.apps.len())
+        .sum::<usize>();
+    let app_watch_note = if application_count > 0 {
         format!(", watching {application_count} application selector(s)")
     } else {
         String::new()
@@ -1259,8 +1251,7 @@ async fn start_windows_capture(
     }
 
     // 2) Resolve upstream credentials (manual fields; vault password_ref).
-    let (mut up_host, mut up_port, mut up_user, mut up_pass) =
-        relay::upstream_from_config(cfg);
+    let (mut up_host, mut up_port, mut up_user, mut up_pass) = relay::upstream_from_config(cfg);
     if !cfg.upstream.password_ref.is_empty() {
         if let Ok(Some(p)) = state.vault.resolve(&cfg.upstream.password_ref) {
             up_pass = (*p).clone();
@@ -1273,9 +1264,7 @@ async fn start_windows_capture(
     if !cfg.upstream.session_id.is_empty() {
         let sess = {
             let db = state.db.lock().ok();
-            db.and_then(|db| {
-                crate::session::db::get_session(&db, &cfg.upstream.session_id).ok()
-            })
+            db.and_then(|db| crate::session::db::get_session(&db, &cfg.upstream.session_id).ok())
         };
         if let Some(sess) = sess {
             up_host = sess.host.clone();
@@ -1343,7 +1332,9 @@ async fn start_windows_capture(
                 session_ssh_auth(&state.vault, sess)
             } else if !ppass.is_empty() {
                 SshAuth::Password(ppass.clone())
-            } else if !p.upstream.password_ref.is_empty() && p.upstream.password_ref.starts_with("key:") {
+            } else if !p.upstream.password_ref.is_empty()
+                && p.upstream.password_ref.starts_with("key:")
+            {
                 SshAuth::PrivateKey(p.upstream.password_ref.clone())
             } else {
                 SshAuth::Agent
@@ -1404,8 +1395,7 @@ async fn start_windows_capture(
     // Global native loopback proxy → remember its port for PID-bypass below.
     if matches!(
         cfg.upstream.kind,
-        crate::sockscap::config::UpstreamKind::Http
-            | crate::sockscap::config::UpstreamKind::Socks5
+        crate::sockscap::config::UpstreamKind::Http | crate::sockscap::config::UpstreamKind::Socks5
     ) && up_port != 0
         && listener_pid::is_loopback(&up_host)
         && !loopback_proxy_ports.contains(&up_port)
@@ -1414,8 +1404,10 @@ async fn start_windows_capture(
     }
 
     // Optional SSH pool for capture-path PROXY via direct-tcpip.
-    let ssh_pool = if matches!(cfg.upstream.kind, crate::sockscap::config::UpstreamKind::Ssh)
-    {
+    let ssh_pool = if matches!(
+        cfg.upstream.kind,
+        crate::sockscap::config::UpstreamKind::Ssh
+    ) {
         use crate::sockscap::egress::ssh_pool::SshPool;
         use crate::terminal::ssh::SshAuth;
         let auth = if let Some(sess) = &up_session {
@@ -1547,9 +1539,7 @@ async fn start_windows_capture(
             for pid in listener_pid::resolve_listener_pids(*port) {
                 if !bypass_pids.contains(&pid) {
                     bypass_pids.push(pid);
-                    tracing::info!(
-                        "sockscap: bypassing local proxy pid {pid} on 127.0.0.1:{port}"
-                    );
+                    tracing::info!("sockscap: bypassing local proxy pid {pid} on 127.0.0.1:{port}");
                 }
                 if let Some(path) = procs
                     .iter()
@@ -1688,7 +1678,9 @@ fn spawn_xray_bypass_updater(
             })
             .await;
             match sent {
-                Ok(Ok(_)) => tracing::info!("sockscap: pushed refreshed bypass list after xray respawn"),
+                Ok(Ok(_)) => {
+                    tracing::info!("sockscap: pushed refreshed bypass list after xray respawn")
+                }
                 Ok(Err(e)) => tracing::warn!("sockscap: bypass refresh failed: {e}"),
                 Err(e) => tracing::warn!("sockscap: bypass refresh task failed: {e}"),
             }
@@ -1726,10 +1718,7 @@ pub async fn sockscap_stop(
 /// macOS teardown must happen while the async runtime and the stored sudo
 /// credential are still available. If teardown fails, the exit command returns
 /// an error and the UI keeps the process alive so the user can retry or Recover.
-pub async fn prepare_for_exit(
-    app: &AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn prepare_for_exit(app: &AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let owns_capture = state.sockscap.has_activation_lock();
     let recovery_required = matches!(
         state.sockscap.orch.read().await.status().phase,
@@ -1936,12 +1925,8 @@ pub async fn sockscap_recover(
     sudo_password: Option<String>,
 ) -> Result<(), String> {
     if !state.sockscap.has_activation_lock() {
-        let lock = ModuleLock::try_acquire_for_app(
-            &app,
-            "sockscap",
-            "global",
-            "SocksCap recovery",
-        )?;
+        let lock =
+            ModuleLock::try_acquire_for_app(&app, "sockscap", "global", "SocksCap recovery")?;
         state.sockscap.install_activation_lock(lock);
     }
 
@@ -2114,10 +2099,7 @@ async fn full_teardown(
         let mut orch = state.sockscap.orch.write().await;
         orch.finish_stop();
         if !errors.is_empty() {
-            orch.set_recovery_required(
-                &capture::capabilities().capture_backend,
-                errors.join("; "),
-            );
+            orch.set_recovery_required(&capture::capabilities().capture_backend, errors.join("; "));
         }
     }
     if errors.is_empty() {
@@ -2212,7 +2194,8 @@ pub async fn sockscap_test_upstream(
 
     match kind.as_str() {
         "http" => {
-            egress::http_connect::dial(&host, port, &target_host, target_port, &user, &pass).await?;
+            egress::http_connect::dial(&host, port, &target_host, target_port, &user, &pass)
+                .await?;
             Ok(format!(
                 "HTTP CONNECT via {}:{} to {}:{} ok",
                 host, port, target_host, target_port
@@ -2238,9 +2221,7 @@ pub async fn sockscap_test_upstream(
                 SshAuth::Password(pass)
             };
             let pool = SshPool::connect(&host, port, &user, auth).await?;
-            let stream = pool
-                .dial(&target_host, target_port, "127.0.0.1", 0)
-                .await?;
+            let stream = pool.dial(&target_host, target_port, "127.0.0.1", 0).await?;
             // Drop after successful open.
             drop(stream);
             Ok(format!(
@@ -2443,26 +2424,35 @@ async fn probe_local_proxy_kind(port: u16) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let connect = tokio::time::timeout(std::time::Duration::from_millis(300), TcpStream::connect(addr));
+    let connect = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        TcpStream::connect(addr),
+    );
     let mut s = connect.await.ok()?.ok()?;
     // SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth).
     if s.write_all(&[0x05, 0x01, 0x00]).await.is_ok() {
         let mut buf = [0u8; 2];
-        if tokio::time::timeout(std::time::Duration::from_millis(300), s.read_exact(&mut buf))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .is_some()
+        if tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            s.read_exact(&mut buf),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some()
             && buf[0] == 0x05
         {
             return Some("socks5".into());
         }
     }
     // Not SOCKS5 — try a fresh connection for an HTTP CONNECT probe.
-    let mut s = tokio::time::timeout(std::time::Duration::from_millis(300), TcpStream::connect(addr))
-        .await
-        .ok()?
-        .ok()?;
+    let mut s = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        TcpStream::connect(addr),
+    )
+    .await
+    .ok()?
+    .ok()?;
     let req = "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
     s.write_all(req.as_bytes()).await.ok()?;
     let mut buf = [0u8; 16];
@@ -2563,13 +2553,22 @@ pub async fn sockscap_detect_local_proxies() -> Result<Vec<LocalProxyCandidate>,
             continue;
         };
         let (pid, process, client, client_label) = match port_meta.get(&port) {
-            Some(m) => (m.pid, m.process.clone(), m.client.clone(), m.client_label.clone()),
+            Some(m) => (
+                m.pid,
+                m.process.clone(),
+                m.client.clone(),
+                m.client_label.clone(),
+            ),
             None => {
                 let pid = listener_pid::resolve_listener_pids(port)
                     .into_iter()
                     .next()
                     .unwrap_or(0);
-                let process = if pid != 0 { name_of(pid) } else { String::new() };
+                let process = if pid != 0 {
+                    name_of(pid)
+                } else {
+                    String::new()
+                };
                 let (client, client_label) = classify_client(&process);
                 (pid, process, client, client_label)
             }
@@ -2685,7 +2684,10 @@ fn read_ready_files(dir: &std::path::Path) -> Vec<StaleReadyFile> {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
                 pid = v.get("pid").and_then(|x| x.as_u64()).map(|n| n as u32);
-                parent_pid = v.get("parentPid").and_then(|x| x.as_u64()).map(|n| n as u32);
+                parent_pid = v
+                    .get("parentPid")
+                    .and_then(|x| x.as_u64())
+                    .map(|n| n as u32);
             }
         }
         out.push(StaleReadyFile {
@@ -2721,18 +2723,14 @@ pub async fn boot_repair(app: &AppHandle, state: &AppState) {
 
     // Another live instance may own the dirty journal. Never repair global
     // network state underneath its active capture session.
-    let _repair_lock = match ModuleLock::try_acquire_for_app(
-        app,
-        "sockscap",
-        "global",
-        "SocksCap recovery",
-    ) {
-        Ok(lock) => lock,
-        Err(error) => {
-            tracing::info!("sockscap: boot repair skipped: {error}");
-            return;
-        }
-    };
+    let _repair_lock =
+        match ModuleLock::try_acquire_for_app(app, "sockscap", "global", "SocksCap recovery") {
+            Ok(lock) => lock,
+            Err(error) => {
+                tracing::info!("sockscap: boot repair skipped: {error}");
+                return;
+            }
+        };
 
     let Ok(dir) = data_dir(app) else {
         return;
@@ -2885,9 +2883,7 @@ pub async fn sockscap_get_domain_records(
 }
 
 #[tauri::command]
-pub async fn sockscap_clear_domain_records(
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn sockscap_clear_domain_records(state: State<'_, AppState>) -> Result<(), String> {
     let orch = state.sockscap.orch.read().await;
     let mut guard = orch.domains.lock().map_err(|e| e.to_string())?;
     guard.clear();
@@ -2896,7 +2892,10 @@ pub async fn sockscap_clear_domain_records(
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_client, session_password_ref, session_proxy_password, session_ssh_auth};
+    use super::{
+        Orchestrator, classify_client, ensure_configuration_unlocked, session_password_ref,
+        session_proxy_password, session_ssh_auth,
+    };
     use crate::session::models::{AuthMethod, SessionConfig, SessionType};
     use crate::terminal::ssh::SshAuth;
     use crate::vault::Vault;
@@ -2922,8 +2921,23 @@ mod tests {
     fn fresh_vault() -> (tempfile::TempDir, Vault) {
         let dir = tempfile::tempdir().expect("tempdir");
         let vault = Vault::open(&dir.path().join("vault.db")).expect("open vault");
-        vault.init("correct-horse-battery-staple").expect("init vault");
+        vault
+            .init("correct-horse-battery-staple")
+            .expect("init vault");
         (dir, vault)
+    }
+
+    #[test]
+    fn configuration_mutations_are_rejected_during_capture() {
+        let mut orchestrator = Orchestrator::new();
+        assert!(ensure_configuration_unlocked(&orchestrator).is_ok());
+
+        orchestrator.set_active("test", "active");
+        let error = ensure_configuration_unlocked(&orchestrator).unwrap_err();
+        assert!(error.contains("stop capture before making changes"));
+
+        orchestrator.finish_stop();
+        assert!(ensure_configuration_unlocked(&orchestrator).is_ok());
     }
 
     #[test]
@@ -2983,7 +2997,10 @@ mod tests {
             .reference;
         vault.lock().expect("lock");
         let options = format!(r#"{{"passwordRef":"{reference}"}}"#);
-        assert_eq!(session_proxy_password(&vault, &proxy_session(&options)), None);
+        assert_eq!(
+            session_proxy_password(&vault, &proxy_session(&options)),
+            None
+        );
     }
 
     fn ssh_session(auth_method: AuthMethod, options_json: &str) -> SessionConfig {
@@ -3050,7 +3067,12 @@ mod tests {
         assert!(matches!(
             session_ssh_auth(
                 &vault,
-                &ssh_session(AuthMethod::PrivateKey { key_path: "  ".into() }, "{}")
+                &ssh_session(
+                    AuthMethod::PrivateKey {
+                        key_path: "  ".into()
+                    },
+                    "{}"
+                )
             ),
             SshAuth::Agent
         ));

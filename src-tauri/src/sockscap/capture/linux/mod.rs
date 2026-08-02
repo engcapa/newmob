@@ -91,6 +91,9 @@ struct AppCaptureProfile {
 enum CaptureScope {
     Global,
     Apps(Vec<AppCaptureProfile>),
+    /// Higher-priority application profiles followed by the first active
+    /// global profile, which is the final catch-all by policy semantics.
+    Mixed(Vec<AppCaptureProfile>),
 }
 
 struct AppProcessMonitor {
@@ -194,6 +197,14 @@ impl LinuxCapture for LinuxCaptureImpl {
                 let target_groups = pid_filter::resolve_target_pid_groups(&selector_groups)?;
                 cgroup::CgroupSession::prepare_apps(&target_groups, std::process::id(), sudo_pw)?
             }
+            CaptureScope::Mixed(profiles) => {
+                let selector_groups = profiles
+                    .iter()
+                    .map(|profile| profile.selectors.clone())
+                    .collect::<Vec<_>>();
+                let target_groups = pid_filter::resolve_target_pid_groups(&selector_groups)?;
+                cgroup::CgroupSession::prepare_mixed(&target_groups, std::process::id(), sudo_pw)?
+            }
         };
         let cgroups = Arc::new(Mutex::new(cgroups));
 
@@ -220,6 +231,26 @@ impl LinuxCapture for LinuxCaptureImpl {
                 }
                 result
             }
+            CaptureScope::Mixed(profiles) => {
+                let mut result = Ok(());
+                for profile in profiles {
+                    match relay::start_linux_relay(Arc::clone(&ctx), Some(profile.id.clone())).await
+                    {
+                        Ok(relay) => relays.push(relay),
+                        Err(error) => {
+                            result = Err(error);
+                            break;
+                        }
+                    }
+                }
+                if result.is_ok() {
+                    match relay::start_linux_relay(Arc::clone(&ctx), None).await {
+                        Ok(relay) => relays.push(relay),
+                        Err(error) => result = Err(error),
+                    }
+                }
+                result
+            }
         };
         if let Err(error) = relay_result {
             stop_relays(relays).await;
@@ -228,7 +259,10 @@ impl LinuxCapture for LinuxCaptureImpl {
         }
 
         let relay_port = relays
-            .first()
+            .get(match &scope {
+                CaptureScope::Mixed(profiles) => profiles.len(),
+                CaptureScope::Global | CaptureScope::Apps(_) => 0,
+            })
             .map(|relay| relay.handle.port)
             .ok_or_else(|| "Linux capture did not create a relay".to_string())?;
         let redirect_ipv6 = relays.iter().all(|relay| relay.ipv6_ready);
@@ -254,6 +288,27 @@ impl LinuxCapture for LinuxCaptureImpl {
                     tunnel::RedirectPlan::new_app_routes(
                         redirect_ipv6,
                         &config.bypass_cidrs,
+                        &routes,
+                        config.block_quic,
+                    )
+                }
+                CaptureScope::Mixed(profiles) => {
+                    let routes = session
+                        .capture_matches()
+                        .iter()
+                        .cloned()
+                        .zip(
+                            relays
+                                .iter()
+                                .take(profiles.len())
+                                .map(|relay| relay.handle.port),
+                        )
+                        .collect::<Vec<_>>();
+                    tunnel::RedirectPlan::new_mixed_routes(
+                        relay_port,
+                        redirect_ipv6,
+                        &config.bypass_cidrs,
+                        session.bypass_match(),
                         &routes,
                         config.block_quic,
                     )
@@ -284,6 +339,11 @@ impl LinuxCapture for LinuxCaptureImpl {
                 Arc::clone(&cgroups),
                 sudo_password.clone(),
             )),
+            CaptureScope::Mixed(profiles) => Some(AppProcessMonitor::spawn(
+                profiles.clone(),
+                Arc::clone(&cgroups),
+                sudo_password.clone(),
+            )),
         };
 
         tracing::info!(
@@ -291,7 +351,7 @@ impl LinuxCapture for LinuxCaptureImpl {
             mode = ?scope,
             app_profiles = match &scope {
                 CaptureScope::Global => 0,
-                CaptureScope::Apps(profiles) => profiles.len(),
+                CaptureScope::Apps(profiles) | CaptureScope::Mixed(profiles) => profiles.len(),
             },
             "sockscap Linux nftables transparent capture started"
         );
@@ -329,21 +389,18 @@ fn capture_scope(config: &SocksCapConfig) -> Result<CaptureScope, String> {
     if active_profiles.is_empty() {
         return Err("At least one profile must be enabled and active".into());
     }
-    if active_profiles
-        .iter()
-        .any(|profile| matches!(profile.mode, ScopeMode::Global))
-    {
-        return Ok(CaptureScope::Global);
-    }
-    Ok(CaptureScope::Apps(
-        active_profiles
-            .into_iter()
-            .map(|profile| AppCaptureProfile {
+    let mut app_profiles = Vec::new();
+    for profile in active_profiles {
+        match profile.mode {
+            ScopeMode::Apps => app_profiles.push(AppCaptureProfile {
                 id: profile.id.clone(),
                 selectors: profile.apps.clone(),
-            })
-            .collect(),
-    ))
+            }),
+            ScopeMode::Global if app_profiles.is_empty() => return Ok(CaptureScope::Global),
+            ScopeMode::Global => return Ok(CaptureScope::Mixed(app_profiles)),
+        }
+    }
+    Ok(CaptureScope::Apps(app_profiles))
 }
 
 #[cfg(test)]
@@ -375,5 +432,58 @@ mod tests {
         };
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id, "default");
+    }
+
+    #[test]
+    fn mixed_capture_keeps_only_apps_before_the_global_catch_all() {
+        let mut config = SocksCapConfig::default();
+        config.profiles[0].id = "agy".into();
+        config.profiles[0].priority = 1;
+        config.profiles[0].mode = ScopeMode::Apps;
+        config.profiles[0].apps = vec![AppSelector {
+            path: "/opt/agy/agy".into(),
+            bundle_id: String::new(),
+            name: "agy".into(),
+            macos_identity: None,
+        }];
+
+        let mut global = config.profiles[0].clone();
+        global.id = "global".into();
+        global.priority = 2;
+        global.mode = ScopeMode::Global;
+        global.apps.clear();
+        let mut unreachable_app = config.profiles[0].clone();
+        unreachable_app.id = "lower-app".into();
+        unreachable_app.priority = 3;
+        config.profiles.extend([global, unreachable_app]);
+        config.active_profile_ids = vec!["agy".into(), "global".into(), "lower-app".into()];
+
+        let CaptureScope::Mixed(profiles) = capture_scope(&config).unwrap() else {
+            panic!("expected mixed capture scope");
+        };
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "agy");
+    }
+
+    #[test]
+    fn a_highest_priority_global_profile_is_the_only_capture_scope() {
+        let mut config = SocksCapConfig::default();
+        let mut lower_app = config.profiles[0].clone();
+        lower_app.id = "lower-app".into();
+        lower_app.priority = 10;
+        lower_app.mode = ScopeMode::Apps;
+        lower_app.apps = vec![AppSelector {
+            path: "/opt/example/example".into(),
+            bundle_id: String::new(),
+            name: "Example".into(),
+            macos_identity: None,
+        }];
+        config.profiles.push(lower_app);
+        config.active_profile_ids = vec!["default".into(), "lower-app".into()];
+
+        assert!(matches!(
+            capture_scope(&config).unwrap(),
+            CaptureScope::Global
+        ));
     }
 }

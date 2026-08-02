@@ -449,6 +449,8 @@
 - `[data-testid="sidebar-tools-panel"]` — display — F-Sockscap-1.tools-panel
 - `[data-testid="sidebar-tool-sockscap"]` — interactive — F-Sockscap-1.sidebar-entry
 - `[data-testid="sockscap-panel"]` — display — F-Sockscap-1.panel
+- `[data-testid="sockscap-locked-banner"]` — display [optional] — F-Sockscap-1.locked-banner
+- `[data-testid="sockscap-add-profile"]` — interactive — F-Sockscap-1.add-profile
 - `[data-testid="sockscap-start"]` — interactive — F-Sockscap-1.start
 - `[data-testid="sockscap-stop"]` — interactive [optional] — F-Sockscap-1.stop
 - `[data-testid="sockscap-refresh-status"]` — interactive — F-Sockscap-1.refresh-status
@@ -470,6 +472,9 @@
 - `[data-testid="sockscap-root-prompt-cancel"]` — interactive [optional] — F-Sockscap-1.root-prompt-cancel
 - `[data-testid="sockscap-root-prompt-close"]` — interactive [optional] — F-Sockscap-1.root-prompt-close
 - `[data-testid="sockscap-refresh-gfw"]` — interactive [optional] — F-Sockscap-1.refresh-gfw
+- `[data-testid="sockscap-import-gfw"]` — interactive [optional] — F-Sockscap-1.import-gfw
+- `[data-testid="sockscap-rules-editor"]` — display [optional] — F-Sockscap-1.rules-editor
+- `[data-testid="sockscap-block-quic"]` — interactive [optional] — F-Sockscap-1.block-quic
 - `[data-testid="sockscap-test-host"]` — interactive — F-Sockscap-1.test-host
 - `[data-testid="sockscap-test-target"]` — interactive — F-Sockscap-1.test-target
 - `[data-testid="sockscap-helper-start"]` — interactive [optional] — F-Sockscap-1.helper-start

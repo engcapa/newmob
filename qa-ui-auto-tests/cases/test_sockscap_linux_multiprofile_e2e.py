@@ -1,17 +1,12 @@
-"""SocksCap Linux multi-profile E2E (distinct cgroups -> distinct relay ports).
+"""SocksCap Linux mixed-profile E2E (app relay -> global catch-all relay).
 
-The Linux analogue of test_sockscap_multiprofile_e2e.py. Windows shares one
-WinDivert helper and hot-swaps a single relay port; Linux instead gives each
-app profile its own capture cgroup and its own relay port, wired by a single
-nft table (the `RedirectPlan::new_app_routes` shape in the Rust backend):
+This reproduces the production priority topology from the original regression:
 
-    capture-profile-0  -> redirect to :<relay0>   (HTTP upstream)
-    capture-profile-1  -> redirect to :<relay1>   (SOCKS5 upstream)
+    priority 1 application + proxyAll -> dedicated app relay (HTTP upstream)
+    priority 2 global + gfwList       -> final catch-all relay (SOCKS5 upstream)
 
-The test proves per-profile isolation: a request made from inside profile-0's
-cgroup lands only on relay0 and egresses via HTTP; a request from profile-1's
-cgroup lands only on relay1 and egresses via SOCKS5. Cross-contamination (a
-request showing up on the wrong relay) fails the test.
+The test proves the application cgroup rule precedes the bare global redirect,
+and that both routes work simultaneously without cross-contamination.
 
 Exit codes: 0 all passed · 1 a leg failed · 77 skipped (prereqs unmet).
 """
@@ -26,12 +21,12 @@ import _sockscap_linux_harness as H
 SKIP = 77
 
 print("=" * 82)
-print(" Taomni SocksCap Linux — Multi-Profile E2E (2 cgroups, 2 relay ports)")
+print(" Taomni SocksCap Linux — Mixed-Profile E2E (app relay + global fallback)")
 print("=" * 82)
 
-# One GFWList target per profile so each must be PROXIED through its own relay.
-PROFILE0_TARGET = "https://www.google.com"       # via relay0 (HTTP)
-PROFILE1_TARGET = "https://en.wikipedia.org"     # via relay1 (SOCKS5)
+# The app target intentionally misses GFWList: proxyAll must still proxy it.
+APP_TARGET = "https://www.baidu.com"             # app relay (HTTP)
+GLOBAL_TARGET = "https://en.wikipedia.org"       # global GFWList (SOCKS5)
 
 stats = {"total": 0, "passed": 0, "failed": 0}
 
@@ -47,10 +42,17 @@ def record(name, ok, detail=""):
     print(f"  [{s}] {name:<52} {detail}")
 
 
-def curl_in(session, index, url):
+def curl_in_app(session, url):
     argv = [ENV.CURL, "-4", "-s", "-o", "/dev/null",
             "-w", "%{http_code}", "--max-time", "20", url]
-    _rc, out, _err = session.run_in_cgroup(index, argv, timeout=25)
+    _rc, out, _err = session.run_in_cgroup(0, argv, timeout=25)
+    return out.strip()
+
+
+def curl_in_global(session, url):
+    argv = [ENV.CURL, "-4", "-s", "-o", "/dev/null",
+            "-w", "%{http_code}", "--max-time", "20", url]
+    _rc, out, _err = session.run_global(argv, timeout=25)
     return out.strip()
 
 
@@ -75,57 +77,68 @@ def main():
     for err in H.recover(sudo):
         print(f"  WARN: {err}")
 
-    print("\n[Step 2/5] Starting two relays (profile0=HTTP, profile1=SOCKS5)...")
-    relay0 = H.Relay(http=(ENV.HTTP_HOST, ENV.HTTP_PORT))
-    relay0.upstream_mode = "HTTP"
-    relay1 = H.Relay(socks5=(ENV.SOCKS5_HOST, ENV.SOCKS5_PORT))
-    relay1.upstream_mode = "SOCKS5"
-    p0 = relay0.start()
-    p1 = relay1.start()
-    print(f"  relay0 (HTTP)   127.0.0.1:{p0}")
-    print(f"  relay1 (SOCKS5) 127.0.0.1:{p1}")
+    print("\n[Step 2/5] Starting app proxyAll + global GFWList relays...")
+    app_relay = H.Relay(
+        http=(ENV.HTTP_HOST, ENV.HTTP_PORT), rule_mode="proxyAll"
+    )
+    app_relay.upstream_mode = "HTTP"
+    global_relay = H.Relay(socks5=(ENV.SOCKS5_HOST, ENV.SOCKS5_PORT))
+    global_relay.upstream_mode = "SOCKS5"
+    app_port = app_relay.start()
+    global_port = global_relay.start()
+    print(f"  app relay (HTTP/proxyAll)       127.0.0.1:{app_port}")
+    print(f"  global relay (SOCKS5/gfwList)  127.0.0.1:{global_port}")
 
     session = H.CaptureSession(sudo)
     try:
-        print("\n[Step 3/5] Creating 2 capture cgroups + single nft table with 2 routes...")
-        session.create_cgroups(profile_count=2)
-        print(f"  profile-0: {session.profile_dirs[0]} -> :{p0}")
-        print(f"  profile-1: {session.profile_dirs[1]} -> :{p1}")
-        session.install_nft([(0, p0), (1, p1)], ENV.DEFAULT_BYPASS_CIDRS)
-        # Both cgroup routes must be present in the one table.
+        print("\n[Step 3/5] Creating mixed cgroups + ordered nft routes...")
+        session.create_cgroups(profile_count=1, mixed=True)
+        print(f"  app profile: {session.profile_dirs[0]} -> :{app_port}")
+        print(f"  global catch-all -> :{global_port}")
+        session.install_nft(
+            [(0, app_port)],
+            ENV.DEFAULT_BYPASS_CIDRS,
+            global_relay_port=global_port,
+        )
         rc, out, _e = sudo.run([ENV.NFT, "list", "table", ENV.NFT_FAMILY, ENV.NFT_TABLE])
-        record("route 0 present (profile-0 -> relay0)",
-               f"capture-profile-0\" ip protocol tcp redirect to :{p0}" in out)
-        record("route 1 present (profile-1 -> relay1)",
-               f"capture-profile-1\" ip protocol tcp redirect to :{p1}" in out)
+        app_rule = f"capture-profile-0\" ip protocol tcp redirect to :{app_port}"
+        global_rule = f"ip protocol tcp redirect to :{global_port}"
+        record("application route present", app_rule in out)
+        record("global catch-all route present", global_rule in out)
+        record(
+            "application route precedes global catch-all",
+            out.find(app_rule) >= 0 and out.find(app_rule) < out.find(global_rule),
+        )
 
-        print("\n[Step 4/5] Driving each profile and checking isolation...")
-        c0 = curl_in(session, 0, PROFILE0_TARGET)
-        c1 = curl_in(session, 1, PROFILE1_TARGET)
+        print("\n[Step 4/5] Driving application and global traffic...")
+        app_code = curl_in_app(session, APP_TARGET)
+        global_code = curl_in_global(session, GLOBAL_TARGET)
         time.sleep(0.2)
 
-        a0 = [e for e in relay0.audit if "error" not in e]
-        a1 = [e for e in relay1.audit if "error" not in e]
+        app_audit = [e for e in app_relay.audit if "error" not in e]
+        global_audit = [e for e in global_relay.audit if "error" not in e]
 
-        record("profile-0 request reachable", ENV.http_reachable(c0), f"code={c0}")
-        record("profile-1 request reachable", ENV.http_reachable(c1), f"code={c1}")
-        record("relay0 saw exactly profile-0's request", len(a0) == 1,
-               f"count={len(a0)} sni={a0[-1].get('sni') if a0 else None}")
-        record("relay1 saw exactly profile-1's request", len(a1) == 1,
-               f"count={len(a1)} sni={a1[-1].get('sni') if a1 else None}")
-        record("relay0 egressed via HTTP",
-               bool(a0) and a0[-1].get("mode") == "HTTP" and a0[-1].get("decision") == "PROXY")
-        record("relay1 egressed via SOCKS5",
-               bool(a1) and a1[-1].get("mode") == "SOCKS5" and a1[-1].get("decision") == "PROXY")
-        # No cross-contamination: neither relay saw the other's SNI.
-        record("no cross-contamination relay0",
-               all("wikipedia" not in (e.get("sni") or "") for e in a0))
-        record("no cross-contamination relay1",
-               all("google" not in (e.get("sni") or "") for e in a1))
+        record("application request reachable", ENV.http_reachable(app_code), f"code={app_code}")
+        record("global request reachable", ENV.http_reachable(global_code), f"code={global_code}")
+        record("app relay saw only the app request", len(app_audit) == 1,
+               f"count={len(app_audit)} sni={app_audit[-1].get('sni') if app_audit else None}")
+        record("global relay saw only fallback traffic", len(global_audit) == 1,
+               f"count={len(global_audit)} sni={global_audit[-1].get('sni') if global_audit else None}")
+        record("app proxyAll proxied a GFWList miss",
+               bool(app_audit) and not app_audit[-1].get("gfwlist_match")
+               and app_audit[-1].get("decision") == "PROXY")
+        record("global GFWList used SOCKS5",
+               bool(global_audit) and global_audit[-1].get("gfwlist_match")
+               and global_audit[-1].get("mode") == "SOCKS5"
+               and global_audit[-1].get("decision") == "PROXY")
+        record("app relay did not see global traffic",
+               all("wikipedia" not in (e.get("sni") or "") for e in app_audit))
+        record("global relay did not see app traffic",
+               all("baidu" not in (e.get("sni") or "") for e in global_audit))
     finally:
         print("\n[Step 5/5] Teardown + verify clean...")
-        relay0.stop()
-        relay1.stop()
+        app_relay.stop()
+        global_relay.stop()
         for e in session.cleanup():
             print(f"  WARN: {e}")
         table_present, dir_present = session.residue()
@@ -142,4 +155,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-
