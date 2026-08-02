@@ -218,14 +218,14 @@ fn rgba_frame(frame: xcap::Frame) -> anyhow::Result<Frame> {
     for pixel in bgra.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    Ok(Frame {
-        data: bgra,
-        x: 0,
-        y: 0,
+    Ok(Frame::bgra(
+        bgra,
+        0,
+        0,
         width,
         height,
-        stride: usize::from(width) * 4,
-    })
+        usize::from(width) * 4,
+    ))
 }
 
 pub(crate) fn try_new(

@@ -77,13 +77,6 @@ impl Capturer for XcapCapturer {
             bgra.push(px[3]); // A
         }
         let stride = (w as usize).saturating_mul(4);
-        Ok(Frame {
-            data: bgra,
-            x: 0,
-            y: 0,
-            width: self.width,
-            height: self.height,
-            stride,
-        })
+        Ok(Frame::bgra(bgra, 0, 0, self.width, self.height, stride))
     }
 }

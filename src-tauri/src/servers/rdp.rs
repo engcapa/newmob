@@ -60,6 +60,7 @@ mod clipboard;
 mod diff;
 mod display;
 mod input;
+mod metrics;
 mod session;
 mod tls;
 
@@ -67,6 +68,7 @@ use auth::AuthConfig;
 use clipboard::ClipboardFactory;
 use display::RdpDisplay;
 use input::RdpInput;
+use metrics::RdpMetrics;
 
 const CONTROL_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -625,8 +627,14 @@ fn build_server(
             state: Mutex::new(ControlGateState::default()),
         })
     });
-    let input = RdpInput::new(log.clone(), params.view_only, control_gate.clone());
-    let display = RdpDisplay::new(log.clone(), params.display_id.clone())?;
+    let metrics = RdpMetrics::new(log.clone());
+    let input = RdpInput::new(
+        log.clone(),
+        params.view_only,
+        control_gate.clone(),
+        metrics.clone(),
+    );
+    let display = RdpDisplay::new(log.clone(), params.display_id.clone(), metrics)?;
     let cliprdr: Box<dyn ironrdp::server::CliprdrServerFactory> =
         Box::new(ClipboardFactory::new(log.clone()));
 

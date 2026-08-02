@@ -22,6 +22,7 @@
 //! `view_only` short-circuits all injection.
 
 use std::sync::mpsc::{self, Sender};
+use std::time::Instant;
 
 use enigo::{
     Axis, Button, Coordinate, Direction,
@@ -31,6 +32,7 @@ use enigo::{
 use ironrdp::server::{KeyboardEvent, MouseEvent, RdpServerInputHandler};
 
 use super::ControlGate;
+use super::metrics::RdpMetrics;
 use crate::servers::engine::LogEmitter;
 
 /// A single input action to replay on the local desktop. Every field is plain
@@ -42,6 +44,14 @@ enum InputCmd {
     Button { button: Button, dir: Direction },
     MoveMouse { x: i32, y: i32, coord: Coordinate },
     Scroll { length: i32, axis: Axis },
+}
+
+/// Timestamping is intentionally attached to the command rather than the
+/// handler: it measures the full queueing delay before the thread-affine
+/// Enigo actor applies the input event.
+struct QueuedInput {
+    received_at: Instant,
+    cmd: InputCmd,
 }
 
 /// RDP server input handler.
@@ -60,7 +70,7 @@ pub(crate) struct RdpInput {
     view_only: bool,
     /// `None` if enigo failed to initialize (no display / no permission) or the
     /// actor thread has exited; we log once and then silently drop input.
-    tx: Option<Sender<InputCmd>>,
+    tx: Option<Sender<QueuedInput>>,
     warned: bool,
     control_gate: Option<std::sync::Arc<ControlGate>>,
 }
@@ -70,11 +80,12 @@ impl RdpInput {
         log: LogEmitter,
         view_only: bool,
         control_gate: Option<std::sync::Arc<ControlGate>>,
+        metrics: RdpMetrics,
     ) -> Self {
         let tx = if view_only {
             None
         } else {
-            Self::spawn_actor(&log)
+            Self::spawn_actor(&log, metrics.clone())
         };
         Self {
             log,
@@ -90,8 +101,8 @@ impl RdpInput {
     /// / no accessibility permission) — in which case the connection stays
     /// view-only. `Enigo::new` runs *inside* the thread because the resulting
     /// value is `!Send` on macOS and so cannot be constructed here and moved in.
-    fn spawn_actor(log: &LogEmitter) -> Option<Sender<InputCmd>> {
-        let (tx, rx) = mpsc::channel::<InputCmd>();
+    fn spawn_actor(log: &LogEmitter, metrics: RdpMetrics) -> Option<Sender<QueuedInput>> {
+        let (tx, rx) = mpsc::channel::<QueuedInput>();
         // Bootstrap channel: the thread reports back whether `Enigo::new`
         // succeeded so `new()` can decide view-only vs interactive synchronously.
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -113,8 +124,10 @@ impl RdpInput {
                 drop(ready_tx);
 
                 // Drain commands until all senders drop (server shutdown).
-                while let Ok(cmd) = rx.recv() {
-                    apply(&mut enigo, cmd);
+                while let Ok(queued) = rx.recv() {
+                    metrics.record_input_handoff(queued.received_at);
+                    apply(&mut enigo, queued.cmd);
+                    metrics.report_if_due();
                 }
             });
 
@@ -166,7 +179,13 @@ impl RdpInput {
             return;
         }
         if let Some(tx) = &self.tx {
-            if tx.send(cmd).is_err() {
+            if tx
+                .send(QueuedInput {
+                    received_at: Instant::now(),
+                    cmd,
+                })
+                .is_err()
+            {
                 // Actor thread is gone; stop trying and warn once.
                 self.tx = None;
                 self.warned = false;
