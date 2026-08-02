@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Boxes, ChevronDown, ChevronRight, Loader2, Play, Package, RefreshCw } from "lucide-react";
 import {
   workspaceDependencyTree,
+  workspaceExecutionModel,
   workspaceTaskTree,
   type DependencyNode,
   type WorkspaceTaskGroup,
@@ -55,13 +56,14 @@ interface RootTaskTree {
   rootName: string;
   rootPath: string;
   groups: WorkspaceTaskGroup[];
+  targets: WorkspaceTaskItem[];
 }
 
 interface BuildPanelProps {
   workspaceInstanceId: string;
   roots: CodeWorkspaceRootInfo[];
   active: boolean;
-  onRunTask: (task: WorkspaceTaskItem) => void;
+  onRunTask: (task: WorkspaceTaskItem, onExit?: (exitCode: number) => void) => void;
   /** Resolve Java modules for a root via jdtls (M7 F-4); omitted → no Modules section. */
   onLoadModules?: (rootPath: string) => Promise<JavaModule[]>;
   /** Per-workspace Maven/Gradle executable overrides (wrapper still wins). */
@@ -129,12 +131,43 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
     setLoading(true);
     setError(null);
     try {
-      const next = await Promise.all(roots.map(async (root): Promise<RootTaskTree> => ({
-        rootId: root.id,
-        rootName: root.name,
-        rootPath: root.path,
-        groups: await workspaceTaskTree(root.path, toolConfig),
-      })));
+      const next = await Promise.all(roots.map(async (root): Promise<RootTaskTree> => {
+        const [groups, executionModel] = await Promise.all([
+          workspaceTaskTree(root.path, toolConfig),
+          workspaceExecutionModel(root.path, undefined, toolConfig),
+        ]);
+        const projectById = new Map(executionModel.projects.map((project) => [project.id, project]));
+        return {
+          rootId: root.id,
+          rootName: root.name,
+          rootPath: root.path,
+          groups,
+          targets: executionModel.buildTargets.map((target) => {
+            const project = projectById.get(target.projectId);
+            return {
+              id: target.id,
+              label: target.label,
+              command: target.command.display,
+              cwd: target.command.cwd,
+              source: project ? `${project.languages.join("/")} · ${project.provider}` : "Build target",
+              modulePath: project?.module,
+              rootId: root.id,
+              rootName: root.name,
+              execution: {
+                executable: target.command.executable,
+                args: target.command.args,
+                source: target.command.source,
+                error: target.command.error,
+              },
+              environment: Object.fromEntries(Object.entries(target.command.env).map(([name, value]) => [
+                name,
+                { value, mode: "replace" as const },
+              ])),
+              dependsOn: target.dependsOn,
+            };
+          }),
+        };
+      }));
       setTrees(next);
       setLoaded(true);
     } catch (reason) {
@@ -161,11 +194,15 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
   }, []);
 
   const hasTasks = useMemo(
-    () => trees.some((tree) => tree.groups.some((group) => group.tasks.length > 0)),
+    () => trees.some((tree) => tree.targets.length > 0 || tree.groups.some((group) => group.tasks.length > 0)),
     [trees],
   );
   const showRootNames = trees.length > 1;
   const preferredBuildTasks = useMemo(() => trees.flatMap((tree) => {
+    const structured = tree.targets.find((target) => target.source !== "Java · maven" && target.label.toLowerCase().includes("build"))
+      ?? tree.targets.find((target) => target.label.toLowerCase() === "compile")
+      ?? tree.targets.find((target) => target.label.toLowerCase() === "classes");
+    if (structured) return [structured];
     const preferred = [
       ["Maven", "compile"],
       ["Gradle", "classes"],
@@ -204,6 +241,26 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
     return [];
   }), [trees]);
 
+  const runBuildTarget = useCallback((task: WorkspaceTaskItem) => {
+    if (!task.dependsOn?.length) {
+      onRunTask(task);
+      return;
+    }
+    const targetById = new Map(trees.flatMap((tree) => tree.targets).map((target) => [target.id, target]));
+    const queue = [...(task.dependsOn ?? [])]
+      .map((id) => targetById.get(id))
+      .filter((target): target is WorkspaceTaskItem => !!target);
+    queue.push(task);
+    const runNext = (index: number) => {
+      const next = queue[index];
+      if (!next) return;
+      onRunTask(next, (exitCode) => {
+        if (exitCode === 0) runNext(index + 1);
+      });
+    };
+    runNext(0);
+  }, [onRunTask, trees]);
+
   return (
     <div data-testid="code-workspace-build-panel" className="h-full min-h-0 flex flex-col text-[11px]">
       <div className="h-8 shrink-0 flex items-center gap-2 border-b border-[var(--taomni-code-border)] px-2">
@@ -212,7 +269,7 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
           type="button"
           data-testid="build-panel-build-project"
           className="taomni-btn h-6 px-1.5 inline-flex items-center gap-1"
-          onClick={() => preferredBuildTasks.forEach((task) => onRunTask(task))}
+          onClick={() => preferredBuildTasks.forEach(runBuildTarget)}
           disabled={loading || preferredBuildTasks.length === 0}
           title="Compile all detected project roots"
         >
@@ -291,6 +348,43 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
             </div>
           );
         }))}
+
+        {trees.filter((tree) => tree.targets.length > 0).map((tree) => {
+          const key = `${tree.rootId}:structured-build-targets`;
+          const isCollapsed = collapsed[key];
+          const heading = showRootNames ? `${tree.rootName} · Build targets` : "Build targets";
+          return (
+            <div key={key} className="select-none border-b border-[var(--taomni-code-border)] pb-1">
+              <button
+                type="button"
+                className="flex w-full items-center gap-1 px-2 py-0.5 text-left hover:bg-[var(--taomni-hover-bg)]"
+                onClick={() => toggle(key)}
+              >
+                {isCollapsed ? <ChevronRight className="h-3 w-3 shrink-0" /> : <ChevronDown className="h-3 w-3 shrink-0" />}
+                <span className="font-medium text-[var(--taomni-text-muted)]">{heading}</span>
+                <span className="ml-auto text-[10px] text-[var(--taomni-text-muted)]">{tree.targets.length}</span>
+              </button>
+              {!isCollapsed && tree.targets.map((task) => (
+                <button
+                  key={task.id}
+                  type="button"
+                  data-testid={`build-panel-target-${task.id}`}
+                  className="group flex w-full items-center gap-1.5 py-0.5 pl-6 pr-2 text-left hover:bg-[var(--taomni-hover-bg)] disabled:opacity-60"
+                  title={task.execution?.error ?? task.command}
+                  disabled={!!task.execution?.error}
+                  onClick={() => runBuildTarget(task)}
+                >
+                  {task.execution?.error
+                    ? <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" />
+                    : <Play className="h-3 w-3 shrink-0 opacity-60 group-hover:opacity-100" />}
+                  {task.modulePath && <span className="shrink-0 rounded bg-[var(--taomni-code-active-line-bg)] px-1 text-[9px] text-[var(--taomni-text-muted)]">{task.modulePath}</span>}
+                  <span className="truncate">{task.label}</span>
+                  <span className="ml-auto truncate text-[10px] text-[var(--taomni-text-muted)]">{task.source}</span>
+                </button>
+              ))}
+            </div>
+          );
+        })}
 
         {trees.map((tree) => {
           const key = `deps:${tree.rootId}`;

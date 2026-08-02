@@ -5,6 +5,7 @@ import { BuildPanel } from "./BuildPanel";
 const workspaceMocks = vi.hoisted(() => ({
   workspaceTaskTree: vi.fn(),
   workspaceDependencyTree: vi.fn(),
+  workspaceExecutionModel: vi.fn(),
 }));
 
 vi.mock("../../../../lib/editor/workspace", () => workspaceMocks);
@@ -13,6 +14,13 @@ const roots = [{ id: "app", name: "app", path: "/repo/app", kind: "git" as const
 
 describe("BuildPanel", () => {
   beforeEach(() => {
+    workspaceMocks.workspaceExecutionModel.mockReset().mockResolvedValue({
+      projects: [],
+      buildTargets: [],
+      runConfigurations: [],
+      debugConfigurations: [],
+      tools: [],
+    });
     workspaceMocks.workspaceTaskTree.mockReset().mockResolvedValue([
       {
         source: "Maven",
@@ -164,5 +172,44 @@ describe("BuildPanel", () => {
     );
     await screen.findByText("package.json");
     expect(screen.queryByTestId("build-panel-modules-load-app")).toBeNull();
+  });
+
+  it("renders structured build targets separately from compatibility tasks", async () => {
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [{
+        id: "project:go",
+        provider: "go",
+        root: "/repo/app",
+        manifest: "/repo/app/go.mod",
+        module: "app",
+        languages: ["go"],
+        toolchain: "go",
+        diagnostics: [],
+      }],
+      buildTargets: [{
+        id: "build:go",
+        projectId: "project:go",
+        label: "Build all packages",
+        kind: "build",
+        command: {
+          executable: "go",
+          args: ["build", "./..."],
+          cwd: "/repo/app",
+          env: {},
+          display: "go build ./...",
+          source: "path",
+        },
+        dependsOn: [],
+      }],
+      runConfigurations: [],
+      debugConfigurations: [],
+      tools: [],
+    });
+    const onRunTask = vi.fn();
+    render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={onRunTask} />);
+
+    expect(await screen.findByText("Build targets")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Build all packages"));
+    expect(onRunTask).toHaveBeenCalledWith(expect.objectContaining({ command: "go build ./..." }));
   });
 });

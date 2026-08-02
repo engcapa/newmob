@@ -91,6 +91,9 @@ libc = "0.2"
 font-kit = "0.14"
 dirs = "6"
 flate2 = "1"
+# Read source files returned as jar:/kls: definition URIs without extracting
+# archives to the workspace. Keep formats narrow: SDK/source JARs use deflate.
+zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2"] }
 tungstenite = "0.29"
 tokio-tungstenite = "0.29"
 imap = "2.4.1"

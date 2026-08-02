@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildInteractiveCommandInput, renderTerminalTask, terminalTaskShell } from "./commandInput";
+import {
+  buildInteractiveCommandInput,
+  renderTerminalExecutionCommand,
+  renderTerminalTask,
+  terminalTaskShell,
+} from "./commandInput";
 
 describe("buildInteractiveCommandInput", () => {
   it("submits a single command with carriage return", () => {
@@ -25,6 +30,25 @@ describe("buildInteractiveCommandInput", () => {
 });
 
 describe("terminal task rendering", () => {
+  it("renders structured argv for the shell that owns the terminal", () => {
+    const execution = {
+      executable: "/opt/Tool Chain/cargo",
+      args: ["run", "--bin", "demo app", "it's-ready"],
+    };
+    expect(renderTerminalExecutionCommand(execution, { shellId: "bash" })).toBe(
+      `'/opt/Tool Chain/cargo' 'run' '--bin' 'demo app' 'it'"'"'s-ready'`,
+    );
+    expect(renderTerminalExecutionCommand(execution, { shellId: "powershell" })).toBe(
+      "& '/opt/Tool Chain/cargo' 'run' '--bin' 'demo app' 'it''s-ready'",
+    );
+    expect(renderTerminalExecutionCommand({
+      executable: "C:\\Program Files\\dotnet\\dotnet.exe",
+      args: ["run", 'say "hello"', "trailing\\"],
+    }, { shellId: "command-prompt" })).toBe(
+      '"C:\\Program Files\\dotnet\\dotnet.exe" "run" "say \\\"hello\\\"" "trailing\\\\"',
+    );
+  });
+
   it("uses the registered shell instead of the host platform", () => {
     expect(terminalTaskShell({ platform: "windows", shellId: "git-bash" })).toBe("posix");
     expect(terminalTaskShell({ platform: "linux", shellId: "powershell" })).toBe("powershell");

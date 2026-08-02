@@ -102,6 +102,62 @@
 - `[data-testid="capture-stop-scroll"]` — interactive [optional] — F4.13.stop-scroll-pill
 - `[data-testid="capture-stop-gif"]` — interactive [optional] — F4.13.stop-gif-pill
 
+## code-workspace/execution (F25.1)
+
+- `[data-testid="sidebar-tool-code-workspace"]` — interactive — F25.1.sidebar-entry
+- `[data-testid="code-workspace-tab"]` — display — F25.1.workspace
+- `[data-testid="code-workspace-build-project"]` — interactive [optional] — F25.1.build-current-project
+- `[data-testid="code-workspace-run-target"]` — interactive [optional] — F25.1.run-current-target
+- `[data-testid="code-workspace-debug-target"]` — interactive [optional] — F25.1.debug-current-target
+- `[data-testid="code-workspace-bottom-tab-run"]` — interactive — F25.1.run-tab
+- `[data-testid="code-workspace-bottom-tab-build"]` — interactive — F25.1.build-tab
+- `[data-testid="code-workspace-bottom-tab-debug"]` — interactive — F25.1.debug-tab
+- `[data-testid="code-workspace-run-panel"]` — display — F25.1.run-panel
+- `[data-testid="run-panel-custom-command"]` — interactive — F25.1.custom-command
+- `[data-testid="run-panel-add-custom-task"]` — interactive — F25.1.add-custom-task
+- `[data-testid="run-panel-custom-root"]` — interactive [optional] — F25.1.custom-root
+- `[data-testid="run-panel-configure-tools"]` — interactive — F25.1.configure-tools
+- `[data-testid="run-panel-refresh"]` — interactive — F25.1.refresh-run-targets
+- `[data-testid^="run-panel-configuration-run:"]` — interactive [optional] — F25.1.run-configuration
+- `[data-testid^="run-panel-configuration-edit-run:"]` — interactive [optional] — F25.1.run-configuration-edit
+- `[data-testid="run-configuration-editor"]` — display [optional] — F25.1.run-configuration-editor
+- `[data-testid="run-configuration-cwd"]` — interactive [optional] — F25.1.run-configuration-cwd
+- `[data-testid="run-configuration-args"]` — interactive [optional] — F25.1.run-configuration-args
+- `[data-testid="run-configuration-env"]` — interactive [optional] — F25.1.run-configuration-env
+- `[data-testid="run-configuration-save"]` — interactive [optional] — F25.1.run-configuration-save
+- `[data-testid="run-configuration-reset"]` — interactive [optional] — F25.1.run-configuration-reset
+- `[data-testid="code-workspace-build-panel"]` — display — F25.1.build-panel
+- `[data-testid="build-panel-error"]` — display [optional] — F25.1.build-error
+- `[data-testid="build-panel-build-project"]` — interactive [optional] — F25.1.build-project
+- `[data-testid="build-panel-rebuild-project"]` — interactive [optional] — F25.1.rebuild-project
+- `[data-testid="build-panel-refresh"]` — interactive — F25.1.refresh-build-targets
+- `[data-testid^="build-panel-target-build:"]` — interactive [optional] — F25.1.build-target
+- `[data-testid="code-workspace-debug-panel"]` — display — F25.1.debug-panel
+- `[data-testid="workspace-build-run-tools-dialog"]` — display — F25.1.tools-dialog
+- `[data-testid="workspace-build-run-tools-close"]` — interactive — F25.1.tools-close
+- `[data-testid="workspace-build-run-tools-cancel"]` — interactive — F25.1.tools-cancel
+- `[data-testid="workspace-build-run-tools-save"]` — interactive — F25.1.tools-save
+- `[data-testid="workspace-tool-cargo"]` — interactive — F25.1.tool-cargo
+- `[data-testid="workspace-tool-go"]` — interactive — F25.1.tool-go
+- `[data-testid="workspace-tool-node"]` — interactive — F25.1.tool-node
+- `[data-testid="workspace-tool-npm"]` — interactive — F25.1.tool-npm
+- `[data-testid="workspace-tool-pnpm"]` — interactive — F25.1.tool-pnpm
+- `[data-testid="workspace-tool-yarn"]` — interactive — F25.1.tool-yarn
+- `[data-testid="workspace-tool-python"]` — interactive — F25.1.tool-python
+- `[data-testid="workspace-tool-cmake"]` — interactive — F25.1.tool-cmake
+- `[data-testid="workspace-tool-dotnet"]` — interactive — F25.1.tool-dotnet
+- `[data-testid="workspace-tool-maven"]` — interactive — F25.1.tool-maven
+- `[data-testid="workspace-tool-gradle"]` — interactive — F25.1.tool-gradle
+- `[data-testid="workspace-tool-sbt"]` — interactive — F25.1.tool-sbt
+- `[data-testid="workspace-tool-swift"]` — interactive — F25.1.tool-swift
+- `[data-testid="workspace-tool-lldbDap"]` — interactive — F25.1.tool-lldb-dap
+- `[data-testid="workspace-tool-delve"]` — interactive — F25.1.tool-delve
+- `[data-testid="workspace-tool-debugpy"]` — interactive — F25.1.tool-debugpy
+- `[data-testid="workspace-tool-jsDebug"]` — interactive — F25.1.tool-js-debug
+- `[data-testid="workspace-tool-netcoredbg"]` — interactive — F25.1.tool-netcoredbg
+- `[data-testid="workspace-maven-run-jvm-args"]` — interactive — F25.1.maven-jvm-args
+- `[data-testid="workspace-maven-inherit-argline"]` — interactive — F25.1.inherit-maven-argline
+
 ## database/hbase (F-DB-3)
 
 - `input[aria-label="Remote host"]` — interactive [optional] — F-DB-3.remote-host
@@ -389,6 +445,8 @@
 
 ## network/sockscap (F-Sockscap-1)
 
+- `[data-testid="side-tab-tools"]` — interactive — F-Sockscap-1.tools-side-tab
+- `[data-testid="sidebar-tools-panel"]` — display — F-Sockscap-1.tools-panel
 - `[data-testid="sidebar-tool-sockscap"]` — interactive — F-Sockscap-1.sidebar-entry
 - `[data-testid="sockscap-panel"]` — display — F-Sockscap-1.panel
 - `[data-testid="sockscap-start"]` — interactive — F-Sockscap-1.start

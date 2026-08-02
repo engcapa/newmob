@@ -12,10 +12,12 @@ import { TerminalPanel } from "../../../terminal/TerminalPanel";
 import { getTerminal } from "../../../../lib/terminal/terminalRegistry";
 import {
   buildInteractiveCommandInput,
+  renderTerminalExecutionCommand,
   renderTerminalTask,
   type TerminalTaskVariables,
 } from "../../../../lib/terminal/commandInput";
 import { getAppPlatform } from "../../../../lib/runtime";
+import type { WorkspaceTaskExecution } from "../../../../lib/editor/workspace";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
 
 interface WorkspaceTerminalInstance {
@@ -25,6 +27,7 @@ interface WorkspaceTerminalInstance {
   workspaceRoot: string | null;
   cwd: string;
   pendingCommand: string | null;
+  pendingExecution: WorkspaceTaskExecution | null;
   pendingEnvironment: TerminalTaskVariables | undefined;
   onTaskExit: ((exitCode: number) => void) | null;
 }
@@ -52,6 +55,7 @@ export interface TerminalDockHandle {
     title?: string,
     onExit?: (exitCode: number) => void,
     environment?: TerminalTaskVariables,
+    execution?: WorkspaceTaskExecution,
   ) => string;
   focus: () => void;
 }
@@ -86,6 +90,7 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
       pendingCommand: string | null = null,
       onTaskExit: ((exitCode: number) => void) | null = null,
       pendingEnvironment: TerminalTaskVariables | undefined = undefined,
+      pendingExecution: WorkspaceTaskExecution | null = null,
     ) => {
       sequenceRef.current += 1;
       const id = terminalId(workspaceInstanceId, sequenceRef.current);
@@ -96,6 +101,7 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
         workspaceRoot: rootForCwd(roots, cwd),
         cwd,
         pendingCommand,
+        pendingExecution,
         pendingEnvironment,
         onTaskExit,
       };
@@ -111,12 +117,13 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
 
     useImperativeHandle(ref, () => ({
       openAt: (cwd, title) => createInstance(cwd, title),
-      runCommand: (command, cwd, title, onExit, environment) => createInstance(
+      runCommand: (command, cwd, title, onExit, environment, execution) => createInstance(
         cwd,
         title,
         command,
         onExit ?? null,
         environment,
+        execution ?? null,
       ),
       focus: () => {
         if (instances.length > 0) setActiveId((current) => current ?? instances[0].id);
@@ -141,19 +148,22 @@ export const TerminalDockPanel = forwardRef<TerminalDockHandle, TerminalDockPane
         if (!instance?.pendingCommand) return;
         const terminal = getTerminal(id);
         if (terminal) {
+          const command = instance.pendingExecution
+            ? renderTerminalExecutionCommand(instance.pendingExecution, terminal.localEnvironment)
+            : instance.pendingCommand;
           if (terminal.runTask) {
-            terminal.runTask(instance.pendingCommand, instance.pendingEnvironment);
+            terminal.runTask(command, instance.pendingEnvironment);
           } else {
             // Backward-compatible path for lightweight registrants and tests.
             const task = renderTerminalTask(
-              instance.pendingCommand,
+              command,
               terminal.localEnvironment ?? { platform: getAppPlatform() },
               instance.pendingEnvironment,
             );
             terminal.writeInput(buildInteractiveCommandInput(task.input));
           }
           setInstances((current) => current.map((item) => item.id === id
-            ? { ...item, pendingCommand: null }
+            ? { ...item, pendingCommand: null, pendingExecution: null }
             : item));
           return;
         }

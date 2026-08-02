@@ -24,6 +24,11 @@ export interface RenderedTerminalTask {
   shell: TerminalTaskShell;
 }
 
+export interface TerminalExecutionCommand {
+  executable: string;
+  args: string[];
+}
+
 const TASK_START_BEL = "\x1b]633;TaomniTaskStart\x07";
 const TASK_START_ST = "\x1b]633;TaomniTaskStart\x1b\\";
 
@@ -39,6 +44,26 @@ export function terminalTaskShell(environment?: TerminalTaskEnvironment | null):
   // WSL, and other workspace shells use POSIX task syntax even on Windows.
   if (id && id !== "default") return "posix";
   return environment?.platform?.toLowerCase() === "windows" ? "powershell" : "posix";
+}
+
+/**
+ * Convert a structured executable/argv pair to syntax for the interactive
+ * shell that owns the workspace terminal. Built-in workspace targets use this
+ * path; user-authored tasks intentionally remain raw shell commands.
+ */
+export function renderTerminalExecutionCommand(
+  execution: TerminalExecutionCommand,
+  environment?: TerminalTaskEnvironment | null,
+): string {
+  const values = [execution.executable, ...execution.args];
+  const shell = terminalTaskShell(environment);
+  if (shell === "powershell") {
+    return `& ${values.map(quotePowerShell).join(" ")}`;
+  }
+  if (shell === "cmd") {
+    return values.map(quoteCmdArgument).join(" ");
+  }
+  return values.map(quotePosix).join(" ");
 }
 
 /** Render a task wrapper that reports status without replacing the live shell. */
@@ -140,6 +165,25 @@ function renderPosixVariableSetup(variables: NormalizedTaskVariable[]): string {
 
 function quotePowerShell(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
+}
+
+function quoteCmdArgument(value: string): string {
+  let quoted = '"';
+  let backslashes = 0;
+  for (const char of value) {
+    if (char === "\\") {
+      backslashes += 1;
+      continue;
+    }
+    if (char === '"') {
+      quoted += "\\".repeat(backslashes * 2 + 1) + '"';
+      backslashes = 0;
+      continue;
+    }
+    quoted += "\\".repeat(backslashes) + char;
+    backslashes = 0;
+  }
+  return `${quoted}${"\\".repeat(backslashes * 2)}"`;
 }
 
 function renderPowerShellTaskWithVariables(

@@ -238,8 +238,8 @@ export function looseIdForPath(path: string): string {
 }
 
 /**
- * A JDK / dependency source delivered by the language server instead of the file
- * system (jdtls answers `java/classFileContents` for `jdt://` class URIs).
+ * An SDK / dependency source delivered by a language server or read from an
+ * archive instead of the normal file system.
  */
 export interface LibraryBufferInfo {
   uri: string;
@@ -260,6 +260,17 @@ const LIBRARY_LANGUAGE_EXTENSIONS: Record<string, string> = {
   kotlin: "kt",
   scala: "scala",
   groovy: "groovy",
+  csharp: "cs",
+  swift: "swift",
+  cpp: "cpp",
+  c: "c",
+  python: "py",
+  rust: "rs",
+  go: "go",
+  typescript: "ts",
+  typescriptreact: "tsx",
+  javascript: "js",
+  javascriptreact: "jsx",
 };
 
 /**

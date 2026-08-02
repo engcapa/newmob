@@ -656,7 +656,7 @@ const STUB_LSP_PRESETS = [
     fileExtensions: ["cs", "csx"],
     fileNames: [],
     commands: [
-      { id: "csharp-ls", label: "csharp-ls", command: "csharp-ls", args: [], installHint: "dotnet tool install -g csharp-ls", fallback: false },
+      { id: "csharp-ls", label: "csharp-ls", command: "csharp-ls", args: ["--features", "metadata-uris"], installHint: "dotnet tool install -g csharp-ls", fallback: false },
       { id: "omnisharp", label: "OmniSharp", command: "omnisharp", args: ["--languageserver"], installHint: "Install OmniSharp and ensure `omnisharp` is on PATH", fallback: true },
     ],
   },
@@ -1780,6 +1780,15 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     }
     case "workspace_detect_tasks": {
       return [] as T;
+    }
+    case "workspace_execution_model": {
+      return {
+        projects: [],
+        buildTargets: [],
+        runConfigurations: [],
+        debugConfigurations: [],
+        tools: [],
+      } as T;
     }
     case "create_ssh_terminal": {
       const cols = (args?.cols as number) ?? 80;

@@ -9,8 +9,24 @@ interface WorkspaceBuildRunToolsDialogProps {
 }
 
 const TOOLS = [
+  { id: "cargo", label: "Cargo", placeholder: "cargo or an absolute path" },
+  { id: "go", label: "Go", placeholder: "go or an absolute path" },
+  { id: "node", label: "Node.js", placeholder: "node or an absolute path" },
+  { id: "npm", label: "npm", placeholder: "npm or an absolute path" },
+  { id: "pnpm", label: "pnpm", placeholder: "pnpm or an absolute path" },
+  { id: "yarn", label: "Yarn", placeholder: "yarn or an absolute path" },
+  { id: "python", label: "Python", placeholder: "python3, python.exe, or an absolute path" },
+  { id: "cmake", label: "CMake", placeholder: "cmake or an absolute path" },
+  { id: "dotnet", label: ".NET", placeholder: "dotnet or an absolute path" },
   { id: "maven", label: "Maven", placeholder: "mvn, mvn.cmd, or an absolute path" },
   { id: "gradle", label: "Gradle", placeholder: "gradle, gradle.bat, or an absolute path" },
+  { id: "sbt", label: "sbt", placeholder: "sbt or an absolute path" },
+  { id: "swift", label: "Swift", placeholder: "swift or an absolute path" },
+  { id: "lldbDap", label: "LLDB DAP", placeholder: "lldb-dap or an absolute path" },
+  { id: "delve", label: "Delve", placeholder: "dlv or an absolute path" },
+  { id: "debugpy", label: "debugpy", placeholder: "debugpy-adapter or an absolute path" },
+  { id: "jsDebug", label: "JS Debug", placeholder: "js-debug-adapter or an absolute path" },
+  { id: "netcoredbg", label: "CoreCLR", placeholder: "netcoredbg or an absolute path" },
 ] as const;
 
 export function WorkspaceBuildRunToolsDialog({
@@ -43,19 +59,26 @@ export function WorkspaceBuildRunToolsDialog({
       >
         <div className="flex h-10 items-center border-b border-[var(--taomni-code-border)] px-3">
           <span className="font-medium">Build and Run Tools</span>
-          <button type="button" aria-label="Close build and run tools" className="ml-auto" onClick={onClose}>
+          <button
+            type="button"
+            data-testid="workspace-build-run-tools-close"
+            aria-label="Close build and run tools"
+            className="ml-auto"
+            onClick={onClose}
+          >
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="space-y-3 p-3 text-xs">
+        <div className="max-h-[min(72vh,680px)] space-y-3 overflow-y-auto p-3 text-xs">
           <p className="text-[var(--taomni-code-muted)]">
             Resolution order is project wrapper, configured executable, then workspace SDK/PATH.
             Leave a field empty for automatic discovery.
           </p>
           {TOOLS.map((tool) => (
-            <label key={tool.id} className="grid grid-cols-[80px_1fr] items-center gap-2">
+            <label key={tool.id} className="grid grid-cols-[92px_1fr] items-center gap-2">
               <span>{tool.label}</span>
               <input
+                data-testid={`workspace-tool-${tool.id}`}
                 aria-label={`${tool.label} executable`}
                 value={values[tool.id]}
                 placeholder={tool.placeholder}
@@ -94,9 +117,15 @@ export function WorkspaceBuildRunToolsDialog({
           </label>
         </div>
         <div className="flex justify-end gap-2 border-t border-[var(--taomni-code-border)] p-3">
-          <button type="button" className="taomni-btn h-7 px-3" onClick={onClose}>Cancel</button>
           <button
             type="button"
+            data-testid="workspace-build-run-tools-cancel"
+            className="taomni-btn h-7 px-3"
+            onClick={onClose}
+          >Cancel</button>
+          <button
+            type="button"
+            data-testid="workspace-build-run-tools-save"
             className="taomni-btn h-7 px-3"
             onClick={() => {
               const tools = { ...config.tools };

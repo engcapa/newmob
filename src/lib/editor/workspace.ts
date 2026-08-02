@@ -92,10 +92,99 @@ export interface JavaRunTarget {
 export interface WorkspaceToolConfig {
   maven?: string;
   gradle?: string;
+  cargo?: string;
+  go?: string;
+  node?: string;
+  npm?: string;
+  pnpm?: string;
+  yarn?: string;
+  python?: string;
+  uv?: string;
+  poetry?: string;
+  cmake?: string;
+  dotnet?: string;
+  sbt?: string;
+  swift?: string;
+  lldbDap?: string;
+  delve?: string;
+  debugpy?: string;
+  jsDebug?: string;
+  netcoredbg?: string;
   /** Explicit JVM options applied to Maven `exec:java` through MAVEN_OPTS. */
   mavenJvmArgs?: string[];
   /** Auto-inherit safe runtime options from Maven test plugin `argLine`. */
   inheritMavenArgLine?: boolean;
+}
+
+export interface ExecutionCommand {
+  executable: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+  display: string;
+  source: "wrapper" | "configured" | "path";
+  error?: string;
+}
+
+export interface ExecutionToolProbe {
+  id: string;
+  label: string;
+  state: "available" | "missing";
+  executable?: string;
+  source?: "wrapper" | "configured" | "path";
+  installHint: string;
+}
+
+export interface ExecutionProjectModel {
+  id: string;
+  provider: string;
+  root: string;
+  manifest: string;
+  module: string;
+  languages: string[];
+  toolchain: string;
+  diagnostics: string[];
+}
+
+export interface ExecutionBuildTarget {
+  id: string;
+  projectId: string;
+  label: string;
+  kind: "configure" | "restore" | "build" | "clean" | "check" | "test";
+  command: ExecutionCommand;
+  dependsOn: string[];
+}
+
+export interface ExecutionRunConfiguration {
+  id: string;
+  projectId: string;
+  label: string;
+  kind: string;
+  command: ExecutionCommand;
+  sourceFile?: string;
+  preLaunchTargets: string[];
+  debugConfigurationId?: string;
+}
+
+export interface ExecutionDebugConfiguration {
+  id: string;
+  projectId: string;
+  label: string;
+  adapterId: string;
+  request: "launch" | "attach";
+  available: boolean;
+  diagnostic?: string;
+  preLaunchTargets: string[];
+  sourceFile?: string;
+  launchConfig: Record<string, unknown>;
+}
+
+export interface WorkspaceExecutionModel {
+  projects: ExecutionProjectModel[];
+  buildTargets: ExecutionBuildTarget[];
+  runConfigurations: ExecutionRunConfiguration[];
+  debugConfigurations: ExecutionDebugConfiguration[];
+  tools: ExecutionToolProbe[];
 }
 
 export function workspaceListDir(
@@ -142,6 +231,19 @@ export function workspaceDetectTasks(
   toolConfig?: WorkspaceToolConfig,
 ): Promise<WorkspaceTask[]> {
   return invoke<WorkspaceTask[]>("workspace_detect_tasks", { repoRoot, toolConfig: toolConfig ?? null });
+}
+
+/** Discover structured projects and first-class Build/Run/Debug capabilities. */
+export function workspaceExecutionModel(
+  repoRoot: string,
+  activeFile?: string,
+  toolConfig?: WorkspaceToolConfig,
+): Promise<WorkspaceExecutionModel> {
+  return invoke<WorkspaceExecutionModel>("workspace_execution_model", {
+    repoRoot,
+    activeFile: activeFile ?? null,
+    toolConfig: toolConfig ?? null,
+  });
 }
 
 /** Discover runnable Java main classes without requiring the java-debug bundle. */
