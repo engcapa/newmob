@@ -2377,6 +2377,18 @@ mod tests {
     use std::time::Duration;
     use tokio::net::TcpStream;
 
+    /// Live RDP fixtures commonly use a self-signed certificate. Keep the
+    /// production default fail-closed, while letting an operator explicitly
+    /// supply the known SHA-256 leaf pin for ignored live tests.
+    fn apply_live_certificate_pin(options: &mut RdpOptions) {
+        let Ok(pin) = std::env::var("TAOMNI_RDP_LIVE_CERTIFICATE_FINGERPRINT") else {
+            return;
+        };
+        if !pin.trim().is_empty() {
+            options.certificate_fingerprint = Some(pin);
+        }
+    }
+
     #[tokio::test]
     async fn handle_round_trip_via_channels() {
         let (mut handle, out_tx, _ctrl_rx) = RdpSessionHandle::new();
@@ -2745,6 +2757,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
         options.redirect_audio = "play".to_owned();
         if let Ok(path) = std::env::var("TAOMNI_RDP_LIVE_DRIVE_PATH") {
             options.redirect_drive.enabled = true;
@@ -2825,6 +2838,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
         options.redirect_clipboard = true;
 
         let mut handle = start_ironrdp_session(RdpSessionConfig {
@@ -2928,6 +2942,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
         options.redirect_clipboard = false;
         options.redirect_audio = "off".to_owned();
         options.redirect_drive.enabled = true;
@@ -3013,6 +3028,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
 
         let mut handle = start_ironrdp_session(RdpSessionConfig {
             stream: RdpStream::Tcp(stream),
@@ -3113,6 +3129,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
 
         let result = test_ironrdp_connection(
             RdpSessionConfig {
