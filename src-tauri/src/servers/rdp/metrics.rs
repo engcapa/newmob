@@ -29,6 +29,8 @@ struct MetricsState {
     forwarded_frames: u64,
     duplicate_frames: u64,
     replaced_frames: u64,
+    input_coalesced: u64,
+    input_dropped: u64,
     raw_bytes: u64,
     capture_us: SampleWindow,
     hash_us: SampleWindow,
@@ -81,6 +83,8 @@ impl RdpMetrics {
                 forwarded_frames: 0,
                 duplicate_frames: 0,
                 replaced_frames: 0,
+                input_coalesced: 0,
+                input_dropped: 0,
                 raw_bytes: 0,
                 capture_us: SampleWindow::default(),
                 hash_us: SampleWindow::default(),
@@ -108,6 +112,24 @@ impl RdpMetrics {
     pub(crate) fn record_duplicate_frame(&self) {
         if let Ok(mut state) = self.inner.lock() {
             state.duplicate_frames += 1;
+        }
+    }
+
+    pub(crate) fn record_frame_replaced(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.replaced_frames += 1;
+        }
+    }
+
+    pub(crate) fn record_input_coalesced(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.input_coalesced += 1;
+        }
+    }
+
+    pub(crate) fn record_input_dropped(&self) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.input_dropped += 1;
         }
     }
 
@@ -140,6 +162,8 @@ impl RdpMetrics {
                 state.forwarded_frames,
                 state.duplicate_frames,
                 state.replaced_frames,
+                state.input_coalesced,
+                state.input_dropped,
                 state.raw_bytes,
                 state.capture_us.percentiles(),
                 state.hash_us.percentiles(),
@@ -156,10 +180,21 @@ impl RdpMetrics {
             ),
             None => String::new(),
         };
-        let (captured, forwarded, duplicates, replaced, bytes, capture, hash, age, input) =
-            snapshot;
+        let (
+            captured,
+            forwarded,
+            duplicates,
+            replaced,
+            input_coalesced,
+            input_dropped,
+            bytes,
+            capture,
+            hash,
+            age,
+            input,
+        ) = snapshot;
         self.log.line(format!(
-            "RDP latency: captured={captured} forwarded={forwarded} duplicate={duplicates} replaced={replaced} raw={}MiB{}{}{}{}",
+            "RDP latency: captured={captured} forwarded={forwarded} duplicate={duplicates} replaced={replaced} input-coalesced={input_coalesced} input-dropped={input_dropped} raw={}MiB{}{}{}{}",
             bytes / (1024 * 1024),
             fmt(" capture", capture),
             fmt(" hash", hash),

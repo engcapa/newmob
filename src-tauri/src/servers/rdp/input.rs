@@ -21,7 +21,9 @@
 //!
 //! `view_only` short-circuits all injection.
 
-use std::sync::mpsc::{self, Sender};
+use std::collections::VecDeque;
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use enigo::{
@@ -46,12 +48,108 @@ enum InputCmd {
     Scroll { length: i32, axis: Axis },
 }
 
+impl InputCmd {
+    fn is_mouse_move(&self) -> bool {
+        matches!(self, Self::MoveMouse { .. })
+    }
+}
+
 /// Timestamping is intentionally attached to the command rather than the
 /// handler: it measures the full queueing delay before the thread-affine
 /// Enigo actor applies the input event.
 struct QueuedInput {
     received_at: Instant,
     cmd: InputCmd,
+}
+
+/// High-frequency mouse movement is advisory: only the most recent position
+/// before the next key/button/scroll boundary matters. This queue collapses
+/// consecutive moves, and has a soft bound for move traffic so a busy Windows
+/// client cannot make macOS replay stale coordinates for seconds. Semantic
+/// events are never discarded, even when the soft move bound is reached.
+#[derive(Clone)]
+struct InputQueue {
+    inner: Arc<(Mutex<InputQueueState>, Condvar)>,
+}
+
+struct InputQueueState {
+    commands: VecDeque<QueuedInput>,
+    closed: bool,
+}
+
+enum InputQueuePush {
+    Enqueued,
+    Coalesced,
+    DroppedMove,
+    Closed,
+}
+
+const MAX_PENDING_INPUTS: usize = 128;
+
+impl InputQueue {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new((
+                Mutex::new(InputQueueState {
+                    commands: VecDeque::new(),
+                    closed: false,
+                }),
+                Condvar::new(),
+            )),
+        }
+    }
+
+    fn push(&self, queued: QueuedInput) -> InputQueuePush {
+        let (lock, wake) = &*self.inner;
+        let Ok(mut state) = lock.lock() else {
+            return InputQueuePush::Closed;
+        };
+        if state.closed {
+            return InputQueuePush::Closed;
+        }
+
+        if queued.cmd.is_mouse_move()
+            && state
+                .commands
+                .back()
+                .is_some_and(|last| last.cmd.is_mouse_move())
+        {
+            *state.commands.back_mut().expect("tail checked above") = queued;
+            wake.notify_one();
+            return InputQueuePush::Coalesced;
+        }
+
+        if queued.cmd.is_mouse_move() && state.commands.len() >= MAX_PENDING_INPUTS {
+            return InputQueuePush::DroppedMove;
+        }
+
+        state.commands.push_back(queued);
+        wake.notify_one();
+        InputQueuePush::Enqueued
+    }
+
+    fn recv(&self) -> Option<QueuedInput> {
+        let (lock, wake) = &*self.inner;
+        let mut state = lock.lock().ok()?;
+        loop {
+            if let Some(queued) = state.commands.pop_front() {
+                return Some(queued);
+            }
+            if state.closed {
+                return None;
+            }
+            state = wake.wait(state).ok()?;
+        }
+    }
+
+    fn close(&self) {
+        let (lock, wake) = &*self.inner;
+        if let Ok(mut state) = lock.lock() {
+            state.closed = true;
+            state.commands.clear();
+        }
+        wake.notify_all();
+    }
 }
 
 /// RDP server input handler.
@@ -61,8 +159,8 @@ struct QueuedInput {
 /// actually moves the handler onto `spawn_blocking` worker threads. Wrapping the
 /// `Enigo` in a `Mutex` does *not* help — `Mutex<T>: Send` still requires
 /// `T: Send`. So instead of holding the `Enigo` directly, we own it on a single
-/// dedicated thread (the actor) and keep only an `mpsc::Sender<InputCmd>` here.
-/// `Sender<InputCmd>` is `Send` (because `InputCmd` is), which makes `RdpInput`
+/// dedicated thread (the actor) and keep only an [`InputQueue`] here.
+/// `InputQueue` is `Send`, which makes `RdpInput`
 /// `Send` uniformly across platforms — no `unsafe impl Send`, no per-OS `cfg`.
 /// As a bonus, all CGEvent posting happens on one consistent thread.
 pub(crate) struct RdpInput {
@@ -70,9 +168,10 @@ pub(crate) struct RdpInput {
     view_only: bool,
     /// `None` if enigo failed to initialize (no display / no permission) or the
     /// actor thread has exited; we log once and then silently drop input.
-    tx: Option<Sender<QueuedInput>>,
+    tx: Option<InputQueue>,
     warned: bool,
     control_gate: Option<std::sync::Arc<ControlGate>>,
+    metrics: RdpMetrics,
 }
 
 impl RdpInput {
@@ -93,6 +192,7 @@ impl RdpInput {
             tx,
             warned: false,
             control_gate,
+            metrics,
         }
     }
 
@@ -101,8 +201,9 @@ impl RdpInput {
     /// / no accessibility permission) — in which case the connection stays
     /// view-only. `Enigo::new` runs *inside* the thread because the resulting
     /// value is `!Send` on macOS and so cannot be constructed here and moved in.
-    fn spawn_actor(log: &LogEmitter, metrics: RdpMetrics) -> Option<Sender<QueuedInput>> {
-        let (tx, rx) = mpsc::channel::<QueuedInput>();
+    fn spawn_actor(log: &LogEmitter, metrics: RdpMetrics) -> Option<InputQueue> {
+        let tx = InputQueue::new();
+        let rx = tx.clone();
         // Bootstrap channel: the thread reports back whether `Enigo::new`
         // succeeded so `new()` can decide view-only vs interactive synchronously.
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -123,8 +224,8 @@ impl RdpInput {
                 };
                 drop(ready_tx);
 
-                // Drain commands until all senders drop (server shutdown).
-                while let Ok(queued) = rx.recv() {
+                // Drain commands until the server drops the queue on shutdown.
+                while let Some(queued) = rx.recv() {
                     metrics.record_input_handoff(queued.received_at);
                     apply(&mut enigo, queued.cmd);
                     metrics.report_if_due();
@@ -179,17 +280,19 @@ impl RdpInput {
             return;
         }
         if let Some(tx) = &self.tx {
-            if tx
-                .send(QueuedInput {
-                    received_at: Instant::now(),
-                    cmd,
-                })
-                .is_err()
-            {
-                // Actor thread is gone; stop trying and warn once.
-                self.tx = None;
-                self.warned = false;
-                self.warn_if_missing();
+            match tx.push(QueuedInput {
+                received_at: Instant::now(),
+                cmd,
+            }) {
+                InputQueuePush::Enqueued => {}
+                InputQueuePush::Coalesced => self.metrics.record_input_coalesced(),
+                InputQueuePush::DroppedMove => self.metrics.record_input_dropped(),
+                InputQueuePush::Closed => {
+                    // Actor thread is gone; stop trying and warn once.
+                    self.tx = None;
+                    self.warned = false;
+                    self.warn_if_missing();
+                }
             }
         }
     }
@@ -217,6 +320,14 @@ impl RdpInput {
                     });
                 }
             }
+        }
+    }
+}
+
+impl Drop for RdpInput {
+    fn drop(&mut self) {
+        if let Some(tx) = &self.tx {
+            tx.close();
         }
     }
 }
@@ -598,6 +709,17 @@ fn macos_extended_scancode_to_keycode(scancode: u8) -> Option<u16> {
 mod tests {
     use super::*;
 
+    fn absolute_move(x: i32) -> QueuedInput {
+        QueuedInput {
+            received_at: Instant::now(),
+            cmd: InputCmd::MoveMouse {
+                x,
+                y: 0,
+                coord: Coordinate::Abs,
+            },
+        }
+    }
+
     /// `RdpServerInputHandler: Send` and `ironrdp-server` moves the handler onto
     /// `spawn_blocking` threads, so `RdpInput` MUST be `Send` on every platform —
     /// including macOS, where `Enigo` is `!Send`. This static assertion fails to
@@ -607,6 +729,41 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<RdpInput>();
     };
+
+    #[test]
+    fn input_queue_coalesces_only_consecutive_mouse_moves() {
+        let queue = InputQueue::new();
+        assert!(matches!(
+            queue.push(absolute_move(1)),
+            InputQueuePush::Enqueued
+        ));
+        assert!(matches!(
+            queue.push(absolute_move(2)),
+            InputQueuePush::Coalesced
+        ));
+        assert!(matches!(
+            queue.push(QueuedInput {
+                received_at: Instant::now(),
+                cmd: InputCmd::Button {
+                    button: Button::Left,
+                    dir: Press,
+                },
+            }),
+            InputQueuePush::Enqueued
+        ));
+        assert!(matches!(
+            queue.push(absolute_move(3)),
+            InputQueuePush::Enqueued
+        ));
+
+        let first = queue.recv().unwrap();
+        assert!(matches!(first.cmd, InputCmd::MoveMouse { x: 2, .. }));
+        assert!(matches!(queue.recv().unwrap().cmd, InputCmd::Button { .. }));
+        assert!(matches!(
+            queue.recv().unwrap().cmd,
+            InputCmd::MoveMouse { x: 3, .. }
+        ));
+    }
 
     #[test]
     fn main_block_is_scancode_plus_eight() {
