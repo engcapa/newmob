@@ -51,6 +51,8 @@ export interface AppSelector {
 }
 
 export interface MacosAppIdentity {
+  kind: "bundle" | "executable";
+  selectedPath: string;
   bundlePath: string;
   canonicalBundlePath: string;
   mainExecutablePath: string;
