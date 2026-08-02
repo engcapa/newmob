@@ -933,8 +933,47 @@ return paths as text
             .collect())
     }
 
-    pub fn clipboard_write_files(_paths: &[String]) -> Result<(), String> {
-        Err("native file clipboard is not implemented on macOS".to_string())
+    pub fn clipboard_write_files(paths: &[String]) -> Result<(), String> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        if paths.len() > 256 {
+            return Err("macOS file clipboard accepts at most 256 paths".to_string());
+        }
+
+        let canonical = paths
+            .iter()
+            .map(|path| {
+                std::fs::canonicalize(path)
+                    .map_err(|error| format!("macOS file clipboard '{}': {error}", path))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|error| format!("macOS file clipboard init: {error}"))?;
+        clipboard
+            .set()
+            .file_list(&canonical)
+            .map_err(|error| format!("macOS file clipboard write: {error}"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn file_clipboard_rejects_missing_and_oversized_path_lists_before_writing() {
+            let missing = vec!["/definitely/not/a/taomni/clipboard/file".to_string()];
+            assert!(
+                super::clipboard_write_files(&missing)
+                    .unwrap_err()
+                    .contains("clipboard")
+            );
+
+            let oversized = vec!["/tmp/unused".to_string(); 257];
+            assert!(
+                super::clipboard_write_files(&oversized)
+                    .unwrap_err()
+                    .contains("at most 256")
+            );
+        }
     }
 }
 
