@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 
 /// Create the `server_configs` table if it does not exist. Called from
 /// `lib.rs` `setup()` right after `session::db::init_db`.
@@ -63,4 +63,19 @@ pub fn load_server_configs(conn: &Connection) -> SqlResult<HashMap<String, serde
         }
     }
     Ok(out)
+}
+
+/// Load one persisted config. Malformed JSON is treated as missing so callers
+/// never accidentally reuse a partially parsed credential record.
+pub fn load_server_config(
+    conn: &Connection,
+    server_type: &str,
+) -> SqlResult<Option<serde_json::Value>> {
+    let mut stmt = conn.prepare("SELECT config_json FROM server_configs WHERE server_type = ?1")?;
+    let mut rows = stmt.query(params![server_type])?;
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let config_json: String = row.get(0)?;
+    Ok(serde_json::from_str(&config_json).ok())
 }

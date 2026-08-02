@@ -12,6 +12,7 @@ import { useT } from "../../lib/i18n";
 import { confirmAppDialog } from "../../lib/appDialogs";
 import { closeCurrentDetachedWindow } from "../../lib/detachWindowing";
 import { isTauriRuntime } from "../../lib/runtime";
+import { ensureVaultReady } from "../../lib/vaultGate";
 import { ServerList } from "./ServerList";
 import { ServerSettings } from "./ServerSettings";
 
@@ -146,9 +147,17 @@ export function ServersDialog() {
   const handleApply = async () => {
     const { configs, runtimes } = useServersStore.getState();
     for (const type of SERVER_ORDER) {
-      const cfg = configs[type];
+      let cfg = configs[type];
       try {
-        await saveServerConfig(type, cfg);
+        if (
+          type === "rdp" &&
+          !(await ensureVaultReady(t("servers.notes.rdpVaultReason")))
+        ) {
+          appendLog(type, timestampLine(t("servers.notes.rdpVaultCancelled")));
+          continue;
+        }
+        cfg = await saveServerConfig(type, cfg);
+        useServersStore.getState().setConfig(type, cfg);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         appendLog(type, timestampLine(message));

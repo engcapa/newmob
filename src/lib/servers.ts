@@ -109,6 +109,7 @@ export function defaultConfig(type: ServerType): ServerConfig {
     case "rdp":
       return {
         ...base,
+        bindAddress: "127.0.0.1",
         username: "",
         password: "",
         domain: "",
@@ -163,8 +164,8 @@ export async function listServerStatuses(): Promise<ServerStatus[]> {
 export async function saveServerConfig(
   serverType: ServerType,
   config: ServerConfig,
-): Promise<void> {
-  return invoke("save_server_config", { serverType, config });
+): Promise<ServerConfig> {
+  return invoke<ServerConfig>("save_server_config", { serverType, config });
 }
 
 export async function loadServerConfigs(): Promise<Record<string, ServerConfig>> {

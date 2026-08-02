@@ -13,19 +13,18 @@
 //!
 //! Server-specific config (`config.extra`, camelCase as sent by the frontend):
 //!   - `username`     (string) RDP username clients must present
-//!   - `password`     (string) RDP password clients must present
+//!   - `passwordRef`  (string) encrypted-vault reference resolved at startup
 //!   - `domain`       (string) optional NLA domain
 //!   - `viewOnly`     (bool)   ignore client keyboard/mouse input (default false)
-//!   - `securityMode` (string) "tls" | "hybrid" (NLA, default) | "none" (insecure)
+//!   - `securityMode` (string) "hybrid" (NLA/CredSSP; the only production mode)
 //!
 //! ## Security
 //!
-//! Default mode is `hybrid` (NLA/CredSSP over TLS), which mstsc requires out of
-//! the box. `tls` offers TLS without NLA; `none` is plain unencrypted RDP for
-//! diagnostics only. TLS uses a self-signed cert cached in app-data (see
-//! [`tls`]). Credentials are mandatory except in `none` mode, where a loud
-//! warning is logged — mirroring [`super::ssh`]'s refusal to run wide open and
-//! [`super::vnc`]'s `-nopw` warning.
+//! Production mode is `hybrid` (NLA/CredSSP over TLS). TLS-only mode is not an
+//! authentication mechanism in IronRDP and plain RDP has no transport
+//! encryption, so both are rejected. TLS uses a self-signed cert cached in
+//! app-data (see [`tls`]); credentials are mandatory and are only present in
+//! memory after resolving the encrypted vault reference.
 //!
 //! ## Cancel bridge (the one new integration step vs `ssh.rs`)
 //!
@@ -60,25 +59,19 @@ use clipboard::ClipboardFactory;
 use display::RdpDisplay;
 use input::RdpInput;
 
-/// How the listening socket is secured.
-///   - `Hybrid` — NLA/CredSSP over TLS (mstsc's default; recommended).
-///   - `Tls` — TLS without NLA (FreeRDP `/sec:tls`).
-///   - `None` — plain RDP security, no encryption (FreeRDP `/sec:rdp`; insecure,
-///     for diagnostics only).
+/// The only production security mode: NLA/CredSSP over TLS.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SecurityMode {
-    None,
-    Tls,
     Hybrid,
 }
 
 impl SecurityMode {
-    fn parse(s: &str) -> Self {
+    fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "none" | "rdp" | "insecure" => SecurityMode::None,
-            "tls" => SecurityMode::Tls,
-            // Default to NLA/CredSSP — the only thing mstsc accepts out of the box.
-            _ => SecurityMode::Hybrid,
+            "" | "hybrid" | "nla" => Ok(SecurityMode::Hybrid),
+            other => Err(format!(
+                "RDP security mode '{other}' is disabled: production server requires NLA/CredSSP over TLS"
+            )),
         }
     }
 }
@@ -88,27 +81,14 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
     let bind = config.bind_address.clone();
 
     let view_only = config.bool_field("viewOnly", false);
-    let security = SecurityMode::parse(config.str_field("securityMode", "hybrid"));
+    let security = SecurityMode::parse(config.str_field("securityMode", "hybrid"))?;
 
-    // Credentials are mandatory unless explicitly running the insecure `none`
-    // mode for diagnostics (where there is no CredSSP to check them anyway).
     let auth = AuthConfig::from_fields(
         config.str_field("username", ""),
         config.str_field("password", ""),
         config.str_field("domain", ""),
     );
-    let auth = match (security, auth) {
-        (_, Ok(a)) => Some(a),
-        (SecurityMode::None, Err(_)) => {
-            ctx.log.line(
-                "WARNING: RDP server starting with NO security and NO credentials — anyone \
-                 who can reach this port gets full control of this desktop. Use only on a \
-                 trusted, isolated network.",
-            );
-            None
-        }
-        (_, Err(e)) => return Err(e),
-    };
+    let auth = auth?;
 
     // Resolve the bind address to a concrete SocketAddr up front so a bad
     // address surfaces as a startup error rather than inside the spawned task.
@@ -116,65 +96,32 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
         .parse()
         .map_err(|e| format!("invalid RDP bind address {}:{} — {}", bind, port, e))?;
 
-    // Probe-bind the port so "address already in use" / privilege errors surface
-    // as a startup Error. Small TOCTOU window before IronRDP binds for real —
-    // acceptable for a developer tool, same tradeoff as `iperf.rs`.
-    match std::net::TcpListener::bind(addr) {
-        Ok(probe) => drop(probe),
-        Err(e) => return Err(format!("cannot bind {} for RDP — {}", addr, e)),
+    if addr.ip().is_unspecified() && !config.bool_field("allowPublicBind", false) {
+        return Err(
+            "RDP refuses to bind all network interfaces without explicit allowPublicBind consent"
+                .to_string(),
+        );
     }
-
-    if bind == "0.0.0.0" || bind == "::" {
+    if addr.ip().is_unspecified() {
         ctx.log.line(
-            "WARNING: RDP server is bound to all interfaces — anyone who can reach this \
-             port may attempt to connect. Restrict the bind address or firewall the port.",
+            "RDP public bind explicitly enabled — protect this port with a host firewall and \
+             expose it only to trusted networks.",
         );
     }
 
-    // For TLS/Hybrid, generate (or load) the self-signed identity up front so a
-    // cert/key failure surfaces as a startup Error rather than inside the thread.
-    let identity = match security {
-        SecurityMode::None => {
-            ctx.log.line(
-                "NOTE: securityMode='none' — traffic is unencrypted. Connect with FreeRDP \
-                 `/sec:rdp`. mstsc requires NLA; use the default 'hybrid' mode for it.",
-            );
-            None
-        }
-        SecurityMode::Tls | SecurityMode::Hybrid => {
-            let id = tls::identity(&ctx.app).map_err(|e| format!("RDP TLS setup failed: {}", e))?;
-            ctx.log
-                .line("loaded self-signed TLS certificate (clients will see a trust warning)");
-            Some(id)
-        }
-    };
+    let identity = tls::identity(&ctx.app).map_err(|e| format!("RDP TLS setup failed: {}", e))?;
+    ctx.log
+        .line("loaded self-signed TLS certificate for NLA/CredSSP");
 
     let size = DesktopSize {
         width: 1920,
         height: 1080,
     };
 
-    // R0: announce capture capability so logs make "placeholder vs real desktop"
-    // obvious before a client connects.
     ctx.log.line(format!(
         "RDP capture: {}",
         capture::capture_capability_summary()
     ));
-    match capture::create_capturer(&ctx.log) {
-        Ok(cap) => {
-            let (w, h) = cap.desktop_size();
-            ctx.log.line(format!(
-                "RDP capture probe OK — desktop {}x{} (real frames will be served)",
-                w, h
-            ));
-        }
-        Err(e) => {
-            ctx.log.line(format!(
-                "RDP capture probe FAILED — clients will see a placeholder checkerboard \
-                 until a backend is available: {e}"
-            ));
-        }
-    }
 
     // Phase 7 (Linux advanced): independent/headless virtual sessions. The base
     // server mirrors the current console desktop; when the user asks for a
@@ -205,24 +152,22 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
 
     let params = ServerParams {
         addr,
-        size,
         view_only,
         security,
         identity,
-        credentials: auth.as_ref().map(AuthConfig::to_credentials),
+        credentials: auth.to_credentials(),
     };
-    let task = spawn_server(params, ctx.cancel.clone(), ctx.log.clone());
+    let task = spawn_server(params, ctx.cancel.clone(), ctx.log.clone()).await?;
     Ok(ServerStarted { pid: None, task })
 }
 
 /// Everything the server thread needs to build and run the [`RdpServer`].
 struct ServerParams {
     addr: SocketAddr,
-    size: DesktopSize,
     view_only: bool,
     security: SecurityMode,
-    identity: Option<TlsIdentityCtx>,
-    credentials: Option<Credentials>,
+    identity: TlsIdentityCtx,
+    credentials: Credentials,
 }
 
 /// Drive `RdpServer::run()` and bridge `cancel` → clean shutdown.
@@ -235,11 +180,13 @@ struct ServerParams {
 /// that thread. The returned [`JoinHandle`] is an async wrapper that waits for
 /// that thread to finish, so the registry's `task.abort()` plus the `cancel`
 /// token both tear it down cleanly.
-fn spawn_server(
+async fn spawn_server(
     params: ServerParams,
     cancel: CancellationToken,
     log: LogEmitter,
-) -> tokio::task::JoinHandle<()> {
+) -> Result<tokio::task::JoinHandle<()>, String> {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<SocketAddr, String>>();
+    let thread_cancel = cancel.clone();
     let thread = std::thread::Builder::new()
         .name("rdp-server".to_string())
         .spawn(move || {
@@ -249,6 +196,7 @@ fn spawn_server(
             {
                 Ok(rt) => rt,
                 Err(e) => {
+                    let _ = ready_tx.send(Err(format!("failed to start RDP runtime: {e}")));
                     log.line(format!("RDP server: failed to start runtime: {}", e));
                     return;
                 }
@@ -258,60 +206,89 @@ fn spawn_server(
                 let mut server = match build_server(&params, &log) {
                     Ok(s) => s,
                     Err(e) => {
+                        let _ = ready_tx.send(Err(e.to_string()));
                         log.line(format!("RDP server: {}", e));
                         return;
                     }
                 };
-                if let Some(creds) = params.credentials.clone() {
-                    server.set_credentials(Some(creds));
-                }
+                server.set_credentials(Some(params.credentials.clone()));
 
-                // Grab the event sender before moving `server`: sending Quit
-                // makes the accept loop break the next time it is idle. The
-                // bridge future is `Send` (only a token + sender), so plain
-                // `tokio::spawn` works even on this current-thread runtime.
                 let ev_sender = server.event_sender().clone();
-                let bridge = {
-                    let cancel = cancel.clone();
-                    tokio::spawn(async move {
-                        cancel.cancelled().await;
-                        let _ = ev_sender.send(ServerEvent::Quit("server stopped".to_string()));
-                    })
-                };
+                let (addr_tx, addr_rx) = tokio::sync::oneshot::channel();
+                if ev_sender.send(ServerEvent::GetLocalAddr(addr_tx)).is_err() {
+                    let _ = ready_tx.send(Err("RDP listener event channel closed".to_string()));
+                    return;
+                }
+                let run = server.run();
+                tokio::pin!(run);
 
                 tokio::select! {
-                    res = server.run() => {
+                    bound = addr_rx => {
+                        let result = bound
+                            .map_err(|_| "RDP listener readiness channel closed".to_string())
+                            .and_then(|addr| addr.ok_or_else(|| "RDP listener did not report an address".to_string()));
+                        if ready_tx.send(result).is_err() {
+                            return;
+                        }
+                    }
+                    res = &mut run => {
+                        let message = res
+                            .err()
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "RDP listener stopped before becoming ready".to_string());
+                        let _ = ready_tx.send(Err(message));
+                        return;
+                    }
+                    _ = thread_cancel.cancelled() => {
+                        let _ = ready_tx.send(Err("RDP server startup cancelled".to_string()));
+                        return;
+                    }
+                }
+
+                tokio::select! {
+                    res = &mut run => {
                         if let Err(e) = res {
                             log.line(format!("RDP server error: {}", e));
                         }
                     }
-                    // Hard backstop guaranteeing the thread exits (and the join
-                    // wrapper completes) even if a client connection is
-                    // mid-flight when stop is requested — otherwise the Quit
-                    // event would not be processed until run_connection returns.
-                    _ = cancel.cancelled() => {}
+                    _ = thread_cancel.cancelled() => {
+                        let _ = ev_sender.send(ServerEvent::Quit("server stopped".to_string()));
+                    }
                 }
-
-                bridge.abort();
                 log.line("RDP server stopped");
             });
         });
 
-    let handle = match thread {
-        Ok(h) => h,
-        Err(e) => {
-            // Spawn failed: return a no-op completed task so the caller's
-            // JoinHandle contract still holds.
-            return tokio::spawn(async move {
-                let _ = e;
-            });
-        }
-    };
+    let handle = thread.map_err(|e| format!("failed to spawn RDP server thread: {e}"))?;
 
-    // Bridge the std thread join into an async JoinHandle the registry can hold.
-    tokio::task::spawn_blocking(move || {
+    let task = tokio::task::spawn_blocking(move || {
         let _ = handle.join();
-    })
+    });
+    match tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx).await {
+        Ok(Ok(Ok(addr))) => {
+            log_ready(addr);
+            Ok(task)
+        }
+        Ok(Ok(Err(e))) => {
+            cancel.cancel();
+            let _ = task.await;
+            Err(format!("RDP listener failed to start: {e}"))
+        }
+        Ok(Err(_)) => {
+            cancel.cancel();
+            let _ = task.await;
+            Err("RDP listener readiness channel closed".to_string())
+        }
+        Err(_) => {
+            cancel.cancel();
+            let _ = task.await;
+            Err("timed out waiting for RDP listener readiness".to_string())
+        }
+    }
+}
+
+fn log_ready(addr: SocketAddr) {
+    tracing::info!(%addr, "RDP listener ready");
 }
 
 /// Assemble the [`RdpServer`] for the requested security mode. Each branch
@@ -319,36 +296,15 @@ fn spawn_server(
 /// the input/display/build tail is repeated per branch.
 fn build_server(params: &ServerParams, log: &LogEmitter) -> anyhow::Result<RdpServer> {
     let input = RdpInput::new(log.clone(), params.view_only);
-    let display = RdpDisplay::new(log.clone(), params.size);
+    let display = RdpDisplay::new(log.clone())?;
     let cliprdr: Box<dyn ironrdp::server::CliprdrServerFactory> =
         Box::new(ClipboardFactory::new(log.clone()));
 
     let base = RdpServer::builder().with_addr(params.addr);
 
     let server = match params.security {
-        SecurityMode::None => base
-            .with_no_security()
-            .with_input_handler(input)
-            .with_display_handler(display)
-            .with_cliprdr_factory(Some(cliprdr))
-            .build(),
-        SecurityMode::Tls => {
-            let identity = params
-                .identity
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS identity missing"))?;
-            let acceptor = identity.make_acceptor()?;
-            base.with_tls(acceptor)
-                .with_input_handler(input)
-                .with_display_handler(display)
-                .with_cliprdr_factory(Some(cliprdr))
-                .build()
-        }
         SecurityMode::Hybrid => {
-            let identity = params
-                .identity
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("TLS identity missing"))?;
+            let identity = &params.identity;
             let acceptor = identity.make_acceptor()?;
             base.with_hybrid(acceptor, identity.pub_key.clone())
                 .with_input_handler(input)
@@ -358,4 +314,25 @@ fn build_server(params: &ServerParams, log: &LogEmitter) -> anyhow::Result<RdpSe
         }
     };
     Ok(server)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SecurityMode, SocketAddr};
+
+    #[test]
+    fn production_security_accepts_only_hybrid() {
+        assert_eq!(SecurityMode::parse("hybrid"), Ok(SecurityMode::Hybrid));
+        assert_eq!(SecurityMode::parse("NLA"), Ok(SecurityMode::Hybrid));
+        assert!(SecurityMode::parse("tls").is_err());
+        assert!(SecurityMode::parse("none").is_err());
+    }
+
+    #[test]
+    fn socket_address_detects_public_wildcards() {
+        let ipv4: SocketAddr = "0.0.0.0:3389".parse().unwrap();
+        let ipv6: SocketAddr = "[::]:3389".parse().unwrap();
+        assert!(ipv4.ip().is_unspecified());
+        assert!(ipv6.ip().is_unspecified());
+    }
 }

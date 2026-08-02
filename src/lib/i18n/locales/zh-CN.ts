@@ -1609,6 +1609,8 @@ export const zhCN: DeepPartial<typeof en> = {
       rdpSecHybrid: "NLA（推荐）",
       rdpSecTls: "仅 TLS",
       rdpSecNone: "无（不安全）",
+      rdpPasswordStored: "已安全保存——输入新密码可替换",
+      rdpPublicBind: "允许绑定所有网络接口",
       optional: "可选",
     },
     notes: {
@@ -1616,6 +1618,10 @@ export const zhCN: DeepPartial<typeof en> = {
       nfsPrivileges: "NFS 导出需要操作系统权限，可能会提示提权。",
       iperfBandwidth: "应用于连接的客户端（Mbit/s）。0 表示不限制。",
       rdpSelfSigned: "使用存储在应用数据中的自签名证书；客户端首次连接时会看到信任警告。",
+      rdpHybridOnly: "生产模式强制使用 TLS 上的 NLA/CredSSP；自签名服务端证书保存在应用数据中。",
+      rdpVaultReason: "请解锁凭据保险库，以保护 RDP Server 密码。",
+      rdpVaultCancelled: "凭据保险库未解锁，RDP Server 设置未保存。",
+      rdpPublicBind: "这会把 RDP 监听器暴露到本机之外；请使用防火墙限制范围，并仅用于可信网络。",
       rdpInsecure:
         "无安全模式意味着流量不加密；若未设置凭据，任何能访问该端口的人都可完全控制本机桌面。请仅在隔离网络中使用。",
       rdpCapLinux:

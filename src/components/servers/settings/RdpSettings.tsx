@@ -1,7 +1,7 @@
 import { useT } from "../../../lib/i18n";
 import type { ServerConfig } from "../../../lib/servers";
 import { getAppPlatform } from "../../../lib/runtime";
-import { CheckboxField, FieldNote, PasswordField, SelectField, TextField } from "../fields";
+import { CheckboxField, FieldNote, PasswordField, TextField } from "../fields";
 
 interface Props {
   config: ServerConfig;
@@ -18,9 +18,10 @@ export function RdpSettings({ config, onChange }: Props) {
   const username = typeof config.username === "string" ? config.username : "";
   const password = typeof config.password === "string" ? config.password : "";
   const domain = typeof config.domain === "string" ? config.domain : "";
-  const securityMode =
-    typeof config.securityMode === "string" ? config.securityMode : "hybrid";
+  const passwordStored =
+    typeof config.passwordRef === "string" && config.passwordRef.startsWith("vault:");
   const viewOnly = config.viewOnly === true;
+  const allowPublicBind = config.allowPublicBind === true;
   const platform = getAppPlatform();
   const capabilityNote =
     platform === "macos"
@@ -43,6 +44,7 @@ export function RdpSettings({ config, onChange }: Props) {
         label={t("servers.fields.password")}
         value={password}
         onChange={(v) => onChange({ password: v })}
+        placeholder={passwordStored ? t("servers.fields.rdpPasswordStored") : undefined}
       />
       <TextField
         label={t("servers.fields.rdpDomain")}
@@ -50,28 +52,22 @@ export function RdpSettings({ config, onChange }: Props) {
         onChange={(v) => onChange({ domain: v })}
         placeholder={t("servers.fields.optional")}
       />
-      <SelectField
-        label={t("servers.fields.rdpSecurity")}
-        value={securityMode}
-        onChange={(v) => onChange({ securityMode: v })}
-        options={[
-          { value: "hybrid", label: t("servers.fields.rdpSecHybrid") },
-          { value: "tls", label: t("servers.fields.rdpSecTls") },
-          { value: "none", label: t("servers.fields.rdpSecNone") },
-        ]}
-        width={220}
-      />
-      {securityMode === "none" ? (
-        <FieldNote tone="warning">{t("servers.notes.rdpInsecure")}</FieldNote>
-      ) : (
-        <FieldNote>{t("servers.notes.rdpSelfSigned")}</FieldNote>
-      )}
+      <FieldNote>{t("servers.notes.rdpHybridOnly")}</FieldNote>
       <CheckboxField
         label={t("servers.fields.viewOnly")}
         checkboxLabel={t("servers.fields.viewOnly")}
         value={viewOnly}
         onChange={(v) => onChange({ viewOnly: v })}
       />
+      <CheckboxField
+        label={t("servers.fields.rdpPublicBind")}
+        checkboxLabel={t("servers.fields.rdpPublicBind")}
+        value={allowPublicBind}
+        onChange={(v) => onChange({ allowPublicBind: v })}
+      />
+      {allowPublicBind ? (
+        <FieldNote tone="warning">{t("servers.notes.rdpPublicBind")}</FieldNote>
+      ) : null}
     </div>
   );
 }

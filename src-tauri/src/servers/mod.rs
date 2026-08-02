@@ -35,7 +35,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::module_lock::ModuleLock;
 use crate::state::AppState;
-use engine::{set_status, ServerCtx};
+use engine::{ServerCtx, set_status};
+
+const RDP_PASSWORD_KIND: &str = "rdp-server-password";
+const RDP_PASSWORD_LABEL: &str = "RDP server password";
 
 /* ---------------------------- shared DTOs --------------------------- */
 
@@ -305,7 +308,7 @@ pub async fn start_local_server(
         }
     }
 
-    let config: ServerConfig = serde_json::from_value(config)
+    let mut config: ServerConfig = serde_json::from_value(config)
         .map_err(|e| format!("invalid config for {}: {}", server_type, e))?;
     // There is one persisted configuration per server type. Keep that type
     // exclusive across Taomni processes; different server types may coexist.
@@ -325,6 +328,20 @@ pub async fn start_local_server(
         error: None,
     };
     set_status(&app, &state.servers, starting).await;
+
+    if st == ServerType::Rdp {
+        if let Err(e) = resolve_rdp_password(&state, &mut config) {
+            let info = ServerStatus {
+                server_type: st,
+                status: ServerRunState::Error,
+                pid: None,
+                started_at: None,
+                error: Some(e.clone()),
+            };
+            set_status(&app, &state.servers, info).await;
+            return Err(e);
+        }
+    }
 
     // Dispatch to the leaf. Fallible setup (bind/locate) surfaces here.
     let cancel = CancellationToken::new();
@@ -429,21 +446,161 @@ pub async fn list_server_statuses(state: State<'_, AppState>) -> Result<Vec<Serv
 pub async fn save_server_config(
     state: State<'_, AppState>,
     server_type: String,
-    config: serde_json::Value,
-) -> Result<(), String> {
+    mut config: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let st = ServerType::from_str(&server_type)
         .ok_or_else(|| format!("unknown server type: {}", server_type))?;
+    if st == ServerType::Rdp {
+        let legacy_password = {
+            let db = state.db.lock().map_err(|e| e.to_string())?;
+            db::load_server_config(&db, st.as_str())
+                .map_err(|e| e.to_string())?
+                .and_then(|value| rdp_plaintext_password(&value).map(str::to_owned))
+        };
+        secure_rdp_config(
+            state.vault.as_ref(),
+            &mut config,
+            legacy_password.as_deref(),
+        )?;
+    }
     let json = serde_json::to_string(&config).map_err(|e| e.to_string())?;
     let db = state.db.lock().map_err(|e| e.to_string())?;
-    db::save_server_config(&db, st.as_str(), &json).map_err(|e| e.to_string())
+    db::save_server_config(&db, st.as_str(), &json).map_err(|e| e.to_string())?;
+    Ok(config)
 }
 
 #[tauri::command]
 pub async fn load_server_configs(
     state: State<'_, AppState>,
 ) -> Result<HashMap<String, serde_json::Value>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
-    db::load_server_configs(&db).map_err(|e| e.to_string())
+    let mut configs = {
+        let db = state.db.lock().map_err(|e| e.to_string())?;
+        db::load_server_configs(&db).map_err(|e| e.to_string())?
+    };
+
+    if let Some(config) = configs.get_mut(ServerType::Rdp.as_str()) {
+        let legacy_password = rdp_plaintext_password(config).map(str::to_owned);
+        if legacy_password.is_some() {
+            match secure_rdp_config(state.vault.as_ref(), config, legacy_password.as_deref()) {
+                Ok(()) => {
+                    let json = serde_json::to_string(config).map_err(|e| e.to_string())?;
+                    let db = state.db.lock().map_err(|e| e.to_string())?;
+                    db::save_server_config(&db, ServerType::Rdp.as_str(), &json)
+                        .map_err(|e| e.to_string())?;
+                }
+                Err(e) if e == crate::vault::ERR_VAULT_LOCKED => {
+                    redact_legacy_rdp_password(config);
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            redact_rdp_password(config);
+        }
+    }
+
+    Ok(configs)
+}
+
+fn rdp_plaintext_password(config: &serde_json::Value) -> Option<&str> {
+    config
+        .get("password")
+        .and_then(|value| value.as_str())
+        .filter(|password| {
+            !password.is_empty() && !password.starts_with(crate::vault::VAULT_REF_PREFIX)
+        })
+}
+
+fn redact_rdp_password(config: &mut serde_json::Value) {
+    if let Some(object) = config.as_object_mut() {
+        object.remove("password");
+    }
+}
+
+fn redact_legacy_rdp_password(config: &mut serde_json::Value) {
+    if let Some(object) = config.as_object_mut() {
+        object.remove("password");
+        object.insert(
+            "credentialMigrationRequired".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+}
+
+/// Move an RDP password out of the general configuration database and into the
+/// encrypted credential vault. The returned JSON is safe to persist or send
+/// back to the frontend: it contains only a `vault:` reference.
+fn secure_rdp_config(
+    vault: &crate::vault::Vault,
+    config: &mut serde_json::Value,
+    legacy_password: Option<&str>,
+) -> Result<(), String> {
+    let object = config
+        .as_object_mut()
+        .ok_or_else(|| "invalid RDP server config: expected an object".to_string())?;
+
+    let submitted_password = object
+        .remove("password")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .filter(|password| !password.is_empty());
+    let existing_reference = object
+        .get("passwordRef")
+        .and_then(|value| value.as_str())
+        .filter(|reference| reference.starts_with(crate::vault::VAULT_REF_PREFIX))
+        .map(str::to_owned);
+    let plaintext = submitted_password
+        .as_deref()
+        .filter(|password| !password.starts_with(crate::vault::VAULT_REF_PREFIX))
+        .or(legacy_password);
+
+    let reference = if let Some(plaintext) = plaintext {
+        if let Some(reference) = existing_reference.as_deref() {
+            let id = reference
+                .strip_prefix(crate::vault::VAULT_REF_PREFIX)
+                .ok_or_else(|| "invalid RDP password vault reference".to_string())?;
+            vault.update(id, plaintext)?;
+            reference.to_string()
+        } else {
+            vault
+                .put(RDP_PASSWORD_KIND, RDP_PASSWORD_LABEL, plaintext)?
+                .reference
+        }
+    } else if let Some(reference) = existing_reference {
+        reference
+    } else if let Some(reference) = submitted_password
+        .as_deref()
+        .filter(|password| password.starts_with(crate::vault::VAULT_REF_PREFIX))
+    {
+        reference.to_string()
+    } else {
+        return Err(
+            "RDP server password is required and must be stored in the credential vault"
+                .to_string(),
+        );
+    };
+
+    object.insert(
+        "passwordRef".to_string(),
+        serde_json::Value::String(reference),
+    );
+    object.remove("credentialMigrationRequired");
+    Ok(())
+}
+
+fn resolve_rdp_password(state: &AppState, config: &mut ServerConfig) -> Result<(), String> {
+    let reference = config
+        .extra
+        .get("passwordRef")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| "RDP server password is not stored in the credential vault".to_string())?;
+    let password = state
+        .vault
+        .resolve(reference)?
+        .ok_or_else(|| "invalid RDP server password vault reference".to_string())?;
+    config.extra.insert(
+        "password".to_string(),
+        serde_json::Value::String(password.to_string()),
+    );
+    Ok(())
 }
 
 /// Called once at startup to start any servers whose persisted config has
@@ -481,5 +638,51 @@ pub async fn autostart_servers(app: AppHandle) {
         if let Err(e) = start_local_server(app.clone(), state, type_str.clone(), value).await {
             tracing::warn!("autostart server {}: {}", type_str, e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{redact_legacy_rdp_password, secure_rdp_config};
+    use crate::vault::Vault;
+
+    #[test]
+    fn rdp_password_is_persisted_only_as_a_vault_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = Vault::open(&dir.path().join("vault.db")).unwrap();
+        vault.init("test-master-password").unwrap();
+        let mut config = json!({
+            "username": "alice",
+            "password": "first-secret",
+            "securityMode": "hybrid"
+        });
+
+        secure_rdp_config(&vault, &mut config, None).unwrap();
+
+        assert!(config.get("password").is_none());
+        let reference = config["passwordRef"].as_str().unwrap().to_string();
+        assert!(reference.starts_with("vault:"));
+        assert_eq!(
+            vault.resolve(&reference).unwrap().unwrap().as_str(),
+            "first-secret"
+        );
+
+        config["password"] = json!("replacement-secret");
+        secure_rdp_config(&vault, &mut config, None).unwrap();
+        assert_eq!(config["passwordRef"].as_str(), Some(reference.as_str()));
+        assert_eq!(
+            vault.resolve(&reference).unwrap().unwrap().as_str(),
+            "replacement-secret"
+        );
+    }
+
+    #[test]
+    fn locked_legacy_config_is_redacted_before_returning_to_ui() {
+        let mut config = json!({ "username": "alice", "password": "legacy-secret" });
+        redact_legacy_rdp_password(&mut config);
+        assert!(config.get("password").is_none());
+        assert_eq!(config["credentialMigrationRequired"], true);
     }
 }

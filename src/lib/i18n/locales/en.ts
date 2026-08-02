@@ -1616,6 +1616,8 @@ const dict = {
       rdpSecHybrid: "NLA (recommended)",
       rdpSecTls: "TLS only",
       rdpSecNone: "None (insecure)",
+      rdpPasswordStored: "Stored securely — type to replace",
+      rdpPublicBind: "Allow binding all interfaces",
       optional: "optional",
     },
     notes: {
@@ -1626,6 +1628,12 @@ const dict = {
       iperfBandwidth: "Applies to connecting clients (Mbit/s). 0 means unlimited.",
       rdpSelfSigned:
         "Uses a self-signed certificate stored in app data; clients will see a trust warning on first connect.",
+      rdpHybridOnly:
+        "Production mode requires NLA/CredSSP over TLS. The self-signed server certificate is stored in app data.",
+      rdpVaultReason: "Unlock the credential vault to protect the RDP server password.",
+      rdpVaultCancelled: "RDP server settings were not saved because the credential vault is locked.",
+      rdpPublicBind:
+        "This exposes the RDP listener beyond this Mac. Restrict it with a firewall and use only trusted networks.",
       rdpInsecure:
         "No security means traffic is unencrypted and, without credentials, anyone who can reach the port gets full control. Use only on an isolated network.",
       rdpCapLinux:

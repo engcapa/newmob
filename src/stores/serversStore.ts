@@ -13,6 +13,7 @@ import {
   type ServerStatus,
   type ServerType,
 } from "../lib/servers";
+import { ensureVaultReady } from "../lib/vaultGate";
 
 const MAX_LOG_LINES = 500;
 
@@ -164,7 +165,7 @@ export const useServersStore = create<ServersStore>((set, get) => ({
   },
 
   start: async (t) => {
-    const cfg = get().configs[t];
+    let cfg = get().configs[t];
     // Optimistic "starting" so the row reflects intent immediately.
     set((s) => ({
       runtimes: {
@@ -173,7 +174,11 @@ export const useServersStore = create<ServersStore>((set, get) => ({
       },
     }));
     try {
-      await saveServerConfig(t, cfg);
+      if (t === "rdp" && !(await ensureVaultReady("Store the RDP server password securely"))) {
+        throw new Error("RDP server start cancelled: credential vault is not ready");
+      }
+      cfg = await saveServerConfig(t, cfg);
+      get().setConfig(t, cfg);
       const status = await startLocalServer(t, cfg);
       get().setStatus(t, status);
     } catch (err) {
