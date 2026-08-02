@@ -1568,6 +1568,11 @@ export const zhCN: DeepPartial<typeof en> = {
     statusError: "错误",
     confirmDiscard: "放弃未保存的服务器更改？",
     restartForPort: "重启服务器以应用端口更改",
+    rdpApprovalTitle: "允许远程控制？",
+    rdpApprovalMessage:
+      "RDP 客户端 {peer} 正在请求控制这台 Mac。是否允许此连接注入键盘和鼠标输入？请求将在 {seconds} 秒后失效。",
+    rdpApprovalAllow: "允许控制",
+    rdpApprovalDeny: "拒绝",
     fields: {
       port: "监听端口",
       bindAddress: "绑定地址",
@@ -1617,6 +1622,7 @@ export const zhCN: DeepPartial<typeof en> = {
       rdpCapturePermission: "屏幕录制权限",
       rdpGrantCapture: "授予权限……",
       rdpRefreshDisplays: "刷新显示器",
+      rdpControlApproval: "要求本机确认远程控制",
       optional: "可选",
     },
     notes: {
@@ -1636,6 +1642,7 @@ export const zhCN: DeepPartial<typeof en> = {
         "桌面采集：macOS 使用持久原生显示流。请授予屏幕录制权限，并选择要共享的显示器。",
       rdpCaptureGranted: "权限已授予",
       rdpCaptureRequired: "启动服务器前必须授予权限",
+      rdpUnattendedControl: "通过认证的客户端无需本机确认即可控制这台 Mac。",
       rdpCapWindows:
         "桌面采集：本构建尚未实现 Windows DXGI/WGC，客户端将看到占位棋盘格画面。真实桌面共享请用 Linux/macOS，或等待 Windows 后端。",
       rdpCapUnknown:

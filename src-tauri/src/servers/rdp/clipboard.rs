@@ -15,6 +15,7 @@
 //!
 //! Images and files are out of scope; only Unicode text crosses the bridge.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ironrdp::cliprdr::backend::{
@@ -37,6 +38,8 @@ struct Shared {
     /// Last text we know the host clipboard holds (set by the poller, and by us
     /// after applying a client paste so we don't echo it back).
     host_text: Mutex<Option<String>>,
+    /// At most one host poller belongs to the current CLIPRDR connection.
+    active_poller: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 /// Factory: the server rebuilds a backend per connection, so the factory holds
@@ -94,6 +97,15 @@ impl ClipboardMessageProxy for EventProxy {
 }
 
 const CF_UNICODETEXT: ClipboardFormatId = ClipboardFormatId::CF_UNICODETEXT;
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 4 * 1024 * 1024;
+
+fn unicode_payload_within_limit(text: &str) -> bool {
+    text.encode_utf16()
+        .count()
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(2))
+        .is_some_and(|bytes| bytes <= MAX_CLIPBOARD_TEXT_BYTES)
+}
 
 struct ClipboardBackend {
     log: LogEmitter,
@@ -104,6 +116,7 @@ struct ClipboardBackend {
     remote_has_text: bool,
     /// Guards against spawning more than one host-clipboard poll thread.
     poller_started: bool,
+    poller_cancel: Arc<AtomicBool>,
 }
 
 // `CliprdrBackend` requires `Debug`; the backend holds non-`Debug` handles
@@ -135,6 +148,7 @@ impl ClipboardBackend {
             temp_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             remote_has_text: false,
             poller_started: false,
+            poller_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -147,9 +161,16 @@ impl ClipboardBackend {
         }
         self.poller_started = true;
 
+        if let Ok(mut active) = self.shared.active_poller.lock() {
+            if let Some(previous) = active.replace(Arc::clone(&self.poller_cancel)) {
+                previous.store(true, Ordering::Release);
+            }
+        }
+
         let proxy = self.proxy.clone();
         let shared = Arc::clone(&self.shared);
         let log = self.log.clone();
+        let cancel = Arc::clone(&self.poller_cancel);
         std::thread::Builder::new()
             .name("rdp-cliprdr-poll".to_string())
             .spawn(move || {
@@ -160,13 +181,35 @@ impl ClipboardBackend {
                         return;
                     }
                 };
-                loop {
+                let mut warned_oversized = false;
+                while !cancel.load(Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(500));
+                    if cancel.load(Ordering::Acquire) {
+                        break;
+                    }
                     let current = clipboard.get_text().ok();
                     let mut guard = match shared.host_text.lock() {
                         Ok(g) => g,
                         Err(_) => break,
                     };
+                    if current
+                        .as_deref()
+                        .is_some_and(|text| !unicode_payload_within_limit(text))
+                    {
+                        *guard = None;
+                        drop(guard);
+                        proxy
+                            .send_clipboard_message(ClipboardMessage::SendInitiateCopy(Vec::new()));
+                        if !warned_oversized {
+                            warned_oversized = true;
+                            log.line(format!(
+                                "clipboard: local text exceeds {} MiB and will not be shared",
+                                MAX_CLIPBOARD_TEXT_BYTES / (1024 * 1024)
+                            ));
+                        }
+                        continue;
+                    }
+                    warned_oversized = false;
                     if current.is_some() && *guard != current {
                         *guard = current;
                         drop(guard);
@@ -180,6 +223,13 @@ impl ClipboardBackend {
     }
 
     fn set_host_text(&self, text: String) {
+        if !unicode_payload_within_limit(&text) {
+            self.log.line(format!(
+                "clipboard: rejected remote text larger than {} MiB",
+                MAX_CLIPBOARD_TEXT_BYTES / (1024 * 1024)
+            ));
+            return;
+        }
         // Remember it first so the poller doesn't bounce it back to the client.
         if let Ok(mut guard) = self.shared.host_text.lock() {
             *guard = Some(text.clone());
@@ -190,6 +240,20 @@ impl ClipboardBackend {
                 .log
                 .line(format!("clipboard: failed to set host text: {}", e)),
         }
+    }
+}
+
+impl Drop for ClipboardBackend {
+    fn drop(&mut self) {
+        self.poller_cancel.store(true, Ordering::Release);
+        if let Ok(mut active) = self.shared.active_poller.lock()
+            && active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.poller_cancel))
+        {
+            *active = None;
+        }
+        self.log.line("clipboard channel stopped");
     }
 }
 
@@ -249,6 +313,7 @@ impl CliprdrBackend for ClipboardBackend {
                 .lock()
                 .ok()
                 .and_then(|g| g.clone())
+                .filter(|text| unicode_payload_within_limit(text))
                 .unwrap_or_default();
             FormatDataResponse::new_unicode_string(&text).into_owned()
         } else {
@@ -261,6 +326,13 @@ impl CliprdrBackend for ClipboardBackend {
     fn on_format_data_response(&mut self, response: FormatDataResponse<'_>) {
         // The client sent us the text it had copied — set it on the host.
         if response.is_error() {
+            return;
+        }
+        if response.data().len() > MAX_CLIPBOARD_TEXT_BYTES {
+            self.log.line(format!(
+                "clipboard: rejected remote payload larger than {} MiB",
+                MAX_CLIPBOARD_TEXT_BYTES / (1024 * 1024)
+            ));
             return;
         }
         match response.to_unicode_string() {
@@ -284,4 +356,20 @@ impl CliprdrBackend for ClipboardBackend {
     fn on_lock(&mut self, _data_id: LockDataId) {}
 
     fn on_unlock(&mut self, _data_id: LockDataId) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_CLIPBOARD_TEXT_BYTES, unicode_payload_within_limit};
+
+    #[test]
+    fn clipboard_limit_counts_encoded_unicode_payload() {
+        let max_ascii_chars = (MAX_CLIPBOARD_TEXT_BYTES - 2) / 2;
+        assert!(unicode_payload_within_limit(&"a".repeat(max_ascii_chars)));
+        assert!(!unicode_payload_within_limit(
+            &"a".repeat(max_ascii_chars + 1)
+        ));
+        // A supplementary character occupies a UTF-16 surrogate pair.
+        assert!(!unicode_payload_within_limit(&"😀".repeat(max_ascii_chars)));
+    }
 }

@@ -34,6 +34,7 @@ export function RdpSettings({ config, onChange }: Props) {
     typeof config.passwordRef === "string" && config.passwordRef.startsWith("vault:");
   const viewOnly = config.viewOnly === true;
   const allowPublicBind = config.allowPublicBind === true;
+  const requireControlApproval = config.requireControlApproval !== false;
   const displayId = typeof config.displayId === "string" ? config.displayId : "";
   const platform = getAppPlatform();
   const [captureProbe, setCaptureProbe] = useState<RdpCaptureProbe | null>(null);
@@ -135,6 +136,17 @@ export function RdpSettings({ config, onChange }: Props) {
         value={viewOnly}
         onChange={(v) => onChange({ viewOnly: v })}
       />
+      {!viewOnly ? (
+        <CheckboxField
+          label={t("servers.fields.rdpControlApproval")}
+          checkboxLabel={t("servers.fields.rdpControlApproval")}
+          value={requireControlApproval}
+          onChange={(value) => onChange({ requireControlApproval: value })}
+        />
+      ) : null}
+      {!viewOnly && !requireControlApproval ? (
+        <FieldNote tone="warning">{t("servers.notes.rdpUnattendedControl")}</FieldNote>
+      ) : null}
       <CheckboxField
         label={t("servers.fields.rdpPublicBind")}
         checkboxLabel={t("servers.fields.rdpPublicBind")}

@@ -17,6 +17,7 @@
 //!   - `domain`       (string) optional NLA domain
 //!   - `viewOnly`     (bool)   ignore client keyboard/mouse input (default false)
 //!   - `displayId`    (string) optional macOS display id; empty selects primary
+//!   - `requireControlApproval` (bool) require local consent before input (default true)
 //!   - `securityMode` (string) "hybrid" (NLA/CredSSP; the only production mode)
 //!
 //! ## Security
@@ -36,9 +37,16 @@
 //! race `run()` against the cancel token as a hard backstop for the case where a
 //! client connection is mid-flight when stop is requested.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
-use ironrdp::server::{Credentials, DesktopSize, RdpServer, ServerEvent, TlsIdentityCtx};
+use ironrdp::server::{
+    ConnectionHandler, Credentials, DesktopSize, PostConnectionAction, RdpServer, ServerEvent,
+    TlsIdentityCtx,
+};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
 use tokio_util::sync::CancellationToken;
 
 use super::ServerConfig;
@@ -59,6 +67,293 @@ use auth::AuthConfig;
 use clipboard::ClipboardFactory;
 use display::RdpDisplay;
 use input::RdpInput;
+
+const CONTROL_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Pending local approvals are registered by the dedicated RDP server thread
+/// and resolved by the main-window command handler.
+#[derive(Default)]
+pub(crate) struct ApprovalBroker {
+    pending: Mutex<HashMap<String, std::sync::mpsc::Sender<bool>>>,
+}
+
+impl ApprovalBroker {
+    fn register(&self, request_id: String) -> std::sync::mpsc::Receiver<bool> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.insert(request_id, tx);
+        }
+        rx
+    }
+
+    pub(crate) fn resolve(&self, request_id: &str, approved: bool) -> bool {
+        let sender = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(request_id));
+        sender.is_some_and(|sender| sender.send(approved).is_ok())
+    }
+
+    fn cancel(&self, request_id: &str) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(request_id);
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionApprovalRequest {
+    request_id: String,
+    peer: String,
+    timeout_seconds: u64,
+    expires_at: i64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RdpSessionEvent {
+    state: &'static str,
+    peer: String,
+    view_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum ControlDecision {
+    #[default]
+    Unknown,
+    Awaiting,
+    Approved,
+    Denied,
+}
+
+#[derive(Default)]
+struct ControlGateState {
+    peer: Option<SocketAddr>,
+    decision: ControlDecision,
+    request_id: Option<String>,
+}
+
+/// Input injection gate shared by the connection lifecycle handler and the
+/// input handler. The prompt is raised on the first post-authentication input
+/// event, not on raw TCP accept, so unauthenticated network probes cannot spam
+/// local consent dialogs.
+pub(crate) struct ControlGate {
+    app: AppHandle,
+    log: LogEmitter,
+    approvals: Arc<ApprovalBroker>,
+    cancel: CancellationToken,
+    state: Mutex<ControlGateState>,
+}
+
+impl ControlGate {
+    fn begin_session(&self, peer: SocketAddr) {
+        if let Ok(mut state) = self.state.lock() {
+            state.peer = Some(peer);
+            state.decision = ControlDecision::Unknown;
+        }
+    }
+
+    fn end_session(&self) {
+        let request_id = self.state.lock().ok().and_then(|mut state| {
+            state.peer = None;
+            state.decision = ControlDecision::Denied;
+            state.request_id.take()
+        });
+        if let Some(request_id) = request_id {
+            self.approvals.cancel(&request_id);
+        }
+    }
+
+    pub(crate) fn ensure_approved(&self) -> bool {
+        let (peer, request_id) = {
+            let Ok(mut state) = self.state.lock() else {
+                return false;
+            };
+            match state.decision {
+                ControlDecision::Approved => return true,
+                ControlDecision::Denied | ControlDecision::Awaiting => return false,
+                ControlDecision::Unknown => {
+                    state.decision = ControlDecision::Awaiting;
+                    let Some(peer) = state.peer else {
+                        state.decision = ControlDecision::Denied;
+                        return false;
+                    };
+                    let request_id = uuid::Uuid::new_v4().to_string();
+                    state.request_id = Some(request_id.clone());
+                    (peer, request_id)
+                }
+            }
+        };
+
+        let receiver = self.approvals.register(request_id.clone());
+        let request = ConnectionApprovalRequest {
+            request_id: request_id.clone(),
+            peer: peer.to_string(),
+            timeout_seconds: CONTROL_APPROVAL_TIMEOUT.as_secs(),
+            expires_at: crate::servers::now_ms() + CONTROL_APPROVAL_TIMEOUT.as_millis() as i64,
+        };
+        self.log.line(format!(
+            "RDP control attempt from {peer}; waiting up to {}s for local approval",
+            CONTROL_APPROVAL_TIMEOUT.as_secs()
+        ));
+
+        let delivered = self
+            .app
+            .emit_to("main", "server://rdp/connection-request", request)
+            .is_ok();
+        let approved = delivered && self.wait_for_approval(&request_id, &receiver);
+        self.approvals.cancel(&request_id);
+
+        let approved = self
+            .state
+            .lock()
+            .ok()
+            .filter(|state| {
+                state.peer == Some(peer) && state.request_id.as_deref() == Some(request_id.as_str())
+            })
+            .map(|mut state| {
+                state.request_id = None;
+                state.decision = if approved {
+                    ControlDecision::Approved
+                } else {
+                    ControlDecision::Denied
+                };
+                approved
+            })
+            .unwrap_or(false);
+        self.log.line(format!(
+            "RDP control from {peer} {}",
+            if approved {
+                "approved locally"
+            } else {
+                "denied, cancelled, or timed out"
+            }
+        ));
+        approved
+    }
+
+    fn wait_for_approval(
+        &self,
+        request_id: &str,
+        receiver: &std::sync::mpsc::Receiver<bool>,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + CONTROL_APPROVAL_TIMEOUT;
+        loop {
+            if self.cancel.is_cancelled() {
+                self.approvals.cancel(request_id);
+                return false;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                self.approvals.cancel(request_id);
+                return false;
+            }
+            let slice = deadline
+                .saturating_duration_since(now)
+                .min(std::time::Duration::from_millis(250));
+            match receiver.recv_timeout(slice) {
+                Ok(approved) => return approved,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+    }
+}
+
+struct ConnectionPolicy {
+    app: AppHandle,
+    log: LogEmitter,
+    control_gate: Option<Arc<ControlGate>>,
+    view_only: bool,
+    active: bool,
+}
+
+impl ConnectionPolicy {
+    fn emit_session(
+        &self,
+        state: &'static str,
+        peer: SocketAddr,
+        duration: Option<std::time::Duration>,
+        reason: Option<String>,
+    ) {
+        let _ = self.app.emit(
+            "server://rdp/session",
+            RdpSessionEvent {
+                state,
+                peer: peer.to_string(),
+                view_only: self.view_only,
+                duration_ms: duration.map(|value| value.as_millis() as u64),
+                reason,
+            },
+        );
+    }
+}
+
+impl ConnectionHandler for ConnectionPolicy {
+    fn on_accept(&mut self, peer: SocketAddr) -> bool {
+        // IronRDP currently drives one connection at a time. Keep the invariant
+        // explicit so a future concurrent accept loop cannot silently turn
+        // console sharing into an uncontrolled multi-client service.
+        if self.active {
+            self.log.line(format!(
+                "RDP rejected {peer}: single-client policy already has an active session"
+            ));
+            self.emit_session(
+                "rejected",
+                peer,
+                None,
+                Some("single-client policy".to_string()),
+            );
+            return false;
+        }
+
+        self.active = true;
+        if let Some(gate) = &self.control_gate {
+            gate.begin_session(peer);
+        }
+        self.log.line(format!(
+            "RDP client connection from {peer} ({})",
+            if self.view_only {
+                "view-only"
+            } else if self.control_gate.is_some() {
+                "control requires local approval"
+            } else {
+                "unattended control"
+            }
+        ));
+        self.emit_session("connecting", peer, None, None);
+        true
+    }
+
+    fn on_disconnected(
+        &mut self,
+        peer: SocketAddr,
+        duration: std::time::Duration,
+        error: Option<&anyhow::Error>,
+    ) -> PostConnectionAction {
+        self.active = false;
+        if let Some(gate) = &self.control_gate {
+            gate.end_session();
+        }
+        let reason = error.map(ToString::to_string);
+        self.log.line(format!(
+            "RDP client {peer} disconnected after {:.1}s{}",
+            duration.as_secs_f64(),
+            reason
+                .as_deref()
+                .map(|value| format!(": {value}"))
+                .unwrap_or_default()
+        ));
+        self.emit_session("disconnected", peer, Some(duration), reason);
+        PostConnectionAction::Continue
+    }
+}
 
 /// The only production security mode: NLA/CredSSP over TLS.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -82,6 +377,7 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
     let bind = config.bind_address.clone();
 
     let view_only = config.bool_field("viewOnly", false);
+    let require_control_approval = config.bool_field("requireControlApproval", true);
     let display_id = config.str_field("displayId", "").trim().to_string();
     let display_id = (!display_id.is_empty()).then_some(display_id);
     let security = SecurityMode::parse(config.str_field("securityMode", "hybrid"))?;
@@ -109,6 +405,11 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
         ctx.log.line(
             "RDP public bind explicitly enabled — protect this port with a host firewall and \
              expose it only to trusted networks.",
+        );
+    }
+    if !view_only && !require_control_approval {
+        ctx.log.line(
+            "RDP unattended control is enabled: authenticated clients can control this Mac without a local confirmation prompt.",
         );
     }
 
@@ -160,6 +461,14 @@ pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted
         identity,
         credentials: auth.to_credentials(),
         display_id,
+        app: ctx.app.clone(),
+        approvals: ctx
+            .app
+            .state::<crate::state::AppState>()
+            .servers
+            .rdp_approvals
+            .clone(),
+        require_control_approval,
     };
     let task = spawn_server(params, ctx.cancel.clone(), ctx.log.clone()).await?;
     Ok(ServerStarted { pid: None, task })
@@ -173,6 +482,9 @@ struct ServerParams {
     identity: TlsIdentityCtx,
     credentials: Credentials,
     display_id: Option<String>,
+    app: AppHandle,
+    approvals: Arc<ApprovalBroker>,
+    require_control_approval: bool,
 }
 
 /// Drive `RdpServer::run()` and bridge `cancel` → clean shutdown.
@@ -208,7 +520,7 @@ async fn spawn_server(
             };
 
             rt.block_on(async move {
-                let mut server = match build_server(&params, &log) {
+                let mut server = match build_server(&params, &log, thread_cancel.clone()) {
                     Ok(s) => s,
                     Err(e) => {
                         let _ = ready_tx.send(Err(e.to_string()));
@@ -299,13 +611,33 @@ fn log_ready(addr: SocketAddr) {
 /// Assemble the [`RdpServer`] for the requested security mode. Each branch
 /// produces a different builder type (the builder is a typestate machine), so
 /// the input/display/build tail is repeated per branch.
-fn build_server(params: &ServerParams, log: &LogEmitter) -> anyhow::Result<RdpServer> {
-    let input = RdpInput::new(log.clone(), params.view_only);
+fn build_server(
+    params: &ServerParams,
+    log: &LogEmitter,
+    cancel: CancellationToken,
+) -> anyhow::Result<RdpServer> {
+    let control_gate = (!params.view_only && params.require_control_approval).then(|| {
+        Arc::new(ControlGate {
+            app: params.app.clone(),
+            log: log.clone(),
+            approvals: params.approvals.clone(),
+            cancel: cancel.clone(),
+            state: Mutex::new(ControlGateState::default()),
+        })
+    });
+    let input = RdpInput::new(log.clone(), params.view_only, control_gate.clone());
     let display = RdpDisplay::new(log.clone(), params.display_id.clone())?;
     let cliprdr: Box<dyn ironrdp::server::CliprdrServerFactory> =
         Box::new(ClipboardFactory::new(log.clone()));
 
     let base = RdpServer::builder().with_addr(params.addr);
+    let connection_handler: Box<dyn ConnectionHandler> = Box::new(ConnectionPolicy {
+        app: params.app.clone(),
+        log: log.clone(),
+        control_gate,
+        view_only: params.view_only,
+        active: false,
+    });
 
     let server = match params.security {
         SecurityMode::Hybrid => {
@@ -315,6 +647,7 @@ fn build_server(params: &ServerParams, log: &LogEmitter) -> anyhow::Result<RdpSe
                 .with_input_handler(input)
                 .with_display_handler(display)
                 .with_cliprdr_factory(Some(cliprdr))
+                .with_connection_handler(Some(connection_handler))
                 .build()
         }
     };
@@ -323,7 +656,7 @@ fn build_server(params: &ServerParams, log: &LogEmitter) -> anyhow::Result<RdpSe
 
 #[cfg(test)]
 mod tests {
-    use super::{SecurityMode, SocketAddr};
+    use super::{ApprovalBroker, SecurityMode, SocketAddr};
 
     #[test]
     fn production_security_accepts_only_hybrid() {
@@ -339,5 +672,15 @@ mod tests {
         let ipv6: SocketAddr = "[::]:3389".parse().unwrap();
         assert!(ipv4.ip().is_unspecified());
         assert!(ipv6.ip().is_unspecified());
+    }
+
+    #[test]
+    fn approval_broker_resolves_each_request_once() {
+        let broker = ApprovalBroker::default();
+        let receiver = broker.register("request-1".to_string());
+        assert!(broker.resolve("request-1", true));
+        assert_eq!(receiver.recv().unwrap(), true);
+        assert!(!broker.resolve("request-1", false));
+        assert!(!broker.resolve("missing", true));
     }
 }

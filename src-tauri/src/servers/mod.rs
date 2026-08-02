@@ -217,6 +217,16 @@ pub struct ActiveServer {
 pub struct ServerRegistry {
     pub running: AsyncMutex<HashMap<ServerType, ActiveServer>>,
     pub statuses: AsyncMutex<HashMap<ServerType, ServerStatus>>,
+    pub(crate) rdp_approvals: std::sync::Arc<rdp::ApprovalBroker>,
+}
+
+#[tauri::command]
+pub async fn resolve_rdp_connection_request(
+    state: State<'_, AppState>,
+    request_id: String,
+    approved: bool,
+) -> Result<bool, String> {
+    Ok(state.servers.rdp_approvals.resolve(&request_id, approved))
 }
 
 impl ServerRegistry {

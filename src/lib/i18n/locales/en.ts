@@ -1575,6 +1575,11 @@ const dict = {
     statusError: "Error",
     confirmDiscard: "Discard unsaved server changes?",
     restartForPort: "Restart server to apply port change",
+    rdpApprovalTitle: "Allow remote control?",
+    rdpApprovalMessage:
+      "RDP client {peer} is requesting control of this Mac. Allow input for this connection? This request expires in {seconds} seconds.",
+    rdpApprovalAllow: "Allow control",
+    rdpApprovalDeny: "Deny",
     fields: {
       port: "Listening port",
       bindAddress: "Bind address",
@@ -1624,6 +1629,7 @@ const dict = {
       rdpCapturePermission: "Screen Recording",
       rdpGrantCapture: "Grant permission…",
       rdpRefreshDisplays: "Refresh displays",
+      rdpControlApproval: "Require local control approval",
       optional: "optional",
     },
     notes: {
@@ -1648,6 +1654,8 @@ const dict = {
         "Desktop capture: macOS uses a persistent native display stream. Grant Screen Recording permission and select the display to share.",
       rdpCaptureGranted: "Permission granted",
       rdpCaptureRequired: "Permission required before the server can start",
+      rdpUnattendedControl:
+        "Authenticated clients can control this Mac without a local confirmation prompt.",
       rdpCapWindows:
         "Desktop capture: Windows DXGI/WGC is not implemented in this build — clients see a placeholder checkerboard. Use Linux/macOS for real desktop sharing, or wait for the Windows backend.",
       rdpCapUnknown:

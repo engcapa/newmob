@@ -8,6 +8,7 @@ describe("RDP server defaults", () => {
       securityMode: "hybrid",
       viewOnly: false,
       displayId: "",
+      requireControlApproval: true,
     });
   });
 });

@@ -622,6 +622,7 @@ pub fn run() {
             servers::get_server_status,
             servers::list_server_statuses,
             servers::probe_rdp_capture,
+            servers::resolve_rdp_connection_request,
             servers::save_server_config,
             servers::load_server_configs,
             vnc::vnc_connect,
