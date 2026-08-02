@@ -5,9 +5,9 @@
 //! hold non-`Send`, thread-affine handles — see [`super::capture`]). That thread
 //! pushes BGRA frames over an `mpsc` channel; [`DisplayUpdatesImpl::next_update`]
 //! awaits the channel, keeping the protocol runtime free and the await point
-//! cancel-safe. If no capture backend is available (unimplemented platform, no
-//! X11), we fall back to a synthetic cycling-color frame source so the server
-//! still runs and the failure is visible rather than fatal.
+//! cancel-safe. A production RDP listener does not start when capture is
+//! unavailable; serving a synthetic frame would falsely report healthy remote
+//! desktop service.
 //!
 //! Phase 3 will add dirty-rect diffing on top of the full frames produced here.
 
@@ -19,9 +19,8 @@ use ironrdp::server::{
     RdpServerDisplayUpdates,
 };
 use tokio::sync::mpsc;
-use tokio::time::{Duration, sleep};
 
-use super::capture::{Capturer, Frame, create_capturer};
+use super::capture::{Capturer, Frame, create_capturer_for_display};
 use crate::servers::engine::LogEmitter;
 
 /// Display handler handed to the IronRDP builder. Probes the capture backend to
@@ -31,42 +30,33 @@ pub(crate) struct RdpDisplay {
     /// Desktop size reported to the client. Set from the capture backend when
     /// available, else the fallback size passed in at construction.
     size: DesktopSize,
-    /// Whether a real capture backend initialized successfully.
-    have_capture: bool,
+    display_id: Option<String>,
 }
 
 impl RdpDisplay {
-    pub(crate) fn new(log: LogEmitter, fallback: DesktopSize) -> Self {
+    pub(crate) fn new(log: LogEmitter, display_id: Option<String>) -> anyhow::Result<Self> {
         // Probe once up front (on this caller's thread) only to learn the size;
         // the real capturer is created again inside the capture thread, which is
         // where it must live. Probing here keeps `size()` honest for the client.
-        let (size, have_capture) = match create_capturer(&log) {
+        let size = match create_capturer_for_display(&log, display_id.as_deref()) {
             Ok(cap) => {
                 let (w, h) = cap.desktop_size();
                 match (NonZeroU16::new(w), NonZeroU16::new(h)) {
-                    (Some(_), Some(_)) => (
-                        DesktopSize {
-                            width: w,
-                            height: h,
-                        },
-                        true,
-                    ),
-                    _ => (fallback, false),
+                    (Some(_), Some(_)) => DesktopSize {
+                        width: w,
+                        height: h,
+                    },
+                    _ => anyhow::bail!("screen capture reported an invalid desktop size"),
                 }
             }
-            Err(e) => {
-                let msg = format!("screen capture unavailable: {} — serving placeholder", e);
-                log.line(msg.clone());
-                tracing::warn!("RDP display: {}", msg);
-                (fallback, false)
-            }
+            Err(e) => anyhow::bail!("screen capture unavailable: {e}"),
         };
 
-        Self {
+        Ok(Self {
             log,
             size,
-            have_capture,
-        }
+            display_id,
+        })
     }
 }
 
@@ -78,30 +68,22 @@ impl RdpServerDisplay for RdpDisplay {
 
     async fn updates(&mut self) -> anyhow::Result<Box<dyn RdpServerDisplayUpdates>> {
         self.log.line("client requested display stream");
-        if self.have_capture {
-            Ok(Box::new(DisplayUpdatesImpl::with_capture(
-                self.log.clone(),
-                self.size,
-            )))
-        } else {
-            Ok(Box::new(DisplayUpdatesImpl::synthetic(self.size)))
-        }
+        Ok(Box::new(DisplayUpdatesImpl::with_capture(
+            self.log.clone(),
+            self.size,
+            self.display_id.clone(),
+        )))
     }
 }
 
-/// Per-client update producer. Either drains a capture thread or, in fallback
-/// mode, emits a synthetic cycling-color frame.
+/// Per-client update producer that drains the native capture thread.
 pub(crate) struct DisplayUpdatesImpl {
-    size: DesktopSize,
-    /// Receiver of captured frames; `None` in synthetic mode.
-    rx: Option<mpsc::Receiver<Frame>>,
-    /// Demo color index (synthetic mode only).
-    tick: u8,
+    rx: mpsc::Receiver<Frame>,
 }
 
 impl DisplayUpdatesImpl {
     /// Spawn the capture thread and return an updater draining its frames.
-    fn with_capture(log: LogEmitter, size: DesktopSize) -> Self {
+    fn with_capture(log: LogEmitter, _size: DesktopSize, display_id: Option<String>) -> Self {
         // Bounded channel: capacity 1 keeps only the freshest frame in flight,
         // applying natural backpressure (slow client → capture thread blocks on
         // send rather than building an unbounded backlog of stale frames).
@@ -109,22 +91,10 @@ impl DisplayUpdatesImpl {
 
         std::thread::Builder::new()
             .name("rdp-capture".to_string())
-            .spawn(move || capture_loop(log, tx))
+            .spawn(move || capture_loop(log, tx, display_id))
             .ok();
 
-        Self {
-            size,
-            rx: Some(rx),
-            tick: 0,
-        }
-    }
-
-    fn synthetic(size: DesktopSize) -> Self {
-        Self {
-            size,
-            rx: None,
-            tick: 0,
-        }
+        Self { rx }
     }
 
     /// Wrap a captured BGRA frame (full screen or a cropped damage region) into
@@ -145,94 +115,16 @@ impl DisplayUpdatesImpl {
             stride,
         })
     }
-
-    /// Build a full-frame solid-color BgrA32 bitmap (synthetic mode).
-    fn solid_frame(&self, bgr: [u8; 3]) -> Option<BitmapUpdate> {
-        let width = NonZeroU16::new(self.size.width)?;
-        let height = NonZeroU16::new(self.size.height)?;
-        let w = usize::from(self.size.width);
-        let h = usize::from(self.size.height);
-        let stride = NonZeroUsize::new(w.checked_mul(4)?)?;
-
-        let mut data = Vec::with_capacity(stride.get().checked_mul(h)?);
-        for _ in 0..(w * h) {
-            data.push(bgr[0]);
-            data.push(bgr[1]);
-            data.push(bgr[2]);
-            data.push(255);
-        }
-        Some(BitmapUpdate {
-            x: 0,
-            y: 0,
-            width,
-            height,
-            format: PixelFormat::BgrA32,
-            data: data.into(),
-            stride,
-        })
-    }
-
-    async fn next_synthetic(&mut self) -> anyhow::Result<Option<DisplayUpdate>> {
-        sleep(Duration::from_millis(750)).await;
-        // Checkerboard + shifting accent stripe so "placeholder" is obvious
-        // even if the client is silent (no real desktop capture on this OS).
-        self.tick = self.tick.wrapping_add(1);
-        Ok(self.placeholder_frame().map(DisplayUpdate::Bitmap))
-    }
-
-    /// High-contrast placeholder so users never mistake empty capture for a
-    /// frozen desktop. Stripe position advances with `tick`.
-    fn placeholder_frame(&self) -> Option<BitmapUpdate> {
-        let width = NonZeroU16::new(self.size.width)?;
-        let height = NonZeroU16::new(self.size.height)?;
-        let w = usize::from(self.size.width);
-        let h = usize::from(self.size.height);
-        let stride = NonZeroUsize::new(w.checked_mul(4)?)?;
-        let stripe = (usize::from(self.tick).saturating_mul(8)) % w.max(1);
-
-        let mut data = Vec::with_capacity(stride.get().checked_mul(h)?);
-        for y in 0..h {
-            for x in 0..w {
-                let cell = ((x / 32) + (y / 32)) % 2 == 0;
-                let on_stripe = x.abs_diff(stripe) < 6;
-                let (b, g, r) = if on_stripe {
-                    (0x20, 0xA0, 0xFF)
-                } else if cell {
-                    (0x38, 0x38, 0x48)
-                } else {
-                    (0x22, 0x22, 0x2E)
-                };
-                data.push(b);
-                data.push(g);
-                data.push(r);
-                data.push(255);
-            }
-        }
-        Some(BitmapUpdate {
-            x: 0,
-            y: 0,
-            width,
-            height,
-            format: PixelFormat::BgrA32,
-            data: data.into(),
-            stride,
-        })
-    }
 }
 
 #[async_trait]
 impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
     async fn next_update(&mut self) -> anyhow::Result<Option<DisplayUpdate>> {
-        match self.rx.as_mut() {
-            Some(rx) => {
-                // Await the next captured frame. `recv` is cancel-safe; if the
-                // capture thread ends (channel closed) we end the stream.
-                match rx.recv().await {
-                    Some(frame) => Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap)),
-                    None => Ok(None),
-                }
-            }
-            None => self.next_synthetic().await,
+        // Await the next captured frame. `recv` is cancel-safe; if the capture
+        // thread ends (channel closed) we end the stream.
+        match self.rx.recv().await {
+            Some(frame) => Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap)),
+            None => Ok(None),
         }
     }
 }
@@ -247,13 +139,13 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
 ///   actually changes and returns only the changed regions (the first frame is
 ///   full, to seed the encoder framebuffer). No interval, no hashing — idle
 ///   costs nothing and a small change sends a small region.
-/// - **Polling fallback** (synthetic, or X11 without DAMAGE, or other
-///   platforms): capture a full frame on a ~30 fps interval and suppress
+/// - **Polling backend** (X11 without DAMAGE, macOS, or other platforms):
+///   capture a full frame on a ~30 fps interval and suppress
 ///   byte-identical frames with a cheap FNV-1a hash so a static desktop still
 ///   costs near-zero downstream. The IronRDP encoder diffs the frames we DO
 ///   send and only encodes changed rectangles.
-fn capture_loop(log: LogEmitter, tx: mpsc::Sender<Frame>) {
-    let mut capturer = match create_capturer(&log) {
+fn capture_loop(log: LogEmitter, tx: mpsc::Sender<Frame>, display_id: Option<String>) {
+    let mut capturer = match create_capturer_for_display(&log, display_id.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             log.line(format!("capture thread: {}", e));

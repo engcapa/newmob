@@ -18,16 +18,23 @@ import {
   encodeRefresh,
   encodeResize,
   encodeWheel,
+  extractRdpCertificateChallenge,
+  formatRdpCertificateFingerprint,
+  isRetryableRdpConnectError,
   keyEventToScancode,
   mouseButtonMask,
   normalizeRdpResizeSize,
   OUT_AUDIO,
+  OUT_CURSOR,
   OUT_FRAME,
   parseAudioFrame,
   parseFrameTile,
+  parseRdpCursorFrame,
   parseRdpWsText,
   rdpConnect,
   rdpDisconnect,
+  rdpCursorToCss,
+  rdpTrustCertificate,
   wheelDeltaToRotationUnits,
 } from "../../lib/rdp";
 import { useRdpStore } from "../../stores/rdpStore";
@@ -51,6 +58,7 @@ import { useCaptureStore, type CaptureSource } from "../../stores/captureStore";
 import { CaptureMenuButton } from "../capture/CaptureMenuButton";
 import { captureCanvasPng } from "../../lib/capture";
 import { useAppStore } from "../../stores/appStore";
+import { confirmAppDialog } from "../../lib/appDialogs";
 
 export interface RdpPanelProps {
   tabId: string;
@@ -98,17 +106,27 @@ export default function RdpPanel({
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const imeInputRef = useRef<HTMLTextAreaElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const heartbeatRef = useRef<number | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const connectedAtRef = useRef(0);
+  const retryAllowedRef = useRef(true);
   const audioRef = useRef<{ ctx: AudioContext; nextTime: number } | null>(null);
   const lastResizeRequestRef = useRef<string | null>(null);
   const destroyedRef = useRef(false);
+  const certificatePromptRef = useRef(false);
+  const reconnectRef = useRef<() => void>(() => {});
   const visibleRef = useRef(visible);
   const suppressNextPasteKeyUpRef = useRef(false);
+  const pressedScancodesRef = useRef(new Set<number>());
+  const composingRef = useRef(false);
   const initRef = useRef({ host, port, username, password, options, networkSettingsJson });
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
+  const [remoteCursorCss, setRemoteCursorCss] = useState("default");
   // Tracks whether the host OS window is fullscreen. Only meaningful for
   // attached tabs (detached windows manage their own fullscreen via
   // `detachedWindowControls`). Cosmetic — drives the toolbar icon.
@@ -116,6 +134,38 @@ export default function RdpPanel({
 
   const store = useRdpStore();
   const conn = store.connections[tabId];
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const handleAutomaticReconnect = useCallback(
+    (reason: string): boolean => {
+      if (destroyedRef.current || certificatePromptRef.current || !retryAllowedRef.current) {
+        return false;
+      }
+      if (reconnectTimerRef.current !== null) return true;
+      if (reconnectAttemptsRef.current >= 3) {
+        store.setDisconnected(tabId, reason);
+        return true;
+      }
+
+      reconnectAttemptsRef.current += 1;
+      const attempt = reconnectAttemptsRef.current;
+      const delay = 500 * 2 ** (attempt - 1);
+      store.initConnection(tabId);
+      store.setStage(tabId, t("rdp.autoReconnect", { attempt }));
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (!destroyedRef.current) reconnectRef.current();
+      }, delay);
+      return true;
+    },
+    [store, t, tabId],
+  );
 
   /* ── Send helpers ────────────────────────────────────────────────── */
 
@@ -130,6 +180,12 @@ export default function RdpPanel({
       wsRef.current.send(JSON.stringify(data));
     }
   }, []);
+
+  const releaseRemoteInput = useCallback(() => {
+    pressedScancodesRef.current.clear();
+    suppressNextPasteKeyUpRef.current = false;
+    sendText({ type: "release_input" });
+  }, [sendText]);
 
   const sendRemoteResize = useCallback(
     (width: number, height: number, force = false) => {
@@ -208,6 +264,8 @@ export default function RdpPanel({
     const args = initRef.current;
     destroyedRef.current = false;
     lastResizeRequestRef.current = null;
+    retryAllowedRef.current = true;
+    setRemoteCursorCss("default");
     store.initConnection(tabId);
 
     let cancelled = false;
@@ -228,7 +286,9 @@ export default function RdpPanel({
         sessionIdRef.current = result.session_id;
         store.setConnecting(tabId, result.session_id, result.ws_port);
 
-        const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}`, [
+          `taomni-rdp.${result.ws_token}`,
+        ]);
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
 
@@ -253,12 +313,17 @@ export default function RdpPanel({
               if (visibleRef.current) sendBinary(encodeAck());
             } else if (tag === OUT_AUDIO) {
               playAudioFrame(parseAudioFrame(event.data));
+            } else if (tag === OUT_CURSOR) {
+              const cursor = parseRdpCursorFrame(event.data);
+              if (cursor) setRemoteCursorCss(rdpCursorToCss(cursor));
             }
           } else {
             const msg = parseRdpWsText(event.data as string);
             if (!msg) return;
             switch (msg.type) {
               case "connected":
+                connectedAtRef.current = Date.now();
+                retryAllowedRef.current = true;
                 store.setConnected(tabId, msg.width, msg.height, msg.protocol, msg.server_name);
                 resizeCanvas(canvasRef.current, msg.width, msg.height);
                 window.setTimeout(() => requestViewportResize(false), 0);
@@ -276,7 +341,65 @@ export default function RdpPanel({
                 store.setStage(tabId, msg.stage);
                 break;
               case "error":
-                store.setDisconnected(tabId, msg.message);
+                {
+                  const challenge = extractRdpCertificateChallenge(msg.message);
+                  if (certificatePromptRef.current) break;
+                  if (!challenge) {
+                    retryAllowedRef.current = msg.retryable === true;
+                    store.setDisconnected(tabId, msg.message);
+                    break;
+                  }
+                  retryAllowedRef.current = false;
+                  clearReconnectTimer();
+                  certificatePromptRef.current = true;
+                  store.setStage(tabId, "certificate-review");
+                  void (async () => {
+                    const fingerprint = formatRdpCertificateFingerprint(challenge.observed);
+                    const confirmed = await confirmAppDialog({
+                      title: t(
+                        challenge.changed
+                          ? "rdp.certificateChangedTitle"
+                          : "rdp.certificateTrustTitle",
+                      ),
+                      message: t(
+                        challenge.changed
+                          ? "rdp.certificateChangedMessage"
+                          : "rdp.certificateTrustMessage",
+                        {
+                          host: challenge.host,
+                          port: challenge.port,
+                          fingerprint,
+                        },
+                      ),
+                      confirmLabel: t("rdp.certificateTrustConfirm"),
+                      danger: challenge.changed,
+                    });
+                    if (!confirmed || destroyedRef.current) {
+                      certificatePromptRef.current = false;
+                      store.setDisconnected(tabId, t("rdp.certificateTrustDeclined"));
+                      return;
+                    }
+                    try {
+                      await rdpTrustCertificate(
+                        challenge.host,
+                        challenge.port,
+                        challenge.observed,
+                      );
+                      const oldSession = sessionIdRef.current;
+                      sessionIdRef.current = null;
+                      if (oldSession) await rdpDisconnect(oldSession).catch(() => {});
+                      const currentWs = wsRef.current;
+                      wsRef.current = null;
+                      currentWs?.close();
+                      reconnectAttemptsRef.current = 0;
+                      certificatePromptRef.current = false;
+                      window.setTimeout(() => reconnectRef.current(), 0);
+                    } catch (err) {
+                      certificatePromptRef.current = false;
+                      store.setDisconnected(tabId, String(err));
+                    }
+                  })();
+                }
                 break;
               case "clipboard":
                 void writeClipboardText(msg.text).catch((err) => {
@@ -296,24 +419,36 @@ export default function RdpPanel({
         };
 
         ws.onclose = () => {
+          if (wsRef.current !== ws) return;
           closeAudio();
+          pressedScancodesRef.current.clear();
           wsRef.current = null;
           if (heartbeatRef.current !== null) {
             window.clearInterval(heartbeatRef.current);
             heartbeatRef.current = null;
           }
-          if (!destroyedRef.current) {
-            store.setDisconnected(tabId, tr("rdp.closedConnection"));
+          const sid = sessionIdRef.current;
+          sessionIdRef.current = null;
+          if (sid) void rdpDisconnect(sid).catch(() => {});
+          if (connectedAtRef.current > 0 && Date.now() - connectedAtRef.current >= 30_000) {
+            reconnectAttemptsRef.current = 0;
           }
+          connectedAtRef.current = 0;
+          if (destroyedRef.current || certificatePromptRef.current) return;
+          const reason = tr("rdp.closedConnection");
+          if (!retryAllowedRef.current) return;
+          if (!handleAutomaticReconnect(reason)) store.setDisconnected(tabId, reason);
         };
         ws.onerror = () => {
-          if (!destroyedRef.current) {
-            store.setDisconnected(tabId, tr("rdp.websocketError"));
+          if (!destroyedRef.current && wsRef.current === ws) {
+            store.setStage(tabId, "websocket-error");
           }
         };
       } catch (err) {
         if (!cancelled && !destroyedRef.current) {
-          store.setDisconnected(tabId, String(err));
+          const reason = String(err);
+          retryAllowedRef.current = isRetryableRdpConnectError(err);
+          if (!handleAutomaticReconnect(reason)) store.setDisconnected(tabId, reason);
         }
       }
     })();
@@ -321,7 +456,18 @@ export default function RdpPanel({
     return () => {
       cancelled = true;
     };
-  }, [closeAudio, playAudioFrame, requestViewportResize, sendBinary, store, tabId]);
+  }, [
+    clearReconnectTimer,
+    closeAudio,
+    handleAutomaticReconnect,
+    playAudioFrame,
+    requestViewportResize,
+    sendBinary,
+    store,
+    tabId,
+  ]);
+
+  reconnectRef.current = doConnect;
 
   useEffect(() => {
     initRef.current = { host, port, username, password, options, networkSettingsJson };
@@ -333,17 +479,19 @@ export default function RdpPanel({
       window.clearTimeout(t);
       cancel?.();
       destroyedRef.current = true;
+      clearReconnectTimer();
       if (heartbeatRef.current !== null) {
         window.clearInterval(heartbeatRef.current);
         heartbeatRef.current = null;
       }
       closeAudio();
+      releaseRemoteInput();
       const sid = sessionIdRef.current;
+      sessionIdRef.current = null;
       if (sid) rdpDisconnect(sid).catch(() => {});
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      const currentWs = wsRef.current;
+      wsRef.current = null;
+      currentWs?.close();
       store.removeConnection(tabId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -351,7 +499,21 @@ export default function RdpPanel({
 
   useEffect(() => {
     visibleRef.current = visible;
-  }, [visible]);
+    if (!visible) releaseRemoteInput();
+  }, [releaseRemoteInput, visible]);
+
+  useEffect(() => {
+    const release = () => releaseRemoteInput();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") release();
+    };
+    window.addEventListener("blur", release);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("blur", release);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [releaseRemoteInput]);
 
   /* ── Input handlers ──────────────────────────────────────────────── */
 
@@ -445,6 +607,11 @@ export default function RdpPanel({
       if (!visible || conn?.status !== "connected") return;
       const code = e.nativeEvent.code;
 
+      if (composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+        e.preventDefault();
+        return;
+      }
+
       // Local view shortcuts intercepted before reaching the remote desktop:
       //   F11 → toggle host-window OS fullscreen
       if (code === "F11") {
@@ -467,7 +634,10 @@ export default function RdpPanel({
       const sc = keyEventToScancode(e.nativeEvent);
       if (!sc) return;
       e.preventDefault();
-      sendBinary(encodeKey(down, applyExtended(sc.scancode, sc.extended)));
+      const wireScancode = applyExtended(sc.scancode, sc.extended);
+      if (down) pressedScancodesRef.current.add(wireScancode);
+      else pressedScancodesRef.current.delete(wireScancode);
+      sendBinary(encodeKey(down, wireScancode));
     },
     [
       conn?.status,
@@ -476,6 +646,20 @@ export default function RdpPanel({
       toggleOsFullscreen,
       visible,
     ],
+  );
+
+  const onCompositionEnd = useCallback(
+    (e: React.CompositionEvent<HTMLTextAreaElement>) => {
+      composingRef.current = false;
+      const text = e.data;
+      e.currentTarget.value = "";
+      if (!text || !visible || conn?.status !== "connected") return;
+      const characters = Array.from(text);
+      for (let offset = 0; offset < characters.length; offset += 1024) {
+        sendText({ type: "unicode", text: characters.slice(offset, offset + 1024).join("") });
+      }
+    },
+    [conn?.status, sendText, visible],
   );
 
   const onPointer = useCallback(
@@ -534,16 +718,19 @@ export default function RdpPanel({
   }, [conn?.status, requestViewportResize, visible]);
 
   const reconnect = useCallback(() => {
+    clearReconnectTimer();
+    reconnectAttemptsRef.current = 0;
+    connectedAtRef.current = 0;
     const sid = sessionIdRef.current;
+    sessionIdRef.current = null;
     if (sid) rdpDisconnect(sid).catch(() => {});
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
+    const currentWs = wsRef.current;
+    wsRef.current = null;
+    currentWs?.close();
     closeAudio();
     store.setDisconnected(tabId);
     doConnect();
-  }, [closeAudio, doConnect, store, tabId]);
+  }, [clearReconnectTimer, closeAudio, doConnect, store, tabId]);
 
   /* ── Render ──────────────────────────────────────────────────────── */
 
@@ -611,6 +798,9 @@ export default function RdpPanel({
       tabIndex={0}
       onKeyDown={onKey(true)}
       onKeyUp={onKey(false)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) releaseRemoteInput();
+      }}
       style={{
         outline: "none",
         position: "relative",
@@ -741,8 +931,12 @@ export default function RdpPanel({
           width={Math.max(640, conn?.width ?? 1920)}
           height={Math.max(480, conn?.height ?? 1080)}
           onPointerMove={onPointer}
-          onPointerDown={onPointer}
+          onPointerDown={(e) => {
+            imeInputRef.current?.focus({ preventScroll: true });
+            onPointer(e);
+          }}
           onPointerUp={onPointer}
+          onPointerCancel={() => releaseRemoteInput()}
           onWheel={onWheel}
           onContextMenu={(e) => e.preventDefault()}
           style={{
@@ -750,6 +944,37 @@ export default function RdpPanel({
             maxHeight: scaleMode === "fit" ? "100%" : undefined,
             imageRendering: "pixelated",
             background: "#000",
+            // IronRDP forwards the server-provided shape, while the WebView
+            // moves this local cursor immediately without waiting for a remote
+            // framebuffer update.
+            cursor: status === "connected" ? remoteCursorCss : "default",
+          }}
+        />
+        <textarea
+          ref={imeInputRef}
+          tabIndex={-1}
+          aria-label={t("rdp.imeInput")}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={onCompositionEnd}
+          onInput={(e) => {
+            if (!composingRef.current) e.currentTarget.value = "";
+          }}
+          onPaste={(e) => e.preventDefault()}
+          style={{
+            position: "absolute",
+            width: 1,
+            height: 1,
+            opacity: 0,
+            pointerEvents: "none",
+            insetInlineStart: 0,
+            bottom: 0,
+            padding: 0,
+            border: 0,
           }}
         />
       </div>

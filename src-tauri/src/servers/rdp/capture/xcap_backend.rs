@@ -12,8 +12,10 @@ use crate::servers::engine::LogEmitter;
 pub(crate) struct XcapCapturer {
     width: u16,
     height: u16,
-    /// Monitor index within `xcap::Monitor::all()` (primary = 0 when present).
-    monitor_index: usize,
+    /// Keep one platform monitor handle for the lifetime of the capture loop.
+    /// Re-enumerating every frame was expensive and allowed display ordering to
+    /// change underneath a live stream.
+    monitor: xcap::Monitor,
 }
 
 impl XcapCapturer {
@@ -45,20 +47,8 @@ impl XcapCapturer {
         Ok(Self {
             width,
             height,
-            monitor_index: 0,
+            monitor,
         })
-    }
-
-    fn grab_monitor(&self) -> anyhow::Result<xcap::Monitor> {
-        let monitors = xcap::Monitor::all().map_err(|e| anyhow::anyhow!("xcap enum: {e}"))?;
-        monitors
-            .into_iter()
-            .nth(self.monitor_index)
-            .or_else(|| {
-                // Monitor list may reorder after sleep/lid; fall back to first.
-                xcap::Monitor::all().ok().and_then(|m| m.into_iter().next())
-            })
-            .ok_or_else(|| anyhow::anyhow!("xcap: no monitor available"))
     }
 }
 
@@ -68,8 +58,8 @@ impl Capturer for XcapCapturer {
     }
 
     fn capture(&mut self) -> anyhow::Result<Frame> {
-        let monitor = self.grab_monitor()?;
-        let image = monitor
+        let image = self
+            .monitor
             .capture_image()
             .map_err(|e| anyhow::anyhow!("xcap capture: {e}"))?;
         let w = image.width();

@@ -30,18 +30,21 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
+use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tungstenite::http::{HeaderValue, StatusCode, header};
+use uuid::Uuid;
 
+use crate::rdp::RdpOptions;
 use crate::rdp::frame::TileHeader;
 use crate::rdp::input::{KeyEvent, PointerEvent, PointerWheelEvent};
 use crate::rdp::session::{
-    start_ironrdp_session, RdpSessionConfig, RdpSessionHandle, SessionOutput,
+    RdpSessionConfig, RdpSessionHandle, SessionOutput, start_ironrdp_session,
 };
 use crate::rdp::transport::open_transport;
-use crate::rdp::RdpOptions;
 use crate::terminal::network::NetworkSettings;
 
 const WS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -69,9 +72,21 @@ pub mod channel {
     pub const IN_REFRESH: u8 = 6; // request a full-desktop redraw
 }
 
+/// Payload kinds carried by [`channel::CURSOR`]. Bitmap payloads continue with
+/// hotspot x/y, width/height (all big-endian u16), then PNG bytes.
+pub mod cursor {
+    pub const DEFAULT: u8 = 0;
+    pub const HIDDEN: u8 = 1;
+    pub const BITMAP: u8 = 2;
+    pub const BITMAP_HEADER_LEN: usize = 9;
+    pub const MAX_DIMENSION: u16 = 512;
+}
+
 #[derive(Debug)]
 pub enum RdpControl {
     Key(KeyEvent),
+    UnicodeText(String),
+    ReleaseInput,
     Pointer(PointerEvent),
     Wheel(PointerWheelEvent),
     Resize {
@@ -110,6 +125,10 @@ enum WsIncomingText {
     Clipboard { text: String },
     #[serde(rename = "clipboard_files")]
     ClipboardFiles { paths: Vec<String> },
+    #[serde(rename = "unicode")]
+    Unicode { text: String },
+    #[serde(rename = "release_input")]
+    ReleaseInput,
     #[serde(rename = "resize")]
     Resize { width: u16, height: u16 },
     #[serde(rename = "refresh")]
@@ -121,6 +140,7 @@ enum WsIncomingText {
 pub struct RdpSession {
     pub control_tx: UnboundedSender<RdpControl>,
     pub ws_port: u16,
+    pub ws_token: String,
     pub cancel: CancellationToken,
 }
 
@@ -135,6 +155,7 @@ pub struct RdpSpawnConfig {
 
 pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> {
     let cancel = CancellationToken::new();
+    let ws_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
 
     // 1. Transport. Direct TCP, HTTP/SOCKS5 proxy, and RD Gateway all
     // converge on the same async stream abstraction; IronRDP owns all
@@ -176,6 +197,7 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
     let cancel_clone = cancel.clone();
     let cancel_guard = cancel.clone();
     let control_tx_for_relay = control_tx.clone();
+    let ws_token_for_relay = ws_token.clone();
     tokio::spawn(async move {
         if let Err(e) = run_relay(
             listener,
@@ -185,6 +207,7 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
             control_tx_for_relay,
             control_rx,
             cancel_clone,
+            ws_token_for_relay,
         )
         .await
         {
@@ -199,6 +222,7 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
     Ok(RdpSession {
         control_tx,
         ws_port,
+        ws_token,
         cancel,
     })
 }
@@ -212,22 +236,9 @@ async fn run_relay(
     _control_tx: UnboundedSender<RdpControl>,
     mut control_rx: UnboundedReceiver<RdpControl>,
     cancel: CancellationToken,
+    ws_token: String,
 ) -> Result<(), String> {
-    let (stream, _) = tokio::select! {
-        r = tokio::time::timeout(WS_ACCEPT_TIMEOUT, listener.accept()) => match r {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => return Err(format!("rdp accept: {}", e)),
-            Err(_) => {
-                tracing::warn!("RDP WS accept timed out after {:?}", WS_ACCEPT_TIMEOUT);
-                cancel.cancel();
-                return Ok(());
-            }
-        },
-        _ = cancel.cancelled() => return Ok(()),
-    };
-    let ws_stream = tokio_tungstenite::accept_async(stream)
-        .await
-        .map_err(|e| format!("rdp WS upgrade: {}", e))?;
+    let ws_stream = accept_authorized_ws(&listener, &ws_token, &cancel).await?;
     let (mut ws_sink, ws_reader) = ws_stream.split();
     let last_seen = std::sync::Arc::new(AsyncMutex::new(Instant::now()));
 
@@ -275,6 +286,15 @@ async fn run_relay(
                             }
                             WsIncomingText::ClipboardFiles { paths } => {
                                 let _ = ctrl.send(RdpControl::ClipboardFiles { paths });
+                            }
+                            WsIncomingText::Unicode { text } if text.chars().count() <= 4096 => {
+                                let _ = ctrl.send(RdpControl::UnicodeText(text));
+                            }
+                            WsIncomingText::Unicode { .. } => {
+                                tracing::warn!("ignored oversized RDP Unicode input message");
+                            }
+                            WsIncomingText::ReleaseInput => {
+                                let _ = ctrl.send(RdpControl::ReleaseInput);
                             }
                             WsIncomingText::Resize { width, height } => {
                                 let _ = ctrl.send(RdpControl::Resize { width, height });
@@ -374,6 +394,81 @@ async fn run_relay(
     Ok(())
 }
 
+async fn accept_authorized_ws(
+    listener: &TcpListener,
+    ws_token: &str,
+    cancel: &CancellationToken,
+) -> Result<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, String> {
+    let deadline = tokio::time::Instant::now() + WS_ACCEPT_TIMEOUT;
+    let expected_protocol = format!("taomni-rdp.{ws_token}");
+    loop {
+        let (stream, _) = tokio::select! {
+            accepted = tokio::time::timeout_at(deadline, listener.accept()) => match accepted {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => return Err(format!("rdp accept: {e}")),
+                Err(_) => {
+                    tracing::warn!("RDP WS accept timed out after {:?}", WS_ACCEPT_TIMEOUT);
+                    return Err("RDP WebSocket authorization timed out".to_string());
+                }
+            },
+            _ = cancel.cancelled() => return Err("RDP relay cancelled".to_string()),
+        };
+        let protocol = expected_protocol.clone();
+        let callback = move |request: &Request, mut response: Response| {
+            if !request_has_authorized_origin(request) || !request_has_protocol(request, &protocol)
+            {
+                let mut rejection = ErrorResponse::new(Some("forbidden".to_string()));
+                *rejection.status_mut() = StatusCode::FORBIDDEN;
+                return Err(rejection);
+            }
+            response.headers_mut().insert(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_str(&protocol).expect("generated WS protocol is valid"),
+            );
+            Ok(response)
+        };
+        match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+            Ok(ws) => return Ok(ws),
+            Err(e) => tracing::warn!("rejected unauthorized RDP WebSocket attempt: {e}"),
+        }
+    }
+}
+
+fn request_has_protocol(request: &Request, expected: &str) -> bool {
+    request
+        .headers()
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|item| item.trim() == expected))
+}
+
+fn request_has_authorized_origin(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_authorized_origin)
+}
+
+fn is_authorized_origin(origin: &str) -> bool {
+    if matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    ) {
+        return true;
+    }
+    if cfg!(debug_assertions) {
+        return [
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+            "http://localhost:5000",
+            "http://127.0.0.1:5000",
+        ]
+        .contains(&origin);
+    }
+    false
+}
+
 /// Decode a binary control frame from the canvas. Layout:
 ///
 /// ```text
@@ -442,6 +537,9 @@ pub fn frame_payload_with_header(header: TileHeader, rgba: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+    use tokio_tungstenite::connect_async;
+    use tungstenite::client::IntoClientRequest;
 
     #[test]
     fn parse_key_event() {
@@ -507,6 +605,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_unicode_and_release_input_messages() {
+        match serde_json::from_str::<WsIncomingText>(r#"{"type":"unicode","text":"中文😀"}"#)
+            .unwrap()
+        {
+            WsIncomingText::Unicode { text } => assert_eq!(text, "中文😀"),
+            _ => panic!("expected Unicode input"),
+        }
+        assert!(matches!(
+            serde_json::from_str::<WsIncomingText>(r#"{"type":"release_input"}"#).unwrap(),
+            WsIncomingText::ReleaseInput
+        ));
+    }
+
+    #[test]
     fn parse_refresh() {
         assert!(matches!(
             parse_binary_control(&[channel::IN_REFRESH]),
@@ -538,5 +650,125 @@ mod tests {
         assert_eq!(&p[4..6], &30u16.to_be_bytes());
         assert_eq!(&p[6..8], &40u16.to_be_bytes());
         assert_eq!(&p[8..], &rgba[..]);
+    }
+
+    #[test]
+    fn relay_origin_allowlist_rejects_unrelated_pages() {
+        assert!(is_authorized_origin("tauri://localhost"));
+        assert!(is_authorized_origin("https://tauri.localhost"));
+        assert!(!is_authorized_origin("https://attacker.example"));
+        assert!(!is_authorized_origin("null"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_RDP_LIVE_HOST/USER/PASS and a reachable Windows RDP server"]
+    async fn live_credssp_relay_authorizes_websocket_and_delivers_first_frame() {
+        let host = std::env::var("TAOMNI_RDP_LIVE_HOST").expect("TAOMNI_RDP_LIVE_HOST is required");
+        let port = std::env::var("TAOMNI_RDP_LIVE_PORT")
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+            .unwrap_or(3389);
+        let username =
+            std::env::var("TAOMNI_RDP_LIVE_USER").expect("TAOMNI_RDP_LIVE_USER is required");
+        let password =
+            std::env::var("TAOMNI_RDP_LIVE_PASS").expect("TAOMNI_RDP_LIVE_PASS is required");
+        let mut options = RdpOptions::default();
+        options.screen_w = 1280;
+        options.screen_h = 720;
+        options.nla = true;
+        if let Ok(pin) = std::env::var("TAOMNI_RDP_LIVE_CERTIFICATE_FINGERPRINT") {
+            if !pin.trim().is_empty() {
+                options.certificate_fingerprint = Some(pin);
+            }
+        }
+
+        let started = Instant::now();
+        let session = spawn_rdp_relay(RdpSpawnConfig {
+            host,
+            port,
+            username: Some(username),
+            password: Some(password),
+            options,
+            network: None,
+        })
+        .await
+        .expect("start live RDP relay");
+
+        let expected_protocol = format!("taomni-rdp.{}", session.ws_token);
+        let mut request = format!("ws://127.0.0.1:{}", session.ws_port)
+            .into_client_request()
+            .expect("build relay WebSocket request");
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("tauri://localhost"),
+        );
+        request.headers_mut().insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_str(&expected_protocol).expect("generated protocol is valid"),
+        );
+        let (mut socket, response) = connect_async(request)
+            .await
+            .expect("connect to authorized live RDP relay");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_protocol.as_str())
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut connected_at = None;
+        let mut first_frame_at = None;
+        while Instant::now() < deadline && first_frame_at.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let message = tokio::time::timeout(remaining, socket.next())
+                .await
+                .expect("timed out waiting for live RDP relay output")
+                .expect("live RDP relay closed before first frame")
+                .expect("read live RDP relay message");
+            match message {
+                Message::Text(text) => {
+                    let value = serde_json::from_str::<serde_json::Value>(&text)
+                        .expect("live relay status is valid JSON");
+                    match value.get("type").and_then(|value| value.as_str()) {
+                        Some("connected") => {
+                            connected_at = Some(started.elapsed());
+                            socket
+                                .send(Message::Binary(vec![channel::IN_ACK].into()))
+                                .await
+                                .expect("acknowledge live RDP relay");
+                            socket
+                                .send(Message::Binary(vec![channel::IN_REFRESH].into()))
+                                .await
+                                .expect("request live RDP refresh");
+                        }
+                        Some("error") => panic!("live RDP relay failed: {text}"),
+                        _ => {}
+                    }
+                }
+                Message::Binary(frame)
+                    if frame.first() == Some(&channel::FRAME) && frame.len() > 9 =>
+                {
+                    first_frame_at = Some(started.elapsed());
+                }
+                _ => {}
+            }
+        }
+
+        socket
+            .send(Message::Text(r#"{"type":"disconnect"}"#.into()))
+            .await
+            .expect("disconnect live RDP relay");
+        let _ = socket.close(None).await;
+        tokio::time::timeout(Duration::from_secs(5), session.cancel.cancelled())
+            .await
+            .expect("live RDP relay shut down after disconnect");
+
+        let connected_at = connected_at.expect("live RDP relay did not report connected");
+        let first_frame_at = first_frame_at.expect("live RDP relay did not deliver a frame");
+        eprintln!(
+            "live RDP relay timing: connected={connected_at:?}, first_frame={first_frame_at:?}"
+        );
     }
 }

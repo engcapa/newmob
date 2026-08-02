@@ -1575,6 +1575,11 @@ const dict = {
     statusError: "Error",
     confirmDiscard: "Discard unsaved server changes?",
     restartForPort: "Restart server to apply port change",
+    rdpApprovalTitle: "Allow remote control?",
+    rdpApprovalMessage:
+      "RDP client {peer} is requesting control of this Mac. Allow input for this connection? This request expires in {seconds} seconds.",
+    rdpApprovalAllow: "Allow control",
+    rdpApprovalDeny: "Deny",
     fields: {
       port: "Listening port",
       bindAddress: "Bind address",
@@ -1616,6 +1621,15 @@ const dict = {
       rdpSecHybrid: "NLA (recommended)",
       rdpSecTls: "TLS only",
       rdpSecNone: "None (insecure)",
+      rdpPasswordStored: "Stored securely — type to replace",
+      rdpPublicBind: "Allow binding all interfaces",
+      rdpDisplay: "Shared display",
+      rdpDisplayPrimary: "Primary display (automatic)",
+      rdpDisplayPrimaryBadge: "primary",
+      rdpCapturePermission: "Screen Recording",
+      rdpGrantCapture: "Grant permission…",
+      rdpRefreshDisplays: "Refresh displays",
+      rdpControlApproval: "Require local control approval",
       optional: "optional",
     },
     notes: {
@@ -1626,12 +1640,22 @@ const dict = {
       iperfBandwidth: "Applies to connecting clients (Mbit/s). 0 means unlimited.",
       rdpSelfSigned:
         "Uses a self-signed certificate stored in app data; clients will see a trust warning on first connect.",
+      rdpHybridOnly:
+        "Production mode requires NLA/CredSSP over TLS. The self-signed server certificate is stored in app data.",
+      rdpVaultReason: "Unlock the credential vault to protect the RDP server password.",
+      rdpVaultCancelled: "RDP server settings were not saved because the credential vault is locked.",
+      rdpPublicBind:
+        "This exposes the RDP listener beyond this Mac. Restrict it with a firewall and use only trusted networks.",
       rdpInsecure:
         "No security means traffic is unencrypted and, without credentials, anyone who can reach the port gets full control. Use only on an isolated network.",
       rdpCapLinux:
         "Desktop capture: Linux X11/XWayland is fully supported. On pure Wayland, capture uses the portal (accept the ScreenCast prompt). Input works via enigo.",
       rdpCapMacos:
-        "Desktop capture: macOS uses system capture (xcap). Grant Screen Recording permission under System Settings → Privacy & Security, then restart Taomni if capture fails.",
+        "Desktop capture: macOS uses a persistent native display stream. Grant Screen Recording permission and select the display to share.",
+      rdpCaptureGranted: "Permission granted",
+      rdpCaptureRequired: "Permission required before the server can start",
+      rdpUnattendedControl:
+        "Authenticated clients can control this Mac without a local confirmation prompt.",
       rdpCapWindows:
         "Desktop capture: Windows DXGI/WGC is not implemented in this build — clients see a placeholder checkerboard. Use Linux/macOS for real desktop sharing, or wait for the Windows backend.",
       rdpCapUnknown:
@@ -1690,11 +1714,21 @@ const dict = {
     closedConnection: "Connection closed",
     websocketError: "WebSocket error",
     errorGeneric: "Connection failed",
+    autoReconnect: "Reconnecting automatically ({attempt}/3)…",
     detach: "Detach to its own window",
     reattach: "Reattach as tab",
     maximize: "Maximize in window",
     restore: "Restore",
     osFullscreen: "Toggle OS fullscreen",
+    certificateTrustTitle: "Verify RDP certificate",
+    certificateChangedTitle: "RDP certificate changed",
+    certificateTrustMessage:
+      "The certificate for {host}:{port} is not trusted by this Mac. Verify this SHA-256 fingerprint with the server administrator before continuing:\n\n{fingerprint}",
+    certificateChangedMessage:
+      "The pinned certificate for {host}:{port} has changed. This can indicate a server rebuild or an interception attempt. Verify the new SHA-256 fingerprint independently:\n\n{fingerprint}",
+    certificateTrustConfirm: "Trust and reconnect",
+    certificateTrustDeclined: "Certificate was not trusted; connection blocked.",
+    imeInput: "Remote desktop keyboard input",
     options: {
       title: "RDP options",
       domain: "Domain",
@@ -1708,6 +1742,7 @@ const dict = {
       drive: "Drive redirection",
       driveLabel: "Drive label",
       drivePath: "Local folder",
+      driveReadOnly: "Read-only (recommended)",
       driveBrowse: "Browse…",
       gateway: "RD Gateway",
       gatewayHost: "Gateway host",

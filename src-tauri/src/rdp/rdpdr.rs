@@ -21,18 +21,21 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use ironrdp::core::AsAny;
 use ironrdp::pdu::PduResult;
+use ironrdp::rdpdr::pdu::RdpdrPdu;
 use ironrdp::rdpdr::pdu::efs;
 use ironrdp::rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
-use ironrdp::rdpdr::pdu::RdpdrPdu;
 use ironrdp::rdpdr::{Rdpdr as IronRdpdr, RdpdrBackend};
 use ironrdp::svc::SvcMessage;
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::rdp::session::SessionOutput;
 use crate::rdp::DriveRedirectOpt;
+use crate::rdp::session::SessionOutput;
 
 // ── Component / PacketId pairs ──────────────────────────────────────────
 
@@ -255,7 +258,48 @@ fn normalize_inside(root: &Path, candidate: PathBuf) -> Result<PathBuf, String> 
     Ok(resolved)
 }
 
+/// Reject symlinks/reparse-style indirection in every existing component.
+/// `safe_join` is lexical; this second check prevents an in-root symlink from
+/// resolving to a path outside the mapped directory.
+fn validate_confined_path(root: &Path, candidate: &Path) -> Result<(), String> {
+    let relative = candidate.strip_prefix(root).map_err(|_| {
+        format!(
+            "rdpdr: refusing path '{}' outside mapped root '{}'",
+            candidate.display(),
+            root.display()
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(segment) = component else {
+            return Err("rdpdr: invalid mapped path component".into());
+        };
+        current.push(segment);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "rdpdr: symbolic links are not allowed in mapped paths ('{}')",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => {
+                return Err(format!(
+                    "rdpdr: inspect mapped path '{}': {}",
+                    current.display(),
+                    error
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 const DEFAULT_DRIVE_ID: u32 = 1;
+const MAX_DRIVE_IO_CHUNK: usize = 16 * 1024 * 1024;
+const MAX_DRIVE_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_DRIVE_SESSION_WRITE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct LocalDriveBackend {
@@ -264,6 +308,8 @@ pub struct LocalDriveBackend {
     next_file_id: u32,
     handles: HashMap<u32, OpenedHandle>,
     status_tx: Option<UnboundedSender<SessionOutput>>,
+    read_only: bool,
+    written_bytes: u64,
 }
 
 #[derive(Debug)]
@@ -294,6 +340,15 @@ impl LocalDriveBackend {
         label: impl Into<String>,
         status_tx: Option<UnboundedSender<SessionOutput>>,
     ) -> Result<Self, String> {
+        Self::new_with_policy(root, label, status_tx, false)
+    }
+
+    fn new_with_policy(
+        root: impl AsRef<Path>,
+        label: impl Into<String>,
+        status_tx: Option<UnboundedSender<SessionOutput>>,
+        read_only: bool,
+    ) -> Result<Self, String> {
         let root = root.as_ref();
         if root.as_os_str().is_empty() {
             return Err("rdpdr: redirected drive path is empty".into());
@@ -317,6 +372,8 @@ impl LocalDriveBackend {
             next_file_id: DEFAULT_DRIVE_ID,
             handles: HashMap::new(),
             status_tx,
+            read_only,
+            written_bytes: 0,
         })
     }
 
@@ -344,17 +401,44 @@ impl LocalDriveBackend {
 
     fn handle_create(&mut self, req: efs::DeviceCreateRequest) -> PduResult<Vec<SvcMessage>> {
         let path = match safe_join(&self.root, &req.path) {
-            Ok(path) => path,
+            Ok(path) if validate_confined_path(&self.root, &path).is_ok() => path,
             Err(_) => {
                 return Ok(create_response(
                     &req,
                     efs::NtStatus::ACCESS_DENIED,
                     0,
                     efs::Information::empty(),
-                ))
+                ));
+            }
+            Ok(_) => {
+                return Ok(create_response(
+                    &req,
+                    efs::NtStatus::ACCESS_DENIED,
+                    0,
+                    efs::Information::empty(),
+                ));
             }
         };
         let file_id = self.next_file_id();
+
+        let mutating_open =
+            wants_write(&req) || req.create_disposition != efs::CreateDisposition::FILE_OPEN;
+        if self.read_only && mutating_open {
+            return Ok(create_response(
+                &req,
+                efs::NtStatus::ACCESS_DENIED,
+                file_id,
+                efs::Information::empty(),
+            ));
+        }
+        if req.allocation_size.max(0) as u64 > MAX_DRIVE_FILE_BYTES {
+            return Ok(create_response(
+                &req,
+                efs::NtStatus::ACCESS_DENIED,
+                file_id,
+                efs::Information::empty(),
+            ));
+        }
 
         let wants_directory = req
             .create_options
@@ -413,6 +497,14 @@ impl LocalDriveBackend {
                     efs::Information::empty(),
                 ));
             }
+            if validate_confined_path(&self.root, &path).is_err() {
+                return Ok(create_response(
+                    &req,
+                    efs::NtStatus::ACCESS_DENIED,
+                    file_id,
+                    efs::Information::empty(),
+                ));
+            }
         }
         if !path.is_dir() {
             return Ok(create_response(
@@ -450,9 +542,21 @@ impl LocalDriveBackend {
             options.write(true);
         }
         apply_disposition(&mut options, &req.create_disposition);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
 
         match options.open(&path) {
             Ok(file) => {
+                if file.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+                    > MAX_DRIVE_FILE_BYTES
+                {
+                    return Ok(create_response(
+                        &req,
+                        efs::NtStatus::ACCESS_DENIED,
+                        file_id,
+                        efs::Information::empty(),
+                    ));
+                }
                 self.handles.insert(
                     file_id,
                     OpenedHandle {
@@ -488,7 +592,10 @@ impl LocalDriveBackend {
         let OpenedHandleKind::File(file) = &mut handle.kind else {
             return Ok(read_response(&req, efs::NtStatus::UNSUCCESSFUL, Vec::new()));
         };
-        let mut data = vec![0; usize::try_from(req.length).unwrap_or(0)];
+        let requested = usize::try_from(req.length)
+            .unwrap_or(usize::MAX)
+            .min(MAX_DRIVE_IO_CHUNK);
+        let mut data = vec![0; requested];
         let status = match file
             .seek(SeekFrom::Start(req.offset))
             .and_then(|_| file.read(&mut data))
@@ -506,6 +613,14 @@ impl LocalDriveBackend {
     }
 
     fn handle_write(&mut self, req: efs::DeviceWriteRequest) -> PduResult<Vec<SvcMessage>> {
+        let write_len = u64::try_from(req.write_data.len()).unwrap_or(u64::MAX);
+        if self.read_only
+            || req.write_data.len() > MAX_DRIVE_IO_CHUNK
+            || req.offset.saturating_add(write_len) > MAX_DRIVE_FILE_BYTES
+            || self.written_bytes.saturating_add(write_len) > MAX_DRIVE_SESSION_WRITE_BYTES
+        {
+            return Ok(write_response(&req, efs::NtStatus::ACCESS_DENIED, 0));
+        }
         let Some(handle) = self.handles.get_mut(&req.device_io_request.file_id) else {
             return Ok(write_response(&req, efs::NtStatus::NO_SUCH_FILE, 0));
         };
@@ -520,6 +635,7 @@ impl LocalDriveBackend {
         {
             Ok(()) => {
                 length = u32::try_from(req.write_data.len()).unwrap_or(u32::MAX);
+                self.written_bytes = self.written_bytes.saturating_add(write_len);
                 efs::NtStatus::SUCCESS
             }
             Err(e) => io_status(&e),
@@ -546,6 +662,13 @@ impl LocalDriveBackend {
         let Some(handle) = self.handles.get(&req.device_io_request.file_id) else {
             return Ok(query_info_response(&req, efs::NtStatus::NO_SUCH_FILE, None));
         };
+        if validate_confined_path(&self.root, &handle.path).is_err() {
+            return Ok(query_info_response(
+                &req,
+                efs::NtStatus::ACCESS_DENIED,
+                None,
+            ));
+        }
         let metadata = match fs::metadata(&handle.path) {
             Ok(metadata) => metadata,
             Err(e) => return Ok(query_info_response(&req, io_status(&e), None)),
@@ -587,7 +710,7 @@ impl LocalDriveBackend {
                     &req,
                     efs::NtStatus::NOT_SUPPORTED,
                     None,
-                ))
+                ));
             }
         };
         Ok(query_info_response(&req, efs::NtStatus::SUCCESS, buffer))
@@ -706,7 +829,7 @@ impl LocalDriveBackend {
                     &req,
                     efs::NtStatus::NOT_SUPPORTED,
                     None,
-                ))
+                ));
             }
         };
         Ok(query_volume_response(&req, efs::NtStatus::SUCCESS, buffer))
@@ -731,6 +854,9 @@ impl LocalDriveBackend {
         &mut self,
         req: &efs::ServerDriveSetInformationRequest,
     ) -> Result<(), efs::NtStatus> {
+        if self.read_only {
+            return Err(efs::NtStatus::ACCESS_DENIED);
+        }
         let Some(handle) = self.handles.get_mut(&req.device_io_request.file_id) else {
             return Err(efs::NtStatus::NO_SUCH_FILE);
         };
@@ -746,6 +872,8 @@ impl LocalDriveBackend {
             efs::FileInformationClass::Rename(info) => {
                 let target = safe_join(&self.root, &info.file_name)
                     .map_err(|_| efs::NtStatus::ACCESS_DENIED)?;
+                validate_confined_path(&self.root, &target)
+                    .map_err(|_| efs::NtStatus::ACCESS_DENIED)?;
                 fs::rename(&handle.path, &target).map_err(|e| io_status(&e))?;
                 handle.path = target;
                 Ok(())
@@ -754,8 +882,11 @@ impl LocalDriveBackend {
                 let OpenedHandleKind::File(file) = &mut handle.kind else {
                     return Err(efs::NtStatus::UNSUCCESSFUL);
                 };
-                file.set_len(info.end_of_file.max(0) as u64)
-                    .map_err(|e| io_status(&e))
+                let target_len = info.end_of_file.max(0) as u64;
+                if target_len > MAX_DRIVE_FILE_BYTES {
+                    return Err(efs::NtStatus::ACCESS_DENIED);
+                }
+                file.set_len(target_len).map_err(|e| io_status(&e))
             }
             efs::FileInformationClass::Allocation(_) | efs::FileInformationClass::Basic(_) => {
                 Ok(())
@@ -848,7 +979,12 @@ pub fn build_drive_channel(
     if !options.enabled {
         return Ok(None);
     }
-    let backend = LocalDriveBackend::new_with_status(&options.path, &options.label, status_tx)?;
+    let backend = LocalDriveBackend::new_with_policy(
+        &options.path,
+        &options.label,
+        status_tx,
+        options.read_only,
+    )?;
     let label = backend.label.clone();
     let computer_name = local_computer_name();
     Ok(Some(
@@ -1125,12 +1261,13 @@ fn directory_info(
 fn query_entries(root: &Path, base: &Path, query: &str) -> Result<Vec<PathBuf>, String> {
     let query = query.trim_end_matches('\0').replace('\\', "/");
     if query.is_empty() || query == "*" {
-        return list_directory(base);
+        return list_directory(root, base);
     }
     if query.contains('*') {
         let (parent, pattern) = split_query_pattern(&query);
         let dir = safe_join_from(root, base, parent)?;
-        let mut entries = list_directory(&dir)?;
+        validate_confined_path(root, &dir)?;
+        let mut entries = list_directory(root, &dir)?;
         if pattern != "*" {
             let prefix = pattern.trim_end_matches('*');
             entries.retain(|entry| display_name(entry, "").starts_with(prefix));
@@ -1138,6 +1275,7 @@ fn query_entries(root: &Path, base: &Path, query: &str) -> Result<Vec<PathBuf>, 
         return Ok(entries);
     }
     let path = safe_join_from(root, base, &query)?;
+    validate_confined_path(root, &path)?;
     if path.exists() {
         Ok(vec![path])
     } else {
@@ -1152,10 +1290,12 @@ fn split_query_pattern(query: &str) -> (&str, &str) {
     }
 }
 
-fn list_directory(dir: &Path) -> Result<Vec<PathBuf>, String> {
+fn list_directory(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
+    validate_confined_path(root, dir)?;
     let mut entries = fs::read_dir(dir)
         .map_err(|e| format!("rdpdr: read directory '{}': {}", dir.display(), e))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| validate_confined_path(root, path).is_ok())
         .collect::<Vec<_>>();
     entries.sort_by_key(|path| display_name(path, ""));
     Ok(entries)
@@ -1330,12 +1470,73 @@ mod tests {
         assert!(!dir.path().parent().unwrap().join("escape.txt").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn local_drive_backend_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), root.path().join("outside")).unwrap();
+        let mut backend = LocalDriveBackend::new(root.path(), "shared").unwrap();
+
+        backend
+            .handle_drive_io_request(efs::ServerDriveIoRequest::ServerCreateDriveRequest(
+                create_request("outside/escape.txt"),
+            ))
+            .unwrap();
+
+        assert!(backend.handles.is_empty());
+        assert!(!outside.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn local_drive_backend_read_only_policy_denies_mutating_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend =
+            LocalDriveBackend::new_with_policy(dir.path(), "shared", None, true).unwrap();
+
+        backend
+            .handle_drive_io_request(efs::ServerDriveIoRequest::ServerCreateDriveRequest(
+                create_request("blocked.txt"),
+            ))
+            .unwrap();
+
+        assert!(backend.handles.is_empty());
+        assert!(!dir.path().join("blocked.txt").exists());
+    }
+
+    #[test]
+    fn local_drive_backend_enforces_session_write_quota() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut backend = LocalDriveBackend::new(dir.path(), "shared").unwrap();
+        backend
+            .handle_drive_io_request(efs::ServerDriveIoRequest::ServerCreateDriveRequest(
+                create_request("quota.txt"),
+            ))
+            .unwrap();
+        backend.written_bytes = MAX_DRIVE_SESSION_WRITE_BYTES;
+
+        backend
+            .handle_drive_io_request(efs::ServerDriveIoRequest::DeviceWriteRequest(
+                efs::DeviceWriteRequest {
+                    device_io_request: io_request(DEFAULT_DRIVE_ID, 2, efs::MajorFunction::Write),
+                    offset: 0,
+                    write_data: b"blocked".to_vec(),
+                },
+            ))
+            .unwrap();
+
+        assert_eq!(fs::read(dir.path().join("quota.txt")).unwrap(), b"");
+    }
+
     #[test]
     fn build_drive_channel_ignores_disabled_option() {
         let options = DriveRedirectOpt {
             enabled: false,
             label: "shared".into(),
             path: String::new(),
+            read_only: true,
         };
         assert!(build_drive_channel(&options, None).unwrap().is_none());
     }

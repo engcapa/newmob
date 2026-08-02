@@ -213,6 +213,14 @@ export function RdpOptionsForm({ options, onChange }: RdpOptionsFormProps) {
                 style={{ flex: 1 }}
               />
             </label>
+            <label style={row()}>
+              <input
+                type="checkbox"
+                checked={opt.redirectDrive.readOnly}
+                onChange={(e) => setDrive({ readOnly: e.target.checked })}
+              />
+              <span>{t("rdp.options.driveReadOnly")}</span>
+            </label>
           </>
         )}
       </fieldset>

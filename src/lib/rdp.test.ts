@@ -8,20 +8,29 @@ import {
   encodePointer,
   encodeResize,
   encodeWheel,
+  extractRdpCertificateChallenge,
+  formatRdpCertificateFingerprint,
   IN_ACK,
   IN_KEY,
   IN_PING,
   IN_POINTER,
   IN_RESIZE,
   IN_WHEEL,
+  isRetryableRdpConnectError,
   keyEventToScancode,
   mouseButtonMask,
   normalizeRdpResizeSize,
   OUT_AUDIO,
+  OUT_CURSOR,
   OUT_FRAME,
   parseAudioFrame,
   parseFrameTile,
+  parseRdpCursorFrame,
   parseRdpWsText,
+  RDP_CURSOR_BITMAP,
+  RDP_CURSOR_DEFAULT,
+  RDP_CURSOR_HIDDEN,
+  rdpCursorToCss,
   wheelDeltaToRotationUnits,
 } from "./rdp";
 import {
@@ -103,6 +112,35 @@ describe("rdp WS encoders", () => {
   });
 });
 
+describe("RDP certificate challenges", () => {
+  it("extracts an untrusted certificate fingerprint from a TLS error", () => {
+    const observed = "ab".repeat(32);
+    expect(
+      extractRdpCertificateChallenge(
+        `rdp TLS upgrade failed: RDP_CERTIFICATE_UNTRUSTED host=rdp.example.com port=3389 observed=${observed} system_error=unknown issuer`,
+      ),
+    ).toEqual({
+      changed: false,
+      host: "rdp.example.com",
+      port: 3389,
+      expected: undefined,
+      observed,
+    });
+    expect(formatRdpCertificateFingerprint(observed)).toMatch(/^AB:AB:/);
+  });
+
+  it("extracts changed pins and ignores unrelated errors", () => {
+    const expected = "11".repeat(32);
+    const observed = "22".repeat(32);
+    expect(
+      extractRdpCertificateChallenge(
+        `RDP_CERTIFICATE_CHANGED host=10.0.0.8 port=443 expected=${expected} observed=${observed}`,
+      ),
+    ).toEqual({ changed: true, host: "10.0.0.8", port: 443, expected, observed });
+    expect(extractRdpCertificateChallenge("bad credentials")).toBeNull();
+  });
+});
+
 describe("rdp WS frame parser", () => {
   it("parses a tile with the expected geometry", () => {
     const w = 4;
@@ -168,6 +206,56 @@ describe("rdp WS audio parser", () => {
   });
 });
 
+describe("rdp cursor channel", () => {
+  it("maps default and hidden cursor messages to local CSS cursors", () => {
+    expect(
+      parseRdpCursorFrame(new Uint8Array([OUT_CURSOR, RDP_CURSOR_DEFAULT]).buffer),
+    ).toEqual({ kind: "default" });
+    const hidden = parseRdpCursorFrame(
+      new Uint8Array([OUT_CURSOR, RDP_CURSOR_HIDDEN]).buffer,
+    );
+    expect(hidden).toEqual({ kind: "hidden" });
+    expect(rdpCursorToCss(hidden!)).toBe("none");
+  });
+
+  it("parses a bounded PNG cursor with its remote hotspot", () => {
+    const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const bytes = new Uint8Array(10 + pngSignature.length);
+    const view = new DataView(bytes.buffer);
+    bytes[0] = OUT_CURSOR;
+    bytes[1] = RDP_CURSOR_BITMAP;
+    view.setUint16(2, 3);
+    view.setUint16(4, 4);
+    view.setUint16(6, 32);
+    view.setUint16(8, 32);
+    bytes.set(pngSignature, 10);
+
+    const cursor = parseRdpCursorFrame(bytes.buffer);
+
+    expect(cursor).toMatchObject({
+      kind: "bitmap",
+      hotspotX: 3,
+      hotspotY: 4,
+      width: 32,
+      height: 32,
+    });
+    expect(rdpCursorToCss(cursor!)).toMatch(
+      /^url\("data:image\/png;base64,[A-Za-z0-9+/=]+"\) 3 4, default$/,
+    );
+  });
+
+  it("rejects malformed or unbounded cursor messages", () => {
+    const invalid = new Uint8Array(18);
+    const view = new DataView(invalid.buffer);
+    invalid[0] = OUT_CURSOR;
+    invalid[1] = RDP_CURSOR_BITMAP;
+    view.setUint16(6, 513);
+    view.setUint16(8, 32);
+    expect(parseRdpCursorFrame(invalid.buffer)).toBeNull();
+    expect(parseRdpCursorFrame(new Uint8Array([OUT_FRAME, 0]).buffer)).toBeNull();
+  });
+});
+
 describe("rdp WS text parser", () => {
   it("parses a connected event", () => {
     const msg = parseRdpWsText(
@@ -189,6 +277,28 @@ describe("rdp WS text parser", () => {
   it("returns null for invalid JSON", () => {
     expect(parseRdpWsText("not json")).toBeNull();
   });
+
+  it("preserves retryability on structured session errors", () => {
+    const msg = parseRdpWsText(
+      JSON.stringify({ type: "error", code: "rdp-session", message: "timed out", retryable: true }),
+    );
+    expect(msg).toMatchObject({ type: "error", retryable: true });
+  });
+});
+
+describe("RDP connect retry classification", () => {
+  it("retries transient network failures", () => {
+    expect(isRetryableRdpConnectError("connection refused")).toBe(true);
+    expect(isRetryableRdpConnectError("RDP proxy connection timed out after 30 seconds")).toBe(
+      true,
+    );
+  });
+
+  it("does not retry configuration, credential, or certificate failures", () => {
+    expect(isRetryableRdpConnectError("invalid credentials")).toBe(false);
+    expect(isRetryableRdpConnectError("certificate changed")).toBe(false);
+    expect(isRetryableRdpConnectError("proxy type is not implemented")).toBe(false);
+  });
 });
 
 describe("keyEventToScancode", () => {
@@ -203,6 +313,14 @@ describe("keyEventToScancode", () => {
     });
     expect(keyEventToScancode({ code: "KeyA" } as KeyboardEvent)).toEqual({
       scancode: 0x1e,
+      extended: false,
+    });
+    expect(keyEventToScancode({ code: "NumpadDivide" } as KeyboardEvent)).toEqual({
+      scancode: 0x35,
+      extended: true,
+    });
+    expect(keyEventToScancode({ code: "IntlBackslash" } as KeyboardEvent)).toEqual({
+      scancode: 0x56,
       extended: false,
     });
   });
@@ -240,7 +358,7 @@ describe("RdpOptions parse/serialize", () => {
       nla: false,
       redirectClipboard: false,
       redirectAudio: "off",
-      redirectDrive: { enabled: true, label: "SHARED", path: "/data" },
+      redirectDrive: { enabled: true, label: "SHARED", path: "/data", readOnly: false },
       gateway: {
         host: "rdg.example.com",
         port: 443,
@@ -310,6 +428,8 @@ describe("RdpOptions parse/serialize", () => {
     const json = JSON.stringify({
       redirectDrive: { enabled: true, label: "VERYLONGLABEL", path: "/x" },
     });
-    expect(parseRdpOptions(json).redirectDrive.label).toBe("VERYLONG");
+    const drive = parseRdpOptions(json).redirectDrive;
+    expect(drive.label).toBe("VERYLONG");
+    expect(drive.readOnly).toBe(true);
   });
 });

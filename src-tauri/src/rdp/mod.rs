@@ -27,6 +27,7 @@ pub mod rdpdr;
 pub mod rdpsnd;
 pub mod rfx;
 pub mod session;
+pub mod tls;
 pub mod transport;
 pub mod ws;
 
@@ -34,8 +35,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use uuid::Uuid;
 
-use crate::rdp::session::{test_ironrdp_connection, RdpSessionConfig};
-use crate::rdp::ws::{spawn_rdp_relay, RdpControl, RdpSpawnConfig};
+use crate::rdp::session::{RdpSessionConfig, test_ironrdp_connection};
+use crate::rdp::ws::{RdpControl, RdpSpawnConfig, spawn_rdp_relay};
 use crate::state::AppState;
 use crate::terminal::network::NetworkSettings;
 use crate::vault::Vault;
@@ -55,6 +56,10 @@ pub struct RdpOptions {
     pub screen_h: u16,
     #[serde(default)]
     pub nla: bool,
+    /// Optional SHA-256 pin for a self-signed/private-CA RDP certificate.
+    /// System trust is always attempted first.
+    #[serde(default)]
+    pub certificate_fingerprint: Option<String>,
     #[serde(default)]
     pub performance: PerformanceFlags,
     #[serde(default = "default_true")]
@@ -140,7 +145,7 @@ impl PerformanceFlags {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveRedirectOpt {
     #[serde(default)]
@@ -149,6 +154,20 @@ pub struct DriveRedirectOpt {
     pub label: String,
     #[serde(default)]
     pub path: String,
+    /// Expose the mapped directory without allowing the remote host to mutate it.
+    #[serde(default = "default_true")]
+    pub read_only: bool,
+}
+
+impl Default for DriveRedirectOpt {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            label: String::new(),
+            path: String::new(),
+            read_only: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -165,6 +184,9 @@ pub struct GatewayOpt {
     pub auth: String, // "basic" | "ntlm"
     #[serde(default = "default_true")]
     pub use_session_creds: bool,
+    /// Optional SHA-256 pin for the HTTPS certificate presented by RD Gateway.
+    #[serde(default)]
+    pub certificate_fingerprint: Option<String>,
 }
 
 fn default_gateway_port() -> u16 {
@@ -194,6 +216,7 @@ impl RdpOptions {
 pub struct RdpConnectResult {
     pub session_id: String,
     pub ws_port: u16,
+    pub ws_token: String,
 }
 
 /// Resolve a possibly-vault-referenced secret. Mirrors the helper used by
@@ -221,6 +244,30 @@ fn apply_session_credentials_to_gateway(
     }
 }
 
+fn apply_stored_certificate_pins(
+    state: &AppState,
+    host: &str,
+    port: u16,
+    options: &mut RdpOptions,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    if let Some(pin) = tls::load_pin(&db, host, port).map_err(|e| e.to_string())? {
+        options.certificate_fingerprint = Some(pin);
+    } else if let Some(pin) = options.certificate_fingerprint.as_deref() {
+        options.certificate_fingerprint = Some(tls::normalize_fingerprint(pin)?);
+    }
+    if let Some(gateway) = options.gateway.as_mut() {
+        if let Some(pin) =
+            tls::load_pin(&db, &gateway.host, gateway.port).map_err(|e| e.to_string())?
+        {
+            gateway.certificate_fingerprint = Some(pin);
+        } else if let Some(pin) = gateway.certificate_fingerprint.as_deref() {
+            gateway.certificate_fingerprint = Some(tls::normalize_fingerprint(pin)?);
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn rdp_connect(
@@ -236,6 +283,7 @@ pub async fn rdp_connect(
 
     let resolved_password = resolve_secret(&state.vault, password.as_deref())?;
     let mut options = RdpOptions::from_json(options_json.as_deref());
+    apply_stored_certificate_pins(&state, &host, port, &mut options)?;
     if let Some(g) = options.gateway.as_mut() {
         if let Some(p) = g.password.as_deref() {
             if let Some(plain) = state.vault.resolve(p)? {
@@ -264,6 +312,7 @@ pub async fn rdp_connect(
     let result = RdpConnectResult {
         session_id: session_id.clone(),
         ws_port: session.ws_port,
+        ws_token: session.ws_token.clone(),
     };
 
     // Reap the session-map entry once the relay's cancellation token fires
@@ -293,6 +342,24 @@ pub async fn rdp_disconnect(state: State<'_, AppState>, session_id: String) -> R
     Ok(())
 }
 
+/// Persist an explicitly confirmed SHA-256 certificate fingerprint. Future
+/// handshakes for this exact host/port pair accept only that leaf certificate
+/// when operating-system trust validation fails.
+#[tauri::command]
+pub async fn rdp_trust_certificate(
+    state: State<'_, AppState>,
+    host: String,
+    port: u16,
+    fingerprint: String,
+) -> Result<String, String> {
+    let host = host.trim();
+    if host.is_empty() || port == 0 {
+        return Err("RDP certificate trust requires a valid host and port".to_string());
+    }
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    tls::save_pin(&db, host, port, &fingerprint)
+}
+
 /// Run the real IronRDP connection path without spawning the UI relay. Used
 /// by the SessionEditor "Test connection" button.
 #[tauri::command]
@@ -307,6 +374,7 @@ pub async fn rdp_test_connection(
 ) -> Result<String, String> {
     let resolved_password = resolve_secret(&state.vault, password.as_deref())?;
     let mut options = RdpOptions::from_json(options_json.as_deref());
+    apply_stored_certificate_pins(&state, &host, port, &mut options)?;
     if let Some(g) = options.gateway.as_mut() {
         if let Some(p) = g.password.as_deref() {
             if let Some(plain) = state.vault.resolve(p)? {
@@ -359,6 +427,7 @@ mod tests {
                 password: Some("gateway-pass".into()),
                 auth: "ntlm".into(),
                 use_session_creds: true,
+                certificate_fingerprint: None,
             }),
             ..RdpOptions::default()
         };
@@ -382,6 +451,7 @@ mod tests {
                 password: Some("gateway-pass".into()),
                 auth: "basic".into(),
                 use_session_creds: false,
+                certificate_fingerprint: None,
             }),
             ..RdpOptions::default()
         };

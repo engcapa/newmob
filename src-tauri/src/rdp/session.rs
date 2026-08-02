@@ -7,11 +7,13 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 
+use image::{ColorType, ImageEncoder};
+use ironrdp::cliprdr::CliprdrClient;
 use ironrdp::cliprdr::backend::CliprdrBackend;
 use ironrdp::cliprdr::pdu::{
     ClipboardFileAttributes, ClipboardFormat, ClipboardFormatId, ClipboardFormatName,
@@ -19,7 +21,6 @@ use ironrdp::cliprdr::pdu::{
     FileContentsResponse, FileDescriptor as IronClipboardFileDescriptor, FormatDataRequest,
     FormatDataResponse, LockDataId, OwnedFormatDataResponse, PackedFileList,
 };
-use ironrdp::cliprdr::CliprdrClient;
 use ironrdp::connector::connection_activation::{
     ConnectionActivationSequence, ConnectionActivationState,
 };
@@ -28,16 +29,17 @@ use ironrdp::core::{AsAny, IntoOwned, WriteBuf};
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::dvc::DrdynvcClient;
 use ironrdp::graphics::image_processing::PixelFormat;
+use ironrdp::graphics::pointer::DecodedPointer;
 use ironrdp::input::{
     Database as InputDatabase, MouseButton, MousePosition, Operation, Scancode, WheelRotations,
 };
+use ironrdp::pdu::Action;
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags as IronPerformanceFlags, TimezoneInfo};
 use ironrdp::pdu::rdp::headers::ShareDataPdu;
 use ironrdp::pdu::rdp::refresh_rectangle::RefreshRectanglePdu;
-use ironrdp::pdu::Action;
 use ironrdp::rdpsnd::client::{Rdpsnd, RdpsndClientHandler};
 use ironrdp::rdpsnd::pdu::{
     AudioFormat as IronAudioFormat, PitchPdu, VolumePdu, WaveFormat as IronWaveFormat,
@@ -49,11 +51,11 @@ use ironrdp_tokio::{Framed, FramedRead, FramedWrite};
 use serde_json::json;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::rdp::RdpOptions;
 use crate::rdp::frame::{DecodedTile, TileHeader};
 use crate::rdp::input::{KeyEvent, PointerEvent, PointerWheelEvent};
-use crate::rdp::transport::{open_transport, RdpStream};
-use crate::rdp::ws::{channel, frame_payload_with_header, RdpControl};
-use crate::rdp::RdpOptions;
+use crate::rdp::transport::{RdpStream, open_transport};
+use crate::rdp::ws::{RdpControl, channel, cursor, frame_payload_with_header};
 use crate::terminal::network::NetworkSettings;
 
 /// Output yielded from the session toward the WS layer.
@@ -123,8 +125,13 @@ const AUDIO_SAMPLE_RATE: u32 = 44_100;
 const AUDIO_CHANNELS: u16 = 2;
 const AUDIO_BITS_PER_SAMPLE: u16 = 16;
 const CLIPRDR_FILE_LIST_FORMAT_VALUE: u32 = 0x0000_C006;
-const MAX_CLIPBOARD_FILE_ITEMS: usize = 4096;
+const MAX_CLIPBOARD_FILE_ITEMS: usize = 256;
+const MAX_CLIPBOARD_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_CLIPBOARD_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const REMOTE_FILE_CHUNK_SIZE: u32 = 1024 * 1024;
+const RDP_NEGOTIATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const RDP_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const RDP_AUTHENTICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 impl RdpSessionHandle {
     pub fn new() -> (
@@ -204,6 +211,7 @@ struct ClipboardBridgeState {
     local_files: Vec<LocalClipboardFile>,
     pending_remote_format: Option<ClipboardFormatId>,
     remote_file_transfer: Option<RemoteFileTransfer>,
+    completed_remote_staging: Vec<StagingDirectory>,
     actions: VecDeque<ClipboardAction>,
     ready: bool,
     negotiated_capabilities: ClipboardGeneralCapabilityFlags,
@@ -241,10 +249,29 @@ struct RemoteFileStream {
 
 #[derive(Debug)]
 struct RemoteFileTransfer {
+    staging: StagingDirectory,
     files: Vec<RemoteClipboardFile>,
     top_level_paths: Vec<PathBuf>,
     streams: HashMap<u32, RemoteFileStream>,
     next_stream_id: u32,
+    received_bytes: u64,
+}
+
+#[derive(Debug)]
+struct StagingDirectory(PathBuf);
+
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.0.display(),
+                    %error,
+                    "failed to clean RDP clipboard staging directory"
+                );
+            }
+        }
+    }
 }
 
 struct TaomniCliprdrBackend {
@@ -259,12 +286,14 @@ struct RdpsndWsBackend {
 
 impl ClipboardBridge {
     fn new(out_tx: UnboundedSender<SessionOutput>) -> Self {
+        cleanup_stale_clipboard_staging();
         Self {
             state: Arc::new(Mutex::new(ClipboardBridgeState {
                 local_text: None,
                 local_files: Vec::new(),
                 pending_remote_format: None,
                 remote_file_transfer: None,
+                completed_remote_staging: Vec::new(),
                 actions: VecDeque::new(),
                 ready: false,
                 negotiated_capabilities: ClipboardGeneralCapabilityFlags::empty(),
@@ -274,8 +303,7 @@ impl ClipboardBridge {
     }
 
     fn backend(&self) -> TaomniCliprdrBackend {
-        let temporary_directory = std::env::temp_dir()
-            .join("taomni-rdp-cliprdr")
+        let temporary_directory = clipboard_process_staging_root()
             .to_string_lossy()
             .into_owned();
         TaomniCliprdrBackend {
@@ -377,7 +405,14 @@ impl ClipboardBridge {
         if !request.flags.contains(FileContentsFlags::RANGE) || file.is_directory {
             return FileContentsResponse::new_error(request.stream_id);
         }
-        read_clipboard_file_range(&file.path, request.position, request.requested_size)
+        if request.position > file.size {
+            return FileContentsResponse::new_error(request.stream_id);
+        }
+        let remaining = file.size.saturating_sub(request.position);
+        let requested_size = request
+            .requested_size
+            .min(remaining.min(u32::MAX as u64) as u32);
+        read_clipboard_file_range(&file.path, request.position, requested_size)
             .map(|data| FileContentsResponse::new_data_response(request.stream_id, data))
             .unwrap_or_else(|_| FileContentsResponse::new_error(request.stream_id))
     }
@@ -393,11 +428,22 @@ impl ClipboardBridge {
                             "Remote clipboard did not contain any file paths.",
                         );
                     } else {
+                        if let Ok(mut state) = self.state.lock() {
+                            state.completed_remote_staging.clear();
+                            state.completed_remote_staging.push(transfer.staging);
+                        } else {
+                            self.send_clipboard_status(
+                                "clipboard-remote-files-error",
+                                "Remote clipboard staging state is unavailable.",
+                            );
+                            return;
+                        }
                         self.finish_remote_file_receive(completed_paths);
                     }
                     return;
                 }
                 if let Ok(mut state) = self.state.lock() {
+                    state.completed_remote_staging.clear();
                     state
                         .actions
                         .push_back(ClipboardAction::RequestRemoteFileContents(requests));
@@ -413,7 +459,7 @@ impl ClipboardBridge {
 
     fn handle_remote_file_contents_response(&self, response: FileContentsResponse<'_>) {
         let stream_id = response.stream_id();
-        let data = response.data().to_vec();
+        let data = response.data();
         let mut next_request = None;
         let mut completed_paths = None;
         let mut error = None;
@@ -427,20 +473,45 @@ impl ClipboardBridge {
             };
             let Some(stream) = transfer.streams.remove(&stream_id) else {
                 error = Some(format!("unknown remote file stream {}", stream_id));
+                state.remote_file_transfer = None;
                 drop(state);
                 self.send_clipboard_status("clipboard-remote-files-error", &error.unwrap());
                 return;
             };
             let Some(file) = transfer.files.get(stream.index).cloned() else {
                 error = Some(format!("remote file index {} is unavailable", stream.index));
+                state.remote_file_transfer = None;
                 drop(state);
                 self.send_clipboard_status("clipboard-remote-files-error", &error.unwrap());
                 return;
             };
 
-            if !file.is_directory && !data.is_empty() {
+            let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            let remaining = file.size.saturating_sub(stream.position);
+            if file.is_directory {
+                error = Some(format!(
+                    "remote directory index {} returned file data",
+                    stream.index
+                ));
+            } else if data.is_empty() && stream.position < file.size {
+                error = Some(format!(
+                    "remote file '{}' ended before its declared size",
+                    file.path.display()
+                ));
+            } else if data.len() > REMOTE_FILE_CHUNK_SIZE as usize || data_len > remaining {
+                error = Some(format!(
+                    "remote file '{}' exceeded its declared transfer bounds",
+                    file.path.display()
+                ));
+            } else if transfer.received_bytes.saturating_add(data_len) > MAX_CLIPBOARD_TOTAL_BYTES {
+                error = Some("remote file clipboard exceeded its total byte quota".to_string());
+            }
+
+            if error.is_none() && !data.is_empty() {
                 if let Err(e) = write_remote_file_chunk(&file.path, stream.position, &data) {
                     error = Some(e);
+                } else {
+                    transfer.received_bytes = transfer.received_bytes.saturating_add(data_len);
                 }
             }
 
@@ -451,13 +522,17 @@ impl ClipboardBridge {
                 next_request = Some(request);
             }
 
-            if let Some(request) = next_request.clone() {
+            if error.is_some() {
+                state.remote_file_transfer = None;
+            } else if let Some(request) = next_request.clone() {
                 state
                     .actions
                     .push_back(ClipboardAction::RequestRemoteFileContents(vec![request]));
             } else if transfer.streams.is_empty() {
-                completed_paths = Some(transfer.top_level_paths.clone());
-                state.remote_file_transfer = None;
+                if let Some(transfer) = state.remote_file_transfer.take() {
+                    completed_paths = Some(transfer.top_level_paths.clone());
+                    state.completed_remote_staging.push(transfer.staging);
+                }
             }
         }
 
@@ -857,34 +932,76 @@ async fn drive_ironrdp_connection(
     let mut framed = ironrdp_tokio::TokioFramed::new(transport.stream);
 
     send_status(&out_tx, "negotiating", "Negotiating RDP security protocol.");
-    let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
-        .await
-        .map_err(|e| format!("rdp negotiation failed: {}", e))?;
+    let should_upgrade = tokio::time::timeout(
+        RDP_NEGOTIATION_TIMEOUT,
+        ironrdp_tokio::connect_begin(&mut framed, &mut connector),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "RDP negotiation timed out after {} seconds",
+            RDP_NEGOTIATION_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("rdp negotiation failed: {}", e))?;
 
     send_status(&out_tx, "tls", "Upgrading the transport to TLS.");
     let stream = framed.into_inner_no_leftover();
-    let (tls_stream, cert) = ironrdp_tls::upgrade(stream, &cfg.host)
-        .await
-        .map_err(|e| format!("rdp TLS upgrade failed: {}", e))?;
-    let server_public_key = ironrdp_tls::extract_tls_server_public_key(&cert)
-        .ok_or_else(|| "rdp TLS certificate did not expose a public key".to_string())?
-        .to_vec();
+    let verified = tokio::time::timeout(
+        RDP_TLS_TIMEOUT,
+        crate::rdp::tls::upgrade(
+            stream,
+            &cfg.host,
+            cfg.port,
+            cfg.options.certificate_fingerprint.as_deref(),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "RDP TLS handshake timed out after {} seconds",
+            RDP_TLS_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("rdp TLS upgrade failed: {}", e))?;
+    send_status(
+        &out_tx,
+        if verified.used_pin {
+            "tls-pinned"
+        } else {
+            "tls-verified"
+        },
+        &format!(
+            "RDP certificate verified (SHA-256 {}).",
+            crate::rdp::tls::format_fingerprint(&verified.fingerprint)
+        ),
+    );
+    let server_public_key = verified.server_public_key;
 
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
-    let mut framed = ironrdp_tokio::TokioFramed::new(tls_stream);
+    let mut framed = ironrdp_tokio::TokioFramed::new(verified.stream);
     let mut network_client = ironrdp_tokio::reqwest::ReqwestNetworkClient::new();
 
     send_status(&out_tx, "credssp", "Authenticating with CredSSP/NLA.");
-    let connection_result = ironrdp_tokio::connect_finalize(
-        upgraded,
-        connector,
-        &mut framed,
-        &mut network_client,
-        cfg.host.clone().into(),
-        server_public_key,
-        None,
+    let connection_result = tokio::time::timeout(
+        RDP_AUTHENTICATION_TIMEOUT,
+        ironrdp_tokio::connect_finalize(
+            upgraded,
+            connector,
+            &mut framed,
+            &mut network_client,
+            cfg.host.clone().into(),
+            server_public_key,
+            None,
+        ),
     )
     .await
+    .map_err(|_| {
+        format!(
+            "RDP authentication timed out after {} seconds",
+            RDP_AUTHENTICATION_TIMEOUT.as_secs()
+        )
+    })?
     .map_err(|e| format!("rdp connection finalization failed: {}", e))?;
 
     let protocol = if cfg.options.nla {
@@ -911,6 +1028,10 @@ async fn drive_ironrdp_connection(
                     match ctrl {
                         RdpControl::Disconnect => break,
                         RdpControl::Ack => {}
+                        RdpControl::ReleaseInput => {
+                            let _ = input_db.release_all();
+                            last_buttons = 0;
+                        }
                         _ => send_status(
                             &out_tx,
                             "reactivating",
@@ -1012,6 +1133,35 @@ where
             let outputs = active_stage
                 .process_fastpath_input(image, &events)
                 .map_err(|e| format!("rdp key input: {}", e))?;
+            match handle_active_outputs(framed, image, outputs, out_tx).await? {
+                ActiveOutputFlow::Continue => {}
+                ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
+                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+            }
+        }
+        RdpControl::UnicodeText(text) => {
+            let events = input_db.apply(unicode_operations(&text));
+            if events.is_empty() {
+                return Ok(ControlOutcome::Continue);
+            }
+            let outputs = active_stage
+                .process_fastpath_input(image, &events)
+                .map_err(|e| format!("rdp Unicode input: {}", e))?;
+            match handle_active_outputs(framed, image, outputs, out_tx).await? {
+                ActiveOutputFlow::Continue => {}
+                ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
+                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+            }
+        }
+        RdpControl::ReleaseInput => {
+            let events = input_db.release_all();
+            *last_buttons = 0;
+            if events.is_empty() {
+                return Ok(ControlOutcome::Continue);
+            }
+            let outputs = active_stage
+                .process_fastpath_input(image, &events)
+                .map_err(|e| format!("rdp release input: {}", e))?;
             match handle_active_outputs(framed, image, outputs, out_tx).await? {
                 ActiveOutputFlow::Continue => {}
                 ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
@@ -1368,12 +1518,25 @@ where
                     });
                 }
             }
-            ActiveStageOutput::PointerDefault
-            | ActiveStageOutput::PointerHidden
-            | ActiveStageOutput::PointerPosition { .. }
-            | ActiveStageOutput::PointerBitmap(_) => {
-                // Pointer changes are software-rendered into the framebuffer by
-                // IronRDP when pointer_software_rendering is enabled.
+            ActiveStageOutput::PointerDefault => {
+                send_cursor_payload(out_tx, vec![cursor::DEFAULT]);
+            }
+            ActiveStageOutput::PointerHidden => {
+                send_cursor_payload(out_tx, vec![cursor::HIDDEN]);
+            }
+            ActiveStageOutput::PointerPosition { .. } => {
+                // Browsers intentionally do not allow applications to warp the
+                // host pointer. Normal movement follows local pointer events,
+                // while server-provided shape changes are handled below.
+            }
+            ActiveStageOutput::PointerBitmap(pointer) => {
+                match cursor_bitmap_payload(pointer.as_ref()) {
+                    Ok(payload) => send_cursor_payload(out_tx, payload),
+                    Err(error) => {
+                        tracing::warn!(%error, "ignoring invalid RDP cursor bitmap");
+                        send_cursor_payload(out_tx, vec![cursor::DEFAULT]);
+                    }
+                }
             }
             ActiveStageOutput::Terminate(reason) => {
                 send_text(
@@ -1597,29 +1760,138 @@ fn file_contents_request_message(request: FileContentsRequest) -> SvcMessage {
         .with_flags(ChannelFlags::SHOW_PROTOCOL)
 }
 
+fn clipboard_staging_base() -> PathBuf {
+    #[cfg(unix)]
+    let name = format!("taomni-rdp-cliprdr-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let name = "taomni-rdp-cliprdr".to_string();
+    std::env::temp_dir().join(name)
+}
+
+fn clipboard_process_staging_root() -> PathBuf {
+    clipboard_staging_base().join(format!("process-{}", std::process::id()))
+}
+
+fn cleanup_stale_clipboard_staging() {
+    static CLEANUP: Once = Once::new();
+    CLEANUP.call_once(|| {
+        let base = clipboard_staging_base();
+        if let Err(error) = ensure_private_directory(&base) {
+            tracing::warn!(path = %base.display(), %error, "failed to create RDP clipboard staging root");
+            return;
+        }
+        if let Err(error) = ensure_private_directory(&clipboard_process_staging_root()) {
+            tracing::warn!(%error, "failed to create private RDP clipboard process directory");
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&base) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == clipboard_process_staging_root() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stale = if let Some(pid) = name
+                .strip_prefix("process-")
+                .and_then(|value| value.parse::<u32>().ok())
+            {
+                !process_is_alive(pid)
+            } else {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(24 * 60 * 60))
+            };
+            if stale {
+                let result = if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                if let Err(error) = result {
+                    tracing::warn!(path = %path.display(), %error, "failed to remove stale RDP clipboard staging path");
+                }
+            }
+        }
+    });
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path)
+        .map_err(|error| format!("create private directory '{}': {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("secure directory '{}': {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    // Avoid deleting another process's active transfer on platforms where this
+    // module has no inexpensive process-existence probe.
+    true
+}
+
 fn build_remote_file_transfer(
     list: PackedFileList,
 ) -> Result<(RemoteFileTransfer, Vec<FileContentsRequest>), String> {
-    let staging_dir = std::env::temp_dir()
-        .join("taomni-rdp-cliprdr")
-        .join(uuid::Uuid::new_v4().to_string());
-    fs::create_dir_all(&staging_dir).map_err(|e| {
-        format!(
-            "create staging directory '{}': {}",
-            staging_dir.display(),
-            e
-        )
-    })?;
+    if list.files.len() > MAX_CLIPBOARD_FILE_ITEMS {
+        return Err(format!(
+            "remote file clipboard contains more than {} items",
+            MAX_CLIPBOARD_FILE_ITEMS
+        ));
+    }
+    let process_root = clipboard_process_staging_root();
+    ensure_private_directory(&process_root)?;
+    let staging_dir = process_root.join(uuid::Uuid::new_v4().to_string());
+    ensure_private_directory(&staging_dir)?;
+    let staging = StagingDirectory(staging_dir.clone());
 
     let mut files = Vec::with_capacity(list.files.len());
     let mut top_level_names = HashSet::new();
     let mut top_level_paths = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut total_bytes = 0u64;
     for file in list.files {
         let is_directory = file
             .attributes
             .unwrap_or_else(ClipboardFileAttributes::empty)
             .contains(ClipboardFileAttributes::DIRECTORY);
         let path = remote_clipboard_safe_path(&staging_dir, &file.name)?;
+        if !seen_paths.insert(path.clone()) {
+            return Err(format!(
+                "remote file clipboard contains duplicate path '{}'",
+                file.name
+            ));
+        }
+        let file_size = file.file_size.unwrap_or_default();
+        if !is_directory && file_size > MAX_CLIPBOARD_FILE_BYTES {
+            return Err(format!(
+                "remote clipboard file '{}' exceeds the {} MiB per-file quota",
+                file.name,
+                MAX_CLIPBOARD_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(file_size);
+        if total_bytes > MAX_CLIPBOARD_TOTAL_BYTES {
+            return Err(format!(
+                "remote file clipboard exceeds the {} MiB total quota",
+                MAX_CLIPBOARD_TOTAL_BYTES / (1024 * 1024)
+            ));
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("create directory '{}': {}", parent.display(), e))?;
@@ -1627,8 +1899,14 @@ fn build_remote_file_transfer(
         if is_directory {
             fs::create_dir_all(&path)
                 .map_err(|e| format!("create directory '{}': {}", path.display(), e))?;
-        } else if file.file_size.unwrap_or_default() == 0 {
-            File::create(&path).map_err(|e| format!("create '{}': {}", path.display(), e))?;
+        } else {
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            options
+                .open(&path)
+                .map_err(|e| format!("create '{}': {}", path.display(), e))?;
         }
 
         if let Some(name) = remote_top_level_name(&file.name) {
@@ -1639,22 +1917,18 @@ fn build_remote_file_transfer(
 
         files.push(RemoteClipboardFile {
             path,
-            size: file.file_size.unwrap_or_default(),
+            size: file_size,
             is_directory,
         });
-        if files.len() > MAX_CLIPBOARD_FILE_ITEMS {
-            return Err(format!(
-                "remote file clipboard contains more than {} items",
-                MAX_CLIPBOARD_FILE_ITEMS
-            ));
-        }
     }
 
     let mut transfer = RemoteFileTransfer {
+        staging,
         files,
         top_level_paths,
         streams: HashMap::new(),
         next_stream_id: 1,
+        received_bytes: 0,
     };
     let mut requests = Vec::new();
     for index in 0..transfer.files.len() {
@@ -1718,9 +1992,11 @@ fn remote_top_level_name(remote_name: &str) -> Option<PathBuf> {
 }
 
 fn write_remote_file_chunk(path: &Path, position: u64, data: &[u8]) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
+    let mut options = OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    let mut file = options
         .open(path)
         .map_err(|e| format!("open '{}': {}", path.display(), e))?;
     file.seek(SeekFrom::Start(position))
@@ -1731,6 +2007,7 @@ fn write_remote_file_chunk(path: &Path, position: u64, data: &[u8]) -> Result<()
 
 fn collect_local_clipboard_files(paths: &[String]) -> Result<Vec<LocalClipboardFile>, String> {
     let mut files = Vec::new();
+    let mut total_bytes = 0u64;
     for raw in paths {
         if raw.trim().is_empty() {
             continue;
@@ -1740,7 +2017,7 @@ fn collect_local_clipboard_files(paths: &[String]) -> Result<Vec<LocalClipboardF
             .canonicalize()
             .map_err(|e| format!("canonicalize '{}': {}", raw, e))?;
         let root = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-        collect_clipboard_path(&root, &path, &mut files)?;
+        collect_clipboard_path(&root, &path, &mut files, &mut total_bytes)?;
         if files.len() > MAX_CLIPBOARD_FILE_ITEMS {
             return Err(format!(
                 "file clipboard contains more than {} items",
@@ -1755,10 +2032,33 @@ fn collect_clipboard_path(
     root: &Path,
     path: &Path,
     out: &mut Vec<LocalClipboardFile>,
+    total_bytes: &mut u64,
 ) -> Result<(), String> {
     let metadata =
-        fs::metadata(path).map_err(|e| format!("metadata '{}': {}", path.display(), e))?;
+        fs::symlink_metadata(path).map_err(|e| format!("metadata '{}': {}", path.display(), e))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "clipboard path '{}' is a symbolic link; links are not transferred",
+            path.display()
+        ));
+    }
     let is_directory = metadata.is_dir();
+    if !is_directory {
+        if metadata.len() > MAX_CLIPBOARD_FILE_BYTES {
+            return Err(format!(
+                "clipboard file '{}' exceeds the {} MiB per-file quota",
+                path.display(),
+                MAX_CLIPBOARD_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        *total_bytes = total_bytes.saturating_add(metadata.len());
+        if *total_bytes > MAX_CLIPBOARD_TOTAL_BYTES {
+            return Err(format!(
+                "file clipboard exceeds the {} MiB total quota",
+                MAX_CLIPBOARD_TOTAL_BYTES / (1024 * 1024)
+            ));
+        }
+    }
     let name = clipboard_relative_name(root, path)?;
     out.push(LocalClipboardFile {
         path: path.to_path_buf(),
@@ -1779,7 +2079,7 @@ fn collect_clipboard_path(
             .map_err(|e| format!("read directory '{}': {}", path.display(), e))?;
         entries.sort_by_key(|entry| entry.path());
         for entry in entries {
-            collect_clipboard_path(root, &entry.path(), out)?;
+            collect_clipboard_path(root, &entry.path(), out, total_bytes)?;
             if out.len() > MAX_CLIPBOARD_FILE_ITEMS {
                 return Err(format!(
                     "file clipboard contains more than {} items",
@@ -1818,7 +2118,13 @@ fn read_clipboard_file_range(
     position: u64,
     requested_size: u32,
 ) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|e| format!("open '{}': {}", path.display(), e))?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("open '{}': {}", path.display(), e))?;
     file.seek(SeekFrom::Start(position))
         .map_err(|e| format!("seek '{}': {}", path.display(), e))?;
     let max_chunk = 16 * 1024 * 1024;
@@ -1854,6 +2160,17 @@ fn key_operations(key: KeyEvent) -> Vec<Operation> {
     } else {
         vec![Operation::KeyReleased(scancode)]
     }
+}
+
+fn unicode_operations(text: &str) -> Vec<Operation> {
+    text.chars()
+        .flat_map(|character| {
+            [
+                Operation::UnicodeKeyPressed(character),
+                Operation::UnicodeKeyReleased(character),
+            ]
+        })
+        .collect()
 }
 
 fn pointer_operations(pointer: PointerEvent, last_buttons: &mut u8) -> Vec<Operation> {
@@ -1956,7 +2273,10 @@ fn build_ironrdp_config(cfg: &RdpConnectionSettings) -> connector::Config {
         request_data: None,
         autologon: !cfg.options.nla && (cfg.username.is_some() || cfg.password.is_some()),
         enable_audio_playback: cfg.options.redirect_audio == "play",
-        pointer_software_rendering: true,
+        // The WebView renders server-provided cursor shapes as a native CSS
+        // cursor. Compositing the pointer into the framebuffer would make its
+        // movement wait for remote graphics updates and feel noticeably slow.
+        pointer_software_rendering: false,
         performance_flags,
         hardware_id: None,
         license_cache: None::<Arc<dyn connector::LicenseCache>>,
@@ -1964,6 +2284,65 @@ fn build_ironrdp_config(cfg: &RdpConnectionSettings) -> connector::Config {
         compression_type: None,
         multitransport_flags: None,
     }
+}
+
+fn send_cursor_payload(out_tx: &UnboundedSender<SessionOutput>, payload: Vec<u8>) {
+    let _ = out_tx.send(SessionOutput::Channel {
+        tag: channel::CURSOR,
+        payload,
+    });
+}
+
+fn cursor_bitmap_payload(pointer: &DecodedPointer) -> Result<Vec<u8>, String> {
+    if pointer.width == 0 || pointer.height == 0 {
+        return Ok(vec![cursor::HIDDEN]);
+    }
+    if pointer.width > cursor::MAX_DIMENSION || pointer.height > cursor::MAX_DIMENSION {
+        return Err(format!(
+            "cursor dimensions {}x{} exceed {}x{}",
+            pointer.width,
+            pointer.height,
+            cursor::MAX_DIMENSION,
+            cursor::MAX_DIMENSION,
+        ));
+    }
+    if pointer.hotspot_x >= pointer.width || pointer.hotspot_y >= pointer.height {
+        return Err(format!(
+            "cursor hotspot {},{} lies outside {}x{}",
+            pointer.hotspot_x, pointer.hotspot_y, pointer.width, pointer.height,
+        ));
+    }
+
+    let expected = usize::from(pointer.width)
+        .checked_mul(usize::from(pointer.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("cursor bitmap size overflow")?;
+    if pointer.bitmap_data.len() != expected {
+        return Err(format!(
+            "cursor bitmap has {} bytes; expected {}",
+            pointer.bitmap_data.len(),
+            expected,
+        ));
+    }
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            &pointer.bitmap_data,
+            u32::from(pointer.width),
+            u32::from(pointer.height),
+            ColorType::Rgba8.into(),
+        )
+        .map_err(|error| format!("encode cursor PNG: {error}"))?;
+
+    let mut payload = Vec::with_capacity(cursor::BITMAP_HEADER_LEN + png.len());
+    payload.push(cursor::BITMAP);
+    payload.extend_from_slice(&pointer.hotspot_x.to_be_bytes());
+    payload.extend_from_slice(&pointer.hotspot_y.to_be_bytes());
+    payload.extend_from_slice(&pointer.width.to_be_bytes());
+    payload.extend_from_slice(&pointer.height.to_be_bytes());
+    payload.extend_from_slice(&png);
+    Ok(payload)
 }
 
 fn normalize_width(width: u16) -> u16 {
@@ -2043,15 +2422,26 @@ fn send_status(out_tx: &UnboundedSender<SessionOutput>, stage: &str, detail: &st
 }
 
 fn send_error(out_tx: &UnboundedSender<SessionOutput>, code: &str, message: &str) {
+    let retryable = is_retryable_rdp_error(message);
     send_text(
         out_tx,
         json!({
             "type": "error",
             "code": code,
             "message": message,
+            "retryable": retryable,
         })
         .to_string(),
     );
+}
+
+fn is_retryable_rdp_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timed out")
+        || lower.starts_with("rdp read frame:")
+        || lower.starts_with("rdp write frame:")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
 }
 
 fn send_text(out_tx: &UnboundedSender<SessionOutput>, text: String) {
@@ -2063,6 +2453,18 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::net::TcpStream;
+
+    /// Live RDP fixtures commonly use a self-signed certificate. Keep the
+    /// production default fail-closed, while letting an operator explicitly
+    /// supply the known SHA-256 leaf pin for ignored live tests.
+    fn apply_live_certificate_pin(options: &mut RdpOptions) {
+        let Ok(pin) = std::env::var("TAOMNI_RDP_LIVE_CERTIFICATE_FINGERPRINT") else {
+            return;
+        };
+        if !pin.trim().is_empty() {
+            options.certificate_fingerprint = Some(pin);
+        }
+    }
 
     #[tokio::test]
     async fn handle_round_trip_via_channels() {
@@ -2130,6 +2532,66 @@ mod tests {
     }
 
     #[test]
+    fn connector_uses_client_side_cursor_rendering() {
+        let settings = RdpConnectionSettings {
+            host: "rdp.example.test".to_owned(),
+            port: 3389,
+            username: Some("user".to_owned()),
+            password: Some("password".to_owned()),
+            options: RdpOptions::default(),
+            network: None,
+        };
+
+        let config = build_ironrdp_config(&settings);
+
+        assert!(config.enable_server_pointer);
+        assert!(!config.pointer_software_rendering);
+    }
+
+    #[test]
+    fn cursor_bitmap_payload_preserves_shape_and_hotspot_as_png() {
+        let pointer = DecodedPointer {
+            width: 2,
+            height: 1,
+            hotspot_x: 1,
+            hotspot_y: 0,
+            bitmap_data: vec![
+                0xff, 0x00, 0x00, 0xff, // opaque red
+                0x00, 0xff, 0x00, 0x80, // translucent green
+            ],
+        };
+
+        let payload = cursor_bitmap_payload(&pointer).expect("encode cursor payload");
+
+        assert_eq!(payload[0], cursor::BITMAP);
+        assert_eq!(u16::from_be_bytes([payload[1], payload[2]]), 1);
+        assert_eq!(u16::from_be_bytes([payload[3], payload[4]]), 0);
+        assert_eq!(u16::from_be_bytes([payload[5], payload[6]]), 2);
+        assert_eq!(u16::from_be_bytes([payload[7], payload[8]]), 1);
+        let decoded = image::load_from_memory(&payload[cursor::BITMAP_HEADER_LEN..])
+            .expect("decode cursor PNG")
+            .to_rgba8();
+        assert_eq!(decoded.into_raw(), pointer.bitmap_data);
+    }
+
+    #[test]
+    fn cursor_bitmap_payload_hides_empty_and_rejects_invalid_shapes() {
+        assert_eq!(
+            cursor_bitmap_payload(&DecodedPointer::new_invisible()).unwrap(),
+            vec![cursor::HIDDEN]
+        );
+
+        let invalid = DecodedPointer {
+            width: 1,
+            height: 1,
+            hotspot_x: 1,
+            hotspot_y: 0,
+            bitmap_data: vec![0; 4],
+        };
+        assert!(cursor_bitmap_payload(&invalid).is_err());
+    }
+
+    #[test]
     fn wheel_operations_preserve_position_axis_and_units() {
         let ops = wheel_operations(PointerWheelEvent {
             x: 25,
@@ -2161,6 +2623,32 @@ mod tests {
             Operation::KeyPressed(scancode) => assert_eq!(scancode.as_u8(), (true, 0x48)),
             _ => panic!("expected key press"),
         }
+    }
+
+    #[test]
+    fn unicode_operations_press_and_release_each_character() {
+        let ops = unicode_operations("中😀");
+        assert_eq!(ops.len(), 4);
+        assert!(matches!(ops[0], Operation::UnicodeKeyPressed('中')));
+        assert!(matches!(ops[1], Operation::UnicodeKeyReleased('中')));
+        assert!(matches!(ops[2], Operation::UnicodeKeyPressed('😀')));
+        assert!(matches!(ops[3], Operation::UnicodeKeyReleased('😀')));
+    }
+
+    #[test]
+    fn retryable_error_classifier_excludes_authentication_failures() {
+        assert!(is_retryable_rdp_error(
+            "RDP TLS handshake timed out after 15 seconds"
+        ));
+        assert!(is_retryable_rdp_error(
+            "rdp read frame: Connection reset by peer"
+        ));
+        assert!(!is_retryable_rdp_error(
+            "rdp connection finalization failed: invalid credentials"
+        ));
+        assert!(!is_retryable_rdp_error(
+            "RDP_CERTIFICATE_CHANGED host=server"
+        ));
     }
 
     #[test]
@@ -2215,9 +2703,11 @@ mod tests {
         assert!(names.contains(&"note.txt"));
         assert!(names.contains(&"folder"));
         assert!(names.contains(&"folder\\child.txt"));
-        assert!(files
-            .iter()
-            .any(|file| file.name == "folder" && file.is_directory));
+        assert!(
+            files
+                .iter()
+                .any(|file| file.name == "folder" && file.is_directory)
+        );
     }
 
     #[test]
@@ -2258,9 +2748,11 @@ mod tests {
         let (mut handle, out_tx, _ctrl_rx) = RdpSessionHandle::new();
         let bridge = ClipboardBridge::new(out_tx);
         bridge.start_remote_file_receive(PackedFileList {
-            files: vec![IronClipboardFileDescriptor::new("remote.txt")
-                .with_attributes(ClipboardFileAttributes::NORMAL)
-                .with_file_size(3)],
+            files: vec![
+                IronClipboardFileDescriptor::new("remote.txt")
+                    .with_attributes(ClipboardFileAttributes::NORMAL)
+                    .with_file_size(3),
+            ],
         });
 
         let actions = bridge.drain_actions();
@@ -2291,6 +2783,38 @@ mod tests {
         .expect("clipboard_files notification");
         let path = output["paths"][0].as_str().unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"abc");
+        let staged_path = PathBuf::from(path);
+        drop(bridge);
+        assert!(!staged_path.exists());
+    }
+
+    #[test]
+    fn remote_file_clipboard_rejects_declared_size_over_quota() {
+        let error = build_remote_file_transfer(PackedFileList {
+            files: vec![
+                IronClipboardFileDescriptor::new("too-large.bin")
+                    .with_attributes(ClipboardFileAttributes::NORMAL)
+                    .with_file_size(MAX_CLIPBOARD_FILE_BYTES + 1),
+            ],
+        })
+        .unwrap_err();
+
+        assert!(error.contains("per-file quota"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_file_clipboard_does_not_follow_nested_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), root.path().join("linked-secret")).unwrap();
+
+        let error = collect_local_clipboard_files(&[root.path().to_string_lossy().into_owned()])
+            .unwrap_err();
+
+        assert!(error.contains("symbolic link"));
     }
 
     #[test]
@@ -2370,6 +2894,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
         options.redirect_audio = "play".to_owned();
         if let Ok(path) = std::env::var("TAOMNI_RDP_LIVE_DRIVE_PATH") {
             options.redirect_drive.enabled = true;
@@ -2390,6 +2915,7 @@ mod tests {
 
         let mut connected = false;
         let mut frame_tiles = 0usize;
+        let mut cursor_updates = 0usize;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
 
         loop {
@@ -2416,6 +2942,27 @@ mod tests {
                 SessionOutput::Channel { tag, payload } if tag == channel::FRAME => {
                     assert!(payload.len() >= 8, "frame payload missing tile header");
                     frame_tiles += 1;
+                    if connected && cursor_updates > 0 {
+                        break;
+                    }
+                }
+                SessionOutput::Channel { tag, payload } if tag == channel::CURSOR => {
+                    assert!(!payload.is_empty(), "cursor payload is empty");
+                    assert!(
+                        matches!(
+                            payload[0],
+                            cursor::DEFAULT | cursor::HIDDEN | cursor::BITMAP
+                        ),
+                        "unknown cursor payload kind {}",
+                        payload[0],
+                    );
+                    if payload[0] == cursor::BITMAP {
+                        assert!(
+                            payload.len() > cursor::BITMAP_HEADER_LEN,
+                            "bitmap cursor payload is missing PNG data"
+                        );
+                    }
+                    cursor_updates += 1;
                     if connected && frame_tiles > 0 {
                         break;
                     }
@@ -2427,6 +2974,10 @@ mod tests {
         let _ = handle.dispatch_control(RdpControl::Disconnect).await;
         assert!(connected, "live RDP session did not report connected");
         assert!(frame_tiles > 0, "live RDP session did not emit a frame");
+        assert!(
+            cursor_updates > 0,
+            "live RDP session did not emit a cursor update"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2450,6 +3001,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
         options.redirect_clipboard = true;
 
         let mut handle = start_ironrdp_session(RdpSessionConfig {
@@ -2553,6 +3105,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
         options.redirect_clipboard = false;
         options.redirect_audio = "off".to_owned();
         options.redirect_drive.enabled = true;
@@ -2638,6 +3191,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
 
         let mut handle = start_ironrdp_session(RdpSessionConfig {
             stream: RdpStream::Tcp(stream),
@@ -2738,6 +3292,7 @@ mod tests {
         options.screen_w = 1280;
         options.screen_h = 720;
         options.nla = true;
+        apply_live_certificate_pin(&mut options);
 
         let result = test_ironrdp_connection(
             RdpSessionConfig {

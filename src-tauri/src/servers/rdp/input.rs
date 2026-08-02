@@ -30,6 +30,7 @@ use enigo::{
 };
 use ironrdp::server::{KeyboardEvent, MouseEvent, RdpServerInputHandler};
 
+use super::ControlGate;
 use crate::servers::engine::LogEmitter;
 
 /// A single input action to replay on the local desktop. Every field is plain
@@ -61,10 +62,15 @@ pub(crate) struct RdpInput {
     /// actor thread has exited; we log once and then silently drop input.
     tx: Option<Sender<InputCmd>>,
     warned: bool,
+    control_gate: Option<std::sync::Arc<ControlGate>>,
 }
 
 impl RdpInput {
-    pub(crate) fn new(log: LogEmitter, view_only: bool) -> Self {
+    pub(crate) fn new(
+        log: LogEmitter,
+        view_only: bool,
+        control_gate: Option<std::sync::Arc<ControlGate>>,
+    ) -> Self {
         let tx = if view_only {
             None
         } else {
@@ -75,6 +81,7 @@ impl RdpInput {
             view_only,
             tx,
             warned: false,
+            control_gate,
         }
     }
 
@@ -148,6 +155,16 @@ impl RdpInput {
             return;
         }
         self.warn_if_missing();
+        if self.tx.is_none() {
+            return;
+        }
+        if self
+            .control_gate
+            .as_ref()
+            .is_some_and(|gate| !gate.ensure_approved())
+        {
+            return;
+        }
         if let Some(tx) = &self.tx {
             if tx.send(cmd).is_err() {
                 // Actor thread is gone; stop trying and warn once.

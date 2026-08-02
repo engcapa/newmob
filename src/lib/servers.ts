@@ -33,6 +33,35 @@ export interface ServerStatus {
   error?: string;
 }
 
+export interface RdpCaptureDisplay {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  primary: boolean;
+}
+
+export interface RdpCaptureProbe {
+  permission: "granted" | "denied" | "notRequired";
+  displays: RdpCaptureDisplay[];
+  summary: string;
+}
+
+export interface RdpConnectionRequest {
+  requestId: string;
+  peer: string;
+  timeoutSeconds: number;
+  expiresAt: number;
+}
+
+export interface RdpServerSessionEvent {
+  state: "connecting" | "rejected" | "disconnected";
+  peer: string;
+  viewOnly: boolean;
+  durationMs?: number;
+  reason?: string;
+}
+
 /**
  * Static metadata for each server type. `labelKey`/`descKey` are i18n keys
  * resolved at render time via `useT()`. This array is the source of truth for
@@ -109,11 +138,14 @@ export function defaultConfig(type: ServerType): ServerConfig {
     case "rdp":
       return {
         ...base,
+        bindAddress: "127.0.0.1",
         username: "",
         password: "",
         domain: "",
         securityMode: "hybrid",
         viewOnly: false,
+        displayId: "",
+        requireControlApproval: true,
       };
     default:
       return base;
@@ -160,11 +192,24 @@ export async function listServerStatuses(): Promise<ServerStatus[]> {
   return invoke<ServerStatus[]>("list_server_statuses", {});
 }
 
+export async function probeRdpCapture(
+  requestPermission = false,
+): Promise<RdpCaptureProbe> {
+  return invoke<RdpCaptureProbe>("probe_rdp_capture", { requestPermission });
+}
+
+export async function resolveRdpConnectionRequest(
+  requestId: string,
+  approved: boolean,
+): Promise<boolean> {
+  return invoke<boolean>("resolve_rdp_connection_request", { requestId, approved });
+}
+
 export async function saveServerConfig(
   serverType: ServerType,
   config: ServerConfig,
-): Promise<void> {
-  return invoke("save_server_config", { serverType, config });
+): Promise<ServerConfig> {
+  return invoke<ServerConfig>("save_server_config", { serverType, config });
 }
 
 export async function loadServerConfigs(): Promise<Record<string, ServerConfig>> {
@@ -195,6 +240,22 @@ export async function listenServerStatus(
   cb: (s: ServerStatus) => void,
 ): Promise<UnlistenFn> {
   return listen<ServerStatus>(`server://status/${serverType}`, (event) => {
+    cb(event.payload);
+  });
+}
+
+export async function listenRdpConnectionRequests(
+  cb: (request: RdpConnectionRequest) => void,
+): Promise<UnlistenFn> {
+  return listen<RdpConnectionRequest>("server://rdp/connection-request", (event) => {
+    cb(event.payload);
+  });
+}
+
+export async function listenRdpServerSessions(
+  cb: (session: RdpServerSessionEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<RdpServerSessionEvent>("server://rdp/session", (event) => {
     cb(event.payload);
   });
 }

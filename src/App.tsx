@@ -8,6 +8,7 @@ import DetachedSessionWindow from "./components/detached/DetachedSessionWindow";
 import LanChatDetachedWindow from "./components/detached/LanChatDetachedWindow";
 import { NotesDetachedWindow } from "./components/notes/NotesDetachedWindow";
 import { ServersDialog } from "./components/servers/ServersDialog";
+import { RdpServerApprovalBridge } from "./components/servers/RdpServerApprovalBridge";
 import { detectDetachedRoute } from "./lib/detachedSession";
 import { useAppTheme } from "./lib/appTheme";
 import { applyCodeViewProfile, loadCodeViewProfile } from "./lib/codeViewProfile";
@@ -146,6 +147,7 @@ function App() {
   }, []);
 
   let content: ReactNode;
+  let hostsRdpApprovals = false;
   const detachedSftpId = detectDetachedSftpRoute();
   if (detachedSftpId) {
     content = <SftpDetachedWindow sessionId={detachedSftpId} />;
@@ -158,6 +160,7 @@ function App() {
     } else if (detachedRoute?.kind === "servers") {
       content = <ServersDialog />;
     } else {
+      hostsRdpApprovals = !detachedRoute;
       content =
         detachedRoute && detachedRoute.kind !== "sftp"
           ? <DetachedSessionWindow kind={detachedRoute.kind} id={detachedRoute.id} />
@@ -167,6 +170,7 @@ function App() {
 
   return (
     <AppDialogProvider>
+      {hostsRdpApprovals ? <RdpServerApprovalBridge /> : null}
       <VaultGateProvider>
         <StartupVaultUnlockGate>{content}</StartupVaultUnlockGate>
       </VaultGateProvider>

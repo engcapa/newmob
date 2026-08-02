@@ -6,6 +6,15 @@ import { serializeRdpOptions } from "../types/rdp";
 export interface RdpConnectResult {
   session_id: string;
   ws_port: number;
+  ws_token: string;
+}
+
+export interface RdpCertificateChallenge {
+  changed: boolean;
+  host: string;
+  port: number;
+  expected?: string;
+  observed: string;
 }
 
 /** Begin an RDP session. Returns the loopback WS port the canvas connects to. */
@@ -32,6 +41,35 @@ export async function rdpConnect(
 /** Close a session previously opened with `rdpConnect`. */
 export async function rdpDisconnect(sessionId: string): Promise<void> {
   return invoke("rdp_disconnect", { sessionId });
+}
+
+export async function rdpTrustCertificate(
+  host: string,
+  port: number,
+  fingerprint: string,
+): Promise<string> {
+  return invoke<string>("rdp_trust_certificate", { host, port, fingerprint });
+}
+
+/** Extract a structured certificate challenge from a rustls handshake error. */
+export function extractRdpCertificateChallenge(message: string): RdpCertificateChallenge | null {
+  const match = message.match(
+    /RDP_CERTIFICATE_(UNTRUSTED|CHANGED)\s+host=([^\s]+)\s+port=(\d+)(?:\s+expected=([0-9a-f]{64}))?\s+observed=([0-9a-f]{64})/i,
+  );
+  if (!match) return null;
+  const port = Number.parseInt(match[3], 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return {
+    changed: match[1].toUpperCase() === "CHANGED",
+    host: match[2],
+    port,
+    expected: match[4]?.toLowerCase(),
+    observed: match[5].toLowerCase(),
+  };
+}
+
+export function formatRdpCertificateFingerprint(fingerprint: string): string {
+  return fingerprint.match(/.{1,2}/g)?.join(":").toUpperCase() ?? fingerprint.toUpperCase();
 }
 
 /** Run the X.224 + Negotiation handshake without spawning the relay. */
@@ -75,13 +113,19 @@ export const OUT_CLIPBOARD_DATA = 4;
 export const OUT_STATUS = 5;
 export const OUT_FRAME_END = 6;
 
+export const RDP_CURSOR_DEFAULT = 0;
+export const RDP_CURSOR_HIDDEN = 1;
+export const RDP_CURSOR_BITMAP = 2;
+const RDP_CURSOR_BITMAP_HEADER_LENGTH = 10;
+const RDP_CURSOR_MAX_DIMENSION = 512;
+
 export type RdpWsText =
   | { type: "connected"; width: number; height: number; protocol: string; server_name: string }
   | { type: "disconnected"; reason: string }
   | { type: "status"; stage: string; detail: string }
   | { type: "clipboard"; text: string }
   | { type: "clipboard_files"; paths: string[]; text?: string }
-  | { type: "error"; code: string; message: string };
+  | { type: "error"; code: string; message: string; retryable?: boolean };
 
 export function parseRdpWsText(data: string): RdpWsText | null {
   try {
@@ -89,6 +133,30 @@ export function parseRdpWsText(data: string): RdpWsText | null {
   } catch {
     return null;
   }
+}
+
+/** Classify failures that occur before the authenticated relay WebSocket exists. */
+export function isRetryableRdpConnectError(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  if (
+    message.includes("certificate") ||
+    message.includes("credential") ||
+    message.includes("password") ||
+    message.includes("not implemented") ||
+    message.includes("unsupported")
+  ) {
+    return false;
+  }
+  return [
+    "timed out",
+    "connection refused",
+    "connection reset",
+    "broken pipe",
+    "network is unreachable",
+    "no route to host",
+    "failed to lookup",
+    "dns",
+  ].some((needle) => message.includes(needle));
 }
 
 export function encodePing(): ArrayBuffer {
@@ -230,6 +298,18 @@ export interface RdpAudioFrame {
   pcm: Uint8Array<ArrayBuffer>;
 }
 
+export type RdpCursorUpdate =
+  | { kind: "default" }
+  | { kind: "hidden" }
+  | {
+      kind: "bitmap";
+      hotspotX: number;
+      hotspotY: number;
+      width: number;
+      height: number;
+      png: Uint8Array<ArrayBuffer>;
+    };
+
 export function parseFrameTile(data: ArrayBuffer): RdpFrameTile | null {
   if (data.byteLength < 9) return null;
   const dv = new DataView(data);
@@ -257,6 +337,54 @@ export function parseAudioFrame(data: ArrayBuffer): RdpAudioFrame | null {
   return { tag, sampleRate, channels, bitsPerSample, timestamp, formatNo, pcm };
 }
 
+export function parseRdpCursorFrame(data: ArrayBuffer): RdpCursorUpdate | null {
+  if (data.byteLength < 2) return null;
+  const view = new DataView(data);
+  if (view.getUint8(0) !== OUT_CURSOR) return null;
+
+  const kind = view.getUint8(1);
+  if (kind === RDP_CURSOR_DEFAULT) {
+    return data.byteLength === 2 ? { kind: "default" } : null;
+  }
+  if (kind === RDP_CURSOR_HIDDEN) {
+    return data.byteLength === 2 ? { kind: "hidden" } : null;
+  }
+  if (kind !== RDP_CURSOR_BITMAP || data.byteLength <= RDP_CURSOR_BITMAP_HEADER_LENGTH) {
+    return null;
+  }
+
+  const hotspotX = view.getUint16(2);
+  const hotspotY = view.getUint16(4);
+  const width = view.getUint16(6);
+  const height = view.getUint16(8);
+  if (
+    width === 0 ||
+    height === 0 ||
+    width > RDP_CURSOR_MAX_DIMENSION ||
+    height > RDP_CURSOR_MAX_DIMENSION ||
+    hotspotX >= width ||
+    hotspotY >= height
+  ) {
+    return null;
+  }
+
+  const png = new Uint8Array(data, RDP_CURSOR_BITMAP_HEADER_LENGTH) as Uint8Array<ArrayBuffer>;
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (png.length < pngSignature.length || !pngSignature.every((byte, index) => png[index] === byte)) {
+    return null;
+  }
+  return { kind: "bitmap", hotspotX, hotspotY, width, height, png };
+}
+
+export function rdpCursorToCss(update: RdpCursorUpdate): string {
+  if (update.kind === "default") return "default";
+  if (update.kind === "hidden") return "none";
+
+  let binary = "";
+  for (const byte of update.png) binary += String.fromCharCode(byte);
+  return `url("data:image/png;base64,${window.btoa(binary)}") ${update.hotspotX} ${update.hotspotY}, default`;
+}
+
 /** Map a DOM `KeyboardEvent` to a (scancode, isExtended) pair. */
 export function keyEventToScancode(
   e: KeyboardEvent,
@@ -280,6 +408,10 @@ export function keyEventToScancode(
     MetaRight: [0x5c, true],
     Space: [0x39, false],
     CapsLock: [0x3a, false],
+    NumLock: [0x45, false],
+    NumpadClear: [0x45, false],
+    ScrollLock: [0x46, false],
+    PrintScreen: [0x37, true],
     ArrowUp: [0x48, true],
     ArrowDown: [0x50, true],
     ArrowLeft: [0x4b, true],
@@ -290,6 +422,7 @@ export function keyEventToScancode(
     PageDown: [0x51, true],
     Insert: [0x52, true],
     Delete: [0x53, true],
+    ContextMenu: [0x5d, true],
     KeyA: [0x1e, false],
     KeyB: [0x30, false],
     KeyC: [0x2e, false],
@@ -337,6 +470,25 @@ export function keyEventToScancode(
     Comma: [0x33, false],
     Period: [0x34, false],
     Slash: [0x35, false],
+    IntlBackslash: [0x56, false],
+    IntlRo: [0x73, false],
+    IntlYen: [0x7d, false],
+    Numpad0: [0x52, false],
+    Numpad1: [0x4f, false],
+    Numpad2: [0x50, false],
+    Numpad3: [0x51, false],
+    Numpad4: [0x4b, false],
+    Numpad5: [0x4c, false],
+    Numpad6: [0x4d, false],
+    Numpad7: [0x47, false],
+    Numpad8: [0x48, false],
+    Numpad9: [0x49, false],
+    NumpadDecimal: [0x53, false],
+    NumpadAdd: [0x4e, false],
+    NumpadSubtract: [0x4a, false],
+    NumpadMultiply: [0x37, false],
+    NumpadDivide: [0x35, true],
+    NumpadEqual: [0x59, false],
     F1: [0x3b, false],
     F2: [0x3c, false],
     F3: [0x3d, false],
@@ -349,6 +501,18 @@ export function keyEventToScancode(
     F10: [0x44, false],
     F11: [0x57, false],
     F12: [0x58, false],
+    F13: [0x64, false],
+    F14: [0x65, false],
+    F15: [0x66, false],
+    F16: [0x67, false],
+    F17: [0x68, false],
+    F18: [0x69, false],
+    F19: [0x6a, false],
+    F20: [0x6b, false],
+    F21: [0x6c, false],
+    F22: [0x6d, false],
+    F23: [0x6e, false],
+    F24: [0x76, false],
   };
   const entry = map[e.code];
   if (entry) return { scancode: entry[0], extended: entry[1] };

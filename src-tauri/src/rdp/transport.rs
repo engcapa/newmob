@@ -14,6 +14,8 @@
 //! Higher layers (X.224 negotiation, TLS upgrade, MCS, …) treat the
 //! transport opaquely.
 
+use std::fmt::Display;
+use std::future::Future;
 use std::net::SocketAddr;
 
 use std::pin::Pin;
@@ -25,6 +27,10 @@ use tokio::net::TcpStream;
 use crate::rdp::gateway::{self, GatewayOpt};
 use crate::terminal::network::{NetworkSettings, establish_transport};
 use crate::terminal::ssh::{SshTransport, build_ssh_transport};
+
+const DIRECT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const ROUTED_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const GATEWAY_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 pub struct RdpTransport {
     pub stream: RdpStream,
@@ -97,7 +103,12 @@ pub async fn open_transport(
     gw: Option<&GatewayOpt>,
 ) -> Result<RdpTransport, String> {
     if let Some(g) = gw {
-        let stream = gateway::open_tunnel(g, host, port).await?;
+        let stream = with_timeout(
+            GATEWAY_CONNECT_TIMEOUT,
+            "RD Gateway tunnel",
+            gateway::open_tunnel(g, host, port),
+        )
+        .await?;
         return Ok(RdpTransport {
             stream: RdpStream::Gateway(stream),
             local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -106,7 +117,12 @@ pub async fn open_transport(
     let proxy_kind = network.map(|n| n.proxy_kind.as_str()).unwrap_or("none");
     match proxy_kind {
         "" | "none" => {
-            let s = direct_tcp(host, port, network).await?;
+            let s = with_timeout(
+                DIRECT_CONNECT_TIMEOUT,
+                "direct TCP connection",
+                direct_tcp(host, port, network),
+            )
+            .await?;
             let local_addr = s
                 .local_addr()
                 .map_err(|e| format!("rdp: get local address: {}", e))?;
@@ -116,7 +132,12 @@ pub async fn open_transport(
             })
         }
         "http" | "socks5" => {
-            let s = establish_transport(host, port, network).await?;
+            let s = with_timeout(
+                ROUTED_CONNECT_TIMEOUT,
+                "proxy connection",
+                establish_transport(host, port, network),
+            )
+            .await?;
             let local_addr = s
                 .local_addr()
                 .map_err(|e| format!("rdp: get local address: {}", e))?;
@@ -126,7 +147,12 @@ pub async fn open_transport(
             })
         }
         "ssh-tunnel" => {
-            let s = build_ssh_transport(host, port, network).await?;
+            let s = with_timeout(
+                GATEWAY_CONNECT_TIMEOUT,
+                "SSH tunnel",
+                build_ssh_transport(host, port, network),
+            )
+            .await?;
             Ok(RdpTransport {
                 stream: RdpStream::Ssh(s),
                 local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -137,6 +163,21 @@ pub async fn open_transport(
             other,
         )),
     }
+}
+
+async fn with_timeout<T, E, F>(
+    timeout: std::time::Duration,
+    stage: &str,
+    future: F,
+) -> Result<T, String>
+where
+    E: Display,
+    F: Future<Output = Result<T, E>>,
+{
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| format!("RDP {stage} timed out after {} seconds", timeout.as_secs()))?
+        .map_err(|error| error.to_string())
 }
 
 async fn direct_tcp(
@@ -186,5 +227,18 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains(crate::terminal::ssh::MISSING_JUMP_PASSWORD_ERROR));
+    }
+
+    #[tokio::test]
+    async fn timeout_wrapper_reports_stage_and_duration() {
+        let result = with_timeout(
+            std::time::Duration::from_millis(5),
+            "test stage",
+            std::future::pending::<Result<(), &str>>(),
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert!(error.contains("test stage"));
+        assert!(error.contains("timed out"));
     }
 }

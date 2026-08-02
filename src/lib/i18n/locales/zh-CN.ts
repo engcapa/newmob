@@ -1568,6 +1568,11 @@ export const zhCN: DeepPartial<typeof en> = {
     statusError: "错误",
     confirmDiscard: "放弃未保存的服务器更改？",
     restartForPort: "重启服务器以应用端口更改",
+    rdpApprovalTitle: "允许远程控制？",
+    rdpApprovalMessage:
+      "RDP 客户端 {peer} 正在请求控制这台 Mac。是否允许此连接注入键盘和鼠标输入？请求将在 {seconds} 秒后失效。",
+    rdpApprovalAllow: "允许控制",
+    rdpApprovalDeny: "拒绝",
     fields: {
       port: "监听端口",
       bindAddress: "绑定地址",
@@ -1609,6 +1614,15 @@ export const zhCN: DeepPartial<typeof en> = {
       rdpSecHybrid: "NLA（推荐）",
       rdpSecTls: "仅 TLS",
       rdpSecNone: "无（不安全）",
+      rdpPasswordStored: "已安全保存——输入新密码可替换",
+      rdpPublicBind: "允许绑定所有网络接口",
+      rdpDisplay: "共享显示器",
+      rdpDisplayPrimary: "主显示器（自动）",
+      rdpDisplayPrimaryBadge: "主显示器",
+      rdpCapturePermission: "屏幕录制权限",
+      rdpGrantCapture: "授予权限……",
+      rdpRefreshDisplays: "刷新显示器",
+      rdpControlApproval: "要求本机确认远程控制",
       optional: "可选",
     },
     notes: {
@@ -1616,12 +1630,19 @@ export const zhCN: DeepPartial<typeof en> = {
       nfsPrivileges: "NFS 导出需要操作系统权限，可能会提示提权。",
       iperfBandwidth: "应用于连接的客户端（Mbit/s）。0 表示不限制。",
       rdpSelfSigned: "使用存储在应用数据中的自签名证书；客户端首次连接时会看到信任警告。",
+      rdpHybridOnly: "生产模式强制使用 TLS 上的 NLA/CredSSP；自签名服务端证书保存在应用数据中。",
+      rdpVaultReason: "请解锁凭据保险库，以保护 RDP Server 密码。",
+      rdpVaultCancelled: "凭据保险库未解锁，RDP Server 设置未保存。",
+      rdpPublicBind: "这会把 RDP 监听器暴露到本机之外；请使用防火墙限制范围，并仅用于可信网络。",
       rdpInsecure:
         "无安全模式意味着流量不加密；若未设置凭据，任何能访问该端口的人都可完全控制本机桌面。请仅在隔离网络中使用。",
       rdpCapLinux:
         "桌面采集：Linux X11/XWayland 已完整支持。纯 Wayland 使用门户截屏（需在弹窗中授权）。键鼠注入通过 enigo。",
       rdpCapMacos:
-        "桌面采集：macOS 使用系统捕获（xcap）。请在「系统设置 → 隐私与安全性 → 屏幕录制」中授权本应用；失败后可重启 Taomni 再试。",
+        "桌面采集：macOS 使用持久原生显示流。请授予屏幕录制权限，并选择要共享的显示器。",
+      rdpCaptureGranted: "权限已授予",
+      rdpCaptureRequired: "启动服务器前必须授予权限",
+      rdpUnattendedControl: "通过认证的客户端无需本机确认即可控制这台 Mac。",
       rdpCapWindows:
         "桌面采集：本构建尚未实现 Windows DXGI/WGC，客户端将看到占位棋盘格画面。真实桌面共享请用 Linux/macOS，或等待 Windows 后端。",
       rdpCapUnknown:
@@ -1680,11 +1701,21 @@ export const zhCN: DeepPartial<typeof en> = {
     closedConnection: "连接已关闭",
     websocketError: "WebSocket 错误",
     errorGeneric: "连接失败",
+    autoReconnect: "正在自动重连（{attempt}/3）……",
     detach: "在独立窗口打开",
     reattach: "恢复为标签页",
     maximize: "窗口内最大化",
     restore: "还原",
     osFullscreen: "切换全屏",
+    certificateTrustTitle: "验证 RDP 证书",
+    certificateChangedTitle: "RDP 证书已变化",
+    certificateTrustMessage:
+      "此 Mac 不信任 {host}:{port} 提供的证书。继续前请通过独立渠道向服务器管理员核对以下 SHA-256 指纹：\n\n{fingerprint}",
+    certificateChangedMessage:
+      "{host}:{port} 已固定的证书发生变化，可能是服务器重建，也可能是中间人攻击。请通过独立渠道核对新的 SHA-256 指纹：\n\n{fingerprint}",
+    certificateTrustConfirm: "信任并重新连接",
+    certificateTrustDeclined: "未信任该证书，连接已阻止。",
+    imeInput: "远程桌面键盘输入",
     options: {
       title: "RDP 选项",
       domain: "域",
@@ -1698,6 +1729,7 @@ export const zhCN: DeepPartial<typeof en> = {
       drive: "磁盘重定向",
       driveLabel: "磁盘名称",
       drivePath: "本地文件夹",
+      driveReadOnly: "只读（推荐）",
       driveBrowse: "浏览…",
       gateway: "RD 网关",
       gatewayHost: "网关主机",
