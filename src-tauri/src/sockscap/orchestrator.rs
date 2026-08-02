@@ -51,7 +51,8 @@ pub struct Orchestrator {
     /// unit, including clearing the interception scope before shutdown.
     #[cfg(target_os = "macos")]
     macos_capture: Option<MacosCaptureHandle>,
-    /// Shared with the relay task so config/rules can hot-reload while Active.
+    /// Shared with the relay task for the lifetime of one immutable capture
+    /// session. Configuration changes require Stop before the next Start.
     pub relay_ctx:
         Option<std::sync::Arc<tokio::sync::RwLock<crate::sockscap::relay::RelayContext>>>,
     /// Signal DNS cache refresher to exit when capture stops.
@@ -347,28 +348,20 @@ impl Orchestrator {
         }
     }
 
-    /// Hot-update policy surface used by the running relay.
-    pub async fn hot_reload_policy(
-        &self,
-        cfg: SocksCapConfig,
-        rules: Option<crate::sockscap::rules::CompiledRules>,
-    ) {
-        if let Some(ctx) = &self.relay_ctx {
-            let mut g = ctx.write().await;
-            g.config = cfg;
-            if let Some(r) = rules {
-                g.rules = Some(r);
-            }
-            // The engine is a compiled snapshot of both; without this, live
-            // flows would keep being judged by the previous configuration.
-            g.rebuild_engine();
-        }
-    }
-
     pub fn is_running(&self) -> bool {
         matches!(
             self.phase,
             EnginePhase::Active | EnginePhase::Preparing | EnginePhase::Degraded
+        )
+    }
+
+    pub fn configuration_locked(&self) -> bool {
+        matches!(
+            self.phase,
+            EnginePhase::Preparing
+                | EnginePhase::Active
+                | EnginePhase::Degraded
+                | EnginePhase::Stopping
         )
     }
 }
@@ -395,5 +388,25 @@ mod tests {
         assert_eq!(status.capture_backend, "none");
         assert_eq!(status.message, "authorization required");
         assert!(!orchestrator.is_running());
+    }
+
+    #[test]
+    fn configuration_is_locked_for_every_live_capture_phase() {
+        let mut orchestrator = Orchestrator::new();
+        assert!(!orchestrator.configuration_locked());
+
+        orchestrator.set_preparing("test");
+        assert!(orchestrator.configuration_locked());
+        orchestrator.set_active("test", "active");
+        assert!(orchestrator.configuration_locked());
+        orchestrator.set_degraded("test", "degraded");
+        assert!(orchestrator.configuration_locked());
+        orchestrator.take_relay_for_stop();
+        assert!(orchestrator.configuration_locked());
+
+        orchestrator.finish_stop();
+        assert!(!orchestrator.configuration_locked());
+        orchestrator.set_recovery_required("test", "recover");
+        assert!(!orchestrator.configuration_locked());
     }
 }

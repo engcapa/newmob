@@ -66,8 +66,20 @@ steps:
       selector: '[data-testid="sockscap-test-host"]'
       value: www.google.com
   - click: '[data-testid="sockscap-test-target"]'
+  - click: '[data-testid="sockscap-add-profile"]'
+  - assert_text:
+      selector: '[data-testid="sockscap-panel"]'
+      contains: 方案 2
   - click: '[data-testid="sockscap-start"]'
   - wait_for: '[data-testid="sockscap-stop"]'
+  - assert_visible: '[data-testid="sockscap-locked-banner"]'
+  - assert_disabled: '[data-testid="sockscap-add-profile"]'
+  - click: '[data-testid="sockscap-section-rules-toggle"]'
+  - assert_disabled: '[data-testid="sockscap-rules-editor"]'
+  - click: '[data-testid="sockscap-section-gfwlist-toggle"]'
+  - assert_disabled: '[data-testid="sockscap-refresh-gfw"]'
+  - assert_disabled: '[data-testid="sockscap-import-gfw"]'
+  - assert_disabled: '[data-testid="sockscap-block-quic"]'
   - click: '[data-testid="sockscap-stop"]'
   - wait_for: '[data-testid="sockscap-start"]'
   - click: '[data-testid="sockscap-recover"]'

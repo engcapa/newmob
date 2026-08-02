@@ -1184,7 +1184,7 @@ export const zhCN: DeepPartial<typeof en> = {
     restartNeeded: "作用域或上游的修改需重启捕获后才会生效。",
     restartNow: "重启捕获",
     lockedHint:
-      "运行中 — 作用域、上游与方案结构已锁定，仅规则可热更新。需先停止捕获再修改（仍可新增方案）。",
+      "运行中 — Profile、路由规则、上游与共享设置均已锁定，请先停止捕获再修改。",
     lockedTooltip: "运行中已锁定 — 请先停止捕获再修改。",
     testing: "测试中…",
     probing: "探测中…",

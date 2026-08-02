@@ -439,7 +439,7 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     expect(currentCfg.activeProfileIds).not.toContain(a.id);
   });
 
-  it("locks scope/upstream/profile edits while running but keeps Add profile", async () => {
+  it("locks every profile and routing-rule mutation while running", async () => {
     // Report the engine as Active so the panel enters the locked state.
     vi.mocked(sockscapStatus).mockResolvedValue({
       phase: "active",
@@ -453,14 +453,21 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       expect(screen.getByTestId("sockscap-locked-banner")).toBeInTheDocument(),
     );
     expect(within(screen.getByTestId("sockscap-header")).getByTestId("sockscap-locked-banner")).toBeInTheDocument();
-    // Restart-requiring controls are disabled…
+    // Capture topology and profile controls are disabled.
     expect(screen.getByTestId("sockscap-upstream-kind")).toBeDisabled();
     expect(screen.getByTestId("sockscap-mode-global")).toBeDisabled();
     expect(screen.getByTestId("sockscap-upstream-source")).toBeDisabled();
     expect(screen.getByTestId("sockscap-profile-checkbox-default")).toBeDisabled();
     expect(screen.getByTestId("sockscap-profile-priority-input-default")).toBeDisabled();
-    // …but adding a new profile is still allowed.
-    expect(screen.getByTestId("sockscap-add-profile")).not.toBeDisabled();
+    expect(screen.getByTestId("sockscap-add-profile")).toBeDisabled();
+
+    // Policy and shared routing-rule mutations are disabled as well.
+    fireEvent.click(screen.getByTestId("sockscap-section-rules-toggle"));
+    expect(await screen.findByTestId("sockscap-rules-editor")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("sockscap-section-gfwlist-toggle"));
+    expect(await screen.findByTestId("sockscap-refresh-gfw")).toBeDisabled();
+    expect(screen.getByTestId("sockscap-import-gfw")).toBeDisabled();
+    expect(screen.getByTestId("sockscap-block-quic")).toBeDisabled();
   });
 
   it("shows a copyable detail modal after testing the upstream", async () => {

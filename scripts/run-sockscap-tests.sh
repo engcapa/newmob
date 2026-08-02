@@ -134,7 +134,7 @@ menu_file=(
 menu_desc=(
   "Direct connectivity smoke (no sudo/capture)"
   "Full-link app-mode E2E (nft + cgroup + soak)"
-  "Multi-profile (2 cgroups -> 2 relay ports)"
+  "Mixed profiles (app relay -> global fallback relay)"
   "Extended matrix + soak + ssh -D egress (no sudo)"
 )
 
@@ -175,4 +175,3 @@ while true; do
       ;;
   esac
 done
-

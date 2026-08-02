@@ -1,20 +1,10 @@
 /**
- * Detect whether a SocksCap config change requires the running capture to be
- * restarted (Stop + Start) rather than being picked up live.
+ * Compare the capture-topology portion of two SocksCap configs.
  *
- * Backend behaviour (see src-tauri/src/sockscap):
- * - `sockscap_set_config` hot-reloads ONLY the relay policy surface into the
- *   running RelayContext: `rule_mode`, `user_rules`, `default_action`,
- *   `bypass_cidrs`, and the GFWList ruleset. Those take effect immediately.
- * - The resolved upstream connections (host/port/kind/credentials/SSH pool) and
- *   — on Windows — the elevated helper's WinDivert capture plan (`mode`,
- *   `app_paths`, the active-profile set) are captured at Start and are NOT
- *   re-pushed by `set_config`. Changing any of them while Active silently has
- *   no effect until the next Start.
- *
- * This module computes, from two configs, whether the "scope + upstream"
- * surface changed so the UI can prompt for a restart. It is intentionally a
- * pure function so it can be unit-tested without the Tauri backend.
+ * Running sessions are immutable: backend commands reject every config/rule
+ * mutation until capture stops. This pure helper remains useful to callers
+ * comparing two idle snapshots, but the UI no longer offers live edits or an
+ * automatic restart path.
  */
 import type { SocksCapConfig, SocksCapProfile, UpstreamRef } from "./sockscap";
 
@@ -44,7 +34,8 @@ function profileScopeKey(p: SocksCapProfile): string {
 /**
  * Signature of everything a running capture would need restarted to apply:
  * the set of active profiles (by id, order-independent) and, for each, its
- * scope mode, app list, and upstream. Hot-reloadable rule fields are excluded.
+ * scope mode, app list, and upstream. Routing-policy fields are outside this
+ * topology-only signature.
  */
 export function captureScopeSignature(cfg: SocksCapConfig): string {
   const activeIds = new Set(
@@ -58,8 +49,7 @@ export function captureScopeSignature(cfg: SocksCapConfig): string {
 }
 
 /**
- * True when moving from `prev` to `next` changes the capture scope/upstream in
- * a way the running backend will not pick up live (needs Stop + Start).
+ * True when moving from `prev` to `next` changes capture topology.
  */
 export function requiresRestart(
   prev: SocksCapConfig,

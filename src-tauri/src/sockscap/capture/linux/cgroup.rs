@@ -83,8 +83,9 @@ impl CgroupV2Match {
 ///
 /// In global mode, Taomni itself is moved to a bypass cgroup while all other
 /// local TCP traffic is redirected. In app mode, only selected target PIDs are
-/// moved into capture cgroups; children inherit their parent's cgroup. The
-/// relay stays in the caller's cgroup and is therefore naturally excluded.
+/// moved into capture cgroups; children inherit their parent's cgroup. Mixed
+/// mode combines both arrangements so higher-priority apps can use dedicated
+/// relays before the final global catch-all relay.
 #[derive(Debug)]
 pub struct CgroupSession {
     root: PathBuf,
@@ -125,6 +126,22 @@ impl CgroupSession {
         }
         let mut session = Self::create(self_pid, sudo_password)?;
         let setup = session.setup_app_groups(target_pid_groups, sudo_password);
+        session.finish_setup(setup, sudo_password)
+    }
+
+    pub fn prepare_mixed(
+        target_pid_groups: &[BTreeSet<u32>],
+        self_pid: u32,
+        sudo_password: Option<&str>,
+    ) -> Result<Self, String> {
+        if target_pid_groups.is_empty() {
+            return Err("Mixed mode requires at least one application profile".into());
+        }
+        let mut session = Self::create(self_pid, sudo_password)?;
+        let setup = session
+            .move_pid(self_pid, session.root.join("bypass"), sudo_password)
+            .map(|cgroup_match| session.bypass_match = Some(cgroup_match))
+            .and_then(|()| session.setup_app_groups(target_pid_groups, sudo_password));
         session.finish_setup(setup, sudo_password)
     }
 

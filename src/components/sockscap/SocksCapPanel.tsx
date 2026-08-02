@@ -74,7 +74,6 @@ import {
   type UpstreamParams,
   type UserRule,
 } from "../../lib/sockscap";
-import { requiresRestart } from "../../lib/sockscapRestart";
 import {
   collectProbeTargets,
   collectUpstreamConfigIssues,
@@ -317,12 +316,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [downSpeed, setDownSpeed] = useState(0);
   const lastBytesRef = useRef<{ up: number; down: number; ts: number } | null>(null);
 
-  // Config as it was when capture last started successfully. Used to detect
-  // scope/upstream edits that the running backend will not apply until a
-  // Stop+Start (see lib/sockscapRestart).
-  const startedCfgRef = useRef<SocksCapConfig | null>(null);
-  const [needsRestart, setNeedsRestart] = useState(false);
-
   // Resizable profile sidebar & ribbon collapse state
   const [sidebarWidth, setSidebarWidth] = useState(230);
   const [isRibbon, setIsRibbon] = useState(false);
@@ -504,13 +497,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     status?.phase === "degraded" ||
     status?.phase === "preparing";
 
-  // While capture is running the backend only hot-reloads the rule surface
-  // (ruleMode / userRules / defaultAction / bypassCidrs / GFWList). Scope, app
-  // list, upstream, and the active-profile set are snapshotted at Start and
-  // ignored until the next Stop+Start (see lib/sockscapRestart + orchestrator
-  // hot_reload_policy). So lock every "needs restart" control while running and
-  // tell the user to stop first. Adding a NEW profile stays allowed.
-  const locked = running;
+  // A capture session is an immutable snapshot on every platform. This also
+  // covers the short Stopping phase so edits cannot race teardown.
+  const locked = running || status?.phase === "stopping";
 
   const selectedProf = useMemo(() => {
     if (!cfg) return DEFAULT_PROFILE;
@@ -529,24 +518,19 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     [cfg],
   );
 
-  // While capture is running, editing scope/upstream (mode, apps, active
-  // profiles, upstream) does not take effect until Stop+Start — the backend
-  // only hot-reloads the rule policy. Flag that so the UI can offer a restart.
-  useEffect(() => {
-    if (!running || !cfg || !startedCfgRef.current) {
-      setNeedsRestart(false);
-      return;
-    }
-    setNeedsRestart(requiresRestart(startedCfgRef.current, cfg));
-  }, [cfg, running]);
-
   const persistConfig = async (next: SocksCapConfig) => {
-    setCfg(next);
+    if (locked) {
+      report(t("sockscap.lockedTooltip"), false);
+      return false;
+    }
     try {
       await sockscapSetConfig(next);
+      setCfg(next);
       report(t("sockscap.saved"));
+      return true;
     } catch (e) {
       report(String(e), false);
+      return false;
     }
   };
 
@@ -642,7 +626,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   };
 
   const addProfile = async () => {
-    if (!cfg) return;
+    if (!cfg || locked) return;
     const newId = "prof-" + Date.now().toString(36);
     const newProf: SocksCapProfile = {
       id: newId,
@@ -681,7 +665,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
    *  are NOT auto-activated (avoids spawning many cores at once); the user
    *  activates the one they want. Selects the first imported node. */
   const onImportSubscription = async () => {
-    if (!cfg || !subInput.trim()) return;
+    if (!cfg || locked || !subInput.trim()) return;
     setBusy(true);
     try {
       const nodes = await sockscapImportSubscription(subInput.trim());
@@ -769,7 +753,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   };
 
   const duplicateProfile = async (prof: SocksCapProfile) => {
-    if (!cfg) return;
+    if (!cfg || locked) return;
     const newId = "prof-" + Date.now().toString(36);
     const newProf: SocksCapProfile = {
       ...prof,
@@ -796,6 +780,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   };
 
   const deleteProfile = async (id: string) => {
+    if (locked) return;
     if (!cfg || cfg.profiles.length <= 1) {
       report(t("sockscap.atLeastOneProfile"), false);
       return;
@@ -929,9 +914,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       await sockscapSetConfig(cfg);
       const st = await sockscapStart(sudoPassword);
       setStatus(st);
-      // Snapshot the capture scope so later edits can flag a needed restart.
-      startedCfgRef.current = cfg;
-      setNeedsRestart(false);
       setRootPromptIntent(null);
       setRootPromptError(null);
       report(st.message || t("sockscap.started"), st.phase !== "idle");
@@ -967,8 +949,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     try {
       const st = await sockscapStop();
       setStatus(st);
-      startedCfgRef.current = null;
-      setNeedsRestart(false);
       const [sn, hp] = await Promise.all([
         sockscapStatsSnapshot().catch(() => null),
         sockscapHelperStatus().catch(() => null),
@@ -976,32 +956,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       if (sn) setStats(sn);
       if (hp) setHelper(hp);
       report(t("sockscap.stopped"));
-    } catch (e) {
-      report(String(e), false);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // Apply scope/upstream edits to a running capture: Stop then Start so the
-  // backend rebuilds the capture plan and upstream connections.
-  const onRestart = async () => {
-    setBusy(true);
-    try {
-      await sockscapStop().catch(() => null);
-      startedCfgRef.current = null;
-      setNeedsRestart(false);
-      if (cfg) await sockscapSetConfig(cfg);
-      const st = await sockscapStart();
-      setStatus(st);
-      startedCfgRef.current = cfg;
-      const [sn, hp] = await Promise.all([
-        sockscapStatsSnapshot().catch(() => null),
-        sockscapHelperStatus().catch(() => null),
-      ]);
-      if (sn) setStats(sn);
-      if (hp) setHelper(hp);
-      report(t("sockscap.restarted"), st.phase !== "idle");
     } catch (e) {
       report(String(e), false);
     } finally {
@@ -1066,7 +1020,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   };
 
   const onRefreshGfw = async () => {
-    if (!cfg) return;
+    if (!cfg || locked) return;
     setBusy(true);
     try {
       const res = await sockscapRefreshGfwlist(cfg.gfwlist.url);
@@ -1083,6 +1037,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   };
 
   const onImportGfw = async () => {
+    if (locked) return;
     try {
       if (!isTauriRuntime()) {
         report(t("sockscap.importDesktopOnly"), false);
@@ -1107,7 +1062,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const onTestTarget = async () => {
     setTesting(true);
     try {
-      if (cfg) await sockscapSetConfig(cfg);
       const res = await sockscapTestTarget(testHost.trim(), 443);
       setTestResult(res);
       const summary = t("sockscap.testTargetResult", {
@@ -1639,7 +1593,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   };
 
   const addUserRule = async () => {
-    if (!cfg || !newRule.pattern.trim()) return;
+    if (!cfg || locked || !newRule.pattern.trim()) return;
     await patchSelectedProfile({
       userRules: [...selectedProf.userRules, { ...newRule, pattern: newRule.pattern.trim() }],
     });
@@ -1882,29 +1836,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         </div>
       )}
 
-      {/* Scope/upstream edited while running — needs Stop+Start to apply */}
-      {needsRestart && running && (
-        <div
-          data-testid="sockscap-restart-banner"
-          className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-[11px] flex flex-wrap items-center justify-between gap-2 text-amber-700 dark:text-amber-400"
-        >
-          <span className="flex items-center gap-1.5">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-            {t("sockscap.restartNeeded")}
-          </span>
-          <button
-            type="button"
-            data-testid="sockscap-restart"
-            className="inline-flex items-center gap-1 px-3 py-1 rounded text-[11px] bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-60"
-            onClick={() => void onRestart()}
-            disabled={busy}
-          >
-            <RefreshCw className={`w-3 h-3 ${busy ? "animate-spin" : ""}`} />
-            {t("sockscap.restartNow")}
-          </button>
-        </div>
-      )}
-
       {/* Main Dual-Column Content Area */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* Left Column: Profile Manager Sidebar */}
@@ -1926,9 +1857,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               <button
                 type="button"
                 data-testid="sockscap-add-profile"
-                className="p-1.5 rounded text-[var(--taomni-text-muted)] hover:text-[var(--taomni-accent)] hover:bg-[var(--taomni-hover)] transition-colors"
+                className="p-1.5 rounded text-[var(--taomni-text-muted)] hover:text-[var(--taomni-accent)] hover:bg-[var(--taomni-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={() => void addProfile()}
-                title={t("sockscap.newProfileTooltip")}
+                disabled={locked}
+                title={locked ? t("sockscap.lockedTooltip") : t("sockscap.newProfileTooltip")}
                 aria-label={t("sockscap.newProfileTooltip")}
               >
                 <Plus className="w-4 h-4" />
@@ -1975,9 +1907,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                 <button
                   type="button"
                   data-testid="sockscap-add-profile"
-                  className="p-1 rounded text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)] transition-colors flex items-center justify-center"
+                  className="p-1 rounded text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] hover:bg-[var(--taomni-hover)] transition-colors flex items-center justify-center disabled:opacity-50 disabled:cursor-not-allowed"
                   onClick={() => void addProfile()}
-                  title={t("sockscap.newProfileTooltip")}
+                  disabled={locked}
+                  title={locked ? t("sockscap.lockedTooltip") : t("sockscap.newProfileTooltip")}
                   aria-label={t("sockscap.newProfileTooltip")}
                 >
                   <Plus className="w-4 h-4" />
@@ -2013,6 +1946,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                     className="w-full text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] resize-y min-h-[48px]"
                     placeholder={t("sockscap.subImportPlaceholder")}
                     value={subInput}
+                    disabled={locked}
+                    title={locked ? t("sockscap.lockedTooltip") : undefined}
                     onChange={(e) => setSubInput(e.target.value)}
                   />
                   <button
@@ -2515,6 +2450,12 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
           {/* Rules Strategy */}
           <Section sectionId="rules" title={t("sockscap.section.rules")}>
+            <fieldset
+              data-testid="sockscap-rules-editor"
+              disabled={locked}
+              title={locked ? t("sockscap.lockedTooltip") : undefined}
+              className="disabled:opacity-60"
+            >
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
               <Field label={t("sockscap.ruleMode")}>
                 <select
@@ -2605,6 +2546,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                 </ul>
               )}
             </div>
+            </fieldset>
           </Section>
 
           {/* Test Target Dry-run */}
@@ -2655,18 +2597,22 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               <div className="flex gap-2">
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                  data-testid="sockscap-refresh-gfw"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
                   onClick={() => void onRefreshGfw()}
-                  disabled={busy}
+                  disabled={busy || locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
                 >
                   <RefreshCw className={`w-3 h-3 ${busy ? "animate-spin" : ""}`} />
                   {t("sockscap.refreshGfw")}
                 </button>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                  data-testid="sockscap-import-gfw"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
                   onClick={() => void onImportGfw()}
-                  disabled={busy}
+                  disabled={busy || locked}
+                  title={locked ? t("sockscap.lockedTooltip") : undefined}
                 >
                   {t("sockscap.importGfw")}
                 </button>
@@ -2849,7 +2795,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                             <td className="py-1.5 px-2 text-right">
                               <button
                                 type="button"
-                                className="px-1.5 py-0.5 rounded text-[9px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] transition-colors"
+                                className="px-1.5 py-0.5 rounded text-[9px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                disabled={locked}
+                                title={locked ? t("sockscap.lockedTooltip") : undefined}
                                 onClick={() => {
                                   if (!cfg) return;
                                   const pattern = rec.domainOrIp;
