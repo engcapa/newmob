@@ -1698,6 +1698,7 @@ const dict = {
     closedConnection: "Connection closed",
     websocketError: "WebSocket error",
     errorGeneric: "Connection failed",
+    autoReconnect: "Reconnecting automatically ({attempt}/3)…",
     detach: "Detach to its own window",
     reattach: "Reattach as tab",
     maximize: "Maximize in window",

@@ -127,6 +127,9 @@ const MAX_CLIPBOARD_FILE_ITEMS: usize = 256;
 const MAX_CLIPBOARD_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CLIPBOARD_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const REMOTE_FILE_CHUNK_SIZE: u32 = 1024 * 1024;
+const RDP_NEGOTIATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const RDP_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const RDP_AUTHENTICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 impl RdpSessionHandle {
     pub fn new() -> (
@@ -927,19 +930,37 @@ async fn drive_ironrdp_connection(
     let mut framed = ironrdp_tokio::TokioFramed::new(transport.stream);
 
     send_status(&out_tx, "negotiating", "Negotiating RDP security protocol.");
-    let should_upgrade = ironrdp_tokio::connect_begin(&mut framed, &mut connector)
-        .await
-        .map_err(|e| format!("rdp negotiation failed: {}", e))?;
+    let should_upgrade = tokio::time::timeout(
+        RDP_NEGOTIATION_TIMEOUT,
+        ironrdp_tokio::connect_begin(&mut framed, &mut connector),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "RDP negotiation timed out after {} seconds",
+            RDP_NEGOTIATION_TIMEOUT.as_secs()
+        )
+    })?
+    .map_err(|e| format!("rdp negotiation failed: {}", e))?;
 
     send_status(&out_tx, "tls", "Upgrading the transport to TLS.");
     let stream = framed.into_inner_no_leftover();
-    let verified = crate::rdp::tls::upgrade(
-        stream,
-        &cfg.host,
-        cfg.port,
-        cfg.options.certificate_fingerprint.as_deref(),
+    let verified = tokio::time::timeout(
+        RDP_TLS_TIMEOUT,
+        crate::rdp::tls::upgrade(
+            stream,
+            &cfg.host,
+            cfg.port,
+            cfg.options.certificate_fingerprint.as_deref(),
+        ),
     )
     .await
+    .map_err(|_| {
+        format!(
+            "RDP TLS handshake timed out after {} seconds",
+            RDP_TLS_TIMEOUT.as_secs()
+        )
+    })?
     .map_err(|e| format!("rdp TLS upgrade failed: {}", e))?;
     send_status(
         &out_tx,
@@ -960,16 +981,25 @@ async fn drive_ironrdp_connection(
     let mut network_client = ironrdp_tokio::reqwest::ReqwestNetworkClient::new();
 
     send_status(&out_tx, "credssp", "Authenticating with CredSSP/NLA.");
-    let connection_result = ironrdp_tokio::connect_finalize(
-        upgraded,
-        connector,
-        &mut framed,
-        &mut network_client,
-        cfg.host.clone().into(),
-        server_public_key,
-        None,
+    let connection_result = tokio::time::timeout(
+        RDP_AUTHENTICATION_TIMEOUT,
+        ironrdp_tokio::connect_finalize(
+            upgraded,
+            connector,
+            &mut framed,
+            &mut network_client,
+            cfg.host.clone().into(),
+            server_public_key,
+            None,
+        ),
     )
     .await
+    .map_err(|_| {
+        format!(
+            "RDP authentication timed out after {} seconds",
+            RDP_AUTHENTICATION_TIMEOUT.as_secs()
+        )
+    })?
     .map_err(|e| format!("rdp connection finalization failed: {}", e))?;
 
     let protocol = if cfg.options.nla {
@@ -2315,15 +2345,26 @@ fn send_status(out_tx: &UnboundedSender<SessionOutput>, stage: &str, detail: &st
 }
 
 fn send_error(out_tx: &UnboundedSender<SessionOutput>, code: &str, message: &str) {
+    let retryable = is_retryable_rdp_error(message);
     send_text(
         out_tx,
         json!({
             "type": "error",
             "code": code,
             "message": message,
+            "retryable": retryable,
         })
         .to_string(),
     );
+}
+
+fn is_retryable_rdp_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("timed out")
+        || lower.starts_with("rdp read frame:")
+        || lower.starts_with("rdp write frame:")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
 }
 
 fn send_text(out_tx: &UnboundedSender<SessionOutput>, text: String) {
@@ -2443,6 +2484,22 @@ mod tests {
         assert!(matches!(ops[1], Operation::UnicodeKeyReleased('中')));
         assert!(matches!(ops[2], Operation::UnicodeKeyPressed('😀')));
         assert!(matches!(ops[3], Operation::UnicodeKeyReleased('😀')));
+    }
+
+    #[test]
+    fn retryable_error_classifier_excludes_authentication_failures() {
+        assert!(is_retryable_rdp_error(
+            "RDP TLS handshake timed out after 15 seconds"
+        ));
+        assert!(is_retryable_rdp_error(
+            "rdp read frame: Connection reset by peer"
+        ));
+        assert!(!is_retryable_rdp_error(
+            "rdp connection finalization failed: invalid credentials"
+        ));
+        assert!(!is_retryable_rdp_error(
+            "RDP_CERTIFICATE_CHANGED host=server"
+        ));
     }
 
     #[test]

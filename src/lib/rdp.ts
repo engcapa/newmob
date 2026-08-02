@@ -119,7 +119,7 @@ export type RdpWsText =
   | { type: "status"; stage: string; detail: string }
   | { type: "clipboard"; text: string }
   | { type: "clipboard_files"; paths: string[]; text?: string }
-  | { type: "error"; code: string; message: string };
+  | { type: "error"; code: string; message: string; retryable?: boolean };
 
 export function parseRdpWsText(data: string): RdpWsText | null {
   try {
@@ -127,6 +127,30 @@ export function parseRdpWsText(data: string): RdpWsText | null {
   } catch {
     return null;
   }
+}
+
+/** Classify failures that occur before the authenticated relay WebSocket exists. */
+export function isRetryableRdpConnectError(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  if (
+    message.includes("certificate") ||
+    message.includes("credential") ||
+    message.includes("password") ||
+    message.includes("not implemented") ||
+    message.includes("unsupported")
+  ) {
+    return false;
+  }
+  return [
+    "timed out",
+    "connection refused",
+    "connection reset",
+    "broken pipe",
+    "network is unreachable",
+    "no route to host",
+    "failed to lookup",
+    "dns",
+  ].some((needle) => message.includes(needle));
 }
 
 export function encodePing(): ArrayBuffer {

@@ -1686,6 +1686,7 @@ export const zhCN: DeepPartial<typeof en> = {
     closedConnection: "连接已关闭",
     websocketError: "WebSocket 错误",
     errorGeneric: "连接失败",
+    autoReconnect: "正在自动重连（{attempt}/3）……",
     detach: "在独立窗口打开",
     reattach: "恢复为标签页",
     maximize: "窗口内最大化",

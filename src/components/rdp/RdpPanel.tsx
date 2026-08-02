@@ -20,6 +20,7 @@ import {
   encodeWheel,
   extractRdpCertificateChallenge,
   formatRdpCertificateFingerprint,
+  isRetryableRdpConnectError,
   keyEventToScancode,
   mouseButtonMask,
   normalizeRdpResizeSize,
@@ -107,6 +108,10 @@ export default function RdpPanel({
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const heartbeatRef = useRef<number | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const connectedAtRef = useRef(0);
+  const retryAllowedRef = useRef(true);
   const audioRef = useRef<{ ctx: AudioContext; nextTime: number } | null>(null);
   const lastResizeRequestRef = useRef<string | null>(null);
   const destroyedRef = useRef(false);
@@ -125,6 +130,38 @@ export default function RdpPanel({
 
   const store = useRdpStore();
   const conn = store.connections[tabId];
+
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+  }, []);
+
+  const handleAutomaticReconnect = useCallback(
+    (reason: string): boolean => {
+      if (destroyedRef.current || certificatePromptRef.current || !retryAllowedRef.current) {
+        return false;
+      }
+      if (reconnectTimerRef.current !== null) return true;
+      if (reconnectAttemptsRef.current >= 3) {
+        store.setDisconnected(tabId, reason);
+        return true;
+      }
+
+      reconnectAttemptsRef.current += 1;
+      const attempt = reconnectAttemptsRef.current;
+      const delay = 500 * 2 ** (attempt - 1);
+      store.initConnection(tabId);
+      store.setStage(tabId, t("rdp.autoReconnect", { attempt }));
+      reconnectTimerRef.current = window.setTimeout(() => {
+        reconnectTimerRef.current = null;
+        if (!destroyedRef.current) reconnectRef.current();
+      }, delay);
+      return true;
+    },
+    [store, t, tabId],
+  );
 
   /* ── Send helpers ────────────────────────────────────────────────── */
 
@@ -223,6 +260,7 @@ export default function RdpPanel({
     const args = initRef.current;
     destroyedRef.current = false;
     lastResizeRequestRef.current = null;
+    retryAllowedRef.current = true;
     store.initConnection(tabId);
 
     let cancelled = false;
@@ -276,6 +314,8 @@ export default function RdpPanel({
             if (!msg) return;
             switch (msg.type) {
               case "connected":
+                connectedAtRef.current = Date.now();
+                retryAllowedRef.current = true;
                 store.setConnected(tabId, msg.width, msg.height, msg.protocol, msg.server_name);
                 resizeCanvas(canvasRef.current, msg.width, msg.height);
                 window.setTimeout(() => requestViewportResize(false), 0);
@@ -295,10 +335,14 @@ export default function RdpPanel({
               case "error":
                 {
                   const challenge = extractRdpCertificateChallenge(msg.message);
-                  if (!challenge || certificatePromptRef.current) {
+                  if (certificatePromptRef.current) break;
+                  if (!challenge) {
+                    retryAllowedRef.current = msg.retryable === true;
                     store.setDisconnected(tabId, msg.message);
                     break;
                   }
+                  retryAllowedRef.current = false;
+                  clearReconnectTimer();
                   certificatePromptRef.current = true;
                   store.setStage(tabId, "certificate-review");
                   void (async () => {
@@ -336,8 +380,10 @@ export default function RdpPanel({
                       const oldSession = sessionIdRef.current;
                       sessionIdRef.current = null;
                       if (oldSession) await rdpDisconnect(oldSession).catch(() => {});
-                      wsRef.current?.close();
+                      const currentWs = wsRef.current;
                       wsRef.current = null;
+                      currentWs?.close();
+                      reconnectAttemptsRef.current = 0;
                       certificatePromptRef.current = false;
                       window.setTimeout(() => reconnectRef.current(), 0);
                     } catch (err) {
@@ -365,25 +411,36 @@ export default function RdpPanel({
         };
 
         ws.onclose = () => {
+          if (wsRef.current !== ws) return;
           closeAudio();
           pressedScancodesRef.current.clear();
-          if (wsRef.current === ws) wsRef.current = null;
+          wsRef.current = null;
           if (heartbeatRef.current !== null) {
             window.clearInterval(heartbeatRef.current);
             heartbeatRef.current = null;
           }
-          if (!destroyedRef.current) {
-            store.setDisconnected(tabId, tr("rdp.closedConnection"));
+          const sid = sessionIdRef.current;
+          sessionIdRef.current = null;
+          if (sid) void rdpDisconnect(sid).catch(() => {});
+          if (connectedAtRef.current > 0 && Date.now() - connectedAtRef.current >= 30_000) {
+            reconnectAttemptsRef.current = 0;
           }
+          connectedAtRef.current = 0;
+          if (destroyedRef.current || certificatePromptRef.current) return;
+          const reason = tr("rdp.closedConnection");
+          if (!retryAllowedRef.current) return;
+          if (!handleAutomaticReconnect(reason)) store.setDisconnected(tabId, reason);
         };
         ws.onerror = () => {
-          if (!destroyedRef.current) {
-            store.setDisconnected(tabId, tr("rdp.websocketError"));
+          if (!destroyedRef.current && wsRef.current === ws) {
+            store.setStage(tabId, "websocket-error");
           }
         };
       } catch (err) {
         if (!cancelled && !destroyedRef.current) {
-          store.setDisconnected(tabId, String(err));
+          const reason = String(err);
+          retryAllowedRef.current = isRetryableRdpConnectError(err);
+          if (!handleAutomaticReconnect(reason)) store.setDisconnected(tabId, reason);
         }
       }
     })();
@@ -391,7 +448,16 @@ export default function RdpPanel({
     return () => {
       cancelled = true;
     };
-  }, [closeAudio, playAudioFrame, requestViewportResize, sendBinary, store, tabId]);
+  }, [
+    clearReconnectTimer,
+    closeAudio,
+    handleAutomaticReconnect,
+    playAudioFrame,
+    requestViewportResize,
+    sendBinary,
+    store,
+    tabId,
+  ]);
 
   reconnectRef.current = doConnect;
 
@@ -405,6 +471,7 @@ export default function RdpPanel({
       window.clearTimeout(t);
       cancel?.();
       destroyedRef.current = true;
+      clearReconnectTimer();
       if (heartbeatRef.current !== null) {
         window.clearInterval(heartbeatRef.current);
         heartbeatRef.current = null;
@@ -412,11 +479,11 @@ export default function RdpPanel({
       closeAudio();
       releaseRemoteInput();
       const sid = sessionIdRef.current;
+      sessionIdRef.current = null;
       if (sid) rdpDisconnect(sid).catch(() => {});
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      const currentWs = wsRef.current;
+      wsRef.current = null;
+      currentWs?.close();
       store.removeConnection(tabId);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -643,16 +710,19 @@ export default function RdpPanel({
   }, [conn?.status, requestViewportResize, visible]);
 
   const reconnect = useCallback(() => {
+    clearReconnectTimer();
+    reconnectAttemptsRef.current = 0;
+    connectedAtRef.current = 0;
     const sid = sessionIdRef.current;
+    sessionIdRef.current = null;
     if (sid) rdpDisconnect(sid).catch(() => {});
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
+    const currentWs = wsRef.current;
+    wsRef.current = null;
+    currentWs?.close();
     closeAudio();
     store.setDisconnected(tabId);
     doConnect();
-  }, [closeAudio, doConnect, store, tabId]);
+  }, [clearReconnectTimer, closeAudio, doConnect, store, tabId]);
 
   /* ── Render ──────────────────────────────────────────────────────── */
 

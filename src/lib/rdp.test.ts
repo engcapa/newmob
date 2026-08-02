@@ -16,6 +16,7 @@ import {
   IN_POINTER,
   IN_RESIZE,
   IN_WHEEL,
+  isRetryableRdpConnectError,
   keyEventToScancode,
   mouseButtonMask,
   normalizeRdpResizeSize,
@@ -219,6 +220,28 @@ describe("rdp WS text parser", () => {
 
   it("returns null for invalid JSON", () => {
     expect(parseRdpWsText("not json")).toBeNull();
+  });
+
+  it("preserves retryability on structured session errors", () => {
+    const msg = parseRdpWsText(
+      JSON.stringify({ type: "error", code: "rdp-session", message: "timed out", retryable: true }),
+    );
+    expect(msg).toMatchObject({ type: "error", retryable: true });
+  });
+});
+
+describe("RDP connect retry classification", () => {
+  it("retries transient network failures", () => {
+    expect(isRetryableRdpConnectError("connection refused")).toBe(true);
+    expect(isRetryableRdpConnectError("RDP proxy connection timed out after 30 seconds")).toBe(
+      true,
+    );
+  });
+
+  it("does not retry configuration, credential, or certificate failures", () => {
+    expect(isRetryableRdpConnectError("invalid credentials")).toBe(false);
+    expect(isRetryableRdpConnectError("certificate changed")).toBe(false);
+    expect(isRetryableRdpConnectError("proxy type is not implemented")).toBe(false);
   });
 });
 
