@@ -1711,6 +1711,7 @@ const dict = {
       "The pinned certificate for {host}:{port} has changed. This can indicate a server rebuild or an interception attempt. Verify the new SHA-256 fingerprint independently:\n\n{fingerprint}",
     certificateTrustConfirm: "Trust and reconnect",
     certificateTrustDeclined: "Certificate was not trusted; connection blocked.",
+    imeInput: "Remote desktop keyboard input",
     options: {
       title: "RDP options",
       domain: "Domain",

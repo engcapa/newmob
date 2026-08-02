@@ -236,6 +236,14 @@ describe("keyEventToScancode", () => {
       scancode: 0x1e,
       extended: false,
     });
+    expect(keyEventToScancode({ code: "NumpadDivide" } as KeyboardEvent)).toEqual({
+      scancode: 0x35,
+      extended: true,
+    });
+    expect(keyEventToScancode({ code: "IntlBackslash" } as KeyboardEvent)).toEqual({
+      scancode: 0x56,
+      extended: false,
+    });
   });
 
   it("returns null for unmapped codes", () => {

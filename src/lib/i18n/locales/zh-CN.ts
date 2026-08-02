@@ -1699,6 +1699,7 @@ export const zhCN: DeepPartial<typeof en> = {
       "{host}:{port} 已固定的证书发生变化，可能是服务器重建，也可能是中间人攻击。请通过独立渠道核对新的 SHA-256 指纹：\n\n{fingerprint}",
     certificateTrustConfirm: "信任并重新连接",
     certificateTrustDeclined: "未信任该证书，连接已阻止。",
+    imeInput: "远程桌面键盘输入",
     options: {
       title: "RDP 选项",
       domain: "域",

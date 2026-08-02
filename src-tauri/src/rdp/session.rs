@@ -996,6 +996,10 @@ async fn drive_ironrdp_connection(
                     match ctrl {
                         RdpControl::Disconnect => break,
                         RdpControl::Ack => {}
+                        RdpControl::ReleaseInput => {
+                            let _ = input_db.release_all();
+                            last_buttons = 0;
+                        }
                         _ => send_status(
                             &out_tx,
                             "reactivating",
@@ -1097,6 +1101,35 @@ where
             let outputs = active_stage
                 .process_fastpath_input(image, &events)
                 .map_err(|e| format!("rdp key input: {}", e))?;
+            match handle_active_outputs(framed, image, outputs, out_tx).await? {
+                ActiveOutputFlow::Continue => {}
+                ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
+                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+            }
+        }
+        RdpControl::UnicodeText(text) => {
+            let events = input_db.apply(unicode_operations(&text));
+            if events.is_empty() {
+                return Ok(ControlOutcome::Continue);
+            }
+            let outputs = active_stage
+                .process_fastpath_input(image, &events)
+                .map_err(|e| format!("rdp Unicode input: {}", e))?;
+            match handle_active_outputs(framed, image, outputs, out_tx).await? {
+                ActiveOutputFlow::Continue => {}
+                ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
+                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+            }
+        }
+        RdpControl::ReleaseInput => {
+            let events = input_db.release_all();
+            *last_buttons = 0;
+            if events.is_empty() {
+                return Ok(ControlOutcome::Continue);
+            }
+            let outputs = active_stage
+                .process_fastpath_input(image, &events)
+                .map_err(|e| format!("rdp release input: {}", e))?;
             match handle_active_outputs(framed, image, outputs, out_tx).await? {
                 ActiveOutputFlow::Continue => {}
                 ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
@@ -2084,6 +2117,17 @@ fn key_operations(key: KeyEvent) -> Vec<Operation> {
     }
 }
 
+fn unicode_operations(text: &str) -> Vec<Operation> {
+    text.chars()
+        .flat_map(|character| {
+            [
+                Operation::UnicodeKeyPressed(character),
+                Operation::UnicodeKeyReleased(character),
+            ]
+        })
+        .collect()
+}
+
 fn pointer_operations(pointer: PointerEvent, last_buttons: &mut u8) -> Vec<Operation> {
     let mut ops = Vec::with_capacity(4);
     ops.push(Operation::MouseMove(MousePosition {
@@ -2389,6 +2433,16 @@ mod tests {
             Operation::KeyPressed(scancode) => assert_eq!(scancode.as_u8(), (true, 0x48)),
             _ => panic!("expected key press"),
         }
+    }
+
+    #[test]
+    fn unicode_operations_press_and_release_each_character() {
+        let ops = unicode_operations("中😀");
+        assert_eq!(ops.len(), 4);
+        assert!(matches!(ops[0], Operation::UnicodeKeyPressed('中')));
+        assert!(matches!(ops[1], Operation::UnicodeKeyReleased('中')));
+        assert!(matches!(ops[2], Operation::UnicodeKeyPressed('😀')));
+        assert!(matches!(ops[3], Operation::UnicodeKeyReleased('😀')));
     }
 
     #[test]

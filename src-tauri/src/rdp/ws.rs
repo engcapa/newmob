@@ -75,6 +75,8 @@ pub mod channel {
 #[derive(Debug)]
 pub enum RdpControl {
     Key(KeyEvent),
+    UnicodeText(String),
+    ReleaseInput,
     Pointer(PointerEvent),
     Wheel(PointerWheelEvent),
     Resize {
@@ -113,6 +115,10 @@ enum WsIncomingText {
     Clipboard { text: String },
     #[serde(rename = "clipboard_files")]
     ClipboardFiles { paths: Vec<String> },
+    #[serde(rename = "unicode")]
+    Unicode { text: String },
+    #[serde(rename = "release_input")]
+    ReleaseInput,
     #[serde(rename = "resize")]
     Resize { width: u16, height: u16 },
     #[serde(rename = "refresh")]
@@ -270,6 +276,15 @@ async fn run_relay(
                             }
                             WsIncomingText::ClipboardFiles { paths } => {
                                 let _ = ctrl.send(RdpControl::ClipboardFiles { paths });
+                            }
+                            WsIncomingText::Unicode { text } if text.chars().count() <= 4096 => {
+                                let _ = ctrl.send(RdpControl::UnicodeText(text));
+                            }
+                            WsIncomingText::Unicode { .. } => {
+                                tracing::warn!("ignored oversized RDP Unicode input message");
+                            }
+                            WsIncomingText::ReleaseInput => {
+                                let _ = ctrl.send(RdpControl::ReleaseInput);
                             }
                             WsIncomingText::Resize { width, height } => {
                                 let _ = ctrl.send(RdpControl::Resize { width, height });
@@ -573,6 +588,20 @@ mod tests {
         assert!(matches!(
             parse_binary_control(&[channel::IN_ACK]),
             Some(RdpControl::Ack)
+        ));
+    }
+
+    #[test]
+    fn parses_unicode_and_release_input_messages() {
+        match serde_json::from_str::<WsIncomingText>(r#"{"type":"unicode","text":"中文😀"}"#)
+            .unwrap()
+        {
+            WsIncomingText::Unicode { text } => assert_eq!(text, "中文😀"),
+            _ => panic!("expected Unicode input"),
+        }
+        assert!(matches!(
+            serde_json::from_str::<WsIncomingText>(r#"{"type":"release_input"}"#).unwrap(),
+            WsIncomingText::ReleaseInput
         ));
     }
 

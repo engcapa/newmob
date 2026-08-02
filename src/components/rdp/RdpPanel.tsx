@@ -102,6 +102,7 @@ export default function RdpPanel({
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const imeInputRef = useRef<HTMLTextAreaElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
@@ -113,6 +114,8 @@ export default function RdpPanel({
   const reconnectRef = useRef<() => void>(() => {});
   const visibleRef = useRef(visible);
   const suppressNextPasteKeyUpRef = useRef(false);
+  const pressedScancodesRef = useRef(new Set<number>());
+  const composingRef = useRef(false);
   const initRef = useRef({ host, port, username, password, options, networkSettingsJson });
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
   // Tracks whether the host OS window is fullscreen. Only meaningful for
@@ -136,6 +139,12 @@ export default function RdpPanel({
       wsRef.current.send(JSON.stringify(data));
     }
   }, []);
+
+  const releaseRemoteInput = useCallback(() => {
+    pressedScancodesRef.current.clear();
+    suppressNextPasteKeyUpRef.current = false;
+    sendText({ type: "release_input" });
+  }, [sendText]);
 
   const sendRemoteResize = useCallback(
     (width: number, height: number, force = false) => {
@@ -357,7 +366,8 @@ export default function RdpPanel({
 
         ws.onclose = () => {
           closeAudio();
-          wsRef.current = null;
+          pressedScancodesRef.current.clear();
+          if (wsRef.current === ws) wsRef.current = null;
           if (heartbeatRef.current !== null) {
             window.clearInterval(heartbeatRef.current);
             heartbeatRef.current = null;
@@ -400,6 +410,7 @@ export default function RdpPanel({
         heartbeatRef.current = null;
       }
       closeAudio();
+      releaseRemoteInput();
       const sid = sessionIdRef.current;
       if (sid) rdpDisconnect(sid).catch(() => {});
       if (wsRef.current) {
@@ -413,7 +424,21 @@ export default function RdpPanel({
 
   useEffect(() => {
     visibleRef.current = visible;
-  }, [visible]);
+    if (!visible) releaseRemoteInput();
+  }, [releaseRemoteInput, visible]);
+
+  useEffect(() => {
+    const release = () => releaseRemoteInput();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") release();
+    };
+    window.addEventListener("blur", release);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.removeEventListener("blur", release);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [releaseRemoteInput]);
 
   /* ── Input handlers ──────────────────────────────────────────────── */
 
@@ -507,6 +532,11 @@ export default function RdpPanel({
       if (!visible || conn?.status !== "connected") return;
       const code = e.nativeEvent.code;
 
+      if (composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) {
+        e.preventDefault();
+        return;
+      }
+
       // Local view shortcuts intercepted before reaching the remote desktop:
       //   F11 → toggle host-window OS fullscreen
       if (code === "F11") {
@@ -529,7 +559,10 @@ export default function RdpPanel({
       const sc = keyEventToScancode(e.nativeEvent);
       if (!sc) return;
       e.preventDefault();
-      sendBinary(encodeKey(down, applyExtended(sc.scancode, sc.extended)));
+      const wireScancode = applyExtended(sc.scancode, sc.extended);
+      if (down) pressedScancodesRef.current.add(wireScancode);
+      else pressedScancodesRef.current.delete(wireScancode);
+      sendBinary(encodeKey(down, wireScancode));
     },
     [
       conn?.status,
@@ -538,6 +571,20 @@ export default function RdpPanel({
       toggleOsFullscreen,
       visible,
     ],
+  );
+
+  const onCompositionEnd = useCallback(
+    (e: React.CompositionEvent<HTMLTextAreaElement>) => {
+      composingRef.current = false;
+      const text = e.data;
+      e.currentTarget.value = "";
+      if (!text || !visible || conn?.status !== "connected") return;
+      const characters = Array.from(text);
+      for (let offset = 0; offset < characters.length; offset += 1024) {
+        sendText({ type: "unicode", text: characters.slice(offset, offset + 1024).join("") });
+      }
+    },
+    [conn?.status, sendText, visible],
   );
 
   const onPointer = useCallback(
@@ -673,6 +720,9 @@ export default function RdpPanel({
       tabIndex={0}
       onKeyDown={onKey(true)}
       onKeyUp={onKey(false)}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) releaseRemoteInput();
+      }}
       style={{
         outline: "none",
         position: "relative",
@@ -803,8 +853,12 @@ export default function RdpPanel({
           width={Math.max(640, conn?.width ?? 1920)}
           height={Math.max(480, conn?.height ?? 1080)}
           onPointerMove={onPointer}
-          onPointerDown={onPointer}
+          onPointerDown={(e) => {
+            imeInputRef.current?.focus({ preventScroll: true });
+            onPointer(e);
+          }}
           onPointerUp={onPointer}
+          onPointerCancel={() => releaseRemoteInput()}
           onWheel={onWheel}
           onContextMenu={(e) => e.preventDefault()}
           style={{
@@ -812,6 +866,33 @@ export default function RdpPanel({
             maxHeight: scaleMode === "fit" ? "100%" : undefined,
             imageRendering: "pixelated",
             background: "#000",
+          }}
+        />
+        <textarea
+          ref={imeInputRef}
+          tabIndex={-1}
+          aria-label={t("rdp.imeInput")}
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={onCompositionEnd}
+          onInput={(e) => {
+            if (!composingRef.current) e.currentTarget.value = "";
+          }}
+          onPaste={(e) => e.preventDefault()}
+          style={{
+            position: "absolute",
+            width: 1,
+            height: 1,
+            opacity: 0,
+            pointerEvents: "none",
+            insetInlineStart: 0,
+            bottom: 0,
+            padding: 0,
+            border: 0,
           }}
         />
       </div>
