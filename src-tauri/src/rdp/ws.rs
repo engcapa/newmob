@@ -527,6 +527,9 @@ pub fn frame_payload_with_header(header: TileHeader, rgba: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+    use tokio_tungstenite::connect_async;
+    use tungstenite::client::IntoClientRequest;
 
     #[test]
     fn parse_key_event() {
@@ -645,5 +648,117 @@ mod tests {
         assert!(is_authorized_origin("https://tauri.localhost"));
         assert!(!is_authorized_origin("https://attacker.example"));
         assert!(!is_authorized_origin("null"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_RDP_LIVE_HOST/USER/PASS and a reachable Windows RDP server"]
+    async fn live_credssp_relay_authorizes_websocket_and_delivers_first_frame() {
+        let host = std::env::var("TAOMNI_RDP_LIVE_HOST").expect("TAOMNI_RDP_LIVE_HOST is required");
+        let port = std::env::var("TAOMNI_RDP_LIVE_PORT")
+            .ok()
+            .and_then(|raw| raw.parse::<u16>().ok())
+            .unwrap_or(3389);
+        let username =
+            std::env::var("TAOMNI_RDP_LIVE_USER").expect("TAOMNI_RDP_LIVE_USER is required");
+        let password =
+            std::env::var("TAOMNI_RDP_LIVE_PASS").expect("TAOMNI_RDP_LIVE_PASS is required");
+        let mut options = RdpOptions::default();
+        options.screen_w = 1280;
+        options.screen_h = 720;
+        options.nla = true;
+        if let Ok(pin) = std::env::var("TAOMNI_RDP_LIVE_CERTIFICATE_FINGERPRINT") {
+            if !pin.trim().is_empty() {
+                options.certificate_fingerprint = Some(pin);
+            }
+        }
+
+        let started = Instant::now();
+        let session = spawn_rdp_relay(RdpSpawnConfig {
+            host,
+            port,
+            username: Some(username),
+            password: Some(password),
+            options,
+            network: None,
+        })
+        .await
+        .expect("start live RDP relay");
+
+        let expected_protocol = format!("taomni-rdp.{}", session.ws_token);
+        let mut request = format!("ws://127.0.0.1:{}", session.ws_port)
+            .into_client_request()
+            .expect("build relay WebSocket request");
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("tauri://localhost"),
+        );
+        request.headers_mut().insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_str(&expected_protocol).expect("generated protocol is valid"),
+        );
+        let (mut socket, response) = connect_async(request)
+            .await
+            .expect("connect to authorized live RDP relay");
+        assert_eq!(
+            response
+                .headers()
+                .get(header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok()),
+            Some(expected_protocol.as_str())
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(45);
+        let mut connected_at = None;
+        let mut first_frame_at = None;
+        while Instant::now() < deadline && first_frame_at.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let message = tokio::time::timeout(remaining, socket.next())
+                .await
+                .expect("timed out waiting for live RDP relay output")
+                .expect("live RDP relay closed before first frame")
+                .expect("read live RDP relay message");
+            match message {
+                Message::Text(text) => {
+                    let value = serde_json::from_str::<serde_json::Value>(&text)
+                        .expect("live relay status is valid JSON");
+                    match value.get("type").and_then(|value| value.as_str()) {
+                        Some("connected") => {
+                            connected_at = Some(started.elapsed());
+                            socket
+                                .send(Message::Binary(vec![channel::IN_ACK].into()))
+                                .await
+                                .expect("acknowledge live RDP relay");
+                            socket
+                                .send(Message::Binary(vec![channel::IN_REFRESH].into()))
+                                .await
+                                .expect("request live RDP refresh");
+                        }
+                        Some("error") => panic!("live RDP relay failed: {text}"),
+                        _ => {}
+                    }
+                }
+                Message::Binary(frame)
+                    if frame.first() == Some(&channel::FRAME) && frame.len() > 9 =>
+                {
+                    first_frame_at = Some(started.elapsed());
+                }
+                _ => {}
+            }
+        }
+
+        socket
+            .send(Message::Text(r#"{"type":"disconnect"}"#.into()))
+            .await
+            .expect("disconnect live RDP relay");
+        let _ = socket.close(None).await;
+        tokio::time::timeout(Duration::from_secs(5), session.cancel.cancelled())
+            .await
+            .expect("live RDP relay shut down after disconnect");
+
+        let connected_at = connected_at.expect("live RDP relay did not report connected");
+        let first_frame_at = first_frame_at.expect("live RDP relay did not deliver a frame");
+        eprintln!(
+            "live RDP relay timing: connected={connected_at:?}, first_frame={first_frame_at:?}"
+        );
     }
 }
