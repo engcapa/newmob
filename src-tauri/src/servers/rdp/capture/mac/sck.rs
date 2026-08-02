@@ -15,7 +15,7 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, ProtocolObject};
-use objc2::{define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_graphics::{CGDisplayPixelsHigh, CGDisplayPixelsWide, CGMainDisplayID};
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{
@@ -205,42 +205,49 @@ impl SckCapturer {
             anyhow::bail!("selected display {id} has an invalid pixel size {width}x{height}");
         }
 
-        let filter = SCContentFilter::initWithDisplay_excludingWindows(
-            SCContentFilter::alloc(),
-            &display,
-            &NSArray::new(),
-        );
-        let configuration = SCStreamConfiguration::new();
-        configuration.setWidth(usize::from(width));
-        configuration.setHeight(usize::from(height));
-        configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
-        configuration.setMinimumFrameInterval(objc2_core_media::CMTime::new(1, FRAME_RATE));
-        configuration.setQueueDepth(NATIVE_QUEUE_DEPTH);
-        // The RDP client renders its local cursor immediately. Including it in
-        // video produces a second, delayed cursor and was the source of the
-        // observed overlap on macOS.
-        configuration.setShowsCursor(false);
-        configuration.setShowMouseClicks(false);
-        configuration.setCapturesAudio(false);
+        let filter = unsafe {
+            SCContentFilter::initWithDisplay_excludingWindows(
+                SCContentFilter::alloc(),
+                &display,
+                &NSArray::new(),
+            )
+        };
+        let configuration = unsafe { SCStreamConfiguration::new() };
+        unsafe {
+            configuration.setWidth(usize::from(width));
+            configuration.setHeight(usize::from(height));
+            configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
+            configuration.setMinimumFrameInterval(objc2_core_media::CMTime::new(1, FRAME_RATE));
+            configuration.setQueueDepth(NATIVE_QUEUE_DEPTH);
+            // The RDP client renders its local cursor immediately. Including it in
+            // video produces a second, delayed cursor and was the source of the
+            // observed overlap on macOS.
+            configuration.setShowsCursor(false);
+            configuration.setShowMouseClicks(false);
+            configuration.setCapturesAudio(false);
+        }
 
         let slot = Arc::new(FrameSlot::new());
         let output = StreamOutput::new(slot.clone());
         let delegate: &ProtocolObject<dyn SCStreamDelegate> = ProtocolObject::from_ref(&*output);
-        let stream = SCStream::initWithFilter_configuration_delegate(
-            SCStream::alloc(),
-            &filter,
-            &configuration,
-            Some(delegate),
-        );
+        let stream = unsafe {
+            SCStream::initWithFilter_configuration_delegate(
+                SCStream::alloc(),
+                &filter,
+                &configuration,
+                Some(delegate),
+            )
+        };
         let queue = DispatchQueue::new("taomni.rdp.screencapture", None);
         let stream_output: &ProtocolObject<dyn SCStreamOutput> = ProtocolObject::from_ref(&*output);
-        stream
-            .addStreamOutput_type_sampleHandlerQueue_error(
+        unsafe {
+            stream.addStreamOutput_type_sampleHandlerQueue_error(
                 stream_output,
                 SCStreamOutputType::Screen,
                 Some(&queue),
             )
-            .map_err(|_| anyhow::anyhow!("could not attach ScreenCaptureKit display output"))?;
+        }
+        .map_err(|_| anyhow::anyhow!("could not attach ScreenCaptureKit display output"))?;
         start_stream(&stream)?;
 
         let first = slot.take(INITIAL_FRAME_TIMEOUT)?;
@@ -336,11 +343,11 @@ fn select_display(
                 .map_err(|_| anyhow::anyhow!("invalid macOS display id '{value}'"))
         })
         .transpose()?;
-    let displays = content.displays().to_vec();
+    let displays = unsafe { content.displays().to_vec() };
     let selected = match requested {
         Some(id) => displays
             .into_iter()
-            .find(|display| display.displayID() == id)
+            .find(|display| unsafe { display.displayID() } == id)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "selected display {id} is no longer available; choose an active display in RDP Server settings"
@@ -350,13 +357,13 @@ fn select_display(
             let main_display = CGMainDisplayID();
             displays
                 .iter()
-                .find(|display| display.displayID() == main_display)
+                .find(|display| unsafe { display.displayID() } == main_display)
                 .cloned()
                 .or_else(|| displays.into_iter().next())
                 .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit found no active macOS displays"))?
         }
     };
-    let id = selected.displayID();
+    let id = unsafe { selected.displayID() };
     Ok((selected, id))
 }
 

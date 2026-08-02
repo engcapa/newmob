@@ -30,6 +30,7 @@ pub(crate) mod mac;
 /// `height` rows. `x`/`y` are the top-left origin of this region within the
 /// desktop (0,0 for a full-screen frame), so the display layer can place a
 /// cropped damage rectangle at the right offset in the client's framebuffer.
+#[derive(Debug)]
 pub(crate) struct Frame {
     pub data: Vec<u8>,
     /// Monotonic timestamp taken after the backend has produced the pixels.

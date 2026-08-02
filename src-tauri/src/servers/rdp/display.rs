@@ -25,6 +25,8 @@ use ironrdp::server::{
 use tokio::sync::Notify;
 
 use super::capture::{Capturer, Frame, create_capturer_for_display};
+#[cfg(target_os = "macos")]
+use super::gfx::{GfxReadiness, GfxSubmit, GfxTransport, H264Encoder};
 use super::metrics::RdpMetrics;
 use crate::servers::engine::LogEmitter;
 
@@ -37,6 +39,8 @@ pub(crate) struct RdpDisplay {
     /// available, else the fallback size passed in at construction.
     size: DesktopSize,
     display_id: Option<String>,
+    #[cfg(target_os = "macos")]
+    gfx: GfxTransport,
 }
 
 impl RdpDisplay {
@@ -44,6 +48,7 @@ impl RdpDisplay {
         log: LogEmitter,
         display_id: Option<String>,
         metrics: RdpMetrics,
+        #[cfg(target_os = "macos")] gfx: GfxTransport,
     ) -> anyhow::Result<Self> {
         // Probe once up front (on this caller's thread) only to learn the size;
         // the real capturer is created again inside the capture thread, which is
@@ -67,6 +72,8 @@ impl RdpDisplay {
             metrics,
             size,
             display_id,
+            #[cfg(target_os = "macos")]
+            gfx,
         })
     }
 }
@@ -84,6 +91,8 @@ impl RdpServerDisplay for RdpDisplay {
             self.size,
             self.display_id.clone(),
             self.metrics.clone(),
+            #[cfg(target_os = "macos")]
+            self.gfx.clone(),
         )))
     }
 }
@@ -93,6 +102,10 @@ pub(crate) struct DisplayUpdatesImpl {
     mailbox: Arc<LatestFrameMailbox>,
     active_damage: VecDeque<Frame>,
     metrics: RdpMetrics,
+    #[cfg(target_os = "macos")]
+    gfx: GfxTransport,
+    #[cfg(target_os = "macos")]
+    h264: Option<H264Encoder>,
 }
 
 /// Cross-thread latest-frame mailbox. Unlike `mpsc::channel(1)` plus
@@ -221,6 +234,7 @@ impl DisplayUpdatesImpl {
         _size: DesktopSize,
         display_id: Option<String>,
         metrics: RdpMetrics,
+        #[cfg(target_os = "macos")] gfx: GfxTransport,
     ) -> Self {
         let mailbox = Arc::new(LatestFrameMailbox::new());
 
@@ -237,6 +251,10 @@ impl DisplayUpdatesImpl {
             mailbox,
             active_damage: VecDeque::new(),
             metrics,
+            #[cfg(target_os = "macos")]
+            gfx,
+            #[cfg(target_os = "macos")]
+            h264: None,
         }
     }
 
@@ -258,6 +276,46 @@ impl DisplayUpdatesImpl {
             stride,
         })
     }
+
+    /// Prefer the negotiated EGFX/AVC420 path on macOS. The decision is made
+    /// after capture and before turning pixels into a regular RDP bitmap so a
+    /// slow client can drop a current frame instead of queuing stale work.
+    #[cfg(target_os = "macos")]
+    fn try_send_gfx(&mut self, frame: &mut Frame) -> Option<GfxSubmit> {
+        match self.gfx.readiness() {
+            GfxReadiness::Backpressured => return Some(GfxSubmit::Backpressured),
+            GfxReadiness::Unavailable => return None,
+            GfxReadiness::Ready => {}
+        }
+        let needs_new_encoder = self
+            .h264
+            .as_ref()
+            .is_none_or(|encoder| !encoder.matches(frame));
+        if needs_new_encoder {
+            match H264Encoder::new(frame.width, frame.height) {
+                Ok(encoder) => self.h264 = Some(encoder),
+                Err(error) => {
+                    tracing::warn!(
+                        "RDP EGFX hardware encoder unavailable; using bitmap updates: {error}"
+                    );
+                    self.h264 = None;
+                    return None;
+                }
+            }
+        }
+        let encoder = self.h264.as_mut()?;
+        match encoder.encode(frame) {
+            Ok(h264) => Some(self.gfx.send_avc420(frame, &h264)),
+            Err(error) => {
+                // Encoding failure is isolated to this client/update. The
+                // next update may recreate VideoToolbox, while this frame is
+                // still delivered through the reliable bitmap fallback.
+                tracing::warn!("RDP EGFX hardware frame failed; using bitmap update: {error}");
+                self.h264 = None;
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -275,6 +333,17 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
                 }
                 self.metrics.record_frame_handoff(frame.captured_at);
                 self.metrics.report_if_due();
+                #[cfg(target_os = "macos")]
+                {
+                    let mut frame = frame;
+                    match self.try_send_gfx(&mut frame) {
+                        Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
+                        Some(GfxSubmit::Unavailable) | None => {
+                            return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
                 return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
             }
 
@@ -282,6 +351,17 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
                 Some(PendingFrames::Full(frame)) => {
                     self.metrics.record_frame_handoff(frame.captured_at);
                     self.metrics.report_if_due();
+                    #[cfg(target_os = "macos")]
+                    {
+                        let mut frame = frame;
+                        match self.try_send_gfx(&mut frame) {
+                            Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
+                            Some(GfxSubmit::Unavailable) | None => {
+                                return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
                     return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
                 }
                 Some(PendingFrames::Damage(frames)) => {

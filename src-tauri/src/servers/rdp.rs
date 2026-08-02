@@ -59,6 +59,8 @@ pub(crate) mod capture;
 mod clipboard;
 mod diff;
 mod display;
+#[cfg(target_os = "macos")]
+mod gfx;
 mod input;
 mod metrics;
 mod session;
@@ -634,7 +636,15 @@ fn build_server(
         control_gate.clone(),
         metrics.clone(),
     );
-    let display = RdpDisplay::new(log.clone(), params.display_id.clone(), metrics)?;
+    #[cfg(target_os = "macos")]
+    let gfx = gfx::GfxTransport::new(log.clone());
+    let display = RdpDisplay::new(
+        log.clone(),
+        params.display_id.clone(),
+        metrics,
+        #[cfg(target_os = "macos")]
+        gfx.clone(),
+    )?;
     let cliprdr: Box<dyn ironrdp::server::CliprdrServerFactory> =
         Box::new(ClipboardFactory::new(log.clone()));
 
@@ -651,10 +661,14 @@ fn build_server(
         SecurityMode::Hybrid => {
             let identity = &params.identity;
             let acceptor = identity.make_acceptor()?;
-            base.with_hybrid(acceptor, identity.pub_key.clone())
+            let builder = base
+                .with_hybrid(acceptor, identity.pub_key.clone())
                 .with_input_handler(input)
                 .with_display_handler(display)
-                .with_cliprdr_factory(Some(cliprdr))
+                .with_cliprdr_factory(Some(cliprdr));
+            #[cfg(target_os = "macos")]
+            let builder = builder.with_gfx_factory(Some(Box::new(gfx.factory())));
+            builder
                 .with_connection_handler(Some(connection_handler))
                 .build()
         }

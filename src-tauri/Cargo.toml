@@ -239,7 +239,14 @@ dispatch2 = "0.3.1"
 objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError"] }
 objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
+objc2-core-foundation = "0.3.2"
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-graphics", "objc2-core-media"] }
+objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-media", "objc2-core-video", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession"] }
+# The IronRDP umbrella crate does not expose its server EGFX feature. A direct
+# dependency enables that feature on the same 0.11 server crate it re-exports,
+# so the macOS server can use the negotiated AVC420 graphics channel.
+ironrdp-server = { version = "0.11", features = ["egfx"] }
+ironrdp-egfx = "0.1"
 # Explicit Screen Recording permission preflight/request used by the RDP
 # server settings probe. xcap also uses CoreGraphics internally, but keeping
 # this direct dependency makes our permission boundary intentional.
