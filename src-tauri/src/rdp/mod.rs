@@ -145,7 +145,7 @@ impl PerformanceFlags {
     }
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DriveRedirectOpt {
     #[serde(default)]
@@ -154,6 +154,20 @@ pub struct DriveRedirectOpt {
     pub label: String,
     #[serde(default)]
     pub path: String,
+    /// Expose the mapped directory without allowing the remote host to mutate it.
+    #[serde(default = "default_true")]
+    pub read_only: bool,
+}
+
+impl Default for DriveRedirectOpt {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            label: String::new(),
+            path: String::new(),
+            read_only: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

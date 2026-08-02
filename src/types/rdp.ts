@@ -33,6 +33,8 @@ export interface RdpDriveRedirect {
   label: string;
   /** Local folder to expose. Empty when `enabled` is false. */
   path: string;
+  /** Deny remote create, write, rename and delete operations. */
+  readOnly: boolean;
 }
 
 export interface RdpGatewayOptions {
@@ -68,7 +70,7 @@ export const DEFAULT_RDP_OPTIONS: RdpOptions = {
   performance: DEFAULT_RDP_PERFORMANCE,
   redirectClipboard: true,
   redirectAudio: "play",
-  redirectDrive: { enabled: false, label: "TAOMNI", path: "" },
+  redirectDrive: { enabled: false, label: "TAOMNI", path: "", readOnly: true },
 };
 
 /** Parse RDP options from a session's `options_json`. Defaults fill in. */
@@ -163,6 +165,7 @@ function mergeDrive(raw: unknown): RdpDriveRedirect {
         ? o.label.slice(0, 8)
         : "TAOMNI",
     path: typeof o.path === "string" ? o.path : "",
+    readOnly: typeof o.readOnly === "boolean" ? o.readOnly : true,
   };
 }
 

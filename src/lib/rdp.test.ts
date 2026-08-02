@@ -271,7 +271,7 @@ describe("RdpOptions parse/serialize", () => {
       nla: false,
       redirectClipboard: false,
       redirectAudio: "off",
-      redirectDrive: { enabled: true, label: "SHARED", path: "/data" },
+      redirectDrive: { enabled: true, label: "SHARED", path: "/data", readOnly: false },
       gateway: {
         host: "rdg.example.com",
         port: 443,
@@ -341,6 +341,8 @@ describe("RdpOptions parse/serialize", () => {
     const json = JSON.stringify({
       redirectDrive: { enabled: true, label: "VERYLONGLABEL", path: "/x" },
     });
-    expect(parseRdpOptions(json).redirectDrive.label).toBe("VERYLONG");
+    const drive = parseRdpOptions(json).redirectDrive;
+    expect(drive.label).toBe("VERYLONG");
+    expect(drive.readOnly).toBe(true);
   });
 });

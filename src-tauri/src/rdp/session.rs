@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
@@ -123,7 +123,9 @@ const AUDIO_SAMPLE_RATE: u32 = 44_100;
 const AUDIO_CHANNELS: u16 = 2;
 const AUDIO_BITS_PER_SAMPLE: u16 = 16;
 const CLIPRDR_FILE_LIST_FORMAT_VALUE: u32 = 0x0000_C006;
-const MAX_CLIPBOARD_FILE_ITEMS: usize = 4096;
+const MAX_CLIPBOARD_FILE_ITEMS: usize = 256;
+const MAX_CLIPBOARD_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_CLIPBOARD_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
 const REMOTE_FILE_CHUNK_SIZE: u32 = 1024 * 1024;
 
 impl RdpSessionHandle {
@@ -204,6 +206,7 @@ struct ClipboardBridgeState {
     local_files: Vec<LocalClipboardFile>,
     pending_remote_format: Option<ClipboardFormatId>,
     remote_file_transfer: Option<RemoteFileTransfer>,
+    completed_remote_staging: Vec<StagingDirectory>,
     actions: VecDeque<ClipboardAction>,
     ready: bool,
     negotiated_capabilities: ClipboardGeneralCapabilityFlags,
@@ -241,10 +244,29 @@ struct RemoteFileStream {
 
 #[derive(Debug)]
 struct RemoteFileTransfer {
+    staging: StagingDirectory,
     files: Vec<RemoteClipboardFile>,
     top_level_paths: Vec<PathBuf>,
     streams: HashMap<u32, RemoteFileStream>,
     next_stream_id: u32,
+    received_bytes: u64,
+}
+
+#[derive(Debug)]
+struct StagingDirectory(PathBuf);
+
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.0.display(),
+                    %error,
+                    "failed to clean RDP clipboard staging directory"
+                );
+            }
+        }
+    }
 }
 
 struct TaomniCliprdrBackend {
@@ -259,12 +281,14 @@ struct RdpsndWsBackend {
 
 impl ClipboardBridge {
     fn new(out_tx: UnboundedSender<SessionOutput>) -> Self {
+        cleanup_stale_clipboard_staging();
         Self {
             state: Arc::new(Mutex::new(ClipboardBridgeState {
                 local_text: None,
                 local_files: Vec::new(),
                 pending_remote_format: None,
                 remote_file_transfer: None,
+                completed_remote_staging: Vec::new(),
                 actions: VecDeque::new(),
                 ready: false,
                 negotiated_capabilities: ClipboardGeneralCapabilityFlags::empty(),
@@ -274,8 +298,7 @@ impl ClipboardBridge {
     }
 
     fn backend(&self) -> TaomniCliprdrBackend {
-        let temporary_directory = std::env::temp_dir()
-            .join("taomni-rdp-cliprdr")
+        let temporary_directory = clipboard_process_staging_root()
             .to_string_lossy()
             .into_owned();
         TaomniCliprdrBackend {
@@ -377,7 +400,14 @@ impl ClipboardBridge {
         if !request.flags.contains(FileContentsFlags::RANGE) || file.is_directory {
             return FileContentsResponse::new_error(request.stream_id);
         }
-        read_clipboard_file_range(&file.path, request.position, request.requested_size)
+        if request.position > file.size {
+            return FileContentsResponse::new_error(request.stream_id);
+        }
+        let remaining = file.size.saturating_sub(request.position);
+        let requested_size = request
+            .requested_size
+            .min(remaining.min(u32::MAX as u64) as u32);
+        read_clipboard_file_range(&file.path, request.position, requested_size)
             .map(|data| FileContentsResponse::new_data_response(request.stream_id, data))
             .unwrap_or_else(|_| FileContentsResponse::new_error(request.stream_id))
     }
@@ -393,11 +423,22 @@ impl ClipboardBridge {
                             "Remote clipboard did not contain any file paths.",
                         );
                     } else {
+                        if let Ok(mut state) = self.state.lock() {
+                            state.completed_remote_staging.clear();
+                            state.completed_remote_staging.push(transfer.staging);
+                        } else {
+                            self.send_clipboard_status(
+                                "clipboard-remote-files-error",
+                                "Remote clipboard staging state is unavailable.",
+                            );
+                            return;
+                        }
                         self.finish_remote_file_receive(completed_paths);
                     }
                     return;
                 }
                 if let Ok(mut state) = self.state.lock() {
+                    state.completed_remote_staging.clear();
                     state
                         .actions
                         .push_back(ClipboardAction::RequestRemoteFileContents(requests));
@@ -413,7 +454,7 @@ impl ClipboardBridge {
 
     fn handle_remote_file_contents_response(&self, response: FileContentsResponse<'_>) {
         let stream_id = response.stream_id();
-        let data = response.data().to_vec();
+        let data = response.data();
         let mut next_request = None;
         let mut completed_paths = None;
         let mut error = None;
@@ -427,20 +468,45 @@ impl ClipboardBridge {
             };
             let Some(stream) = transfer.streams.remove(&stream_id) else {
                 error = Some(format!("unknown remote file stream {}", stream_id));
+                state.remote_file_transfer = None;
                 drop(state);
                 self.send_clipboard_status("clipboard-remote-files-error", &error.unwrap());
                 return;
             };
             let Some(file) = transfer.files.get(stream.index).cloned() else {
                 error = Some(format!("remote file index {} is unavailable", stream.index));
+                state.remote_file_transfer = None;
                 drop(state);
                 self.send_clipboard_status("clipboard-remote-files-error", &error.unwrap());
                 return;
             };
 
-            if !file.is_directory && !data.is_empty() {
+            let data_len = u64::try_from(data.len()).unwrap_or(u64::MAX);
+            let remaining = file.size.saturating_sub(stream.position);
+            if file.is_directory {
+                error = Some(format!(
+                    "remote directory index {} returned file data",
+                    stream.index
+                ));
+            } else if data.is_empty() && stream.position < file.size {
+                error = Some(format!(
+                    "remote file '{}' ended before its declared size",
+                    file.path.display()
+                ));
+            } else if data.len() > REMOTE_FILE_CHUNK_SIZE as usize || data_len > remaining {
+                error = Some(format!(
+                    "remote file '{}' exceeded its declared transfer bounds",
+                    file.path.display()
+                ));
+            } else if transfer.received_bytes.saturating_add(data_len) > MAX_CLIPBOARD_TOTAL_BYTES {
+                error = Some("remote file clipboard exceeded its total byte quota".to_string());
+            }
+
+            if error.is_none() && !data.is_empty() {
                 if let Err(e) = write_remote_file_chunk(&file.path, stream.position, &data) {
                     error = Some(e);
+                } else {
+                    transfer.received_bytes = transfer.received_bytes.saturating_add(data_len);
                 }
             }
 
@@ -451,13 +517,17 @@ impl ClipboardBridge {
                 next_request = Some(request);
             }
 
-            if let Some(request) = next_request.clone() {
+            if error.is_some() {
+                state.remote_file_transfer = None;
+            } else if let Some(request) = next_request.clone() {
                 state
                     .actions
                     .push_back(ClipboardAction::RequestRemoteFileContents(vec![request]));
             } else if transfer.streams.is_empty() {
-                completed_paths = Some(transfer.top_level_paths.clone());
-                state.remote_file_transfer = None;
+                if let Some(transfer) = state.remote_file_transfer.take() {
+                    completed_paths = Some(transfer.top_level_paths.clone());
+                    state.completed_remote_staging.push(transfer.staging);
+                }
             }
         }
 
@@ -1612,29 +1682,138 @@ fn file_contents_request_message(request: FileContentsRequest) -> SvcMessage {
         .with_flags(ChannelFlags::SHOW_PROTOCOL)
 }
 
+fn clipboard_staging_base() -> PathBuf {
+    #[cfg(unix)]
+    let name = format!("taomni-rdp-cliprdr-{}", unsafe { libc::geteuid() });
+    #[cfg(not(unix))]
+    let name = "taomni-rdp-cliprdr".to_string();
+    std::env::temp_dir().join(name)
+}
+
+fn clipboard_process_staging_root() -> PathBuf {
+    clipboard_staging_base().join(format!("process-{}", std::process::id()))
+}
+
+fn cleanup_stale_clipboard_staging() {
+    static CLEANUP: Once = Once::new();
+    CLEANUP.call_once(|| {
+        let base = clipboard_staging_base();
+        if let Err(error) = ensure_private_directory(&base) {
+            tracing::warn!(path = %base.display(), %error, "failed to create RDP clipboard staging root");
+            return;
+        }
+        if let Err(error) = ensure_private_directory(&clipboard_process_staging_root()) {
+            tracing::warn!(%error, "failed to create private RDP clipboard process directory");
+            return;
+        }
+        let Ok(entries) = fs::read_dir(&base) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path == clipboard_process_staging_root() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let stale = if let Some(pid) = name
+                .strip_prefix("process-")
+                .and_then(|value| value.parse::<u32>().ok())
+            {
+                !process_is_alive(pid)
+            } else {
+                entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(24 * 60 * 60))
+            };
+            if stale {
+                let result = if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                if let Err(error) = result {
+                    tracing::warn!(path = %path.display(), %error, "failed to remove stale RDP clipboard staging path");
+                }
+            }
+        }
+    });
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path)
+        .map_err(|error| format!("create private directory '{}': {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("secure directory '{}': {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    // Avoid deleting another process's active transfer on platforms where this
+    // module has no inexpensive process-existence probe.
+    true
+}
+
 fn build_remote_file_transfer(
     list: PackedFileList,
 ) -> Result<(RemoteFileTransfer, Vec<FileContentsRequest>), String> {
-    let staging_dir = std::env::temp_dir()
-        .join("taomni-rdp-cliprdr")
-        .join(uuid::Uuid::new_v4().to_string());
-    fs::create_dir_all(&staging_dir).map_err(|e| {
-        format!(
-            "create staging directory '{}': {}",
-            staging_dir.display(),
-            e
-        )
-    })?;
+    if list.files.len() > MAX_CLIPBOARD_FILE_ITEMS {
+        return Err(format!(
+            "remote file clipboard contains more than {} items",
+            MAX_CLIPBOARD_FILE_ITEMS
+        ));
+    }
+    let process_root = clipboard_process_staging_root();
+    ensure_private_directory(&process_root)?;
+    let staging_dir = process_root.join(uuid::Uuid::new_v4().to_string());
+    ensure_private_directory(&staging_dir)?;
+    let staging = StagingDirectory(staging_dir.clone());
 
     let mut files = Vec::with_capacity(list.files.len());
     let mut top_level_names = HashSet::new();
     let mut top_level_paths = Vec::new();
+    let mut seen_paths = HashSet::new();
+    let mut total_bytes = 0u64;
     for file in list.files {
         let is_directory = file
             .attributes
             .unwrap_or_else(ClipboardFileAttributes::empty)
             .contains(ClipboardFileAttributes::DIRECTORY);
         let path = remote_clipboard_safe_path(&staging_dir, &file.name)?;
+        if !seen_paths.insert(path.clone()) {
+            return Err(format!(
+                "remote file clipboard contains duplicate path '{}'",
+                file.name
+            ));
+        }
+        let file_size = file.file_size.unwrap_or_default();
+        if !is_directory && file_size > MAX_CLIPBOARD_FILE_BYTES {
+            return Err(format!(
+                "remote clipboard file '{}' exceeds the {} MiB per-file quota",
+                file.name,
+                MAX_CLIPBOARD_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        total_bytes = total_bytes.saturating_add(file_size);
+        if total_bytes > MAX_CLIPBOARD_TOTAL_BYTES {
+            return Err(format!(
+                "remote file clipboard exceeds the {} MiB total quota",
+                MAX_CLIPBOARD_TOTAL_BYTES / (1024 * 1024)
+            ));
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("create directory '{}': {}", parent.display(), e))?;
@@ -1642,8 +1821,14 @@ fn build_remote_file_transfer(
         if is_directory {
             fs::create_dir_all(&path)
                 .map_err(|e| format!("create directory '{}': {}", path.display(), e))?;
-        } else if file.file_size.unwrap_or_default() == 0 {
-            File::create(&path).map_err(|e| format!("create '{}': {}", path.display(), e))?;
+        } else {
+            let mut options = OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            options
+                .open(&path)
+                .map_err(|e| format!("create '{}': {}", path.display(), e))?;
         }
 
         if let Some(name) = remote_top_level_name(&file.name) {
@@ -1654,22 +1839,18 @@ fn build_remote_file_transfer(
 
         files.push(RemoteClipboardFile {
             path,
-            size: file.file_size.unwrap_or_default(),
+            size: file_size,
             is_directory,
         });
-        if files.len() > MAX_CLIPBOARD_FILE_ITEMS {
-            return Err(format!(
-                "remote file clipboard contains more than {} items",
-                MAX_CLIPBOARD_FILE_ITEMS
-            ));
-        }
     }
 
     let mut transfer = RemoteFileTransfer {
+        staging,
         files,
         top_level_paths,
         streams: HashMap::new(),
         next_stream_id: 1,
+        received_bytes: 0,
     };
     let mut requests = Vec::new();
     for index in 0..transfer.files.len() {
@@ -1733,9 +1914,11 @@ fn remote_top_level_name(remote_name: &str) -> Option<PathBuf> {
 }
 
 fn write_remote_file_chunk(path: &Path, position: u64, data: &[u8]) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
+    let mut options = OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    let mut file = options
         .open(path)
         .map_err(|e| format!("open '{}': {}", path.display(), e))?;
     file.seek(SeekFrom::Start(position))
@@ -1746,6 +1929,7 @@ fn write_remote_file_chunk(path: &Path, position: u64, data: &[u8]) -> Result<()
 
 fn collect_local_clipboard_files(paths: &[String]) -> Result<Vec<LocalClipboardFile>, String> {
     let mut files = Vec::new();
+    let mut total_bytes = 0u64;
     for raw in paths {
         if raw.trim().is_empty() {
             continue;
@@ -1755,7 +1939,7 @@ fn collect_local_clipboard_files(paths: &[String]) -> Result<Vec<LocalClipboardF
             .canonicalize()
             .map_err(|e| format!("canonicalize '{}': {}", raw, e))?;
         let root = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
-        collect_clipboard_path(&root, &path, &mut files)?;
+        collect_clipboard_path(&root, &path, &mut files, &mut total_bytes)?;
         if files.len() > MAX_CLIPBOARD_FILE_ITEMS {
             return Err(format!(
                 "file clipboard contains more than {} items",
@@ -1770,10 +1954,33 @@ fn collect_clipboard_path(
     root: &Path,
     path: &Path,
     out: &mut Vec<LocalClipboardFile>,
+    total_bytes: &mut u64,
 ) -> Result<(), String> {
     let metadata =
-        fs::metadata(path).map_err(|e| format!("metadata '{}': {}", path.display(), e))?;
+        fs::symlink_metadata(path).map_err(|e| format!("metadata '{}': {}", path.display(), e))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "clipboard path '{}' is a symbolic link; links are not transferred",
+            path.display()
+        ));
+    }
     let is_directory = metadata.is_dir();
+    if !is_directory {
+        if metadata.len() > MAX_CLIPBOARD_FILE_BYTES {
+            return Err(format!(
+                "clipboard file '{}' exceeds the {} MiB per-file quota",
+                path.display(),
+                MAX_CLIPBOARD_FILE_BYTES / (1024 * 1024)
+            ));
+        }
+        *total_bytes = total_bytes.saturating_add(metadata.len());
+        if *total_bytes > MAX_CLIPBOARD_TOTAL_BYTES {
+            return Err(format!(
+                "file clipboard exceeds the {} MiB total quota",
+                MAX_CLIPBOARD_TOTAL_BYTES / (1024 * 1024)
+            ));
+        }
+    }
     let name = clipboard_relative_name(root, path)?;
     out.push(LocalClipboardFile {
         path: path.to_path_buf(),
@@ -1794,7 +2001,7 @@ fn collect_clipboard_path(
             .map_err(|e| format!("read directory '{}': {}", path.display(), e))?;
         entries.sort_by_key(|entry| entry.path());
         for entry in entries {
-            collect_clipboard_path(root, &entry.path(), out)?;
+            collect_clipboard_path(root, &entry.path(), out, total_bytes)?;
             if out.len() > MAX_CLIPBOARD_FILE_ITEMS {
                 return Err(format!(
                     "file clipboard contains more than {} items",
@@ -1833,7 +2040,13 @@ fn read_clipboard_file_range(
     position: u64,
     requested_size: u32,
 ) -> Result<Vec<u8>, String> {
-    let mut file = File::open(path).map_err(|e| format!("open '{}': {}", path.display(), e))?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("open '{}': {}", path.display(), e))?;
     file.seek(SeekFrom::Start(position))
         .map_err(|e| format!("seek '{}': {}", path.display(), e))?;
     let max_chunk = 16 * 1024 * 1024;
@@ -2310,6 +2523,38 @@ mod tests {
         .expect("clipboard_files notification");
         let path = output["paths"][0].as_str().unwrap();
         assert_eq!(std::fs::read(path).unwrap(), b"abc");
+        let staged_path = PathBuf::from(path);
+        drop(bridge);
+        assert!(!staged_path.exists());
+    }
+
+    #[test]
+    fn remote_file_clipboard_rejects_declared_size_over_quota() {
+        let error = build_remote_file_transfer(PackedFileList {
+            files: vec![
+                IronClipboardFileDescriptor::new("too-large.bin")
+                    .with_attributes(ClipboardFileAttributes::NORMAL)
+                    .with_file_size(MAX_CLIPBOARD_FILE_BYTES + 1),
+            ],
+        })
+        .unwrap_err();
+
+        assert!(error.contains("per-file quota"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_file_clipboard_does_not_follow_nested_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), root.path().join("linked-secret")).unwrap();
+
+        let error = collect_local_clipboard_files(&[root.path().to_string_lossy().into_owned()])
+            .unwrap_err();
+
+        assert!(error.contains("symbolic link"));
     }
 
     #[test]

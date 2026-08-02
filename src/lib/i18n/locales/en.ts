@@ -1724,6 +1724,7 @@ const dict = {
       drive: "Drive redirection",
       driveLabel: "Drive label",
       drivePath: "Local folder",
+      driveReadOnly: "Read-only (recommended)",
       driveBrowse: "Browse…",
       gateway: "RD Gateway",
       gatewayHost: "Gateway host",

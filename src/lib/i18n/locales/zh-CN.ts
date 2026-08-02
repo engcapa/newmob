@@ -1712,6 +1712,7 @@ export const zhCN: DeepPartial<typeof en> = {
       drive: "磁盘重定向",
       driveLabel: "磁盘名称",
       drivePath: "本地文件夹",
+      driveReadOnly: "只读（推荐）",
       driveBrowse: "浏览…",
       gateway: "RD 网关",
       gatewayHost: "网关主机",
