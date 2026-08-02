@@ -936,6 +936,10 @@ export default function RdpPanel({
             maxHeight: scaleMode === "fit" ? "100%" : undefined,
             imageRendering: "pixelated",
             background: "#000",
+            // IronRDP composites the server pointer into the framebuffer.
+            // Hide the WebView cursor while connected so the local and remote
+            // pointers are not rendered on top of each other.
+            cursor: status === "connected" ? "none" : "default",
           }}
         />
         <textarea
