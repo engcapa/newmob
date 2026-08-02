@@ -12,6 +12,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 
+use image::{ColorType, ImageEncoder};
 use ironrdp::cliprdr::CliprdrClient;
 use ironrdp::cliprdr::backend::CliprdrBackend;
 use ironrdp::cliprdr::pdu::{
@@ -28,6 +29,7 @@ use ironrdp::core::{AsAny, IntoOwned, WriteBuf};
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::dvc::DrdynvcClient;
 use ironrdp::graphics::image_processing::PixelFormat;
+use ironrdp::graphics::pointer::DecodedPointer;
 use ironrdp::input::{
     Database as InputDatabase, MouseButton, MousePosition, Operation, Scancode, WheelRotations,
 };
@@ -53,7 +55,7 @@ use crate::rdp::RdpOptions;
 use crate::rdp::frame::{DecodedTile, TileHeader};
 use crate::rdp::input::{KeyEvent, PointerEvent, PointerWheelEvent};
 use crate::rdp::transport::{RdpStream, open_transport};
-use crate::rdp::ws::{RdpControl, channel, frame_payload_with_header};
+use crate::rdp::ws::{RdpControl, channel, cursor, frame_payload_with_header};
 use crate::terminal::network::NetworkSettings;
 
 /// Output yielded from the session toward the WS layer.
@@ -1516,12 +1518,25 @@ where
                     });
                 }
             }
-            ActiveStageOutput::PointerDefault
-            | ActiveStageOutput::PointerHidden
-            | ActiveStageOutput::PointerPosition { .. }
-            | ActiveStageOutput::PointerBitmap(_) => {
-                // Pointer changes are software-rendered into the framebuffer by
-                // IronRDP when pointer_software_rendering is enabled.
+            ActiveStageOutput::PointerDefault => {
+                send_cursor_payload(out_tx, vec![cursor::DEFAULT]);
+            }
+            ActiveStageOutput::PointerHidden => {
+                send_cursor_payload(out_tx, vec![cursor::HIDDEN]);
+            }
+            ActiveStageOutput::PointerPosition { .. } => {
+                // Browsers intentionally do not allow applications to warp the
+                // host pointer. Normal movement follows local pointer events,
+                // while server-provided shape changes are handled below.
+            }
+            ActiveStageOutput::PointerBitmap(pointer) => {
+                match cursor_bitmap_payload(pointer.as_ref()) {
+                    Ok(payload) => send_cursor_payload(out_tx, payload),
+                    Err(error) => {
+                        tracing::warn!(%error, "ignoring invalid RDP cursor bitmap");
+                        send_cursor_payload(out_tx, vec![cursor::DEFAULT]);
+                    }
+                }
             }
             ActiveStageOutput::Terminate(reason) => {
                 send_text(
@@ -2258,7 +2273,10 @@ fn build_ironrdp_config(cfg: &RdpConnectionSettings) -> connector::Config {
         request_data: None,
         autologon: !cfg.options.nla && (cfg.username.is_some() || cfg.password.is_some()),
         enable_audio_playback: cfg.options.redirect_audio == "play",
-        pointer_software_rendering: true,
+        // The WebView renders server-provided cursor shapes as a native CSS
+        // cursor. Compositing the pointer into the framebuffer would make its
+        // movement wait for remote graphics updates and feel noticeably slow.
+        pointer_software_rendering: false,
         performance_flags,
         hardware_id: None,
         license_cache: None::<Arc<dyn connector::LicenseCache>>,
@@ -2266,6 +2284,65 @@ fn build_ironrdp_config(cfg: &RdpConnectionSettings) -> connector::Config {
         compression_type: None,
         multitransport_flags: None,
     }
+}
+
+fn send_cursor_payload(out_tx: &UnboundedSender<SessionOutput>, payload: Vec<u8>) {
+    let _ = out_tx.send(SessionOutput::Channel {
+        tag: channel::CURSOR,
+        payload,
+    });
+}
+
+fn cursor_bitmap_payload(pointer: &DecodedPointer) -> Result<Vec<u8>, String> {
+    if pointer.width == 0 || pointer.height == 0 {
+        return Ok(vec![cursor::HIDDEN]);
+    }
+    if pointer.width > cursor::MAX_DIMENSION || pointer.height > cursor::MAX_DIMENSION {
+        return Err(format!(
+            "cursor dimensions {}x{} exceed {}x{}",
+            pointer.width,
+            pointer.height,
+            cursor::MAX_DIMENSION,
+            cursor::MAX_DIMENSION,
+        ));
+    }
+    if pointer.hotspot_x >= pointer.width || pointer.hotspot_y >= pointer.height {
+        return Err(format!(
+            "cursor hotspot {},{} lies outside {}x{}",
+            pointer.hotspot_x, pointer.hotspot_y, pointer.width, pointer.height,
+        ));
+    }
+
+    let expected = usize::from(pointer.width)
+        .checked_mul(usize::from(pointer.height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or("cursor bitmap size overflow")?;
+    if pointer.bitmap_data.len() != expected {
+        return Err(format!(
+            "cursor bitmap has {} bytes; expected {}",
+            pointer.bitmap_data.len(),
+            expected,
+        ));
+    }
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            &pointer.bitmap_data,
+            u32::from(pointer.width),
+            u32::from(pointer.height),
+            ColorType::Rgba8.into(),
+        )
+        .map_err(|error| format!("encode cursor PNG: {error}"))?;
+
+    let mut payload = Vec::with_capacity(cursor::BITMAP_HEADER_LEN + png.len());
+    payload.push(cursor::BITMAP);
+    payload.extend_from_slice(&pointer.hotspot_x.to_be_bytes());
+    payload.extend_from_slice(&pointer.hotspot_y.to_be_bytes());
+    payload.extend_from_slice(&pointer.width.to_be_bytes());
+    payload.extend_from_slice(&pointer.height.to_be_bytes());
+    payload.extend_from_slice(&png);
+    Ok(payload)
 }
 
 fn normalize_width(width: u16) -> u16 {
@@ -2452,6 +2529,66 @@ mod tests {
             Operation::MouseButtonReleased(MouseButton::Left)
         ));
         assert_eq!(last, 0x00);
+    }
+
+    #[test]
+    fn connector_uses_client_side_cursor_rendering() {
+        let settings = RdpConnectionSettings {
+            host: "rdp.example.test".to_owned(),
+            port: 3389,
+            username: Some("user".to_owned()),
+            password: Some("password".to_owned()),
+            options: RdpOptions::default(),
+            network: None,
+        };
+
+        let config = build_ironrdp_config(&settings);
+
+        assert!(config.enable_server_pointer);
+        assert!(!config.pointer_software_rendering);
+    }
+
+    #[test]
+    fn cursor_bitmap_payload_preserves_shape_and_hotspot_as_png() {
+        let pointer = DecodedPointer {
+            width: 2,
+            height: 1,
+            hotspot_x: 1,
+            hotspot_y: 0,
+            bitmap_data: vec![
+                0xff, 0x00, 0x00, 0xff, // opaque red
+                0x00, 0xff, 0x00, 0x80, // translucent green
+            ],
+        };
+
+        let payload = cursor_bitmap_payload(&pointer).expect("encode cursor payload");
+
+        assert_eq!(payload[0], cursor::BITMAP);
+        assert_eq!(u16::from_be_bytes([payload[1], payload[2]]), 1);
+        assert_eq!(u16::from_be_bytes([payload[3], payload[4]]), 0);
+        assert_eq!(u16::from_be_bytes([payload[5], payload[6]]), 2);
+        assert_eq!(u16::from_be_bytes([payload[7], payload[8]]), 1);
+        let decoded = image::load_from_memory(&payload[cursor::BITMAP_HEADER_LEN..])
+            .expect("decode cursor PNG")
+            .to_rgba8();
+        assert_eq!(decoded.into_raw(), pointer.bitmap_data);
+    }
+
+    #[test]
+    fn cursor_bitmap_payload_hides_empty_and_rejects_invalid_shapes() {
+        assert_eq!(
+            cursor_bitmap_payload(&DecodedPointer::new_invisible()).unwrap(),
+            vec![cursor::HIDDEN]
+        );
+
+        let invalid = DecodedPointer {
+            width: 1,
+            height: 1,
+            hotspot_x: 1,
+            hotspot_y: 0,
+            bitmap_data: vec![0; 4],
+        };
+        assert!(cursor_bitmap_payload(&invalid).is_err());
     }
 
     #[test]
@@ -2778,6 +2915,7 @@ mod tests {
 
         let mut connected = false;
         let mut frame_tiles = 0usize;
+        let mut cursor_updates = 0usize;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
 
         loop {
@@ -2804,6 +2942,27 @@ mod tests {
                 SessionOutput::Channel { tag, payload } if tag == channel::FRAME => {
                     assert!(payload.len() >= 8, "frame payload missing tile header");
                     frame_tiles += 1;
+                    if connected && cursor_updates > 0 {
+                        break;
+                    }
+                }
+                SessionOutput::Channel { tag, payload } if tag == channel::CURSOR => {
+                    assert!(!payload.is_empty(), "cursor payload is empty");
+                    assert!(
+                        matches!(
+                            payload[0],
+                            cursor::DEFAULT | cursor::HIDDEN | cursor::BITMAP
+                        ),
+                        "unknown cursor payload kind {}",
+                        payload[0],
+                    );
+                    if payload[0] == cursor::BITMAP {
+                        assert!(
+                            payload.len() > cursor::BITMAP_HEADER_LEN,
+                            "bitmap cursor payload is missing PNG data"
+                        );
+                    }
+                    cursor_updates += 1;
                     if connected && frame_tiles > 0 {
                         break;
                     }
@@ -2815,6 +2974,10 @@ mod tests {
         let _ = handle.dispatch_control(RdpControl::Disconnect).await;
         assert!(connected, "live RDP session did not report connected");
         assert!(frame_tiles > 0, "live RDP session did not emit a frame");
+        assert!(
+            cursor_updates > 0,
+            "live RDP session did not emit a cursor update"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

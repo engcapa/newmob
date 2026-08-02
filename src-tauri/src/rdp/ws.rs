@@ -72,6 +72,16 @@ pub mod channel {
     pub const IN_REFRESH: u8 = 6; // request a full-desktop redraw
 }
 
+/// Payload kinds carried by [`channel::CURSOR`]. Bitmap payloads continue with
+/// hotspot x/y, width/height (all big-endian u16), then PNG bytes.
+pub mod cursor {
+    pub const DEFAULT: u8 = 0;
+    pub const HIDDEN: u8 = 1;
+    pub const BITMAP: u8 = 2;
+    pub const BITMAP_HEADER_LEN: usize = 9;
+    pub const MAX_DIMENSION: u16 = 512;
+}
+
 #[derive(Debug)]
 pub enum RdpControl {
     Key(KeyEvent),

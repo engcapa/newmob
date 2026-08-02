@@ -113,6 +113,12 @@ export const OUT_CLIPBOARD_DATA = 4;
 export const OUT_STATUS = 5;
 export const OUT_FRAME_END = 6;
 
+export const RDP_CURSOR_DEFAULT = 0;
+export const RDP_CURSOR_HIDDEN = 1;
+export const RDP_CURSOR_BITMAP = 2;
+const RDP_CURSOR_BITMAP_HEADER_LENGTH = 10;
+const RDP_CURSOR_MAX_DIMENSION = 512;
+
 export type RdpWsText =
   | { type: "connected"; width: number; height: number; protocol: string; server_name: string }
   | { type: "disconnected"; reason: string }
@@ -292,6 +298,18 @@ export interface RdpAudioFrame {
   pcm: Uint8Array<ArrayBuffer>;
 }
 
+export type RdpCursorUpdate =
+  | { kind: "default" }
+  | { kind: "hidden" }
+  | {
+      kind: "bitmap";
+      hotspotX: number;
+      hotspotY: number;
+      width: number;
+      height: number;
+      png: Uint8Array<ArrayBuffer>;
+    };
+
 export function parseFrameTile(data: ArrayBuffer): RdpFrameTile | null {
   if (data.byteLength < 9) return null;
   const dv = new DataView(data);
@@ -317,6 +335,54 @@ export function parseAudioFrame(data: ArrayBuffer): RdpAudioFrame | null {
   const formatNo = dv.getUint16(13);
   const pcm = new Uint8Array(data, 17) as Uint8Array<ArrayBuffer>;
   return { tag, sampleRate, channels, bitsPerSample, timestamp, formatNo, pcm };
+}
+
+export function parseRdpCursorFrame(data: ArrayBuffer): RdpCursorUpdate | null {
+  if (data.byteLength < 2) return null;
+  const view = new DataView(data);
+  if (view.getUint8(0) !== OUT_CURSOR) return null;
+
+  const kind = view.getUint8(1);
+  if (kind === RDP_CURSOR_DEFAULT) {
+    return data.byteLength === 2 ? { kind: "default" } : null;
+  }
+  if (kind === RDP_CURSOR_HIDDEN) {
+    return data.byteLength === 2 ? { kind: "hidden" } : null;
+  }
+  if (kind !== RDP_CURSOR_BITMAP || data.byteLength <= RDP_CURSOR_BITMAP_HEADER_LENGTH) {
+    return null;
+  }
+
+  const hotspotX = view.getUint16(2);
+  const hotspotY = view.getUint16(4);
+  const width = view.getUint16(6);
+  const height = view.getUint16(8);
+  if (
+    width === 0 ||
+    height === 0 ||
+    width > RDP_CURSOR_MAX_DIMENSION ||
+    height > RDP_CURSOR_MAX_DIMENSION ||
+    hotspotX >= width ||
+    hotspotY >= height
+  ) {
+    return null;
+  }
+
+  const png = new Uint8Array(data, RDP_CURSOR_BITMAP_HEADER_LENGTH) as Uint8Array<ArrayBuffer>;
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (png.length < pngSignature.length || !pngSignature.every((byte, index) => png[index] === byte)) {
+    return null;
+  }
+  return { kind: "bitmap", hotspotX, hotspotY, width, height, png };
+}
+
+export function rdpCursorToCss(update: RdpCursorUpdate): string {
+  if (update.kind === "default") return "default";
+  if (update.kind === "hidden") return "none";
+
+  let binary = "";
+  for (const byte of update.png) binary += String.fromCharCode(byte);
+  return `url("data:image/png;base64,${window.btoa(binary)}") ${update.hotspotX} ${update.hotspotY}, default`;
 }
 
 /** Map a DOM `KeyboardEvent` to a (scancode, isExtended) pair. */

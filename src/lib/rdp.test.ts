@@ -21,10 +21,16 @@ import {
   mouseButtonMask,
   normalizeRdpResizeSize,
   OUT_AUDIO,
+  OUT_CURSOR,
   OUT_FRAME,
   parseAudioFrame,
   parseFrameTile,
+  parseRdpCursorFrame,
   parseRdpWsText,
+  RDP_CURSOR_BITMAP,
+  RDP_CURSOR_DEFAULT,
+  RDP_CURSOR_HIDDEN,
+  rdpCursorToCss,
   wheelDeltaToRotationUnits,
 } from "./rdp";
 import {
@@ -197,6 +203,56 @@ describe("rdp WS audio parser", () => {
     const buf = new Uint8Array(17);
     buf[0] = OUT_FRAME;
     expect(parseAudioFrame(buf.buffer)).toBeNull();
+  });
+});
+
+describe("rdp cursor channel", () => {
+  it("maps default and hidden cursor messages to local CSS cursors", () => {
+    expect(
+      parseRdpCursorFrame(new Uint8Array([OUT_CURSOR, RDP_CURSOR_DEFAULT]).buffer),
+    ).toEqual({ kind: "default" });
+    const hidden = parseRdpCursorFrame(
+      new Uint8Array([OUT_CURSOR, RDP_CURSOR_HIDDEN]).buffer,
+    );
+    expect(hidden).toEqual({ kind: "hidden" });
+    expect(rdpCursorToCss(hidden!)).toBe("none");
+  });
+
+  it("parses a bounded PNG cursor with its remote hotspot", () => {
+    const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    const bytes = new Uint8Array(10 + pngSignature.length);
+    const view = new DataView(bytes.buffer);
+    bytes[0] = OUT_CURSOR;
+    bytes[1] = RDP_CURSOR_BITMAP;
+    view.setUint16(2, 3);
+    view.setUint16(4, 4);
+    view.setUint16(6, 32);
+    view.setUint16(8, 32);
+    bytes.set(pngSignature, 10);
+
+    const cursor = parseRdpCursorFrame(bytes.buffer);
+
+    expect(cursor).toMatchObject({
+      kind: "bitmap",
+      hotspotX: 3,
+      hotspotY: 4,
+      width: 32,
+      height: 32,
+    });
+    expect(rdpCursorToCss(cursor!)).toMatch(
+      /^url\("data:image\/png;base64,[A-Za-z0-9+/=]+"\) 3 4, default$/,
+    );
+  });
+
+  it("rejects malformed or unbounded cursor messages", () => {
+    const invalid = new Uint8Array(18);
+    const view = new DataView(invalid.buffer);
+    invalid[0] = OUT_CURSOR;
+    invalid[1] = RDP_CURSOR_BITMAP;
+    view.setUint16(6, 513);
+    view.setUint16(8, 32);
+    expect(parseRdpCursorFrame(invalid.buffer)).toBeNull();
+    expect(parseRdpCursorFrame(new Uint8Array([OUT_FRAME, 0]).buffer)).toBeNull();
   });
 });
 

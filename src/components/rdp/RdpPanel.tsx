@@ -25,12 +25,15 @@ import {
   mouseButtonMask,
   normalizeRdpResizeSize,
   OUT_AUDIO,
+  OUT_CURSOR,
   OUT_FRAME,
   parseAudioFrame,
   parseFrameTile,
+  parseRdpCursorFrame,
   parseRdpWsText,
   rdpConnect,
   rdpDisconnect,
+  rdpCursorToCss,
   rdpTrustCertificate,
   wheelDeltaToRotationUnits,
 } from "../../lib/rdp";
@@ -123,6 +126,7 @@ export default function RdpPanel({
   const composingRef = useRef(false);
   const initRef = useRef({ host, port, username, password, options, networkSettingsJson });
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
+  const [remoteCursorCss, setRemoteCursorCss] = useState("default");
   // Tracks whether the host OS window is fullscreen. Only meaningful for
   // attached tabs (detached windows manage their own fullscreen via
   // `detachedWindowControls`). Cosmetic — drives the toolbar icon.
@@ -261,6 +265,7 @@ export default function RdpPanel({
     destroyedRef.current = false;
     lastResizeRequestRef.current = null;
     retryAllowedRef.current = true;
+    setRemoteCursorCss("default");
     store.initConnection(tabId);
 
     let cancelled = false;
@@ -308,6 +313,9 @@ export default function RdpPanel({
               if (visibleRef.current) sendBinary(encodeAck());
             } else if (tag === OUT_AUDIO) {
               playAudioFrame(parseAudioFrame(event.data));
+            } else if (tag === OUT_CURSOR) {
+              const cursor = parseRdpCursorFrame(event.data);
+              if (cursor) setRemoteCursorCss(rdpCursorToCss(cursor));
             }
           } else {
             const msg = parseRdpWsText(event.data as string);
@@ -936,10 +944,10 @@ export default function RdpPanel({
             maxHeight: scaleMode === "fit" ? "100%" : undefined,
             imageRendering: "pixelated",
             background: "#000",
-            // IronRDP composites the server pointer into the framebuffer.
-            // Hide the WebView cursor while connected so the local and remote
-            // pointers are not rendered on top of each other.
-            cursor: status === "connected" ? "none" : "default",
+            // IronRDP forwards the server-provided shape, while the WebView
+            // moves this local cursor immediately without waiting for a remote
+            // framebuffer update.
+            cursor: status === "connected" ? remoteCursorCss : "default",
           }}
         />
         <textarea

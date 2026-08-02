@@ -41,12 +41,12 @@ describe("RdpPanel pointer rendering", () => {
     );
   }
 
-  it("hides the WebView cursor when IronRDP is rendering the connected server pointer", () => {
+  it("uses a local WebView cursor so pointer movement is not gated by remote frames", () => {
     useRdpStore.setState({ connections: { "rdp-tab": CONNECTED } });
 
     renderPanel();
 
-    expect(screen.getByTestId("rdp-canvas")).toHaveStyle({ cursor: "none" });
+    expect(screen.getByTestId("rdp-canvas")).toHaveStyle({ cursor: "default" });
   });
 
   it("keeps a local cursor while the RDP desktop is disconnected", () => {
