@@ -2225,7 +2225,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                           <span className="block truncate">{a.name || a.path}</span>
                           {a.macosIdentity && (
                             <span className="block truncate text-[10px] text-[var(--taomni-text-muted)]">
-                              {a.macosIdentity.mainExecutablePath} · {t("sockscap.bundleFamilyCoverage")}
+                              {a.macosIdentity.mainExecutablePath} ·{" "}
+                              {a.macosIdentity.kind === "executable"
+                                ? t("sockscap.executableOnlyCoverage")
+                                : t("sockscap.bundleFamilyCoverage")}
                             </span>
                           )}
                         </span>

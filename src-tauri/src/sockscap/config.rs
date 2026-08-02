@@ -189,9 +189,30 @@ pub struct UpstreamRef {
     pub params: UpstreamParams,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MacosAppIdentityKind {
+    Bundle,
+    Executable,
+}
+
+impl Default for MacosAppIdentityKind {
+    fn default() -> Self {
+        Self::Bundle
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MacosAppIdentity {
+    /// Whether this identity covers a complete `.app` family or one standalone
+    /// executable. Missing in older configs and therefore defaults to Bundle.
+    #[serde(default)]
+    pub kind: MacosAppIdentityKind,
+    /// Stable user-facing entry point. For command names this is the absolute
+    /// PATH match (which may be a symlink updated in place).
+    #[serde(default)]
+    pub selected_path: String,
     #[serde(default)]
     pub bundle_path: String,
     #[serde(default)]
