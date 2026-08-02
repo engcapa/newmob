@@ -1691,6 +1691,14 @@ export const zhCN: DeepPartial<typeof en> = {
     maximize: "窗口内最大化",
     restore: "还原",
     osFullscreen: "切换全屏",
+    certificateTrustTitle: "验证 RDP 证书",
+    certificateChangedTitle: "RDP 证书已变化",
+    certificateTrustMessage:
+      "此 Mac 不信任 {host}:{port} 提供的证书。继续前请通过独立渠道向服务器管理员核对以下 SHA-256 指纹：\n\n{fingerprint}",
+    certificateChangedMessage:
+      "{host}:{port} 已固定的证书发生变化，可能是服务器重建，也可能是中间人攻击。请通过独立渠道核对新的 SHA-256 指纹：\n\n{fingerprint}",
+    certificateTrustConfirm: "信任并重新连接",
+    certificateTrustDeclined: "未信任该证书，连接已阻止。",
     options: {
       title: "RDP 选项",
       domain: "域",

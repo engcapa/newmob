@@ -9,6 +9,8 @@ export interface RdpOptions {
   screenW: number;
   screenH: number;
   nla: boolean;
+  /** Optional SHA-256 pin used only when operating-system trust validation fails. */
+  certificateFingerprint?: string;
   performance: RdpPerformanceFlags;
   redirectClipboard: boolean;
   redirectAudio: "play" | "off";
@@ -42,6 +44,7 @@ export interface RdpGatewayOptions {
   auth: "basic" | "ntlm";
   /** When true, reuse the RDP session credentials for the gateway. */
   useSessionCreds: boolean;
+  certificateFingerprint?: string;
 }
 
 export const DEFAULT_RDP_PERFORMANCE: RdpPerformanceFlags = {
@@ -88,6 +91,9 @@ export function parseRdpOptions(optionsJson: string | undefined | null): RdpOpti
     screenW: clampInt(o.screenW, 1920, undefined, 320, 8192),
     screenH: clampInt(o.screenH, 1080, undefined, 200, 8192),
     nla: typeof o.nla === "boolean" ? o.nla : false,
+    ...(normalizeFingerprint(o.certificateFingerprint)
+      ? { certificateFingerprint: normalizeFingerprint(o.certificateFingerprint) }
+      : {}),
     performance,
     redirectClipboard:
       typeof o.redirectClipboard === "boolean" ? o.redirectClipboard : true,
@@ -109,6 +115,7 @@ export function serializeRdpOptions(opts: RdpOptions): string {
   return JSON.stringify({
     ...opts,
     domain: opts.domain?.trim() || undefined,
+    certificateFingerprint: normalizeFingerprint(opts.certificateFingerprint),
     redirectDrive,
     gateway,
   });
@@ -171,6 +178,9 @@ function mergeGateway(raw: unknown): RdpGatewayOptions | undefined {
     auth: o.auth === "basic" ? "basic" : "ntlm",
     useSessionCreds:
       typeof o.useSessionCreds === "boolean" ? o.useSessionCreds : true,
+    ...(normalizeFingerprint(o.certificateFingerprint)
+      ? { certificateFingerprint: normalizeFingerprint(o.certificateFingerprint) }
+      : {}),
   };
 }
 
@@ -186,7 +196,14 @@ function normalizeGatewayForStorage(
     password: useSessionCreds ? undefined : raw.password || undefined,
     auth: raw.auth === "basic" ? "basic" : "ntlm",
     useSessionCreds,
+    certificateFingerprint: normalizeFingerprint(raw.certificateFingerprint),
   };
+}
+
+function normalizeFingerprint(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const normalized = raw.replace(/[:\-\s]/g, "").toLowerCase();
+  return /^[0-9a-f]{64}$/.test(normalized) ? normalized : undefined;
 }
 
 function sanitizeDriveLabel(label: string): string {

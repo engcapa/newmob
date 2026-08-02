@@ -98,6 +98,7 @@ pub fn run() {
             let conn = rusqlite::Connection::open(&db_path).expect("failed to open database");
             session::db::init_db(&conn).expect("failed to init database");
             servers::db::init_server_tables(&conn).expect("init server tables");
+            rdp::tls::init_trust_table(&conn).expect("init RDP certificate trust table");
             let mail_db_dir = app_data.join("mail-cache");
             std::fs::create_dir_all(&mail_db_dir).expect("failed to create mail cache directory");
 
@@ -628,6 +629,7 @@ pub fn run() {
             rdp::rdp_connect,
             rdp::rdp_disconnect,
             rdp::rdp_test_connection,
+            rdp::rdp_trust_certificate,
             database::db_connect,
             database::db_ping,
             database::db_disconnect,

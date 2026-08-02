@@ -18,6 +18,8 @@ import {
   encodeRefresh,
   encodeResize,
   encodeWheel,
+  extractRdpCertificateChallenge,
+  formatRdpCertificateFingerprint,
   keyEventToScancode,
   mouseButtonMask,
   normalizeRdpResizeSize,
@@ -28,6 +30,7 @@ import {
   parseRdpWsText,
   rdpConnect,
   rdpDisconnect,
+  rdpTrustCertificate,
   wheelDeltaToRotationUnits,
 } from "../../lib/rdp";
 import { useRdpStore } from "../../stores/rdpStore";
@@ -51,6 +54,7 @@ import { useCaptureStore, type CaptureSource } from "../../stores/captureStore";
 import { CaptureMenuButton } from "../capture/CaptureMenuButton";
 import { captureCanvasPng } from "../../lib/capture";
 import { useAppStore } from "../../stores/appStore";
+import { confirmAppDialog } from "../../lib/appDialogs";
 
 export interface RdpPanelProps {
   tabId: string;
@@ -105,6 +109,8 @@ export default function RdpPanel({
   const audioRef = useRef<{ ctx: AudioContext; nextTime: number } | null>(null);
   const lastResizeRequestRef = useRef<string | null>(null);
   const destroyedRef = useRef(false);
+  const certificatePromptRef = useRef(false);
+  const reconnectRef = useRef<() => void>(() => {});
   const visibleRef = useRef(visible);
   const suppressNextPasteKeyUpRef = useRef(false);
   const initRef = useRef({ host, port, username, password, options, networkSettingsJson });
@@ -228,7 +234,9 @@ export default function RdpPanel({
         sessionIdRef.current = result.session_id;
         store.setConnecting(tabId, result.session_id, result.ws_port);
 
-        const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}`, [
+          `taomni-rdp.${result.ws_token}`,
+        ]);
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
 
@@ -276,7 +284,59 @@ export default function RdpPanel({
                 store.setStage(tabId, msg.stage);
                 break;
               case "error":
-                store.setDisconnected(tabId, msg.message);
+                {
+                  const challenge = extractRdpCertificateChallenge(msg.message);
+                  if (!challenge || certificatePromptRef.current) {
+                    store.setDisconnected(tabId, msg.message);
+                    break;
+                  }
+                  certificatePromptRef.current = true;
+                  store.setStage(tabId, "certificate-review");
+                  void (async () => {
+                    const fingerprint = formatRdpCertificateFingerprint(challenge.observed);
+                    const confirmed = await confirmAppDialog({
+                      title: t(
+                        challenge.changed
+                          ? "rdp.certificateChangedTitle"
+                          : "rdp.certificateTrustTitle",
+                      ),
+                      message: t(
+                        challenge.changed
+                          ? "rdp.certificateChangedMessage"
+                          : "rdp.certificateTrustMessage",
+                        {
+                          host: challenge.host,
+                          port: challenge.port,
+                          fingerprint,
+                        },
+                      ),
+                      confirmLabel: t("rdp.certificateTrustConfirm"),
+                      danger: challenge.changed,
+                    });
+                    if (!confirmed || destroyedRef.current) {
+                      certificatePromptRef.current = false;
+                      store.setDisconnected(tabId, t("rdp.certificateTrustDeclined"));
+                      return;
+                    }
+                    try {
+                      await rdpTrustCertificate(
+                        challenge.host,
+                        challenge.port,
+                        challenge.observed,
+                      );
+                      const oldSession = sessionIdRef.current;
+                      sessionIdRef.current = null;
+                      if (oldSession) await rdpDisconnect(oldSession).catch(() => {});
+                      wsRef.current?.close();
+                      wsRef.current = null;
+                      certificatePromptRef.current = false;
+                      window.setTimeout(() => reconnectRef.current(), 0);
+                    } catch (err) {
+                      certificatePromptRef.current = false;
+                      store.setDisconnected(tabId, String(err));
+                    }
+                  })();
+                }
                 break;
               case "clipboard":
                 void writeClipboardText(msg.text).catch((err) => {
@@ -322,6 +382,8 @@ export default function RdpPanel({
       cancelled = true;
     };
   }, [closeAudio, playAudioFrame, requestViewportResize, sendBinary, store, tabId]);
+
+  reconnectRef.current = doConnect;
 
   useEffect(() => {
     initRef.current = { host, port, username, password, options, networkSettingsJson };

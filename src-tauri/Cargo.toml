@@ -102,9 +102,10 @@ mail-parser = { version = "0.11.4", features = ["full_encoding"] }
 native-tls = "0.2"
 tokio-native-tls = "0.3"
 ironrdp = { version = "0.15.0", features = ["core", "connector", "session", "graphics", "input", "cliprdr", "rdpdr", "rdpsnd", "svc", "dvc", "displaycontrol", "server", "acceptor"] }
-ironrdp-tls = { version = "0.2.1", features = ["rustls"] }
 ironrdp-tokio = { version = "0.9.0", features = ["reqwest-rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
+x509-cert = "0.2"
 # RDP server (servers/rdp.rs): self-signed TLS cert + cross-platform input injection.
 rcgen = "0.14"
 # LanChat (lanchat/tls.rs): async rustls adapter to upgrade the P2P TCP control

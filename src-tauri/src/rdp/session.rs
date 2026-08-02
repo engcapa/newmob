@@ -12,6 +12,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Once};
 
+use ironrdp::cliprdr::CliprdrClient;
 use ironrdp::cliprdr::backend::CliprdrBackend;
 use ironrdp::cliprdr::pdu::{
     ClipboardFileAttributes, ClipboardFormat, ClipboardFormatId, ClipboardFormatName,
@@ -19,7 +20,6 @@ use ironrdp::cliprdr::pdu::{
     FileContentsResponse, FileDescriptor as IronClipboardFileDescriptor, FormatDataRequest,
     FormatDataResponse, LockDataId, OwnedFormatDataResponse, PackedFileList,
 };
-use ironrdp::cliprdr::CliprdrClient;
 use ironrdp::connector::connection_activation::{
     ConnectionActivationSequence, ConnectionActivationState,
 };
@@ -31,13 +31,13 @@ use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::input::{
     Database as InputDatabase, MouseButton, MousePosition, Operation, Scancode, WheelRotations,
 };
+use ironrdp::pdu::Action;
 use ironrdp::pdu::gcc::KeyboardType;
 use ironrdp::pdu::geometry::InclusiveRectangle;
 use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp::pdu::rdp::client_info::{PerformanceFlags as IronPerformanceFlags, TimezoneInfo};
 use ironrdp::pdu::rdp::headers::ShareDataPdu;
 use ironrdp::pdu::rdp::refresh_rectangle::RefreshRectanglePdu;
-use ironrdp::pdu::Action;
 use ironrdp::rdpsnd::client::{Rdpsnd, RdpsndClientHandler};
 use ironrdp::rdpsnd::pdu::{
     AudioFormat as IronAudioFormat, PitchPdu, VolumePdu, WaveFormat as IronWaveFormat,
@@ -49,11 +49,11 @@ use ironrdp_tokio::{Framed, FramedRead, FramedWrite};
 use serde_json::json;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::rdp::RdpOptions;
 use crate::rdp::frame::{DecodedTile, TileHeader};
 use crate::rdp::input::{KeyEvent, PointerEvent, PointerWheelEvent};
-use crate::rdp::transport::{open_transport, RdpStream};
-use crate::rdp::ws::{channel, frame_payload_with_header, RdpControl};
-use crate::rdp::RdpOptions;
+use crate::rdp::transport::{RdpStream, open_transport};
+use crate::rdp::ws::{RdpControl, channel, frame_payload_with_header};
 use crate::terminal::network::NetworkSettings;
 
 /// Output yielded from the session toward the WS layer.
@@ -863,15 +863,30 @@ async fn drive_ironrdp_connection(
 
     send_status(&out_tx, "tls", "Upgrading the transport to TLS.");
     let stream = framed.into_inner_no_leftover();
-    let (tls_stream, cert) = ironrdp_tls::upgrade(stream, &cfg.host)
-        .await
-        .map_err(|e| format!("rdp TLS upgrade failed: {}", e))?;
-    let server_public_key = ironrdp_tls::extract_tls_server_public_key(&cert)
-        .ok_or_else(|| "rdp TLS certificate did not expose a public key".to_string())?
-        .to_vec();
+    let verified = crate::rdp::tls::upgrade(
+        stream,
+        &cfg.host,
+        cfg.port,
+        cfg.options.certificate_fingerprint.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("rdp TLS upgrade failed: {}", e))?;
+    send_status(
+        &out_tx,
+        if verified.used_pin {
+            "tls-pinned"
+        } else {
+            "tls-verified"
+        },
+        &format!(
+            "RDP certificate verified (SHA-256 {}).",
+            crate::rdp::tls::format_fingerprint(&verified.fingerprint)
+        ),
+    );
+    let server_public_key = verified.server_public_key;
 
     let upgraded = ironrdp_tokio::mark_as_upgraded(should_upgrade, &mut connector);
-    let mut framed = ironrdp_tokio::TokioFramed::new(tls_stream);
+    let mut framed = ironrdp_tokio::TokioFramed::new(verified.stream);
     let mut network_client = ironrdp_tokio::reqwest::ReqwestNetworkClient::new();
 
     send_status(&out_tx, "credssp", "Authenticating with CredSSP/NLA.");
@@ -2215,9 +2230,11 @@ mod tests {
         assert!(names.contains(&"note.txt"));
         assert!(names.contains(&"folder"));
         assert!(names.contains(&"folder\\child.txt"));
-        assert!(files
-            .iter()
-            .any(|file| file.name == "folder" && file.is_directory));
+        assert!(
+            files
+                .iter()
+                .any(|file| file.name == "folder" && file.is_directory)
+        );
     }
 
     #[test]
@@ -2258,9 +2275,11 @@ mod tests {
         let (mut handle, out_tx, _ctrl_rx) = RdpSessionHandle::new();
         let bridge = ClipboardBridge::new(out_tx);
         bridge.start_remote_file_receive(PackedFileList {
-            files: vec![IronClipboardFileDescriptor::new("remote.txt")
-                .with_attributes(ClipboardFileAttributes::NORMAL)
-                .with_file_size(3)],
+            files: vec![
+                IronClipboardFileDescriptor::new("remote.txt")
+                    .with_attributes(ClipboardFileAttributes::NORMAL)
+                    .with_file_size(3),
+            ],
         });
 
         let actions = bridge.drain_actions();

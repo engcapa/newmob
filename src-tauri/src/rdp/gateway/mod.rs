@@ -34,12 +34,12 @@ pub mod rpch;
 
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Once};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use tokio::io::{
     AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, DuplexStream, ReadBuf,
 };
@@ -1017,7 +1017,7 @@ pub async fn open_tunnel(
     ))
 }
 
-type GatewayTlsStream = ironrdp_tls::TlsStream<TcpStream>;
+type GatewayTlsStream = crate::rdp::tls::TlsStream<TcpStream>;
 
 #[derive(Clone, Copy, Debug)]
 enum RpcHttpChannel {
@@ -1182,24 +1182,26 @@ where
 }
 
 async fn connect_gateway_tls(g: &GatewayOpt) -> Result<GatewayTlsStream, String> {
-    install_rustls_crypto_provider();
     let addr = format!("{}:{}", g.host.trim(), g.port);
     let tcp = TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("rdg: connect {}: {}", addr, e))?;
     tcp.set_nodelay(true)
         .map_err(|e| format!("rdg: set TCP_NODELAY: {}", e))?;
-    let (tls, _cert) = ironrdp_tls::upgrade(tcp, g.host.trim())
-        .await
-        .map_err(|e| format!("rdg: TLS handshake with {}: {}", g.host.trim(), e))?;
-    Ok(tls)
-}
-
-fn install_rustls_crypto_provider() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
+    let verified = crate::rdp::tls::upgrade(
+        tcp,
+        g.host.trim(),
+        g.port,
+        g.certificate_fingerprint.as_deref(),
+    )
+    .await
+    .map_err(|e| format!("rdg: TLS handshake with {}: {}", g.host.trim(), e))?;
+    tracing::debug!(
+        fingerprint = %verified.fingerprint,
+        pinned = verified.used_pin,
+        "RD Gateway certificate verified"
+    );
+    Ok(verified.stream)
 }
 
 async fn read_final_http_response_head_async<S>(stream: &mut S) -> Result<HttpResponseHead, String>
@@ -1591,7 +1593,7 @@ fn validate_gateway_base(
             return Err(format!(
                 "rdg: auth '{}' not supported (basic | ntlm)",
                 other
-            ))
+            ));
         }
     }
     if g.username.trim().is_empty() {
@@ -1819,6 +1821,7 @@ mod tests {
             password: Some("secret".into()),
             auth: "basic".into(),
             use_session_creds: false,
+            certificate_fingerprint: None,
         };
         let packets = build_gateway_initial_packets(&g).unwrap();
         assert_eq!(packets.http_host, "rdg.example.com");
@@ -1828,8 +1831,11 @@ mod tests {
             in_headers.starts_with("RPC_IN_DATA /rpc/rpcproxy.dll?rdg.example.com:3388 HTTP/1.1")
         );
         assert!(in_headers.contains("Authorization: Basic YWxpY2U6c2VjcmV0\r\n"));
-        assert!(in_headers
-            .contains("Pragma: ResourceTypeUuid=44e265dd-7daf-42cd-8560-3cdb6e7a2729, SessionId="));
+        assert!(
+            in_headers.contains(
+                "Pragma: ResourceTypeUuid=44e265dd-7daf-42cd-8560-3cdb6e7a2729, SessionId="
+            )
+        );
         assert!(in_headers.contains("Content-Length: 1073741824\r\n"));
         let out_headers = std::str::from_utf8(&packets.rpc_out_headers).unwrap();
         assert!(out_headers.contains("Content-Length: 76\r\n"));
@@ -1864,6 +1870,7 @@ mod tests {
             password: Some("secret".into()),
             auth: "ntlm".into(),
             use_session_creds: false,
+            certificate_fingerprint: None,
         };
         let packets = build_gateway_initial_packets(&g).unwrap();
         assert_eq!(packets.http_host, "rdg.example.com:8443");
@@ -1895,6 +1902,7 @@ mod tests {
             password: Some("secret".into()),
             auth: "ntlm".into(),
             use_session_creds: false,
+            certificate_fingerprint: None,
         };
         let challenge = ntlm::ChallengeMessage {
             target_name: b"CORP".to_vec(),
@@ -2112,6 +2120,7 @@ mod tests {
             password: None,
             auth: "ntlm".into(),
             use_session_creds: true,
+            certificate_fingerprint: None,
         };
         assert!(open_tunnel(&g, "host", 3389).await.is_err());
     }
@@ -2125,6 +2134,7 @@ mod tests {
             password: Some("p".into()),
             auth: "kerberos".into(),
             use_session_creds: true,
+            certificate_fingerprint: None,
         };
         let err = match open_tunnel(&g, "host", 3389).await {
             Ok(_) => panic!("should reject"),
@@ -2142,6 +2152,7 @@ mod tests {
             password: Some("p".into()),
             auth: "ntlm".into(),
             use_session_creds: true,
+            certificate_fingerprint: None,
         };
         let err = match open_tunnel(&g, "host", 3389).await {
             Ok(_) => panic!("should reject missing username"),
@@ -2187,6 +2198,9 @@ mod tests {
             password: Some(password),
             auth: env_nonempty("TAOMNI_RDP_GATEWAY_LIVE_AUTH").unwrap_or_else(|| "ntlm".into()),
             use_session_creds: false,
+            certificate_fingerprint: env_nonempty(
+                "TAOMNI_RDP_GATEWAY_LIVE_CERTIFICATE_FINGERPRINT",
+            ),
         };
         let target_port = env_u16("TAOMNI_RDP_GATEWAY_LIVE_TARGET_PORT", 3389);
 

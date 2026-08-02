@@ -6,6 +6,15 @@ import { serializeRdpOptions } from "../types/rdp";
 export interface RdpConnectResult {
   session_id: string;
   ws_port: number;
+  ws_token: string;
+}
+
+export interface RdpCertificateChallenge {
+  changed: boolean;
+  host: string;
+  port: number;
+  expected?: string;
+  observed: string;
 }
 
 /** Begin an RDP session. Returns the loopback WS port the canvas connects to. */
@@ -32,6 +41,35 @@ export async function rdpConnect(
 /** Close a session previously opened with `rdpConnect`. */
 export async function rdpDisconnect(sessionId: string): Promise<void> {
   return invoke("rdp_disconnect", { sessionId });
+}
+
+export async function rdpTrustCertificate(
+  host: string,
+  port: number,
+  fingerprint: string,
+): Promise<string> {
+  return invoke<string>("rdp_trust_certificate", { host, port, fingerprint });
+}
+
+/** Extract a structured certificate challenge from a rustls handshake error. */
+export function extractRdpCertificateChallenge(message: string): RdpCertificateChallenge | null {
+  const match = message.match(
+    /RDP_CERTIFICATE_(UNTRUSTED|CHANGED)\s+host=([^\s]+)\s+port=(\d+)(?:\s+expected=([0-9a-f]{64}))?\s+observed=([0-9a-f]{64})/i,
+  );
+  if (!match) return null;
+  const port = Number.parseInt(match[3], 10);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return {
+    changed: match[1].toUpperCase() === "CHANGED",
+    host: match[2],
+    port,
+    expected: match[4]?.toLowerCase(),
+    observed: match[5].toLowerCase(),
+  };
+}
+
+export function formatRdpCertificateFingerprint(fingerprint: string): string {
+  return fingerprint.match(/.{1,2}/g)?.join(":").toUpperCase() ?? fingerprint.toUpperCase();
 }
 
 /** Run the X.224 + Negotiation handshake without spawning the relay. */

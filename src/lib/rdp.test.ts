@@ -8,6 +8,8 @@ import {
   encodePointer,
   encodeResize,
   encodeWheel,
+  extractRdpCertificateChallenge,
+  formatRdpCertificateFingerprint,
   IN_ACK,
   IN_KEY,
   IN_PING,
@@ -100,6 +102,35 @@ describe("rdp WS encoders", () => {
     // Large deltas clamp to the 9-bit signed wire range.
     expect(wheelDeltaToRotationUnits(5000, 0)).toBe(255);
     expect(wheelDeltaToRotationUnits(Number.NaN, 0)).toBe(0);
+  });
+});
+
+describe("RDP certificate challenges", () => {
+  it("extracts an untrusted certificate fingerprint from a TLS error", () => {
+    const observed = "ab".repeat(32);
+    expect(
+      extractRdpCertificateChallenge(
+        `rdp TLS upgrade failed: RDP_CERTIFICATE_UNTRUSTED host=rdp.example.com port=3389 observed=${observed} system_error=unknown issuer`,
+      ),
+    ).toEqual({
+      changed: false,
+      host: "rdp.example.com",
+      port: 3389,
+      expected: undefined,
+      observed,
+    });
+    expect(formatRdpCertificateFingerprint(observed)).toMatch(/^AB:AB:/);
+  });
+
+  it("extracts changed pins and ignores unrelated errors", () => {
+    const expected = "11".repeat(32);
+    const observed = "22".repeat(32);
+    expect(
+      extractRdpCertificateChallenge(
+        `RDP_CERTIFICATE_CHANGED host=10.0.0.8 port=443 expected=${expected} observed=${observed}`,
+      ),
+    ).toEqual({ changed: true, host: "10.0.0.8", port: 443, expected, observed });
+    expect(extractRdpCertificateChallenge("bad credentials")).toBeNull();
   });
 });
 

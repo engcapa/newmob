@@ -30,18 +30,21 @@ use std::time::{Duration, Instant};
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
+use tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tungstenite::http::{HeaderValue, StatusCode, header};
+use uuid::Uuid;
 
+use crate::rdp::RdpOptions;
 use crate::rdp::frame::TileHeader;
 use crate::rdp::input::{KeyEvent, PointerEvent, PointerWheelEvent};
 use crate::rdp::session::{
-    start_ironrdp_session, RdpSessionConfig, RdpSessionHandle, SessionOutput,
+    RdpSessionConfig, RdpSessionHandle, SessionOutput, start_ironrdp_session,
 };
 use crate::rdp::transport::open_transport;
-use crate::rdp::RdpOptions;
 use crate::terminal::network::NetworkSettings;
 
 const WS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -121,6 +124,7 @@ enum WsIncomingText {
 pub struct RdpSession {
     pub control_tx: UnboundedSender<RdpControl>,
     pub ws_port: u16,
+    pub ws_token: String,
     pub cancel: CancellationToken,
 }
 
@@ -135,6 +139,7 @@ pub struct RdpSpawnConfig {
 
 pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> {
     let cancel = CancellationToken::new();
+    let ws_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
 
     // 1. Transport. Direct TCP, HTTP/SOCKS5 proxy, and RD Gateway all
     // converge on the same async stream abstraction; IronRDP owns all
@@ -176,6 +181,7 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
     let cancel_clone = cancel.clone();
     let cancel_guard = cancel.clone();
     let control_tx_for_relay = control_tx.clone();
+    let ws_token_for_relay = ws_token.clone();
     tokio::spawn(async move {
         if let Err(e) = run_relay(
             listener,
@@ -185,6 +191,7 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
             control_tx_for_relay,
             control_rx,
             cancel_clone,
+            ws_token_for_relay,
         )
         .await
         {
@@ -199,6 +206,7 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
     Ok(RdpSession {
         control_tx,
         ws_port,
+        ws_token,
         cancel,
     })
 }
@@ -212,22 +220,9 @@ async fn run_relay(
     _control_tx: UnboundedSender<RdpControl>,
     mut control_rx: UnboundedReceiver<RdpControl>,
     cancel: CancellationToken,
+    ws_token: String,
 ) -> Result<(), String> {
-    let (stream, _) = tokio::select! {
-        r = tokio::time::timeout(WS_ACCEPT_TIMEOUT, listener.accept()) => match r {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => return Err(format!("rdp accept: {}", e)),
-            Err(_) => {
-                tracing::warn!("RDP WS accept timed out after {:?}", WS_ACCEPT_TIMEOUT);
-                cancel.cancel();
-                return Ok(());
-            }
-        },
-        _ = cancel.cancelled() => return Ok(()),
-    };
-    let ws_stream = tokio_tungstenite::accept_async(stream)
-        .await
-        .map_err(|e| format!("rdp WS upgrade: {}", e))?;
+    let ws_stream = accept_authorized_ws(&listener, &ws_token, &cancel).await?;
     let (mut ws_sink, ws_reader) = ws_stream.split();
     let last_seen = std::sync::Arc::new(AsyncMutex::new(Instant::now()));
 
@@ -372,6 +367,81 @@ async fn run_relay(
     }
     cancel.cancel();
     Ok(())
+}
+
+async fn accept_authorized_ws(
+    listener: &TcpListener,
+    ws_token: &str,
+    cancel: &CancellationToken,
+) -> Result<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, String> {
+    let deadline = tokio::time::Instant::now() + WS_ACCEPT_TIMEOUT;
+    let expected_protocol = format!("taomni-rdp.{ws_token}");
+    loop {
+        let (stream, _) = tokio::select! {
+            accepted = tokio::time::timeout_at(deadline, listener.accept()) => match accepted {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => return Err(format!("rdp accept: {e}")),
+                Err(_) => {
+                    tracing::warn!("RDP WS accept timed out after {:?}", WS_ACCEPT_TIMEOUT);
+                    return Err("RDP WebSocket authorization timed out".to_string());
+                }
+            },
+            _ = cancel.cancelled() => return Err("RDP relay cancelled".to_string()),
+        };
+        let protocol = expected_protocol.clone();
+        let callback = move |request: &Request, mut response: Response| {
+            if !request_has_authorized_origin(request) || !request_has_protocol(request, &protocol)
+            {
+                let mut rejection = ErrorResponse::new(Some("forbidden".to_string()));
+                *rejection.status_mut() = StatusCode::FORBIDDEN;
+                return Err(rejection);
+            }
+            response.headers_mut().insert(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_str(&protocol).expect("generated WS protocol is valid"),
+            );
+            Ok(response)
+        };
+        match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+            Ok(ws) => return Ok(ws),
+            Err(e) => tracing::warn!("rejected unauthorized RDP WebSocket attempt: {e}"),
+        }
+    }
+}
+
+fn request_has_protocol(request: &Request, expected: &str) -> bool {
+    request
+        .headers()
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.split(',').any(|item| item.trim() == expected))
+}
+
+fn request_has_authorized_origin(request: &Request) -> bool {
+    request
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_authorized_origin)
+}
+
+fn is_authorized_origin(origin: &str) -> bool {
+    if matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    ) {
+        return true;
+    }
+    if cfg!(debug_assertions) {
+        return [
+            "http://localhost:1420",
+            "http://127.0.0.1:1420",
+            "http://localhost:5000",
+            "http://127.0.0.1:5000",
+        ]
+        .contains(&origin);
+    }
+    false
 }
 
 /// Decode a binary control frame from the canvas. Layout:
@@ -538,5 +608,13 @@ mod tests {
         assert_eq!(&p[4..6], &30u16.to_be_bytes());
         assert_eq!(&p[6..8], &40u16.to_be_bytes());
         assert_eq!(&p[8..], &rgba[..]);
+    }
+
+    #[test]
+    fn relay_origin_allowlist_rejects_unrelated_pages() {
+        assert!(is_authorized_origin("tauri://localhost"));
+        assert!(is_authorized_origin("https://tauri.localhost"));
+        assert!(!is_authorized_origin("https://attacker.example"));
+        assert!(!is_authorized_origin("null"));
     }
 }

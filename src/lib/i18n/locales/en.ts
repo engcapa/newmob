@@ -1703,6 +1703,14 @@ const dict = {
     maximize: "Maximize in window",
     restore: "Restore",
     osFullscreen: "Toggle OS fullscreen",
+    certificateTrustTitle: "Verify RDP certificate",
+    certificateChangedTitle: "RDP certificate changed",
+    certificateTrustMessage:
+      "The certificate for {host}:{port} is not trusted by this Mac. Verify this SHA-256 fingerprint with the server administrator before continuing:\n\n{fingerprint}",
+    certificateChangedMessage:
+      "The pinned certificate for {host}:{port} has changed. This can indicate a server rebuild or an interception attempt. Verify the new SHA-256 fingerprint independently:\n\n{fingerprint}",
+    certificateTrustConfirm: "Trust and reconnect",
+    certificateTrustDeclined: "Certificate was not trusted; connection blocked.",
     options: {
       title: "RDP options",
       domain: "Domain",
