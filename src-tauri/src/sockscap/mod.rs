@@ -601,7 +601,7 @@ pub async fn sockscap_start(
 
     // GFWList mode: require rules (cache or fresh fetch) before capture.
     let mut gfw_start_note = String::new();
-    if matches!(cfg.rule_mode, RuleMode::GfwList) {
+    if cfg.requires_gfwlist() {
         let mut orch = state.sockscap.orch.write().await;
         if orch.rules().is_none() {
             if let Some(c) = rules::source::load_cached(&dir) {

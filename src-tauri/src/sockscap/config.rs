@@ -437,7 +437,10 @@ impl SocksCapConfig {
             }
         }
         if self.selected_profile_id.is_empty()
-            || !self.profiles.iter().any(|p| p.id == self.selected_profile_id)
+            || !self
+                .profiles
+                .iter()
+                .any(|p| p.id == self.selected_profile_id)
         {
             if let Some(first) = self.profiles.first() {
                 self.selected_profile_id = first.id.clone();
@@ -485,6 +488,12 @@ impl SocksCapConfig {
             .collect();
         list.sort_by_key(|p| p.priority);
         list
+    }
+
+    pub fn requires_gfwlist(&self) -> bool {
+        self.active_profiles()
+            .iter()
+            .any(|profile| matches!(profile.rule_mode, RuleMode::GfwList))
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -641,5 +650,22 @@ mod tests {
         assert_eq!(loaded.profiles[0].upstream.host, "1.2.3.4");
         assert_eq!(loaded.profiles[0].rule_mode, RuleMode::ProxyAll);
         assert!(loaded.validate().is_ok());
+    }
+
+    #[test]
+    fn gfwlist_requirement_covers_every_active_profile() {
+        let mut config = SocksCapConfig::default();
+        config.profiles[0].rule_mode = RuleMode::ProxyAll;
+        let mut gfw = config.profiles[0].clone();
+        gfw.id = "gfw".into();
+        gfw.rule_mode = RuleMode::GfwList;
+        gfw.priority = 10;
+        config.profiles.push(gfw);
+        config.active_profile_ids = vec!["default".into(), "gfw".into()];
+        config.selected_profile_id = "default".into();
+
+        assert!(config.requires_gfwlist());
+        config.active_profile_ids = vec!["default".into()];
+        assert!(!config.requires_gfwlist());
     }
 }

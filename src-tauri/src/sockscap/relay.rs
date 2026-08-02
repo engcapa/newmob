@@ -50,6 +50,13 @@ const RELAY_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Start probing an idle connection after this long, then every interval.
 const RELAY_KEEPALIVE_IDLE: Duration = Duration::from_secs(60);
 const RELAY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+/// ProxyAll/off/bypass decisions do not need a hostname. Give already-buffered
+/// SNI/HTTP Host a small chance to arrive for better diagnostics and proxy-side
+/// DNS, but do not put it on the critical path.
+const HOSTNAME_SNIFF_OPPORTUNISTIC: Duration = Duration::from_millis(75);
+/// GFWList and hostname user rules require attribution. DNS observation is the
+/// fallback, so a long per-connection stall is no longer useful.
+const HOSTNAME_SNIFF_REQUIRED: Duration = Duration::from_millis(350);
 
 pub struct RelayHandle {
     pub port: u16,
@@ -399,47 +406,90 @@ where
 {
     let dest_ip = flow.dest_ip;
     let dest_port = flow.dest_port;
+    let authoritative_host = flow.dest_host;
     let process_path = flow.process_path;
     let pid = flow.pid;
     let origin = flow.origin;
     let profile_id_hint = flow.profile_id_hint;
 
-    if dest_ip.is_none() && flow.dest_host.is_none() {
+    if dest_ip.is_none() && authoritative_host.is_none() {
         return Err("captured flow carried neither a destination address nor a hostname".into());
     }
 
-    let (prefix, hostname) = match flow.dest_host {
+    let (preliminary_engine, cached_hostname) = {
+        let context = ctx.read().await;
+        let cached_hostname = dest_ip.and_then(|ip| {
+            context
+                .dns_map
+                .lock()
+                .ok()
+                .and_then(|mut map| map.lookup(ip))
+        });
+        (Arc::clone(&context.engine), cached_hostname)
+    };
+    let hostname_free_decision = if authoritative_host.is_none() && cached_hostname.is_none() {
+        preliminary_engine.decide_without_hostname(
+            &PolicyInput {
+                host: None,
+                ip: dest_ip,
+                port: dest_port,
+                process_path: process_path.clone(),
+                pid,
+            },
+            profile_id_hint.as_deref(),
+        )
+    } else {
+        None
+    };
+    let sniff_budget = if cached_hostname.is_some() || hostname_free_decision.is_some() {
+        HOSTNAME_SNIFF_OPPORTUNISTIC
+    } else {
+        HOSTNAME_SNIFF_REQUIRED
+    };
+
+    let (prefix, observed_hostname) = match authoritative_host {
         // A proxy handshake already named the target. Skipping the sniff also
         // avoids stalling server-first protocols (SMTP, IMAP, SSH), where the
         // client sends nothing until the server has greeted it.
         Some(host) => (Vec::new(), Some(host)),
         // Multi-read peek for SNI / HTTP Host (ClientHello may span packets).
-        None => peek_for_hostname(&mut client, dest_port).await,
+        None => peek_for_hostname(&mut client, dest_port, sniff_budget).await,
     };
 
     let snap = {
         let g = ctx.read().await;
         // Learn IP→host from this flow for later pure-IP connections.
-        if let (Some(host), Some(ip)) = (hostname.as_ref(), dest_ip) {
+        if let (Some(host), Some(ip)) = (observed_hostname.as_ref(), dest_ip) {
             if let Ok(mut map) = g.dns_map.lock() {
                 map.insert(ip, host.clone(), None);
             }
         }
 
-        // Prefer live SNI/Host, then dns_map, then none.
-        let host_for_policy = hostname.clone().or_else(|| {
-            dest_ip.and_then(|ip| g.dns_map.lock().ok().and_then(|mut m| m.lookup(ip)))
-        });
+        // Prefer authoritative/live SNI/Host, then the observed DNS response.
+        // DNS attribution is especially important for TLS ECH, where SNI is
+        // intentionally unavailable to a transparent, non-MITM relay.
+        let host_for_policy = observed_hostname
+            .clone()
+            .or_else(|| cached_hostname.clone())
+            .or_else(|| {
+                dest_ip.and_then(|ip| g.dns_map.lock().ok().and_then(|mut m| m.lookup(ip)))
+            });
 
         let engine = Arc::clone(&g.engine);
         let input = PolicyInput {
-            host: host_for_policy,
+            host: host_for_policy.clone(),
             ip: dest_ip,
             port: dest_port,
             process_path: process_path.clone(),
             pid,
         };
-        let trace = engine.decide_with_profile_hint(&input, profile_id_hint.as_deref());
+        let trace = if host_for_policy.is_none() {
+            hostname_free_decision.unwrap_or_else(|| {
+                engine.decide_with_profile_hint(&input, profile_id_hint.as_deref())
+            })
+        } else {
+            engine.decide_with_profile_hint(&input, profile_id_hint.as_deref())
+        };
 
         let (kind, up_host, up_port, up_user, up_pass, ssh_pool, xray_port) =
             match trace.profile_id.as_deref() {
@@ -467,7 +517,8 @@ where
             };
 
         (
-            hostname,
+            observed_hostname,
+            host_for_policy,
             trace,
             kind,
             up_host,
@@ -482,7 +533,8 @@ where
     };
 
     let (
-        hostname,
+        observed_hostname,
+        policy_hostname,
         trace,
         kind,
         up_host,
@@ -495,19 +547,30 @@ where
         xray_port,
     ) = snap;
 
-    // Prefer hostname for dial when known (proxy-side DNS).
-    let dial_host = match (hostname, dest_ip) {
-        (Some(host), _) => host,
-        (None, Some(ip)) => ip.to_string(),
-        (None, None) => return Err("captured flow had no dialable destination".into()),
+    // A direct transparent flow already has the exact destination address; do
+    // not repeat local DNS and possibly select a different CDN edge. Proxied
+    // flows prefer the recovered hostname so the upstream performs DNS and is
+    // not constrained by a locally poisoned answer.
+    let dial_host = match trace.decision {
+        Decision::Proxy => observed_hostname
+            .clone()
+            .or_else(|| policy_hostname.clone())
+            .or_else(|| dest_ip.map(|ip| ip.to_string())),
+        Decision::Direct | Decision::Block => dest_ip
+            .map(|ip| ip.to_string())
+            .or_else(|| observed_hostname.clone())
+            .or_else(|| policy_hostname.clone()),
     };
+    let dial_host =
+        dial_host.ok_or_else(|| "captured flow had no dialable destination".to_string())?;
+    let record_host = policy_hostname.clone().unwrap_or_else(|| dial_host.clone());
 
     let res = match trace.decision {
         Decision::Block => {
             stats.record_decision(false, true);
             if let Ok(mut doms) = domains.lock() {
                 doms.record(
-                    dial_host.clone(),
+                    record_host.clone(),
                     trace.decision,
                     trace.matched_rule.clone(),
                     trace.profile_name.clone(),
@@ -518,7 +581,7 @@ where
                 );
             }
             return Err(format!(
-                "blocked {dial_host}:{dest_port} ({})",
+                "blocked {record_host}:{dest_port} ({})",
                 trace.reason
             ));
         }
@@ -635,7 +698,7 @@ where
             stats.add_bytes(up, down);
             if let Ok(mut doms) = domains.lock() {
                 doms.record(
-                    dial_host,
+                    record_host,
                     trace.decision,
                     trace.matched_rule,
                     trace.profile_name,
@@ -674,15 +737,19 @@ fn server_speaks_first(port: u16) -> bool {
 }
 
 /// Read until we extract a hostname, TLS record is complete, or budget exhausted.
-async fn peek_for_hostname<S>(client: &mut S, dest_port: u16) -> (Vec<u8>, Option<String>)
+async fn peek_for_hostname<S>(
+    client: &mut S,
+    dest_port: u16,
+    budget: Duration,
+) -> (Vec<u8>, Option<String>)
 where
     S: AsyncRead + Unpin,
 {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
     if server_speaks_first(dest_port) {
         return (Vec::new(), None);
     }
-    let deadline = Instant::now() + Duration::from_millis(900);
+    let deadline = Instant::now() + budget;
     let mut prefix: Vec<u8> = Vec::new();
     while Instant::now() < deadline && prefix.len() < 16 * 1024 {
         if let Some(h) = extract_hostname_from_prefix(&prefix) {

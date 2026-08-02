@@ -229,6 +229,8 @@ export interface StatsSnapshot {
   lastQuicDropAt?: number | null;
   scopeMismatchFlows?: number;
   lastScopeMismatchAt?: number | null;
+  flowFailures?: number;
+  dnsAnswersLearned?: number;
 }
 
 export interface ProcessInfo {

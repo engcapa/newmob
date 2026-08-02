@@ -17,6 +17,8 @@ pub struct StatsCounters {
     pub last_quic_drop_at: AtomicU64,
     pub scope_mismatch_flows: AtomicU64,
     pub last_scope_mismatch_at: AtomicU64,
+    pub flow_failures: AtomicU64,
+    pub dns_answers_learned: AtomicU64,
 }
 
 impl StatsCounters {
@@ -36,6 +38,8 @@ impl StatsCounters {
             last_scope_mismatch_at: nonzero_timestamp(
                 self.last_scope_mismatch_at.load(Ordering::Relaxed),
             ),
+            flow_failures: self.flow_failures.load(Ordering::Relaxed),
+            dns_answers_learned: self.dns_answers_learned.load(Ordering::Relaxed),
         }
     }
 
@@ -78,6 +82,14 @@ impl StatsCounters {
             .store(now_unix(), Ordering::Relaxed);
     }
 
+    pub fn record_flow_failure(&self) {
+        self.flow_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_dns_answers(&self, count: u64) {
+        self.dns_answers_learned.fetch_add(count, Ordering::Relaxed);
+    }
+
     pub fn reset(&self) {
         self.flows_total.store(0, Ordering::Relaxed);
         self.flows_proxy.store(0, Ordering::Relaxed);
@@ -91,6 +103,8 @@ impl StatsCounters {
         self.last_quic_drop_at.store(0, Ordering::Relaxed);
         self.scope_mismatch_flows.store(0, Ordering::Relaxed);
         self.last_scope_mismatch_at.store(0, Ordering::Relaxed);
+        self.flow_failures.store(0, Ordering::Relaxed);
+        self.dns_answers_learned.store(0, Ordering::Relaxed);
     }
 }
 
@@ -121,6 +135,10 @@ pub struct StatsSnapshot {
     #[serde(default)]
     #[cfg_attr(not(target_os = "macos"), serde(skip_serializing))]
     pub last_scope_mismatch_at: Option<u64>,
+    #[serde(default)]
+    pub flow_failures: u64,
+    #[serde(default)]
+    pub dns_answers_learned: u64,
 }
 
 fn now_unix() -> u64 {
@@ -241,7 +259,13 @@ impl DomainTracker {
         }
     }
 
-    pub fn add_traffic(&mut self, domain_or_ip: &str, decision: Decision, bytes_up: u64, bytes_down: u64) {
+    pub fn add_traffic(
+        &mut self,
+        domain_or_ip: &str,
+        decision: Decision,
+        bytes_up: u64,
+        bytes_down: u64,
+    ) {
         let key = format!("{domain_or_ip}:{:?}", decision);
         if let Some(entry) = self.records.get_mut(&key) {
             entry.bytes_up += bytes_up;

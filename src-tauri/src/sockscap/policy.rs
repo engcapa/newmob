@@ -1,10 +1,10 @@
-use std::net::IpAddr;
 use serde::Serialize;
+use std::net::IpAddr;
 
-use crate::sockscap::config::{RuleMode, ScopeMode, SocksCapConfig, SocksCapProfile, UserRule, UserRuleAction};
+use crate::sockscap::Decision;
+use crate::sockscap::config::{RuleMode, ScopeMode, SocksCapConfig, UserRule, UserRuleAction};
 use crate::sockscap::paths::{normalize_exe_path, paths_match_exe};
 use crate::sockscap::rules::{CompiledRules, RuleMatch};
-use crate::sockscap::Decision;
 
 #[derive(Debug, Clone)]
 pub struct PolicyInput {
@@ -69,22 +69,14 @@ impl IpNetwork {
         match (self.addr, ip) {
             (IpAddr::V4(n), IpAddr::V4(a)) => {
                 let shift = 32u32.saturating_sub(self.prefix as u32);
-                let mask = if shift >= 32 {
-                    0
-                } else {
-                    u32::MAX << shift
-                };
+                let mask = if shift >= 32 { 0 } else { u32::MAX << shift };
                 (u32::from(n) & mask) == (u32::from(a) & mask)
             }
             (IpAddr::V6(n), IpAddr::V6(a)) => {
                 let n = u128::from(n);
                 let a = u128::from(a);
                 let shift = 128u32.saturating_sub(self.prefix as u32);
-                let mask = if shift >= 128 {
-                    0
-                } else {
-                    u128::MAX << shift
-                };
+                let mask = if shift >= 128 { 0 } else { u128::MAX << shift };
                 (n & mask) == (a & mask)
             }
             _ => false,
@@ -132,7 +124,11 @@ impl PolicyEngine {
         if self.profiles.is_empty() {
             return false;
         }
-        if self.profiles.iter().any(|p| matches!(p.mode, ScopeMode::Global)) {
+        if self
+            .profiles
+            .iter()
+            .any(|p| matches!(p.mode, ScopeMode::Global))
+        {
             return true;
         }
         let Some(p) = process_path else {
@@ -146,6 +142,57 @@ impl PolicyEngine {
 
     pub fn decide(&self, input: &PolicyInput) -> MatchTrace {
         self.decide_with_profile_hint(input, None)
+    }
+
+    /// Return a final decision when hostname attribution cannot affect it.
+    ///
+    /// Transparent capture receives an IP before any application bytes. Global
+    /// ProxyAll profiles and hard bypasses can be routed immediately instead of
+    /// holding every connection open for the hostname sniff budget. A profile
+    /// with a domain user rule or GFWList still returns `None` and waits for SNI,
+    /// HTTP Host, or the DNS observation cache.
+    pub(crate) fn decide_without_hostname(
+        &self,
+        input: &PolicyInput,
+        profile_id_hint: Option<&str>,
+    ) -> Option<MatchTrace> {
+        if input.host.is_some() {
+            return Some(self.decide_with_profile_hint(input, profile_id_hint));
+        }
+
+        if let Some(ip) = input.ip
+            && self.bypass_cidrs.iter().any(|network| network.contains(ip))
+        {
+            return Some(self.decide_with_profile_hint(input, profile_id_hint));
+        }
+
+        for profile in &self.profiles {
+            if matches!(profile.mode, ScopeMode::Apps) {
+                let in_scope = profile_id_hint
+                    .map(|profile_id| profile_id == profile.id)
+                    .unwrap_or_else(|| match input.process_path.as_deref() {
+                        Some(path) => {
+                            let normalized = normalize_path(path);
+                            profile.apps.iter().any(|app| paths_match(&normalized, app))
+                        }
+                        None => false,
+                    });
+                if !in_scope {
+                    continue;
+                }
+            }
+
+            let has_domain_rule = profile.user_rules.iter().any(|rule| {
+                let pattern = rule.pattern.trim();
+                !pattern.is_empty() && IpNetwork::parse(pattern).is_none()
+            });
+            if has_domain_rule || matches!(profile.rule_mode, RuleMode::GfwList) {
+                return None;
+            }
+            return Some(self.decide_with_profile_hint(input, profile_id_hint));
+        }
+
+        Some(self.decide_with_profile_hint(input, profile_id_hint))
     }
 
     /// Evaluate a flow already scoped by an OS capture backend to one app
@@ -196,17 +243,23 @@ impl PolicyEngine {
             }
 
             // User rules in this profile — Block > Proxy > Direct
-            if let Some(mut t) = self.match_user_rules(prof, host.as_deref(), input.ip, UserRuleAction::Block) {
+            if let Some(mut t) =
+                self.match_user_rules(prof, host.as_deref(), input.ip, UserRuleAction::Block)
+            {
                 t.profile_id = Some(prof.id.clone());
                 t.profile_name = Some(prof.name.clone());
                 return t;
             }
-            if let Some(mut t) = self.match_user_rules(prof, host.as_deref(), input.ip, UserRuleAction::Proxy) {
+            if let Some(mut t) =
+                self.match_user_rules(prof, host.as_deref(), input.ip, UserRuleAction::Proxy)
+            {
                 t.profile_id = Some(prof.id.clone());
                 t.profile_name = Some(prof.name.clone());
                 return t;
             }
-            if let Some(mut t) = self.match_user_rules(prof, host.as_deref(), input.ip, UserRuleAction::Direct) {
+            if let Some(mut t) =
+                self.match_user_rules(prof, host.as_deref(), input.ip, UserRuleAction::Direct)
+            {
                 t.profile_id = Some(prof.id.clone());
                 t.profile_name = Some(prof.name.clone());
                 return t;
@@ -263,7 +316,10 @@ impl PolicyEngine {
                         Some(RuleMatch::Miss) | None => {
                             return MatchTrace {
                                 decision: prof.default_action,
-                                reason: format!("profile '{}' gfwlist miss; default_action", prof.name),
+                                reason: format!(
+                                    "profile '{}' gfwlist miss; default_action",
+                                    prof.name
+                                ),
                                 matched_rule: None,
                                 profile_id: Some(prof.id.clone()),
                                 profile_name: Some(prof.name.clone()),
@@ -347,9 +403,11 @@ fn paths_match(process: &str, selector: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sockscap::config::{AppSelector, RuleMode, ScopeMode, SocksCapConfig, SocksCapProfile, UserRule};
-    use crate::sockscap::rules::CompiledRules;
     use crate::sockscap::Decision;
+    use crate::sockscap::config::{
+        AppSelector, RuleMode, ScopeMode, SocksCapConfig, SocksCapProfile, UserRule,
+    };
+    use crate::sockscap::rules::CompiledRules;
 
     fn cfg_gfw() -> SocksCapConfig {
         let mut c = SocksCapConfig::default();
@@ -393,6 +451,60 @@ mod tests {
             pid: None,
         });
         assert!(matches!(miss.decision, Decision::Direct));
+    }
+
+    #[test]
+    fn hostname_free_decisions_skip_sniff_only_when_safe() {
+        let mut config = cfg_gfw();
+        let input = PolicyInput {
+            host: None,
+            ip: Some("8.8.8.8".parse().unwrap()),
+            port: 443,
+            process_path: None,
+            pid: None,
+        };
+        let gfw = PolicyEngine::from_config(&config, None);
+        assert!(gfw.decide_without_hostname(&input, None).is_none());
+
+        config.profiles[0].rule_mode = RuleMode::ProxyAll;
+        let proxy_all = PolicyEngine::from_config(&config, None);
+        assert!(matches!(
+            proxy_all
+                .decide_without_hostname(&input, None)
+                .unwrap()
+                .decision,
+            Decision::Proxy
+        ));
+
+        config.profiles[0].user_rules.push(UserRule {
+            pattern: "example.com".into(),
+            action: UserRuleAction::Direct,
+            comment: String::new(),
+        });
+        let domain_override = PolicyEngine::from_config(&config, None);
+        assert!(
+            domain_override
+                .decide_without_hostname(&input, None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bypass_ip_never_waits_for_a_hostname() {
+        let engine = PolicyEngine::from_config(&cfg_gfw(), None);
+        let trace = engine
+            .decide_without_hostname(
+                &PolicyInput {
+                    host: None,
+                    ip: Some("192.168.0.110".parse().unwrap()),
+                    port: 31028,
+                    process_path: None,
+                    pid: None,
+                },
+                None,
+            )
+            .unwrap();
+        assert!(matches!(trace.decision, Decision::Direct));
     }
 
     #[test]
