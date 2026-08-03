@@ -42,6 +42,7 @@ use crate::servers::engine::LogEmitter;
 /// permitting an interactive client to accumulate visibly stale desktop state.
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 const ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
+const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 
 #[derive(Clone)]
 pub(crate) struct GfxTransport {
@@ -277,6 +278,9 @@ pub(crate) struct H264Encoder {
     callback_state: Arc<EncoderCallbackState>,
     width: u16,
     height: u16,
+    encoded_width: u16,
+    encoded_height: u16,
+    padded_input: Option<Vec<u8>>,
     next_timestamp: i64,
 }
 
@@ -293,6 +297,19 @@ unsafe impl Send for H264Encoder {}
 
 impl H264Encoder {
     pub(crate) fn new(width: u16, height: u16) -> anyhow::Result<Self> {
+        let encoded_width = align_dimension(width)?;
+        let encoded_height = align_dimension(height)?;
+        let padded_input = if (encoded_width, encoded_height) == (width, height) {
+            None
+        } else {
+            let stride = usize::from(encoded_width)
+                .checked_mul(4)
+                .ok_or_else(|| anyhow::anyhow!("aligned H.264 row size overflow"))?;
+            let length = stride
+                .checked_mul(usize::from(encoded_height))
+                .ok_or_else(|| anyhow::anyhow!("aligned H.264 frame size overflow"))?;
+            Some(vec![0; length])
+        };
         let callback_state = Arc::new(EncoderCallbackState {
             sender: Mutex::new(None),
         });
@@ -300,8 +317,8 @@ impl H264Encoder {
         let status = unsafe {
             VTCompressionSession::create(
                 None,
-                i32::from(width),
-                i32::from(height),
+                i32::from(encoded_width),
+                i32::from(encoded_height),
                 kCMVideoCodecType_H264,
                 None,
                 None,
@@ -350,6 +367,9 @@ impl H264Encoder {
             callback_state,
             width,
             height,
+            encoded_width,
+            encoded_height,
+            padded_input,
             next_timestamp: 0,
         })
     }
@@ -362,17 +382,16 @@ impl H264Encoder {
         if !self.matches(frame) {
             anyhow::bail!("H.264 encoder dimensions no longer match captured frame");
         }
-        let base_address = NonNull::new(frame.data.as_mut_ptr().cast::<c_void>())
-            .ok_or_else(|| anyhow::anyhow!("cannot encode an empty captured frame"))?;
+        let (base_address, input_stride) = self.prepare_input(frame)?;
         let mut raw_pixel_buffer = ptr::null_mut();
         let status = unsafe {
             CVPixelBufferCreateWithBytes(
                 None,
-                usize::from(frame.width),
-                usize::from(frame.height),
+                usize::from(self.encoded_width),
+                usize::from(self.encoded_height),
                 kCVPixelFormatType_32BGRA,
                 base_address,
-                frame.stride,
+                input_stride,
                 None,
                 ptr::null_mut(),
                 None,
@@ -430,6 +449,56 @@ impl H264Encoder {
         }
         result?
     }
+
+    /// RDPEGFX requires the coded AVC420 dimensions to be macroblock-aligned.
+    /// ScreenCaptureKit commonly reports scaled sizes such as 1918x970, so the
+    /// reusable buffer pads those pixels to 1920x976. The AVC region metadata
+    /// still names the original surface size and crops the padded edge.
+    fn prepare_input(&mut self, frame: &mut Frame) -> anyhow::Result<(NonNull<c_void>, usize)> {
+        let row_bytes = usize::from(frame.width)
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("H.264 source row size overflow"))?;
+        if frame.stride < row_bytes {
+            anyhow::bail!("H.264 source stride is smaller than its visible row");
+        }
+        let source_length = frame
+            .stride
+            .checked_mul(usize::from(frame.height))
+            .ok_or_else(|| anyhow::anyhow!("H.264 source frame size overflow"))?;
+        if frame.data.len() < source_length {
+            anyhow::bail!(
+                "H.264 source has {} bytes; expected at least {source_length}",
+                frame.data.len()
+            );
+        }
+
+        if let Some(padded) = self.padded_input.as_mut() {
+            let padded_stride = usize::from(self.encoded_width) * 4;
+            for row in 0..usize::from(frame.height) {
+                let source_start = row * frame.stride;
+                let target_start = row * padded_stride;
+                padded[target_start..target_start + row_bytes]
+                    .copy_from_slice(&frame.data[source_start..source_start + row_bytes]);
+            }
+            let address = NonNull::new(padded.as_mut_ptr().cast::<c_void>())
+                .ok_or_else(|| anyhow::anyhow!("cannot encode an empty padded frame"))?;
+            Ok((address, padded_stride))
+        } else {
+            let address = NonNull::new(frame.data.as_mut_ptr().cast::<c_void>())
+                .ok_or_else(|| anyhow::anyhow!("cannot encode an empty captured frame"))?;
+            Ok((address, frame.stride))
+        }
+    }
+}
+
+fn align_dimension(value: u16) -> anyhow::Result<u16> {
+    if value == 0 {
+        anyhow::bail!("cannot create an H.264 encoder with a zero dimension");
+    }
+    value
+        .checked_add(15)
+        .map(|padded| padded & !15)
+        .ok_or_else(|| anyhow::anyhow!("H.264 dimension {value} cannot be aligned to 16 pixels"))
 }
 
 unsafe extern "C-unwind" fn on_h264_encoded(
@@ -450,7 +519,7 @@ unsafe extern "C-unwind" fn on_h264_encoded(
     } else if sample.is_null() {
         Err(anyhow::anyhow!("VideoToolbox dropped an H.264 frame"))
     } else {
-        unsafe { sample_to_avcc(&*sample) }
+        unsafe { sample_to_annex_b(&*sample) }
     };
     if let Ok(sender) = state.sender.lock() {
         if let Some(sender) = sender.as_ref() {
@@ -485,7 +554,12 @@ unsafe fn pixel_buffer_as_image_buffer(pixel_buffer: &CFRetained<CVPixelBuffer>)
     unsafe { &*(pixel_buffer.as_ref() as *const CVPixelBuffer).cast::<CVImageBuffer>() }
 }
 
-unsafe fn sample_to_avcc(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> {
+/// Convert one VideoToolbox sample into the H.264 byte-stream form required by
+/// MS-RDPEGFX. CoreMedia stores encoded samples as AVCC (a big-endian length
+/// before every NAL unit), while RFX_AVC420_BITMAP_STREAM requires Annex B
+/// start codes. Sending AVCC is accepted by the EGFX framing layer but cannot
+/// be decoded by mstsc, leaving the session black and preventing frame ACKs.
+unsafe fn sample_to_annex_b(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> {
     let block: CFRetained<CMBlockBuffer> = unsafe { sample.data_buffer() }
         .ok_or_else(|| anyhow::anyhow!("VideoToolbox returned H.264 without a data buffer"))?;
     let data_length = unsafe { block.data_length() };
@@ -506,6 +580,7 @@ unsafe fn sample_to_avcc(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> {
     let description = unsafe { sample.format_description() }
         .ok_or_else(|| anyhow::anyhow!("VideoToolbox H.264 sample has no format description"))?;
     let mut count = 0;
+    let mut nal_header_length = 0;
     ensure_status(
         unsafe {
             CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
@@ -514,11 +589,19 @@ unsafe fn sample_to_avcc(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> {
                 ptr::null_mut(),
                 ptr::null_mut(),
                 &mut count,
-                ptr::null_mut(),
+                &mut nal_header_length,
             )
         },
         "read VideoToolbox H.264 parameter-set count",
     )?;
+    let nal_header_length = usize::try_from(nal_header_length)
+        .ok()
+        .filter(|length| (1..=4).contains(length))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "VideoToolbox returned invalid H.264 NAL header length {nal_header_length}"
+            )
+        })?;
 
     let mut output = Vec::with_capacity(h264.len().saturating_add(128));
     for index in 0..count {
@@ -539,17 +622,67 @@ unsafe fn sample_to_avcc(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> {
         )?;
         let length = u32::try_from(length)
             .map_err(|_| anyhow::anyhow!("VideoToolbox H.264 parameter set is too large"))?;
+        if pointer.is_null() || length == 0 {
+            anyhow::bail!("VideoToolbox returned an empty H.264 parameter set");
+        }
         let parameter_set = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
-        output.extend_from_slice(&length.to_be_bytes());
-        output.extend_from_slice(parameter_set);
+        append_annex_b_nal(&mut output, parameter_set);
     }
-    output.append(&mut h264);
+    avcc_to_annex_b(&h264, nal_header_length, &mut output)?;
     Ok(output)
+}
+
+fn append_annex_b_nal(output: &mut Vec<u8>, nal: &[u8]) {
+    output.extend_from_slice(&ANNEX_B_START_CODE);
+    output.extend_from_slice(nal);
+}
+
+fn avcc_to_annex_b(
+    avcc: &[u8],
+    nal_header_length: usize,
+    output: &mut Vec<u8>,
+) -> anyhow::Result<()> {
+    if !(1..=4).contains(&nal_header_length) {
+        anyhow::bail!("invalid AVCC NAL header length {nal_header_length}");
+    }
+
+    let mut offset = 0usize;
+    let mut nal_count = 0usize;
+    while offset < avcc.len() {
+        let header_end = offset
+            .checked_add(nal_header_length)
+            .filter(|end| *end <= avcc.len())
+            .ok_or_else(|| anyhow::anyhow!("truncated AVCC NAL length at byte {offset}"))?;
+        let nal_length = avcc[offset..header_end]
+            .iter()
+            .fold(0usize, |value, byte| (value << 8) | usize::from(*byte));
+        if nal_length == 0 {
+            anyhow::bail!("AVCC sample contains an empty NAL unit at byte {offset}");
+        }
+        let nal_end = header_end
+            .checked_add(nal_length)
+            .filter(|end| *end <= avcc.len())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "AVCC NAL at byte {offset} declares {nal_length} bytes beyond the sample"
+                )
+            })?;
+        append_annex_b_nal(output, &avcc[header_end..nal_end]);
+        offset = nal_end;
+        nal_count += 1;
+    }
+
+    if nal_count == 0 {
+        anyhow::bail!("VideoToolbox returned an empty H.264 sample");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{H264Encoder, MAX_FRAMES_IN_FLIGHT};
+    use super::{
+        ANNEX_B_START_CODE, H264Encoder, MAX_FRAMES_IN_FLIGHT, align_dimension, avcc_to_annex_b,
+    };
     use crate::servers::rdp::capture::Frame;
 
     #[test]
@@ -558,22 +691,71 @@ mod tests {
     }
 
     #[test]
-    fn video_toolbox_emits_an_avcc_frame() {
+    fn aligns_avc420_dimensions_to_macroblocks() {
+        assert_eq!(align_dimension(16).unwrap(), 16);
+        assert_eq!(align_dimension(1918).unwrap(), 1920);
+        assert_eq!(align_dimension(970).unwrap(), 976);
+        assert!(align_dimension(0).is_err());
+        assert!(align_dimension(u16::MAX).is_err());
+    }
+
+    #[test]
+    fn video_toolbox_emits_an_annex_b_frame_for_rdpegfx() {
         // 16x16 is the smallest broadly-supported H.264 test surface. This
         // exercises the actual macOS hardware/software codec path without
         // requiring Screen Recording permission or a live RDP client.
         let mut frame = Frame::bgra(vec![0x80; 16 * 16 * 4], 0, 0, 16, 16, 16 * 4);
         let mut encoder = H264Encoder::new(16, 16).expect("create VideoToolbox encoder");
-        let avcc = encoder
+        let annex_b = encoder
             .encode(&mut frame)
             .expect("encode VideoToolbox frame");
 
-        // Every output begins with a 32-bit AVCC NAL length. Parameter sets
-        // are deliberately prefixed by `sample_to_avcc`, making a new EGFX
-        // surface independently decodable.
-        assert!(avcc.len() > 4);
-        let first_nal_length = u32::from_be_bytes(avcc[..4].try_into().unwrap()) as usize;
-        assert!(first_nal_length > 0);
-        assert!(avcc.len() >= 4 + first_nal_length);
+        assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
+        let nal_types: Vec<u8> = annex_b
+            .windows(5)
+            .filter(|bytes| bytes[..4] == ANNEX_B_START_CODE)
+            .map(|bytes| bytes[4] & 0x1f)
+            .collect();
+        assert!(nal_types.contains(&7), "frame must include an SPS");
+        assert!(nal_types.contains(&8), "frame must include a PPS");
+        assert!(
+            nal_types.iter().any(|kind| matches!(kind, 1 | 5)),
+            "frame must include a coded slice"
+        );
+    }
+
+    #[test]
+    fn video_toolbox_encodes_non_aligned_desktops_through_a_padded_surface() {
+        let mut frame = Frame::bgra(vec![0x80; 18 * 18 * 4], 0, 0, 18, 18, 18 * 4);
+        let mut encoder = H264Encoder::new(18, 18).expect("create padded VideoToolbox encoder");
+        let annex_b = encoder.encode(&mut frame).expect("encode padded frame");
+
+        assert_eq!((encoder.encoded_width, encoder.encoded_height), (32, 32));
+        assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
+    }
+
+    #[test]
+    fn converts_avcc_nal_lengths_to_annex_b_start_codes() {
+        let avcc = [0, 0, 0, 2, 0x67, 0xaa, 0, 0, 0, 3, 0x65, 0xbb, 0xcc];
+        let mut annex_b = Vec::new();
+        avcc_to_annex_b(&avcc, 4, &mut annex_b).unwrap();
+
+        assert_eq!(
+            annex_b,
+            [
+                ANNEX_B_START_CODE.as_slice(),
+                [0x67, 0xaa].as_slice(),
+                ANNEX_B_START_CODE.as_slice(),
+                [0x65, 0xbb, 0xcc].as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_avcc_nal_units() {
+        let mut annex_b = Vec::new();
+        let error = avcc_to_annex_b(&[0, 0, 0, 4, 0x65], 4, &mut annex_b).unwrap_err();
+        assert!(error.to_string().contains("declares 4 bytes beyond"));
     }
 }
