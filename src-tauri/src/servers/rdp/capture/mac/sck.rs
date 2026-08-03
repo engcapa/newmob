@@ -213,19 +213,7 @@ impl SckCapturer {
             )
         };
         let configuration = unsafe { SCStreamConfiguration::new() };
-        unsafe {
-            configuration.setWidth(usize::from(width));
-            configuration.setHeight(usize::from(height));
-            configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
-            configuration.setMinimumFrameInterval(objc2_core_media::CMTime::new(1, FRAME_RATE));
-            configuration.setQueueDepth(NATIVE_QUEUE_DEPTH);
-            // The RDP client renders its local cursor immediately. Including it in
-            // video produces a second, delayed cursor and was the source of the
-            // observed overlap on macOS.
-            configuration.setShowsCursor(false);
-            configuration.setShowMouseClicks(false);
-            configuration.setCapturesAudio(false);
-        }
+        configure_stream(&configuration, width, height);
 
         let slot = Arc::new(FrameSlot::new());
         let output = StreamOutput::new(slot.clone());
@@ -265,6 +253,26 @@ impl SckCapturer {
             width: frame_width,
             height: frame_height,
         })
+    }
+}
+
+fn configure_stream(configuration: &SCStreamConfiguration, width: u16, height: u16) {
+    unsafe {
+        configuration.setWidth(usize::from(width));
+        configuration.setHeight(usize::from(height));
+        configuration.setPixelFormat(kCVPixelFormatType_32BGRA);
+        configuration.setMinimumFrameInterval(objc2_core_media::CMTime::new(1, FRAME_RATE));
+        configuration.setQueueDepth(NATIVE_QUEUE_DEPTH);
+        // The RDP client renders its local cursor immediately. Including it in
+        // video produces a second, delayed cursor and was the source of the
+        // observed overlap on macOS.
+        configuration.setShowsCursor(false);
+        configuration.setCapturesAudio(false);
+
+        // Do not call `setShowMouseClicks(false)` here. Apple introduced that
+        // selector in macOS 15; sending it to SCStreamConfiguration on macOS 14
+        // raises an Objective-C exception which cannot unwind through Rust and
+        // aborts the entire process. Its documented default is already false.
     }
 }
 
@@ -473,8 +481,12 @@ fn frame_dimensions(frame: &Frame) -> anyhow::Result<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Frame, FrameSlot};
     use std::time::Duration;
+
+    use objc2_core_video::kCVPixelFormatType_32BGRA;
+    use objc2_screen_capture_kit::SCStreamConfiguration;
+
+    use super::{Frame, FrameSlot, configure_stream};
 
     fn frame(value: u8) -> Frame {
         Frame::bgra(vec![value, 0, 0, 0], 0, 0, 1, 1, 4)
@@ -486,5 +498,19 @@ mod tests {
         slot.publish(frame(1));
         slot.publish(frame(2));
         assert_eq!(slot.take(Duration::from_millis(1)).unwrap().data[0], 2);
+    }
+
+    #[test]
+    fn stream_configuration_is_safe_on_the_deployment_target() {
+        let configuration = unsafe { SCStreamConfiguration::new() };
+        configure_stream(&configuration, 1920, 1080);
+
+        unsafe {
+            assert_eq!(configuration.width(), 1920);
+            assert_eq!(configuration.height(), 1080);
+            assert_eq!(configuration.pixelFormat(), kCVPixelFormatType_32BGRA);
+            assert!(!configuration.showsCursor());
+            assert!(!configuration.capturesAudio());
+        }
     }
 }
