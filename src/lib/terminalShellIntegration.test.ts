@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildSshCwdIntegration, SSH_CWD_INTEGRATION_BODY } from "./terminalShellIntegration";
+import {
+  buildLocalZshCwdIntegration,
+  buildSshCwdIntegration,
+  LOCAL_ZSH_CWD_INTEGRATION_BODY,
+  SSH_CWD_INTEGRATION_BODY,
+} from "./terminalShellIntegration";
 
 describe("buildSshCwdIntegration", () => {
   it("emits a printf OSC 7 form matching the frontend parser", () => {
@@ -47,5 +52,41 @@ describe("buildSshCwdIntegration", () => {
   it("single-quote-escapes the directory to resist injection", () => {
     const out = buildSshCwdIntegration("/tmp/O'Brien");
     expect(out).toContain(" cd '/tmp/O'\\''Brien' 2>/dev/null;");
+  });
+});
+
+describe("buildLocalZshCwdIntegration", () => {
+  it("emits a printf OSC 7 form matching the frontend parser", () => {
+    // Real backslashes so the local printf produces ESC ] 7 ; ... ESC \.
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).toContain("\\033]133;A\\033\\\\");
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).toContain("\\033]7;file://%s%s\\033\\\\'");
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).toContain('"$PWD"');
+  });
+
+  it("only acts under zsh so a local bash keeps the backend PROMPT_COMMAND path", () => {
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).toMatch(/^ if \[ -n "\$ZSH_VERSION" \]; then/);
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY.trimEnd()).toMatch(/fi;$/);
+    // No bash PROMPT_COMMAND branch — that shell is already covered by the backend.
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).not.toContain("PROMPT_COMMAND");
+  });
+
+  it("registers the zsh precmd hook and runs it once at the end", () => {
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).toContain("precmd_functions+=(__taomni_osc7)");
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).toContain(" __taomni_osc7;");
+  });
+
+  it("is idempotent so a re-injection doesn't stack the hook", () => {
+    expect(LOCAL_ZSH_CWD_INTEGRATION_BODY).toContain(
+      'case " ${precmd_functions[*]} " in *" __taomni_osc7 "*)',
+    );
+  });
+
+  it("never cd's — the local PTY already spawns in the right directory", () => {
+    expect(buildLocalZshCwdIntegration()).toBe(LOCAL_ZSH_CWD_INTEGRATION_BODY);
+    expect(buildLocalZshCwdIntegration()).not.toContain(" cd ");
+  });
+
+  it("leads with a space as a cheap HIST_IGNORE_SPACE guard", () => {
+    expect(buildLocalZshCwdIntegration()).toMatch(/^ /);
   });
 });
