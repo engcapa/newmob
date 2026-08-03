@@ -6,6 +6,12 @@
 //! encoder instead. The graphics server's frame acknowledgements are used as a
 //! hard two-frame backpressure boundary: newest state wins over building a
 //! network or decoder backlog.
+//!
+//! The AVC420 path is intentionally opt-in until the IronRDP callback used by
+//! this version exposes `totalFramesDecoded` from the client's frame ACK. An
+//! ACK alone only proves receipt, not successful H.264 decode; treating it as a
+//! render acknowledgement can leave a mapped black surface permanently hiding
+//! the reliable bitmap output.
 
 use core::ffi::c_void;
 use std::ptr::{self, NonNull};
@@ -45,6 +51,7 @@ use crate::servers::engine::LogEmitter;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 const ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
+pub(crate) const AVC420_OPT_IN_ENV: &str = "TAOMNI_RDP_EXPERIMENTAL_AVC420";
 /// How long the ACK window may stay full without a single acknowledgement
 /// arriving before the client is treated as no longer consuming EGFX.
 ///
@@ -53,6 +60,24 @@ const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 /// This bound converts that permanent stall into a one-time downgrade to the
 /// bitmap path, which every client supports.
 const ACK_STALL_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// The accelerated path must be explicitly enabled while its ACK callback
+/// cannot distinguish "received" from "decoded". Keeping the policy here
+/// makes it difficult to accidentally re-enable the black-screen regression
+/// merely by wiring an EGFX factory into the server builder.
+pub(crate) fn avc420_opted_in() -> bool {
+    std::env::var(AVC420_OPT_IN_ENV)
+        .ok()
+        .as_deref()
+        .is_some_and(avc420_opt_in_value)
+}
+
+fn avc420_opt_in_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 #[derive(Clone)]
 pub(crate) struct GfxTransport {
@@ -370,8 +395,11 @@ fn desktop_monitor(width: u16, height: u16) -> Monitor {
     Monitor {
         left: 0,
         top: 0,
-        right: i32::from(width),
-        bottom: i32::from(height),
+        // TS_MONITOR_DEF uses inclusive lower-right coordinates. Using width
+        // and height here describes a monitor one pixel larger in each axis
+        // than the ResetGraphics output buffer, which Win11 may reject.
+        right: i32::from(width.saturating_sub(1)),
+        bottom: i32::from(height.saturating_sub(1)),
         flags: MonitorFlags::PRIMARY,
     }
 }
@@ -875,7 +903,8 @@ mod tests {
 
     use super::{
         ACK_STALL_TIMEOUT, ANNEX_B_START_CODE, AckStall, H264Encoder, MAX_FRAMES_IN_FLIGHT,
-        StallVerdict, align_dimension, avcc_to_annex_b, desktop_monitor, stall_verdict,
+        StallVerdict, align_dimension, avc420_opt_in_value, avcc_to_annex_b, desktop_monitor,
+        stall_verdict,
     };
     use crate::servers::rdp::capture::Frame;
     use ironrdp::pdu::gcc::MonitorFlags;
@@ -929,8 +958,21 @@ mod tests {
     fn reset_graphics_describes_one_primary_desktop_monitor() {
         let monitor = desktop_monitor(1920, 1080);
         assert_eq!((monitor.left, monitor.top), (0, 0));
-        assert_eq!((monitor.right, monitor.bottom), (1920, 1080));
+        assert_eq!((monitor.right, monitor.bottom), (1919, 1079));
         assert!(monitor.flags.contains(MonitorFlags::PRIMARY));
+    }
+
+    #[test]
+    fn accelerated_graphics_requires_an_explicit_truthy_opt_in() {
+        for enabled in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(avc420_opt_in_value(enabled), "{enabled} should opt in");
+        }
+        for disabled in ["", "0", "false", "no", "off", "unexpected"] {
+            assert!(
+                !avc420_opt_in_value(disabled),
+                "{disabled} should keep compatibility mode"
+            );
+        }
     }
 
     #[test]

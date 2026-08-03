@@ -638,6 +638,8 @@ fn build_server(
     );
     #[cfg(target_os = "macos")]
     let gfx = gfx::GfxTransport::new(log.clone());
+    #[cfg(target_os = "macos")]
+    let enable_avc420 = gfx::avc420_opted_in();
     let display = RdpDisplay::new(
         log.clone(),
         params.display_id.clone(),
@@ -667,7 +669,19 @@ fn build_server(
                 .with_display_handler(display)
                 .with_cliprdr_factory(Some(cliprdr));
             #[cfg(target_os = "macos")]
-            let builder = builder.with_gfx_factory(Some(Box::new(gfx.factory())));
+            let builder = if enable_avc420 {
+                log.line(format!(
+                    "RDP display transport: experimental EGFX/AVC420 enabled by {}",
+                    gfx::AVC420_OPT_IN_ENV
+                ));
+                builder.with_gfx_factory(Some(Box::new(gfx.factory())))
+            } else {
+                log.line(format!(
+                    "RDP display transport: low-latency bitmap compatibility mode (set {}=1 only for AVC420 diagnostics)",
+                    gfx::AVC420_OPT_IN_ENV
+                ));
+                builder
+            };
             builder
                 .with_connection_handler(Some(connection_handler))
                 .build()
