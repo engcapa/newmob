@@ -271,12 +271,29 @@ pub async fn recover() -> Result<(), String> {
     stop_bridge(&mut bridge).await?;
     drop(listener);
     drop(cleanup);
-    verify_direct_connectivity_after_recovery().await?;
+    // Applying and then stopping the bridge both write the inert scope through
+    // the verified Provider control channel. That is the same completion
+    // boundary used by a normal Stop. A public TCP endpoint is only a useful
+    // post-condition diagnostic: the host may be offline, behind a captive
+    // portal, or on a network that blocks the fixed probe addresses. Do not
+    // turn those unrelated conditions into a permanently dirty journal.
+    if let Some(error) =
+        connectivity_probe_warning(verify_direct_connectivity_after_recovery().await)
+    {
+        tracing::warn!(
+            %error,
+            "sockscap: Redirector inert recovery succeeded; direct TCP probe was inconclusive"
+        );
+    }
     tracing::info!(
         provider_pid = bridge.provider_pid,
         "sockscap: Redirector recovery inert scope applied"
     );
     Ok(())
+}
+
+fn connectivity_probe_warning(result: Result<(), String>) -> Option<String> {
+    result.err()
 }
 
 async fn verify_direct_connectivity_after_recovery() -> Result<(), String> {
@@ -300,16 +317,21 @@ async fn verify_direct_connectivity_after_recovery() -> Result<(), String> {
                 tracing::info!(%target, probe = "/usr/bin/nc", "sockscap: post-recovery direct TCP probe succeeded");
                 return Ok(());
             }
-            Ok(Ok(output)) => errors.push(format!(
-                "{target}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )),
+            Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail = stderr.trim();
+                errors.push(if detail.is_empty() {
+                    format!("{target}: nc exited with {}", output.status)
+                } else {
+                    format!("{target}: {detail}")
+                });
+            }
             Ok(Err(error)) => errors.push(format!("{target}: launch /usr/bin/nc: {error}")),
             Err(_) => errors.push(format!("{target}: probe timed out")),
         }
     }
     Err(format!(
-        "Redirector inert scope was sent, but an independent /usr/bin/nc process could not prove ordinary TCP connectivity ({}). The recovery journal remains dirty. Check the network, set SOCKSCAP_RECOVERY_PROBE_ADDR to a reachable IP:port, retry Recover, or use the manual macOS recovery steps",
+        "an independent /usr/bin/nc process could not verify ordinary TCP connectivity after the Redirector inert scope was applied ({}). The host may be offline or the probe targets may be blocked; SOCKSCAP_RECOVERY_PROBE_ADDR can override them for diagnostics",
         errors.join("; ")
     ))
 }
@@ -1110,6 +1132,13 @@ mod tests {
         assert_eq!(targets.len(), 2);
         assert!(parse_recovery_probe_targets("example.com:443").is_err());
         assert!(parse_recovery_probe_targets("  ").is_err());
+    }
+
+    #[test]
+    fn failed_connectivity_probe_is_advisory_after_inert_recovery() {
+        let warning = connectivity_probe_warning(Err("host is offline".into()));
+        assert_eq!(warning.as_deref(), Some("host is offline"));
+        assert!(connectivity_probe_warning(Ok(())).is_none());
     }
 
     #[test]

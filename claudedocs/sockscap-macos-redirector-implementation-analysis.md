@@ -104,9 +104,9 @@
 - bridge 监控父 PID、管理管道 EOF 和 10 秒 heartbeat，处理 `SIGINT`/`SIGTERM`/`SIGHUP`；任何触发都执行 `inert -> 300 ms drain -> flow/control close`。bridge/provider 异常通过 telemetry 使 orchestrator 转为 `RecoveryRequired`。
 - Provider control peer 必须同时通过 Darwin `LOCAL_PEERPID`、audit token、System Extension bundle/Team codesign 和固定 executable hash；每个 Provider flow 必须来自同一 PID。bridge 与主进程的 flow socket也双向校验预期 PID。
 - Start 在业务 scope 前 durable 写入 `Preparing`，之后记录 `Active`；Stop 先写 `Stopping`，只有 inert teardown 与 journal clean/remove/fsync 都成功才进入 Idle。启动期间 readiness barrier 阻止 Start 与异步 boot repair 竞态。
-- dirty recovery 会持有跨进程模块锁，启动新的已验证 Redirector，只发送随机非空 inert，关闭 listener 后再由明确未 self-exclude 的 `/usr/bin/nc` 子进程做普通 TCP 直连。可用 `SOCKSCAP_RECOVERY_PROBE_ADDR` 指定逗号分隔的 numeric `IP:port`；失败保留 journal 和 `RecoveryRequired`。
+- dirty recovery 会持有跨进程模块锁，启动新的已验证 Redirector，只发送随机非空 inert 并正常关闭 listener/control；这与正常 Stop 使用相同的硬完成边界。随后由明确未 self-exclude 的 `/usr/bin/nc` 子进程做普通 TCP 直连诊断，可用 `SOCKSCAP_RECOVERY_PROBE_ADDR` 指定逗号分隔的 numeric `IP:port`。公网不可达只记录告警，不再把离线/受限网络误判为 Redirector 恢复失败；控制连接、身份校验或 inert 下发失败仍保留 journal 和 `RecoveryRequired`。
 - 启动恢复仅删除当前用户、固定命名、类型为 Unix socket 且已经无法连接的遗留节点；不会删除普通文件、外来 owner 或活跃 socket。
-- UI 提供 Recover、macOS 系统设置手动关闭步骤和去敏诊断复制；恢复失败会阻止 Start、更新和静默宣称成功。
+- UI 提供 Recover、macOS 系统设置手动关闭步骤和去敏诊断复制；恢复失败会阻止 Start、更新和静默宣称成功。若当前进程仍持有捕获锁也会阻止普通退出；仅启动时发现遗留 dirty journal、当前进程没有活动捕获时允许退出并保留 journal，避免离线用户被困在应用内。
 
 仍有一个无法在 Taomni v1 适配层内消除的上游边界：Redirector v0.12.11 没有 Provider applied ACK、typed identity selector 或 control EOF atomic fail-open。因此本地 `Applied/Active` 只表示 bridge 已把完整 v1 frame 写入经验证的 Provider control；真正 Provider ACK 需要上游 protocol v2。
 
@@ -121,8 +121,8 @@
 ### 9.1 P0：先消除“假恢复”
 
 - [x] 在真实 macOS recovery 完成前，dirty journal 必须使运行态保持 `RecoveryRequired`；`recover_system()` 空操作不得清除 journal。
-- [x] 调整 `boot_repair()` 和 `sockscap_recover()` 的平台契约：只有 macOS recovery 明确证明 inert 已下发且网络已恢复，才能 `force_idle()` 和 `mark_clean_and_clear()`。
-- [x] 恢复失败时禁止新的 Start/更新/静默退出，UI 显示可操作原因，不得仅显示“已恢复”。
+- [x] 调整 `boot_repair()` 和 `sockscap_recover()` 的平台契约：只有 macOS recovery 通过已验证控制通道完成 inert apply/stop，才能 `force_idle()` 和 `mark_clean_and_clear()`；独立公网探针只作诊断，避免离线或目标受限造成假失败。
+- [x] 恢复失败时禁止新的 Start/更新；当前进程仍持有捕获锁时禁止静默退出，只有无活动捕获的遗留 journal 状态允许保留记录后退出；UI 显示可操作原因，不得仅显示“已恢复”。
 - [x] 提供可观察的手动兜底：指引用户在 macOS 系统设置中关闭 Mitmproxy Redirector network configuration/system extension，并导出诊断信息。
 
 ### 9.2 P0：独立 bridge 与进程生命周期

@@ -45,7 +45,7 @@
 - Global capability 只在 `/Applications/Mitmproxy Redirector.app` 通过嵌套 codesign、Team/bundle identity 与 v0.12.11 可执行文件 hash 校验后开放。
 - release workflow 固定下载 wheel、校验 wheel/app tar hash、原样 stage signed universal app tar 与 MIT notice；GitHub Runner 不编译 Xcode extension。
 - 独立 bridge 模式已持有 Provider control，使用 version/session/generation/request-id 管理协议、父进程/心跳 watchdog 与 signal inert cleanup；Provider 和 bridge flow 两端均校验 Darwin peer PID/audit token，Provider control 额外校验固定签名和可执行文件 hash。
-- write-ahead recovery journal、启动 readiness barrier、dirty recovery-only、独立 `/usr/bin/nc` 直连证明和 `RecoveryRequired` UI/诊断已经接通；v1 仍只能证明 frame 完整写入，不能声称 Provider ACK。
+- write-ahead recovery journal、启动 readiness barrier、dirty recovery-only、独立 `/usr/bin/nc` 直连诊断和 `RecoveryRequired` UI/诊断已经接通；恢复的硬完成边界与正常 Stop 一致，要求已验证控制通道完成 inert apply/stop，公网探针失败仅告警；v1 仍只能证明 frame 完整写入，不能声称 Provider ACK。
 - Applications 已接入 `.app` Picker、Security.framework seal/designated-requirement 校验、启动前重验/移动与升级连续性、bundle family 和 fail-open 二次匹配，macOS `app_filter=true`。
 - bundled tar 安装/升级 UI 已实现固定 hash、签名、版本、entitlement、双架构、Gatekeeper 校验、授权 staging/backup/rollback 和同名冲突拒绝。
 - UDP direct 已增加 idle/并发/速率限制与 datagram、QUIC、scope mismatch 统计；P2 protocol v2 的 typed selector、ACK 和 atomic EOF 提案已形成仓库内草案。
