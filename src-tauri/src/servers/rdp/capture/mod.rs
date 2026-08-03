@@ -80,6 +80,34 @@ pub(crate) trait Capturer {
     /// Capture the whole screen into a BGRA full-frame [`Frame`]. Blocking.
     fn capture(&mut self) -> anyhow::Result<Frame>;
 
+    /// Poll for the next full frame, distinguishing "nothing changed" from
+    /// "capture is broken".
+    ///
+    /// `Ok(None)` means the backend saw no new content within its own idle
+    /// budget. That is the normal state of a static desktop, so the caller MUST
+    /// keep polling; treating it as an error terminates the capture thread and
+    /// freezes the client on its last frame. `Err` is reserved for a capture
+    /// source that has genuinely failed.
+    ///
+    /// The default implementation preserves the older "every call must yield a
+    /// frame" contract used by the X11, Wayland and xcap backends.
+    fn poll_frame(&mut self) -> anyhow::Result<Option<Frame>> {
+        self.capture().map(Some)
+    }
+
+    /// Whether this backend already caps its own frame rate at the source.
+    ///
+    /// A self-paced backend blocks inside [`Capturer::poll_frame`] until the
+    /// next frame is genuinely available, so the caller must NOT add a poll
+    /// interval on top: doing so pages in a frame that is already waiting only
+    /// at the next tick, adding up to one whole frame interval of staleness.
+    ///
+    /// Unlike [`Capturer::is_event_driven`], a self-paced backend still returns
+    /// full frames, so the caller keeps its dedup hashing.
+    fn is_self_paced(&self) -> bool {
+        false
+    }
+
     /// Whether this backend drives itself off change notifications (e.g. X11
     /// XDamage) rather than fixed-interval polling. Event-driven backends sleep
     /// until the screen actually changes and return only the changed regions,

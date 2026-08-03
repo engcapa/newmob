@@ -9,11 +9,13 @@
 
 use core::ffi::c_void;
 use std::ptr::{self, NonNull};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ironrdp::dvc::encode_dvc_messages;
-use ironrdp::svc::ChannelFlags;
+use ironrdp::pdu::gcc::{Monitor, MonitorFlags};
+use ironrdp::svc::{ChannelFlags, SvcMessage};
 use ironrdp_egfx::pdu::{Avc420Region, CapabilitiesAdvertisePdu, CapabilitySet};
 use ironrdp_egfx::server::{GraphicsPipelineHandler, GraphicsPipelineServer};
 use ironrdp_server::{
@@ -43,10 +45,22 @@ use crate::servers::engine::LogEmitter;
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
 const ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
+/// How long the ACK window may stay full without a single acknowledgement
+/// arriving before the client is treated as no longer consuming EGFX.
+///
+/// Backpressure drops frames by design, so a client that stops acknowledging
+/// would otherwise freeze the desktop indefinitely while capture stays healthy.
+/// This bound converts that permanent stall into a one-time downgrade to the
+/// bitmap path, which every client supports.
+const ACK_STALL_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Clone)]
 pub(crate) struct GfxTransport {
     state: Arc<Mutex<GfxState>>,
+    /// Incremented by the graphics handler on every client frame acknowledgement.
+    /// Shared with the per-connection handler so the display side can tell a
+    /// slow-but-live client from one that has stopped consuming EGFX entirely.
+    acks: Arc<AtomicU64>,
     log: LogEmitter,
 }
 
@@ -54,6 +68,43 @@ struct GfxState {
     sender: Option<UnboundedSender<ServerEvent>>,
     handle: Option<GfxServerHandle>,
     surface: Option<GfxSurface>,
+    /// Set once the ACK window has been full past [`ACK_STALL_TIMEOUT`] with no
+    /// progress. Cleared when a new connection builds a fresh graphics server.
+    disabled: bool,
+    stall: Option<AckStall>,
+}
+
+/// Start of the current uninterrupted backpressure window.
+#[derive(Clone, Copy)]
+struct AckStall {
+    since: Instant,
+    acks: u64,
+}
+
+/// What to do about a full ACK window.
+#[derive(Debug, PartialEq, Eq)]
+enum StallVerdict {
+    /// Begin (or restart) the stall window against the current ACK count.
+    Restart,
+    /// Client is behind but still acknowledging. Drop this frame.
+    Wait,
+    /// Client has not acknowledged anything for [`ACK_STALL_TIMEOUT`]. Stop
+    /// using EGFX so the desktop keeps updating over the bitmap path.
+    Disable,
+}
+
+/// Decide the fate of a full ACK window from the stall record and the current
+/// acknowledgement count. Pure so the timing policy is directly testable.
+fn stall_verdict(stall: Option<AckStall>, acks: u64, now: Instant) -> StallVerdict {
+    match stall {
+        // Acknowledgements advanced during the window: the client is consuming.
+        Some(stall) if stall.acks != acks => StallVerdict::Restart,
+        Some(stall) if now.duration_since(stall.since) >= ACK_STALL_TIMEOUT => {
+            StallVerdict::Disable
+        }
+        Some(_) => StallVerdict::Wait,
+        None => StallVerdict::Restart,
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -88,7 +139,10 @@ impl GfxTransport {
                 sender: None,
                 handle: None,
                 surface: None,
+                disabled: false,
+                stall: None,
             })),
+            acks: Arc::new(AtomicU64::new(0)),
             log,
         }
     }
@@ -96,44 +150,132 @@ impl GfxTransport {
     pub(crate) fn factory(&self) -> EgfxFactory {
         EgfxFactory {
             state: self.state.clone(),
+            acks: self.acks.clone(),
             log: self.log.clone(),
         }
+    }
+
+    /// Snapshot the connection-scoped state. Taking this before locking the
+    /// graphics server keeps one consistent lock order (state, then server)
+    /// everywhere in this module.
+    fn snapshot(&self) -> Option<GfxSnapshot> {
+        let state = self.state.lock().ok()?;
+        if state.disabled {
+            return None;
+        }
+        Some(GfxSnapshot {
+            handle: state.handle.clone()?,
+            sender: state.sender.clone()?,
+            surface: state.surface,
+            stall: state.stall,
+        })
     }
 
     /// Check before beginning a hardware encode. This inexpensive gate means
     /// no CPU/GPU work is spent for an unready client or one whose ACK window
     /// is already full.
     pub(crate) fn readiness(&self) -> GfxReadiness {
-        let Ok(state) = self.state.lock() else {
+        let Some(snapshot) = self.snapshot() else {
             return GfxReadiness::Unavailable;
         };
-        let Some(handle) = &state.handle else {
-            return GfxReadiness::Unavailable;
-        };
-        let Ok(server) = handle.lock() else {
+        let Ok(server) = snapshot.handle.lock() else {
             return GfxReadiness::Unavailable;
         };
         if !server.is_ready() || !server.supports_avc420() {
-            GfxReadiness::Unavailable
-        } else if server.should_backpressure() {
-            GfxReadiness::Backpressured
-        } else {
-            GfxReadiness::Ready
+            return GfxReadiness::Unavailable;
+        }
+        if !server.should_backpressure() {
+            drop(server);
+            self.clear_stall();
+            return GfxReadiness::Ready;
+        }
+        drop(server);
+
+        // The ACK window is full. Decide whether this client is merely a frame
+        // behind or has stopped acknowledging altogether.
+        let acks = self.acks.load(Ordering::Relaxed);
+        match stall_verdict(snapshot.stall, acks, Instant::now()) {
+            StallVerdict::Restart => {
+                self.begin_stall(acks);
+                GfxReadiness::Backpressured
+            }
+            StallVerdict::Wait => GfxReadiness::Backpressured,
+            StallVerdict::Disable => {
+                self.disable_after_stall();
+                GfxReadiness::Unavailable
+            }
+        }
+    }
+
+    /// Record the beginning of a backpressure window against the current ACK
+    /// count, so progress can be detected on the next check.
+    fn begin_stall(&self, acks: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.stall = Some(AckStall {
+                since: Instant::now(),
+                acks,
+            });
+        }
+    }
+
+    fn clear_stall(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.stall = None;
+        }
+    }
+
+    /// Give up on EGFX for this connection and return it to bitmap updates.
+    ///
+    /// The mapped surface is removed first: leaving it in place would let the
+    /// client keep compositing a frozen surface over the graphics output and
+    /// hide the bitmap updates that are about to take over.
+    fn disable_after_stall(&self) {
+        let (handle, sender, surface) = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if state.disabled {
+                return;
+            }
+            state.disabled = true;
+            state.stall = None;
+            let surface = state.surface.take();
+            let (Some(handle), Some(sender)) = (state.handle.clone(), state.sender.clone()) else {
+                return;
+            };
+            (handle, sender, surface)
+        };
+
+        self.log.line(format!(
+            "RDP EGFX client stopped acknowledging frames for {}ms; returning to bitmap updates",
+            ACK_STALL_TIMEOUT.as_millis()
+        ));
+
+        let Some(surface) = surface else {
+            return;
+        };
+        let Ok(mut server) = handle.lock() else {
+            return;
+        };
+        server.delete_surface(surface.id);
+        let Some(channel_id) = server.channel_id() else {
+            return;
+        };
+        let output = server.drain_output();
+        drop(server);
+        if let Some(messages) = encode_output(channel_id, output) {
+            let _ = sender.send(ServerEvent::Egfx(EgfxServerMessage::SendMessages {
+                messages,
+            }));
         }
     }
 
     pub(crate) fn send_avc420(&self, frame: &Frame, h264: &[u8]) -> GfxSubmit {
-        let (handle, sender, surface) = {
-            let Ok(state) = self.state.lock() else {
-                return GfxSubmit::Unavailable;
-            };
-            let (Some(handle), Some(sender)) = (&state.handle, &state.sender) else {
-                return GfxSubmit::Unavailable;
-            };
-            (handle.clone(), sender.clone(), state.surface)
+        let Some(snapshot) = self.snapshot() else {
+            return GfxSubmit::Unavailable;
         };
 
-        let Ok(mut server) = handle.lock() else {
+        let Ok(mut server) = snapshot.handle.lock() else {
             return GfxSubmit::Unavailable;
         };
         if !server.is_ready() || !server.supports_avc420() {
@@ -143,61 +285,64 @@ impl GfxTransport {
             return GfxSubmit::Backpressured;
         }
 
-        let surface = match surface
-            .filter(|surface| surface.width == frame.width && surface.height == frame.height)
-        {
-            Some(surface) => surface,
+        let reuse = snapshot
+            .surface
+            .filter(|surface| surface.width == frame.width && surface.height == frame.height);
+        let (surface, created) = match reuse {
+            Some(surface) => (surface, false),
             None => {
-                if let Some(previous) = surface {
-                    // A mode change must not leave an obsolete surface mapped
-                    // in the client compositor. Remove it before mapping the
-                    // new dimensions so repeated display changes stay bounded.
-                    server.delete_surface(previous.id);
-                }
-                server.set_output_dimensions(frame.width, frame.height);
+                // First frame, or the captured display changed mode. Resizing
+                // publishes the new graphics output, drops the obsolete surface
+                // so the client stops compositing it, and clears the ACK window
+                // that referred to it.
+                server.resize_with_monitors(
+                    frame.width,
+                    frame.height,
+                    vec![desktop_monitor(frame.width, frame.height)],
+                );
                 let Some(id) = server.create_surface(frame.width, frame.height) else {
                     return GfxSubmit::Unavailable;
                 };
                 if !server.map_surface_to_output(id, 0, 0) {
                     return GfxSubmit::Unavailable;
                 }
-                let surface = GfxSurface {
-                    id,
-                    width: frame.width,
-                    height: frame.height,
-                };
-                if let Ok(mut state) = self.state.lock() {
-                    state.surface = Some(surface);
-                }
-                surface
+                (
+                    GfxSurface {
+                        id,
+                        width: frame.width,
+                        height: frame.height,
+                    },
+                    true,
+                )
             }
         };
 
         let region = Avc420Region::full_frame(frame.width, frame.height, 26);
         let timestamp_ms = frame.captured_at.elapsed().as_millis() as u32;
-        if server
+        let queued = server
             .send_avc420_frame(surface.id, h264, &[region], timestamp_ms)
-            .is_none()
-        {
-            return GfxSubmit::Backpressured;
-        }
-        let Some(channel_id) = server.channel_id() else {
-            return GfxSubmit::Unavailable;
-        };
-        let messages = match encode_dvc_messages(
-            channel_id,
-            server.drain_output(),
-            ChannelFlags::SHOW_PROTOCOL,
-        ) {
-            Ok(messages) => messages,
-            Err(error) => {
-                tracing::warn!("RDP EGFX output encoding failed; using bitmap updates: {error}");
-                return GfxSubmit::Unavailable;
-            }
-        };
+            .is_some();
+        let channel_id = server.channel_id();
+        let output = server.drain_output();
         drop(server);
 
-        if sender
+        // The state lock is only taken after the server lock is released, so
+        // this module always acquires the two in the same order.
+        if created && let Ok(mut state) = self.state.lock() {
+            state.surface = Some(surface);
+        }
+        if !queued {
+            return GfxSubmit::Backpressured;
+        }
+        let Some(channel_id) = channel_id else {
+            return GfxSubmit::Unavailable;
+        };
+        let Some(messages) = encode_output(channel_id, output) else {
+            return GfxSubmit::Unavailable;
+        };
+
+        if snapshot
+            .sender
             .send(ServerEvent::Egfx(EgfxServerMessage::SendMessages {
                 messages,
             }))
@@ -209,11 +354,47 @@ impl GfxTransport {
     }
 }
 
+/// Connection-scoped state read under the state lock, before the graphics
+/// server lock is taken.
+struct GfxSnapshot {
+    handle: GfxServerHandle,
+    sender: UnboundedSender<ServerEvent>,
+    surface: Option<GfxSurface>,
+    stall: Option<AckStall>,
+}
+
+/// Single primary monitor covering the whole captured desktop. MS-RDPEGFX
+/// allows an empty monitor array, but real servers always describe the layout,
+/// and clients use it to place the graphics output buffer.
+fn desktop_monitor(width: u16, height: u16) -> Monitor {
+    Monitor {
+        left: 0,
+        top: 0,
+        right: i32::from(width),
+        bottom: i32::from(height),
+        flags: MonitorFlags::PRIMARY,
+    }
+}
+
+fn encode_output(
+    channel_id: u32,
+    output: Vec<ironrdp::dvc::DvcMessage>,
+) -> Option<Vec<SvcMessage>> {
+    match encode_dvc_messages(channel_id, output, ChannelFlags::SHOW_PROTOCOL) {
+        Ok(messages) => Some(messages),
+        Err(error) => {
+            tracing::warn!("RDP EGFX output encoding failed; using bitmap updates: {error}");
+            None
+        }
+    }
+}
+
 /// Factory installed into IronRDP. A fresh graphics server is created for each
 /// RDP connection; retaining the previous surface or ACK state across clients
 /// would be protocol-invalid and could cause a new session to start stale.
 pub(crate) struct EgfxFactory {
     state: Arc<Mutex<GfxState>>,
+    acks: Arc<AtomicU64>,
     log: LogEmitter,
 }
 
@@ -228,6 +409,7 @@ impl ServerEventSender for EgfxFactory {
 impl GfxServerFactory for EgfxFactory {
     fn build_gfx_handler(&self) -> Box<dyn GraphicsPipelineHandler> {
         Box::new(EgfxHandler {
+            acks: self.acks.clone(),
             log: self.log.clone(),
         })
     }
@@ -236,15 +418,21 @@ impl GfxServerFactory for EgfxFactory {
         let server = Arc::new(Mutex::new(GraphicsPipelineServer::new(
             self.build_gfx_handler(),
         )));
+        self.acks.store(0, Ordering::Relaxed);
         if let Ok(mut state) = self.state.lock() {
             state.handle = Some(server.clone());
             state.surface = None;
+            // A fresh client gets a fresh verdict: an earlier client that
+            // stopped acknowledging must not keep EGFX switched off.
+            state.disabled = false;
+            state.stall = None;
         }
         Some((GfxDvcBridge::new(server.clone()), server))
     }
 }
 
 struct EgfxHandler {
+    acks: Arc<AtomicU64>,
     log: LogEmitter,
 }
 
@@ -257,6 +445,9 @@ impl GraphicsPipelineHandler for EgfxHandler {
     }
 
     fn on_frame_ack(&mut self, _frame_id: u32, queue_depth: u32) {
+        // Publishes liveness to the display side, which uses it to tell a
+        // client that is one frame behind from one that has stopped consuming.
+        self.acks.fetch_add(1, Ordering::Relaxed);
         tracing::trace!(queue_depth, "RDP EGFX frame acknowledged");
     }
 
@@ -680,14 +871,66 @@ fn avcc_to_annex_b(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{
-        ANNEX_B_START_CODE, H264Encoder, MAX_FRAMES_IN_FLIGHT, align_dimension, avcc_to_annex_b,
+        ACK_STALL_TIMEOUT, ANNEX_B_START_CODE, AckStall, H264Encoder, MAX_FRAMES_IN_FLIGHT,
+        StallVerdict, align_dimension, avcc_to_annex_b, desktop_monitor, stall_verdict,
     };
     use crate::servers::rdp::capture::Frame;
+    use ironrdp::pdu::gcc::MonitorFlags;
 
     #[test]
     fn graphics_path_keeps_only_a_two_frame_ack_window() {
         assert_eq!(MAX_FRAMES_IN_FLIGHT, 2);
+    }
+
+    #[test]
+    fn a_live_but_slow_client_keeps_the_graphics_path() {
+        // Backpressure has been active past the timeout, but acknowledgements
+        // advanced in the meantime: the client is consuming, just one frame
+        // behind. Dropping frames is correct here; disabling EGFX is not.
+        let started = Instant::now();
+        let stall = AckStall {
+            since: started,
+            acks: 4,
+        };
+        let now = started + ACK_STALL_TIMEOUT + Duration::from_millis(500);
+        assert_eq!(stall_verdict(Some(stall), 5, now), StallVerdict::Restart);
+    }
+
+    #[test]
+    fn a_client_that_stops_acknowledging_falls_back_to_bitmaps() {
+        // Same elapsed time, no ACK progress. Without this bound the desktop
+        // would stay frozen for as long as the client stayed connected.
+        let started = Instant::now();
+        let stall = AckStall {
+            since: started,
+            acks: 4,
+        };
+        let now = started + ACK_STALL_TIMEOUT + Duration::from_millis(500);
+        assert_eq!(stall_verdict(Some(stall), 4, now), StallVerdict::Disable);
+    }
+
+    #[test]
+    fn brief_backpressure_is_not_treated_as_a_stall() {
+        let started = Instant::now();
+        let stall = AckStall {
+            since: started,
+            acks: 4,
+        };
+        let now = started + ACK_STALL_TIMEOUT - Duration::from_millis(1);
+        assert_eq!(stall_verdict(Some(stall), 4, now), StallVerdict::Wait);
+        // No window recorded yet: open one against the current ACK count.
+        assert_eq!(stall_verdict(None, 4, now), StallVerdict::Restart);
+    }
+
+    #[test]
+    fn reset_graphics_describes_one_primary_desktop_monitor() {
+        let monitor = desktop_monitor(1920, 1080);
+        assert_eq!((monitor.left, monitor.top), (0, 0));
+        assert_eq!((monitor.right, monitor.bottom), (1920, 1080));
+        assert!(monitor.flags.contains(MonitorFlags::PRIMARY));
     }
 
     #[test]
