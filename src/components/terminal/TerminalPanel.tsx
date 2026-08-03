@@ -108,7 +108,7 @@ import { getAppPlatform, isTauriRuntime } from "../../lib/runtime";
 import { extractTerminalCommand } from "../../lib/terminalCommand";
 import { normalizeLocalStartCwd } from "../../lib/terminalCwd";
 import { inferTerminalProgram } from "../../lib/terminalActivity";
-import { buildSshCwdIntegration } from "../../lib/terminalShellIntegration";
+import { buildSshCwdIntegration, buildLocalZshCwdIntegration } from "../../lib/terminalShellIntegration";
 import { buildInteractiveCommandInput, renderTerminalTask } from "../../lib/terminal/commandInput";
 import { registerTerminal, consumeTerminalDetachPending } from "../../lib/terminal/terminalRegistry";
 import {
@@ -2820,6 +2820,60 @@ export function TerminalPanel({
         `${adopted ? "Reattached" : mode === "reconnect" ? "Reconnected" : "Connected"} (${connectedSid})`,
       );
       scheduleTerminalFitAndSync(true);
+      // Install continuous OSC 7 cwd reporting by writing a one-shot setup
+      // command into the shell, but only once it shows a real, idle prompt —
+      // never into a blank/initializing shell (a slow rc / conda init), a
+      // streaming MOTD, or a half-typed line. Injecting early is what leaked the
+      // raw command: the input got buffered, the echo came back after the
+      // suppressor's TTL, and the whole line printed. Poll for the prompt over
+      // several seconds; if login init or a startup command outlives that window,
+      // retain an event-driven installer that runs when output later settles at
+      // an idle prompt. The terminal is usable immediately; this only defers the
+      // background hook. Shared by the SSH remote shell and the local macOS zsh.
+      const scheduleCwdIntegrationInstall = (targetSid: string, integrationCommand: string) => {
+        let integrationAttempts = 0;
+        let integrationInstalling = false;
+        const MAX_INTEGRATION_ATTEMPTS = 12; // ~6s of polling for a slow login
+        const installCwdIntegration = (): boolean => {
+          if (destroyed || sessionIdRef.current !== targetSid) {
+            if (installSshCwdIntegrationRef.current === installCwdIntegration) {
+              installSshCwdIntegrationRef.current = null;
+            }
+            return false;
+          }
+          if (integrationInstalling) return true;
+          const liveTerm = termRef.current;
+          if (!liveTerm || !terminalAtIdlePrompt(liveTerm)) return false;
+          integrationInstalling = true;
+          if (installSshCwdIntegrationRef.current === installCwdIntegration) {
+            installSshCwdIntegrationRef.current = null;
+          }
+          // Generous TTL so a laggy link's echo round-trip still arrives while
+          // the suppressor is dropping (we only get here at a ready prompt, so
+          // it's just network latency, not shell startup). Bounded so a
+          // non-POSIX shell — which never emits the OSC 7 — isn't blacked out
+          // for too long before output resumes.
+          injectedInputEchoSuppressorRef.current = createOsc7BlankingSuppressor(4000);
+          writeTerminal(targetSid, encodeBase64(`${integrationCommand}\r`)).catch(() => {
+            if (sessionIdRef.current === targetSid) {
+              integrationInstalling = false;
+              installSshCwdIntegrationRef.current = installCwdIntegration;
+              injectedInputEchoSuppressorRef.current = null;
+            }
+          });
+          return true;
+        };
+        installSshCwdIntegrationRef.current = installCwdIntegration;
+        const pollForCwdIntegration = () => {
+          if (installCwdIntegration()) return;
+          if (destroyed || sessionIdRef.current !== targetSid) return;
+          if (integrationAttempts < MAX_INTEGRATION_ATTEMPTS) {
+            integrationAttempts += 1;
+            window.setTimeout(pollForCwdIntegration, 500);
+          }
+        };
+        window.setTimeout(pollForCwdIntegration, 500);
+      };
       if (ssh && !adopted) {
         if (mode === "reconnect") {
           term.write(`\r\n\x1b[32m[Reconnected to ${ssh.username}@${ssh.host}:${ssh.port}]\x1b[0m\r\n`);
@@ -2841,59 +2895,19 @@ export function TerminalPanel({
         // source's cwd, the setup cd's there first (SSH can't set a start dir).
         // Best-effort POSIX (bash/zsh); a non-POSIX remote just errors on the
         // line, which the blanking suppressor hides up to its TTL.
-        //
-        // Only inject once the remote shows a real, idle prompt — never into a
-        // blank/initializing shell (a slow .bashrc / conda init), a streaming
-        // MOTD, or a half-typed line. Injecting early on a slow server is what
-        // leaked the raw command: the input got buffered, the echo came back
-        // after the suppressor's TTL, and the whole line printed. Poll for the
-        // prompt over several seconds. If login initialization or a configured
-        // startup command outlives that polling window, retain an event-driven
-        // installer and run it when any later output settles at an idle prompt.
-        // The terminal is usable immediately; this only defers the background hook.
-        const integrationCommand = buildSshCwdIntegration(initialCwd);
-        let integrationAttempts = 0;
-        let integrationInstalling = false;
-        const MAX_INTEGRATION_ATTEMPTS = 12; // ~6s of polling for a slow login
-        const installCwdIntegration = (): boolean => {
-          if (destroyed || sessionIdRef.current !== connectedSid) {
-            if (installSshCwdIntegrationRef.current === installCwdIntegration) {
-              installSshCwdIntegrationRef.current = null;
-            }
-            return false;
-          }
-          if (integrationInstalling) return true;
-          const liveTerm = termRef.current;
-          if (!liveTerm || !terminalAtIdlePrompt(liveTerm)) return false;
-          integrationInstalling = true;
-          if (installSshCwdIntegrationRef.current === installCwdIntegration) {
-            installSshCwdIntegrationRef.current = null;
-          }
-          // Generous TTL so a laggy link's echo round-trip still arrives while
-          // the suppressor is dropping (we only get here at a ready prompt, so
-          // it's just network latency, not shell startup). Bounded so a
-          // non-POSIX remote — which never emits the OSC 7 — isn't blacked out
-          // for too long before output resumes.
-          injectedInputEchoSuppressorRef.current = createOsc7BlankingSuppressor(4000);
-          writeTerminal(connectedSid, encodeBase64(`${integrationCommand}\r`)).catch(() => {
-            if (sessionIdRef.current === connectedSid) {
-              integrationInstalling = false;
-              installSshCwdIntegrationRef.current = installCwdIntegration;
-              injectedInputEchoSuppressorRef.current = null;
-            }
-          });
-          return true;
-        };
-        installSshCwdIntegrationRef.current = installCwdIntegration;
-        const pollForCwdIntegration = () => {
-          if (installCwdIntegration()) return;
-          if (destroyed || sessionIdRef.current !== connectedSid) return;
-          if (integrationAttempts < MAX_INTEGRATION_ATTEMPTS) {
-            integrationAttempts += 1;
-            window.setTimeout(pollForCwdIntegration, 500);
-          }
-        };
-        window.setTimeout(pollForCwdIntegration, 500);
+        scheduleCwdIntegrationInstall(connectedSid, buildSshCwdIntegration(initialCwd));
+      } else if (
+        !commandTerminal &&
+        !adopted &&
+        getAppPlatform() === "macos"
+      ) {
+        // macOS-only: the default local shell is zsh, and the backend's
+        // shell_integration.rs installs a bash `PROMPT_COMMAND` that zsh
+        // ignores — so a local zsh never reports its cwd and tab-duplication /
+        // the git panel have nothing to work with. Inject a zsh `precmd_functions`
+        // hook the same way the SSH path does. No-op on bash (already covered by
+        // the backend `PROMPT_COMMAND`). Linux/Windows locals are left untouched.
+        scheduleCwdIntegrationInstall(connectedSid, buildLocalZshCwdIntegration());
       }
 
       unlistenExit = await listenTerminalExit(connectedSid, () => markDisconnected(connectedSid));
