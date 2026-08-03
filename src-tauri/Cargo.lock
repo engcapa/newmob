@@ -4545,6 +4545,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironrdp-egfx"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c3f5fda720d92207ca71d49f66b9e4e64f9cbfad2e476f9560d74cbb0e3f6cd"
+dependencies = [
+ "bit_field",
+ "bitflags 2.13.0",
+ "ironrdp-core",
+ "ironrdp-dvc",
+ "ironrdp-graphics",
+ "ironrdp-pdu",
+ "tracing",
+]
+
+[[package]]
 name = "ironrdp-error"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4645,6 +4660,7 @@ dependencies = [
  "ironrdp-displaycontrol",
  "ironrdp-dvc",
  "ironrdp-echo",
+ "ironrdp-egfx",
  "ironrdp-graphics",
  "ironrdp-pdu",
  "ironrdp-rdpsnd",
@@ -6411,6 +6427,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-screen-capture-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74b7c5390f477482f001bc354d6571a70db7e4f8d5288e860c45521fbce11394"
+dependencies = [
+ "block2",
+ "dispatch2",
+ "objc2",
+ "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-foundation",
+]
+
+[[package]]
 name = "objc2-ui-kit"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6439,6 +6469,19 @@ checksum = "9df9128cbbfef73cda168416ccf7f837b62737d748333bfe9ab71c245d76613e"
 dependencies = [
  "objc2",
  "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-video-toolbox"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05bf9a3c14831a7d9641b0d81d87dd913ee238a012b2fde27db5a84b56f5df3e"
+dependencies = [
+ "bitflags 2.13.0",
+ "block2",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
 ]
 
 [[package]]
@@ -10209,6 +10252,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bcrypt-pbkdf",
+ "block2",
  "blowfish",
  "byteorder",
  "bytes",
@@ -10219,6 +10263,7 @@ dependencies = [
  "cross-krb5",
  "des",
  "dirs",
+ "dispatch2",
  "enigo",
  "flate2",
  "font-kit",
@@ -10235,6 +10280,8 @@ dependencies = [
  "image",
  "imap",
  "ironrdp",
+ "ironrdp-egfx",
+ "ironrdp-server",
  "ironrdp-tokio",
  "jaq-core",
  "jaq-json",
@@ -10250,7 +10297,14 @@ dependencies = [
  "mdns-sd",
  "native-tls",
  "nokhwa",
+ "objc2",
+ "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation",
+ "objc2-screen-capture-kit",
+ "objc2-video-toolbox",
  "openh264",
  "oracle",
  "pbkdf2",

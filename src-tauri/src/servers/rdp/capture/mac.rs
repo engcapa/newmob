@@ -1,4 +1,8 @@
-//! macOS screen capture for the RDP server via xcap's native persistent stream.
+//! macOS screen capture for the RDP server.
+//!
+//! The primary backend is ScreenCaptureKit (`sck.rs`), which requests native
+//! BGRA frames through a deliberately shallow queue. `MacCapturer` remains as
+//! a compatibility fallback for systems where ScreenCaptureKit cannot start.
 //!
 //! Requires **Screen Recording** permission (System Settings → Privacy & Security).
 //! Permission is checked before constructing the stream so the listener fails
@@ -11,6 +15,8 @@ use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCapture
 
 use super::{CaptureDisplay, CaptureProbe, Capturer, Frame};
 use crate::servers::engine::LogEmitter;
+
+mod sck;
 
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
@@ -218,22 +224,34 @@ fn rgba_frame(frame: xcap::Frame) -> anyhow::Result<Frame> {
     for pixel in bgra.chunks_exact_mut(4) {
         pixel.swap(0, 2);
     }
-    Ok(Frame {
-        data: bgra,
-        x: 0,
-        y: 0,
+    Ok(Frame::bgra(
+        bgra,
+        0,
+        0,
         width,
         height,
-        stride: usize::from(width) * 4,
-    })
+        usize::from(width) * 4,
+    ))
 }
 
 pub(crate) fn try_new(
     log: &LogEmitter,
     display_id: Option<&str>,
 ) -> anyhow::Result<Box<dyn Capturer>> {
-    log.line("macOS RDP capture: starting persistent native display stream");
-    Ok(Box::new(MacCapturer::new(log, display_id)?))
+    log.line("macOS RDP capture: starting ScreenCaptureKit stream");
+    match sck::SckCapturer::new(log, display_id) {
+        Ok(capturer) => Ok(Box::new(capturer)),
+        Err(sck_error) => {
+            // Keep a functional fallback for older macOS deployments and for
+            // transient framework failures. The log makes it clear when the
+            // lower-latency path was not selected, so production diagnostics
+            // never mistake the legacy backend for ScreenCaptureKit.
+            log.line(format!(
+                "macOS RDP capture: ScreenCaptureKit unavailable ({sck_error}); falling back to legacy AVCapture stream"
+            ));
+            Ok(Box::new(MacCapturer::new(log, display_id)?))
+        }
+    }
 }
 
 #[cfg(test)]

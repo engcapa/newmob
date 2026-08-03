@@ -445,14 +445,7 @@ impl X11Capturer {
             }
         }
 
-        Ok(Frame {
-            data,
-            x,
-            y,
-            width: w,
-            height: h,
-            stride: usize::from(w) * 4,
-        })
+        Ok(Frame::bgra(data, x, y, w, h, usize::from(w) * 4))
     }
 
     /// Drain all currently-queued `DamageNotify` events. Returns true if at

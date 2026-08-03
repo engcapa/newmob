@@ -13,6 +13,7 @@
 
 use crate::servers::engine::LogEmitter;
 use serde::Serialize;
+use std::time::Instant;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod xcap_backend;
@@ -29,8 +30,15 @@ pub(crate) mod mac;
 /// `height` rows. `x`/`y` are the top-left origin of this region within the
 /// desktop (0,0 for a full-screen frame), so the display layer can place a
 /// cropped damage rectangle at the right offset in the client's framebuffer.
+#[derive(Debug)]
 pub(crate) struct Frame {
     pub data: Vec<u8>,
+    /// Monotonic timestamp taken after the backend has produced the pixels.
+    /// It lets the display handoff report frame age without relying on wall
+    /// clock time or carrying user-visible data into telemetry.
+    pub captured_at: Instant,
+    /// Assigned by the capture loop immediately before publication.
+    pub sequence: u64,
     /// Region origin within the desktop, in pixels.
     pub x: u16,
     pub y: u16,
@@ -38,6 +46,28 @@ pub(crate) struct Frame {
     pub height: u16,
     /// Bytes per row (`>= width * 4`).
     pub stride: usize,
+}
+
+impl Frame {
+    pub(crate) fn bgra(
+        data: Vec<u8>,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        stride: usize,
+    ) -> Self {
+        Self {
+            data,
+            captured_at: Instant::now(),
+            sequence: 0,
+            x,
+            y,
+            width,
+            height,
+            stride,
+        }
+    }
 }
 
 /// A platform screen-capture source. Lives on its own OS thread because most

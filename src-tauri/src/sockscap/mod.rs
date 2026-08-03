@@ -1724,7 +1724,12 @@ pub async fn prepare_for_exit(app: &AppHandle, state: State<'_, AppState>) -> Re
         state.sockscap.orch.read().await.status().phase,
         orchestrator::EnginePhase::RecoveryRequired
     );
-    if recovery_required {
+    // A dirty journal discovered by boot recovery is durable evidence for the
+    // next launch, but it is not an active capture owned by this process. In
+    // that state keeping Taomni open cannot make the network safer and can trap
+    // an offline user in an unquittable app. Still block when this process owns
+    // the capture lock: that path has live state and must finish teardown first.
+    if should_block_exit_for_recovery(recovery_required, owns_capture) {
         return Err(
             "SocksCap network recovery is required before Taomni can exit safely; use Recover network first"
                 .into(),
@@ -1924,10 +1929,12 @@ pub async fn sockscap_recover(
     state: State<'_, AppState>,
     sudo_password: Option<String>,
 ) -> Result<(), String> {
+    let mut acquired_recovery_lock = false;
     if !state.sockscap.has_activation_lock() {
         let lock =
             ModuleLock::try_acquire_for_app(&app, "sockscap", "global", "SocksCap recovery")?;
         state.sockscap.install_activation_lock(lock);
+        acquired_recovery_lock = true;
     }
 
     // Even if stopping the active session was incomplete, recovery gets one
@@ -1950,6 +1957,9 @@ pub async fn sockscap_recover(
                         &capture::capabilities().capture_backend,
                         message.clone(),
                     );
+                    if acquired_recovery_lock {
+                        state.sockscap.release_activation_lock();
+                    }
                     return Err(message);
                 }
             }
@@ -1984,9 +1994,20 @@ pub async fn sockscap_recover(
                 .write()
                 .await
                 .set_recovery_required(&backend, message.clone());
+            // A lock acquired only to serialize this Recover attempt must not
+            // turn a failed recovery into apparent ownership of live capture.
+            // The durable journal remains dirty and another attempt (or the
+            // next launch) can safely reacquire the module lock.
+            if acquired_recovery_lock {
+                state.sockscap.release_activation_lock();
+            }
             Err(message)
         }
     }
+}
+
+fn should_block_exit_for_recovery(recovery_required: bool, owns_capture: bool) -> bool {
+    recovery_required && owns_capture
 }
 
 /// Thorough capture teardown:
@@ -2894,7 +2915,7 @@ pub async fn sockscap_clear_domain_records(state: State<'_, AppState>) -> Result
 mod tests {
     use super::{
         Orchestrator, classify_client, ensure_configuration_unlocked, session_password_ref,
-        session_proxy_password, session_ssh_auth,
+        session_proxy_password, session_ssh_auth, should_block_exit_for_recovery,
     };
     use crate::session::models::{AuthMethod, SessionConfig, SessionType};
     use crate::terminal::ssh::SshAuth;
@@ -2938,6 +2959,13 @@ mod tests {
 
         orchestrator.finish_stop();
         assert!(ensure_configuration_unlocked(&orchestrator).is_ok());
+    }
+
+    #[test]
+    fn stale_recovery_journal_without_owned_capture_does_not_block_exit() {
+        assert!(!should_block_exit_for_recovery(true, false));
+        assert!(should_block_exit_for_recovery(true, true));
+        assert!(!should_block_exit_for_recovery(false, true));
     }
 
     #[test]

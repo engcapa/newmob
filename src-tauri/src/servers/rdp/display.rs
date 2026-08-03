@@ -3,38 +3,53 @@
 //!
 //! Real screen capture runs on a dedicated OS thread (native capture backends
 //! hold non-`Send`, thread-affine handles — see [`super::capture`]). That thread
-//! pushes BGRA frames over an `mpsc` channel; [`DisplayUpdatesImpl::next_update`]
-//! awaits the channel, keeping the protocol runtime free and the await point
-//! cancel-safe. A production RDP listener does not start when capture is
-//! unavailable; serving a synthetic frame would falsely report healthy remote
-//! desktop service.
+//! publishes BGRA frames through a latest-frame mailbox;
+//! [`DisplayUpdatesImpl::next_update`] awaits that mailbox without allowing a
+//! slow encoder or network to make the native capture callback retain stale
+//! frames. A production RDP listener does not start when capture is unavailable;
+//! serving a synthetic frame would falsely report healthy remote desktop service.
 //!
-//! Phase 3 will add dirty-rect diffing on top of the full frames produced here.
+//! Backends that can identify damage regions use the same mailbox. If their
+//! partial updates would overlap a queued batch, the capture thread publishes a
+//! replacement full refresh instead of risking a corrupt client framebuffer.
 
 use core::num::{NonZeroU16, NonZeroUsize};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironrdp::server::{
     BitmapUpdate, DesktopSize, DisplayUpdate, PixelFormat, RdpServerDisplay,
     RdpServerDisplayUpdates,
 };
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 use super::capture::{Capturer, Frame, create_capturer_for_display};
+#[cfg(target_os = "macos")]
+use super::gfx::{GfxReadiness, GfxSubmit, GfxTransport, H264Encoder};
+use super::metrics::RdpMetrics;
 use crate::servers::engine::LogEmitter;
 
 /// Display handler handed to the IronRDP builder. Probes the capture backend to
 /// learn the real desktop size, falling back to the configured default.
 pub(crate) struct RdpDisplay {
     log: LogEmitter,
+    metrics: RdpMetrics,
     /// Desktop size reported to the client. Set from the capture backend when
     /// available, else the fallback size passed in at construction.
     size: DesktopSize,
     display_id: Option<String>,
+    #[cfg(target_os = "macos")]
+    gfx: GfxTransport,
 }
 
 impl RdpDisplay {
-    pub(crate) fn new(log: LogEmitter, display_id: Option<String>) -> anyhow::Result<Self> {
+    pub(crate) fn new(
+        log: LogEmitter,
+        display_id: Option<String>,
+        metrics: RdpMetrics,
+        #[cfg(target_os = "macos")] gfx: GfxTransport,
+    ) -> anyhow::Result<Self> {
         // Probe once up front (on this caller's thread) only to learn the size;
         // the real capturer is created again inside the capture thread, which is
         // where it must live. Probing here keeps `size()` honest for the client.
@@ -54,8 +69,11 @@ impl RdpDisplay {
 
         Ok(Self {
             log,
+            metrics,
             size,
             display_id,
+            #[cfg(target_os = "macos")]
+            gfx,
         })
     }
 }
@@ -72,29 +90,172 @@ impl RdpServerDisplay for RdpDisplay {
             self.log.clone(),
             self.size,
             self.display_id.clone(),
+            self.metrics.clone(),
+            #[cfg(target_os = "macos")]
+            self.gfx.clone(),
         )))
     }
 }
 
 /// Per-client update producer that drains the native capture thread.
 pub(crate) struct DisplayUpdatesImpl {
-    rx: mpsc::Receiver<Frame>,
+    mailbox: Arc<LatestFrameMailbox>,
+    active_damage: VecDeque<Frame>,
+    metrics: RdpMetrics,
+    #[cfg(target_os = "macos")]
+    gfx: GfxTransport,
+    #[cfg(target_os = "macos")]
+    h264: Option<H264Encoder>,
+}
+
+/// Cross-thread latest-frame mailbox. Unlike `mpsc::channel(1)` plus
+/// `blocking_send`, publishing a new full frame replaces the stale pending
+/// frame and never makes the native capture callback wait for an encoder.
+///
+/// Damage batches need stronger guarantees: a dropped rectangle can leave a
+/// permanent hole in the client framebuffer. When a damage batch is already
+/// pending or being drained we therefore ask the capture loop for one fresh
+/// full frame, which safely supersedes all prior partial updates.
+struct LatestFrameMailbox {
+    state: Mutex<MailboxState>,
+    ready: Notify,
+}
+
+struct MailboxState {
+    pending: Option<PendingFrames>,
+    active_damage: bool,
+    closed: bool,
+}
+
+enum PendingFrames {
+    Full(Frame),
+    Damage(VecDeque<Frame>),
+}
+
+enum PublishResult {
+    Published { replaced: bool },
+    NeedsFullRefresh,
+    Closed,
+}
+
+impl LatestFrameMailbox {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(MailboxState {
+                pending: None,
+                active_damage: false,
+                closed: false,
+            }),
+            ready: Notify::new(),
+        }
+    }
+
+    fn publish_full(&self, frame: Frame) -> PublishResult {
+        let Ok(mut state) = self.state.lock() else {
+            return PublishResult::Closed;
+        };
+        if state.closed {
+            return PublishResult::Closed;
+        }
+        let replaced = state.pending.is_some() || state.active_damage;
+        state.pending = Some(PendingFrames::Full(frame));
+        self.ready.notify_one();
+        PublishResult::Published { replaced }
+    }
+
+    fn publish_damage(&self, frames: Vec<Frame>) -> PublishResult {
+        let Ok(mut state) = self.state.lock() else {
+            return PublishResult::Closed;
+        };
+        if state.closed {
+            return PublishResult::Closed;
+        }
+        if frames.is_empty() {
+            return PublishResult::Published { replaced: false };
+        }
+        if state.pending.is_some() || state.active_damage {
+            return PublishResult::NeedsFullRefresh;
+        }
+        state.pending = Some(PendingFrames::Damage(frames.into()));
+        self.ready.notify_one();
+        PublishResult::Published { replaced: false }
+    }
+
+    async fn take(&self) -> Option<PendingFrames> {
+        loop {
+            // Register interest before inspecting the state. This prevents a
+            // producer notification between the empty check and `.await()`
+            // from being lost.
+            let notified = self.ready.notified();
+            {
+                let Ok(mut state) = self.state.lock() else {
+                    return None;
+                };
+                if let Some(pending) = state.pending.take() {
+                    state.active_damage = matches!(&pending, PendingFrames::Damage(_));
+                    return Some(pending);
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    /// An active partial batch becomes obsolete as soon as a new full refresh
+    /// is waiting. In that case the remaining rectangles must not be emitted.
+    fn full_refresh_waiting(&self) -> bool {
+        self.state
+            .lock()
+            .ok()
+            .is_some_and(|state| matches!(state.pending, Some(PendingFrames::Full(_))))
+    }
+
+    fn finish_damage(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.active_damage = false;
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+            state.pending = None;
+        }
+        self.ready.notify_waiters();
+    }
 }
 
 impl DisplayUpdatesImpl {
     /// Spawn the capture thread and return an updater draining its frames.
-    fn with_capture(log: LogEmitter, _size: DesktopSize, display_id: Option<String>) -> Self {
-        // Bounded channel: capacity 1 keeps only the freshest frame in flight,
-        // applying natural backpressure (slow client → capture thread blocks on
-        // send rather than building an unbounded backlog of stale frames).
-        let (tx, rx) = mpsc::channel::<Frame>(1);
+    fn with_capture(
+        log: LogEmitter,
+        _size: DesktopSize,
+        display_id: Option<String>,
+        metrics: RdpMetrics,
+        #[cfg(target_os = "macos")] gfx: GfxTransport,
+    ) -> Self {
+        let mailbox = Arc::new(LatestFrameMailbox::new());
 
         std::thread::Builder::new()
             .name("rdp-capture".to_string())
-            .spawn(move || capture_loop(log, tx, display_id))
+            .spawn({
+                let metrics = metrics.clone();
+                let mailbox = mailbox.clone();
+                move || capture_loop(log, mailbox, display_id, metrics)
+            })
             .ok();
 
-        Self { rx }
+        Self {
+            mailbox,
+            active_damage: VecDeque::new(),
+            metrics,
+            #[cfg(target_os = "macos")]
+            gfx,
+            #[cfg(target_os = "macos")]
+            h264: None,
+        }
     }
 
     /// Wrap a captured BGRA frame (full screen or a cropped damage region) into
@@ -115,17 +276,106 @@ impl DisplayUpdatesImpl {
             stride,
         })
     }
+
+    /// Prefer the negotiated EGFX/AVC420 path on macOS. The decision is made
+    /// after capture and before turning pixels into a regular RDP bitmap so a
+    /// slow client can drop a current frame instead of queuing stale work.
+    #[cfg(target_os = "macos")]
+    fn try_send_gfx(&mut self, frame: &mut Frame) -> Option<GfxSubmit> {
+        match self.gfx.readiness() {
+            GfxReadiness::Backpressured => return Some(GfxSubmit::Backpressured),
+            GfxReadiness::Unavailable => return None,
+            GfxReadiness::Ready => {}
+        }
+        let needs_new_encoder = self
+            .h264
+            .as_ref()
+            .is_none_or(|encoder| !encoder.matches(frame));
+        if needs_new_encoder {
+            match H264Encoder::new(frame.width, frame.height) {
+                Ok(encoder) => self.h264 = Some(encoder),
+                Err(error) => {
+                    tracing::warn!(
+                        "RDP EGFX hardware encoder unavailable; using bitmap updates: {error}"
+                    );
+                    self.h264 = None;
+                    return None;
+                }
+            }
+        }
+        let encoder = self.h264.as_mut()?;
+        match encoder.encode(frame) {
+            Ok(h264) => Some(self.gfx.send_avc420(frame, &h264)),
+            Err(error) => {
+                // Encoding failure is isolated to this client/update. The
+                // next update may recreate VideoToolbox, while this frame is
+                // still delivered through the reliable bitmap fallback.
+                tracing::warn!("RDP EGFX hardware frame failed; using bitmap update: {error}");
+                self.h264 = None;
+                None
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
     async fn next_update(&mut self) -> anyhow::Result<Option<DisplayUpdate>> {
-        // Await the next captured frame. `recv` is cancel-safe; if the capture
-        // thread ends (channel closed) we end the stream.
-        match self.rx.recv().await {
-            Some(frame) => Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap)),
-            None => Ok(None),
+        loop {
+            if !self.active_damage.is_empty() && self.mailbox.full_refresh_waiting() {
+                self.active_damage.clear();
+                self.mailbox.finish_damage();
+            }
+
+            if let Some(frame) = self.active_damage.pop_front() {
+                if self.active_damage.is_empty() {
+                    self.mailbox.finish_damage();
+                }
+                self.metrics.record_frame_handoff(frame.captured_at);
+                self.metrics.report_if_due();
+                #[cfg(target_os = "macos")]
+                {
+                    let mut frame = frame;
+                    match self.try_send_gfx(&mut frame) {
+                        Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
+                        Some(GfxSubmit::Unavailable) | None => {
+                            return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+            }
+
+            match self.mailbox.take().await {
+                Some(PendingFrames::Full(frame)) => {
+                    self.metrics.record_frame_handoff(frame.captured_at);
+                    self.metrics.report_if_due();
+                    #[cfg(target_os = "macos")]
+                    {
+                        let mut frame = frame;
+                        match self.try_send_gfx(&mut frame) {
+                            Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
+                            Some(GfxSubmit::Unavailable) | None => {
+                                return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+                            }
+                        }
+                    }
+                    #[cfg(not(target_os = "macos"))]
+                    return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+                }
+                Some(PendingFrames::Damage(frames)) => {
+                    self.active_damage = frames;
+                }
+                None => return Ok(None),
+            }
         }
+    }
+}
+
+impl Drop for DisplayUpdatesImpl {
+    fn drop(&mut self) {
+        self.mailbox.close();
     }
 }
 
@@ -144,7 +394,12 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
 ///   byte-identical frames with a cheap FNV-1a hash so a static desktop still
 ///   costs near-zero downstream. The IronRDP encoder diffs the frames we DO
 ///   send and only encodes changed rectangles.
-fn capture_loop(log: LogEmitter, tx: mpsc::Sender<Frame>, display_id: Option<String>) {
+fn capture_loop(
+    log: LogEmitter,
+    mailbox: Arc<LatestFrameMailbox>,
+    display_id: Option<String>,
+    metrics: RdpMetrics,
+) {
     let mut capturer = match create_capturer_for_display(&log, display_id.as_deref()) {
         Ok(c) => c,
         Err(e) => {
@@ -154,9 +409,9 @@ fn capture_loop(log: LogEmitter, tx: mpsc::Sender<Frame>, display_id: Option<Str
     };
 
     if capturer.is_event_driven() {
-        capture_loop_event_driven(capturer.as_mut(), &tx);
+        capture_loop_event_driven(capturer.as_mut(), &mailbox, &metrics);
     } else {
-        capture_loop_polling(capturer.as_mut(), &tx);
+        capture_loop_polling(capturer.as_mut(), &mailbox, &metrics);
     }
     log.line("capture thread stopped");
 }
@@ -165,28 +420,67 @@ fn capture_loop(log: LogEmitter, tx: mpsc::Sender<Frame>, display_id: Option<Str
 /// backend internally blocks on change notifications and caps the frame rate,
 /// so this loop adds no interval of its own. An empty result is an idle tick;
 /// we use it to notice a disconnected client (closed channel) promptly.
-fn capture_loop_event_driven(capturer: &mut dyn Capturer, tx: &mpsc::Sender<Frame>) {
+fn capture_loop_event_driven(
+    capturer: &mut dyn Capturer,
+    mailbox: &LatestFrameMailbox,
+    metrics: &RdpMetrics,
+) {
     let mut first = true;
+    let mut sequence = 0;
     loop {
+        let started = std::time::Instant::now();
         match capturer.next_updates(first) {
-            Ok(frames) => {
+            Ok(mut frames) => {
                 first = false;
                 if frames.is_empty() {
                     // Idle tick: nothing changed within the wait budget. Bail
                     // out if the client went away, otherwise keep waiting.
-                    if tx.is_closed() {
+                    if matches!(mailbox.publish_damage(Vec::new()), PublishResult::Closed) {
                         break;
                     }
                     continue;
                 }
-                for frame in frames {
-                    if tx.blocking_send(frame).is_err() {
-                        return;
-                    }
+                for frame in &mut frames {
+                    metrics.record_capture(started.elapsed(), frame.data.len());
+                    sequence += 1;
+                    frame.sequence = sequence;
                 }
+
+                match mailbox.publish_damage(frames) {
+                    PublishResult::Published { replaced } => {
+                        if replaced {
+                            metrics.record_frame_replaced();
+                        }
+                    }
+                    PublishResult::NeedsFullRefresh => {
+                        let full_started = std::time::Instant::now();
+                        let mut full = match capturer.capture() {
+                            Ok(frame) => frame,
+                            Err(e) => {
+                                tracing::warn!("RDP capture (damage full refresh): {}", e);
+                                break;
+                            }
+                        };
+                        metrics.record_capture(full_started.elapsed(), full.data.len());
+                        sequence += 1;
+                        full.sequence = sequence;
+                        match mailbox.publish_full(full) {
+                            PublishResult::Published { replaced } => {
+                                if replaced {
+                                    metrics.record_frame_replaced();
+                                }
+                            }
+                            PublishResult::Closed => return,
+                            PublishResult::NeedsFullRefresh => {
+                                unreachable!("full frames always publish")
+                            }
+                        }
+                    }
+                    PublishResult::Closed => return,
+                }
+                metrics.report_if_due();
             }
             Err(e) => {
-                let _ = tx; // nothing to send; surface and stop
                 tracing::warn!("RDP capture (damage): {}", e);
                 break;
             }
@@ -197,23 +491,43 @@ fn capture_loop_event_driven(capturer: &mut dyn Capturer, tx: &mpsc::Sender<Fram
 /// Fixed-interval full-frame loop with FNV-1a dedup (used when the backend is
 /// not event-driven). ~30 fps ceiling; identical frames are suppressed so a
 /// static desktop costs nothing downstream.
-fn capture_loop_polling(capturer: &mut dyn Capturer, tx: &mpsc::Sender<Frame>) {
+fn capture_loop_polling(
+    capturer: &mut dyn Capturer,
+    mailbox: &LatestFrameMailbox,
+    metrics: &RdpMetrics,
+) {
     let frame_interval = std::time::Duration::from_millis(33);
     let mut last_hash: Option<u64> = None;
     let mut first = true;
+    let mut sequence = 0;
     loop {
         let start = std::time::Instant::now();
         match capturer.capture() {
-            Ok(frame) => {
+            Ok(mut frame) => {
+                metrics.record_capture(start.elapsed(), frame.data.len());
+                let hash_started = std::time::Instant::now();
                 let hash = super::diff::frame_hash(&frame.data);
+                metrics.record_hash(hash_started.elapsed());
                 // Always send the first frame so the client gets an initial
                 // image; thereafter suppress byte-identical frames.
                 if first || last_hash != Some(hash) {
                     first = false;
                     last_hash = Some(hash);
-                    if tx.blocking_send(frame).is_err() {
-                        break;
+                    sequence += 1;
+                    frame.sequence = sequence;
+                    match mailbox.publish_full(frame) {
+                        PublishResult::Published { replaced } => {
+                            if replaced {
+                                metrics.record_frame_replaced();
+                            }
+                        }
+                        PublishResult::Closed => break,
+                        PublishResult::NeedsFullRefresh => {
+                            unreachable!("full frames always publish")
+                        }
                     }
+                } else {
+                    metrics.record_duplicate_frame();
                 }
             }
             Err(e) => {
@@ -224,5 +538,63 @@ fn capture_loop_polling(capturer: &mut dyn Capturer, tx: &mpsc::Sender<Frame>) {
         if let Some(rem) = frame_interval.checked_sub(start.elapsed()) {
             std::thread::sleep(rem);
         }
+        metrics.report_if_due();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LatestFrameMailbox, PendingFrames, PublishResult};
+    use crate::servers::rdp::capture::Frame;
+
+    fn frame(value: u8) -> Frame {
+        Frame::bgra(vec![value, 0, 0, 0], 0, 0, 1, 1, 4)
+    }
+
+    #[tokio::test]
+    async fn newest_full_frame_replaces_an_unconsumed_frame() {
+        let mailbox = LatestFrameMailbox::new();
+        assert!(matches!(
+            mailbox.publish_full(frame(1)),
+            PublishResult::Published { replaced: false }
+        ));
+        assert!(matches!(
+            mailbox.publish_full(frame(2)),
+            PublishResult::Published { replaced: true }
+        ));
+
+        let PendingFrames::Full(frame) = mailbox.take().await.unwrap() else {
+            panic!("expected a full frame");
+        };
+        assert_eq!(frame.data[0], 2);
+    }
+
+    #[tokio::test]
+    async fn damage_backlog_requests_a_safe_full_refresh() {
+        let mailbox = LatestFrameMailbox::new();
+        assert!(matches!(
+            mailbox.publish_damage(vec![frame(1)]),
+            PublishResult::Published { replaced: false }
+        ));
+        assert!(matches!(
+            mailbox.take().await,
+            Some(PendingFrames::Damage(_))
+        ));
+
+        assert!(matches!(
+            mailbox.publish_damage(vec![frame(2)]),
+            PublishResult::NeedsFullRefresh
+        ));
+        assert!(matches!(
+            mailbox.publish_full(frame(3)),
+            PublishResult::Published { replaced: true }
+        ));
+        assert!(mailbox.full_refresh_waiting());
+
+        mailbox.finish_damage();
+        let PendingFrames::Full(frame) = mailbox.take().await.unwrap() else {
+            panic!("expected the full refresh");
+        };
+        assert_eq!(frame.data[0], 3);
     }
 }
