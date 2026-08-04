@@ -81,6 +81,7 @@ import {
   type UpstreamConfigIssue,
 } from "../../lib/sockscapPreflight";
 import { SocksCapRootPrompt } from "./SocksCapRootPrompt";
+import { SocksCapMacosSetupGuide } from "./SocksCapMacosSetupGuide";
 import {
   UpstreamSourcePicker,
   type UpstreamChoice,
@@ -99,6 +100,19 @@ import { open } from "@tauri-apps/plugin-dialog";
 interface Props {
   onStatusMessage?: (msg: string) => void;
   onClose?: () => void;
+}
+
+export const SOCKSCAP_MACOS_SETUP_STORAGE_KEY =
+  "taomni.sockscap.macosSetupGuide.v1";
+
+type MacosSetupGuideMode = "onboarding" | "help";
+
+function hasCompletedMacosSetup(): boolean {
+  try {
+    return window.localStorage.getItem(SOCKSCAP_MACOS_SETUP_STORAGE_KEY) === "complete";
+  } catch {
+    return false;
+  }
 }
 
 const DEFAULT_PROFILE: SocksCapProfile = {
@@ -261,6 +275,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [helper, setHelper] = useState<HelperStatus | null>(null);
   const [redirectorInstall, setRedirectorInstall] = useState<RedirectorInstallStatus | null>(null);
+  const [macosSetupGuideMode, setMacosSetupGuideMode] =
+    useState<MacosSetupGuideMode | null>(null);
+  const [macosSetupCompleted, setMacosSetupCompleted] = useState(hasCompletedMacosSetup);
+  const [macosSetupError, setMacosSetupError] = useState<string | null>(null);
   const [sessions, setSessions] = useState<SessionOpt[]>([]);
   const [detectedProxies, setDetectedProxies] = useState<LocalProxyCandidate[]>([]);
   const [processes, setProcesses] = useState<ProcessInfo[]>([]);
@@ -315,6 +333,8 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [upSpeed, setUpSpeed] = useState(0);
   const [downSpeed, setDownSpeed] = useState(0);
   const lastBytesRef = useRef<{ up: number; down: number; ts: number } | null>(null);
+  const macosSetupAutoHandledRef = useRef(false);
+  const startButtonRef = useRef<HTMLButtonElement | null>(null);
 
   // Resizable profile sidebar & ribbon collapse state
   const [sidebarWidth, setSidebarWidth] = useState(230);
@@ -444,6 +464,20 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     // Populate the upstream picker's "detected local proxies" group.
     void rescanLocalProxies();
   }, [refresh, rescanLocalProxies]);
+
+  useEffect(() => {
+    if (
+      caps?.platform !== "macos" ||
+      !redirectorInstall ||
+      macosSetupAutoHandledRef.current
+    ) {
+      return;
+    }
+    macosSetupAutoHandledRef.current = true;
+    if (!macosSetupCompleted && redirectorInstall.state !== "ready") {
+      setMacosSetupGuideMode("onboarding");
+    }
+  }, [caps?.platform, macosSetupCompleted, redirectorInstall]);
 
   useEffect(() => {
     if (!tunWarningOpen) return;
@@ -909,6 +943,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   const onStart = async (sudoPassword?: string) => {
     if (!cfg) return;
+    setMacosSetupError(null);
     if (sudoPassword) {
       setRootPromptBusy(true);
       setRootPromptError(null);
@@ -921,6 +956,18 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       setStatus(st);
       setRootPromptIntent(null);
       setRootPromptError(null);
+      if (
+        caps?.platform === "macos" &&
+        (st.phase === "active" || st.phase === "degraded")
+      ) {
+        setMacosSetupCompleted(true);
+        setMacosSetupGuideMode(null);
+        try {
+          window.localStorage.setItem(SOCKSCAP_MACOS_SETUP_STORAGE_KEY, "complete");
+        } catch {
+          // Setup completion is still retained for this session when storage is unavailable.
+        }
+      }
       report(st.message || t("sockscap.started"), st.phase !== "idle");
       const [gf, sn, hp] = await Promise.all([
         sockscapGfwlistStatus().catch(() => null),
@@ -941,6 +988,19 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         setRootPromptError(t("sockscap.rootPromptIncorrectPassword"));
       } else {
         if (sudoPassword) setRootPromptIntent(null);
+        if (caps?.platform === "macos") {
+          const latestInstall = await sockscapRedirectorInstallStatus().catch(() => null);
+          if (latestInstall) setRedirectorInstall(latestInstall);
+          const lower = errStr.toLowerCase();
+          if (
+            latestInstall?.state === "pendingSystemApproval" ||
+            lower.includes("redirector") ||
+            lower.includes("system extension") ||
+            lower.includes("network configuration")
+          ) {
+            setMacosSetupGuideMode("onboarding");
+          }
+        }
         report(errStr, false);
       }
     } finally {
@@ -1012,16 +1072,40 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   const installRedirector = async () => {
     setBusy(true);
+    setMacosSetupError(null);
     try {
       const install = await sockscapInstallRedirector();
       setRedirectorInstall(install);
       await refresh();
       report(install.message);
     } catch (e) {
-      report(String(e), false);
+      const error = String(e);
+      setMacosSetupError(error);
+      report(error, false);
     } finally {
       setBusy(false);
     }
+  };
+
+  const refreshRedirectorApproval = async () => {
+    setBusy(true);
+    setMacosSetupError(null);
+    try {
+      const install = await sockscapRedirectorInstallStatus();
+      setRedirectorInstall(install);
+      report(t("sockscap.statusRefreshed"));
+    } catch (e) {
+      const error = String(e);
+      setMacosSetupError(error);
+      report(error, false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const continueMacosSetupToStart = () => {
+    setMacosSetupGuideMode(null);
+    window.requestAnimationFrame(() => startButtonRef.current?.focus());
   };
 
   const onRefreshGfw = async () => {
@@ -1756,6 +1840,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         ) : (
           <button
             type="button"
+            ref={startButtonRef}
             data-testid="sockscap-start"
             className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-[12px] bg-[var(--taomni-accent)] text-white hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
             onClick={() => void preflightAndStart()}
@@ -1772,6 +1857,22 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               <Play className="w-3.5 h-3.5" />
             )}
             {probing ? t("sockscap.probing") : t("sockscap.start")}
+          </button>
+        )}
+        {caps?.platform === "macos" && (
+          <button
+            type="button"
+            data-testid="sockscap-macos-setup-help"
+            className="inline-flex items-center gap-1 px-2 py-1.5 rounded text-[12px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+            onClick={() => {
+              setMacosSetupError(null);
+              setMacosSetupGuideMode("help");
+            }}
+            title={t("sockscap.macosSetupHelpHint")}
+            aria-label={t("sockscap.macosSetupHelp")}
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+            <span>{t("sockscap.macosSetupHelp")}</span>
           </button>
         )}
         <button
@@ -1841,7 +1942,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             }
             onClick={() =>
               void (redirectorInstall?.state === "pendingSystemApproval"
-                ? onRefreshStatus()
+                ? refreshRedirectorApproval()
                 : installRedirector())
             }
           >
@@ -2864,6 +2965,21 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           )}
         </div>
       </div>
+
+      {macosSetupGuideMode && caps?.platform === "macos" && (
+        <SocksCapMacosSetupGuide
+          mode={macosSetupGuideMode}
+          installStatus={redirectorInstall}
+          captureReady={status?.phase === "active" || status?.phase === "degraded"}
+          completed={macosSetupCompleted}
+          busy={busy}
+          error={macosSetupError}
+          onClose={() => setMacosSetupGuideMode(null)}
+          onInstall={() => void installRedirector()}
+          onRefreshApproval={() => void refreshRedirectorApproval()}
+          onContinueToStart={continueMacosSetupToStart}
+        />
+      )}
 
       {showProcPicker && (
         <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-20">

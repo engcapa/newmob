@@ -1179,6 +1179,41 @@ const dict = {
     refreshRedirectorApproval: "Refresh approval",
     redirectorApprovalPendingHint:
       "Approve the Mitmproxy Redirector System Extension in System Settings before starting.",
+    macosSetupTitle: "Set up macOS capture",
+    macosSetupHelpTitle: "macOS capture setup help",
+    macosSetupIntro:
+      "Complete these steps in order. macOS asks for the System Extension and network filter approvals separately.",
+    macosSetupHelp: "Help",
+    macosSetupHelpHint: "Show the macOS Redirector installation and approval steps",
+    macosSetupStep1Title: "Install Mitmproxy Redirector",
+    macosSetupStep1Body:
+      "Click Install Redirector and approve the administrator prompt. Taomni will verify the bundled Redirector before installing it.",
+    macosSetupStep2Title: "Start once to request system approval",
+    macosSetupStep2Body:
+      "Configure a working upstream, then click Start. The first attempt may stop while macOS waits for you to approve the System Extension.",
+    macosSetupStep3Title: "Approve the System Extension",
+    macosSetupStep3Body:
+      "On macOS 14, open System Settings, go to Privacy & Security, scroll to Security, and click Allow for Mitmproxy Redirector. Authenticate if prompted.",
+    macosSetupStep4Title: "Refresh, then start again",
+    macosSetupStep4Body:
+      "Return to SocksCap and refresh the approval status. When it is ready, click Start again and allow Mitmproxy Redirector to filter network content.",
+    macosSetupPrivacyPath: "System Settings → Privacy & Security → Security → Allow",
+    macosSetupNetworkPath:
+      "After the final approval, it appears under System Settings → Network → VPN & Filters.",
+    macosSetupCurrentStatus: "Current status:",
+    macosSetupStatusChecking: "Checking Redirector installation…",
+    macosSetupStatusMissing: "Redirector is not installed.",
+    macosSetupStatusUpgrade: "The installed Redirector needs to be upgraded.",
+    macosSetupStatusResourceMissing: "The Redirector package is missing from this build.",
+    macosSetupStatusConflict: "Another Redirector installation conflicts with this package.",
+    macosSetupStatusWaiting: "Waiting for approval in System Settings.",
+    macosSetupStatusNotRegistered: "Installed; click Start once to request approval.",
+    macosSetupStatusEnabled: "System Extension approved and ready.",
+    macosSetupStatusUnknown: "Redirector status needs attention.",
+    macosSetupLater: "Later",
+    macosSetupRefreshNow: "Refresh approval",
+    macosSetupGoToStart: "Go to Start",
+    macosSetupFinished: "Done",
     refreshStatus: "Refresh status & traffic counters",
     statusRefreshed: "Status refreshed",
     saved: "Configuration saved",

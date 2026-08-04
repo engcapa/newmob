@@ -1177,6 +1177,41 @@ export const zhCN: DeepPartial<typeof en> = {
     refreshRedirectorApproval: "刷新批准状态",
     redirectorApprovalPendingHint:
       "请先在系统设置中批准 Mitmproxy Redirector 系统扩展，再启动 SocksCap。",
+    macosSetupTitle: "设置 macOS 捕获",
+    macosSetupHelpTitle: "macOS 捕获设置帮助",
+    macosSetupIntro:
+      "请按顺序完成以下步骤。macOS 会分别请求系统扩展和网络过滤器两次授权。",
+    macosSetupHelp: "帮助",
+    macosSetupHelpHint: "查看 macOS Redirector 的安装与授权步骤",
+    macosSetupStep1Title: "安装 Mitmproxy Redirector",
+    macosSetupStep1Body:
+      "点击“安装 Redirector”，并批准管理员授权提示。Taomni 会先校验随应用提供的 Redirector，再进行安装。",
+    macosSetupStep2Title: "先启动一次，触发系统授权",
+    macosSetupStep2Body:
+      "配置可用的上游后点击“启动”。第一次启动可能会暂停，这是 macOS 正在等待你批准系统扩展。",
+    macosSetupStep3Title: "批准系统扩展",
+    macosSetupStep3Body:
+      "在 macOS 14 中打开“系统设置”，进入“隐私与安全性”，向下滚动到“安全性”，找到 Mitmproxy Redirector 并点击“允许”；如有提示请完成验证。",
+    macosSetupStep4Title: "刷新状态，然后再次启动",
+    macosSetupStep4Body:
+      "回到 SocksCap 刷新批准状态。显示就绪后再次点击“启动”，并允许 Mitmproxy Redirector 过滤网络内容。",
+    macosSetupPrivacyPath: "系统设置 → 隐私与安全性 → 安全性 → 允许",
+    macosSetupNetworkPath:
+      "完成最后一次授权后，可在“系统设置 → 网络 → VPN 与过滤器”中看到它。",
+    macosSetupCurrentStatus: "当前状态：",
+    macosSetupStatusChecking: "正在检查 Redirector 安装状态…",
+    macosSetupStatusMissing: "尚未安装 Redirector。",
+    macosSetupStatusUpgrade: "已安装的 Redirector 需要升级。",
+    macosSetupStatusResourceMissing: "当前构建中缺少 Redirector 安装包。",
+    macosSetupStatusConflict: "另一个 Redirector 安装与当前安装包冲突。",
+    macosSetupStatusWaiting: "正在等待你在系统设置中批准。",
+    macosSetupStatusNotRegistered: "已安装；请先点击一次“启动”以请求授权。",
+    macosSetupStatusEnabled: "系统扩展已批准并就绪。",
+    macosSetupStatusUnknown: "Redirector 状态需要处理。",
+    macosSetupLater: "稍后处理",
+    macosSetupRefreshNow: "刷新批准状态",
+    macosSetupGoToStart: "前往启动",
+    macosSetupFinished: "完成",
     refreshStatus: "刷新状态与流量计数",
     statusRefreshed: "状态已刷新",
     saved: "配置已保存",

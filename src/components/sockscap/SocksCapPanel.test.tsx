@@ -1,8 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SocksCapPanel } from "./SocksCapPanel";
+import {
+  SOCKSCAP_MACOS_SETUP_STORAGE_KEY,
+  SocksCapPanel,
+} from "./SocksCapPanel";
 import {
   sockscapCapabilities,
+  sockscapInstallRedirector,
   sockscapRecover,
   sockscapRedirectorInstallStatus,
   sockscapStart,
@@ -110,6 +114,13 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
     sockscapDetectLocalProxies: vi.fn(async () => []),
     sockscapDetectTunConflicts: vi.fn(async () => []),
     sockscapImportSubscription: vi.fn(),
+    sockscapInstallRedirector: vi.fn(async () => ({
+      state: "pendingSystemApproval",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "notRegistered",
+      message: "installed",
+    })),
     sockscapRedirectorInstallStatus: vi.fn(async () => ({
       state: "ready",
       packageVersion: "0.12.11",
@@ -132,6 +143,7 @@ vi.mock("../../lib/ipc", async (importOriginal) => {
 
 describe("SocksCapPanel Multi-Profile UI", () => {
   beforeEach(() => {
+    window.localStorage.removeItem(SOCKSCAP_MACOS_SETUP_STORAGE_KEY);
     currentCfg = JSON.parse(JSON.stringify(defaultTestCfg));
     currentPlatform = "windows";
     vi.mocked(sockscapStart).mockReset();
@@ -156,6 +168,14 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     vi.mocked(sockscapTestUpstream).mockResolvedValue("SOCKS5 ok");
     vi.mocked(sockscapDetectTunConflicts).mockReset();
     vi.mocked(sockscapDetectTunConflicts).mockResolvedValue([]);
+    vi.mocked(sockscapInstallRedirector).mockReset();
+    vi.mocked(sockscapInstallRedirector).mockResolvedValue({
+      state: "pendingSystemApproval",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "notRegistered",
+      message: "installed",
+    });
     vi.mocked(sockscapRedirectorInstallStatus).mockReset();
     vi.mocked(sockscapRedirectorInstallStatus).mockResolvedValue({
       state: "ready",
@@ -641,6 +661,83 @@ describe("SocksCapPanel Multi-Profile UI", () => {
 
     fireEvent.click(await screen.findByTestId("sockscap-probe-fail-force"));
     await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalled());
+  });
+
+  it("opens the ordered macOS setup guide when Redirector is missing", async () => {
+    currentPlatform = "macos";
+    vi.mocked(sockscapRedirectorInstallStatus).mockResolvedValue({
+      state: "missing",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "notRegistered",
+      message: "Mitmproxy Redirector is not installed.",
+    });
+
+    render(<SocksCapPanel />);
+
+    const guide = await screen.findByTestId("sockscap-macos-setup-dialog");
+    expect(within(guide).getByTestId("sockscap-macos-setup-step-1")).toHaveTextContent(
+      "Install Mitmproxy Redirector",
+    );
+    expect(within(guide).getByTestId("sockscap-macos-setup-step-2")).toHaveTextContent(
+      "Start once to request system approval",
+    );
+    expect(within(guide).getByTestId("sockscap-macos-setup-step-3")).toHaveTextContent(
+      "Privacy & Security",
+    );
+    expect(within(guide).getByTestId("sockscap-macos-setup-step-4")).toHaveTextContent(
+      "Refresh, then start again",
+    );
+
+    fireEvent.click(within(guide).getByTestId("sockscap-macos-setup-install"));
+    await waitFor(() => expect(vi.mocked(sockscapInstallRedirector)).toHaveBeenCalledOnce());
+  });
+
+  it("shows macOS approval location and refreshes a waiting Redirector", async () => {
+    currentPlatform = "macos";
+    vi.mocked(sockscapRedirectorInstallStatus).mockResolvedValue({
+      state: "pendingSystemApproval",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "waitingForUser",
+      message: "Mitmproxy Redirector is waiting for approval in System Settings.",
+    });
+
+    render(<SocksCapPanel />);
+
+    const guide = await screen.findByTestId("sockscap-macos-setup-dialog");
+    expect(guide).toHaveTextContent(
+      "System Settings → Privacy & Security → Security → Allow",
+    );
+    fireEvent.click(within(guide).getByTestId("sockscap-macos-setup-refresh"));
+    await waitFor(() =>
+      expect(vi.mocked(sockscapRedirectorInstallStatus)).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("keeps macOS setup help beside Start after Redirector is ready", async () => {
+    currentPlatform = "macos";
+
+    render(<SocksCapPanel />);
+
+    await screen.findByTestId("sockscap-start");
+    expect(screen.queryByTestId("sockscap-macos-setup-dialog")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("sockscap-macos-setup-help"));
+
+    const guide = await screen.findByTestId("sockscap-macos-setup-dialog");
+    expect(guide).toHaveTextContent("macOS capture setup help");
+    expect(guide).toHaveTextContent("System Settings → Network → VPN & Filters");
+  });
+
+  it("remembers a completed macOS setup after capture starts", async () => {
+    currentPlatform = "macos";
+
+    render(<SocksCapPanel />);
+    fireEvent.click(await screen.findByTestId("sockscap-start"));
+
+    await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalled());
+    expect(window.localStorage.getItem(SOCKSCAP_MACOS_SETUP_STORAGE_KEY)).toBe("complete");
   });
 
   it("does not request a sudo password for macOS Redirector errors", async () => {
