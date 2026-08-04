@@ -1141,6 +1141,8 @@ async fn start_macos_capture(
     journal_path: &std::path::Path,
 ) -> Result<SocksCapStatus, String> {
     capture::macos::preflight(cfg)?;
+    redirector::cleanup_stale_sockets()?;
+    redirector::cleanup_stale_launchers().await?;
     let ctx = match build_unix_relay_context(state, cfg).await {
         Ok(ctx) => ctx,
         Err(error) => {
@@ -1171,17 +1173,32 @@ async fn start_macos_capture(
 
     let capture = match capture::macos::start(app, cfg, Arc::clone(&ctx), &session_id).await {
         Ok(capture) => capture,
-        Err(error) => {
+        Err(start_error) => {
             if let Some(manager) = state.sockscap.xray() {
                 manager.shutdown_all().await;
             }
-            state.sockscap.orch.write().await.set_recovery_required(
-                &caps.capture_backend,
-                format!(
-                    "macOS Redirector start did not complete after the dirty journal was written: {error}; run Recover before retrying"
-                ),
-            );
-            return Err(error);
+            if start_error.recovery_required() {
+                state.sockscap.orch.write().await.set_recovery_required(
+                    &caps.capture_backend,
+                    format!(
+                        "macOS Redirector start may have reached the Provider after the dirty journal was written: {}; run Recover before retrying",
+                        start_error.message()
+                    ),
+                );
+            } else if let Err(clear_error) = recovery::mark_clean_and_clear(journal_path) {
+                let message = format!(
+                    "macOS Redirector failed before applying capture scope ({}), but the Preparing journal could not be cleared: {clear_error}",
+                    start_error.message()
+                );
+                state
+                    .sockscap
+                    .orch
+                    .write()
+                    .await
+                    .set_recovery_required(&caps.capture_backend, message.clone());
+                return Err(message);
+            }
+            return Err(start_error.to_string());
         }
     };
 
@@ -1940,6 +1957,67 @@ pub async fn sockscap_recover(
     // Even if stopping the active session was incomplete, recovery gets one
     // more independent chance to remove the platform-owned state.
     let teardown_error = full_teardown(&app, &state, false).await.err();
+    #[cfg(target_os = "macos")]
+    let stale_runtime_clean = {
+        let sockets_clean = match redirector::cleanup_stale_sockets() {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!("sockscap: Recover stale Redirector socket cleanup failed: {error}");
+                false
+            }
+        };
+        let launchers_clean = match redirector::cleanup_stale_launchers().await {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    "sockscap: Recover stale Redirector launcher cleanup failed: {error}"
+                );
+                false
+            }
+        };
+        sockets_clean && launchers_clean
+    };
+
+    #[cfg(target_os = "macos")]
+    let pending_approval_journal = data_dir(&app)
+        .ok()
+        .map(|dir| recovery::journal_path(&dir))
+        .filter(|journal| {
+            recovery::read_journal(journal)
+                .as_ref()
+                .is_some_and(pending_approval_never_recorded_scope)
+        });
+
+    #[cfg(target_os = "macos")]
+    if teardown_error.is_none()
+        && stale_runtime_clean
+        && matches!(
+            redirector::installer::system_extension_state(),
+            redirector::installer::RedirectorSystemExtensionState::WaitingForUser
+        )
+        && pending_approval_journal.is_some()
+    {
+        let journal = pending_approval_journal.expect("checked above");
+        if let Err(error) = recovery::mark_clean_and_clear(&journal) {
+            let message = format!(
+                "Redirector never applied capture while System Extension approval was pending, but its journal could not be cleared: {error}"
+            );
+            state
+                .sockscap
+                .orch
+                .write()
+                .await
+                .set_recovery_required("mitmproxy-redirector", message.clone());
+            state.sockscap.release_activation_lock();
+            return Err(message);
+        }
+        state.sockscap.orch.write().await.force_idle();
+        state.sockscap.release_activation_lock();
+        tracing::info!(
+            "sockscap: Recover cleared an aborted first-use approval attempt without starting another launcher"
+        );
+        return Ok(());
+    }
     let sudo_password = sudo_password.map(Zeroizing::new);
     let sudo_pw = sudo_password.as_deref().map(|password| password.as_str());
     match capture::recover_system(sudo_pw).await {
@@ -2008,6 +2086,14 @@ pub async fn sockscap_recover(
 
 fn should_block_exit_for_recovery(recovery_required: bool, owns_capture: bool) -> bool {
     recovery_required && owns_capture
+}
+
+#[cfg(target_os = "macos")]
+fn pending_approval_never_recorded_scope(journal: &recovery::RecoveryJournal) -> bool {
+    matches!(journal.phase, recovery::RecoveryPhase::Preparing)
+        && journal.scope_hash.is_none()
+        && journal.bridge_pid.is_none()
+        && journal.provider_pid.is_none()
 }
 
 /// Thorough capture teardown:
@@ -2758,13 +2844,33 @@ pub async fn boot_repair(app: &AppHandle, state: &AppState) {
     };
 
     #[cfg(target_os = "macos")]
-    match redirector::cleanup_stale_sockets() {
+    let stale_sockets_clean = match redirector::cleanup_stale_sockets() {
         Ok(count) if count > 0 => {
-            tracing::info!(count, "sockscap: removed stale Redirector Unix sockets")
+            tracing::info!(count, "sockscap: removed stale Redirector Unix sockets");
+            true
         }
-        Ok(_) => {}
-        Err(error) => tracing::warn!("sockscap: stale Redirector socket cleanup failed: {error}"),
-    }
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!("sockscap: stale Redirector socket cleanup failed: {error}");
+            false
+        }
+    };
+
+    #[cfg(target_os = "macos")]
+    let stale_launchers_clean = match redirector::cleanup_stale_launchers().await {
+        Ok(count) if count > 0 => {
+            tracing::warn!(
+                count,
+                "sockscap: reaped stale Redirector approval launchers"
+            );
+            true
+        }
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!("sockscap: stale Redirector launcher cleanup failed: {error}");
+            false
+        }
+    };
 
     let mut orphans: Vec<u32> = Vec::new();
     for ready in read_ready_files(&dir) {
@@ -2815,6 +2921,43 @@ pub async fn boot_repair(app: &AppHandle, state: &AppState) {
                 j.helper_port
             );
         }
+    }
+
+    // If macOS is still waiting for first-use approval, the System Extension
+    // is not enabled and cannot have installed a Provider scope. A Preparing
+    // journal with no recorded bridge/provider/scope is therefore an aborted
+    // approval attempt, not residual capture. Once its dead sockets and exact
+    // coordinator processes are gone, clear it without launching another
+    // coordinator that would only wait for the same approval again.
+    #[cfg(target_os = "macos")]
+    if dirty
+        && stale_sockets_clean
+        && stale_launchers_clean
+        && matches!(
+            redirector::installer::system_extension_state(),
+            redirector::installer::RedirectorSystemExtensionState::WaitingForUser
+        )
+        && recovery::read_journal(&journal_path)
+            .as_ref()
+            .is_some_and(pending_approval_never_recorded_scope)
+    {
+        match recovery::mark_clean_and_clear(&journal_path) {
+            Ok(()) => {
+                tracing::info!(
+                    "sockscap: cleared aborted first-use approval journal; waiting for System Settings approval"
+                );
+                state.sockscap.orch.write().await.force_idle();
+            }
+            Err(error) => {
+                state.sockscap.orch.write().await.set_recovery_required(
+                    "mitmproxy-redirector",
+                    format!(
+                        "Redirector never applied capture while System Extension approval was pending, but its journal could not be cleared: {error}"
+                    ),
+                );
+            }
+        }
+        return;
     }
 
     // The previous helper cannot be contacted without its token, so recovery
@@ -2913,11 +3056,15 @@ pub async fn sockscap_clear_domain_records(state: State<'_, AppState>) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::pending_approval_never_recorded_scope;
     use super::{
         Orchestrator, classify_client, ensure_configuration_unlocked, session_password_ref,
         session_proxy_password, session_ssh_auth, should_block_exit_for_recovery,
     };
     use crate::session::models::{AuthMethod, SessionConfig, SessionType};
+    #[cfg(target_os = "macos")]
+    use crate::sockscap::recovery::{RecoveryJournal, RecoveryPhase};
     use crate::terminal::ssh::SshAuth;
     use crate::vault::Vault;
 
@@ -3148,5 +3295,32 @@ mod tests {
             assert_eq!(id, "unknown", "unexpected id for {name}");
             assert!(label.is_empty(), "unexpected label for {name}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn only_unapplied_preparing_journal_can_clear_during_pending_approval() {
+        let mut journal = RecoveryJournal {
+            platform: "macos".into(),
+            capture_backend: "mitmproxy-redirector".into(),
+            config_hash: "hash".into(),
+            pid: 1,
+            clean: false,
+            phase: RecoveryPhase::Preparing,
+            session_id: "session".into(),
+            backend_version: Some("0.12.11".into()),
+            scope_hash: None,
+            bridge_pid: None,
+            provider_pid: None,
+            relay_port: None,
+            helper_port: None,
+        };
+        assert!(pending_approval_never_recorded_scope(&journal));
+
+        journal.scope_hash = Some("scope".into());
+        assert!(!pending_approval_never_recorded_scope(&journal));
+        journal.scope_hash = None;
+        journal.phase = RecoveryPhase::Active;
+        assert!(!pending_approval_never_recorded_scope(&journal));
     }
 }

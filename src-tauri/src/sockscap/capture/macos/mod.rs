@@ -23,7 +23,7 @@ pub async fn start(
     config: &SocksCapConfig,
     ctx: Arc<RwLock<RelayContext>>,
     session_id: &str,
-) -> Result<MacosCaptureHandle, String> {
+) -> Result<MacosCaptureHandle, runtime::RedirectorStartError> {
     runtime::start(app, config, ctx, session_id).await
 }
 

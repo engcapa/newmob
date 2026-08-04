@@ -1176,6 +1176,9 @@ const dict = {
     diagnosticsCopied: "SocksCap diagnostics copied.",
     redirectorMissing: "Mitmproxy Redirector is required for macOS capture.",
     installRedirector: "Install Redirector…",
+    refreshRedirectorApproval: "Refresh approval",
+    redirectorApprovalPendingHint:
+      "Approve the Mitmproxy Redirector System Extension in System Settings before starting.",
     refreshStatus: "Refresh status & traffic counters",
     statusRefreshed: "Status refreshed",
     saved: "Configuration saved",

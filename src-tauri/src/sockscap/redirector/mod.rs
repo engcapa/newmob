@@ -115,6 +115,137 @@ pub fn cleanup_stale_sockets() -> Result<usize, String> {
     Ok(removed)
 }
 
+/// Reap only orphaned Redirector coordinator apps launched by Taomni whose
+/// private provider socket is already gone. The caller must hold the global
+/// SocksCap module lock. Exact uid, executable path, argument shape, and socket
+/// namespace checks keep the cleanup away from the System Extension Provider
+/// and from independently launched processes.
+#[cfg(target_os = "macos")]
+pub async fn cleanup_stale_launchers() -> Result<usize, String> {
+    let output = Command::new("/bin/ps")
+        .args(["-ww", "-axo", "pid=,uid=,args="])
+        .output()
+        .map_err(|error| format!("enumerate stale Redirector launchers: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "enumerate stale Redirector launchers: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let executable = installed_executable_path();
+    let current_uid = unsafe { libc::geteuid() };
+    let mut candidates = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| parse_launcher_process(line, current_uid, &executable))
+        .filter(|(_, socket)| !socket.exists())
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(pid, _)| *pid);
+    candidates.dedup_by_key(|(pid, _)| *pid);
+
+    let mut signalled = Vec::new();
+    for (pid, socket) in candidates {
+        // Revalidate the executable immediately before signalling to avoid a
+        // stale process-list row ever targeting a reused pid.
+        if process_path(pid).ok().as_deref() != Some(executable.as_path()) || socket.exists() {
+            continue;
+        }
+        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if result == 0 {
+            signalled.push(pid);
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(format!(
+                    "terminate stale Redirector launcher pid {pid}: {error}"
+                ));
+            }
+        }
+    }
+
+    let reaped = signalled.len();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        signalled.retain(|pid| process_path(*pid).ok().as_deref() == Some(executable.as_path()));
+        if signalled.is_empty() || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    for pid in &signalled {
+        // A pending Swift continuation should normally exit on SIGTERM. Use a
+        // final SIGKILL only for the same still-verified executable.
+        if process_path(*pid).ok().as_deref() == Some(executable.as_path()) {
+            let result = unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(format!("kill stale Redirector launcher pid {pid}: {error}"));
+                }
+            }
+        }
+    }
+    let kill_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    loop {
+        signalled.retain(|pid| process_path(*pid).ok().as_deref() == Some(executable.as_path()));
+        if signalled.is_empty() {
+            break;
+        }
+        if tokio::time::Instant::now() >= kill_deadline {
+            return Err(format!(
+                "stale Redirector launcher pid(s) did not exit: {:?}",
+                signalled
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Ok(reaped)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_launcher_process(
+    line: &str,
+    current_uid: libc::uid_t,
+    executable: &Path,
+) -> Option<(u32, PathBuf)> {
+    let (pid, rest) = take_process_field(line.trim_start())?;
+    let (uid, command) = take_process_field(rest.trim_start())?;
+    if uid.parse::<libc::uid_t>().ok()? != current_uid {
+        return None;
+    }
+    let pid = pid.parse::<u32>().ok()?;
+    let executable = executable.to_str()?;
+    let remainder = command.trim_start().strip_prefix(executable)?;
+    if !remainder.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let socket = remainder.trim_start();
+    if socket.is_empty() || socket.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let socket = PathBuf::from(socket);
+    is_taomni_provider_socket(&socket).then_some((pid, socket))
+}
+
+#[cfg(target_os = "macos")]
+fn take_process_field(value: &str) -> Option<(&str, &str)> {
+    let split = value.find(char::is_whitespace)?;
+    Some((&value[..split], &value[split..]))
+}
+
+#[cfg(target_os = "macos")]
+fn is_taomni_provider_socket(path: &Path) -> bool {
+    if path.parent() != Some(Path::new("/tmp")) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    (name.starts_with("taomni-redirector-provider-")
+        || name.starts_with("taomni-redirector-recovery-provider-"))
+        && name.ends_with(".sock")
+}
+
 /// Refuse lookalike/replaced apps at the well-known path. The exact executable
 /// hashes pin v0.12.11, while codesign verifies the intact nested signature and
 /// the Team/bundle identities establish the upstream publisher boundary.
@@ -373,6 +504,32 @@ mod tests {
         assert_eq!(REDIRECTOR_EXTENSION_EXECUTABLE_SHA256.len(), 64);
         assert_eq!(REDIRECTOR_TEAM_ID.len(), 10);
         assert!(!REDIRECTOR_VERSION.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stale_launcher_parser_requires_exact_identity_and_socket_namespace() {
+        let executable = installed_executable_path();
+        let valid = format!(
+            " 2059 501 {} /tmp/taomni-redirector-provider-384689e4563143f7a19bc9635e033314.sock",
+            executable.display()
+        );
+        assert_eq!(
+            parse_launcher_process(&valid, 501, &executable),
+            Some((
+                2059,
+                PathBuf::from(
+                    "/tmp/taomni-redirector-provider-384689e4563143f7a19bc9635e033314.sock"
+                )
+            ))
+        );
+
+        let foreign_uid = valid.replacen("501", "502", 1);
+        assert!(parse_launcher_process(&foreign_uid, 501, &executable).is_none());
+        let unrelated_socket = valid.replace("taomni-redirector-provider-", "unrelated-");
+        assert!(parse_launcher_process(&unrelated_socket, 501, &executable).is_none());
+        let extra_argument = format!("{valid} --unexpected");
+        assert!(parse_launcher_process(&extra_argument, 501, &executable).is_none());
     }
 
     #[cfg(target_os = "macos")]

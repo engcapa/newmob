@@ -181,6 +181,12 @@ export interface RedirectorInstallStatus {
     | "resourceMissing";
   packageVersion: string;
   resourceAvailable: boolean;
+  systemExtensionState:
+    | "enabled"
+    | "waitingForUser"
+    | "notRegistered"
+    | "other"
+    | "unavailable";
   message: string;
 }
 
