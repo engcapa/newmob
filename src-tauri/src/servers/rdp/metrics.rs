@@ -140,6 +140,14 @@ impl RdpMetrics {
             .map(|values| values.p50)
     }
 
+    #[cfg(test)]
+    pub(crate) fn hash_sample_count(&self) -> usize {
+        self.inner
+            .lock()
+            .map(|state| state.hash_us.values.len())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn record_hash(&self, duration: Duration) {
         if let Ok(mut state) = self.inner.lock() {
             state.hash_us.push(duration);

@@ -305,6 +305,14 @@ impl Capturer for SckCapturer {
         true
     }
 
+    /// ScreenCaptureKit emits an idle sample with no image buffer while the
+    /// desktop is unchanged. Every frame that reaches this trait is therefore
+    /// already a change notification; re-hashing the entire BGRA surface would
+    /// add tens of milliseconds on a Retina display without filtering anything.
+    fn needs_frame_deduplication(&self) -> bool {
+        false
+    }
+
     fn capture(&mut self) -> anyhow::Result<Frame> {
         let frame = match self.pending.take() {
             Some(frame) => frame,

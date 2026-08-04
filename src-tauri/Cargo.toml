@@ -197,6 +197,8 @@ sqlparser = "0.62.0"
 
 [patch.crates-io]
 ironrdp-connector = { path = "vendor/ironrdp-connector" }
+# Keep latency-sensitive RDP display updates out of Nagle's small-packet delay.
+ironrdp-server = { path = "vendor/ironrdp-server" }
 picky = { path = "vendor/picky" }
 picky-krb = { path = "vendor/picky-krb" }
 portable-pty = { path = "vendor/portable-pty" }

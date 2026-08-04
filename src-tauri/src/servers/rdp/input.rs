@@ -346,12 +346,34 @@ fn apply(enigo: &mut Enigo, cmd: InputCmd) {
             let _ = enigo.button(button, dir);
         }
         InputCmd::MoveMouse { x, y, coord } => {
+            #[cfg(target_os = "macos")]
+            if coord == Coordinate::Abs
+                && let Ok(current) = enigo.location()
+            {
+                // enigo 0.6.1 writes the absolute CGEvent delta as
+                // `current - target`. macOS uses that delta to determine edge
+                // pressure, so the cursor reaches the Dock edge visually but
+                // the system sees motion in the opposite direction and does
+                // not reveal an auto-hidden Dock. Its relative path preserves
+                // the supplied delta, so use that path for absolute RDP moves.
+                let (dx, dy) = absolute_move_delta(current, (x, y));
+                if enigo.move_mouse(dx, dy, Coordinate::Rel).is_ok() {
+                    return;
+                }
+            }
             let _ = enigo.move_mouse(x, y, coord);
         }
         InputCmd::Scroll { length, axis } => {
             let _ = enigo.scroll(length, axis);
         }
     }
+}
+
+fn absolute_move_delta(current: (i32, i32), target: (i32, i32)) -> (i32, i32) {
+    (
+        target.0.saturating_sub(current.0),
+        target.1.saturating_sub(current.1),
+    )
 }
 
 impl RdpServerInputHandler for RdpInput {
@@ -763,6 +785,12 @@ mod tests {
             queue.recv().unwrap().cmd,
             InputCmd::MoveMouse { x: 3, .. }
         ));
+    }
+
+    #[test]
+    fn absolute_mouse_delta_points_toward_the_target() {
+        assert_eq!(absolute_move_delta((100, 200), (140, 260)), (40, 60));
+        assert_eq!(absolute_move_delta((140, 260), (100, 200)), (-40, -60));
     }
 
     #[test]

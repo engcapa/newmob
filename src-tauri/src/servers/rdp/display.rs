@@ -38,7 +38,13 @@ pub(crate) struct RdpDisplay {
     /// Desktop size reported to the client. Set from the capture backend when
     /// available, else the fallback size passed in at construction.
     size: DesktopSize,
+    #[cfg(not(target_os = "macos"))]
     display_id: Option<String>,
+    /// macOS capture is warmed before the listener becomes ready and remains
+    /// alive across client authentication. This removes ScreenCaptureKit setup
+    /// from the post-login critical path.
+    #[cfg(target_os = "macos")]
+    mailbox: Arc<LatestFrameMailbox>,
     #[cfg(target_os = "macos")]
     gfx: GfxTransport,
 }
@@ -50,9 +56,13 @@ impl RdpDisplay {
         metrics: RdpMetrics,
         #[cfg(target_os = "macos")] gfx: GfxTransport,
     ) -> anyhow::Result<Self> {
-        // Probe once up front (on this caller's thread) only to learn the size;
-        // the real capturer is created again inside the capture thread, which is
-        // where it must live. Probing here keeps `size()` honest for the client.
+        #[cfg(target_os = "macos")]
+        let (size, mailbox) =
+            start_warmed_macos_capture(log.clone(), display_id.clone(), metrics.clone())?;
+
+        // Other platforms keep their existing per-client capture lifecycle.
+        // Probing here keeps `size()` honest for the client.
+        #[cfg(not(target_os = "macos"))]
         let size = match create_capturer_for_display(&log, display_id.as_deref()) {
             Ok(cap) => {
                 let (w, h) = cap.desktop_size();
@@ -71,7 +81,10 @@ impl RdpDisplay {
             log,
             metrics,
             size,
+            #[cfg(not(target_os = "macos"))]
             display_id,
+            #[cfg(target_os = "macos")]
+            mailbox,
             #[cfg(target_os = "macos")]
             gfx,
         })
@@ -86,20 +99,40 @@ impl RdpServerDisplay for RdpDisplay {
 
     async fn updates(&mut self) -> anyhow::Result<Box<dyn RdpServerDisplayUpdates>> {
         self.log.line("client requested display stream");
+        #[cfg(target_os = "macos")]
+        {
+            // Authentication may finish while the desktop is static and
+            // ScreenCaptureKit is emitting only idle markers. Replay the
+            // retained complete frame rather than waiting for a future change.
+            self.mailbox.replay_latest_full();
+            return Ok(Box::new(DisplayUpdatesImpl::from_warmed_capture(
+                self.mailbox.clone(),
+                self.metrics.clone(),
+                self.gfx.clone(),
+            )));
+        }
+
+        #[cfg(not(target_os = "macos"))]
         Ok(Box::new(DisplayUpdatesImpl::with_capture(
             self.log.clone(),
             self.size,
             self.display_id.clone(),
             self.metrics.clone(),
-            #[cfg(target_os = "macos")]
-            self.gfx.clone(),
         )))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for RdpDisplay {
+    fn drop(&mut self) {
+        self.mailbox.close();
     }
 }
 
 /// Per-client update producer that drains the native capture thread.
 pub(crate) struct DisplayUpdatesImpl {
     mailbox: Arc<LatestFrameMailbox>,
+    close_mailbox_on_drop: bool,
     active_damage: VecDeque<Frame>,
     metrics: RdpMetrics,
     #[cfg(target_os = "macos")]
@@ -123,6 +156,9 @@ struct LatestFrameMailbox {
 
 struct MailboxState {
     pending: Option<PendingFrames>,
+    /// Latest complete desktop retained with reference-counted pixel storage.
+    /// Partial damage is never stored here because it cannot seed a new client.
+    latest_full: Option<Frame>,
     active_damage: bool,
     closed: bool,
 }
@@ -143,6 +179,7 @@ impl LatestFrameMailbox {
         Self {
             state: Mutex::new(MailboxState {
                 pending: None,
+                latest_full: None,
                 active_damage: false,
                 closed: false,
             }),
@@ -158,6 +195,7 @@ impl LatestFrameMailbox {
             return PublishResult::Closed;
         }
         let replaced = state.pending.is_some() || state.active_damage;
+        state.latest_full = Some(frame.clone());
         state.pending = Some(PendingFrames::Full(frame));
         self.ready.notify_one();
         PublishResult::Published { replaced }
@@ -203,6 +241,24 @@ impl LatestFrameMailbox {
         }
     }
 
+    /// Queue the retained full desktop for a newly authenticated client. The
+    /// clone only increments the `Bytes` reference count; pixel memory is not
+    /// copied.
+    fn replay_latest_full(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.closed {
+            return;
+        }
+        let Some(frame) = state.latest_full.clone() else {
+            return;
+        };
+        state.pending = Some(PendingFrames::Full(frame));
+        state.active_damage = false;
+        self.ready.notify_one();
+    }
+
     /// An active partial batch becomes obsolete as soon as a new full refresh
     /// is waiting. In that case the remaining rectangles must not be emitted.
     fn full_refresh_waiting(&self) -> bool {
@@ -229,19 +285,36 @@ impl LatestFrameMailbox {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
             state.pending = None;
+            state.latest_full = None;
         }
         self.ready.notify_waiters();
     }
 }
 
 impl DisplayUpdatesImpl {
+    #[cfg(target_os = "macos")]
+    fn from_warmed_capture(
+        mailbox: Arc<LatestFrameMailbox>,
+        metrics: RdpMetrics,
+        gfx: GfxTransport,
+    ) -> Self {
+        Self {
+            mailbox,
+            close_mailbox_on_drop: false,
+            active_damage: VecDeque::new(),
+            metrics,
+            gfx,
+            h264: None,
+        }
+    }
+
     /// Spawn the capture thread and return an updater draining its frames.
+    #[cfg(not(target_os = "macos"))]
     fn with_capture(
         log: LogEmitter,
         _size: DesktopSize,
         display_id: Option<String>,
         metrics: RdpMetrics,
-        #[cfg(target_os = "macos")] gfx: GfxTransport,
     ) -> Self {
         let mailbox = Arc::new(LatestFrameMailbox::new());
 
@@ -256,12 +329,9 @@ impl DisplayUpdatesImpl {
 
         Self {
             mailbox,
+            close_mailbox_on_drop: true,
             active_damage: VecDeque::new(),
             metrics,
-            #[cfg(target_os = "macos")]
-            gfx,
-            #[cfg(target_os = "macos")]
-            h264: None,
         }
     }
 
@@ -279,7 +349,7 @@ impl DisplayUpdatesImpl {
             width,
             height,
             format: PixelFormat::BgrA32,
-            data: frame.data.into(),
+            data: frame.data,
             stride,
         })
     }
@@ -288,7 +358,7 @@ impl DisplayUpdatesImpl {
     /// after capture and before turning pixels into a regular RDP bitmap so a
     /// slow client can drop a current frame instead of queuing stale work.
     #[cfg(target_os = "macos")]
-    fn try_send_gfx(&mut self, frame: &mut Frame) -> Option<GfxSubmit> {
+    fn try_send_gfx(&mut self, frame: &Frame) -> Option<GfxSubmit> {
         match self.gfx.readiness() {
             GfxReadiness::Backpressured => return Some(GfxSubmit::Backpressured),
             GfxReadiness::Unavailable => return None,
@@ -342,8 +412,7 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
                 self.metrics.report_if_due();
                 #[cfg(target_os = "macos")]
                 {
-                    let mut frame = frame;
-                    match self.try_send_gfx(&mut frame) {
+                    match self.try_send_gfx(&frame) {
                         Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
                         Some(GfxSubmit::Unavailable) | None => {
                             return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
@@ -360,8 +429,7 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
                     self.metrics.report_if_due();
                     #[cfg(target_os = "macos")]
                     {
-                        let mut frame = frame;
-                        match self.try_send_gfx(&mut frame) {
+                        match self.try_send_gfx(&frame) {
                             Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
                             Some(GfxSubmit::Unavailable) | None => {
                                 return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
@@ -382,7 +450,9 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
 
 impl Drop for DisplayUpdatesImpl {
     fn drop(&mut self) {
-        self.mailbox.close();
+        if self.close_mailbox_on_drop {
+            self.mailbox.close();
+        }
     }
 }
 
@@ -401,13 +471,83 @@ impl Drop for DisplayUpdatesImpl {
 ///   byte-identical frames with a cheap FNV-1a hash so a static desktop still
 ///   costs near-zero downstream. The IronRDP encoder diffs the frames we DO
 ///   send and only encodes changed rectangles.
+#[cfg(target_os = "macos")]
+fn start_warmed_macos_capture(
+    log: LogEmitter,
+    display_id: Option<String>,
+    metrics: RdpMetrics,
+) -> anyhow::Result<(DesktopSize, Arc<LatestFrameMailbox>)> {
+    let mailbox = Arc::new(LatestFrameMailbox::new());
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+
+    std::thread::Builder::new()
+        .name("rdp-capture".to_string())
+        .spawn({
+            let worker_mailbox = mailbox.clone();
+            move || {
+                let result = (|| {
+                    let mut capturer = create_capturer_for_display(&log, display_id.as_deref())?;
+
+                    // Both ScreenCaptureKit and its legacy fallback retain the
+                    // initial frame acquired during construction. Publish it
+                    // before declaring the server ready, so authentication can
+                    // never race native stream startup or a static desktop.
+                    let started = std::time::Instant::now();
+                    let mut initial = capturer.capture()?;
+                    let width = NonZeroU16::new(initial.width)
+                        .ok_or_else(|| anyhow::anyhow!("screen capture reported zero width"))?;
+                    let height = NonZeroU16::new(initial.height)
+                        .ok_or_else(|| anyhow::anyhow!("screen capture reported zero height"))?;
+                    metrics.record_capture(started.elapsed(), initial.data.len());
+                    initial.sequence = 1;
+                    if matches!(worker_mailbox.publish_full(initial), PublishResult::Closed) {
+                        anyhow::bail!("screen capture mailbox closed during warm-up");
+                    }
+
+                    Ok((
+                        DesktopSize {
+                            width: width.get(),
+                            height: height.get(),
+                        },
+                        capturer,
+                    ))
+                })();
+
+                let (size, capturer) = match result {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                if ready_tx.send(Ok(size)).is_err() {
+                    worker_mailbox.close();
+                    return;
+                }
+
+                log.line(format!(
+                    "macOS capture pre-warmed for RDP login ({}x{}); first frame is ready",
+                    size.width, size.height
+                ));
+                drive_capture(log, worker_mailbox, capturer, metrics);
+            }
+        })
+        .map_err(|error| anyhow::anyhow!("spawn macOS capture thread: {error}"))?;
+
+    let size = ready_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("macOS capture thread stopped during warm-up"))??;
+    Ok((size, mailbox))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn capture_loop(
     log: LogEmitter,
     mailbox: Arc<LatestFrameMailbox>,
     display_id: Option<String>,
     metrics: RdpMetrics,
 ) {
-    let mut capturer = match create_capturer_for_display(&log, display_id.as_deref()) {
+    let capturer = match create_capturer_for_display(&log, display_id.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             log.line(format!("capture thread: {}", e));
@@ -415,6 +555,15 @@ fn capture_loop(
         }
     };
 
+    drive_capture(log, mailbox, capturer, metrics);
+}
+
+fn drive_capture(
+    log: LogEmitter,
+    mailbox: Arc<LatestFrameMailbox>,
+    mut capturer: Box<dyn Capturer>,
+    metrics: RdpMetrics,
+) {
     if capturer.is_event_driven() {
         capture_loop_event_driven(capturer.as_mut(), &mailbox, &metrics);
     } else {
@@ -514,6 +663,7 @@ fn capture_loop_polling(
     // A backend that caps its own frame rate must not be paced again: the extra
     // sleep would hold back a frame that is already sitting in its mailbox.
     let self_paced = capturer.is_self_paced();
+    let needs_deduplication = capturer.needs_frame_deduplication();
     let frame_interval = (!self_paced).then(|| std::time::Duration::from_millis(33));
     let mut last_hash: Option<u64> = None;
     let mut first = true;
@@ -533,14 +683,25 @@ fn capture_loop_polling(
                     start.elapsed()
                 };
                 metrics.record_capture(capture_cost, frame.data.len());
-                let hash_started = std::time::Instant::now();
-                let hash = super::diff::frame_hash(&frame.data);
-                metrics.record_hash(hash_started.elapsed());
-                // Always send the first frame so the client gets an initial
-                // image; thereafter suppress byte-identical frames.
-                if first || last_hash != Some(hash) {
-                    first = false;
+                // ScreenCaptureKit already reports an explicit idle tick when
+                // nothing changed. Avoid scanning its entire Retina-sized BGRA
+                // surface again; polling backends still need the hash to stop
+                // unchanged frames before they reach IronRDP.
+                let changed = if needs_deduplication {
+                    let hash_started = std::time::Instant::now();
+                    let hash = super::diff::frame_hash(&frame.data);
+                    metrics.record_hash(hash_started.elapsed());
+                    let changed = first || last_hash != Some(hash);
                     last_hash = Some(hash);
+                    changed
+                } else {
+                    true
+                };
+                // Always send the first frame so the client gets an initial
+                // image; thereafter suppress byte-identical frames only for
+                // sources that cannot report idle explicitly.
+                if changed {
+                    first = false;
                     sequence += 1;
                     frame.sequence = sequence;
                     match mailbox.publish_full(frame) {
@@ -604,6 +765,8 @@ mod tests {
         disconnect_at: Option<(usize, Arc<LatestFrameMailbox>)>,
         /// Reported through [`Capturer::is_self_paced`].
         self_paced: bool,
+        /// Reported through [`Capturer::needs_frame_deduplication`].
+        needs_deduplication: bool,
         /// Time spent inside one producing poll before the pixels exist, standing
         /// in for a backend that blocks until the next frame is available.
         wait: Duration,
@@ -617,6 +780,7 @@ mod tests {
                 stop_after,
                 disconnect_at: None,
                 self_paced: false,
+                needs_deduplication: true,
                 wait: Duration::ZERO,
             }
         }
@@ -629,6 +793,10 @@ mod tests {
 
         fn is_self_paced(&self) -> bool {
             self.self_paced
+        }
+
+        fn needs_frame_deduplication(&self) -> bool {
+            self.needs_deduplication
         }
 
         fn capture(&mut self) -> anyhow::Result<Frame> {
@@ -673,6 +841,40 @@ mod tests {
             panic!("expected a full frame");
         };
         assert_eq!(frame.data[0], 2);
+    }
+
+    #[tokio::test]
+    async fn retained_full_frame_replays_immediately_without_copying_pixels() {
+        // ScreenCaptureKit emits idle markers while the desktop is static. A
+        // newly authenticated client must still receive the last complete
+        // desktop immediately, without waiting for a future screen change.
+        let mailbox = LatestFrameMailbox::new();
+        let original = frame(7);
+        let pixels = original.data.as_ptr();
+        assert!(matches!(
+            mailbox.publish_full(original),
+            PublishResult::Published { replaced: false }
+        ));
+
+        let PendingFrames::Full(first) = mailbox.take().await.unwrap() else {
+            panic!("expected the first full frame");
+        };
+        assert_eq!(first.data.as_ptr(), pixels);
+
+        mailbox.replay_latest_full();
+        let replay = tokio::time::timeout(Duration::from_millis(50), mailbox.take())
+            .await
+            .expect("retained frame must not wait for a new capture")
+            .expect("mailbox must stay open across client subscriptions");
+        let PendingFrames::Full(replay) = replay else {
+            panic!("expected the retained full frame");
+        };
+        assert_eq!(replay.data[0], 7);
+        assert_eq!(
+            replay.data.as_ptr(),
+            pixels,
+            "replay should only clone the Bytes handle, not the pixel buffer"
+        );
     }
 
     #[tokio::test]
@@ -769,6 +971,25 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(100),
             "self-paced backend was paced a second time: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_change_stream_does_not_hash_full_frames_again() {
+        let mailbox = LatestFrameMailbox::new();
+        let metrics = RdpMetrics::silent();
+        let mut capturer = IdleCapturer {
+            self_paced: true,
+            needs_deduplication: false,
+            ..IdleCapturer::new(Arc::new(AtomicUsize::new(0)), 1, 2)
+        };
+
+        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+
+        assert_eq!(
+            metrics.hash_sample_count(),
+            0,
+            "a native change stream must not pay for a second full-frame scan"
         );
     }
 
