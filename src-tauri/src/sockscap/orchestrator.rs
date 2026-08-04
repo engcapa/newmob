@@ -285,9 +285,12 @@ impl Orchestrator {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let errors: Vec<String> = Vec::new();
         #[cfg(target_os = "linux")]
-        if let Some(capture) = self.linux_capture.take() {
+        let mut retryable_linux_capture = None;
+        #[cfg(target_os = "linux")]
+        if let Some(mut capture) = self.linux_capture.take() {
             if let Err(error) = capture.stop().await {
                 errors.push(error);
+                retryable_linux_capture = Some(capture);
             }
         }
         #[cfg(target_os = "macos")]
@@ -304,6 +307,10 @@ impl Orchestrator {
             Ok(())
         } else {
             let error = errors.join("; ");
+            #[cfg(target_os = "linux")]
+            {
+                self.linux_capture = retryable_linux_capture;
+            }
             self.set_recovery_required(&capture_backend, error.clone());
             Err(error)
         }
