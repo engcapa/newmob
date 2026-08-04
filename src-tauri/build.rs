@@ -5,7 +5,62 @@ fn main() {
     enforce_asr_llm_isolation();
     compile_hbase_protos();
     configure_macos_rpath();
-    tauri_build::build();
+    let embed_manifest_ourselves = configure_windows_manifest();
+    build_tauri(embed_manifest_ourselves);
+}
+
+/// Run tauri-build, opting out of its Windows manifest embedding when
+/// `configure_windows_manifest` has taken that job over (see its docs).
+fn build_tauri(embed_manifest_ourselves: bool) {
+    if !embed_manifest_ourselves {
+        tauri_build::build();
+        return;
+    }
+    let attributes = tauri_build::Attributes::new()
+        .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+    tauri_build::try_build(attributes).expect("failed to run tauri-build");
+}
+
+/// Embed the ComCtl32 v6 side-by-side manifest into *every* linked target on
+/// windows-msvc, and report whether we did (so tauri-build can be told to skip
+/// its own manifest embedding and avoid a duplicate resource).
+///
+/// `tauri-plugin-dialog` depends on `rfd` with its `common-controls-v6`
+/// feature, so this crate statically imports `TaskDialogIndirect` from
+/// ComCtl32. That symbol exists only in the ComCtl32 v6 WinSxS assembly — the
+/// v5.82 stub in System32 does not export it — so any binary importing it must
+/// declare the v6 dependency in its manifest, or the Windows loader aborts the
+/// process at startup with 0xC0000139 (STATUS_ENTRYPOINT_NOT_FOUND).
+///
+/// tauri-build embeds that manifest through `cargo:rustc-link-arg-bins`, which
+/// reaches bin targets only, so `cargo test --lib` produced a harness binary
+/// with no manifest that died before running a single test. Cargo has no
+/// "everything except bins" link-arg scope: `cargo:rustc-link-arg-tests`
+/// applies to `tests/` integration targets and *not* to the `--lib` unittest
+/// harness (verified empirically), and the unscoped `cargo:rustc-link-arg`
+/// collides with tauri-winres' manifest resource (`CVT1100: duplicate
+/// resource, type:MANIFEST` → `LNK1123`).
+///
+/// So we take ownership: tauri-build embeds nothing, and the unscoped link-arg
+/// gives bins, the cdylib, and the test harness exactly one manifest from one
+/// source. `windows-app-manifest.xml` mirrors tauri-build's default byte for
+/// byte, so the shipped binaries are unchanged.
+fn configure_windows_manifest() -> bool {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
+        return false;
+    }
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
+    let manifest = Path::new(&manifest_dir).join("windows-app-manifest.xml");
+    if !manifest.exists() {
+        // Fall back to tauri-build's own manifest rather than shipping without one.
+        return false;
+    }
+    println!("cargo:rerun-if-changed=windows-app-manifest.xml");
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    true
 }
 
 /// On macOS, add an `@executable_path/../Frameworks` rpath so the krb5 dylibs
