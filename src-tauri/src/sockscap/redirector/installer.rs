@@ -30,12 +30,24 @@ pub struct RedirectorInstallStatus {
     pub state: RedirectorInstallState,
     pub package_version: String,
     pub resource_available: bool,
+    pub system_extension_state: RedirectorSystemExtensionState,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RedirectorSystemExtensionState {
+    Enabled,
+    WaitingForUser,
+    NotRegistered,
+    Other,
+    Unavailable,
 }
 
 pub fn status(app: &tauri::AppHandle) -> RedirectorInstallStatus {
     let resource_available = resolve_archive(app).is_some();
     let installed = installed_app_path();
+    let system_extension_state = system_extension_state();
     let (state, message) = if !installed.exists() {
         if resource_available {
             (
@@ -50,12 +62,19 @@ pub fn status(app: &tauri::AppHandle) -> RedirectorInstallStatus {
         }
     } else {
         match verify_bundle(&installed) {
-            Ok(()) => match extension_is_active() {
-                Some(false) => (
+            Ok(()) => match system_extension_state {
+                RedirectorSystemExtensionState::WaitingForUser => (
+                    RedirectorInstallState::PendingSystemApproval,
+                    "Mitmproxy Redirector is waiting for approval in System Settings. Approve its System Extension, then retry Start or Recover; repeated attempts cannot bypass macOS approval."
+                        .into(),
+                ),
+                RedirectorSystemExtensionState::NotRegistered
+                | RedirectorSystemExtensionState::Other => (
                     RedirectorInstallState::PendingSystemApproval,
                     "Mitmproxy Redirector is installed and verified. Start SocksCap once, then approve its System Extension and network configuration in System Settings.".into(),
                 ),
-                Some(true) | None => (
+                RedirectorSystemExtensionState::Enabled
+                | RedirectorSystemExtensionState::Unavailable => (
                     RedirectorInstallState::Ready,
                     format!("Mitmproxy Redirector {REDIRECTOR_VERSION} is installed and verified."),
                 ),
@@ -86,6 +105,7 @@ pub fn status(app: &tauri::AppHandle) -> RedirectorInstallStatus {
         state,
         package_version: REDIRECTOR_VERSION.into(),
         resource_available,
+        system_extension_state,
         message,
     }
 }
@@ -140,19 +160,40 @@ pub fn install(app: &tauri::AppHandle) -> Result<RedirectorInstallStatus, String
     Ok(status(app))
 }
 
-fn extension_is_active() -> Option<bool> {
+pub(crate) fn system_extension_state() -> RedirectorSystemExtensionState {
     let output = Command::new("/usr/bin/systemextensionsctl")
         .arg("list")
         .output()
-        .ok()?;
+        .ok();
+    let Some(output) = output else {
+        return RedirectorSystemExtensionState::Unavailable;
+    };
     if !output.status.success() {
-        return None;
+        return RedirectorSystemExtensionState::Unavailable;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let line = text
+    parse_system_extension_state(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn parse_system_extension_state(output: &str) -> RedirectorSystemExtensionState {
+    let matching = output
         .lines()
-        .find(|line| line.contains(REDIRECTOR_EXTENSION_BUNDLE_ID));
-    Some(line.is_some_and(|line| line.contains("[activated enabled]") && line.starts_with('*')))
+        .filter(|line| line.contains(REDIRECTOR_EXTENSION_BUNDLE_ID))
+        .collect::<Vec<_>>();
+    if matching
+        .iter()
+        .any(|line| line.contains("[activated enabled]"))
+    {
+        RedirectorSystemExtensionState::Enabled
+    } else if matching
+        .iter()
+        .any(|line| line.contains("waiting for user"))
+    {
+        RedirectorSystemExtensionState::WaitingForUser
+    } else if matching.is_empty() {
+        RedirectorSystemExtensionState::NotRegistered
+    } else {
+        RedirectorSystemExtensionState::Other
+    }
 }
 
 fn resolve_archive(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -342,5 +383,24 @@ mod tests {
         if installed_app_path().exists() {
             verify_supply_chain(&installed_app_path()).unwrap();
         }
+    }
+
+    #[test]
+    fn parses_system_extension_approval_states() {
+        let waiting = "\t*\tS8XHQB96PW\torg.mitmproxy.macos-redirector.network-extension (2.0/1)\tnetwork-extension\t[activated waiting for user]";
+        assert_eq!(
+            parse_system_extension_state(waiting),
+            RedirectorSystemExtensionState::WaitingForUser
+        );
+
+        let enabled = "*\t*\tS8XHQB96PW\torg.mitmproxy.macos-redirector.network-extension (2.0/1)\tnetwork-extension\t[activated enabled]";
+        assert_eq!(
+            parse_system_extension_state(enabled),
+            RedirectorSystemExtensionState::Enabled
+        );
+        assert_eq!(
+            parse_system_extension_state("no matching extensions"),
+            RedirectorSystemExtensionState::NotRegistered
+        );
     }
 }

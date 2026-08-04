@@ -1174,6 +1174,9 @@ export const zhCN: DeepPartial<typeof en> = {
     diagnosticsCopied: "已复制 SocksCap 诊断信息。",
     redirectorMissing: "macOS 捕获需要安装 Mitmproxy Redirector。",
     installRedirector: "安装 Redirector…",
+    refreshRedirectorApproval: "刷新批准状态",
+    redirectorApprovalPendingHint:
+      "请先在系统设置中批准 Mitmproxy Redirector 系统扩展，再启动 SocksCap。",
     refreshStatus: "刷新状态与流量计数",
     statusRefreshed: "状态已刷新",
     saved: "配置已保存",

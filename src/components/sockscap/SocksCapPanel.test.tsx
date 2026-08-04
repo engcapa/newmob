@@ -4,6 +4,7 @@ import { SocksCapPanel } from "./SocksCapPanel";
 import {
   sockscapCapabilities,
   sockscapRecover,
+  sockscapRedirectorInstallStatus,
   sockscapStart,
   sockscapStatus,
   sockscapParseShareLink,
@@ -109,6 +110,13 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
     sockscapDetectLocalProxies: vi.fn(async () => []),
     sockscapDetectTunConflicts: vi.fn(async () => []),
     sockscapImportSubscription: vi.fn(),
+    sockscapRedirectorInstallStatus: vi.fn(async () => ({
+      state: "ready",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "enabled",
+      message: "ready",
+    })),
   };
 });
 
@@ -148,6 +156,14 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     vi.mocked(sockscapTestUpstream).mockResolvedValue("SOCKS5 ok");
     vi.mocked(sockscapDetectTunConflicts).mockReset();
     vi.mocked(sockscapDetectTunConflicts).mockResolvedValue([]);
+    vi.mocked(sockscapRedirectorInstallStatus).mockReset();
+    vi.mocked(sockscapRedirectorInstallStatus).mockResolvedValue({
+      state: "ready",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "enabled",
+      message: "ready",
+    });
   });
 
   afterEach(() => {
@@ -649,6 +665,42 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     ).toBeInTheDocument();
     expect(screen.queryByTestId("sockscap-root-prompt-dialog")).not.toBeInTheDocument();
     expect(vi.mocked(sockscapStart)).toHaveBeenCalledWith(undefined);
+  });
+
+  it("blocks repeated Start attempts while macOS System Extension approval is waiting", async () => {
+    currentPlatform = "macos";
+    vi.mocked(sockscapRedirectorInstallStatus).mockResolvedValue({
+      state: "pendingSystemApproval",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "waitingForUser",
+      message: "Mitmproxy Redirector is waiting for approval in System Settings.",
+    });
+    render(<SocksCapPanel />);
+
+    const start = await screen.findByTestId("sockscap-start");
+    expect(start).toBeDisabled();
+    expect(start).toHaveAttribute(
+      "title",
+      expect.stringContaining("Approve the Mitmproxy Redirector System Extension"),
+    );
+    expect(await screen.findByTestId("sockscap-redirector-action")).toHaveTextContent(
+      "Refresh approval",
+    );
+  });
+
+  it("keeps first Start available before Redirector has registered its approval request", async () => {
+    currentPlatform = "macos";
+    vi.mocked(sockscapRedirectorInstallStatus).mockResolvedValue({
+      state: "pendingSystemApproval",
+      packageVersion: "0.12.11",
+      resourceAvailable: true,
+      systemExtensionState: "notRegistered",
+      message: "Start SocksCap once, then approve its System Extension.",
+    });
+    render(<SocksCapPanel />);
+
+    expect(await screen.findByTestId("sockscap-start")).not.toBeDisabled();
   });
 
   it("disables app scope and shows the backend notes when app filtering is unavailable", async () => {

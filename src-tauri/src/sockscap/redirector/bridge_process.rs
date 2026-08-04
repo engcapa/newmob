@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -28,6 +28,7 @@ const CONTROL_CONNECT_TIMEOUT: Duration = Duration::from_secs(180);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const HEARTBEAT_CHECK: Duration = Duration::from_secs(1);
 const DISABLE_DRAIN: Duration = Duration::from_millis(300);
+const LAUNCHER_EXIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct Options {
     provider_socket: PathBuf,
@@ -100,6 +101,10 @@ async fn run() -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
+        // The upstream app can wait indefinitely for macOS user approval.
+        // Every ordinary bridge exit must therefore terminate it; the explicit
+        // cleanup below reaps it, while kill_on_drop covers early unwinding.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
             format!(
@@ -108,17 +113,36 @@ async fn run() -> Result<(), String> {
             )
         })?;
 
-    let (mut control, provider_pid) =
-        accept_verified_control(&listener, CONTROL_CONNECT_TIMEOUT).await?;
-    tokio::spawn(async move {
-        match launcher.wait().await {
-            Ok(status) if status.success() => {
-                eprintln!("sockscap bridge: Redirector launcher exited successfully")
-            }
-            Ok(status) => eprintln!("sockscap bridge: Redirector launcher exited with {status}"),
-            Err(error) => eprintln!("sockscap bridge: Redirector launcher wait failed: {error}"),
-        }
-    });
+    let result = run_session(&options, &listener, &mut launcher).await;
+    terminate_launcher(&mut launcher).await;
+    result
+}
+
+async fn run_session(
+    options: &Options,
+    listener: &UnixListener,
+    launcher: &mut Child,
+) -> Result<(), String> {
+    // Signals and the parent watchdog must be live during first-use approval,
+    // not only after the Provider connects. Otherwise quitting Taomni while
+    // macOS is waiting for approval strands both bridge and launcher processes.
+    let mut terminate = signal(SignalKind::terminate())
+        .map_err(|error| format!("install SIGTERM handler: {error}"))?;
+    let mut interrupt = signal(SignalKind::interrupt())
+        .map_err(|error| format!("install SIGINT handler: {error}"))?;
+    let mut hangup =
+        signal(SignalKind::hangup()).map_err(|error| format!("install SIGHUP handler: {error}"))?;
+
+    let (mut control, provider_pid) = accept_verified_control(
+        listener,
+        CONTROL_CONNECT_TIMEOUT,
+        launcher,
+        options.parent_pid,
+        &mut terminate,
+        &mut interrupt,
+        &mut hangup,
+    )
+    .await?;
 
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
@@ -133,12 +157,6 @@ async fn run() -> Result<(), String> {
     )
     .await?;
 
-    let mut terminate = signal(SignalKind::terminate())
-        .map_err(|error| format!("install SIGTERM handler: {error}"))?;
-    let mut interrupt = signal(SignalKind::interrupt())
-        .map_err(|error| format!("install SIGINT handler: {error}"))?;
-    let mut hangup =
-        signal(SignalKind::hangup()).map_err(|error| format!("install SIGHUP handler: {error}"))?;
     let mut heartbeat = tokio::time::interval(HEARTBEAT_CHECK);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_management = Instant::now();
@@ -148,10 +166,15 @@ async fn run() -> Result<(), String> {
     let mut active = false;
     let mut flows = JoinSet::new();
     let mut stop_reason = "management stop".to_string();
+    let mut launcher_running = launcher
+        .try_wait()
+        .map_err(|error| format!("inspect Redirector launcher: {error}"))?
+        .is_none();
 
-    loop {
-        let mut line = String::new();
-        tokio::select! {
+    let management_result: Result<(), String> = async {
+        loop {
+            let mut line = String::new();
+            tokio::select! {
             read = read_management_line(&mut input, &mut line) => {
                 let size = read.map_err(|error| format!("read management command: {error}"))?;
                 if size == 0 {
@@ -297,12 +320,34 @@ async fn run() -> Result<(), String> {
                     break;
                 }
             }
-            joined = flows.join_next(), if !flows.is_empty() => {
-                if let Some(Err(error)) = joined {
-                    eprintln!("sockscap bridge: flow forwarding task failed: {error}");
+                status = launcher.wait(), if launcher_running => {
+                    launcher_running = false;
+                    match status {
+                        Ok(status) if status.success() => {
+                            eprintln!("sockscap bridge: Redirector launcher exited successfully");
+                        }
+                        Ok(status) => {
+                            return Err(format!("Redirector launcher exited with {status}"));
+                        }
+                        Err(error) => {
+                            return Err(format!("Redirector launcher wait failed: {error}"));
+                        }
+                    }
+                }
+                joined = flows.join_next(), if !flows.is_empty() => {
+                    if let Some(Err(error)) = joined {
+                        eprintln!("sockscap bridge: flow forwarding task failed: {error}");
+                    }
                 }
             }
         }
+        #[allow(unreachable_code)]
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = &management_result {
+        stop_reason = error.clone();
     }
 
     eprintln!("sockscap bridge: disabling interception ({stop_reason})");
@@ -314,6 +359,10 @@ async fn run() -> Result<(), String> {
     flows.shutdown().await;
 
     if let Err(error) = disable_result {
+        let _ = write_error(&mut output, Some(stop_request_id), error.clone()).await;
+        return Err(error);
+    }
+    if let Err(error) = management_result {
         let _ = write_error(&mut output, Some(stop_request_id), error.clone()).await;
         return Err(error);
     }
@@ -332,26 +381,91 @@ async fn run() -> Result<(), String> {
 async fn accept_verified_control(
     listener: &UnixListener,
     timeout: Duration,
+    launcher: &mut Child,
+    parent_pid: u32,
+    terminate: &mut tokio::signal::unix::Signal,
+    interrupt: &mut tokio::signal::unix::Signal,
+    hangup: &mut tokio::signal::unix::Signal,
 ) -> Result<(UnixStream, u32), String> {
     let deadline = Instant::now() + timeout;
+    let mut parent_check = tokio::time::interval(HEARTBEAT_CHECK);
+    parent_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut launcher_running = launcher
+        .try_wait()
+        .map_err(|error| format!("inspect Redirector launcher: {error}"))?
+        .is_none();
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err("timed out waiting for a verified Redirector control channel".into());
         }
-        let (stream, _) = tokio::time::timeout(remaining, listener.accept())
-            .await
-            .map_err(|_| {
-                "timed out waiting for Mitmproxy Redirector; approve its System Extension and network configuration in System Settings, then retry"
-                    .to_string()
-            })?
-            .map_err(|error| format!("accept Redirector control channel: {error}"))?;
+        let accepted = tokio::select! {
+            accepted = listener.accept() => Some(
+                accepted.map_err(|error| format!("accept Redirector control channel: {error}"))?
+            ),
+            status = launcher.wait(), if launcher_running => {
+                launcher_running = false;
+                match status {
+                    Ok(status) if status.success() => {
+                        // The upstream coordinator exits after starting the NE
+                        // tunnel; the Provider connection can arrive just after.
+                        eprintln!("sockscap bridge: Redirector launcher exited successfully");
+                        None
+                    }
+                    Ok(status) => return Err(format!("Redirector launcher exited with {status}")),
+                    Err(error) => return Err(format!("Redirector launcher wait failed: {error}")),
+                }
+            }
+            _ = parent_check.tick() => {
+                if !process_exists(parent_pid) {
+                    return Err(format!(
+                        "Taomni parent pid {parent_pid} exited while waiting for Redirector approval"
+                    ));
+                }
+                None
+            }
+            _ = terminate.recv() => return Err("received SIGTERM while waiting for Redirector approval".into()),
+            _ = interrupt.recv() => return Err("received SIGINT while waiting for Redirector approval".into()),
+            _ = hangup.recv() => return Err("received SIGHUP while waiting for Redirector approval".into()),
+            _ = tokio::time::sleep(remaining) => {
+                return Err(
+                    "timed out waiting for Mitmproxy Redirector; approve its System Extension and network configuration in System Settings, then retry"
+                        .into()
+                );
+            }
+        };
+        let Some((stream, _)) = accepted else {
+            continue;
+        };
         match verify_redirector_peer(&stream) {
             Ok(pid) => return Ok((stream, pid)),
             Err(error) => {
                 eprintln!("sockscap bridge: rejected unverified control peer: {error}");
             }
         }
+    }
+}
+
+async fn terminate_launcher(launcher: &mut Child) {
+    match launcher.try_wait() {
+        Ok(Some(_)) => return,
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("sockscap bridge: inspect Redirector launcher during cleanup: {error}");
+        }
+    }
+    if let Some(pid) = launcher.id() {
+        // Let Swift unwind a pending SystemExtension continuation first.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    if tokio::time::timeout(LAUNCHER_EXIT_TIMEOUT, launcher.wait())
+        .await
+        .is_err()
+    {
+        let _ = launcher.start_kill();
+        let _ = launcher.wait().await;
     }
 }
 
@@ -502,5 +616,19 @@ mod tests {
         assert!(
             validate_socket_path(Path::new("/var/tmp/taomni-redirector-x.sock"), "flow").is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn pending_approval_launcher_is_terminated_and_reaped() {
+        let mut launcher = Command::new("/bin/sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        assert!(launcher.id().is_some());
+
+        terminate_launcher(&mut launcher).await;
+
+        assert!(launcher.try_wait().unwrap().is_some());
     }
 }

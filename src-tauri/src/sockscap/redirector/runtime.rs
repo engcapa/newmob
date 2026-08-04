@@ -69,6 +69,51 @@ pub struct RedirectorCaptureHandle {
     telemetry: Arc<RuntimeTelemetry>,
 }
 
+/// A failed Start distinguishes errors that happened before any business scope
+/// could be written from errors after the Apply frame may have reached the
+/// Provider. Only the latter requires durable network recovery.
+#[derive(Debug)]
+pub struct RedirectorStartError {
+    message: String,
+    scope_may_be_active: bool,
+}
+
+impl RedirectorStartError {
+    fn before_scope(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            scope_may_be_active: false,
+        }
+    }
+
+    fn after_apply(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            scope_may_be_active: true,
+        }
+    }
+
+    pub fn recovery_required(&self) -> bool {
+        self.scope_may_be_active
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for RedirectorStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl From<String> for RedirectorStartError {
+    fn from(message: String) -> Self {
+        Self::before_scope(message)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RedirectorTelemetrySnapshot {
@@ -171,7 +216,7 @@ pub async fn start(
     config: &SocksCapConfig,
     ctx: Arc<RwLock<RelayContext>>,
     session_id: &str,
-) -> Result<RedirectorCaptureHandle, String> {
+) -> Result<RedirectorCaptureHandle, RedirectorStartError> {
     preflight(config)?;
     let file_descriptor_limit = prepare_file_descriptor_budget()?;
     let flow_capacity = relay_flow_capacity(file_descriptor_limit);
@@ -256,6 +301,18 @@ pub async fn start(
 /// relay context is constructed on this path.
 pub async fn recover() -> Result<(), String> {
     super::verify_installed()?;
+    match super::installer::system_extension_state() {
+        super::installer::RedirectorSystemExtensionState::WaitingForUser => {
+            return Err(
+                "Mitmproxy Redirector System Extension approval is pending in System Settings. Approve it first, then retry Recover."
+                    .into(),
+            );
+        }
+        super::installer::RedirectorSystemExtensionState::Enabled
+        | super::installer::RedirectorSystemExtensionState::NotRegistered
+        | super::installer::RedirectorSystemExtensionState::Other
+        | super::installer::RedirectorSystemExtensionState::Unavailable => {}
+    }
     let flow_socket_path = random_socket_path("recovery-flow");
     let provider_socket_path = random_socket_path("recovery-provider");
     let listener = bind_private_listener(&flow_socket_path)?;
@@ -267,7 +324,8 @@ pub async fn recover() -> Result<(), String> {
         &inert_actions(),
         &uuid::Uuid::new_v4().to_string(),
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
     stop_bridge(&mut bridge).await?;
     drop(listener);
     drop(cleanup);
@@ -366,6 +424,18 @@ pub fn preflight(config: &SocksCapConfig) -> Result<(), String> {
     let _ = config;
     super::verify_installed()
         .map_err(|error| format!("{error}; no system-proxy fallback is available"))?;
+    match super::installer::system_extension_state() {
+        super::installer::RedirectorSystemExtensionState::WaitingForUser => {
+            return Err(
+                "Mitmproxy Redirector System Extension approval is pending in System Settings. Approve it first, then retry Start or Recover."
+                    .into(),
+            );
+        }
+        super::installer::RedirectorSystemExtensionState::Enabled
+        | super::installer::RedirectorSystemExtensionState::NotRegistered
+        | super::installer::RedirectorSystemExtensionState::Other
+        | super::installer::RedirectorSystemExtensionState::Unavailable => {}
+    }
     prepare_file_descriptor_budget()?;
     Ok(())
 }
@@ -578,12 +648,16 @@ async fn launch_bridge(
     flow_socket: &std::path::Path,
     actions: &[String],
     session_id: &str,
-) -> Result<BridgeSession, String> {
+) -> Result<BridgeSession, RedirectorStartError> {
     if actions.is_empty() {
-        return Err("Redirector bridge actions must not be empty".into());
+        return Err(RedirectorStartError::before_scope(
+            "Redirector bridge actions must not be empty",
+        ));
     }
     if session_id.trim().is_empty() {
-        return Err("Redirector bridge session id must not be empty".into());
+        return Err(RedirectorStartError::before_scope(
+            "Redirector bridge session id must not be empty",
+        ));
     }
     let executable = std::env::current_exe()
         .map_err(|error| format!("resolve Taomni bridge executable: {error}"))?;
@@ -605,11 +679,15 @@ async fn launch_bridge(
         .map_err(|error| format!("launch isolated Redirector bridge: {error}"))?;
     let Some(stdin) = child.stdin.take() else {
         terminate_bridge_child(&mut child).await;
-        return Err("Redirector bridge stdin is unavailable".into());
+        return Err(RedirectorStartError::before_scope(
+            "Redirector bridge stdin is unavailable",
+        ));
     };
     let Some(stdout) = child.stdout.take() else {
         terminate_bridge_child(&mut child).await;
-        return Err("Redirector bridge stdout is unavailable".into());
+        return Err(RedirectorStartError::before_scope(
+            "Redirector bridge stdout is unavailable",
+        ));
     };
     let mut input = BufWriter::new(stdin);
     let mut output = BufReader::new(stdout);
@@ -619,11 +697,13 @@ async fn launch_bridge(
             Ok(Ok(event)) => event,
             Ok(Err(error)) => {
                 terminate_bridge_child(&mut child).await;
-                return Err(error);
+                return Err(RedirectorStartError::before_scope(error));
             }
             Err(_) => {
                 terminate_bridge_child(&mut child).await;
-                return Err("timed out waiting for Redirector bridge control readiness".into());
+                return Err(RedirectorStartError::before_scope(
+                    "timed out waiting for Redirector bridge control readiness",
+                ));
             }
         };
     let provider_pid = match ready {
@@ -633,13 +713,13 @@ async fn launch_bridge(
         } if version == BRIDGE_PROTOCOL_VERSION => provider_pid,
         BridgeEvent::Error { message, .. } => {
             terminate_bridge_child(&mut child).await;
-            return Err(message);
+            return Err(RedirectorStartError::before_scope(message));
         }
         event => {
             terminate_bridge_child(&mut child).await;
-            return Err(format!(
+            return Err(RedirectorStartError::before_scope(format!(
                 "unexpected Redirector bridge readiness event: {event:?}"
-            ));
+            )));
         }
     };
 
@@ -657,17 +737,19 @@ async fn launch_bridge(
     .await
     {
         terminate_bridge_child(&mut child).await;
-        return Err(error);
+        return Err(RedirectorStartError::after_apply(error));
     }
     let applied = match tokio::time::timeout(STOP_TIMEOUT, read_bridge_event(&mut output)).await {
         Ok(Ok(event)) => event,
         Ok(Err(error)) => {
             terminate_bridge_child(&mut child).await;
-            return Err(error);
+            return Err(RedirectorStartError::after_apply(error));
         }
         Err(_) => {
             terminate_bridge_child(&mut child).await;
-            return Err("timed out waiting for Redirector bridge scope apply".into());
+            return Err(RedirectorStartError::after_apply(
+                "timed out waiting for Redirector bridge scope apply",
+            ));
         }
     };
     match applied {
@@ -682,13 +764,13 @@ async fn launch_bridge(
             && generation == 1 => {}
         BridgeEvent::Error { message, .. } => {
             terminate_bridge_child(&mut child).await;
-            return Err(message);
+            return Err(RedirectorStartError::after_apply(message));
         }
         event => {
             terminate_bridge_child(&mut child).await;
-            return Err(format!(
+            return Err(RedirectorStartError::after_apply(format!(
                 "unexpected Redirector bridge apply event: {event:?}"
-            ));
+            )));
         }
     }
 

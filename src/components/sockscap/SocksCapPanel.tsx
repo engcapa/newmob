@@ -496,6 +496,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     status?.phase === "active" ||
     status?.phase === "degraded" ||
     status?.phase === "preparing";
+  const redirectorApprovalWaiting =
+    caps?.platform === "macos" &&
+    redirectorInstall?.systemExtensionState === "waitingForUser";
 
   // A capture session is an immutable snapshot on every platform. This also
   // covers the short Stopping phase so edits cannot race teardown.
@@ -811,18 +814,20 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const onRefreshStatus = async () => {
     setBusy(true);
     try {
-      const [st, sn, hp, gf, drs] = await Promise.all([
+      const [st, sn, hp, gf, drs, ri] = await Promise.all([
         sockscapStatus().catch(() => null),
         sockscapStatsSnapshot().catch(() => null),
         sockscapHelperStatus().catch(() => null),
         sockscapGfwlistStatus().catch(() => null),
         sockscapGetDomainRecords().catch(() => null),
+        sockscapRedirectorInstallStatus().catch(() => null),
       ]);
       if (st) setStatus(st);
       if (sn) setStats(sn);
       if (hp) setHelper(hp);
       if (gf) setGfw(gf);
       if (drs) setDomainRecords(drs);
+      if (ri) setRedirectorInstall(ri);
       report(t("sockscap.statusRefreshed"));
     } finally {
       setBusy(false);
@@ -1754,7 +1759,12 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             data-testid="sockscap-start"
             className="inline-flex items-center gap-1 px-3 py-1.5 rounded text-[12px] bg-[var(--taomni-accent)] text-white hover:opacity-90 disabled:opacity-60 disabled:cursor-not-allowed"
             onClick={() => void preflightAndStart()}
-            disabled={busy || probing}
+            disabled={busy || probing || redirectorApprovalWaiting}
+            title={
+              redirectorApprovalWaiting
+                ? t("sockscap.redirectorApprovalPendingHint")
+                : undefined
+            }
           >
             {probing ? (
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1821,17 +1831,30 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           <span>{redirectorInstall?.message || t("sockscap.redirectorMissing")}</span>
           <button
             type="button"
+            data-testid="sockscap-redirector-action"
             className="inline-flex items-center gap-1 px-2 py-1 rounded border border-amber-500/40 hover:bg-amber-500/10 disabled:opacity-50"
             disabled={
               busy ||
-              !redirectorInstall?.resourceAvailable ||
-              redirectorInstall?.state === "conflict" ||
-              redirectorInstall?.state === "pendingSystemApproval"
+              (redirectorInstall?.state !== "pendingSystemApproval" &&
+                (!redirectorInstall?.resourceAvailable ||
+                  redirectorInstall?.state === "conflict"))
             }
-            onClick={() => void installRedirector()}
+            onClick={() =>
+              void (redirectorInstall?.state === "pendingSystemApproval"
+                ? onRefreshStatus()
+                : installRedirector())
+            }
           >
-            {busy ? <Loader2 className="w-3 h-3 animate-spin" /> : <Shield className="w-3 h-3" />}
-            {t("sockscap.installRedirector")}
+            {busy ? (
+              <Loader2 className="w-3 h-3 animate-spin" />
+            ) : redirectorInstall?.state === "pendingSystemApproval" ? (
+              <RefreshCw className="w-3 h-3" />
+            ) : (
+              <Shield className="w-3 h-3" />
+            )}
+            {redirectorInstall?.state === "pendingSystemApproval"
+              ? t("sockscap.refreshRedirectorApproval")
+              : t("sockscap.installRedirector")}
           </button>
         </div>
       )}
