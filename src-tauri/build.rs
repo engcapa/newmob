@@ -5,14 +5,7 @@ fn main() {
     enforce_asr_llm_isolation();
     compile_hbase_protos();
     configure_macos_rpath();
-    // Skip tauri_build when compiling under `cargo test`.  tauri_build
-    // embeds a Windows GUI manifest and statically links WebView2Loader,
-    // whose COM entry points cannot be resolved on the headless Windows
-    // Server CI runner (exit code 0xC0000139 / STATUS_ENTRYPOINT_NOT_FOUND).
-    // Unit tests never need the WebView2 runtime, so this is always safe.
-    if std::env::var("CARGO_CFG_TEST").is_err() {
-        tauri_build::build();
-    }
+    tauri_build::build();
 }
 
 /// On macOS, add an `@executable_path/../Frameworks` rpath so the krb5 dylibs
