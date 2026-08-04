@@ -245,7 +245,8 @@ impl CgroupSession {
         let mut errors = Vec::new();
 
         for moved in self.moves.iter().rev() {
-            if let Err(error) = restore_managed_processes(moved, sudo_password) {
+            if let Err(error) = restore_managed_processes(moved, Some(self.self_pid), sudo_password)
+            {
                 errors.push(error);
             }
         }
@@ -292,14 +293,17 @@ impl CgroupSession {
             }
         }
 
-        self.moves.clear();
-        self.capture_matches.clear();
-        self.app_group_dirs.clear();
-        self.bypass_match = None;
-
         if errors.is_empty() {
+            self.moves.clear();
+            self.capture_matches.clear();
+            self.app_group_dirs.clear();
+            self.bypass_match = None;
             Ok(())
         } else {
+            // Keep the original-to-managed mappings after a partial cleanup.
+            // Recover can then retry the live cgroup migration safely instead
+            // of falling back to cleanup_empty_sessions, which deliberately
+            // refuses to guess where a live process belonged.
             Err(errors.join("; "))
         }
     }
@@ -437,34 +441,112 @@ fn parse_cgroup_processes(contents: &str, path: &Path) -> Result<Vec<u32>, Strin
 
 fn restore_managed_processes(
     moved: &CgroupMove,
+    preferred_pid: Option<u32>,
     sudo_password: Option<&str>,
 ) -> Result<(), String> {
-    for pid in cgroup_processes(&moved.managed_dir)? {
-        if !Path::new(&format!("/proc/{pid}")).exists() {
-            continue;
+    let target = moved.original_dir.join("cgroup.procs");
+    drain_cgroup_processes(
+        preferred_pid,
+        || cgroup_processes(&moved.managed_dir),
+        |pid| restore_pid(pid, &moved.managed_dir, &target, sudo_password),
+    )
+}
+
+/// Move every direct member out of a managed cgroup, retrying when a process
+/// forks or exits between the membership snapshot and the write.
+///
+/// The preferred PID is the Taomni process in global/mixed mode. Moving it
+/// first ensures any privileged helper subsequently spawned by cleanup starts
+/// outside the bypass cgroup and cannot make that cgroup busy again.
+fn drain_cgroup_processes<List, Restore>(
+    preferred_pid: Option<u32>,
+    mut list: List,
+    mut restore: Restore,
+) -> Result<(), String>
+where
+    List: FnMut() -> Result<Vec<u32>, String>,
+    Restore: FnMut(u32) -> Result<(), String>,
+{
+    const MAX_DRAIN_PASSES: usize = 8;
+
+    for pass in 0..MAX_DRAIN_PASSES {
+        let mut members = list()?;
+        if members.is_empty() {
+            return Ok(());
         }
-        let target = moved.original_dir.join("cgroup.procs");
-        if let Err(error) = fs::write(&target, pid.to_string()) {
-            if !is_effective_root() && sudo_password.is_some() {
-                let target_str = target.display().to_string();
-                let contents = format!("{pid}\n");
-                let res =
-                    run_command_elevated("tee", &[&target_str], Some(&contents), sudo_password)?;
-                if !res.status.success() {
-                    return Err(format!(
-                        "restore PID {pid} from {} to {}: {error}",
-                        moved.managed_dir.display(),
-                        moved.original_dir.display()
-                    ));
-                }
-            } else {
-                return Err(format!(
-                    "restore PID {pid} from {} to {}: {error}",
-                    moved.managed_dir.display(),
-                    moved.original_dir.display()
-                ));
+        if let Some(preferred_pid) = preferred_pid {
+            if let Some(index) = members.iter().position(|pid| *pid == preferred_pid) {
+                members.swap(0, index);
             }
         }
+
+        let mut move_errors = Vec::new();
+        let mut moved_any = false;
+        for pid in &members {
+            match restore(*pid) {
+                Ok(()) => moved_any = true,
+                Err(error) => move_errors.push(error),
+            }
+        }
+
+        // Re-read even after failures. A short-lived PID may have exited after
+        // the first read, in which case the failed write needs no remediation.
+        let remaining = list()?;
+        if remaining.is_empty() {
+            return Ok(());
+        }
+
+        let same_members = {
+            let mut before = members.clone();
+            let mut after = remaining.clone();
+            before.sort_unstable();
+            after.sort_unstable();
+            before == after
+        };
+        if (!moved_any && same_members) || pass + 1 == MAX_DRAIN_PASSES {
+            let detail = if move_errors.is_empty() {
+                String::new()
+            } else {
+                format!("; {}", move_errors.join("; "))
+            };
+            return Err(format!(
+                "cgroup still contains live PIDs {remaining:?} after {} drain pass(es){detail}",
+                pass + 1
+            ));
+        }
+        std::thread::yield_now();
+    }
+
+    unreachable!("the bounded cgroup drain loop always returns")
+}
+
+fn restore_pid(
+    pid: u32,
+    managed_dir: &Path,
+    target: &Path,
+    sudo_password: Option<&str>,
+) -> Result<(), String> {
+    if let Err(error) = fs::write(target, pid.to_string()) {
+        if !is_effective_root() && sudo_password.is_some() {
+            let target_str = target.display().to_string();
+            let contents = format!("{pid}\n");
+            let output =
+                run_command_elevated("tee", &[&target_str], Some(&contents), sudo_password)?;
+            if output.status.success() {
+                return Ok(());
+            }
+            return Err(format!(
+                "restore PID {pid} from {} to {}: {}",
+                managed_dir.display(),
+                target.parent().unwrap_or(target).display(),
+                command_error(&output)
+            ));
+        }
+        return Err(format!(
+            "restore PID {pid} from {} to {}: {error}",
+            managed_dir.display(),
+            target.parent().unwrap_or(target).display()
+        ));
     }
     Ok(())
 }
@@ -583,6 +665,49 @@ mod tests {
     fn parses_direct_cgroup_members() {
         let members = parse_cgroup_processes("42\n1001\n", Path::new("/test")).unwrap();
         assert_eq!(members, vec![42, 1001]);
+    }
+
+    #[test]
+    fn drain_prioritizes_owner_and_retries_members_discovered_late() {
+        use std::cell::RefCell;
+
+        let snapshots = RefCell::new(vec![vec![20, 10], vec![30], vec![30], vec![]].into_iter());
+        let restored = RefCell::new(Vec::new());
+
+        drain_cgroup_processes(
+            Some(10),
+            || Ok(snapshots.borrow_mut().next().unwrap()),
+            |pid| {
+                restored.borrow_mut().push(pid);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(*restored.borrow(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn drain_ignores_a_failed_write_when_the_pid_has_exited() {
+        use std::cell::RefCell;
+
+        let snapshots = RefCell::new(vec![vec![42], vec![]].into_iter());
+        drain_cgroup_processes(
+            None,
+            || Ok(snapshots.borrow_mut().next().unwrap()),
+            |_| Err("process disappeared".into()),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn drain_reports_a_persistent_member_without_spinning() {
+        let error =
+            drain_cgroup_processes(None, || Ok(vec![42]), |_| Err("permission denied".into()))
+                .unwrap_err();
+
+        assert!(error.contains("live PIDs [42]"));
+        assert!(error.contains("permission denied"));
     }
 
     #[test]

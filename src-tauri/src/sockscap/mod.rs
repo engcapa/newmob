@@ -2143,20 +2143,35 @@ async fn full_teardown(
         }
     }
 
+    // Stop Linux xray health monitoring before cgroup cleanup. A respawn is a
+    // child of Taomni and therefore inherits the global/mixed bypass cgroup;
+    // allowing that during cleanup can repopulate the cgroup after its member
+    // snapshot and make rmdir fail with EBUSY.
+    #[cfg(target_os = "linux")]
+    if let Some(mgr) = state.sockscap.xray() {
+        mgr.shutdown_all().await;
+    }
+
     // --- 2) Linux removes nft rules + restores cgroups before its relay stops -
     #[cfg(target_os = "linux")]
-    {
-        let linux_capture = {
+    let retryable_linux_capture = {
+        let mut linux_capture = {
             let mut orch = state.sockscap.orch.write().await;
             orch.take_linux_capture_for_stop()
         };
-        if let Some(capture) = linux_capture {
+        if let Some(capture) = linux_capture.as_mut() {
             if let Err(error) = capture.stop().await {
                 tracing::warn!("sockscap: Linux capture teardown error: {error}");
                 errors.push(format!("Linux capture teardown failed: {error}"));
+            } else {
+                linux_capture = None;
             }
         }
-    }
+
+        // A partially-cleaned handle retains the original cgroup mappings so
+        // Recover in this same process can retry safely.
+        linux_capture
+    };
 
     // --- 2b) macOS first sends Redirector's inert scope, then closes IPC ------
     #[cfg(target_os = "macos")]
@@ -2197,6 +2212,7 @@ async fn full_teardown(
 
     // --- 3b) Stop all xray cores (all platforms). Their node connections are
     //         now unnecessary; leaving them would leak processes on Stop.
+    #[cfg(not(target_os = "linux"))]
     if let Some(mgr) = state.sockscap.xray() {
         mgr.shutdown_all().await;
     }
@@ -2207,6 +2223,10 @@ async fn full_teardown(
         orch.finish_stop();
         if !errors.is_empty() {
             orch.set_recovery_required(&capture::capabilities().capture_backend, errors.join("; "));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(capture) = retryable_linux_capture {
+            orch.set_linux_capture(capture);
         }
     }
     if errors.is_empty() {

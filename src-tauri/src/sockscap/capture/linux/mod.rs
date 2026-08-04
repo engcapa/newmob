@@ -42,7 +42,7 @@ impl LinuxCaptureHandle {
     /// Remove redirect rules before stopping the relay, then restore all cgroup
     /// assignments. This ordering prevents new intercepted connections from
     /// reaching a relay that is already shutting down.
-    pub async fn stop(mut self) -> Result<(), String> {
+    pub async fn stop(&mut self) -> Result<(), String> {
         if let Some(monitor) = self.app_monitor.take() {
             monitor.stop().await;
         }
