@@ -30,9 +30,12 @@ pub(crate) mod mac;
 /// `height` rows. `x`/`y` are the top-left origin of this region within the
 /// desktop (0,0 for a full-screen frame), so the display layer can place a
 /// cropped damage rectangle at the right offset in the client's framebuffer.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Frame {
-    pub data: Vec<u8>,
+    /// Reference-counted pixels make retaining the most recent complete frame
+    /// cheap. A newly authenticated client can replay that frame immediately
+    /// instead of waiting several seconds for a new native capture stream.
+    pub data: bytes::Bytes,
     /// Monotonic timestamp taken after the backend has produced the pixels.
     /// It lets the display handoff report frame age without relying on wall
     /// clock time or carrying user-visible data into telemetry.
@@ -58,7 +61,7 @@ impl Frame {
         stride: usize,
     ) -> Self {
         Self {
-            data,
+            data: data.into(),
             captured_at: Instant::now(),
             sequence: 0,
             x,
@@ -106,6 +109,17 @@ pub(crate) trait Capturer {
     /// full frames, so the caller keeps its dedup hashing.
     fn is_self_paced(&self) -> bool {
         false
+    }
+
+    /// Whether the display loop must scan the complete pixel buffer to suppress
+    /// duplicate frames.
+    ///
+    /// Grab-on-demand sources may return the same desktop on every poll and
+    /// therefore need the hash. Native change streams such as ScreenCaptureKit
+    /// already distinguish an idle tick from a new frame; hashing those Retina
+    /// buffers only adds a full-screen memory pass to every real update.
+    fn needs_frame_deduplication(&self) -> bool {
+        true
     }
 
     /// Whether this backend drives itself off change notifications (e.g. X11

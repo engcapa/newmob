@@ -597,7 +597,7 @@ impl H264Encoder {
         self.width == frame.width && self.height == frame.height
     }
 
-    pub(crate) fn encode(&mut self, frame: &mut Frame) -> anyhow::Result<Vec<u8>> {
+    pub(crate) fn encode(&mut self, frame: &Frame) -> anyhow::Result<Vec<u8>> {
         if !self.matches(frame) {
             anyhow::bail!("H.264 encoder dimensions no longer match captured frame");
         }
@@ -673,7 +673,7 @@ impl H264Encoder {
     /// ScreenCaptureKit commonly reports scaled sizes such as 1918x970, so the
     /// reusable buffer pads those pixels to 1920x976. The AVC region metadata
     /// still names the original surface size and crops the padded edge.
-    fn prepare_input(&mut self, frame: &mut Frame) -> anyhow::Result<(NonNull<c_void>, usize)> {
+    fn prepare_input(&mut self, frame: &Frame) -> anyhow::Result<(NonNull<c_void>, usize)> {
         let row_bytes = usize::from(frame.width)
             .checked_mul(4)
             .ok_or_else(|| anyhow::anyhow!("H.264 source row size overflow"))?;
@@ -703,7 +703,10 @@ impl H264Encoder {
                 .ok_or_else(|| anyhow::anyhow!("cannot encode an empty padded frame"))?;
             Ok((address, padded_stride))
         } else {
-            let address = NonNull::new(frame.data.as_mut_ptr().cast::<c_void>())
+            // CoreVideo's creation API takes a mutable pointer for historical
+            // C ABI reasons, but the encoder only reads this BGRA input. The
+            // Bytes allocation stays alive until complete_frames returns.
+            let address = NonNull::new(frame.data.as_ptr().cast_mut().cast::<c_void>())
                 .ok_or_else(|| anyhow::anyhow!("cannot encode an empty captured frame"))?;
             Ok((address, frame.stride))
         }
@@ -989,11 +992,9 @@ mod tests {
         // 16x16 is the smallest broadly-supported H.264 test surface. This
         // exercises the actual macOS hardware/software codec path without
         // requiring Screen Recording permission or a live RDP client.
-        let mut frame = Frame::bgra(vec![0x80; 16 * 16 * 4], 0, 0, 16, 16, 16 * 4);
+        let frame = Frame::bgra(vec![0x80; 16 * 16 * 4], 0, 0, 16, 16, 16 * 4);
         let mut encoder = H264Encoder::new(16, 16).expect("create VideoToolbox encoder");
-        let annex_b = encoder
-            .encode(&mut frame)
-            .expect("encode VideoToolbox frame");
+        let annex_b = encoder.encode(&frame).expect("encode VideoToolbox frame");
 
         assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
         let nal_types: Vec<u8> = annex_b
@@ -1011,9 +1012,9 @@ mod tests {
 
     #[test]
     fn video_toolbox_encodes_non_aligned_desktops_through_a_padded_surface() {
-        let mut frame = Frame::bgra(vec![0x80; 18 * 18 * 4], 0, 0, 18, 18, 18 * 4);
+        let frame = Frame::bgra(vec![0x80; 18 * 18 * 4], 0, 0, 18, 18, 18 * 4);
         let mut encoder = H264Encoder::new(18, 18).expect("create padded VideoToolbox encoder");
-        let annex_b = encoder.encode(&mut frame).expect("encode padded frame");
+        let annex_b = encoder.encode(&frame).expect("encode padded frame");
 
         assert_eq!((encoder.encoded_width, encoder.encoded_height), (32, 32));
         assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
