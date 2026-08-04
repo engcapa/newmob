@@ -251,6 +251,7 @@ mod tests {
             apps,
             upstream: Default::default(),
             rule_mode: Default::default(),
+            local_proxy_port: 0,
             user_rules: vec![],
             default_action: Default::default(),
         }

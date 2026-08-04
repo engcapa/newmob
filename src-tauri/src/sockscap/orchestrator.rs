@@ -3,6 +3,7 @@
 use crate::sockscap::capture::SocksCapCapabilities;
 #[cfg(target_os = "linux")]
 use crate::sockscap::capture::linux::LinuxCaptureHandle;
+use crate::sockscap::capture::local_proxy::{LocalProxyHandle, ProxyPortInfo};
 #[cfg(target_os = "macos")]
 use crate::sockscap::capture::macos::MacosCaptureHandle;
 use crate::sockscap::config::SocksCapConfig;
@@ -31,6 +32,11 @@ pub struct SocksCapStatus {
     pub message: String,
     pub rule_count: usize,
     pub capture_backend: String,
+    /// Loopback proxy ports, when the local-proxy backend is running. Empty for
+    /// transparent backends. Reported structurally so the UI never has to parse
+    /// a port out of `message`.
+    #[serde(default)]
+    pub proxy_ports: Vec<ProxyPortInfo>,
 }
 
 pub struct Orchestrator {
@@ -51,6 +57,9 @@ pub struct Orchestrator {
     /// unit, including clearing the interception scope before shutdown.
     #[cfg(target_os = "macos")]
     macos_capture: Option<MacosCaptureHandle>,
+    /// Active local-proxy listeners. Owns no machine-wide state, so teardown can
+    /// never leave the host needing recovery.
+    local_proxy: Option<LocalProxyHandle>,
     /// Shared with the relay task for the lifetime of one immutable capture
     /// session. Configuration changes require Stop before the next Start.
     pub relay_ctx:
@@ -76,6 +85,7 @@ impl Orchestrator {
             linux_capture: None,
             #[cfg(target_os = "macos")]
             macos_capture: None,
+            local_proxy: None,
             relay_ctx: None,
             dns_stop: None,
         }
@@ -111,7 +121,32 @@ impl Orchestrator {
             message: self.message.clone(),
             rule_count: self.rules.as_ref().map(|r| r.meta.rule_count).unwrap_or(0),
             capture_backend: self.capture_backend.clone(),
+            proxy_ports: self
+                .local_proxy
+                .as_ref()
+                .map(|proxy| proxy.ports().to_vec())
+                .unwrap_or_default(),
         }
+    }
+
+    pub fn set_local_proxy(&mut self, proxy: LocalProxyHandle) {
+        self.local_proxy = Some(proxy);
+    }
+
+    /// Take the local proxy out so the caller can stop it without holding the
+    /// orchestrator write lock, matching [`Self::take_relay_for_stop`].
+    pub fn take_local_proxy_for_stop(&mut self) -> Option<LocalProxyHandle> {
+        if !matches!(self.phase, EnginePhase::Idle) {
+            self.phase = EnginePhase::Stopping;
+            self.message = "stopping".into();
+        }
+        self.local_proxy.take()
+    }
+
+    pub fn local_proxy_default_port(&self) -> Option<u16> {
+        self.local_proxy
+            .as_ref()
+            .and_then(LocalProxyHandle::default_port)
     }
 
     #[cfg(target_os = "macos")]
@@ -226,11 +261,15 @@ impl Orchestrator {
 
     #[cfg(target_os = "linux")]
     pub fn relay_port(&self) -> Option<u16> {
-        self.relay.as_ref().map(|relay| relay.port).or_else(|| {
-            self.linux_capture
-                .as_ref()
-                .map(LinuxCaptureHandle::relay_port)
-        })
+        self.relay
+            .as_ref()
+            .map(|relay| relay.port)
+            .or_else(|| {
+                self.linux_capture
+                    .as_ref()
+                    .map(LinuxCaptureHandle::relay_port)
+            })
+            .or_else(|| self.local_proxy_default_port())
     }
 
     #[cfg(target_os = "macos")]
@@ -249,12 +288,18 @@ impl Orchestrator {
 
     #[cfg(target_os = "macos")]
     pub fn relay_port(&self) -> Option<u16> {
-        self.relay.as_ref().map(|relay| relay.port)
+        self.relay
+            .as_ref()
+            .map(|relay| relay.port)
+            .or_else(|| self.local_proxy_default_port())
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub fn relay_port(&self) -> Option<u16> {
-        self.relay.as_ref().map(|relay| relay.port)
+        self.relay
+            .as_ref()
+            .map(|relay| relay.port)
+            .or_else(|| self.local_proxy_default_port())
     }
 
     /// Take the running relay out so the caller can stop it without holding
@@ -275,7 +320,11 @@ impl Orchestrator {
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         let no_platform_capture = true;
 
-        if matches!(self.phase, EnginePhase::Idle) && self.relay.is_none() && no_platform_capture {
+        if matches!(self.phase, EnginePhase::Idle)
+            && self.relay.is_none()
+            && no_platform_capture
+            && self.local_proxy.is_none()
+        {
             return Ok(());
         }
         self.phase = EnginePhase::Stopping;
@@ -296,6 +345,9 @@ impl Orchestrator {
                 errors.push(error);
             }
         }
+        if let Some(proxy) = self.local_proxy.take() {
+            proxy.stop().await;
+        }
         if let Some(relay) = self.relay.take() {
             relay.stop().await;
         }
@@ -309,11 +361,32 @@ impl Orchestrator {
         }
     }
 
+    /// Safety net for a local proxy that reaches a synchronous teardown path.
+    ///
+    /// Both real paths (`Self::stop` and `full_teardown`) take the handle and
+    /// await its shutdown first, so this normally finds nothing. It exists
+    /// because dropping a listener handle is deliberately inert: a handle that
+    /// slipped through would keep its port bound and block the next Start on a
+    /// fixed port. These callers cannot await, so hand the shutdown to the
+    /// runtime when one is available.
+    fn abandon_local_proxy(&mut self) {
+        if let Some(proxy) = self.local_proxy.take() {
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    handle.spawn(proxy.stop());
+                }
+                // No runtime (unit tests): nothing is listening to leak.
+                Err(_) => drop(proxy),
+            }
+        }
+    }
+
     /// Clear runtime handles after relay has been stopped (or abandoned).
     pub fn finish_stop(&mut self) {
         if let Some(flag) = self.dns_stop.take() {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        self.abandon_local_proxy();
         self.relay_ctx = None;
         self.relay = None;
         #[cfg(target_os = "linux")]
@@ -333,6 +406,7 @@ impl Orchestrator {
         if let Some(flag) = self.dns_stop.take() {
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        self.abandon_local_proxy();
         self.phase = EnginePhase::Idle;
         self.message = "recovered".into();
         self.capture_backend = "none".into();

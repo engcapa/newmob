@@ -14,8 +14,13 @@ pub use super::SocksCapCapabilities;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
+pub mod local_proxy;
+
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+/// Backend name reported when capture runs as an explicit loopback proxy.
+pub const LOCAL_PROXY_BACKEND: &str = "local-proxy";
 
 /// Describe what this build/OS can do today.
 pub fn capabilities() -> SocksCapCapabilities {
@@ -30,20 +35,12 @@ pub fn capabilities() -> SocksCapCapabilities {
                 "Windows: elevated sockscap-helper + WinDivert FLOW/NETWORK. Place WinDivert.dll next to the helper.".into(),
             ],
             privileged_required: true,
+            local_proxy: false,
         }
     }
     #[cfg(target_os = "linux")]
     {
-        SocksCapCapabilities {
-            platform: "linux".into(),
-            global_tcp: true,
-            app_filter: true,
-            capture_backend: "nft-cgroup-redirect".into(),
-            notes: vec![
-                "Linux: nftables transparent TCP redirect with cgroup v2 process filtering. Requires root or delegated CAP_NET_ADMIN/cgroup permissions.".into(),
-            ],
-            privileged_required: true,
-        }
+        linux_capabilities(linux::support::transparent_support())
     }
     #[cfg(target_os = "macos")]
     {
@@ -58,7 +55,47 @@ pub fn capabilities() -> SocksCapCapabilities {
             capture_backend: "unsupported".into(),
             notes: vec!["Unsupported platform for SocksCap capture.".into()],
             privileged_required: false,
+            local_proxy: false,
         }
+    }
+}
+
+/// Linux capabilities, parameterized on whether transparent capture is possible
+/// in this environment at all.
+///
+/// When it is not, reporting `privileged_required: false` matters as much as the
+/// backend name: it is what stops the UI from asking for a sudo password that
+/// cannot help, because the missing capability is absent from the bounding set.
+#[cfg(any(target_os = "linux", test))]
+pub fn linux_capabilities(transparent_support: Result<(), String>) -> SocksCapCapabilities {
+    match transparent_support {
+        Ok(()) => SocksCapCapabilities {
+            platform: "linux".into(),
+            global_tcp: true,
+            app_filter: true,
+            capture_backend: "nft-cgroup-redirect".into(),
+            notes: vec![
+                "Linux: nftables transparent TCP redirect with cgroup v2 process filtering. Requires root or delegated CAP_NET_ADMIN/cgroup permissions.".into(),
+            ],
+            privileged_required: true,
+            local_proxy: true,
+        },
+        Err(reason) => SocksCapCapabilities {
+            platform: "linux".into(),
+            // No traffic is intercepted; clients opt in by pointing at the port.
+            global_tcp: false,
+            // A proxy handshake carries no process identity, so executable-path
+            // selectors cannot be honoured. Profiles are selected by port.
+            app_filter: false,
+            capture_backend: LOCAL_PROXY_BACKEND.into(),
+            notes: vec![
+                format!("Linux transparent capture is unavailable here: {reason}."),
+                "SocksCap runs a loopback SOCKS5 / HTTP-CONNECT proxy instead. Only clients pointed at its port are captured, and QUIC blocking does not apply.".into(),
+                "For system-wide transparent capture, the container or host must provide CAP_NET_ADMIN and a mounted cgroup v2 hierarchy.".into(),
+            ],
+            privileged_required: false,
+            local_proxy: true,
+        },
     }
 }
 
@@ -78,6 +115,7 @@ pub fn macos_capabilities(redirector_installed: bool) -> SocksCapCapabilities {
                 "Global and signed-application capture are available. Application identities are revalidated before each activation.".into(),
             ],
             privileged_required: false,
+            local_proxy: false,
         }
     } else {
         SocksCapCapabilities {
@@ -90,6 +128,7 @@ pub fn macos_capabilities(redirector_installed: bool) -> SocksCapCapabilities {
                 crate::sockscap::redirector::REDIRECTOR_VERSION
             )],
             privileged_required: false,
+            local_proxy: false,
         }
     }
 }
@@ -199,6 +238,94 @@ pub struct CapturePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_with_transparent_support_reports_the_nft_backend() {
+        let caps = linux_capabilities(Ok(()));
+        assert_eq!(caps.capture_backend, "nft-cgroup-redirect");
+        assert!(caps.global_tcp);
+        assert!(caps.app_filter);
+        assert!(
+            caps.privileged_required,
+            "a capable host still needs elevation, so the UI must ask for it"
+        );
+    }
+
+    #[test]
+    fn linux_without_transparent_support_falls_back_to_the_local_proxy() {
+        let caps = linux_capabilities(Err("CAP_NET_ADMIN is not in the bounding set".into()));
+
+        assert_eq!(caps.capture_backend, LOCAL_PROXY_BACKEND);
+        // Nothing is intercepted and no process identity is available.
+        assert!(!caps.global_tcp);
+        assert!(!caps.app_filter);
+        // The decisive part: a sudo password cannot help, so never ask for one.
+        assert!(!caps.privileged_required);
+    }
+
+    #[test]
+    fn linux_can_select_the_local_proxy_whether_or_not_transparent_works() {
+        // The flag says the backend is *selectable*, so a user on a fully capable
+        // host can still choose it deliberately. It is separate from which
+        // backend is currently running.
+        assert!(linux_capabilities(Ok(())).local_proxy);
+        assert!(linux_capabilities(Err("cgroup v2 is not mounted".into())).local_proxy);
+    }
+
+    #[test]
+    fn platforms_without_a_local_proxy_start_path_do_not_advertise_it() {
+        // Offering the mode where nothing would happen is worse than omitting it.
+        assert!(!macos_capabilities(true).local_proxy);
+        assert!(!macos_capabilities(false).local_proxy);
+    }
+
+    #[test]
+    fn the_local_proxy_fallback_explains_why_and_what_changed() {
+        let caps = linux_capabilities(Err("cgroup v2 is not mounted".into()));
+
+        let notes = caps.notes.join(" ");
+        assert!(
+            notes.contains("cgroup v2 is not mounted"),
+            "the underlying reason must reach the user"
+        );
+        assert!(
+            notes.contains("Only clients pointed at its port are captured"),
+            "the reduced scope must be stated"
+        );
+        assert!(
+            notes.contains("QUIC"),
+            "QUIC blocking silently not applying must be called out"
+        );
+    }
+
+    /// Checked against the machine actually running the tests, not a fixture.
+    ///
+    /// The invariant is what keeps a locked-down container out of an unresolvable
+    /// password loop: elevation is only ever advertised where the environment can
+    /// really reach transparent capture, and everywhere else a usable backend is
+    /// named instead of none.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn this_environment_never_advertises_elevation_it_cannot_use() {
+        let caps = capabilities();
+
+        if caps.privileged_required {
+            assert!(
+                linux::support::transparent_supported(),
+                "elevation was advertised on a host that cannot do transparent capture"
+            );
+        } else {
+            assert_eq!(
+                caps.capture_backend, LOCAL_PROXY_BACKEND,
+                "without elevation the local proxy must be the running backend"
+            );
+            assert!(!caps.global_tcp, "the local proxy intercepts nothing");
+            assert!(
+                !caps.app_filter,
+                "a proxy handshake carries no process identity"
+            );
+        }
+    }
 
     #[test]
     fn macos_without_redirector_is_unavailable_without_fallback() {

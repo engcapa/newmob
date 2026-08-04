@@ -188,6 +188,13 @@ pub struct SocksCapCapabilities {
     pub capture_backend: String,
     pub notes: Vec<String>,
     pub privileged_required: bool,
+    /// Whether this build can run the privilege-free loopback proxy backend.
+    ///
+    /// Distinct from `capture_backend == "local-proxy"`, which says it is
+    /// *currently* in use. This says it can be *chosen*, so the UI only offers
+    /// the capture-mode selector where picking it would actually do something.
+    #[serde(default)]
+    pub local_proxy: bool,
 }
 
 #[tauri::command]
@@ -1093,6 +1100,60 @@ async fn build_unix_relay_context(
     })))
 }
 
+/// Start the local-proxy backend and report the resulting status.
+///
+/// `degraded_reason` is `Some` when this backend was reached by falling back from
+/// transparent capture, which must be reported as Degraded: nothing is being
+/// intercepted, so calling it Active would overstate what is happening.
+#[cfg(target_os = "linux")]
+async fn start_local_proxy_capture(
+    state: &State<'_, AppState>,
+    cfg: &SocksCapConfig,
+    ctx: Arc<RwLock<relay::RelayContext>>,
+    degraded_reason: Option<String>,
+) -> Result<SocksCapStatus, String> {
+    let proxy = capture::local_proxy::start(cfg, ctx.clone()).await?;
+
+    let mut orch = state.sockscap.orch.write().await;
+    let gfw_note = orch
+        .gfwlist_meta()
+        .map(|meta| format!(", gfw={}", meta.rule_count))
+        .unwrap_or_default();
+    let ports = proxy.ports().to_vec();
+    let port_note = ports
+        .iter()
+        .map(|port| format!("{} :{}", port.profile_name, port.port))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // QUIC blocking needs an nftables filter chain, which is exactly what is
+    // unavailable here. Say so rather than letting the enabled toggle imply it.
+    let quic_note = if cfg.block_quic {
+        " (QUIC blocking does not apply to the local proxy)"
+    } else {
+        ""
+    };
+
+    orch.relay_ctx = Some(ctx);
+    orch.set_local_proxy(proxy);
+    match degraded_reason {
+        Some(reason) => orch.set_degraded(
+            capture::LOCAL_PROXY_BACKEND,
+            format!(
+                "transparent capture unavailable ({reason}); local proxy ready — {port_note}. \
+                 Only clients pointed at it are captured{quic_note}{gfw_note}"
+            ),
+        ),
+        None => orch.set_active(
+            capture::LOCAL_PROXY_BACKEND,
+            format!(
+                "local proxy active — {port_note}. \
+                 Only clients pointed at it are captured{quic_note}{gfw_note}"
+            ),
+        ),
+    }
+    Ok(orch.status())
+}
+
 #[cfg(target_os = "linux")]
 async fn start_linux_capture(
     state: &State<'_, AppState>,
@@ -1100,11 +1161,43 @@ async fn start_linux_capture(
     caps: &capture::SocksCapCapabilities,
     sudo_password: Option<String>,
 ) -> Result<SocksCapStatus, String> {
-    use crate::sockscap::capture::linux::{LinuxCapture, LinuxCaptureImpl};
+    use crate::sockscap::capture::linux::{LinuxCapture, LinuxCaptureImpl, support};
+    use crate::sockscap::config::CaptureMode;
 
     let ctx = build_unix_relay_context(state, cfg).await?;
+
+    // Decide the backend before touching the kernel. `Transparent` deliberately
+    // surfaces the raw failure so a privilege problem stays diagnosable.
+    match cfg.capture_mode {
+        CaptureMode::LocalProxy => {
+            return start_local_proxy_capture(state, cfg, ctx, None).await;
+        }
+        CaptureMode::Auto => {
+            if let Err(reason) = support::transparent_support() {
+                tracing::info!(
+                    "sockscap: transparent capture unsupported ({reason}); using the local proxy"
+                );
+                return start_local_proxy_capture(state, cfg, ctx, Some(reason)).await;
+            }
+        }
+        CaptureMode::Transparent => {}
+    }
+
     let backend = LinuxCaptureImpl;
-    let capture = backend.start(cfg, Arc::clone(&ctx), sudo_password).await?;
+    let capture = match backend.start(cfg, Arc::clone(&ctx), sudo_password).await {
+        Ok(capture) => capture,
+        Err(error) => {
+            // `LinuxCaptureImpl::start` rolls back its own relay/cgroup/nft state
+            // on failure, so falling back cannot leave residue behind.
+            if matches!(cfg.capture_mode, CaptureMode::Auto) {
+                tracing::warn!(
+                    "sockscap: transparent capture failed ({error}); falling back to the local proxy"
+                );
+                return start_local_proxy_capture(state, cfg, ctx, Some(error)).await;
+            }
+            return Err(error);
+        }
+    };
     let relay_port = capture.relay_port();
 
     let mut orch = state.sockscap.orch.write().await;
@@ -2107,6 +2200,16 @@ async fn full_teardown(
     if let Some(relay) = relay {
         // Internal: dual-stack wake + 800ms abort fallback.
         relay.stop().await;
+    }
+
+    // --- 3a) Local proxy listeners. Same take-then-await shape; releases the
+    //         loopback port before the next Start tries to bind it.
+    let local_proxy = {
+        let mut orch = state.sockscap.orch.write().await;
+        orch.take_local_proxy_for_stop()
+    };
+    if let Some(proxy) = local_proxy {
+        proxy.stop().await;
     }
 
     // --- 3b) Stop all xray cores (all platforms). Their node connections are

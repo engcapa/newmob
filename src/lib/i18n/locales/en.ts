@@ -1326,6 +1326,31 @@ const dict = {
     blockQuic: "Block QUIC (force HTTP/3 → TCP)",
     blockQuicHint:
       "Drops captured apps' UDP 443 so QUIC falls back to TCP, which SocksCap can route through the upstream. Without it, QUIC bypasses capture and leaks your real IP (sites may report a disallowed region). Turning it off lets in-scope apps use QUIC directly.",
+    blockQuicUnavailable:
+      "QUIC blocking needs a kernel firewall rule, so it does not apply to the local proxy. Clients that use QUIC must be configured to use the proxy port, or disable QUIC themselves.",
+    captureModeLabel: "Capture mode",
+    captureMode: {
+      auto: "Automatic",
+      autoHint:
+        "Prefer transparent capture, and fall back to the local proxy when this system cannot support it (for example a container without CAP_NET_ADMIN).",
+      transparent: "Transparent only",
+      transparentHint:
+        "Only intercept traffic in the kernel. Start fails with the underlying reason, which is useful for diagnosing a privilege problem.",
+      localProxy: "Local proxy only",
+      localProxyHint:
+        "Only run a loopback SOCKS5 / HTTP proxy. Needs no privileges; only clients pointed at its port are captured.",
+    },
+    localProxyPortLabel: "Local proxy port",
+    localProxyPortHint: "0 picks a port automatically",
+    profileLocalProxyPortLabel: "This profile's port",
+    profileLocalProxyPortHint:
+      "Local proxy only: a client reaches this profile by connecting to its own port. 0 assigns one automatically (the catch-all profile takes the configured port); pin it so client configuration survives a restart.",
+    localProxyActiveTitle: "Local proxy listening",
+    localProxyScopeNote:
+      "Traffic is not intercepted automatically. Point a client at the address below — process-based app rules do not apply, so each profile is reachable on its own port.",
+    localProxyDefaultBadge: "default",
+    localProxyCopyAddress: "Copy address",
+    localProxySnippetsLabel: "Client setup:",
     importDesktopOnly: "Importing a local rules file requires the desktop app.",
     gfwRefreshed: "GFWList loaded ({count} rules)",
     gfwImported: "Imported rules ({count})",

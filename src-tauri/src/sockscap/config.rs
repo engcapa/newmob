@@ -12,6 +12,39 @@ pub enum ScopeMode {
     Apps,
 }
 
+/// Which capture plane the engine should use.
+///
+/// Transparent capture needs privileges the OS may simply refuse to grant — in a
+/// container, `CAP_NET_ADMIN` is often absent from the *bounding* set, so even
+/// uid 0 inside the container cannot obtain it and no sudo flow can help. This
+/// selector lets the engine fall back to the privilege-free loopback proxy
+/// ingress instead of failing outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum CaptureMode {
+    /// Prefer transparent capture; fall back to the local proxy when the
+    /// platform cannot support it.
+    #[default]
+    Auto,
+    /// Only transparent capture. Fails with the underlying reason, which keeps
+    /// the mode useful for diagnosing a privilege problem.
+    Transparent,
+    /// Only the loopback SOCKS5 / HTTP-CONNECT listener. Requires no privileges.
+    LocalProxy,
+}
+
+/// Default loopback port for the local proxy ingress.
+///
+/// Deliberately not 1080: the default upstream is `socks5 127.0.0.1:1080`, so
+/// defaulting the ingress there would make it bind the very port the default
+/// upstream dials — a self-loop on stock settings. 7890 also matches what users
+/// of this tooling typically already have in `ALL_PROXY`.
+pub const DEFAULT_LOCAL_PROXY_PORT: u16 = 7890;
+
+fn default_local_proxy_port() -> u16 {
+    DEFAULT_LOCAL_PROXY_PORT
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum RuleMode {
@@ -293,6 +326,15 @@ pub struct SocksCapProfile {
     pub upstream: UpstreamRef,
     #[serde(default)]
     pub rule_mode: RuleMode,
+    /// Pin this profile's local-proxy port instead of letting one be assigned.
+    ///
+    /// Only meaningful for the local-proxy backend, where a profile is selected
+    /// by which port the client connects to. `0` (the default) means "assign
+    /// one": the catch-all profile takes [`SocksCapConfig::local_proxy_port`] and
+    /// the rest get ephemeral ports. Pinning lets a client's configuration stay
+    /// valid for a specific profile across restarts.
+    #[serde(default)]
+    pub local_proxy_port: u16,
     #[serde(default)]
     pub user_rules: Vec<UserRule>,
     #[serde(default)]
@@ -312,6 +354,7 @@ impl Default for SocksCapProfile {
             apps: Vec::new(),
             upstream: UpstreamRef::default(),
             rule_mode: RuleMode::GfwList,
+            local_proxy_port: 0,
             user_rules: Vec::new(),
             default_action: Decision::Direct,
         }
@@ -396,6 +439,16 @@ pub struct SocksCapConfig {
     /// claudedocs/sockscap-quic-block-design.md.
     #[serde(default = "default_true")]
     pub block_quic: bool,
+
+    /// Which capture plane to use. Defaults to [`CaptureMode::Auto`].
+    #[serde(default)]
+    pub capture_mode: CaptureMode,
+    /// Loopback port for the local proxy ingress. `0` picks an ephemeral port.
+    ///
+    /// A fixed default keeps `ALL_PROXY`-style client configuration stable across
+    /// restarts, which an ephemeral port would invalidate every launch.
+    #[serde(default = "default_local_proxy_port")]
+    pub local_proxy_port: u16,
 }
 
 fn default_bypass_cidrs() -> Vec<String> {
@@ -427,6 +480,8 @@ impl Default for SocksCapConfig {
             default_action: Decision::Direct,
             restore_on_login: false,
             block_quic: default_true(),
+            capture_mode: CaptureMode::default(),
+            local_proxy_port: default_local_proxy_port(),
         };
         cfg.normalize();
         cfg
@@ -447,6 +502,7 @@ impl SocksCapConfig {
                 apps: self.apps.clone(),
                 upstream: self.upstream.clone(),
                 rule_mode: self.rule_mode,
+                local_proxy_port: 0,
                 user_rules: self.user_rules.clone(),
                 default_action: self.default_action,
             };
@@ -522,6 +578,23 @@ impl SocksCapConfig {
         if active.is_empty() {
             return Err("At least one profile must be enabled and active".into());
         }
+        // A privileged port cannot be bound without CAP_NET_BIND_SERVICE, and the
+        // local proxy is specifically the backend for environments that have no
+        // extra privileges. Reject it here rather than at bind time.
+        if self.local_proxy_port != 0 && self.local_proxy_port < 1024 {
+            return Err(format!(
+                "Local proxy port {} is privileged; use 0 (automatic) or a port in 1024-65535",
+                self.local_proxy_port
+            ));
+        }
+        for profile in &active {
+            if profile.local_proxy_port != 0 && profile.local_proxy_port < 1024 {
+                return Err(format!(
+                    "Profile '{}' local proxy port {} is privileged; use 0 (automatic) or a port in 1024-65535",
+                    profile.name, profile.local_proxy_port
+                ));
+            }
+        }
         for prof in active {
             if matches!(prof.mode, ScopeMode::Apps) && prof.apps.is_empty() {
                 return Err(format!(
@@ -589,6 +662,128 @@ mod tests {
         let off: SocksCapConfig =
             serde_json::from_str(r#"{"enabled": true, "blockQuic": false}"#).unwrap();
         assert!(!off.block_quic);
+    }
+
+    #[test]
+    fn capture_mode_and_local_proxy_port_default_for_configs_without_the_fields() {
+        // Configs written before the local-proxy backend must keep preferring
+        // transparent capture and land on the documented default port, with no
+        // migration step.
+        let old_json = r#"{
+            "enabled": true,
+            "profiles": [{
+                "id": "p1", "name": "old",
+                "upstream": {"kind": "socks5", "host": "1.2.3.4", "port": 1080}
+            }],
+            "activeProfileIds": ["p1"],
+            "selectedProfileId": "p1"
+        }"#;
+        let mut cfg: SocksCapConfig = serde_json::from_str(old_json).unwrap();
+        cfg.normalize();
+        assert!(matches!(cfg.capture_mode, CaptureMode::Auto));
+        assert_eq!(cfg.local_proxy_port, DEFAULT_LOCAL_PROXY_PORT);
+    }
+
+    #[test]
+    fn capture_mode_and_local_proxy_port_survive_a_roundtrip() {
+        let mut cfg = SocksCapConfig::default();
+        cfg.capture_mode = CaptureMode::LocalProxy;
+        cfg.local_proxy_port = 8388;
+
+        let back: SocksCapConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        assert!(matches!(back.capture_mode, CaptureMode::LocalProxy));
+        assert_eq!(back.local_proxy_port, 8388);
+    }
+
+    #[test]
+    fn a_legacy_config_file_on_disk_loads_with_the_new_defaults() {
+        // Exercises the real load() path an upgrading user hits, not just serde.
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "enabled": true,
+                "profiles": [{
+                    "id": "p1", "name": "legacy",
+                    "upstream": {"kind": "socks5", "host": "1.2.3.4", "port": 1080}
+                }],
+                "activeProfileIds": ["p1"],
+                "selectedProfileId": "p1",
+                "blockQuic": true
+            }"#,
+        )
+        .unwrap();
+
+        let loaded = SocksCapConfig::load(&path);
+
+        assert!(matches!(loaded.capture_mode, CaptureMode::Auto));
+        assert_eq!(loaded.local_proxy_port, DEFAULT_LOCAL_PROXY_PORT);
+        assert!(loaded.validate().is_ok());
+    }
+
+    #[test]
+    fn a_saved_config_round_trips_the_new_fields_through_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let mut cfg = SocksCapConfig::default();
+        cfg.capture_mode = CaptureMode::LocalProxy;
+        cfg.local_proxy_port = 8388;
+
+        cfg.save(&path).unwrap();
+        let loaded = SocksCapConfig::load(&path);
+
+        assert!(matches!(loaded.capture_mode, CaptureMode::LocalProxy));
+        assert_eq!(loaded.local_proxy_port, 8388);
+    }
+
+    #[test]
+    fn capture_mode_serializes_as_camel_case() {
+        // The frontend reads these values directly.
+        let mut cfg = SocksCapConfig::default();
+        cfg.capture_mode = CaptureMode::LocalProxy;
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"captureMode\":\"localProxy\""));
+        assert!(json.contains("\"localProxyPort\""));
+    }
+
+    #[test]
+    fn a_privileged_local_proxy_port_is_rejected() {
+        // The local proxy exists for environments with no extra privileges, so a
+        // port it could never bind must fail validation rather than at bind time.
+        let mut cfg = SocksCapConfig::default();
+        cfg.profiles[0].upstream.host = "127.0.0.1".into();
+        cfg.profiles[0].upstream.port = 1080;
+        cfg.local_proxy_port = 80;
+
+        let error = cfg.validate().unwrap_err();
+        assert!(error.contains("privileged"));
+    }
+
+    #[test]
+    fn a_privileged_per_profile_local_proxy_port_is_rejected() {
+        let mut cfg = SocksCapConfig::default();
+        cfg.profiles[0].upstream.host = "127.0.0.1".into();
+        cfg.profiles[0].upstream.port = 1080;
+        cfg.profiles[0].local_proxy_port = 443;
+
+        let error = cfg.validate().unwrap_err();
+        assert!(error.contains("privileged"));
+        assert!(error.contains("443"));
+    }
+
+    #[test]
+    fn automatic_and_unprivileged_local_proxy_ports_are_accepted() {
+        let mut cfg = SocksCapConfig::default();
+        cfg.profiles[0].upstream.host = "127.0.0.1".into();
+        cfg.profiles[0].upstream.port = 1080;
+
+        for port in [0u16, 1024, DEFAULT_LOCAL_PROXY_PORT, 65535] {
+            cfg.local_proxy_port = port;
+            assert!(cfg.validate().is_ok(), "port {port} should be accepted");
+        }
     }
 
     #[test]

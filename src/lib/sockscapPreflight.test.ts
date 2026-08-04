@@ -48,6 +48,8 @@ function mkCfg(profiles: SocksCapProfile[]): SocksCapConfig {
     defaultAction: "direct",
     restoreOnLogin: false,
     blockQuic: true,
+    captureMode: "auto",
+    localProxyPort: 7890,
   };
 }
 

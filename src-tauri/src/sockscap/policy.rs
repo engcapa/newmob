@@ -144,6 +144,50 @@ impl PolicyEngine {
         self.decide_with_profile_hint(input, None)
     }
 
+    /// The profile a capture backend already scoped this flow to, if it is still
+    /// active.
+    ///
+    /// A hint means the flow arrived on one profile's own relay port (Linux
+    /// transparent app capture) or listening port (the local proxy, where the
+    /// port *is* the profile selector because a proxy handshake carries no
+    /// process identity). That attribution is stronger than priority order, so
+    /// it is honoured for every mode rather than only for app profiles.
+    ///
+    /// A hint naming a profile that is no longer active — a live configuration
+    /// update dropped it — is discarded so the flow gets the normal priority
+    /// walk instead of falling through to "no matching profile".
+    fn scoped_profile<'a>(&'a self, profile_id_hint: Option<&'a str>) -> Option<&'a str> {
+        profile_id_hint.filter(|hint| self.profiles.iter().any(|profile| profile.id == *hint))
+    }
+
+    /// Whether `profile` is allowed to answer for this flow.
+    ///
+    /// Without the scoped check, a Global profile that happens to sort first
+    /// would answer for a flow belonging to the hinted profile, silently
+    /// applying the wrong rules and dialing the wrong upstream. That is easy to
+    /// reach wherever profiles are selected by port: every profile there is
+    /// Global, since no process identity is available to match app selectors.
+    fn profile_in_scope(
+        &self,
+        profile: &ActiveProfileEngine,
+        input: &PolicyInput,
+        scoped: Option<&str>,
+    ) -> bool {
+        if let Some(hint) = scoped {
+            return profile.id == hint;
+        }
+        if !matches!(profile.mode, ScopeMode::Apps) {
+            return true;
+        }
+        match input.process_path.as_deref() {
+            Some(path) => {
+                let normalized = normalize_path(path);
+                profile.apps.iter().any(|app| paths_match(&normalized, app))
+            }
+            None => false,
+        }
+    }
+
     /// Return a final decision when hostname attribution cannot affect it.
     ///
     /// Transparent capture receives an IP before any application bytes. Global
@@ -166,20 +210,10 @@ impl PolicyEngine {
             return Some(self.decide_with_profile_hint(input, profile_id_hint));
         }
 
+        let scoped = self.scoped_profile(profile_id_hint);
         for profile in &self.profiles {
-            if matches!(profile.mode, ScopeMode::Apps) {
-                let in_scope = profile_id_hint
-                    .map(|profile_id| profile_id == profile.id)
-                    .unwrap_or_else(|| match input.process_path.as_deref() {
-                        Some(path) => {
-                            let normalized = normalize_path(path);
-                            profile.apps.iter().any(|app| paths_match(&normalized, app))
-                        }
-                        None => false,
-                    });
-                if !in_scope {
-                    continue;
-                }
+            if !self.profile_in_scope(profile, input, scoped) {
+                continue;
             }
 
             let has_domain_rule = profile.user_rules.iter().any(|rule| {
@@ -226,20 +260,10 @@ impl PolicyEngine {
         }
 
         // Iterate active profiles in priority order
+        let scoped = self.scoped_profile(profile_id_hint);
         for prof in &self.profiles {
-            if matches!(prof.mode, ScopeMode::Apps) {
-                let in_scope = profile_id_hint
-                    .map(|profile_id| profile_id == prof.id)
-                    .unwrap_or_else(|| match input.process_path.as_deref() {
-                        Some(p) => {
-                            let norm = normalize_path(p);
-                            prof.apps.iter().any(|a| paths_match(&norm, a))
-                        }
-                        None => false,
-                    });
-                if !in_scope {
-                    continue;
-                }
+            if !self.profile_in_scope(prof, input, scoped) {
+                continue;
             }
 
             // User rules in this profile — Block > Proxy > Direct
@@ -526,6 +550,7 @@ mod tests {
             }],
             upstream: Default::default(),
             rule_mode: RuleMode::ProxyAll,
+            local_proxy_port: 0,
             user_rules: vec![],
             default_action: Decision::Proxy,
         };
@@ -545,6 +570,7 @@ mod tests {
             }],
             upstream: Default::default(),
             rule_mode: RuleMode::Off,
+            local_proxy_port: 0,
             user_rules: vec![],
             default_action: Decision::Direct,
         };
@@ -611,6 +637,105 @@ mod tests {
         );
         assert_eq!(trace.decision, Decision::Proxy);
         assert_eq!(trace.profile_id.as_deref(), Some("default"));
+    }
+
+    /// Two Global profiles with different rules, in priority order.
+    ///
+    /// This is the shape the local-proxy backend produces: with no process
+    /// identity available, every profile is Global and the listening port is the
+    /// only selector.
+    fn two_global_profiles() -> SocksCapConfig {
+        let mut config = SocksCapConfig::default();
+        config.profiles[0].id = "first".into();
+        config.profiles[0].name = "First".into();
+        config.profiles[0].priority = 0;
+        config.profiles[0].rule_mode = RuleMode::Off;
+        config.profiles[0].default_action = Decision::Direct;
+
+        let mut second = config.profiles[0].clone();
+        second.id = "second".into();
+        second.name = "Second".into();
+        second.priority = 1;
+        second.rule_mode = RuleMode::ProxyAll;
+        config.profiles.push(second);
+        config.active_profile_ids = vec!["first".into(), "second".into()];
+        config
+    }
+
+    fn host_input(host: &str) -> PolicyInput {
+        PolicyInput {
+            host: Some(host.into()),
+            ip: None,
+            port: 443,
+            process_path: None,
+            pid: None,
+        }
+    }
+
+    #[test]
+    fn a_port_scoped_flow_is_answered_by_its_own_profile_not_the_first_one() {
+        // A client that connected to Second's port must get Second's rules and
+        // upstream. Letting First answer because it sorts earlier would silently
+        // route the flow through the wrong upstream.
+        let config = two_global_profiles();
+        let engine = PolicyEngine::from_config(&config, None);
+
+        let trace = engine.decide_with_profile_hint(&host_input("example.com"), Some("second"));
+
+        assert_eq!(trace.decision, Decision::Proxy);
+        assert_eq!(trace.profile_id.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn an_unhinted_flow_still_follows_priority_order() {
+        let config = two_global_profiles();
+        let engine = PolicyEngine::from_config(&config, None);
+
+        let trace = engine.decide_with_profile_hint(&host_input("example.com"), None);
+
+        assert_eq!(trace.profile_id.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn a_hint_naming_no_active_profile_falls_back_to_priority_order() {
+        // A live configuration update can drop a profile while its listener is
+        // still draining. Dropping to "no matching profile" (Direct) would be a
+        // worse answer than the normal walk.
+        let config = two_global_profiles();
+        let engine = PolicyEngine::from_config(&config, None);
+
+        let trace = engine.decide_with_profile_hint(&host_input("example.com"), Some("removed"));
+
+        assert_eq!(trace.profile_id.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn a_scoped_flow_keeps_waiting_for_a_hostname_its_own_profile_needs() {
+        // decide_without_hostname is the fast path that answers before SNI. It
+        // must consult the scoped profile: answering from First's ProxyAll here
+        // would both use the wrong profile and skip the hostname the scoped
+        // GFWList profile needs to decide.
+        let mut config = two_global_profiles();
+        config.profiles[0].rule_mode = RuleMode::ProxyAll;
+        config.profiles[1].rule_mode = RuleMode::GfwList;
+        let rules = CompiledRules::compile("||wikipedia.org\n", "test").unwrap();
+        let engine = PolicyEngine::from_config(&config, Some(&rules));
+        let input = PolicyInput {
+            host: None,
+            ip: Some("93.184.216.34".parse().unwrap()),
+            port: 443,
+            process_path: None,
+            pid: None,
+        };
+
+        assert!(
+            engine
+                .decide_without_hostname(&input, Some("second"))
+                .is_none(),
+            "the scoped GFWList profile needs the hostname"
+        );
+        // Unhinted, First's ProxyAll can still answer immediately.
+        assert!(engine.decide_without_hostname(&input, None).is_some());
     }
 
     #[test]

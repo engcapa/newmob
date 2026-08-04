@@ -54,9 +54,13 @@ import {
   sockscapInstallRedirector,
   sockscapRedirectorInstallStatus,
   upstreamRequiresCore,
+  DEFAULT_LOCAL_PROXY_PORT,
+  LOCAL_PROXY_BACKEND,
   type AppSelector,
+  type CaptureMode,
   type LocalProxyCandidate,
   type Decision,
+  type ProxyPortInfo,
   type DomainRecord,
   type GfwListStatus,
   type HelperStatus,
@@ -150,6 +154,8 @@ const DEFAULT_CFG: SocksCapConfig = {
   defaultAction: "direct",
   restoreOnLogin: false,
   blockQuic: true,
+  captureMode: "auto",
+  localProxyPort: DEFAULT_LOCAL_PROXY_PORT,
 };
 
 const MIN_PROFILE_PRIORITY = -2_147_483_648;
@@ -185,9 +191,16 @@ function phaseTone(phase: string): string {
   }
 }
 
-/** Platforms whose capture backend asks for an elevation password up front. */
-function needsElevationPassword(platform: string | undefined): boolean {
-  return platform === "linux";
+/**
+ * Whether this backend can actually use an elevation password.
+ *
+ * Keyed on the reported capability rather than on `platform === "linux"`. Where
+ * transparent capture is impossible — a container without CAP_NET_ADMIN in its
+ * bounding set — no password can ever succeed, and prompting for one traps the
+ * user in a loop that cannot resolve.
+ */
+function needsElevationPassword(caps: SocksCapCapabilities | null): boolean {
+  return caps?.platform === "linux" && caps.privilegedRequired;
 }
 
 function isRootRequiredError(message: string): boolean {
@@ -210,6 +223,40 @@ function isSudoAuthenticationError(message: string): boolean {
     lower.includes("sorry, try again") ||
     lower.includes("a password is required")
   );
+}
+
+/**
+ * Ready-to-paste client configuration for a local proxy port.
+ *
+ * Local-proxy capture only works when clients are pointed at the port, so
+ * handing over the exact commands is what makes the mode usable rather than
+ * merely available. `socks5h` (not `socks5`) is deliberate: it resolves DNS at
+ * the proxy, which keeps lookups from leaking and lets the upstream resolve
+ * names the local resolver cannot.
+ */
+export function localProxySnippets(port: number): { id: string; label: string; text: string }[] {
+  const address = `127.0.0.1:${port}`;
+  return [
+    {
+      id: "env",
+      label: "shell env",
+      text: [
+        `export http_proxy=http://${address}`,
+        `export https_proxy=http://${address}`,
+        `export ALL_PROXY=socks5h://${address}`,
+        `export no_proxy=localhost,127.0.0.1,::1`,
+      ].join("\n"),
+    },
+    { id: "curl", label: "curl", text: `curl --proxy socks5h://${address} https://example.com` },
+    { id: "git", label: "git", text: `git config --global http.proxy socks5h://${address}` },
+    {
+      id: "npm",
+      label: "npm / pnpm",
+      text: [`npm config set proxy http://${address}`, `npm config set https-proxy http://${address}`].join(
+        "\n",
+      ),
+    },
+  ];
 }
 
 function normalizeFrontendConfig(raw: SocksCapConfig): SocksCapConfig {
@@ -249,6 +296,8 @@ function normalizeFrontendConfig(raw: SocksCapConfig): SocksCapConfig {
     ruleMode: selectedProf.ruleMode,
     userRules: selectedProf.userRules,
     defaultAction: selectedProf.defaultAction,
+    captureMode: raw.captureMode || "auto",
+    localProxyPort: raw.localProxyPort ?? DEFAULT_LOCAL_PROXY_PORT,
   };
 }
 
@@ -517,6 +566,30 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     () => (cfg ? profilesByPriority(cfg.profiles) : []),
     [cfg],
   );
+
+  /**
+   * Ports the local-proxy backend is listening on, default port first.
+   *
+   * Read from the structured status rather than parsed out of `message`, and only
+   * while that backend is the running one.
+   */
+  const localProxyPorts = useMemo<ProxyPortInfo[]>(() => {
+    if (status?.captureBackend !== LOCAL_PROXY_BACKEND) return [];
+    return [...(status.proxyPorts ?? [])].sort(
+      (a, b) => Number(b.isDefault) - Number(a.isDefault),
+    );
+  }, [status]);
+
+  /**
+   * QUIC blocking needs a kernel filter rule, so it cannot apply when the local
+   * proxy is the only available backend. Reflect that instead of leaving a toggle
+   * that silently does nothing.
+   */
+  const quicBlockingApplies = useMemo(() => {
+    if (status?.captureBackend === LOCAL_PROXY_BACKEND) return false;
+    if (cfg?.captureMode === "localProxy") return false;
+    return caps === null || caps.captureBackend !== LOCAL_PROXY_BACKEND;
+  }, [status, cfg, caps]);
 
   const persistConfig = async (next: SocksCapConfig) => {
     if (locked) {
@@ -927,7 +1000,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       if (hp) setHelper(hp);
     } catch (e) {
       const errStr = String(e);
-      const needsPassword = needsElevationPassword(caps?.platform);
+      const needsPassword = needsElevationPassword(caps);
       if (needsPassword && !sudoPassword && isRootRequiredError(errStr)) {
         setRootPromptIntent("start");
         setRootPromptError(null);
@@ -978,7 +1051,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       report(t("sockscap.recovered"));
     } catch (e) {
       const errStr = String(e);
-      const needsPassword = needsElevationPassword(caps?.platform);
+      const needsPassword = needsElevationPassword(caps);
       if (needsPassword && !sudoPassword && isRootRequiredError(errStr)) {
         setRootPromptIntent("recover");
         setRootPromptError(null);
@@ -1000,6 +1073,15 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       const diagnostics = await sockscapDiagnostics();
       await writeText(JSON.stringify(diagnostics, null, 2));
       report(t("sockscap.diagnosticsCopied"));
+    } catch (e) {
+      report(String(e), false);
+    }
+  };
+
+  const copyLocalProxyAddress = async (value: string) => {
+    try {
+      await writeText(value);
+      report(t("common.copied"));
     } catch (e) {
       report(String(e), false);
     }
@@ -1816,6 +1898,71 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         </div>
       )}
 
+      {localProxyPorts.length > 0 && (
+        <div
+          data-testid="sockscap-local-proxy-banner"
+          className="px-4 py-3 bg-[var(--taomni-accent)]/10 border-b border-[var(--taomni-accent)]/30 text-[11px]"
+        >
+          <div className="flex items-center gap-1.5 font-semibold">
+            <Info className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-accent)]" />
+            {t("sockscap.localProxyActiveTitle")}
+          </div>
+          <div className="mt-1 text-[var(--taomni-text-muted)]">
+            {t("sockscap.localProxyScopeNote")}
+          </div>
+          <div className="mt-2 space-y-1.5">
+            {localProxyPorts.map((entry) => {
+              const address = `127.0.0.1:${entry.port}`;
+              return (
+                <div key={`${entry.profileId}-${entry.port}`} className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{entry.profileName}</span>
+                  <code className="px-1.5 py-0.5 rounded bg-[var(--taomni-hover)] font-mono">
+                    {address}
+                  </code>
+                  {entry.isDefault && (
+                    <span className="text-[10px] text-[var(--taomni-text-muted)]">
+                      {t("sockscap.localProxyDefaultBadge")}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)]"
+                    onClick={() => void copyLocalProxyAddress(address)}
+                    title={t("sockscap.localProxyCopyAddress")}
+                  >
+                    <Copy className="w-3 h-3" />
+                    {t("sockscap.localProxyCopyAddress")}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {/* Client configuration for the default port. Local-proxy capture only
+              happens when a client is actually pointed at it. */}
+          <div
+            data-testid="sockscap-local-proxy-snippets"
+            className="mt-2 flex flex-wrap items-center gap-1.5"
+          >
+            <span className="text-[var(--taomni-text-muted)]">
+              {t("sockscap.localProxySnippetsLabel")}
+            </span>
+            {localProxySnippets(localProxyPorts[0].port).map((snippet) => (
+              <button
+                key={snippet.id}
+                type="button"
+                data-testid={`sockscap-local-proxy-snippet-${snippet.id}`}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] font-mono"
+                onClick={() => void copyLocalProxyAddress(snippet.text)}
+                title={snippet.text}
+              >
+                <Copy className="w-3 h-3" />
+                {snippet.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {caps?.platform === "macos" && redirectorInstall?.state !== "ready" && (
         <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-[11px] flex flex-wrap items-center justify-between gap-2 text-amber-800 dark:text-amber-300">
           <span>{redirectorInstall?.message || t("sockscap.redirectorMissing")}</span>
@@ -2184,6 +2331,39 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               <p className="mt-2 text-[11px] text-[var(--taomni-text-muted)]">
                 {t("sockscap.appModeUnsupported")}
               </p>
+            )}
+            {/* Under the local proxy a profile's scope *is* its port, so the pin
+                belongs with the scope settings. Without it every profile but the
+                catch-all gets an ephemeral port that changes on each restart,
+                invalidating client configuration each time. */}
+            {caps?.localProxy && (
+              <label className="mt-3 flex flex-wrap items-center gap-2 text-[12px]">
+                <span className="text-[var(--taomni-text)]">
+                  {t("sockscap.profileLocalProxyPortLabel")}
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={65535}
+                  data-testid="sockscap-profile-local-proxy-port"
+                  value={selectedProf.localProxyPort ?? 0}
+                  disabled={locked || busy}
+                  onChange={(e) => {
+                    const parsed = Number.parseInt(e.target.value, 10);
+                    if (Number.isNaN(parsed) || parsed < 0 || parsed > 65535) return;
+                    void patchSelectedProfile({ localProxyPort: parsed });
+                  }}
+                  className="w-24 px-2 py-1 rounded text-[12px] bg-[var(--taomni-bg)] border border-[var(--taomni-divider)] disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={
+                    locked
+                      ? t("sockscap.lockedTooltip")
+                      : t("sockscap.profileLocalProxyPortHint")
+                  }
+                />
+                <span className="text-[11px] text-[var(--taomni-text-muted)]">
+                  {t("sockscap.localProxyPortHint")}
+                </span>
+              </label>
             )}
             {selectedProf.mode === "apps" && (
               <div className="mt-3 space-y-2">
@@ -2622,16 +2802,84 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               </div>
             </div>
 
+            {/* Capture plane: transparent interception vs. an explicit local proxy.
+                Only shown where the local proxy backend actually exists, so the
+                selector never offers a mode that would silently do nothing. */}
+            {caps?.localProxy && (
+            <div className="mt-3 space-y-2">
+              <div className="text-[12px] font-medium text-[var(--taomni-text)]">
+                {t("sockscap.captureModeLabel")}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {(["auto", "transparent", "localProxy"] as CaptureMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    data-testid={`sockscap-capture-mode-${mode}`}
+                    className={`px-2.5 py-1 rounded text-[11px] border transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+                      (cfg.captureMode ?? "auto") === mode
+                        ? "border-[var(--taomni-accent)] bg-[var(--taomni-accent)]/10 text-[var(--taomni-text)]"
+                        : "border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] text-[var(--taomni-text-muted)]"
+                    }`}
+                    disabled={locked || busy}
+                    title={locked ? t("sockscap.lockedTooltip") : t(`sockscap.captureMode.${mode}Hint`)}
+                    onClick={() => {
+                      if (!cfg) return;
+                      void persistConfig({ ...cfg, captureMode: mode });
+                    }}
+                  >
+                    {t(`sockscap.captureMode.${mode}`)}
+                  </button>
+                ))}
+              </div>
+              <div className="text-[11px] text-[var(--taomni-text-muted)]">
+                {t(`sockscap.captureMode.${cfg.captureMode ?? "auto"}Hint`)}
+              </div>
+              <label className="flex flex-wrap items-center gap-2 text-[12px]">
+                <span className="text-[var(--taomni-text)]">
+                  {t("sockscap.localProxyPortLabel")}
+                </span>
+                <input
+                  type="number"
+                  min={0}
+                  max={65535}
+                  data-testid="sockscap-local-proxy-port"
+                  value={cfg.localProxyPort ?? DEFAULT_LOCAL_PROXY_PORT}
+                  disabled={locked || busy}
+                  onChange={(e) => {
+                    if (!cfg) return;
+                    const parsed = Number.parseInt(e.target.value, 10);
+                    if (Number.isNaN(parsed) || parsed < 0 || parsed > 65535) return;
+                    void persistConfig({ ...cfg, localProxyPort: parsed });
+                  }}
+                  className="w-24 px-2 py-1 rounded text-[12px] bg-[var(--taomni-bg)] border border-[var(--taomni-divider)] disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={locked ? t("sockscap.lockedTooltip") : t("sockscap.localProxyPortHint")}
+                />
+                <span className="text-[11px] text-[var(--taomni-text-muted)]">
+                  {t("sockscap.localProxyPortHint")}
+                </span>
+              </label>
+            </div>
+            )}
+
             {/* Session-level QUIC blocking (forces QUIC→TCP so capture can proxy it). */}
             <label
-              className="mt-3 flex items-start gap-2 text-[12px] cursor-pointer select-none"
-              title={locked ? t("sockscap.lockedTooltip") : undefined}
+              className={`mt-3 flex items-start gap-2 text-[12px] select-none ${
+                quicBlockingApplies ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+              }`}
+              title={
+                locked
+                  ? t("sockscap.lockedTooltip")
+                  : quicBlockingApplies
+                    ? undefined
+                    : t("sockscap.blockQuicUnavailable")
+              }
             >
               <input
                 type="checkbox"
                 data-testid="sockscap-block-quic"
                 checked={cfg.blockQuic ?? true}
-                disabled={locked || busy}
+                disabled={locked || busy || !quicBlockingApplies}
                 onChange={(e) => {
                   if (!cfg) return;
                   void persistConfig({ ...cfg, blockQuic: e.target.checked });
@@ -2643,7 +2891,9 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                   {t("sockscap.blockQuic")}
                 </span>
                 <span className="block text-[11px] text-[var(--taomni-text-muted)]">
-                  {t("sockscap.blockQuicHint")}
+                  {quicBlockingApplies
+                    ? t("sockscap.blockQuicHint")
+                    : t("sockscap.blockQuicUnavailable")}
                 </span>
               </span>
             </label>

@@ -47,6 +47,8 @@ function cfg(profiles: SocksCapProfile[], activeIds?: string[]): SocksCapConfig 
     defaultAction: "direct",
     restoreOnLogin: false,
     blockQuic: true,
+    captureMode: "auto",
+    localProxyPort: 7890,
   };
 }
 

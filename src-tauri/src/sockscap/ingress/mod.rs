@@ -56,13 +56,29 @@ pub struct Ingress {
 
 /// Start the loopback proxy listener. Returns the port the OS proxy settings
 /// (or a manually configured client) should point at.
+///
+/// `port` binds a specific loopback port so client configuration (`ALL_PROXY`,
+/// a browser profile, a shell rc file) survives a restart. `0` picks an
+/// ephemeral port. A requested port that is already taken is reported rather
+/// than silently replaced, because silently moving the port would break exactly
+/// the stable-configuration guarantee a fixed port is chosen for.
 pub async fn start_ingress(
     ctx: Arc<RwLock<RelayContext>>,
     profile_id_hint: Option<String>,
+    port: u16,
 ) -> Result<Ingress, String> {
-    let listener_v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+    let listener_v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .await
-        .map_err(|error| format!("bind SocksCap proxy ingress: {error}"))?;
+        .map_err(|error| {
+            if port == 0 {
+                format!("bind SocksCap proxy ingress: {error}")
+            } else {
+                format!(
+                    "bind SocksCap proxy ingress on 127.0.0.1:{port}: {error}. \
+                     Choose a free port or set the local proxy port to 0 for an automatic one"
+                )
+            }
+        })?;
     let port = listener_v4
         .local_addr()
         .map_err(|error| format!("read SocksCap proxy ingress port: {error}"))?

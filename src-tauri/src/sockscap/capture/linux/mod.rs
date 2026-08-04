@@ -9,6 +9,7 @@ pub mod cgroup;
 pub mod exec;
 pub mod pid_filter;
 pub mod relay;
+pub mod support;
 pub mod tunnel;
 
 use std::sync::Arc;
@@ -373,6 +374,17 @@ async fn stop_relays(relays: Vec<relay::LinuxRelay>) {
 }
 
 pub fn recover_system(sudo_password: Option<&str>) -> Result<(), String> {
+    // Where transparent capture is impossible, this build can never have
+    // installed an nft table or a cgroup, and probing for one only fails with
+    // "Operation not permitted" — which would strand the engine in
+    // RecoveryRequired forever. There is genuinely nothing to undo, so report
+    // that honestly instead of surfacing an unfixable permission error.
+    if let Err(reason) = support::transparent_support() {
+        tracing::info!(
+            "sockscap: skipping Linux transparent-capture recovery; unsupported here ({reason})"
+        );
+        return Ok(());
+    }
     tunnel::recover_rules(sudo_password)?;
     match cgroup::cleanup_empty_sessions(sudo_password) {
         Ok(()) => Ok(()),

@@ -44,10 +44,21 @@ const defaultTestCfg: SocksCapConfig = {
   defaultAction: "direct",
   restoreOnLogin: false,
   blockQuic: true,
+  captureMode: "auto",
+  localProxyPort: 7890,
 };
 
 let currentCfg = { ...defaultTestCfg };
 let currentPlatform = "windows";
+/** Overrides for the reported capabilities; reset in beforeEach. */
+let currentCapsOverride: Partial<{
+  globalTcp: boolean;
+  appFilter: boolean;
+  captureBackend: string;
+  notes: string[];
+  privilegedRequired: boolean;
+  localProxy: boolean;
+}> = {};
 
 vi.mock("../../lib/sockscap", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/sockscap")>();
@@ -64,6 +75,8 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
       captureBackend: "WinDivert",
       notes: [],
       privilegedRequired: true,
+      localProxy: true,
+      ...currentCapsOverride,
     })),
     sockscapStart: vi.fn(async () => ({
       phase: "active",
@@ -126,6 +139,7 @@ describe("SocksCapPanel Multi-Profile UI", () => {
   beforeEach(() => {
     currentCfg = JSON.parse(JSON.stringify(defaultTestCfg));
     currentPlatform = "windows";
+    currentCapsOverride = {};
     vi.mocked(sockscapStart).mockReset();
     vi.mocked(sockscapStart).mockResolvedValue({
       phase: "active",
@@ -506,6 +520,174 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     fireEvent.click(startButton);
 
     expect(await screen.findByTestId("sockscap-root-prompt-dialog")).toBeInTheDocument();
+  });
+
+  it("does not prompt for sudo when Linux cannot support transparent capture at all", async () => {
+    // A container without CAP_NET_ADMIN in its bounding set reports the
+    // local-proxy backend. No password can ever grant that capability, so
+    // prompting would trap the user in a loop that cannot resolve.
+    currentPlatform = "linux";
+    currentCapsOverride = {
+      globalTcp: false,
+      appFilter: false,
+      captureBackend: "local-proxy",
+      privilegedRequired: false,
+      notes: ["Linux transparent capture is unavailable here: cgroup v2 is not mounted."],
+    };
+    vi.mocked(sockscapStart).mockRejectedValueOnce(
+      "create /sys/fs/cgroup/taomni-sockscap-1: Permission denied. "
+        + "Linux capture must run with permission to manage cgroup v2",
+    );
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-start"));
+
+    await waitFor(() => {
+      expect(vi.mocked(sockscapStart)).toHaveBeenCalled();
+    });
+    expect(screen.queryByTestId("sockscap-root-prompt-dialog")).not.toBeInTheDocument();
+  });
+
+  it("shows the local proxy ports with copyable client configuration", async () => {
+    currentPlatform = "linux";
+    currentCapsOverride = {
+      globalTcp: false,
+      appFilter: false,
+      captureBackend: "local-proxy",
+      privilegedRequired: false,
+      notes: [],
+    };
+    vi.mocked(sockscapStatus).mockResolvedValue({
+      phase: "degraded",
+      message: "transparent capture unavailable; local proxy ready",
+      ruleCount: 0,
+      captureBackend: "local-proxy",
+      proxyPorts: [
+        {
+          profileId: "apps",
+          profileName: "Apps",
+          port: 47811,
+          isDefault: false,
+          ipv6Ready: true,
+        },
+        {
+          profileId: "default",
+          profileName: "默认方案",
+          port: 7890,
+          isDefault: true,
+          ipv6Ready: true,
+        },
+      ],
+    });
+    render(<SocksCapPanel />);
+
+    const banner = await screen.findByTestId("sockscap-local-proxy-banner");
+    expect(banner).toHaveTextContent("127.0.0.1:7890");
+    expect(banner).toHaveTextContent("127.0.0.1:47811");
+    // The default profile's port is listed first so it is the obvious one to use.
+    const addresses = within(banner)
+      .getAllByText(/127\.0\.0\.1:/)
+      .map((node) => node.textContent);
+    expect(addresses[0]).toBe("127.0.0.1:7890");
+  });
+
+  it("hides the local proxy banner for transparent backends", async () => {
+    vi.mocked(sockscapStatus).mockResolvedValue({
+      phase: "active",
+      message: "capture active",
+      ruleCount: 0,
+      captureBackend: "nft-cgroup-redirect",
+      proxyPorts: [],
+    });
+    render(<SocksCapPanel />);
+
+    // Wait for the transparent backend to be reflected before asserting absence.
+    await screen.findByTestId("sockscap-capability-notes");
+    expect(screen.queryByTestId("sockscap-local-proxy-banner")).not.toBeInTheDocument();
+  });
+
+  it("persists the selected capture mode", async () => {
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-capture-mode-localProxy"));
+
+    await waitFor(() => {
+      expect(currentCfg.captureMode).toBe("localProxy");
+    });
+  });
+
+  it("hides the capture mode selector where the local proxy backend does not exist", async () => {
+    // Offering a mode that silently does nothing would be worse than omitting it.
+    currentCapsOverride = { localProxy: false };
+    render(<SocksCapPanel />);
+
+    await screen.findByTestId("sockscap-capability-notes");
+    expect(screen.queryByTestId("sockscap-capture-mode-localProxy")).not.toBeInTheDocument();
+  });
+
+  it("pins the selected profile's local proxy port", async () => {
+    // Non-catch-all profiles otherwise get an ephemeral port that changes on
+    // every restart, invalidating whatever the client was configured with.
+    render(<SocksCapPanel />);
+
+    fireEvent.change(await screen.findByTestId("sockscap-profile-local-proxy-port"), {
+      target: { value: "9050" },
+    });
+
+    await waitFor(() => {
+      expect(currentCfg.profiles[0].localProxyPort).toBe(9050);
+    });
+  });
+
+  it("hides the per-profile port where the local proxy backend does not exist", async () => {
+    currentCapsOverride = { localProxy: false };
+    render(<SocksCapPanel />);
+
+    await screen.findByTestId("sockscap-capability-notes");
+    expect(screen.queryByTestId("sockscap-profile-local-proxy-port")).not.toBeInTheDocument();
+  });
+
+  it("offers copyable client configuration for the local proxy port", async () => {
+    currentPlatform = "linux";
+    currentCapsOverride = {
+      globalTcp: false,
+      appFilter: false,
+      captureBackend: "local-proxy",
+      privilegedRequired: false,
+      notes: [],
+    };
+    vi.mocked(sockscapStatus).mockResolvedValue({
+      phase: "degraded",
+      message: "local proxy ready",
+      ruleCount: 0,
+      captureBackend: "local-proxy",
+      proxyPorts: [
+        { profileId: "default", profileName: "默认方案", port: 7890, isDefault: true, ipv6Ready: true },
+      ],
+    });
+    render(<SocksCapPanel />);
+
+    const snippets = await screen.findByTestId("sockscap-local-proxy-snippets");
+    for (const id of ["env", "curl", "git", "npm"]) {
+      expect(within(snippets).getByTestId(`sockscap-local-proxy-snippet-${id}`)).toBeInTheDocument();
+    }
+  });
+
+  it("disables QUIC blocking when the local proxy cannot apply it", async () => {
+    // The toggle would otherwise imply an effect it cannot have.
+    currentPlatform = "linux";
+    currentCapsOverride = {
+      globalTcp: false,
+      appFilter: false,
+      captureBackend: "local-proxy",
+      privilegedRequired: false,
+      notes: [],
+    };
+    render(<SocksCapPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sockscap-block-quic")).toBeDisabled();
+    });
   });
 
   it("retries Recover with sudo without accidentally starting capture", async () => {

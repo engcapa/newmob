@@ -2216,6 +2216,8 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
           defaultAction: "direct",
           restoreOnLogin: false,
           blockQuic: true,
+          captureMode: "auto",
+          localProxyPort: 7890,
         };
       }
       if (!Array.isArray(cfg.profiles) || cfg.profiles.length === 0) {
@@ -2243,6 +2245,8 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         const profList = cfg.profiles as Array<Record<string, unknown>>;
         cfg.selectedProfileId = String(profList[0]?.id ?? "default");
       }
+      cfg.captureMode ??= "auto";
+      cfg.localProxyPort ??= 7890;
       return cfg as T;
     }
     case "sockscap_validate_macos_app": {
@@ -2290,12 +2294,19 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         message: "browser preview",
         ruleCount: 0,
         captureBackend: "none",
+        proxyPorts: [],
       } as T;
     }
     case "sockscap_diagnostics": {
       return {
         generatedAt: Math.floor(Date.now() / 1000),
-        status: { phase: "idle", message: "browser preview", ruleCount: 0, captureBackend: "none" },
+        status: {
+          phase: "idle",
+          message: "browser preview",
+          ruleCount: 0,
+          captureBackend: "none",
+          proxyPorts: [],
+        },
         capabilities: {
           platform: "browser",
           globalTcp: false,
@@ -2323,6 +2334,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         message: "Browser preview — capture unavailable; use desktop build for SocksCap.",
         ruleCount: 0,
         captureBackend: "none",
+        proxyPorts: [],
       } as T;
     }
     case "sockscap_stop": {
@@ -2331,6 +2343,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         message: "stopped",
         ruleCount: 0,
         captureBackend: "none",
+        proxyPorts: [],
       } as T;
     }
     case "sockscap_recover":

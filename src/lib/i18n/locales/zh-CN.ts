@@ -1319,6 +1319,31 @@ export const zhCN: DeepPartial<typeof en> = {
     blockQuic: "拦截 QUIC（强制 HTTP/3 回退 TCP）",
     blockQuicHint:
       "丢弃被捕获应用的 UDP 443，使 QUIC 回退到 TCP，SocksCap 才能经上游代理转发。否则 QUIC 绕过捕获、泄漏真实 IP（网站可能提示地区不允许）。关闭后，范围内应用将直接使用 QUIC。",
+    blockQuicUnavailable:
+      "拦截 QUIC 需要内核防火墙规则，因此对本地代理模式不生效。使用 QUIC 的客户端需自行指向代理端口，或自行关闭 QUIC。",
+    captureModeLabel: "捕获模式",
+    captureMode: {
+      auto: "自动",
+      autoHint:
+        "优先使用透明捕获；当前系统不支持时（例如缺少 CAP_NET_ADMIN 的容器）自动回退到本地代理。",
+      transparent: "仅透明捕获",
+      transparentHint:
+        "只在内核层拦截流量。启动失败时直接给出底层原因，便于排查权限问题。",
+      localProxy: "仅本地代理",
+      localProxyHint:
+        "只启动 loopback SOCKS5 / HTTP 代理。无需任何特权；仅捕获指向该端口的客户端。",
+    },
+    localProxyPortLabel: "本地代理端口",
+    localProxyPortHint: "填 0 表示自动分配",
+    profileLocalProxyPortLabel: "本方案端口",
+    profileLocalProxyPortHint:
+      "仅本地代理模式使用：客户端连接该端口即选中本方案。填 0 表示自动分配（catch-all 方案使用上面配置的端口）；固定端口可让客户端配置在重启后继续有效。",
+    localProxyActiveTitle: "本地代理已监听",
+    localProxyScopeNote:
+      "流量不会被自动拦截。请将客户端指向下面的地址 —— 基于进程的应用规则在此模式下不生效，因此每个方案各有独立端口。",
+    localProxyDefaultBadge: "默认",
+    localProxyCopyAddress: "复制地址",
+    localProxySnippetsLabel: "客户端配置：",
     importDesktopOnly: "导入本地规则文件需要桌面版。",
     gfwRefreshed: "GFWList 已加载（{count} 条）",
     gfwImported: "已导入规则（{count} 条）",

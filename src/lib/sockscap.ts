@@ -76,6 +76,8 @@ export interface SocksCapProfile {
   apps: AppSelector[];
   upstream: UpstreamRef;
   ruleMode: RuleMode;
+  /** Pin this profile's local-proxy port. 0 = assign one automatically. */
+  localProxyPort?: number;
   userRules: UserRule[];
   defaultAction: Decision;
 }
@@ -160,6 +162,30 @@ export interface SocksCapConfig {
    *  capture can attribute (SNI) and route through the upstream. Without it QUIC
    *  bypasses capture and leaks the real IP. Session-level; default on. */
   blockQuic: boolean;
+  /** Which capture plane to use. `auto` prefers transparent capture and falls
+   *  back to the local proxy where the OS cannot support it. */
+  captureMode: CaptureMode;
+  /** Loopback port for the local proxy ingress; 0 picks one automatically. */
+  localProxyPort: number;
+}
+
+/** Capture plane selection. */
+export type CaptureMode = "auto" | "transparent" | "localProxy";
+
+/** Backend name reported when capture runs as an explicit loopback proxy. */
+export const LOCAL_PROXY_BACKEND = "local-proxy";
+
+/** Default loopback port for the local proxy ingress. Mirrors the Rust default.
+ *  Not 1080, which is the default upstream port and would self-loop. */
+export const DEFAULT_LOCAL_PROXY_PORT = 7890;
+
+/** One local proxy listening port and the profile it routes to. */
+export interface ProxyPortInfo {
+  profileId: string;
+  profileName: string;
+  port: number;
+  isDefault: boolean;
+  ipv6Ready: boolean;
 }
 
 export interface SocksCapCapabilities {
@@ -169,6 +195,9 @@ export interface SocksCapCapabilities {
   captureBackend: string;
   notes: string[];
   privilegedRequired: boolean;
+  /** Whether the privilege-free local proxy backend can be selected here.
+   *  Distinct from it currently being in use. */
+  localProxy?: boolean;
 }
 
 export interface RedirectorInstallStatus {
@@ -189,6 +218,9 @@ export interface SocksCapStatus {
   message: string;
   ruleCount: number;
   captureBackend: string;
+  /** Loopback proxy ports when the local-proxy backend is running; empty for
+   *  transparent backends. */
+  proxyPorts?: ProxyPortInfo[];
 }
 
 export interface SocksCapDiagnostics {
