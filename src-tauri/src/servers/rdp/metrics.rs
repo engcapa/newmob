@@ -20,7 +20,9 @@ const SAMPLE_WINDOW: usize = 256;
 #[derive(Clone)]
 pub(crate) struct RdpMetrics {
     inner: Arc<Mutex<MetricsState>>,
-    log: LogEmitter,
+    /// `None` only in unit tests, which have no Tauri `AppHandle` to emit
+    /// through. Recording stays fully active either way.
+    log: Option<LogEmitter>,
 }
 
 struct MetricsState {
@@ -76,6 +78,17 @@ impl SampleWindow {
 
 impl RdpMetrics {
     pub(crate) fn new(log: LogEmitter) -> Self {
+        Self::with_sink(Some(log))
+    }
+
+    /// Metrics that record but never emit. Lets capture/display loops be driven
+    /// in unit tests without a Tauri application handle.
+    #[cfg(test)]
+    pub(crate) fn silent() -> Self {
+        Self::with_sink(None)
+    }
+
+    fn with_sink(log: Option<LogEmitter>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(MetricsState {
                 last_report: Instant::now(),
@@ -95,12 +108,36 @@ impl RdpMetrics {
         }
     }
 
+    /// Record capture-side latency: the time attributable to getting one frame's
+    /// pixels into our hands.
+    ///
+    /// For a grab-on-demand backend that is the duration of the capture call.
+    /// A backend that blocks until the next frame exists — self-paced (see
+    /// [`Capturer::is_self_paced`]) or event-driven
+    /// ([`Capturer::is_event_driven`]) — spends nearly all of that call waiting,
+    /// so the caller passes the frame's age at pickup instead. Charging the
+    /// deliberate wait to "capture" would just report the frame interval and
+    /// hide the real cost.
+    ///
+    /// [`Capturer::is_self_paced`]: super::capture::Capturer::is_self_paced
+    /// [`Capturer::is_event_driven`]: super::capture::Capturer::is_event_driven
     pub(crate) fn record_capture(&self, duration: Duration, bytes: usize) {
         if let Ok(mut state) = self.inner.lock() {
             state.captured_frames += 1;
             state.raw_bytes += bytes as u64;
             state.capture_us.push(duration);
         }
+    }
+
+    /// Capture-side p50 in microseconds. Lets tests assert what the "capture"
+    /// metric actually measures, which is the whole point of recording it.
+    #[cfg(test)]
+    pub(crate) fn capture_p50_us(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|state| state.capture_us.percentiles())
+            .map(|values| values.p50)
     }
 
     pub(crate) fn record_hash(&self, duration: Duration) {
@@ -149,6 +186,9 @@ impl RdpMetrics {
     /// Emit one compact snapshot at most every five seconds. This method is
     /// intentionally cheap in the hot path when a report is not due.
     pub(crate) fn report_if_due(&self) {
+        let Some(log) = self.log.as_ref() else {
+            return;
+        };
         let snapshot = {
             let Ok(mut state) = self.inner.lock() else {
                 return;
@@ -193,7 +233,7 @@ impl RdpMetrics {
             age,
             input,
         ) = snapshot;
-        self.log.line(format!(
+        log.line(format!(
             "RDP latency: captured={captured} forwarded={forwarded} duplicate={duplicates} replaced={replaced} input-coalesced={input_coalesced} input-dropped={input_dropped} raw={}MiB{}{}{}{}",
             bytes / (1024 * 1024),
             fmt(" capture", capture),

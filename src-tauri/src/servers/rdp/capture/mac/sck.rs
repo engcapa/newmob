@@ -41,6 +41,12 @@ const NATIVE_QUEUE_DEPTH: isize = 3;
 const FRAME_RATE: i32 = 30;
 const CONTENT_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_millis(750);
+/// How long one poll waits for new desktop content before reporting an idle
+/// tick. ScreenCaptureKit delivers no usable frame at all while the desktop is
+/// static, so this is the interval at which the capture loop gets a chance to
+/// notice a disconnected client. It is deliberately far below
+/// [`FRAME_TIMEOUT`], which stays reserved for the initial frame.
+const IDLE_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 struct FrameSlot {
@@ -85,7 +91,11 @@ impl FrameSlot {
         self.wake.notify_all();
     }
 
-    fn take(&self, timeout: Duration) -> anyhow::Result<Frame> {
+    /// Wait up to `timeout` for the next frame. `Ok(None)` means the timeout
+    /// elapsed with the desktop unchanged, which is not an error: the stream is
+    /// healthy and simply has nothing new to show. Only a stopped stream or a
+    /// poisoned lock is reported as `Err`.
+    fn take_or_idle(&self, timeout: Duration) -> anyhow::Result<Option<Frame>> {
         let deadline = Instant::now() + timeout;
         let mut state = self
             .state
@@ -93,17 +103,14 @@ impl FrameSlot {
             .map_err(|_| anyhow::anyhow!("ScreenCaptureKit frame mailbox lock poisoned"))?;
         loop {
             if let Some(frame) = state.latest.take() {
-                return Ok(frame);
+                return Ok(Some(frame));
             }
             if let Some(reason) = &state.stopped {
                 anyhow::bail!("ScreenCaptureKit stream stopped: {reason}");
             }
             let now = Instant::now();
             if now >= deadline {
-                anyhow::bail!(
-                    "ScreenCaptureKit stream produced no frame within {} seconds",
-                    timeout.as_secs()
-                );
+                return Ok(None);
             }
             let remaining = deadline.saturating_duration_since(now);
             let (next, wait) = self
@@ -111,13 +118,21 @@ impl FrameSlot {
                 .wait_timeout(state, remaining)
                 .map_err(|_| anyhow::anyhow!("ScreenCaptureKit frame mailbox lock poisoned"))?;
             state = next;
-            if wait.timed_out() && state.latest.is_none() {
-                anyhow::bail!(
-                    "ScreenCaptureKit stream produced no frame within {} seconds",
-                    timeout.as_secs()
-                );
+            if wait.timed_out() && state.latest.is_none() && state.stopped.is_none() {
+                return Ok(None);
             }
         }
+    }
+
+    /// Wait for a frame and treat the timeout as a failure. Used where a frame
+    /// is genuinely required — starting the stream and probing the desktop size.
+    fn take(&self, timeout: Duration) -> anyhow::Result<Frame> {
+        self.take_or_idle(timeout)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "ScreenCaptureKit stream produced no frame within {} seconds",
+                timeout.as_secs()
+            )
+        })
     }
 }
 
@@ -145,9 +160,12 @@ define_class!(
                 return;
             }
             match copy_bgra_frame(sample_buffer) {
-                Ok(frame) => self.ivars().slot.publish(frame),
-                // ScreenCaptureKit can emit transient non-display buffers
-                // while a display is changing mode. Do not terminate a usable
+                // `None` is an idle sample: the desktop did not change, so
+                // there is nothing to publish and nothing worth logging.
+                Ok(Some(frame)) => self.ivars().slot.publish(frame),
+                Ok(None) => {}
+                // ScreenCaptureKit can emit transient malformed buffers while
+                // a display is changing mode. Do not terminate a usable
                 // session for one such sample; the timed consumer path will
                 // surface a persistent outage with a clear error.
                 Err(error) => tracing::debug!("discarding ScreenCaptureKit sample: {error}"),
@@ -281,11 +299,38 @@ impl Capturer for SckCapturer {
         (self.width, self.height)
     }
 
+    /// ScreenCaptureKit enforces [`FRAME_RATE`] through
+    /// `setMinimumFrameInterval`, so the display loop must not pace again.
+    fn is_self_paced(&self) -> bool {
+        true
+    }
+
     fn capture(&mut self) -> anyhow::Result<Frame> {
         let frame = match self.pending.take() {
             Some(frame) => frame,
             None => self.slot.take(FRAME_TIMEOUT)?,
         };
+        self.accept(frame)
+    }
+
+    fn poll_frame(&mut self) -> anyhow::Result<Option<Frame>> {
+        let frame = match self.pending.take() {
+            Some(frame) => frame,
+            None => match self.slot.take_or_idle(IDLE_POLL)? {
+                Some(frame) => frame,
+                // Static desktop. The stream is healthy and will deliver again
+                // as soon as something on screen changes.
+                None => return Ok(None),
+            },
+        };
+        self.accept(frame).map(Some)
+    }
+}
+
+impl SckCapturer {
+    /// Validate a delivered frame and adopt its dimensions, which change when
+    /// the captured display switches mode.
+    fn accept(&mut self, frame: Frame) -> anyhow::Result<Frame> {
         let (width, height) = frame_dimensions(&frame)?;
         self.width = width;
         self.height = height;
@@ -414,9 +459,18 @@ fn stop_stream(stream: &SCStream) {
     let _ = receiver.recv_timeout(STOP_TIMEOUT);
 }
 
-fn copy_bgra_frame(sample_buffer: &CMSampleBuffer) -> anyhow::Result<Frame> {
-    let pixel_buffer = unsafe { sample_buffer.image_buffer() }
-        .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit sample has no image buffer"))?;
+/// Copy one ScreenCaptureKit sample into an owned BGRA frame.
+///
+/// Returns `Ok(None)` for a sample that carries no pixels. ScreenCaptureKit
+/// keeps delivering buffers on the configured frame interval even when the
+/// desktop is static, and marks them `SCFrameStatusIdle` with no attached image
+/// buffer. Those idle markers are the normal steady state of an unchanging
+/// desktop, so they must not be mistaken for a capture failure.
+fn copy_bgra_frame(sample_buffer: &CMSampleBuffer) -> anyhow::Result<Option<Frame>> {
+    let image_buffer = unsafe { sample_buffer.image_buffer() };
+    let Some(pixel_buffer) = image_buffer else {
+        return Ok(None);
+    };
     if CVPixelBufferGetPixelFormatType(&pixel_buffer) != kCVPixelFormatType_32BGRA {
         anyhow::bail!("ScreenCaptureKit sample was not delivered as BGRA");
     }
@@ -449,7 +503,7 @@ fn copy_bgra_frame(sample_buffer: &CMSampleBuffer) -> anyhow::Result<Frame> {
         // Preserve the source stride. IronRDP accepts row-aligned BGRA data,
         // avoiding a second full-frame repack on every display refresh.
         let data = unsafe { slice::from_raw_parts(base.cast::<u8>(), total_bytes) }.to_vec();
-        Ok(Frame::bgra(data, 0, 0, width, height, stride))
+        Ok(Some(Frame::bgra(data, 0, 0, width, height, stride)))
     })();
 
     let unlock_result =
@@ -498,6 +552,44 @@ mod tests {
         slot.publish(frame(1));
         slot.publish(frame(2));
         assert_eq!(slot.take(Duration::from_millis(1)).unwrap().data[0], 2);
+    }
+
+    #[test]
+    fn static_desktop_reports_an_idle_tick_instead_of_an_error() {
+        // ScreenCaptureKit delivers no usable frame while the desktop is
+        // unchanged. Reporting that as an error would end the capture thread and
+        // freeze the connected client on its last frame.
+        let slot = FrameSlot::new();
+        assert!(
+            slot.take_or_idle(Duration::from_millis(1))
+                .expect("idle is not a failure")
+                .is_none()
+        );
+
+        slot.publish(frame(7));
+        let frame = slot
+            .take_or_idle(Duration::from_millis(1))
+            .expect("published frame is delivered")
+            .expect("frame is present");
+        assert_eq!(frame.data[0], 7);
+    }
+
+    #[test]
+    fn stopped_stream_is_an_error_on_both_paths() {
+        let slot = FrameSlot::new();
+        slot.stop("display disconnected");
+
+        let idle_error = slot.take_or_idle(Duration::from_millis(1)).unwrap_err();
+        assert!(idle_error.to_string().contains("display disconnected"));
+        assert!(slot.take(Duration::from_millis(1)).is_err());
+    }
+
+    #[test]
+    fn required_frame_still_fails_when_none_arrives() {
+        // The initial frame and the desktop-size probe genuinely need pixels.
+        let slot = FrameSlot::new();
+        let error = slot.take(Duration::from_millis(1)).unwrap_err();
+        assert!(error.to_string().contains("produced no frame"));
     }
 
     #[test]

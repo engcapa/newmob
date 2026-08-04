@@ -20,6 +20,9 @@ mod sck;
 
 const INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(2);
+/// Idle budget for one poll of the fallback stream. See [`Capturer::poll_frame`]:
+/// a quiet desktop must not be reported as a capture failure.
+const IDLE_POLL: Duration = Duration::from_millis(250);
 
 pub(crate) fn permission_granted() -> bool {
     CGPreflightScreenCaptureAccess()
@@ -169,6 +172,12 @@ impl Capturer for MacCapturer {
         (self.width, self.height)
     }
 
+    /// The native stream delivers on its own schedule; pacing again here would
+    /// only serve frames that already arrived one interval late.
+    fn is_self_paced(&self) -> bool {
+        true
+    }
+
     fn capture(&mut self) -> anyhow::Result<Frame> {
         let frame = match self.pending.take() {
             Some(frame) => frame,
@@ -185,6 +194,29 @@ impl Capturer for MacCapturer {
                     }
                 })?,
         };
+        self.accept(frame)
+    }
+
+    fn poll_frame(&mut self) -> anyhow::Result<Option<Frame>> {
+        let frame = match self.pending.take() {
+            Some(frame) => frame,
+            None => match self.frames.recv_timeout(IDLE_POLL) {
+                Ok(frame) => frame,
+                // A quiet interval is not a stalled stream: this backend also
+                // only produces frames when the desktop actually changes.
+                Err(RecvTimeoutError::Timeout) => return Ok(None),
+                Err(RecvTimeoutError::Disconnected) => {
+                    anyhow::bail!("native display stream disconnected")
+                }
+            },
+        };
+        self.accept(frame).map(Some)
+    }
+}
+
+impl MacCapturer {
+    /// Validate a delivered frame, adopt its dimensions, and convert to BGRA.
+    fn accept(&mut self, frame: xcap::Frame) -> anyhow::Result<Frame> {
         let (width, height) = frame_dimensions(&frame)?;
         self.width = width;
         self.height = height;

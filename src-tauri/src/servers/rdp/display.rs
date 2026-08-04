@@ -218,6 +218,13 @@ impl LatestFrameMailbox {
         }
     }
 
+    /// Whether the consuming client has gone away. The capture loop checks this
+    /// on idle ticks, where it has no frame to publish and would otherwise not
+    /// notice a disconnect.
+    fn is_closed(&self) -> bool {
+        self.state.lock().is_ok_and(|state| state.closed)
+    }
+
     fn close(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
@@ -428,7 +435,6 @@ fn capture_loop_event_driven(
     let mut first = true;
     let mut sequence = 0;
     loop {
-        let started = std::time::Instant::now();
         match capturer.next_updates(first) {
             Ok(mut frames) => {
                 first = false;
@@ -441,7 +447,10 @@ fn capture_loop_event_driven(
                     continue;
                 }
                 for frame in &mut frames {
-                    metrics.record_capture(started.elapsed(), frame.data.len());
+                    // This backend sleeps until the screen changes and caps its
+                    // own rate, so the time since the call started is mostly
+                    // deliberate waiting. Report each region's age at handoff.
+                    metrics.record_capture(frame.captured_at.elapsed(), frame.data.len());
                     sequence += 1;
                     frame.sequence = sequence;
                 }
@@ -491,20 +500,39 @@ fn capture_loop_event_driven(
 /// Fixed-interval full-frame loop with FNV-1a dedup (used when the backend is
 /// not event-driven). ~30 fps ceiling; identical frames are suppressed so a
 /// static desktop costs nothing downstream.
+///
+/// A backend that reports an idle tick ([`Capturer::poll_frame`] returning
+/// `Ok(None)`) has simply seen no change. That is the steady state of an
+/// untouched desktop and must never end this loop: the mailbox has no producer
+/// once this thread exits, so `next_update` would block forever and freeze the
+/// client on its last frame while the connection still looks healthy.
 fn capture_loop_polling(
     capturer: &mut dyn Capturer,
     mailbox: &LatestFrameMailbox,
     metrics: &RdpMetrics,
 ) {
-    let frame_interval = std::time::Duration::from_millis(33);
+    // A backend that caps its own frame rate must not be paced again: the extra
+    // sleep would hold back a frame that is already sitting in its mailbox.
+    let self_paced = capturer.is_self_paced();
+    let frame_interval = (!self_paced).then(|| std::time::Duration::from_millis(33));
     let mut last_hash: Option<u64> = None;
     let mut first = true;
     let mut sequence = 0;
     loop {
         let start = std::time::Instant::now();
-        match capturer.capture() {
-            Ok(mut frame) => {
-                metrics.record_capture(start.elapsed(), frame.data.len());
+        match capturer.poll_frame() {
+            Ok(Some(mut frame)) => {
+                // Charge only pixel production to "capture". A self-paced poll
+                // blocks until the next frame exists, so its elapsed time is the
+                // frame interval, not our cost — the frame's age at pickup is.
+                // A grab-on-demand poll does the work inline, so there the call
+                // duration is the cost and the frame's age is ~zero.
+                let capture_cost = if self_paced {
+                    frame.captured_at.elapsed()
+                } else {
+                    start.elapsed()
+                };
+                metrics.record_capture(capture_cost, frame.data.len());
                 let hash_started = std::time::Instant::now();
                 let hash = super::diff::frame_hash(&frame.data);
                 metrics.record_hash(hash_started.elapsed());
@@ -529,14 +557,21 @@ fn capture_loop_polling(
                 } else {
                     metrics.record_duplicate_frame();
                 }
+                if let Some(rem) = frame_interval.and_then(|i| i.checked_sub(start.elapsed())) {
+                    std::thread::sleep(rem);
+                }
+            }
+            Ok(None) => {
+                // Idle tick. The poll already blocked for the backend's idle
+                // budget, so pace nothing here; just notice a client that left.
+                if mailbox.is_closed() {
+                    break;
+                }
             }
             Err(e) => {
                 tracing::warn!("RDP capture (polling): {}", e);
                 break;
             }
-        }
-        if let Some(rem) = frame_interval.checked_sub(start.elapsed()) {
-            std::thread::sleep(rem);
         }
         metrics.report_if_due();
     }
@@ -544,11 +579,82 @@ fn capture_loop_polling(
 
 #[cfg(test)]
 mod tests {
-    use super::{LatestFrameMailbox, PendingFrames, PublishResult};
-    use crate::servers::rdp::capture::Frame;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use super::{LatestFrameMailbox, PendingFrames, PublishResult, capture_loop_polling};
+    use crate::servers::rdp::capture::{Capturer, Frame};
+    use crate::servers::rdp::metrics::RdpMetrics;
 
     fn frame(value: u8) -> Frame {
         Frame::bgra(vec![value, 0, 0, 0], 0, 0, 1, 1, 4)
+    }
+
+    /// Capturer that reports idle ticks, mimicking ScreenCaptureKit on a static
+    /// desktop, and produces one real frame every `frame_every` polls.
+    ///
+    /// `disconnect_at` closes the mailbox from inside the poll so the test does
+    /// not depend on thread scheduling: the real backends block for their idle
+    /// budget on each poll, while this stub returns instantly.
+    struct IdleCapturer {
+        polls: Arc<AtomicUsize>,
+        frame_every: usize,
+        stop_after: usize,
+        disconnect_at: Option<(usize, Arc<LatestFrameMailbox>)>,
+        /// Reported through [`Capturer::is_self_paced`].
+        self_paced: bool,
+        /// Time spent inside one producing poll before the pixels exist, standing
+        /// in for a backend that blocks until the next frame is available.
+        wait: Duration,
+    }
+
+    impl IdleCapturer {
+        fn new(polls: Arc<AtomicUsize>, frame_every: usize, stop_after: usize) -> Self {
+            Self {
+                polls,
+                frame_every,
+                stop_after,
+                disconnect_at: None,
+                self_paced: false,
+                wait: Duration::ZERO,
+            }
+        }
+    }
+
+    impl Capturer for IdleCapturer {
+        fn desktop_size(&self) -> (u16, u16) {
+            (1, 1)
+        }
+
+        fn is_self_paced(&self) -> bool {
+            self.self_paced
+        }
+
+        fn capture(&mut self) -> anyhow::Result<Frame> {
+            anyhow::bail!("polling loop must use poll_frame")
+        }
+
+        fn poll_frame(&mut self) -> anyhow::Result<Option<Frame>> {
+            let poll = self.polls.fetch_add(1, Ordering::Relaxed) + 1;
+            if poll > self.stop_after {
+                anyhow::bail!("capture source failed");
+            }
+            if let Some((at, mailbox)) = &self.disconnect_at
+                && poll == *at
+            {
+                mailbox.close();
+            }
+            if self.frame_every > 0 && poll.is_multiple_of(self.frame_every) {
+                // Wait first, then build the frame: both regimes hand back
+                // pixels that are fresh when the call returns, whatever the
+                // call itself spent getting there.
+                std::thread::sleep(self.wait);
+                #[expect(clippy::cast_possible_truncation, reason = "test frame payload")]
+                return Ok(Some(frame(poll as u8)));
+            }
+            Ok(None)
+        }
     }
 
     #[tokio::test]
@@ -596,5 +702,116 @@ mod tests {
             panic!("expected the full refresh");
         };
         assert_eq!(frame.data[0], 3);
+    }
+
+    #[test]
+    fn idle_ticks_do_not_end_the_capture_thread() {
+        // Regression: a static macOS desktop yields only idle ticks. Treating
+        // one as fatal ended the capture thread, leaving `next_update` awaiting
+        // a mailbox with no producer — the client froze on its last frame while
+        // the connection stayed up.
+        let mailbox = Arc::new(LatestFrameMailbox::new());
+        let metrics = RdpMetrics::silent();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut capturer = IdleCapturer {
+            disconnect_at: Some((25, mailbox.clone())),
+            ..IdleCapturer::new(polls.clone(), 0, 200)
+        };
+
+        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+
+        // 24 idle ticks were survived; the loop ended only once the client left.
+        assert_eq!(
+            polls.load(Ordering::Relaxed),
+            25,
+            "loop must ride out idle ticks and stop exactly on disconnect"
+        );
+    }
+
+    #[test]
+    fn capture_failure_still_ends_the_loop() {
+        let mailbox = LatestFrameMailbox::new();
+        let metrics = RdpMetrics::silent();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut capturer = IdleCapturer {
+            self_paced: true,
+            ..IdleCapturer::new(polls.clone(), 2, 4)
+        };
+
+        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+
+        assert_eq!(polls.load(Ordering::Relaxed), 5, "loop must stop on error");
+    }
+
+    /// Long enough to separate "waited for the next frame" from "produced the
+    /// pixels" in a wall-clock assertion, short enough to keep tests quick.
+    const WAIT: Duration = Duration::from_millis(40);
+
+    #[test]
+    fn a_self_paced_backend_is_not_paced_again() {
+        // ScreenCaptureKit already caps itself at its configured frame rate.
+        // Sleeping another frame interval per iteration served each frame one
+        // interval after it was already sitting in the backend's mailbox.
+        let mailbox = LatestFrameMailbox::new();
+        let metrics = RdpMetrics::silent();
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut capturer = IdleCapturer {
+            self_paced: true,
+            ..IdleCapturer::new(polls.clone(), 1, 6)
+        };
+
+        let started = Instant::now();
+        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+        let elapsed = started.elapsed();
+
+        assert_eq!(polls.load(Ordering::Relaxed), 7);
+        // Six unpaced polls take microseconds; six paced ones take ~200ms.
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "self-paced backend was paced a second time: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn capture_metric_excludes_a_self_paced_backends_wait() {
+        // `capture=` has to report what getting pixels costs us. Charging the
+        // wait for the next frame to it just restates the frame interval, so a
+        // genuinely slow capture becomes indistinguishable from an idle desktop.
+        let mailbox = LatestFrameMailbox::new();
+        let metrics = RdpMetrics::silent();
+        let mut capturer = IdleCapturer {
+            self_paced: true,
+            wait: WAIT,
+            ..IdleCapturer::new(Arc::new(AtomicUsize::new(0)), 1, 1)
+        };
+
+        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+
+        let capture_us = metrics.capture_p50_us().expect("one frame was captured");
+        assert!(
+            capture_us < u64::try_from(WAIT.as_micros()).unwrap() / 2,
+            "the self-paced wait was charged to capture: {capture_us}us"
+        );
+    }
+
+    #[test]
+    fn capture_metric_covers_a_grab_on_demand_backends_work() {
+        // The flip side: a backend that produces pixels inline must still have
+        // that work measured, so the fix above cannot silently zero the metric
+        // on X11-without-DAMAGE or the Wayland/xcap fallback.
+        let mailbox = LatestFrameMailbox::new();
+        let metrics = RdpMetrics::silent();
+        let mut capturer = IdleCapturer {
+            wait: WAIT,
+            ..IdleCapturer::new(Arc::new(AtomicUsize::new(0)), 1, 1)
+        };
+
+        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+
+        let capture_us = metrics.capture_p50_us().expect("one frame was captured");
+        assert!(
+            capture_us >= u64::try_from(WAIT.as_micros()).unwrap() / 2,
+            "grab-on-demand capture work was not measured: {capture_us}us"
+        );
     }
 }
