@@ -166,6 +166,7 @@
 - `[data-testid="hbase-schema-tree-filter"]` — interactive [optional] — F-DB-3.schema-filter
 - `[data-testid="hbase-query-library-tab"]` — interactive [optional] — F-DB-3.query-library-tab
 - `[data-testid="hbase-save-query"]` — interactive [optional] — F-DB-3.save-query
+- `[data-testid="hbase-tab-limit"]` — interactive [optional] — F-DB-3.tab-limit
 - `[data-testid="hbase-run-current-statement"]` — interactive [optional] — F-DB-3.run-current
 - `[data-testid="hbase-help-dialog"]` — display [optional] — F-DB-3.help-dialog
 - `[data-testid="hbase-sidebar-drawer-handle"]` — interactive [optional] — F-DB-3.sidebar-drawer
@@ -255,6 +256,7 @@
 - `[data-testid="db-schema-drawer-handle"]` — interactive [optional] — F-DB-1.schema-drawer-handle
 - `[data-testid="db-query-library-tab"]` — interactive [optional] — F-DB-1.query-library-tab
 - `[data-testid="db-save-query"]` — interactive [optional] — F-DB-1.save-query
+- `[data-testid="db-tab-limit"]` — interactive [optional] — F-DB-1.tab-limit
 - `[data-testid="db-connection-error-banner"]` — display [optional] — F-DB-1.connection-error-banner
 - `[data-testid="db-chat-toggle"]` — interactive [optional] — F-DB-1.chat-toggle
 - `[data-testid="db-detach"]` — interactive [optional] — F-DB-1.detach

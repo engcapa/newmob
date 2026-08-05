@@ -3657,6 +3657,7 @@ files:
   - src/lib/sqlLocalRelations.ts
   - src/lib/sqlMetadataCompletions.ts
   - src/lib/sqlQueryScope.ts
+  - src/lib/databaseTabLimit.ts
   - src/lib/ipc.ts
   - src-tauri/src/database/mod.rs
   - src-tauri/src/database/sql.rs
@@ -3821,6 +3822,10 @@ controls:
     selector: '[data-testid="db-save-query"]'
     kind: interactive
     optional: true
+  - id: tab-limit
+    selector: '[data-testid="db-tab-limit"]'
+    kind: interactive
+    optional: true       # only inside an open SQL DB tab
   - id: connection-error-banner
     selector: '[data-testid="db-connection-error-banner"]'
     kind: display
@@ -3841,7 +3846,7 @@ controls:
 -->
 
 - DB 会话（MySQL/PostgreSQL/PanWeiDB/Oracle/SQLServer/StarRocks/ClickHouse/Presto）经 `SessionEditor` 创建（proto 选择器 + database section 由 F6.3 拥有），打开后 `MainLayout.openDbTab` 挂载 `DbClientTab`（`type:"database"`），与 SFTP/VNC 一样常驻挂载以便查询跨标签存活
-- 左侧 `SchemaTree`：懒加载 schema→table→column/index 展开（`db-schema-drawer-handle` 抽屉折叠）；右侧查询工作区为多 query 面板（最多 4 个）的 tab 布局
+- 左侧 `SchemaTree`：懒加载 schema→table→column/index 展开（`db-schema-drawer-handle` 抽屉折叠）；右侧查询工作区为多 query 面板的 tab 布局，`Tab limit` 同时限制每个 session 的 query tabs 和每个 query 的 result tabs（默认 50）
 - `SqlEditorPanel` 封装 CodeMirror 6：按引擎选 dialect，提供语法上下文感知的本地 CTE/函数补全与有界、可缓存的远端元数据补全，覆盖表/列、读取光标后 `FROM/JOIN` 的 `SELECT` 字段补全、通配符展开、`INSERT` 列和外键优先的 `JOIN ON`；补全触发键、输入自动弹出及 Tab/Enter 接受行为可在全局设置中修改，运行中的主/分离窗口会动态重配 keymap；加载、截断与错误会通过 `sql-completion-status` 反馈
 - SQL 历史持久化到 SQLite `sql_history`，按 workspace/session + engine 查询；History 面板支持 Run / Select / +Tab / JSON / Ask AI / Refresh / Clear / Delete；当前 editor 语句面板用 cursor/selection 定位多 SQL 文档中的单条语句，并提供同一套 Run / Select / +Tab / JSON / Ask AI 交互
 - `QueryResultGrid` 为手写虚拟化网格（行高 24 + overscan）：NULL 徽标、数值右对齐、排序、CSV/单元格复制、完整值查看（Ctrl+Enter / 右键菜单，保留长文本和换行）、列显隐、聚合统计、行筛选、Table/List/Chart 视图、增删改行 + 提交/撤销；过滤/排序先本地生效，显式 `Query` 后优先把 `WHERE` / `ORDER BY` 原位写回仍匹配的来源语句并刷新当前 result sheet，复杂 SQL fallback 为包裹源 SQL 的 derived SQL，`Sync` 可创建/复用 `Generated SQL` query 面板作为草稿
@@ -4001,6 +4006,7 @@ files:
   - src/lib/hbaseCommands.ts
   - src/lib/hbaseCompletions.ts
   - src/lib/hbaseStatements.ts
+  - src/lib/databaseTabLimit.ts
 controls:
   - id: remote-host
     selector: 'input[aria-label="Remote host"]'
@@ -4026,6 +4032,10 @@ controls:
     selector: '[data-testid="hbase-save-query"]'
     kind: interactive
     optional: true
+  - id: tab-limit
+    selector: '[data-testid="hbase-tab-limit"]'
+    kind: interactive
+    optional: true
   - id: run-current
     selector: '[data-testid="hbase-run-current-statement"]'
     kind: interactive
@@ -4044,7 +4054,7 @@ controls:
     optional: true
 -->
 
-- HBase REST/native/thrift 会话使用同一多面板 shell 工作区、命令补全、写操作确认与结果表格；连接失败时工作区和 Query Library 继续可用。
+- HBase REST/native/thrift 会话使用同一多面板 shell 工作区、命令补全、写操作确认与结果表格；`Tab limit` 同时限制每个 session 的 query tabs 和每个 query 的 result tabs（默认 50）；连接失败时工作区和 Query Library 继续可用。
 - Query Library 以稳定 HBase session id + namespace 过滤命令，打开后仍通过原 HBase statement runner 执行并参与退出 flush。
 
 ### 24.3 数据库 Query Library 与草稿持久化 ✅

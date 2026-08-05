@@ -121,6 +121,25 @@ describe("HBaseShellTab workspace", () => {
     expect(await screen.findByTestId("query-result-grid")).toHaveTextContent("1 rows");
   });
 
+  it("uses the shared tab limit for query tabs and result tabs", async () => {
+    localStorage.setItem("taomni.db.HBaseShell.tabLimit", "2");
+
+    render(<HBaseShellTab tabId="t1" info={info} visible />);
+    await waitFor(() => expect(ipcMock.hbaseConnect).toHaveBeenCalled());
+    expect(screen.getByTestId("hbase-tab-limit")).toHaveValue(2);
+
+    fireEvent.click(screen.getByTitle("New query panel"));
+    await waitFor(() => expect(screen.getByTitle("Query 2")).toBeInTheDocument());
+    expect(screen.queryByTitle("New query panel")).not.toBeInTheDocument();
+
+    for (let run = 0; run < 3; run += 1) {
+      fireEvent.click(screen.getByTestId("mock-editor"));
+      await waitFor(() => {
+        expect(screen.getAllByTestId("result-sheet-tab")).toHaveLength(Math.min(run + 1, 2));
+      });
+    }
+  });
+
   it("forces a confirmation popup before a write command and runs it on confirm", async () => {
     editorState.value = "drop 'users'";
     render(<HBaseShellTab tabId="t1" info={info} visible />);

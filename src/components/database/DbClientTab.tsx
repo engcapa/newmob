@@ -107,6 +107,13 @@ import { writeText } from "../../lib/clipboard";
 import { createDbMetadataCache } from "../../lib/dbMetadataCache";
 import { sqlNamespaceFromMetadata } from "../../lib/sqlMetadataCompletions";
 import {
+  MAX_DATABASE_TAB_LIMIT,
+  MIN_DATABASE_TAB_LIMIT,
+  clampDatabaseTabLimit,
+  readDatabaseTabLimit,
+  writeDatabaseTabLimit,
+} from "../../lib/databaseTabLimit";
+import {
   asSqlEngine,
   quoteIdent as dialectQuoteIdent,
   qualifiedName as dialectQualifiedName,
@@ -132,10 +139,6 @@ interface DbClientTabProps {
 }
 
 const MAX_HISTORY = 200;
-const MAX_PANELS = 4;
-const DEFAULT_MAX_RESULT_SHEETS = 50;
-const MIN_RESULT_SHEETS = 1;
-const MAX_RESULT_SHEETS_LIMIT = 200;
 const DEFAULT_ROW_LIMIT = 1000;
 const MIN_ROW_LIMIT = 1;
 const MAX_ROW_LIMIT = 1_000_000;
@@ -570,15 +573,7 @@ export default function DbClientTab({
   const [rowLimit, setRowLimit] = useState(() =>
     readIntSetting(info.engine, "rowLimit", DEFAULT_ROW_LIMIT, MIN_ROW_LIMIT, MAX_ROW_LIMIT),
   );
-  const [maxResultSheets, setMaxResultSheets] = useState(() =>
-    readIntSetting(
-      info.engine,
-      "maxResultSheets",
-      DEFAULT_MAX_RESULT_SHEETS,
-      MIN_RESULT_SHEETS,
-      MAX_RESULT_SHEETS_LIMIT,
-    ),
-  );
+  const [tabLimit, setTabLimit] = useState(() => readDatabaseTabLimit(info.engine));
   const [schemas, setSchemas] = useState<string[]>([]);
   const [activeSchema, setActiveSchema] = useState<string | null>(() => initialActiveSchema(info));
   const [schemaMap, setSchemaMap] = useState<Record<string, string[]>>({});
@@ -599,6 +594,7 @@ export default function DbClientTab({
   const echoPanelIdRef = useRef<string | null>(null);
   const timersRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
   const panelsRef = useRef<PanelState[]>(panels);
+  const tabLimitRef = useRef(tabLimit);
   const activePanelIdRef = useRef(activePanelId);
   const autoSaveInFlightRef = useRef<Promise<void> | null>(null);
   const autoSaveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -637,6 +633,10 @@ export default function DbClientTab({
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
+
+  useEffect(() => {
+    tabLimitRef.current = tabLimit;
+  }, [tabLimit]);
 
   useEffect(() => {
     activePanelIdRef.current = activePanelId;
@@ -706,7 +706,7 @@ export default function DbClientTab({
           return;
         }
         const restored = await Promise.all(
-          workspace.tabs.slice(0, MAX_PANELS).map(async (entry) => {
+          workspace.tabs.slice(0, tabLimitRef.current).map(async (entry) => {
             const savedQuery = entry.savedQueryId
               ? await dbGetSavedQuery(entry.savedQueryId).catch(() => null)
               : null;
@@ -760,8 +760,8 @@ export default function DbClientTab({
             createdAt: Date.now() + index,
           }),
         );
-        if (restored.length >= MAX_PANELS) break;
-        if (index >= MAX_PANELS - 1) break;
+        if (restored.length >= tabLimitRef.current) break;
+        if (index >= tabLimitRef.current - 1) break;
       }
       if (cancelled) return;
       if (restored.length === 0) {
@@ -809,8 +809,8 @@ export default function DbClientTab({
   }, [info.engine, rowLimit]);
 
   useEffect(() => {
-    writeIntSetting(info.engine, "maxResultSheets", maxResultSheets);
-  }, [info.engine, maxResultSheets]);
+    writeDatabaseTabLimit(info.engine, tabLimit);
+  }, [info.engine, tabLimit]);
 
   const patchPanel = useCallback((id: string, patch: Partial<PanelState>) => {
     setPanels((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
@@ -1200,7 +1200,7 @@ export default function DbClientTab({
         setPanels((prev) =>
           prev.map((p) => {
             if (p.id !== panelId) return p;
-            const sheets = [...p.sheets, sheet].slice(-maxResultSheets);
+            const sheets = [...p.sheets, sheet].slice(-tabLimit);
             return {
               ...p,
               sheets,
@@ -1213,7 +1213,7 @@ export default function DbClientTab({
         if (!summary.ok) break;
       }
     },
-    [appendSqlHistory, maxResultSheets, rowLimit, statementRangesForRun, streamQueryIntoSheet],
+    [appendSqlHistory, rowLimit, statementRangesForRun, streamQueryIntoSheet, tabLimit],
   );
 
   const insertQueryFromOutside = useCallback(
@@ -1227,7 +1227,7 @@ export default function DbClientTab({
     ) => {
       const text = sql.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       if (!text.trim()) return;
-      if (options?.destination === "new" && panels.length < MAX_PANELS) {
+      if (options?.destination === "new" && panels.length < tabLimit) {
         const panel = newPanel({ doc: text, dirty: true });
         setPanels((prev) => [...prev, panel]);
         setActivePanelId(panel.id);
@@ -1259,7 +1259,7 @@ export default function DbClientTab({
         void runQuery(panelId, next ?? text);
       }
     },
-    [activePanelId, panels, patchPanel, runQuery],
+    [activePanelId, panels, patchPanel, runQuery, tabLimit],
   );
 
   // Append a statement echoed from an AI/Claude Code SQL execution to a stable
@@ -1288,7 +1288,7 @@ export default function DbClientTab({
       const panel = newPanel({ doc: block, dirty: true });
       echoPanelIdRef.current = panel.id;
       setPanels((prev) => {
-        const next = [...prev, panel].slice(-MAX_PANELS);
+        const next = [...prev, panel].slice(-tabLimit);
         panelsRef.current = next;
         return next;
       });
@@ -1309,7 +1309,7 @@ export default function DbClientTab({
     patchPanel(targetId, { doc: joined, dirty: true });
     setActivePanelId(targetId);
     editor?.focus();
-  }, [patchPanel]);
+  }, [patchPanel, tabLimit]);
 
   const queryRegistryTitle = useMemo(() => {
     const database = info.engine === "Presto"
@@ -1551,7 +1551,7 @@ export default function DbClientTab({
                       warnings: [],
                       resultTab: "messages" as ResultSubTab,
                     },
-                  ].slice(-maxResultSheets),
+                  ].slice(-tabLimit),
                   activeSheetId: sheet.id,
                 }
               : p,
@@ -1560,7 +1560,7 @@ export default function DbClientTab({
         setStatusMessage(`Schema switch failed: ${String(err)}`);
       }
     },
-    [activePanelId, activeSchema, connectionSessionId, info.catalog, info.engine, maxResultSheets, panels, rowLimit],
+    [activePanelId, activeSchema, connectionSessionId, info.catalog, info.engine, panels, rowLimit, tabLimit],
   );
   const insertIntoActive = useCallback(
     (text: string) => {
@@ -1599,7 +1599,7 @@ export default function DbClientTab({
   );
 
   const addPanel = () => {
-    if (panels.length >= MAX_PANELS) return;
+    if (panels.length >= tabLimit) return;
     const p = newPanel();
     setPanels((prev) => [...prev, p]);
     setActivePanelId(p.id);
@@ -1790,7 +1790,7 @@ export default function DbClientTab({
         label: "New query tab",
         icon: <Plus className="w-3 h-3" />,
         onClick: addPanel,
-        disabled: panels.length >= MAX_PANELS,
+        disabled: panels.length >= tabLimit,
       },
       {
         label: "Close",
@@ -1859,7 +1859,7 @@ export default function DbClientTab({
               sheets: [
                 ...p.sheets,
                 { ...sheet, running: false, result: null, error: message, resultTab: "messages" as ResultSubTab },
-              ].slice(-maxResultSheets),
+              ].slice(-tabLimit),
               activeSheetId: sheet.id,
             }
           : p,
@@ -1944,8 +1944,8 @@ export default function DbClientTab({
       return existingTargetId;
     }
 
-    if (livePanels.length >= MAX_PANELS) {
-      setStatusMessage(`Maximum query panels reached (${MAX_PANELS}).`);
+    if (livePanels.length >= tabLimit) {
+      setStatusMessage(`Maximum query panels reached (${tabLimit}).`);
       return null;
     }
 
@@ -2148,8 +2148,8 @@ export default function DbClientTab({
     origin: SqlStatementSourceRef["origin"] = "history",
     savedQuery: DbSavedQuery | null = null,
   ) => {
-    if (panelsRef.current.length >= MAX_PANELS) {
-      setStatusMessage(`Maximum query panels reached (${MAX_PANELS}).`);
+    if (panelsRef.current.length >= tabLimit) {
+      setStatusMessage(`Maximum query panels reached (${tabLimit}).`);
       return;
     }
     const panel = newPanel({ doc: sql, savedQuery, dirty: !savedQuery });
@@ -2634,7 +2634,7 @@ export default function DbClientTab({
                   </button>
                 );
               })}
-              {panels.length < MAX_PANELS && (
+              {panels.length < tabLimit && (
                 <button
                   type="button"
                   title="New query panel"
@@ -2678,12 +2678,12 @@ export default function DbClientTab({
                 onSaveQuery={() => addQueryTriggerRef.current?.()}
                 onSchemaChange={(schema) => void switchSchema(schema)}
                 rowLimit={rowLimit}
-                maxResultSheets={maxResultSheets}
+                tabLimit={tabLimit}
                 onRowLimitChange={(value) =>
                   setRowLimit(clampInt(value, MIN_ROW_LIMIT, MAX_ROW_LIMIT))
                 }
-                onMaxResultSheetsChange={(value) =>
-                  setMaxResultSheets(clampInt(value, MIN_RESULT_SHEETS, MAX_RESULT_SHEETS_LIMIT))
+                onTabLimitChange={(value) =>
+                  setTabLimit(clampDatabaseTabLimit(value))
                 }
               />
               {historyPanelId === activePanel.id && (
@@ -2792,9 +2792,9 @@ function EditorToolbar({
   onSaveQuery,
   onSchemaChange,
   rowLimit,
-  maxResultSheets,
+  tabLimit,
   onRowLimitChange,
-  onMaxResultSheetsChange,
+  onTabLimitChange,
 }: {
   engine: string;
   schemas: string[];
@@ -2816,9 +2816,9 @@ function EditorToolbar({
   onSaveQuery: () => void;
   onSchemaChange: (schema: string) => void;
   rowLimit: number;
-  maxResultSheets: number;
+  tabLimit: number;
   onRowLimitChange: (value: number) => void;
-  onMaxResultSheetsChange: (value: number) => void;
+  onTabLimitChange: (value: number) => void;
 }) {
   const t = useT();
   const [langMenuOpen, setLangMenuOpen] = useState(false);
@@ -2915,15 +2915,16 @@ function EditorToolbar({
         />
       </label>
       <label className="h-6 inline-flex items-center gap-1 text-[11px] text-[var(--taomni-text-muted)]">
-        Sheets
+        Tab limit
         <input
+          data-testid="db-tab-limit"
           className={input}
           type="number"
-          min={MIN_RESULT_SHEETS}
-          max={MAX_RESULT_SHEETS_LIMIT}
-          value={maxResultSheets}
-          title="Maximum open result sheets in this DB tab"
-          onChange={(event) => onMaxResultSheetsChange(Number(event.target.value))}
+          min={MIN_DATABASE_TAB_LIMIT}
+          max={MAX_DATABASE_TAB_LIMIT}
+          value={tabLimit}
+          title="Maximum query tabs per session and result tabs per query"
+          onChange={(event) => onTabLimitChange(Number(event.target.value))}
         />
       </label>
       <div className="flex-1" />

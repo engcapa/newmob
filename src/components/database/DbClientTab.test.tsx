@@ -542,6 +542,27 @@ describe("DbClientTab connection lifecycle", () => {
     });
   });
 
+  it("uses the shared tab limit for query tabs and result tabs", async () => {
+    localStorage.setItem("taomni.db.PostgreSQL.tabLimit", "2");
+    ipcMock.dbConnect.mockResolvedValue({ ok: true });
+
+    render(<DbClientTab tabId="tab-1" info={postgresInfo} visible />);
+
+    await waitFor(() => expect(screen.getByTestId("schema-tree")).toBeInTheDocument());
+    expect(screen.getByTestId("db-tab-limit")).toHaveValue(2);
+
+    fireEvent.click(screen.getByTitle("New query panel"));
+    await waitFor(() => expect(screen.getByTitle("Query 2")).toBeInTheDocument());
+    expect(screen.queryByTitle("New query panel")).not.toBeInTheDocument();
+
+    for (let run = 0; run < 3; run += 1) {
+      fireEvent.click(screen.getByTitle("Run (F5)"));
+      await waitFor(() => {
+        expect(screen.getAllByTestId("result-sheet-tab")).toHaveLength(Math.min(run + 1, 2));
+      });
+    }
+  });
+
   it("supports batch close actions from the result sheet context menu", async () => {
     ipcMock.dbConnect.mockResolvedValue({ ok: true });
 
@@ -716,4 +737,3 @@ describe("DbClientTab connection lifecycle", () => {
     });
   });
 });
-
