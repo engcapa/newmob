@@ -78,6 +78,13 @@ import { HBaseSchemaTree } from "./HBaseSchemaTree";
 import { useDbSessionFontSize } from "./useDbSessionFontSize";
 import { QueryLibraryPanel } from "./QueryLibraryPanel";
 import { registerQueryTab } from "../../lib/queryRegistry";
+import {
+  MAX_DATABASE_TAB_LIMIT,
+  MIN_DATABASE_TAB_LIMIT,
+  clampDatabaseTabLimit,
+  readDatabaseTabLimit,
+  writeDatabaseTabLimit,
+} from "../../lib/databaseTabLimit";
 
 interface HBaseShellTabProps {
   tabId: string;
@@ -90,10 +97,9 @@ interface HBaseShellTabProps {
   };
 }
 
-const MAX_PANELS = 4;
 const MAX_HISTORY = 200;
-const MAX_RESULT_SHEETS = 50;
 const DEFAULT_ROW_LIMIT = 50;
+const HBASE_TAB_LIMIT_SCOPE = "HBaseShell";
 
 type ResultSubTab = "results" | "messages";
 
@@ -466,6 +472,7 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
   const [connectionSessionId, setConnectionSessionId] = useState<string | null>(null);
   const [connError, setConnError] = useState<string | null>(null);
   const [hasBeenVisible, setHasBeenVisible] = useState(false);
+  const [tabLimit, setTabLimit] = useState(() => readDatabaseTabLimit(HBASE_TAB_LIMIT_SCOPE));
 
   // --- workspace state (restored from localStorage) ---
   const workspaceKey = `taomni.hbase.workspace.v1.${info.sessionId}`;
@@ -478,13 +485,13 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
           panels?: Array<{ doc?: string; savedQueryId?: string | null }>;
         };
         if (Array.isArray(parsed.panels) && parsed.panels.length > 0) {
-          return parsed.panels.slice(0, MAX_PANELS).map((panel) => ({
+          return parsed.panels.slice(0, tabLimit).map((panel) => ({
             ...newPanel(typeof panel.doc === "string" ? panel.doc : ""),
             savedQueryId: panel.savedQueryId ?? null,
           }));
         }
         if (Array.isArray(parsed.docs) && parsed.docs.length > 0) {
-          return parsed.docs.slice(0, MAX_PANELS).map((doc) => newPanel(doc));
+          return parsed.docs.slice(0, tabLimit).map((doc) => newPanel(doc));
         }
       }
     } catch {
@@ -523,6 +530,10 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
+
+  useEffect(() => {
+    writeDatabaseTabLimit(HBASE_TAB_LIMIT_SCOPE, tabLimit);
+  }, [tabLimit]);
 
   // Persist panel docs + active panel for restore-on-mount.
   useEffect(() => {
@@ -679,7 +690,7 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
         const sheet = newSheet(statement, ordinal);
         setPanels((prev) =>
           prev.map((p) =>
-            p.id !== panelId ? p : { ...p, sheets: [...p.sheets, sheet].slice(-MAX_RESULT_SHEETS), activeSheetId: sheet.id },
+            p.id !== panelId ? p : { ...p, sheets: [...p.sheets, sheet].slice(-tabLimit), activeSheetId: sheet.id },
           ),
         );
         const success = await executeIntoSheet(panelId, sheet.id, statement);
@@ -688,7 +699,7 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
       }
       if (mutated) setRefreshSignal((s) => s + 1);
     },
-    [connectionSessionId, panels, confirmWrite, executeIntoSheet],
+    [connectionSessionId, panels, confirmWrite, executeIntoSheet, tabLimit],
   );
 
   const runCurrentStatement = useCallback(
@@ -859,13 +870,13 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
 
   const addPanel = useCallback(
     (doc = "", savedQuery: DbSavedQuery | null = null) => {
-      if (panels.length >= MAX_PANELS) return null;
+      if (panels.length >= tabLimit) return null;
       const panel = newPanel(doc, savedQuery);
       setPanels((prev) => [...prev, panel]);
       setActivePanelId(panel.id);
       return panel.id;
     },
-    [panels.length],
+    [panels.length, tabLimit],
   );
 
   const openQuerySave = useCallback(() => {
@@ -980,7 +991,7 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
   const onRunCommand = useCallback((stmt: string) => void runStatements(activePanelId, stmt), [runStatements, activePanelId]);
   const onInsert = useCallback(
     (stmt: string, target: "cursor" | "newPanel" = "cursor") => {
-      if (target === "newPanel" && panels.length < MAX_PANELS) {
+      if (target === "newPanel" && panels.length < tabLimit) {
         addPanel(stmt);
         return;
       }
@@ -992,7 +1003,7 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
         patchPanel(activePanelId, { doc: `${activePanel?.doc ?? ""}${activePanel?.doc ? "\n" : ""}${stmt}` });
       }
     },
-    [panels.length, addPanel, activePanelId, activePanel, patchPanel],
+    [panels.length, addPanel, activePanelId, activePanel, patchPanel, tabLimit],
   );
 
   const onTablesLoaded = useCallback((tables: string[]) => {
@@ -1213,7 +1224,7 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
                   </button>
                 );
               })}
-              {panels.length < MAX_PANELS && (
+              {panels.length < tabLimit && (
                 <button type="button" title="New query panel" className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-[var(--taomni-hover)]" onClick={() => addPanel("")}>
                   <Plus className="w-3 h-3" />
                 </button>
@@ -1317,6 +1328,19 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
                   <input className="taomni-input h-6 w-[68px] text-[11px]" type="number" min={1} max={10000} value={rowLimit}
                     title="Default scan row limit" onChange={(e) => setRowLimit(Math.max(1, Math.min(10000, Number(e.target.value) || DEFAULT_ROW_LIMIT)))} />
                 </label>
+                <label className="h-6 inline-flex items-center gap-1 text-[11px] text-[var(--taomni-text-muted)]">
+                  Tab limit
+                  <input
+                    data-testid="hbase-tab-limit"
+                    className="taomni-input h-6 w-[68px] text-[11px]"
+                    type="number"
+                    min={MIN_DATABASE_TAB_LIMIT}
+                    max={MAX_DATABASE_TAB_LIMIT}
+                    value={tabLimit}
+                    title="Maximum query tabs per session and result tabs per query"
+                    onChange={(event) => setTabLimit(clampDatabaseTabLimit(Number(event.target.value)))}
+                  />
+                </label>
                 <span className="text-[10px] text-[var(--taomni-text-muted)]">HBase ({transport})</span>
                 {showCommands && <CommandsMenu transport={transport} onPick={(ex) => onInsert(ex, "cursor")} onClose={() => setShowCommands(false)} />}
                 {showHistory && <HistoryDropdown history={historyRef.current[activePanel.id] ?? []} onPick={(cmd) => { editorHandles.current[activePanel.id]?.setValue(cmd); setShowHistory(false); }} onClose={() => setShowHistory(false)} />}
@@ -1369,7 +1393,6 @@ export default function HBaseShellTab({ tabId, info, visible, chatToggle }: HBas
     </div>
   );
 }
-
 
 
 
