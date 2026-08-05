@@ -4613,10 +4613,34 @@ controls:
     selector: '[data-testid="sockscap-launch-only-banner"]'
     kind: display
     optional: true       # Linux only when transparent capture is unavailable
+  - id: rootless-mode
+    selector: '[data-testid="sockscap-rootless-mode"]'
+    kind: display
+    optional: true       # Linux launch-only configuration summary
+  - id: rootless-app-editor
+    selector: '[data-testid="sockscap-rootless-app-editor"]'
+    kind: display
+    optional: true       # Linux launch-only command editor
+  - id: rootless-command
+    selector: '[data-testid="sockscap-rootless-command"]'
+    kind: interactive
+    optional: true       # accepts an executable path or a command resolved through PATH
+  - id: rootless-arguments
+    selector: '[data-testid="sockscap-rootless-arguments"]'
+    kind: interactive
+    optional: true       # shell-style argument input for the launch command
+  - id: rootless-launch-mode
+    selector: '[data-testid="sockscap-rootless-launch-mode"]'
+    kind: interactive
+    optional: true       # desktop application or integrated-terminal TUI launch
+  - id: add-rootless-application
+    selector: '[data-testid="sockscap-add-rootless-application"]'
+    kind: interactive
+    optional: true       # saves the command without starting capture
   - id: pick-linux-application
     selector: '[data-testid="sockscap-pick-linux-application"]'
     kind: interactive
-    optional: true       # Linux desktop only
+    optional: true       # Linux desktop browse action; launch-only mode only fills the command
   - id: launch-application
     selector: '[data-testid^="sockscap-launch-app-"]'
     kind: interactive

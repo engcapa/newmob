@@ -9,7 +9,7 @@
  * validated Application scopes).
  * There is no macOS system-proxy fallback.
  */
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 export type ScopeMode = "global" | "apps";
 export type RuleMode = "gfwList" | "proxyAll" | "off";
@@ -46,6 +46,8 @@ export type EnginePhase =
 
 export interface AppSelector {
   path: string;
+  args?: string[];
+  launchMode?: "desktop" | "terminal";
   bundleId?: string;
   name?: string;
   macosIdentity?: MacosAppIdentity | null;
@@ -261,7 +263,9 @@ export interface LaunchedAppInfo {
   pid: number;
   profileId: string;
   path: string;
+  args: string[];
   running: boolean;
+  terminalSessionId?: string | null;
 }
 
 export function sockscapCapabilities(): Promise<SocksCapCapabilities> {
@@ -325,8 +329,31 @@ export function sockscapStart(sudoPassword?: string): Promise<SocksCapStatus> {
 export function sockscapLaunchApp(
   profileId: string,
   path: string,
+  args: string[] = [],
 ): Promise<LaunchedAppInfo> {
-  return invoke("sockscap_launch_app", { profileId, path });
+  return invoke("sockscap_launch_app", { profileId, path, args });
+}
+
+export function sockscapLaunchTerminalApp(
+  terminalSessionId: string,
+  profileId: string,
+  path: string,
+  args: string[],
+  cols: number,
+  rows: number,
+  onOutput: (data: Uint8Array) => void,
+): Promise<LaunchedAppInfo> {
+  const channel = new Channel<ArrayBuffer>();
+  channel.onmessage = (message) => onOutput(new Uint8Array(message));
+  return invoke("sockscap_launch_terminal_app", {
+    terminalSessionId,
+    profileId,
+    path,
+    args,
+    cols,
+    rows,
+    onOutput: channel,
+  });
 }
 
 export function sockscapLaunchedApps(): Promise<LaunchedAppInfo[]> {

@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 #[cfg(target_os = "macos")]
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::io::Read;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -833,6 +834,7 @@ pub fn create_pty_with_environment(
         Some(integration),
         cwd,
         sdk_environment,
+        None,
     )?;
 
     Ok((handle, reader, shell_id))
@@ -844,7 +846,30 @@ pub fn create_command_pty(
     program: &str,
     args: &[String],
 ) -> Result<(PtyHandle, Box<dyn Read + Send>), String> {
-    create_pty_for_launch(cols, rows, program, args, None, None, None)
+    create_pty_for_launch(cols, rows, program, args, None, None, None, None)
+}
+
+/// Launch a command in a real controlling PTY with a small, explicit set of
+/// environment overrides. Used by SocksCap launch-only mode for interactive
+/// TUI applications; it deliberately does not invoke a shell.
+#[cfg(target_os = "linux")]
+pub fn create_command_pty_with_environment(
+    cols: u16,
+    rows: u16,
+    program: &str,
+    args: &[String],
+    environment: &[(OsString, OsString)],
+) -> Result<(PtyHandle, Box<dyn Read + Send>), String> {
+    create_pty_for_launch(
+        cols,
+        rows,
+        program,
+        args,
+        None,
+        None,
+        None,
+        Some(environment),
+    )
 }
 
 fn create_pty_for_launch(
@@ -855,6 +880,7 @@ fn create_pty_for_launch(
     integration: Option<super::shell_integration::Integration>,
     cwd: Option<String>,
     sdk_environment: Option<&crate::sdk::WorkspaceSdkEnvironment>,
+    environment: Option<&[(OsString, OsString)]>,
 ) -> Result<(PtyHandle, Box<dyn Read + Send>), String> {
     let pty_system = native_pty_system();
 
@@ -892,6 +918,12 @@ fn create_pty_for_launch(
         }
         if let Some(path) = sdk_environment.prepend_path(std::env::var_os("PATH").as_deref()) {
             cmd.env("PATH", path);
+        }
+    }
+
+    if let Some(environment) = environment {
+        for (key, value) in environment {
+            cmd.env(key, value);
         }
     }
 
@@ -1003,6 +1035,37 @@ mod directory_shortcut_tests {
             directory_from_history_command(r#"cd "D:\code\my app""#, None),
             Some(PathBuf::from(r"D:\code\my app")),
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod command_pty_environment_tests {
+    use super::*;
+    use std::io::Read;
+
+    #[test]
+    fn command_pty_has_a_controlling_tty_and_custom_environment() {
+        let args = vec![
+            "-c".to_string(),
+            "test -t 0 && test \"$TAOMNI_PTY_TEST\" = ok && printf pty-ready".to_string(),
+        ];
+        let environment = vec![(OsString::from("TAOMNI_PTY_TEST"), OsString::from("ok"))];
+        let (mut handle, mut reader) =
+            create_command_pty_with_environment(80, 24, "/bin/sh", &args, &environment).unwrap();
+
+        let status = handle.child.wait().unwrap();
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 256];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+            }
+        }
+        let output = String::from_utf8_lossy(&bytes);
+
+        assert!(status.success());
+        assert!(output.contains("pty-ready"));
     }
 }
 

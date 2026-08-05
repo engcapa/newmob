@@ -238,9 +238,19 @@ pub struct MacosAppIdentity {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSelector {
-    /// Absolute or normalized executable path (Windows/Linux).
+    /// Executable path or command name. Linux launch-only mode also accepts a
+    /// command resolved through the Taomni process PATH.
     #[serde(default)]
     pub path: String,
+    /// Arguments used when launch-only capture starts this application.
+    /// Transparent capture backends ignore them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// How launch-only Linux capture presents the application. Desktop apps
+    /// inherit the graphical session; terminal apps run inside Taomni's PTY so
+    /// interactive TUI programs receive a controlling terminal.
+    #[serde(default, skip_serializing_if = "AppLaunchMode::is_desktop")]
+    pub launch_mode: AppLaunchMode,
     /// macOS bundle id when available.
     #[serde(default)]
     pub bundle_id: String,
@@ -250,6 +260,20 @@ pub struct AppSelector {
     /// macOS path-family identity. Other platforms preserve but ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_identity: Option<MacosAppIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AppLaunchMode {
+    #[default]
+    Desktop,
+    Terminal,
+}
+
+impl AppLaunchMode {
+    fn is_desktop(&self) -> bool {
+        matches!(self, Self::Desktop)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -567,6 +591,21 @@ mod tests {
         assert_eq!(back.profiles.len(), 1);
         assert_eq!(back.active_profile_ids, vec!["default"]);
         assert!(back.block_quic, "block_quic defaults on");
+    }
+
+    #[test]
+    fn app_launch_mode_defaults_to_desktop_and_persists_terminal() {
+        let desktop: AppSelector = serde_json::from_str(r#"{"path":"agy"}"#).unwrap();
+        assert_eq!(desktop.launch_mode, AppLaunchMode::Desktop);
+        assert!(!serde_json::to_string(&desktop)
+            .unwrap()
+            .contains("launchMode"));
+
+        let mut terminal = desktop;
+        terminal.launch_mode = AppLaunchMode::Terminal;
+        assert!(serde_json::to_string(&terminal)
+            .unwrap()
+            .contains(r#""launchMode":"terminal""#));
     }
 
     #[test]

@@ -3,14 +3,16 @@
 //! The launched process loads a small connect interposer.  TCP sockets keep
 //! their original file descriptor and nonblocking behaviour, but connect to a
 //! loopback listener instead.  Original destinations arrive out-of-band over
-//! an inherited Unix datagram socket and are matched by the accepted socket's
-//! source address.  No HTTP_PROXY/ALL_PROXY-style application configuration is
-//! involved.
+//! a private Unix datagram control socket and are matched by the accepted
+//! socket's source address. A private environment fallback carries only the
+//! loopback ingress/control coordinates, so Chromium-style child launchers can
+//! close inherited descriptors without escaping capture. No
+//! HTTP_PROXY/ALL_PROXY-style application configuration is involved.
 
 use std::collections::HashMap;
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
@@ -33,7 +35,6 @@ use crate::sockscap::relay::{
     new_relay_flow_limiter,
 };
 
-const CONTROL_FD: libc::c_int = 198;
 const CONFIG_FD: libc::c_int = 199;
 const CONFIG_MAGIC: u32 = 0x544d_5343;
 const FLOW_MAGIC: u32 = 0x544d_464c;
@@ -76,14 +77,69 @@ pub struct LaunchedAppInfo {
     pub pid: u32,
     pub profile_id: String,
     pub path: String,
+    pub args: Vec<String>,
     pub running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_session_id: Option<String>,
 }
 
 struct LaunchedProcess {
     info: LaunchedAppInfo,
-    child: Child,
+    child: Option<Child>,
     process_group: libc::pid_t,
     registration_task: JoinHandle<()>,
+    terminal_running: Option<Arc<AtomicBool>>,
+}
+
+struct TerminalActivityReader {
+    inner: Box<dyn Read + Send>,
+    running: Arc<AtomicBool>,
+}
+
+impl Read for TerminalActivityReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let result = self.inner.read(buffer);
+        if !matches!(result, Ok(count) if count > 0) {
+            self.running.store(false, Ordering::Release);
+        }
+        result
+    }
+}
+
+impl Drop for TerminalActivityReader {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Release);
+    }
+}
+
+struct ControlSocketPath {
+    path: PathBuf,
+    socket: StdUnixDatagram,
+}
+
+impl ControlSocketPath {
+    fn bind(path: PathBuf) -> Result<Self, String> {
+        let socket = StdUnixDatagram::bind(&path).map_err(|error| {
+            format!(
+                "bind SocksCap launch control socket {}: {error}",
+                path.display()
+            )
+        })?;
+        Ok(Self { path, socket })
+    }
+}
+
+impl Drop for ControlSocketPath {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(
+                path = %self.path.display(),
+                "remove SocksCap launch control socket: {error}"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -156,6 +212,7 @@ pub struct LaunchedCaptureHandle {
     ipv6_ready: bool,
     registry: Arc<FlowRegistry>,
     shim_path: PathBuf,
+    runtime_dir: PathBuf,
     processes: Vec<LaunchedProcess>,
 }
 
@@ -171,6 +228,7 @@ impl LaunchedCaptureHandle {
             ipv6_ready,
             registry,
             shim_path,
+            runtime_dir: runtime_dir.to_path_buf(),
             processes: Vec::new(),
         })
     }
@@ -182,23 +240,29 @@ impl LaunchedCaptureHandle {
     pub async fn launch_app(
         &mut self,
         profile_id: &str,
-        executable: &Path,
+        command_name: &str,
+        args: &[String],
     ) -> Result<LaunchedAppInfo, String> {
-        validate_executable(executable)?;
-        let (parent_control, child_control) = StdUnixDatagram::pair()
-            .map_err(|error| format!("create SocksCap launch control socket: {error}"))?;
+        let command_name = command_name.trim();
+        let executable = resolve_executable(command_name)?;
+        let control_path = self
+            .runtime_dir
+            .join(format!("launch-{}.sock", uuid::Uuid::new_v4()));
+        let control_path_guard = ControlSocketPath::bind(control_path)?;
+        let parent_control = control_path_guard
+            .socket
+            .try_clone()
+            .map_err(|error| format!("clone SocksCap launch control socket: {error}"))?;
         parent_control
             .set_nonblocking(true)
             .map_err(|error| format!("configure SocksCap launch control socket: {error}"))?;
         let config_file = create_config_memfd(self.relay_port, self.ipv6_ready)?;
-        let control_fd = duplicate_for_child(child_control.as_raw_fd())
-            .map_err(|error| format!("prepare SocksCap launch control descriptor: {error}"))?;
         let config_fd = duplicate_for_child(config_file.as_raw_fd())
             .map_err(|error| format!("prepare SocksCap launch config descriptor: {error}"))?;
-        let control_raw = control_fd.as_raw_fd();
         let config_raw = config_fd.as_raw_fd();
 
-        let mut command = Command::new(executable);
+        let mut command = Command::new(&executable);
+        command.args(args);
         let preload = match std::env::var_os("LD_PRELOAD") {
             Some(existing) if !existing.is_empty() => {
                 let mut value = self.shim_path.as_os_str().to_os_string();
@@ -209,23 +273,29 @@ impl LaunchedCaptureHandle {
             _ => self.shim_path.as_os_str().to_os_string(),
         };
         command.env("LD_PRELOAD", preload);
+        command.env(
+            "TAOMNI_SOCKSCAP_CONTROL_PATH",
+            control_path_guard.path.as_os_str(),
+        );
+        command.env("TAOMNI_SOCKSCAP_RELAY_PORT", self.relay_port.to_string());
+        command.env(
+            "TAOMNI_SOCKSCAP_IPV6_READY",
+            if self.ipv6_ready { "1" } else { "0" },
+        );
         command.kill_on_drop(false);
         unsafe {
             command.pre_exec(move || {
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                duplicate_inherited_fd(control_raw, CONTROL_FD)?;
                 duplicate_inherited_fd(config_raw, CONFIG_FD)?;
                 Ok(())
             });
         }
-        let child = command.spawn().map_err(|error| {
-            format!("launch {} through SocksCap: {error}", executable.display())
-        })?;
-        drop(child_control);
+        let child = command
+            .spawn()
+            .map_err(|error| format!("launch {command_name} through SocksCap: {error}"))?;
         drop(config_file);
-        drop(control_fd);
         drop(config_fd);
 
         let pid = child.id().ok_or_else(|| {
@@ -237,35 +307,147 @@ impl LaunchedCaptureHandle {
             Arc::clone(&self.registry),
             profile_id.to_string(),
             process_path.clone(),
+            control_path_guard,
         )?;
         let info = LaunchedAppInfo {
             pid,
             profile_id: profile_id.to_string(),
-            path: process_path,
+            path: command_name.to_string(),
+            args: args.to_vec(),
             running: true,
+            terminal_session_id: None,
         };
+        tracing::info!(
+            pid,
+            command = command_name,
+            executable = %executable.display(),
+            argument_count = args.len(),
+            "SocksCap launched application with rootless capture"
+        );
         self.processes.push(LaunchedProcess {
             info: info.clone(),
-            child,
+            child: Some(child),
             process_group: pid as libc::pid_t,
             registration_task,
+            terminal_running: None,
         });
         Ok(info)
+    }
+
+    /// Launch an interactive command in a controlling PTY while applying the
+    /// same connect interposer as desktop launch mode. The returned PTY is
+    /// registered with Taomni's terminal subsystem by the Tauri command layer.
+    pub fn launch_terminal_app(
+        &mut self,
+        profile_id: &str,
+        command_name: &str,
+        args: &[String],
+        terminal_session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<
+        (
+            LaunchedAppInfo,
+            crate::terminal::pty::PtyHandle,
+            Box<dyn Read + Send>,
+        ),
+        String,
+    > {
+        let command_name = command_name.trim();
+        let executable = resolve_executable(command_name)?;
+        let control_path = self
+            .runtime_dir
+            .join(format!("launch-{}.sock", uuid::Uuid::new_v4()));
+        let control_path_guard = ControlSocketPath::bind(control_path)?;
+        let parent_control = control_path_guard
+            .socket
+            .try_clone()
+            .map_err(|error| format!("clone SocksCap launch control socket: {error}"))?;
+        parent_control
+            .set_nonblocking(true)
+            .map_err(|error| format!("configure SocksCap launch control socket: {error}"))?;
+
+        let environment = launch_environment(
+            &self.shim_path,
+            &control_path_guard.path,
+            self.relay_port,
+            self.ipv6_ready,
+        );
+        let executable_text = executable.to_string_lossy().into_owned();
+        let (mut handle, reader) = crate::terminal::pty::create_command_pty_with_environment(
+            cols,
+            rows,
+            &executable_text,
+            args,
+            &environment,
+        )?;
+        let pid = handle.child.process_id().ok_or_else(|| {
+            "terminal application exited before its PID was available".to_string()
+        })?;
+        let registration_task = match spawn_registration_reader(
+            parent_control,
+            Arc::clone(&self.registry),
+            profile_id.to_string(),
+            executable_text.clone(),
+            control_path_guard,
+        ) {
+            Ok(task) => task,
+            Err(error) => {
+                let _ = handle.child.kill();
+                return Err(error);
+            }
+        };
+        let info = LaunchedAppInfo {
+            pid,
+            profile_id: profile_id.to_string(),
+            path: command_name.to_string(),
+            args: args.to_vec(),
+            running: true,
+            terminal_session_id: Some(terminal_session_id.to_string()),
+        };
+        tracing::info!(
+            pid,
+            command = command_name,
+            executable = %executable.display(),
+            argument_count = args.len(),
+            terminal_session_id,
+            "SocksCap launched terminal application with rootless capture"
+        );
+        let terminal_running = Arc::new(AtomicBool::new(true));
+        let tracked_reader: Box<dyn Read + Send> = Box::new(TerminalActivityReader {
+            inner: reader,
+            running: Arc::clone(&terminal_running),
+        });
+        self.processes.push(LaunchedProcess {
+            info: info.clone(),
+            child: None,
+            process_group: pid as libc::pid_t,
+            registration_task,
+            terminal_running: Some(terminal_running),
+        });
+        Ok((info, handle, tracked_reader))
     }
 
     pub fn apps(&mut self) -> Vec<LaunchedAppInfo> {
         for process in &mut self.processes {
             if process.info.running {
-                match process.child.try_wait() {
-                    Ok(Some(_)) | Ok(None) => {
-                        process.info.running = process_group_is_alive(process.process_group);
-                        if !process.info.running {
-                            process.registration_task.abort();
-                        }
-                    }
-                    Err(error) => {
+                if process
+                    .terminal_running
+                    .as_ref()
+                    .is_some_and(|running| !running.load(Ordering::Acquire))
+                {
+                    process.info.running = false;
+                    process.registration_task.abort();
+                    continue;
+                }
+                if let Some(child) = process.child.as_mut() {
+                    if let Err(error) = child.try_wait() {
                         tracing::warn!(pid = process.info.pid, "read launched app status: {error}");
                     }
+                }
+                process.info.running = process_group_is_alive(process.process_group);
+                if !process.info.running {
+                    process.registration_task.abort();
                 }
             }
         }
@@ -314,7 +496,9 @@ async fn stop_process_group(process: &mut LaunchedProcess) -> Result<(), String>
             }
         }
         for _ in 0..20 {
-            let _ = process.child.try_wait();
+            if let Some(child) = process.child.as_mut() {
+                let _ = child.try_wait();
+            }
             if !process_group_is_alive(process.process_group) {
                 break;
             }
@@ -333,19 +517,61 @@ async fn stop_process_group(process: &mut LaunchedProcess) -> Result<(), String>
             }
         }
     }
-    let _ = tokio::time::timeout(Duration::from_secs(1), process.child.wait()).await;
+    if let Some(child) = process.child.as_mut() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    }
     process.info.running = false;
+    if let Some(running) = &process.terminal_running {
+        running.store(false, Ordering::Release);
+    }
     process.registration_task.abort();
     Ok(())
 }
 
-fn validate_executable(path: &Path) -> Result<(), String> {
-    if !path.is_absolute() {
-        return Err(format!(
-            "SocksCap launch path must be absolute: {}",
-            path.display()
-        ));
+fn resolve_executable(command: &str) -> Result<PathBuf, String> {
+    if command.is_empty() {
+        return Err("SocksCap launch command is empty".into());
     }
+    let path = which::which(command).map_err(|error| {
+        format!("resolve SocksCap launch command {command:?} through PATH: {error}")
+    })?;
+    validate_executable(&path)?;
+    Ok(path)
+}
+
+fn launch_environment(
+    shim_path: &Path,
+    control_path: &Path,
+    relay_port: u16,
+    ipv6_ready: bool,
+) -> Vec<(OsString, OsString)> {
+    let preload = match std::env::var_os("LD_PRELOAD") {
+        Some(existing) if !existing.is_empty() => {
+            let mut value = shim_path.as_os_str().to_os_string();
+            value.push(":");
+            value.push(existing);
+            value
+        }
+        _ => shim_path.as_os_str().to_os_string(),
+    };
+    vec![
+        (OsString::from("LD_PRELOAD"), preload),
+        (
+            OsString::from("TAOMNI_SOCKSCAP_CONTROL_PATH"),
+            control_path.as_os_str().to_os_string(),
+        ),
+        (
+            OsString::from("TAOMNI_SOCKSCAP_RELAY_PORT"),
+            OsString::from(relay_port.to_string()),
+        ),
+        (
+            OsString::from("TAOMNI_SOCKSCAP_IPV6_READY"),
+            OsString::from(if ipv6_ready { "1" } else { "0" }),
+        ),
+    ]
+}
+
+fn validate_executable(path: &Path) -> Result<(), String> {
     let metadata = fs::metadata(path)
         .map_err(|error| format!("inspect launch path {}: {error}", path.display()))?;
     if !metadata.is_file() {
@@ -450,11 +676,16 @@ fn spawn_registration_reader(
     registry: Arc<FlowRegistry>,
     profile_id: String,
     configured_path: String,
+    control_path: ControlSocketPath,
 ) -> Result<JoinHandle<()>, String> {
     let socket = UnixDatagram::from_std(socket)
         .map_err(|error| format!("adopt SocksCap launch control socket: {error}"))?;
     Ok(tokio::spawn(async move {
+        // Keep the bound filesystem socket alive for every descendant. It is
+        // removed automatically when this task exits or is aborted.
+        let _control_path = control_path;
         let mut buffer = [0u8; 256];
+        let mut reported_first_flow = false;
         loop {
             let count = match socket.recv(&mut buffer).await {
                 Ok(count) => count,
@@ -473,6 +704,14 @@ fn spawn_registration_reader(
             let Some(destination) = registration.destination() else {
                 continue;
             };
+            if !reported_first_flow {
+                tracing::info!(
+                    pid = registration.pid,
+                    %destination,
+                    "SocksCap received the first rootless flow registration"
+                );
+                reported_first_flow = true;
+            }
             let process_path = fs::read_link(format!("/proc/{}/exe", registration.pid))
                 .ok()
                 .map(|path| path.to_string_lossy().into_owned())
@@ -720,5 +959,30 @@ mod tests {
             fs::metadata(&first).unwrap().permissions().mode() & 0o777,
             0o700
         );
+    }
+
+    #[test]
+    fn resolves_launch_commands_through_path() {
+        let executable = resolve_executable("sh").unwrap();
+        assert!(executable.is_absolute());
+        assert!(fs::metadata(executable).unwrap().permissions().mode() & 0o111 != 0);
+    }
+
+    #[test]
+    fn filesystem_control_socket_survives_descriptor_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("control.sock");
+        let control = ControlSocketPath::bind(path.clone()).unwrap();
+        control
+            .socket
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let sender = StdUnixDatagram::unbound().unwrap();
+        sender.send_to(b"flow", &path).unwrap();
+        let mut message = [0u8; 16];
+        let count = control.socket.recv(&mut message).unwrap();
+        assert_eq!(&message[..count], b"flow");
+        drop(control);
+        assert!(!path.exists());
     }
 }

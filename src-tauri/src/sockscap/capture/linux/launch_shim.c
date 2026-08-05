@@ -5,11 +5,14 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #define TAOMNI_CONTROL_FD 198
@@ -68,10 +71,32 @@ static void load_symbols(void) {
 
 static int read_config(struct taomni_launch_config *config) {
     ssize_t count = pread(TAOMNI_CONFIG_FD, config, sizeof(*config), 0);
-    return count == (ssize_t)sizeof(*config) &&
-           config->magic == TAOMNI_CONFIG_MAGIC &&
-           config->version == TAOMNI_PROTOCOL_VERSION &&
-           config->relay_port != 0;
+    if (count == (ssize_t)sizeof(*config) &&
+        config->magic == TAOMNI_CONFIG_MAGIC &&
+        config->version == TAOMNI_PROTOCOL_VERSION &&
+        config->relay_port != 0) {
+        return 1;
+    }
+
+    const char *port_text = getenv("TAOMNI_SOCKSCAP_RELAY_PORT");
+    if (port_text == NULL || *port_text == '\0') {
+        return 0;
+    }
+    char *end = NULL;
+    errno = 0;
+    long port = strtol(port_text, &end, 10);
+    if (errno != 0 || end == port_text || *end != '\0' || port <= 0 || port > 65535) {
+        return 0;
+    }
+    memset(config, 0, sizeof(*config));
+    config->magic = TAOMNI_CONFIG_MAGIC;
+    config->version = TAOMNI_PROTOCOL_VERSION;
+    config->relay_port = (uint16_t)port;
+    const char *ipv6_ready = getenv("TAOMNI_SOCKSCAP_IPV6_READY");
+    if (ipv6_ready != NULL && strcmp(ipv6_ready, "1") == 0) {
+        config->flags |= TAOMNI_CONFIG_FLAG_IPV6_READY;
+    }
+    return 1;
 }
 
 static int is_loopback(const struct sockaddr *address) {
@@ -136,6 +161,35 @@ static int fill_endpoint(const struct sockaddr *address, uint8_t bytes[16], uint
     return 0;
 }
 
+static void send_registration(const struct taomni_flow_registration *message) {
+    const char *path = getenv("TAOMNI_SOCKSCAP_CONTROL_PATH");
+    if (path == NULL || *path == '\0') {
+        (void)syscall(SYS_sendto, TAOMNI_CONTROL_FD, message, sizeof(*message),
+                      MSG_DONTWAIT | MSG_NOSIGNAL, NULL, 0);
+        return;
+    }
+
+    size_t path_length = strlen(path);
+    struct sockaddr_un destination;
+    if (path_length >= sizeof(destination.sun_path)) {
+        return;
+    }
+    memset(&destination, 0, sizeof(destination));
+    destination.sun_family = AF_UNIX;
+    memcpy(destination.sun_path, path, path_length + 1);
+
+    int control = (int)syscall(SYS_socket, AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (control < 0) {
+        return;
+    }
+    socklen_t destination_length =
+        (socklen_t)(offsetof(struct sockaddr_un, sun_path) + path_length + 1);
+    (void)syscall(SYS_sendto, control, message, sizeof(*message),
+                  MSG_DONTWAIT | MSG_NOSIGNAL,
+                  (const struct sockaddr *)&destination, destination_length);
+    (void)syscall(SYS_close, control);
+}
+
 static void register_flow(int fd, const struct sockaddr *destination) {
     struct sockaddr_storage source;
     socklen_t source_length = sizeof(source);
@@ -158,8 +212,7 @@ static void register_flow(int fd, const struct sockaddr *destination) {
     }
     message.family = (uint16_t)source_family;
 
-    (void)syscall(SYS_sendto, TAOMNI_CONTROL_FD, &message, sizeof(message),
-                  MSG_DONTWAIT | MSG_NOSIGNAL, NULL, 0);
+    send_registration(&message);
 }
 
 __attribute__((visibility("default")))

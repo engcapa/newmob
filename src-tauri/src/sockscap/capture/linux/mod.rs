@@ -421,10 +421,43 @@ impl LinuxCaptureHandle {
     pub async fn launch_app(
         &mut self,
         profile_id: &str,
-        executable: &std::path::Path,
+        command: &str,
+        args: &[String],
     ) -> Result<launched::LaunchedAppInfo, String> {
         match self {
-            Self::Launched(capture) => capture.launch_app(profile_id, executable).await,
+            Self::Launched(capture) => capture.launch_app(profile_id, command, args).await,
+            Self::Transparent(_) => Err(
+                "the active Linux backend captures applications transparently; launch-only control is unavailable"
+                    .into(),
+            ),
+        }
+    }
+
+    pub fn launch_terminal_app(
+        &mut self,
+        profile_id: &str,
+        command: &str,
+        args: &[String],
+        terminal_session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<
+        (
+            launched::LaunchedAppInfo,
+            crate::terminal::pty::PtyHandle,
+            Box<dyn std::io::Read + Send>,
+        ),
+        String,
+    > {
+        match self {
+            Self::Launched(capture) => capture.launch_terminal_app(
+                profile_id,
+                command,
+                args,
+                terminal_session_id,
+                cols,
+                rows,
+            ),
             Self::Transparent(_) => Err(
                 "the active Linux backend captures applications transparently; launch-only control is unavailable"
                     .into(),
@@ -504,6 +537,8 @@ mod tests {
         config.profiles[0].mode = ScopeMode::Apps;
         config.profiles[0].apps = vec![AppSelector {
             path: "/opt/example/example".into(),
+            args: Vec::new(),
+            launch_mode: Default::default(),
             bundle_id: String::new(),
             name: "Example".into(),
             macos_identity: None,
@@ -523,6 +558,8 @@ mod tests {
         config.profiles[0].mode = ScopeMode::Apps;
         config.profiles[0].apps = vec![AppSelector {
             path: "/opt/agy/agy".into(),
+            args: Vec::new(),
+            launch_mode: Default::default(),
             bundle_id: String::new(),
             name: "agy".into(),
             macos_identity: None,
@@ -555,6 +592,8 @@ mod tests {
         lower_app.mode = ScopeMode::Apps;
         lower_app.apps = vec![AppSelector {
             path: "/opt/example/example".into(),
+            args: Vec::new(),
+            launch_mode: Default::default(),
             bundle_id: String::new(),
             name: "Example".into(),
             macos_identity: None,

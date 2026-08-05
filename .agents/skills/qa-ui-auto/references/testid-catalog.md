@@ -466,6 +466,12 @@
 - `[data-testid="sockscap-tun-warning-dialog"]` — display [optional] — F-Sockscap-1.tun-warning-dialog
 - `[data-testid="sockscap-tun-warning-close"]` — interactive [optional] — F-Sockscap-1.tun-warning-close
 - `[data-testid="sockscap-launch-only-banner"]` — display [optional] — F-Sockscap-1.launch-only-banner
+- `[data-testid="sockscap-rootless-mode"]` — display [optional] — F-Sockscap-1.rootless-mode
+- `[data-testid="sockscap-rootless-app-editor"]` — display [optional] — F-Sockscap-1.rootless-app-editor
+- `[data-testid="sockscap-rootless-command"]` — interactive [optional] — F-Sockscap-1.rootless-command
+- `[data-testid="sockscap-rootless-arguments"]` — interactive [optional] — F-Sockscap-1.rootless-arguments
+- `[data-testid="sockscap-rootless-launch-mode"]` — interactive [optional] — F-Sockscap-1.rootless-launch-mode
+- `[data-testid="sockscap-add-rootless-application"]` — interactive [optional] — F-Sockscap-1.add-rootless-application
 - `[data-testid="sockscap-pick-linux-application"]` — interactive [optional] — F-Sockscap-1.pick-linux-application
 - `[data-testid^="sockscap-launch-app-"]` — interactive [optional] — F-Sockscap-1.launch-application
 - `[data-testid^="sockscap-stop-launched-app-"]` — interactive [optional] — F-Sockscap-1.stop-launched-application

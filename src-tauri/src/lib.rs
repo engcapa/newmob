@@ -600,6 +600,7 @@ pub fn run() {
             sockscap::sockscap_diagnostics,
             sockscap::sockscap_start,
             sockscap::sockscap_launch_app,
+            sockscap::sockscap_launch_terminal_app,
             sockscap::sockscap_launched_apps,
             sockscap::sockscap_stop_launched_app,
             sockscap::sockscap_stop,

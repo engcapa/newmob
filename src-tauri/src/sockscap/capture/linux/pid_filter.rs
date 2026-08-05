@@ -128,6 +128,8 @@ mod tests {
     fn allows_start_before_selected_process_and_matches_it_later() {
         let selectors = vec![vec![AppSelector {
             path: "/opt/example/example".into(),
+            args: Vec::new(),
+            launch_mode: Default::default(),
             bundle_id: String::new(),
             name: "Example".into(),
             macos_identity: None,
@@ -149,12 +151,16 @@ mod tests {
         let selectors = vec![
             vec![AppSelector {
                 path: "/opt/example/example".into(),
+                args: Vec::new(),
+                launch_mode: Default::default(),
                 bundle_id: String::new(),
                 name: "Primary".into(),
                 macos_identity: None,
             }],
             vec![AppSelector {
                 path: "example".into(),
+                args: Vec::new(),
+                launch_mode: Default::default(),
                 bundle_id: String::new(),
                 name: "Fallback".into(),
                 macos_identity: None,

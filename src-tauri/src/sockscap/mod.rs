@@ -1193,10 +1193,10 @@ pub async fn sockscap_launch_app(
     state: State<'_, AppState>,
     profile_id: String,
     path: String,
+    args: Vec<String>,
 ) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "linux")]
     {
-        let path = std::path::PathBuf::from(path);
         let mut orch = state.sockscap.orch.write().await;
         if !orch.is_running() {
             return Err("start SocksCap before launching an application".into());
@@ -1210,10 +1210,11 @@ pub async fn sockscap_launch_app(
                     .find(|profile| profile.id == profile_id)
             })
             .is_some_and(|profile| {
-                profile
-                    .apps
-                    .iter()
-                    .any(|app| paths::paths_match_exe(&app.path, &path.to_string_lossy()))
+                profile.apps.iter().any(|app| {
+                    app.path == path
+                        && app.args == args
+                        && matches!(app.launch_mode, config::AppLaunchMode::Desktop)
+                })
             });
         if !configured {
             return Err(
@@ -1223,14 +1224,111 @@ pub async fn sockscap_launch_app(
         let capture = orch
             .linux_capture_mut()
             .ok_or_else(|| "Linux capture backend is not active".to_string())?;
-        let info = capture.launch_app(&profile_id, &path).await?;
+        let info = capture.launch_app(&profile_id, &path, &args).await?;
         serde_json::to_value(info)
             .map_err(|error| format!("serialize launched application: {error}"))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (state, profile_id, path);
+        let _ = (state, profile_id, path, args);
         Err("launching applications through SocksCap is currently Linux-only".into())
+    }
+}
+
+#[tauri::command]
+pub async fn sockscap_launch_terminal_app(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    profile_id: String,
+    path: String,
+    args: Vec<String>,
+    terminal_session_id: String,
+    cols: u16,
+    rows: u16,
+    on_output: crate::terminal::TerminalOutputChannel,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if state
+            .terminals
+            .read()
+            .await
+            .contains_key(&terminal_session_id)
+        {
+            return Err(format!("Terminal {} already exists", terminal_session_id));
+        }
+
+        let mut orch = state.sockscap.orch.write().await;
+        if !orch.is_running() {
+            return Err("start SocksCap before launching an application".into());
+        }
+        let configured = orch
+            .config()
+            .and_then(|config| {
+                config
+                    .active_profiles()
+                    .into_iter()
+                    .find(|profile| profile.id == profile_id)
+            })
+            .is_some_and(|profile| {
+                profile.apps.iter().any(|configured| {
+                    configured.path == path
+                        && configured.args == args
+                        && matches!(configured.launch_mode, config::AppLaunchMode::Terminal)
+                })
+            });
+        if !configured {
+            return Err(
+                "the terminal application must belong to the selected active SocksCap profile"
+                    .into(),
+            );
+        }
+        let capture = orch
+            .linux_capture_mut()
+            .ok_or_else(|| "Linux capture backend is not active".to_string())?;
+        let (info, handle, reader) = capture.launch_terminal_app(
+            &profile_id,
+            &path,
+            &args,
+            &terminal_session_id,
+            cols,
+            rows,
+        )?;
+        if let Err(error) = crate::terminal::register_local_terminal(
+            terminal_session_id,
+            handle,
+            reader,
+            on_output,
+            state.inner(),
+            app,
+        )
+        .await
+        {
+            if let Err(stop_error) = capture.stop_launched_app(info.pid).await {
+                tracing::warn!(
+                    pid = info.pid,
+                    "clean up failed terminal launch: {stop_error}"
+                );
+            }
+            return Err(error);
+        }
+        serde_json::to_value(info)
+            .map_err(|error| format!("serialize launched terminal application: {error}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (
+            app,
+            state,
+            profile_id,
+            path,
+            args,
+            terminal_session_id,
+            cols,
+            rows,
+            on_output,
+        );
+        Err("launching terminal applications through SocksCap is currently Linux-only".into())
     }
 }
 

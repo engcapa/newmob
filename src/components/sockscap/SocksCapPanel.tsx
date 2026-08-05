@@ -100,6 +100,7 @@ import { useT } from "../../lib/i18n";
 import { isTauriRuntime } from "../../lib/runtime";
 import { writeText } from "../../lib/clipboard";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useAppStore } from "../../stores/appStore";
 
 interface Props {
   onStatusMessage?: (msg: string) => void;
@@ -292,6 +293,10 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [launchedApps, setLaunchedApps] = useState<LaunchedAppInfo[]>([]);
   const [launchingPath, setLaunchingPath] = useState<string | null>(null);
   const [stoppingPid, setStoppingPid] = useState<number | null>(null);
+  const [rootlessCommand, setRootlessCommand] = useState("");
+  const [rootlessArguments, setRootlessArguments] = useState("");
+  const [rootlessLaunchMode, setRootlessLaunchMode] =
+    useState<"desktop" | "terminal">("desktop");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [testHost, setTestHost] = useState("www.google.com");
@@ -678,30 +683,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       defaultAction: prof.defaultAction,
     };
     setCfg(nextCfg);
-  };
-
-  const selectRootlessProfile = async (id: string) => {
-    if (!cfg || locked) return;
-    const prof = cfg.profiles.find((profile) => profile.id === id);
-    if (!prof) return;
-    const profiles = cfg.profiles.map((profile) =>
-      profile.id === id ? { ...profile, enabled: true } : profile,
-    );
-    const nextCfg: SocksCapConfig = {
-      ...cfg,
-      profiles,
-      activeProfileIds: cfg.activeProfileIds.includes(id)
-        ? cfg.activeProfileIds
-        : [...cfg.activeProfileIds, id],
-      selectedProfileId: id,
-      mode: prof.mode,
-      apps: prof.apps,
-      upstream: prof.upstream,
-      ruleMode: prof.ruleMode,
-      userRules: prof.userRules,
-      defaultAction: prof.defaultAction,
-    };
-    await persistConfig(nextCfg);
   };
 
   const addProfile = async () => {
@@ -1723,7 +1704,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       candidate =
         caps?.platform === "macos"
           ? await sockscapValidateMacosApp(path)
-          : { path, name: name || path.split(/[/\\]/).pop() || path };
+          : { path, args: [], name: name || path.split(/[/\\]/).pop() || path };
     } catch (e) {
       report(String(e), false);
       return null;
@@ -1760,30 +1741,64 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     }
   };
 
-  const pickRootlessApplicationAndLaunch = async () => {
-    if (locked || launchingPath || stoppingPid !== null) return;
+  const pickRootlessApplication = async () => {
+    if (locked) return;
     try {
       const selected = await open({ multiple: false });
       if (!selected || Array.isArray(selected)) return;
-      const added = await addAppPath(selected);
-      if (!added) return;
-      await onRootlessLaunchApp(
-        added.config.selectedProfileId,
-        added.app.path,
-        added.config,
-      );
+      setRootlessCommand(selected);
     } catch (e) {
       report(String(e), false);
+    }
+  };
+
+  const addRootlessApplication = async () => {
+    if (!cfg || locked) return;
+    const command = rootlessCommand.trim();
+    if (!command) return;
+    let args: string[];
+    try {
+      args = parseShellArguments(rootlessArguments);
+    } catch {
+      report(t("sockscap.rootlessArgsInvalid"), false);
+      return;
+    }
+    const candidate: AppSelector = {
+      path: command,
+      args,
+      launchMode: rootlessLaunchMode,
+      name: command.split(/[/\\]/).pop() || command,
+    };
+    const key = rootlessAppKey(candidate.path, candidate.args, candidate.launchMode);
+    if (
+      selectedProf.apps.some(
+        (app) => rootlessAppKey(app.path, app.args, app.launchMode) === key,
+      )
+    ) {
+      report(t("sockscap.rootlessAppAlreadyAdded"), false);
+      return;
+    }
+    const nextConfig = await patchSelectedProfile({
+      apps: [...selectedProf.apps, candidate],
+    });
+    if (nextConfig) {
+      setRootlessCommand("");
+      setRootlessArguments("");
+      setRootlessLaunchMode("desktop");
     }
   };
 
   const onRootlessLaunchApp = async (
     profileId: string,
     path: string,
+    args: string[] = [],
+    launchMode: "desktop" | "terminal" = "desktop",
+    name?: string,
     configOverride?: SocksCapConfig,
   ) => {
     if (launchingPath || stoppingPid !== null) return;
-    setLaunchingPath(path);
+    const launchKey = rootlessAppKey(path, args, launchMode);
+    setLaunchingPath(launchKey);
     let startedHere = false;
     try {
       let launchConfig = configOverride ?? cfg;
@@ -1793,16 +1808,16 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         );
         if (launchConfig && targetProfile) {
           const profileActive =
-            targetProfile.enabled && launchConfig.activeProfileIds.includes(profileId);
+            targetProfile.enabled &&
+            launchConfig.activeProfileIds.length === 1 &&
+            launchConfig.activeProfileIds[0] === profileId;
           if (!profileActive) {
             launchConfig = {
               ...launchConfig,
               profiles: launchConfig.profiles.map((profile) =>
                 profile.id === profileId ? { ...profile, enabled: true } : profile,
               ),
-              activeProfileIds: launchConfig.activeProfileIds.includes(profileId)
-                ? launchConfig.activeProfileIds
-                : [...launchConfig.activeProfileIds, profileId],
+              activeProfileIds: [profileId],
             };
             if (!(await persistConfig(launchConfig))) return;
           }
@@ -1811,7 +1826,20 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
         if (!started) return;
         startedHere = true;
       }
-      const launched = await sockscapLaunchApp(profileId, path);
+      if (launchMode === "terminal") {
+        const id = `sockscap-terminal-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        useAppStore.getState().addTab({
+          id,
+          type: "terminal",
+          title: name || path.split(/[/\\]/).pop() || path,
+          closable: true,
+          sockscapTerminal: { profileId, path, args },
+          terminalTitleMode: "manual",
+        });
+        report(t("sockscap.terminalApplicationOpened"));
+        return;
+      }
+      const launched = await sockscapLaunchApp(profileId, path, args);
       setLaunchedApps((current) => [
         ...current.filter((app) => app.pid !== launched.pid),
         launched,
@@ -2436,36 +2464,17 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
               data-testid="sockscap-rootless-mode"
               className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-3"
             >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-[13px] font-semibold">
-                    {t("sockscap.rootlessModeTitle")}
-                  </div>
-                  <p className="mt-1 text-[11px] leading-5 text-[var(--taomni-text-muted)]">
-                    {t("sockscap.rootlessModeDescription")}
-                  </p>
-                  {caps?.linux?.containerized && (
-                    <p className="mt-1 text-[11px] text-sky-700 dark:text-sky-300">
-                      {t("sockscap.launchOnlyContainer")}
-                    </p>
-                  )}
-                </div>
-                <Field label={t("sockscap.rootlessRouteProfile")}>
-                  <select
-                    data-testid="sockscap-rootless-profile"
-                    className="min-w-[180px] text-[12px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] disabled:opacity-60"
-                    value={selectedProf.id}
-                    disabled={locked}
-                    onChange={(event) => void selectRootlessProfile(event.target.value)}
-                  >
-                    {profilesByPriority(cfg.profiles).map(({ profile }) => (
-                      <option key={profile.id} value={profile.id}>
-                        {profile.icon || "🛡️"} {profile.name}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
+              <div className="text-[13px] font-semibold">
+                {t("sockscap.rootlessModeTitle")}
               </div>
+              <p className="mt-1 text-[11px] leading-5 text-[var(--taomni-text-muted)]">
+                {t("sockscap.rootlessModeDescription")}
+              </p>
+              {caps?.linux?.containerized && (
+                <p className="mt-1 text-[11px] text-sky-700 dark:text-sky-300">
+                  {t("sockscap.launchOnlyContainer")}
+                </p>
+              )}
             </section>
           )}
 
@@ -2558,41 +2567,108 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
             )}
             {(selectedProf.mode === "apps" || linuxLaunchOnly) && (
               <div className="mt-3 space-y-2">
-                <div className="flex gap-2">
-                  {caps?.platform === "macos" && (
-                    <button
-                      type="button"
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
-                      onClick={() => void pickMacosApplication()}
-                      disabled={locked}
-                      title={locked ? t("sockscap.lockedTooltip") : undefined}
-                    >
-                      <Plus className="w-3 h-3" />
-                      {t("sockscap.pickApplication")}
-                    </button>
-                  )}
-                  {caps?.platform === "linux" && (
-                    <button
-                      type="button"
-                      data-testid="sockscap-pick-linux-application"
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
-                      onClick={() =>
-                        void (linuxLaunchOnly
-                          ? pickRootlessApplicationAndLaunch()
-                          : pickLinuxApplication())
-                      }
-                      disabled={locked}
-                      title={locked ? t("sockscap.lockedTooltip") : undefined}
-                    >
-                      <Plus className="w-3 h-3" />
-                      {t(
-                        linuxLaunchOnly
-                          ? "sockscap.selectAppAndCapture"
-                          : "sockscap.pickApplication",
-                      )}
-                    </button>
-                  )}
-                  {!linuxLaunchOnly && (
+                {linuxLaunchOnly ? (
+                  <div
+                    data-testid="sockscap-rootless-app-editor"
+                    className="rounded border border-[var(--taomni-divider)] bg-[var(--taomni-bg)] p-2.5"
+                  >
+                    <div className="grid grid-cols-1 xl:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_140px_auto] gap-2 items-end">
+                      <Field label={t("sockscap.rootlessCommandLabel")}>
+                        <div className="flex gap-1">
+                          <input
+                            data-testid="sockscap-rootless-command"
+                            className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                            value={rootlessCommand}
+                            disabled={locked}
+                            placeholder={t("sockscap.rootlessCommandPlaceholder")}
+                            onChange={(event) => setRootlessCommand(event.target.value)}
+                          />
+                          <button
+                            type="button"
+                            data-testid="sockscap-pick-linux-application"
+                            className="shrink-0 px-2 py-1.5 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50"
+                            onClick={() => void pickRootlessApplication()}
+                            disabled={locked}
+                          >
+                            {t("sockscap.browseApplication")}
+                          </button>
+                        </div>
+                      </Field>
+                      <Field label={t("sockscap.rootlessArgumentsLabel")}>
+                        <input
+                          data-testid="sockscap-rootless-arguments"
+                          className="w-full text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                          value={rootlessArguments}
+                          disabled={locked}
+                          placeholder={t("sockscap.rootlessArgumentsPlaceholder")}
+                          onChange={(event) => setRootlessArguments(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") void addRootlessApplication();
+                          }}
+                        />
+                      </Field>
+                      <Field label={t("sockscap.rootlessLaunchModeLabel")}>
+                        <select
+                          data-testid="sockscap-rootless-launch-mode"
+                          className="w-full text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                          value={rootlessLaunchMode}
+                          disabled={locked}
+                          onChange={(event) =>
+                            setRootlessLaunchMode(
+                              event.target.value as "desktop" | "terminal",
+                            )
+                          }
+                        >
+                          <option value="desktop">
+                            {t("sockscap.rootlessLaunchModeDesktop")}
+                          </option>
+                          <option value="terminal">
+                            {t("sockscap.rootlessLaunchModeTerminal")}
+                          </option>
+                        </select>
+                      </Field>
+                      <button
+                        type="button"
+                        data-testid="sockscap-add-rootless-application"
+                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded text-[11px] border border-[var(--taomni-accent)] text-[var(--taomni-accent)] hover:bg-[var(--taomni-accent)]/10 disabled:opacity-50"
+                        disabled={locked || !rootlessCommand.trim()}
+                        onClick={() => void addRootlessApplication()}
+                      >
+                        <Plus className="w-3 h-3" />
+                        {t("sockscap.addApplication")}
+                      </button>
+                    </div>
+                    <p className="mt-2 text-[10px] text-[var(--taomni-text-muted)]">
+                      {t("sockscap.rootlessCommandHint")}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex gap-2">
+                    {caps?.platform === "macos" && (
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={() => void pickMacosApplication()}
+                        disabled={locked}
+                        title={locked ? t("sockscap.lockedTooltip") : undefined}
+                      >
+                        <Plus className="w-3 h-3" />
+                        {t("sockscap.pickApplication")}
+                      </button>
+                    )}
+                    {caps?.platform === "linux" && (
+                      <button
+                        type="button"
+                        data-testid="sockscap-pick-linux-application"
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+                        onClick={() => void pickLinuxApplication()}
+                        disabled={locked}
+                        title={locked ? t("sockscap.lockedTooltip") : undefined}
+                      >
+                        <Plus className="w-3 h-3" />
+                        {t("sockscap.pickApplication")}
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
@@ -2603,33 +2679,51 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                       <Plus className="w-3 h-3" />
                       {t("sockscap.pickProcess")}
                     </button>
-                  )}
-                  {!linuxLaunchOnly && (
                     <ManualAppAdd onAdd={(path) => void addAppPath(path)} disabled={locked} />
-                  )}
-                </div>
+                  </div>
+                )}
                 {selectedProf.apps.length === 0 ? (
-                  <div className="text-[11px] text-[var(--taomni-text-muted)]">{t("sockscap.appsEmpty")}</div>
+                  <div className="text-[11px] text-[var(--taomni-text-muted)]">
+                    {t(linuxLaunchOnly ? "sockscap.rootlessAppsEmpty" : "sockscap.appsEmpty")}
+                  </div>
                 ) : (
                   <ul className="space-y-1">
                     {selectedProf.apps.map((a, index) => {
+                      const appKey = rootlessAppKey(a.path, a.args, a.launchMode);
                       const launched = launchedApps.find(
                         (app) =>
                           app.running &&
                           app.profileId === selectedProf.id &&
-                          app.path === a.path,
+                          rootlessAppKey(
+                            app.path,
+                            app.args,
+                            app.terminalSessionId ? "terminal" : "desktop",
+                          ) === appKey,
                       );
                       const profileActive =
                         selectedProf.enabled &&
                         (cfg?.activeProfileIds.includes(selectedProf.id) ?? false);
-                      const launchPathSupported = a.path.startsWith("/");
                       return (
                         <li
-                          key={a.path}
+                          key={appKey}
                           className="flex items-center gap-2 text-[12px] px-2 py-1 rounded bg-[var(--taomni-bg)] border border-[var(--taomni-divider)]"
                         >
                           <span className="flex-1 min-w-0" title={a.path}>
                             <span className="block truncate">{a.name || a.path}</span>
+                            {linuxLaunchOnly && (
+                              <>
+                                <span className="block truncate font-mono text-[10px] text-[var(--taomni-text-muted)]">
+                                  {formatRootlessCommand(a.path, a.args)}
+                                </span>
+                                <span className="block text-[10px] text-sky-700 dark:text-sky-300">
+                                  {t(
+                                    a.launchMode === "terminal"
+                                      ? "sockscap.rootlessLaunchModeTerminal"
+                                      : "sockscap.rootlessLaunchModeDesktop",
+                                  )}
+                                </span>
+                              </>
+                            )}
                             {a.macosIdentity && (
                               <span className="block truncate text-[10px] text-[var(--taomni-text-muted)]">
                                 {a.macosIdentity.mainExecutablePath} ·{" "}
@@ -2675,7 +2769,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                                 className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--taomni-accent)] text-[var(--taomni-accent)] hover:bg-[var(--taomni-accent)]/10 disabled:opacity-50 disabled:cursor-not-allowed"
                                 disabled={
                                   (running && !profileActive) ||
-                                  !launchPathSupported ||
                                   busy ||
                                   probing ||
                                   launchingPath !== null ||
@@ -2684,23 +2777,31 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                                 title={
                                   running && !profileActive
                                     ? t("sockscap.launchProfileInactive")
-                                    : !launchPathSupported
-                                      ? t("sockscap.launchAbsolutePathRequired")
-                                      : undefined
+                                    : undefined
                                 }
                                 onClick={() =>
-                                  void onRootlessLaunchApp(selectedProf.id, a.path)
+                                  void onRootlessLaunchApp(
+                                    selectedProf.id,
+                                    a.path,
+                                    a.args ?? [],
+                                    a.launchMode ?? "desktop",
+                                    a.name,
+                                  )
                                 }
                               >
-                                {launchingPath === a.path ? (
+                                {launchingPath === appKey ? (
                                   <Loader2 className="w-3 h-3 animate-spin" />
                                 ) : (
                                   <Play className="w-3 h-3" />
                                 )}
                                 {t(
-                                  running
-                                    ? "sockscap.launchApplication"
-                                    : "sockscap.startAndCapture",
+                                  a.launchMode === "terminal"
+                                    ? running
+                                      ? "sockscap.openTerminalApplication"
+                                      : "sockscap.startTerminalAndCapture"
+                                    : running
+                                      ? "sockscap.launchApplication"
+                                      : "sockscap.startAndCapture",
                                 )}
                               </button>
                             ))}
@@ -2711,7 +2812,14 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                             title={locked ? t("sockscap.lockedTooltip") : undefined}
                             onClick={() =>
                               void patchSelectedProfile({
-                                apps: selectedProf.apps.filter((x) => x.path !== a.path),
+                                apps: selectedProf.apps.filter(
+                                  (item) =>
+                                    rootlessAppKey(
+                                      item.path,
+                                      item.args,
+                                      item.launchMode,
+                                    ) !== appKey,
+                                ),
                               })
                             }
                           >
@@ -3674,6 +3782,78 @@ function ManualAppAdd({
       </button>
     </div>
   );
+}
+
+function rootlessAppKey(
+  path: string,
+  args: string[] | undefined,
+  launchMode: "desktop" | "terminal" | undefined,
+): string {
+  return JSON.stringify([path, args ?? [], launchMode ?? "desktop"]);
+}
+
+function parseShellArguments(value: string): string[] {
+  const args: string[] = [];
+  let current = "";
+  let quote: "single" | "double" | null = null;
+  let escaped = false;
+  let started = false;
+
+  const finish = () => {
+    if (!started) return;
+    args.push(current);
+    current = "";
+    started = false;
+  };
+
+  for (const char of value) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      started = true;
+      continue;
+    }
+    if (quote === "single") {
+      if (char === "'") quote = null;
+      else current += char;
+      started = true;
+      continue;
+    }
+    if (quote === "double") {
+      if (char === '"') quote = null;
+      else if (char === "\\") escaped = true;
+      else current += char;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      finish();
+    } else if (char === "'") {
+      quote = "single";
+      started = true;
+    } else if (char === '"') {
+      quote = "double";
+      started = true;
+    } else if (char === "\\") {
+      escaped = true;
+      started = true;
+    } else {
+      current += char;
+      started = true;
+    }
+  }
+  if (quote !== null || escaped) throw new Error("unterminated shell argument");
+  finish();
+  return args;
+}
+
+function formatRootlessCommand(path: string, args: string[] | undefined): string {
+  return [path, ...(args ?? [])].map(quoteShellArgument).join(" ");
+}
+
+function quoteShellArgument(value: string): string {
+  if (value && /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function formatBytes(bytes: number): string {

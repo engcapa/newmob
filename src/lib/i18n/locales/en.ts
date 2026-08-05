@@ -1268,28 +1268,44 @@ const dict = {
     launchOnlyDescription:
       "Transparent system capture is unavailable. Configure routing, then choose an application to start and capture without sudo.",
     launchOnlyContainer:
-      "Container mode: Taomni and the launched desktop application must run in this same container.",
+      "Container mode: Taomni and the launched application must run in this same container.",
     launchOnlyScopeHint:
       "Global and Applications below control routing policy only; capture itself is limited to applications launched from this list.",
     rootlessModeTitle: "Application capture without administrator access",
     rootlessModeDescription:
-      "Choose a routing profile, configure its upstream and rules, then launch an application from Taomni. Only that application and its inherited process tree are captured.",
-    rootlessRouteProfile: "Routing profile",
+      "Configure the single routing setup below, add desktop or terminal applications, then start each when needed. Only applications started here and their child processes are captured.",
     rootlessApplicationsTitle: "Applications",
     selectAppAndCapture: "Choose application and capture",
+    rootlessCommandLabel: "Command",
+    rootlessCommandPlaceholder: "Executable path or command in PATH, e.g. google-chrome-stable",
+    rootlessArgumentsLabel: "Arguments (optional)",
+    rootlessArgumentsPlaceholder: "e.g. --incognito --user-data-dir=/tmp/chrome-test",
+    rootlessLaunchModeLabel: "Application type",
+    rootlessLaunchModeDesktop: "Desktop application",
+    rootlessLaunchModeTerminal: "Terminal application (TUI)",
+    rootlessCommandHint:
+      "Terminal applications open in Taomni's built-in terminal; desktop applications inherit the graphical session. Existing processes cannot be attached in no-permission mode.",
+    browseApplication: "Browse…",
+    addApplication: "Add application",
+    rootlessArgsInvalid: "Arguments contain an unmatched quote or trailing escape.",
+    rootlessAppAlreadyAdded: "The same command, arguments, and application type are already in the list.",
+    rootlessAppsEmpty: "No launch commands yet. Enter a command above or browse for an executable.",
     startAndCapture: "Start and capture",
+    startTerminalAndCapture: "Start in terminal and capture",
     rootlessLockedHint:
       "Capturing — stop capture before changing the upstream, rules, or application list.",
     rootlessProbeFailedTitle: "Cannot start application capture",
     rootlessProbeFailed:
       "The upstream test failed. Check the details, update the upstream, and try again.",
     launchApplication: "Launch",
+    openTerminalApplication: "Open in terminal",
     stopApplication: "Stop app",
     launchPrepareFirst: "Prepare capture first",
     launchProfileInactive: "Activate this profile before launching its application",
-    launchAbsolutePathRequired: "Pick an executable with an absolute path for launch-only capture",
+    launchAbsolutePathRequired: "Enter an executable path or a command available in PATH",
     applicationRunning: "Running · PID {pid}",
     applicationLaunched: "Application launched through SocksCap · PID {pid}",
+    terminalApplicationOpened: "Opened a terminal tab; the application will start and be captured there.",
     applicationStopped: "Application stopped · PID {pid}",
     rootPromptTitle: "Root Authorization Required",
     rootPromptSubtitle:
