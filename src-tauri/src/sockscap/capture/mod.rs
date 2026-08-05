@@ -30,19 +30,37 @@ pub fn capabilities() -> SocksCapCapabilities {
                 "Windows: elevated sockscap-helper + WinDivert FLOW/NETWORK. Place WinDivert.dll next to the helper.".into(),
             ],
             privileged_required: true,
+            linux: None,
         }
     }
     #[cfg(target_os = "linux")]
     {
+        let transparent = linux::transparent_preflight();
+        let transparent_available = transparent.is_ok();
         SocksCapCapabilities {
             platform: "linux".into(),
-            global_tcp: true,
+            global_tcp: transparent_available,
             app_filter: true,
-            capture_backend: "nft-cgroup-redirect".into(),
-            notes: vec![
-                "Linux: nftables transparent TCP redirect with cgroup v2 process filtering. Requires root or delegated CAP_NET_ADMIN/cgroup permissions.".into(),
-            ],
-            privileged_required: true,
+            capture_backend: if transparent_available {
+                "nft-cgroup-redirect".into()
+            } else {
+                "linux-app-launch".into()
+            },
+            notes: if transparent_available {
+                vec!["Linux nftables and cgroup transparent capture is available without additional elevation.".into()]
+            } else {
+                vec!["Linux transparent capture is unavailable. Launch selected applications from SocksCap to capture their TCP process tree without sudo or proxy environment variables.".into()]
+            },
+            // Launch-only capture is always offered, so Linux no longer needs
+            // privilege merely to start a useful SocksCap session.
+            privileged_required: false,
+            linux: Some(crate::sockscap::LinuxCaptureCapabilities {
+                transparent_available,
+                launched_application_available: true,
+                launch_only: !transparent_available,
+                containerized: linux::is_containerized(),
+                transparent_unavailable_reason: transparent.err(),
+            }),
         }
     }
     #[cfg(target_os = "macos")]
@@ -58,6 +76,7 @@ pub fn capabilities() -> SocksCapCapabilities {
             capture_backend: "unsupported".into(),
             notes: vec!["Unsupported platform for SocksCap capture.".into()],
             privileged_required: false,
+            linux: None,
         }
     }
 }
@@ -78,6 +97,7 @@ pub fn macos_capabilities(redirector_installed: bool) -> SocksCapCapabilities {
                 "Global and signed-application capture are available. Application identities are revalidated before each activation.".into(),
             ],
             privileged_required: false,
+            linux: None,
         }
     } else {
         SocksCapCapabilities {
@@ -90,6 +110,7 @@ pub fn macos_capabilities(redirector_installed: bool) -> SocksCapCapabilities {
                 crate::sockscap::redirector::REDIRECTOR_VERSION
             )],
             privileged_required: false,
+            linux: None,
         }
     }
 }

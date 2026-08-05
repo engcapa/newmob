@@ -4609,6 +4609,22 @@ controls:
     selector: '[data-testid="sockscap-tun-warning-close"]'
     kind: interactive
     optional: true       # shown inside the conditional TUN warning dialog
+  - id: launch-only-banner
+    selector: '[data-testid="sockscap-launch-only-banner"]'
+    kind: display
+    optional: true       # Linux only when transparent capture is unavailable
+  - id: pick-linux-application
+    selector: '[data-testid="sockscap-pick-linux-application"]'
+    kind: interactive
+    optional: true       # Linux desktop only
+  - id: launch-application
+    selector: '[data-testid^="sockscap-launch-app-"]'
+    kind: interactive
+    optional: true       # one control per configured app in Linux launch-only mode
+  - id: stop-launched-application
+    selector: '[data-testid^="sockscap-stop-launched-app-"]'
+    kind: interactive
+    optional: true       # replaces Launch while that app is running
   - id: linux-capture-state
     selector: '[data-testid="sockscap-linux-capture-state"]'
     kind: display
@@ -4666,7 +4682,7 @@ controls:
 -->
 
 - 提供全局/按应用 TCP 路由、上游代理、GFWList、规则 dry-run、状态与流量统计的控制面板。
-- Linux 后端通过 nftables + cgroup v2 做透明 TCP 重定向；实际启用需要受管理员策略授权的网络与 cgroup 权限，因此该特性保持部分完成状态直到真实特权环境验证完成。
+- Linux 有权限时继续通过 nftables + cgroup v2 做透明 TCP 重定向；无 sudo、受限桌面容器等环境自动切换为“从 SocksCap 启动应用”的 loopback 捕获，不注入 HTTP_PROXY/ALL_PROXY 等代理变量。该模式只覆盖由面板启动的动态链接应用及其继承进程。
 - 浏览器预览覆盖控制面板状态流转；内核捕获和原始目标恢复由 Rust 单元/集成验证覆盖。
 
 ---

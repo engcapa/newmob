@@ -1162,6 +1162,7 @@ const dict = {
     subtitle: "Route app or system TCP traffic via HTTP / SOCKS5 / SSH",
     loading: "Loading SocksCap…",
     start: "Start",
+    prepareCapture: "Prepare capture",
     stop: "Stop",
     recover: "Recover network",
     recoverHint:
@@ -1263,6 +1264,33 @@ const dict = {
     linuxCaptureReady:
       "Linux nftables transparent capture is ready when started with cgroup and network-admin privileges.",
     linuxCaptureActive: "Active · Linux nftables transparent capture",
+    launchOnlyTitle: "No-permission application capture",
+    launchOnlyDescription:
+      "Transparent system capture is unavailable. Configure routing, then choose an application to start and capture without sudo.",
+    launchOnlyContainer:
+      "Container mode: Taomni and the launched desktop application must run in this same container.",
+    launchOnlyScopeHint:
+      "Global and Applications below control routing policy only; capture itself is limited to applications launched from this list.",
+    rootlessModeTitle: "Application capture without administrator access",
+    rootlessModeDescription:
+      "Choose a routing profile, configure its upstream and rules, then launch an application from Taomni. Only that application and its inherited process tree are captured.",
+    rootlessRouteProfile: "Routing profile",
+    rootlessApplicationsTitle: "Applications",
+    selectAppAndCapture: "Choose application and capture",
+    startAndCapture: "Start and capture",
+    rootlessLockedHint:
+      "Capturing — stop capture before changing the upstream, rules, or application list.",
+    rootlessProbeFailedTitle: "Cannot start application capture",
+    rootlessProbeFailed:
+      "The upstream test failed. Check the details, update the upstream, and try again.",
+    launchApplication: "Launch",
+    stopApplication: "Stop app",
+    launchPrepareFirst: "Prepare capture first",
+    launchProfileInactive: "Activate this profile before launching its application",
+    launchAbsolutePathRequired: "Pick an executable with an absolute path for launch-only capture",
+    applicationRunning: "Running · PID {pid}",
+    applicationLaunched: "Application launched through SocksCap · PID {pid}",
+    applicationStopped: "Application stopped · PID {pid}",
     rootPromptTitle: "Root Authorization Required",
     rootPromptSubtitle:
       "Linux nftables & cgroup v2 transparent capture requires Root (CAP_NET_ADMIN) privileges. Please enter your sudo password to proceed.",

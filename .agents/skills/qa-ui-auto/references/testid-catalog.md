@@ -465,6 +465,10 @@
 - `[data-testid="sockscap-tun-warning"]` — interactive [optional] — F-Sockscap-1.tun-warning
 - `[data-testid="sockscap-tun-warning-dialog"]` — display [optional] — F-Sockscap-1.tun-warning-dialog
 - `[data-testid="sockscap-tun-warning-close"]` — interactive [optional] — F-Sockscap-1.tun-warning-close
+- `[data-testid="sockscap-launch-only-banner"]` — display [optional] — F-Sockscap-1.launch-only-banner
+- `[data-testid="sockscap-pick-linux-application"]` — interactive [optional] — F-Sockscap-1.pick-linux-application
+- `[data-testid^="sockscap-launch-app-"]` — interactive [optional] — F-Sockscap-1.launch-application
+- `[data-testid^="sockscap-stop-launched-app-"]` — interactive [optional] — F-Sockscap-1.stop-launched-application
 - `[data-testid="sockscap-linux-capture-state"]` — display [optional] — F-Sockscap-1.linux-capture-state
 - `[data-testid="sockscap-root-prompt-dialog"]` — display [optional] — F-Sockscap-1.root-prompt-dialog
 - `[data-testid="sockscap-root-password-input"]` — interactive [optional] — F-Sockscap-1.root-password-input

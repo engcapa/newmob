@@ -7,6 +7,7 @@
 
 pub mod cgroup;
 pub mod exec;
+pub mod launched;
 pub mod pid_filter;
 pub mod relay;
 pub mod tunnel;
@@ -25,7 +26,7 @@ use crate::sockscap::relay::RelayContext;
 
 /// A running Linux capture session. Dropping it is intentionally inert: callers
 /// must call [`Self::stop`] so failures are visible and recovery can be offered.
-pub struct LinuxCaptureHandle {
+pub struct TransparentCaptureHandle {
     relay_port: u16,
     relays: Vec<crate::sockscap::relay::RelayHandle>,
     redirect: tunnel::NftRedirect,
@@ -34,7 +35,7 @@ pub struct LinuxCaptureHandle {
     app_monitor: Option<AppProcessMonitor>,
 }
 
-impl LinuxCaptureHandle {
+impl TransparentCaptureHandle {
     pub fn relay_port(&self) -> u16 {
         self.relay_port
     }
@@ -75,11 +76,32 @@ pub trait LinuxCapture: Send + Sync {
         config: &SocksCapConfig,
         ctx: Arc<RwLock<RelayContext>>,
         sudo_password: Option<String>,
-    ) -> Result<LinuxCaptureHandle, String>;
+    ) -> Result<TransparentCaptureHandle, String>;
 }
 
 #[derive(Debug, Default)]
 pub struct LinuxCaptureImpl;
+
+/// Read-only capability probe used by the UI and backend selector.  It does
+/// not create cgroups or mutate nftables state.
+pub fn transparent_preflight() -> Result<(), String> {
+    LinuxCaptureImpl.preflight(None)
+}
+
+/// Container detection is explanatory only; backend selection is driven by
+/// the actual transparent-capture probe above.
+pub fn is_containerized() -> bool {
+    std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
+        || std::fs::read_to_string("/proc/1/cgroup")
+            .ok()
+            .is_some_and(|value| {
+                value.contains("docker")
+                    || value.contains("containerd")
+                    || value.contains("kubepods")
+                    || value.contains("libpod")
+            })
+}
 
 #[derive(Debug, Clone)]
 struct AppCaptureProfile {
@@ -179,7 +201,7 @@ impl LinuxCapture for LinuxCaptureImpl {
         config: &SocksCapConfig,
         ctx: Arc<RwLock<RelayContext>>,
         sudo_password: Option<String>,
-    ) -> Result<LinuxCaptureHandle, String> {
+    ) -> Result<TransparentCaptureHandle, String> {
         let scope = capture_scope(config)?;
         let sudo_password = sudo_password.map(|password| Arc::new(Zeroizing::new(password)));
         let sudo_pw = sudo_password.as_deref().map(|password| password.as_str());
@@ -355,7 +377,7 @@ impl LinuxCapture for LinuxCaptureImpl {
             },
             "sockscap Linux nftables transparent capture started"
         );
-        Ok(LinuxCaptureHandle {
+        Ok(TransparentCaptureHandle {
             relay_port,
             relays: relays.into_iter().map(|relay| relay.handle).collect(),
             redirect,
@@ -363,6 +385,65 @@ impl LinuxCapture for LinuxCaptureImpl {
             sudo_password,
             app_monitor,
         })
+    }
+}
+
+/// Runtime-selected Linux backend. Transparent capture preserves the existing
+/// nft/cgroup implementation; launched capture owns only loopback listeners and
+/// applications explicitly started from SocksCap.
+pub enum LinuxCaptureHandle {
+    Transparent(TransparentCaptureHandle),
+    Launched(launched::LaunchedCaptureHandle),
+}
+
+impl LinuxCaptureHandle {
+    pub fn relay_port(&self) -> u16 {
+        match self {
+            Self::Transparent(capture) => capture.relay_port(),
+            Self::Launched(capture) => capture.relay_port(),
+        }
+    }
+
+    pub fn is_launch_only(&self) -> bool {
+        matches!(self, Self::Launched(_))
+    }
+
+    pub async fn stop(&mut self) -> Result<(), String> {
+        match self {
+            Self::Transparent(capture) => capture.stop().await,
+            Self::Launched(capture) => {
+                capture.stop().await;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn launch_app(
+        &mut self,
+        profile_id: &str,
+        executable: &std::path::Path,
+    ) -> Result<launched::LaunchedAppInfo, String> {
+        match self {
+            Self::Launched(capture) => capture.launch_app(profile_id, executable).await,
+            Self::Transparent(_) => Err(
+                "the active Linux backend captures applications transparently; launch-only control is unavailable"
+                    .into(),
+            ),
+        }
+    }
+
+    pub fn launched_apps(&mut self) -> Vec<launched::LaunchedAppInfo> {
+        match self {
+            Self::Launched(capture) => capture.apps(),
+            Self::Transparent(_) => Vec::new(),
+        }
+    }
+
+    pub async fn stop_launched_app(&mut self, pid: u32) -> Result<(), String> {
+        match self {
+            Self::Launched(capture) => capture.stop_app(pid).await,
+            Self::Transparent(_) => Err("the active Linux backend is not launch-only".into()),
+        }
     }
 }
 

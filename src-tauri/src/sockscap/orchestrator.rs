@@ -216,6 +216,11 @@ impl Orchestrator {
     }
 
     #[cfg(target_os = "linux")]
+    pub fn linux_capture_mut(&mut self) -> Option<&mut LinuxCaptureHandle> {
+        self.linux_capture.as_mut()
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn take_linux_capture_for_stop(&mut self) -> Option<LinuxCaptureHandle> {
         if !matches!(self.phase, EnginePhase::Idle) {
             self.phase = EnginePhase::Stopping;

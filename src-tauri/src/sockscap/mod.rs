@@ -188,6 +188,18 @@ pub struct SocksCapCapabilities {
     pub capture_backend: String,
     pub notes: Vec<String>,
     pub privileged_required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linux: Option<LinuxCaptureCapabilities>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxCaptureCapabilities {
+    pub transparent_available: bool,
+    pub launched_application_available: bool,
+    pub launch_only: bool,
+    pub containerized: bool,
+    pub transparent_unavailable_reason: Option<String>,
 }
 
 #[tauri::command]
@@ -649,7 +661,7 @@ pub async fn sockscap_start(
 
     #[cfg(target_os = "linux")]
     let status: Result<SocksCapStatus, String> =
-        start_linux_capture(&state, &cfg, &caps, sudo_password).await;
+        start_linux_capture(&app, &state, &cfg, &caps, sudo_password).await;
 
     #[cfg(target_os = "macos")]
     let status: Result<SocksCapStatus, String> =
@@ -1095,17 +1107,38 @@ async fn build_unix_relay_context(
 
 #[cfg(target_os = "linux")]
 async fn start_linux_capture(
+    app: &AppHandle,
     state: &State<'_, AppState>,
     cfg: &SocksCapConfig,
     caps: &capture::SocksCapCapabilities,
     sudo_password: Option<String>,
 ) -> Result<SocksCapStatus, String> {
-    use crate::sockscap::capture::linux::{LinuxCapture, LinuxCaptureImpl};
+    use crate::sockscap::capture::linux::{LinuxCapture, LinuxCaptureHandle, LinuxCaptureImpl};
 
     let ctx = build_unix_relay_context(state, cfg).await?;
-    let backend = LinuxCaptureImpl;
-    let capture = backend.start(cfg, Arc::clone(&ctx), sudo_password).await?;
+    let transparent_available = caps
+        .linux
+        .as_ref()
+        .is_some_and(|linux| linux.transparent_available);
+    let capture = if sudo_password.is_some() {
+        let backend = LinuxCaptureImpl;
+        LinuxCaptureHandle::Transparent(backend.start(cfg, Arc::clone(&ctx), sudo_password).await?)
+    } else if transparent_available {
+        let backend = LinuxCaptureImpl;
+        match backend.start(cfg, Arc::clone(&ctx), None).await {
+            Ok(capture) => LinuxCaptureHandle::Transparent(capture),
+            Err(error) => {
+                tracing::warn!(
+                    "Linux transparent capture became unavailable after preflight; falling back to launch-only capture: {error}"
+                );
+                start_linux_launched_capture(app, Arc::clone(&ctx)).await?
+            }
+        }
+    } else {
+        start_linux_launched_capture(app, Arc::clone(&ctx)).await?
+    };
     let relay_port = capture.relay_port();
+    let launch_only = capture.is_launch_only();
 
     let mut orch = state.sockscap.orch.write().await;
     let gfw_note = orch
@@ -1115,21 +1148,131 @@ async fn start_linux_capture(
     let active_profiles = cfg.active_profiles();
     let application_count = active_profiles
         .iter()
-        .take_while(|profile| matches!(profile.mode, config::ScopeMode::Apps))
+        .filter(|profile| matches!(profile.mode, config::ScopeMode::Apps))
         .map(|profile| profile.apps.len())
         .sum::<usize>();
-    let app_watch_note = if application_count > 0 {
+    let app_watch_note = if launch_only {
+        ", waiting for an application to be launched from SocksCap".to_string()
+    } else if application_count > 0 {
         format!(", watching {application_count} application selector(s)")
     } else {
         String::new()
     };
     orch.relay_ctx = Some(ctx);
     orch.set_linux_capture(capture);
+    let backend = if launch_only {
+        "linux-app-launch"
+    } else {
+        "nft-cgroup-redirect"
+    };
+    let transport = if launch_only {
+        "Linux unprivileged loopback launch relay"
+    } else {
+        "Linux nft+cgroup relay"
+    };
     orch.set_active(
-        &caps.capture_backend,
-        format!("capture active (Linux nft+cgroup relay :{relay_port}{gfw_note}{app_watch_note})"),
+        backend,
+        format!("capture active ({transport} :{relay_port}{gfw_note}{app_watch_note})"),
     );
     Ok(orch.status())
+}
+
+#[cfg(target_os = "linux")]
+async fn start_linux_launched_capture(
+    app: &AppHandle,
+    ctx: Arc<RwLock<relay::RelayContext>>,
+) -> Result<capture::linux::LinuxCaptureHandle, String> {
+    let runtime_dir = data_dir(app)?.join("runtime");
+    Ok(capture::linux::LinuxCaptureHandle::Launched(
+        capture::linux::launched::LaunchedCaptureHandle::start(ctx, &runtime_dir).await?,
+    ))
+}
+
+#[tauri::command]
+pub async fn sockscap_launch_app(
+    state: State<'_, AppState>,
+    profile_id: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = std::path::PathBuf::from(path);
+        let mut orch = state.sockscap.orch.write().await;
+        if !orch.is_running() {
+            return Err("start SocksCap before launching an application".into());
+        }
+        let configured = orch
+            .config()
+            .and_then(|config| {
+                config
+                    .active_profiles()
+                    .into_iter()
+                    .find(|profile| profile.id == profile_id)
+            })
+            .is_some_and(|profile| {
+                profile
+                    .apps
+                    .iter()
+                    .any(|app| paths::paths_match_exe(&app.path, &path.to_string_lossy()))
+            });
+        if !configured {
+            return Err(
+                "the application must belong to the selected active SocksCap profile".into(),
+            );
+        }
+        let capture = orch
+            .linux_capture_mut()
+            .ok_or_else(|| "Linux capture backend is not active".to_string())?;
+        let info = capture.launch_app(&profile_id, &path).await?;
+        serde_json::to_value(info)
+            .map_err(|error| format!("serialize launched application: {error}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (state, profile_id, path);
+        Err("launching applications through SocksCap is currently Linux-only".into())
+    }
+}
+
+#[tauri::command]
+pub async fn sockscap_launched_apps(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut orch = state.sockscap.orch.write().await;
+        let apps = orch
+            .linux_capture_mut()
+            .map(|capture| capture.launched_apps())
+            .unwrap_or_default();
+        serde_json::to_value(apps)
+            .map_err(|error| format!("serialize launched applications: {error}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        Ok(serde_json::json!([]))
+    }
+}
+
+#[tauri::command]
+pub async fn sockscap_stop_launched_app(
+    state: State<'_, AppState>,
+    pid: u32,
+) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut orch = state.sockscap.orch.write().await;
+        let capture = orch
+            .linux_capture_mut()
+            .ok_or_else(|| "Linux capture backend is not active".to_string())?;
+        capture.stop_launched_app(pid).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (state, pid);
+        Err("launching applications through SocksCap is currently Linux-only".into())
+    }
 }
 
 #[cfg(target_os = "macos")]
