@@ -3,8 +3,8 @@
 > 范围：`src-tauri/src/servers/rdp/` + 前端 `RdpSettings`  
 > 定位：内网/受控环境的本机桌面共享（mstsc / FreeRDP 客户端），**不是** Windows RDS / TeamViewer 替代  
 > 制定日期：2026-07-19  
-> 决策基线：`rust_rdp_server_dev_plan.md`（架构与平台裁决）  
-> 任务追踪基线：`rust_rdp_server_feature_dev_task.md`（进度盘点，本计划与之对齐并向前推进）  
+> 决策基线：当前实现、本文的平台裁决，以及根目录 `DESIGN.md`。
+> 状态索引：根目录 `IMPLEMENTATION_PLAN.md`；本文件只维护 RDP 专项任务和验收边界。
 > 栈：ironrdp-server 0.10、enigo、arboard、rcgen；Linux X11 捕获已实装
 
 ---
@@ -242,15 +242,15 @@ R0 可观测性 ──┬── R1 Windows 捕获 ⭐ ──→  Win 可用
 | 路径 | 角色 |
 |------|------|
 | `src-tauri/src/servers/rdp.rs` | 入口 / 安全模式 / 生命周期 |
-| `src-tauri/src/servers/rdp/capture/` | 捕获后端（待增 `win.rs` / `mac.rs`） |
+| `src-tauri/src/servers/rdp/capture/` | 捕获后端（macOS、X11、Wayland 已有实现；Windows 原生后端待增） |
 | `src-tauri/src/servers/rdp/display.rs` | 帧下发 |
 | `src-tauri/src/servers/rdp/input.rs` | 键鼠 |
 | `src-tauri/src/servers/rdp/clipboard.rs` | 剪贴板 |
 | `src-tauri/src/servers/rdp/session.rs` | Linux 进阶探测 |
 | `src-tauri/src/servers/rdp/tls.rs` / `auth.rs` | 证书与凭据 |
 | `src/components/servers/settings/RdpSettings.tsx` | 表单 + 能力说明 |
-| `rust_rdp_server_dev_plan.md` | 架构决策（勿改平台裁决） |
-| `rust_rdp_server_feature_dev_task.md` | 细粒度任务勾选 |
+| `DESIGN.md` | 仓库级架构与跨平台安全约束 |
+| `IMPLEMENTATION_PLAN.md` | 当前工作流与交付状态索引 |
 
 ---
 

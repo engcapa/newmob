@@ -1,70 +1,76 @@
-# CC → DB 会话集成计划(Phase 6,承接 cc-agent-orchestration-plan.md)
+# Claude Code 数据库会话工具
 
-**状态**: 实现完成(Phase 1–5),待 GUI 端到端验证 + 提交
-**日期**: 2026-06-23
-**分支**: `feat/cc-db-sessions`
-**目标**: 把 Claude Code 接入 DB 查询会话(MySQL/PG/ClickHouse/Presto/Redis),参考 shell 会话实现,但用**独立 MCP**;每个 DB 线程只加载自己引擎的 MCP,不加载 shell 专用 MCP,减少干扰。
+> 状态：SQL 与 Redis MCP 工具已实现并接入会话绑定。本文记录当前设计、安全约束和仍需原生环境验证的边界。
 
-## 实现状态(全部 builds + tests green:Rust 564、前端 550、tsc/vite OK)
-- ✅ **Phase 1 infra**:`mcp_http.rs` 加 `Flavor{Shell,Sql,Redis}`,一个 listener 挂三路 `/mcp`(shell,不变)、`/mcp/sql`、`/mcp/redis`,共享 token map + auth;抽出 `scope_from_ctx`/`await_permission`/`decide_permission`/allow-deny 等 `pub(crate)` 复用件;`provision_for_thread(flavor,…)`。
-- ✅ **Phase 2 桥 + SQL 只读**:`AppState.cc_db_bindings`(thread→连接 id)+ `ChatSendRequest.bound_db_connection_id`(逐轮存);`mcp_sql.rs::SqlHandler` 直连 `crate::database::db_*`:list_catalogs/schemas/tables、describe_table、list_indexes/objects、object_ddl、table_stats、run_sql(有界)。
-- ✅ **Phase 3 写 HITL + capture/export**:`agent/sql_classify.rs`(读/写,含 CTE/EXPLAIN ANALYZE/多语句/注释,保守默认写);`run_sql_captured`(整结果写 CSV capture 文件,返回摘要)、`read_result`(head/tail/range/grep/stats,复用 `capture::reduce`)、`export_result`(写 Downloads/taomni-exports,v1 仅 csv,HITL)。`safety::is_write_tool` 纳入 DB 写工具。
-- ✅ **Phase 4 Redis**:`mcp_redis.rs::RedisHandler` 直连 `redis_*`:list_keys/get/set/del/exec(exec 按命令读/写分级);`RedisClientTab` 加 `chatToggle` + MainLayout 接线。
-- ✅ **Phase 5 身份卡 + 测试**:`session_card.rs` 按 `session_type` 分派 DB 路由(SQL/Redis 工具,降级本地 `<env>`,不再误导 run_in_terminal);`Flavor::for_session_type` 选 flavor(chat/mod.rs spawn 用);`config.rs` 写 flavor server 名 + `flavor.permission_prompt_tool()`;`CcAgentBridge.describe/preview` 加 SQL/Redis 文案;前端 `appStore.dbConnByTab` + DbClientTab/RedisClientTab 连接时上报 conn id + chatStore 逐轮带 `bound_db_connection_id`。新增测试:sql_classify、session_card DB 变体、flavor 映射/路径、config flavor 名、mcp_sql CSV/parse、redis 命令分级。
+## 目标
 
-## v1 已知取舍(后续可优化)
-- `run_sql_captured` 先 `db_execute` 物化全量再写 CSV(未走 `db_execute_stream` 流式);超大结果占内存,建议用 LIMIT 或后续改流式。
-- `export_result` v1 仅 csv(capture 即 CSV);json/tsv 顺延。
-- DB 身份卡未含 schema 快照(卡片构建是同步、early,连接绑定此时可能尚未入 `cc_db_bindings`);CC 自行调 list_tables 获取。
-- commands.rs 的 `cc_send_message`/`cc_stream_message` 备用通路固定 Shell flavor(前端未用)。
+当 Claude Code 对话绑定到 Taomni 的数据库会话时，模型通过 Taomni 后端提供的 MCP 工具操作该连接，而不是获得数据库凭据、拼接本机 CLI 命令或访问其他会话。每个工具调用都再次校验线程、绑定会话和权限。
 
-## 待办
-- ☐ GUI 端到端验证:绑定 MySQL/PG/CH/Presto 会话 → CC 查 schema、跑 SELECT、写语句弹卡、大结果 run_sql_captured+read_result、export_result 落盘;Redis 同理。
-- ☐ 提交(用户确认后)。
+## 会话 flavor
 
----
+MCP bridge 根据绑定会话选择互斥的工具集：
 
-## 原始计划(供参考)
+- `Shell`：终端、文件和进程工具。
+- `Sql`：MySQL、PostgreSQL、SQL Server、Oracle、SQLite、DuckDB、Presto 等统一数据库工具。
+- `Redis`：键扫描、值读取和 Redis 命令工具。
 
-## 已锁定决策(用户确认)
-- **两种 DB MCP flavor**:`taomni_sql`(MySQL/PG/ClickHouse/Presto 合一,handler 内按 engine 分派)+ `taomni_redis`(Redis 独立)。shell `taomni` 不变。
-- **一线程一 flavor**:spawn 时按绑定会话 `session_type` 选 flavor;生成的 `.mcp.json` 只列**一个** server。DB 线程看不到 shell 工具。
-- **v1 引擎**:MySQL / PostgreSQL / ClickHouse / Presto / Redis。HBaseShell 顺延。
-- **写操作允许但 HITL 弹卡**:新增 `agent/sql_classify.rs`;SELECT/SHOW/EXPLAIN/DESCRIBE/WITH…SELECT = 只读(自动放行,受 `confirm_readonly`);INSERT/UPDATE/DELETE/MERGE/CREATE/ALTER/DROP/TRUNCATE/GRANT + 多语句 = 写 → 弹卡。
-- **后端直连执行**:DB MCP handler 在进程内直接打 `state.db_connections`(复用 `database/*`),结果不经前端往返;大结果走 capture(整入后端文件 → 摘要 → `read_result`/`export_result`)。
+HBase 使用独立 shell/协议模型，不伪装成 SQL flavor。身份卡在 Claude Code 进程创建时生成，说明当前绑定、可用工具和安全规则；绑定改变时应新建/重启对应进程，不能让旧进程跨会话复用权限。
 
-## 关键代码事实
-- DB 连接活在 `state.db_connections`,**key = 前端随机 runtime id**(`createRuntimeDbSessionId` → `baseSessionId::uuid`,`DbClientTab.tsx:109`),后端推不出来 → 需前端把活连接 id 桥过来。
-- 后端已有全套执行/introspection:`database/mod.rs` 的 `db_execute(_stream)`/`db_list_*`/`db_describe_table`/`db_object_ddl`/`db_table_stats`/`db_cancel`、`redis_*`。
-- `DbClientTab` 已接 `chatToggle`(CC drawer 可绑 DB tab);`RedisClientTab` 尚未接。
-- spawn(`chat/mod.rs:541-679`)已解析绑定 `SessionConfig`(含 `session_type`)用于身份卡 → 在此处分 flavor。
-- shell MCP:`cc_bridge/mcp_http.rs`(server 名 `taomni`,nest `/mcp`)、`config.rs`(写 `.mcp.json` + `PERMISSION_PROMPT_TOOL`)、`session_card.rs`(SSH 形身份卡)。
+## SQL 工具
 
-## 工作流
-- **A. MCP infra 重构**(`mcp_http.rs`):抽出共享件(`TokenScope`+`flavor`/`TokenMap`/`auth_mw`/`scope()`/`await_permission`/分级/allow-deny JSON)到 `mcp_common`;一个 listener 挂三路 `/mcp/shell`(现 `CcHandler`)、`/mcp/sql`(`SqlHandler`)、`/mcp/redis`(`RedisHandler`),共享 token map。`provision_for_thread(flavor,…)` 按 flavor 返回 URL+token。**先 spike**:多 `StreamableHttpService` nest 同一 router。
-- **B. 线程→DB连接 桥**:`ChatSendRequest` 增 `bound_db_connection_id`(前端逐轮传活连接 id,同 `bound_session_id`/`cwd`);后端每轮存入新 `AppState.cc_db_bindings: Arc<RwLock<HashMap<thread_id,String>>>`;SQL/Redis handler 从此解析绑定连接(CC 不命名连接 id → 天然 scope 安全)。
-- **C. SQL handler**(`taomni_sql`,全后端直连):
-  - 只读(自动):`list_schemas`/`list_tables`/`describe_table`/`list_indexes`/`list_objects`/`object_ddl`/`table_stats`/`list_catalogs`(Presto)——这就是 CC 生成 SQL 的 schema 上下文,无需"生成"工具。
-  - `run_sql(sql,max_rows?)` → 有界内联结果;写 → HITL。
-  - `run_sql_captured(sql)` → 整结果流入后端文件(复用 `CaptureWriter`,CSV/JSONL),返回列+行数+head 预览。
-  - `read_result(capture_id,op=head|range|grep|stats)` → 复用 `agent/capture/reduce`。
-  - `export_result(capture_id|sql,format=csv|json|tsv)` → 写 **Taomni 托管 exports 目录**(非任意路径),HITL,返回路径。
-  - `cancel` → `db_cancel`;`permission_prompt` → safety + `sql_classify`。
-- **D. Redis handler**(`taomni_redis`):`redis_list_keys`(scan)/`redis_get_key`(读) 自动;`redis_set_key`/`redis_del_key`(写→HITL);`redis_exec`(分类命令读/写→写弹卡)。直连 `redis_ops::*`。
-- **E. spawn flavor + DB 身份卡**(`chat/mod.rs`、`session_card.rs`):`session_type`→flavor;`--permission-prompt-tool = mcp__taomni_{flavor}__permission_prompt`;新 DB 卡:引擎/host/db/catalog 身份 + 路由("操作绑定的 `<engine>` 连接,用 SQL MCP 工具,别用本地 Bash/Read") + 每引擎方言注记 + **schema 快照**(替代 SSH 命令历史)。
-- **F. 前端**:`RedisClientTab` 接 `chatToggle`;`chatStore.sendMessage` 带 `bound_db_connection_id`;`CcAgentBridge.describe()` 增 SQL/Redis 文案。后端直连执行 → **无需新增 `agent-cc-tool` 执行分支**,只复用权限卡路径。
-- **G. plumbing**:`AppState` 字段+init;`ipc.ts` 包装(若有新命令);`lib.rs` 注册。
-- **H. 测试**:`sql_classify`(读写/CTE/注释/多语句);DB `session_card` 快照;MCP flavor 路由(sql 线程 `.mcp.json` 只含 `taomni_sql`)、401+scope、分级(SELECT 自动 / DELETE→HITL);前端 vitest;env 门控 live(仿 Hologres 测试)。
+SQL handler 复用 `src-tauri/src/database/` 的连接与驱动实现，提供：
 
-## 分阶段(每阶段一 review gate)
-1. infra 重构(A)+ flavor provisioning 骨架(E 部分)——gate:shell 不变,SQL 线程能连(空)SQL MCP。
-2. 桥(B)+ SQL 只读工具(C-read)——gate:CC 查 schema/表、跑 SELECT 拿结果。
-3. `sql_classify` + 写 HITL + captured/read/export(C-write)——gate:DELETE 弹卡;大结果 capture+分页;export 落文件。
-4. Redis handler(D)+ Redis `chatToggle`(F)——gate:Redis 读写经 CC。
-5. DB 身份卡打磨 + 全量测试(E,H)。
+- schema/catalog/table/view/index/object 枚举与表结构描述。
+- `run_sql`：返回有界的行内结果。
+- `run_sql_captured`：完整结果捕获到后端管理文件，只向模型返回摘要和少量预览。
+- `read_result`：对捕获的 CSV 执行 `head/tail/range/grep/stats`，每次输出仍有上限。
+- `export_result`：经确认后导出到用户下载目录的 `taomni-exports`；当前格式为 CSV。
+- 查询取消和连接生命周期清理。
 
-## 风险/边界
-- rmcp 多路 nest:先 spike(低风险)。
-- 结果体量:`run_sql` 硬上限;卡片引导大输出走 `run_sql_captured`。
-- 安全:`export_result` 限托管目录(非任意写)+ HITL;卡片只含引擎/host/db(过 redact),绝不碰 `options_json`/vault。
-- v1 不做:HBaseShell、任意导出路径、超大导出流式超额。
+大结果优先捕获、检索、再导出，不能反复重跑查询来读取不同片段。捕获文件及 token 只对创建它的线程/绑定作用域有效。
+
+## Redis 工具
+
+Redis handler 提供分页 `SCAN`、读取键值以及受控的原生命令执行。只读命令可按会话策略自动放行；`SET`、`DEL`、`FLUSH*` 等写入或破坏性命令必须进入确认流程。空命令或不能可靠分类的命令按写操作处理。
+
+## 权限与数据边界
+
+- MCP URL 中的随机 token 只用于定位进程，后端还必须核对 thread、session 和 flavor。
+- 后端按已保存的 session id 打开连接；工具参数不能覆盖 host、port、username、password、Vault ref 或 driver options。
+- SQL 分类器采用保守策略：只有可靠识别为只读的语句才免确认；多语句、DDL、DML、存储过程和未知语法按写操作处理。
+- Redis 同样使用保守的只读命令白名单。
+- 写 SQL、Redis 写命令、文件导出等副作用进入 HITL 确认卡；`disableAiWrite` 必须在后端生效。
+- 错误、身份卡和 MCP 返回值不得包含密码、连接串秘密或 Vault 内容。
+- 所有列表、查询、grep 和预览结果都有界，避免把数据库内容无上限送入模型上下文。
+
+## 关键实现
+
+- MCP HTTP/作用域：`src-tauri/src/agent/cc_bridge/mcp_http.rs`
+- SQL 工具：`src-tauri/src/agent/cc_bridge/mcp_sql.rs`
+- Redis 工具：`src-tauri/src/agent/cc_bridge/mcp_redis.rs`
+- 会话身份卡：`src-tauri/src/agent/cc_bridge/session_card.rs`
+- SQL 分类：`src-tauri/src/agent/sql_classify.rs`
+- 权限策略：`src-tauri/src/agent/safety.rs`
+- 数据库驱动：`src-tauri/src/database/`
+
+## 已知边界
+
+- `export_result` 当前只支持 CSV。
+- 捕获结果是后端受管的临时/缓存数据，不是长期备份格式；应用退出和清理策略必须可预测。
+- 身份卡是进程启动时快照，不代表持续刷新的 schema 或运行时 cwd。
+- 各数据库对 catalog/schema、取消和类型序列化的支持不同，统一工具需要返回明确的能力差异。
+- 浏览器 stub 可验证交互，不等同于真实数据库、Claude Code CLI 和 Tauri IPC 的原生证据。
+
+## 验证
+
+单元/集成测试至少覆盖：
+
+- flavor 选择和跨线程、跨会话、错 token 拒绝。
+- SQL 只读/写入/多语句分类及 `disableAiWrite`。
+- Redis 只读白名单与未知命令的保守确认。
+- 各 SQL 驱动的 schema 工具、结果上限、捕获、检索、CSV 转义和取消。
+- 捕获 id 猜测、路径穿越、过期文件和跨线程读取失败。
+- 身份卡脱敏，不包含秘密或其他会话信息。
+- 原生 UI 中的绑定、确认、取消、错误恢复和大结果导出。
+
+浏览器自动化用例位于 `qa-ui-auto-tests/`；真实数据库和真实 Claude Code CLI 的冒烟结果应作为发布证据保存，而不是写成永久“已验证”结论。

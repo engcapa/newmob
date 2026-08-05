@@ -1,7 +1,7 @@
 import type { NoteAlert } from "../notes";
 
 /**
- * Unified Tao alert model (see tao-notes-feature-plan.md §7.2, §10.3). A single
+ * Unified Tao alert model (see tao-notes-feature-plan.md). A single
  * badge/jump mechanism serves notes due/overdue/reminder alerts and chat
  * "AI reply ready" events today, with `mail` reserved for a future module.
  */

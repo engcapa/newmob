@@ -1383,7 +1383,7 @@ html[data-app-theme="dark"] .hover\:bg-white\/70:hover {
 }
 
 
-/* AI z-index hierarchy (ai-native-plan §10.1)
+/* AI z-index hierarchy (see ai-native-plan.md)
  *   100: MainLayout main area (terminal / SFTP / VNC)
  *   200: AI Chat Drawer (right side)
  *   300: Ctrl+K AiRewriteOverlay (small input + diff)

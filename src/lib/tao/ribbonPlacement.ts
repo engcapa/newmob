@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 
 /**
- * Tao Ribbon placement model (see tao-notes-feature-plan.md §7.1). The ribbon
+ * Tao Ribbon placement model (see tao-notes-feature-plan.md). The ribbon
  * docks to one of the four window edges at a fractional offset along that edge,
  * so its position stays relatively stable across window resizes.
  */

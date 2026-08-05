@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 import type { NotesFont, NotesTheme } from "../../stores/notesStore";
 
 /**
- * Notes theme system (see tao-notes-feature-plan.md §9). A theme re-maps a
+ * Notes theme system (see tao-notes-feature-plan.md). A theme re-maps a
  * handful of `--taomni-*` CSS variables **locally** on the notes panel root, so
  * it restyles only the notes surface and cards without disturbing the global
  * app theme. "taomni" inherits the app theme unchanged.

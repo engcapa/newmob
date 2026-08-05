@@ -2,7 +2,7 @@
 
 > Taomni — Local Server Manager Panel  
 > Design reference: MobaXterm "Servers management" dialog  
-> UI system: Taomni design tokens (`--taomni-*`), Tailwind CSS, React 18 + TypeScript
+> UI system: Taomni design tokens (`--taomni-*`), Tailwind CSS, React 19 + TypeScript
 
 ---
 

@@ -1,18 +1,18 @@
 # Taomni 已完成功能清单
 
-> 本文档基于当前仓库代码 + `IMPLEMENTATION_PLAN.md` / `TERMINAL_EXPERIENCE_PLAN.md` / `TERMINAL_APPEARANCE_PLAN.md` / `ipc-improve-plan.md` / `replit.md` 的标记，**仅记录已实现并接入主流程的功能**。
+> 本文档基于当前仓库代码、稳定 `data-testid` 目录和自动化用例维护，**仅记录已实现并接入主流程的功能**。架构与现状索引见 `DESIGN.md`、`IMPLEMENTATION_PLAN.md`。
 > 标记说明：
 > - ✅ 已完成
 > - 🟡 已部分完成（关键路径可用，仍有未覆盖的能力，列出具体范围）
 > - 未完成的能力不写入本文档（详见各 plan 文档的待办项）
-> 当前对照版本：v0.1.0 → v0.1.39（含本仓库 `package.json` 标识的当前版本）。
+> 当前对照版本：以本仓库 `package.json` 的 `0.4.9` 为准；下方历史版本记录仅用于追溯用例来源。
 
 ---
 
 ## 1. 应用框架与主界面
 
 ### 1.1 工程基座 ✅
-- Tauri 2 + React 18 + TypeScript + Vite 桌面工程已搭建
+- Tauri 2 + React 19 + TypeScript + Vite 桌面工程已搭建
 - Rust 后端模块拆分：`terminal / session / filebrowser / tunnel / appearance / config / state`
 - 前端目录拆分：`components / layouts / lib / stores / hooks / stubs / types`
 - 同时支持 **Tauri 桌面打包模式** 与 **Vite 浏览器开发预览模式**（通过 `TAURI_ENV_PLATFORM` 自动切换 stub/真实后端）

@@ -8,7 +8,7 @@ Taomni is a Tauri 2 desktop app with a React 19/TypeScript frontend and Rust bac
 
 - `pnpm install`: install Node dependencies.
 - `pnpm dev`: run the Vite frontend on port `5000` with `src/stubs/`.
-- `pnpm tauri dev`: run the full desktop app; Tauri uses Vite on port `1420`.
+- `pnpm tauri dev`: run the full desktop app; Tauri uses Vite on port `1980`.
 - `pnpm build`: run `tsc -b` and build frontend assets into `dist/`.
 - `pnpm test`: run frontend/unit tests with Vitest and jsdom.
 - `pnpm tauri build`: build and package the desktop app.
@@ -22,7 +22,7 @@ Use TypeScript strict mode and keep code free of unused locals and parameters. F
 
 ## Testing Guidelines
 
-Vitest tests colocate with source files and use `describe`/`it`. Add focused tests for new utilities, stores, and UI behavior. Rust tests use inline `#[test]` modules or files in `src-tauri/tests/`; async tests use `#[tokio::test]`. For UI workflow coverage, add or update `qa-ui-auto-tests/cases/TC-...testcase.yaml` and keep feature references aligned with `feature-list.md`.
+Vitest tests colocate with source files and use `describe`/`it`. Add focused tests for new utilities, stores, and UI behavior. Rust tests use inline `#[test]` modules or files in `src-tauri/tests/`; async tests use `#[tokio::test]`. For UI workflow coverage, add or update `qa-ui-auto-tests/cases/TC-...testcase.yaml` and keep feature references aligned with `qa-ui-auto-tests/feature-list.md`.
 
 ## Commit & Pull Request Guidelines
 

@@ -2,7 +2,7 @@ import type { ChatDrawerPosition } from "../../stores/chatStore";
 
 /**
  * How the chat drawer docks for a given position/pin state and viewport
- * (see tao-notes-feature-plan.md §8). Shared by MainLayout (placement) and
+ * (see tao-notes-feature-plan.md). Shared by MainLayout (placement) and
  * ChatDrawer (rendering) so both always agree.
  *
  * - "side-inline": left/right pinned — a full-height column beside the work area.
