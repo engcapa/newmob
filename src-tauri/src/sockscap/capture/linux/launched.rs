@@ -1,75 +1,35 @@
 //! Unprivileged Linux capture for applications launched by SocksCap.
 //!
-//! The launched process loads a small connect interposer.  TCP sockets keep
-//! their original file descriptor and nonblocking behaviour, but connect to a
-//! loopback listener instead.  Original destinations arrive out-of-band over
-//! a private Unix datagram control socket and are matched by the accepted
-//! socket's source address. A private environment fallback carries only the
-//! loopback ingress/control coordinates, so Chromium-style child launchers can
-//! close inherited descriptors without escaping capture. No
-//! HTTP_PROXY/ALL_PROXY-style application configuration is involved.
+//! A private launcher installs a seccomp filter and enters ptrace supervision
+//! before it execs the requested desktop or TUI application. The filter is
+//! inherited by the complete process tree and reports socket creation plus
+//! TCP connection attempts.
 
-use std::collections::HashMap;
-use std::ffi::{CString, OsString};
 use std::fs::{self, File};
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::{FileExt, PermissionsExt};
-use std::os::unix::net::UnixDatagram as StdUnixDatagram;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::net::{TcpListener, UnixDatagram};
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, Notify, RwLock, Semaphore};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::net::TcpListener;
+use tokio::sync::{RwLock, Semaphore};
+use tokio::task::JoinSet;
 
+use super::tracer::{FlowQueue, ProcessIdentity, TracerSupervisor};
 use crate::sockscap::relay::{
     ACCEPT_BACKOFF_INITIAL, ACCEPT_BACKOFF_MAX, CapturedFlow, MAX_ACTIVE_RELAY_FLOWS,
     RELAY_PERMIT_WAIT, RelayContext, RelayHandle, acquire_relay_flow_permit,
     new_relay_flow_limiter,
 };
 
-const CONFIG_FD: libc::c_int = 199;
-const CONFIG_MAGIC: u32 = 0x544d_5343;
-const FLOW_MAGIC: u32 = 0x544d_464c;
-const PROTOCOL_VERSION: u16 = 1;
-const CONFIG_FLAG_IPV6_READY: u16 = 1;
 const FLOW_WAIT: Duration = Duration::from_secs(2);
-const MAX_PENDING_FLOWS: usize = 8192;
-const PENDING_FLOW_TTL: Duration = Duration::from_secs(10);
-
-static SHIM_BYTES: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/libtaomni-sockscap-launch.so"));
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct LaunchConfig {
-    magic: u32,
-    version: u16,
-    flags: u16,
-    relay_port: u16,
-    reserved: u16,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct FlowRegistration {
-    magic: u32,
-    version: u16,
-    family: u16,
-    pid: u32,
-    fd: i32,
-    source_port: u16,
-    destination_port: u16,
-    source_address: [u8; 16],
-    destination_address: [u8; 16],
-}
+static LAUNCHER_BYTES: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/taomni-sockscap-trace-launcher"));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,23 +41,11 @@ pub struct LaunchedAppInfo {
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_session_id: Option<String>,
-    #[serde(default)]
-    pub capture_compatibility: CaptureCompatibility,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum CaptureCompatibility {
-    #[default]
-    LibcInterposed,
-    DirectSyscallRisk,
 }
 
 struct LaunchedProcess {
     info: LaunchedAppInfo,
-    child: Option<Child>,
     process_group: libc::pid_t,
-    registration_task: JoinHandle<()>,
     terminal_running: Option<Arc<AtomicBool>>,
 }
 
@@ -122,124 +70,32 @@ impl Drop for TerminalActivityReader {
     }
 }
 
-struct ControlSocketPath {
-    path: PathBuf,
-    socket: StdUnixDatagram,
-}
-
-impl ControlSocketPath {
-    fn bind(path: PathBuf) -> Result<Self, String> {
-        let socket = StdUnixDatagram::bind(&path).map_err(|error| {
-            format!(
-                "bind SocksCap launch control socket {}: {error}",
-                path.display()
-            )
-        })?;
-        Ok(Self { path, socket })
-    }
-}
-
-impl Drop for ControlSocketPath {
-    fn drop(&mut self) {
-        if let Err(error) = fs::remove_file(&self.path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::debug!(
-                path = %self.path.display(),
-                "remove SocksCap launch control socket: {error}"
-            );
-        }
-    }
-}
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-struct FlowKey(SocketAddr);
-
-#[derive(Debug, Clone)]
-struct PendingFlow {
-    destination: SocketAddr,
-    pid: u32,
-    process_path: String,
-    profile_id: String,
-    registered_at: Instant,
-}
-
-#[derive(Default)]
-struct FlowRegistry {
-    pending: Mutex<HashMap<FlowKey, PendingFlow>>,
-    changed: Notify,
-}
-
-impl FlowRegistry {
-    async fn insert(&self, source: SocketAddr, flow: PendingFlow) {
-        let mut pending = self.pending.lock().await;
-        if pending.len() >= MAX_PENDING_FLOWS {
-            let now = Instant::now();
-            pending.retain(|_, value| now.duration_since(value.registered_at) < PENDING_FLOW_TTL);
-        }
-        if pending.len() >= MAX_PENDING_FLOWS {
-            if let Some(oldest) = pending
-                .iter()
-                .min_by_key(|(_, value)| value.registered_at)
-                .map(|(key, _)| key.clone())
-            {
-                pending.remove(&oldest);
-            }
-        }
-        pending.insert(FlowKey(source), flow);
-        drop(pending);
-        self.changed.notify_waiters();
-    }
-
-    async fn wait_take(&self, source: SocketAddr) -> Option<PendingFlow> {
-        let deadline = tokio::time::Instant::now() + FLOW_WAIT;
-        loop {
-            let notified = self.changed.notified();
-            if let Some(flow) = self.pending.lock().await.remove(&FlowKey(source)) {
-                if flow.registered_at.elapsed() < PENDING_FLOW_TTL {
-                    return Some(flow);
-                }
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return None;
-            }
-            if tokio::time::timeout(deadline - now, notified)
-                .await
-                .is_err()
-            {
-                return None;
-            }
-        }
-    }
-}
-
-/// Lifecycle for the launch-only backend.  It owns no system network state, so
+/// Lifecycle for the launch-only backend. It owns no system network state, so
 /// stop can always return to Idle after closing its children and listener.
 pub struct LaunchedCaptureHandle {
     relay: Option<RelayHandle>,
     relay_port: u16,
-    ipv6_ready: bool,
-    registry: Arc<FlowRegistry>,
-    shim_path: PathBuf,
-    runtime_dir: PathBuf,
+    launcher_path: PathBuf,
     processes: Vec<LaunchedProcess>,
+    tracer: Option<TracerSupervisor>,
 }
 
 impl LaunchedCaptureHandle {
     pub async fn start(ctx: Arc<RwLock<RelayContext>>, runtime_dir: &Path) -> Result<Self, String> {
-        let shim_path = materialize_shim(runtime_dir)?;
-        let registry = Arc::new(FlowRegistry::default());
-        let (relay, ipv6_ready) = start_redirect_ingress(ctx, Arc::clone(&registry)).await?;
+        let launcher_path = materialize_launcher(runtime_dir)?;
+        super::tracer::preflight(&launcher_path).map_err(|error| {
+            format!("Linux rootless application capture is unavailable: {error}")
+        })?;
+        let flows = Arc::new(FlowQueue::default());
+        let (relay, ipv6_ready) = start_redirect_ingress(ctx, Arc::clone(&flows)).await?;
         let relay_port = relay.port;
+        let tracer = TracerSupervisor::start(relay_port, ipv6_ready, flows);
         Ok(Self {
             relay: Some(relay),
             relay_port,
-            ipv6_ready,
-            registry,
-            shim_path,
-            runtime_dir: runtime_dir.to_path_buf(),
+            launcher_path,
             processes: Vec::new(),
+            tracer: Some(tracer),
         })
     }
 
@@ -255,71 +111,17 @@ impl LaunchedCaptureHandle {
     ) -> Result<LaunchedAppInfo, String> {
         let command_name = command_name.trim();
         let executable = resolve_executable(command_name)?;
-        let control_path = self
-            .runtime_dir
-            .join(format!("launch-{}.sock", uuid::Uuid::new_v4()));
-        let control_path_guard = ControlSocketPath::bind(control_path)?;
-        let parent_control = control_path_guard
-            .socket
-            .try_clone()
-            .map_err(|error| format!("clone SocksCap launch control socket: {error}"))?;
-        parent_control
-            .set_nonblocking(true)
-            .map_err(|error| format!("configure SocksCap launch control socket: {error}"))?;
-        let config_file = create_config_memfd(self.relay_port, self.ipv6_ready)?;
-        let config_fd = duplicate_for_child(config_file.as_raw_fd())
-            .map_err(|error| format!("prepare SocksCap launch config descriptor: {error}"))?;
-        let config_raw = config_fd.as_raw_fd();
-
-        let mut command = Command::new(&executable);
-        command.args(args);
-        let preload = match std::env::var_os("LD_PRELOAD") {
-            Some(existing) if !existing.is_empty() => {
-                let mut value = self.shim_path.as_os_str().to_os_string();
-                value.push(":");
-                value.push(existing);
-                value
-            }
-            _ => self.shim_path.as_os_str().to_os_string(),
-        };
-        command.env("LD_PRELOAD", preload);
-        command.env(
-            "TAOMNI_SOCKSCAP_CONTROL_PATH",
-            control_path_guard.path.as_os_str(),
-        );
-        command.env("TAOMNI_SOCKSCAP_RELAY_PORT", self.relay_port.to_string());
-        command.env(
-            "TAOMNI_SOCKSCAP_IPV6_READY",
-            if self.ipv6_ready { "1" } else { "0" },
-        );
-        command.kill_on_drop(false);
-        unsafe {
-            command.pre_exec(move || {
-                if libc::setsid() < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                duplicate_inherited_fd(config_raw, CONFIG_FD)?;
-                Ok(())
-            });
+        let executable_text = executable.to_string_lossy().into_owned();
+        let pid = self
+            .tracer
+            .as_ref()
+            .ok_or_else(|| "SocksCap ptrace supervisor is not running".to_string())?
+            .spawn_desktop(&self.launcher_path, &executable, args)?;
+        if let Err(error) = self.register_trace(pid, profile_id, &executable_text) {
+            kill_process_group(pid as libc::pid_t);
+            return Err(error);
         }
-        let child = command
-            .spawn()
-            .map_err(|error| format!("launch {command_name} through SocksCap: {error}"))?;
-        drop(config_file);
-        drop(config_fd);
 
-        let pid = child.id().ok_or_else(|| {
-            "launched application exited before its PID was available".to_string()
-        })?;
-        let process_path = executable.to_string_lossy().into_owned();
-        let capture_compatibility = capture_compatibility(&executable);
-        let registration_task = spawn_registration_reader(
-            parent_control,
-            Arc::clone(&self.registry),
-            profile_id.to_string(),
-            process_path.clone(),
-            control_path_guard,
-        )?;
         let info = LaunchedAppInfo {
             pid,
             profile_id: profile_id.to_string(),
@@ -327,29 +129,22 @@ impl LaunchedCaptureHandle {
             args: args.to_vec(),
             running: true,
             terminal_session_id: None,
-            capture_compatibility,
         };
-        warn_about_capture_compatibility(pid, &executable, capture_compatibility);
         tracing::info!(
             pid,
             command = command_name,
             executable = %executable.display(),
             argument_count = args.len(),
-            "SocksCap launched application with rootless capture"
+            "SocksCap launched application under ptrace/seccomp capture"
         );
         self.processes.push(LaunchedProcess {
             info: info.clone(),
-            child: Some(child),
             process_group: pid as libc::pid_t,
-            registration_task,
             terminal_running: None,
         });
         Ok(info)
     }
 
-    /// Launch an interactive command in a controlling PTY while applying the
-    /// same connect interposer as desktop launch mode. The returned PTY is
-    /// registered with Taomni's terminal subsystem by the Tauri command layer.
     pub fn launch_terminal_app(
         &mut self,
         profile_id: &str,
@@ -368,48 +163,17 @@ impl LaunchedCaptureHandle {
     > {
         let command_name = command_name.trim();
         let executable = resolve_executable(command_name)?;
-        let control_path = self
-            .runtime_dir
-            .join(format!("launch-{}.sock", uuid::Uuid::new_v4()));
-        let control_path_guard = ControlSocketPath::bind(control_path)?;
-        let parent_control = control_path_guard
-            .socket
-            .try_clone()
-            .map_err(|error| format!("clone SocksCap launch control socket: {error}"))?;
-        parent_control
-            .set_nonblocking(true)
-            .map_err(|error| format!("configure SocksCap launch control socket: {error}"))?;
-
-        let environment = launch_environment(
-            &self.shim_path,
-            &control_path_guard.path,
-            self.relay_port,
-            self.ipv6_ready,
-        );
         let executable_text = executable.to_string_lossy().into_owned();
-        let (mut handle, reader) = crate::terminal::pty::create_command_pty_with_environment(
-            cols,
-            rows,
-            &executable_text,
-            args,
-            &environment,
-        )?;
-        let pid = handle.child.process_id().ok_or_else(|| {
-            "terminal application exited before its PID was available".to_string()
-        })?;
-        let registration_task = match spawn_registration_reader(
-            parent_control,
-            Arc::clone(&self.registry),
-            profile_id.to_string(),
-            executable_text.clone(),
-            control_path_guard,
-        ) {
-            Ok(task) => task,
-            Err(error) => {
-                let _ = handle.child.kill();
-                return Err(error);
-            }
-        };
+        let (pid, mut handle, reader) = self
+            .tracer
+            .as_ref()
+            .ok_or_else(|| "SocksCap ptrace supervisor is not running".to_string())?
+            .spawn_terminal(&self.launcher_path, &executable, args, cols, rows)?;
+        if let Err(error) = self.register_trace(pid, profile_id, &executable_text) {
+            let _ = handle.child.kill();
+            return Err(error);
+        }
+
         let info = LaunchedAppInfo {
             pid,
             profile_id: profile_id.to_string(),
@@ -417,16 +181,14 @@ impl LaunchedCaptureHandle {
             args: args.to_vec(),
             running: true,
             terminal_session_id: Some(terminal_session_id.to_string()),
-            capture_compatibility: capture_compatibility(&executable),
         };
-        warn_about_capture_compatibility(pid, &executable, info.capture_compatibility);
         tracing::info!(
             pid,
             command = command_name,
             executable = %executable.display(),
             argument_count = args.len(),
             terminal_session_id,
-            "SocksCap launched terminal application with rootless capture"
+            "SocksCap launched terminal application under ptrace/seccomp capture"
         );
         let terminal_running = Arc::new(AtomicBool::new(true));
         let tracked_reader: Box<dyn Read + Send> = Box::new(TerminalActivityReader {
@@ -435,12 +197,24 @@ impl LaunchedCaptureHandle {
         });
         self.processes.push(LaunchedProcess {
             info: info.clone(),
-            child: None,
             process_group: pid as libc::pid_t,
-            registration_task,
             terminal_running: Some(terminal_running),
         });
         Ok((info, handle, tracked_reader))
+    }
+
+    fn register_trace(&self, pid: u32, profile_id: &str, executable: &str) -> Result<(), String> {
+        self.tracer
+            .as_ref()
+            .ok_or_else(|| "SocksCap ptrace supervisor is not running".to_string())?
+            .register_root(
+                pid,
+                ProcessIdentity {
+                    profile_id: profile_id.to_string(),
+                    configured_path: executable.to_string(),
+                },
+            )
+            .map_err(|error| format!("attach rootless capture to PID {pid}: {error}"))
     }
 
     pub fn apps(&mut self) -> Vec<LaunchedAppInfo> {
@@ -452,18 +226,9 @@ impl LaunchedCaptureHandle {
                     .is_some_and(|running| !running.load(Ordering::Acquire))
                 {
                     process.info.running = false;
-                    process.registration_task.abort();
                     continue;
                 }
-                if let Some(child) = process.child.as_mut() {
-                    if let Err(error) = child.try_wait() {
-                        tracing::warn!(pid = process.info.pid, "read launched app status: {error}");
-                    }
-                }
                 process.info.running = process_group_is_alive(process.process_group);
-                if !process.info.running {
-                    process.registration_task.abort();
-                }
             }
         }
         self.processes
@@ -487,6 +252,9 @@ impl LaunchedCaptureHandle {
                 tracing::warn!(pid = process.info.pid, "stop launched app: {error}");
             }
         }
+        if let Some(mut tracer) = self.tracer.take() {
+            tracer.shutdown();
+        }
         if let Some(relay) = self.relay.take() {
             relay.stop().await;
         }
@@ -496,6 +264,10 @@ impl LaunchedCaptureHandle {
 fn process_group_is_alive(process_group: libc::pid_t) -> bool {
     let result = unsafe { libc::kill(-process_group, 0) };
     result == 0 || std::io::Error::last_os_error().kind() == std::io::ErrorKind::PermissionDenied
+}
+
+fn kill_process_group(process_group: libc::pid_t) {
+    unsafe { libc::kill(-process_group, libc::SIGKILL) };
 }
 
 async fn stop_process_group(process: &mut LaunchedProcess) -> Result<(), String> {
@@ -511,9 +283,6 @@ async fn stop_process_group(process: &mut LaunchedProcess) -> Result<(), String>
             }
         }
         for _ in 0..20 {
-            if let Some(child) = process.child.as_mut() {
-                let _ = child.try_wait();
-            }
             if !process_group_is_alive(process.process_group) {
                 break;
             }
@@ -532,14 +301,10 @@ async fn stop_process_group(process: &mut LaunchedProcess) -> Result<(), String>
             }
         }
     }
-    if let Some(child) = process.child.as_mut() {
-        let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
-    }
     process.info.running = false;
     if let Some(running) = &process.terminal_running {
         running.store(false, Ordering::Release);
     }
-    process.registration_task.abort();
     Ok(())
 }
 
@@ -552,38 +317,6 @@ fn resolve_executable(command: &str) -> Result<PathBuf, String> {
     })?;
     validate_executable(&path)?;
     Ok(path)
-}
-
-fn launch_environment(
-    shim_path: &Path,
-    control_path: &Path,
-    relay_port: u16,
-    ipv6_ready: bool,
-) -> Vec<(OsString, OsString)> {
-    let preload = match std::env::var_os("LD_PRELOAD") {
-        Some(existing) if !existing.is_empty() => {
-            let mut value = shim_path.as_os_str().to_os_string();
-            value.push(":");
-            value.push(existing);
-            value
-        }
-        _ => shim_path.as_os_str().to_os_string(),
-    };
-    vec![
-        (OsString::from("LD_PRELOAD"), preload),
-        (
-            OsString::from("TAOMNI_SOCKSCAP_CONTROL_PATH"),
-            control_path.as_os_str().to_os_string(),
-        ),
-        (
-            OsString::from("TAOMNI_SOCKSCAP_RELAY_PORT"),
-            OsString::from(relay_port.to_string()),
-        ),
-        (
-            OsString::from("TAOMNI_SOCKSCAP_IPV6_READY"),
-            OsString::from(if ipv6_ready { "1" } else { "0" }),
-        ),
-    ]
 }
 
 fn validate_executable(path: &Path) -> Result<(), String> {
@@ -610,282 +343,50 @@ fn validate_executable(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn capture_compatibility(path: &Path) -> CaptureCompatibility {
-    if elf_has_section(path, b".go.buildinfo") || elf_has_section(path, b".gopclntab") {
-        CaptureCompatibility::DirectSyscallRisk
-    } else {
-        CaptureCompatibility::LibcInterposed
-    }
-}
-
-fn warn_about_capture_compatibility(
-    pid: u32,
-    executable: &Path,
-    compatibility: CaptureCompatibility,
-) {
-    if matches!(compatibility, CaptureCompatibility::DirectSyscallRisk) {
-        tracing::warn!(
-            pid,
-            executable = %executable.display(),
-            "SocksCap detected a Go/direct-syscall application; unprivileged libc interposition may only capture its dynamically linked child applications"
-        );
-    }
-}
-
-/// Inspect the ELF section-name table without reading the whole executable.
-/// Go applications retain `.go.buildinfo` or `.gopclntab` even when their
-/// symbols and build metadata have otherwise been stripped.
-fn elf_has_section(path: &Path, target: &[u8]) -> bool {
-    const ELF64_HEADER_SIZE: usize = 64;
-    const ELF64_SECTION_HEADER_SIZE: usize = 64;
-    const MAX_SECTION_COUNT: usize = 8192;
-    const MAX_SECTION_NAMES_SIZE: usize = 1024 * 1024;
-
-    let Ok(file) = File::open(path) else {
-        return false;
-    };
-    let mut header = [0u8; ELF64_HEADER_SIZE];
-    if file.read_exact_at(&mut header, 0).is_err()
-        || &header[..4] != b"\x7fELF"
-        || header[4] != 2
-        || header[5] != 1
-    {
-        return false;
-    }
-
-    let section_offset = u64::from_le_bytes(header[40..48].try_into().unwrap());
-    let section_entry_size = u16::from_le_bytes(header[58..60].try_into().unwrap()) as usize;
-    let section_count = u16::from_le_bytes(header[60..62].try_into().unwrap()) as usize;
-    let names_index = u16::from_le_bytes(header[62..64].try_into().unwrap()) as usize;
-    if section_offset == 0
-        || section_entry_size < ELF64_SECTION_HEADER_SIZE
-        || section_count == 0
-        || section_count > MAX_SECTION_COUNT
-        || names_index >= section_count
-    {
-        return false;
-    }
-
-    let mut names_header = [0u8; ELF64_SECTION_HEADER_SIZE];
-    let Some(names_header_offset) = section_offset.checked_add(
-        (names_index as u64).saturating_mul(section_entry_size as u64),
-    ) else {
-        return false;
-    };
-    if file
-        .read_exact_at(&mut names_header, names_header_offset)
-        .is_err()
-    {
-        return false;
-    }
-    let names_offset = u64::from_le_bytes(names_header[24..32].try_into().unwrap());
-    let names_size = u64::from_le_bytes(names_header[32..40].try_into().unwrap()) as usize;
-    if names_size == 0 || names_size > MAX_SECTION_NAMES_SIZE {
-        return false;
-    }
-    let mut names = vec![0u8; names_size];
-    if file.read_exact_at(&mut names, names_offset).is_err() {
-        return false;
-    }
-
-    let mut section_header = [0u8; ELF64_SECTION_HEADER_SIZE];
-    for index in 0..section_count {
-        let Some(offset) = section_offset
-            .checked_add((index as u64).saturating_mul(section_entry_size as u64))
-        else {
-            return false;
-        };
-        if file.read_exact_at(&mut section_header, offset).is_err() {
-            return false;
-        }
-        let name_offset =
-            u32::from_le_bytes(section_header[..4].try_into().unwrap()) as usize;
-        let Some(tail) = names.get(name_offset..) else {
-            continue;
-        };
-        let length = tail.iter().position(|byte| *byte == 0).unwrap_or(tail.len());
-        if &tail[..length] == target {
-            return true;
-        }
-    }
-    false
-}
-
-fn materialize_shim(runtime_dir: &Path) -> Result<PathBuf, String> {
+fn materialize_launcher(runtime_dir: &Path) -> Result<PathBuf, String> {
     fs::create_dir_all(runtime_dir)
         .map_err(|error| format!("create SocksCap runtime directory: {error}"))?;
     fs::set_permissions(runtime_dir, fs::Permissions::from_mode(0o700))
         .map_err(|error| format!("secure SocksCap runtime directory: {error}"))?;
-    let path = runtime_dir.join("libtaomni-sockscap-launch.so");
-    if fs::read(&path).ok().as_deref() == Some(SHIM_BYTES) {
+    let path = runtime_dir.join("taomni-sockscap-trace-launcher");
+    if fs::read(&path).ok().as_deref() == Some(LAUNCHER_BYTES) {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("secure SocksCap trace launcher: {error}"))?;
         return Ok(path);
     }
     let temporary = runtime_dir.join(format!(
-        ".libtaomni-sockscap-launch-{}.tmp",
+        ".taomni-sockscap-trace-launcher-{}.tmp",
         std::process::id()
     ));
     let mut file = File::create(&temporary)
-        .map_err(|error| format!("create SocksCap launch shim: {error}"))?;
-    file.write_all(SHIM_BYTES)
+        .map_err(|error| format!("create SocksCap trace launcher: {error}"))?;
+    file.write_all(LAUNCHER_BYTES)
         .and_then(|()| file.sync_all())
-        .map_err(|error| format!("write SocksCap launch shim: {error}"))?;
+        .map_err(|error| format!("write SocksCap trace launcher: {error}"))?;
     fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))
-        .map_err(|error| format!("set SocksCap launch shim permissions: {error}"))?;
+        .map_err(|error| format!("set SocksCap trace launcher permissions: {error}"))?;
     fs::rename(&temporary, &path)
-        .map_err(|error| format!("install SocksCap launch shim: {error}"))?;
+        .map_err(|error| format!("install SocksCap trace launcher: {error}"))?;
     Ok(path)
 }
 
-fn create_config_memfd(relay_port: u16, ipv6_ready: bool) -> Result<File, String> {
-    let name = CString::new("taomni-sockscap-launch")
-        .map_err(|error| format!("create memfd name: {error}"))?;
-    let fd = unsafe { libc::syscall(libc::SYS_memfd_create, name.as_ptr(), libc::MFD_CLOEXEC) };
-    if fd < 0 {
-        return Err(format!(
-            "create SocksCap launch configuration: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let mut file = unsafe { File::from_raw_fd(fd as libc::c_int) };
-    let config = LaunchConfig {
-        magic: CONFIG_MAGIC,
-        version: PROTOCOL_VERSION,
-        flags: if ipv6_ready {
-            CONFIG_FLAG_IPV6_READY
-        } else {
-            0
-        },
-        relay_port,
-        reserved: 0,
-    };
-    let bytes = unsafe {
-        std::slice::from_raw_parts(
-            (&config as *const LaunchConfig).cast::<u8>(),
-            std::mem::size_of::<LaunchConfig>(),
-        )
-    };
-    file.write_all(bytes)
-        .map_err(|error| format!("write SocksCap launch configuration: {error}"))?;
-    Ok(file)
-}
-
-fn duplicate_inherited_fd(source: libc::c_int, destination: libc::c_int) -> std::io::Result<()> {
-    if source != destination && unsafe { libc::dup2(source, destination) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(destination, libc::F_SETFD, 0) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn duplicate_for_child(source: libc::c_int) -> std::io::Result<OwnedFd> {
-    let duplicated = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 256) };
-    if duplicated < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(duplicated) })
-}
-
-fn spawn_registration_reader(
-    socket: StdUnixDatagram,
-    registry: Arc<FlowRegistry>,
-    profile_id: String,
-    configured_path: String,
-    control_path: ControlSocketPath,
-) -> Result<JoinHandle<()>, String> {
-    let socket = UnixDatagram::from_std(socket)
-        .map_err(|error| format!("adopt SocksCap launch control socket: {error}"))?;
-    Ok(tokio::spawn(async move {
-        // Keep the bound filesystem socket alive for every descendant. It is
-        // removed automatically when this task exits or is aborted.
-        let _control_path = control_path;
-        let mut buffer = [0u8; 256];
-        let mut reported_first_flow = false;
-        loop {
-            let count = match socket.recv(&mut buffer).await {
-                Ok(count) => count,
-                Err(error) => {
-                    tracing::debug!("SocksCap launch control socket closed: {error}");
-                    break;
-                }
-            };
-            let Some(registration) = decode_registration(&buffer[..count]) else {
-                tracing::warn!("ignored malformed SocksCap launch flow registration");
-                continue;
-            };
-            let Some(source) = registration.source() else {
-                continue;
-            };
-            let Some(destination) = registration.destination() else {
-                continue;
-            };
-            if !reported_first_flow {
-                tracing::info!(
-                    pid = registration.pid,
-                    %destination,
-                    "SocksCap received the first rootless flow registration"
-                );
-                reported_first_flow = true;
-            }
-            let process_path = fs::read_link(format!("/proc/{}/exe", registration.pid))
-                .ok()
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| configured_path.clone());
-            registry
-                .insert(
-                    source,
-                    PendingFlow {
-                        destination,
-                        pid: registration.pid,
-                        process_path,
-                        profile_id: profile_id.clone(),
-                        registered_at: Instant::now(),
-                    },
-                )
-                .await;
-        }
-    }))
-}
-
-fn decode_registration(bytes: &[u8]) -> Option<FlowRegistration> {
-    if bytes.len() != std::mem::size_of::<FlowRegistration>() {
-        return None;
-    }
-    let registration: FlowRegistration = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast()) };
-    (registration.magic == FLOW_MAGIC && registration.version == PROTOCOL_VERSION)
-        .then_some(registration)
-}
-
-impl FlowRegistration {
-    fn source(&self) -> Option<SocketAddr> {
-        socket_address(self.family, self.source_address, self.source_port)
-    }
-
-    fn destination(&self) -> Option<SocketAddr> {
-        socket_address(self.family, self.destination_address, self.destination_port)
-    }
-}
-
-fn socket_address(family: u16, bytes: [u8; 16], port: u16) -> Option<SocketAddr> {
-    match family as libc::c_int {
-        libc::AF_INET => Some(SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]),
-            port,
-        ))),
-        libc::AF_INET6 => Some(SocketAddr::V6(SocketAddrV6::new(
-            Ipv6Addr::from(bytes),
-            port,
-            0,
-            0,
-        ))),
-        _ => None,
-    }
+/// Read-only capability probe used before rootless backend selection.
+pub fn preflight() -> Result<(), String> {
+    let directory = std::env::temp_dir().join(format!(
+        "taomni-sockscap-preflight-{}-{}",
+        unsafe { libc::geteuid() },
+        uuid::Uuid::new_v4()
+    ));
+    let launcher = materialize_launcher(&directory)?;
+    let result = super::tracer::preflight(&launcher);
+    let _ = fs::remove_file(&launcher);
+    let _ = fs::remove_dir(&directory);
+    result
 }
 
 async fn start_redirect_ingress(
     ctx: Arc<RwLock<RelayContext>>,
-    registry: Arc<FlowRegistry>,
+    flows: Arc<FlowQueue>,
 ) -> Result<(RelayHandle, bool), String> {
     let listener_v4 = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .await
@@ -909,12 +410,12 @@ async fn start_redirect_ingress(
         let v4 = accept_loop(
             listener_v4,
             Arc::clone(&ctx),
-            Arc::clone(&registry),
+            Arc::clone(&flows),
             Arc::clone(&stop_for_task),
             Arc::clone(&limiter),
         );
         if let Some(listener_v6) = listener_v6 {
-            let v6 = accept_loop(listener_v6, ctx, registry, stop_for_task, limiter);
+            let v6 = accept_loop(listener_v6, ctx, flows, stop_for_task, limiter);
             let _ = tokio::join!(v4, v6);
         } else {
             v4.await;
@@ -945,7 +446,7 @@ fn bind_loopback_v6(port: u16) -> Result<TcpListener, String> {
 async fn accept_loop(
     listener: TcpListener,
     ctx: Arc<RwLock<RelayContext>>,
-    registry: Arc<FlowRegistry>,
+    flows: Arc<FlowQueue>,
     stop: Arc<AtomicBool>,
     limiter: Arc<Semaphore>,
 ) {
@@ -984,15 +485,11 @@ async fn accept_loop(
             continue;
         };
         let ctx = Arc::clone(&ctx);
-        let registry = Arc::clone(&registry);
+        let flows = Arc::clone(&flows);
         clients.spawn(async move {
             let _permit = permit;
-            let flow = registry
-                .wait_take(peer)
-                .await
-                .ok_or_else(|| format!("no launch flow registration for {peer}"));
-            match flow {
-                Ok(flow) => {
+            match flows.wait_take(FLOW_WAIT).await {
+                Some(flow) => {
                     let captured = CapturedFlow {
                         dest_ip: Some(flow.destination.ip()),
                         dest_host: None,
@@ -1005,10 +502,10 @@ async fn accept_loop(
                     if let Err(error) =
                         crate::sockscap::relay::handle_captured_client(socket, captured, ctx).await
                     {
-                        tracing::warn!("Linux launch relay client {peer}: {error}");
+                        tracing::warn!("Linux rootless relay client {peer}: {error}");
                     }
                 }
-                Err(error) => tracing::warn!("Linux launch relay client {peer}: {error}"),
+                None => tracing::warn!("Linux rootless relay client {peer}: no traced connect"),
             }
         });
     }
@@ -1018,59 +515,140 @@ async fn accept_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Seek, Write};
+    use std::collections::HashMap;
+    use std::process::Command;
+    use std::sync::Mutex;
 
-    #[test]
-    fn protocol_layout_matches_the_c_interposer() {
-        assert_eq!(std::mem::size_of::<LaunchConfig>(), 12);
-        assert_eq!(std::mem::size_of::<FlowRegistration>(), 52);
+    use crate::sockscap::config::{RuleMode, ScopeMode, UpstreamKind};
+    use crate::sockscap::helper::HelperRegistry;
+    use crate::sockscap::relay::{RelayContext, ResolvedUpstream};
+    use crate::sockscap::rules::dns_map::DnsMap;
+    use crate::sockscap::stats::{DomainTracker, StatsCounters};
+
+    struct RootlessTestCapture {
+        capture: LaunchedCaptureHandle,
+        profile_id: String,
+        stats: Arc<StatsCounters>,
+        directory: tempfile::TempDir,
     }
 
-    #[test]
-    fn decodes_ipv4_registration() {
-        let mut registration = FlowRegistration {
-            magic: FLOW_MAGIC,
-            version: PROTOCOL_VERSION,
-            family: libc::AF_INET as u16,
-            pid: 42,
-            fd: 7,
-            source_port: 32000,
-            destination_port: 443,
-            source_address: [0; 16],
-            destination_address: [0; 16],
-        };
-        registration.source_address[..4].copy_from_slice(&[127, 0, 0, 1]);
-        registration.destination_address[..4].copy_from_slice(&[93, 184, 216, 34]);
-        assert_eq!(
-            registration.source().unwrap(),
-            "127.0.0.1:32000".parse().unwrap()
+    async fn start_rootless_test_capture() -> RootlessTestCapture {
+        let proxy = std::env::var("TAOMNI_TEST_HTTP_PROXY")
+            .expect("set TAOMNI_TEST_HTTP_PROXY, for example http://127.0.0.1:31128");
+        let proxy = url::Url::parse(&proxy).expect("parse TAOMNI_TEST_HTTP_PROXY");
+        assert_eq!(proxy.scheme(), "http");
+        let proxy_host = proxy.host_str().unwrap().to_string();
+        let proxy_port = proxy.port_or_known_default().unwrap();
+
+        let mut config = crate::sockscap::config::SocksCapConfig::default();
+        let profile = &mut config.profiles[0];
+        profile.mode = ScopeMode::Apps;
+        profile.rule_mode = RuleMode::ProxyAll;
+        profile.upstream.kind = UpstreamKind::Http;
+        profile.upstream.host = proxy_host.clone();
+        profile.upstream.port = proxy_port;
+        let profile_id = profile.id.clone();
+        config.active_profile_ids = vec![profile_id.clone()];
+
+        let stats = Arc::new(StatsCounters::default());
+        let mut profile_upstreams = HashMap::new();
+        profile_upstreams.insert(
+            profile_id.clone(),
+            ResolvedUpstream {
+                kind: UpstreamKind::Http,
+                host: proxy_host.clone(),
+                port: proxy_port,
+                user: String::new(),
+                pass: String::new(),
+                ssh_pool: None,
+                xray_port: None,
+            },
         );
-        assert_eq!(
-            registration.destination().unwrap(),
-            "93.184.216.34:443".parse().unwrap()
-        );
-    }
+        let context = Arc::new(RwLock::new(RelayContext {
+            engine: RelayContext::build_engine(&config, None),
+            config,
+            rules: None,
+            helper: Arc::new(HelperRegistry::new()),
+            helper_client: None,
+            stats: Arc::clone(&stats),
+            upstream_host: proxy_host,
+            upstream_port: proxy_port,
+            upstream_user: String::new(),
+            upstream_pass: String::new(),
+            self_pid: std::process::id(),
+            ssh_pool: None,
+            xray_port: None,
+            profile_upstreams,
+            dns_map: Arc::new(Mutex::new(DnsMap::new(64, Duration::from_secs(60)))),
+            domains: Arc::new(Mutex::new(DomainTracker::new(32))),
+        }));
 
-    #[test]
-    fn launch_config_records_ipv6_availability() {
-        let mut file = create_config_memfd(43123, true).unwrap();
-        file.rewind().unwrap();
-        let mut bytes = [0u8; std::mem::size_of::<LaunchConfig>()];
-        file.read_exact(&mut bytes).unwrap();
-        let config = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<LaunchConfig>()) };
-        assert_eq!(config.magic, CONFIG_MAGIC);
-        assert_eq!(config.version, PROTOCOL_VERSION);
-        assert_eq!(config.relay_port, 43123);
-        assert_eq!(config.flags, CONFIG_FLAG_IPV6_READY);
-    }
-
-    #[test]
-    fn materialized_shim_is_private_and_stable() {
         let directory = tempfile::tempdir().unwrap();
-        let first = materialize_shim(directory.path()).unwrap();
-        let second = materialize_shim(directory.path()).unwrap();
+        let capture = LaunchedCaptureHandle::start(context, directory.path())
+            .await
+            .expect("start ptrace/seccomp capture");
+        RootlessTestCapture {
+            capture,
+            profile_id,
+            stats,
+            directory,
+        }
+    }
+
+    async fn wait_for_text(path: &Path, expected: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if fs::read_to_string(path)
+                .ok()
+                .is_some_and(|body| body.contains(expected))
+            {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {} to contain {expected:?}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn wait_for_nonempty_file(path: &Path) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for {}",
+                path.display()
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    fn curl_arguments(output: &Path) -> Vec<String> {
+        vec![
+            "--noproxy".into(),
+            "*".into(),
+            "--silent".into(),
+            "--show-error".into(),
+            "--max-time".into(),
+            "20".into(),
+            "--output".into(),
+            output.to_string_lossy().into_owned(),
+            "http://example.com/".into(),
+        ]
+    }
+
+    #[test]
+    fn materialized_launcher_is_private_and_stable() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = materialize_launcher(directory.path()).unwrap();
+        let second = materialize_launcher(directory.path()).unwrap();
         assert_eq!(first, second);
-        assert_eq!(fs::read(&first).unwrap(), SHIM_BYTES);
+        assert_eq!(fs::read(&first).unwrap(), LAUNCHER_BYTES);
         assert_eq!(
             fs::metadata(&first).unwrap().permissions().mode() & 0o777,
             0o700
@@ -1084,54 +662,215 @@ mod tests {
         assert!(fs::metadata(executable).unwrap().permissions().mode() & 0o111 != 0);
     }
 
-    #[test]
-    fn identifies_go_elf_sections_as_direct_syscall_risk() {
-        let directory = tempfile::tempdir().unwrap();
-        let executable = directory.path().join("go-app");
-        let names = b"\0.shstrtab\0.go.buildinfo\0";
-        let mut elf = vec![0u8; 256 + names.len()];
-        elf[..4].copy_from_slice(b"\x7fELF");
-        elf[4] = 2;
-        elf[5] = 1;
-        elf[40..48].copy_from_slice(&64u64.to_le_bytes());
-        elf[58..60].copy_from_slice(&64u16.to_le_bytes());
-        elf[60..62].copy_from_slice(&3u16.to_le_bytes());
-        elf[62..64].copy_from_slice(&1u16.to_le_bytes());
-        let names_header = 64 + 64;
-        elf[names_header..names_header + 4].copy_from_slice(&1u32.to_le_bytes());
-        elf[names_header + 24..names_header + 32].copy_from_slice(&256u64.to_le_bytes());
-        elf[names_header + 32..names_header + 40]
-            .copy_from_slice(&(names.len() as u64).to_le_bytes());
-        let go_header = 64 + 128;
-        elf[go_header..go_header + 4].copy_from_slice(&11u32.to_le_bytes());
-        elf[256..].copy_from_slice(names);
-        File::create(&executable)
-            .unwrap()
-            .write_all(&elf)
-            .unwrap();
-
-        assert!(elf_has_section(&executable, b".go.buildinfo"));
-        assert_eq!(
-            capture_compatibility(&executable),
-            CaptureCompatibility::DirectSyscallRisk
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_TEST_HTTP_PROXY and unprivileged ptrace/seccomp"]
+    async fn rootless_capture_routes_curl_through_http_upstream() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_test_writer()
+            .try_init();
+        let mut harness = start_rootless_test_capture().await;
+        let output = harness.directory.path().join("example.html");
+        let launched = harness
+            .capture
+            .launch_app(&harness.profile_id, "curl", &curl_arguments(&output))
+            .await
+            .expect("launch curl under rootless capture");
+        wait_for_text(&output, "Example Domain").await;
+        eprintln!(
+            "rootless apps={:?}, stats={:?}",
+            harness.capture.apps(),
+            harness.stats.snapshot()
         );
+        assert!(harness.stats.snapshot().flows_proxy >= 1);
+        assert_eq!(harness.stats.snapshot().flow_failures, 0);
+        harness.capture.stop_app(launched.pid).await.unwrap();
+        harness.capture.stop().await;
     }
 
-    #[test]
-    fn filesystem_control_socket_survives_descriptor_cleanup() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("control.sock");
-        let control = ControlSocketPath::bind(path.clone()).unwrap();
-        control
-            .socket
-            .set_read_timeout(Some(Duration::from_secs(1)))
-            .unwrap();
-        let sender = StdUnixDatagram::unbound().unwrap();
-        sender.send_to(b"flow", &path).unwrap();
-        let mut message = [0u8; 16];
-        let count = control.socket.recv(&mut message).unwrap();
-        assert_eq!(&message[..count], b"flow");
-        drop(control);
-        assert!(!path.exists());
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_TEST_HTTP_PROXY, curl, and unprivileged ptrace/seccomp"]
+    async fn rootless_capture_follows_shell_children_and_terminal_apps() {
+        let mut harness = start_rootless_test_capture().await;
+        let concurrent = harness.directory.path().join("concurrent");
+        fs::create_dir(&concurrent).unwrap();
+        let script = r#"set -eu
+for name in one two three four; do
+  curl --noproxy '*' --silent --show-error --max-time 20 --output "$1/$name.html" http://example.com/ &
+done
+wait"#;
+        let arguments = vec![
+            "-c".into(),
+            script.into(),
+            "taomni-sockscap-test".into(),
+            concurrent.to_string_lossy().into_owned(),
+        ];
+        let shell = harness
+            .capture
+            .launch_app(&harness.profile_id, "sh", &arguments)
+            .await
+            .expect("launch shell process tree under rootless capture");
+        for name in ["one", "two", "three", "four"] {
+            wait_for_text(&concurrent.join(format!("{name}.html")), "Example Domain").await;
+        }
+        assert!(harness.stats.snapshot().flows_proxy >= 4);
+        harness.capture.stop_app(shell.pid).await.unwrap();
+
+        let terminal_output = harness.directory.path().join("terminal.html");
+        let terminal_script = "printf 'TAOMNI_PTY_READY\\n'; exec curl --noproxy '*' --silent --show-error --max-time 20 --output \"$1\" http://example.com/";
+        let terminal_arguments = vec![
+            "-c".into(),
+            terminal_script.into(),
+            "taomni-sockscap-test".into(),
+            terminal_output.to_string_lossy().into_owned(),
+        ];
+        let (terminal, _handle, mut reader) = harness
+            .capture
+            .launch_terminal_app(
+                &harness.profile_id,
+                "sh",
+                &terminal_arguments,
+                "rootless-test-terminal",
+                80,
+                24,
+            )
+            .expect("launch PTY application under rootless capture");
+        let reader_task = tokio::task::spawn_blocking(move || {
+            let mut output = String::new();
+            let _ = reader.read_to_string(&mut output);
+            output
+        });
+        wait_for_text(&terminal_output, "Example Domain").await;
+        let terminal_text = tokio::time::timeout(Duration::from_secs(5), reader_task)
+            .await
+            .expect("PTY reader should observe application exit")
+            .expect("PTY reader task should not panic");
+        assert!(terminal_text.contains("TAOMNI_PTY_READY"));
+        assert!(harness.stats.snapshot().flows_proxy >= 5);
+        assert_eq!(harness.stats.snapshot().flow_failures, 0);
+        harness.capture.stop_app(terminal.pid).await.unwrap();
+        harness.capture.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_TEST_HTTP_PROXY, Go, and unprivileged ptrace/seccomp"]
+    async fn rootless_capture_routes_static_go_direct_syscalls() {
+        let go = std::env::var_os("TAOMNI_TEST_GO")
+            .map(PathBuf::from)
+            .or_else(|| which::which("go").ok())
+            .expect("set TAOMNI_TEST_GO to a Go executable");
+        let build_directory = tempfile::tempdir().unwrap();
+        let source = build_directory.path().join("direct.go");
+        let executable = build_directory.path().join("direct-client");
+        fs::write(
+            &source,
+            r#"package main
+
+import (
+    "io"
+    "net"
+    "net/http"
+    "os"
+    "time"
+)
+
+func main() {
+    transport := &http.Transport{
+        Proxy: nil,
+        DialContext: (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+    }
+    client := &http.Client{Transport: transport, Timeout: 20 * time.Second}
+    response, err := client.Get("http://example.com/")
+    if err != nil {
+        panic(err)
+    }
+    defer response.Body.Close()
+    body, err := io.ReadAll(response.Body)
+    if err != nil {
+        panic(err)
+    }
+    if err := os.WriteFile(os.Args[1], body, 0600); err != nil {
+        panic(err)
+    }
+}
+"#,
+        )
+        .unwrap();
+        let build = Command::new(go)
+            .env("CGO_ENABLED", "0")
+            .arg("build")
+            .arg("-trimpath")
+            .arg("-o")
+            .arg(&executable)
+            .arg(&source)
+            .output()
+            .expect("run go build");
+        assert!(
+            build.status.success(),
+            "go build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let mut harness = start_rootless_test_capture().await;
+        let output = harness.directory.path().join("go-example.html");
+        let launched = harness
+            .capture
+            .launch_app(
+                &harness.profile_id,
+                executable.to_str().unwrap(),
+                &[output.to_string_lossy().into_owned()],
+            )
+            .await
+            .expect("launch static Go client under rootless capture");
+        wait_for_text(&output, "Example Domain").await;
+        assert!(harness.stats.snapshot().flows_proxy >= 1);
+        assert_eq!(harness.stats.snapshot().flow_failures, 0);
+        harness.capture.stop_app(launched.pid).await.unwrap();
+        harness.capture.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_TEST_HTTP_PROXY, Chrome/Chromium, and unprivileged ptrace/seccomp"]
+    async fn rootless_capture_supports_chromium_process_tree() {
+        let chrome = std::env::var_os("TAOMNI_TEST_CHROME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                ["google-chrome", "chromium", "chromium-browser"]
+                    .into_iter()
+                    .find_map(|command| which::which(command).ok())
+            })
+            .expect("set TAOMNI_TEST_CHROME to Chrome or Chromium");
+        let mut harness = start_rootless_test_capture().await;
+        let user_data = harness.directory.path().join("chrome-profile");
+        let screenshot = harness.directory.path().join("example.png");
+        let mut arguments = vec![
+            "--headless=new".into(),
+            "--disable-background-networking".into(),
+            "--disable-component-update".into(),
+            "--disable-default-apps".into(),
+            "--disable-dev-shm-usage".into(),
+            "--disable-gpu".into(),
+            "--disable-sync".into(),
+            "--metrics-recording-only".into(),
+            "--no-first-run".into(),
+            "--no-proxy-server".into(),
+            "--window-size=800,600".into(),
+            format!("--user-data-dir={}", user_data.display()),
+            format!("--screenshot={}", screenshot.display()),
+            "http://example.com/".into(),
+        ];
+        if unsafe { libc::geteuid() } == 0 {
+            arguments.push("--no-sandbox".into());
+        }
+        let launched = harness
+            .capture
+            .launch_app(&harness.profile_id, chrome.to_str().unwrap(), &arguments)
+            .await
+            .expect("launch Chromium under rootless capture");
+        wait_for_nonempty_file(&screenshot).await;
+        assert!(harness.stats.snapshot().flows_proxy >= 1);
+        assert_eq!(harness.stats.snapshot().flow_failures, 0);
+        harness.capture.stop_app(launched.pid).await.unwrap();
+        harness.capture.stop().await;
     }
 }

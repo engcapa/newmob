@@ -869,8 +869,6 @@ export const zhCN: DeepPartial<typeof en> = {
     connecting: "连接中……",
     disconnected: "已断开",
     reconnect: "重新连接",
-    sockscapDirectSyscallWarning:
-      "SocksCap 提示：该 Go/直接系统调用应用可能绕过无权限捕获；其动态链接子应用仍可捕获。",
     copySelection: "复制选区",
     paste: "粘贴",
     multilinePasteTitle: "确认多行粘贴",
@@ -1298,8 +1296,6 @@ export const zhCN: DeepPartial<typeof en> = {
     launchProfileInactive: "请先激活此方案，再启动其应用",
     launchAbsolutePathRequired: "请输入可执行文件路径或 PATH 中可用的命令",
     applicationRunning: "运行中 · PID {pid}",
-    rootlessDirectSyscallWarning:
-      "检测到 Go/直接系统调用网络栈：应用本体可能绕过无权限捕获；其动态链接子应用仍可捕获。",
     applicationLaunched: "应用已通过 SocksCap 启动 · PID {pid}",
     terminalApplicationOpened: "已打开终端页签，应用将在其中启动并捕获。",
     applicationStopped: "应用已停止 · PID {pid}",

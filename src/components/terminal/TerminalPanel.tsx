@@ -3118,9 +3118,6 @@ export function TerminalPanel({
               return;
             }
             launchedSockscapPid = launched.pid;
-            if (launched.captureCompatibility === "directSyscallRisk") {
-              term.write(`\r\n\x1b[33m${t("terminal.sockscapDirectSyscallWarning")}\x1b[0m\r\n`);
-            }
             return handleConnected({ sessionId: sid, shellId: null }, "initial");
           })
           .catch((err) => {

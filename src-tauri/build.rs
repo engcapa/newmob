@@ -4,32 +4,32 @@ use std::path::Path;
 fn main() {
     enforce_asr_llm_isolation();
     compile_hbase_protos();
-    compile_linux_sockscap_shim();
+    compile_linux_sockscap_launcher();
     configure_macos_rpath();
     let embed_manifest_ourselves = configure_windows_manifest();
     build_tauri(embed_manifest_ourselves);
 }
 
-/// Build the tiny connection interposer used by Linux's unprivileged
-/// "launch from SocksCap" backend.  It is a standalone shared object rather
-/// than a Rust cdylib so its connect hook has no allocator/runtime bootstrap
-/// dependencies and can run safely during the dynamic loader's early startup.
-fn compile_linux_sockscap_shim() {
+/// Build the tiny launcher used by Linux's unprivileged "launch from
+/// SocksCap" backend. It enters ptrace supervision, installs a seccomp filter
+/// for socket(2)/connect(2), and then execs the requested desktop or TUI
+/// application.
+fn compile_linux_sockscap_launcher() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux") {
         return;
     }
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
-    let source = Path::new(&manifest_dir).join("src/sockscap/capture/linux/launch_shim.c");
-    let output =
-        Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR")).join("libtaomni-sockscap-launch.so");
+    let source = Path::new(&manifest_dir).join("src/sockscap/capture/linux/trace_launcher.c");
+    let output = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("taomni-sockscap-trace-launcher");
     println!("cargo:rerun-if-changed={}", source.display());
 
     let compiler = cc::Build::new().get_compiler();
     let mut command = compiler.to_command();
     command.args([
-        "-shared",
-        "-fPIC",
+        "-fPIE",
+        "-pie",
         "-O2",
         "-fvisibility=hidden",
         "-Wall",
@@ -39,18 +39,13 @@ fn compile_linux_sockscap_shim() {
         "-Wl,-z,now",
         "-Wl,-z,noexecstack",
     ]);
-    command
-        .arg(&source)
-        .arg("-ldl")
-        .arg("-pthread")
-        .arg("-o")
-        .arg(&output);
+    command.arg(&source).arg("-o").arg(&output);
     let status = command
         .status()
-        .unwrap_or_else(|error| panic!("compile Linux SocksCap launch shim: {error}"));
+        .unwrap_or_else(|error| panic!("compile Linux SocksCap trace launcher: {error}"));
     assert!(
         status.success(),
-        "Linux SocksCap launch shim compiler failed"
+        "Linux SocksCap trace launcher compiler failed"
     );
 }
 

@@ -10,6 +10,7 @@ pub mod exec;
 pub mod launched;
 pub mod pid_filter;
 pub mod relay;
+pub mod tracer;
 pub mod tunnel;
 
 use std::sync::Arc;

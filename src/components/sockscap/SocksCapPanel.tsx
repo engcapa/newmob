@@ -2737,11 +2737,6 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                                 {t("sockscap.applicationRunning", { pid: launched.pid })}
                               </span>
                             )}
-                            {launched?.captureCompatibility === "directSyscallRisk" && (
-                              <span className="block text-[10px] text-amber-700 dark:text-amber-300">
-                                {t("sockscap.rootlessDirectSyscallWarning")}
-                              </span>
-                            )}
                           </span>
                           {a.macosIdentity?.teamId && (
                             <span

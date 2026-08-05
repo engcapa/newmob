@@ -165,7 +165,6 @@ const sockscapMocks = vi.hoisted(() => ({
     args,
     running: true,
     terminalSessionId,
-    captureCompatibility: "libcInterposed" as const,
   })),
   sockscapStopLaunchedApp: vi.fn(async () => undefined),
 }));

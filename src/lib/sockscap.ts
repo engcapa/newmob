@@ -266,7 +266,6 @@ export interface LaunchedAppInfo {
   args: string[];
   running: boolean;
   terminalSessionId?: string | null;
-  captureCompatibility?: "libcInterposed" | "directSyscallRisk";
 }
 
 export function sockscapCapabilities(): Promise<SocksCapCapabilities> {
