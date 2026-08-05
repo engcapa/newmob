@@ -1259,6 +1259,17 @@ pub async fn sockscap_launch_terminal_app(
         }
 
         let mut orch = state.sockscap.orch.write().await;
+        // The frontend may be mounted twice by React StrictMode. Re-check
+        // after serializing on the orchestrator lock so concurrent requests
+        // with the same stable terminal id cannot both launch a process.
+        if state
+            .terminals
+            .read()
+            .await
+            .contains_key(&terminal_session_id)
+        {
+            return Err(format!("Terminal {} already exists", terminal_session_id));
+        }
         if !orch.is_running() {
             return Err("start SocksCap before launching an application".into());
         }

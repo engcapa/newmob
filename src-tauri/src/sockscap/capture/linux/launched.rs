@@ -15,7 +15,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::os::unix::net::UnixDatagram as StdUnixDatagram;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,6 +81,16 @@ pub struct LaunchedAppInfo {
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_session_id: Option<String>,
+    #[serde(default)]
+    pub capture_compatibility: CaptureCompatibility,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CaptureCompatibility {
+    #[default]
+    LibcInterposed,
+    DirectSyscallRisk,
 }
 
 struct LaunchedProcess {
@@ -302,6 +312,7 @@ impl LaunchedCaptureHandle {
             "launched application exited before its PID was available".to_string()
         })?;
         let process_path = executable.to_string_lossy().into_owned();
+        let capture_compatibility = capture_compatibility(&executable);
         let registration_task = spawn_registration_reader(
             parent_control,
             Arc::clone(&self.registry),
@@ -316,7 +327,9 @@ impl LaunchedCaptureHandle {
             args: args.to_vec(),
             running: true,
             terminal_session_id: None,
+            capture_compatibility,
         };
+        warn_about_capture_compatibility(pid, &executable, capture_compatibility);
         tracing::info!(
             pid,
             command = command_name,
@@ -404,7 +417,9 @@ impl LaunchedCaptureHandle {
             args: args.to_vec(),
             running: true,
             terminal_session_id: Some(terminal_session_id.to_string()),
+            capture_compatibility: capture_compatibility(&executable),
         };
+        warn_about_capture_compatibility(pid, &executable, info.capture_compatibility);
         tracing::info!(
             pid,
             command = command_name,
@@ -593,6 +608,107 @@ fn validate_executable(path: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+fn capture_compatibility(path: &Path) -> CaptureCompatibility {
+    if elf_has_section(path, b".go.buildinfo") || elf_has_section(path, b".gopclntab") {
+        CaptureCompatibility::DirectSyscallRisk
+    } else {
+        CaptureCompatibility::LibcInterposed
+    }
+}
+
+fn warn_about_capture_compatibility(
+    pid: u32,
+    executable: &Path,
+    compatibility: CaptureCompatibility,
+) {
+    if matches!(compatibility, CaptureCompatibility::DirectSyscallRisk) {
+        tracing::warn!(
+            pid,
+            executable = %executable.display(),
+            "SocksCap detected a Go/direct-syscall application; unprivileged libc interposition may only capture its dynamically linked child applications"
+        );
+    }
+}
+
+/// Inspect the ELF section-name table without reading the whole executable.
+/// Go applications retain `.go.buildinfo` or `.gopclntab` even when their
+/// symbols and build metadata have otherwise been stripped.
+fn elf_has_section(path: &Path, target: &[u8]) -> bool {
+    const ELF64_HEADER_SIZE: usize = 64;
+    const ELF64_SECTION_HEADER_SIZE: usize = 64;
+    const MAX_SECTION_COUNT: usize = 8192;
+    const MAX_SECTION_NAMES_SIZE: usize = 1024 * 1024;
+
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mut header = [0u8; ELF64_HEADER_SIZE];
+    if file.read_exact_at(&mut header, 0).is_err()
+        || &header[..4] != b"\x7fELF"
+        || header[4] != 2
+        || header[5] != 1
+    {
+        return false;
+    }
+
+    let section_offset = u64::from_le_bytes(header[40..48].try_into().unwrap());
+    let section_entry_size = u16::from_le_bytes(header[58..60].try_into().unwrap()) as usize;
+    let section_count = u16::from_le_bytes(header[60..62].try_into().unwrap()) as usize;
+    let names_index = u16::from_le_bytes(header[62..64].try_into().unwrap()) as usize;
+    if section_offset == 0
+        || section_entry_size < ELF64_SECTION_HEADER_SIZE
+        || section_count == 0
+        || section_count > MAX_SECTION_COUNT
+        || names_index >= section_count
+    {
+        return false;
+    }
+
+    let mut names_header = [0u8; ELF64_SECTION_HEADER_SIZE];
+    let Some(names_header_offset) = section_offset.checked_add(
+        (names_index as u64).saturating_mul(section_entry_size as u64),
+    ) else {
+        return false;
+    };
+    if file
+        .read_exact_at(&mut names_header, names_header_offset)
+        .is_err()
+    {
+        return false;
+    }
+    let names_offset = u64::from_le_bytes(names_header[24..32].try_into().unwrap());
+    let names_size = u64::from_le_bytes(names_header[32..40].try_into().unwrap()) as usize;
+    if names_size == 0 || names_size > MAX_SECTION_NAMES_SIZE {
+        return false;
+    }
+    let mut names = vec![0u8; names_size];
+    if file.read_exact_at(&mut names, names_offset).is_err() {
+        return false;
+    }
+
+    let mut section_header = [0u8; ELF64_SECTION_HEADER_SIZE];
+    for index in 0..section_count {
+        let Some(offset) = section_offset
+            .checked_add((index as u64).saturating_mul(section_entry_size as u64))
+        else {
+            return false;
+        };
+        if file.read_exact_at(&mut section_header, offset).is_err() {
+            return false;
+        }
+        let name_offset =
+            u32::from_le_bytes(section_header[..4].try_into().unwrap()) as usize;
+        let Some(tail) = names.get(name_offset..) else {
+            continue;
+        };
+        let length = tail.iter().position(|byte| *byte == 0).unwrap_or(tail.len());
+        if &tail[..length] == target {
+            return true;
+        }
+    }
+    false
 }
 
 fn materialize_shim(runtime_dir: &Path) -> Result<PathBuf, String> {
@@ -902,7 +1018,7 @@ async fn accept_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Seek};
+    use std::io::{Read, Seek, Write};
 
     #[test]
     fn protocol_layout_matches_the_c_interposer() {
@@ -966,6 +1082,39 @@ mod tests {
         let executable = resolve_executable("sh").unwrap();
         assert!(executable.is_absolute());
         assert!(fs::metadata(executable).unwrap().permissions().mode() & 0o111 != 0);
+    }
+
+    #[test]
+    fn identifies_go_elf_sections_as_direct_syscall_risk() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("go-app");
+        let names = b"\0.shstrtab\0.go.buildinfo\0";
+        let mut elf = vec![0u8; 256 + names.len()];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        elf[40..48].copy_from_slice(&64u64.to_le_bytes());
+        elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+        elf[60..62].copy_from_slice(&3u16.to_le_bytes());
+        elf[62..64].copy_from_slice(&1u16.to_le_bytes());
+        let names_header = 64 + 64;
+        elf[names_header..names_header + 4].copy_from_slice(&1u32.to_le_bytes());
+        elf[names_header + 24..names_header + 32].copy_from_slice(&256u64.to_le_bytes());
+        elf[names_header + 32..names_header + 40]
+            .copy_from_slice(&(names.len() as u64).to_le_bytes());
+        let go_header = 64 + 128;
+        elf[go_header..go_header + 4].copy_from_slice(&11u32.to_le_bytes());
+        elf[256..].copy_from_slice(names);
+        File::create(&executable)
+            .unwrap()
+            .write_all(&elf)
+            .unwrap();
+
+        assert!(elf_has_section(&executable, b".go.buildinfo"));
+        assert_eq!(
+            capture_compatibility(&executable),
+            CaptureCompatibility::DirectSyscallRisk
+        );
     }
 
     #[test]

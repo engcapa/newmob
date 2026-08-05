@@ -870,6 +870,8 @@ const dict = {
     connecting: "Connecting…",
     disconnected: "Disconnected",
     reconnect: "Reconnect",
+    sockscapDirectSyscallWarning:
+      "SocksCap warning: this Go/direct-syscall application can bypass unprivileged capture. Dynamically linked child applications are still captured.",
     copySelection: "Copy selection",
     paste: "Paste",
     multilinePasteTitle: "Confirm multiline paste",
@@ -1304,6 +1306,8 @@ const dict = {
     launchProfileInactive: "Activate this profile before launching its application",
     launchAbsolutePathRequired: "Enter an executable path or a command available in PATH",
     applicationRunning: "Running · PID {pid}",
+    rootlessDirectSyscallWarning:
+      "Go/direct-syscall networking detected: the application itself may bypass unprivileged capture; dynamically linked child applications remain capturable.",
     applicationLaunched: "Application launched through SocksCap · PID {pid}",
     terminalApplicationOpened: "Opened a terminal tab; the application will start and be captured there.",
     applicationStopped: "Application stopped · PID {pid}",

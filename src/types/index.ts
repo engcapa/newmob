@@ -473,6 +473,7 @@ export interface SocksCapTerminalLaunchInfo {
   profileId: string;
   path: string;
   args: string[];
+  terminalSessionId: string;
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";

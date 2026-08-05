@@ -1833,7 +1833,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           type: "terminal",
           title: name || path.split(/[/\\]/).pop() || path,
           closable: true,
-          sockscapTerminal: { profileId, path, args },
+          sockscapTerminal: { profileId, path, args, terminalSessionId: id },
           terminalTitleMode: "manual",
         });
         report(t("sockscap.terminalApplicationOpened"));
@@ -2735,6 +2735,11 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                             {launched && (
                               <span className="block text-[10px] text-emerald-600 dark:text-emerald-400">
                                 {t("sockscap.applicationRunning", { pid: launched.pid })}
+                              </span>
+                            )}
+                            {launched?.captureCompatibility === "directSyscallRisk" && (
+                              <span className="block text-[10px] text-amber-700 dark:text-amber-300">
+                                {t("sockscap.rootlessDirectSyscallWarning")}
                               </span>
                             )}
                           </span>

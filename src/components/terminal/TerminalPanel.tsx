@@ -2300,6 +2300,7 @@ export function TerminalPanel({
     let cleanupImePositionLock: (() => void) | null = null;
     let resizeTimer: ReturnType<typeof setTimeout>;
     let activityPromptTimer: ReturnType<typeof setTimeout> | undefined;
+    let sockscapLaunchTimer: ReturnType<typeof setTimeout> | undefined;
     let launchedSockscapPid: number | null = null;
 
     const primaryFont = getPrimaryFontName(fontFamily);
@@ -2595,7 +2596,10 @@ export function TerminalPanel({
     el.addEventListener("scroll", onContainerScroll, { passive: true });
 
     const adopted = adoptedTerminalRef.current;
-    const sid = adopted?.sessionId ?? createTerminalSessionId();
+    const sid =
+      adopted?.sessionId ??
+      sockscapTerminal?.terminalSessionId ??
+      createTerminalSessionId();
     if (adopted?.snapshotText) {
       term.write(adopted.snapshotText.replace(/\n/g, "\r\n"));
     }
@@ -3093,20 +3097,36 @@ export function TerminalPanel({
       );
       fitVisibleTerminal();
       const { cols, rows } = currentTerminalSize(term);
-      sockscapLaunchTerminalApp(
-        sid,
-        sockscapTerminal.profileId,
-        sockscapTerminal.path,
-        sockscapTerminal.args,
-        cols,
-        rows,
-        handleRawOutput,
-      )
-        .then((launched) => {
-          launchedSockscapPid = launched.pid;
-          return handleConnected({ sessionId: sid, shellId: null }, "initial");
-        })
-        .catch((err) => handleConnectFailure(err, "initial"));
+      // React StrictMode intentionally runs mount effects twice in development.
+      // Defer the irreversible backend launch so the first setup can be
+      // cancelled by its immediate cleanup instead of spawning two commands.
+      sockscapLaunchTimer = window.setTimeout(() => {
+        if (destroyed) return;
+        sockscapLaunchTerminalApp(
+          sid,
+          sockscapTerminal.profileId,
+          sockscapTerminal.path,
+          sockscapTerminal.args,
+          cols,
+          rows,
+          handleRawOutput,
+        )
+          .then((launched) => {
+            if (destroyed) {
+              void closeTerminal(sid).catch(() => {});
+              void sockscapStopLaunchedApp(launched.pid).catch(() => {});
+              return;
+            }
+            launchedSockscapPid = launched.pid;
+            if (launched.captureCompatibility === "directSyscallRisk") {
+              term.write(`\r\n\x1b[33m${t("terminal.sockscapDirectSyscallWarning")}\x1b[0m\r\n`);
+            }
+            return handleConnected({ sessionId: sid, shellId: null }, "initial");
+          })
+          .catch((err) => {
+            if (!destroyed) handleConnectFailure(err, "initial");
+          });
+      }, 0);
     } else {
       connectionStateRef.current = "connecting";
       appendEvent("connection", `Starting ${localShell?.name ?? "local terminal"}`);
@@ -3142,6 +3162,7 @@ export function TerminalPanel({
       resizeDisposable.dispose();
       clearTimeout(resizeTimer);
       if (activityPromptTimer) clearTimeout(activityPromptTimer);
+      if (sockscapLaunchTimer) clearTimeout(sockscapLaunchTimer);
       installSshCwdIntegrationRef.current = null;
       unlistenExit?.();
       unlistenForwardError?.();
