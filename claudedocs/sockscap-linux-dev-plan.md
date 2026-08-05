@@ -46,7 +46,7 @@
 - `bash scripts/stage-sockscap-linux.sh --check`：通过。
 - `qa_ui_auto.lint`、SocksCap case dry-run 和 `audit --feature F-Sockscap-1`：通过。
 - `pnpm tauri build --bundles deb`：release 编译、资源预检与 `Taomni_0.3.37_amd64.deb` 生成成功；`dpkg-deb` 确认依赖含 `nftables`、包内含 Linux runtime README 与 `sockscap-helper`。命令最终仅因本地没有 `TAURI_SIGNING_PRIVATE_KEY` 而在签名后置步骤返回非零；发布/CI 环境须提供该密钥。
-- 本机 `nft list tables` 返回 `Operation not permitted`，因此不能在此 runner 做 `CAP_NET_ADMIN` 流量验证；端口 5000/1420 也没有已运行的 Vite/桌面服务，按 UI 自动化流程不自动启动服务。
+- 本机 `nft list tables` 返回 `Operation not permitted`，因此不能在此 runner 做 `CAP_NET_ADMIN` 流量验证；端口 5000/1980 也没有已运行的 Vite/桌面服务，按 UI 自动化流程不自动启动服务。
 
 ## 实现偏差与原因
 

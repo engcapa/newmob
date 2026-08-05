@@ -2,7 +2,7 @@
 //!
 //! Notes live in their own SQLite file (`notes.db`), deliberately kept separate
 //! from `taomni.db` so the note data model, backup, and future encryption can
-//! evolve independently (see `tao-notes-feature-plan.md` §5.1).
+//! evolve independently (see `tao-notes-feature-plan.md`).
 //!
 //! All timestamps are Unix **seconds** (matching the chat module's `now()`), so
 //! the frontend divides `Date.now()` by 1000 before sending times over IPC.

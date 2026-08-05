@@ -104,7 +104,7 @@ pub fn run() {
 
             // Tao Notes lives in its own SQLite file (notes.db), deliberately
             // separate from taomni.db so its data model / backup / encryption can
-            // evolve independently (see tao-notes-feature-plan.md §5).
+            // evolve independently (see tao-notes-feature-plan.md).
             let notes_db_path = app_data.join("notes.db");
             let notes_conn =
                 rusqlite::Connection::open(&notes_db_path).expect("failed to open notes database");
