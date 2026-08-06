@@ -628,6 +628,59 @@ mod tests {
         }
     }
 
+    async fn wait_for_chrome_window(user_data: &Path) -> xcap::Window {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let user_data = user_data.to_string_lossy();
+        loop {
+            for window in xcap::Window::all().expect("enumerate X11 windows") {
+                let Ok(pid) = window.pid() else {
+                    continue;
+                };
+                let command_line = fs::read(format!("/proc/{pid}/cmdline"))
+                    .ok()
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
+                if command_line
+                    .as_deref()
+                    .is_some_and(|value| value.contains(user_data.as_ref()))
+                {
+                    return window;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for a Chrome X11 window using {user_data}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn window_is_not_black(window: &xcap::Window) -> bool {
+        let image = window.capture_image().expect("capture Chrome X11 window");
+        let bright_pixels = image
+            .pixels()
+            .filter(|pixel| pixel.0[..3].iter().any(|channel| *channel > 32))
+            .count();
+        bright_pixels * 20 > image.width() as usize * image.height() as usize
+    }
+
+    async fn wait_for_window_rendered(window: &xcap::Window) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        while !window_is_not_black(window) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for Chrome to render its first X11 frame"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    fn assert_window_is_not_black(window: &xcap::Window) {
+        assert!(
+            window_is_not_black(window),
+            "Chrome X11 window became black after ptrace/seccomp capture"
+        );
+    }
+
     fn curl_arguments(output: &Path) -> Vec<String> {
         vec![
             "--noproxy".into(),
@@ -870,6 +923,43 @@ func main() {
         wait_for_nonempty_file(&screenshot).await;
         assert!(harness.stats.snapshot().flows_proxy >= 1);
         assert_eq!(harness.stats.snapshot().flow_failures, 0);
+        harness.capture.stop_app(launched.pid).await.unwrap();
+        harness.capture.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_TEST_HTTP_PROXY, TAOMNI_TEST_CHROME, X11, and unprivileged ptrace/seccomp"]
+    async fn rootless_capture_keeps_chromium_desktop_rendering() {
+        let chrome = std::env::var_os("TAOMNI_TEST_CHROME")
+            .map(PathBuf::from)
+            .expect("set TAOMNI_TEST_CHROME to Chrome or Chromium");
+        assert!(std::env::var_os("DISPLAY").is_some(), "set DISPLAY to X11");
+        let mut harness = start_rootless_test_capture().await;
+        let user_data = harness.directory.path().join("chrome-desktop-profile");
+        let arguments = vec![
+            "--disable-component-update".into(),
+            "--disable-default-apps".into(),
+            "--disable-dev-shm-usage".into(),
+            "--disable-sync".into(),
+            "--metrics-recording-only".into(),
+            "--no-first-run".into(),
+            "--no-proxy-server".into(),
+            "--window-size=960,720".into(),
+            format!("--user-data-dir={}", user_data.display()),
+            "http://example.com/".into(),
+        ];
+        let launched = harness
+            .capture
+            .launch_app(&harness.profile_id, chrome.to_str().unwrap(), &arguments)
+            .await
+            .expect("launch desktop Chromium under rootless capture");
+        let window = wait_for_chrome_window(&user_data).await;
+        wait_for_window_rendered(&window).await;
+
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        assert_window_is_not_black(&window);
+        assert!(harness.stats.snapshot().flows_proxy >= 1);
+
         harness.capture.stop_app(launched.pid).await.unwrap();
         harness.capture.stop().await;
     }

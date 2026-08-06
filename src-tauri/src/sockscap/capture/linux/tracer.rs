@@ -254,6 +254,7 @@ struct TraceState {
     identities: HashMap<libc::pid_t, ProcessIdentity>,
     initialized: HashSet<libc::pid_t>,
     launch_ready: HashMap<libc::pid_t, mpsc::Sender<Result<(), String>>>,
+    deferred_statuses: HashMap<libc::pid_t, libc::c_int>,
     socket_types: HashMap<String, libc::c_int>,
 }
 
@@ -263,6 +264,7 @@ impl TraceState {
             identities: HashMap::new(),
             initialized: HashSet::new(),
             launch_ready: HashMap::new(),
+            deferred_statuses: HashMap::new(),
             socket_types: HashMap::new(),
         }
     }
@@ -270,6 +272,7 @@ impl TraceState {
     fn remove(&mut self, pid: libc::pid_t, detail: &str) {
         self.identities.remove(&pid);
         self.initialized.remove(&pid);
+        self.deferred_statuses.remove(&pid);
         if let Some(ready) = self.launch_ready.remove(&pid) {
             let _ = ready.send(Err(detail.to_string()));
         }
@@ -290,31 +293,50 @@ fn trace_loop(
             }
         }
 
-        let pids = state.identities.keys().copied().collect::<Vec<_>>();
         let mut handled_event = false;
-        for pid in pids {
+        let registered_deferred = state
+            .deferred_statuses
+            .keys()
+            .filter(|pid| state.identities.contains_key(pid))
+            .copied()
+            .collect::<Vec<_>>();
+        for pid in registered_deferred {
+            let Some(status) = state.deferred_statuses.remove(&pid) else {
+                continue;
+            };
+            handled_event = true;
+            handle_wait_status(pid, status, &mut state, &flows, relay_port, ipv6_ready);
+        }
+
+        loop {
             let mut status = 0;
             let waited = unsafe {
                 libc::waitpid(
-                    pid,
+                    -1,
                     &mut status,
-                    libc::WNOHANG | libc::WUNTRACED | libc::__WALL,
+                    libc::WNOHANG | libc::WUNTRACED | libc::__WALL | libc::__WNOTHREAD,
                 )
             };
             if waited == 0 {
-                continue;
+                break;
             }
             if waited < 0 {
                 let error = std::io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::ECHILD) {
-                    state.remove(pid, &format!("application PID {pid} exited before tracing"));
-                } else {
-                    tracing::warn!(pid, "wait for traced process: {error}");
+                if error.raw_os_error() != Some(libc::ECHILD) {
+                    tracing::warn!("wait for traced process tree: {error}");
                 }
-                continue;
+                break;
             }
             handled_event = true;
-            handle_wait_status(pid, status, &mut state, &flows, relay_port, ipv6_ready);
+            if state.identities.contains_key(&waited) {
+                handle_wait_status(waited, status, &mut state, &flows, relay_port, ipv6_ready);
+            } else {
+                // A launcher can enter its initial SIGSTOP between the spawn
+                // response and Register command. A clone child can likewise
+                // stop before its parent's event is consumed. Keep that one
+                // status until the tracee identity becomes available.
+                state.deferred_statuses.insert(waited, status);
+            }
         }
 
         if handled_event {
