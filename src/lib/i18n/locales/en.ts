@@ -1162,6 +1162,7 @@ const dict = {
     subtitle: "Route app or system TCP traffic via HTTP / SOCKS5 / SSH",
     loading: "Loading SocksCap…",
     start: "Start",
+    prepareCapture: "Prepare capture",
     stop: "Stop",
     recover: "Recover network",
     recoverHint:
@@ -1263,6 +1264,49 @@ const dict = {
     linuxCaptureReady:
       "Linux nftables transparent capture is ready when started with cgroup and network-admin privileges.",
     linuxCaptureActive: "Active · Linux nftables transparent capture",
+    launchOnlyTitle: "No-permission application capture",
+    launchOnlyDescription:
+      "Transparent system capture is unavailable. Configure routing, then choose an application to start and capture without sudo.",
+    launchOnlyContainer:
+      "Container mode: Taomni and the launched application must run in this same container.",
+    launchOnlyScopeHint:
+      "Global and Applications below control routing policy only; capture itself is limited to applications launched from this list.",
+    rootlessModeTitle: "Application capture without administrator access",
+    rootlessModeDescription:
+      "Configure the single routing setup below, add desktop or terminal applications, then start each when needed. Only applications started here and their child processes are captured.",
+    rootlessApplicationsTitle: "Applications",
+    selectAppAndCapture: "Choose application and capture",
+    rootlessCommandLabel: "Command",
+    rootlessCommandPlaceholder: "Executable path or command in PATH, e.g. google-chrome-stable",
+    rootlessArgumentsLabel: "Arguments (optional)",
+    rootlessArgumentsPlaceholder: "e.g. --incognito --user-data-dir=/tmp/chrome-test",
+    rootlessLaunchModeLabel: "Application type",
+    rootlessLaunchModeDesktop: "Desktop application",
+    rootlessLaunchModeTerminal: "Terminal application (TUI)",
+    rootlessCommandHint:
+      "Terminal applications open in Taomni's built-in terminal; desktop applications inherit the graphical session. Existing processes cannot be attached in no-permission mode.",
+    browseApplication: "Browse…",
+    addApplication: "Add application",
+    rootlessArgsInvalid: "Arguments contain an unmatched quote or trailing escape.",
+    rootlessAppAlreadyAdded: "The same command, arguments, and application type are already in the list.",
+    rootlessAppsEmpty: "No launch commands yet. Enter a command above or browse for an executable.",
+    startAndCapture: "Start and capture",
+    startTerminalAndCapture: "Start in terminal and capture",
+    rootlessLockedHint:
+      "Capturing — stop capture before changing the upstream, rules, or application list.",
+    rootlessProbeFailedTitle: "Cannot start application capture",
+    rootlessProbeFailed:
+      "The upstream test failed. Check the details, update the upstream, and try again.",
+    launchApplication: "Launch",
+    openTerminalApplication: "Open in terminal",
+    stopApplication: "Stop app",
+    launchPrepareFirst: "Prepare capture first",
+    launchProfileInactive: "Activate this profile before launching its application",
+    launchAbsolutePathRequired: "Enter an executable path or a command available in PATH",
+    applicationRunning: "Running · PID {pid}",
+    applicationLaunched: "Application launched through SocksCap · PID {pid}",
+    terminalApplicationOpened: "Opened a terminal tab; the application will start and be captured there.",
+    applicationStopped: "Application stopped · PID {pid}",
     rootPromptTitle: "Root Authorization Required",
     rootPromptSubtitle:
       "Linux nftables & cgroup v2 transparent capture requires Root (CAP_NET_ADMIN) privileges. Please enter your sudo password to proceed.",

@@ -142,6 +142,46 @@ pub struct LocalTerminalCreated {
     pub shell_id: String,
 }
 
+/// Register an already-spawned local PTY in the shared terminal runtime and
+/// start forwarding its output. SocksCap uses this after it has prepared the
+/// rootless capture environment and spawned an interactive TUI command.
+#[cfg(target_os = "linux")]
+pub(crate) async fn register_local_terminal(
+    session_id: String,
+    handle: pty::PtyHandle,
+    reader: Box<dyn Read + Send>,
+    on_output: TerminalOutputChannel,
+    state: &AppState,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    let terminal = ActiveTerminal::Local {
+        writer: Mutex::new(handle.writer),
+        master: Mutex::new(handle.master),
+        child: Mutex::new(handle.child),
+    };
+
+    {
+        let mut terminals = state.terminals.write().await;
+        if terminals.contains_key(&session_id) {
+            return Err(format!("Terminal {} already exists", session_id));
+        }
+        terminals.insert(session_id.clone(), terminal);
+    }
+    if let Err(error) = add_terminal_output_channel(&state.terminal_outputs, &session_id, on_output)
+    {
+        state.terminals.write().await.remove(&session_id);
+        return Err(error);
+    }
+
+    let sid = session_id;
+    let outputs = state.terminal_outputs.clone();
+    std::thread::spawn(move || {
+        read_loop_local(reader, sid, app_handle, outputs);
+    });
+    Ok(())
+}
+
 /// Single prompt forwarded to the frontend for a keyboard-interactive
 /// (MFA/OTP) auth round.
 #[derive(Clone, Debug, Serialize)]

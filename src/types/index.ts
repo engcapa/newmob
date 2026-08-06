@@ -393,6 +393,7 @@ export interface Tab {
   commandTerminal?: CommandTerminalConnectInfo;
   localShell?: LocalShellSelection;
   adoptedTerminal?: AdoptedTerminalInfo;
+  sockscapTerminal?: SocksCapTerminalLaunchInfo;
   terminalProfile?: TerminalProfile;
   message?: string;
   sftp?: SftpTabInfo;
@@ -466,6 +467,13 @@ export interface CommandTerminalConnectInfo {
 export interface AdoptedTerminalInfo {
   sessionId: string;
   snapshotText?: string;
+}
+
+export interface SocksCapTerminalLaunchInfo {
+  profileId: string;
+  path: string;
+  args: string[];
+  terminalSessionId: string;
 }
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";

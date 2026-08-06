@@ -9,6 +9,10 @@ import {
   sockscapInstallRedirector,
   sockscapRecover,
   sockscapRedirectorInstallStatus,
+  sockscapLaunchApp,
+  sockscapLaunchedApps,
+  sockscapStopLaunchedApp,
+  sockscapStop,
   sockscapStart,
   sockscapStatus,
   sockscapParseShareLink,
@@ -18,6 +22,15 @@ import {
   type SocksCapConfig,
 } from "../../lib/sockscap";
 import { vaultStatus, vaultPut, listSessions, type SessionConfig } from "../../lib/ipc";
+import { useAppStore } from "../../stores/appStore";
+
+const { dialogOpenMock } = vi.hoisted(() => ({
+  dialogOpenMock: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: dialogOpenMock,
+}));
 
 const defaultTestCfg: SocksCapConfig = {
   enabled: false,
@@ -62,19 +75,52 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
     sockscapSetConfig: vi.fn(async (cfg) => {
       currentCfg = JSON.parse(JSON.stringify(cfg));
     }),
-    sockscapCapabilities: vi.fn(async () => ({
-      platform: currentPlatform,
-      globalTcp: true,
-      appFilter: true,
-      captureBackend: "WinDivert",
-      notes: [],
-      privilegedRequired: true,
-    })),
+    sockscapCapabilities: vi.fn(async () =>
+      currentPlatform === "linux"
+        ? {
+            platform: "linux",
+            globalTcp: false,
+            appFilter: true,
+            captureBackend: "linux-app-launch",
+            notes: ["Launch configured applications from SocksCap."],
+            privilegedRequired: false,
+            linux: {
+              transparentAvailable: false,
+              launchedApplicationAvailable: true,
+              launchOnly: true,
+              containerized: false,
+              transparentUnavailableReason: "Operation not permitted",
+            },
+          }
+        : {
+            platform: currentPlatform,
+            globalTcp: true,
+            appFilter: true,
+            captureBackend: "WinDivert",
+            notes: [],
+            privilegedRequired: true,
+          },
+    ),
     sockscapStart: vi.fn(async () => ({
       phase: "active",
       message: "active",
       ruleCount: 0,
       captureBackend: "test",
+    })),
+    sockscapLaunchApp: vi.fn(async (profileId: string, path: string, args: string[]) => ({
+      pid: 4242,
+      profileId,
+      path,
+      args: args ?? [],
+      running: true,
+    })),
+    sockscapLaunchedApps: vi.fn(async () => []),
+    sockscapStopLaunchedApp: vi.fn(async () => undefined),
+    sockscapStop: vi.fn(async () => ({
+      phase: "idle",
+      message: "idle",
+      ruleCount: 0,
+      captureBackend: "none",
     })),
     sockscapRecover: vi.fn(async () => undefined),
     sockscapStatus: vi.fn(async () => ({
@@ -153,6 +199,25 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       ruleCount: 0,
       captureBackend: "test",
     });
+    vi.mocked(sockscapLaunchApp).mockReset();
+    vi.mocked(sockscapLaunchApp).mockImplementation(async (profileId, path, args) => ({
+      pid: 4242,
+      profileId,
+      path,
+      args: args ?? [],
+      running: true,
+    }));
+    vi.mocked(sockscapLaunchedApps).mockReset();
+    vi.mocked(sockscapLaunchedApps).mockResolvedValue([]);
+    vi.mocked(sockscapStopLaunchedApp).mockReset();
+    vi.mocked(sockscapStopLaunchedApp).mockResolvedValue(undefined);
+    vi.mocked(sockscapStop).mockReset();
+    vi.mocked(sockscapStop).mockResolvedValue({
+      phase: "idle",
+      message: "idle",
+      ruleCount: 0,
+      captureBackend: "none",
+    });
     vi.mocked(sockscapRecover).mockReset();
     vi.mocked(sockscapRecover).mockResolvedValue(undefined);
     // Default to idle so the panel is unlocked; the lock test overrides this.
@@ -184,6 +249,8 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       systemExtensionState: "enabled",
       message: "ready",
     });
+    dialogOpenMock.mockReset();
+    dialogOpenMock.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -530,18 +597,228 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     expect(await screen.findByTestId("sockscap-noproxy-help")).toBeInTheDocument();
   });
 
-  it("prompts for sudo when Linux nftables reports missing CAP_NET_ADMIN", async () => {
+  it("uses launch-only mode without asking for sudo when transparent Linux capture is unavailable", async () => {
     currentPlatform = "linux";
-    vi.mocked(sockscapStart).mockRejectedValueOnce(
-      "nftables is present but unavailable: Operation not permitted "
-        + "(you must be root). Linux capture requires CAP_NET_ADMIN",
-    );
     render(<SocksCapPanel />);
 
-    const startButton = await screen.findByTestId("sockscap-start");
-    fireEvent.click(startButton);
+    expect(await screen.findByTestId("sockscap-rootless-mode")).toHaveTextContent(
+      "Application capture without administrator access",
+    );
+    expect(screen.getByTestId("sockscap-launch-only-banner")).toHaveTextContent(
+      "No-permission application capture",
+    );
+    expect(screen.queryByTestId("sockscap-start")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sockscap-profile-list")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sockscap-pick-linux-application")).toHaveTextContent("Browse");
+    expect(screen.getByTestId("sockscap-rootless-command")).toBeVisible();
+    expect(screen.getByTestId("sockscap-rootless-arguments")).toBeVisible();
+    expect(screen.getByTestId("sockscap-rootless-launch-mode")).toHaveValue("desktop");
+    expect(screen.queryByTestId("sockscap-rootless-profile-current")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sockscap-rootless-profile")).not.toBeInTheDocument();
+    expect(screen.getByTestId("sockscap-section-upstream-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByTestId("sockscap-section-rules-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByTestId("sockscap-section-gfwlist-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.getByTestId("sockscap-upstream-kind")).toBeVisible();
+    expect(screen.getByTestId("sockscap-rules-editor")).toBeVisible();
+    expect(screen.getByTestId("sockscap-refresh-gfw")).toBeVisible();
 
-    expect(await screen.findByTestId("sockscap-root-prompt-dialog")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("sockscap-upstream-kind"), {
+      target: { value: "http" },
+    });
+    await waitFor(() => expect(currentCfg.profiles[0].upstream.kind).toBe("http"));
+    fireEvent.change(
+      within(screen.getByTestId("sockscap-rules-editor")).getByDisplayValue("GFWList"),
+      { target: { value: "proxyAll" } },
+    );
+    await waitFor(() => expect(currentCfg.profiles[0].ruleMode).toBe("proxyAll"));
+
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("sockscap-root-prompt-dialog")).not.toBeInTheDocument();
+  });
+
+  it("launches and stops a configured Linux application from the launch-only UI", async () => {
+    currentPlatform = "linux";
+    currentCfg.profiles[0].apps = [
+      { path: "/usr/bin/example-app", name: "Example App" },
+    ];
+    currentCfg.apps = currentCfg.profiles[0].apps;
+    render(<SocksCapPanel />);
+
+    const launch = await screen.findByTestId("sockscap-launch-app-0");
+    expect(launch).toBeEnabled();
+    expect(launch).toHaveTextContent("Start and capture");
+    fireEvent.click(launch);
+
+    await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalledWith(undefined));
+    await waitFor(() =>
+      expect(vi.mocked(sockscapLaunchApp)).toHaveBeenCalledWith(
+        "default",
+        "/usr/bin/example-app",
+        [],
+      ),
+    );
+    expect(await screen.findByText("Running · PID 4242")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("sockscap-stop-launched-app-4242"));
+    await waitFor(() =>
+      expect(vi.mocked(sockscapStopLaunchedApp)).toHaveBeenCalledWith(4242),
+    );
+    expect(vi.mocked(sockscapStop)).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps profiles implicit in rootless mode even when legacy config contains several", async () => {
+    currentPlatform = "linux";
+    currentCfg.profiles.push({
+      ...JSON.parse(JSON.stringify(currentCfg.profiles[0])),
+      id: "alternate",
+      name: "备用方案",
+      priority: 1,
+    });
+    render(<SocksCapPanel />);
+
+    expect(await screen.findByTestId("sockscap-rootless-mode")).toBeInTheDocument();
+    expect(screen.queryByTestId("sockscap-rootless-profile")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sockscap-rootless-profile-current")).not.toBeInTheDocument();
+    expect(currentCfg.selectedProfileId).toBe("default");
+  });
+
+  it("uses the file picker to fill a rootless command without launching it", async () => {
+    currentPlatform = "linux";
+    dialogOpenMock.mockResolvedValue("/usr/bin/example-app");
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-pick-linux-application"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("sockscap-rootless-command")).toHaveValue(
+        "/usr/bin/example-app",
+      ),
+    );
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+    expect(vi.mocked(sockscapLaunchApp)).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId("sockscap-add-rootless-application"));
+    await waitFor(() => expect(currentCfg.profiles[0].apps).toHaveLength(1));
+    expect(currentCfg.profiles[0].apps).toEqual([
+      {
+        path: "/usr/bin/example-app",
+        args: [],
+        launchMode: "desktop",
+        name: "example-app",
+      },
+    ]);
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+  });
+
+  it("adds a PATH command with parsed arguments before launching", async () => {
+    currentPlatform = "linux";
+    render(<SocksCapPanel />);
+
+    fireEvent.change(await screen.findByTestId("sockscap-rootless-command"), {
+      target: { value: "google-chrome-stable" },
+    });
+    fireEvent.change(screen.getByTestId("sockscap-rootless-arguments"), {
+      target: { value: '--incognito "--user-data-dir=/tmp/chrome profile"' },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-add-rootless-application"));
+
+    await waitFor(() =>
+      expect(currentCfg.profiles[0].apps).toEqual([
+        {
+          path: "google-chrome-stable",
+          args: ["--incognito", "--user-data-dir=/tmp/chrome profile"],
+          launchMode: "desktop",
+          name: "google-chrome-stable",
+        },
+      ]),
+    );
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+
+    fireEvent.click(await screen.findByTestId("sockscap-launch-app-0"));
+    await waitFor(() =>
+      expect(vi.mocked(sockscapLaunchApp)).toHaveBeenCalledWith(
+        "default",
+        "google-chrome-stable",
+        ["--incognito", "--user-data-dir=/tmp/chrome profile"],
+      ),
+    );
+  });
+
+  it("opens a terminal tab for a TUI command instead of launching it without a TTY", async () => {
+    currentPlatform = "linux";
+    render(<SocksCapPanel />);
+
+    fireEvent.change(await screen.findByTestId("sockscap-rootless-command"), {
+      target: { value: "agy" },
+    });
+    fireEvent.change(screen.getByTestId("sockscap-rootless-launch-mode"), {
+      target: { value: "terminal" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-add-rootless-application"));
+
+    await waitFor(() =>
+      expect(currentCfg.profiles[0].apps).toEqual([
+        {
+          path: "agy",
+          args: [],
+          launchMode: "terminal",
+          name: "agy",
+        },
+      ]),
+    );
+    fireEvent.click(await screen.findByTestId("sockscap-launch-app-0"));
+
+    await waitFor(() => expect(vi.mocked(sockscapStart)).toHaveBeenCalledWith(undefined));
+    expect(vi.mocked(sockscapLaunchApp)).not.toHaveBeenCalled();
+    const terminalTab = useAppStore
+      .getState()
+      .tabs.find((tab) => tab.sockscapTerminal?.path === "agy");
+    expect(terminalTab).toMatchObject({
+      type: "terminal",
+      title: "agy",
+      sockscapTerminal: {
+        profileId: "default",
+        path: "agy",
+        args: [],
+      },
+    });
+    if (terminalTab) useAppStore.getState().removeTab(terminalTab.id);
+  });
+
+  it("starts multiple configured rootless applications independently", async () => {
+    currentPlatform = "linux";
+    currentCfg.profiles[0].apps = [
+      { path: "first-app", args: ["--one"], name: "First" },
+      { path: "second-app", args: ["--two"], name: "Second" },
+    ];
+    currentCfg.apps = currentCfg.profiles[0].apps;
+    let pid = 5000;
+    vi.mocked(sockscapLaunchApp).mockImplementation(async (profileId, path, args) => ({
+      pid: pid++,
+      profileId,
+      path,
+      args: args ?? [],
+      running: true,
+    }));
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-launch-app-0"));
+    await waitFor(() => expect(vi.mocked(sockscapLaunchApp)).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByTestId("sockscap-launch-app-1"));
+    await waitFor(() => expect(vi.mocked(sockscapLaunchApp)).toHaveBeenCalledTimes(2));
+
+    expect(vi.mocked(sockscapStart)).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Running · PID 5000")).toBeInTheDocument();
+    expect(screen.getByText("Running · PID 5001")).toBeInTheDocument();
   });
 
   it("retries Recover with sudo without accidentally starting capture", async () => {

@@ -2126,7 +2126,13 @@ export function MainLayout() {
 
   const activeTerminalGitAction = useMemo(() => {
     const tab = activeTab;
-    if (!tab || tab.type !== "terminal" || tab.ssh || tab.commandTerminal) {
+    if (
+      !tab ||
+      tab.type !== "terminal" ||
+      tab.ssh ||
+      tab.commandTerminal ||
+      tab.sockscapTerminal
+    ) {
       return undefined;
     }
     const cwd = terminalCwds[tab.id] ?? null;
@@ -3514,6 +3520,7 @@ export function MainLayout() {
                             ssh={tab.ssh}
                             commandTerminal={tab.commandTerminal}
                             localShell={tab.localShell}
+                            sockscapTerminal={tab.sockscapTerminal}
                             terminalProfile={liveTerminalProfile}
                             onTerminalProfileChange={(profile) => handleTerminalProfileChange(tab.id, profile)}
                             adoptedTerminal={tab.adoptedTerminal}

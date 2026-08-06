@@ -2325,6 +2325,14 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         captureBackend: "none",
       } as T;
     }
+    case "sockscap_launch_app":
+      throw new Error("Launching applications through SocksCap requires the Linux desktop build.");
+    case "sockscap_launch_terminal_app":
+      throw new Error("Launching terminal applications through SocksCap requires the Linux desktop build.");
+    case "sockscap_launched_apps":
+      return [] as T;
+    case "sockscap_stop_launched_app":
+      return undefined as T;
     case "sockscap_stop": {
       return {
         phase: "idle",

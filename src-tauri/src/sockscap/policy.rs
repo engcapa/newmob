@@ -520,6 +520,8 @@ mod tests {
             mode: ScopeMode::Apps,
             apps: vec![AppSelector {
                 path: "C:\\Apex.exe".into(),
+                args: Vec::new(),
+                launch_mode: Default::default(),
                 bundle_id: "".into(),
                 name: "Apex".into(),
                 macos_identity: None,
@@ -539,6 +541,8 @@ mod tests {
             mode: ScopeMode::Apps,
             apps: vec![AppSelector {
                 path: "C:\\VSCode.exe".into(),
+                args: Vec::new(),
+                launch_mode: Default::default(),
                 bundle_id: "".into(),
                 name: "VSCode".into(),
                 macos_identity: None,
@@ -593,6 +597,8 @@ mod tests {
         config.profiles[0].mode = ScopeMode::Apps;
         config.profiles[0].apps = vec![AppSelector {
             path: "/opt/example/example".into(),
+            args: Vec::new(),
+            launch_mode: Default::default(),
             bundle_id: String::new(),
             name: "Example".into(),
             macos_identity: None,
@@ -621,6 +627,8 @@ mod tests {
         config.profiles[0].mode = ScopeMode::Apps;
         config.profiles[0].apps = vec![AppSelector {
             path: "/opt/agy/agy".into(),
+            args: Vec::new(),
+            launch_mode: Default::default(),
             bundle_id: String::new(),
             name: "agy".into(),
             macos_identity: None,

@@ -142,6 +142,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as tauriOpen } from "@tauri-apps/plugin-shell";
 import { useT } from "../../lib/i18n";
 import { gitProbePath, gitSnapshot } from "../../lib/git";
+import {
+  sockscapLaunchTerminalApp,
+  sockscapStopLaunchedApp,
+} from "../../lib/sockscap";
+import type { SocksCapTerminalLaunchInfo } from "../../types";
 import "@xterm/xterm/css/xterm.css";
 
 export interface SshConnectInfo {
@@ -201,6 +206,7 @@ interface TerminalPanelProps {
   terminalProfile?: TerminalProfile;
   onTerminalProfileChange?: (profile: TerminalProfile) => void;
   adoptedTerminal?: AdoptedTerminalSession;
+  sockscapTerminal?: SocksCapTerminalLaunchInfo;
   /**
    * One-shot working directory for the initial connect. Local terminals launch
    * the shell here; SSH terminals `cd` here right after the shell opens. Used
@@ -311,6 +317,7 @@ export function TerminalPanel({
   terminalProfile,
   onTerminalProfileChange,
   adoptedTerminal,
+  sockscapTerminal,
   initialCwd,
   workspaceRoot,
   preserveSessionOnUnmount = false,
@@ -396,6 +403,7 @@ export function TerminalPanel({
   const attachToComposer = useChatStore((s) => s.attachToComposer);
   const explainSelection = useChatStore((s) => s.explainSelection);
   const isLocal = !ssh && !commandTerminal;
+  const supportsShellTools = !sockscapTerminal;
   const initialProfileRef = useRef<TerminalProfile | null>(null);
   if (!initialProfileRef.current) {
     initialProfileRef.current = terminalProfile ?? loadTerminalDefaultProfile();
@@ -723,7 +731,8 @@ export function TerminalPanel({
         : (localShell?.id === "powershell" || localShell?.id === "windows-powershell")),
     [isLocal, resolvedLocalShellId, localShell?.id],
   );
-  const suggestionsActive = inlineSuggestionsEnabled && !isLocalPowerShell;
+  const suggestionsActive =
+    supportsShellTools && inlineSuggestionsEnabled && !isLocalPowerShell;
   const history = useCommandHistory(historyHostKey, inlineSuggestionsMax);
 
   // Which command (if any) can probe this terminal's cwd via OSC 7. SSH and
@@ -738,12 +747,12 @@ export function TerminalPanel({
     [isLocal, resolvedLocalShellId, localShell?.id, localShell?.name],
   );
   const cwdProbeCommand = useMemo<string | null>(() => {
-    if (commandTerminal) return null;
+    if (commandTerminal || sockscapTerminal) return null;
     if (!isLocal) return CWD_QUERY_COMMAND; // SSH → remote POSIX shell.
     if (isLocalCmd) return null;
     if (isLocalPowerShell) return PS_CWD_QUERY_COMMAND;
     return CWD_QUERY_COMMAND; // bash/zsh/git-bash/WSL/Unix default.
-  }, [isLocal, isLocalCmd, isLocalPowerShell]);
+  }, [isLocal, isLocalCmd, isLocalPowerShell, sockscapTerminal]);
   const cwdProbeCommandRef = useRef(cwdProbeCommand);
   useEffect(() => {
     cwdProbeCommandRef.current = cwdProbeCommand;
@@ -1732,7 +1741,7 @@ export function TerminalPanel({
       return false;
     }
     if (
-      isLocal &&
+      isLocal && supportsShellTools &&
       event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey &&
       event.key.toLowerCase() === "p"
     ) {
@@ -1744,7 +1753,7 @@ export function TerminalPanel({
     }
     // Ctrl+K: AI command rewrite overlay (v2.2)
     if (
-      aiCommandRewriteEnabled && !isLocalPowerShell &&
+      supportsShellTools && aiCommandRewriteEnabled && !isLocalPowerShell &&
       event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey &&
       event.key.toLowerCase() === "k"
     ) {
@@ -1867,6 +1876,7 @@ export function TerminalPanel({
     resetFontSize,
     saveBufferToFile,
     searchOpen,
+    supportsShellTools,
     writeBroadcastInput,
   ]);
 
@@ -2290,6 +2300,8 @@ export function TerminalPanel({
     let cleanupImePositionLock: (() => void) | null = null;
     let resizeTimer: ReturnType<typeof setTimeout>;
     let activityPromptTimer: ReturnType<typeof setTimeout> | undefined;
+    let sockscapLaunchTimer: ReturnType<typeof setTimeout> | undefined;
+    let launchedSockscapPid: number | null = null;
 
     const primaryFont = getPrimaryFontName(fontFamily);
     const safeFontFamily = isMonospaceFont(primaryFont) ? fontFamily : getDefaultTerminalFontFamily();
@@ -2584,7 +2596,10 @@ export function TerminalPanel({
     el.addEventListener("scroll", onContainerScroll, { passive: true });
 
     const adopted = adoptedTerminalRef.current;
-    const sid = adopted?.sessionId ?? createTerminalSessionId();
+    const sid =
+      adopted?.sessionId ??
+      sockscapTerminal?.terminalSessionId ??
+      createTerminalSessionId();
     if (adopted?.snapshotText) {
       term.write(adopted.snapshotText.replace(/\n/g, "\r\n"));
     }
@@ -2750,6 +2765,10 @@ export function TerminalPanel({
 
     const markDisconnected = (endedSid: string) => {
       if (sessionIdRef.current !== endedSid) return;
+
+      if (sockscapTerminal) {
+        void closeTerminal(endedSid).catch(() => {});
+      }
 
       clearConnectionListeners();
       connectionStateRef.current = "disconnected";
@@ -3070,6 +3089,41 @@ export function TerminalPanel({
       startSshConnection(sid, "initial");
     } else if (commandTerminal) {
       startCommandTerminal(sid);
+    } else if (sockscapTerminal) {
+      connectionStateRef.current = "connecting";
+      appendEvent("connection", `Starting ${sockscapTerminal.path} through SocksCap`);
+      term.write(
+        `\x1b[33mStarting ${sockscapTerminal.path} through SocksCap...\x1b[0m\r\n`,
+      );
+      fitVisibleTerminal();
+      const { cols, rows } = currentTerminalSize(term);
+      // React StrictMode intentionally runs mount effects twice in development.
+      // Defer the irreversible backend launch so the first setup can be
+      // cancelled by its immediate cleanup instead of spawning two commands.
+      sockscapLaunchTimer = window.setTimeout(() => {
+        if (destroyed) return;
+        sockscapLaunchTerminalApp(
+          sid,
+          sockscapTerminal.profileId,
+          sockscapTerminal.path,
+          sockscapTerminal.args,
+          cols,
+          rows,
+          handleRawOutput,
+        )
+          .then((launched) => {
+            if (destroyed) {
+              void closeTerminal(sid).catch(() => {});
+              void sockscapStopLaunchedApp(launched.pid).catch(() => {});
+              return;
+            }
+            launchedSockscapPid = launched.pid;
+            return handleConnected({ sessionId: sid, shellId: null }, "initial");
+          })
+          .catch((err) => {
+            if (!destroyed) handleConnectFailure(err, "initial");
+          });
+      }, 0);
     } else {
       connectionStateRef.current = "connecting";
       appendEvent("connection", `Starting ${localShell?.name ?? "local terminal"}`);
@@ -3105,6 +3159,7 @@ export function TerminalPanel({
       resizeDisposable.dispose();
       clearTimeout(resizeTimer);
       if (activityPromptTimer) clearTimeout(activityPromptTimer);
+      if (sockscapLaunchTimer) clearTimeout(sockscapLaunchTimer);
       installSshCwdIntegrationRef.current = null;
       unlistenExit?.();
       unlistenForwardError?.();
@@ -3127,6 +3182,9 @@ export function TerminalPanel({
         if (!detachPending && !adopted) {
           closeTerminal(sessionIdRef.current).catch(() => {});
         }
+      }
+      if (launchedSockscapPid !== null) {
+        void sockscapStopLaunchedApp(launchedSockscapPid).catch(() => {});
       }
       term.dispose();
       webglAddonRef.current = null;
@@ -3849,7 +3907,7 @@ export function TerminalPanel({
         />
       )}
 
-      {isLocal && (
+      {isLocal && supportsShellTools && (
         <CommonCommandsPalette
           open={paletteOpen}
           historyHostKey={historyHostKey}
@@ -3867,7 +3925,7 @@ export function TerminalPanel({
         />
       )}
 
-      {aiRewriteOpen && !isLocalPowerShell && (
+      {supportsShellTools && aiRewriteOpen && !isLocalPowerShell && (
         <AiRewriteOverlay
           currentCommand={pendingRef.current}
           onAccept={(newCmd) => {

@@ -5,8 +5,8 @@ description: |
   OS packet capture, so Start must enter its degraded preview state rather than
   claim Linux capture is active. This case verifies the panel entry point,
   status refresh, rule dry-run, Start → Stop transition, and recovery action.
-  Privileged nftables/cgroup capture is verified separately by Rust tests and
-  native/manual validation on a Linux host with the required permissions.
+  Privileged nftables/cgroup capture and Linux launch-only capture are verified
+  separately by Rust/Vitest tests and native desktop validation.
 covers: [F-Sockscap-1]
 tags: [auto-generated, smoke, needs-review, network, sockscap]
 modes: [browser]

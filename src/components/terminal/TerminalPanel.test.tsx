@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TerminalPanel, collectTerminalBlockSelectionText } from "./TerminalPanel";
 import { DEFAULT_TERMINAL_PROFILE, SYSTEM_TERMINAL_THEME } from "../../lib/terminalProfile";
@@ -151,6 +152,23 @@ const clipboardMocks = vi.hoisted(() => ({
   readFiles: vi.fn(async () => [] as string[]),
 }));
 
+const sockscapMocks = vi.hoisted(() => ({
+  sockscapLaunchTerminalApp: vi.fn(async (
+    terminalSessionId: string,
+    profileId: string,
+    path: string,
+    args: string[],
+  ) => ({
+    pid: 4242,
+    profileId,
+    path,
+    args,
+    running: true,
+    terminalSessionId,
+  })),
+  sockscapStopLaunchedApp: vi.fn(async () => undefined),
+}));
+
 const gitMocks = vi.hoisted(() => ({
   gitProbePath: vi.fn(async (path: string) => ({
     path,
@@ -227,6 +245,8 @@ vi.mock("../../lib/clipboard", async () => {
 
 vi.mock("../../lib/git", () => gitMocks);
 
+vi.mock("../../lib/sockscap", () => sockscapMocks);
+
 vi.mock("../../lib/terminalImeGuard", () => ({
   attachTerminalImeGuard: vi.fn(() => vi.fn()),
   shouldUseLinuxImeGuard: vi.fn(() => false),
@@ -297,6 +317,8 @@ describe("TerminalPanel focus behavior", () => {
       ipcMocks.terminalExitHandlers.set(sessionId, callback);
       return vi.fn(() => ipcMocks.terminalExitHandlers.delete(sessionId));
     });
+    sockscapMocks.sockscapLaunchTerminalApp.mockClear();
+    sockscapMocks.sockscapStopLaunchedApp.mockClear();
     clipboardMocks.readFiles.mockReset();
     clipboardMocks.readFiles.mockResolvedValue([]);
     webglMocks.instances.length = 0;
@@ -322,6 +344,36 @@ describe("TerminalPanel focus behavior", () => {
     await waitFor(() => {
       expect(terminalMocks.focus).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("launches a SocksCap TUI only once when StrictMode replays mount effects", async () => {
+    render(
+      <StrictMode>
+        <TerminalPanel
+          tabId="sockscap-tab"
+          visible
+          sockscapTerminal={{
+            profileId: "default",
+            path: "agy",
+            args: [],
+            terminalSessionId: "sockscap-terminal-session",
+          }}
+        />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(sockscapMocks.sockscapLaunchTerminalApp).toHaveBeenCalledTimes(1);
+    });
+    expect(sockscapMocks.sockscapLaunchTerminalApp).toHaveBeenCalledWith(
+      "sockscap-terminal-session",
+      "default",
+      "agy",
+      [],
+      80,
+      24,
+      expect.any(Function),
+    );
   });
 
   it("passes the workspace root when launching an SDK-aware local terminal", async () => {
