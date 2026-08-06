@@ -860,13 +860,28 @@ pub fn create_command_pty_with_environment(
     args: &[String],
     environment: &[(OsString, OsString)],
 ) -> Result<(PtyHandle, Box<dyn Read + Send>), String> {
+    create_command_pty_with_launch_options(cols, rows, program, args, None, environment)
+}
+
+/// Launch a Linux command in a controlling PTY with explicit cwd and
+/// environment overrides. SocksCap uses this so preparation state is shared by
+/// its trace launcher, shell wrapper, and final TUI process.
+#[cfg(target_os = "linux")]
+pub fn create_command_pty_with_launch_options(
+    cols: u16,
+    rows: u16,
+    program: &str,
+    args: &[String],
+    cwd: Option<String>,
+    environment: &[(OsString, OsString)],
+) -> Result<(PtyHandle, Box<dyn Read + Send>), String> {
     create_pty_for_launch(
         cols,
         rows,
         program,
         args,
         None,
-        None,
+        cwd,
         None,
         Some(environment),
     )

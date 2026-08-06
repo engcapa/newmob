@@ -356,6 +356,10 @@ describe("TerminalPanel focus behavior", () => {
             profileId: "default",
             path: "agy",
             args: [],
+            launchPreparation: {
+              workingDirectory: "/workspace/agy",
+              preCommand: "export AGL_RUN_MODE=prepared",
+            },
             terminalSessionId: "sockscap-terminal-session",
           }}
         />
@@ -370,6 +374,10 @@ describe("TerminalPanel focus behavior", () => {
       "default",
       "agy",
       [],
+      {
+        workingDirectory: "/workspace/agy",
+        preCommand: "export AGL_RUN_MODE=prepared",
+      },
       80,
       24,
       expect.any(Function),

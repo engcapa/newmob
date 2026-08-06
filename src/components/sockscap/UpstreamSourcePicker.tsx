@@ -465,7 +465,7 @@ export function UpstreamSourcePicker({
             role="tree"
             data-testid={`${testId}-menu`}
             style={{ top: menuPos.top, left: menuPos.left, width: menuPos.width }}
-            className="fixed z-[100] max-h-72 flex flex-col overflow-hidden rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] shadow-lg"
+            className="taomni-sockscap-popover fixed z-[100] max-h-72 flex flex-col overflow-hidden rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] shadow-lg"
             onKeyDown={onKeyDown}
           >
           <div className="shrink-0 border-b border-[var(--taomni-divider)] p-1.5 flex gap-1.5">
@@ -557,5 +557,3 @@ export function UpstreamSourcePicker({
     </div>
   );
 }
-
-

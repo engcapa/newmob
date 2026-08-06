@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
 
-use crate::sockscap::config::{AppSelector, ScopeMode, SocksCapConfig};
+use crate::sockscap::config::{AppLaunchPreparation, AppSelector, ScopeMode, SocksCapConfig};
 use crate::sockscap::relay::RelayContext;
 
 /// A running Linux capture session. Dropping it is intentionally inert: callers
@@ -424,9 +424,14 @@ impl LinuxCaptureHandle {
         profile_id: &str,
         command: &str,
         args: &[String],
+        launch_preparation: &AppLaunchPreparation,
     ) -> Result<launched::LaunchedAppInfo, String> {
         match self {
-            Self::Launched(capture) => capture.launch_app(profile_id, command, args).await,
+            Self::Launched(capture) => {
+                capture
+                    .launch_app(profile_id, command, args, launch_preparation)
+                    .await
+            }
             Self::Transparent(_) => Err(
                 "the active Linux backend captures applications transparently; launch-only control is unavailable"
                     .into(),
@@ -439,6 +444,7 @@ impl LinuxCaptureHandle {
         profile_id: &str,
         command: &str,
         args: &[String],
+        launch_preparation: &AppLaunchPreparation,
         terminal_session_id: &str,
         cols: u16,
         rows: u16,
@@ -455,6 +461,7 @@ impl LinuxCaptureHandle {
                 profile_id,
                 command,
                 args,
+                launch_preparation,
                 terminal_session_id,
                 cols,
                 rows,
@@ -540,6 +547,7 @@ mod tests {
             path: "/opt/example/example".into(),
             args: Vec::new(),
             launch_mode: Default::default(),
+            launch_preparation: Default::default(),
             bundle_id: String::new(),
             name: "Example".into(),
             macos_identity: None,
@@ -561,6 +569,7 @@ mod tests {
             path: "/opt/agy/agy".into(),
             args: Vec::new(),
             launch_mode: Default::default(),
+            launch_preparation: Default::default(),
             bundle_id: String::new(),
             name: "agy".into(),
             macos_identity: None,
@@ -595,6 +604,7 @@ mod tests {
             path: "/opt/example/example".into(),
             args: Vec::new(),
             launch_mode: Default::default(),
+            launch_preparation: Default::default(),
             bundle_id: String::new(),
             name: "Example".into(),
             macos_identity: None,

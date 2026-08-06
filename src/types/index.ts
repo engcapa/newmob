@@ -3,6 +3,7 @@ import type { TerminalProfile } from "../lib/terminalProfile";
 import type { NetworkSettingsPayload } from "../lib/networkSettings";
 import type { RdpOptions } from "./rdp";
 import type { ObjectStorageConfig } from "./objectStorage";
+import type { LaunchPreparation } from "../lib/sockscap";
 
 export type TabKind = "terminal" | "sftp" | "rdp" | "vnc" | "nettools" | "sockscap" | "welcome" | "settings" | "placeholder" | "file-browser" | "database" | "redis" | "hbase-shell" | "proxy-test" | "object-storage" | "lan-chat" | "git" | "mail" | "code-workspace";
 
@@ -473,6 +474,7 @@ export interface SocksCapTerminalLaunchInfo {
   profileId: string;
   path: string;
   args: string[];
+  launchPreparation?: LaunchPreparation;
   terminalSessionId: string;
 }
 

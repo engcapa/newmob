@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  FolderOpen,
   HelpCircle,
   Info,
   Layers,
@@ -17,6 +18,7 @@ import {
   Lock,
   PanelLeftClose,
   PanelLeftOpen,
+  Pencil,
   Play,
   Plus,
   RefreshCw,
@@ -64,6 +66,7 @@ import {
   type GfwListStatus,
   type HelperStatus,
   type LaunchedAppInfo,
+  type LaunchPreparation,
   type ProcessInfo,
   type RedirectorInstallStatus,
   type RuleMode,
@@ -111,6 +114,12 @@ export const SOCKSCAP_MACOS_SETUP_STORAGE_KEY =
   "taomni.sockscap.macosSetupGuide.v1";
 
 type MacosSetupGuideMode = "onboarding" | "help";
+
+type EnvironmentDraft = {
+  id: number;
+  name: string;
+  value: string;
+};
 
 function hasCompletedMacosSetup(): boolean {
   try {
@@ -297,6 +306,14 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
   const [rootlessArguments, setRootlessArguments] = useState("");
   const [rootlessLaunchMode, setRootlessLaunchMode] =
     useState<"desktop" | "terminal">("desktop");
+  const [rootlessPreparationOpen, setRootlessPreparationOpen] = useState(false);
+  const [rootlessWorkingDirectory, setRootlessWorkingDirectory] = useState("");
+  const [rootlessPreCommand, setRootlessPreCommand] = useState("");
+  const [rootlessLaunchShell, setRootlessLaunchShell] =
+    useState<"sh" | "bash">("sh");
+  const [rootlessEnvironment, setRootlessEnvironment] = useState<EnvironmentDraft[]>([]);
+  const [editingRootlessAppKey, setEditingRootlessAppKey] = useState<string | null>(null);
+  const nextEnvironmentDraftId = useRef(1);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const [testHost, setTestHost] = useState("www.google.com");
@@ -1752,6 +1769,51 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     }
   };
 
+  const pickRootlessWorkingDirectory = async () => {
+    if (locked) return;
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (!selected || Array.isArray(selected)) return;
+      setRootlessWorkingDirectory(selected);
+      setRootlessPreparationOpen(true);
+    } catch (e) {
+      report(String(e), false);
+    }
+  };
+
+  const resetRootlessApplicationDraft = () => {
+    setRootlessCommand("");
+    setRootlessArguments("");
+    setRootlessLaunchMode("desktop");
+    setRootlessPreparationOpen(false);
+    setRootlessWorkingDirectory("");
+    setRootlessPreCommand("");
+    setRootlessLaunchShell("sh");
+    setRootlessEnvironment([]);
+    setEditingRootlessAppKey(null);
+  };
+
+  const editRootlessApplication = (app: AppSelector) => {
+    const preparation = normalizeLaunchPreparation(app.launchPreparation);
+    setRootlessCommand(app.path);
+    setRootlessArguments(formatRootlessArguments(app.args));
+    setRootlessLaunchMode(app.launchMode ?? "desktop");
+    setRootlessWorkingDirectory(preparation.workingDirectory ?? "");
+    setRootlessPreCommand(preparation.preCommand ?? "");
+    setRootlessLaunchShell(preparation.shell ?? "sh");
+    setRootlessEnvironment(
+      Object.entries(preparation.environment ?? {}).map(([name, value]) => ({
+        id: nextEnvironmentDraftId.current++,
+        name,
+        value,
+      })),
+    );
+    setRootlessPreparationOpen(!launchPreparationIsEmpty(preparation));
+    setEditingRootlessAppKey(
+      rootlessAppKey(app.path, app.args, app.launchMode, app.launchPreparation),
+    );
+  };
+
   const addRootlessApplication = async () => {
     if (!cfg || locked) return;
     const command = rootlessCommand.trim();
@@ -1763,28 +1825,78 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
       report(t("sockscap.rootlessArgsInvalid"), false);
       return;
     }
+    const environment: Record<string, string> = {};
+    for (const entry of rootlessEnvironment) {
+      const name = entry.name.trim();
+      if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+        report(t("sockscap.rootlessEnvironmentInvalid"), false);
+        return;
+      }
+      if (Object.prototype.hasOwnProperty.call(environment, name)) {
+        report(t("sockscap.rootlessEnvironmentDuplicate", { name }), false);
+        return;
+      }
+      environment[name] = entry.value;
+    }
+    const workingDirectory = rootlessWorkingDirectory.trim();
+    if (workingDirectory && !workingDirectory.startsWith("/")) {
+      report(t("sockscap.rootlessWorkingDirectoryAbsolute"), false);
+      return;
+    }
+    const launchPreparation = normalizeLaunchPreparation({
+      workingDirectory,
+      environment,
+      preCommand: rootlessPreCommand.trim(),
+      shell: rootlessLaunchShell,
+    });
     const candidate: AppSelector = {
       path: command,
       args,
       launchMode: rootlessLaunchMode,
+      ...(launchPreparationIsEmpty(launchPreparation) ? {} : { launchPreparation }),
       name: command.split(/[/\\]/).pop() || command,
     };
-    const key = rootlessAppKey(candidate.path, candidate.args, candidate.launchMode);
+    const key = rootlessAppKey(
+      candidate.path,
+      candidate.args,
+      candidate.launchMode,
+      candidate.launchPreparation,
+    );
     if (
       selectedProf.apps.some(
-        (app) => rootlessAppKey(app.path, app.args, app.launchMode) === key,
+        (app) =>
+          rootlessAppKey(
+            app.path,
+            app.args,
+            app.launchMode,
+            app.launchPreparation,
+          ) === key &&
+          rootlessAppKey(
+            app.path,
+            app.args,
+            app.launchMode,
+            app.launchPreparation,
+          ) !== editingRootlessAppKey,
       )
     ) {
       report(t("sockscap.rootlessAppAlreadyAdded"), false);
       return;
     }
-    const nextConfig = await patchSelectedProfile({
-      apps: [...selectedProf.apps, candidate],
-    });
+    const apps = editingRootlessAppKey
+      ? selectedProf.apps.map((app) =>
+          rootlessAppKey(
+            app.path,
+            app.args,
+            app.launchMode,
+            app.launchPreparation,
+          ) === editingRootlessAppKey
+            ? candidate
+            : app,
+        )
+      : [...selectedProf.apps, candidate];
+    const nextConfig = await patchSelectedProfile({ apps });
     if (nextConfig) {
-      setRootlessCommand("");
-      setRootlessArguments("");
-      setRootlessLaunchMode("desktop");
+      resetRootlessApplicationDraft();
     }
   };
 
@@ -1793,11 +1905,12 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     path: string,
     args: string[] = [],
     launchMode: "desktop" | "terminal" = "desktop",
+    launchPreparation: LaunchPreparation = {},
     name?: string,
     configOverride?: SocksCapConfig,
   ) => {
     if (launchingPath || stoppingPid !== null) return;
-    const launchKey = rootlessAppKey(path, args, launchMode);
+    const launchKey = rootlessAppKey(path, args, launchMode, launchPreparation);
     setLaunchingPath(launchKey);
     let startedHere = false;
     try {
@@ -1833,13 +1946,24 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
           type: "terminal",
           title: name || path.split(/[/\\]/).pop() || path,
           closable: true,
-          sockscapTerminal: { profileId, path, args, terminalSessionId: id },
+          sockscapTerminal: {
+            profileId,
+            path,
+            args,
+            launchPreparation,
+            terminalSessionId: id,
+          },
           terminalTitleMode: "manual",
         });
         report(t("sockscap.terminalApplicationOpened"));
         return;
       }
-      const launched = await sockscapLaunchApp(profileId, path, args);
+      const launched = await sockscapLaunchApp(
+        profileId,
+        path,
+        args,
+        launchPreparation,
+      );
       setLaunchedApps((current) => [
         ...current.filter((app) => app.pid !== launched.pid),
         launched,
@@ -1916,7 +2040,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   return (
     <div
-      className="relative h-full flex flex-col bg-[var(--taomni-panel-bg)] text-[var(--taomni-text)]"
+      className="sockscap-panel relative h-full flex flex-col bg-[var(--taomni-panel-bg)] text-[var(--taomni-text)]"
       data-testid="sockscap-panel"
     >
       {/* Header */}
@@ -2627,17 +2751,196 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                           </option>
                         </select>
                       </Field>
-                      <button
-                        type="button"
-                        data-testid="sockscap-add-rootless-application"
-                        className="inline-flex items-center justify-center gap-1 px-3 py-1.5 rounded text-[11px] border border-[var(--taomni-accent)] text-[var(--taomni-accent)] hover:bg-[var(--taomni-accent)]/10 disabled:opacity-50"
-                        disabled={locked || !rootlessCommand.trim()}
-                        onClick={() => void addRootlessApplication()}
-                      >
-                        <Plus className="w-3 h-3" />
-                        {t("sockscap.addApplication")}
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          data-testid="sockscap-add-rootless-application"
+                          className="inline-flex flex-1 items-center justify-center gap-1 px-3 py-1.5 rounded text-[11px] border border-[var(--taomni-accent)] text-[var(--taomni-accent)] hover:bg-[var(--taomni-accent)]/10 disabled:opacity-50"
+                          disabled={locked || !rootlessCommand.trim()}
+                          onClick={() => void addRootlessApplication()}
+                        >
+                          {editingRootlessAppKey ? (
+                            <Pencil className="w-3 h-3" />
+                          ) : (
+                            <Plus className="w-3 h-3" />
+                          )}
+                          {t(
+                            editingRootlessAppKey
+                              ? "sockscap.updateApplication"
+                              : "sockscap.addApplication",
+                          )}
+                        </button>
+                        {editingRootlessAppKey && (
+                          <button
+                            type="button"
+                            data-testid="sockscap-cancel-rootless-application-edit"
+                            className="p-1.5 rounded border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50"
+                            disabled={locked}
+                            title={t("common.cancel")}
+                            aria-label={t("common.cancel")}
+                            onClick={resetRootlessApplicationDraft}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
                     </div>
+                    <button
+                      type="button"
+                      data-testid="sockscap-rootless-preparation-toggle"
+                      className="mt-2 inline-flex items-center gap-1 text-[11px] text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)] disabled:opacity-50"
+                      disabled={locked}
+                      aria-expanded={rootlessPreparationOpen}
+                      onClick={() => setRootlessPreparationOpen((open) => !open)}
+                    >
+                      {rootlessPreparationOpen ? (
+                        <ChevronDown className="w-3 h-3" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3" />
+                      )}
+                      {t("sockscap.rootlessPreparationTitle")}
+                    </button>
+                    {rootlessPreparationOpen && (
+                      <div
+                        data-testid="sockscap-rootless-preparation"
+                        className="mt-2 border-t border-[var(--taomni-divider)] pt-2 space-y-2"
+                      >
+                        <div className="grid grid-cols-1 xl:grid-cols-[minmax(280px,1fr)_140px] gap-2">
+                          <Field label={t("sockscap.rootlessWorkingDirectoryLabel")}>
+                            <div className="flex gap-1">
+                              <input
+                                data-testid="sockscap-rootless-working-directory"
+                                className="flex-1 min-w-0 text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                                value={rootlessWorkingDirectory}
+                                disabled={locked}
+                                placeholder={t("sockscap.rootlessWorkingDirectoryPlaceholder")}
+                                onChange={(event) =>
+                                  setRootlessWorkingDirectory(event.target.value)
+                                }
+                              />
+                              <button
+                                type="button"
+                                data-testid="sockscap-pick-rootless-working-directory"
+                                className="p-1.5 rounded border border-[var(--taomni-divider)] hover:bg-[var(--taomni-hover)] disabled:opacity-50"
+                                disabled={locked}
+                                title={t("sockscap.browseDirectory")}
+                                aria-label={t("sockscap.browseDirectory")}
+                                onClick={() => void pickRootlessWorkingDirectory()}
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </Field>
+                          <Field label={t("sockscap.rootlessShellLabel")}>
+                            <select
+                              data-testid="sockscap-rootless-shell"
+                              className="w-full text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                              value={rootlessLaunchShell}
+                              disabled={locked}
+                              onChange={(event) =>
+                                setRootlessLaunchShell(event.target.value as "sh" | "bash")
+                              }
+                            >
+                              <option value="sh">POSIX sh</option>
+                              <option value="bash">Bash</option>
+                            </select>
+                          </Field>
+                        </div>
+                        <Field label={t("sockscap.rootlessPreCommandLabel")}>
+                          <textarea
+                            data-testid="sockscap-rootless-pre-command"
+                            className="w-full min-h-20 resize-y font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                            value={rootlessPreCommand}
+                            disabled={locked}
+                            placeholder={t("sockscap.rootlessPreCommandPlaceholder")}
+                            onChange={(event) => setRootlessPreCommand(event.target.value)}
+                          />
+                        </Field>
+                        <div>
+                          <div className="mb-1 flex items-center justify-between gap-2">
+                            <span className="text-[11px] font-medium">
+                              {t("sockscap.rootlessEnvironmentLabel")}
+                            </span>
+                            <button
+                              type="button"
+                              data-testid="sockscap-add-rootless-environment"
+                              className="inline-flex items-center gap-1 text-[10px] text-[var(--taomni-accent)] hover:underline disabled:opacity-50"
+                              disabled={locked}
+                              onClick={() =>
+                                setRootlessEnvironment((entries) => [
+                                  ...entries,
+                                  {
+                                    id: nextEnvironmentDraftId.current++,
+                                    name: "",
+                                    value: "",
+                                  },
+                                ])
+                              }
+                            >
+                              <Plus className="w-3 h-3" />
+                              {t("sockscap.addEnvironmentVariable")}
+                            </button>
+                          </div>
+                          <div className="space-y-1">
+                            {rootlessEnvironment.map((entry, index) => (
+                              <div
+                                key={entry.id}
+                                className="grid grid-cols-[minmax(120px,0.45fr)_minmax(160px,1fr)_auto] gap-1"
+                              >
+                                <input
+                                  data-testid={`sockscap-rootless-environment-name-${index}`}
+                                  aria-label={t("sockscap.environmentName")}
+                                  className="min-w-0 font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                                  value={entry.name}
+                                  disabled={locked}
+                                  placeholder={t("sockscap.environmentName")}
+                                  onChange={(event) =>
+                                    setRootlessEnvironment((entries) =>
+                                      entries.map((current) =>
+                                        current.id === entry.id
+                                          ? { ...current, name: event.target.value }
+                                          : current,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <input
+                                  data-testid={`sockscap-rootless-environment-value-${index}`}
+                                  aria-label={t("sockscap.environmentValue")}
+                                  className="min-w-0 font-mono text-[11px] px-2 py-1.5 rounded border border-[var(--taomni-divider)] bg-[var(--taomni-panel-bg)] disabled:opacity-60"
+                                  value={entry.value}
+                                  disabled={locked}
+                                  placeholder={t("sockscap.environmentValue")}
+                                  onChange={(event) =>
+                                    setRootlessEnvironment((entries) =>
+                                      entries.map((current) =>
+                                        current.id === entry.id
+                                          ? { ...current, value: event.target.value }
+                                          : current,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <button
+                                  type="button"
+                                  className="p-1.5 rounded hover:text-red-500 disabled:opacity-50"
+                                  disabled={locked}
+                                  title={t("common.remove")}
+                                  aria-label={t("common.remove")}
+                                  onClick={() =>
+                                    setRootlessEnvironment((entries) =>
+                                      entries.filter((current) => current.id !== entry.id),
+                                    )
+                                  }
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     <p className="mt-2 text-[10px] text-[var(--taomni-text-muted)]">
                       {t("sockscap.rootlessCommandHint")}
                     </p>
@@ -2689,17 +2992,24 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                 ) : (
                   <ul className="space-y-1">
                     {selectedProf.apps.map((a, index) => {
-                      const appKey = rootlessAppKey(a.path, a.args, a.launchMode);
-                      const launched = launchedApps.find(
+                      const appKey = rootlessAppKey(
+                        a.path,
+                        a.args,
+                        a.launchMode,
+                        a.launchPreparation,
+                      );
+                      const matchingLaunches = launchedApps.filter(
                         (app) =>
-                          app.running &&
                           app.profileId === selectedProf.id &&
                           rootlessAppKey(
                             app.path,
                             app.args,
                             app.terminalSessionId ? "terminal" : "desktop",
+                            app.launchPreparation,
                           ) === appKey,
                       );
+                      const latestLaunch = matchingLaunches.at(-1);
+                      const launched = latestLaunch?.running ? latestLaunch : undefined;
                       const profileActive =
                         selectedProf.enabled &&
                         (cfg?.activeProfileIds.includes(selectedProf.id) ?? false);
@@ -2722,6 +3032,20 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                                       : "sockscap.rootlessLaunchModeDesktop",
                                   )}
                                 </span>
+                                {a.launchPreparation?.workingDirectory && (
+                                  <span className="block truncate font-mono text-[10px] text-[var(--taomni-text-muted)]">
+                                    {t("sockscap.rootlessWorkingDirectorySummary", {
+                                      path: a.launchPreparation.workingDirectory,
+                                    })}
+                                  </span>
+                                )}
+                                {a.launchPreparation?.preCommand && (
+                                  <span className="block truncate font-mono text-[10px] text-[var(--taomni-text-muted)]">
+                                    {t("sockscap.rootlessPreCommandSummary", {
+                                      command: a.launchPreparation.preCommand.split(/\r?\n/)[0],
+                                    })}
+                                  </span>
+                                )}
                               </>
                             )}
                             {a.macosIdentity && (
@@ -2733,8 +3057,29 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                               </span>
                             )}
                             {launched && (
-                              <span className="block text-[10px] text-emerald-600 dark:text-emerald-400">
-                                {t("sockscap.applicationRunning", { pid: launched.pid })}
+                              <span
+                                className={`block text-[10px] ${
+                                  launched.phase === "preparing"
+                                    ? "text-amber-600 dark:text-amber-400"
+                                    : "text-emerald-600 dark:text-emerald-400"
+                                }`}
+                              >
+                                {t(
+                                  launched.phase === "preparing"
+                                    ? "sockscap.applicationPreparing"
+                                    : "sockscap.applicationRunning",
+                                  { pid: launched.pid },
+                                )}
+                              </span>
+                            )}
+                            {!launched && latestLaunch?.phase === "failed" && (
+                              <span
+                                className="block truncate text-[10px] text-red-600 dark:text-red-400"
+                                title={latestLaunch.launchError}
+                              >
+                                {t("sockscap.applicationLaunchFailed", {
+                                  reason: latestLaunch.launchError ?? t("common.unknownError"),
+                                })}
                               </span>
                             )}
                           </span>
@@ -2785,6 +3130,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                                     a.path,
                                     a.args ?? [],
                                     a.launchMode ?? "desktop",
+                                    a.launchPreparation ?? {},
                                     a.name,
                                   )
                                 }
@@ -2805,6 +3151,19 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                                 )}
                               </button>
                             ))}
+                          {linuxLaunchOnly && (
+                            <button
+                              type="button"
+                              data-testid={`sockscap-edit-app-${index}`}
+                              className="p-1 hover:text-[var(--taomni-accent)] disabled:opacity-40 disabled:cursor-not-allowed"
+                              disabled={locked || launched !== undefined}
+                              title={t("sockscap.editApplication")}
+                              aria-label={t("sockscap.editApplication")}
+                              onClick={() => editRootlessApplication(a)}
+                            >
+                              <Pencil className="w-3 h-3" />
+                            </button>
+                          )}
                           <button
                             type="button"
                             className="p-1 hover:text-red-500 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -2818,6 +3177,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
                                       item.path,
                                       item.args,
                                       item.launchMode,
+                                      item.launchPreparation,
                                     ) !== appKey,
                                 ),
                               })
@@ -3715,23 +4075,29 @@ function Section({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const contentId = `sockscap-section-${sectionId}-content`;
   return (
-    <section className="rounded-lg border border-[var(--taomni-divider)] overflow-hidden">
+    <section className="sockscap-section rounded-lg border border-[var(--taomni-divider)] overflow-hidden">
       <button
         type="button"
         data-testid={`sockscap-section-${sectionId}-toggle`}
-        className="w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-[var(--taomni-hover)] transition-colors"
+        className="sockscap-section-toggle w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-[var(--taomni-hover)] transition-colors"
         aria-expanded={expanded}
         aria-controls={contentId}
         onClick={() => setExpanded((current) => !current)}
       >
-        <h3 className="text-[12px] font-semibold truncate">{title}</h3>
+        <h3 className="sockscap-section-title text-[12px] font-semibold truncate">
+          {title}
+        </h3>
         {expanded ? (
           <ChevronDown className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-text-muted)]" />
         ) : (
           <ChevronRight className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-text-muted)]" />
         )}
       </button>
-      <div id={contentId} hidden={!expanded} className="border-t border-[var(--taomni-divider)] p-3">
+      <div
+        id={contentId}
+        hidden={!expanded}
+        className="sockscap-section-content border-t border-[var(--taomni-divider)] p-3"
+      >
         {children}
       </div>
     </section>
@@ -3740,8 +4106,10 @@ function Section({
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block text-[11px]">
-      <div className="text-[var(--taomni-text-muted)] mb-1">{label}</div>
+    <label className="sockscap-field block text-[11px]">
+      <div className="sockscap-field-label text-[var(--taomni-text-muted)] mb-1">
+        {label}
+      </div>
       {children}
     </label>
   );
@@ -3788,8 +4156,37 @@ function rootlessAppKey(
   path: string,
   args: string[] | undefined,
   launchMode: "desktop" | "terminal" | undefined,
+  launchPreparation: LaunchPreparation | undefined,
 ): string {
-  return JSON.stringify([path, args ?? [], launchMode ?? "desktop"]);
+  return JSON.stringify([
+    path,
+    args ?? [],
+    launchMode ?? "desktop",
+    normalizeLaunchPreparation(launchPreparation),
+  ]);
+}
+
+function normalizeLaunchPreparation(
+  preparation: LaunchPreparation | undefined,
+): LaunchPreparation {
+  const workingDirectory = preparation?.workingDirectory?.trim() ?? "";
+  const preCommand = preparation?.preCommand?.trim() ?? "";
+  const environment = Object.fromEntries(
+    Object.entries(preparation?.environment ?? {}).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  );
+  const shell = preparation?.shell ?? "sh";
+  return {
+    ...(workingDirectory ? { workingDirectory } : {}),
+    ...(Object.keys(environment).length > 0 ? { environment } : {}),
+    ...(preCommand ? { preCommand } : {}),
+    ...(shell === "bash" ? { shell } : {}),
+  };
+}
+
+function launchPreparationIsEmpty(preparation: LaunchPreparation): boolean {
+  return Object.keys(normalizeLaunchPreparation(preparation)).length === 0;
 }
 
 function parseShellArguments(value: string): string[] {
@@ -3849,6 +4246,10 @@ function parseShellArguments(value: string): string[] {
 
 function formatRootlessCommand(path: string, args: string[] | undefined): string {
   return [path, ...(args ?? [])].map(quoteShellArgument).join(" ");
+}
+
+function formatRootlessArguments(args: string[] | undefined): string {
+  return (args ?? []).map(quoteShellArgument).join(" ");
 }
 
 function quoteShellArgument(value: string): string {

@@ -1194,6 +1194,7 @@ pub async fn sockscap_launch_app(
     profile_id: String,
     path: String,
     args: Vec<String>,
+    launch_preparation: config::AppLaunchPreparation,
 ) -> Result<serde_json::Value, String> {
     #[cfg(target_os = "linux")]
     {
@@ -1213,6 +1214,7 @@ pub async fn sockscap_launch_app(
                 profile.apps.iter().any(|app| {
                     app.path == path
                         && app.args == args
+                        && app.launch_preparation == launch_preparation
                         && matches!(app.launch_mode, config::AppLaunchMode::Desktop)
                 })
             });
@@ -1224,13 +1226,15 @@ pub async fn sockscap_launch_app(
         let capture = orch
             .linux_capture_mut()
             .ok_or_else(|| "Linux capture backend is not active".to_string())?;
-        let info = capture.launch_app(&profile_id, &path, &args).await?;
+        let info = capture
+            .launch_app(&profile_id, &path, &args, &launch_preparation)
+            .await?;
         serde_json::to_value(info)
             .map_err(|error| format!("serialize launched application: {error}"))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (state, profile_id, path, args);
+        let _ = (state, profile_id, path, args, launch_preparation);
         Err("launching applications through SocksCap is currently Linux-only".into())
     }
 }
@@ -1242,6 +1246,7 @@ pub async fn sockscap_launch_terminal_app(
     profile_id: String,
     path: String,
     args: Vec<String>,
+    launch_preparation: config::AppLaunchPreparation,
     terminal_session_id: String,
     cols: u16,
     rows: u16,
@@ -1285,6 +1290,7 @@ pub async fn sockscap_launch_terminal_app(
                 profile.apps.iter().any(|configured| {
                     configured.path == path
                         && configured.args == args
+                        && configured.launch_preparation == launch_preparation
                         && matches!(configured.launch_mode, config::AppLaunchMode::Terminal)
                 })
             });
@@ -1301,6 +1307,7 @@ pub async fn sockscap_launch_terminal_app(
             &profile_id,
             &path,
             &args,
+            &launch_preparation,
             &terminal_session_id,
             cols,
             rows,
@@ -1334,6 +1341,7 @@ pub async fn sockscap_launch_terminal_app(
             profile_id,
             path,
             args,
+            launch_preparation,
             terminal_session_id,
             cols,
             rows,
