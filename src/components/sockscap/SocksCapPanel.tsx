@@ -2040,7 +2040,7 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
 
   return (
     <div
-      className="relative h-full flex flex-col bg-[var(--taomni-panel-bg)] text-[var(--taomni-text)]"
+      className="sockscap-panel relative h-full flex flex-col bg-[var(--taomni-panel-bg)] text-[var(--taomni-text)]"
       data-testid="sockscap-panel"
     >
       {/* Header */}
@@ -4075,23 +4075,29 @@ function Section({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const contentId = `sockscap-section-${sectionId}-content`;
   return (
-    <section className="rounded-lg border border-[var(--taomni-divider)] overflow-hidden">
+    <section className="sockscap-section rounded-lg border border-[var(--taomni-divider)] overflow-hidden">
       <button
         type="button"
         data-testid={`sockscap-section-${sectionId}-toggle`}
-        className="w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-[var(--taomni-hover)] transition-colors"
+        className="sockscap-section-toggle w-full px-3 py-2.5 flex items-center justify-between gap-2 text-left hover:bg-[var(--taomni-hover)] transition-colors"
         aria-expanded={expanded}
         aria-controls={contentId}
         onClick={() => setExpanded((current) => !current)}
       >
-        <h3 className="text-[12px] font-semibold truncate">{title}</h3>
+        <h3 className="sockscap-section-title text-[12px] font-semibold truncate">
+          {title}
+        </h3>
         {expanded ? (
           <ChevronDown className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-text-muted)]" />
         ) : (
           <ChevronRight className="w-3.5 h-3.5 shrink-0 text-[var(--taomni-text-muted)]" />
         )}
       </button>
-      <div id={contentId} hidden={!expanded} className="border-t border-[var(--taomni-divider)] p-3">
+      <div
+        id={contentId}
+        hidden={!expanded}
+        className="sockscap-section-content border-t border-[var(--taomni-divider)] p-3"
+      >
         {children}
       </div>
     </section>
@@ -4100,8 +4106,10 @@ function Section({
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <label className="block text-[11px]">
-      <div className="text-[var(--taomni-text-muted)] mb-1">{label}</div>
+    <label className="sockscap-field block text-[11px]">
+      <div className="sockscap-field-label text-[var(--taomni-text-muted)] mb-1">
+        {label}
+      </div>
       {children}
     </label>
   );

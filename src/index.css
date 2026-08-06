@@ -1651,3 +1651,164 @@ html[data-app-theme="dark"] .hover\:bg-white\/70:hover {
   background: #854d0e;
   color: #fef3c7;
 }
+
+/* SocksCap surface
+ *
+ * SocksCap is a dense configuration tool, so its visual hierarchy needs to
+ * remain readable when the global UI font is changed. The panel predates the
+ * global typography tokens and contains many fixed Tailwind font sizes; keep
+ * those utility classes as semantic size steps here instead of rewriting the
+ * behavior-heavy form markup.
+ */
+.sockscap-panel,
+.taomni-sockscap-popover {
+  --sockscap-label-color: color-mix(in srgb, var(--taomni-text) 78%, var(--taomni-text-muted));
+  --sockscap-info-text: color-mix(in srgb, var(--taomni-accent) 72%, var(--taomni-text));
+  --sockscap-danger-text: color-mix(in srgb, #ef4444 72%, var(--taomni-text));
+  font-family: var(--taomni-ui-font-family);
+  font-size: var(--taomni-ui-font-size);
+  line-height: 1.35;
+}
+
+.sockscap-panel :is(button, input, select, textarea):not(.font-mono):not(.taomni-mono),
+.taomni-sockscap-popover :is(button, input, select, textarea):not(.font-mono):not(.taomni-mono) {
+  font-family: inherit;
+}
+
+/* Keep metadata smaller than body text while preventing the old 9-10px labels
+   from becoming unreadable. All steps still move with Settings > Global UI. */
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-\[9px\] {
+  font-size: max(10px, calc(var(--taomni-ui-font-size) - 3px)) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-\[10px\] {
+  font-size: max(10px, calc(var(--taomni-ui-font-size) - 2px)) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-\[11px\] {
+  font-size: max(11px, calc(var(--taomni-ui-font-size) - 1px)) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-\[12px\] {
+  font-size: var(--taomni-ui-font-size) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-\[13px\] {
+  font-size: calc(var(--taomni-ui-font-size) + 1px) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-\[14px\] {
+  font-size: calc(var(--taomni-ui-font-size) + 2px) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-xs {
+  font-size: var(--taomni-ui-font-size) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-sm {
+  font-size: calc(var(--taomni-ui-font-size) + 2px) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) .text-base {
+  font-size: calc(var(--taomni-ui-font-size) + 4px) !important;
+}
+
+/* Section chrome gives the title a stable visual anchor and separates the
+   editable body from the surrounding panel without adding nested card noise. */
+.sockscap-section {
+  background: color-mix(in srgb, var(--taomni-panel-bg) 88%, var(--taomni-card-bg));
+  border-color: color-mix(in srgb, var(--taomni-divider) 88%, var(--taomni-text)) !important;
+  box-shadow: var(--taomni-shadow-sm);
+}
+.sockscap-section-toggle {
+  min-height: 42px;
+  background: color-mix(in srgb, var(--taomni-card-bg) 48%, var(--taomni-panel-bg));
+  color: var(--taomni-text);
+}
+.sockscap-section-toggle:hover {
+  background: var(--taomni-hover);
+}
+.sockscap-section-title {
+  font-size: var(--taomni-ui-font-size) !important;
+  letter-spacing: 0.01em;
+}
+.sockscap-section-content {
+  background: color-mix(in srgb, var(--taomni-panel-bg) 94%, var(--taomni-card-bg));
+}
+.sockscap-field {
+  color: var(--sockscap-label-color);
+  font-size: max(11px, calc(var(--taomni-ui-font-size) - 1px)) !important;
+  line-height: 1.35;
+}
+.sockscap-field-label {
+  color: var(--sockscap-label-color) !important;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1.3;
+}
+
+/* Make editable controls read as controls in both themes. */
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea
+) {
+  min-width: 0;
+  border-color: var(--taomni-input-border) !important;
+  background-color: var(--taomni-input-bg) !important;
+  color: var(--taomni-text) !important;
+  font-size: var(--taomni-ui-font-size) !important;
+  line-height: 1.3;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select
+) {
+  min-height: max(30px, calc(var(--taomni-ui-font-size) + 12px));
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(input, select, textarea)::placeholder {
+  color: color-mix(in srgb, var(--taomni-text-muted) 82%, var(--taomni-text)) !important;
+  opacity: 1;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(input, select, textarea):focus-visible {
+  border-color: var(--taomni-accent) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--taomni-accent) 22%, transparent);
+  outline: none;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(input, select, textarea):disabled {
+  background-color: var(--taomni-button-disabled) !important;
+}
+
+/* Tailwind's dark: variant follows the OS preference, while Taomni's theme
+   switch follows data-app-theme. Remap these panel-only semantic colors to
+   tokens so app dark mode never leaves dark text on a dark banner. */
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(
+  .text-sky-700,
+  .text-sky-800,
+  .dark\:text-sky-300,
+  .dark\:text-sky-400,
+  .text-blue-600,
+  .dark\:text-blue-400
+) {
+  color: var(--sockscap-info-text) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(
+  .text-amber-600,
+  .text-amber-800,
+  .dark\:text-amber-300,
+  .dark\:text-amber-400
+) {
+  color: var(--taomni-warning-text) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(
+  .text-red-600,
+  .text-red-700,
+  .dark\:text-red-300,
+  .dark\:text-red-400
+) {
+  color: var(--sockscap-danger-text) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(
+  .text-emerald-600,
+  .dark\:text-emerald-400
+) {
+  color: var(--taomni-success-text) !important;
+}
+:is(.sockscap-panel, .taomni-sockscap-popover) :is(
+  .text-slate-600,
+  .dark\:text-slate-400
+) {
+  color: var(--taomni-text-muted) !important;
+}
