@@ -10,7 +10,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::os::fd::{FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
 
-const TRACE_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const TRACE_START_TIMEOUT: Duration = Duration::from_secs(3);
+const PREFLIGHT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const FLOW_CLAIM_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING_FLOWS: usize = 8192;
 const LINUX_SOCK_TYPE_MASK: libc::c_int = 0xf;
@@ -209,24 +210,62 @@ impl LaunchLifecycle {
 
 pub struct TracerSupervisor {
     commands: mpsc::Sender<TraceCommand>,
+    // `waitpid(WNOHANG)` cannot be selected alongside the command channel. A
+    // self-pipe gives both command senders and SIGCHLD one loss-tolerant wakeup
+    // path, while the loop still drains every queued wait status.
+    wake_writer: UnixStream,
+    // Keep the peer alive until the signal hook is unregistered. The hook's
+    // async write must not observe a closed UnixStream during shutdown.
+    _wake_reader_guard: UnixStream,
+    signal_registration: Option<signal_hook::SigId>,
     launch_lifecycles: Arc<Mutex<HashMap<libc::pid_t, LaunchLifecycle>>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl TracerSupervisor {
-    pub fn start(relay_port: u16, ipv6_ready: bool, flows: Arc<FlowQueue>) -> Self {
+    pub fn start(relay_port: u16, ipv6_ready: bool, flows: Arc<FlowQueue>) -> Result<Self, String> {
         let (commands, receiver) = mpsc::channel();
+        let (wake_reader, wake_writer) = UnixStream::pair()
+            .map_err(|error| format!("create SocksCap ptrace wake socket: {error}"))?;
+        let wake_reader_guard = wake_reader
+            .try_clone()
+            .map_err(|error| format!("clone SocksCap ptrace read guard: {error}"))?;
+        let signal_writer = wake_writer
+            .try_clone()
+            .map_err(|error| format!("clone SocksCap ptrace wake socket: {error}"))?;
+        let signal_registration = signal_hook::low_level::pipe::register(
+            signal_hook::consts::signal::SIGCHLD,
+            signal_writer,
+        )
+        .map_err(|error| format!("register SocksCap SIGCHLD wakeup: {error}"))?;
         let launch_lifecycles = Arc::new(Mutex::new(HashMap::new()));
         let thread_lifecycles = Arc::clone(&launch_lifecycles);
-        let thread = std::thread::Builder::new()
+        let thread = match std::thread::Builder::new()
             .name("sockscap-ptrace".into())
-            .spawn(move || trace_loop(receiver, flows, relay_port, ipv6_ready, thread_lifecycles))
-            .expect("spawn SocksCap ptrace supervisor");
-        Self {
+            .spawn(move || {
+                trace_loop(
+                    receiver,
+                    wake_reader,
+                    flows,
+                    relay_port,
+                    ipv6_ready,
+                    thread_lifecycles,
+                )
+            }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                signal_hook::low_level::unregister(signal_registration);
+                return Err(format!("spawn SocksCap ptrace supervisor: {error}"));
+            }
+        };
+        Ok(Self {
             commands,
+            wake_writer,
+            _wake_reader_guard: wake_reader_guard,
+            signal_registration: Some(signal_registration),
             launch_lifecycles,
             thread: Some(thread),
-        }
+        })
     }
 
     pub fn spawn_desktop(&self, launcher: &Path, launch: &LaunchCommand) -> Result<u32, String> {
@@ -238,6 +277,7 @@ impl TracerSupervisor {
                 response,
             })
             .map_err(|_| "SocksCap ptrace supervisor stopped before launch".to_string())?;
+        wake_trace_loop(&self.wake_writer);
         result
             .recv_timeout(TRACE_START_TIMEOUT)
             .map_err(|_| "timed out waiting for the SocksCap launcher".to_string())?
@@ -260,6 +300,7 @@ impl TracerSupervisor {
                 response,
             })
             .map_err(|_| "SocksCap ptrace supervisor stopped before terminal launch".to_string())?;
+        wake_trace_loop(&self.wake_writer);
         result
             .recv_timeout(TRACE_START_TIMEOUT)
             .map_err(|_| "timed out waiting for the SocksCap terminal launcher".to_string())?
@@ -280,6 +321,7 @@ impl TracerSupervisor {
                 ready,
             })
             .map_err(|_| "SocksCap ptrace supervisor stopped before launch".to_string())?;
+        wake_trace_loop(&self.wake_writer);
         response.recv_timeout(TRACE_START_TIMEOUT).map_err(|_| {
             "timed out waiting for the launched application to enter ptrace".to_string()
         })?
@@ -294,11 +336,16 @@ impl TracerSupervisor {
     }
 
     pub fn shutdown(&mut self) {
-        let _ = self.commands.send(TraceCommand::Shutdown);
+        if self.commands.send(TraceCommand::Shutdown).is_ok() {
+            wake_trace_loop(&self.wake_writer);
+        }
         if let Some(thread) = self.thread.take()
             && thread.join().is_err()
         {
             tracing::warn!("SocksCap ptrace supervisor panicked during shutdown");
+        }
+        if let Some(signal_registration) = self.signal_registration.take() {
+            signal_hook::low_level::unregister(signal_registration);
         }
     }
 }
@@ -355,6 +402,7 @@ impl TraceState {
 
 fn trace_loop(
     receiver: mpsc::Receiver<TraceCommand>,
+    mut wake_reader: UnixStream,
     flows: Arc<FlowQueue>,
     relay_port: u16,
     ipv6_ready: bool,
@@ -397,6 +445,9 @@ fn trace_loop(
             }
             if waited < 0 {
                 let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
                 if error.raw_os_error() != Some(libc::ECHILD) {
                     tracing::warn!("wait for traced process tree: {error}");
                 }
@@ -417,15 +468,35 @@ fn trace_loop(
         if handled_event {
             continue;
         }
-        match receiver.recv_timeout(TRACE_POLL_INTERVAL) {
-            Ok(command) => {
-                if handle_trace_command(command, &mut state) {
-                    return;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        if let Err(error) = wait_for_trace_wake(&mut wake_reader) {
+            tracing::warn!("wait for SocksCap ptrace activity: {error}");
+            return;
         }
+    }
+}
+
+fn wake_trace_loop(writer: &UnixStream) {
+    let byte = b'X';
+    unsafe {
+        libc::send(
+            writer.as_raw_fd(),
+            (&byte as *const u8).cast(),
+            1,
+            libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+        );
+    }
+}
+
+fn wait_for_trace_wake(reader: &mut UnixStream) -> std::io::Result<()> {
+    let mut buffer = [0u8; 256];
+    match reader.read(&mut buffer) {
+        Ok(0) => Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "SocksCap ptrace wake socket closed",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -1270,7 +1341,7 @@ pub fn preflight(launcher: &Path) -> Result<(), String> {
                 let _ = unsafe { libc::waitpid(pid, &mut status, 0) };
                 return Err("ptrace/seccomp preflight timed out".into());
             }
-            std::thread::sleep(TRACE_POLL_INTERVAL);
+            std::thread::sleep(PREFLIGHT_POLL_INTERVAL);
             continue;
         }
         if libc::WIFEXITED(status) {
@@ -1305,6 +1376,79 @@ pub fn preflight(launcher: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trace_wake_socket_buffers_commands_and_sigchld() {
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let signal_registration = signal_hook::low_level::pipe::register(
+            signal_hook::consts::signal::SIGCHLD,
+            writer.try_clone().unwrap(),
+        )
+        .unwrap();
+
+        wake_trace_loop(&writer);
+        wait_for_trace_wake(&mut reader).unwrap();
+
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        assert!(child.wait().unwrap().success());
+        wait_for_trace_wake(&mut reader).unwrap();
+
+        assert!(signal_hook::low_level::unregister(signal_registration));
+    }
+
+    #[test]
+    fn traced_signal_burst_is_resumed_without_polling_delay() {
+        let launcher = PathBuf::from(concat!(env!("OUT_DIR"), "/taomni-sockscap-trace-launcher"));
+        if let Err(error) = preflight(&launcher) {
+            eprintln!("skipping rootless ptrace latency test: {error}");
+            return;
+        }
+
+        let mut tracer = TracerSupervisor::start(9, false, Arc::new(FlowQueue::default())).unwrap();
+        let launch = LaunchCommand {
+            executable: PathBuf::from("/bin/sh"),
+            args: vec![
+                "-c".into(),
+                "i=0; while [ \"$i\" -lt 500 ]; do kill -URG $$; i=$((i + 1)); done".into(),
+            ],
+            working_directory: None,
+            environment: Vec::new(),
+        };
+        let pid = tracer.spawn_desktop(&launcher, &launch).unwrap();
+        let started = Instant::now();
+        tracer
+            .register_root(
+                pid,
+                ProcessIdentity {
+                    profile_id: "signal-latency-test".into(),
+                    configured_path: "/bin/sh".into(),
+                },
+                1,
+            )
+            .unwrap();
+
+        let deadline = started + Duration::from_secs(3);
+        loop {
+            match tracer.launch_status(pid) {
+                Some(LaunchStatus::Exited) => break,
+                Some(LaunchStatus::Failed(error)) => {
+                    panic!("traced signal process failed: {error}")
+                }
+                _ if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(1)),
+                status => panic!("traced signal process did not exit: {status:?}"),
+            }
+        }
+        let elapsed = started.elapsed();
+        tracer.shutdown();
+
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "500 traced SIGURG deliveries took {elapsed:?}; ptrace stops appear to be polled"
+        );
+    }
 
     #[test]
     fn launch_lifecycle_requires_the_target_exec_and_preserves_preparation_failure() {

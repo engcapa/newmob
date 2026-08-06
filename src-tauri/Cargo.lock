@@ -10333,6 +10333,7 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "shellexpand",
+ "signal-hook",
  "socket2 0.6.4",
  "sqlparser",
  "sqlx-core",

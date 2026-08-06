@@ -266,6 +266,9 @@ core-foundation = "0.10.1"
 tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Wake the rootless ptrace supervisor directly from SIGCHLD so traced TUI
+# processes are resumed without a latency-inducing polling interval.
+signal-hook = "0.3"
 # RDP server X11 screen capture (XShm / MIT-SHM via libxcb) plus the DAMAGE
 # extension for event-driven, region-cropped capture (only the rectangles the
 # X server reports as changed are read back and encoded — see capture/x11.rs).

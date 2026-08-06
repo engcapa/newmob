@@ -115,7 +115,13 @@ impl LaunchedCaptureHandle {
         let flows = Arc::new(FlowQueue::default());
         let (relay, ipv6_ready) = start_redirect_ingress(ctx, Arc::clone(&flows)).await?;
         let relay_port = relay.port;
-        let tracer = TracerSupervisor::start(relay_port, ipv6_ready, flows);
+        let tracer = match TracerSupervisor::start(relay_port, ipv6_ready, flows) {
+            Ok(tracer) => tracer,
+            Err(error) => {
+                relay.stop().await;
+                return Err(error);
+            }
+        };
         Ok(Self {
             relay: Some(relay),
             relay_port,
