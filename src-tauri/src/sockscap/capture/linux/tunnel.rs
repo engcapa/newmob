@@ -578,8 +578,10 @@ mod tests {
             RedirectPlan::new_mixed_routes(17000, true, &[], Some(bypass.clone()), &[], false)
                 .is_err()
         );
-        let route =
-            CgroupV2Match::from_relative_path("taomni-sockscap-42/capture-profile-0").unwrap();
+        let route = CgroupV2Match::from_relative_path(
+            "taomni-sockscap-42/capture-profile-0",
+        )
+        .unwrap();
         assert!(
             RedirectPlan::new_mixed_routes(0, true, &[], Some(bypass), &[(route, 15000)], false)
                 .is_err()

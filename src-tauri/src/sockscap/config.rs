@@ -693,19 +693,15 @@ mod tests {
         let desktop: AppSelector = serde_json::from_str(r#"{"path":"agy"}"#).unwrap();
         assert_eq!(desktop.launch_mode, AppLaunchMode::Desktop);
         assert!(desktop.launch_preparation.is_empty());
-        assert!(
-            !serde_json::to_string(&desktop)
-                .unwrap()
-                .contains("launchMode")
-        );
+        assert!(!serde_json::to_string(&desktop)
+            .unwrap()
+            .contains("launchMode"));
 
         let mut terminal = desktop;
         terminal.launch_mode = AppLaunchMode::Terminal;
-        assert!(
-            serde_json::to_string(&terminal)
-                .unwrap()
-                .contains(r#""launchMode":"terminal""#)
-        );
+        assert!(serde_json::to_string(&terminal)
+            .unwrap()
+            .contains(r#""launchMode":"terminal""#));
     }
 
     #[test]
