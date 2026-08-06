@@ -294,7 +294,7 @@ impl AppLaunchPreparation {
     }
 
     fn validate(&self, profile_name: &str, app_path: &str) -> Result<(), String> {
-        if !self.working_directory.is_empty() && !Path::new(&self.working_directory).is_absolute() {
+        if !self.working_directory.is_empty() && !is_absolute_launch_path(&self.working_directory) {
             return Err(format!(
                 "Profile '{profile_name}' application '{app_path}' working directory must be absolute"
             ));
@@ -323,6 +323,14 @@ impl AppLaunchPreparation {
         }
         Ok(())
     }
+}
+
+/// Launch preparation is a Linux/POSIX feature, but its configuration is
+/// persisted and validated on every platform. `Path::is_absolute()` on
+/// Windows treats `/workspace/app` as root-relative rather than absolute,
+/// even though that is a valid POSIX path for the Linux backend.
+fn is_absolute_launch_path(path: &str) -> bool {
+    path.starts_with('/') || Path::new(path).is_absolute()
 }
 
 fn valid_environment_name(name: &str) -> bool {
@@ -693,15 +701,19 @@ mod tests {
         let desktop: AppSelector = serde_json::from_str(r#"{"path":"agy"}"#).unwrap();
         assert_eq!(desktop.launch_mode, AppLaunchMode::Desktop);
         assert!(desktop.launch_preparation.is_empty());
-        assert!(!serde_json::to_string(&desktop)
-            .unwrap()
-            .contains("launchMode"));
+        assert!(
+            !serde_json::to_string(&desktop)
+                .unwrap()
+                .contains("launchMode")
+        );
 
         let mut terminal = desktop;
         terminal.launch_mode = AppLaunchMode::Terminal;
-        assert!(serde_json::to_string(&terminal)
-            .unwrap()
-            .contains(r#""launchMode":"terminal""#));
+        assert!(
+            serde_json::to_string(&terminal)
+                .unwrap()
+                .contains(r#""launchMode":"terminal""#)
+        );
     }
 
     #[test]
@@ -738,6 +750,12 @@ mod tests {
             .environment
             .insert("INVALID-NAME".into(), "value".into());
         assert!(config.validate().unwrap_err().contains("INVALID-NAME"));
+    }
+
+    #[test]
+    fn launch_preparation_accepts_posix_absolute_paths_on_all_hosts() {
+        assert!(is_absolute_launch_path("/workspace/app"));
+        assert!(!is_absolute_launch_path("workspace/app"));
     }
 
     #[test]
