@@ -6,6 +6,7 @@
 //! loopback ingress, and restores application memory after the syscall returns.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -136,14 +137,12 @@ impl FlowQueue {
 enum TraceCommand {
     SpawnDesktop {
         launcher: PathBuf,
-        executable: PathBuf,
-        args: Vec<String>,
+        launch: LaunchCommand,
         response: mpsc::Sender<Result<u32, String>>,
     },
     SpawnTerminal {
         launcher: PathBuf,
-        executable: PathBuf,
-        args: Vec<String>,
+        launch: LaunchCommand,
         cols: u16,
         rows: u16,
         response: mpsc::Sender<Result<SpawnedTerminal, String>>,
@@ -151,6 +150,7 @@ enum TraceCommand {
     Register {
         pid: libc::pid_t,
         identity: ProcessIdentity,
+        execs_until_running: u8,
         ready: mpsc::Sender<Result<(), String>>,
     },
     Shutdown,
@@ -158,36 +158,83 @@ enum TraceCommand {
 
 pub type SpawnedTerminal = (u32, crate::terminal::pty::PtyHandle, Box<dyn Read + Send>);
 
+#[derive(Debug, Clone)]
+pub struct LaunchCommand {
+    pub executable: PathBuf,
+    pub args: Vec<String>,
+    pub working_directory: Option<PathBuf>,
+    pub environment: Vec<(OsString, OsString)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchStatus {
+    Preparing,
+    Running,
+    Exited,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+struct LaunchLifecycle {
+    status: LaunchStatus,
+    execs_until_running: u8,
+}
+
+impl LaunchLifecycle {
+    fn new(execs_until_running: u8) -> Self {
+        Self {
+            status: LaunchStatus::Preparing,
+            execs_until_running,
+        }
+    }
+
+    fn observe_exec(&mut self) {
+        if !matches!(self.status, LaunchStatus::Preparing) {
+            return;
+        }
+        self.execs_until_running = self.execs_until_running.saturating_sub(1);
+        if self.execs_until_running == 0 {
+            self.status = LaunchStatus::Running;
+        }
+    }
+
+    fn finish(&mut self, failure: String) {
+        self.status = if matches!(self.status, LaunchStatus::Preparing) {
+            LaunchStatus::Failed(failure)
+        } else {
+            LaunchStatus::Exited
+        };
+    }
+}
+
 pub struct TracerSupervisor {
     commands: mpsc::Sender<TraceCommand>,
+    launch_lifecycles: Arc<Mutex<HashMap<libc::pid_t, LaunchLifecycle>>>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl TracerSupervisor {
     pub fn start(relay_port: u16, ipv6_ready: bool, flows: Arc<FlowQueue>) -> Self {
         let (commands, receiver) = mpsc::channel();
+        let launch_lifecycles = Arc::new(Mutex::new(HashMap::new()));
+        let thread_lifecycles = Arc::clone(&launch_lifecycles);
         let thread = std::thread::Builder::new()
             .name("sockscap-ptrace".into())
-            .spawn(move || trace_loop(receiver, flows, relay_port, ipv6_ready))
+            .spawn(move || trace_loop(receiver, flows, relay_port, ipv6_ready, thread_lifecycles))
             .expect("spawn SocksCap ptrace supervisor");
         Self {
             commands,
+            launch_lifecycles,
             thread: Some(thread),
         }
     }
 
-    pub fn spawn_desktop(
-        &self,
-        launcher: &Path,
-        executable: &Path,
-        args: &[String],
-    ) -> Result<u32, String> {
+    pub fn spawn_desktop(&self, launcher: &Path, launch: &LaunchCommand) -> Result<u32, String> {
         let (response, result) = mpsc::channel();
         self.commands
             .send(TraceCommand::SpawnDesktop {
                 launcher: launcher.to_path_buf(),
-                executable: executable.to_path_buf(),
-                args: args.to_vec(),
+                launch: launch.clone(),
                 response,
             })
             .map_err(|_| "SocksCap ptrace supervisor stopped before launch".to_string())?;
@@ -199,8 +246,7 @@ impl TracerSupervisor {
     pub fn spawn_terminal(
         &self,
         launcher: &Path,
-        executable: &Path,
-        args: &[String],
+        launch: &LaunchCommand,
         cols: u16,
         rows: u16,
     ) -> Result<SpawnedTerminal, String> {
@@ -208,8 +254,7 @@ impl TracerSupervisor {
         self.commands
             .send(TraceCommand::SpawnTerminal {
                 launcher: launcher.to_path_buf(),
-                executable: executable.to_path_buf(),
-                args: args.to_vec(),
+                launch: launch.clone(),
                 cols,
                 rows,
                 response,
@@ -220,18 +265,32 @@ impl TracerSupervisor {
             .map_err(|_| "timed out waiting for the SocksCap terminal launcher".to_string())?
     }
 
-    pub fn register_root(&self, pid: u32, identity: ProcessIdentity) -> Result<(), String> {
+    pub fn register_root(
+        &self,
+        pid: u32,
+        identity: ProcessIdentity,
+        execs_until_running: u8,
+    ) -> Result<(), String> {
         let (ready, response) = mpsc::channel();
         self.commands
             .send(TraceCommand::Register {
                 pid: pid as libc::pid_t,
                 identity,
+                execs_until_running,
                 ready,
             })
             .map_err(|_| "SocksCap ptrace supervisor stopped before launch".to_string())?;
         response.recv_timeout(TRACE_START_TIMEOUT).map_err(|_| {
             "timed out waiting for the launched application to enter ptrace".to_string()
         })?
+    }
+
+    pub fn launch_status(&self, pid: u32) -> Option<LaunchStatus> {
+        self.launch_lifecycles
+            .lock()
+            .ok()?
+            .get(&(pid as libc::pid_t))
+            .map(|lifecycle| lifecycle.status.clone())
     }
 
     pub fn shutdown(&mut self) {
@@ -256,16 +315,18 @@ struct TraceState {
     launch_ready: HashMap<libc::pid_t, mpsc::Sender<Result<(), String>>>,
     deferred_statuses: HashMap<libc::pid_t, libc::c_int>,
     socket_types: HashMap<String, libc::c_int>,
+    launch_lifecycles: Arc<Mutex<HashMap<libc::pid_t, LaunchLifecycle>>>,
 }
 
 impl TraceState {
-    fn new() -> Self {
+    fn new(launch_lifecycles: Arc<Mutex<HashMap<libc::pid_t, LaunchLifecycle>>>) -> Self {
         Self {
             identities: HashMap::new(),
             initialized: HashSet::new(),
             launch_ready: HashMap::new(),
             deferred_statuses: HashMap::new(),
             socket_types: HashMap::new(),
+            launch_lifecycles,
         }
     }
 
@@ -276,6 +337,19 @@ impl TraceState {
         if let Some(ready) = self.launch_ready.remove(&pid) {
             let _ = ready.send(Err(detail.to_string()));
         }
+        if let Ok(mut lifecycles) = self.launch_lifecycles.lock()
+            && let Some(lifecycle) = lifecycles.get_mut(&pid)
+        {
+            lifecycle.finish(detail.to_string());
+        }
+    }
+
+    fn observe_exec(&self, pid: libc::pid_t) {
+        if let Ok(mut lifecycles) = self.launch_lifecycles.lock()
+            && let Some(lifecycle) = lifecycles.get_mut(&pid)
+        {
+            lifecycle.observe_exec();
+        }
     }
 }
 
@@ -284,8 +358,9 @@ fn trace_loop(
     flows: Arc<FlowQueue>,
     relay_port: u16,
     ipv6_ready: bool,
+    launch_lifecycles: Arc<Mutex<HashMap<libc::pid_t, LaunchLifecycle>>>,
 ) {
-    let mut state = TraceState::new();
+    let mut state = TraceState::new(launch_lifecycles);
     loop {
         while let Ok(command) = receiver.try_recv() {
             if handle_trace_command(command, &mut state) {
@@ -358,27 +433,26 @@ fn handle_trace_command(command: TraceCommand, state: &mut TraceState) -> bool {
     match command {
         TraceCommand::SpawnDesktop {
             launcher,
-            executable,
-            args,
+            launch,
             response,
         } => {
-            let _ = response.send(spawn_desktop(launcher, executable, args));
+            let _ = response.send(spawn_desktop(launcher, launch));
             false
         }
         TraceCommand::SpawnTerminal {
             launcher,
-            executable,
-            args,
+            launch,
             cols,
             rows,
             response,
         } => {
-            let _ = response.send(spawn_terminal(launcher, executable, args, cols, rows));
+            let _ = response.send(spawn_terminal(launcher, launch, cols, rows));
             false
         }
         TraceCommand::Register {
             pid,
             identity,
+            execs_until_running,
             ready,
         } => {
             if state.identities.insert(pid, identity).is_some() {
@@ -386,6 +460,9 @@ fn handle_trace_command(command: TraceCommand, state: &mut TraceState) -> bool {
                     "application PID {pid} is already registered with SocksCap"
                 )));
             } else {
+                if let Ok(mut lifecycles) = state.launch_lifecycles.lock() {
+                    lifecycles.insert(pid, LaunchLifecycle::new(execs_until_running));
+                }
                 state.launch_ready.insert(pid, ready);
             }
             false
@@ -394,10 +471,14 @@ fn handle_trace_command(command: TraceCommand, state: &mut TraceState) -> bool {
     }
 }
 
-fn spawn_desktop(launcher: PathBuf, executable: PathBuf, args: Vec<String>) -> Result<u32, String> {
+fn spawn_desktop(launcher: PathBuf, launch: LaunchCommand) -> Result<u32, String> {
     let mut command = Command::new(&launcher);
-    command.arg(&executable);
-    command.args(&args);
+    command.arg(&launch.executable);
+    command.args(&launch.args);
+    command.envs(launch.environment);
+    if let Some(directory) = &launch.working_directory {
+        command.current_dir(directory);
+    }
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 {
@@ -406,9 +487,12 @@ fn spawn_desktop(launcher: PathBuf, executable: PathBuf, args: Vec<String>) -> R
             Ok(())
         });
     }
-    let child = command
-        .spawn()
-        .map_err(|error| format!("launch {} through SocksCap: {error}", executable.display()))?;
+    let child = command.spawn().map_err(|error| {
+        format!(
+            "launch {} through SocksCap: {error}",
+            launch.executable.display()
+        )
+    })?;
     let pid = child.id();
     drop(child);
     Ok(pid)
@@ -416,18 +500,25 @@ fn spawn_desktop(launcher: PathBuf, executable: PathBuf, args: Vec<String>) -> R
 
 fn spawn_terminal(
     launcher: PathBuf,
-    executable: PathBuf,
-    args: Vec<String>,
+    launch: LaunchCommand,
     cols: u16,
     rows: u16,
 ) -> Result<SpawnedTerminal, String> {
     let launcher = launcher.to_string_lossy().into_owned();
-    let executable = executable.to_string_lossy().into_owned();
-    let mut launcher_args = Vec::with_capacity(args.len() + 1);
+    let executable = launch.executable.to_string_lossy().into_owned();
+    let mut launcher_args = Vec::with_capacity(launch.args.len() + 1);
     launcher_args.push(executable);
-    launcher_args.extend(args);
-    let (handle, reader) =
-        crate::terminal::pty::create_command_pty(cols, rows, &launcher, &launcher_args)?;
+    launcher_args.extend(launch.args);
+    let (handle, reader) = crate::terminal::pty::create_command_pty_with_launch_options(
+        cols,
+        rows,
+        &launcher,
+        &launcher_args,
+        launch
+            .working_directory
+            .map(|path| path.to_string_lossy().into_owned()),
+        &launch.environment,
+    )?;
     let pid = handle
         .child
         .process_id()
@@ -447,7 +538,7 @@ fn handle_wait_status(
         let code = libc::WEXITSTATUS(status);
         state.remove(
             pid,
-            &format!("application PID {pid} exited with status {code} before tracing"),
+            &format!("application PID {pid} exited with status {code} before the target started"),
         );
         return;
     }
@@ -455,7 +546,9 @@ fn handle_wait_status(
         let signal = libc::WTERMSIG(status);
         state.remove(
             pid,
-            &format!("application PID {pid} was terminated by signal {signal}"),
+            &format!(
+                "application PID {pid} was terminated by signal {signal} before the target started"
+            ),
         );
         return;
     }
@@ -538,7 +631,13 @@ fn handle_wait_status(
         return;
     }
 
-    if event == libc::PTRACE_EVENT_EXEC || event != 0 || signal == libc::SIGTRAP {
+    if event == libc::PTRACE_EVENT_EXEC {
+        state.observe_exec(pid);
+        let _ = ptrace_resume(pid, libc::PTRACE_CONT, 0);
+        return;
+    }
+
+    if event != 0 || signal == libc::SIGTRAP {
         let _ = ptrace_resume(pid, libc::PTRACE_CONT, 0);
         return;
     }
@@ -1206,6 +1305,25 @@ pub fn preflight(launcher: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_lifecycle_requires_the_target_exec_and_preserves_preparation_failure() {
+        let mut prepared = LaunchLifecycle::new(2);
+        prepared.observe_exec();
+        assert_eq!(prepared.status, LaunchStatus::Preparing);
+        prepared.observe_exec();
+        assert_eq!(prepared.status, LaunchStatus::Running);
+        prepared.finish("normal exit".into());
+        assert_eq!(prepared.status, LaunchStatus::Exited);
+
+        let mut failed = LaunchLifecycle::new(2);
+        failed.observe_exec();
+        failed.finish("pre-command exited with status 7".into());
+        assert_eq!(
+            failed.status,
+            LaunchStatus::Failed("pre-command exited with status 7".into())
+        );
+    }
 
     #[test]
     fn rewrites_ipv4_sockaddr_to_loopback_without_changing_destination_port() {

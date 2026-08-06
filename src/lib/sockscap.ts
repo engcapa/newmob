@@ -44,10 +44,18 @@ export type EnginePhase =
   | "stopping"
   | "recoveryRequired";
 
+export interface LaunchPreparation {
+  workingDirectory?: string;
+  environment?: Record<string, string>;
+  preCommand?: string;
+  shell?: "sh" | "bash";
+}
+
 export interface AppSelector {
   path: string;
   args?: string[];
   launchMode?: "desktop" | "terminal";
+  launchPreparation?: LaunchPreparation;
   bundleId?: string;
   name?: string;
   macosIdentity?: MacosAppIdentity | null;
@@ -264,6 +272,9 @@ export interface LaunchedAppInfo {
   profileId: string;
   path: string;
   args: string[];
+  launchPreparation?: LaunchPreparation;
+  phase?: "preparing" | "running" | "exited" | "failed";
+  launchError?: string;
   running: boolean;
   terminalSessionId?: string | null;
 }
@@ -330,8 +341,9 @@ export function sockscapLaunchApp(
   profileId: string,
   path: string,
   args: string[] = [],
+  launchPreparation: LaunchPreparation = {},
 ): Promise<LaunchedAppInfo> {
-  return invoke("sockscap_launch_app", { profileId, path, args });
+  return invoke("sockscap_launch_app", { profileId, path, args, launchPreparation });
 }
 
 export function sockscapLaunchTerminalApp(
@@ -339,6 +351,7 @@ export function sockscapLaunchTerminalApp(
   profileId: string,
   path: string,
   args: string[],
+  launchPreparation: LaunchPreparation,
   cols: number,
   rows: number,
   onOutput: (data: Uint8Array) => void,
@@ -350,6 +363,7 @@ export function sockscapLaunchTerminalApp(
     profileId,
     path,
     args,
+    launchPreparation,
     cols,
     rows,
     onOutput: channel,

@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Serialize;
 use std::collections::HashSet;
 #[cfg(target_os = "macos")]
@@ -308,10 +308,7 @@ fn expand_common_directory_path(raw: &str, home: Option<&Path>) -> Option<PathBu
     let candidate = PathBuf::from(path);
     // `/tmp/...` is absolute on Unix; on Windows Path::is_absolute is false for
     // that form, but history lines from remote shells still use it.
-    if candidate.is_absolute()
-        || looks_like_windows_absolute_path(path)
-        || path.starts_with('/')
-    {
+    if candidate.is_absolute() || looks_like_windows_absolute_path(path) || path.starts_with('/') {
         Some(candidate)
     } else {
         None
@@ -860,13 +857,28 @@ pub fn create_command_pty_with_environment(
     args: &[String],
     environment: &[(OsString, OsString)],
 ) -> Result<(PtyHandle, Box<dyn Read + Send>), String> {
+    create_command_pty_with_launch_options(cols, rows, program, args, None, environment)
+}
+
+/// Launch a Linux command in a controlling PTY with explicit cwd and
+/// environment overrides. SocksCap uses this so preparation state is shared by
+/// its trace launcher, shell wrapper, and final TUI process.
+#[cfg(target_os = "linux")]
+pub fn create_command_pty_with_launch_options(
+    cols: u16,
+    rows: u16,
+    program: &str,
+    args: &[String],
+    cwd: Option<String>,
+    environment: &[(OsString, OsString)],
+) -> Result<(PtyHandle, Box<dyn Read + Send>), String> {
     create_pty_for_launch(
         cols,
         rows,
         program,
         args,
         None,
-        None,
+        cwd,
         None,
         Some(environment),
     )

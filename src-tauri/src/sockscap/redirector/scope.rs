@@ -230,6 +230,7 @@ mod tests {
             path: path.into(),
             args: Vec::new(),
             launch_mode: Default::default(),
+            launch_preparation: Default::default(),
             bundle_id: String::new(),
             name: path.into(),
             macos_identity: None,

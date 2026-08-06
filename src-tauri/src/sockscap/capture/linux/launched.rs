@@ -5,6 +5,7 @@
 //! inherited by the complete process tree and reports socket creation plus
 //! TCP connection attempts.
 
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
@@ -20,7 +21,8 @@ use tokio::net::TcpListener;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::task::JoinSet;
 
-use super::tracer::{FlowQueue, ProcessIdentity, TracerSupervisor};
+use super::tracer::{FlowQueue, LaunchCommand, LaunchStatus, ProcessIdentity, TracerSupervisor};
+use crate::sockscap::config::AppLaunchPreparation;
 use crate::sockscap::relay::{
     ACCEPT_BACKOFF_INITIAL, ACCEPT_BACKOFF_MAX, CapturedFlow, MAX_ACTIVE_RELAY_FLOWS,
     RELAY_PERMIT_WAIT, RelayContext, RelayHandle, acquire_relay_flow_permit,
@@ -28,6 +30,14 @@ use crate::sockscap::relay::{
 };
 
 const FLOW_WAIT: Duration = Duration::from_secs(2);
+const PREPARATION_WRAPPER: &str = r#"taomni_prepare() {
+  eval "$1"
+}
+taomni_prepare "$1"
+taomni_status=$?
+[ "$taomni_status" -eq 0 ] || exit "$taomni_status"
+shift
+exec "$@""#;
 static LAUNCHER_BYTES: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/taomni-sockscap-trace-launcher"));
 
@@ -38,9 +48,25 @@ pub struct LaunchedAppInfo {
     pub profile_id: String,
     pub path: String,
     pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "AppLaunchPreparation::is_empty")]
+    pub launch_preparation: AppLaunchPreparation,
+    #[serde(default)]
+    pub phase: LaunchedAppPhase,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_error: Option<String>,
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub terminal_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LaunchedAppPhase {
+    Preparing,
+    #[default]
+    Running,
+    Exited,
+    Failed,
 }
 
 struct LaunchedProcess {
@@ -108,16 +134,22 @@ impl LaunchedCaptureHandle {
         profile_id: &str,
         command_name: &str,
         args: &[String],
+        launch_preparation: &AppLaunchPreparation,
     ) -> Result<LaunchedAppInfo, String> {
         let command_name = command_name.trim();
-        let executable = resolve_executable(command_name)?;
-        let executable_text = executable.to_string_lossy().into_owned();
+        let launch = prepare_launch(command_name, args, launch_preparation)?;
+        let executable_text = command_name.to_string();
         let pid = self
             .tracer
             .as_ref()
             .ok_or_else(|| "SocksCap ptrace supervisor is not running".to_string())?
-            .spawn_desktop(&self.launcher_path, &executable, args)?;
-        if let Err(error) = self.register_trace(pid, profile_id, &executable_text) {
+            .spawn_desktop(&self.launcher_path, &launch)?;
+        if let Err(error) = self.register_trace(
+            pid,
+            profile_id,
+            &executable_text,
+            !launch_preparation.is_empty(),
+        ) {
             kill_process_group(pid as libc::pid_t);
             return Err(error);
         }
@@ -127,14 +159,18 @@ impl LaunchedCaptureHandle {
             profile_id: profile_id.to_string(),
             path: command_name.to_string(),
             args: args.to_vec(),
+            launch_preparation: launch_preparation.clone(),
+            phase: LaunchedAppPhase::Preparing,
+            launch_error: None,
             running: true,
             terminal_session_id: None,
         };
         tracing::info!(
             pid,
             command = command_name,
-            executable = %executable.display(),
+            executable = command_name,
             argument_count = args.len(),
+            prepared = !launch_preparation.is_empty(),
             "SocksCap launched application under ptrace/seccomp capture"
         );
         self.processes.push(LaunchedProcess {
@@ -150,6 +186,7 @@ impl LaunchedCaptureHandle {
         profile_id: &str,
         command_name: &str,
         args: &[String],
+        launch_preparation: &AppLaunchPreparation,
         terminal_session_id: &str,
         cols: u16,
         rows: u16,
@@ -162,14 +199,19 @@ impl LaunchedCaptureHandle {
         String,
     > {
         let command_name = command_name.trim();
-        let executable = resolve_executable(command_name)?;
-        let executable_text = executable.to_string_lossy().into_owned();
+        let launch = prepare_launch(command_name, args, launch_preparation)?;
+        let executable_text = command_name.to_string();
         let (pid, mut handle, reader) = self
             .tracer
             .as_ref()
             .ok_or_else(|| "SocksCap ptrace supervisor is not running".to_string())?
-            .spawn_terminal(&self.launcher_path, &executable, args, cols, rows)?;
-        if let Err(error) = self.register_trace(pid, profile_id, &executable_text) {
+            .spawn_terminal(&self.launcher_path, &launch, cols, rows)?;
+        if let Err(error) = self.register_trace(
+            pid,
+            profile_id,
+            &executable_text,
+            !launch_preparation.is_empty(),
+        ) {
             let _ = handle.child.kill();
             return Err(error);
         }
@@ -179,14 +221,18 @@ impl LaunchedCaptureHandle {
             profile_id: profile_id.to_string(),
             path: command_name.to_string(),
             args: args.to_vec(),
+            launch_preparation: launch_preparation.clone(),
+            phase: LaunchedAppPhase::Preparing,
+            launch_error: None,
             running: true,
             terminal_session_id: Some(terminal_session_id.to_string()),
         };
         tracing::info!(
             pid,
             command = command_name,
-            executable = %executable.display(),
+            executable = command_name,
             argument_count = args.len(),
+            prepared = !launch_preparation.is_empty(),
             terminal_session_id,
             "SocksCap launched terminal application under ptrace/seccomp capture"
         );
@@ -203,7 +249,13 @@ impl LaunchedCaptureHandle {
         Ok((info, handle, tracked_reader))
     }
 
-    fn register_trace(&self, pid: u32, profile_id: &str, executable: &str) -> Result<(), String> {
+    fn register_trace(
+        &self,
+        pid: u32,
+        profile_id: &str,
+        executable: &str,
+        prepared: bool,
+    ) -> Result<(), String> {
         self.tracer
             .as_ref()
             .ok_or_else(|| "SocksCap ptrace supervisor is not running".to_string())?
@@ -213,6 +265,7 @@ impl LaunchedCaptureHandle {
                     profile_id: profile_id.to_string(),
                     configured_path: executable.to_string(),
                 },
+                if prepared { 2 } else { 1 },
             )
             .map_err(|error| format!("attach rootless capture to PID {pid}: {error}"))
     }
@@ -220,15 +273,47 @@ impl LaunchedCaptureHandle {
     pub fn apps(&mut self) -> Vec<LaunchedAppInfo> {
         for process in &mut self.processes {
             if process.info.running {
+                if let Some(status) = self
+                    .tracer
+                    .as_ref()
+                    .and_then(|tracer| tracer.launch_status(process.info.pid))
+                {
+                    match status {
+                        LaunchStatus::Preparing => {
+                            process.info.phase = LaunchedAppPhase::Preparing;
+                            process.info.launch_error = None;
+                        }
+                        LaunchStatus::Running => {
+                            process.info.phase = LaunchedAppPhase::Running;
+                            process.info.launch_error = None;
+                        }
+                        LaunchStatus::Exited => {
+                            process.info.phase = LaunchedAppPhase::Exited;
+                            process.info.launch_error = None;
+                            process.info.running = false;
+                            continue;
+                        }
+                        LaunchStatus::Failed(error) => {
+                            process.info.phase = LaunchedAppPhase::Failed;
+                            process.info.launch_error = Some(error);
+                            process.info.running = false;
+                            continue;
+                        }
+                    }
+                }
                 if process
                     .terminal_running
                     .as_ref()
                     .is_some_and(|running| !running.load(Ordering::Acquire))
                 {
+                    process.info.phase = LaunchedAppPhase::Exited;
                     process.info.running = false;
                     continue;
                 }
                 process.info.running = process_group_is_alive(process.process_group);
+                if !process.info.running {
+                    process.info.phase = LaunchedAppPhase::Exited;
+                }
             }
         }
         self.processes
@@ -302,6 +387,8 @@ async fn stop_process_group(process: &mut LaunchedProcess) -> Result<(), String>
         }
     }
     process.info.running = false;
+    process.info.phase = LaunchedAppPhase::Exited;
+    process.info.launch_error = None;
     if let Some(running) = &process.terminal_running {
         running.store(false, Ordering::Release);
     }
@@ -317,6 +404,63 @@ fn resolve_executable(command: &str) -> Result<PathBuf, String> {
     })?;
     validate_executable(&path)?;
     Ok(path)
+}
+
+fn prepare_launch(
+    command: &str,
+    args: &[String],
+    preparation: &AppLaunchPreparation,
+) -> Result<LaunchCommand, String> {
+    if command.is_empty() {
+        return Err("SocksCap launch command is empty".into());
+    }
+    if preparation.is_empty() {
+        return Ok(LaunchCommand {
+            executable: resolve_executable(command)?,
+            args: args.to_vec(),
+            working_directory: None,
+            environment: Vec::new(),
+        });
+    }
+
+    let working_directory = if preparation.working_directory.is_empty() {
+        None
+    } else {
+        let path = PathBuf::from(&preparation.working_directory);
+        let metadata = fs::metadata(&path).map_err(|error| {
+            format!(
+                "inspect SocksCap launch working directory {}: {error}",
+                path.display()
+            )
+        })?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "SocksCap launch working directory is not a directory: {}",
+                path.display()
+            ));
+        }
+        Some(path)
+    };
+
+    let shell = resolve_executable(preparation.shell.command_name())?;
+    let mut shell_args = Vec::with_capacity(args.len() + 5);
+    shell_args.push("-c".into());
+    shell_args.push(PREPARATION_WRAPPER.into());
+    shell_args.push("taomni-sockscap-preparation".into());
+    shell_args.push(preparation.pre_command.clone());
+    shell_args.push(command.to_string());
+    shell_args.extend(args.iter().cloned());
+    let environment = preparation
+        .environment
+        .iter()
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        .collect();
+    Ok(LaunchCommand {
+        executable: shell,
+        args: shell_args,
+        working_directory,
+        environment,
+    })
 }
 
 fn validate_executable(path: &Path) -> Result<(), String> {
@@ -519,7 +663,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Mutex;
 
-    use crate::sockscap::config::{RuleMode, ScopeMode, UpstreamKind};
+    use crate::sockscap::config::{AppLaunchShell, RuleMode, ScopeMode, UpstreamKind};
     use crate::sockscap::helper::HelperRegistry;
     use crate::sockscap::relay::{RelayContext, ResolvedUpstream};
     use crate::sockscap::rules::dns_map::DnsMap;
@@ -715,6 +859,84 @@ mod tests {
         assert!(fs::metadata(executable).unwrap().permissions().mode() & 0o111 != 0);
     }
 
+    #[test]
+    fn prepared_launch_preserves_cwd_environment_and_literal_arguments() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("prepared-target");
+        let output = directory.path().join("prepared-output");
+        fs::write(
+            &target,
+            r#"#!/bin/sh
+printf '%s\n%s\n%s\n%s\n' "$PWD" "$STRUCTURED_ENV" "$PRE_COMMAND_ENV" "$1" > "$2"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut preparation = AppLaunchPreparation {
+            working_directory: directory.path().to_string_lossy().into_owned(),
+            pre_command: "export PRE_COMMAND_ENV='prepared value'".into(),
+            shell: AppLaunchShell::Sh,
+            ..Default::default()
+        };
+        preparation
+            .environment
+            .insert("STRUCTURED_ENV".into(), "literal $value".into());
+        let launch = prepare_launch(
+            "./prepared-target",
+            &[
+                "argument with spaces; not a command".into(),
+                output.to_string_lossy().into_owned(),
+            ],
+            &preparation,
+        )
+        .unwrap();
+        let status = Command::new(launch.executable)
+            .args(launch.args)
+            .current_dir(launch.working_directory.unwrap())
+            .envs(launch.environment)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            fs::read_to_string(output).unwrap(),
+            format!(
+                "{}\nliteral $value\nprepared value\nargument with spaces; not a command\n",
+                directory.path().display()
+            )
+        );
+    }
+
+    #[test]
+    fn failed_preparation_does_not_execute_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let output = directory.path().join("must-not-exist");
+        let preparation = AppLaunchPreparation {
+            working_directory: directory.path().to_string_lossy().into_owned(),
+            pre_command: "false".into(),
+            ..Default::default()
+        };
+        let launch = prepare_launch(
+            "sh",
+            &[
+                "-c".into(),
+                "printf unexpected > \"$1\"".into(),
+                "prepared-target".into(),
+                output.to_string_lossy().into_owned(),
+            ],
+            &preparation,
+        )
+        .unwrap();
+        let status = Command::new(launch.executable)
+            .args(launch.args)
+            .current_dir(launch.working_directory.unwrap())
+            .envs(launch.environment)
+            .status()
+            .unwrap();
+        assert!(!status.success());
+        assert!(!output.exists());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires TAOMNI_TEST_HTTP_PROXY and unprivileged ptrace/seccomp"]
     async fn rootless_capture_routes_curl_through_http_upstream() {
@@ -726,7 +948,12 @@ mod tests {
         let output = harness.directory.path().join("example.html");
         let launched = harness
             .capture
-            .launch_app(&harness.profile_id, "curl", &curl_arguments(&output))
+            .launch_app(
+                &harness.profile_id,
+                "curl",
+                &curl_arguments(&output),
+                &AppLaunchPreparation::default(),
+            )
             .await
             .expect("launch curl under rootless capture");
         wait_for_text(&output, "Example Domain").await;
@@ -738,6 +965,146 @@ mod tests {
         assert!(harness.stats.snapshot().flows_proxy >= 1);
         assert_eq!(harness.stats.snapshot().flow_failures, 0);
         harness.capture.stop_app(launched.pid).await.unwrap();
+        harness.capture.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires TAOMNI_TEST_HTTP_PROXY, curl, and unprivileged ptrace/seccomp"]
+    async fn rootless_capture_prepares_desktop_and_terminal_applications() {
+        let mut harness = start_rootless_test_capture().await;
+        let working_directory = harness.directory.path().join("prepared-app");
+        fs::create_dir(&working_directory).unwrap();
+        let target = working_directory.join("prepared-client");
+        fs::write(
+            &target,
+            r#"#!/bin/sh
+set -eu
+[ "$STRUCTURED_ENV" = "literal value" ]
+[ "$PRE_COMMAND_ENV" = "prepared value" ]
+[ "$PWD" = "$EXPECTED_CWD" ]
+printf 'TAOMNI_PREPARATION_READY\n'
+exec curl --noproxy '*' --silent --show-error --max-time 20 --output "$1" http://example.com/
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut preparation = AppLaunchPreparation {
+            working_directory: working_directory.to_string_lossy().into_owned(),
+            pre_command: "export PRE_COMMAND_ENV='prepared value'".into(),
+            ..Default::default()
+        };
+        preparation
+            .environment
+            .insert("STRUCTURED_ENV".into(), "literal value".into());
+        preparation.environment.insert(
+            "EXPECTED_CWD".into(),
+            working_directory.to_string_lossy().into_owned(),
+        );
+
+        let desktop_output = harness.directory.path().join("prepared-desktop.html");
+        let desktop = harness
+            .capture
+            .launch_app(
+                &harness.profile_id,
+                "./prepared-client",
+                &[desktop_output.to_string_lossy().into_owned()],
+                &preparation,
+            )
+            .await
+            .expect("launch prepared desktop application");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if harness
+                    .capture
+                    .apps()
+                    .into_iter()
+                    .find(|application| application.pid == desktop.pid)
+                    .is_some_and(|application| application.phase == LaunchedAppPhase::Running)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("prepared target exec should be observable");
+        wait_for_text(&desktop_output, "Example Domain").await;
+        harness.capture.stop_app(desktop.pid).await.unwrap();
+
+        let failed_output = harness.directory.path().join("must-not-launch");
+        let failed_preparation = AppLaunchPreparation {
+            working_directory: working_directory.to_string_lossy().into_owned(),
+            pre_command: "false".into(),
+            ..Default::default()
+        };
+        let failed = harness
+            .capture
+            .launch_app(
+                &harness.profile_id,
+                "sh",
+                &[
+                    "-c".into(),
+                    "printf unexpected > \"$1\"".into(),
+                    "prepared-target".into(),
+                    failed_output.to_string_lossy().into_owned(),
+                ],
+                &failed_preparation,
+            )
+            .await
+            .expect("register failed preparation launch");
+        let failed_status = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Some(application) = harness
+                    .capture
+                    .apps()
+                    .into_iter()
+                    .find(|application| application.pid == failed.pid)
+                    && application.phase == LaunchedAppPhase::Failed
+                {
+                    break application;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("failed preparation should be observable");
+        assert!(!failed_status.running);
+        assert!(
+            failed_status
+                .launch_error
+                .as_deref()
+                .is_some_and(|error| error.contains("status 1"))
+        );
+        assert!(!failed_output.exists());
+
+        let terminal_output = harness.directory.path().join("prepared-terminal.html");
+        let (terminal, _handle, mut reader) = harness
+            .capture
+            .launch_terminal_app(
+                &harness.profile_id,
+                "./prepared-client",
+                &[terminal_output.to_string_lossy().into_owned()],
+                &preparation,
+                "rootless-prepared-terminal",
+                80,
+                24,
+            )
+            .expect("launch prepared terminal application");
+        let reader_task = tokio::task::spawn_blocking(move || {
+            let mut output = String::new();
+            let _ = reader.read_to_string(&mut output);
+            output
+        });
+        wait_for_text(&terminal_output, "Example Domain").await;
+        let terminal_text = tokio::time::timeout(Duration::from_secs(5), reader_task)
+            .await
+            .expect("prepared terminal reader should observe exit")
+            .expect("prepared terminal reader should not panic");
+        assert!(terminal_text.contains("TAOMNI_PREPARATION_READY"));
+        assert!(harness.stats.snapshot().flows_proxy >= 2);
+        assert_eq!(harness.stats.snapshot().flow_failures, 0);
+        harness.capture.stop_app(terminal.pid).await.unwrap();
         harness.capture.stop().await;
     }
 
@@ -760,7 +1127,12 @@ wait"#;
         ];
         let shell = harness
             .capture
-            .launch_app(&harness.profile_id, "sh", &arguments)
+            .launch_app(
+                &harness.profile_id,
+                "sh",
+                &arguments,
+                &AppLaunchPreparation::default(),
+            )
             .await
             .expect("launch shell process tree under rootless capture");
         for name in ["one", "two", "three", "four"] {
@@ -783,6 +1155,7 @@ wait"#;
                 &harness.profile_id,
                 "sh",
                 &terminal_arguments,
+                &AppLaunchPreparation::default(),
                 "rootless-test-terminal",
                 80,
                 24,
@@ -872,6 +1245,7 @@ func main() {
                 &harness.profile_id,
                 executable.to_str().unwrap(),
                 &[output.to_string_lossy().into_owned()],
+                &AppLaunchPreparation::default(),
             )
             .await
             .expect("launch static Go client under rootless capture");
@@ -915,9 +1289,18 @@ func main() {
         if unsafe { libc::geteuid() } == 0 {
             arguments.push("--no-sandbox".into());
         }
+        let preparation = AppLaunchPreparation {
+            pre_command: "export TAOMNI_SOCKSCAP_PREPARED=1".into(),
+            ..Default::default()
+        };
         let launched = harness
             .capture
-            .launch_app(&harness.profile_id, chrome.to_str().unwrap(), &arguments)
+            .launch_app(
+                &harness.profile_id,
+                chrome.to_str().unwrap(),
+                &arguments,
+                &preparation,
+            )
             .await
             .expect("launch Chromium under rootless capture");
         wait_for_nonempty_file(&screenshot).await;
@@ -948,9 +1331,18 @@ func main() {
             format!("--user-data-dir={}", user_data.display()),
             "http://example.com/".into(),
         ];
+        let preparation = AppLaunchPreparation {
+            pre_command: "export TAOMNI_SOCKSCAP_PREPARED=1".into(),
+            ..Default::default()
+        };
         let launched = harness
             .capture
-            .launch_app(&harness.profile_id, chrome.to_str().unwrap(), &arguments)
+            .launch_app(
+                &harness.profile_id,
+                chrome.to_str().unwrap(),
+                &arguments,
+                &preparation,
+            )
             .await
             .expect("launch desktop Chromium under rootless capture");
         let window = wait_for_chrome_window(&user_data).await;

@@ -67,6 +67,7 @@ fn make_test_config(mode: ScopeMode, upstream: UpstreamRef) -> SocksCapConfig {
             path: "C:\\Windows\\System32\\curl.exe".to_string(),
             args: Vec::new(),
             launch_mode: Default::default(),
+            launch_preparation: Default::default(),
             bundle_id: String::new(),
             name: "curl.exe".to_string(),
             macos_identity: None,

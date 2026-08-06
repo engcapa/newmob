@@ -107,11 +107,12 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
       ruleCount: 0,
       captureBackend: "test",
     })),
-    sockscapLaunchApp: vi.fn(async (profileId: string, path: string, args: string[]) => ({
+    sockscapLaunchApp: vi.fn(async (profileId: string, path: string, args: string[], launchPreparation = {}) => ({
       pid: 4242,
       profileId,
       path,
       args: args ?? [],
+      launchPreparation,
       running: true,
     })),
     sockscapLaunchedApps: vi.fn(async () => []),
@@ -200,11 +201,12 @@ describe("SocksCapPanel Multi-Profile UI", () => {
       captureBackend: "test",
     });
     vi.mocked(sockscapLaunchApp).mockReset();
-    vi.mocked(sockscapLaunchApp).mockImplementation(async (profileId, path, args) => ({
+    vi.mocked(sockscapLaunchApp).mockImplementation(async (profileId, path, args, launchPreparation) => ({
       pid: 4242,
       profileId,
       path,
       args: args ?? [],
+      launchPreparation,
       running: true,
     }));
     vi.mocked(sockscapLaunchedApps).mockReset();
@@ -664,6 +666,7 @@ describe("SocksCapPanel Multi-Profile UI", () => {
         "default",
         "/usr/bin/example-app",
         [],
+        {},
       ),
     );
     expect(await screen.findByText("Running · PID 4242")).toBeInTheDocument();
@@ -749,6 +752,83 @@ describe("SocksCapPanel Multi-Profile UI", () => {
         "default",
         "google-chrome-stable",
         ["--incognito", "--user-data-dir=/tmp/chrome profile"],
+        {},
+      ),
+    );
+  });
+
+  it("adds, edits, and launches a desktop application with launch preparation", async () => {
+    currentPlatform = "linux";
+    render(<SocksCapPanel />);
+
+    fireEvent.change(await screen.findByTestId("sockscap-rootless-command"), {
+      target: { value: "./bin/example-app" },
+    });
+    fireEvent.change(screen.getByTestId("sockscap-rootless-arguments"), {
+      target: { value: '"argument with spaces"' },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-rootless-preparation-toggle"));
+    fireEvent.change(screen.getByTestId("sockscap-rootless-working-directory"), {
+      target: { value: "/workspace/example" },
+    });
+    fireEvent.change(screen.getByTestId("sockscap-rootless-shell"), {
+      target: { value: "bash" },
+    });
+    fireEvent.change(screen.getByTestId("sockscap-rootless-pre-command"), {
+      target: { value: "export PREPARED=yes" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-add-rootless-environment"));
+    fireEvent.change(screen.getByTestId("sockscap-rootless-environment-name-0"), {
+      target: { value: "APP_ENV" },
+    });
+    fireEvent.change(screen.getByTestId("sockscap-rootless-environment-value-0"), {
+      target: { value: "development" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-add-rootless-application"));
+
+    await waitFor(() =>
+      expect(currentCfg.profiles[0].apps).toEqual([
+        {
+          path: "./bin/example-app",
+          args: ["argument with spaces"],
+          launchMode: "desktop",
+          launchPreparation: {
+            workingDirectory: "/workspace/example",
+            environment: { APP_ENV: "development" },
+            preCommand: "export PREPARED=yes",
+            shell: "bash",
+          },
+          name: "example-app",
+        },
+      ]),
+    );
+
+    fireEvent.click(screen.getByTestId("sockscap-edit-app-0"));
+    expect(screen.getByTestId("sockscap-rootless-working-directory")).toHaveValue(
+      "/workspace/example",
+    );
+    fireEvent.change(screen.getByTestId("sockscap-rootless-working-directory"), {
+      target: { value: "/workspace/updated" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-add-rootless-application"));
+    await waitFor(() =>
+      expect(currentCfg.profiles[0].apps[0].launchPreparation?.workingDirectory).toBe(
+        "/workspace/updated",
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("sockscap-launch-app-0"));
+    await waitFor(() =>
+      expect(vi.mocked(sockscapLaunchApp)).toHaveBeenCalledWith(
+        "default",
+        "./bin/example-app",
+        ["argument with spaces"],
+        {
+          workingDirectory: "/workspace/updated",
+          environment: { APP_ENV: "development" },
+          preCommand: "export PREPARED=yes",
+          shell: "bash",
+        },
       ),
     );
   });
@@ -763,6 +843,13 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     fireEvent.change(screen.getByTestId("sockscap-rootless-launch-mode"), {
       target: { value: "terminal" },
     });
+    fireEvent.click(screen.getByTestId("sockscap-rootless-preparation-toggle"));
+    fireEvent.change(screen.getByTestId("sockscap-rootless-working-directory"), {
+      target: { value: "/workspace/agy" },
+    });
+    fireEvent.change(screen.getByTestId("sockscap-rootless-pre-command"), {
+      target: { value: "export AGL_RUN_MODE=prepared" },
+    });
     fireEvent.click(screen.getByTestId("sockscap-add-rootless-application"));
 
     await waitFor(() =>
@@ -771,6 +858,10 @@ describe("SocksCapPanel Multi-Profile UI", () => {
           path: "agy",
           args: [],
           launchMode: "terminal",
+          launchPreparation: {
+            workingDirectory: "/workspace/agy",
+            preCommand: "export AGL_RUN_MODE=prepared",
+          },
           name: "agy",
         },
       ]),
@@ -789,6 +880,10 @@ describe("SocksCapPanel Multi-Profile UI", () => {
         profileId: "default",
         path: "agy",
         args: [],
+        launchPreparation: {
+          workingDirectory: "/workspace/agy",
+          preCommand: "export AGL_RUN_MODE=prepared",
+        },
       },
     });
     if (terminalTab) useAppStore.getState().removeTab(terminalTab.id);
@@ -802,11 +897,12 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     ];
     currentCfg.apps = currentCfg.profiles[0].apps;
     let pid = 5000;
-    vi.mocked(sockscapLaunchApp).mockImplementation(async (profileId, path, args) => ({
+    vi.mocked(sockscapLaunchApp).mockImplementation(async (profileId, path, args, launchPreparation) => ({
       pid: pid++,
       profileId,
       path,
       args: args ?? [],
+      launchPreparation,
       running: true,
     }));
     render(<SocksCapPanel />);
@@ -819,6 +915,37 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     expect(vi.mocked(sockscapStart)).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Running · PID 5000")).toBeInTheDocument();
     expect(screen.getByText("Running · PID 5001")).toBeInTheDocument();
+  });
+
+  it("shows a structured error when launch preparation fails", async () => {
+    currentPlatform = "linux";
+    currentCfg.profiles[0].apps = [
+      {
+        path: "example-app",
+        args: [],
+        launchPreparation: { preCommand: "false" },
+        name: "Example",
+      },
+    ];
+    currentCfg.apps = currentCfg.profiles[0].apps;
+    vi.mocked(sockscapLaunchApp).mockResolvedValueOnce({
+      pid: 5002,
+      profileId: "default",
+      path: "example-app",
+      args: [],
+      launchPreparation: { preCommand: "false" },
+      phase: "failed",
+      launchError: "application PID 5002 exited with status 1 before the target started",
+      running: false,
+    });
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-launch-app-0"));
+
+    expect(
+      await screen.findByText(/Launch failed: application PID 5002 exited with status 1/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Running · PID 5002")).not.toBeInTheDocument();
   });
 
   it("retries Recover with sudo without accidentally starting capture", async () => {

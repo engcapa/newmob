@@ -3107,6 +3107,7 @@ export function TerminalPanel({
           sockscapTerminal.profileId,
           sockscapTerminal.path,
           sockscapTerminal.args,
+          sockscapTerminal.launchPreparation ?? {},
           cols,
           rows,
           handleRawOutput,

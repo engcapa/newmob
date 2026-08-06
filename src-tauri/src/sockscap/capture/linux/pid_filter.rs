@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use crate::sockscap::config::AppSelector;
-use crate::sockscap::paths::{paths_match_exe, normalize_exe_path};
+use crate::sockscap::paths::{normalize_exe_path, paths_match_exe};
 use crate::sockscap::process::{self, ProcessInfo};
 
 /// Whether a packet/process PID belongs to a resolved app-mode target set.
@@ -130,6 +130,7 @@ mod tests {
             path: "/opt/example/example".into(),
             args: Vec::new(),
             launch_mode: Default::default(),
+            launch_preparation: Default::default(),
             bundle_id: String::new(),
             name: "Example".into(),
             macos_identity: None,
@@ -153,6 +154,7 @@ mod tests {
                 path: "/opt/example/example".into(),
                 args: Vec::new(),
                 launch_mode: Default::default(),
+                launch_preparation: Default::default(),
                 bundle_id: String::new(),
                 name: "Primary".into(),
                 macos_identity: None,
@@ -161,6 +163,7 @@ mod tests {
                 path: "example".into(),
                 args: Vec::new(),
                 launch_mode: Default::default(),
+                launch_preparation: Default::default(),
                 bundle_id: String::new(),
                 name: "Fallback".into(),
                 macos_identity: None,

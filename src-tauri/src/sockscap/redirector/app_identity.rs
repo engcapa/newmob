@@ -133,6 +133,7 @@ fn validate_bundle(bundle_path: &Path, allow_unsigned: bool) -> Result<AppSelect
         path: canonical_bundle_path.clone(),
         args: Vec::new(),
         launch_mode: Default::default(),
+        launch_preparation: Default::default(),
         bundle_id: bundle_id.clone(),
         name,
         macos_identity: Some(MacosAppIdentity {
@@ -201,6 +202,7 @@ fn validate_standalone_executable(
         path: canonical_executable_path.clone(),
         args: Vec::new(),
         launch_mode: Default::default(),
+        launch_preparation: Default::default(),
         bundle_id: String::new(),
         name,
         macos_identity: Some(MacosAppIdentity {

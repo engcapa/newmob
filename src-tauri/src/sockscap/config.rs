@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -251,6 +252,10 @@ pub struct AppSelector {
     /// interactive TUI programs receive a controlling terminal.
     #[serde(default, skip_serializing_if = "AppLaunchMode::is_desktop")]
     pub launch_mode: AppLaunchMode,
+    /// Structured preparation applied before a Linux launch-only application
+    /// is exec'd. Transparent capture backends preserve but ignore it.
+    #[serde(default, skip_serializing_if = "AppLaunchPreparation::is_empty")]
+    pub launch_preparation: AppLaunchPreparation,
     /// macOS bundle id when available.
     #[serde(default)]
     pub bundle_id: String,
@@ -260,6 +265,91 @@ pub struct AppSelector {
     /// macOS path-family identity. Other platforms preserve but ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macos_identity: Option<MacosAppIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLaunchPreparation {
+    /// Absolute directory inherited by the trace launcher, preparation shell,
+    /// target application, and every descendant.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub working_directory: String,
+    /// Literal environment overrides. Values are not shell-expanded.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, String>,
+    /// Shell program evaluated before the final target is exec'd.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pre_command: String,
+    /// POSIX-compatible interpreter used for the preparation wrapper.
+    #[serde(default, skip_serializing_if = "AppLaunchShell::is_sh")]
+    pub shell: AppLaunchShell,
+}
+
+impl AppLaunchPreparation {
+    pub fn is_empty(&self) -> bool {
+        self.working_directory.is_empty()
+            && self.environment.is_empty()
+            && self.pre_command.is_empty()
+            && self.shell.is_sh()
+    }
+
+    fn validate(&self, profile_name: &str, app_path: &str) -> Result<(), String> {
+        if !self.working_directory.is_empty() && !Path::new(&self.working_directory).is_absolute() {
+            return Err(format!(
+                "Profile '{profile_name}' application '{app_path}' working directory must be absolute"
+            ));
+        }
+        if self.pre_command.len() > 64 * 1024 {
+            return Err(format!(
+                "Profile '{profile_name}' application '{app_path}' preparation command exceeds 64 KiB"
+            ));
+        }
+        if self.environment.len() > 128 {
+            return Err(format!(
+                "Profile '{profile_name}' application '{app_path}' has more than 128 environment variables"
+            ));
+        }
+        for (name, value) in &self.environment {
+            if !valid_environment_name(name) {
+                return Err(format!(
+                    "Profile '{profile_name}' application '{app_path}' has invalid environment variable name '{name}'"
+                ));
+            }
+            if value.len() > 64 * 1024 {
+                return Err(format!(
+                    "Profile '{profile_name}' application '{app_path}' environment variable '{name}' exceeds 64 KiB"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn valid_environment_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    matches!(characters.next(), Some('_' | 'A'..='Z' | 'a'..='z'))
+        && characters.all(|character| matches!(character, '_' | '0'..='9' | 'A'..='Z' | 'a'..='z'))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AppLaunchShell {
+    #[default]
+    Sh,
+    Bash,
+}
+
+impl AppLaunchShell {
+    fn is_sh(&self) -> bool {
+        matches!(self, Self::Sh)
+    }
+
+    pub fn command_name(self) -> &'static str {
+        match self {
+            Self::Sh => "sh",
+            Self::Bash => "bash",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -565,6 +655,11 @@ impl SocksCapConfig {
                 }
             }
         }
+        for profile in &self.profiles {
+            for app in &profile.apps {
+                app.launch_preparation.validate(&profile.name, &app.path)?;
+            }
+        }
         Ok(())
     }
 
@@ -597,15 +692,56 @@ mod tests {
     fn app_launch_mode_defaults_to_desktop_and_persists_terminal() {
         let desktop: AppSelector = serde_json::from_str(r#"{"path":"agy"}"#).unwrap();
         assert_eq!(desktop.launch_mode, AppLaunchMode::Desktop);
-        assert!(!serde_json::to_string(&desktop)
-            .unwrap()
-            .contains("launchMode"));
+        assert!(desktop.launch_preparation.is_empty());
+        assert!(
+            !serde_json::to_string(&desktop)
+                .unwrap()
+                .contains("launchMode")
+        );
 
         let mut terminal = desktop;
         terminal.launch_mode = AppLaunchMode::Terminal;
-        assert!(serde_json::to_string(&terminal)
-            .unwrap()
-            .contains(r#""launchMode":"terminal""#));
+        assert!(
+            serde_json::to_string(&terminal)
+                .unwrap()
+                .contains(r#""launchMode":"terminal""#)
+        );
+    }
+
+    #[test]
+    fn launch_preparation_roundtrips_and_validates_environment_names() {
+        let app: AppSelector = serde_json::from_str(
+            r#"{
+                "path":"./app",
+                "launchPreparation": {
+                    "workingDirectory":"/workspace/app",
+                    "environment":{"APP_ENV":"test"},
+                    "preCommand":"ulimit -n 4096",
+                    "shell":"bash"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(app.launch_preparation.shell, AppLaunchShell::Bash);
+        assert_eq!(
+            app.launch_preparation.environment.get("APP_ENV"),
+            Some(&"test".to_string())
+        );
+        assert!(
+            serde_json::to_string(&app)
+                .unwrap()
+                .contains("launchPreparation")
+        );
+
+        let mut config = SocksCapConfig::default();
+        config.profiles[0].upstream.host = "127.0.0.1".into();
+        config.profiles[0].upstream.port = 1080;
+        config.profiles[0].apps = vec![app];
+        config.profiles[0].apps[0]
+            .launch_preparation
+            .environment
+            .insert("INVALID-NAME".into(), "value".into());
+        assert!(config.validate().unwrap_err().contains("INVALID-NAME"));
     }
 
     #[test]
