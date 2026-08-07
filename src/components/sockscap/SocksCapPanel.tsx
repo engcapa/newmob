@@ -990,6 +990,11 @@ export function SocksCapPanel({ onStatusMessage, onClose }: Props) {
     }
 
     // 3) All probes passed → start.
+    if (needsStartElevation(caps)) {
+      setRootPromptIntent("start");
+      setRootPromptError(null);
+      return false;
+    }
     return onStart(undefined, startConfig);
   };
 

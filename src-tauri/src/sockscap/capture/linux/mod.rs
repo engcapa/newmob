@@ -25,6 +25,13 @@ use zeroize::Zeroizing;
 use crate::sockscap::config::{AppLaunchPreparation, AppSelector, ScopeMode, SocksCapConfig};
 use crate::sockscap::relay::RelayContext;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum TransparentCapability {
+    Available,
+    ElevationRequired,
+    Unavailable(String),
+}
+
 /// A running Linux capture session. Dropping it is intentionally inert: callers
 /// must call [`Self::stop`] so failures are visible and recovery can be offered.
 pub struct TransparentCaptureHandle {
@@ -87,6 +94,47 @@ pub struct LinuxCaptureImpl;
 /// not create cgroups or mutate nftables state.
 pub fn transparent_preflight() -> Result<(), String> {
     LinuxCaptureImpl.preflight(None)
+}
+
+/// Classify the read-only transparent-capture probe for UI/backend selection.
+/// A normal desktop user cannot list nftables tables until sudo authenticates;
+/// that is an elevation requirement, not evidence that the backend is absent.
+pub(super) fn transparent_capability() -> TransparentCapability {
+    classify_transparent_preflight(
+        transparent_preflight(),
+        crate::sockscap::elevate::is_effective_root(),
+        is_containerized(),
+        sudo_available(),
+    )
+}
+
+fn classify_transparent_preflight(
+    preflight: Result<(), String>,
+    effective_root: bool,
+    containerized: bool,
+    sudo_available: bool,
+) -> TransparentCapability {
+    match preflight {
+        Ok(()) => TransparentCapability::Available,
+        Err(error)
+            if !effective_root
+                && !containerized
+                && sudo_available
+                && error.to_ascii_lowercase().contains("cap_net_admin") =>
+        {
+            TransparentCapability::ElevationRequired
+        }
+        Err(error) => TransparentCapability::Unavailable(error),
+    }
+}
+
+fn sudo_available() -> bool {
+    ["/usr/bin/sudo", "/bin/sudo"]
+        .iter()
+        .any(|path| std::path::Path::new(path).is_file())
+        || std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| directory.join("sudo").is_file())
+        })
 }
 
 /// Container detection is explanatory only; backend selection is driven by
@@ -529,6 +577,48 @@ fn capture_scope(config: &SocksCapConfig) -> Result<CaptureScope, String> {
 mod tests {
     use super::*;
     use crate::sockscap::config::SocksCapConfig;
+
+    #[test]
+    fn nft_permission_failure_requests_elevation_for_a_desktop_user() {
+        let capability = classify_transparent_preflight(
+            Err("nftables is present but unavailable: Operation not permitted. Linux capture requires CAP_NET_ADMIN".into()),
+            false,
+            false,
+            true,
+        );
+
+        assert_eq!(capability, TransparentCapability::ElevationRequired);
+    }
+
+    #[test]
+    fn nft_permission_failure_stays_unavailable_when_elevation_cannot_help() {
+        for (effective_root, containerized, sudo_available) in [
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
+            let capability = classify_transparent_preflight(
+                Err("Linux capture requires CAP_NET_ADMIN".into()),
+                effective_root,
+                containerized,
+                sudo_available,
+            );
+
+            assert!(matches!(capability, TransparentCapability::Unavailable(_)));
+        }
+    }
+
+    #[test]
+    fn non_permission_preflight_failure_stays_unavailable() {
+        let capability = classify_transparent_preflight(
+            Err("nftables is required for Linux SocksCap; install the nft package".into()),
+            false,
+            false,
+            true,
+        );
+
+        assert!(matches!(capability, TransparentCapability::Unavailable(_)));
+    }
 
     #[test]
     fn default_config_uses_global_capture() {
