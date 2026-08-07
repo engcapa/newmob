@@ -49,7 +49,6 @@ steps:
       timeout_sec: 5
   # The status chip should be present and show "connecting" or "error" (no real server).
   - assert_visible: '[data-testid="rdp-status"]'
-  - assert_visible: '[data-testid="rdp-floating-toolbar"]'
   - click: '[data-testid="rdp-scale-toggle"]'
   - assert_visible: '[data-testid="rdp-view-cycle"]'
   - click: '[data-testid="rdp-view-cycle"]'

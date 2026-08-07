@@ -89,6 +89,7 @@ fn make_test_config(mode: ScopeMode, upstream: UpstreamRef) -> SocksCapConfig {
         ],
         default_action: Decision::Proxy,
         restore_on_login: false,
+        block_quic: false,
     };
     cfg.normalize();
     cfg

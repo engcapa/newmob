@@ -6417,7 +6417,10 @@ iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAA
             &[folder],
             &[message],
             "INBOX",
-            &MailCacheSettings::default(),
+            &MailCacheSettings {
+                header_retention_days: 0,
+                ..MailCacheSettings::default()
+            },
         )
         .unwrap();
 

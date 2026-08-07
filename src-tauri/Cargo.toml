@@ -274,9 +274,16 @@ signal-hook = "0.3"
 # X server reports as changed are read back and encoded — see capture/x11.rs).
 # The `damage` feature transitively enables `xfixes`, which provides the
 # `xfixes::Region` type that `damage_subtract` takes.
-x11rb = { version = "0.13", features = ["shm", "damage"] }
-# Wayland fallback when no usable X11/`DISPLAY` is available: xcap uses the
-# xdg-desktop-portal ScreenCast path on pure Wayland sessions.
+x11rb = { version = "0.13", features = ["shm", "damage", "randr"] }
+# Wayland RDP sharing uses one xdg-desktop-portal RemoteDesktop session for
+# both ScreenCast/PipeWire capture and input injection. Keeping the two
+# permissions in one session is required on GNOME/KDE and avoids accidentally
+# capturing or controlling only XWayland surfaces.
+ashpd = { version = "0.12", default-features = false, features = ["tokio"] }
+pipewire = "0.9"
+# The SOCKS/process capture test harness still enumerates X11 windows through
+# xcap. RDP screen sharing does not use this crate on Linux; its Wayland path
+# is the portal/PipeWire backend above.
 xcap = "0.9.6"
 # Linux WebView (webkit2gtk) media stack. The default webkit2gtk settings ship
 # with media-stream / WebRTC disabled, so navigator.mediaDevices.getUserMedia

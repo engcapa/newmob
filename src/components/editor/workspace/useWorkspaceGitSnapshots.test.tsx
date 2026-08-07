@@ -97,9 +97,10 @@ describe("useWorkspaceGitSnapshots", () => {
   });
 
   it("refreshes the matching repository and publishes path changes", async () => {
+    const onError = vi.fn();
     const { result } = renderHook(() => useWorkspaceGitSnapshots({
       roots,
-      onError: vi.fn(),
+      onError,
     }));
     await waitFor(() => expect(result.current.gitSnapshots["/repo"]?.headOid).toBe("head-1"));
 

@@ -1,5 +1,6 @@
 //! RDP server input handler: injects client keyboard/mouse events into the
-//! local desktop via `enigo`, with native CoreGraphics pointer events on macOS.
+//! local desktop via `enigo`, the RemoteDesktop portal on Wayland, and native
+//! CoreGraphics pointer events on macOS.
 //!
 //! ## Coordinates
 //! [`MouseEvent::Move { x, y }`] carries coordinates in the advertised RDP
@@ -53,6 +54,8 @@ use objc2_core_graphics::{
 };
 
 use super::ControlGate;
+#[cfg(target_os = "linux")]
+use super::capture::PortalInput;
 use super::metrics::RdpMetrics;
 use crate::servers::engine::LogEmitter;
 
@@ -432,6 +435,7 @@ impl RdpInput {
         view_only: bool,
         control_gate: Option<std::sync::Arc<ControlGate>>,
         metrics: RdpMetrics,
+        #[cfg(target_os = "linux")] portal_tx: Option<mpsc::SyncSender<PortalInput>>,
         #[cfg(target_os = "macos")] mapping: Option<MacInputMapping>,
     ) -> Self {
         let tx = if view_only {
@@ -440,6 +444,8 @@ impl RdpInput {
             Self::spawn_actor(
                 &log,
                 metrics.clone(),
+                #[cfg(target_os = "linux")]
+                portal_tx,
                 #[cfg(target_os = "macos")]
                 mapping,
             )
@@ -462,6 +468,7 @@ impl RdpInput {
     fn spawn_actor(
         log: &LogEmitter,
         metrics: RdpMetrics,
+        #[cfg(target_os = "linux")] portal_tx: Option<mpsc::SyncSender<PortalInput>>,
         #[cfg(target_os = "macos")] mapping: Option<MacInputMapping>,
     ) -> Option<InputQueue> {
         let tx = InputQueue::new();
@@ -479,6 +486,19 @@ impl RdpInput {
                     open_prompt_to_get_permissions: false,
                     ..Settings::default()
                 };
+                #[cfg(target_os = "linux")]
+                let mut enigo = if portal_tx.is_some() {
+                    None
+                } else {
+                    match Enigo::new(&settings) {
+                        Ok(e) => Some(e),
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(e.to_string()));
+                            return;
+                        }
+                    }
+                };
+                #[cfg(not(target_os = "linux"))]
                 let mut enigo = match Enigo::new(&settings) {
                     Ok(e) => e,
                     Err(e) => {
@@ -516,12 +536,34 @@ impl RdpInput {
                         }
                         permission_checked_at = Instant::now();
                     }
-                    if let Err(error) = apply(
+                    #[cfg(target_os = "linux")]
+                    let result = if let Some(portal_tx) = &portal_tx {
+                        input_cmd_to_portal(queued.cmd)
+                            .ok_or_else(|| "unsupported input command for Wayland portal".to_string())
+                            .and_then(|input| {
+                                portal_tx
+                                    .send(input)
+                                    .map_err(|_| "Wayland portal input channel closed".to_string())
+                            })
+                    } else {
+                        match enigo.as_mut() {
+                            Some(enigo) => apply(
+                                enigo,
+                                #[cfg(target_os = "macos")]
+                                &mut mac_mouse,
+                                queued.cmd,
+                            ),
+                            None => Err("input backend was not initialized".to_string()),
+                        }
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let result = apply(
                         &mut enigo,
                         #[cfg(target_os = "macos")]
                         &mut mac_mouse,
                         queued.cmd,
-                    ) {
+                    );
+                    if let Err(error) = result {
                         actor_log.line(format!("input injection stopped: {error}"));
                         rx.close();
                         break;
@@ -628,6 +670,62 @@ impl Drop for RdpInput {
             tx.close();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn input_cmd_to_portal(cmd: InputCmd) -> Option<PortalInput> {
+    match cmd {
+        // Enigo's Linux raw key API takes X11 keycodes (evdev + 8), while the
+        // RemoteDesktop portal takes Linux evdev keycodes directly.
+        InputCmd::Raw { code, dir } => Some(PortalInput::Keycode {
+            code: i32::from(code.saturating_sub(8)),
+            pressed: dir == Press,
+        }),
+        InputCmd::Key {
+            key: Key::Unicode(ch),
+            dir,
+        } => Some(PortalInput::Keysym {
+            keysym: unicode_to_keysym(ch),
+            pressed: dir == Press,
+        }),
+        InputCmd::Key { .. } => None,
+        InputCmd::Button { button, dir } => Some(PortalInput::Button {
+            button: match button {
+                Button::Left => 0x110,
+                Button::Right => 0x111,
+                Button::Middle => 0x112,
+                Button::Back => 0x116,
+                Button::Forward => 0x115,
+                _ => return None,
+            },
+            pressed: dir == Press,
+        }),
+        InputCmd::MoveMouse { x, y, coord } => match coord {
+            Coordinate::Abs => Some(PortalInput::MotionAbsolute {
+                x: f64::from(x),
+                y: f64::from(y),
+            }),
+            Coordinate::Rel => Some(PortalInput::MotionRelative {
+                dx: f64::from(x),
+                dy: f64::from(y),
+            }),
+        },
+        InputCmd::Scroll { length, axis } => Some(PortalInput::Scroll {
+            horizontal: axis == Axis::Horizontal,
+            steps: length,
+        }),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn unicode_to_keysym(ch: char) -> i32 {
+    let codepoint = u32::from(ch);
+    let keysym = if codepoint <= 0xff {
+        codepoint
+    } else {
+        0x0100_0000 | codepoint
+    };
+    i32::try_from(keysym).expect("Unicode keysym fits in a signed 32-bit portal value")
 }
 
 /// Replay one command on the thread-owned input backend. Returning an error

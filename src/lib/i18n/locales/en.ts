@@ -1754,7 +1754,7 @@ const dict = {
       rdpInsecure:
         "No security means traffic is unencrypted and, without credentials, anyone who can reach the port gets full control. Use only on an isolated network.",
       rdpCapLinux:
-        "Desktop capture: Linux X11/XWayland is fully supported. On pure Wayland, capture uses the portal (accept the ScreenCast prompt). Input works via enigo.",
+        "Desktop capture: Linux X11 uses MIT-SHM/XDamage with XTest input. Native Wayland uses one RemoteDesktop portal session and a persistent PipeWire stream; accept the screen and keyboard/pointer prompts to enable control.",
       rdpCapMacos:
         "Desktop capture: macOS uses a persistent native display stream. Grant Screen Recording permission and select the display to share.",
       rdpCaptureGranted: "Permission granted",

@@ -54,8 +54,8 @@ Taomni 当前计划已经明确产品不是 Windows RDS 或 TeamViewer 替代品
 | macOS 当前控制台共享 | **核心链路已实现，发布候选** | IronRDP + ScreenCaptureKit + CoreGraphics/Accessibility + VideoToolbox AVC420；`xcap` 捕获回退 | macOS 本机构建和自动化回归已通过；仍需 mstsc、Windows App、macOS 客户端和 FreeRDP 真机矩阵。需要 Screen Recording 与 Accessibility 权限，不覆盖登录窗口和安全桌面 |
 | Windows 当前控制台共享 | **未达标，阻塞启动** | IronRDP 协议和输入代码可复用；仍需 WGC/DXGI 捕获，建议 WGC 优先、DXGI Desktop Duplication 兜底 | 当前捕获器明确返回错误。UAC secure desktop、锁屏和跨会话还需要服务级能力 |
 | Windows 远程登录 / 独立会话 | **不由 Taomni 内嵌服务器提供** | 使用系统 Remote Desktop Service | 通常要求 Pro/Enterprise；语义是远程登录，不等价于与本地用户同时共享控制台 |
-| Linux X11 控制台共享 | **既有实现可用，本轮未改动** | XShm/XDamage 捕获 + `enigo` X11 输入 + bitmap 更新 | 既有路径已有实测记录；本分支尚未在 Linux 重新做回归。依赖当前 X server，会话锁定、多屏/缩放及高分辨率性能仍需矩阵验证 |
-| Linux Wayland 控制台共享 | **条件支持 / 实验性** | 当前为 X11 优先，X11 不可用时走 `xcap` Portal 回退；目标是统一使用 RemoteDesktop/ScreenCast + PipeWire 输入授权 | 带 XWayland 时可能只捕获 X11 内容；Portal、合成器、输入授权和重连语义仍未收口，不能按 X11 同等级发布 |
+| Linux X11 控制台共享 | **代码与自动化门槛已达标** | XShm/XDamage 区域捕获 + XRandR 几何监听 + `enigo`/XTest 输入 + bitmap 更新 | SHM resize 重建、GetImage 降级、resize-before-frame 和边界测试已通过；仍需真机多屏/旋转/缩放、锁屏及高分辨率性能矩阵 |
+| Linux Wayland 控制台共享 | **代码与自动化门槛已达标** | Wayland 会话优先使用同一个 RemoteDesktop Portal 授权屏幕与键鼠，通过持久 PipeWire stream 捕获并通过 Portal 注入输入 | 像素格式/stride/负 stride、坐标映射、流关闭和 mailbox 已覆盖；仍需 GNOME/KDE 真机授权、合成器兼容性、睡眠唤醒和长稳验证 |
 | Linux 无头 / 多用户 / 登录界面 | **不支持** | 委托 xrdp；固定 GNOME 环境可评估 GNOME Remote Desktop remote-login/headless | Taomni 没有 PAM/GDM/session gateway，不应在应用内重建系统会话生命周期 |
 
 ### macOS
@@ -90,7 +90,9 @@ Windows 原生 RDP 更适合“远程登录到系统会话”的场景。微软�
 
 Linux X11 是当前最接近完整链路的路径。XShm/XDamage 适合做区域级脏帧采集，IronRDP 只负责协议和显示更新，职责边界清晰。
 
-建议保留该实现，并补充：
+本轮已增加 XRandR 事件监听和根窗口几何检查。显示尺寸变化时会重建 MIT-SHM 缓冲；重建失败则降级到 GetImage。显示层先发送 `DisplayUpdate::Resize`，下一次更新才发送新尺寸全帧，避免客户端以旧几何解释像素。
+
+仍需补充：
 
 - XRandR 旋转、缩放和多显示器测试。
 - XTest/uinput 输入失败时的明确错误提示。
@@ -99,12 +101,18 @@ Linux X11 是当前最接近完整链路的路径。XShm/XDamage 适合做区域
 
 ### Linux Wayland
 
-当前 Wayland 路径存在策略风险：创建捕获器时先尝试 X11，只有 X11 不可用才走 Portal 回退；[capture/mod.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mod.rs)。在带 XWayland 的桌面中，X11 root 通常只代表 X11/XWayland 内容，不能保证覆盖原生 Wayland 窗口。
+Wayland 路径已改为以会话类型为准：检测到 Wayland 时不会被可用的 XWayland `DISPLAY` 覆盖，而是直接创建 RemoteDesktop Portal session。屏幕源、键盘和指针权限共享同一授权上下文，Portal 返回的 PipeWire FD 由持久 stream 消费。
 
-建议：
+本轮已完成：
 
-- 检测到 Wayland 后优先使用 RemoteDesktop/ScreenCast Portal 和 PipeWire。
-- 让屏幕捕获授权和输入注入共享同一个远程桌面授权上下文。
+- latest-frame mailbox，只保留最新 PipeWire 帧，慢编码端不会反压捕获回调。
+- BGRA/RGBA/BGR/RGB、行 padding、正负 stride 和尺寸上限处理。
+- 键盘 keycode/keysym、指针绝对/相对移动、按钮和滚轮 Portal 注入；绝对坐标按 compositor logical size 映射。
+- 服务启动时预热并跨认证复用 Portal/PipeWire session，避免每个客户端重复弹授权框。
+- PipeWire 线程退出时关闭 mailbox 并唤醒显示端，避免连接停在最后一帧。
+
+仍需：
+
 - 对 GNOME 直接评估 GNOME Remote Desktop；它使用 Mutter、PipeWire 和 libei，能覆盖 remote assistance、headless 和 remote-login。
 - 对 KDE 或其他合成器只在经过实机互操作测试后宣布支持。
 
@@ -172,9 +180,12 @@ Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrd
 | macOS 可控输入与权限边界 | **代码层已达标** | CoreGraphics 鼠标、Accessibility 预检/请求/撤销检测、无权限时保持可查看但停止控制 |
 | macOS VideoToolbox H.264 | **代码层已达标** | AVC420 默认协商、VideoToolbox 异步编码、原生 pixel buffer 生命周期管理；实际硬件/软件编码器选择待增加观测 |
 | 有界背压和自动降级 | **已达标** | 编码在途帧上限为 2；编码硬超时 250 ms；ACK/解码停滞时销毁 EGFX surface 并恢复 bitmap |
-| 自动化回归 | **已达标** | RDP Rust 聚焦测试 54 个通过；前端构建和权限设置测试通过 |
+| Linux X11 动态显示 | **代码层已达标** | XRandR 监听、根窗口几何检测、SHM 重建/GetImage 降级、resize 先于新尺寸全帧 |
+| Linux Wayland 捕获与控制 | **代码层已达标** | Wayland 优先路由、RemoteDesktop Portal 联合授权、持久 PipeWire stream、Portal 输入与流失败收口 |
+| RDP client 慢消费者背压 | **已达标** | session 与 WebSocket 两层均使用有界控制队列和 latest-complete-frame 批次，旧完整帧可被新帧替换 |
+| 自动化回归 | **已达标** | RDP server 43 个测试、RDP client 225 个测试、完整 Rust lib/integration、前端 build/Vitest 均通过 |
 | macOS 生产发布门槛 | **部分达标** | 编译与回归通过；缺真实客户端兼容矩阵、真机长稳和量化性能数据 |
-| Windows/Linux 达到同等原生性能 | **未达标** | Windows 捕获仍缺失；Linux 本轮没有新增硬件编码或 Wayland 授权整合 |
+| Windows/Linux 达到同等原生性能 | **部分达标** | Windows 捕获仍缺失；Linux 捕获与授权链路已完成，但尚无硬件编码和真机量化性能数据 |
 
 ### 性能表现
 
@@ -196,15 +207,18 @@ Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrd
 
 ### 验证记录
 
-实施提交 `3fd37189` 已通过：
+截至 2026-08-08，本工作区已通过：
 
 - `cargo check --lib`
-- `cargo test --lib servers::rdp:: --quiet`：54 passed
+- `cargo test --lib servers::rdp:: --quiet`：43 passed
+- `cargo test --lib rdp:: --quiet`：218 passed，7 ignored（需要 live RDP fixture）
+- `cargo test --lib`：1165 passed，18 ignored
+- `cargo test --test integration`：57 passed
 - `pnpm build`
-- `pnpm test -- src/components/servers/settings/RdpSettings.test.tsx`：232 files、1984 tests passed
+- `pnpm test`：232 files、1985 tests passed
 - `git diff --check`
 
-这些结果覆盖编译、状态机、捕获 mailbox、resize 顺序、坐标映射、编码背压/超时/停滞判断和权限设置 UI；它们不替代真实 RDP 客户端、真机图像正确性、硬件编码器和长时间会话验证。
+这些结果覆盖编译、状态机、Wayland PipeWire 像素转换和 stream 关闭、X11 resize/边界、捕获 mailbox、resize 顺序、坐标映射、client/WebSocket 慢消费者背压、编码超时/停滞判断和权限设置 UI；它们不替代真实 RDP 客户端、GNOME/KDE 真机图像与输入、硬件编码器和长时间会话验证。
 
 ## 五、替代方案比较
 
@@ -231,7 +245,7 @@ Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrd
 
 1. 对 macOS 使用 mstsc、Windows App、macOS Microsoft Remote Desktop 和 FreeRDP 完成真实互操作、长稳和性能基准。
 2. 完成 Windows WGC/DXGI 捕获，并加入 GDI fallback。
-3. 对 Wayland 改为 Portal/PipeWire 优先，验证 GNOME 和 KDE 至少各一套实机环境。
+3. 在已完成 Portal/PipeWire 优先实现的基础上，验证 GNOME 和 KDE 至少各一套实机环境。
 4. 为单连接实现显式 `Reject` 或认证后 `Preempt` 策略。
 
 ### P1：提升性能和协议兼容性

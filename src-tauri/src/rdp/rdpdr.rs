@@ -32,10 +32,9 @@ use ironrdp::rdpdr::pdu::esc::{ScardCall, ScardIoCtlCode};
 use ironrdp::rdpdr::{Rdpdr as IronRdpdr, RdpdrBackend};
 use ironrdp::svc::SvcMessage;
 use serde_json::json;
-use tokio::sync::mpsc::UnboundedSender;
 
 use crate::rdp::DriveRedirectOpt;
-use crate::rdp::session::SessionOutput;
+use crate::rdp::session::{SessionOutput, SessionOutputSender};
 
 // ── Component / PacketId pairs ──────────────────────────────────────────
 
@@ -307,7 +306,7 @@ pub struct LocalDriveBackend {
     label: String,
     next_file_id: u32,
     handles: HashMap<u32, OpenedHandle>,
-    status_tx: Option<UnboundedSender<SessionOutput>>,
+    status_tx: Option<SessionOutputSender>,
     read_only: bool,
     written_bytes: u64,
 }
@@ -338,7 +337,7 @@ impl LocalDriveBackend {
     pub fn new_with_status(
         root: impl AsRef<Path>,
         label: impl Into<String>,
-        status_tx: Option<UnboundedSender<SessionOutput>>,
+        status_tx: Option<SessionOutputSender>,
     ) -> Result<Self, String> {
         Self::new_with_policy(root, label, status_tx, false)
     }
@@ -346,7 +345,7 @@ impl LocalDriveBackend {
     fn new_with_policy(
         root: impl AsRef<Path>,
         label: impl Into<String>,
-        status_tx: Option<UnboundedSender<SessionOutput>>,
+        status_tx: Option<SessionOutputSender>,
         read_only: bool,
     ) -> Result<Self, String> {
         let root = root.as_ref();
@@ -974,7 +973,7 @@ impl RdpdrBackend for LocalDriveBackend {
 
 pub fn build_drive_channel(
     options: &DriveRedirectOpt,
-    status_tx: Option<UnboundedSender<SessionOutput>>,
+    status_tx: Option<SessionOutputSender>,
 ) -> Result<Option<IronRdpdr>, String> {
     if !options.enabled {
         return Ok(None);
@@ -1541,10 +1540,10 @@ mod tests {
         assert!(build_drive_channel(&options, None).unwrap().is_none());
     }
 
-    #[test]
-    fn local_drive_backend_reports_server_acceptance() {
+    #[tokio::test]
+    async fn local_drive_backend_reports_server_acceptance() {
         let dir = tempfile::tempdir().unwrap();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mut handle, tx, _ctrl_rx) = crate::rdp::session::RdpSessionHandle::new();
         let mut backend =
             LocalDriveBackend::new_with_status(dir.path(), "shared", Some(tx)).unwrap();
 
@@ -1555,7 +1554,7 @@ mod tests {
             })
             .unwrap();
 
-        match rx.try_recv().unwrap() {
+        match handle.next_outgoing().await.unwrap() {
             SessionOutput::Text(text) => {
                 assert!(text.contains(r#""stage":"drive-ready""#));
                 assert!(text.contains("accepted by server"));

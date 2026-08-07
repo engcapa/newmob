@@ -17,6 +17,8 @@ use core::num::{NonZeroU16, NonZeroUsize};
 use std::collections::VecDeque;
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
@@ -30,6 +32,8 @@ use tokio::sync::Notify;
 #[cfg(target_os = "macos")]
 use tokio::sync::oneshot;
 
+#[cfg(target_os = "linux")]
+use super::capture::PortalInput;
 use super::capture::{Capturer, Frame, create_capturer_for_display};
 #[cfg(target_os = "macos")]
 use super::gfx::{EncodedFrame, GfxReadiness, GfxSubmit, GfxTransport, H264Encoder};
@@ -44,7 +48,7 @@ pub(crate) struct RdpDisplay {
     /// Desktop size reported to the client. Set from the capture backend when
     /// available, else the fallback size passed in at construction.
     size: DesktopSize,
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     display_id: Option<String>,
     /// macOS capture is warmed before the listener becomes ready and remains
     /// alive across client authentication. This removes ScreenCaptureKit setup
@@ -59,6 +63,13 @@ pub(crate) struct RdpDisplay {
     supports_client_size: bool,
     #[cfg(target_os = "macos")]
     input_surface_size: Arc<AtomicU32>,
+    /// Linux capture is also warmed before the listener starts. For Wayland
+    /// this keeps the portal grant and PipeWire stream alive across RDP login;
+    /// for X11 it avoids opening a second X connection per client.
+    #[cfg(target_os = "linux")]
+    mailbox: Arc<LatestFrameMailbox>,
+    #[cfg(target_os = "linux")]
+    portal_input: Option<std::sync::mpsc::SyncSender<PortalInput>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -75,19 +86,28 @@ impl RdpDisplay {
         log: LogEmitter,
         display_id: Option<String>,
         metrics: RdpMetrics,
+        view_only: bool,
         #[cfg(target_os = "macos")] gfx: GfxTransport,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "macos")]
         let (size, mailbox, resize_tx, supports_client_size) =
             start_warmed_macos_capture(log.clone(), display_id.clone(), metrics.clone())?;
 
+        #[cfg(target_os = "linux")]
+        let (size, mailbox, portal_input) = start_warmed_linux_capture(
+            log.clone(),
+            display_id.clone(),
+            metrics.clone(),
+            !view_only,
+        )?;
+
         #[cfg(target_os = "macos")]
         let input_surface_size = Arc::new(AtomicU32::new(pack_desktop_size(size)));
 
         // Other platforms keep their existing per-client capture lifecycle.
         // Probing here keeps `size()` honest for the client.
-        #[cfg(not(target_os = "macos"))]
-        let size = match create_capturer_for_display(&log, display_id.as_deref()) {
+        #[cfg(target_os = "windows")]
+        let size = match create_capturer_for_display(&log, display_id.as_deref(), !view_only) {
             Ok(cap) => {
                 let (w, h) = cap.desktop_size();
                 match (NonZeroU16::new(w), NonZeroU16::new(h)) {
@@ -105,7 +125,7 @@ impl RdpDisplay {
             log,
             metrics,
             size,
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
             display_id,
             #[cfg(target_os = "macos")]
             mailbox,
@@ -117,6 +137,10 @@ impl RdpDisplay {
             supports_client_size,
             #[cfg(target_os = "macos")]
             input_surface_size,
+            #[cfg(target_os = "linux")]
+            mailbox,
+            #[cfg(target_os = "linux")]
+            portal_input,
         })
     }
 
@@ -133,6 +157,11 @@ impl RdpDisplay {
     #[cfg(target_os = "macos")]
     pub(crate) fn supports_client_size(&self) -> bool {
         self.supports_client_size
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn portal_input(&self) -> Option<std::sync::mpsc::SyncSender<PortalInput>> {
+        self.portal_input.clone()
     }
 }
 
@@ -210,12 +239,23 @@ impl RdpServerDisplay for RdpDisplay {
             self.mailbox.replay_latest_full();
             return Ok(Box::new(DisplayUpdatesImpl::from_warmed_capture(
                 self.mailbox.clone(),
+                self.size,
                 self.metrics.clone(),
                 self.gfx.clone(),
             )));
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            self.mailbox.replay_latest_full();
+            return Ok(Box::new(DisplayUpdatesImpl::from_warmed_linux_capture(
+                self.mailbox.clone(),
+                self.size,
+                self.metrics.clone(),
+            )));
+        }
+
+        #[cfg(target_os = "windows")]
         Ok(Box::new(DisplayUpdatesImpl::with_capture(
             self.log.clone(),
             self.size,
@@ -232,12 +272,21 @@ impl Drop for RdpDisplay {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl Drop for RdpDisplay {
+    fn drop(&mut self) {
+        self.mailbox.close();
+    }
+}
+
 /// Per-client update producer that drains the native capture thread.
 pub(crate) struct DisplayUpdatesImpl {
     mailbox: Arc<LatestFrameMailbox>,
     close_mailbox_on_drop: bool,
     active_damage: VecDeque<Frame>,
     metrics: RdpMetrics,
+    current_size: DesktopSize,
+    deferred_full: Option<Frame>,
     #[cfg(target_os = "macos")]
     gfx: GfxTransport,
     #[cfg(target_os = "macos")]
@@ -406,6 +455,7 @@ impl DisplayUpdatesImpl {
     #[cfg(target_os = "macos")]
     fn from_warmed_capture(
         mailbox: Arc<LatestFrameMailbox>,
+        size: DesktopSize,
         metrics: RdpMetrics,
         gfx: GfxTransport,
     ) -> Self {
@@ -414,8 +464,26 @@ impl DisplayUpdatesImpl {
             close_mailbox_on_drop: false,
             active_damage: VecDeque::new(),
             metrics,
+            current_size: size,
+            deferred_full: None,
             gfx,
             h264: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn from_warmed_linux_capture(
+        mailbox: Arc<LatestFrameMailbox>,
+        size: DesktopSize,
+        metrics: RdpMetrics,
+    ) -> Self {
+        Self {
+            mailbox,
+            close_mailbox_on_drop: false,
+            active_damage: VecDeque::new(),
+            metrics,
+            current_size: size,
+            deferred_full: None,
         }
     }
 
@@ -443,6 +511,8 @@ impl DisplayUpdatesImpl {
             close_mailbox_on_drop: true,
             active_damage: VecDeque::new(),
             metrics,
+            current_size: _size,
+            deferred_full: None,
         }
     }
 
@@ -580,6 +650,18 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
                 self.mailbox.finish_damage();
             }
 
+            if let Some(frame) = self.deferred_full.take() {
+                self.metrics.record_frame_handoff(frame.captured_at);
+                self.metrics.report_if_due();
+                #[cfg(target_os = "macos")]
+                {
+                    if self.try_queue_gfx(&frame) {
+                        continue;
+                    }
+                }
+                return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+            }
+
             if let Some(frame) = self.active_damage.pop_front() {
                 if self.active_damage.is_empty() {
                     self.mailbox.finish_damage();
@@ -646,6 +728,15 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
 
             match pending {
                 Some(PendingFrames::Full(frame)) => {
+                    let frame_size = DesktopSize {
+                        width: frame.width,
+                        height: frame.height,
+                    };
+                    if frame_size != self.current_size {
+                        self.current_size = frame_size;
+                        self.deferred_full = Some(frame);
+                        return Ok(Some(DisplayUpdate::Resize(frame_size)));
+                    }
                     self.metrics.record_frame_handoff(frame.captured_at);
                     self.metrics.report_if_due();
                     #[cfg(target_os = "macos")]
@@ -711,7 +802,8 @@ fn start_warmed_macos_capture(
             let worker_mailbox = mailbox.clone();
             move || {
                 let result = (|| {
-                    let mut capturer = create_capturer_for_display(&log, display_id.as_deref())?;
+                    let mut capturer =
+                        create_capturer_for_display(&log, display_id.as_deref(), false)?;
                     let supports_client_size = capturer.supports_output_resize();
 
                     // Both ScreenCaptureKit and its legacy fallback retain the
@@ -767,6 +859,89 @@ fn start_warmed_macos_capture(
     Ok((size, mailbox, resize_tx, supports_client_size))
 }
 
+/// Start one Linux capture owner before the RDP listener accepts clients.
+/// Wayland portal permissions and the PipeWire stream are tied to the portal
+/// session, so creating this backend per client would trigger repeated consent
+/// dialogs and lose the first frame during authentication.
+#[cfg(target_os = "linux")]
+fn start_warmed_linux_capture(
+    log: LogEmitter,
+    display_id: Option<String>,
+    metrics: RdpMetrics,
+    request_input: bool,
+) -> anyhow::Result<(
+    DesktopSize,
+    Arc<LatestFrameMailbox>,
+    Option<SyncSender<PortalInput>>,
+)> {
+    let mailbox = Arc::new(LatestFrameMailbox::new());
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (portal_tx, portal_rx) = std::sync::mpsc::sync_channel(256);
+
+    std::thread::Builder::new()
+        .name("rdp-capture".to_string())
+        .spawn({
+            let worker_mailbox = mailbox.clone();
+            move || {
+                let result = (|| {
+                    let mut capturer =
+                        create_capturer_for_display(&log, display_id.as_deref(), request_input)?;
+                    let supports_input = request_input && capturer.supports_portal_input();
+                    let input_rx = supports_input.then_some(portal_rx);
+                    let started = std::time::Instant::now();
+                    let mut initial = capturer.capture()?;
+                    let width = NonZeroU16::new(initial.width)
+                        .ok_or_else(|| anyhow::anyhow!("screen capture reported zero width"))?;
+                    let height = NonZeroU16::new(initial.height)
+                        .ok_or_else(|| anyhow::anyhow!("screen capture reported zero height"))?;
+                    metrics.record_capture(started.elapsed(), initial.byte_len());
+                    initial.sequence = 1;
+                    if matches!(worker_mailbox.publish_full(initial), PublishResult::Closed) {
+                        anyhow::bail!("screen capture mailbox closed during warm-up");
+                    }
+                    Ok((
+                        DesktopSize {
+                            width: width.get(),
+                            height: height.get(),
+                        },
+                        capturer,
+                        input_rx,
+                        supports_input,
+                    ))
+                })();
+
+                let (size, capturer, input_rx, supports_input) = match result {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                if ready_tx.send(Ok((size, supports_input))).is_err() {
+                    worker_mailbox.close();
+                    return;
+                }
+                log.line(format!(
+                    "Linux capture pre-warmed for RDP login ({}x{}; portal_input={})",
+                    size.width,
+                    size.height,
+                    if supports_input {
+                        "granted"
+                    } else {
+                        "native/disabled"
+                    }
+                ));
+                drive_capture(log, worker_mailbox, capturer, metrics, input_rx);
+            }
+        })
+        .map_err(|error| anyhow::anyhow!("spawn Linux capture thread: {error}"))?;
+
+    let (size, supports_input) = ready_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("Linux capture thread stopped during warm-up"))??;
+    Ok((size, mailbox, supports_input.then_some(portal_tx)))
+}
+
 #[cfg(not(target_os = "macos"))]
 fn capture_loop(
     log: LogEmitter,
@@ -774,7 +949,7 @@ fn capture_loop(
     display_id: Option<String>,
     metrics: RdpMetrics,
 ) {
-    let capturer = match create_capturer_for_display(&log, display_id.as_deref()) {
+    let capturer = match create_capturer_for_display(&log, display_id.as_deref(), false) {
         Ok(c) => c,
         Err(e) => {
             log.line(format!("capture thread: {}", e));
@@ -782,7 +957,7 @@ fn capture_loop(
         }
     };
 
-    drive_capture(log, mailbox, capturer, metrics);
+    drive_capture(log, mailbox, capturer, metrics, None);
 }
 
 fn drive_capture(
@@ -791,6 +966,7 @@ fn drive_capture(
     mut capturer: Box<dyn Capturer>,
     metrics: RdpMetrics,
     #[cfg(target_os = "macos")] resize_rx: Option<std::sync::mpsc::Receiver<CaptureResizeRequest>>,
+    #[cfg(target_os = "linux")] input_rx: Option<Receiver<PortalInput>>,
 ) {
     if capturer.is_event_driven() {
         capture_loop_event_driven(capturer.as_mut(), &mailbox, &metrics);
@@ -801,6 +977,8 @@ fn drive_capture(
             &metrics,
             #[cfg(target_os = "macos")]
             resize_rx.as_ref(),
+            #[cfg(target_os = "linux")]
+            input_rx.as_ref(),
         );
     }
     // Every producer exit must wake consumers. This covers native stream
@@ -898,6 +1076,7 @@ fn capture_loop_polling(
     mailbox: &LatestFrameMailbox,
     metrics: &RdpMetrics,
     #[cfg(target_os = "macos")] resize_rx: Option<&std::sync::mpsc::Receiver<CaptureResizeRequest>>,
+    #[cfg(target_os = "linux")] input_rx: Option<&Receiver<PortalInput>>,
 ) {
     // A backend that caps its own frame rate must not be paced again: the extra
     // sleep would hold back a frame that is already sitting in its mailbox.
@@ -907,7 +1086,20 @@ fn capture_loop_polling(
     let mut last_hash: Option<u64> = None;
     let mut first = true;
     let mut sequence = 0;
+    #[cfg(target_os = "linux")]
+    let mut input_failed = false;
     loop {
+        #[cfg(target_os = "linux")]
+        if let Some(input_rx) = input_rx {
+            while let Ok(input) = input_rx.try_recv() {
+                if !input_failed {
+                    if let Err(error) = capturer.inject_portal_input(input) {
+                        tracing::warn!(%error, "Wayland portal input injection stopped");
+                        input_failed = true;
+                    }
+                }
+            }
+        }
         #[cfg(target_os = "macos")]
         if let Some(resize_rx) = resize_rx {
             while let Ok(request) = resize_rx.try_recv() {
@@ -1034,9 +1226,38 @@ mod tests {
     use super::{LatestFrameMailbox, PendingFrames, PublishResult, capture_loop_polling};
     use crate::servers::rdp::capture::{Capturer, Frame};
     use crate::servers::rdp::metrics::RdpMetrics;
+    use ironrdp::server::{DesktopSize, DisplayUpdate, RdpServerDisplayUpdates};
 
     fn frame(value: u8) -> Frame {
         Frame::bgra(vec![value, 0, 0, 0], 0, 0, 1, 1, 4)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn resize_precedes_the_first_frame_at_the_new_geometry() {
+        let mailbox = Arc::new(LatestFrameMailbox::new());
+        let metrics = RdpMetrics::silent();
+        let mut updates = super::DisplayUpdatesImpl::from_warmed_linux_capture(
+            mailbox.clone(),
+            DesktopSize {
+                width: 1,
+                height: 1,
+            },
+            metrics,
+        );
+        mailbox.publish_full(Frame::bgra(vec![0; 2 * 2 * 4], 0, 0, 2, 2, 8));
+
+        assert!(matches!(
+            updates.next_update().await.unwrap(),
+            Some(DisplayUpdate::Resize(DesktopSize {
+                width: 2,
+                height: 2
+            }))
+        ));
+        assert!(matches!(
+            updates.next_update().await.unwrap(),
+            Some(DisplayUpdate::Bitmap(bitmap)) if bitmap.width.get() == 2 && bitmap.height.get() == 2
+        ));
     }
 
     /// Capturer that reports idle ticks, mimicking ScreenCaptureKit on a static
@@ -1251,7 +1472,14 @@ mod tests {
             })
             .unwrap();
 
-        capture_loop_polling(&mut capturer, &mailbox, &metrics, Some(&resize_rx));
+        capture_loop_polling(
+            &mut capturer,
+            &mailbox,
+            &metrics,
+            Some(&resize_rx),
+            #[cfg(target_os = "linux")]
+            None,
+        );
 
         assert_eq!(*requested.lock().unwrap(), Some((2, 3)));
         assert_eq!(result_rx.blocking_recv().unwrap().unwrap(), requested_size);
@@ -1283,6 +1511,8 @@ mod tests {
             &metrics,
             #[cfg(target_os = "macos")]
             None,
+            #[cfg(target_os = "linux")]
+            None,
         );
 
         // 24 idle ticks were survived; the loop ended only once the client left.
@@ -1308,6 +1538,8 @@ mod tests {
             &mailbox,
             &metrics,
             #[cfg(target_os = "macos")]
+            None,
+            #[cfg(target_os = "linux")]
             None,
         );
 
@@ -1338,6 +1570,8 @@ mod tests {
             &metrics,
             #[cfg(target_os = "macos")]
             None,
+            #[cfg(target_os = "linux")]
+            None,
         );
         let elapsed = started.elapsed();
 
@@ -1364,6 +1598,8 @@ mod tests {
             &mailbox,
             &metrics,
             #[cfg(target_os = "macos")]
+            None,
+            #[cfg(target_os = "linux")]
             None,
         );
 
@@ -1393,6 +1629,8 @@ mod tests {
             &metrics,
             #[cfg(target_os = "macos")]
             None,
+            #[cfg(target_os = "linux")]
+            None,
         );
 
         let capture_us = metrics.capture_p50_us().expect("one frame was captured");
@@ -1419,6 +1657,8 @@ mod tests {
             &mailbox,
             &metrics,
             #[cfg(target_os = "macos")]
+            None,
+            #[cfg(target_os = "linux")]
             None,
         );
 

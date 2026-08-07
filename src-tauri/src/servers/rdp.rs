@@ -644,6 +644,7 @@ fn build_server(
         log.clone(),
         params.display_id.clone(),
         metrics.clone(),
+        params.view_only,
         #[cfg(target_os = "macos")]
         gfx.clone(),
     )?;
@@ -663,6 +664,8 @@ fn build_server(
         params.view_only,
         control_gate.clone(),
         metrics.clone(),
+        #[cfg(target_os = "linux")]
+        display.portal_input(),
         #[cfg(target_os = "macos")]
         input_mapping,
     );
