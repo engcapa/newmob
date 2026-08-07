@@ -3,11 +3,13 @@
 ## 文档信息
 
 - 评估日期：2026-08-07
+- 最近更新：2026-08-07（macOS 原生链路实施完成）
 - 评估对象：Taomni 当前本地 RDP Server 实现
-- 核心依赖：`ironrdp`、vendored `ironrdp-server`、`xcap`
+- 核心依赖：`ironrdp 0.17`、`ironrdp-tokio 0.10`、vendored `ironrdp-server 0.13`、`ironrdp-egfx 0.3`
 - 目标平台：macOS、Windows、Linux
 - 外网资料：通过 `http://192.168.0.110:31028` 代理核对
-- 变更性质：架构评估文档，未修改实现代码
+- 实施基线：`3fd37189`（`feat(rdp): optimize the native macOS capture pipeline`）
+- 变更性质：架构评估及实施结果记录；本轮已落地 macOS 原生捕获、输入、编码和权限链路
 
 ## 一、结论
 
@@ -31,7 +33,8 @@ Taomni 生命周期 / 配置 / UI
 
 - 作为 Rust/Tauri 内嵌式 RDP 协议层：推荐，属于当前较优解。
 - 作为 macOS、Windows、Linux 的统一完整服务器：不是最优解。
-- 作为当前代码的生产实现：尚未达标，Windows 仍不能启动，Wayland 和独立会话需要单独处理。
+- 作为 macOS 当前控制台共享的实现：核心链路已在代码和自动化测试层达标，发布前仍需真实客户端互操作和性能基准。
+- 作为三平台统一的生产实现：尚未达标；Windows 捕获仍会阻止服务启动，Wayland 仍是条件支持，独立会话不属于本实现范围。
 
 ### 关键区分
 
@@ -46,30 +49,35 @@ Taomni 当前计划已经明确产品不是 Windows RDS 或 TeamViewer 替代品
 
 ## 二、平台裁决
 
-| 平台 / 场景 | 裁决 | 推荐实现 | 主要限制 |
+| 平台 / 场景 | 当前支持状态 | 当前实现 / 推荐实现 | 验证状态与主要限制 |
 |---|---|---|---|
-| macOS 当前控制台共享 | 推荐保留 IronRDP | ScreenCaptureKit + Accessibility 输入 + VideoToolbox 编码 | 需要 Screen Recording 和 Accessibility 权限；锁屏、登录窗口和安全桌面不等价于普通 GUI |
-| Windows 当前控制台共享 | 保留协议层，但必须补后端 | Windows Graphics Capture（WGC）优先，DXGI Desktop Duplication 兜底，SendInput 注入 | 当前捕获器直接报错；UAC secure desktop、锁屏、跨会话需要服务权限 |
-| Windows 远程登录 / 独立会话 | 原生 Windows RDP 更优 | 使用系统 Remote Desktop Service | 通常要求 Pro/Enterprise；语义是远程登录，不等价于与本地用户同时共享控制台 |
-| Linux X11 控制台共享 | 推荐保留 IronRDP | XShm/XDamage 捕获 + X11 输入 | 依赖 X server 和当前用户会话；高分辨率下需要硬件编码 |
-| Linux Wayland 控制台共享 | 条件保留 | xdg-desktop-portal RemoteDesktop/ScreenCast + PipeWire；固定 GNOME 可用 GNOME Remote Desktop | 用户授权、合成器差异、输入协议和重连语义复杂；不能把 XWayland root 当成完整桌面 |
-| Linux 无头 / 多用户 / 登录界面 | 不建议在 Taomni 内重建 | xrdp；GNOME 环境可用 GNOME Remote Desktop remote-login/headless | 涉及 PAM、GDM、Xorg/Wayland 会话、用户切换和进程回收 |
+| macOS 当前控制台共享 | **核心链路已实现，发布候选** | IronRDP + ScreenCaptureKit + CoreGraphics/Accessibility + VideoToolbox AVC420；`xcap` 捕获回退 | macOS 本机构建和自动化回归已通过；仍需 mstsc、Windows App、macOS 客户端和 FreeRDP 真机矩阵。需要 Screen Recording 与 Accessibility 权限，不覆盖登录窗口和安全桌面 |
+| Windows 当前控制台共享 | **未达标，阻塞启动** | IronRDP 协议和输入代码可复用；仍需 WGC/DXGI 捕获，建议 WGC 优先、DXGI Desktop Duplication 兜底 | 当前捕获器明确返回错误。UAC secure desktop、锁屏和跨会话还需要服务级能力 |
+| Windows 远程登录 / 独立会话 | **不由 Taomni 内嵌服务器提供** | 使用系统 Remote Desktop Service | 通常要求 Pro/Enterprise；语义是远程登录，不等价于与本地用户同时共享控制台 |
+| Linux X11 控制台共享 | **既有实现可用，本轮未改动** | XShm/XDamage 捕获 + `enigo` X11 输入 + bitmap 更新 | 既有路径已有实测记录；本分支尚未在 Linux 重新做回归。依赖当前 X server，会话锁定、多屏/缩放及高分辨率性能仍需矩阵验证 |
+| Linux Wayland 控制台共享 | **条件支持 / 实验性** | 当前为 X11 优先，X11 不可用时走 `xcap` Portal 回退；目标是统一使用 RemoteDesktop/ScreenCast + PipeWire 输入授权 | 带 XWayland 时可能只捕获 X11 内容；Portal、合成器、输入授权和重连语义仍未收口，不能按 X11 同等级发布 |
+| Linux 无头 / 多用户 / 登录界面 | **不支持** | 委托 xrdp；固定 GNOME 环境可评估 GNOME Remote Desktop remote-login/headless | Taomni 没有 PAM/GDM/session gateway，不应在应用内重建系统会话生命周期 |
 
 ### macOS
 
-macOS 是当前最适合继续使用 IronRDP 的平台。Taomni 已经采用 ScreenCaptureKit 主路径，并保留 `xcap` 兼容回退：[mac.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mac.rs:1)。这比依赖 Apple 原生 Screen Sharing 更符合“标准 RDP 客户端”的要求。
+macOS 是当前最适合继续使用 IronRDP 的平台。Taomni 已经采用 ScreenCaptureKit 主路径，并保留 `xcap` 兼容回退：[mac.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mac.rs)。这比依赖 Apple 原生 Screen Sharing 更符合“标准 RDP 客户端”的要求。
 
 如果产品不要求 RDP 兼容，Apple 原生 Screen Sharing/VNC 的系统集成会更简单；但它不能作为统一 RDP 方案替代 IronRDP。
 
-建议后续重点放在：
+本次已完成：
 
-1. 使用 VideoToolbox 直接服务 H.264/AVC420，减少 BGRA CPU 拷贝。
-2. 处理 Screen Recording、Accessibility、显示器切换和睡眠唤醒权限状态。
-3. 明确锁屏和登录窗口不属于普通用户态控制台共享能力。
+1. 捕获线程在服务就绪前预热 ScreenCaptureKit，并用 latest-frame mailbox 替换过期全帧，避免编码慢时反压原生捕获回调。
+2. 保留原生 `CVPixelBuffer`/IOSurface 直到 VideoToolbox 编码；bitmap 回退才按需读回 BGRA，并在帧克隆间共享读回缓存。
+3. 协商客户端初始桌面尺寸，通过 `SCStream::updateConfiguration` 在采集源缩放；发布新尺寸首帧后才确认尺寸，输入映射同步使用已确认尺寸。
+4. Retina 与副屏坐标从 RDP 像素空间映射到 Quartz 全局逻辑坐标；鼠标事件改用 CoreGraphics，键盘继续由专用输入线程处理。
+5. 设置页同时展示并请求 Screen Recording 与 Accessibility 权限；输入线程周期性检查 Accessibility 撤销并停止注入。
+6. 协商成功时默认使用 EGFX/AVC420 与 VideoToolbox；编码、输出通道、ACK 或解码进度异常时删除 surface，并自动回退到 bitmap 全帧恢复。
+
+仍需完成：真实客户端兼容矩阵、显示器热插拔、睡眠唤醒、锁屏行为和量化性能基准。登录窗口与安全桌面明确不在普通用户态控制台共享范围内。
 
 ### Windows
 
-Windows 是当前最大的阻塞点。代码在创建捕获器时明确 `bail!`：[capture/mod.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mod.rs:237)，而 `RdpDisplay::new` 会把该错误继续向上传播：[display.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/display.rs:65)。因此现状不是“低质量占位帧”，而是 RDP 服务不能正常启动。
+Windows 是当前最大的阻塞点。代码在创建捕获器时明确 `bail!`：[capture/mod.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mod.rs)，而 `RdpDisplay::new` 会把该错误继续向上传播：[display.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/display.rs)。因此现状不是“低质量占位帧”，而是 RDP 服务不能正常启动。
 
 建议采用两阶段实现：
 
@@ -91,7 +99,7 @@ Linux X11 是当前最接近完整链路的路径。XShm/XDamage 适合做区域
 
 ### Linux Wayland
 
-当前 Wayland 路径存在策略风险：创建捕获器时先尝试 X11，只有 X11 不可用才走 Portal 回退；[capture/mod.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mod.rs:216)。在带 XWayland 的桌面中，X11 root 通常只代表 X11/XWayland 内容，不能保证覆盖原生 Wayland 窗口。
+当前 Wayland 路径存在策略风险：创建捕获器时先尝试 X11，只有 X11 不可用才走 Portal 回退；[capture/mod.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mod.rs)。在带 XWayland 的桌面中，X11 root 通常只代表 X11/XWayland 内容，不能保证覆盖原生 Wayland 窗口。
 
 建议：
 
@@ -104,29 +112,28 @@ Linux X11 是当前最接近完整链路的路径。XShm/XDamage 适合做区域
 
 ### Linux 无头和多用户会话
 
-Taomni 的 `session.rs` 当前只有能力探测和未来的 spawn 计划，并不是可用的 PAM/session gateway：[session.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/session.rs:14)。
+Taomni 的 `session.rs` 当前只有能力探测和未来的 spawn 计划，并不是可用的 PAM/session gateway：[session.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/session.rs)。
 
 这部分不应在 Taomni 内重复实现 xrdp 的多年积累。xrdp 已经提供 PAM 登录、Xorg/Xvnc 会话、重连、动态缩放、剪贴板、驱动器重定向等能力。固定 GNOME 环境下，GNOME Remote Desktop 也已经支持 remote login 和 headless 模式。
 
 ## 三、当前代码和依赖证据
 
-### 依赖版本落后于上游
+### 依赖升级已完成
 
-Taomni 当前使用 `ironrdp 0.15.0`，并通过 vendored/patch 方式使用 `ironrdp-server 0.11.0`：[Cargo.toml](/Users/zhyhang/code/person/taomni/src-tauri/Cargo.toml:105)。当前上游资料显示：
+Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrdp-server 0.13` 和 `ironrdp-egfx 0.3`：[Cargo.toml](/Users/zhyhang/code/person/taomni/src-tauri/Cargo.toml)。项目 Rust 最低版本同步为 1.94。
 
-- `ironrdp-server 0.13.0`
-- `ironrdp 0.17.0`
+升级时已经重放 Taomni 的本地定制：
 
-上游 `ironrdp-server 0.13.0` 要求 Rust 1.94。升级不能只修改版本号，需要重放 Taomni 对 vendored server 的本地修改，并重新验证 API、编译器版本和所有客户端。
+- server socket 启用 `TCP_NODELAY`，减少输入响应和小块更新等待后续包的机会。
+- vendored connector 继续使用关闭默认 features 的 `picky 7.0.0-rc.23`。
+- 接入上游初始桌面尺寸能力，并在 macOS 捕获层真正采用客户端请求尺寸。
+- 通过直接依赖启用 server EGFX feature，接入 `ironrdp-egfx` AVC420 图形通道。
 
-值得评估的上游改进包括：
-
-- 0.12：可选 NSCodec，改善部分 Windows App/macOS 客户端兼容性；新增 `CredentialValidator`。
-- 0.13：客户端请求的初始桌面尺寸、Network Auto-Detect 修复、更多剪贴板文件操作接口。
+升级消除了原评估中的版本缺口，但不等于完成客户端兼容认证；所有目标客户端仍需真实握手、输入、resize、静态桌面和连续运动画面测试。
 
 ### 单连接行为
 
-当前 vendored server 在 `accept()` 后内联等待 `run_connection()` 完成：[server.rs](/Users/zhyhang/code/person/taomni/src-tauri/vendor/ironrdp-server/src/server.rs:663)。上游也存在对应的公开问题：第二个客户端可能完成 TCP 握手但一直得不到 RDP 协商响应。
+当前 vendored server 仍在 `accept()` 后内联等待 `run_connection()` 完成：[server.rs](/Users/zhyhang/code/person/taomni/src-tauri/vendor/ironrdp-server/src/server.rs)。上游也存在对应的公开问题：第二个客户端可能完成 TCP 握手但一直得不到 RDP 协商响应。`TCP_NODELAY` 只改善传输时延，不改变该单连接行为。
 
 如果 Taomni 只允许一个控制台客户端，应实现显式策略：
 
@@ -149,11 +156,57 @@ Taomni 当前使用 `ironrdp 0.15.0`，并通过 vendored/patch 方式使用 `ir
 
 ### 显示、剪贴板和自动化测试
 
-- macOS AVC420/EGFX 当前是 opt-in 实验路径；其他平台主要仍是 bitmap 传输，高分辨率性能存在风险。
+- macOS 在客户端协商 EGFX/AVC420 成功且 VideoToolbox 可用时默认走系统 H.264 编码；不支持或运行中停滞时自动回退 bitmap。当前实现没有强制或记录 VideoToolbox 是否选中硬件编码器，因此不能把实际硬件加速视为已验证。Windows/Linux 仍主要使用 bitmap，高分辨率性能风险未消除。
 - 剪贴板目前仅支持 Unicode 文本，图片和文件不在范围内：[clipboard.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/clipboard.rs:1)。
 - 浏览器自动化用例不会真正启动 RDP 服务，因此不能代表协议互操作覆盖：[TC-auto-F-Servers-1](/Users/zhyhang/code/person/taomni/qa-ui-auto-tests/cases/auto/TC-auto-F-Servers-1-servers-dialog.testcase.yaml:14)。
 
-## 四、替代方案比较
+## 四、本次实施结果与达标情况
+
+### 已完善的内容
+
+| 目标 | 状态 | 实现结果 |
+|---|---|---|
+| 保持 IronRDP 协议内核并升级到当前版本 | **已达标** | 完成 server、connector、Tokio 和 EGFX 依赖升级，保留本地兼容修改 |
+| macOS 原生低时延捕获 | **代码层已达标** | ScreenCaptureKit 预热、自驱动采帧、latest-frame mailbox、静态桌面 idle 与捕获失败分离 |
+| 客户端尺寸与 Retina/副屏一致性 | **代码层已达标** | 初始尺寸协商、源端原生缩放、新尺寸首帧后确认、动态输入坐标映射 |
+| macOS 可控输入与权限边界 | **代码层已达标** | CoreGraphics 鼠标、Accessibility 预检/请求/撤销检测、无权限时保持可查看但停止控制 |
+| macOS VideoToolbox H.264 | **代码层已达标** | AVC420 默认协商、VideoToolbox 异步编码、原生 pixel buffer 生命周期管理；实际硬件/软件编码器选择待增加观测 |
+| 有界背压和自动降级 | **已达标** | 编码在途帧上限为 2；编码硬超时 250 ms；ACK/解码停滞时销毁 EGFX surface 并恢复 bitmap |
+| 自动化回归 | **已达标** | RDP Rust 聚焦测试 54 个通过；前端构建和权限设置测试通过 |
+| macOS 生产发布门槛 | **部分达标** | 编译与回归通过；缺真实客户端兼容矩阵、真机长稳和量化性能数据 |
+| Windows/Linux 达到同等原生性能 | **未达标** | Windows 捕获仍缺失；Linux 本轮没有新增硬件编码或 Wayland 授权整合 |
+
+### 性能表现
+
+本次可以确认的是热路径和背压模型已经改善，不能把这些结构性结果直接等同于真机 FPS、CPU 或带宽成绩。
+
+| 维度 | 当前实现带来的确定效果 | 尚未测量 / 不能宣称的内容 |
+|---|---|---|
+| 捕获时延 | ScreenCaptureKit 自己节流，不再被外层重复 sleep；新全帧覆盖 mailbox 中的旧全帧，客户端优先拿到较新的画面 | 尚无端到端输入到显示延迟的 p50/p95 数据 |
+| 捕获开销 | ScreenCaptureKit 变更流不再对每个 Retina 全帧做额外去重哈希 | 尚无不同分辨率下 CPU 占用对比 |
+| 像素拷贝 | 对齐尺寸下，AVC 路径把原生 `CVPixelBuffer` 直接交给 VideoToolbox，不生成整帧 BGRA 副本；非 16 对齐时直接逐行写入 padding buffer；bitmap 读回只发生在需要时且跨 clone 缓存 | 不能称为全链路“绝对零拷贝”；VideoToolbox、RDP 打包和回退仍可能产生内部缓冲 |
+| 编码吞吐 | VideoToolbox AVC420 取代 macOS 高频全帧 bitmap；编码与捕获异步，最多保留 2 个在途输入，避免无界积压 | 尚未记录 VideoToolbox 实际选择硬件还是软件编码器，也没有 1080p/Retina/4K 的稳定 FPS、CPU/GPU 和码率数据 |
+| 小更新交互 | RDP TCP socket 启用 `TCP_NODELAY`，降低输入响应和小更新被 Nagle 延迟的风险 | 不是网络 RTT 保证，也没有公网/弱网数据 |
+| 尾帧与故障恢复 | 尝试配置 `MaxFrameDelayCount=1`；不支持时在 75 ms idle 后 flush，单帧等待超过 250 ms 切换 bitmap；ACK 或 `totalFramesDecoded` 连续停滞 1.5 s 后删除 EGFX surface 并回退 bitmap | 250 ms 是内部编码等待预算，不是端到端延迟上限；降级期间可能短暂降低画质或帧率 |
+| 分辨率缩放 | 客户端请求较小桌面时由 ScreenCaptureKit 在源端输出目标尺寸，减少后续每帧像素数量和编码输入规模 | 节省比例取决于客户端请求尺寸和画面内容，尚未做实测对照 |
+
+因此当前性能结论应表述为：**macOS 已具备低延迟 VideoToolbox 编码所需的正确数据流和有界队列，预期优于原来的逐帧 BGRA + bitmap 路径；是否命中硬件编码器以及实际提升幅度尚待真机观测和基准确认。**
+
+建议发布前至少记录以下矩阵：1080p、Retina 原生尺寸和 4K；静态桌面、文本滚动、窗口拖动和视频播放；分别采集 capture/encode/send p50/p95、端到端延迟、稳定 FPS、CPU/GPU、内存、码率、丢帧/替换帧数和 bitmap fallback 次数。客户端至少覆盖 Windows mstsc、Windows App、macOS Microsoft Remote Desktop 和 FreeRDP。
+
+### 验证记录
+
+实施提交 `3fd37189` 已通过：
+
+- `cargo check --lib`
+- `cargo test --lib servers::rdp:: --quiet`：54 passed
+- `pnpm build`
+- `pnpm test -- src/components/servers/settings/RdpSettings.test.tsx`：232 files、1984 tests passed
+- `git diff --check`
+
+这些结果覆盖编译、状态机、捕获 mailbox、resize 顺序、坐标映射、编码背压/超时/停滞判断和权限设置 UI；它们不替代真实 RDP 客户端、真机图像正确性、硬件编码器和长时间会话验证。
+
+## 五、替代方案比较
 
 | 方案 | 优势 | 不适合作为 Taomni 统一方案的原因 |
 |---|---|---|
@@ -172,21 +225,21 @@ Taomni 当前使用 `ironrdp 0.15.0`，并通过 vendored/patch 方式使用 `ir
 - 公网远程协助：RustDesk/WebRTC 类方案更优。
 - 三个平台统一且兼容标准 RDP 客户端：IronRDP + 原生平台适配层最平衡。
 
-## 五、实施优先级
+## 六、后续实施优先级
 
-### P0：恢复真实跨平台可用性
+### P0：完成发布验证并恢复真实跨平台可用性
 
-1. 完成 Windows WGC/DXGI 捕获，并加入 GDI fallback。
-2. 对 Wayland 改为 Portal/PipeWire 优先，验证 GNOME 和 KDE 至少各一套实机环境。
-3. 为单连接实现显式 `Reject` 或认证后 `Preempt` 策略。
-4. 使用 mstsc、Windows App、macOS Microsoft Remote Desktop、xfreerdp 做真实互操作测试。
+1. 对 macOS 使用 mstsc、Windows App、macOS Microsoft Remote Desktop 和 FreeRDP 完成真实互操作、长稳和性能基准。
+2. 完成 Windows WGC/DXGI 捕获，并加入 GDI fallback。
+3. 对 Wayland 改为 Portal/PipeWire 优先，验证 GNOME 和 KDE 至少各一套实机环境。
+4. 为单连接实现显式 `Reject` 或认证后 `Preempt` 策略。
 
 ### P1：提升性能和协议兼容性
 
-1. 评估迁移到 `ironrdp-server 0.13` / `ironrdp 0.17`，重放本地 fork 修改。
-2. 为 macOS、Windows、Linux 分别接入硬件编码。
-3. 支持客户端初始尺寸、动态缩放、游标缓存和必要的 NSCodec/EGFX 能力。
-4. 将剪贴板从文本扩展到图片和文件，前提是明确安全策略。
+1. 在 Windows 和 Linux 接入硬件编码；macOS VideoToolbox 链路已完成，但还要记录并验证实际编码器类型。
+2. 补动态会话中途 resize、游标缓存和必要的 NSCodec 兼容路径；macOS 初始尺寸与 EGFX 已完成。
+3. 将剪贴板从文本扩展到图片和文件，前提是明确安全策略。
+4. 增加可长期采样的 capture/encode/send、帧龄、队列替换、EGFX ACK/解码进度和 fallback 指标。
 
 ### P2：平台服务分流
 
@@ -194,7 +247,7 @@ Taomni 当前使用 `ironrdp 0.15.0`，并通过 vendored/patch 方式使用 `ir
 2. Windows remote-login 模式调用系统 Remote Desktop Service。
 3. 只有在产品明确要求统一控制台共享体验时，才继续扩展 Taomni 自己的嵌入式后端。
 
-## 六、建议的最终架构决策
+## 七、建议的最终架构决策
 
 建议将架构决策写成以下口径：
 
@@ -202,7 +255,7 @@ Taomni 当前使用 `ironrdp 0.15.0`，并通过 vendored/patch 方式使用 `ir
 
 这个决策既保留了 Rust/Tauri 的工程优势，也避免为了实现 PAM、GDM、RDS、Wayland compositor 和安全桌面而重新维护一套操作系统服务。
 
-## 七、参考资料
+## 八、参考资料
 
 - [IronRDP server README](https://github.com/Devolutions/IronRDP/tree/master/crates/ironrdp-server)
 - [IronRDP server CHANGELOG](https://github.com/Devolutions/IronRDP/blob/master/crates/ironrdp-server/CHANGELOG.md)
