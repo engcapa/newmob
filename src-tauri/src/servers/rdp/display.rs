@@ -15,7 +15,11 @@
 
 use core::num::{NonZeroU16, NonZeroUsize};
 use std::collections::VecDeque;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ironrdp::server::{
@@ -23,10 +27,12 @@ use ironrdp::server::{
     RdpServerDisplayUpdates,
 };
 use tokio::sync::Notify;
+#[cfg(target_os = "macos")]
+use tokio::sync::oneshot;
 
 use super::capture::{Capturer, Frame, create_capturer_for_display};
 #[cfg(target_os = "macos")]
-use super::gfx::{GfxReadiness, GfxSubmit, GfxTransport, H264Encoder};
+use super::gfx::{EncodedFrame, GfxReadiness, GfxSubmit, GfxTransport, H264Encoder};
 use super::metrics::RdpMetrics;
 use crate::servers::engine::LogEmitter;
 
@@ -47,6 +53,21 @@ pub(crate) struct RdpDisplay {
     mailbox: Arc<LatestFrameMailbox>,
     #[cfg(target_os = "macos")]
     gfx: GfxTransport,
+    #[cfg(target_os = "macos")]
+    resize_tx: std::sync::mpsc::Sender<CaptureResizeRequest>,
+    #[cfg(target_os = "macos")]
+    supports_client_size: bool,
+    #[cfg(target_os = "macos")]
+    input_surface_size: Arc<AtomicU32>,
+}
+
+#[cfg(target_os = "macos")]
+const CAPTURE_RESIZE_TIMEOUT: Duration = Duration::from_secs(7);
+
+#[cfg(target_os = "macos")]
+struct CaptureResizeRequest {
+    size: DesktopSize,
+    result: oneshot::Sender<Result<DesktopSize, String>>,
 }
 
 impl RdpDisplay {
@@ -57,8 +78,11 @@ impl RdpDisplay {
         #[cfg(target_os = "macos")] gfx: GfxTransport,
     ) -> anyhow::Result<Self> {
         #[cfg(target_os = "macos")]
-        let (size, mailbox) =
+        let (size, mailbox, resize_tx, supports_client_size) =
             start_warmed_macos_capture(log.clone(), display_id.clone(), metrics.clone())?;
+
+        #[cfg(target_os = "macos")]
+        let input_surface_size = Arc::new(AtomicU32::new(pack_desktop_size(size)));
 
         // Other platforms keep their existing per-client capture lifecycle.
         // Probing here keeps `size()` honest for the client.
@@ -87,14 +111,93 @@ impl RdpDisplay {
             mailbox,
             #[cfg(target_os = "macos")]
             gfx,
+            #[cfg(target_os = "macos")]
+            resize_tx,
+            #[cfg(target_os = "macos")]
+            supports_client_size,
+            #[cfg(target_os = "macos")]
+            input_surface_size,
         })
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn desktop_size(&self) -> DesktopSize {
+        self.size
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn input_surface_size(&self) -> Arc<AtomicU32> {
+        self.input_surface_size.clone()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn supports_client_size(&self) -> bool {
+        self.supports_client_size
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pack_desktop_size(size: DesktopSize) -> u32 {
+    (u32::from(size.width) << 16) | u32::from(size.height)
 }
 
 #[async_trait]
 impl RdpServerDisplay for RdpDisplay {
     async fn size(&mut self) -> DesktopSize {
         self.size
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn request_initial_size(&mut self, client_size: DesktopSize) -> DesktopSize {
+        if !self.supports_client_size || client_size == self.size {
+            return self.size;
+        }
+
+        let (result_tx, result_rx) = oneshot::channel();
+        if self
+            .resize_tx
+            .send(CaptureResizeRequest {
+                size: client_size,
+                result: result_tx,
+            })
+            .is_err()
+        {
+            self.log
+                .line("macOS capture resize channel closed; keeping physical display size");
+            return self.size;
+        }
+
+        match tokio::time::timeout(CAPTURE_RESIZE_TIMEOUT, result_rx).await {
+            Ok(Ok(Ok(size))) => {
+                self.size = size;
+                self.input_surface_size
+                    .store(pack_desktop_size(size), Ordering::Relaxed);
+                self.log.line(format!(
+                    "macOS capture resized for RDP client: {}x{}",
+                    size.width, size.height
+                ));
+                size
+            }
+            Ok(Ok(Err(error))) => {
+                self.log.line(format!(
+                    "macOS capture could not adopt client size; keeping {}x{}: {error}",
+                    self.size.width, self.size.height
+                ));
+                self.size
+            }
+            Ok(Err(_)) => {
+                self.log
+                    .line("macOS capture resize response closed; keeping physical display size");
+                self.size
+            }
+            Err(_) => {
+                self.log.line(format!(
+                    "macOS capture resize exceeded {}ms; keeping physical display size",
+                    CAPTURE_RESIZE_TIMEOUT.as_millis()
+                ));
+                self.size
+            }
+        }
     }
 
     async fn updates(&mut self) -> anyhow::Result<Box<dyn RdpServerDisplayUpdates>> {
@@ -139,6 +242,14 @@ pub(crate) struct DisplayUpdatesImpl {
     gfx: GfxTransport,
     #[cfg(target_os = "macos")]
     h264: Option<H264Encoder>,
+}
+
+#[cfg(target_os = "macos")]
+enum MacUpdateEvent {
+    Capture(Option<PendingFrames>),
+    Encoded(Option<EncodedFrame>),
+    EncodeFlush,
+    EncodeTimeout,
 }
 
 /// Cross-thread latest-frame mailbox. Unlike `mpsc::channel(1)` plus
@@ -349,7 +460,13 @@ impl DisplayUpdatesImpl {
             width,
             height,
             format: PixelFormat::BgrA32,
-            data: frame.data,
+            data: match frame.bgra_bytes() {
+                Ok(data) => data,
+                Err(error) => {
+                    tracing::warn!("RDP bitmap pixel readback failed: {error}");
+                    return None;
+                }
+            },
             stride,
         })
     }
@@ -358,10 +475,13 @@ impl DisplayUpdatesImpl {
     /// after capture and before turning pixels into a regular RDP bitmap so a
     /// slow client can drop a current frame instead of queuing stale work.
     #[cfg(target_os = "macos")]
-    fn try_send_gfx(&mut self, frame: &Frame) -> Option<GfxSubmit> {
+    fn try_queue_gfx(&mut self, frame: &Frame) -> bool {
         match self.gfx.readiness() {
-            GfxReadiness::Backpressured => return Some(GfxSubmit::Backpressured),
-            GfxReadiness::Unavailable => return None,
+            GfxReadiness::Backpressured => return true,
+            GfxReadiness::Unavailable => {
+                self.h264 = None;
+                return false;
+            }
             GfxReadiness::Ready => {}
         }
         let needs_new_encoder = self
@@ -376,21 +496,77 @@ impl DisplayUpdatesImpl {
                         "RDP EGFX hardware encoder unavailable; using bitmap updates: {error}"
                     );
                     self.h264 = None;
-                    return None;
+                    self.gfx.disable_after_failure();
+                    return false;
                 }
             }
         }
-        let encoder = self.h264.as_mut()?;
-        match encoder.encode(frame) {
-            Ok(h264) => Some(self.gfx.send_avc420(frame, &h264)),
+        let Some(encoder) = self.h264.as_mut() else {
+            return false;
+        };
+        if !encoder.can_submit() {
+            return true;
+        }
+        match encoder.submit(frame) {
+            Ok(()) => true,
             Err(error) => {
-                // Encoding failure is isolated to this client/update. The
-                // next update may recreate VideoToolbox, while this frame is
-                // still delivered through the reliable bitmap fallback.
+                tracing::warn!("RDP EGFX hardware submit failed; using bitmap update: {error}");
+                self.h264 = None;
+                self.gfx.disable_after_failure();
+                false
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn finish_gfx_encode(&mut self, encoded: EncodedFrame) -> Option<Frame> {
+        let frame = encoded.frame;
+        match encoded.result {
+            Ok(h264) => {
+                let submit = self.gfx.send_avc420(&frame, &h264);
+                if matches!(submit, GfxSubmit::Unavailable) {
+                    self.h264 = None;
+                    self.gfx.disable_after_failure();
+                    Some(frame)
+                } else {
+                    None
+                }
+            }
+            Err(error) => {
                 tracing::warn!("RDP EGFX hardware frame failed; using bitmap update: {error}");
                 self.h264 = None;
-                None
+                self.gfx.disable_after_failure();
+                Some(frame)
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    async fn next_macos_event(&mut self) -> MacUpdateEvent {
+        let Some(encoder) = self.h264.as_mut() else {
+            return MacUpdateEvent::Capture(self.mailbox.take().await);
+        };
+        let deadline = encoder.oldest_deadline();
+        let flush_deadline = encoder.flush_deadline();
+        let timeout = async move {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending().await,
+            }
+        };
+        let flush = async move {
+            match flush_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(timeout);
+        tokio::pin!(flush);
+        tokio::select! {
+            encoded = encoder.next_output() => MacUpdateEvent::Encoded(encoded),
+            capture = self.mailbox.take() => MacUpdateEvent::Capture(capture),
+            () = &mut flush => MacUpdateEvent::EncodeFlush,
+            () = &mut timeout => MacUpdateEvent::EncodeTimeout,
         }
     }
 }
@@ -412,29 +588,72 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
                 self.metrics.report_if_due();
                 #[cfg(target_os = "macos")]
                 {
-                    match self.try_send_gfx(&frame) {
-                        Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
-                        Some(GfxSubmit::Unavailable) | None => {
-                            return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
-                        }
+                    if self.try_queue_gfx(&frame) {
+                        continue;
                     }
+                    return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
                 }
                 #[cfg(not(target_os = "macos"))]
                 return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
             }
 
-            match self.mailbox.take().await {
+            #[cfg(target_os = "macos")]
+            let pending = match self.next_macos_event().await {
+                MacUpdateEvent::Capture(pending) => pending,
+                MacUpdateEvent::Encoded(Some(encoded)) => {
+                    if let Some(frame) = self.finish_gfx_encode(encoded) {
+                        return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
+                    }
+                    continue;
+                }
+                MacUpdateEvent::Encoded(None) => {
+                    tracing::warn!("RDP EGFX hardware output channel closed; using bitmap updates");
+                    self.h264 = None;
+                    self.gfx.disable_after_failure();
+                    self.mailbox.replay_latest_full();
+                    continue;
+                }
+                MacUpdateEvent::EncodeFlush => {
+                    let flush_result = self
+                        .h264
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("H.264 encoder disappeared before flush"))
+                        .and_then(H264Encoder::flush_pending);
+                    if let Err(error) = flush_result {
+                        tracing::warn!(
+                            "RDP EGFX idle hardware flush failed; using bitmap updates: {error}"
+                        );
+                        self.h264 = None;
+                        self.gfx.disable_after_failure();
+                        self.mailbox.replay_latest_full();
+                    }
+                    continue;
+                }
+                MacUpdateEvent::EncodeTimeout => {
+                    tracing::warn!(
+                        "RDP EGFX hardware frame exceeded the {}ms latency budget; using bitmap updates",
+                        super::gfx::ENCODE_TIMEOUT.as_millis()
+                    );
+                    self.h264 = None;
+                    self.gfx.disable_after_failure();
+                    self.mailbox.replay_latest_full();
+                    continue;
+                }
+            };
+
+            #[cfg(not(target_os = "macos"))]
+            let pending = self.mailbox.take().await;
+
+            match pending {
                 Some(PendingFrames::Full(frame)) => {
                     self.metrics.record_frame_handoff(frame.captured_at);
                     self.metrics.report_if_due();
                     #[cfg(target_os = "macos")]
                     {
-                        match self.try_send_gfx(&frame) {
-                            Some(GfxSubmit::Sent) | Some(GfxSubmit::Backpressured) => continue,
-                            Some(GfxSubmit::Unavailable) | None => {
-                                return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
-                            }
+                        if self.try_queue_gfx(&frame) {
+                            continue;
                         }
+                        return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
                     }
                     #[cfg(not(target_os = "macos"))]
                     return Ok(Self::frame_to_bitmap(frame).map(DisplayUpdate::Bitmap));
@@ -476,9 +695,15 @@ fn start_warmed_macos_capture(
     log: LogEmitter,
     display_id: Option<String>,
     metrics: RdpMetrics,
-) -> anyhow::Result<(DesktopSize, Arc<LatestFrameMailbox>)> {
+) -> anyhow::Result<(
+    DesktopSize,
+    Arc<LatestFrameMailbox>,
+    std::sync::mpsc::Sender<CaptureResizeRequest>,
+    bool,
+)> {
     let mailbox = Arc::new(LatestFrameMailbox::new());
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let (resize_tx, resize_rx) = std::sync::mpsc::channel();
 
     std::thread::Builder::new()
         .name("rdp-capture".to_string())
@@ -487,6 +712,7 @@ fn start_warmed_macos_capture(
             move || {
                 let result = (|| {
                     let mut capturer = create_capturer_for_display(&log, display_id.as_deref())?;
+                    let supports_client_size = capturer.supports_output_resize();
 
                     // Both ScreenCaptureKit and its legacy fallback retain the
                     // initial frame acquired during construction. Publish it
@@ -498,7 +724,7 @@ fn start_warmed_macos_capture(
                         .ok_or_else(|| anyhow::anyhow!("screen capture reported zero width"))?;
                     let height = NonZeroU16::new(initial.height)
                         .ok_or_else(|| anyhow::anyhow!("screen capture reported zero height"))?;
-                    metrics.record_capture(started.elapsed(), initial.data.len());
+                    metrics.record_capture(started.elapsed(), initial.byte_len());
                     initial.sequence = 1;
                     if matches!(worker_mailbox.publish_full(initial), PublishResult::Closed) {
                         anyhow::bail!("screen capture mailbox closed during warm-up");
@@ -510,17 +736,18 @@ fn start_warmed_macos_capture(
                             height: height.get(),
                         },
                         capturer,
+                        supports_client_size,
                     ))
                 })();
 
-                let (size, capturer) = match result {
+                let (size, capturer, supports_client_size) = match result {
                     Ok(ready) => ready,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error));
                         return;
                     }
                 };
-                if ready_tx.send(Ok(size)).is_err() {
+                if ready_tx.send(Ok((size, supports_client_size))).is_err() {
                     worker_mailbox.close();
                     return;
                 }
@@ -529,15 +756,15 @@ fn start_warmed_macos_capture(
                     "macOS capture pre-warmed for RDP login ({}x{}); first frame is ready",
                     size.width, size.height
                 ));
-                drive_capture(log, worker_mailbox, capturer, metrics);
+                drive_capture(log, worker_mailbox, capturer, metrics, Some(resize_rx));
             }
         })
         .map_err(|error| anyhow::anyhow!("spawn macOS capture thread: {error}"))?;
 
-    let size = ready_rx
+    let (size, supports_client_size) = ready_rx
         .recv()
         .map_err(|_| anyhow::anyhow!("macOS capture thread stopped during warm-up"))??;
-    Ok((size, mailbox))
+    Ok((size, mailbox, resize_tx, supports_client_size))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -563,12 +790,23 @@ fn drive_capture(
     mailbox: Arc<LatestFrameMailbox>,
     mut capturer: Box<dyn Capturer>,
     metrics: RdpMetrics,
+    #[cfg(target_os = "macos")] resize_rx: Option<std::sync::mpsc::Receiver<CaptureResizeRequest>>,
 ) {
     if capturer.is_event_driven() {
         capture_loop_event_driven(capturer.as_mut(), &mailbox, &metrics);
     } else {
-        capture_loop_polling(capturer.as_mut(), &mailbox, &metrics);
+        capture_loop_polling(
+            capturer.as_mut(),
+            &mailbox,
+            &metrics,
+            #[cfg(target_os = "macos")]
+            resize_rx.as_ref(),
+        );
     }
+    // Every producer exit must wake consumers. This covers native stream
+    // errors, malformed frames, and backend failures; otherwise a connected
+    // RDP client could wait forever on a mailbox whose producer has died.
+    mailbox.close();
     log.line("capture thread stopped");
 }
 
@@ -599,7 +837,7 @@ fn capture_loop_event_driven(
                     // This backend sleeps until the screen changes and caps its
                     // own rate, so the time since the call started is mostly
                     // deliberate waiting. Report each region's age at handoff.
-                    metrics.record_capture(frame.captured_at.elapsed(), frame.data.len());
+                    metrics.record_capture(frame.captured_at.elapsed(), frame.byte_len());
                     sequence += 1;
                     frame.sequence = sequence;
                 }
@@ -619,7 +857,7 @@ fn capture_loop_event_driven(
                                 break;
                             }
                         };
-                        metrics.record_capture(full_started.elapsed(), full.data.len());
+                        metrics.record_capture(full_started.elapsed(), full.byte_len());
                         sequence += 1;
                         full.sequence = sequence;
                         match mailbox.publish_full(full) {
@@ -659,6 +897,7 @@ fn capture_loop_polling(
     capturer: &mut dyn Capturer,
     mailbox: &LatestFrameMailbox,
     metrics: &RdpMetrics,
+    #[cfg(target_os = "macos")] resize_rx: Option<&std::sync::mpsc::Receiver<CaptureResizeRequest>>,
 ) {
     // A backend that caps its own frame rate must not be paced again: the extra
     // sleep would hold back a frame that is already sitting in its mailbox.
@@ -669,6 +908,54 @@ fn capture_loop_polling(
     let mut first = true;
     let mut sequence = 0;
     loop {
+        #[cfg(target_os = "macos")]
+        if let Some(resize_rx) = resize_rx {
+            while let Ok(request) = resize_rx.try_recv() {
+                let result = capturer
+                    .resize_output(request.size.width, request.size.height)
+                    .and_then(|mut frame| {
+                        if frame.width != request.size.width || frame.height != request.size.height
+                        {
+                            anyhow::bail!(
+                                "capture backend returned {}x{} after requesting {}x{}",
+                                frame.width,
+                                frame.height,
+                                request.size.width,
+                                request.size.height
+                            );
+                        }
+                        metrics.record_capture(frame.captured_at.elapsed(), frame.byte_len());
+                        sequence += 1;
+                        frame.sequence = sequence;
+                        match mailbox.publish_full(frame) {
+                            PublishResult::Published { replaced } => {
+                                if replaced {
+                                    metrics.record_frame_replaced();
+                                }
+                                Ok(request.size)
+                            }
+                            PublishResult::Closed => {
+                                anyhow::bail!("RDP display closed during capture resize")
+                            }
+                            PublishResult::NeedsFullRefresh => {
+                                unreachable!("full frames always publish")
+                            }
+                        }
+                    })
+                    .map_err(|error| error.to_string());
+                if result.is_ok() {
+                    first = false;
+                    last_hash = None;
+                }
+                let closed = result
+                    .as_ref()
+                    .is_err_and(|error| error == "RDP display closed during capture resize");
+                let _ = request.result.send(result);
+                if closed {
+                    return;
+                }
+            }
+        }
         let start = std::time::Instant::now();
         match capturer.poll_frame() {
             Ok(Some(mut frame)) => {
@@ -682,7 +969,7 @@ fn capture_loop_polling(
                 } else {
                     start.elapsed()
                 };
-                metrics.record_capture(capture_cost, frame.data.len());
+                metrics.record_capture(capture_cost, frame.byte_len());
                 // ScreenCaptureKit already reports an explicit idle tick when
                 // nothing changed. Avoid scanning its entire Retina-sized BGRA
                 // surface again; polling backends still need the hash to stop
@@ -825,6 +1112,42 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    struct ResizeCapturer {
+        requested: Arc<std::sync::Mutex<Option<(u16, u16)>>>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Capturer for ResizeCapturer {
+        fn desktop_size(&self) -> (u16, u16) {
+            (4, 4)
+        }
+
+        fn capture(&mut self) -> anyhow::Result<Frame> {
+            anyhow::bail!("polling loop must use poll_frame")
+        }
+
+        fn supports_output_resize(&self) -> bool {
+            true
+        }
+
+        fn resize_output(&mut self, width: u16, height: u16) -> anyhow::Result<Frame> {
+            *self.requested.lock().unwrap() = Some((width, height));
+            Ok(Frame::bgra(
+                vec![0; usize::from(width) * usize::from(height) * 4],
+                0,
+                0,
+                width,
+                height,
+                usize::from(width) * 4,
+            ))
+        }
+
+        fn poll_frame(&mut self) -> anyhow::Result<Option<Frame>> {
+            anyhow::bail!("capture source stopped after resize")
+        }
+    }
+
     #[tokio::test]
     async fn newest_full_frame_replaces_an_unconsumed_frame() {
         let mailbox = LatestFrameMailbox::new();
@@ -906,6 +1229,40 @@ mod tests {
         assert_eq!(frame.data[0], 3);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_resize_acknowledges_only_after_publishing_the_new_surface() {
+        let mailbox = LatestFrameMailbox::new();
+        let metrics = RdpMetrics::silent();
+        let requested = Arc::new(std::sync::Mutex::new(None));
+        let mut capturer = ResizeCapturer {
+            requested: requested.clone(),
+        };
+        let (resize_tx, resize_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let requested_size = ironrdp::server::DesktopSize {
+            width: 2,
+            height: 3,
+        };
+        resize_tx
+            .send(super::CaptureResizeRequest {
+                size: requested_size,
+                result: result_tx,
+            })
+            .unwrap();
+
+        capture_loop_polling(&mut capturer, &mailbox, &metrics, Some(&resize_rx));
+
+        assert_eq!(*requested.lock().unwrap(), Some((2, 3)));
+        assert_eq!(result_rx.blocking_recv().unwrap().unwrap(), requested_size);
+        let state = mailbox.state.lock().unwrap();
+        let Some(PendingFrames::Full(frame)) = state.pending.as_ref() else {
+            panic!("resize response must follow publication of a full frame");
+        };
+        assert_eq!((frame.width, frame.height), (2, 3));
+        assert_eq!(frame.sequence, 1);
+    }
+
     #[test]
     fn idle_ticks_do_not_end_the_capture_thread() {
         // Regression: a static macOS desktop yields only idle ticks. Treating
@@ -920,7 +1277,13 @@ mod tests {
             ..IdleCapturer::new(polls.clone(), 0, 200)
         };
 
-        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+        capture_loop_polling(
+            &mut capturer,
+            &mailbox,
+            &metrics,
+            #[cfg(target_os = "macos")]
+            None,
+        );
 
         // 24 idle ticks were survived; the loop ended only once the client left.
         assert_eq!(
@@ -940,7 +1303,13 @@ mod tests {
             ..IdleCapturer::new(polls.clone(), 2, 4)
         };
 
-        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+        capture_loop_polling(
+            &mut capturer,
+            &mailbox,
+            &metrics,
+            #[cfg(target_os = "macos")]
+            None,
+        );
 
         assert_eq!(polls.load(Ordering::Relaxed), 5, "loop must stop on error");
     }
@@ -963,7 +1332,13 @@ mod tests {
         };
 
         let started = Instant::now();
-        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+        capture_loop_polling(
+            &mut capturer,
+            &mailbox,
+            &metrics,
+            #[cfg(target_os = "macos")]
+            None,
+        );
         let elapsed = started.elapsed();
 
         assert_eq!(polls.load(Ordering::Relaxed), 7);
@@ -984,7 +1359,13 @@ mod tests {
             ..IdleCapturer::new(Arc::new(AtomicUsize::new(0)), 1, 2)
         };
 
-        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+        capture_loop_polling(
+            &mut capturer,
+            &mailbox,
+            &metrics,
+            #[cfg(target_os = "macos")]
+            None,
+        );
 
         assert_eq!(
             metrics.hash_sample_count(),
@@ -1006,7 +1387,13 @@ mod tests {
             ..IdleCapturer::new(Arc::new(AtomicUsize::new(0)), 1, 1)
         };
 
-        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+        capture_loop_polling(
+            &mut capturer,
+            &mailbox,
+            &metrics,
+            #[cfg(target_os = "macos")]
+            None,
+        );
 
         let capture_us = metrics.capture_p50_us().expect("one frame was captured");
         assert!(
@@ -1027,7 +1414,13 @@ mod tests {
             ..IdleCapturer::new(Arc::new(AtomicUsize::new(0)), 1, 1)
         };
 
-        capture_loop_polling(&mut capturer, &mailbox, &metrics);
+        capture_loop_polling(
+            &mut capturer,
+            &mailbox,
+            &metrics,
+            #[cfg(target_os = "macos")]
+            None,
+        );
 
         let capture_us = metrics.capture_p50_us().expect("one frame was captured");
         assert!(

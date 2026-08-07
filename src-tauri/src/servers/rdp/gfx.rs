@@ -7,15 +7,15 @@
 //! hard two-frame backpressure boundary: newest state wins over building a
 //! network or decoder backlog.
 //!
-//! The AVC420 path is intentionally opt-in until the IronRDP callback used by
-//! this version exposes `totalFramesDecoded` from the client's frame ACK. An
-//! ACK alone only proves receipt, not successful H.264 decode; treating it as a
-//! render acknowledgement can leave a mapped black surface permanently hiding
-//! the reliable bitmap output.
+//! ACK receipt and decoded-frame progress are tracked separately. A client that
+//! keeps acknowledging transport frames without advancing `totalFramesDecoded`
+//! is downgraded to bitmap updates, preventing an undecodable mapped surface
+//! from permanently hiding the reliable compatibility path.
 
 use core::ffi::c_void;
+use std::collections::VecDeque;
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,7 @@ use ironrdp_server::{
     EgfxServerMessage, GfxDvcBridge, GfxServerFactory, GfxServerHandle, ServerEvent,
     ServerEventSender,
 };
-use objc2_core_foundation::{CFBoolean, CFRetained};
+use objc2_core_foundation::{CFBoolean, CFNumber, CFRetained};
 use objc2_core_media::{
     CMBlockBuffer, CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex,
     kCMTimeInvalid, kCMVideoCodecType_H264,
@@ -39,9 +39,10 @@ use objc2_core_video::{
 };
 use objc2_video_toolbox::{
     VTCompressionSession, VTSession, VTSessionSetProperty,
-    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_MaxFrameDelayCount,
+    kVTCompressionPropertyKey_RealTime,
 };
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use super::capture::Frame;
 use crate::servers::engine::LogEmitter;
@@ -49,9 +50,15 @@ use crate::servers::engine::LogEmitter;
 /// Two outstanding ACKs leave room for one currently-rendering frame without
 /// permitting an interactive client to accumulate visibly stale desktop state.
 const MAX_FRAMES_IN_FLIGHT: u32 = 2;
-const ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
+/// Bound VideoToolbox independently of the later EGFX acknowledgement window.
+/// One frame may be encoding while one newer frame waits behind it.
+const MAX_ENCODER_FRAMES_IN_FLIGHT: usize = 2;
+pub(crate) const ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
+/// VideoToolbox may retain the tail of a compression window until another
+/// frame arrives. Flush only after two normal capture intervals have elapsed,
+/// preserving pipelining during motion while bounding a static first frame.
+const ENCODE_FLUSH_DELAY: Duration = Duration::from_millis(75);
 const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
-pub(crate) const AVC420_OPT_IN_ENV: &str = "TAOMNI_RDP_EXPERIMENTAL_AVC420";
 /// How long the ACK window may stay full without a single acknowledgement
 /// arriving before the client is treated as no longer consuming EGFX.
 ///
@@ -60,24 +67,9 @@ pub(crate) const AVC420_OPT_IN_ENV: &str = "TAOMNI_RDP_EXPERIMENTAL_AVC420";
 /// This bound converts that permanent stall into a one-time downgrade to the
 /// bitmap path, which every client supports.
 const ACK_STALL_TIMEOUT: Duration = Duration::from_millis(1500);
-
-/// The accelerated path must be explicitly enabled while its ACK callback
-/// cannot distinguish "received" from "decoded". Keeping the policy here
-/// makes it difficult to accidentally re-enable the black-screen regression
-/// merely by wiring an EGFX factory into the server builder.
-pub(crate) fn avc420_opted_in() -> bool {
-    std::env::var(AVC420_OPT_IN_ENV)
-        .ok()
-        .as_deref()
-        .is_some_and(avc420_opt_in_value)
-}
-
-fn avc420_opt_in_value(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
+/// Maximum time acknowledged AVC420 frames may fail to increase the client's
+/// decoded-frame counter before the mapped surface is considered unusable.
+const DECODE_STALL_TIMEOUT: Duration = Duration::from_millis(1500);
 
 #[derive(Clone)]
 pub(crate) struct GfxTransport {
@@ -86,6 +78,9 @@ pub(crate) struct GfxTransport {
     /// Shared with the per-connection handler so the display side can tell a
     /// slow-but-live client from one that has stopped consuming EGFX entirely.
     acks: Arc<AtomicU64>,
+    /// Latest `totalFramesDecoded` value published by the client. Unlike an ACK
+    /// count, progress here confirms that AVC420 payloads are actually usable.
+    decoded: Arc<AtomicU32>,
     log: LogEmitter,
 }
 
@@ -97,6 +92,9 @@ struct GfxState {
     /// progress. Cleared when a new connection builds a fresh graphics server.
     disabled: bool,
     stall: Option<AckStall>,
+    decode_watch: Option<DecodeWatch>,
+    decode_confirmed: bool,
+    session_started: Instant,
 }
 
 /// Start of the current uninterrupted backpressure window.
@@ -104,6 +102,14 @@ struct GfxState {
 struct AckStall {
     since: Instant,
     acks: u64,
+}
+
+/// Decoded-frame counter observed at the beginning of the current validation
+/// window. This window starts only after an AVC420 frame is submitted.
+#[derive(Clone, Copy)]
+struct DecodeWatch {
+    since: Instant,
+    decoded: u32,
 }
 
 /// What to do about a full ACK window.
@@ -129,6 +135,16 @@ fn stall_verdict(stall: Option<AckStall>, acks: u64, now: Instant) -> StallVerdi
         }
         Some(_) => StallVerdict::Wait,
         None => StallVerdict::Restart,
+    }
+}
+
+fn decode_verdict(watch: DecodeWatch, decoded: u32, now: Instant) -> StallVerdict {
+    if watch.decoded != decoded {
+        StallVerdict::Restart
+    } else if now.duration_since(watch.since) >= DECODE_STALL_TIMEOUT {
+        StallVerdict::Disable
+    } else {
+        StallVerdict::Wait
     }
 }
 
@@ -166,8 +182,12 @@ impl GfxTransport {
                 surface: None,
                 disabled: false,
                 stall: None,
+                decode_watch: None,
+                decode_confirmed: false,
+                session_started: Instant::now(),
             })),
             acks: Arc::new(AtomicU64::new(0)),
+            decoded: Arc::new(AtomicU32::new(0)),
             log,
         }
     }
@@ -176,6 +196,7 @@ impl GfxTransport {
         EgfxFactory {
             state: self.state.clone(),
             acks: self.acks.clone(),
+            decoded: self.decoded.clone(),
             log: self.log.clone(),
         }
     }
@@ -193,6 +214,8 @@ impl GfxTransport {
             sender: state.sender.clone()?,
             surface: state.surface,
             stall: state.stall,
+            decode_watch: state.decode_watch,
+            session_started: state.session_started,
         })
     }
 
@@ -209,24 +232,39 @@ impl GfxTransport {
         if !server.is_ready() || !server.supports_avc420() {
             return GfxReadiness::Unavailable;
         }
-        if !server.should_backpressure() {
-            drop(server);
-            self.clear_stall();
-            return GfxReadiness::Ready;
-        }
+        let backpressured = server.should_backpressure();
         drop(server);
 
-        // The ACK window is full. Decide whether this client is merely a frame
-        // behind or has stopped acknowledging altogether.
-        let acks = self.acks.load(Ordering::Relaxed);
-        match stall_verdict(snapshot.stall, acks, Instant::now()) {
+        if backpressured {
+            // The ACK window is full. Decide whether this client is merely a
+            // frame behind or has stopped acknowledging altogether.
+            let acks = self.acks.load(Ordering::Relaxed);
+            return match stall_verdict(snapshot.stall, acks, Instant::now()) {
+                StallVerdict::Restart => {
+                    self.begin_stall(acks);
+                    GfxReadiness::Backpressured
+                }
+                StallVerdict::Wait => GfxReadiness::Backpressured,
+                StallVerdict::Disable => {
+                    self.disable_after_stall();
+                    GfxReadiness::Unavailable
+                }
+            };
+        }
+
+        self.clear_stall();
+        let Some(watch) = snapshot.decode_watch else {
+            return GfxReadiness::Ready;
+        };
+        let decoded = self.decoded.load(Ordering::Relaxed);
+        match decode_verdict(watch, decoded, Instant::now()) {
             StallVerdict::Restart => {
-                self.begin_stall(acks);
-                GfxReadiness::Backpressured
+                self.record_decode_progress(decoded);
+                GfxReadiness::Ready
             }
-            StallVerdict::Wait => GfxReadiness::Backpressured,
+            StallVerdict::Wait => GfxReadiness::Ready,
             StallVerdict::Disable => {
-                self.disable_after_stall();
+                self.disable_after_decode_stall();
                 GfxReadiness::Unavailable
             }
         }
@@ -249,12 +287,63 @@ impl GfxTransport {
         }
     }
 
+    fn note_frame_submitted(&self, reset_watch: bool) {
+        let decoded = self.decoded.load(Ordering::Relaxed);
+        if let Ok(mut state) = self.state.lock()
+            && (reset_watch || state.decode_watch.is_none())
+        {
+            state.decode_watch = Some(DecodeWatch {
+                since: Instant::now(),
+                decoded,
+            });
+        }
+    }
+
+    fn record_decode_progress(&self, decoded: u32) {
+        let first_confirmation = if let Ok(mut state) = self.state.lock() {
+            state.decode_watch = Some(DecodeWatch {
+                since: Instant::now(),
+                decoded,
+            });
+            let first = !state.decode_confirmed;
+            state.decode_confirmed = true;
+            first
+        } else {
+            false
+        };
+        if first_confirmation {
+            self.log
+                .line("RDP EGFX client confirmed AVC420 decoded-frame progress");
+        }
+    }
+
     /// Give up on EGFX for this connection and return it to bitmap updates.
     ///
     /// The mapped surface is removed first: leaving it in place would let the
     /// client keep compositing a frozen surface over the graphics output and
     /// hide the bitmap updates that are about to take over.
     fn disable_after_stall(&self) {
+        self.disable_after_failure_with_reason(format!(
+            "client stopped acknowledging frames for {}ms",
+            ACK_STALL_TIMEOUT.as_millis()
+        ));
+    }
+
+    fn disable_after_decode_stall(&self) {
+        self.disable_after_failure_with_reason(format!(
+            "client acknowledged graphics frames without decoded-frame progress for {}ms",
+            DECODE_STALL_TIMEOUT.as_millis()
+        ));
+    }
+
+    /// Disable EGFX after a protocol, encoder, or transport failure. A stale
+    /// mapped surface can continue to cover bitmap output on the client, so it
+    /// is deleted before the display path falls back.
+    pub(crate) fn disable_after_failure(&self) {
+        self.disable_after_failure_with_reason("graphics pipeline failed".to_string());
+    }
+
+    fn disable_after_failure_with_reason(&self, reason: String) {
         let (handle, sender, surface) = {
             let Ok(mut state) = self.state.lock() else {
                 return;
@@ -264,6 +353,7 @@ impl GfxTransport {
             }
             state.disabled = true;
             state.stall = None;
+            state.decode_watch = None;
             let surface = state.surface.take();
             let (Some(handle), Some(sender)) = (state.handle.clone(), state.sender.clone()) else {
                 return;
@@ -271,10 +361,8 @@ impl GfxTransport {
             (handle, sender, surface)
         };
 
-        self.log.line(format!(
-            "RDP EGFX client stopped acknowledging frames for {}ms; returning to bitmap updates",
-            ACK_STALL_TIMEOUT.as_millis()
-        ));
+        self.log
+            .line(format!("RDP EGFX {reason}; returning to bitmap updates"));
 
         let Some(surface) = surface else {
             return;
@@ -343,7 +431,7 @@ impl GfxTransport {
         };
 
         let region = Avc420Region::full_frame(frame.width, frame.height, 26);
-        let timestamp_ms = frame.captured_at.elapsed().as_millis() as u32;
+        let timestamp_ms = frame_timestamp_ms(snapshot.session_started, frame.captured_at);
         let queued = server
             .send_avc420_frame(surface.id, h264, &[region], timestamp_ms)
             .is_some();
@@ -366,6 +454,10 @@ impl GfxTransport {
             return GfxSubmit::Unavailable;
         };
 
+        // Capture the decoded counter before the event can be processed and
+        // acknowledged on the connection task. This makes the first decoded
+        // frame observable even on a very low-latency local connection.
+        self.note_frame_submitted(created);
         if snapshot
             .sender
             .send(ServerEvent::Egfx(EgfxServerMessage::SendMessages {
@@ -386,6 +478,17 @@ struct GfxSnapshot {
     sender: UnboundedSender<ServerEvent>,
     surface: Option<GfxSurface>,
     stall: Option<AckStall>,
+    decode_watch: Option<DecodeWatch>,
+    session_started: Instant,
+}
+
+fn frame_timestamp_ms(session_started: Instant, captured_at: Instant) -> u32 {
+    let millis = captured_at
+        .checked_duration_since(session_started)
+        .unwrap_or_default()
+        .as_millis();
+    let modulus = u128::from(u32::MAX) + 1;
+    u32::try_from(millis % modulus).expect("timestamp is reduced to the u32 range")
 }
 
 /// Single primary monitor covering the whole captured desktop. MS-RDPEGFX
@@ -423,6 +526,7 @@ fn encode_output(
 pub(crate) struct EgfxFactory {
     state: Arc<Mutex<GfxState>>,
     acks: Arc<AtomicU64>,
+    decoded: Arc<AtomicU32>,
     log: LogEmitter,
 }
 
@@ -438,6 +542,7 @@ impl GfxServerFactory for EgfxFactory {
     fn build_gfx_handler(&self) -> Box<dyn GraphicsPipelineHandler> {
         Box::new(EgfxHandler {
             acks: self.acks.clone(),
+            decoded: self.decoded.clone(),
             log: self.log.clone(),
         })
     }
@@ -447,6 +552,7 @@ impl GfxServerFactory for EgfxFactory {
             self.build_gfx_handler(),
         )));
         self.acks.store(0, Ordering::Relaxed);
+        self.decoded.store(0, Ordering::Relaxed);
         if let Ok(mut state) = self.state.lock() {
             state.handle = Some(server.clone());
             state.surface = None;
@@ -454,6 +560,9 @@ impl GfxServerFactory for EgfxFactory {
             // stopped acknowledging must not keep EGFX switched off.
             state.disabled = false;
             state.stall = None;
+            state.decode_watch = None;
+            state.decode_confirmed = false;
+            state.session_started = Instant::now();
         }
         Some((GfxDvcBridge::new(server.clone()), server))
     }
@@ -461,6 +570,7 @@ impl GfxServerFactory for EgfxFactory {
 
 struct EgfxHandler {
     acks: Arc<AtomicU64>,
+    decoded: Arc<AtomicU32>,
     log: LogEmitter,
 }
 
@@ -468,15 +578,21 @@ impl GraphicsPipelineHandler for EgfxHandler {
     fn capabilities_advertise(&mut self, _pdu: &CapabilitiesAdvertisePdu) {}
 
     fn on_ready(&mut self, _negotiated: &CapabilitySet) {
-        self.log
-            .line("RDP EGFX channel negotiated; enabling AVC420 hardware video when supported");
+        self.log.line(
+            "RDP EGFX channel negotiated; enabling AVC420 hardware video with decoded-frame validation",
+        );
     }
 
-    fn on_frame_ack(&mut self, _frame_id: u32, queue_depth: u32) {
+    fn on_frame_ack(&mut self, _frame_id: u32, queue_depth: u32, total_frames_decoded: u32) {
         // Publishes liveness to the display side, which uses it to tell a
         // client that is one frame behind from one that has stopped consuming.
         self.acks.fetch_add(1, Ordering::Relaxed);
-        tracing::trace!(queue_depth, "RDP EGFX frame acknowledged");
+        self.decoded.store(total_frames_decoded, Ordering::Relaxed);
+        tracing::trace!(
+            queue_depth,
+            total_frames_decoded,
+            "RDP EGFX frame acknowledged"
+        );
     }
 
     fn on_close(&mut self) {
@@ -495,16 +611,32 @@ impl GraphicsPipelineHandler for EgfxHandler {
 pub(crate) struct H264Encoder {
     session: CFRetained<VTCompressionSession>,
     callback_state: Arc<EncoderCallbackState>,
+    output: UnboundedReceiver<EncodedFrame>,
     width: u16,
     height: u16,
     encoded_width: u16,
     encoded_height: u16,
-    padded_input: Option<Vec<u8>>,
     next_timestamp: i64,
+    next_frame_id: usize,
 }
 
 struct EncoderCallbackState {
-    sender: Mutex<Option<std::sync::mpsc::SyncSender<anyhow::Result<Vec<u8>>>>>,
+    sender: UnboundedSender<EncodedFrame>,
+    pending: Mutex<VecDeque<(usize, PendingInput)>>,
+    in_flight: AtomicUsize,
+}
+
+struct PendingInput {
+    _pixel_buffer: CFRetained<CVPixelBuffer>,
+    _padded_input: Option<Vec<u8>>,
+    frame: Frame,
+    submitted_at: Instant,
+    flushed: bool,
+}
+
+pub(crate) struct EncodedFrame {
+    pub(crate) frame: Frame,
+    pub(crate) result: anyhow::Result<Vec<u8>>,
 }
 
 // `RdpServerDisplayUpdates` requires a `Send` future even though Taomni runs
@@ -518,19 +650,11 @@ impl H264Encoder {
     pub(crate) fn new(width: u16, height: u16) -> anyhow::Result<Self> {
         let encoded_width = align_dimension(width)?;
         let encoded_height = align_dimension(height)?;
-        let padded_input = if (encoded_width, encoded_height) == (width, height) {
-            None
-        } else {
-            let stride = usize::from(encoded_width)
-                .checked_mul(4)
-                .ok_or_else(|| anyhow::anyhow!("aligned H.264 row size overflow"))?;
-            let length = stride
-                .checked_mul(usize::from(encoded_height))
-                .ok_or_else(|| anyhow::anyhow!("aligned H.264 frame size overflow"))?;
-            Some(vec![0; length])
-        };
+        let (output_tx, output) = tokio::sync::mpsc::unbounded_channel();
         let callback_state = Arc::new(EncoderCallbackState {
-            sender: Mutex::new(None),
+            sender: output_tx,
+            pending: Mutex::new(VecDeque::new()),
+            in_flight: AtomicUsize::new(0),
         });
         let mut raw = ptr::null_mut();
         let status = unsafe {
@@ -576,6 +700,20 @@ impl H264Encoder {
             },
             "disable VideoToolbox frame reordering",
         )?;
+        let max_frame_delay = CFNumber::new_i32(1);
+        let delay_status = unsafe {
+            VTSessionSetProperty(
+                vt_session,
+                kVTCompressionPropertyKey_MaxFrameDelayCount,
+                Some(max_frame_delay.as_ref()),
+            )
+        };
+        if delay_status != 0 {
+            tracing::debug!(
+                status = delay_status,
+                "VideoToolbox encoder does not support an explicit frame-delay window"
+            );
+        }
         ensure_status(
             unsafe { session.prepare_to_encode_frames() },
             "prepare VideoToolbox H.264 encoder",
@@ -584,12 +722,13 @@ impl H264Encoder {
         Ok(Self {
             session,
             callback_state,
+            output,
             width,
             height,
             encoded_width,
             encoded_height,
-            padded_input,
             next_timestamp: 0,
+            next_frame_id: 0,
         })
     }
 
@@ -597,11 +736,160 @@ impl H264Encoder {
         self.width == frame.width && self.height == frame.height
     }
 
-    pub(crate) fn encode(&mut self, frame: &Frame) -> anyhow::Result<Vec<u8>> {
+    pub(crate) fn can_submit(&self) -> bool {
+        self.callback_state.in_flight.load(Ordering::Relaxed) < MAX_ENCODER_FRAMES_IN_FLIGHT
+    }
+
+    pub(crate) fn oldest_deadline(&self) -> Option<Instant> {
+        self.callback_state
+            .pending
+            .lock()
+            .ok()?
+            .front()
+            .map(|(_, input)| input.submitted_at + ENCODE_TIMEOUT)
+    }
+
+    pub(crate) fn flush_deadline(&self) -> Option<Instant> {
+        self.callback_state
+            .pending
+            .lock()
+            .ok()?
+            .iter()
+            .find(|(_, input)| !input.flushed)
+            .map(|(_, input)| input.submitted_at + ENCODE_FLUSH_DELAY)
+    }
+
+    pub(crate) fn flush_pending(&self) -> anyhow::Result<()> {
+        {
+            let mut pending = self
+                .callback_state
+                .pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("VideoToolbox pending-frame lock poisoned"))?;
+            for (_, input) in pending.iter_mut() {
+                input.flushed = true;
+            }
+        }
+        ensure_status(
+            unsafe { self.session.complete_frames(kCMTimeInvalid) },
+            "flush idle VideoToolbox H.264 frames",
+        )
+    }
+
+    pub(crate) async fn next_output(&mut self) -> Option<EncodedFrame> {
+        let output = self.output.recv().await;
+        if output.is_some() {
+            self.callback_state
+                .in_flight
+                .fetch_sub(1, Ordering::Relaxed);
+        }
+        output
+    }
+
+    /// Queue one frame and return immediately. The callback owns the retained
+    /// input until VideoToolbox has finished reading it, so ScreenCaptureKit's
+    /// IOSurface and any temporary macroblock padding outlive asynchronous
+    /// encoding without blocking the display updater.
+    pub(crate) fn submit(&mut self, frame: &Frame) -> anyhow::Result<()> {
         if !self.matches(frame) {
             anyhow::bail!("H.264 encoder dimensions no longer match captured frame");
         }
-        let (base_address, input_stride) = self.prepare_input(frame)?;
+        if !self.can_submit() {
+            anyhow::bail!("VideoToolbox H.264 queue is full");
+        }
+
+        let prepared = self.prepare_input(frame)?;
+        let image_buffer =
+            unsafe { pixel_buffer_as_image_buffer(&prepared.pixel_buffer) } as *const CVImageBuffer;
+        self.next_frame_id = self.next_frame_id.wrapping_add(1).max(1);
+        let frame_id = self.next_frame_id;
+        self.callback_state
+            .pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("VideoToolbox pending-frame lock poisoned"))?
+            .push_back((
+                frame_id,
+                PendingInput {
+                    frame: frame.clone(),
+                    submitted_at: Instant::now(),
+                    flushed: false,
+                    _pixel_buffer: prepared.pixel_buffer,
+                    _padded_input: prepared.padded_input,
+                },
+            ));
+        self.callback_state
+            .in_flight
+            .fetch_add(1, Ordering::Relaxed);
+
+        self.next_timestamp = self.next_timestamp.saturating_add(1);
+        let timestamp = unsafe { CMTime::new(self.next_timestamp, 30) };
+        let duration = unsafe { kCMTimeInvalid };
+        let status = unsafe {
+            self.session.encode_frame(
+                &*image_buffer,
+                timestamp,
+                duration,
+                None,
+                ptr::without_provenance_mut(frame_id),
+                ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            if self.callback_state.take_pending(frame_id).is_some() {
+                self.callback_state
+                    .in_flight
+                    .fetch_sub(1, Ordering::Relaxed);
+            }
+            ensure_status(status, "submit VideoToolbox H.264 frame")?;
+        }
+        Ok(())
+    }
+
+    fn prepare_input(&self, frame: &Frame) -> anyhow::Result<PreparedInput> {
+        let aligned = (self.encoded_width, self.encoded_height) == (frame.width, frame.height);
+        if aligned && let Some(pixel_buffer) = frame.native_pixel_buffer() {
+            return Ok(PreparedInput {
+                pixel_buffer,
+                padded_input: None,
+            });
+        }
+
+        let row_bytes = usize::from(frame.width)
+            .checked_mul(4)
+            .ok_or_else(|| anyhow::anyhow!("H.264 source row size overflow"))?;
+        if frame.stride < row_bytes {
+            anyhow::bail!("H.264 source stride is smaller than its visible row");
+        }
+        let source_length = frame
+            .stride
+            .checked_mul(usize::from(frame.height))
+            .ok_or_else(|| anyhow::anyhow!("H.264 source frame size overflow"))?;
+        if frame.byte_len() < source_length {
+            anyhow::bail!(
+                "H.264 source has {} bytes; expected at least {source_length}",
+                frame.byte_len()
+            );
+        }
+
+        let (base_address, input_stride, padded_input) = if aligned {
+            let source = frame.bgra_bytes()?;
+            let address = NonNull::new(source.as_ptr().cast_mut().cast::<c_void>())
+                .ok_or_else(|| anyhow::anyhow!("cannot encode an empty captured frame"))?;
+            (address, frame.stride, None)
+        } else {
+            let padded_stride = usize::from(self.encoded_width)
+                .checked_mul(4)
+                .ok_or_else(|| anyhow::anyhow!("aligned H.264 row size overflow"))?;
+            let padded_length = padded_stride
+                .checked_mul(usize::from(self.encoded_height))
+                .ok_or_else(|| anyhow::anyhow!("aligned H.264 frame size overflow"))?;
+            let mut padded = vec![0; padded_length];
+            frame.copy_bgra_rows_to(&mut padded, padded_stride)?;
+            let address = NonNull::new(padded.as_mut_ptr().cast::<c_void>())
+                .ok_or_else(|| anyhow::anyhow!("cannot encode an empty padded frame"))?;
+            (address, padded_stride, Some(padded))
+        };
+
         let mut raw_pixel_buffer = ptr::null_mut();
         let status = unsafe {
             CVPixelBufferCreateWithBytes(
@@ -623,93 +911,23 @@ impl H264Encoder {
         let raw_pixel_buffer = NonNull::new(raw_pixel_buffer)
             .ok_or_else(|| anyhow::anyhow!("CoreVideo returned a null pixel buffer"))?;
         let pixel_buffer = unsafe { CFRetained::from_raw(raw_pixel_buffer) };
-
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        *self
-            .callback_state
-            .sender
-            .lock()
-            .map_err(|_| anyhow::anyhow!("VideoToolbox callback state lock poisoned"))? =
-            Some(sender);
-
-        self.next_timestamp = self.next_timestamp.saturating_add(1);
-        let timestamp = unsafe { CMTime::new(self.next_timestamp, 30) };
-        let image_buffer = unsafe { pixel_buffer_as_image_buffer(&pixel_buffer) };
-        let duration = unsafe { kCMTimeInvalid };
-        ensure_status(
-            unsafe {
-                self.session.encode_frame(
-                    image_buffer,
-                    timestamp,
-                    duration,
-                    None,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                )
-            },
-            "submit VideoToolbox H.264 frame",
-        )?;
-        ensure_status(
-            unsafe { self.session.complete_frames(timestamp) },
-            "complete VideoToolbox H.264 frame",
-        )?;
-        let result = receiver
-            .recv_timeout(ENCODE_TIMEOUT)
-            .map_err(|error| match error {
-                std::sync::mpsc::RecvTimeoutError::Timeout => {
-                    anyhow::anyhow!("VideoToolbox H.264 frame exceeded the 250ms latency budget")
-                }
-                std::sync::mpsc::RecvTimeoutError::Disconnected => {
-                    anyhow::anyhow!("VideoToolbox H.264 output callback disconnected")
-                }
-            });
-        if let Ok(mut sender) = self.callback_state.sender.lock() {
-            sender.take();
-        }
-        result?
+        Ok(PreparedInput {
+            pixel_buffer,
+            padded_input,
+        })
     }
+}
 
-    /// RDPEGFX requires the coded AVC420 dimensions to be macroblock-aligned.
-    /// ScreenCaptureKit commonly reports scaled sizes such as 1918x970, so the
-    /// reusable buffer pads those pixels to 1920x976. The AVC region metadata
-    /// still names the original surface size and crops the padded edge.
-    fn prepare_input(&mut self, frame: &Frame) -> anyhow::Result<(NonNull<c_void>, usize)> {
-        let row_bytes = usize::from(frame.width)
-            .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("H.264 source row size overflow"))?;
-        if frame.stride < row_bytes {
-            anyhow::bail!("H.264 source stride is smaller than its visible row");
-        }
-        let source_length = frame
-            .stride
-            .checked_mul(usize::from(frame.height))
-            .ok_or_else(|| anyhow::anyhow!("H.264 source frame size overflow"))?;
-        if frame.data.len() < source_length {
-            anyhow::bail!(
-                "H.264 source has {} bytes; expected at least {source_length}",
-                frame.data.len()
-            );
-        }
+struct PreparedInput {
+    pixel_buffer: CFRetained<CVPixelBuffer>,
+    padded_input: Option<Vec<u8>>,
+}
 
-        if let Some(padded) = self.padded_input.as_mut() {
-            let padded_stride = usize::from(self.encoded_width) * 4;
-            for row in 0..usize::from(frame.height) {
-                let source_start = row * frame.stride;
-                let target_start = row * padded_stride;
-                padded[target_start..target_start + row_bytes]
-                    .copy_from_slice(&frame.data[source_start..source_start + row_bytes]);
-            }
-            let address = NonNull::new(padded.as_mut_ptr().cast::<c_void>())
-                .ok_or_else(|| anyhow::anyhow!("cannot encode an empty padded frame"))?;
-            Ok((address, padded_stride))
-        } else {
-            // CoreVideo's creation API takes a mutable pointer for historical
-            // C ABI reasons, but the encoder only reads this BGRA input. The
-            // Bytes allocation stays alive until complete_frames returns.
-            let address = NonNull::new(frame.data.as_ptr().cast_mut().cast::<c_void>())
-                .ok_or_else(|| anyhow::anyhow!("cannot encode an empty captured frame"))?;
-            Ok((address, frame.stride))
-        }
+impl EncoderCallbackState {
+    fn take_pending(&self, frame_id: usize) -> Option<PendingInput> {
+        let mut pending = self.pending.lock().ok()?;
+        let index = pending.iter().position(|(id, _)| *id == frame_id)?;
+        pending.remove(index).map(|(_, input)| input)
     }
 }
 
@@ -725,15 +943,20 @@ fn align_dimension(value: u16) -> anyhow::Result<u16> {
 
 unsafe extern "C-unwind" fn on_h264_encoded(
     output_callback_ref_con: *mut c_void,
-    _source_frame_ref_con: *mut c_void,
+    source_frame_ref_con: *mut c_void,
     status: i32,
     _info_flags: objc2_video_toolbox::VTEncodeInfoFlags,
     sample: *mut CMSampleBuffer,
 ) {
-    if output_callback_ref_con.is_null() {
+    if output_callback_ref_con.is_null() || source_frame_ref_con.is_null() {
         return;
     }
     let state = unsafe { &*output_callback_ref_con.cast::<EncoderCallbackState>() };
+    let frame_id = source_frame_ref_con.addr();
+    let Some(pending) = state.take_pending(frame_id) else {
+        tracing::warn!(frame_id, "VideoToolbox returned an unknown H.264 frame");
+        return;
+    };
     let result = if status != 0 {
         Err(anyhow::anyhow!(
             "VideoToolbox H.264 frame encoding failed (status {status})"
@@ -743,16 +966,25 @@ unsafe extern "C-unwind" fn on_h264_encoded(
     } else {
         unsafe { sample_to_annex_b(&*sample) }
     };
-    if let Ok(sender) = state.sender.lock() {
-        if let Some(sender) = sender.as_ref() {
-            let _ = sender.send(result);
-        }
+    if state
+        .sender
+        .send(EncodedFrame {
+            frame: pending.frame,
+            result,
+        })
+        .is_err()
+    {
+        state.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
 impl Drop for H264Encoder {
     fn drop(&mut self) {
         unsafe { self.session.invalidate() };
+        if let Ok(mut pending) = self.callback_state.pending.lock() {
+            pending.clear();
+        }
+        self.callback_state.in_flight.store(0, Ordering::Relaxed);
     }
 }
 
@@ -905,9 +1137,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ACK_STALL_TIMEOUT, ANNEX_B_START_CODE, AckStall, H264Encoder, MAX_FRAMES_IN_FLIGHT,
-        StallVerdict, align_dimension, avc420_opt_in_value, avcc_to_annex_b, desktop_monitor,
-        stall_verdict,
+        ACK_STALL_TIMEOUT, ANNEX_B_START_CODE, AckStall, DECODE_STALL_TIMEOUT, DecodeWatch,
+        ENCODE_TIMEOUT, H264Encoder, MAX_FRAMES_IN_FLIGHT, StallVerdict, align_dimension,
+        avcc_to_annex_b, decode_verdict, desktop_monitor, frame_timestamp_ms, stall_verdict,
     };
     use crate::servers::rdp::capture::Frame;
     use ironrdp::pdu::gcc::MonitorFlags;
@@ -966,16 +1198,36 @@ mod tests {
     }
 
     #[test]
-    fn accelerated_graphics_requires_an_explicit_truthy_opt_in() {
-        for enabled in ["1", "true", "TRUE", " yes ", "on"] {
-            assert!(avc420_opt_in_value(enabled), "{enabled} should opt in");
-        }
-        for disabled in ["", "0", "false", "no", "off", "unexpected"] {
-            assert!(
-                !avc420_opt_in_value(disabled),
-                "{disabled} should keep compatibility mode"
-            );
-        }
+    fn acknowledged_frames_without_decode_progress_fall_back_to_bitmaps() {
+        let started = Instant::now();
+        let watch = DecodeWatch {
+            since: started,
+            decoded: 7,
+        };
+        let now = started + DECODE_STALL_TIMEOUT + Duration::from_millis(1);
+        assert_eq!(decode_verdict(watch, 7, now), StallVerdict::Disable);
+    }
+
+    #[test]
+    fn decoded_frame_progress_keeps_accelerated_graphics_enabled() {
+        let started = Instant::now();
+        let watch = DecodeWatch {
+            since: started,
+            decoded: 7,
+        };
+        let now = started + DECODE_STALL_TIMEOUT + Duration::from_millis(1);
+        assert_eq!(decode_verdict(watch, 8, now), StallVerdict::Restart);
+    }
+
+    #[test]
+    fn first_decoded_frame_gets_a_bounded_validation_window() {
+        let started = Instant::now();
+        let watch = DecodeWatch {
+            since: started,
+            decoded: 0,
+        };
+        let now = started + DECODE_STALL_TIMEOUT - Duration::from_millis(1);
+        assert_eq!(decode_verdict(watch, 0, now), StallVerdict::Wait);
     }
 
     #[test]
@@ -987,14 +1239,27 @@ mod tests {
         assert!(align_dimension(u16::MAX).is_err());
     }
 
-    #[test]
-    fn video_toolbox_emits_an_annex_b_frame_for_rdpegfx() {
+    async fn encode_test_frame(encoder: &mut H264Encoder, frame: &Frame) -> Vec<u8> {
+        encoder.submit(frame).expect("submit VideoToolbox frame");
+        encoder
+            .flush_pending()
+            .expect("flush VideoToolbox test frame");
+        tokio::time::timeout(ENCODE_TIMEOUT, encoder.next_output())
+            .await
+            .expect("VideoToolbox callback timed out")
+            .expect("VideoToolbox callback channel closed")
+            .result
+            .expect("encode VideoToolbox frame")
+    }
+
+    #[tokio::test]
+    async fn video_toolbox_emits_an_annex_b_frame_for_rdpegfx() {
         // 16x16 is the smallest broadly-supported H.264 test surface. This
         // exercises the actual macOS hardware/software codec path without
         // requiring Screen Recording permission or a live RDP client.
         let frame = Frame::bgra(vec![0x80; 16 * 16 * 4], 0, 0, 16, 16, 16 * 4);
         let mut encoder = H264Encoder::new(16, 16).expect("create VideoToolbox encoder");
-        let annex_b = encoder.encode(&frame).expect("encode VideoToolbox frame");
+        let annex_b = encode_test_frame(&mut encoder, &frame).await;
 
         assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
         let nal_types: Vec<u8> = annex_b
@@ -1010,14 +1275,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn video_toolbox_encodes_non_aligned_desktops_through_a_padded_surface() {
+    #[tokio::test]
+    async fn video_toolbox_encodes_non_aligned_desktops_through_a_padded_surface() {
         let frame = Frame::bgra(vec![0x80; 18 * 18 * 4], 0, 0, 18, 18, 18 * 4);
         let mut encoder = H264Encoder::new(18, 18).expect("create padded VideoToolbox encoder");
-        let annex_b = encoder.encode(&frame).expect("encode padded frame");
+        let annex_b = encode_test_frame(&mut encoder, &frame).await;
 
         assert_eq!((encoder.encoded_width, encoder.encoded_height), (32, 32));
         assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
+    }
+
+    #[test]
+    fn graphics_timestamp_uses_the_session_clock() {
+        let started = Instant::now();
+        assert_eq!(
+            frame_timestamp_ms(started, started + Duration::from_millis(1234)),
+            1234
+        );
     }
 
     #[test]

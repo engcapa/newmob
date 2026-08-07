@@ -62,6 +62,8 @@ mod display;
 #[cfg(target_os = "macos")]
 mod gfx;
 mod input;
+#[cfg(target_os = "macos")]
+pub(crate) use input::{control_permission_granted, request_control_permission};
 mod metrics;
 mod session;
 mod tls;
@@ -630,23 +632,40 @@ fn build_server(
         })
     });
     let metrics = RdpMetrics::new(log.clone());
+    #[cfg(target_os = "macos")]
+    if !params.view_only && !input::control_permission_granted() {
+        anyhow::bail!(
+            "Accessibility permission is required for RDP keyboard and mouse control. Open RDP Server settings, grant permission, then start the server again."
+        );
+    }
+    #[cfg(target_os = "macos")]
+    let gfx = gfx::GfxTransport::new(log.clone());
+    let display = RdpDisplay::new(
+        log.clone(),
+        params.display_id.clone(),
+        metrics.clone(),
+        #[cfg(target_os = "macos")]
+        gfx.clone(),
+    )?;
+    #[cfg(target_os = "macos")]
+    let input_mapping = if params.view_only {
+        None
+    } else {
+        Some(input::MacInputMapping::new(
+            capture::mac::selected_display_bounds(params.display_id.as_deref())?,
+            display.input_surface_size(),
+        )?)
+    };
+    #[cfg(target_os = "macos")]
+    let honor_client_desktop_size = display.supports_client_size();
     let input = RdpInput::new(
         log.clone(),
         params.view_only,
         control_gate.clone(),
         metrics.clone(),
-    );
-    #[cfg(target_os = "macos")]
-    let gfx = gfx::GfxTransport::new(log.clone());
-    #[cfg(target_os = "macos")]
-    let enable_avc420 = gfx::avc420_opted_in();
-    let display = RdpDisplay::new(
-        log.clone(),
-        params.display_id.clone(),
-        metrics,
         #[cfg(target_os = "macos")]
-        gfx.clone(),
-    )?;
+        input_mapping,
+    );
     let cliprdr: Box<dyn ironrdp::server::CliprdrServerFactory> =
         Box::new(ClipboardFactory::new(log.clone()));
 
@@ -669,18 +688,11 @@ fn build_server(
                 .with_display_handler(display)
                 .with_cliprdr_factory(Some(cliprdr));
             #[cfg(target_os = "macos")]
-            let builder = if enable_avc420 {
-                log.line(format!(
-                    "RDP display transport: experimental EGFX/AVC420 enabled by {}",
-                    gfx::AVC420_OPT_IN_ENV
-                ));
+            let builder = builder.with_honor_client_desktop_size(honor_client_desktop_size);
+            #[cfg(target_os = "macos")]
+            let builder = {
+                log.line("RDP display transport: EGFX/AVC420 with decoded-frame bitmap fallback");
                 builder.with_gfx_factory(Some(Box::new(gfx.factory())))
-            } else {
-                log.line(format!(
-                    "RDP display transport: low-latency bitmap compatibility mode (set {}=1 only for AVC420 diagnostics)",
-                    gfx::AVC420_OPT_IN_ENV
-                ));
-                builder
             };
             builder
                 .with_connection_handler(Some(connection_handler))

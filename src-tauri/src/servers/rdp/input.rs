@@ -1,11 +1,11 @@
 //! RDP server input handler: injects client keyboard/mouse events into the
-//! local desktop via `enigo`.
+//! local desktop via `enigo`, with native CoreGraphics pointer events on macOS.
 //!
 //! ## Coordinates
-//! `ironrdp-server` already converts the client's normalized RDP coordinate
-//! space into screen pixels, so [`MouseEvent::Move { x, y }`] carries pixel
-//! coordinates we pass straight to `enigo.move_mouse(.., Coordinate::Abs)`.
-//! (The dev plan's `x = X*W/65535` formula applies inside IronRDP, not here.)
+//! [`MouseEvent::Move { x, y }`] carries coordinates in the advertised RDP
+//! surface. On macOS that surface uses ScreenCaptureKit physical pixels while
+//! CoreGraphics pointer events use global logical points, so [`MacInputMapping`]
+//! scales and offsets absolute movement for Retina and secondary displays.
 //!
 //! ## Keyboard scancodes — the platform-specific part
 //! RDP delivers PC/AT **Set 1** scancodes (`KeyboardEvent::Pressed { code, extended }`).
@@ -22,16 +22,35 @@
 //! `view_only` short-circuits all injection.
 
 use std::collections::VecDeque;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
+use core_foundation::base::TCFType;
+#[cfg(target_os = "macos")]
+use core_foundation::boolean::CFBoolean;
+#[cfg(target_os = "macos")]
+use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+#[cfg(target_os = "macos")]
+use core_foundation::string::{CFString, CFStringRef};
 use enigo::{
     Axis, Button, Coordinate, Direction,
     Direction::{Press, Release},
     Enigo, Key, Keyboard, Mouse, Settings,
 };
+#[cfg(target_os = "macos")]
+use ironrdp::server::DesktopSize;
 use ironrdp::server::{KeyboardEvent, MouseEvent, RdpServerInputHandler};
+#[cfg(target_os = "macos")]
+use objc2_core_foundation::{CFRetained, CGPoint};
+#[cfg(target_os = "macos")]
+use objc2_core_graphics::{
+    CGEvent, CGEventField, CGEventSource, CGEventSourceStateID, CGEventTapLocation, CGEventType,
+    CGMouseButton,
+};
 
 use super::ControlGate;
 use super::metrics::RdpMetrics;
@@ -85,6 +104,239 @@ enum InputQueuePush {
 }
 
 const MAX_PENDING_INPUTS: usize = 128;
+
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    static kAXTrustedCheckOptionPrompt: CFStringRef;
+}
+
+#[cfg(target_os = "macos")]
+fn accessibility_permission(prompt: bool) -> bool {
+    let key = unsafe { CFString::wrap_under_get_rule(kAXTrustedCheckOptionPrompt) };
+    let value = if prompt {
+        CFBoolean::true_value()
+    } else {
+        CFBoolean::false_value()
+    };
+    let options = CFDictionary::from_CFType_pairs(&[(key, value)]);
+    unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn control_permission_granted() -> bool {
+    accessibility_permission(false)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn request_control_permission() -> bool {
+    accessibility_permission(true)
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug)]
+pub(crate) struct MacInputMapping {
+    origin_x: f64,
+    origin_y: f64,
+    logical_width: f64,
+    logical_height: f64,
+    surface_size: Arc<AtomicU32>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacInputMapping {
+    pub(crate) fn new(
+        bounds: super::capture::mac::DisplayBounds,
+        surface_size: Arc<AtomicU32>,
+    ) -> anyhow::Result<Self> {
+        if bounds.width == 0 || bounds.height == 0 {
+            anyhow::bail!("selected display has invalid logical bounds");
+        }
+        let surface = unpack_surface_size(surface_size.load(Ordering::Relaxed));
+        if surface.width == 0 || surface.height == 0 {
+            anyhow::bail!("RDP input surface has invalid dimensions");
+        }
+        Ok(Self {
+            origin_x: f64::from(bounds.x),
+            origin_y: f64::from(bounds.y),
+            logical_width: f64::from(bounds.width),
+            logical_height: f64::from(bounds.height),
+            surface_size,
+        })
+    }
+
+    fn absolute_point(&self, x: u16, y: u16) -> CGPoint {
+        let surface = unpack_surface_size(self.surface_size.load(Ordering::Relaxed));
+        CGPoint {
+            x: map_surface_coordinate(x, surface.width, self.origin_x, self.logical_width),
+            y: map_surface_coordinate(y, surface.height, self.origin_y, self.logical_height),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn unpack_surface_size(packed: u32) -> DesktopSize {
+    DesktopSize {
+        width: (packed >> 16) as u16,
+        height: packed as u16,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn map_surface_coordinate(
+    value: u16,
+    surface_extent: u16,
+    origin: f64,
+    logical_extent: f64,
+) -> f64 {
+    let clamped = value.min(surface_extent.saturating_sub(1));
+    origin + f64::from(clamped) * logical_extent / f64::from(surface_extent)
+}
+
+#[cfg(target_os = "macos")]
+struct MacMouse {
+    source: CFRetained<CGEventSource>,
+    mapping: MacInputMapping,
+    pressed: [bool; 3],
+    clicks: [ClickState; 3],
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Default)]
+struct ClickState {
+    last_press: Option<Instant>,
+    x: f64,
+    y: f64,
+    count: i64,
+}
+
+#[cfg(target_os = "macos")]
+impl MacMouse {
+    fn new(mapping: MacInputMapping) -> Result<Self, String> {
+        let source = CGEventSource::new(CGEventSourceStateID::Private)
+            .ok_or_else(|| "could not create CoreGraphics input event source".to_string())?;
+        Ok(Self {
+            source,
+            mapping,
+            pressed: [false; 3],
+            clicks: [ClickState::default(); 3],
+        })
+    }
+
+    fn current_point(&self) -> Result<CGPoint, String> {
+        let event = CGEvent::new(Some(&self.source))
+            .ok_or_else(|| "could not read the current macOS pointer position".to_string())?;
+        Ok(CGEvent::location(Some(&event)))
+    }
+
+    fn absolute_move(&mut self, x: u16, y: u16) -> Result<(), String> {
+        let target = self.mapping.absolute_point(x, y);
+        self.post_move(target)
+    }
+
+    fn relative_move(&mut self, x: i32, y: i32) -> Result<(), String> {
+        let current = self.current_point()?;
+        self.post_move(CGPoint {
+            x: current.x + f64::from(x),
+            y: current.y + f64::from(y),
+        })
+    }
+
+    fn post_move(&mut self, target: CGPoint) -> Result<(), String> {
+        let current = self.current_point()?;
+        let (event_type, button) = if self.pressed[0] {
+            (CGEventType::LeftMouseDragged, CGMouseButton::Left)
+        } else if self.pressed[1] {
+            (CGEventType::RightMouseDragged, CGMouseButton::Right)
+        } else if self.pressed[2] {
+            (CGEventType::OtherMouseDragged, CGMouseButton::Center)
+        } else {
+            (CGEventType::MouseMoved, CGMouseButton::Left)
+        };
+        let event = CGEvent::new_mouse_event(Some(&self.source), event_type, target, button)
+            .ok_or_else(|| "could not create macOS pointer movement event".to_string())?;
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::MouseEventDeltaX,
+            (target.x - current.x).round() as i64,
+        );
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::MouseEventDeltaY,
+            (target.y - current.y).round() as i64,
+        );
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+        Ok(())
+    }
+
+    fn button(&mut self, button: Button, direction: Direction) -> Result<(), String> {
+        if direction == Direction::Click {
+            self.button(button, Direction::Press)?;
+            return self.button(button, Direction::Release);
+        }
+        let (index, cg_button, down_type, up_type) = match button {
+            Button::Left => (
+                0,
+                CGMouseButton::Left,
+                CGEventType::LeftMouseDown,
+                CGEventType::LeftMouseUp,
+            ),
+            Button::Right => (
+                1,
+                CGMouseButton::Right,
+                CGEventType::RightMouseDown,
+                CGEventType::RightMouseUp,
+            ),
+            Button::Middle => (
+                2,
+                CGMouseButton::Center,
+                CGEventType::OtherMouseDown,
+                CGEventType::OtherMouseUp,
+            ),
+            _ => return Err("unsupported macOS pointer button".to_string()),
+        };
+        let point = self.current_point()?;
+        let pressed = direction == Direction::Press;
+        let click_count = if pressed {
+            let state = &mut self.clicks[index];
+            let repeated = state.last_press.is_some_and(|last| {
+                last.elapsed() <= std::time::Duration::from_millis(500)
+                    && (state.x - point.x).abs() <= 4.0
+                    && (state.y - point.y).abs() <= 4.0
+            });
+            state.count = if repeated {
+                state.count.saturating_add(1)
+            } else {
+                1
+            };
+            state.last_press = Some(Instant::now());
+            state.x = point.x;
+            state.y = point.y;
+            state.count
+        } else {
+            self.clicks[index].count.max(1)
+        };
+        let event = CGEvent::new_mouse_event(
+            Some(&self.source),
+            if pressed { down_type } else { up_type },
+            point,
+            cg_button,
+        )
+        .ok_or_else(|| "could not create macOS pointer button event".to_string())?;
+        CGEvent::set_integer_value_field(
+            Some(&event),
+            CGEventField::MouseEventClickState,
+            click_count,
+        );
+        if index == 2 {
+            CGEvent::set_integer_value_field(Some(&event), CGEventField::MouseEventButtonNumber, 2);
+        }
+        CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+        self.pressed[index] = pressed;
+        Ok(())
+    }
+}
 
 impl InputQueue {
     fn new() -> Self {
@@ -180,11 +432,17 @@ impl RdpInput {
         view_only: bool,
         control_gate: Option<std::sync::Arc<ControlGate>>,
         metrics: RdpMetrics,
+        #[cfg(target_os = "macos")] mapping: Option<MacInputMapping>,
     ) -> Self {
         let tx = if view_only {
             None
         } else {
-            Self::spawn_actor(&log, metrics.clone())
+            Self::spawn_actor(
+                &log,
+                metrics.clone(),
+                #[cfg(target_os = "macos")]
+                mapping,
+            )
         };
         Self {
             log,
@@ -201,33 +459,73 @@ impl RdpInput {
     /// / no accessibility permission) — in which case the connection stays
     /// view-only. `Enigo::new` runs *inside* the thread because the resulting
     /// value is `!Send` on macOS and so cannot be constructed here and moved in.
-    fn spawn_actor(log: &LogEmitter, metrics: RdpMetrics) -> Option<InputQueue> {
+    fn spawn_actor(
+        log: &LogEmitter,
+        metrics: RdpMetrics,
+        #[cfg(target_os = "macos")] mapping: Option<MacInputMapping>,
+    ) -> Option<InputQueue> {
         let tx = InputQueue::new();
         let rx = tx.clone();
         // Bootstrap channel: the thread reports back whether `Enigo::new`
         // succeeded so `new()` can decide view-only vs interactive synchronously.
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
-        let log = log.clone();
+        let actor_log = log.clone();
 
         let spawned = std::thread::Builder::new()
             .name("rdp-input".to_string())
             .spawn(move || {
-                let mut enigo = match Enigo::new(&Settings::default()) {
-                    Ok(e) => {
-                        let _ = ready_tx.send(Ok(()));
-                        e
-                    }
+                let settings = Settings {
+                    #[cfg(target_os = "macos")]
+                    open_prompt_to_get_permissions: false,
+                    ..Settings::default()
+                };
+                let mut enigo = match Enigo::new(&settings) {
+                    Ok(e) => e,
                     Err(e) => {
                         let _ = ready_tx.send(Err(e.to_string()));
                         return;
                     }
                 };
+                #[cfg(target_os = "macos")]
+                let mut mac_mouse = match mapping
+                    .ok_or_else(|| "macOS input display mapping is unavailable".to_string())
+                    .and_then(MacMouse::new)
+                {
+                    Ok(mouse) => mouse,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                let _ = ready_tx.send(Ok(()));
                 drop(ready_tx);
+                #[cfg(target_os = "macos")]
+                let mut permission_checked_at = Instant::now();
 
                 // Drain commands until the server drops the queue on shutdown.
                 while let Some(queued) = rx.recv() {
                     metrics.record_input_handoff(queued.received_at);
-                    apply(&mut enigo, queued.cmd);
+                    #[cfg(target_os = "macos")]
+                    if permission_checked_at.elapsed() >= std::time::Duration::from_secs(1) {
+                        if !control_permission_granted() {
+                            actor_log.line(
+                                "input injection stopped: macOS Accessibility permission was revoked",
+                            );
+                            rx.close();
+                            break;
+                        }
+                        permission_checked_at = Instant::now();
+                    }
+                    if let Err(error) = apply(
+                        &mut enigo,
+                        #[cfg(target_os = "macos")]
+                        &mut mac_mouse,
+                        queued.cmd,
+                    ) {
+                        actor_log.line(format!("input injection stopped: {error}"));
+                        rx.close();
+                        break;
+                    }
                     metrics.report_if_due();
                 }
             });
@@ -332,48 +630,45 @@ impl Drop for RdpInput {
     }
 }
 
-/// Replay a single command on the thread-owned `Enigo`. Errors are ignored
-/// (best-effort injection) exactly as before.
-fn apply(enigo: &mut Enigo, cmd: InputCmd) {
+/// Replay one command on the thread-owned input backend. Returning an error
+/// closes the actor so revoked permissions and backend failures are visible.
+fn apply(
+    enigo: &mut Enigo,
+    #[cfg(target_os = "macos")] mac_mouse: &mut MacMouse,
+    cmd: InputCmd,
+) -> Result<(), String> {
     match cmd {
         InputCmd::Raw { code, dir } => {
-            let _ = enigo.raw(code, dir);
+            enigo.raw(code, dir).map_err(|e| e.to_string())?;
         }
         InputCmd::Key { key, dir } => {
-            let _ = enigo.key(key, dir);
+            enigo.key(key, dir).map_err(|e| e.to_string())?;
         }
         InputCmd::Button { button, dir } => {
-            let _ = enigo.button(button, dir);
+            #[cfg(target_os = "macos")]
+            mac_mouse.button(button, dir)?;
+            #[cfg(not(target_os = "macos"))]
+            enigo.button(button, dir).map_err(|e| e.to_string())?;
         }
         InputCmd::MoveMouse { x, y, coord } => {
             #[cfg(target_os = "macos")]
-            if coord == Coordinate::Abs
-                && let Ok(current) = enigo.location()
-            {
-                // enigo 0.6.1 writes the absolute CGEvent delta as
-                // `current - target`. macOS uses that delta to determine edge
-                // pressure, so the cursor reaches the Dock edge visually but
-                // the system sees motion in the opposite direction and does
-                // not reveal an auto-hidden Dock. Its relative path preserves
-                // the supplied delta, so use that path for absolute RDP moves.
-                let (dx, dy) = absolute_move_delta(current, (x, y));
-                if enigo.move_mouse(dx, dy, Coordinate::Rel).is_ok() {
-                    return;
+            match coord {
+                Coordinate::Abs => {
+                    mac_mouse.absolute_move(
+                        u16::try_from(x).unwrap_or(0),
+                        u16::try_from(y).unwrap_or(0),
+                    )?;
                 }
+                Coordinate::Rel => mac_mouse.relative_move(x, y)?,
             }
-            let _ = enigo.move_mouse(x, y, coord);
+            #[cfg(not(target_os = "macos"))]
+            enigo.move_mouse(x, y, coord).map_err(|e| e.to_string())?;
         }
         InputCmd::Scroll { length, axis } => {
-            let _ = enigo.scroll(length, axis);
+            enigo.scroll(length, axis).map_err(|e| e.to_string())?;
         }
     }
-}
-
-fn absolute_move_delta(current: (i32, i32), target: (i32, i32)) -> (i32, i32) {
-    (
-        target.0.saturating_sub(current.0),
-        target.1.saturating_sub(current.1),
-    )
+    Ok(())
 }
 
 impl RdpServerInputHandler for RdpInput {
@@ -788,9 +1083,45 @@ mod tests {
     }
 
     #[test]
-    fn absolute_mouse_delta_points_toward_the_target() {
-        assert_eq!(absolute_move_delta((100, 200), (140, 260)), (40, 60));
-        assert_eq!(absolute_move_delta((140, 260), (100, 200)), (-40, -60));
+    fn retina_surface_coordinates_map_to_logical_display_points() {
+        assert_eq!(map_surface_coordinate(0, 3840, 0.0, 1920.0), 0.0);
+        assert_eq!(map_surface_coordinate(1920, 3840, 0.0, 1920.0), 960.0);
+        assert_eq!(map_surface_coordinate(3839, 3840, 0.0, 1920.0), 1919.5);
+    }
+
+    #[test]
+    fn secondary_display_mapping_preserves_negative_global_origins() {
+        assert_eq!(map_surface_coordinate(0, 2560, -1280.0, 1280.0), -1280.0);
+        assert_eq!(map_surface_coordinate(1280, 2560, -1280.0, 1280.0), -640.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn input_mapping_uses_the_latest_negotiated_surface_size() {
+        fn packed(width: u16, height: u16) -> u32 {
+            (u32::from(width) << 16) | u32::from(height)
+        }
+
+        let surface_size = Arc::new(AtomicU32::new(packed(3840, 2160)));
+        let mapping = MacInputMapping::new(
+            super::super::capture::mac::DisplayBounds {
+                x: -1920,
+                y: 120,
+                width: 1920,
+                height: 1080,
+            },
+            surface_size.clone(),
+        )
+        .unwrap();
+
+        let retina_center = mapping.absolute_point(1920, 1080);
+        assert_eq!(retina_center.x, -960.0);
+        assert_eq!(retina_center.y, 660.0);
+
+        surface_size.store(packed(1920, 1080), Ordering::Relaxed);
+        let negotiated_center = mapping.absolute_point(960, 540);
+        assert_eq!(negotiated_center.x, retina_center.x);
+        assert_eq!(negotiated_center.y, retina_center.y);
     }
 
     #[test]

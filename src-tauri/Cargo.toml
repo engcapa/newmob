@@ -102,8 +102,8 @@ lettre = "0.11.22"
 mail-parser = { version = "0.11.4", features = ["full_encoding"] }
 native-tls = "0.2"
 tokio-native-tls = "0.3"
-ironrdp = { version = "0.15.0", features = ["core", "connector", "session", "graphics", "input", "cliprdr", "rdpdr", "rdpsnd", "svc", "dvc", "displaycontrol", "server", "acceptor"] }
-ironrdp-tokio = { version = "0.9.0", features = ["reqwest-rustls-ring"] }
+ironrdp = { version = "0.17.0", features = ["core", "connector", "session", "graphics", "input", "cliprdr", "rdpdr", "rdpsnd", "svc", "dvc", "displaycontrol", "server", "acceptor"] }
+ironrdp-tokio = { version = "0.10.0", features = ["reqwest-rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8"
 x509-cert = "0.2"
@@ -250,14 +250,14 @@ objc2-core-foundation = "0.3.2"
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "SCShareableContent", "SCStream", "block2", "dispatch2", "objc2-core-graphics", "objc2-core-media"] }
 objc2-video-toolbox = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-media", "objc2-core-video", "VTBase", "VTCompressionProperties", "VTCompressionSession", "VTErrors", "VTSession"] }
 # The IronRDP umbrella crate does not expose its server EGFX feature. A direct
-# dependency enables that feature on the same 0.11 server crate it re-exports,
+# dependency enables that feature on the same 0.13 server crate it re-exports,
 # so the macOS server can use the negotiated AVC420 graphics channel.
-ironrdp-server = { version = "0.11", features = ["egfx"] }
-ironrdp-egfx = "0.1"
+ironrdp-server = { version = "0.13", features = ["egfx"] }
+ironrdp-egfx = "0.3"
 # Explicit Screen Recording permission preflight/request used by the RDP
 # server settings probe. xcap also uses CoreGraphics internally, but keeping
 # this direct dependency makes our permission boundary intentional.
-objc2-core-graphics = { version = "0.3.2", features = ["CGDirectDisplay", "CGWindow"] }
+objc2-core-graphics = { version = "0.3.2", features = ["CGDirectDisplay", "CGEvent", "CGEventSource", "CGEventTypes", "CGWindow"] }
 # SocksCap application identity validation uses Apple's Security.framework
 # static-code API; codesign output is used only to extract the persisted
 # designated requirement/Team/signing metadata after the seal is validated.

@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.89"
 name = "ironrdp-connector"
-version = "0.9.0"
+version = "0.10.0"
 authors = [
     "Devolutions Inc. <infos@devolutions.net>",
     "Teleport <goteleport.com>",
@@ -57,11 +57,11 @@ version = "0.2"
 version = "0.2"
 
 [dependencies.ironrdp-pdu]
-version = "0.8"
+version = "0.9"
 features = ["std"]
 
 [dependencies.ironrdp-svc]
-version = "0.7"
+version = "0.8"
 
 [dependencies.picky]
 version = "=7.0.0-rc.23"

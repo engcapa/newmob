@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.89"
 name = "ironrdp-server"
-version = "0.11.0"
+version = "0.13.0"
 authors = [
     "Devolutions Inc. <infos@devolutions.net>",
     "Teleport <goteleport.com>",
@@ -51,6 +51,7 @@ helper = [
     "dep:x509-cert",
     "dep:rustls-pemfile",
 ]
+nscodec = ["dep:ironrdp-nscodec"]
 qoi = [
     "dep:qoicoubeh",
     "ironrdp-pdu/qoi",
@@ -78,47 +79,52 @@ version = "0.1"
 version = "1"
 
 [dependencies.ironrdp-acceptor]
-version = "0.9"
+version = "0.10"
 
 [dependencies.ironrdp-ainput]
-version = "0.6"
+version = "0.8"
 
 [dependencies.ironrdp-async]
-version = "0.9"
+version = "0.10"
 
 [dependencies.ironrdp-cliprdr]
-version = "0.6"
+version = "0.7"
 
 [dependencies.ironrdp-core]
 version = "0.2"
 
 [dependencies.ironrdp-displaycontrol]
-version = "0.6"
+version = "0.8"
 
 [dependencies.ironrdp-dvc]
-version = "0.6"
+version = "0.8"
 
 [dependencies.ironrdp-echo]
-version = "0.2"
+version = "0.4"
 
 [dependencies.ironrdp-egfx]
-version = "0.1"
+version = "0.3"
 optional = true
 
 [dependencies.ironrdp-graphics]
-version = "0.8"
+version = "0.9"
+
+[dependencies.ironrdp-nscodec]
+version = "0.2"
+features = ["encoder"]
+optional = true
 
 [dependencies.ironrdp-pdu]
-version = "0.8"
+version = "0.9"
 
 [dependencies.ironrdp-rdpsnd]
-version = "0.8"
+version = "0.9"
 
 [dependencies.ironrdp-svc]
-version = "0.7"
+version = "0.8"
 
 [dependencies.ironrdp-tokio]
-version = "0.9"
+version = "0.10"
 features = ["reqwest"]
 
 [dependencies.qoicoubeh]

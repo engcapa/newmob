@@ -22,7 +22,7 @@ use ironrdp::cliprdr::pdu::{
     FormatDataResponse, LockDataId, OwnedFormatDataResponse, PackedFileList,
 };
 use ironrdp::connector::connection_activation::{
-    ConnectionActivationSequence, ConnectionActivationState,
+    ConnectionActivationFactory, ConnectionActivationSequence, ConnectionActivationState,
 };
 use ironrdp::connector::{self, Credentials, Sequence};
 use ironrdp::core::{AsAny, IntoOwned, WriteBuf};
@@ -45,7 +45,7 @@ use ironrdp::rdpsnd::pdu::{
     AudioFormat as IronAudioFormat, PitchPdu, VolumePdu, WaveFormat as IronWaveFormat,
 };
 use ironrdp::session::image::DecodedImage as IronDecodedImage;
-use ironrdp::session::{ActiveStage, ActiveStageOutput};
+use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp::svc::{ChannelFlags, SvcMessage, SvcProcessorMessages};
 use ironrdp_tokio::{Framed, FramedRead, FramedWrite};
 use serde_json::json;
@@ -67,7 +67,7 @@ pub enum SessionOutput {
 enum ActiveOutputFlow {
     Continue,
     Terminate,
-    Reactivate(ConnectionActivationSequence),
+    Reactivate,
 }
 
 pub struct RdpSessionHandle {
@@ -1012,10 +1012,21 @@ async fn drive_ironrdp_connection(
     let server_name = cfg.host.clone();
     let width = connection_result.desktop_size.width;
     let height = connection_result.desktop_size.height;
+    let activation_factory = connection_result.activation_factory.clone();
     send_connected_event(&out_tx, width, height, protocol, &server_name);
 
     let mut image = IronDecodedImage::new(PixelFormat::RgbA32, width, height);
-    let mut active_stage = ActiveStage::new(connection_result);
+    let mut active_stage = ActiveStageBuilder {
+        static_channels: connection_result.static_channels,
+        user_channel_id: connection_result.user_channel_id,
+        io_channel_id: connection_result.io_channel_id,
+        message_channel_id: connection_result.message_channel_id,
+        share_id: connection_result.share_id,
+        compression_type: connection_result.compression_type,
+        enable_server_pointer: connection_result.enable_server_pointer,
+        pointer_software_rendering: connection_result.pointer_software_rendering,
+    }
+    .build();
     let mut input_db = InputDatabase::new();
     let mut last_buttons = 0u8;
     let mut reactivation: Option<ConnectionActivationSequence> = None;
@@ -1049,6 +1060,7 @@ async fn drive_ironrdp_connection(
                     &mut framed,
                     &out_tx,
                     clipboard.as_ref(),
+                    &activation_factory,
                     &mut reactivation,
                 ).await? {
                     ControlOutcome::Continue => {}
@@ -1095,8 +1107,8 @@ async fn drive_ironrdp_connection(
                 match handle_active_outputs(&mut framed, &image, outputs, &out_tx).await? {
                     ActiveOutputFlow::Continue => {}
                     ActiveOutputFlow::Terminate => break,
-                    ActiveOutputFlow::Reactivate(sequence) => {
-                        reactivation = Some(sequence);
+                    ActiveOutputFlow::Reactivate => {
+                        reactivation = Some(activation_factory.create());
                     }
                 }
                 if reactivation.is_none() {
@@ -1120,6 +1132,7 @@ async fn handle_control<S>(
     framed: &mut Framed<S>,
     out_tx: &UnboundedSender<SessionOutput>,
     clipboard: Option<&ClipboardBridge>,
+    activation_factory: &ConnectionActivationFactory,
     reactivation: &mut Option<ConnectionActivationSequence>,
 ) -> Result<ControlOutcome, String>
 where
@@ -1136,7 +1149,9 @@ where
             match handle_active_outputs(framed, image, outputs, out_tx).await? {
                 ActiveOutputFlow::Continue => {}
                 ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
-                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+                ActiveOutputFlow::Reactivate => {
+                    *reactivation = Some(activation_factory.create());
+                }
             }
         }
         RdpControl::UnicodeText(text) => {
@@ -1150,7 +1165,9 @@ where
             match handle_active_outputs(framed, image, outputs, out_tx).await? {
                 ActiveOutputFlow::Continue => {}
                 ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
-                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+                ActiveOutputFlow::Reactivate => {
+                    *reactivation = Some(activation_factory.create());
+                }
             }
         }
         RdpControl::ReleaseInput => {
@@ -1165,7 +1182,9 @@ where
             match handle_active_outputs(framed, image, outputs, out_tx).await? {
                 ActiveOutputFlow::Continue => {}
                 ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
-                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+                ActiveOutputFlow::Reactivate => {
+                    *reactivation = Some(activation_factory.create());
+                }
             }
         }
         RdpControl::Pointer(pointer) => {
@@ -1177,7 +1196,9 @@ where
             match handle_active_outputs(framed, image, outputs, out_tx).await? {
                 ActiveOutputFlow::Continue => {}
                 ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
-                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+                ActiveOutputFlow::Reactivate => {
+                    *reactivation = Some(activation_factory.create());
+                }
             }
         }
         RdpControl::Wheel(wheel) => {
@@ -1188,7 +1209,9 @@ where
             match handle_active_outputs(framed, image, outputs, out_tx).await? {
                 ActiveOutputFlow::Continue => {}
                 ActiveOutputFlow::Terminate => return Ok(ControlOutcome::Disconnect),
-                ActiveOutputFlow::Reactivate(sequence) => *reactivation = Some(sequence),
+                ActiveOutputFlow::Reactivate => {
+                    *reactivation = Some(activation_factory.create());
+                }
             }
         }
         RdpControl::Resize { width, height } => {
@@ -1549,13 +1572,13 @@ where
                 );
                 return Ok(ActiveOutputFlow::Terminate);
             }
-            ActiveStageOutput::DeactivateAll(sequence) => {
+            ActiveStageOutput::DeactivateAll => {
                 send_status(
                     out_tx,
                     "reactivating",
                     "Server deactivated the RDP session; reactivation is in progress.",
                 );
-                return Ok(ActiveOutputFlow::Reactivate(*sequence));
+                return Ok(ActiveOutputFlow::Reactivate);
             }
             ActiveStageOutput::MultitransportRequest(_) | ActiveStageOutput::AutoDetect(_) => {
                 // Optional RDP transports are not established by this client.
