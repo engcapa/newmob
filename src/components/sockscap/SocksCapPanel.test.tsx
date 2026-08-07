@@ -66,6 +66,7 @@ const defaultTestCfg: SocksCapConfig = {
 
 let currentCfg = { ...defaultTestCfg };
 let currentPlatform = "windows";
+let linuxTransparentRequiresElevation = false;
 
 vi.mock("../../lib/sockscap", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/sockscap")>();
@@ -77,7 +78,23 @@ vi.mock("../../lib/sockscap", async (importOriginal) => {
     }),
     sockscapCapabilities: vi.fn(async () =>
       currentPlatform === "linux"
-        ? {
+        ? linuxTransparentRequiresElevation
+          ? {
+              platform: "linux",
+              globalTcp: true,
+              appFilter: true,
+              captureBackend: "nft-cgroup-redirect",
+              notes: ["Transparent capture is available after sudo authentication."],
+              privilegedRequired: true,
+              linux: {
+                transparentAvailable: true,
+                launchedApplicationAvailable: true,
+                launchOnly: false,
+                containerized: false,
+                transparentUnavailableReason: null,
+              },
+            }
+          : {
             platform: "linux",
             globalTcp: false,
             appFilter: true,
@@ -193,6 +210,7 @@ describe("SocksCapPanel Multi-Profile UI", () => {
     window.localStorage.removeItem(SOCKSCAP_MACOS_SETUP_STORAGE_KEY);
     currentCfg = JSON.parse(JSON.stringify(defaultTestCfg));
     currentPlatform = "windows";
+    linuxTransparentRequiresElevation = false;
     vi.mocked(sockscapStart).mockReset();
     vi.mocked(sockscapStart).mockResolvedValue({
       phase: "active",
@@ -645,6 +663,31 @@ describe("SocksCapPanel Multi-Profile UI", () => {
 
     expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
     expect(screen.queryByTestId("sockscap-root-prompt-dialog")).not.toBeInTheDocument();
+  });
+
+  it("prompts for sudo before starting Linux transparent capture", async () => {
+    currentPlatform = "linux";
+    linuxTransparentRequiresElevation = true;
+    render(<SocksCapPanel />);
+
+    fireEvent.click(await screen.findByTestId("sockscap-start"));
+
+    const prompt = await screen.findByTestId("sockscap-root-prompt-dialog");
+    expect(prompt).toHaveTextContent("Root Authorization Required");
+    expect(vi.mocked(sockscapStart)).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId("sockscap-root-password-input"), {
+      target: { value: "sudo-secret" },
+    });
+    fireEvent.click(screen.getByTestId("sockscap-root-prompt-submit"));
+
+    await waitFor(() => {
+      expect(vi.mocked(sockscapStart)).toHaveBeenCalledOnce();
+      expect(vi.mocked(sockscapStart)).toHaveBeenCalledWith("sudo-secret");
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("sockscap-root-prompt-dialog")).not.toBeInTheDocument();
+    });
   });
 
   it("launches and stops a configured Linux application from the launch-only UI", async () => {

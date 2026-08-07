@@ -1127,6 +1127,7 @@ async fn start_linux_capture(
         let backend = LinuxCaptureImpl;
         match backend.start(cfg, Arc::clone(&ctx), None).await {
             Ok(capture) => LinuxCaptureHandle::Transparent(capture),
+            Err(error) if caps.privileged_required => return Err(error),
             Err(error) => {
                 tracing::warn!(
                     "Linux transparent capture became unavailable after preflight; falling back to launch-only capture: {error}"

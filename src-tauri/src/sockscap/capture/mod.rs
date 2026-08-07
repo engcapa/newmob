@@ -35,8 +35,13 @@ pub fn capabilities() -> SocksCapCapabilities {
     }
     #[cfg(target_os = "linux")]
     {
-        let transparent = linux::transparent_preflight();
-        let transparent_available = transparent.is_ok();
+        let transparent = linux::transparent_capability();
+        let transparent_available =
+            !matches!(&transparent, linux::TransparentCapability::Unavailable(_));
+        let privileged_required = matches!(
+            &transparent,
+            linux::TransparentCapability::ElevationRequired
+        );
         let launched = if transparent_available {
             Ok(())
         } else {
@@ -55,24 +60,31 @@ pub fn capabilities() -> SocksCapCapabilities {
                 "unavailable".into()
             },
             notes: if transparent_available {
-                vec!["Linux nftables and cgroup transparent capture is available without additional elevation.".into()]
+                vec![if privileged_required {
+                    "Linux nftables and cgroup transparent capture is available after sudo authentication.".into()
+                } else {
+                    "Linux nftables and cgroup transparent capture is available without additional elevation.".into()
+                }]
             } else if launched_application_available {
                 vec!["Linux transparent capture is unavailable. Launch selected applications from SocksCap to capture their TCP process tree without sudo or proxy environment variables.".into()]
             } else {
                 vec!["The current Linux container or kernel does not allow unprivileged application capture.".into()]
             },
-            // Linux only requests elevation when the caller explicitly chooses
-            // the existing nftables/cgroup backend.
-            privileged_required: false,
+            privileged_required,
             linux: Some(crate::sockscap::LinuxCaptureCapabilities {
                 transparent_available,
                 launched_application_available,
                 launch_only: !transparent_available,
                 containerized: linux::is_containerized(),
-                transparent_unavailable_reason: if launched_application_available {
-                    transparent.err()
-                } else {
-                    launched.err()
+                transparent_unavailable_reason: match transparent {
+                    linux::TransparentCapability::Unavailable(error)
+                        if launched_application_available =>
+                    {
+                        Some(error)
+                    }
+                    linux::TransparentCapability::Unavailable(_) => launched.err(),
+                    linux::TransparentCapability::Available
+                    | linux::TransparentCapability::ElevationRequired => None,
                 },
             }),
         }
