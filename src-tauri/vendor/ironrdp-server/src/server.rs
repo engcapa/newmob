@@ -1,5 +1,6 @@
+use core::fmt;
 use core::net::SocketAddr;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use core::time::Duration;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -21,6 +22,9 @@ use ironrdp_pdu::rdp::capability_sets::{
 };
 pub use ironrdp_pdu::rdp::client_info::Credentials;
 use ironrdp_pdu::rdp::headers::{ServerDeactivateAll, ShareControlPdu};
+use ironrdp_pdu::rdp::server_error_info::{
+    ErrorInfo, ProtocolIndependentCode, ServerSetErrorInfoPdu,
+};
 use ironrdp_pdu::x224::X224;
 use ironrdp_pdu::{Action, PduResult, decode_err, mcs, nego, rdp};
 use ironrdp_rdpsnd as rdpsnd;
@@ -95,12 +99,151 @@ pub trait ConnectionHandler: Send {
     }
 }
 
+/// Outcome of a successful [`CredentialValidator::validate`] call.
+///
+/// A rejection from a working validator is not an error: the validator did
+/// its job and decided the credentials do not authenticate. Backend failures
+/// (LDAP unreachable, PAM transport broken, database connection lost) are
+/// reported via [`CredentialValidationError`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialDecision {
+    /// Credentials accepted; the connection proceeds.
+    Accept,
+    /// Credentials rejected; the connection is closed.
+    Reject,
+}
+
+/// Error returned by a [`CredentialValidator`] when the validator backend
+/// itself fails (rather than the credentials being invalid).
+///
+/// Wraps any [`core::error::Error`] from the backend (LDAP/PAM/DB/etc.) so
+/// the trait does not require a particular error library in implementors or
+/// consumers.
+#[derive(Debug)]
+pub struct CredentialValidationError {
+    source: Box<dyn core::error::Error + Send + Sync>,
+}
+
+impl CredentialValidationError {
+    /// Wrap a backend error as a credential-validation failure.
+    pub fn new<E>(source: E) -> Self
+    where
+        E: core::error::Error + Send + Sync + 'static,
+    {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+impl fmt::Display for CredentialValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("credential validator backend failure")
+    }
+}
+
+impl core::error::Error for CredentialValidationError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        Some(&*self.source)
+    }
+}
+
+/// Server-side credential validator for TLS-mode connections.
+///
+/// Called during connection setup when the server receives client credentials
+/// via `ClientInfoPdu`. Not used for CredSSP/Hybrid connections (those use
+/// pre-loaded credentials for NTLM challenge-response).
+///
+/// Implement this trait to validate credentials against external systems
+/// (PAM, LDAP, database, etc.). For blocking backends, wrap the call in
+/// `tokio::task::spawn_blocking` to avoid stalling the async runtime.
+///
+/// # Example
+///
+/// ```ignore
+/// use ironrdp_server::{CredentialDecision, CredentialValidationError, CredentialValidator, Credentials};
+///
+/// struct StaticValidator {
+///     expected_user: String,
+///     expected_password: String,
+/// }
+///
+/// #[async_trait::async_trait]
+/// impl CredentialValidator for StaticValidator {
+///     async fn validate(
+///         &self,
+///         creds: &Credentials,
+///     ) -> Result<CredentialDecision, CredentialValidationError> {
+///         if creds.username == self.expected_user && creds.password == self.expected_password {
+///             Ok(CredentialDecision::Accept)
+///         } else {
+///             Ok(CredentialDecision::Reject)
+///         }
+///     }
+/// }
+/// ```
+#[async_trait::async_trait]
+pub trait CredentialValidator: Send + Sync {
+    /// Validate credentials received from the client.
+    ///
+    /// Return `Ok(CredentialDecision::Accept)` to permit the connection,
+    /// `Ok(CredentialDecision::Reject)` to refuse it. Return
+    /// `Err(CredentialValidationError::new(_))` only when the validator
+    /// itself could not produce a decision (backend system error).
+    ///
+    /// Implementors backed by blocking systems (PAM, libldap, a synchronous
+    /// database driver) should offload the work, for example with
+    /// `tokio::task::spawn_blocking`, so the returned future does not stall the
+    /// caller's executor. Native-async backends can simply `.await`.
+    async fn validate(
+        &self,
+        credentials: &Credentials,
+    ) -> Result<CredentialDecision, CredentialValidationError>;
+}
+
+/// A built-in [`CredentialValidator`] that accepts exactly one fixed set of credentials.
+///
+/// This is the validation-policy equivalent of the acceptor's pre-loaded
+/// exact-match: it keeps the common "one known account" case a one-liner while
+/// going through the same hook as PAM, LDAP, or database-backed validators.
+pub struct ExactMatchCredentialValidator {
+    expected: Credentials,
+}
+
+impl ExactMatchCredentialValidator {
+    /// Build a validator that accepts only `expected` and rejects everything else.
+    pub fn new(expected: Credentials) -> Self {
+        Self { expected }
+    }
+}
+
+#[async_trait::async_trait]
+impl CredentialValidator for ExactMatchCredentialValidator {
+    async fn validate(
+        &self,
+        credentials: &Credentials,
+    ) -> Result<CredentialDecision, CredentialValidationError> {
+        if credentials == &self.expected {
+            Ok(CredentialDecision::Accept)
+        } else {
+            Ok(CredentialDecision::Reject)
+        }
+    }
+}
+
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct RdpServerOptions {
     pub addr: SocketAddr,
     pub security: RdpServerSecurity,
     pub codecs: BitmapCodecs,
     pub max_request_size: u32,
+    /// When `true`, each connection's acceptor adopts the desktop size the
+    /// client requests in its Client Core Data (instead of the size reported
+    /// by the display handler), negotiating that size from the start without a
+    /// Deactivation-Reactivation resize. Defaults to `false`. Set via
+    /// [`RdpServerBuilder::with_honor_client_desktop_size`](crate::RdpServerBuilder::with_honor_client_desktop_size).
+    pub honor_client_desktop_size: bool,
 }
 
 impl RdpServerOptions {
@@ -142,6 +285,14 @@ impl RdpServerOptions {
             .0
             .iter()
             .any(|codec| matches!(codec.property, CodecProperty::QoiZ))
+    }
+
+    #[cfg(feature = "nscodec")]
+    fn has_nscodec(&self) -> bool {
+        self.codecs
+            .0
+            .iter()
+            .any(|codec| matches!(codec.property, CodecProperty::NsCodec(_)))
     }
 }
 
@@ -221,6 +372,20 @@ impl DisplayControlHandler for DisplayControlBackend {
     }
 }
 
+/// Selects who performs the TLS handshake for a connection accepted via
+/// [`RdpServer::run_connection_with`].
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub enum TransportTls {
+    /// IronRDP performs the TLS accept on the stream (standard TCP+TLS).
+    Managed,
+    /// The stream is already past TLS, terminated by a lower layer (e.g. a WSS
+    /// terminator). IronRDP skips the TLS handshake. The caller MUST guarantee
+    /// the transport is already encrypted; see the preconditions on
+    /// [`RdpServer::run_connection_with`].
+    AlreadyDone,
+}
+
 /// RDP Server
 ///
 /// A server is created to listen for connections.
@@ -298,6 +463,7 @@ pub struct RdpServer {
     ev_sender: mpsc::UnboundedSender<ServerEvent>,
     ev_receiver: Arc<Mutex<mpsc::UnboundedReceiver<ServerEvent>>>,
     creds: Option<Credentials>,
+    credential_validator: Option<Arc<dyn CredentialValidator>>,
     local_addr: Option<SocketAddr>,
     autodetect: Option<AutoDetectManager>,
     connection_handler: Option<Box<dyn ConnectionHandler>>,
@@ -312,6 +478,14 @@ pub struct RdpServer {
     /// and locks up its input dispatch for seconds on refocus while it
     /// chews through the backlog.
     display_suppressed: Arc<AtomicBool>,
+
+    /// Latest NetworkAutoDetect round-trip time in milliseconds, or `u32::MAX`
+    /// until the first measurement (and while auto-detect is disabled). Updated
+    /// on each RTT Measure Response when auto-detect is enabled (see
+    /// [`Self::enable_autodetect`]). Exposed via [`Self::autodetect_rtt_handle`]
+    /// so display backends can read a fresh, frame-traffic-independent network
+    /// RTT for flow control.
+    autodetect_rtt: Arc<AtomicU32>,
 }
 
 #[derive(Debug)]
@@ -346,17 +520,11 @@ enum RunState {
 }
 
 impl RdpServer {
-    // The lint only fires with the `egfx` feature on (8 args including
-    // `gfx_factory`); without it the parameter count is 7 and the lint
-    // is satisfied. `cfg_attr` keeps `#[expect]` strict in both modes.
-    #[cfg_attr(
-        feature = "egfx",
-        expect(
-            clippy::too_many_arguments,
-            reason = "called via the builder; positional parameters are an internal detail"
-        )
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "called via the builder; positional parameters are an internal detail"
     )]
-    pub fn new(
+    pub(crate) fn new(
         opts: RdpServerOptions,
         handler: Box<dyn RdpServerInputHandler>,
         display: Box<dyn RdpServerDisplay>,
@@ -365,6 +533,7 @@ impl RdpServer {
         connection_handler: Option<Box<dyn ConnectionHandler>>,
         #[cfg(feature = "egfx")] mut gfx_factory: Option<Box<dyn GfxServerFactory>>,
         display_suppressed: Option<Arc<AtomicBool>>,
+        autodetect_rtt: Option<Arc<AtomicU32>>,
     ) -> Self {
         let (ev_sender, ev_receiver) = ServerEvent::create_channel();
         if let Some(cliprdr) = cliprdr_factory.as_mut() {
@@ -392,16 +561,42 @@ impl RdpServer {
             ev_sender,
             ev_receiver: Arc::new(Mutex::new(ev_receiver)),
             creds: None,
+            credential_validator: None,
             local_addr: None,
             autodetect: None,
             connection_handler,
             display_suppressed: display_suppressed
                 .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            autodetect_rtt: {
+                // Reset to the sentinel: an injected handle must not expose a stale value before the first measurement.
+                let handle = autodetect_rtt.unwrap_or_else(|| Arc::new(AtomicU32::new(u32::MAX)));
+                handle.store(u32::MAX, Ordering::Relaxed);
+                handle
+            },
         }
     }
 
     pub fn builder() -> builder::RdpServerBuilder<builder::WantsAddr> {
         builder::RdpServerBuilder::new()
+    }
+
+    /// Set or clear the credential validator for TLS-mode connections.
+    ///
+    /// When set, credentials received from the client during
+    /// `SecureSettingsExchange` are validated through this callback before
+    /// the session is established. If the validator returns
+    /// [`CredentialDecision::Reject`] (or a [`CredentialValidationError`]),
+    /// the connection is rejected. Passing `None` clears any previously
+    /// configured validator.
+    ///
+    /// Most callers should configure the validator at construction time via
+    /// the builder's `with_credential_validator` method
+    /// ([`RdpServer::builder`]); this setter exists for dynamic
+    /// post-construction reconfiguration.
+    ///
+    /// Not used for CredSSP/Hybrid connections (those use pre-loaded credentials).
+    pub fn set_credential_validator(&mut self, validator: Option<Arc<dyn CredentialValidator>>) {
+        self.credential_validator = validator;
     }
 
     pub fn event_sender(&self) -> &mpsc::UnboundedSender<ServerEvent> {
@@ -439,6 +634,16 @@ impl RdpServer {
     /// [crate::RdpServerBuilder]: crate::RdpServerBuilder
     pub fn display_suppressed_handle(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.display_suppressed)
+    }
+
+    /// Returns a handle to the latest NetworkAutoDetect RTT in milliseconds
+    /// (`u32::MAX` until the first measurement, and while auto-detect is
+    /// disabled). The server updates it on each RTT Measure Response; backends
+    /// clone the handle to read a fresh network RTT for flow control. Inject a
+    /// shared instance at construction with
+    /// [`RdpServerBuilder::with_autodetect_rtt_handle`](crate::RdpServerBuilder::with_autodetect_rtt_handle).
+    pub fn autodetect_rtt_handle(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.autodetect_rtt)
     }
 
     /// Returns the shared ECHO server handle for runtime probe requests and RTT measurements.
@@ -523,20 +728,102 @@ impl RdpServer {
         acceptor.attach_static_channel(dvc);
     }
 
+    /// Run a single RDP connection over `stream`, performing the
+    /// IronRDP-managed TLS handshake on `ShouldUpgrade` (standard TCP+TLS).
+    ///
+    /// Equivalent to [`run_connection_with`](Self::run_connection_with) with
+    /// [`TransportTls::Managed`].
     pub async fn run_connection<S>(&mut self, stream: S) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Send + Sync + Unpin,
+    {
+        self.run_connection_with(stream, TransportTls::Managed)
+            .await
+    }
+
+    /// Run a single RDP connection over `stream`, choosing who performs the TLS
+    /// handshake with `tls`.
+    ///
+    /// With [`TransportTls::Managed`], IronRDP performs the TLS accept on
+    /// `ShouldUpgrade`, exactly as [`run_connection`](Self::run_connection).
+    ///
+    /// With [`TransportTls::AlreadyDone`], the caller's `stream` has ALREADY
+    /// been transport-encrypted at a lower layer that the embedder owns
+    /// (typically a WSS terminator in the same process, or a TLS stream the
+    /// embedder accepted up front), so IronRDP skips the TLS handshake and
+    /// advances the state machine via [`Acceptor::mark_security_upgrade_as_done`].
+    /// Everything past the handshake, including the optional Hybrid CredSSP
+    /// exchange and finalization, is identical to the managed path.
+    ///
+    /// # Use case for [`TransportTls::AlreadyDone`]
+    ///
+    /// This mode decouples transport encryption from the RDP security-upgrade
+    /// step. It is for ironrdp-server endpoints that terminate transport
+    /// encryption themselves before the RDP state machine runs — for example a
+    /// server that accepts WSS directly, or one fronted by an in-process TLS
+    /// terminator — and therefore must not perform a second, inner TLS
+    /// handshake when the X.224 negotiation selects `PROTOCOL_SSL`.
+    ///
+    /// This is distinct from a [RDCleanPath] proxy deployment (e.g.
+    /// Devolutions Gateway), where the proxy performs a real TLS handshake with
+    /// a *separate* backend RDP server and relays that server's certificate
+    /// chain to the client. In that topology the backend server owns its own
+    /// TLS and uses [`TransportTls::Managed`]; this mode does not apply to it.
+    /// RDCleanPath is relevant here only as one client-side mechanism (see
+    /// precondition 2) for telling a client not to expect an inner handshake.
+    ///
+    /// # Preconditions for [`TransportTls::AlreadyDone`] (caller MUST guarantee)
+    ///
+    /// 1. The `stream` is already transport-encrypted by another layer
+    ///    (WSS, in-process, etc.). Passing a plain TCP stream here exposes
+    ///    RDP traffic in plaintext on the wire.
+    ///
+    /// 2. The connecting client must not expect an inner TLS handshake on this
+    ///    stream. Vanilla RDP clients (mstsc, xfreerdp) negotiate TLS from the
+    ///    X.224 `selectedProtocol` and have no concept of "TLS already done at a
+    ///    lower layer": they will hang or fail, and must use
+    ///    [`TransportTls::Managed`]. Arranging for a client to skip the inner
+    ///    handshake is the embedder's responsibility; RDCleanPath is one such
+    ///    mechanism, but this method does not depend on it.
+    ///
+    /// 3. If `self.opts.security` is [`RdpServerSecurity::Hybrid`], two things
+    ///    must hold. First, the client must support CredSSP over this
+    ///    transport; the SPNEGO exchange itself is transport-independent
+    ///    (CredSSP carries its own crypto via TSRequest), so it runs the same
+    ///    as on the managed path. Second, and less obvious: the CredSSP
+    ///    server-public-key confirmation (`pubKeyAuth`, per MS-CSSP) binds to
+    ///    the certificate the client validated at the lower transport layer,
+    ///    not to anything IronRDP does here. So the public key configured in
+    ///    [`RdpServerSecurity::Hybrid`] MUST be the public key of the
+    ///    certificate that lower layer (e.g. the WSS terminator) presented to
+    ///    the client, otherwise the client's `pubKeyAuth` check fails and
+    ///    Hybrid is rejected. This is the embedder's responsibility; it does
+    ///    not hold automatically. In practice it means terminating transport
+    ///    TLS with the same certificate configured for Hybrid.
+    ///
+    /// [RDCleanPath]: https://docs.rs/ironrdp-rdcleanpath
+    ///
+    /// # Wire-level invariant
+    ///
+    /// This method does NOT alter the X.224 negotiation. The acceptor still
+    /// advertises whatever `SecurityProtocol` it was constructed with, and the
+    /// connecting client still negotiates as normal. The only behaviour change
+    /// under [`TransportTls::AlreadyDone`] is that after the negotiation reaches
+    /// the security-upgrade gate, no TLS handshake is performed on the byte
+    /// stream, because the caller's stream is already past TLS at a lower layer.
+    pub async fn run_connection_with<S>(&mut self, stream: S, tls: TransportTls) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Send + Sync + Unpin,
     {
         // Per-connection state must start fresh: if the previous client
         // disconnected while it had sent `SuppressOutput { None }` (e.g.,
         // closed the mstsc window while minimized so the matching resume
-        // PDU never arrived), the flag would still read `true` here and
-        // the display backend would silently drop frames for the entire
-        // new session until/unless the new client happens to send a
+        // PDU never arrived), the flag would still read `true` here and the
+        // display backend would silently drop frames for the entire new
+        // session until/unless the new client happens to send a
         // `RefreshRectangle` or `SuppressOutput { Some(rect) }`. Resetting
-        // here also covers backends that share an externally-created Arc
-        // via `set_display_suppressed_handle()` — they get the same
-        // per-connection clean slate.
+        // here also covers backends that share an externally-created Arc via
+        // `set_display_suppressed_handle()`.
         self.display_suppressed.store(false, Ordering::Relaxed);
 
         let framed = TokioFramed::new(stream);
@@ -549,6 +836,7 @@ impl RdpServer {
             capabilities,
             self.creds.clone(),
         );
+        acceptor.set_honor_client_desktop_size(self.opts.honor_client_desktop_size);
 
         self.attach_channels(&mut acceptor);
 
@@ -557,52 +845,89 @@ impl RdpServer {
             .context("accept_begin failed")?;
 
         match res {
-            BeginResult::ShouldUpgrade(stream) => {
-                let tls_acceptor = match &self.opts.security {
-                    RdpServerSecurity::Tls(acceptor) => acceptor,
-                    RdpServerSecurity::Hybrid((acceptor, _)) => acceptor,
-                    RdpServerSecurity::None => unreachable!(),
-                };
-                let accept = match tls_acceptor.accept(stream).await {
-                    Ok(accept) => accept,
-                    Err(e) => {
-                        warn!("Failed to TLS accept: {}", e);
-                        return Ok(());
-                    }
-                };
-                let mut framed = TokioFramed::new(accept);
-
-                acceptor.mark_security_upgrade_as_done();
-
-                if let RdpServerSecurity::Hybrid((_, pub_key)) = &self.opts.security {
-                    // Generic streams don't expose peer address. Use a neutral
-                    // placeholder; it's unclear whether CredSSP/NTLM actually
-                    // uses this value in practice.
-                    let client_name = "rdp-client".to_owned();
-
-                    ironrdp_acceptor::accept_credssp(
-                        &mut framed,
-                        &mut acceptor,
-                        &mut ironrdp_tokio::reqwest::ReqwestNetworkClient::new(),
-                        client_name.into(),
-                        pub_key.clone(),
-                        None,
+            // The only thing that varies between the two modes is who performs
+            // the TLS handshake; everything past it is `finalize_after_upgrade`.
+            BeginResult::ShouldUpgrade(stream) => match tls {
+                TransportTls::Managed => {
+                    let tls_acceptor = match &self.opts.security {
+                        RdpServerSecurity::Tls(acceptor) => acceptor,
+                        RdpServerSecurity::Hybrid((acceptor, _)) => acceptor,
+                        RdpServerSecurity::None => unreachable!(),
+                    };
+                    let accept = match tls_acceptor.accept(stream).await {
+                        Ok(accept) => accept,
+                        Err(e) => {
+                            warn!("Failed to TLS accept: {}", e);
+                            return Ok(());
+                        }
+                    };
+                    self.finalize_after_upgrade(
+                        TokioFramed::new(accept),
+                        acceptor,
+                        "TLS connection",
                     )
                     .await?;
                 }
-
-                let framed = self.accept_finalize(framed, acceptor).await?;
-                debug!("Shutting down TLS connection");
-                let (mut tls_stream, _) = framed.into_inner();
-                if let Err(e) = tls_stream.shutdown().await {
-                    debug!(?e, "TLS shutdown error");
+                TransportTls::AlreadyDone => {
+                    // The stream is already past TLS (terminated at a lower
+                    // layer, e.g. a WSS terminator); do NOT call
+                    // tls_acceptor.accept on it.
+                    self.finalize_after_upgrade(
+                        TokioFramed::new(stream),
+                        acceptor,
+                        "TLS-offloaded stream",
+                    )
+                    .await?;
                 }
-            }
+            },
 
             BeginResult::Continue(framed) => {
                 self.accept_finalize(framed, acceptor).await?;
             }
         };
+
+        Ok(())
+    }
+
+    /// Shared post-handshake tail for both [`TransportTls`] modes: mark the
+    /// security upgrade complete, run the optional Hybrid CredSSP exchange,
+    /// finalize, and shut the stream down. Single-sourcing this is what keeps
+    /// the managed and TLS-offloaded paths structurally identical past the
+    /// handshake, so per-connection state handling cannot drift between them.
+    async fn finalize_after_upgrade<S>(
+        &mut self,
+        mut framed: TokioFramed<S>,
+        mut acceptor: Acceptor,
+        shutdown_label: &str,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Sync + Send + Unpin,
+    {
+        acceptor.mark_security_upgrade_as_done();
+
+        if let RdpServerSecurity::Hybrid((_, pub_key)) = &self.opts.security {
+            // Generic streams don't expose peer address. Use a neutral
+            // placeholder; it's unclear whether CredSSP/NTLM actually
+            // uses this value in practice.
+            let client_name = "rdp-client".to_owned();
+
+            ironrdp_acceptor::accept_credssp(
+                &mut framed,
+                &mut acceptor,
+                &mut ironrdp_tokio::reqwest::ReqwestNetworkClient::new(),
+                client_name.into(),
+                pub_key.clone(),
+                None,
+            )
+            .await?;
+        }
+
+        let framed = self.accept_finalize(framed, acceptor).await?;
+        debug!("Shutting down {}", shutdown_label);
+        let (mut inner, _) = framed.into_inner();
+        if let Err(e) = inner.shutdown().await {
+            debug!(?e, "{} shutdown error", shutdown_label);
+        }
 
         Ok(())
     }
@@ -726,6 +1051,7 @@ impl RdpServer {
         writer: &mut impl FramedWrite,
         io_channel_id: u16,
         user_channel_id: u16,
+        message_channel_id: Option<u16>,
     ) -> Result<RunState> {
         match action {
             Action::FastPath => {
@@ -735,7 +1061,13 @@ impl RdpServer {
 
             Action::X224 => {
                 if self
-                    .handle_x224(writer, io_channel_id, user_channel_id, &bytes)
+                    .handle_x224(
+                        writer,
+                        io_channel_id,
+                        user_channel_id,
+                        message_channel_id,
+                        &bytes,
+                    )
                     .await
                     .context("X224 input error")?
                 {
@@ -789,8 +1121,8 @@ impl RdpServer {
         &mut self,
         events: &mut Vec<ServerEvent>,
         writer: &mut impl FramedWrite,
-        io_channel_id: u16,
         user_channel_id: u16,
+        message_channel_id: Option<u16>,
     ) -> Result<RunState> {
         // Avoid wave messages queuing up and causing extra delay. When a
         // batch carries more than `WAVE_KEEP` waves, drop the OLDEST ones
@@ -860,6 +1192,9 @@ impl RdpServer {
                     let msgs = match c {
                         ClipboardMessage::SendInitiateCopy(formats) => {
                             cliprdr.initiate_copy(&formats)
+                        }
+                        ClipboardMessage::SendInitiateFileCopy(files) => {
+                            cliprdr.initiate_file_copy(files)
                         }
                         ClipboardMessage::SendFormatData(data) => cliprdr.submit_format_data(data),
                         ClipboardMessage::SendInitiatePaste(format) => {
@@ -939,12 +1274,17 @@ impl RdpServer {
                     }
                 },
                 ServerEvent::AutoDetectRttRequest => {
-                    if let Some(ref mut ad) = self.autodetect {
+                    // Auto-detect requests ride the MCS message channel
+                    // ([MS-RDPBCGR] 2.2.14.3). With none negotiated (the client
+                    // did not request it), there is nowhere to send them.
+                    if let (Some(ad), Some(message_channel_id)) =
+                        (self.autodetect.as_mut(), message_channel_id)
+                    {
                         ad.expire_stale_probes(crate::autodetect::RTT_PROBE_MAX_AGE);
                         let request = ad.send_rtt_request();
-                        let data = encode_share_data_pdu(
-                            rdp::headers::ShareDataPdu::AutoDetectReq(request),
-                            io_channel_id,
+                        let data = encode_autodetect_request(
+                            request,
+                            message_channel_id,
                             user_channel_id,
                         )?;
                         writer.write_all(&data).await?;
@@ -962,6 +1302,7 @@ impl RdpServer {
         writer: &mut Framed<W>,
         io_channel_id: u16,
         user_channel_id: u16,
+        message_channel_id: Option<u16>,
         mut encoder: UpdateEncoder,
     ) -> Result<RunState>
     where
@@ -982,7 +1323,14 @@ impl RdpServer {
                 let (action, bytes) = reader.read_pdu().await?;
                 let mut this = this.lock().await;
                 match this
-                    .dispatch_pdu(action, bytes, &mut writer, io_channel_id, user_channel_id)
+                    .dispatch_pdu(
+                        action,
+                        bytes,
+                        &mut writer,
+                        io_channel_id,
+                        user_channel_id,
+                        message_channel_id,
+                    )
                     .await?
                 {
                     RunState::Continue => continue,
@@ -1044,8 +1392,8 @@ impl RdpServer {
                     .dispatch_server_events(
                         &mut events,
                         &mut event_writer,
-                        io_channel_id,
                         user_channel_id,
+                        message_channel_id,
                     )
                     .await?
                 {
@@ -1077,12 +1425,41 @@ impl RdpServer {
     {
         debug!("Client accepted");
 
+        // Validate credentials if a validator is configured. The validator runs here, in the
+        // async server layer, rather than in the sans-I/O acceptor, because real validators
+        // (PAM/LDAP/DB) are I/O-bound. On rejection, deny with a ServerSetErrorInfoPdu before
+        // closing, matching the acceptor's exact-match denial path.
+        if let Some(validator) = self.credential_validator.clone() {
+            if let Some(creds) = &result.credentials {
+                match validator.validate(creds).await {
+                    Ok(CredentialDecision::Accept) => {
+                        debug!("Credential validation accepted");
+                    }
+                    Ok(CredentialDecision::Reject) => {
+                        warn!("Credential validation rejected");
+                        send_access_denied(result.io_channel_id, result.user_channel_id, writer)
+                            .await?;
+                        bail!("credential validation rejected");
+                    }
+                    Err(e) => {
+                        error!(error = %e, "Credential validator backend error");
+                        send_access_denied(result.io_channel_id, result.user_channel_id, writer)
+                            .await?;
+                        bail!("credential validation backend error");
+                    }
+                }
+            } else {
+                debug!("Skipping credential validation (no credentials in AcceptorResult)");
+            }
+        }
+
         if !result.input_events.is_empty() {
             debug!("Handling input event backlog from acceptor sequence");
             self.handle_input_backlog(
                 writer,
                 result.io_channel_id,
                 result.user_channel_id,
+                result.message_channel_id,
                 result.input_events,
             )
             .await?;
@@ -1172,6 +1549,14 @@ impl RdpServer {
                                     update_codecs.set_remotefx(Some((caps.entropy_bits, codec.id)));
                                 }
                             }
+                            #[cfg(feature = "nscodec")]
+                            CodecProperty::NsCodec(client_ns) if self.opts.has_nscodec() => {
+                                // Re-use the client's confirmed color-loss
+                                // level so the server encodes at the same
+                                // shift the client decodes against.
+                                update_codecs
+                                    .set_nscodec(Some((codec.id, client_ns.color_loss_level)));
+                            }
                             CodecProperty::NsCodec(_) => (),
                             #[cfg(feature = "qoi")]
                             CodecProperty::Qoi if self.opts.has_qoi() => {
@@ -1204,6 +1589,7 @@ impl RdpServer {
                 writer,
                 result.io_channel_id,
                 result.user_channel_id,
+                result.message_channel_id,
                 encoder,
             )
             .await
@@ -1217,6 +1603,7 @@ impl RdpServer {
         writer: &mut impl FramedWrite,
         io_channel_id: u16,
         user_channel_id: u16,
+        message_channel_id: Option<u16>,
         frames: Vec<Vec<u8>>,
     ) -> Result<()> {
         for frame in frames {
@@ -1228,7 +1615,13 @@ impl RdpServer {
 
                 Ok(Action::X224) => {
                     let _ = self
-                        .handle_x224(writer, io_channel_id, user_channel_id, &frame)
+                        .handle_x224(
+                            writer,
+                            io_channel_id,
+                            user_channel_id,
+                            message_channel_id,
+                            &frame,
+                        )
                         .await;
                 }
 
@@ -1289,19 +1682,6 @@ impl RdpServer {
                     return Ok(true);
                 }
 
-                rdp::headers::ShareDataPdu::AutoDetectRsp(response) => {
-                    if let Some(ref mut ad) = self.autodetect {
-                        if let Some(rtt_ms) = ad.handle_response(&response) {
-                            debug!(rtt_ms, seq = response.sequence_number(), "RTT measured");
-                        } else {
-                            trace!(
-                                seq = response.sequence_number(),
-                                "Unmatched auto-detect response"
-                            );
-                        }
-                    }
-                }
-
                 // Client requests the server stop or resume sending display
                 // updates. mstsc sends `desktop_rect: None` on minimize and
                 // `desktop_rect: Some(rect)` on refocus. Without honoring
@@ -1344,11 +1724,39 @@ impl RdpServer {
         Ok(false)
     }
 
+    fn handle_message_channel_data(&mut self, data: SendDataRequest<'_>) {
+        // The MCS message channel currently carries only the auto-detect
+        // response. It is framed by a Basic Security Header (SEC_AUTODETECT_RSP),
+        // not a Share Control header.
+        match decode::<rdp::autodetect::AutoDetectRspPdu>(data.user_data.as_ref()) {
+            Ok(pdu) => {
+                if let Some(ref mut ad) = self.autodetect {
+                    if let Some(rtt_ms) = ad.handle_response(&pdu.response) {
+                        self.autodetect_rtt.store(rtt_ms, Ordering::Relaxed);
+                        debug!(rtt_ms, seq = pdu.response.sequence_number(), "RTT measured");
+                    } else {
+                        trace!(
+                            seq = pdu.response.sequence_number(),
+                            "Unmatched auto-detect response"
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    error = format!("{error:#}"),
+                    "Unhandled MCS message channel PDU"
+                );
+            }
+        }
+    }
+
     async fn handle_x224(
         &mut self,
         writer: &mut impl FramedWrite,
         io_channel_id: u16,
         user_channel_id: u16,
+        message_channel_id: Option<u16>,
         frame: &[u8],
     ) -> Result<bool> {
         let message = decode::<X224<mcs::McsMessage<'_>>>(frame)?;
@@ -1362,6 +1770,11 @@ impl RdpServer {
                 );
                 if data.channel_id == io_channel_id {
                     return self.handle_io_channel_data(data).await;
+                }
+
+                if message_channel_id == Some(data.channel_id) {
+                    self.handle_message_channel_data(data);
+                    return Ok(false);
                 }
 
                 if let Some(svc) = self.static_channels.get_by_channel_id_mut(data.channel_id) {
@@ -1479,32 +1892,23 @@ impl RdpServer {
     }
 }
 
-/// Encode a server-initiated Share Data PDU for the IO channel.
+/// Encode a server-initiated Auto-Detect Request PDU for the MCS message channel.
 ///
-/// `share_id` is hard-coded to 0, matching the existing convention in
-/// `deactivate_all()`. In practice, RDP clients do not validate `share_id`
-/// on server-initiated PDUs, but a future refactor could thread the
-/// negotiated value from the Demand Active exchange if needed.
-fn encode_share_data_pdu(
-    share_data_pdu: rdp::headers::ShareDataPdu,
-    io_channel_id: u16,
+/// The request is framed by a Basic Security Header (SEC_AUTODETECT_REQ) per
+/// [MS-RDPBCGR] 2.2.14.3 and carried in an MCS Send Data Indication on the
+/// negotiated message channel, not as a Share Data PDU on the I/O channel.
+fn encode_autodetect_request(
+    request: rdp::autodetect::AutoDetectRequest,
+    message_channel_id: u16,
     user_channel_id: u16,
 ) -> Result<Vec<u8>> {
-    let header = rdp::headers::ShareDataHeader {
-        share_data_pdu,
-        stream_priority: rdp::headers::StreamPriority::Medium,
-        compression_flags: rdp::headers::CompressionFlags::empty(),
-        compression_type: rdp::client_info::CompressionType::K8,
-    };
-    let pdu = rdp::headers::ShareControlHeader {
-        share_id: 0,
-        pdu_source: user_channel_id,
-        share_control_pdu: ShareControlPdu::Data(header),
-    };
+    // Auto-detect rides the MCS message channel framed by a Basic Security
+    // Header (SEC_AUTODETECT_REQ), not a Share Control / Share Data header.
+    let pdu = rdp::autodetect::AutoDetectReqPdu::new(request);
     let user_data = encode_vec(&pdu)?.into();
     let mcs_pdu = SendDataIndication {
         initiator_id: user_channel_id,
-        channel_id: io_channel_id,
+        channel_id: message_channel_id,
         user_data,
     };
     Ok(encode_vec(&X224(mcs_pdu))?)
@@ -1522,6 +1926,29 @@ async fn deactivate_all(
         share_control_pdu: pdu,
     };
     let user_data = encode_vec(&pdu)?.into();
+    let pdu = SendDataIndication {
+        initiator_id: user_channel_id,
+        channel_id: io_channel_id,
+        user_data,
+    };
+    let msg = encode_vec(&X224(pdu))?;
+    writer.write_all(&msg).await?;
+    Ok(())
+}
+
+/// Send a `ServerSetErrorInfoPdu(ServerDeniedConnection)` to the client, then return.
+///
+/// Used to deny a connection after credential validation rejects it, mirroring the
+/// acceptor's exact-match denial so both paths refuse the same spec-defined way.
+async fn send_access_denied(
+    io_channel_id: u16,
+    user_channel_id: u16,
+    writer: &mut impl FramedWrite,
+) -> Result<(), anyhow::Error> {
+    let info = ServerSetErrorInfoPdu(ErrorInfo::ProtocolIndependentCode(
+        ProtocolIndependentCode::ServerDeniedConnection,
+    ));
+    let user_data = encode_vec(&info)?.into();
     let pdu = SendDataIndication {
         initiator_id: user_channel_id,
         channel_id: io_channel_id,

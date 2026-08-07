@@ -6,7 +6,7 @@
 //! three frames and the Rust handoff at one prevents a slow client from making
 //! the cursor and desktop progressively older.
 
-use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -19,10 +19,8 @@ use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_core_graphics::{CGDisplayPixelsHigh, CGDisplayPixelsWide, CGMainDisplayID};
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{
-    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight,
-    CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth, CVPixelBufferLockBaseAddress,
-    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVPixelFormatType_32BGRA,
-    kCVReturnSuccess,
+    CVPixelBufferGetBytesPerRow, CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType,
+    CVPixelBufferGetWidth, kCVPixelFormatType_32BGRA,
 };
 use objc2_foundation::{NSArray, NSError, NSObject};
 use objc2_screen_capture_kit::{
@@ -47,6 +45,10 @@ const STOP_TIMEOUT: Duration = Duration::from_millis(750);
 /// notice a disconnected client. It is deliberately far below
 /// [`FRAME_TIMEOUT`], which stays reserved for the initial frame.
 const IDLE_POLL: Duration = Duration::from_millis(250);
+/// A mode switch can produce a few malformed samples while CoreVideo rebuilds
+/// its IOSurface. Persistent corruption must wake the consumer instead of
+/// leaving it waiting on a healthy-looking mailbox.
+const MALFORMED_SAMPLE_LIMIT: usize = 8;
 
 #[derive(Debug)]
 struct FrameSlot {
@@ -89,6 +91,12 @@ impl FrameSlot {
             state.latest = None;
         }
         self.wake.notify_all();
+    }
+
+    fn discard_pending(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.latest = None;
+        }
     }
 
     /// Wait up to `timeout` for the next frame. `Ok(None)` means the timeout
@@ -139,6 +147,7 @@ impl FrameSlot {
 #[derive(Debug)]
 struct StreamOutputIvars {
     slot: Arc<FrameSlot>,
+    malformed_samples: AtomicUsize,
 }
 
 define_class!(
@@ -159,16 +168,36 @@ define_class!(
             if output_type != SCStreamOutputType::Screen {
                 return;
             }
-            match copy_bgra_frame(sample_buffer) {
+            match retain_bgra_frame(sample_buffer) {
                 // `None` is an idle sample: the desktop did not change, so
                 // there is nothing to publish and nothing worth logging.
-                Ok(Some(frame)) => self.ivars().slot.publish(frame),
-                Ok(None) => {}
+                Ok(Some(frame)) => {
+                    self.ivars().malformed_samples.store(0, Ordering::Relaxed);
+                    self.ivars().slot.publish(frame);
+                }
+                Ok(None) => {
+                    self.ivars().malformed_samples.store(0, Ordering::Relaxed);
+                }
                 // ScreenCaptureKit can emit transient malformed buffers while
                 // a display is changing mode. Do not terminate a usable
                 // session for one such sample; the timed consumer path will
                 // surface a persistent outage with a clear error.
-                Err(error) => tracing::debug!("discarding ScreenCaptureKit sample: {error}"),
+                Err(error) => {
+                    let malformed = self
+                        .ivars()
+                        .malformed_samples
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    if malformed >= MALFORMED_SAMPLE_LIMIT {
+                        self.ivars().slot.stop(format!(
+                            "ScreenCaptureKit delivered {malformed} consecutive invalid samples: {error}"
+                        ));
+                    } else {
+                        tracing::debug!(
+                            "discarding ScreenCaptureKit sample ({malformed}/{MALFORMED_SAMPLE_LIMIT}): {error}"
+                        );
+                    }
+                }
             }
         }
     }
@@ -178,7 +207,7 @@ define_class!(
         unsafe fn stream_did_stop_with_error(&self, _stream: &SCStream, _error: &NSError) {
             self.ivars()
                 .slot
-                .stop("macOS stopped the ScreenCaptureKit stream");
+                .stop("macOS stopped the ScreenCaptureKit stream with an error");
         }
     }
 );
@@ -187,7 +216,10 @@ unsafe impl NSObjectProtocol for StreamOutput {}
 
 impl StreamOutput {
     fn new(slot: Arc<FrameSlot>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(StreamOutputIvars { slot });
+        let this = Self::alloc().set_ivars(StreamOutputIvars {
+            slot,
+            malformed_samples: AtomicUsize::new(0),
+        });
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -297,6 +329,38 @@ fn configure_stream(configuration: &SCStreamConfiguration, width: u16, height: u
 impl Capturer for SckCapturer {
     fn desktop_size(&self) -> (u16, u16) {
         (self.width, self.height)
+    }
+
+    fn supports_output_resize(&self) -> bool {
+        true
+    }
+
+    fn resize_output(&mut self, width: u16, height: u16) -> anyhow::Result<Frame> {
+        if width == 0 || height == 0 {
+            anyhow::bail!("cannot resize ScreenCaptureKit to a zero dimension");
+        }
+        let configuration = unsafe { SCStreamConfiguration::new() };
+        configure_stream(&configuration, width, height);
+        update_stream_configuration(&self.stream, &configuration)?;
+
+        // Samples queued before the completion callback still use the old
+        // dimensions. Drop them and wait for the first surface produced by the
+        // completed configuration before acknowledging the RDP handshake.
+        self.pending = None;
+        self.slot.discard_pending();
+        let deadline = Instant::now() + INITIAL_FRAME_TIMEOUT;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                anyhow::bail!(
+                    "ScreenCaptureKit produced no {width}x{height} frame after reconfiguration"
+                );
+            }
+            let frame = self.slot.take(deadline.saturating_duration_since(now))?;
+            if frame.width == width && frame.height == height {
+                return self.accept(frame);
+            }
+        }
     }
 
     /// ScreenCaptureKit enforces [`FRAME_RATE`] through
@@ -456,6 +520,37 @@ fn start_stream(stream: &SCStream) -> anyhow::Result<()> {
         })?
 }
 
+fn update_stream_configuration(
+    stream: &SCStream,
+    configuration: &SCStreamConfiguration,
+) -> anyhow::Result<()> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let completion = RcBlock::new(move |error: *mut NSError| {
+        let result = if error.is_null() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "macOS rejected ScreenCaptureKit output resize"
+            ))
+        };
+        let _ = sender.send(result);
+    });
+    unsafe {
+        stream.updateConfiguration_completionHandler(configuration, Some(&completion));
+    }
+    receiver
+        .recv_timeout(CONTENT_TIMEOUT)
+        .map_err(|error| match error {
+            RecvTimeoutError::Timeout => anyhow::anyhow!(
+                "ScreenCaptureKit output resize did not finish within {} seconds",
+                CONTENT_TIMEOUT.as_secs()
+            ),
+            RecvTimeoutError::Disconnected => {
+                anyhow::anyhow!("ScreenCaptureKit output resize disconnected")
+            }
+        })?
+}
+
 fn stop_stream(stream: &SCStream) {
     let (sender, receiver) = mpsc::sync_channel(1);
     let completion = RcBlock::new(move |_error: *mut NSError| {
@@ -467,14 +562,14 @@ fn stop_stream(stream: &SCStream) {
     let _ = receiver.recv_timeout(STOP_TIMEOUT);
 }
 
-/// Copy one ScreenCaptureKit sample into an owned BGRA frame.
+/// Retain one ScreenCaptureKit IOSurface without reading its BGRA bytes.
 ///
 /// Returns `Ok(None)` for a sample that carries no pixels. ScreenCaptureKit
 /// keeps delivering buffers on the configured frame interval even when the
 /// desktop is static, and marks them `SCFrameStatusIdle` with no attached image
 /// buffer. Those idle markers are the normal steady state of an unchanging
 /// desktop, so they must not be mistaken for a capture failure.
-fn copy_bgra_frame(sample_buffer: &CMSampleBuffer) -> anyhow::Result<Option<Frame>> {
+fn retain_bgra_frame(sample_buffer: &CMSampleBuffer) -> anyhow::Result<Option<Frame>> {
     let image_buffer = unsafe { sample_buffer.image_buffer() };
     let Some(pixel_buffer) = image_buffer else {
         return Ok(None);
@@ -482,46 +577,27 @@ fn copy_bgra_frame(sample_buffer: &CMSampleBuffer) -> anyhow::Result<Option<Fram
     if CVPixelBufferGetPixelFormatType(&pixel_buffer) != kCVPixelFormatType_32BGRA {
         anyhow::bail!("ScreenCaptureKit sample was not delivered as BGRA");
     }
-    let lock_result =
-        unsafe { CVPixelBufferLockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly) };
-    if lock_result != kCVReturnSuccess {
-        anyhow::bail!("could not lock ScreenCaptureKit pixel buffer ({lock_result})");
+    let width = u16::try_from(CVPixelBufferGetWidth(&pixel_buffer))
+        .map_err(|_| anyhow::anyhow!("captured display width exceeds RDP limits"))?;
+    let height = u16::try_from(CVPixelBufferGetHeight(&pixel_buffer))
+        .map_err(|_| anyhow::anyhow!("captured display height exceeds RDP limits"))?;
+    let stride = CVPixelBufferGetBytesPerRow(&pixel_buffer);
+    let row_bytes = usize::from(width)
+        .checked_mul(4)
+        .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit row width overflow"))?;
+    if width == 0 || height == 0 || stride < row_bytes {
+        anyhow::bail!("ScreenCaptureKit returned an invalid BGRA surface");
     }
+    stride
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit surface size overflow"))?;
 
-    let result = (|| {
-        let width = u16::try_from(CVPixelBufferGetWidth(&pixel_buffer))
-            .map_err(|_| anyhow::anyhow!("captured display width exceeds RDP limits"))?;
-        let height = u16::try_from(CVPixelBufferGetHeight(&pixel_buffer))
-            .map_err(|_| anyhow::anyhow!("captured display height exceeds RDP limits"))?;
-        let stride = CVPixelBufferGetBytesPerRow(&pixel_buffer);
-        let row_bytes = usize::from(width)
-            .checked_mul(4)
-            .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit row width overflow"))?;
-        if width == 0 || height == 0 || stride < row_bytes {
-            anyhow::bail!("ScreenCaptureKit returned an invalid BGRA surface");
-        }
-        let total_bytes = stride
-            .checked_mul(usize::from(height))
-            .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit surface size overflow"))?;
-        let base = CVPixelBufferGetBaseAddress(&pixel_buffer);
-        if base.is_null() {
-            anyhow::bail!("ScreenCaptureKit returned a null BGRA surface address");
-        }
-
-        // Preserve the source stride. IronRDP accepts row-aligned BGRA data,
-        // avoiding a second full-frame repack on every display refresh.
-        let data = unsafe { slice::from_raw_parts(base.cast::<u8>(), total_bytes) }.to_vec();
-        Ok(Some(Frame::bgra(data, 0, 0, width, height, stride)))
-    })();
-
-    let unlock_result =
-        unsafe { CVPixelBufferUnlockBaseAddress(&pixel_buffer, CVPixelBufferLockFlags::ReadOnly) };
-    if unlock_result != kCVReturnSuccess {
-        return Err(anyhow::anyhow!(
-            "could not unlock ScreenCaptureKit pixel buffer ({unlock_result})"
-        ));
-    }
-    result
+    Ok(Some(Frame::native_bgra(
+        pixel_buffer,
+        width,
+        height,
+        stride,
+    )))
 }
 
 fn frame_dimensions(frame: &Frame) -> anyhow::Result<(u16, u16)> {
@@ -532,10 +608,10 @@ fn frame_dimensions(frame: &Frame) -> anyhow::Result<(u16, u16)> {
         .stride
         .checked_mul(usize::from(frame.height))
         .ok_or_else(|| anyhow::anyhow!("ScreenCaptureKit frame size overflow"))?;
-    if frame.data.len() != expected {
+    if frame.byte_len() != expected {
         anyhow::bail!(
             "ScreenCaptureKit frame has {} bytes; expected {expected}",
-            frame.data.len()
+            frame.byte_len()
         );
     }
     Ok((frame.width, frame.height))

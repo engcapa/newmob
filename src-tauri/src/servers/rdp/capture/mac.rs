@@ -15,6 +15,7 @@ use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCapture
 
 use super::{CaptureDisplay, CaptureProbe, Capturer, Frame};
 use crate::servers::engine::LogEmitter;
+use crate::servers::rdp::input::control_permission_granted;
 
 mod sck;
 
@@ -41,12 +42,48 @@ pub(crate) fn probe() -> anyhow::Result<CaptureProbe> {
     };
     Ok(CaptureProbe {
         permission: if granted { "granted" } else { "denied" }.to_string(),
+        control_permission: if control_permission_granted() {
+            "granted"
+        } else {
+            "denied"
+        }
+        .to_string(),
         displays,
         summary: if granted {
             "Screen Recording permission granted; native display capture is available".to_string()
         } else {
             "Screen Recording permission is required before the RDP server can start".to_string()
         },
+    })
+}
+
+/// Quartz global display bounds are expressed in logical points with the main
+/// display at (0, 0). ScreenCaptureKit frames use physical pixels, so input
+/// needs both coordinate spaces to place the pointer on Retina and secondary
+/// displays correctly.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DisplayBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub(crate) fn selected_display_bounds(display_id: Option<&str>) -> anyhow::Result<DisplayBounds> {
+    let monitor = select_monitor(display_id)?;
+    Ok(DisplayBounds {
+        x: monitor
+            .x()
+            .map_err(|e| anyhow::anyhow!("display x coordinate: {e}"))?,
+        y: monitor
+            .y()
+            .map_err(|e| anyhow::anyhow!("display y coordinate: {e}"))?,
+        width: monitor
+            .width()
+            .map_err(|e| anyhow::anyhow!("display logical width: {e}"))?,
+        height: monitor
+            .height()
+            .map_err(|e| anyhow::anyhow!("display logical height: {e}"))?,
     })
 }
 

@@ -459,6 +459,7 @@ pub async fn list_server_statuses(state: State<'_, AppState>) -> Result<Vec<Serv
 pub async fn probe_rdp_capture(
     app: AppHandle,
     request_permission: bool,
+    request_control_permission: bool,
 ) -> Result<rdp::capture::CaptureProbe, String> {
     #[cfg(target_os = "macos")]
     if request_permission && !rdp::capture::mac::permission_granted() {
@@ -472,8 +473,20 @@ pub async fn probe_rdp_capture(
             .map_err(|_| "Screen Recording permission request was cancelled".to_string())?;
     }
 
+    #[cfg(target_os = "macos")]
+    if request_control_permission && !rdp::control_permission_granted() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app.run_on_main_thread(move || {
+            let _ = tx.send(rdp::request_control_permission());
+        })
+        .map_err(|e| format!("failed to request Accessibility permission: {e}"))?;
+        let _ = rx
+            .await
+            .map_err(|_| "Accessibility permission request was cancelled".to_string())?;
+    }
+
     #[cfg(not(target_os = "macos"))]
-    let _ = (app, request_permission);
+    let _ = (app, request_permission, request_control_permission);
 
     rdp::capture::probe().map_err(|e| e.to_string())
 }

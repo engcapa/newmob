@@ -43,6 +43,7 @@ export interface RdpCaptureDisplay {
 
 export interface RdpCaptureProbe {
   permission: "granted" | "denied" | "notRequired";
+  controlPermission: "granted" | "denied" | "notRequired";
   displays: RdpCaptureDisplay[];
   summary: string;
 }
@@ -194,8 +195,12 @@ export async function listServerStatuses(): Promise<ServerStatus[]> {
 
 export async function probeRdpCapture(
   requestPermission = false,
+  requestControlPermission = false,
 ): Promise<RdpCaptureProbe> {
-  return invoke<RdpCaptureProbe>("probe_rdp_capture", { requestPermission });
+  return invoke<RdpCaptureProbe>("probe_rdp_capture", {
+    requestPermission,
+    requestControlPermission,
+  });
 }
 
 export async function resolveRdpConnectionRequest(

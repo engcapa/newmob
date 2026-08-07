@@ -39,7 +39,9 @@ export function RdpSettings({ config, onChange }: Props) {
   const platform = getAppPlatform();
   const [captureProbe, setCaptureProbe] = useState<RdpCaptureProbe | null>(null);
   const [captureProbeError, setCaptureProbeError] = useState("");
-  const [requestingPermission, setRequestingPermission] = useState(false);
+  const [requestingPermission, setRequestingPermission] = useState<
+    "capture" | "control" | "refresh" | null
+  >(null);
   const capabilityNote =
     platform === "macos"
       ? t("servers.notes.rdpCapMacos")
@@ -49,20 +51,25 @@ export function RdpSettings({ config, onChange }: Props) {
           ? t("servers.notes.rdpCapWindows")
           : t("servers.notes.rdpCapUnknown");
 
-  const refreshCaptureProbe = async (requestPermission: boolean) => {
-    setRequestingPermission(true);
+  const refreshCaptureProbe = async (
+    requestPermission: boolean,
+    requestControlPermission = false,
+  ) => {
+    setRequestingPermission(
+      requestPermission ? "capture" : requestControlPermission ? "control" : "refresh",
+    );
     setCaptureProbeError("");
     try {
-      setCaptureProbe(await probeRdpCapture(requestPermission));
+      setCaptureProbe(await probeRdpCapture(requestPermission, requestControlPermission));
     } catch (error) {
       setCaptureProbeError(String(error));
     } finally {
-      setRequestingPermission(false);
+      setRequestingPermission(null);
     }
   };
 
   useEffect(() => {
-    if (platform === "macos") void refreshCaptureProbe(false);
+    if (platform === "macos") void refreshCaptureProbe(false, false);
     // Probe when the settings panel is mounted; permission requests remain an
     // explicit user action through the button below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -99,9 +106,9 @@ export function RdpSettings({ config, onChange }: Props) {
             <button
               type="button"
               className="taomni-btn"
-              disabled={requestingPermission}
+              disabled={requestingPermission !== null}
               onClick={() =>
-                void refreshCaptureProbe(captureProbe?.permission !== "granted")
+                void refreshCaptureProbe(captureProbe?.permission !== "granted", false)
               }
             >
               {captureProbe?.permission === "granted"
@@ -109,6 +116,30 @@ export function RdpSettings({ config, onChange }: Props) {
                 : t("servers.fields.rdpGrantCapture")}
             </button>
           </FormRow>
+          {!viewOnly ? (
+            <FormRow label={t("servers.fields.rdpControlPermission")}>
+              <span style={{ color: "var(--taomni-text-muted)" }}>
+                {captureProbe?.controlPermission === "granted"
+                  ? t("servers.notes.rdpControlGranted")
+                  : t("servers.notes.rdpControlRequired")}
+              </span>
+              <button
+                type="button"
+                className="taomni-btn"
+                disabled={requestingPermission !== null}
+                onClick={() =>
+                  void refreshCaptureProbe(
+                    false,
+                    captureProbe?.controlPermission !== "granted",
+                  )
+                }
+              >
+                {captureProbe?.controlPermission === "granted"
+                  ? t("servers.fields.rdpRefreshPermission")
+                  : t("servers.fields.rdpGrantControl")}
+              </button>
+            </FormRow>
+          ) : null}
           {captureProbeError ? <FieldNote tone="warning">{captureProbeError}</FieldNote> : null}
         </>
       ) : null}

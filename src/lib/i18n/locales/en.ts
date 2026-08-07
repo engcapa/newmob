@@ -1731,6 +1731,9 @@ const dict = {
       rdpCapturePermission: "Screen Recording",
       rdpGrantCapture: "Grant permission…",
       rdpRefreshDisplays: "Refresh displays",
+      rdpControlPermission: "Accessibility",
+      rdpGrantControl: "Grant permission…",
+      rdpRefreshPermission: "Refresh status",
       rdpControlApproval: "Require local control approval",
       optional: "optional",
     },
@@ -1756,6 +1759,8 @@ const dict = {
         "Desktop capture: macOS uses a persistent native display stream. Grant Screen Recording permission and select the display to share.",
       rdpCaptureGranted: "Permission granted",
       rdpCaptureRequired: "Permission required before the server can start",
+      rdpControlGranted: "Keyboard and mouse control enabled",
+      rdpControlRequired: "Required for keyboard and mouse control",
       rdpUnattendedControl:
         "Authenticated clients can control this Mac without a local confirmation prompt.",
       rdpCapWindows:
