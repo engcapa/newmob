@@ -29,7 +29,7 @@ use objc2_core_video::{
     CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress, kCVReturnSuccess,
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub(crate) mod xcap_backend;
 
 #[cfg(target_os = "linux")]
@@ -39,6 +39,17 @@ pub(crate) mod x11;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod mac;
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum PortalInput {
+    Keycode { code: i32, pressed: bool },
+    Keysym { keysym: i32, pressed: bool },
+    Button { button: i32, pressed: bool },
+    MotionAbsolute { x: f64, y: f64 },
+    MotionRelative { dx: f64, dy: f64 },
+    Scroll { horizontal: bool, steps: i32 },
+}
 
 /// One captured frame or sub-region: BGRA8888, `stride` bytes per row,
 /// `height` rows. `x`/`y` are the top-left origin of this region within the
@@ -398,6 +409,19 @@ pub(crate) trait Capturer {
         false
     }
 
+    /// Whether input can be injected through the capture authorization
+    /// context. Wayland's RemoteDesktop portal requires capture and input to
+    /// share one session; X11 and other platforms keep their native input path.
+    #[cfg(target_os = "linux")]
+    fn supports_portal_input(&self) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    fn inject_portal_input(&mut self, _input: PortalInput) -> anyhow::Result<()> {
+        anyhow::bail!("capture backend does not provide portal input")
+    }
+
     /// Drive one update step and return zero or more BGRA regions to send.
     ///
     /// - `first` is true only for the very first call on a fresh connection; an
@@ -443,14 +467,13 @@ pub(crate) struct CaptureProbe {
 pub(crate) fn capture_capability_summary() -> String {
     #[cfg(target_os = "linux")]
     {
-        if std::env::var_os("DISPLAY").is_some() {
-            return "Linux: X11/XWayland capture available when DISPLAY is set; \
-                    pure Wayland falls back to xcap portal"
+        if wayland::is_wayland_session() {
+            return "Linux Wayland: RemoteDesktop portal + persistent PipeWire capture; \
+                    screen and input permission are requested together"
                 .into();
         }
-        if wayland::is_wayland_session() {
-            return "Linux Wayland: capture via xcap/portal (user must accept ScreenCast prompt)"
-                .into();
+        if std::env::var_os("DISPLAY").is_some() {
+            return "Linux X11: XShm/XDamage capture with XTest input and XRandR monitoring".into();
         }
         return "Linux: no DISPLAY and not a Wayland session — capture unavailable".into();
     }
@@ -474,7 +497,7 @@ pub(crate) fn capture_capability_summary() -> String {
 /// reason. MUST be called on the thread that will own/drive the capturer, since
 /// backends are not `Send`.
 pub(crate) fn create_capturer(log: &LogEmitter) -> anyhow::Result<Box<dyn Capturer>> {
-    create_capturer_for_display(log, None)
+    create_capturer_for_display(log, None, false)
 }
 
 /// Build a capturer for an explicitly selected display. The selector is used
@@ -482,31 +505,23 @@ pub(crate) fn create_capturer(log: &LogEmitter) -> anyhow::Result<Box<dyn Captur
 pub(crate) fn create_capturer_for_display(
     log: &LogEmitter,
     display_id: Option<&str>,
+    request_input: bool,
 ) -> anyhow::Result<Box<dyn Capturer>> {
     #[cfg(target_os = "linux")]
     {
-        // Try X11 first whenever an X server is reachable. This is authoritative:
-        // on a real Xorg session it captures the desktop directly, and on a
-        // Wayland session with XWayland it still captures (XWayland exposes the
-        // root window). Only when X11 is genuinely unreachable do we fall back to
-        // the Wayland/xcap portal path.
-        match x11::X11Capturer::new(log) {
-            Ok(cap) => return Ok(Box::new(cap)),
-            Err(x11_err) => {
-                if wayland::is_wayland_session() {
-                    log.line(format!(
-                        "X11 capturer unavailable ({x11_err}); trying Wayland/xcap portal fallback"
-                    ));
-                    return wayland::try_new(log);
-                }
-                return Err(x11_err);
-            }
+        let _ = display_id;
+        // XWayland's root only contains X11 surfaces. A reachable DISPLAY must
+        // never override the session type, otherwise native Wayland windows are
+        // silently missing from the shared desktop.
+        if wayland::is_wayland_session() {
+            return wayland::try_new(log, request_input);
         }
+        return Ok(Box::new(x11::X11Capturer::new(log)?));
     }
 
     #[cfg(target_os = "windows")]
     {
-        let _ = log;
+        let _ = (log, request_input);
         anyhow::bail!(
             "Windows screen capture (DXGI/WGC) is not implemented yet — RDP server will \
              serve a placeholder frame. Desktop sharing on Windows is deferred in this branch."
@@ -515,12 +530,13 @@ pub(crate) fn create_capturer_for_display(
 
     #[cfg(target_os = "macos")]
     {
+        let _ = request_input;
         mac::try_new(log, display_id)
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
-        let _ = log;
+        let _ = (log, request_input);
         anyhow::bail!("screen capture is not supported on this platform")
     }
 }

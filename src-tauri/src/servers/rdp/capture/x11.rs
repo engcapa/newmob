@@ -38,6 +38,7 @@ use anyhow::{Context as _, bail};
 use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::Event;
 use x11rb::protocol::damage::{self, ConnectionExt as _};
+use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::shm::{self, ConnectionExt as _};
 use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageFormat};
@@ -119,6 +120,7 @@ pub(crate) struct X11Capturer {
     /// `Some` when event-driven (XDamage) capture is active; `None` falls back
     /// to fixed-interval full-frame polling driven by the display layer.
     damage: Option<DamageState>,
+    randr: bool,
 }
 
 impl X11Capturer {
@@ -182,6 +184,16 @@ impl X11Capturer {
                 None
             }
         };
+        let randr = match Self::try_init_randr(&conn, root) {
+            Ok(()) => {
+                log.line("X11 capture: XRandR geometry monitoring active".to_string());
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "X11 XRandR monitoring unavailable; geometry is checked during capture");
+                false
+            }
+        };
 
         Ok(Self {
             conn,
@@ -191,6 +203,7 @@ impl X11Capturer {
             depth,
             backend,
             damage,
+            randr,
         })
     }
 
@@ -247,6 +260,31 @@ impl X11Capturer {
         })
     }
 
+    fn try_init_randr(conn: &RustConnection, root: xproto::Window) -> anyhow::Result<()> {
+        if conn
+            .extension_information(randr::X11_EXTENSION_NAME)
+            .context("querying RANDR extension")?
+            .is_none()
+        {
+            bail!("X11 server has no RANDR extension");
+        }
+        conn.randr_query_version(1, 5)
+            .context("RANDR query_version")?
+            .reply()
+            .context("RANDR query_version reply")?;
+        conn.randr_select_input(
+            root,
+            randr::NotifyMask::SCREEN_CHANGE
+                | randr::NotifyMask::CRTC_CHANGE
+                | randr::NotifyMask::OUTPUT_CHANGE
+                | randr::NotifyMask::RESOURCE_CHANGE,
+        )
+        .context("RANDR select_input")?
+        .check()
+        .context("RANDR select_input check")?;
+        Ok(())
+    }
+
     /// Probe MIT-SHM and, if usable, allocate the shared segment. Returns `Err`
     /// (rather than panicking or bailing the whole capturer) so the caller can
     /// fall back to plain `GetImage`.
@@ -282,10 +320,11 @@ impl X11Capturer {
             .checked_mul(usize::from(height))
             .and_then(|p| p.checked_mul(4))
             .context("frame size overflow")?;
+        let len_u32 = u32::try_from(len).context("X11 SHM frame exceeds request size limit")?;
 
         let seg = conn.generate_id().context("generate SHM seg id")?;
         let reply = conn
-            .shm_create_segment(seg, len as u32, false)
+            .shm_create_segment(seg, len_u32, false)
             .context("shm_create_segment")?
             .reply()
             .context("shm_create_segment reply")?;
@@ -437,6 +476,20 @@ impl X11Capturer {
             }
         };
 
+        let expected = usize::from(w)
+            .checked_mul(usize::from(h))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("X11 image size overflow")?;
+        if data.len() != expected {
+            bail!(
+                "X11 image returned {} bytes for {}x{} BGRA pixels (expected {})",
+                data.len(),
+                w,
+                h,
+                expected
+            );
+        }
+
         // Depth 24 still arrives as 4 bytes/pixel in Z_PIXMAP on 32-bpp visuals;
         // the unused 4th byte is undefined, so force it opaque for BgrA32.
         if self.depth == 24 {
@@ -451,14 +504,20 @@ impl X11Capturer {
     /// Drain all currently-queued `DamageNotify` events. Returns true if at
     /// least one arrived (we don't trust their coordinates — the precise region
     /// comes from `subtract_into_region`; the event is just the wakeup signal).
-    fn drain_damage_events(&self) -> anyhow::Result<bool> {
-        let mut any = false;
+    fn drain_damage_events(&self) -> anyhow::Result<(bool, bool)> {
+        let mut damage = false;
+        let mut resize = false;
         while let Some(event) = self.conn.poll_for_event().context("poll_for_event")? {
-            if let Event::DamageNotify(_) = event {
-                any = true;
+            match event {
+                Event::DamageNotify(_) => damage = true,
+                Event::RandrScreenChangeNotify(change) if change.root == self.root => {
+                    resize = true;
+                }
+                Event::RandrNotify(_) => resize = true,
+                _ => {}
             }
         }
-        Ok(any)
+        Ok((damage, resize))
     }
 
     /// Atomically consume the accumulated damage into our scratch region and
@@ -495,6 +554,50 @@ impl X11Capturer {
         let _ = self.subtract_into_rects()?;
         Ok(())
     }
+
+    fn refresh_geometry(&mut self) -> anyhow::Result<bool> {
+        let geometry = self
+            .conn
+            .get_geometry(self.root)
+            .context("get root geometry")?
+            .reply()
+            .context("get root geometry reply")?;
+        let new_width = geometry.width;
+        let new_height = geometry.height;
+        if !geometry_changed((self.width, self.height), (new_width, new_height)) {
+            return Ok(false);
+        }
+        if new_width == 0 || new_height == 0 {
+            bail!("X11 root geometry changed to zero size");
+        }
+        if let Backend::Shm(shm) = &self.backend {
+            let _ = self.conn.shm_detach(shm.seg);
+        }
+        self.backend = match Self::try_init_shm(&self.conn, new_width, new_height) {
+            Ok(shm) => Backend::Shm(shm),
+            Err(error) => {
+                tracing::warn!(%error, "X11 SHM reallocation failed after resize; using GetImage");
+                Backend::Plain
+            }
+        };
+        self.width = new_width;
+        self.height = new_height;
+        self.depth = geometry.depth;
+        if self.damage.is_some() {
+            self.clear_damage()?;
+        }
+        tracing::info!(
+            width = new_width,
+            height = new_height,
+            randr = self.randr,
+            "X11 capture geometry changed"
+        );
+        Ok(true)
+    }
+}
+
+fn geometry_changed(old: (u16, u16), new: (u16, u16)) -> bool {
+    old != new
 }
 
 impl Capturer for X11Capturer {
@@ -503,6 +606,9 @@ impl Capturer for X11Capturer {
     }
 
     fn capture(&mut self) -> anyhow::Result<Frame> {
+        if !self.randr {
+            let _ = self.refresh_geometry()?;
+        }
         self.grab_rect(0, 0, self.width, self.height)
     }
 
@@ -510,7 +616,27 @@ impl Capturer for X11Capturer {
         self.damage.is_some()
     }
 
+    fn poll_frame(&mut self) -> anyhow::Result<Option<Frame>> {
+        if self.randr {
+            let (_, resize_event) = self.drain_damage_events()?;
+            if resize_event && self.refresh_geometry()? {
+                return Ok(Some(self.capture()?));
+            }
+        }
+        self.capture().map(Some)
+    }
+
     fn next_updates(&mut self, first: bool) -> anyhow::Result<Vec<Frame>> {
+        if self.randr {
+            let (_, resize_event) = self.drain_damage_events()?;
+            if resize_event && self.refresh_geometry()? {
+                self.clear_damage()?;
+                return Ok(vec![self.capture()?]);
+            }
+        } else if self.refresh_geometry()? {
+            self.clear_damage()?;
+            return Ok(vec![self.capture()?]);
+        }
         // Polling fallback (no DAMAGE): one full frame; the display layer adds
         // its own interval + dedup.
         if self.damage.is_none() {
@@ -538,7 +664,12 @@ impl Capturer for X11Capturer {
         let deadline = Instant::now() + DAMAGE_WAIT_BUDGET;
         loop {
             self.conn.flush().context("flush")?;
-            if self.drain_damage_events()? {
+            let (damage_event, resize_event) = self.drain_damage_events()?;
+            if resize_event && self.refresh_geometry()? {
+                self.clear_damage()?;
+                return Ok(vec![self.capture()?]);
+            }
+            if damage_event {
                 break;
             }
             if Instant::now() >= deadline {
@@ -679,6 +810,7 @@ mod tests {
             depth: screen.root_depth,
             backend: Backend::Plain,
             damage: None,
+            randr: false,
             conn,
         };
         let frame = cap.capture().expect("plain GetImage capture");
@@ -725,6 +857,7 @@ mod tests {
             depth,
             backend,
             damage,
+            randr: false,
         })
     }
 
@@ -838,5 +971,12 @@ mod tests {
         );
         // Union is commutative.
         assert_eq!(a.union(b), b.union(a));
+    }
+
+    #[test]
+    fn geometry_change_detection_is_dimension_only() {
+        assert!(!geometry_changed((1920, 1080), (1920, 1080)));
+        assert!(geometry_changed((1920, 1080), (2560, 1440)));
+        assert!(geometry_changed((2560, 1440), (1920, 1080)));
     }
 }

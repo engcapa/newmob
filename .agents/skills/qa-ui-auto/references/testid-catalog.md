@@ -528,11 +528,11 @@
 ## rdp (F9.7)
 
 - `[data-testid="rdp-panel"]` — display — F9.7.panel-root
-- `[data-testid="rdp-floating-toolbar"]` — display — F9.7.toolbar
 - `[data-testid="rdp-status"]` — display — F9.7.status
 - `[data-testid="rdp-canvas"]` — display — F9.7.canvas
 - `[data-testid="rdp-scale-toggle"]` — interactive — F9.7.scale-toggle
 - `[data-testid="rdp-reconnect"]` — interactive — F9.7.reconnect
+- `[data-testid="rdp-chat-toggle"]` — interactive [optional] — F9.7.chat-toggle
 - `[data-testid="rdp-detach"]` — interactive — F9.7.detach
 - `[data-testid="rdp-view-cycle"]` — interactive — F9.7.view-cycle
 

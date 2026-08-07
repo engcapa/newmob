@@ -2110,7 +2110,7 @@ controls:
 - VNC tab 常驻挂载，切换标签时连接不主动销毁
 - 已修复 VNC 剪贴板与输入延迟、Windows 11 上的 client→server 文本粘贴
 
-### 9.7 RDP client（IronRDP 0.14）🟡
+### 9.7 RDP client（IronRDP 0.17）🟡
 
 <!-- feature
 id: F9.7
@@ -2131,9 +2131,6 @@ controls:
   - id: panel-root
     selector: '[data-testid="rdp-panel"]'
     kind: display
-  - id: toolbar
-    selector: '[data-testid="rdp-floating-toolbar"]'
-    kind: display
   - id: status
     selector: '[data-testid="rdp-status"]'
     kind: display
@@ -2146,6 +2143,10 @@ controls:
   - id: reconnect
     selector: '[data-testid="rdp-reconnect"]'
     kind: interactive
+  - id: chat-toggle
+    selector: '[data-testid="rdp-chat-toggle"]'
+    kind: interactive
+    optional: true
   - id: detach
     selector: '[data-testid="rdp-detach"]'
     kind: interactive
@@ -2154,7 +2155,7 @@ controls:
     kind: interactive       # one button cycles normal → maximized → fullscreen
 -->
 
-- Tauri desktop 模式下通过 IronRDP 0.14 驱动真实 RDP 会话：CredSSP/NLA、active-stage 图像解码、键盘/鼠标/滚轮输入、画布绘制
+- Tauri desktop 模式下通过 IronRDP 0.17 驱动真实 RDP 会话：CredSSP/NLA、active-stage 图像解码、键盘/鼠标/滚轮输入、画布绘制
 - 传输路径支持 direct TCP、HTTP/SOCKS5 proxy，以及 RD Gateway（MS-TSGU）代码路径；RD Gateway 当前无真实环境，只以 unit test + ignored live smoke 作为验收
 - RDP tab 常驻挂载，保存会话和 `rdp://` QuickConnect 均能打开 RDP panel；密码场景复用 `AuthPrompt`
 - resize 优先使用 DisplayControl DVC；服务器不开放该通道时保持同一 WS/control session 并按新桌面尺寸重连

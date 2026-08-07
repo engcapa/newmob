@@ -1740,7 +1740,7 @@ export const zhCN: DeepPartial<typeof en> = {
       rdpInsecure:
         "无安全模式意味着流量不加密；若未设置凭据，任何能访问该端口的人都可完全控制本机桌面。请仅在隔离网络中使用。",
       rdpCapLinux:
-        "桌面采集：Linux X11/XWayland 已完整支持。纯 Wayland 使用门户截屏（需在弹窗中授权）。键鼠注入通过 enigo。",
+        "桌面采集：Linux X11 使用 MIT-SHM/XDamage 和 XTest 输入。原生 Wayland 使用同一个 RemoteDesktop 门户会话及持久 PipeWire 视频流；请在弹窗中授权屏幕和键鼠设备以启用控制。",
       rdpCapMacos:
         "桌面采集：macOS 使用持久原生显示流。请授予屏幕录制权限，并选择要共享的显示器。",
       rdpCaptureGranted: "权限已授予",

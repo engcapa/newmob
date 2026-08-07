@@ -7,10 +7,11 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, Once};
+use std::sync::{Arc, Condvar, Mutex, Once};
 
 use image::{ColorType, ImageEncoder};
 use ironrdp::cliprdr::CliprdrClient;
@@ -49,6 +50,7 @@ use ironrdp::session::{ActiveStage, ActiveStageBuilder, ActiveStageOutput};
 use ironrdp::svc::{ChannelFlags, SvcMessage, SvcProcessorMessages};
 use ironrdp_tokio::{Framed, FramedRead, FramedWrite};
 use serde_json::json;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::rdp::RdpOptions;
@@ -64,6 +66,148 @@ pub enum SessionOutput {
     Text(String),
 }
 
+const MAX_PENDING_SESSION_STATUS: usize = 256;
+const MAX_FRAME_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+enum QueuedSessionOutput {
+    Control(SessionOutput),
+    FrameBatch(Vec<Vec<u8>>),
+}
+
+struct SessionOutputState {
+    control: std::collections::VecDeque<SessionOutput>,
+    building_frame: Vec<Vec<u8>>,
+    building_bytes: usize,
+    drop_building_frame: bool,
+    latest_frame: Option<Vec<Vec<u8>>>,
+    closed: bool,
+}
+
+/// Bounded output relay. Display updates are assembled into a complete frame
+/// batch and replaced by the newest batch; status, cursor, audio and clipboard
+/// messages stay in a bounded reliable queue. A producer only blocks when the
+/// reliable queue is full, so a slow browser cannot accumulate unbounded pixel
+/// memory or make frame age grow without limit.
+struct SessionOutputQueue {
+    state: Mutex<SessionOutputState>,
+    wake: Notify,
+    space: Condvar,
+}
+
+#[derive(Clone)]
+pub struct SessionOutputSender(Arc<SessionOutputQueue>);
+
+impl fmt::Debug for SessionOutputSender {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionOutputSender(..)")
+    }
+}
+
+impl SessionOutputQueue {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(SessionOutputState {
+                control: std::collections::VecDeque::new(),
+                building_frame: Vec::new(),
+                building_bytes: 0,
+                drop_building_frame: false,
+                latest_frame: None,
+                closed: false,
+            }),
+            wake: Notify::new(),
+            space: Condvar::new(),
+        })
+    }
+
+    fn send(&self, output: SessionOutput) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "rdp output queue poisoned".to_string())?;
+        match output {
+            SessionOutput::Channel { tag, payload } if tag == channel::FRAME => {
+                if !state.drop_building_frame {
+                    let next_bytes = state.building_bytes.saturating_add(payload.len());
+                    if next_bytes <= MAX_FRAME_BATCH_BYTES {
+                        state.building_bytes = next_bytes;
+                        state.building_frame.push(payload);
+                    } else {
+                        state.drop_building_frame = true;
+                        state.building_frame.clear();
+                    }
+                }
+                return Ok(());
+            }
+            SessionOutput::Channel { tag, .. } if tag == channel::FRAME_END => {
+                if !state.drop_building_frame && !state.building_frame.is_empty() {
+                    let batch = std::mem::take(&mut state.building_frame);
+                    state.latest_frame = Some(batch);
+                } else {
+                    state.building_frame.clear();
+                }
+                state.building_bytes = 0;
+                state.drop_building_frame = false;
+                self.wake.notify_one();
+                return Ok(());
+            }
+            other => {
+                while state.control.len() >= MAX_PENDING_SESSION_STATUS && !state.closed {
+                    state = self
+                        .space
+                        .wait(state)
+                        .map_err(|_| "rdp output queue poisoned".to_string())?;
+                }
+                if state.closed {
+                    return Err("rdp output queue closed".to_string());
+                }
+                state.control.push_back(other);
+                self.wake.notify_one();
+            }
+        }
+        Ok(())
+    }
+
+    async fn recv(&self) -> Option<QueuedSessionOutput> {
+        loop {
+            let notified = self.wake.notified();
+            {
+                let Ok(mut state) = self.state.lock() else {
+                    return None;
+                };
+                if let Some(output) = state.control.pop_front() {
+                    self.space.notify_one();
+                    return Some(QueuedSessionOutput::Control(output));
+                }
+                if let Some(frame) = state.latest_frame.take() {
+                    self.space.notify_one();
+                    return Some(QueuedSessionOutput::FrameBatch(frame));
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+            state.control.clear();
+            state.latest_frame = None;
+            state.building_frame.clear();
+        }
+        self.space.notify_all();
+        self.wake.notify_waiters();
+    }
+}
+
+impl SessionOutputSender {
+    pub fn send(&self, output: SessionOutput) -> Result<(), String> {
+        self.0.send(output)
+    }
+}
+
 enum ActiveOutputFlow {
     Continue,
     Terminate,
@@ -71,8 +215,8 @@ enum ActiveOutputFlow {
 }
 
 pub struct RdpSessionHandle {
-    /// Receives outgoing frames produced by the session worker.
-    out_rx: UnboundedReceiver<SessionOutput>,
+    output: Arc<SessionOutputQueue>,
+    active_frame: VecDeque<SessionOutput>,
     /// Sends control input from the relay into the session worker.
     ctrl_tx: UnboundedSender<RdpControl>,
 }
@@ -134,24 +278,53 @@ const RDP_TLS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const RDP_AUTHENTICATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 impl RdpSessionHandle {
-    pub fn new() -> (
-        Self,
-        UnboundedSender<SessionOutput>,
-        UnboundedReceiver<RdpControl>,
-    ) {
-        let (out_tx, out_rx) = mpsc::unbounded_channel();
+    pub fn new() -> (Self, SessionOutputSender, UnboundedReceiver<RdpControl>) {
+        let output = SessionOutputQueue::new();
         let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
-        (Self { out_rx, ctrl_tx }, out_tx, ctrl_rx)
+        (
+            Self {
+                output: output.clone(),
+                active_frame: VecDeque::new(),
+                ctrl_tx,
+            },
+            SessionOutputSender(output),
+            ctrl_rx,
+        )
     }
 
     pub async fn next_outgoing(&mut self) -> Option<SessionOutput> {
-        self.out_rx.recv().await
+        if let Some(output) = self.active_frame.pop_front() {
+            return Some(output);
+        }
+        match self.output.recv().await? {
+            QueuedSessionOutput::Control(output) => Some(output),
+            QueuedSessionOutput::FrameBatch(batch) => {
+                self.active_frame = batch
+                    .into_iter()
+                    .map(|payload| SessionOutput::Channel {
+                        tag: channel::FRAME,
+                        payload,
+                    })
+                    .collect();
+                self.active_frame.push_back(SessionOutput::Channel {
+                    tag: channel::FRAME_END,
+                    payload: Vec::new(),
+                });
+                self.active_frame.pop_front()
+            }
+        }
     }
 
     pub async fn dispatch_control(&self, ctrl: RdpControl) -> Result<(), String> {
         self.ctrl_tx
             .send(ctrl)
             .map_err(|_| "rdp session: ctrl channel closed".to_string())
+    }
+}
+
+impl Drop for RdpSessionHandle {
+    fn drop(&mut self) {
+        self.output.close();
     }
 }
 
@@ -203,7 +376,7 @@ pub async fn test_ironrdp_connection(
 #[derive(Clone)]
 struct ClipboardBridge {
     state: Arc<Mutex<ClipboardBridgeState>>,
-    out_tx: UnboundedSender<SessionOutput>,
+    out_tx: SessionOutputSender,
 }
 
 struct ClipboardBridgeState {
@@ -280,12 +453,12 @@ struct TaomniCliprdrBackend {
 }
 
 struct RdpsndWsBackend {
-    out_tx: UnboundedSender<SessionOutput>,
+    out_tx: SessionOutputSender,
     formats: Vec<IronAudioFormat>,
 }
 
 impl ClipboardBridge {
-    fn new(out_tx: UnboundedSender<SessionOutput>) -> Self {
+    fn new(out_tx: SessionOutputSender) -> Self {
         cleanup_stale_clipboard_staging();
         Self {
             state: Arc::new(Mutex::new(ClipboardBridgeState {
@@ -602,7 +775,7 @@ impl ClipboardBridge {
 }
 
 impl RdpsndWsBackend {
-    fn new(out_tx: UnboundedSender<SessionOutput>) -> Self {
+    fn new(out_tx: SessionOutputSender) -> Self {
         Self {
             out_tx,
             formats: vec![IronAudioFormat {
@@ -799,7 +972,7 @@ impl RdpsndClientHandler for RdpsndWsBackend {
 
 async fn drive_ironrdp_session(
     cfg: RdpSessionConfig,
-    out_tx: UnboundedSender<SessionOutput>,
+    out_tx: SessionOutputSender,
     mut ctrl_rx: UnboundedReceiver<RdpControl>,
 ) -> Result<(), String> {
     install_rustls_crypto_provider();
@@ -870,7 +1043,7 @@ async fn drive_ironrdp_session(
 async fn drive_ironrdp_connection(
     cfg: &RdpConnectionSettings,
     transport: RdpSessionTransport,
-    out_tx: UnboundedSender<SessionOutput>,
+    out_tx: SessionOutputSender,
     ctrl_rx: &mut UnboundedReceiver<RdpControl>,
 ) -> Result<SessionRunOutcome, String> {
     send_status(
@@ -1130,7 +1303,7 @@ async fn handle_control<S>(
     input_db: &mut InputDatabase,
     last_buttons: &mut u8,
     framed: &mut Framed<S>,
-    out_tx: &UnboundedSender<SessionOutput>,
+    out_tx: &SessionOutputSender,
     clipboard: Option<&ClipboardBridge>,
     activation_factory: &ConnectionActivationFactory,
     reactivation: &mut Option<ConnectionActivationSequence>,
@@ -1330,7 +1503,7 @@ async fn request_full_refresh<S>(
     active_stage: &mut ActiveStage,
     image: &IronDecodedImage,
     framed: &mut Framed<S>,
-    out_tx: &UnboundedSender<SessionOutput>,
+    out_tx: &SessionOutputSender,
 ) -> Result<(), String>
 where
     S: FramedWrite,
@@ -1370,7 +1543,7 @@ async fn drain_clipboard_actions<S>(
     active_stage: &mut ActiveStage,
     clipboard: &ClipboardBridge,
     framed: &mut Framed<S>,
-    out_tx: &UnboundedSender<SessionOutput>,
+    out_tx: &SessionOutputSender,
 ) -> Result<(), String>
 where
     S: FramedWrite,
@@ -1464,7 +1637,7 @@ async fn advertise_clipboard_formats<S>(
     active_stage: &mut ActiveStage,
     formats: Vec<ClipboardFormat>,
     framed: &mut Framed<S>,
-    out_tx: &UnboundedSender<SessionOutput>,
+    out_tx: &SessionOutputSender,
     stage: &str,
 ) -> Result<(), String>
 where
@@ -1516,11 +1689,12 @@ async fn handle_active_outputs<S>(
     framed: &mut Framed<S>,
     image: &IronDecodedImage,
     outputs: Vec<ActiveStageOutput>,
-    out_tx: &UnboundedSender<SessionOutput>,
+    out_tx: &SessionOutputSender,
 ) -> Result<ActiveOutputFlow, String>
 where
     S: FramedWrite,
 {
+    let mut sent_frame = false;
     for out in outputs {
         match out {
             ActiveStageOutput::ResponseFrame(frame) => {
@@ -1539,6 +1713,7 @@ where
                         tag: channel::FRAME,
                         payload,
                     });
+                    sent_frame = true;
                 }
             }
             ActiveStageOutput::PointerDefault => {
@@ -1585,6 +1760,12 @@ where
             }
         }
     }
+    if sent_frame {
+        let _ = out_tx.send(SessionOutput::Channel {
+            tag: channel::FRAME_END,
+            payload: Vec::new(),
+        });
+    }
     Ok(ActiveOutputFlow::Continue)
 }
 
@@ -1594,7 +1775,7 @@ async fn process_reactivation_frame<S>(
     active_stage: &mut ActiveStage,
     image: &mut IronDecodedImage,
     framed: &mut Framed<S>,
-    out_tx: &UnboundedSender<SessionOutput>,
+    out_tx: &SessionOutputSender,
     protocol: &str,
     server_name: &str,
 ) -> Result<bool, String>
@@ -2309,7 +2490,7 @@ fn build_ironrdp_config(cfg: &RdpConnectionSettings) -> connector::Config {
     }
 }
 
-fn send_cursor_payload(out_tx: &UnboundedSender<SessionOutput>, payload: Vec<u8>) {
+fn send_cursor_payload(out_tx: &SessionOutputSender, payload: Vec<u8>) {
     let _ = out_tx.send(SessionOutput::Channel {
         tag: channel::CURSOR,
         payload,
@@ -2406,7 +2587,7 @@ fn platform_type() -> MajorPlatformType {
 }
 
 fn send_connected_event(
-    out_tx: &UnboundedSender<SessionOutput>,
+    out_tx: &SessionOutputSender,
     width: u16,
     height: u16,
     protocol: &str,
@@ -2432,7 +2613,7 @@ fn install_rustls_crypto_provider() {
     });
 }
 
-fn send_status(out_tx: &UnboundedSender<SessionOutput>, stage: &str, detail: &str) {
+fn send_status(out_tx: &SessionOutputSender, stage: &str, detail: &str) {
     send_text(
         out_tx,
         json!({
@@ -2444,7 +2625,7 @@ fn send_status(out_tx: &UnboundedSender<SessionOutput>, stage: &str, detail: &st
     );
 }
 
-fn send_error(out_tx: &UnboundedSender<SessionOutput>, code: &str, message: &str) {
+fn send_error(out_tx: &SessionOutputSender, code: &str, message: &str) {
     let retryable = is_retryable_rdp_error(message);
     send_text(
         out_tx,
@@ -2467,7 +2648,7 @@ fn is_retryable_rdp_error(message: &str) -> bool {
         || lower.contains("broken pipe")
 }
 
-fn send_text(out_tx: &UnboundedSender<SessionOutput>, text: String) {
+fn send_text(out_tx: &SessionOutputSender, text: String) {
     let _ = out_tx.send(SessionOutput::Text(text));
 }
 
@@ -2503,6 +2684,32 @@ mod tests {
             }
             SessionOutput::Text(_) => panic!("expected channel output"),
         }
+    }
+
+    #[tokio::test]
+    async fn slow_output_consumer_gets_only_the_latest_frame_batch() {
+        let (mut handle, out_tx, _ctrl_rx) = RdpSessionHandle::new();
+        for value in [1_u8, 2_u8] {
+            let _ = out_tx.send(SessionOutput::Channel {
+                tag: channel::FRAME,
+                payload: vec![value],
+            });
+            let _ = out_tx.send(SessionOutput::Channel {
+                tag: channel::FRAME_END,
+                payload: Vec::new(),
+            });
+        }
+        assert!(matches!(
+            handle.next_outgoing().await,
+            Some(SessionOutput::Channel { tag: channel::FRAME, payload }) if payload == vec![2]
+        ));
+        assert!(matches!(
+            handle.next_outgoing().await,
+            Some(SessionOutput::Channel {
+                tag: channel::FRAME_END,
+                ..
+            })
+        ));
     }
 
     #[tokio::test]

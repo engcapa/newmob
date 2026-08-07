@@ -25,12 +25,15 @@
 //!    which owns X.224 negotiation, TLS, CredSSP/NLA, active-stage display
 //!    decoding, and input encoding.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Notify;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
@@ -114,6 +117,171 @@ pub enum WsOutgoing {
     Text(String),
 }
 
+const MAX_PENDING_WS_STATUS: usize = 256;
+const MAX_WS_FRAME_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+enum QueuedWsOutgoing {
+    Control(WsOutgoing),
+    FrameBatch(Vec<Vec<u8>>),
+}
+
+struct WsOutgoingState {
+    control: VecDeque<WsOutgoing>,
+    building_frame: Vec<Vec<u8>>,
+    building_bytes: usize,
+    drop_building_frame: bool,
+    latest_frame: Option<Vec<Vec<u8>>>,
+    closed: bool,
+}
+
+struct WsOutgoingQueue {
+    state: Mutex<WsOutgoingState>,
+    wake: Notify,
+    space: Condvar,
+}
+
+#[derive(Clone)]
+struct WsOutgoingSender(Arc<WsOutgoingQueue>);
+
+struct WsOutgoingReceiver {
+    queue: Arc<WsOutgoingQueue>,
+    active_frame: VecDeque<WsOutgoing>,
+}
+
+impl WsOutgoingQueue {
+    fn new() -> (WsOutgoingSender, WsOutgoingReceiver) {
+        let queue = Arc::new(Self {
+            state: Mutex::new(WsOutgoingState {
+                control: VecDeque::new(),
+                building_frame: Vec::new(),
+                building_bytes: 0,
+                drop_building_frame: false,
+                latest_frame: None,
+                closed: false,
+            }),
+            wake: Notify::new(),
+            space: Condvar::new(),
+        });
+        (
+            WsOutgoingSender(queue.clone()),
+            WsOutgoingReceiver {
+                queue,
+                active_frame: VecDeque::new(),
+            },
+        )
+    }
+
+    fn send(&self, output: WsOutgoing) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "RDP WebSocket output queue poisoned".to_string())?;
+        match output {
+            WsOutgoing::Frame(bytes) if bytes.first() == Some(&channel::FRAME) => {
+                if !state.drop_building_frame {
+                    let next_bytes = state.building_bytes.saturating_add(bytes.len());
+                    if next_bytes <= MAX_WS_FRAME_BATCH_BYTES {
+                        state.building_bytes = next_bytes;
+                        state.building_frame.push(bytes);
+                    } else {
+                        state.drop_building_frame = true;
+                        state.building_frame.clear();
+                    }
+                }
+                Ok(())
+            }
+            WsOutgoing::Frame(bytes) if bytes.first() == Some(&channel::FRAME_END) => {
+                if !state.drop_building_frame && !state.building_frame.is_empty() {
+                    state.latest_frame = Some(std::mem::take(&mut state.building_frame));
+                } else {
+                    state.building_frame.clear();
+                }
+                state.building_bytes = 0;
+                state.drop_building_frame = false;
+                self.wake.notify_one();
+                Ok(())
+            }
+            other => {
+                while state.control.len() >= MAX_PENDING_WS_STATUS && !state.closed {
+                    state = self
+                        .space
+                        .wait(state)
+                        .map_err(|_| "RDP WebSocket output queue poisoned".to_string())?;
+                }
+                if state.closed {
+                    return Err("RDP WebSocket output queue closed".to_string());
+                }
+                state.control.push_back(other);
+                self.wake.notify_one();
+                Ok(())
+            }
+        }
+    }
+
+    async fn recv(&self) -> Option<QueuedWsOutgoing> {
+        loop {
+            let notified = self.wake.notified();
+            {
+                let Ok(mut state) = self.state.lock() else {
+                    return None;
+                };
+                if let Some(output) = state.control.pop_front() {
+                    self.space.notify_one();
+                    return Some(QueuedWsOutgoing::Control(output));
+                }
+                if let Some(frame) = state.latest_frame.take() {
+                    self.space.notify_one();
+                    return Some(QueuedWsOutgoing::FrameBatch(frame));
+                }
+                if state.closed {
+                    return None;
+                }
+            }
+            notified.await;
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+            state.control.clear();
+            state.latest_frame = None;
+            state.building_frame.clear();
+        }
+        self.space.notify_all();
+        self.wake.notify_waiters();
+    }
+}
+
+impl WsOutgoingSender {
+    fn send(&self, output: WsOutgoing) -> Result<(), String> {
+        self.0.send(output)
+    }
+}
+
+impl WsOutgoingReceiver {
+    async fn recv(&mut self) -> Option<WsOutgoing> {
+        if let Some(output) = self.active_frame.pop_front() {
+            return Some(output);
+        }
+        match self.queue.recv().await? {
+            QueuedWsOutgoing::Control(output) => Some(output),
+            QueuedWsOutgoing::FrameBatch(batch) => {
+                self.active_frame = batch.into_iter().map(WsOutgoing::Frame).collect();
+                self.active_frame
+                    .push_back(WsOutgoing::Frame(vec![channel::FRAME_END]));
+                self.active_frame.pop_front()
+            }
+        }
+    }
+}
+
+impl Drop for WsOutgoingReceiver {
+    fn drop(&mut self) {
+        self.queue.close();
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum WsIncomingText {
@@ -179,7 +347,7 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
         .port();
 
     let (control_tx, control_rx) = mpsc::unbounded_channel::<RdpControl>();
-    let (ws_out_tx, ws_out_rx) = mpsc::unbounded_channel::<WsOutgoing>();
+    let (ws_out_tx, ws_out_rx) = WsOutgoingQueue::new();
 
     // 3. Hand off to IronRDP: connector, TLS, CredSSP, active-stage display
     //    decoding, and input all run behind this handle.
@@ -231,8 +399,8 @@ pub async fn spawn_rdp_relay(cfg: RdpSpawnConfig) -> Result<RdpSession, String> 
 async fn run_relay(
     listener: TcpListener,
     mut session: RdpSessionHandle,
-    ws_out_tx: UnboundedSender<WsOutgoing>,
-    mut ws_out_rx: UnboundedReceiver<WsOutgoing>,
+    ws_out_tx: WsOutgoingSender,
+    mut ws_out_rx: WsOutgoingReceiver,
     _control_tx: UnboundedSender<RdpControl>,
     mut control_rx: UnboundedReceiver<RdpControl>,
     cancel: CancellationToken,
@@ -551,6 +719,23 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[tokio::test]
+    async fn websocket_output_replaces_stale_frame_batches() {
+        let (sender, mut receiver) = WsOutgoingQueue::new();
+        let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME, 1]));
+        let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME_END]));
+        let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME, 2]));
+        let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME_END]));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(WsOutgoing::Frame(bytes)) if bytes == vec![channel::FRAME, 2]
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(WsOutgoing::Frame(bytes)) if bytes == vec![channel::FRAME_END]
+        ));
     }
 
     #[test]
