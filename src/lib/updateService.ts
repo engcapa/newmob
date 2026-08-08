@@ -36,6 +36,26 @@ export interface DownloadProgress {
 // One resolved Update per target key (e.g. "darwin-x86_64"). check() resolves
 // to a single platform entry, so we keep them apart and reuse at install time.
 const updateCache = new Map<string, Update>();
+const SOCKSCAP_UPDATE_SUDO_REQUIRED = "SOCKSCAP_UPDATE_SUDO_REQUIRED:";
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function isSocksCapUpgradeAuthorizationRequired(error: unknown): boolean {
+  return errorText(error).includes(SOCKSCAP_UPDATE_SUDO_REQUIRED);
+}
+
+export function isSudoAuthenticationError(error: unknown): boolean {
+  const message = errorText(error).toLowerCase();
+  return (
+    message.includes("incorrect password") ||
+    message.includes("authentication failure") ||
+    message.includes("sudo authentication failed") ||
+    message.includes("sorry, try again") ||
+    message.includes("a password is required")
+  );
+}
 
 function devOsToken(): string {
   switch (getAppPlatform()) {
@@ -124,9 +144,24 @@ export async function checkForUpdate(target?: string): Promise<AvailableUpdate |
  * are still available; macOS disables Redirector interception over IPC. A cleanup failure blocks the
  * transition so the app cannot silently strand network state.
  */
-async function prepareSocksCapForUpgrade(): Promise<void> {
+async function prepareSocksCapForUpgrade(sudoPassword?: string): Promise<void> {
   if (!isTauriRuntime()) return;
-  await invoke("sockscap_prepare_for_update");
+  await invoke("sockscap_prepare_for_update", { sudoPassword });
+}
+
+/**
+ * Install an already-downloaded update after SocksCap cleanup succeeds.
+ * Exported separately so Linux can request sudo authorization and resume the
+ * installation without downloading the package a second time.
+ */
+export async function installDownloadedUpdate(
+  target: string | undefined,
+  sudoPassword?: string,
+): Promise<void> {
+  const update = updateCache.get(target ?? "");
+  if (!update) throw new Error("The downloaded update is no longer available. Download it again.");
+  await prepareSocksCapForUpgrade(sudoPassword);
+  await update.install();
 }
 
 /**
@@ -182,9 +217,7 @@ export async function downloadAndInstall(
   // Stop SocksCap before installation can replace files or a later relaunch can
   // terminate the process with machine-wide capture state still installed.
   onProgress({ downloaded, total, percent: 100 });
-  await prepareSocksCapForUpgrade();
-
-  await update.install();
+  await installDownloadedUpdate(target);
 }
 
 /** Restart into the freshly installed version (confirmation gate #2). */

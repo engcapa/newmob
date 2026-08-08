@@ -3,15 +3,20 @@ import {
   getUpdaterPlatform,
   checkForUpdate,
   downloadAndInstall,
+  installDownloadedUpdate,
+  isSocksCapUpgradeAuthorizationRequired,
+  isSudoAuthenticationError,
   relaunchApp,
   type DownloadProgress,
 } from "../lib/updateService";
+import { t as tr } from "../lib/i18n";
 
 export type UpdateStatus =
   | "idle"
   | "checking"
   | "available"
   | "downloading"
+  | "authorizing"
   | "ready"
   | "error"
   | "uptodate";
@@ -30,6 +35,8 @@ interface UpdateState {
   notes: string;
   error: string | null;
   progress: DownloadProgress | null;
+  authorizationBusy: boolean;
+  authorizationError: string | null;
 
   // Package / architecture selection (see claudedocs/auto-update-plan.md).
   os: string | null;
@@ -43,6 +50,8 @@ interface UpdateState {
   check: (opts?: { manual?: boolean }) => Promise<void>;
   setSelectedTarget: (target: string) => Promise<void>;
   startDownload: () => Promise<void>;
+  authorizeInstall: (sudoPassword: string) => Promise<void>;
+  cancelAuthorization: () => void;
   restart: () => Promise<void>;
   openDialog: () => void;
   closeDialog: () => void;
@@ -62,6 +71,8 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   notes: "",
   error: null,
   progress: null,
+  authorizationBusy: false,
+  authorizationError: null,
   os: null,
   nativeTarget: null,
   recommendedTarget: null,
@@ -158,15 +169,57 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   startDownload: async () => {
     const { selectedTarget, candidates } = get();
-    set({ status: "downloading", error: null, progress: { downloaded: 0, total: null, percent: 0 } });
+    set({
+      status: "downloading",
+      error: null,
+      progress: { downloaded: 0, total: null, percent: 0 },
+      authorizationBusy: false,
+      authorizationError: null,
+    });
     try {
       const downloadTarget = candidates.length > 1 ? (selectedTarget ?? undefined) : undefined;
       await downloadAndInstall(downloadTarget, (p) => set({ progress: p }));
       set({ status: "ready" });
     } catch (e) {
-      set({ status: "error", error: errMsg(e) });
+      if (isSocksCapUpgradeAuthorizationRequired(e)) {
+        set({ status: "authorizing", authorizationError: null });
+      } else {
+        set({ status: "error", error: errMsg(e) });
+      }
     }
   },
+
+  authorizeInstall: async (sudoPassword) => {
+    const { selectedTarget, candidates } = get();
+    const downloadTarget = candidates.length > 1 ? (selectedTarget ?? undefined) : undefined;
+    set({ authorizationBusy: true, authorizationError: null });
+    try {
+      await installDownloadedUpdate(downloadTarget, sudoPassword);
+      set({ status: "ready", authorizationBusy: false, authorizationError: null });
+    } catch (e) {
+      if (isSudoAuthenticationError(e)) {
+        set({
+          status: "authorizing",
+          authorizationBusy: false,
+          authorizationError: tr("sockscap.rootPromptIncorrectPassword"),
+        });
+      } else {
+        set({
+          status: "error",
+          error: errMsg(e),
+          authorizationBusy: false,
+          authorizationError: null,
+        });
+      }
+    }
+  },
+
+  cancelAuthorization: () =>
+    set({
+      status: "available",
+      authorizationBusy: false,
+      authorizationError: null,
+    }),
 
   restart: async () => {
     try {
@@ -179,5 +232,13 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   openDialog: () => set({ dialogOpen: true }),
   closeDialog: () => set({ dialogOpen: false }),
   reset: () =>
-    set({ status: "idle", error: null, progress: null, dialogOpen: false, targetStatus: "unknown" }),
+    set({
+      status: "idle",
+      error: null,
+      progress: null,
+      authorizationBusy: false,
+      authorizationError: null,
+      dialogOpen: false,
+      targetStatus: "unknown",
+    }),
 }));

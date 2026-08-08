@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useUpdateStore } from "../stores/updateStore";
 import { useT, type TranslateFn } from "../lib/i18n";
+import { SocksCapRootPrompt } from "./sockscap/SocksCapRootPrompt";
 
 const DANGER = "#e5534b";
 
@@ -26,14 +27,15 @@ export function UpdateDialog() {
   const s = useUpdateStore();
 
   const downloading = s.status === "downloading";
+  const authorizing = s.status === "authorizing";
+  const updating = downloading || authorizing;
   const percent = s.progress?.percent ?? null;
-  const installing = downloading && percent === 100;
+  const installing = updating && percent === 100;
   const canDownload =
     s.status === "available" && s.targetStatus !== "checking" && s.targetStatus !== "unavailable";
-  // A download must run to completion without being dismissed by an accidental
-  // click-away or Escape — only the explicit Cancel button (which calls
-  // closeDialog directly) can hide it. Every other state is freely dismissable.
-  const dismissable = s.status !== "downloading";
+  // Download and authorization must not be dismissed by an accidental
+  // click-away or Escape. Their explicit controls own cancellation.
+  const dismissable = !downloading && !authorizing;
 
   const close = () => {
     if (dismissable) s.closeDialog();
@@ -173,7 +175,7 @@ export function UpdateDialog() {
           </div>
         )}
 
-        {(s.status === "available" || downloading) && (
+        {(s.status === "available" || updating) && (
           <>
             <div className="text-[12px] taomni-mono mb-1" style={{ color: "var(--taomni-text-muted)" }}>
               {t("update.currentVersion", { version: s.currentVersion ?? "" })} →{" "}
@@ -201,7 +203,7 @@ export function UpdateDialog() {
                       <button
                         key={target}
                         type="button"
-                        disabled={downloading}
+                        disabled={updating}
                         onClick={() => void s.setSelectedTarget(target)}
                         className="taomni-btn h-8 px-3 text-[12px]"
                         data-primary={selected ? "true" : undefined}
@@ -232,7 +234,7 @@ export function UpdateDialog() {
               </div>
             )}
 
-            {downloading && (
+            {updating && (
               <div className="mb-3" data-testid="update-progress">
                 <div className="h-2 rounded overflow-hidden" style={{ background: "var(--taomni-card-border)" }}>
                   <div
@@ -312,6 +314,15 @@ export function UpdateDialog() {
           )}
         </div>
       </div>
+      {authorizing && (
+        <SocksCapRootPrompt
+          subtitle={t("update.sockscapRecoveryAuthorization")}
+          onSubmit={(password) => s.authorizeInstall(password)}
+          onCancel={s.cancelAuthorization}
+          error={s.authorizationError}
+          busy={s.authorizationBusy}
+        />
+      )}
     </div>
   );
 }
