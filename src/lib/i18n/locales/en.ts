@@ -464,6 +464,8 @@ const dict = {
     later: "Later",
     errorTitle: "Update failed",
     retry: "Try again",
+    sockscapRecoveryAuthorization:
+      "Taomni needs sudo authorization to remove residual SocksCap nftables and cgroup state before installing this update.",
   },
   welcome: {
     versionLabel: "Version {version}",

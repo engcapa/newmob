@@ -28,7 +28,13 @@ vi.mock("./runtime", () => ({
   isTauriRuntime: () => true,
 }));
 
-import { checkForUpdate, downloadAndInstall, relaunchApp } from "./updateService";
+import {
+  checkForUpdate,
+  downloadAndInstall,
+  installDownloadedUpdate,
+  isSocksCapUpgradeAuthorizationRequired,
+  relaunchApp,
+} from "./updateService";
 
 const update = {
   version: "0.4.4",
@@ -58,7 +64,9 @@ describe("updateService.relaunchApp", () => {
   it("gracefully tears down SocksCap before relaunching on Linux", async () => {
     await relaunchApp();
 
-    expect(mocks.invoke).toHaveBeenCalledWith("sockscap_prepare_for_update");
+    expect(mocks.invoke).toHaveBeenCalledWith("sockscap_prepare_for_update", {
+      sudoPassword: undefined,
+    });
     expect(mocks.relaunch).toHaveBeenCalledTimes(1);
     expect(mocks.invoke.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.relaunch.mock.invocationCallOrder[0],
@@ -87,5 +95,25 @@ describe("updateService.relaunchApp", () => {
 
     expect(mocks.download).toHaveBeenCalledTimes(1);
     expect(mocks.install).not.toHaveBeenCalled();
+  });
+
+  it("resumes a downloaded Linux update after automatic recovery gets sudo authorization", async () => {
+    await checkForUpdate();
+    mocks.invoke.mockRejectedValueOnce(
+      "SOCKSCAP_UPDATE_SUDO_REQUIRED: automatic SocksCap recovery failed",
+    );
+
+    const initialInstall = downloadAndInstall(undefined, vi.fn());
+    await expect(initialInstall).rejects.toSatisfy(isSocksCapUpgradeAuthorizationRequired);
+    expect(mocks.download).toHaveBeenCalledTimes(1);
+    expect(mocks.install).not.toHaveBeenCalled();
+
+    await installDownloadedUpdate(undefined, "root-secret");
+
+    expect(mocks.invoke).toHaveBeenLastCalledWith("sockscap_prepare_for_update", {
+      sudoPassword: "root-secret",
+    });
+    expect(mocks.download).toHaveBeenCalledTimes(1);
+    expect(mocks.install).toHaveBeenCalledTimes(1);
   });
 });

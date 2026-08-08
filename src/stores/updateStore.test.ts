@@ -6,6 +6,13 @@ vi.mock("../lib/updateService", () => ({
   getUpdaterPlatform: vi.fn(),
   checkForUpdate: vi.fn(),
   downloadAndInstall: vi.fn(),
+  installDownloadedUpdate: vi.fn(),
+  isSocksCapUpgradeAuthorizationRequired: vi.fn((error: unknown) =>
+    String(error).includes("SOCKSCAP_UPDATE_SUDO_REQUIRED:"),
+  ),
+  isSudoAuthenticationError: vi.fn((error: unknown) =>
+    String(error).includes("sudo authentication failed"),
+  ),
   relaunchApp: vi.fn(),
 }));
 
@@ -42,6 +49,8 @@ beforeEach(() => {
     notes: "",
     error: null,
     progress: null,
+    authorizationBusy: false,
+    authorizationError: null,
     os: null,
     nativeTarget: null,
     recommendedTarget: null,
@@ -218,5 +227,47 @@ describe("updateStore.startDownload", () => {
     await get().startDownload();
     expect(get().status).toBe("error");
     expect(get().error).toBe("boom");
+  });
+
+  it("requests sudo authorization and resumes the already-downloaded Linux update", async () => {
+    useUpdateStore.setState({
+      status: "available",
+      os: "linux",
+      selectedTarget: "linux-x86_64",
+      candidates: ["linux-x86_64"],
+    });
+    mocked.downloadAndInstall.mockRejectedValue(
+      new Error("SOCKSCAP_UPDATE_SUDO_REQUIRED: stale capture state"),
+    );
+
+    await get().startDownload();
+
+    expect(get().status).toBe("authorizing");
+    expect(mocked.installDownloadedUpdate).not.toHaveBeenCalled();
+
+    mocked.installDownloadedUpdate.mockResolvedValue(undefined);
+    await get().authorizeInstall("root-secret");
+
+    expect(mocked.installDownloadedUpdate).toHaveBeenCalledWith(undefined, "root-secret");
+    expect(mocked.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(get().status).toBe("ready");
+  });
+
+  it("keeps the authorization prompt open after an incorrect sudo password", async () => {
+    useUpdateStore.setState({
+      status: "authorizing",
+      os: "linux",
+      selectedTarget: "linux-x86_64",
+      candidates: ["linux-x86_64"],
+    });
+    mocked.installDownloadedUpdate.mockRejectedValue(
+      new Error("sudo authentication failed: Sorry, try again"),
+    );
+
+    await get().authorizeInstall("incorrect");
+
+    expect(get().status).toBe("authorizing");
+    expect(get().authorizationBusy).toBe(false);
+    expect(get().authorizationError).toBe("Sudo password incorrect or authentication failed. Please try again.");
   });
 });

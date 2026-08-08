@@ -463,6 +463,8 @@ export const zhCN: DeepPartial<typeof en> = {
     later: "稍后",
     errorTitle: "更新失败",
     retry: "重试",
+    sockscapRecoveryAuthorization:
+      "安装本次更新前，Taomni 需要 sudo 授权以自动清理 SocksCap 残留的 nftables 与 cgroup 状态。",
   },
   welcome: {
     versionLabel: "版本 {version}",
