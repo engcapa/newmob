@@ -48,8 +48,11 @@ pub(crate) struct RdpDisplay {
     /// Desktop size reported to the client. Set from the capture backend when
     /// available, else the fallback size passed in at construction.
     size: DesktopSize,
+    /// Windows capture is warmed before the listener accepts clients. This
+    /// avoids creating a native capture object during post-auth display
+    /// activation and guarantees a static desktop has a first frame.
     #[cfg(target_os = "windows")]
-    display_id: Option<String>,
+    mailbox: Arc<LatestFrameMailbox>,
     /// macOS capture is warmed before the listener becomes ready and remains
     /// alive across client authentication. This removes ScreenCaptureKit setup
     /// from the post-login critical path.
@@ -89,6 +92,9 @@ impl RdpDisplay {
         view_only: bool,
         #[cfg(target_os = "macos")] gfx: GfxTransport,
     ) -> anyhow::Result<Self> {
+        #[cfg(target_os = "windows")]
+        let _ = view_only;
+
         #[cfg(target_os = "macos")]
         let (size, mailbox, resize_tx, supports_client_size) =
             start_warmed_macos_capture(log.clone(), display_id.clone(), metrics.clone())?;
@@ -104,29 +110,17 @@ impl RdpDisplay {
         #[cfg(target_os = "macos")]
         let input_surface_size = Arc::new(AtomicU32::new(pack_desktop_size(size)));
 
-        // Other platforms keep their existing per-client capture lifecycle.
-        // Probing here keeps `size()` honest for the client.
         #[cfg(target_os = "windows")]
-        let size = match create_capturer_for_display(&log, display_id.as_deref(), !view_only) {
-            Ok(cap) => {
-                let (w, h) = cap.desktop_size();
-                match (NonZeroU16::new(w), NonZeroU16::new(h)) {
-                    (Some(_), Some(_)) => DesktopSize {
-                        width: w,
-                        height: h,
-                    },
-                    _ => anyhow::bail!("screen capture reported an invalid desktop size"),
-                }
-            }
-            Err(e) => anyhow::bail!("screen capture unavailable: {e}"),
-        };
+        let (size, mailbox) =
+            start_warmed_windows_capture(log.clone(), display_id.clone(), metrics.clone())?;
 
+        // Keep size() honest for the client on every native warm-up path.
         Ok(Self {
             log,
             metrics,
             size,
             #[cfg(target_os = "windows")]
-            display_id,
+            mailbox,
             #[cfg(target_os = "macos")]
             mailbox,
             #[cfg(target_os = "macos")]
@@ -256,12 +250,14 @@ impl RdpServerDisplay for RdpDisplay {
         }
 
         #[cfg(target_os = "windows")]
-        Ok(Box::new(DisplayUpdatesImpl::with_capture(
-            self.log.clone(),
-            self.size,
-            self.display_id.clone(),
-            self.metrics.clone(),
-        )))
+        {
+            self.mailbox.replay_latest_full();
+            Ok(Box::new(DisplayUpdatesImpl::from_warmed_windows_capture(
+                self.mailbox.clone(),
+                self.size,
+                self.metrics.clone(),
+            )))
+        }
     }
 }
 
@@ -282,7 +278,6 @@ impl Drop for RdpDisplay {
 /// Per-client update producer that drains the native capture thread.
 pub(crate) struct DisplayUpdatesImpl {
     mailbox: Arc<LatestFrameMailbox>,
-    close_mailbox_on_drop: bool,
     active_damage: VecDeque<Frame>,
     metrics: RdpMetrics,
     current_size: DesktopSize,
@@ -461,7 +456,6 @@ impl DisplayUpdatesImpl {
     ) -> Self {
         Self {
             mailbox,
-            close_mailbox_on_drop: false,
             active_damage: VecDeque::new(),
             metrics,
             current_size: size,
@@ -479,7 +473,6 @@ impl DisplayUpdatesImpl {
     ) -> Self {
         Self {
             mailbox,
-            close_mailbox_on_drop: false,
             active_damage: VecDeque::new(),
             metrics,
             current_size: size,
@@ -487,31 +480,17 @@ impl DisplayUpdatesImpl {
         }
     }
 
-    /// Spawn the capture thread and return an updater draining its frames.
-    #[cfg(not(target_os = "macos"))]
-    fn with_capture(
-        log: LogEmitter,
-        _size: DesktopSize,
-        display_id: Option<String>,
+    #[cfg(target_os = "windows")]
+    fn from_warmed_windows_capture(
+        mailbox: Arc<LatestFrameMailbox>,
+        size: DesktopSize,
         metrics: RdpMetrics,
     ) -> Self {
-        let mailbox = Arc::new(LatestFrameMailbox::new());
-
-        std::thread::Builder::new()
-            .name("rdp-capture".to_string())
-            .spawn({
-                let metrics = metrics.clone();
-                let mailbox = mailbox.clone();
-                move || capture_loop(log, mailbox, display_id, metrics)
-            })
-            .ok();
-
         Self {
             mailbox,
-            close_mailbox_on_drop: true,
             active_damage: VecDeque::new(),
             metrics,
-            current_size: _size,
+            current_size: size,
             deferred_full: None,
         }
     }
@@ -758,17 +737,8 @@ impl RdpServerDisplayUpdates for DisplayUpdatesImpl {
     }
 }
 
-impl Drop for DisplayUpdatesImpl {
-    fn drop(&mut self) {
-        if self.close_mailbox_on_drop {
-            self.mailbox.close();
-        }
-    }
-}
-
-/// Capture-thread body: create the backend on this thread, then loop producing
-/// updates and sending them to the display task. Exits when the receiver is
-/// dropped (client disconnected) or capture errors out.
+/// Drive a warmed capture backend until the client disconnects or capture
+/// fails, publishing updates to the display task.
 ///
 /// Two regimes, chosen by the backend:
 ///
@@ -835,6 +805,7 @@ fn start_warmed_macos_capture(
                 let (size, capturer, supports_client_size) = match result {
                     Ok(ready) => ready,
                     Err(error) => {
+                        worker_mailbox.close();
                         let _ = ready_tx.send(Err(error));
                         return;
                     }
@@ -942,22 +913,78 @@ fn start_warmed_linux_capture(
     Ok((size, mailbox, supports_input.then_some(portal_tx)))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn capture_loop(
+/// Start one Windows WGC capture owner before the RDP listener accepts clients.
+/// Graphics Capture is tied to the interactive console and can be
+/// expensive to initialize, so readiness includes a validated first frame.
+#[cfg(target_os = "windows")]
+fn start_warmed_windows_capture(
     log: LogEmitter,
-    mailbox: Arc<LatestFrameMailbox>,
     display_id: Option<String>,
     metrics: RdpMetrics,
-) {
-    let capturer = match create_capturer_for_display(&log, display_id.as_deref(), false) {
-        Ok(c) => c,
-        Err(e) => {
-            log.line(format!("capture thread: {}", e));
-            return;
-        }
-    };
+) -> anyhow::Result<(DesktopSize, Arc<LatestFrameMailbox>)> {
+    let mailbox = Arc::new(LatestFrameMailbox::new());
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
 
-    drive_capture(log, mailbox, capturer, metrics, None);
+    std::thread::Builder::new()
+        .name("rdp-capture".to_string())
+        .spawn({
+            let worker_mailbox = mailbox.clone();
+            move || {
+                let result = (|| {
+                    let mut capturer =
+                        create_capturer_for_display(&log, display_id.as_deref(), false)?;
+                    let started = std::time::Instant::now();
+                    let mut initial = capturer.capture()?;
+                    let width = NonZeroU16::new(initial.width)
+                        .ok_or_else(|| anyhow::anyhow!("Windows capture reported zero width"))?;
+                    let height = NonZeroU16::new(initial.height)
+                        .ok_or_else(|| anyhow::anyhow!("Windows capture reported zero height"))?;
+                    metrics.record_capture(started.elapsed(), initial.byte_len());
+                    initial.sequence = 1;
+                    if matches!(worker_mailbox.publish_full(initial), PublishResult::Closed) {
+                        anyhow::bail!("Windows capture mailbox closed during warm-up");
+                    }
+                    Ok((
+                        DesktopSize {
+                            width: width.get(),
+                            height: height.get(),
+                        },
+                        capturer,
+                    ))
+                })();
+
+                let (size, capturer) = match result {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        worker_mailbox.close();
+                        let _ = ready_tx.send(Err(error));
+                        return;
+                    }
+                };
+                if ready_tx.send(Ok(size)).is_err() {
+                    worker_mailbox.close();
+                    return;
+                }
+                log.line(format!(
+                    "Windows capture pre-warmed for RDP login ({}x{}; WGC/GDI)",
+                    size.width, size.height
+                ));
+                drive_capture(log, worker_mailbox, capturer, metrics);
+            }
+        })
+        .map_err(|error| anyhow::anyhow!("spawn Windows capture thread: {error}"))?;
+
+    let size = ready_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("Windows capture thread stopped during warm-up"))??;
+    Ok((size, mailbox))
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for RdpDisplay {
+    fn drop(&mut self) {
+        self.mailbox.close();
+    }
 }
 
 fn drive_capture(

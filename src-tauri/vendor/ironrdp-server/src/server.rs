@@ -84,6 +84,13 @@ pub trait ConnectionHandler: Send {
         true
     }
 
+    /// Called when another TCP connection arrives while the single supported
+    /// RDP session is active. The new stream is closed immediately after this
+    /// hook returns.
+    fn on_busy(&mut self, peer: SocketAddr, active_peer: SocketAddr) {
+        let _ = (peer, active_peer);
+    }
+
     /// Called after `run_connection()` completes (successfully or with error).
     ///
     /// `duration` is the wall-clock time the connection was active.
@@ -996,16 +1003,46 @@ impl RdpServer {
                     debug!(?peer, "Received connection");
                     drop(ev_receiver);
 
-                    let accepted = self.connection_handler
+                    // Keep lifecycle reporting outside RdpServer while the
+                    // connection future holds `&mut self`; this also lets busy
+                    // rejections notify the embedder without sharing handler
+                    // state across tasks.
+                    let mut connection_handler = self.connection_handler.take();
+                    let accepted = connection_handler
                         .as_mut()
                         .is_none_or(|h| h.on_accept(peer));
 
                     if !accepted {
                         debug!(?peer, "Connection rejected by handler");
                         drop(stream);
+                        self.connection_handler = connection_handler;
                     } else {
                         let started = tokio::time::Instant::now();
-                        let result = self.run_connection(stream).await;
+                        let result = {
+                            let connection = self.run_connection(stream);
+                            tokio::pin!(connection);
+                            loop {
+                                tokio::select! {
+                                    result = &mut connection => break result,
+                                    Ok((busy_stream, busy_peer)) = listener.accept() => {
+                                        // RdpServer owns one display/input/channel state machine,
+                                        // so another session cannot run concurrently. Still poll
+                                        // the listener while that session is active: otherwise the
+                                        // kernel completes TCP handshakes and leaves clients waiting
+                                        // indefinitely for an RDP negotiation response.
+                                        warn!(
+                                            ?busy_peer,
+                                            active_peer = ?peer,
+                                            "Rejecting RDP connection while the single-client session is active"
+                                        );
+                                        if let Some(handler) = connection_handler.as_mut() {
+                                            handler.on_busy(busy_peer, peer);
+                                        }
+                                        drop(busy_stream);
+                                    }
+                                }
+                            }
+                        };
                         let duration = started.elapsed();
 
                         if let Err(ref error) = result {
@@ -1014,7 +1051,8 @@ impl RdpServer {
 
                         self.static_channels = StaticChannelSet::new();
 
-                        if let Some(ref mut handler) = self.connection_handler {
+                        let mut stop = false;
+                        if let Some(ref mut handler) = connection_handler {
                             let action = handler.on_disconnected(
                                 peer,
                                 duration,
@@ -1022,8 +1060,12 @@ impl RdpServer {
                             );
                             if action == PostConnectionAction::Stop {
                                 debug!(?peer, "Handler requested stop after disconnect");
-                                break;
+                                stop = true;
                             }
+                        }
+                        self.connection_handler = connection_handler;
+                        if stop {
+                            break;
                         }
                     }
                 }

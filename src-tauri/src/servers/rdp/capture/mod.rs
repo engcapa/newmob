@@ -5,7 +5,7 @@
 //! - **Linux X11**: MIT-SHM + XDamage via `x11rb` (`x11.rs`)
 //! - **Linux Wayland**: `xcap` portal fallback when X11 is unreachable (`wayland.rs`)
 //! - **macOS**: persistent native display stream via `xcap` (`mac.rs`)
-//! - **Windows**: still a placeholder (DXGI/WGC not in this branch)
+//! - **Windows**: Windows Graphics Capture with a GDI compatibility fallback
 //!
 //! A captured [`Frame`] is BGRA8888 (`PixelFormat::BgrA32`), top-down, tightly
 //! packed at `stride` bytes per row — exactly what `BitmapUpdate` wants, so the
@@ -39,6 +39,9 @@ pub(crate) mod x11;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod mac;
+
+#[cfg(target_os = "windows")]
+pub(crate) mod win;
 
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -339,7 +342,7 @@ fn copy_rows(
 
 /// A platform screen-capture source. Lives on its own OS thread because most
 /// native backends hold thread-affine, non-`Send` handles (X11 SHM pointers,
-/// DXGI device contexts, …).
+/// native graphics device contexts, …).
 pub(crate) trait Capturer {
     /// Current desktop size in pixels `(width, height)`.
     fn desktop_size(&self) -> (u16, u16);
@@ -484,8 +487,7 @@ pub(crate) fn capture_capability_summary() -> String {
     }
     #[cfg(target_os = "windows")]
     {
-        return "Windows: DXGI/WGC capture not implemented in this build — placeholder frames only"
-            .into();
+        return "Windows: Windows Graphics Capture with GDI compatibility fallback".into();
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
@@ -521,11 +523,8 @@ pub(crate) fn create_capturer_for_display(
 
     #[cfg(target_os = "windows")]
     {
-        let _ = (log, request_input);
-        anyhow::bail!(
-            "Windows screen capture (DXGI/WGC) is not implemented yet — RDP server will \
-             serve a placeholder frame. Desktop sharing on Windows is deferred in this branch."
-        )
+        let _ = request_input;
+        return Ok(Box::new(win::WindowsCapturer::new(log, display_id)?));
     }
 
     #[cfg(target_os = "macos")]
@@ -550,7 +549,18 @@ pub(crate) fn probe() -> anyhow::Result<CaptureProbe> {
         return mac::probe();
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let displays = win::probe_displays()?;
+        return Ok(CaptureProbe {
+            permission: "notRequired".to_string(),
+            control_permission: "notRequired".to_string(),
+            displays,
+            summary: capture_capability_summary(),
+        });
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Ok(CaptureProbe {
             permission: "notRequired".to_string(),

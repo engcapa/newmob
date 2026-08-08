@@ -92,7 +92,9 @@ export function parseRdpOptions(optionsJson: string | undefined | null): RdpOpti
     colorDepth: clampInt(o.colorDepth, 32, [8, 15, 16, 24, 32]),
     screenW: clampInt(o.screenW, 1920, undefined, 320, 8192),
     screenH: clampInt(o.screenH, 1080, undefined, 200, 8192),
-    nla: typeof o.nla === "boolean" ? o.nla : false,
+    // NLA is the production default. Older sessions may explicitly persist
+    // `false` for legacy TLS-only servers, so only a missing value is filled.
+    nla: typeof o.nla === "boolean" ? o.nla : true,
     ...(normalizeFingerprint(o.certificateFingerprint)
       ? { certificateFingerprint: normalizeFingerprint(o.certificateFingerprint) }
       : {}),

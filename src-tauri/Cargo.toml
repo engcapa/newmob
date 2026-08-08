@@ -232,6 +232,17 @@ winapi = { version = "0.3", features = [
   "handleapi", "minwindef", "synchapi", "tlhelp32",
 ] }
 winreg = "0.55"
+# Windows console RDP capture: use xcap's WGC recorder so stop/drop closes the
+# native frame pool and session. The capture module supplies a bounded native
+# GDI fallback when Graphics Capture is unavailable.
+xcap = { version = "0.9.6", features = ["wgc"] }
+scopeguard = "1.2"
+windows = { version = "0.62", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Legacy RDP server macOS capture fallback. The primary capture source below is

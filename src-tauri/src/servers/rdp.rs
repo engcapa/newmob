@@ -299,23 +299,30 @@ impl ConnectionPolicy {
             },
         );
     }
+
+    fn reject_busy(&self, peer: SocketAddr, active_peer: Option<SocketAddr>) {
+        self.log.line(format!(
+            "RDP rejected {peer}: single-client session{} is already active",
+            active_peer
+                .map(|value| format!(" from {value}"))
+                .unwrap_or_default()
+        ));
+        self.emit_session(
+            "rejected",
+            peer,
+            None,
+            Some("single-client session already active".to_string()),
+        );
+    }
 }
 
 impl ConnectionHandler for ConnectionPolicy {
     fn on_accept(&mut self, peer: SocketAddr) -> bool {
-        // IronRDP currently drives one connection at a time. Keep the invariant
-        // explicit so a future concurrent accept loop cannot silently turn
-        // console sharing into an uncontrolled multi-client service.
+        // IronRDP owns one display/input/channel state machine. The vendored
+        // accept loop also invokes `on_busy` for sockets arriving while this
+        // session is running; keep this guard for direct/manual callers.
         if self.active {
-            self.log.line(format!(
-                "RDP rejected {peer}: single-client policy already has an active session"
-            ));
-            self.emit_session(
-                "rejected",
-                peer,
-                None,
-                Some("single-client policy".to_string()),
-            );
+            self.reject_busy(peer, None);
             return false;
         }
 
@@ -335,6 +342,10 @@ impl ConnectionHandler for ConnectionPolicy {
         ));
         self.emit_session("connecting", peer, None, None);
         true
+    }
+
+    fn on_busy(&mut self, peer: SocketAddr, active_peer: SocketAddr) {
+        self.reject_busy(peer, Some(active_peer));
     }
 
     fn on_disconnected(

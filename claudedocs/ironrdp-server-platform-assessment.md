@@ -34,7 +34,7 @@ Taomni 生命周期 / 配置 / UI
 - 作为 Rust/Tauri 内嵌式 RDP 协议层：推荐，属于当前较优解。
 - 作为 macOS、Windows、Linux 的统一完整服务器：不是最优解。
 - 作为 macOS 当前控制台共享的实现：核心链路已在代码和自动化测试层达标，发布前仍需真实客户端互操作和性能基准。
-- 作为三平台统一的生产实现：尚未达标；Windows 捕获仍会阻止服务启动，Wayland 仍是条件支持，独立会话不属于本实现范围。
+- 作为三平台统一的生产实现：协议与平台捕获代码已具备发布候选基础；Windows/Wayland 的真实客户端互操作、真机长稳和量化性能仍需发布前验证，独立会话不属于本实现范围。
 
 ### 关键区分
 
@@ -52,7 +52,7 @@ Taomni 当前计划已经明确产品不是 Windows RDS 或 TeamViewer 替代品
 | 平台 / 场景 | 当前支持状态 | 当前实现 / 推荐实现 | 验证状态与主要限制 |
 |---|---|---|---|
 | macOS 当前控制台共享 | **核心链路已实现，发布候选** | IronRDP + ScreenCaptureKit + CoreGraphics/Accessibility + VideoToolbox AVC420；`xcap` 捕获回退 | macOS 本机构建和自动化回归已通过；仍需 mstsc、Windows App、macOS 客户端和 FreeRDP 真机矩阵。需要 Screen Recording 与 Accessibility 权限，不覆盖登录窗口和安全桌面 |
-| Windows 当前控制台共享 | **未达标，阻塞启动** | IronRDP 协议和输入代码可复用；仍需 WGC/DXGI 捕获，建议 WGC 优先、DXGI Desktop Duplication 兜底 | 当前捕获器明确返回错误。UAC secure desktop、锁屏和跨会话还需要服务级能力 |
+| Windows 当前控制台共享 | **代码层已实现，发布候选待真机验证** | IronRDP + Windows Graphics Capture 连续捕获；原生 GDI BitBlt 兼容回退；latest-frame mailbox；显示器拓扑重建与恢复 | 自动化编译/单测已通过；仍需 mstsc、Windows App、FreeRDP 真机互操作、DPI/多显示器/锁屏和长稳性能矩阵 |
 | Windows 远程登录 / 独立会话 | **不由 Taomni 内嵌服务器提供** | 使用系统 Remote Desktop Service | 通常要求 Pro/Enterprise；语义是远程登录，不等价于与本地用户同时共享控制台 |
 | Linux X11 控制台共享 | **代码与自动化门槛已达标** | XShm/XDamage 区域捕获 + XRandR 几何监听 + `enigo`/XTest 输入 + bitmap 更新 | SHM resize 重建、GetImage 降级、resize-before-frame 和边界测试已通过；仍需真机多屏/旋转/缩放、锁屏及高分辨率性能矩阵 |
 | Linux Wayland 控制台共享 | **代码与自动化门槛已达标** | Wayland 会话优先使用同一个 RemoteDesktop Portal 授权屏幕与键鼠，通过持久 PipeWire stream 捕获并通过 Portal 注入输入 | 像素格式/stride/负 stride、坐标映射、流关闭和 mailbox 已覆盖；仍需 GNOME/KDE 真机授权、合成器兼容性、睡眠唤醒和长稳验证 |
@@ -77,12 +77,12 @@ macOS 是当前最适合继续使用 IronRDP 的平台。Taomni 已经采用 Scr
 
 ### Windows
 
-Windows 是当前最大的阻塞点。代码在创建捕获器时明确 `bail!`：[capture/mod.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mod.rs)，而 `RdpDisplay::new` 会把该错误继续向上传播：[display.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/display.rs)。因此现状不是“低质量占位帧”，而是 RDP 服务不能正常启动。
+Windows 控制台共享的捕获链路已补齐。`xcap 0.9.6` 的 Windows Graphics Capture 作为连续帧主路径，原生 GDI BitBlt 截图作为兼容回退；WGC 的 frame pool/session 支持显式关闭，停止时先释放零容量帧接收端，避免阻塞的原生回调卡住关闭流程。服务就绪前会同步预热并验证首帧，捕获线程通过 latest-frame mailbox 保持有界背压。显示器选择、拓扑变化、尺寸变化、WGC 断线/异常帧恢复、512 MiB 帧上限和静态桌面首帧均在平台适配层收口。Windows 扩展键改为原生 `SendInput`，将 `0xE0` 标志与硬件扫描码分离，避免第三方输入库把完整 `0xE0xx` 错传给 `wScan`。实现位置为 [capture/win.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/win.rs)、[capture/mod.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/capture/mod.rs)、[display.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/display.rs) 和 [input.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/input.rs)。
 
-建议采用两阶段实现：
+当前仍需两类发布验证：
 
-1. 先启用并验证 `xcap 0.9.6` 已有的 WGC/DXGI/GDI 能力，快速覆盖单显示器、DPI、窗口移动、显示器热插拔和帧率场景。
-2. 如果 RGBA 截图和 CPU 拷贝成为瓶颈，再实现直接 D3D11 texture 到编码器的专用后端。
+1. 使用 Windows mstsc、Windows App 和 FreeRDP 覆盖单显示器、DPI、窗口移动、显示器热插拔、输入和重连场景。
+2. 对 RGBA 拷贝、CPU/GPU、稳定 FPS、端到端时延和 WGC/GDI 回退比例做真机基准；若 bitmap 路径成为瓶颈，再实现直接 D3D11 texture 到编码器的专用后端。
 
 Windows 原生 RDP 更适合“远程登录到系统会话”的场景。微软官方文档要求被连接的主机运行 Windows Pro（当前文档以 Windows 10/11 Pro 为例），客户端可以是其他版本或其他操作系统。它的会话和安全桌面集成明显强于用户态嵌入式服务器，但它不能提供 Taomni 自己定义的统一控制台镜像语义。
 
@@ -141,21 +141,13 @@ Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrd
 
 ### 单连接行为
 
-当前 vendored server 仍在 `accept()` 后内联等待 `run_connection()` 完成：[server.rs](/Users/zhyhang/code/person/taomni/src-tauri/vendor/ironrdp-server/src/server.rs)。上游也存在对应的公开问题：第二个客户端可能完成 TCP 握手但一直得不到 RDP 协商响应。`TCP_NODELAY` 只改善传输时延，不改变该单连接行为。
-
-如果 Taomni 只允许一个控制台客户端，应实现显式策略：
-
-- `Reject`：立即返回“已有客户端连接”。
-- `Preempt`：候选连接完成 TLS/NLA 认证后，才允许接管当前连接。
-- `Queue`：只适合明确需要排队的场景。
-
-默认静默挂起不适合作为产品行为。
+vendored server 保持一个 RDP display/input/channel 状态机，但在主连接运行期间继续轮询 listener：[server.rs](/Users/zhyhang/code/person/taomni/src-tauri/vendor/ironrdp-server/src/server.rs)。第二个 TCP 连接现在会被立即接受并关闭，同时通过 `ConnectionHandler::on_busy` 记录日志并发出 `rejected` 会话事件，不再留在 backlog 中静默等待 RDP 协商。当前产品策略明确为 `Reject`；未实现 `Preempt` 或排队，避免未经认证的新连接影响已建立的控制台会话。
 
 ### 认证和安全边界
 
 当前认证是 Taomni 配置中的固定用户名/密码，而不是系统账户或 PAM：[auth.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/auth.rs:1)。这适合受控内网，但不具备多用户登录能力。
 
-建议继续强制 Hybrid/NLA，并补充：
+内嵌 server 继续强制 Hybrid/NLA；出站 RDP client 对新配置和缺失字段默认启用 NLA，显式 `nla: false` 仅作为旧 TLS-only 主机兼容开关。仍需补充：
 
 - 证书持久化、轮换和客户端信任策略。
 - 登录失败限速、IP 临时封禁和审计日志。
@@ -183,9 +175,10 @@ Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrd
 | Linux X11 动态显示 | **代码层已达标** | XRandR 监听、根窗口几何检测、SHM 重建/GetImage 降级、resize 先于新尺寸全帧 |
 | Linux Wayland 捕获与控制 | **代码层已达标** | Wayland 优先路由、RemoteDesktop Portal 联合授权、持久 PipeWire stream、Portal 输入与流失败收口 |
 | RDP client 慢消费者背压 | **已达标** | session 与 WebSocket 两层均使用有界控制队列和 latest-complete-frame 批次，旧完整帧可被新帧替换 |
-| 自动化回归 | **已达标** | RDP server 43 个测试、RDP client 225 个测试、完整 Rust lib/integration、前端 build/Vitest 均通过 |
+| 单连接忙碌策略 | **已达标** | 活跃会话期间继续 accept 并立即关闭额外连接；记录 rejected 会话事件，不再静默挂起 |
+| 自动化回归 | **已达标** | RDP server 32 个测试、RDP client 204 个测试（7 个 live fixture 忽略）、集成 58 个测试、前端 232 个文件/1986 个测试均通过 |
 | macOS 生产发布门槛 | **部分达标** | 编译与回归通过；缺真实客户端兼容矩阵、真机长稳和量化性能数据 |
-| Windows/Linux 达到同等原生性能 | **部分达标** | Windows 捕获仍缺失；Linux 捕获与授权链路已完成，但尚无硬件编码和真机量化性能数据 |
+| Windows/Linux 达到同等原生性能 | **代码层部分达标** | Windows WGC/GDI 与 Linux 捕获/授权链路已完成；Windows/Linux 仍主要使用 bitmap，尚无硬件编码和真机量化性能数据 |
 
 ### 性能表现
 
@@ -218,7 +211,17 @@ Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrd
 - `pnpm test`：232 files、1985 tests passed
 - `git diff --check`
 
-这些结果覆盖编译、状态机、Wayland PipeWire 像素转换和 stream 关闭、X11 resize/边界、捕获 mailbox、resize 顺序、坐标映射、client/WebSocket 慢消费者背压、编码超时/停滞判断和权限设置 UI；它们不替代真实 RDP 客户端、GNOME/KDE 真机图像与输入、硬件编码器和长时间会话验证。
+本轮 Windows 捕获完善后追加验证：
+
+- `cargo check --lib --target x86_64-pc-windows-msvc --quiet`：通过（仅已有编译警告）
+- `cargo test --lib servers::rdp:: --quiet`：32 passed
+- `cargo test --manifest-path vendor/ironrdp-server/Cargo.toml --lib --quiet`：10 passed
+- `cargo test --lib rdp:: --quiet`：206 passed，7 ignored（该名称过滤器也包含 2 个 Windows server helper 测试）
+- `cargo test --test integration --quiet`：58 passed
+- `pnpm test`：232 files、1986 tests passed
+- `pnpm build`：通过
+
+这些结果覆盖编译、状态机、Wayland PipeWire 像素转换和 stream 关闭、X11 resize/边界、Windows 帧上限和扩展扫描码拆分、捕获 mailbox、resize 顺序、坐标映射、client/WebSocket 慢消费者背压、编码超时/停滞判断和权限设置 UI；它们不替代真实 RDP 客户端、GNOME/KDE 真机图像与输入、硬件编码器和长时间会话验证。
 
 ## 五、替代方案比较
 
@@ -244,9 +247,8 @@ Taomni 已升级到 `ironrdp 0.17.0`、`ironrdp-tokio 0.10.0`、vendored `ironrd
 ### P0：完成发布验证并恢复真实跨平台可用性
 
 1. 对 macOS 使用 mstsc、Windows App、macOS Microsoft Remote Desktop 和 FreeRDP 完成真实互操作、长稳和性能基准。
-2. 完成 Windows WGC/DXGI 捕获，并加入 GDI fallback。
+2. 对已完成的 Windows WGC/GDI 捕获完成 mstsc、Windows App、FreeRDP 真机互操作、长稳和性能基准。
 3. 在已完成 Portal/PipeWire 优先实现的基础上，验证 GNOME 和 KDE 至少各一套实机环境。
-4. 为单连接实现显式 `Reject` 或认证后 `Preempt` 策略。
 
 ### P1：提升性能和协议兼容性
 
