@@ -11,8 +11,9 @@
 //! ## Keyboard scancodes — the platform-specific part
 //! RDP delivers PC/AT **Set 1** scancodes (`KeyboardEvent::Pressed { code, extended }`).
 //! How those reach the OS differs by platform, so [`rdp_scancode_to_raw`] adapts:
-//!   - **Windows**: `enigo.raw()` takes a scancode directly (`KEYEVENTF_SCANCODE`),
-//!     so we pass the Set-1 code through (extended keys keep the `0xE0` prefix bit).
+//!   - **Windows**: native `SendInput` receives the Set-1 code directly; extended
+//!     keys split the `0xE0` marker into `KEYEVENTF_EXTENDEDKEY` and the low-byte
+//!     hardware scan code.
 //!   - **X11/Linux**: `enigo.raw()` takes an *X11 keycode* = Linux evdev code + 8.
 //!     RDP Set-1 codes equal evdev codes across the main block, so
 //!     `x11_keycode = scancode + 8` is correct for ordinary keys; extended keys
@@ -737,6 +738,9 @@ fn apply(
 ) -> Result<(), String> {
     match cmd {
         InputCmd::Raw { code, dir } => {
+            #[cfg(target_os = "windows")]
+            inject_windows_scancode(code, dir)?;
+            #[cfg(not(target_os = "windows"))]
             enigo.raw(code, dir).map_err(|e| e.to_string())?;
         }
         InputCmd::Key { key, dir } => {
@@ -767,6 +771,58 @@ fn apply(
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn inject_windows_scancode(code: u16, direction: Direction) -> Result<(), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+        KEYEVENTF_SCANCODE, SendInput,
+    };
+
+    let (scan, extended) = windows_scancode_parts(code);
+    let input = |released: bool| {
+        let mut flags = KEYEVENTF_SCANCODE;
+        if extended {
+            flags |= KEYEVENTF_EXTENDEDKEY;
+        }
+        if released {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: Default::default(),
+                    wScan: scan,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    };
+    let inputs = [input(false), input(true)];
+    let inputs = match direction {
+        Direction::Press => &inputs[..1],
+        Direction::Release => &inputs[1..],
+        Direction::Click => &inputs[..],
+    };
+    let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        return Err(format!(
+            "Windows SendInput injected {sent}/{} keyboard events: {}",
+            inputs.len(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_scancode_parts(code: u16) -> (u16, bool) {
+    const EXTENDED_PREFIX: u16 = 0xE000;
+    (code & 0x00FF, code & EXTENDED_PREFIX == EXTENDED_PREFIX)
 }
 
 impl RdpServerInputHandler for RdpInput {
@@ -943,8 +999,8 @@ impl RdpServerInputHandler for RdpInput {
 pub(crate) fn rdp_scancode_to_raw(scancode: u8, extended: bool) -> Option<u16> {
     #[cfg(target_os = "windows")]
     {
-        // Windows `raw()` takes the scancode directly. Mark extended keys with
-        // the 0xE0 prefix bit so `MAPVK_VSC_TO_VK_EX` resolves the right VK.
+        // Preserve the RDP E0 marker until the native injection layer splits
+        // it into KEYEVENTF_EXTENDEDKEY and the low-byte hardware scan code.
         let mut sc = u16::from(scancode);
         if extended {
             sc |= 0xE000;
@@ -1248,5 +1304,11 @@ mod tests {
     fn unknown_extended_falls_back_to_base() {
         // An unmapped extended code degrades to scancode+8 rather than panicking.
         assert_eq!(linux_scancode_to_keycode(0x7A, true), 0x7A + 8);
+    }
+
+    #[test]
+    fn windows_extended_scancode_keeps_prefix_out_of_hardware_code() {
+        assert_eq!(windows_scancode_parts(0xE048), (0x48, true));
+        assert_eq!(windows_scancode_parts(0x001E), (0x1E, false));
     }
 }

@@ -43,7 +43,7 @@ use crate::vault::Vault;
 
 /// Configuration parsed out of `SessionConfig.options_json` for an RDP
 /// session. Mirrors the TS-side `RdpOptions` in `src/types/rdp.ts`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RdpOptions {
     #[serde(default)]
@@ -54,7 +54,7 @@ pub struct RdpOptions {
     pub screen_w: u16,
     #[serde(default = "default_screen_h")]
     pub screen_h: u16,
-    #[serde(default)]
+    #[serde(default = "default_nla")]
     pub nla: bool,
     /// Optional SHA-256 pin for a self-signed/private-CA RDP certificate.
     /// System trust is always attempted first.
@@ -80,6 +80,9 @@ fn default_screen_w() -> u16 {
 }
 fn default_screen_h() -> u16 {
     1080
+}
+fn default_nla() -> bool {
+    true
 }
 fn default_true() -> bool {
     true
@@ -413,6 +416,24 @@ pub async fn rdp_test_connection(
     ))
 }
 
+impl Default for RdpOptions {
+    fn default() -> Self {
+        Self {
+            domain: None,
+            color_depth: default_color_depth(),
+            screen_w: default_screen_w(),
+            screen_h: default_screen_h(),
+            nla: default_nla(),
+            certificate_fingerprint: None,
+            performance: PerformanceFlags::default(),
+            redirect_clipboard: default_true(),
+            redirect_audio: default_audio_mode(),
+            redirect_drive: DriveRedirectOpt::default(),
+            gateway: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +484,14 @@ mod tests {
         let gateway = options.gateway.unwrap();
         assert_eq!(gateway.username, "gateway-user");
         assert_eq!(gateway.password.as_deref(), Some("gateway-pass"));
+    }
+
+    #[test]
+    fn rdp_options_default_to_nla_for_new_sessions() {
+        assert!(RdpOptions::default().nla);
+        let parsed: RdpOptions = serde_json::from_str("{}").unwrap();
+        assert!(parsed.nla);
+        let legacy_tls: RdpOptions = serde_json::from_str(r#"{"nla":false}"#).unwrap();
+        assert!(!legacy_tls.nla);
     }
 }

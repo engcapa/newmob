@@ -348,6 +348,11 @@ describe("RdpOptions parse/serialize", () => {
     expect(parseRdpOptions("[1,2,3]")).toEqual(DEFAULT_RDP_OPTIONS);
   });
 
+  it("defaults missing NLA to enabled while preserving explicit legacy TLS mode", () => {
+    expect(parseRdpOptions('{"screenW":1280}').nla).toBe(true);
+    expect(parseRdpOptions('{"nla":false}').nla).toBe(false);
+  });
+
   it("round-trips a configuration with gateway", () => {
     const opts: RdpOptions = {
       ...DEFAULT_RDP_OPTIONS,
