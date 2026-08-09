@@ -25,17 +25,17 @@ describe("parseQuickConnectInput", () => {
     });
   });
 
-  it("parses VNC URLs and preserves the VNC authentication prompt contract", () => {
-    const parsed = parseQuickConnectInput("vnc://viewer@desktop.example.test:5901");
+  it("parses VNC URLs through the password prompt path", () => {
+    const parsed = parseQuickConnectInput("vnc://alice@desktop.example.test:5901");
 
-    expect(parsed).toMatchObject({ transient: true, authData: null });
     expect(parsed.config).toMatchObject({
       session_type: "VNC",
       host: "desktop.example.test",
       port: 5901,
-      username: "viewer",
+      username: "alice",
       auth_method: "Password",
     });
+    expect(parsed.authData).toBeNull();
   });
 
   it.each([

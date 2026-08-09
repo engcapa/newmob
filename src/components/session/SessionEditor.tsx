@@ -93,13 +93,6 @@ import {
   type RdpOptions,
 } from "../../types/rdp";
 import {
-  parseVncClientOptions,
-  serializeVncClientOptions,
-  type VncClientOptions,
-  type VncClipboardPolicy,
-  type VncSecurityPolicy,
-} from "../../types/vnc";
-import {
   parseLocalShellOptions,
   serializeLocalShellOptions,
   type LocalShellOptions,
@@ -138,7 +131,7 @@ type Proto =
   | "MySQL" | "PostgreSQL" | "PanWeiDB" | "Oracle" | "SQLServer" | "StarRocks" | "ClickHouse" | "Presto" | "Redis" | "HBaseShell"
   | "Proxy" | "Mail";
 
-type SectionTab = "advanced" | "terminal" | "appearance" | "network" | "bookmark" | "rdp" | "database" | "mappings" | "proxy" | "objectstorage" | "mail";
+type SectionTab = "advanced" | "terminal" | "appearance" | "network" | "bookmark" | "rdp" | "vnc" | "database" | "mappings" | "proxy" | "objectstorage" | "mail";
 type MailSecurityMode = "TLS" | "STARTTLS" | "None";
 type MailProvider = "custom" | "gmail" | "outlook";
 type MailAuthMode = "password" | "oauth2";
@@ -400,18 +393,15 @@ function Checkbox({
   checked,
   onChange,
   disabled,
-  testId,
 }: {
   checked: boolean;
   onChange?: (v: boolean) => void;
   disabled?: boolean;
-  testId?: string;
 }) {
   return (
     <input
       type="checkbox"
       className="taomni-checkbox"
-      data-testid={testId}
       data-checked={checked}
       checked={checked}
       disabled={disabled}
@@ -2543,11 +2533,6 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const [hbaseKrb5ConfPath, setHBaseKrb5ConfPath] = useState(() => optionString(initialOptions, "hbaseKrb5ConfPath", ""));
   const [hbaseSitePath, setHBaseSitePath] = useState(() => optionString(initialOptions, "hbaseSitePath", ""));
 
-  /* --- VNC client policy and recovery options --- */
-  const [vncOptions, setVncOptions] = useState<VncClientOptions>(() =>
-    parseVncClientOptions(initialOptions),
-  );
-
   /* --- proxy session options --- */
   const [proxyKind, setProxyKind] = useState<"http" | "socks5">(() => {
     const v = optionString(initialOptions, "proxyKind", "http");
@@ -2687,6 +2672,25 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const [rdpOptions, setRdpOptions] = useState<RdpOptions>(() =>
     parseRdpOptions(session?.options_json),
   );
+
+  /* --- VNC production policies --- */
+  const [vncSecurityPolicy, setVncSecurityPolicy] = useState<
+    "require-encryption" | "prefer-encryption" | "legacy-compatible" | "allow-none"
+  >(() => {
+    const value = optionString(initialOptions, "vncSecurityPolicy", "prefer-encryption");
+    return value === "require-encryption" || value === "legacy-compatible" || value === "allow-none"
+      ? value
+      : "prefer-encryption";
+  });
+  const [vncViewOnly, setVncViewOnly] = useState(() => optionBoolean(initialOptions, "vncViewOnly", false));
+  const [vncClipboardPolicy, setVncClipboardPolicy] = useState<
+    "disabled" | "client-to-server" | "server-to-client" | "bidirectional"
+  >(() => {
+    const value = optionString(initialOptions, "vncClipboardPolicy", "bidirectional");
+    return value === "disabled" || value === "client-to-server" || value === "server-to-client"
+      ? value
+      : "bidirectional";
+  });
 
   /* --- SFTP path mappings --- */
   const [pathMappings, setPathMappings] = useState<SftpPathMapping[]>(() =>
@@ -2880,7 +2884,9 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
         ? (JSON.parse(serializeRdpOptions(rdpOptions)) as Record<string, unknown>)
         : {};
     const vncOverrides: Record<string, unknown> =
-      proto === "VNC" ? serializeVncClientOptions(vncOptions) : {};
+      proto === "VNC"
+        ? { vncSecurityPolicy, vncViewOnly, vncClipboardPolicy }
+        : {};
     const dbOverrides: Record<string, unknown> = isDb
       ? {
           dbDatabase,
@@ -3441,7 +3447,23 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     setLocalShellOptions(parseLocalShellOptions(session?.options_json));
     setWslOptions(parseWslOptions(session?.options_json));
     setRdpOptions(parseRdpOptions(session?.options_json));
-    setVncOptions(parseVncClientOptions(nextOptions));
+    {
+      const policy = optionString(nextOptions, "vncSecurityPolicy", "prefer-encryption");
+      setVncSecurityPolicy(
+        policy === "require-encryption" || policy === "legacy-compatible" || policy === "allow-none"
+          ? policy
+          : "prefer-encryption",
+      );
+    }
+    setVncViewOnly(optionBoolean(nextOptions, "vncViewOnly", false));
+    {
+      const policy = optionString(nextOptions, "vncClipboardPolicy", "bidirectional");
+      setVncClipboardPolicy(
+        policy === "disabled" || policy === "client-to-server" || policy === "server-to-client"
+          ? policy
+          : "bidirectional",
+      );
+    }
     setPathMappings(parsePathMappingsFromOptions(session?.options_json));
     const restoredMailProvider = initialMailProvider(nextOptions, session?.host);
     setMailProvider(restoredMailProvider);
@@ -3999,6 +4021,8 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
         // (terminal appearance is meaningless for a graphical RDP session).
         ...(isRdp
           ? [{ id: "rdp" as SectionTab, label: t("rdp.options.title"), icon: <Monitor className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
+          : proto === "VNC"
+            ? [{ id: "vnc" as SectionTab, label: "VNC policies", icon: <Monitor className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
           : supportsTerminalAppearance
             ? [{ id: "terminal" as SectionTab, label: t("sessionEditor2.sectionTerminal"), icon: <TerminalIcon className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
             : []),
@@ -4008,6 +4032,8 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
 
   const fallbackSection: SectionTab = isRdp
     ? "rdp"
+    : proto === "VNC"
+      ? "vnc"
     : supportsTerminalAppearance
       ? "terminal"
       : isSSH
@@ -4032,6 +4058,8 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           ? fallbackSection
           : section === "rdp" && !isRdp
             ? fallbackSection
+            : section === "vnc" && proto !== "VNC"
+              ? fallbackSection
             : section === "mappings" && proto !== "SFTP"
               ? fallbackSection
               : section === "terminal" && !supportsTerminalAppearance
@@ -4260,148 +4288,6 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
                   </div>
                 </>
               )}
-            </div>
-          </div>
-        )}
-
-        {proto === "VNC" && (
-          <div
-            data-testid="vnc-client-options"
-            className="px-4 py-3 border-b shrink-0"
-            style={{ borderColor: "var(--taomni-divider)" }}
-          >
-            <div
-              className="text-[12px] font-semibold mb-2 flex items-center gap-2"
-              style={{ color: "var(--taomni-accent)" }}
-            >
-              <Shield className="w-3.5 h-3.5" />
-              {t("sessionEditor2.vncOptionsTitle")}
-            </div>
-            <div className="grid grid-cols-12 gap-2 items-center">
-              <label className="col-span-2 text-[12px] text-right" htmlFor="vnc-security-policy">
-                {t("sessionEditor2.vncSecurityPolicy")}
-              </label>
-              <select
-                id="vnc-security-policy"
-                data-testid="vnc-security-policy"
-                className="taomni-input col-span-4"
-                value={vncOptions.securityPolicy}
-                onChange={(event) => setVncOptions((current) => ({
-                  ...current,
-                  securityPolicy: event.target.value as VncSecurityPolicy,
-                }))}
-              >
-                <option value="require-encryption">{t("sessionEditor2.vncSecurityRequire")}</option>
-                <option value="prefer-encryption">{t("sessionEditor2.vncSecurityPrefer")}</option>
-                <option value="legacy-compatible">{t("sessionEditor2.vncSecurityLegacy")}</option>
-                <option value="allow-none">{t("sessionEditor2.vncSecurityAllowNone")}</option>
-              </select>
-
-              <label className="col-span-2 text-[12px] text-right" htmlFor="vnc-clipboard-policy">
-                {t("sessionEditor2.vncClipboardPolicy")}
-              </label>
-              <select
-                id="vnc-clipboard-policy"
-                data-testid="vnc-clipboard-policy"
-                className="taomni-input col-span-4"
-                value={vncOptions.clipboardPolicy}
-                onChange={(event) => setVncOptions((current) => ({
-                  ...current,
-                  clipboardPolicy: event.target.value as VncClipboardPolicy,
-                }))}
-              >
-                <option value="disabled">{t("sessionEditor2.vncClipboardDisabled")}</option>
-                <option value="client-to-server">{t("sessionEditor2.vncClipboardClientToServer")}</option>
-                <option value="server-to-client">{t("sessionEditor2.vncClipboardServerToClient")}</option>
-                <option value="bidirectional">{t("sessionEditor2.vncClipboardBidirectional")}</option>
-              </select>
-
-              <div className="col-span-2" />
-              <div className="col-span-10 flex flex-wrap items-center gap-x-5 gap-y-2 text-[12px]">
-                <label className="flex items-center gap-1.5">
-                  <Checkbox
-                    testId="vnc-shared"
-                    checked={vncOptions.shared}
-                    onChange={(value) => setVncOptions((current) => ({ ...current, shared: value }))}
-                  />
-                  {t("sessionEditor2.vncShared")}
-                </label>
-                <label className="flex items-center gap-1.5">
-                  <Checkbox
-                    testId="vnc-view-only"
-                    checked={vncOptions.viewOnly}
-                    onChange={(value) => setVncOptions((current) => ({ ...current, viewOnly: value }))}
-                  />
-                  {t("sessionEditor2.vncViewOnly")}
-                </label>
-                <label className="flex items-center gap-1.5">
-                  <Checkbox
-                    testId="vnc-clipboard-html"
-                    checked={vncOptions.allowHtmlClipboard}
-                    onChange={(value) => setVncOptions((current) => ({
-                      ...current,
-                      allowHtmlClipboard: value,
-                    }))}
-                  />
-                  {t("sessionEditor2.vncClipboardHtml")}
-                </label>
-                <label className="flex items-center gap-1.5">
-                  <Checkbox
-                    testId="vnc-clipboard-rtf"
-                    checked={vncOptions.allowRtfClipboard}
-                    onChange={(value) => setVncOptions((current) => ({
-                      ...current,
-                      allowRtfClipboard: value,
-                    }))}
-                  />
-                  {t("sessionEditor2.vncClipboardRtf")}
-                </label>
-                <label className="flex items-center gap-1.5">
-                  <Checkbox
-                    testId="vnc-auto-reconnect"
-                    checked={vncOptions.autoReconnect}
-                    onChange={(value) => setVncOptions((current) => ({
-                      ...current,
-                      autoReconnect: value,
-                    }))}
-                  />
-                  {t("sessionEditor2.vncAutoReconnect")}
-                </label>
-                <label className="flex items-center gap-1.5">
-                  {t("sessionEditor2.vncReconnectAttempts")}
-                  <input
-                    data-testid="vnc-reconnect-attempts"
-                    className="taomni-input w-16"
-                    type="number"
-                    min={0}
-                    max={10}
-                    value={vncOptions.maxReconnectAttempts}
-                    onChange={(event) => setVncOptions((current) => ({
-                      ...current,
-                      maxReconnectAttempts: Math.max(
-                        0,
-                        Math.min(10, Number.parseInt(event.target.value, 10) || 0),
-                      ),
-                    }))}
-                  />
-                </label>
-                <label className="flex items-center gap-1.5">
-                  {t("sessionEditor2.vncClipboardLimit")}
-                  <select
-                    data-testid="vnc-clipboard-limit"
-                    className="taomni-input w-24"
-                    value={vncOptions.maxClipboardBytes}
-                    onChange={(event) => setVncOptions((current) => ({
-                      ...current,
-                      maxClipboardBytes: Number.parseInt(event.target.value, 10),
-                    }))}
-                  >
-                    <option value={1024 * 1024}>1 MiB</option>
-                    <option value={4 * 1024 * 1024}>4 MiB</option>
-                    <option value={16 * 1024 * 1024}>16 MiB</option>
-                  </select>
-                </label>
-              </div>
             </div>
           </div>
         )}
@@ -4650,6 +4536,35 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           {activeSection === "rdp" && (
             <div data-testid="session-rdp-section">
               <RdpOptionsForm options={rdpOptions} onChange={setRdpOptions} />
+            </div>
+          )}
+          {activeSection === "vnc" && proto === "VNC" && (
+            <div data-testid="session-vnc-policies" className="grid grid-cols-12 gap-x-3 gap-y-3 text-[12px]">
+              <Field label="Security policy">
+                <select data-testid="session-vnc-security-policy" className="taomni-input w-64" value={vncSecurityPolicy} onChange={(event) => setVncSecurityPolicy(event.target.value as typeof vncSecurityPolicy)}>
+                  <option value="prefer-encryption">Prefer strongest supported</option>
+                  <option value="require-encryption">Require encrypted RA2</option>
+                  <option value="legacy-compatible">Legacy compatible (no None)</option>
+                  <option value="allow-none">Allow unauthenticated None</option>
+                </select>
+              </Field>
+              <Field label="Clipboard">
+                <select data-testid="session-vnc-clipboard-policy" className="taomni-input w-64" value={vncClipboardPolicy} onChange={(event) => setVncClipboardPolicy(event.target.value as typeof vncClipboardPolicy)}>
+                  <option value="bidirectional">Bidirectional</option>
+                  <option value="client-to-server">Client to server</option>
+                  <option value="server-to-client">Server to client</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+              </Field>
+              <Field label="Input">
+                <label className="flex items-center gap-2">
+                  <input data-testid="session-vnc-view-only" type="checkbox" className="taomni-checkbox" checked={vncViewOnly} onChange={(event) => setVncViewOnly(event.target.checked)} />
+                  View only (keyboard and pointer input disabled)
+                </label>
+              </Field>
+              <div className="col-span-12 rounded border px-3 py-2 text-[11px] text-[var(--taomni-text-muted)]" style={{ borderColor: "var(--taomni-divider)" }}>
+                VNCAuth and RA2ne authenticate but do not encrypt framebuffer traffic. None is rejected unless explicitly allowed.
+              </div>
             </div>
           )}
           {activeSection === "mail" && isMail && (

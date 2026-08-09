@@ -1,36 +1,29 @@
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::io::copy_bidirectional;
-use tokio::net::TcpListener;
-use tokio::net::TcpStream as TokioTcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
-use tokio::sync::Notify;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode, header};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
-use tungstenite::handshake::server::{ErrorResponse, Request, Response};
-use tungstenite::http::{HeaderValue, StatusCode, header};
-use tungstenite::protocol::WebSocketConfig;
 use uuid::Uuid;
-use zeroize::Zeroizing;
 
-use crate::terminal::network::{NetworkSettings, establish_transport};
-use crate::terminal::ssh::build_ssh_transport;
+use crate::terminal::network::NetworkSettings;
 use crate::vnc::clipboard::{
     ACTION_NOTIFY, ACTION_PROVIDE, ACTION_REQUEST, ClipboardFormats, ENCODING_EXTENDED_CLIPBOARD,
     ENCODING_EXTENDED_CLIPBOARD_LEGACY, ExtendedClipboardMsg, FORMAT_HTML, FORMAT_RTF, FORMAT_TEXT,
     SUPPORTED_ACTIONS, build_caps_body, build_notify_body, build_provide_body, build_request_body,
 };
 use crate::vnc::encodings::DecodedRect;
-use crate::vnc::rfb::{
-    MAX_CLIPBOARD_BYTES, RfbConnection, RfbHandshakeOptions, RfbWriter, ServerMessage,
-    VncSecurityPolicy,
-};
+use crate::vnc::policy::{VncClipboardPolicy, VncSecurityPolicy, security_type_kind};
+use crate::vnc::queue::{FrameQueueReceiver, FrameQueueSender, QueuedWsOutgoing};
+use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
 
 /// Deadline for the frontend to complete its WebSocket upgrade after we bind.
 const WS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -38,251 +31,10 @@ const WS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
 const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the idle watchdog checks the last-seen timestamp.
 const WS_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const VNC_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const VNC_WS_PATH: &str = "/vnc";
 
 // ── Messages for internal channels ──────────────────────────────────
-
-/// Outgoing messages from the event loop toward the WebSocket client.
-pub enum WsOutgoing {
-    Frame(Vec<u8>),
-    FrameEnd(u32),
-    Text(String),
-}
-
-const MAX_PENDING_WS_CONTROL: usize = 256;
-const MAX_WS_FRAME_BATCH_BYTES: usize = 64 * 1024 * 1024;
-const MAX_WS_INCOMING_MESSAGE_BYTES: usize = MAX_CLIPBOARD_BYTES + 64 * 1024;
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub enum ClipboardPolicy {
-    Disabled,
-    ClientToServer,
-    ServerToClient,
-    #[default]
-    Bidirectional,
-}
-
-impl ClipboardPolicy {
-    fn allows_client_to_server(self) -> bool {
-        matches!(self, Self::ClientToServer | Self::Bidirectional)
-    }
-
-    fn allows_server_to_client(self) -> bool {
-        matches!(self, Self::ServerToClient | Self::Bidirectional)
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", default)]
-pub struct VncClientOptions {
-    pub security_policy: VncSecurityPolicy,
-    pub shared: bool,
-    pub view_only: bool,
-    pub clipboard_policy: ClipboardPolicy,
-    pub allow_html_clipboard: bool,
-    pub allow_rtf_clipboard: bool,
-    pub max_clipboard_bytes: usize,
-}
-
-impl Default for VncClientOptions {
-    fn default() -> Self {
-        Self {
-            security_policy: VncSecurityPolicy::default(),
-            shared: true,
-            view_only: false,
-            clipboard_policy: ClipboardPolicy::default(),
-            allow_html_clipboard: false,
-            allow_rtf_clipboard: false,
-            max_clipboard_bytes: MAX_CLIPBOARD_BYTES,
-        }
-    }
-}
-
-impl VncClientOptions {
-    pub fn normalized(mut self) -> Self {
-        self.max_clipboard_bytes = self.max_clipboard_bytes.clamp(1, MAX_CLIPBOARD_BYTES);
-        self
-    }
-}
-
-enum QueuedWsOutgoing {
-    Control(WsOutgoing),
-    FrameBatch { frame_id: u32, frames: Vec<Vec<u8>> },
-}
-
-struct WsOutgoingState {
-    control: VecDeque<WsOutgoing>,
-    building_frame: Vec<Vec<u8>>,
-    building_bytes: usize,
-    drop_building_frame: bool,
-    latest_frame: Option<(u32, Vec<Vec<u8>>)>,
-    frame_dropped: bool,
-    closed: bool,
-}
-
-struct WsOutgoingQueue {
-    state: Mutex<WsOutgoingState>,
-    wake: Notify,
-}
-
-#[derive(Clone)]
-struct WsOutgoingSender(Arc<WsOutgoingQueue>);
-
-struct WsOutgoingReceiver {
-    queue: Arc<WsOutgoingQueue>,
-    active_frame: VecDeque<WsOutgoing>,
-}
-
-impl WsOutgoingQueue {
-    fn new() -> (WsOutgoingSender, WsOutgoingReceiver) {
-        let queue = Arc::new(Self {
-            state: Mutex::new(WsOutgoingState {
-                control: VecDeque::new(),
-                building_frame: Vec::new(),
-                building_bytes: 0,
-                drop_building_frame: false,
-                latest_frame: None,
-                frame_dropped: false,
-                closed: false,
-            }),
-            wake: Notify::new(),
-        });
-        (
-            WsOutgoingSender(queue.clone()),
-            WsOutgoingReceiver {
-                queue,
-                active_frame: VecDeque::new(),
-            },
-        )
-    }
-
-    fn send(&self, output: WsOutgoing) -> Result<(), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "VNC WebSocket output queue poisoned".to_string())?;
-        match output {
-            WsOutgoing::Frame(bytes) => {
-                if bytes.is_empty() {
-                    return Err("VNC frame payload must not be empty".to_string());
-                }
-                if !state.drop_building_frame {
-                    let next_bytes = state.building_bytes.saturating_add(bytes.len());
-                    if next_bytes <= MAX_WS_FRAME_BATCH_BYTES {
-                        state.building_bytes = next_bytes;
-                        state.building_frame.push(bytes);
-                    } else {
-                        state.drop_building_frame = true;
-                        state.building_frame.clear();
-                    }
-                }
-                Ok(())
-            }
-            WsOutgoing::FrameEnd(frame_id) => {
-                let frames = if state.drop_building_frame {
-                    state.frame_dropped = true;
-                    state.building_frame.clear();
-                    Vec::new()
-                } else {
-                    std::mem::take(&mut state.building_frame)
-                };
-                if state.latest_frame.replace((frame_id, frames)).is_some() {
-                    state.frame_dropped = true;
-                }
-                state.building_bytes = 0;
-                state.drop_building_frame = false;
-                self.wake.notify_one();
-                Ok(())
-            }
-            other => {
-                if state.control.len() >= MAX_PENDING_WS_CONTROL {
-                    state.closed = true;
-                    state.control.clear();
-                    state.latest_frame = None;
-                    state.building_frame.clear();
-                    self.wake.notify_waiters();
-                    return Err("VNC WebSocket control queue overflow".to_string());
-                }
-                if state.closed {
-                    return Err("VNC WebSocket output queue closed".to_string());
-                }
-                state.control.push_back(other);
-                self.wake.notify_one();
-                Ok(())
-            }
-        }
-    }
-
-    async fn recv(&self) -> Option<QueuedWsOutgoing> {
-        loop {
-            let notified = self.wake.notified();
-            {
-                let Ok(mut state) = self.state.lock() else {
-                    return None;
-                };
-                if let Some(output) = state.control.pop_front() {
-                    return Some(QueuedWsOutgoing::Control(output));
-                }
-                if let Some((frame_id, frames)) = state.latest_frame.take() {
-                    return Some(QueuedWsOutgoing::FrameBatch { frame_id, frames });
-                }
-                if state.closed {
-                    return None;
-                }
-            }
-            notified.await;
-        }
-    }
-
-    fn close(&self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.closed = true;
-            state.control.clear();
-            state.latest_frame = None;
-            state.building_frame.clear();
-        }
-        self.wake.notify_waiters();
-    }
-
-    fn take_frame_drop(&self) -> bool {
-        let Ok(mut state) = self.state.lock() else {
-            return true;
-        };
-        std::mem::take(&mut state.frame_dropped)
-    }
-}
-
-impl WsOutgoingSender {
-    fn send(&self, output: WsOutgoing) -> Result<(), String> {
-        self.0.send(output)
-    }
-
-    fn take_frame_drop(&self) -> bool {
-        self.0.take_frame_drop()
-    }
-}
-
-impl WsOutgoingReceiver {
-    async fn recv(&mut self) -> Option<WsOutgoing> {
-        if let Some(output) = self.active_frame.pop_front() {
-            return Some(output);
-        }
-        match self.queue.recv().await? {
-            QueuedWsOutgoing::Control(output) => Some(output),
-            QueuedWsOutgoing::FrameBatch { frame_id, frames } => {
-                self.active_frame = frames.into_iter().map(WsOutgoing::Frame).collect();
-                self.active_frame.push_back(WsOutgoing::FrameEnd(frame_id));
-                self.active_frame.pop_front()
-            }
-        }
-    }
-}
-
-impl Drop for WsOutgoingReceiver {
-    fn drop(&mut self) {
-        self.queue.close();
-    }
-}
 
 /// Control messages from the WebSocket client toward the VNC event loop.
 #[derive(Debug)]
@@ -301,13 +53,8 @@ pub enum VncControl {
     /// advertised support for. The relay handles caps negotiation and falls
     /// back to plain ClientCutText if the server didn't advertise the encoding.
     ExtendedClipboard(ClipboardFormats),
-    Resize {
-        width: u16,
-        height: u16,
-    },
-    Ack {
-        frame_id: u32,
-    },
+    Refresh,
+    Ack,
     Disconnect,
 }
 
@@ -340,8 +87,8 @@ enum WsIncoming {
         #[serde(default)]
         rtf: Option<String>,
     },
-    #[serde(rename = "resize")]
-    Resize { width: u16, height: u16 },
+    #[serde(rename = "refresh")]
+    Refresh,
 }
 
 #[derive(Debug, Serialize)]
@@ -352,23 +99,22 @@ enum WsOutgoingText {
         width: u16,
         height: u16,
         name: String,
-        security: String,
         protocol: String,
+        security: String,
         encrypted: bool,
-        view_only: bool,
-        clipboard_policy: ClipboardPolicy,
     },
-    #[serde(rename = "resize")]
-    Resize {
-        frame_id: u32,
+    #[serde(rename = "desktop_size")]
+    DesktopSize {
         width: u16,
         height: u16,
+        generation: u64,
     },
     #[serde(rename = "disconnected")]
     Disconnected {
-        reason: String,
         code: &'static str,
+        stage: crate::vnc::error::VncStage,
         retryable: bool,
+        reason: String,
     },
     #[serde(rename = "bell")]
     Bell,
@@ -400,6 +146,65 @@ pub struct VncSession {
     pub ws_port: u16,
     pub ws_token: String,
     pub cancel: CancellationToken,
+    pub network_forward_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for VncSession {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        if let Some(task) = self.network_forward_task.as_ref() {
+            task.abort();
+        }
+    }
+}
+
+pub(crate) struct VncDialedTransport {
+    pub stream: std::net::TcpStream,
+    pub network_forward_task: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct ForwardTaskGuard(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for ForwardTaskGuard {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.as_ref() {
+            task.abort();
+        }
+    }
+}
+
+pub(crate) async fn dial_vnc_transport(
+    host: String,
+    port: u16,
+    network: Option<NetworkSettings>,
+) -> Result<VncDialedTransport, String> {
+    tokio::time::timeout(VNC_CONNECT_TIMEOUT, async move {
+        let network_forward = match network.as_ref() {
+            Some(settings) if settings.proxy_kind != "none" && !settings.proxy_kind.is_empty() => {
+                Some(crate::database::forward::start(host.clone(), port, settings.clone()).await?)
+            }
+            _ => None,
+        };
+        let local_port = network_forward.as_ref().map(|forward| forward.local_port);
+        let mut forward_guard = ForwardTaskGuard(network_forward.map(|forward| forward.task));
+        let socket = match local_port {
+            Some(local_port) => TcpStream::connect(("127.0.0.1", local_port))
+                .await
+                .map_err(|e| format!("VNC TCP connection failed: {e}"))?,
+            None => crate::terminal::network::establish_transport(&host, port, network.as_ref())
+                .await
+                .map_err(|e| format!("VNC TCP connection failed: {e}"))?,
+        };
+        let stream = socket
+            .into_std()
+            .map_err(|e| format!("VNC transport conversion failed: {e}"))?;
+        Ok(VncDialedTransport {
+            stream,
+            network_forward_task: forward_guard.0.take(),
+        })
+    })
+    .await
+    .map_err(|_| "VNC TCP connection timed out after 15 seconds".to_string())?
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -417,61 +222,56 @@ pub async fn spawn_vnc_relay(
     username: Option<String>,
     password: Option<String>,
     network: Option<NetworkSettings>,
-    options: VncClientOptions,
+    security_policy: VncSecurityPolicy,
+    view_only: bool,
+    clipboard_policy: VncClipboardPolicy,
 ) -> Result<VncSession, String> {
-    let options = options.normalized();
-    let password = password.map(Zeroizing::new);
     let cancel = CancellationToken::new();
     let ws_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
 
-    let (transport, transport_bridge) =
-        establish_vnc_transport(&host, port, network.as_ref(), &cancel).await?;
+    // 1. Connect + handshake + auth. Route proxy and SSH-jump connections
+    // through the shared loopback forwarder, allowing the synchronous RA2
+    // framing code to keep its tested std::net transport while the upstream
+    // network path remains fully asynchronous and cancellable.
+    let transport = dial_vnc_transport(host, port, network).await?;
+    let mut network_forward_guard = ForwardTaskGuard(transport.network_forward_task);
+    let std_stream = transport.stream;
+    let (rfb, writer, server_init) = tokio::task::spawn_blocking(move || {
+        let mut rfb = RfbConnection::from_stream(
+            std_stream,
+            Duration::from_secs(15),
+            security_policy,
+            crate::vnc::limits::DecodeLimits::default(),
+        )?;
+        let server_init = rfb.authenticate_with_policy(
+            username.as_deref(),
+            password.as_deref(),
+            security_policy,
+        )?;
+        rfb.set_pixel_format_rgba()?;
+        rfb.set_encodings(&[
+            16,
+            5,
+            1,
+            0,
+            -223,
+            ENCODING_EXTENDED_CLIPBOARD,
+            ENCODING_EXTENDED_CLIPBOARD_LEGACY,
+        ])?;
+        rfb.request_update(false)?;
+        let writer = rfb.take_writer()?;
+        Ok::<_, String>((rfb, writer, server_init))
+    })
+    .await
+    .map_err(|e| format!("VNC handshake worker failed: {e}"))??;
 
-    // Keep all sync RFB setup off the Tokio worker. The protocol implementation
-    // uses std::net::TcpStream and is deliberately isolated until it is
-    // replaced by a fully async transport.
-    let handshake_options = RfbHandshakeOptions {
-        security_policy: options.security_policy,
-        shared: options.shared,
-    };
-    let (rfb, writer, server_init, security_label, protocol_label, encrypted) =
-        tokio::task::spawn_blocking(move || -> Result<_, String> {
-            let mut rfb = RfbConnection::from_stream(transport)?;
-            let server_init = rfb.authenticate(
-                username.as_deref(),
-                password.as_deref().map(|value| value.as_str()),
-                handshake_options,
-            )?;
-            rfb.set_steady_state_timeouts()?;
-            rfb.set_pixel_format_rgba()?;
-            // Encoding preference: ZRLE > Hextile > CopyRect > Raw. DesktopSize
-            // keeps server-driven resolution changes observable to the UI.
-            rfb.set_encodings(&[
-                16,
-                5,
-                1,
-                0,
-                -223,
-                ENCODING_EXTENDED_CLIPBOARD,
-                ENCODING_EXTENDED_CLIPBOARD_LEGACY,
-            ])?;
-            rfb.request_update(false)?;
-            let security_label = rfb.security_type_label().to_string();
-            let protocol_label = rfb.protocol_version_label().to_string();
-            let encrypted = rfb.transport_encrypted();
-            let writer = rfb.take_writer()?;
-            Ok((
-                rfb,
-                writer,
-                server_init,
-                security_label,
-                protocol_label,
-                encrypted,
-            ))
-        })
-        .await
-        .map_err(|e| format!("VNC setup worker failed: {}", e))??;
-
+    // Encoding preference: ZRLE (bandwidth) > Hextile (tile cache) > CopyRect
+    // (scroll) > Raw (fallback). DesktopSize must be listed so server-driven
+    // resolution changes keep working. Tight is intentionally omitted — the
+    // decoder in encodings.rs is not RFC-compliant and would desync the stream.
+    // ExtendedClipboard is a pseudo-encoding advertising support for
+    // multi-format clipboard exchange (HTML/RTF/UTF-8); the server only sends
+    // extended ClientCutText when both sides have advertised it.
     // 2. Bind WS listener on dynamic port
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -481,25 +281,28 @@ pub async fn spawn_vnc_relay(
         .map_err(|e| format!("local addr: {}", e))?
         .port();
     // 3. Channel setup
-    let (control_tx, control_rx) = mpsc::channel::<VncControl>(256);
-    let (ws_out_tx, ws_out_rx) = WsOutgoingQueue::new();
+    let limits = crate::vnc::limits::DecodeLimits::default();
+    let (control_tx, control_rx) = mpsc::channel::<VncControl>(limits.max_control_queue);
+    let (ws_out_tx, ws_out_rx) = FrameQueueSender::new(limits);
 
-    let rfb = Arc::new(tokio::sync::Mutex::new(rfb));
-    let writer = Arc::new(tokio::sync::Mutex::new(writer));
-
-    // Send connected notification
+    // Send connected notification with the actual negotiated security, never
+    // just the requested policy.
+    let negotiated = rfb.security_type.and_then(security_type_kind);
     let connected = serde_json::to_string(&WsOutgoingText::Connected {
         width: server_init.width,
         height: server_init.height,
         name: server_init.name.clone(),
-        security: security_label,
-        protocol: protocol_label,
-        encrypted,
-        view_only: options.view_only,
-        clipboard_policy: options.clipboard_policy,
+        protocol: rfb.protocol_version(),
+        security: negotiated
+            .map(|kind| kind.label())
+            .unwrap_or("Unknown")
+            .to_string(),
+        encrypted: negotiated.is_some_and(|kind| kind.encrypted()),
     })
     .unwrap();
-    let _ = ws_out_tx.send(WsOutgoing::Text(connected));
+    let _ = ws_out_tx.send_critical_control(connected);
+    let shutdown_stream = rfb.shutdown_handle()?;
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
 
     // 4. Spawn the relay
     let cancel_clone = cancel.clone();
@@ -517,8 +320,9 @@ pub async fn spawn_vnc_relay(
             control_rx,
             cancel_clone,
             ws_token_for_relay,
-            transport_bridge,
-            options,
+            shutdown_stream,
+            view_only,
+            clipboard_policy,
         )
         .await
         {
@@ -532,6 +336,7 @@ pub async fn spawn_vnc_relay(
         ws_port,
         ws_token,
         cancel,
+        network_forward_task: network_forward_guard.0.take(),
     })
 }
 
@@ -539,20 +344,19 @@ pub async fn spawn_vnc_relay(
 
 async fn run_relay(
     listener: TcpListener,
-    rfb: Arc<tokio::sync::Mutex<RfbConnection>>,
+    mut rfb: RfbConnection,
     writer: Arc<tokio::sync::Mutex<RfbWriter>>,
-    ws_out_tx: WsOutgoingSender,
-    mut ws_out_rx: WsOutgoingReceiver,
+    ws_out_tx: FrameQueueSender,
+    ws_out_rx: FrameQueueReceiver,
     control_tx: Sender<VncControl>,
     mut control_rx: Receiver<VncControl>,
     cancel: CancellationToken,
     ws_token: String,
-    mut transport_bridge: Option<tokio::task::JoinHandle<()>>,
-    options: VncClientOptions,
+    shutdown_stream: std::net::TcpStream,
+    view_only: bool,
+    clipboard_policy: VncClipboardPolicy,
 ) -> Result<(), String> {
-    // Accept one WS connection with a bounded deadline so a webview that never
-    // comes up doesn't leave the relay and its TCP connection hanging forever.
-    let ws_stream = accept_authorized_ws(&listener, &ws_token, &cancel).await?;
+    let ws_stream = accept_authorized_ws(listener, &ws_token, &cancel).await?;
 
     let (mut ws_sink, ws_reader) = ws_stream.split();
 
@@ -567,26 +371,31 @@ async fn run_relay(
     let latest_local_clipboard = Arc::new(AsyncMutex::new(None::<ClipboardFormats>));
 
     // Task: pump outgoing messages → WS sink
-    let last_delivered_frame = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let delivered_frame_write = last_delivered_frame.clone();
-    let ws_write = tokio::spawn(async move {
+    let mut ws_write = tokio::spawn(async move {
         while let Some(out) = ws_out_rx.recv().await {
-            let delivered_frame_id = match &out {
-                WsOutgoing::FrameEnd(frame_id) => Some(*frame_id),
-                _ => None,
-            };
-            let msg = match out {
-                WsOutgoing::Frame(data) => Message::Binary(data.into()),
-                WsOutgoing::FrameEnd(frame_id) => {
-                    Message::Binary(frame_id.to_be_bytes().to_vec().into())
+            match out {
+                QueuedWsOutgoing::Control(json) => {
+                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
                 }
-                WsOutgoing::Text(json) => Message::Text(json.into()),
-            };
-            if ws_sink.send(msg).await.is_err() {
-                break;
-            }
-            if let Some(frame_id) = delivered_frame_id {
-                delivered_frame_write.store(frame_id, std::sync::atomic::Ordering::Release);
+                QueuedWsOutgoing::Frame(rects) => {
+                    let mut failed = false;
+                    for data in rects {
+                        if ws_sink.send(Message::Binary(data.into())).await.is_err() {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if failed
+                        || ws_sink
+                            .send(Message::Binary(Vec::new().into()))
+                            .await
+                            .is_err()
+                    {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -595,8 +404,8 @@ async fn run_relay(
     let ctrl = control_tx.clone();
     let cancel_read = cancel.clone();
     let last_seen_read = last_seen.clone();
-    let ws_input_options = options;
-    let ws_read = tokio::spawn(async move {
+    let control_limits = crate::vnc::limits::DecodeLimits::default();
+    let mut ws_read = tokio::spawn(async move {
         let mut reader = ws_reader;
         while let Some(Ok(msg)) = reader.next().await {
             if cancel_read.is_cancelled() {
@@ -608,61 +417,50 @@ async fn run_relay(
                 Message::Text(text) => {
                     if let Ok(incoming) = serde_json::from_str::<WsIncoming>(&text) {
                         let ctrl_msg = match incoming {
-                            WsIncoming::Ack => Some(VncControl::Ack { frame_id: 0 }),
+                            WsIncoming::Ack => Some(VncControl::Ack),
                             WsIncoming::Ping => None, // already refreshed last_seen
-                            WsIncoming::Key { down, keysym } => (!ws_input_options.view_only)
-                                .then_some(VncControl::Key { down, keysym }),
-                            WsIncoming::Pointer { x, y, buttons } => (!ws_input_options.view_only)
-                                .then_some(VncControl::Pointer { x, y, buttons }),
+                            WsIncoming::Key { down, keysym } => {
+                                Some(VncControl::Key { down, keysym })
+                            }
+                            WsIncoming::Pointer { x, y, buttons } => {
+                                Some(VncControl::Pointer { x, y, buttons })
+                            }
                             WsIncoming::Clipboard { text } => {
-                                if ws_input_options.clipboard_policy.allows_client_to_server()
-                                    && text.len() <= ws_input_options.max_clipboard_bytes
-                                {
-                                    log::info!(
-                                        "vnc.clip: ws→relay legacy clipboard len={}",
-                                        text.len(),
-                                    );
-                                    Some(VncControl::Clipboard(text))
-                                } else {
-                                    None
-                                }
+                                log::info!(
+                                    "vnc.clip: ws→relay legacy clipboard, len={}",
+                                    text.len()
+                                );
+                                Some(VncControl::Clipboard(text))
                             }
                             WsIncoming::ExtClipboard { text, html, rtf } => {
-                                let formats = filter_configured_clipboard_formats(
-                                    ClipboardFormats { text, html, rtf },
-                                    ws_input_options,
+                                log::info!(
+                                    "vnc.clip: ws→relay ext clipboard text_len={} html_len={} rtf_len={}",
+                                    text.as_deref().map(str::len).unwrap_or(0),
+                                    html.as_deref().map(str::len).unwrap_or(0),
+                                    rtf.as_deref().map(str::len).unwrap_or(0),
                                 );
-                                if ws_input_options.clipboard_policy.allows_client_to_server()
-                                    && clipboard_formats_within_limit(
-                                        &formats,
-                                        ws_input_options.max_clipboard_bytes,
-                                    )
-                                {
-                                    log::info!(
-                                        "vnc.clip: ws→relay ext clipboard text_len={} html_len={} rtf_len={}",
-                                        formats.text.as_deref().map(str::len).unwrap_or(0),
-                                        formats.html.as_deref().map(str::len).unwrap_or(0),
-                                        formats.rtf.as_deref().map(str::len).unwrap_or(0),
-                                    );
-                                    Some(VncControl::ExtendedClipboard(formats))
-                                } else {
-                                    None
-                                }
+                                Some(VncControl::ExtendedClipboard(ClipboardFormats {
+                                    text,
+                                    html,
+                                    rtf,
+                                }))
                             }
-                            WsIncoming::Resize { width, height } => {
-                                Some(VncControl::Resize { width, height })
-                            }
+                            WsIncoming::Refresh => Some(VncControl::Refresh),
                         };
-                        if let Some(m) = ctrl_msg {
-                            let _ = ctrl.send(m).await;
+                        if let Some(m) = ctrl_msg
+                            && control_allowed(&m, view_only, clipboard_policy, &control_limits)
+                            && ctrl.send(m).await.is_err()
+                        {
+                            break;
                         }
                     }
                 }
                 Message::Binary(bytes) => {
                     if let Some(ctrl_msg) = parse_binary_control(&bytes)
-                        && control_allowed(&ctrl_msg, ws_input_options)
+                        && control_allowed(&ctrl_msg, view_only, clipboard_policy, &control_limits)
+                        && ctrl.send(ctrl_msg).await.is_err()
                     {
-                        let _ = ctrl.send(ctrl_msg).await;
+                        break;
                     }
                 }
                 Message::Close(_) => {
@@ -674,76 +472,62 @@ async fn run_relay(
         }
     });
 
-    // Task: VNC read loop — read server messages, decode, push to ws_out_tx
-    let rfb_read = rfb.clone();
+    // The RFB decoder is synchronous and may wait on a socket. Keep it on a
+    // dedicated blocking worker and bridge decoded messages through a bounded
+    // channel so no Tokio executor thread is stalled by a slow server.
+    let initial_framebuffer_size = (rfb.width, rfb.height);
+    let (server_message_tx, mut server_message_rx) =
+        mpsc::channel::<Result<(ServerMessage, u16, u16), String>>(2);
+    let cancel_reader = cancel.clone();
+    let rfb_reader = tokio::task::spawn_blocking(move || {
+        while !cancel_reader.is_cancelled() {
+            let result = rfb
+                .read_server_message()
+                .map(|message| (message, rfb.width, rfb.height));
+            let should_stop = result.is_err();
+            if server_message_tx.blocking_send(result).is_err() || should_stop {
+                break;
+            }
+        }
+    });
+
+    // Task: process decoded server messages and push them to the WS queue.
     let rfb_writer_for_read = writer.clone();
     let ws_out = ws_out_tx.clone();
-    let cancel_vnc = cancel.clone();
     let server_caps_read = server_clip_caps.clone();
     let latest_clipboard_read = latest_local_clipboard.clone();
     let writer_for_caps = writer.clone();
-    let server_output_options = options;
-    let vnc_read = tokio::spawn(async move {
-        let mut next_frame_id = 1u32;
-        loop {
-            if cancel_vnc.is_cancelled() {
-                break;
-            }
-            let read_result = tokio::task::spawn_blocking({
-                let rfb_read = rfb_read.clone();
-                move || {
-                    let mut conn = rfb_read.blocking_lock();
-                    let previous_size = (conn.width, conn.height);
-                    conn.read_server_message().map(|message| {
-                        (
-                            message,
-                            conn.width,
-                            conn.height,
-                            previous_size != (conn.width, conn.height),
-                        )
-                    })
-                }
-            })
-            .await;
-            let (msg, fb_width, fb_height, resized) = match read_result {
-                Ok(Ok(value)) => value,
-                Ok(Err(e)) if RfbConnection::is_timeout_error(&e) => continue,
-                Ok(Err(e)) => {
-                    let (code, retryable) = classify_vnc_runtime_error(&e);
+    let mut vnc_read = tokio::spawn(async move {
+        let mut published_framebuffer_size = initial_framebuffer_size;
+        let mut framebuffer_generation = 0u64;
+        while let Some(result) = server_message_rx.recv().await {
+            let (msg, fb_width, fb_height) = match result {
+                Ok(value) => value,
+                Err(message) => {
+                    let error = crate::vnc::error::VncError::classify(message);
                     let json = serde_json::to_string(&WsOutgoingText::Disconnected {
-                        reason: e.clone(),
-                        code,
-                        retryable,
+                        code: error.code,
+                        stage: error.stage,
+                        retryable: error.retryable,
+                        reason: error.message,
                     })
                     .unwrap();
-                    let _ = ws_out.send(WsOutgoing::Text(json));
-                    break;
-                }
-                Err(e) => {
-                    let _ = ws_out.send(WsOutgoing::Text(
-                        serde_json::to_string(&WsOutgoingText::Disconnected {
-                            reason: format!("VNC reader worker failed: {}", e),
-                            code: "runtime-worker",
-                            retryable: true,
-                        })
-                        .unwrap(),
-                    ));
+                    let _ = ws_out.send_critical_control(json);
                     break;
                 }
             };
             match msg {
                 ServerMessage::FramebufferUpdate { rects } => {
-                    let frame_id = next_frame_id;
-                    next_frame_id = next_frame_id.wrapping_add(1).max(1);
-                    if resized {
-                        let resize = WsOutgoingText::Resize {
-                            frame_id,
+                    if (fb_width, fb_height) != published_framebuffer_size {
+                        framebuffer_generation = framebuffer_generation.saturating_add(1);
+                        published_framebuffer_size = (fb_width, fb_height);
+                        let json = serde_json::to_string(&WsOutgoingText::DesktopSize {
                             width: fb_width,
                             height: fb_height,
-                        };
-                        if let Ok(json) = serde_json::to_string(&resize) {
-                            let _ = ws_out.send(WsOutgoing::Text(json));
-                        }
+                            generation: framebuffer_generation,
+                        })
+                        .unwrap();
+                        let _ = ws_out.send_critical_control(json);
                     }
                     {
                         let mut writer = rfb_writer_for_read.lock().await;
@@ -752,37 +536,37 @@ async fn run_relay(
                     for rect in rects {
                         let DecodedRect::Pixels { x, y, w, h, rgba } = rect;
                         let mut frame = Vec::with_capacity(12 + rgba.len());
-                        frame.extend_from_slice(&make_frame_header(x, y, w, h, frame_id));
+                        frame.extend_from_slice(&make_frame_header(x, y, w, h));
                         frame.extend_from_slice(&rgba);
-                        let _ = ws_out.send(WsOutgoing::Frame(frame));
+                        let _ = ws_out.push_rect(frame);
                     }
-                    let _ = ws_out.send(WsOutgoing::FrameEnd(frame_id));
+                    if ws_out.finish_frame().unwrap_or(false) {
+                        let _ = rfb_writer_for_read.lock().await.request_update(false);
+                    }
                 }
                 ServerMessage::Bell => {
                     let json = serde_json::to_string(&WsOutgoingText::Bell).unwrap();
-                    let _ = ws_out.send(WsOutgoing::Text(json));
+                    let _ = ws_out.send_control(json);
                 }
                 ServerMessage::ServerCutText { text } => {
-                    if server_output_options
-                        .clipboard_policy
-                        .allows_server_to_client()
-                        && text.len() <= server_output_options.max_clipboard_bytes
-                    {
-                        log::info!("vnc.clip: server→client legacy cut text len={}", text.len(),);
-                        let json =
-                            serde_json::to_string(&WsOutgoingText::Clipboard { text }).unwrap();
-                        let _ = ws_out.send(WsOutgoing::Text(json));
+                    if !clipboard_policy.allows_server_to_client() {
+                        continue;
                     }
+                    log::info!("vnc.clip: server→client legacy cut text len={}", text.len());
+                    let json = serde_json::to_string(&WsOutgoingText::Clipboard { text }).unwrap();
+                    let _ = ws_out.send_control(json);
                 }
                 ServerMessage::ExtendedClipboard(ext) => {
-                    log::info!("vnc.clip: server→client ext clipboard event");
+                    if !server_clipboard_message_allowed(&ext, clipboard_policy) {
+                        continue;
+                    }
+                    log::info!("vnc.clip: server→client ext clipboard message");
                     handle_server_ext_clipboard(
                         ext,
                         &server_caps_read,
                         &latest_clipboard_read,
                         &writer_for_caps,
                         &ws_out,
-                        server_output_options,
                     )
                     .await;
                 }
@@ -796,13 +580,10 @@ async fn run_relay(
     let cl_cancel = cancel.clone();
     let server_caps_ctrl = server_clip_caps.clone();
     let latest_clipboard_ctrl = latest_local_clipboard.clone();
-    let control_options = options;
-    let frame_queue_ctrl = ws_out_tx.clone();
-    let delivered_frame_ctrl = last_delivered_frame.clone();
-    let vnc_ctrl = tokio::spawn(async move {
+    let dispatch_limits = crate::vnc::limits::DecodeLimits::default();
+    let mut vnc_ctrl = tokio::spawn(async move {
         let mut deferred_ctrl: Option<VncControl> = None;
         let mut last_pointer_buttons = 0u8;
-        let mut last_acked_frame = 0u32;
         loop {
             let ctrl = match deferred_ctrl.take() {
                 Some(ctrl) => ctrl,
@@ -823,57 +604,36 @@ async fn run_relay(
             if let VncControl::Pointer { buttons, .. } = &ctrl {
                 last_pointer_buttons = *buttons;
             }
+            if !control_allowed(&ctrl, view_only, clipboard_policy, &dispatch_limits) {
+                continue;
+            }
             let result = match ctrl {
-                VncControl::Ack { frame_id } => {
-                    let delivered = delivered_frame_ctrl.load(std::sync::atomic::Ordering::Acquire);
-                    if frame_id != 0 && (frame_id != delivered || frame_id == last_acked_frame) {
-                        Ok(())
-                    } else {
-                        last_acked_frame = frame_id;
-                        let incremental = !frame_queue_ctrl.take_frame_drop();
-                        with_writer(rfb_ctrl.clone(), move |w| w.request_update(incremental)).await
-                    }
-                }
-                VncControl::Key { .. } if control_options.view_only => Ok(()),
+                VncControl::Ack => rfb_ctrl.lock().await.request_update(true),
                 VncControl::Key { down, keysym } => {
-                    with_writer(rfb_ctrl.clone(), move |w| w.send_key_event(down, keysym)).await
+                    rfb_ctrl.lock().await.send_key_event(down, keysym)
                 }
-                VncControl::Pointer { .. } if control_options.view_only => Ok(()),
                 VncControl::Pointer { x, y, buttons } => {
-                    with_writer(rfb_ctrl.clone(), move |w| {
-                        w.send_pointer_event(x, y, buttons)
-                    })
-                    .await
-                }
-                VncControl::Clipboard(_)
-                    if !control_options.clipboard_policy.allows_client_to_server() =>
-                {
-                    Ok(())
+                    rfb_ctrl.lock().await.send_pointer_event(x, y, buttons)
                 }
                 VncControl::Clipboard(text) => {
                     log::debug!("vnc.clip: relay→server legacy cut text len={}", text.len());
-                    with_writer(rfb_ctrl.clone(), move |w| w.send_client_cut_text(&text)).await
-                }
-                VncControl::ExtendedClipboard(_)
-                    if !control_options.clipboard_policy.allows_client_to_server() =>
-                {
-                    Ok(())
+                    rfb_ctrl.lock().await.send_client_cut_text(&text)
                 }
                 VncControl::ExtendedClipboard(formats) => {
                     let server_caps = *server_caps_ctrl.lock().await;
                     *latest_clipboard_ctrl.lock().await = Some(formats.clone());
+                    let mut conn = rfb_ctrl.lock().await;
                     if server_caps.formats == 0 {
                         // No caps received — server doesn't support ExtendedClipboard.
                         // Send UTF-8 bytes via legacy ClientCutText. RFC 6143 nominally
                         // specifies Latin-1, but vino and most modern servers accept UTF-8
                         // and write it directly into the X11 selection (which is UTF-8).
-                        if let Some(text) = formats.text {
+                        if let Some(text) = formats.text.as_deref() {
                             log::info!(
                                 "vnc.clip: relay→server FALLBACK (no ext caps), sending legacy cut text (UTF-8) len={}",
                                 text.len(),
                             );
-                            with_writer(rfb_ctrl.clone(), move |w| w.send_client_cut_text(&text))
-                                .await
+                            conn.send_client_cut_text(text)
                         } else {
                             Ok(())
                         }
@@ -910,19 +670,12 @@ async fn run_relay(
                                 filtered.text.as_deref().map(str::len).unwrap_or(0),
                             );
                             if can_send_notify(server_caps) {
-                                let body = build_notify_body(filtered.format_mask());
-                                with_writer(rfb_ctrl.clone(), move |w| {
-                                    w.send_extended_clipboard(&body)
-                                })
-                                .await
+                                conn.send_extended_clipboard(&build_notify_body(
+                                    filtered.format_mask(),
+                                ))
                             } else if can_send_provide(server_caps) {
                                 match build_provide_body(&filtered) {
-                                    Ok(body) => {
-                                        with_writer(rfb_ctrl.clone(), move |w| {
-                                            w.send_extended_clipboard(&body)
-                                        })
-                                        .await
-                                    }
+                                    Ok(body) => conn.send_extended_clipboard(&body),
                                     Err(e) => Err(e),
                                 }
                             } else {
@@ -931,9 +684,7 @@ async fn run_relay(
                         }
                     }
                 }
-                VncControl::Resize { .. } => {
-                    with_writer(rfb_ctrl.clone(), |w| w.request_update(false)).await
-                }
+                VncControl::Refresh => rfb_ctrl.lock().await.request_update(false),
                 VncControl::Disconnect => {
                     cl_cancel.cancel();
                     Ok(())
@@ -948,7 +699,7 @@ async fn run_relay(
     // Task: idle watchdog — if the frontend stops pinging, tear everything down.
     let watchdog_cancel = cancel.clone();
     let watchdog_last_seen = last_seen.clone();
-    let idle_watch = tokio::spawn(async move {
+    let mut idle_watch = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(WS_IDLE_CHECK_INTERVAL);
         // The first tick fires immediately; skip it so we don't race the ws_read task.
         ticker.tick().await;
@@ -973,194 +724,39 @@ async fn run_relay(
 
     // Wait for any critical task to finish, then cancel everything
     tokio::select! {
+        _ = cancel.cancelled() => {},
         _ = tokio::signal::ctrl_c() => {},
-        r = ws_write => {
+        r = &mut ws_write => {
             if let Err(e) = r { tracing::error!("ws_write: {}", e); }
         }
-        r = ws_read => {
+        r = &mut ws_read => {
             if let Err(e) = r { tracing::error!("ws_read: {}", e); }
         }
-        r = vnc_read => {
+        r = &mut vnc_read => {
             if let Err(e) = r { tracing::error!("vnc_read: {}", e); }
         }
-        r = vnc_ctrl => {
+        r = &mut vnc_ctrl => {
             if let Err(e) = r { tracing::error!("vnc_ctrl: {}", e); }
         }
-        r = idle_watch => {
+        r = &mut idle_watch => {
             if let Err(e) = r { tracing::error!("idle_watch: {}", e); }
         }
     }
 
     cancel.cancel();
-    if let Some(bridge) = transport_bridge.take() {
-        bridge.abort();
-    }
+    // Closing the underlying socket interrupts any blocking read immediately;
+    // the read timeout remains a backstop for broken platform shutdowns.
+    let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
+    rfb_reader.abort();
+    ws_write.abort();
+    ws_read.abort();
+    vnc_read.abort();
+    vnc_ctrl.abort();
+    idle_watch.abort();
     Ok(())
 }
 
-/// Establish the same transport used by the other clients before handing the
-/// socket to the synchronous RFB protocol worker. HTTP CONNECT and SOCKS5 can
-/// be converted directly to a std stream. SSH jump hosts are bridged through a
-/// private loopback listener so the existing async russh transport remains
-/// isolated from the blocking decoder.
-pub(crate) async fn establish_vnc_transport(
-    host: &str,
-    port: u16,
-    network: Option<&NetworkSettings>,
-    cancel: &CancellationToken,
-) -> Result<(std::net::TcpStream, Option<tokio::task::JoinHandle<()>>), String> {
-    let proxy_kind = network.map(|n| n.proxy_kind.as_str()).unwrap_or("none");
-    if proxy_kind != "ssh-tunnel" {
-        let routed = tokio::time::timeout(
-            crate::vnc::rfb::VNC_CONNECT_TIMEOUT,
-            establish_transport(host, port, network),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "VNC transport timed out after {} seconds",
-                crate::vnc::rfb::VNC_CONNECT_TIMEOUT.as_secs()
-            )
-        })??;
-        let std_stream = routed
-            .into_std()
-            .map_err(|e| format!("convert VNC transport to blocking stream: {}", e))?;
-        return Ok((std_stream, None));
-    }
-
-    let network = network.ok_or_else(|| "SSH tunnel settings are missing".to_string())?;
-    let ssh = tokio::time::timeout(
-        Duration::from_secs(30),
-        build_ssh_transport(host, port, Some(network)),
-    )
-    .await
-    .map_err(|_| "VNC SSH jump transport timed out after 30 seconds".to_string())??;
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|e| format!("bind VNC SSH bridge: {}", e))?;
-    let bridge_addr = listener
-        .local_addr()
-        .map_err(|e| format!("VNC SSH bridge address: {}", e))?;
-    let bridge_cancel = cancel.clone();
-    let bridge = tokio::spawn(async move {
-        let accepted = tokio::select! {
-            result = listener.accept() => result,
-            _ = bridge_cancel.cancelled() => return,
-        };
-        let Ok((mut local, _)) = accepted else {
-            return;
-        };
-        let mut remote = ssh;
-        let _ = copy_bidirectional(&mut local, &mut remote).await;
-    });
-    let local = tokio::time::timeout(
-        crate::vnc::rfb::VNC_CONNECT_TIMEOUT,
-        TokioTcpStream::connect(bridge_addr),
-    )
-    .await
-    .map_err(|_| "VNC SSH bridge connect timed out".to_string())?
-    .map_err(|e| format!("connect VNC SSH bridge: {}", e))?;
-    let std_stream = local
-        .into_std()
-        .map_err(|e| format!("convert VNC SSH bridge to blocking stream: {}", e))?;
-    Ok((std_stream, Some(bridge)))
-}
-
 // ── Helpers ─────────────────────────────────────────────────────────
-
-async fn with_writer<T, F>(writer: Arc<AsyncMutex<RfbWriter>>, operation: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce(&mut RfbWriter) -> Result<T, String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || {
-        let mut writer = writer.blocking_lock();
-        operation(&mut writer)
-    })
-    .await
-    .map_err(|e| format!("VNC writer worker failed: {}", e))?
-}
-
-async fn accept_authorized_ws(
-    listener: &TcpListener,
-    ws_token: &str,
-    cancel: &CancellationToken,
-) -> Result<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, String> {
-    let deadline = tokio::time::Instant::now() + WS_ACCEPT_TIMEOUT;
-    let expected_protocol = format!("taomni-vnc.{ws_token}");
-    loop {
-        let (stream, _) = tokio::select! {
-            accepted = tokio::time::timeout_at(deadline, listener.accept()) => match accepted {
-                Ok(Ok(pair)) => pair,
-                Ok(Err(e)) => return Err(format!("VNC accept: {e}")),
-                Err(_) => {
-                    tracing::warn!("VNC WS accept timed out after {:?}", WS_ACCEPT_TIMEOUT);
-                    return Err("VNC WebSocket authorization timed out".to_string());
-                }
-            },
-            _ = cancel.cancelled() => return Err("VNC relay cancelled".to_string()),
-        };
-        let protocol = expected_protocol.clone();
-        let callback = move |request: &Request, mut response: Response| {
-            if !request_has_authorized_origin(request) || !request_has_protocol(request, &protocol)
-            {
-                let mut rejection = ErrorResponse::new(Some("forbidden".to_string()));
-                *rejection.status_mut() = StatusCode::FORBIDDEN;
-                return Err(rejection);
-            }
-            response.headers_mut().insert(
-                header::SEC_WEBSOCKET_PROTOCOL,
-                HeaderValue::from_str(&protocol).expect("generated VNC WS protocol is valid"),
-            );
-            Ok(response)
-        };
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_WS_INCOMING_MESSAGE_BYTES))
-            .max_frame_size(Some(MAX_WS_INCOMING_MESSAGE_BYTES));
-        match tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(config)).await
-        {
-            Ok(ws) => return Ok(ws),
-            Err(e) => tracing::warn!("rejected unauthorized VNC WebSocket attempt: {e}"),
-        }
-    }
-}
-
-fn request_has_protocol(request: &Request, expected: &str) -> bool {
-    request
-        .headers()
-        .get(header::SEC_WEBSOCKET_PROTOCOL)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.split(',').any(|item| item.trim() == expected))
-}
-
-fn request_has_authorized_origin(request: &Request) -> bool {
-    request
-        .headers()
-        .get(header::ORIGIN)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_authorized_origin)
-}
-
-fn is_authorized_origin(origin: &str) -> bool {
-    if matches!(
-        origin,
-        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
-    ) {
-        return true;
-    }
-    if cfg!(debug_assertions) {
-        return [
-            "http://localhost:1420",
-            "http://127.0.0.1:1420",
-            "http://localhost:1980",
-            "http://127.0.0.1:1980",
-            "http://localhost:5000",
-            "http://127.0.0.1:5000",
-        ]
-        .contains(&origin);
-    }
-    false
-}
 
 /// Drive the ExtendedClipboard handshake on receipt of a server message.
 async fn handle_server_ext_clipboard(
@@ -1168,20 +764,12 @@ async fn handle_server_ext_clipboard(
     server_caps: &Arc<AsyncMutex<ServerClipboardCaps>>,
     latest_local_clipboard: &Arc<AsyncMutex<Option<ClipboardFormats>>>,
     writer: &Arc<tokio::sync::Mutex<RfbWriter>>,
-    ws_out: &WsOutgoingSender,
-    options: VncClientOptions,
+    ws_out: &FrameQueueSender,
 ) {
-    let mut our_caps = FORMAT_TEXT;
-    if options.allow_html_clipboard {
-        our_caps |= FORMAT_HTML;
-    }
-    if options.allow_rtf_clipboard {
-        our_caps |= FORMAT_RTF;
-    }
-    if options.clipboard_policy == ClipboardPolicy::Disabled {
-        our_caps = 0;
-    }
-    let max_size = options.max_clipboard_bytes as u32;
+    // We support UTF-8 text, RTF, and HTML — call out our caps with a generous
+    // 16 MiB ceiling per format.
+    const OUR_CAPS: u32 = FORMAT_TEXT | FORMAT_RTF | FORMAT_HTML;
+    const MAX_SIZE: u32 = 16 * 1024 * 1024;
 
     match msg {
         ExtendedClipboardMsg::Caps {
@@ -1191,35 +779,33 @@ async fn handle_server_ext_clipboard(
                 "vnc.clip: ← Caps from server formats={:b} actions={:b} (negotiated {:b})",
                 formats,
                 actions,
-                formats & our_caps,
+                formats & OUR_CAPS,
             );
             *server_caps.lock().await = ServerClipboardCaps {
-                formats: formats & our_caps,
+                formats: formats & OUR_CAPS,
                 actions,
             };
             // Reply with our caps so the server knows what to deliver.
-            let body = build_caps_body(our_caps, max_size);
+            let body = build_caps_body(OUR_CAPS, MAX_SIZE);
             log::info!(
                 "vnc.clip: → Caps to server formats={:b} actions={:b}",
-                our_caps,
+                OUR_CAPS,
                 SUPPORTED_ACTIONS,
             );
-            let _ = with_writer(writer.clone(), move |w| w.send_extended_clipboard(&body)).await;
+            let mut w = writer.lock().await;
+            let _ = w.send_extended_clipboard(&body);
             // Tell the frontend which clipboard path is active so diagnostics
             // can distinguish ExtendedClipboard from the legacy fallback.
             let support = WsOutgoingText::ExtClipboardSupport {
-                available: (formats & our_caps) != 0
+                available: (formats & OUR_CAPS) != 0
                     && (actions & (ACTION_REQUEST | ACTION_NOTIFY | ACTION_PROVIDE)) != 0,
             };
             if let Ok(json) = serde_json::to_string(&support) {
-                let _ = ws_out.send(WsOutgoing::Text(json));
+                let _ = ws_out.send_control(json);
             }
         }
         ExtendedClipboardMsg::Notify { formats } => {
-            if !options.clipboard_policy.allows_server_to_client() {
-                return;
-            }
-            let want = formats & our_caps;
+            let want = formats & OUR_CAPS;
             let caps = *server_caps.lock().await;
             log::info!(
                 "vnc.clip: ← Notify from server formats={:b}, requesting={:b}",
@@ -1228,25 +814,14 @@ async fn handle_server_ext_clipboard(
             );
             if want != 0 && can_send_request(caps) {
                 let body = build_request_body(want);
-                let _ =
-                    with_writer(writer.clone(), move |w| w.send_extended_clipboard(&body)).await;
+                let mut w = writer.lock().await;
+                let _ = w.send_extended_clipboard(&body);
             }
         }
         ExtendedClipboardMsg::Provide {
             formats: _,
             formats_data,
         } => {
-            if !options.clipboard_policy.allows_server_to_client() {
-                return;
-            }
-            let formats_data = filter_configured_clipboard_formats(formats_data, options);
-            if !clipboard_formats_within_limit(&formats_data, options.max_clipboard_bytes) {
-                log::warn!(
-                    "vnc.clip: server clipboard payload exceeds configured {} byte limit",
-                    options.max_clipboard_bytes
-                );
-                return;
-            }
             log::info!(
                 "vnc.clip: ← Provide from server text_len={} html_len={} rtf_len={}",
                 formats_data.text.as_deref().map(str::len).unwrap_or(0),
@@ -1259,38 +834,32 @@ async fn handle_server_ext_clipboard(
                 rtf: formats_data.rtf,
             })
             .unwrap();
-            let _ = ws_out.send(WsOutgoing::Text(json));
+            let _ = ws_out.send_control(json);
         }
         ExtendedClipboardMsg::Request { formats } => {
-            if !options.clipboard_policy.allows_client_to_server() {
-                return;
-            }
             log::info!("vnc.clip: ← Request from server formats={:b}", formats);
             let cached = latest_local_clipboard.lock().await.clone();
             if let Some(data) = cached {
-                let filtered = filter_clipboard_formats(data, formats & our_caps);
+                let filtered = filter_clipboard_formats(data, formats & OUR_CAPS);
                 if filtered.format_mask() != 0 {
                     if let Ok(body) = build_provide_body(&filtered) {
-                        let _ =
-                            with_writer(writer.clone(), move |w| w.send_extended_clipboard(&body))
-                                .await;
+                        let mut w = writer.lock().await;
+                        let _ = w.send_extended_clipboard(&body);
                     }
                 }
             }
         }
         ExtendedClipboardMsg::Peek => {
-            if !options.clipboard_policy.allows_client_to_server() {
-                return;
-            }
             log::info!("vnc.clip: ← Peek from server");
             let formats = latest_local_clipboard
                 .lock()
                 .await
                 .as_ref()
-                .map(|data| data.format_mask() & our_caps)
+                .map(|data| data.format_mask() & OUR_CAPS)
                 .unwrap_or(0);
             let body = build_notify_body(formats);
-            let _ = with_writer(writer.clone(), move |w| w.send_extended_clipboard(&body)).await;
+            let mut w = writer.lock().await;
+            let _ = w.send_extended_clipboard(&body);
         }
     }
 }
@@ -1315,63 +884,6 @@ fn filter_clipboard_formats(data: ClipboardFormats, mask: u32) -> ClipboardForma
     }
 }
 
-fn filter_configured_clipboard_formats(
-    data: ClipboardFormats,
-    options: VncClientOptions,
-) -> ClipboardFormats {
-    ClipboardFormats {
-        text: data.text,
-        html: options.allow_html_clipboard.then_some(data.html).flatten(),
-        rtf: options.allow_rtf_clipboard.then_some(data.rtf).flatten(),
-    }
-}
-
-fn clipboard_formats_within_limit(data: &ClipboardFormats, max_bytes: usize) -> bool {
-    [
-        data.text.as_deref(),
-        data.html.as_deref(),
-        data.rtf.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .all(|value| value.len() <= max_bytes)
-}
-
-fn control_allowed(control: &VncControl, options: VncClientOptions) -> bool {
-    match control {
-        VncControl::Key { .. } | VncControl::Pointer { .. } => !options.view_only,
-        VncControl::Clipboard(text) => {
-            options.clipboard_policy.allows_client_to_server()
-                && text.len() <= options.max_clipboard_bytes
-        }
-        VncControl::ExtendedClipboard(formats) => {
-            options.clipboard_policy.allows_client_to_server()
-                && clipboard_formats_within_limit(formats, options.max_clipboard_bytes)
-        }
-        VncControl::Resize { .. } | VncControl::Ack { .. } | VncControl::Disconnect => true,
-    }
-}
-
-fn classify_vnc_runtime_error(error: &str) -> (&'static str, bool) {
-    let lower = error.to_ascii_lowercase();
-    if lower.contains("authentication") || lower.contains("security policy") {
-        return ("authentication", false);
-    }
-    if lower.contains("invalid")
-        || lower.contains("unsupported")
-        || lower.contains("exceed")
-        || lower.contains("overflow")
-        || lower.contains("decode")
-        || lower.contains("encoding")
-    {
-        return ("protocol", false);
-    }
-    if RfbConnection::is_timeout_error(error) {
-        return ("runtime-timeout", true);
-    }
-    ("runtime-network", true)
-}
-
 fn can_send_request(caps: ServerClipboardCaps) -> bool {
     caps.actions == 0 || caps.actions & ACTION_REQUEST != 0
 }
@@ -1386,10 +898,7 @@ fn can_send_provide(caps: ServerClipboardCaps) -> bool {
 
 fn parse_binary_control(bytes: &[u8]) -> Option<VncControl> {
     match bytes.first().copied()? {
-        0 if bytes.len() == 1 => Some(VncControl::Ack { frame_id: 0 }),
-        0 if bytes.len() == 5 => Some(VncControl::Ack {
-            frame_id: u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]),
-        }),
+        0 if bytes.len() == 1 => Some(VncControl::Ack),
         1 if bytes.len() == 1 => None,
         2 if bytes.len() == 6 => {
             let down = bytes[1] != 0;
@@ -1402,10 +911,7 @@ fn parse_binary_control(bytes: &[u8]) -> Option<VncControl> {
             let y = u16::from_be_bytes([bytes[4], bytes[5]]);
             Some(VncControl::Pointer { x, y, buttons })
         }
-        4 if bytes.len() == 5 => Some(VncControl::Resize {
-            width: u16::from_be_bytes([bytes[1], bytes[2]]),
-            height: u16::from_be_bytes([bytes[3], bytes[4]]),
-        }),
+        4 if bytes.len() == 1 => Some(VncControl::Refresh),
         _ => None,
     }
 }
@@ -1450,12 +956,137 @@ fn coalesce_pointer_control(
     VncControl::Pointer { x, y, buttons }
 }
 
+fn control_allowed(
+    control: &VncControl,
+    view_only: bool,
+    clipboard_policy: VncClipboardPolicy,
+    limits: &crate::vnc::limits::DecodeLimits,
+) -> bool {
+    match control {
+        VncControl::Key { .. } | VncControl::Pointer { .. } => !view_only,
+        VncControl::Clipboard(text) => {
+            clipboard_policy.allows_client_to_server() && limits.clipboard_bytes(text.len()).is_ok()
+        }
+        VncControl::ExtendedClipboard(formats) => {
+            clipboard_policy.allows_client_to_server()
+                && [
+                    formats.text.as_deref(),
+                    formats.html.as_deref(),
+                    formats.rtf.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .try_fold(0usize, |total, value| {
+                    limits.clipboard_bytes(value.len()).ok()?;
+                    total.checked_add(value.len())
+                })
+                .is_some_and(|total| total <= limits.max_clipboard_decompressed_bytes)
+        }
+        VncControl::Refresh | VncControl::Ack | VncControl::Disconnect => true,
+    }
+}
+
+fn server_clipboard_message_allowed(
+    message: &ExtendedClipboardMsg,
+    policy: VncClipboardPolicy,
+) -> bool {
+    match message {
+        ExtendedClipboardMsg::Caps { .. } => true,
+        ExtendedClipboardMsg::Request { .. } | ExtendedClipboardMsg::Peek => {
+            policy.allows_client_to_server()
+        }
+        ExtendedClipboardMsg::Notify { .. } | ExtendedClipboardMsg::Provide { .. } => {
+            policy.allows_server_to_client()
+        }
+    }
+}
+
+async fn accept_authorized_ws(
+    listener: TcpListener,
+    ws_token: &str,
+    cancel: &CancellationToken,
+) -> Result<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, String> {
+    let deadline = tokio::time::Instant::now() + WS_ACCEPT_TIMEOUT;
+    let expected_protocol = format!("taomni-vnc.{ws_token}");
+    let relay_limits = crate::vnc::limits::DecodeLimits::default();
+    loop {
+        let (stream, _) = tokio::select! {
+            accepted = tokio::time::timeout_at(deadline, listener.accept()) => match accepted {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(error)) => return Err(format!("VNC WebSocket accept failed: {error}")),
+                Err(_) => {
+                    tracing::warn!("VNC WS authorization timed out after {:?}", WS_ACCEPT_TIMEOUT);
+                    return Err("VNC WebSocket authorization timed out".into());
+                }
+            },
+            _ = cancel.cancelled() => return Err("VNC relay cancelled".into()),
+        };
+
+        let protocol = expected_protocol.clone();
+        let callback = move |request: &Request, mut response: Response| {
+            let has_protocol = request
+                .headers()
+                .get(header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.split(',').any(|item| item.trim() == protocol));
+            let origin_ok = request
+                .headers()
+                .get(header::ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(is_authorized_origin);
+            let path_ok = request.uri().path() == VNC_WS_PATH;
+            if !has_protocol || !origin_ok || !path_ok {
+                let mut rejection = ErrorResponse::new(Some("forbidden".to_string()));
+                *rejection.status_mut() = StatusCode::FORBIDDEN;
+                return Err(rejection);
+            }
+            response.headers_mut().insert(
+                header::SEC_WEBSOCKET_PROTOCOL,
+                HeaderValue::from_str(&protocol).expect("generated VNC protocol is valid"),
+            );
+            Ok(response)
+        };
+        let ws_config = WebSocketConfig::default()
+            .max_message_size(Some(relay_limits.max_relay_message_bytes))
+            .max_frame_size(Some(relay_limits.max_relay_message_bytes))
+            .max_write_buffer_size(relay_limits.max_frame_queue_bytes);
+        match tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(ws_config))
+            .await
+        {
+            Ok(socket) => return Ok(socket),
+            Err(error) => tracing::warn!("rejected unauthorized VNC WebSocket attempt: {error}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot;
+    use tokio_tungstenite::connect_async;
+    use tungstenite::client::IntoClientRequest;
+
+    fn ws_request(
+        port: u16,
+        path: &str,
+        protocol: &str,
+        origin: &'static str,
+    ) -> tungstenite::handshake::client::Request {
+        let mut request = format!("ws://127.0.0.1:{port}{path}")
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, HeaderValue::from_static(origin));
+        request.headers_mut().insert(
+            header::SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_str(protocol).unwrap(),
+        );
+        request
+    }
 
     #[test]
-    fn binary_control_decodes_key_pointer_and_resize() {
+    fn binary_control_decodes_key_pointer_and_refresh() {
         match parse_binary_control(&[2, 1, 0, 0, 0xff, 0x0d]) {
             Some(VncControl::Key { down, keysym }) => {
                 assert!(down);
@@ -1473,209 +1104,223 @@ mod tests {
             other => panic!("expected pointer control, got {:?}", other),
         }
 
-        match parse_binary_control(&[4, 0x05, 0x00, 0x03, 0x20]) {
-            Some(VncControl::Resize { width, height }) => {
-                assert_eq!(width, 1280);
-                assert_eq!(height, 800);
-            }
-            other => panic!("expected resize control, got {:?}", other),
-        }
+        assert!(matches!(
+            parse_binary_control(&[4]),
+            Some(VncControl::Refresh)
+        ));
+        assert!(parse_binary_control(&[4, 0]).is_none());
     }
 
     #[test]
     fn binary_control_decodes_ack_and_ignores_ping() {
-        assert!(matches!(
-            parse_binary_control(&[0]),
-            Some(VncControl::Ack { frame_id: 0 })
-        ));
-        assert!(matches!(
-            parse_binary_control(&[0, 0x12, 0x34, 0x56, 0x78]),
-            Some(VncControl::Ack {
-                frame_id: 0x1234_5678
-            })
-        ));
+        assert!(matches!(parse_binary_control(&[0]), Some(VncControl::Ack)));
         assert!(parse_binary_control(&[1]).is_none());
         assert!(parse_binary_control(&[3, 0]).is_none());
     }
 
-    #[tokio::test]
-    async fn output_queue_replaces_stale_frame_with_latest_frame() {
-        let (sender, mut receiver) = WsOutgoingQueue::new();
-        sender.send(WsOutgoing::Frame(vec![1])).unwrap();
-        sender.send(WsOutgoing::FrameEnd(1)).unwrap();
-        sender.send(WsOutgoing::Frame(vec![2])).unwrap();
-        sender.send(WsOutgoing::FrameEnd(2)).unwrap();
-
-        assert!(
-            matches!(receiver.recv().await, Some(WsOutgoing::Frame(bytes)) if bytes == vec![2])
-        );
-        assert!(matches!(
-            receiver.recv().await,
-            Some(WsOutgoing::FrameEnd(2))
+    #[test]
+    fn backend_enforces_view_only_and_clipboard_direction() {
+        let limits = crate::vnc::limits::DecodeLimits::default();
+        let key = VncControl::Key {
+            down: true,
+            keysym: 0x41,
+        };
+        assert!(!control_allowed(
+            &key,
+            true,
+            VncClipboardPolicy::Bidirectional,
+            &limits,
         ));
-        assert!(sender.take_frame_drop());
-    }
-
-    #[tokio::test]
-    async fn output_queue_prioritizes_control_messages_over_frames() {
-        let (sender, mut receiver) = WsOutgoingQueue::new();
-        sender
-            .send(WsOutgoing::Frame(vec![1, 2, 3]))
-            .expect("frame enqueue");
-        sender.send(WsOutgoing::FrameEnd(7)).expect("frame commit");
-        sender
-            .send(WsOutgoing::Text("control".to_string()))
-            .expect("control enqueue");
-
-        assert!(matches!(receiver.recv().await, Some(WsOutgoing::Text(text)) if text == "control"));
-        assert!(
-            matches!(receiver.recv().await, Some(WsOutgoing::Frame(bytes)) if bytes == vec![1, 2, 3])
-        );
-        assert!(matches!(
-            receiver.recv().await,
-            Some(WsOutgoing::FrameEnd(7))
+        assert!(control_allowed(
+            &VncControl::Ack,
+            true,
+            VncClipboardPolicy::Disabled,
+            &limits,
         ));
-    }
-
-    #[tokio::test]
-    async fn output_queue_commits_an_empty_frame_after_oversize_drop() {
-        let (sender, mut receiver) = WsOutgoingQueue::new();
-        sender
-            .send(WsOutgoing::Frame(vec![0; MAX_WS_FRAME_BATCH_BYTES + 1]))
-            .unwrap();
-        sender.send(WsOutgoing::FrameEnd(9)).unwrap();
-
-        assert!(matches!(
-            receiver.recv().await,
-            Some(WsOutgoing::FrameEnd(9))
+        assert!(!control_allowed(
+            &VncControl::Clipboard("secret".into()),
+            false,
+            VncClipboardPolicy::ServerToClient,
+            &limits,
         ));
-        assert!(sender.take_frame_drop());
-    }
-
-    #[tokio::test]
-    async fn output_queue_fails_closed_without_blocking_on_control_overflow() {
-        let (sender, receiver) = WsOutgoingQueue::new();
-        for index in 0..MAX_PENDING_WS_CONTROL {
-            sender.send(WsOutgoing::Text(index.to_string())).unwrap();
-        }
-        assert!(
-            sender
-                .send(WsOutgoing::Text("overflow".to_string()))
-                .is_err()
-        );
-        assert!(receiver.queue.recv().await.is_none());
+        assert!(control_allowed(
+            &VncControl::Clipboard("ok".into()),
+            false,
+            VncClipboardPolicy::ClientToServer,
+            &limits,
+        ));
     }
 
     #[test]
-    fn control_policy_enforces_view_only_clipboard_direction_and_size() {
-        let view_only = VncClientOptions {
-            view_only: true,
-            ..VncClientOptions::default()
-        };
+    fn backend_rejects_oversized_clipboard_controls() {
+        let mut limits = crate::vnc::limits::DecodeLimits::default();
+        limits.max_clipboard_format_bytes = 4;
+        limits.max_clipboard_decompressed_bytes = 6;
         assert!(!control_allowed(
-            &VncControl::Key {
-                down: true,
-                keysym: 0xff0d,
-            },
-            view_only,
-        ));
-        assert!(!control_allowed(
-            &VncControl::Pointer {
-                x: 1,
-                y: 2,
-                buttons: 1,
-            },
-            view_only,
-        ));
-
-        let receive_only = VncClientOptions {
-            clipboard_policy: ClipboardPolicy::ServerToClient,
-            ..VncClientOptions::default()
-        };
-        assert!(!control_allowed(
-            &VncControl::Clipboard("allowed-size".to_string()),
-            receive_only,
-        ));
-
-        let limited = VncClientOptions {
-            max_clipboard_bytes: 4,
-            ..VncClientOptions::default()
-        };
-        assert!(control_allowed(
-            &VncControl::Clipboard("four".to_string()),
-            limited,
-        ));
-        assert!(!control_allowed(
-            &VncControl::Clipboard("five!".to_string()),
-            limited,
+            &VncControl::Clipboard("12345".into()),
+            false,
+            VncClipboardPolicy::Bidirectional,
+            &limits,
         ));
         assert!(!control_allowed(
             &VncControl::ExtendedClipboard(ClipboardFormats {
-                text: Some("ok".to_string()),
-                html: Some("12345".to_string()),
+                text: Some("1234".into()),
+                html: Some("5678".into()),
                 rtf: None,
             }),
-            limited,
+            false,
+            VncClipboardPolicy::Bidirectional,
+            &limits,
         ));
     }
 
     #[test]
-    fn clipboard_format_filter_requires_explicit_html_and_rtf_options() {
-        let data = ClipboardFormats {
-            text: Some("text".to_string()),
-            html: Some("<b>html</b>".to_string()),
-            rtf: Some("{\\rtf1}".to_string()),
+    fn clipboard_caps_remain_available_for_one_way_client_sync() {
+        let caps = ExtendedClipboardMsg::Caps {
+            formats: FORMAT_TEXT,
+            actions: SUPPORTED_ACTIONS,
+            sizes: vec![1024],
         };
-        let text_only =
-            filter_configured_clipboard_formats(data.clone(), VncClientOptions::default());
-        assert_eq!(text_only.text.as_deref(), Some("text"));
-        assert!(text_only.html.is_none());
-        assert!(text_only.rtf.is_none());
-
-        let rich = filter_configured_clipboard_formats(
-            data,
-            VncClientOptions {
-                allow_html_clipboard: true,
-                allow_rtf_clipboard: true,
-                ..VncClientOptions::default()
+        assert!(server_clipboard_message_allowed(
+            &caps,
+            VncClipboardPolicy::ClientToServer,
+        ));
+        assert!(!server_clipboard_message_allowed(
+            &ExtendedClipboardMsg::Notify {
+                formats: FORMAT_TEXT,
             },
-        );
-        assert!(rich.html.is_some());
-        assert!(rich.rtf.is_some());
+            VncClipboardPolicy::ClientToServer,
+        ));
     }
 
     #[test]
-    fn resize_message_carries_the_frame_id_atomically() {
-        let json = serde_json::to_string(&WsOutgoingText::Resize {
-            frame_id: 41,
-            width: 1920,
-            height: 1080,
+    fn relay_origin_allowlist_rejects_untrusted_pages() {
+        assert!(is_authorized_origin("tauri://localhost"));
+        assert!(!is_authorized_origin("https://attacker.example"));
+    }
+
+    #[test]
+    fn desktop_size_notification_carries_a_monotonic_generation() {
+        let json = serde_json::to_string(&WsOutgoingText::DesktopSize {
+            width: 2560,
+            height: 1440,
+            generation: 3,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"type":"resize","frame_id":41,"width":1920,"height":1080}"#
-        );
-        assert_eq!(
-            &make_frame_header(1, 2, 3, 4, 41)[8..12],
-            &41u32.to_be_bytes()
+            r#"{"type":"desktop_size","width":2560,"height":1440,"generation":3}"#
         );
     }
 
-    #[test]
-    fn websocket_origin_policy_rejects_untrusted_origins() {
-        assert!(is_authorized_origin("tauri://localhost"));
-        assert!(is_authorized_origin("http://localhost:5000"));
-        assert!(!is_authorized_origin("http://evil.example"));
+    #[tokio::test]
+    async fn authenticated_websocket_rejects_bad_requests_and_is_single_use() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let server_cancel = cancel.clone();
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let socket = accept_authorized_ws(listener, "single-use", &server_cancel)
+                .await
+                .unwrap();
+            let _ = accepted_tx.send(());
+            let _ = release_rx.await;
+            drop(socket);
+        });
+
+        assert!(
+            connect_async(ws_request(
+                port,
+                "/vnc",
+                "taomni-vnc.wrong",
+                "tauri://localhost",
+            ))
+            .await
+            .is_err()
+        );
+        assert!(
+            connect_async(ws_request(
+                port,
+                "/vnc",
+                "taomni-vnc.single-use",
+                "https://attacker.example",
+            ))
+            .await
+            .is_err()
+        );
+        assert!(
+            connect_async(ws_request(
+                port,
+                "/wrong",
+                "taomni-vnc.single-use",
+                "tauri://localhost",
+            ))
+            .await
+            .is_err()
+        );
+
+        let (mut client, response) = connect_async(ws_request(
+            port,
+            "/vnc",
+            "taomni-vnc.single-use",
+            "tauri://localhost",
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(header::SEC_WEBSOCKET_PROTOCOL)
+                .and_then(|value| value.to_str().ok()),
+            Some("taomni-vnc.single-use")
+        );
+        accepted_rx.await.unwrap();
+
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            connect_async(ws_request(
+                port,
+                "/vnc",
+                "taomni-vnc.single-use",
+                "tauri://localhost",
+            )),
+        )
+        .await;
+        assert!(!matches!(second, Ok(Ok(_))));
+
+        let _ = client.close(None).await;
+        let _ = release_tx.send(());
+        server.await.unwrap();
     }
 }
 
-fn make_frame_header(x: u16, y: u16, w: u16, h: u16, frame_id: u32) -> [u8; 12] {
+fn is_authorized_origin(origin: &str) -> bool {
+    if matches!(
+        origin,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    ) {
+        return true;
+    }
+    if cfg!(debug_assertions) {
+        return matches!(
+            origin,
+            "http://localhost:1980"
+                | "http://127.0.0.1:1980"
+                | "http://localhost:5000"
+                | "http://127.0.0.1:5000"
+        );
+    }
+    false
+}
+
+fn make_frame_header(x: u16, y: u16, w: u16, h: u16) -> [u8; 12] {
     let mut hdr = [0u8; 12];
     hdr[0..2].copy_from_slice(&x.to_be_bytes());
     hdr[2..4].copy_from_slice(&y.to_be_bytes());
     hdr[4..6].copy_from_slice(&w.to_be_bytes());
     hdr[6..8].copy_from_slice(&h.to_be_bytes());
-    hdr[8..12].copy_from_slice(&frame_id.to_be_bytes());
+    // bytes 8-11 reserved (zero)
     hdr
 }

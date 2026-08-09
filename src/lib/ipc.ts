@@ -711,7 +711,9 @@ export async function vncConnect(
   username?: string | null,
   password?: string,
   networkSettingsJson?: string | null,
-  clientOptionsJson?: string | null,
+  securityPolicy: "require-encryption" | "prefer-encryption" | "legacy-compatible" | "allow-none" = "prefer-encryption",
+  viewOnly = false,
+  clipboardPolicy: "disabled" | "client-to-server" | "server-to-client" | "bidirectional" = "bidirectional",
 ): Promise<VncConnectResult> {
   return withVaultLockedNotice(() =>
     invoke<VncConnectResult>("vnc_connect", {
@@ -720,7 +722,9 @@ export async function vncConnect(
       username: username?.trim() || null,
       password: password ?? null,
       networkSettingsJson: networkSettingsJson ?? null,
-      clientOptionsJson: clientOptionsJson ?? null,
+      securityPolicy,
+      viewOnly,
+      clipboardPolicy,
     }),
   );
 }
@@ -735,7 +739,7 @@ export async function vncTestConnection(
   username?: string | null,
   password?: string,
   networkSettingsJson?: string | null,
-  clientOptionsJson?: string | null,
+  securityPolicy: "require-encryption" | "prefer-encryption" | "legacy-compatible" | "allow-none" = "prefer-encryption",
 ): Promise<string> {
   return withVaultLockedNotice(() =>
     invoke("vnc_test_connection", {
@@ -744,7 +748,7 @@ export async function vncTestConnection(
       username: username?.trim() || null,
       password: password ?? null,
       networkSettingsJson: networkSettingsJson ?? null,
-      clientOptionsJson: clientOptionsJson ?? null,
+      securityPolicy,
     }),
   );
 }
