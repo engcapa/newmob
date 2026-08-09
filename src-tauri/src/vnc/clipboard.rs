@@ -29,8 +29,7 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use std::io::{Read, Write};
 
-pub const MAX_CLIPBOARD_FORMAT_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_CLIPBOARD_DECODED_BYTES: usize = 32 * 1024 * 1024;
+use crate::vnc::limits::DecodeLimits;
 
 pub const ENCODING_EXTENDED_CLIPBOARD: i32 = 0xC0A1_E5CEu32 as i32;
 // Older Taomni builds advertised this incorrect value. Keeping it in the
@@ -96,11 +95,23 @@ pub enum ExtendedClipboardMsg {
     },
 }
 
-/// Try to parse an extended-clipboard body. Returns None if the action byte is unknown
-/// (which means we should silently drop the message — not abort the connection).
+/// Try to parse an extended-clipboard body. The compatibility wrapper uses
+/// the production limits and preserves the historical `Option` API.
 pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
+    parse_extended_body_with_limits(body, &DecodeLimits::default())
+        .ok()
+        .flatten()
+}
+
+/// Parse an ExtendedClipboard body with bounded compressed and decompressed
+/// storage. Unknown actions are ignored; malformed or oversized payloads are
+/// returned as an error so the owning session can close deterministically.
+pub fn parse_extended_body_with_limits(
+    body: &[u8],
+    limits: &DecodeLimits,
+) -> Result<Option<ExtendedClipboardMsg>, String> {
     if body.len() < 4 {
-        return None;
+        return Err("truncated extended clipboard header".into());
     }
     let flags = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
     let action = flags & ACTION_MASK;
@@ -115,7 +126,7 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
         while bit & FORMAT_MASK != 0 {
             if formats & bit != 0 {
                 if payload.len() < cursor + 4 {
-                    break;
+                    return Err("truncated extended clipboard capabilities".into());
                 }
                 let size = u32::from_be_bytes([
                     payload[cursor],
@@ -128,39 +139,50 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
             }
             bit <<= 1;
         }
-        return Some(ExtendedClipboardMsg::Caps {
+        return Ok(Some(ExtendedClipboardMsg::Caps {
             formats,
             actions: action,
             sizes,
-        });
+        }));
     }
 
     match action {
-        ACTION_REQUEST => Some(ExtendedClipboardMsg::Request { formats }),
-        ACTION_PEEK => Some(ExtendedClipboardMsg::Peek),
-        ACTION_NOTIFY => Some(ExtendedClipboardMsg::Notify { formats }),
+        ACTION_REQUEST => Ok(Some(ExtendedClipboardMsg::Request { formats })),
+        ACTION_PEEK => Ok(Some(ExtendedClipboardMsg::Peek)),
+        ACTION_NOTIFY => Ok(Some(ExtendedClipboardMsg::Notify { formats })),
         ACTION_PROVIDE => {
-            // Body is one zlib stream containing concatenated per-format chunks
-            // in low-bit-first order: [u32 length][bytes...] for each format
-            // bit set in `formats`.
+            if payload.len() > limits.max_compressed_rect_bytes {
+                return Err("extended clipboard compressed body exceeds configured limit".into());
+            }
             let mut decoder = ZlibDecoder::new(payload);
             let mut decoded = Vec::new();
-            let decoded_result = decoder
-                .take((MAX_CLIPBOARD_DECODED_BYTES + 1) as u64)
-                .read_to_end(&mut decoded);
-            if decoded_result.is_err() || decoded.len() > MAX_CLIPBOARD_DECODED_BYTES {
-                return Some(ExtendedClipboardMsg::Provide {
-                    formats,
-                    formats_data: ClipboardFormats::default(),
-                });
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = decoder
+                    .read(&mut chunk)
+                    .map_err(|e| format!("extended clipboard inflate: {e}"))?;
+                if n == 0 {
+                    break;
+                }
+                if decoded
+                    .len()
+                    .checked_add(n)
+                    .is_none_or(|size| size > limits.max_clipboard_decompressed_bytes)
+                {
+                    return Err(
+                        "extended clipboard decompressed body exceeds configured limit".into(),
+                    );
+                }
+                decoded.extend_from_slice(&chunk[..n]);
             }
             let mut data = ClipboardFormats::default();
-            let mut cursor = 0;
+            let mut cursor = 0usize;
             let mut bit = 1u32;
             while bit & FORMAT_MASK != 0 {
                 if formats & bit != 0 {
-                    if decoded.len() < cursor + 4 {
-                        break;
+                    let end = cursor.checked_add(4).ok_or("clipboard length overflow")?;
+                    if decoded.len() < end {
+                        return Err("truncated extended clipboard length".into());
                     }
                     let len = u32::from_be_bytes([
                         decoded[cursor],
@@ -168,20 +190,21 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
                         decoded[cursor + 2],
                         decoded[cursor + 3],
                     ]) as usize;
-                    cursor += 4;
-                    if len > MAX_CLIPBOARD_FORMAT_BYTES
-                        || decoded.len() < cursor.saturating_add(len)
-                    {
-                        break;
+                    cursor = end;
+                    limits.clipboard_bytes(len).map_err(|e| e.to_string())?;
+                    let data_end = cursor
+                        .checked_add(len)
+                        .ok_or("clipboard data length overflow")?;
+                    if decoded.len() < data_end {
+                        return Err("truncated extended clipboard data".into());
                     }
-                    let raw = &decoded[cursor..cursor + len];
-                    // Trim trailing NUL — the extended text format requires it.
+                    let raw = &decoded[cursor..data_end];
                     let trimmed = raw.strip_suffix(&[0]).unwrap_or(raw);
                     let mut s = String::from_utf8_lossy(trimmed).to_string();
                     if bit == FORMAT_TEXT {
                         s = denormalize_text_newlines(&s);
                     }
-                    cursor += len;
+                    cursor = data_end;
                     match bit {
                         FORMAT_TEXT => data.text = Some(s),
                         FORMAT_RTF => data.rtf = Some(s),
@@ -191,12 +214,12 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
                 }
                 bit <<= 1;
             }
-            Some(ExtendedClipboardMsg::Provide {
+            Ok(Some(ExtendedClipboardMsg::Provide {
                 formats,
                 formats_data: data,
-            })
+            }))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -227,6 +250,7 @@ pub fn build_request_body(formats: u32) -> Vec<u8> {
 /// Build a provide body delivering the data for the given formats (the bits that are
 /// non-empty in `data`).
 pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
+    let limits = DecodeLimits::default();
     let formats = data.format_mask();
     let mut payload = Vec::new();
     let mut bit = 1u32;
@@ -238,6 +262,9 @@ pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
             _ => None,
         };
         if let Some(s) = chunk {
+            limits
+                .clipboard_bytes(s.len())
+                .map_err(|error| error.to_string())?;
             // TigerVNC convention: NUL-terminated UTF-8 + 4-byte big-endian length.
             let text;
             let value = if bit == FORMAT_TEXT {
@@ -248,16 +275,18 @@ pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
             };
             let mut buf = value.as_bytes().to_vec();
             buf.push(0);
-            if buf.len() > MAX_CLIPBOARD_FORMAT_BYTES {
-                return Err(format!(
-                    "clipboard format exceeds {} bytes",
-                    MAX_CLIPBOARD_FORMAT_BYTES
-                ));
-            }
-            payload.extend_from_slice(&(buf.len() as u32).to_be_bytes());
+            limits
+                .clipboard_bytes(buf.len())
+                .map_err(|error| error.to_string())?;
+            let len = u32::try_from(buf.len())
+                .map_err(|_| "clipboard format length exceeds RFB limit".to_string())?;
+            payload.extend_from_slice(&len.to_be_bytes());
             payload.extend_from_slice(&buf);
         }
         bit <<= 1;
+    }
+    if payload.len() > limits.max_clipboard_decompressed_bytes {
+        return Err("clipboard payload exceeds configured aggregate limit".into());
     }
 
     let mut compressed = Vec::new();
@@ -270,13 +299,10 @@ pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
             .finish()
             .map_err(|e| format!("zlib finish: {}", e))?;
     }
-    let mut body = Vec::with_capacity(4 + compressed.len());
-    if body.capacity() > MAX_CLIPBOARD_FORMAT_BYTES {
-        return Err(format!(
-            "extended clipboard body exceeds {} bytes",
-            MAX_CLIPBOARD_FORMAT_BYTES
-        ));
+    if compressed.len() > limits.max_compressed_rect_bytes {
+        return Err("compressed clipboard payload exceeds configured limit".into());
     }
+    let mut body = Vec::with_capacity(4 + compressed.len());
     body.extend_from_slice(&(ACTION_PROVIDE | formats).to_be_bytes());
     body.extend_from_slice(&compressed);
     Ok(body)
@@ -420,27 +446,33 @@ mod tests {
     #[test]
     fn truncated_body_returns_none() {
         assert!(parse_extended_body(&[1, 2]).is_none());
+        assert!(parse_extended_body_with_limits(&[1, 2], &DecodeLimits::default()).is_err());
     }
 
     #[test]
-    fn provide_rejects_format_larger_than_limit() {
-        let mut plain = Vec::new();
-        plain.extend_from_slice(&((MAX_CLIPBOARD_FORMAT_BYTES as u32) + 1).to_be_bytes());
-        plain.push(0);
-        let mut compressed = Vec::new();
-        {
-            let mut encoder = ZlibEncoder::new(&mut compressed, Compression::default());
-            encoder.write_all(&plain).unwrap();
-            encoder.finish().unwrap();
-        }
+    fn truncated_capabilities_are_rejected() {
+        let body = (ACTION_CAPS | FORMAT_TEXT).to_be_bytes().to_vec();
+        assert!(parse_extended_body_with_limits(&body, &DecodeLimits::default()).is_err());
+    }
+
+    #[test]
+    fn extended_clipboard_rejects_decompression_bomb() {
+        let data = ClipboardFormats {
+            text: Some("x".repeat(4096)),
+            html: None,
+            rtf: None,
+        };
+        let body = build_provide_body(&data).unwrap();
+        let mut limits = DecodeLimits::default();
+        limits.max_clipboard_decompressed_bytes = 128;
+        assert!(parse_extended_body_with_limits(&body, &limits).is_err());
+    }
+
+    #[test]
+    fn extended_clipboard_rejects_truncated_payload() {
         let mut body = (ACTION_PROVIDE | FORMAT_TEXT).to_be_bytes().to_vec();
-        body.extend_from_slice(&compressed);
-        match parse_extended_body(&body) {
-            Some(ExtendedClipboardMsg::Provide { formats_data, .. }) => {
-                assert!(formats_data.text.is_none());
-            }
-            other => panic!("expected bounded Provide result, got {:?}", other),
-        }
+        body.extend_from_slice(&[0x78, 0x9c, 0x01]);
+        assert!(parse_extended_body_with_limits(&body, &DecodeLimits::default()).is_err());
     }
 
     #[test]

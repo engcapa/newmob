@@ -33,10 +33,6 @@ controls:
     selector: '[data-testid="collapsed-sidebar-rail"]'
     kind: interactive
     optional: true       # only when sidebar collapsed
-  - id: compact-sidebar-drawer
-    selector: '[data-testid="compact-sidebar-drawer"]'
-    kind: display
-    optional: true       # only in compact mode after Show sessions drawer
   - id: sidebar-resize-handle
     selector: '[data-testid="main-sidebar-resize-handle"]'
     kind: display    # drag handle — meaningless to click; existence is the assertion
@@ -266,9 +262,6 @@ controls:
     optional: true       # only rendered when selected shell canElevate
   - id: new-session-card
     selector: 'text="New session…"'
-    kind: interactive
-  - id: new-session-button
-    selector: '[data-testid="welcome-new-session"]'
     kind: interactive
   - id: recent-sessions-panel
     selector: '[data-testid="welcome-recent-sessions"]'
@@ -1152,7 +1145,6 @@ controls:
   - id: side-tab-sessions
     selector: '[data-testid="side-tab-sessions"]'
     kind: interactive
-    optional: true       # compact rail entry when the main sidebar is collapsed
   - id: session-tree
     selector: '[data-testid="session-tree"]'
     kind: display
@@ -2050,34 +2042,33 @@ files:
 controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas surface is owned by F9.6
 -->
 
-- Rust 端 VNC 模块：`src-tauri/src/vnc/{mod, rfb, ws, encodings, clipboard}.rs`
-- Tauri 命令：`vnc_connect / vnc_disconnect / vnc_test_connection`
+- Rust 端 VNC 模块：`src-tauri/src/vnc/{mod,rfb,ws,encodings,clipboard,error,limits,policy,queue}.rs`
+- Tauri 命令：`vnc_connect / vnc_disconnect / vnc_test_connection / vnc_create_detach_claim / vnc_consume_detach_claim`
 - 本地动态端口 WebSocket relay：VNC server ↔ 前端 Canvas（前端不再直接持有 TCP 套接字）
 
 ### 9.2 RFB 握手与认证 ✅
-- 安全类型：VNC password、RealVNC RA2 / RA2ne（128 / 256 位 AES）；None 默认拒绝，仅 `allow-none` 显式策略允许
+- 安全类型：None（仅显式 `allow-none`）、VNC password、RealVNC RA2 / RA2ne（128 / 256 位 AES）
 - RA2 子模式：USER_PASS、PASS-only；公钥位长度合法性校验（1024–8192 bit）
-- 安全类型按强度选择，连接状态展示实际 RFB 版本、认证类型与传输是否加密
+- `RequireEncryption` 在没有 VeNCrypt/TLS 实现时 fail closed，并返回 `security-policy-unsupported`；RA2 提供加密但不验证服务器证书身份
 
 ### 9.3 编码与画面 ✅
 - 解码器：Raw（0）、CopyRect（1）、Hextile（5）、ZRLE（16，单一持久 zlib 流）
-- 伪编码：DesktopSize（-223），后端通过带 frame id 的 resize 消息原子同步前端；未声明支持 client SetDesktopSize
+- 伪编码：DesktopSize（-223）接收；窗口变化仅调整本地 fit，不宣称或发送 SetDesktopSize；丢帧恢复时才请求全量刷新
 - ZRLE 单 zlib 状态贯穿整个 session，已修复历史的 "zrle: eof cpixel" 间歇性断连
 - 像素格式 `set_pixel_format_rgba()` 协商成 little-endian RGBA，前端按位图直接渲染
 - Tight 编码暂未启用（解码器尚未 RFC-conformant，避免 stream 失步）
-- FramebufferUpdate 以逻辑帧批处理，rendered ACK 在 Canvas 实际绘制后发送；慢消费者只保留最新帧，丢帧后请求全量恢复
 
 ### 9.4 ExtendedClipboard 互通 ✅
 - 实现 ExtendedClipboard 伪编码（`0xC0A1E5CE` + 旧 draft 值 `-1063` 双广告兼容）
 - 支持 actions：caps / request / peek / notify / provide
 - 支持 formats：text (UTF-8)、HTML、RTF（zlib 压缩）
 - 老服务器（vino 等）回落 legacy `ServerCutText / ClientCutText` 路径，并已修复中文剪贴板丢失 / Windows 11 端到端粘贴乱码 / 非 ASCII 粘贴丢失等回归
-- 前端 ↔ 后端剪贴板桥：四向策略、单格式大小上限和 HTML/RTF 显式开关均由 relay 强制执行
+- 前端 ↔ 后端剪贴板桥：`vncStore` 协调，文本/HTML/RTF 选择性传输
 
 ### 9.5 输入处理 ✅
 - 鼠标：左/中/右键、滚轮、拖拽（pointer capture）
-- 键盘：左右修饰键、AltGr、数字键盘、锁定键、F1-F24、失焦全释放；view-only 前后端双重阻止输入
-- 剪贴板：disabled / 单向 / 双向同步，自动切换 Extended / Legacy
+- 键盘：包含 RealVNC 输入修复，组合键正确转发
+- 剪贴板：双向同步，自动切换 Extended / Legacy
 
 ### 9.6 前端 `VncPanel` ✅
 
@@ -2085,11 +2076,13 @@ controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas su
 id: F9.6
 status: done
 area: vnc
-components: [VncPanel, FloatingToolbar, CaptureToolbar]
+components: [VncPanel, FloatingToolbar, CaptureToolbar, SessionEditor]
 files:
   - src/components/vnc/VncPanel.tsx
   - src/components/session/SessionEditor.tsx
 controls:
+  # Detach/reattach/fullscreen controls rendered by VncPanel are owned by
+  # F-Detach-1 to avoid duplicate selector ownership.
   - id: panel-root
     selector: '[data-testid="vnc-panel"]'
     kind: display
@@ -2098,10 +2091,6 @@ controls:
     kind: display       # pointer / wheel / context-menu handlers fire only after a live RFB session;
                         # without a configured VNC fixture we can only verify the canvas is attached.
                         # Driving it is left to feature-flagged conformance tests.
-  - id: floating-toolbar
-    selector: '[data-testid="vnc-floating-toolbar"]'
-    kind: display
-    optional: true          # only renders when canvas is showing (connected)
   - id: scale-toggle
     selector: '[data-testid="vnc-scale-toggle"]'
     kind: interactive
@@ -2110,40 +2099,22 @@ controls:
     selector: '[data-testid="vnc-reconnect"]'
     kind: interactive
     optional: true          # only on disconnected/error state
-  - id: security-status
-    selector: '[data-testid="vnc-connection-security"]'
+  - id: policy-settings
+    selector: '[data-testid="session-vnc-policies"]'
     kind: display
-    optional: true
-  - id: client-options
-    selector: '[data-testid="vnc-client-options"]'
-    kind: display
+    optional: true          # only while editing a VNC session
   - id: security-policy
-    selector: '[data-testid="vnc-security-policy"]'
+    selector: '[data-testid="session-vnc-security-policy"]'
     kind: interactive
+    optional: true
   - id: clipboard-policy
-    selector: '[data-testid="vnc-clipboard-policy"]'
+    selector: '[data-testid="session-vnc-clipboard-policy"]'
     kind: interactive
-  - id: shared
-    selector: '[data-testid="vnc-shared"]'
-    kind: interactive
+    optional: true
   - id: view-only
-    selector: '[data-testid="vnc-view-only"]'
+    selector: '[data-testid="session-vnc-view-only"]'
     kind: interactive
-  - id: clipboard-html
-    selector: '[data-testid="vnc-clipboard-html"]'
-    kind: interactive
-  - id: clipboard-rtf
-    selector: '[data-testid="vnc-clipboard-rtf"]'
-    kind: interactive
-  - id: auto-reconnect
-    selector: '[data-testid="vnc-auto-reconnect"]'
-    kind: interactive
-  - id: reconnect-attempts
-    selector: '[data-testid="vnc-reconnect-attempts"]'
-    kind: interactive
-  - id: clipboard-limit
-    selector: '[data-testid="vnc-clipboard-limit"]'
-    kind: interactive
+    optional: true
 -->
 
 - Canvas 画面渲染 + fit / 1:1 缩放
@@ -2151,11 +2122,10 @@ controls:
 - 内嵌 `CaptureToolbar`：可见区域 PNG / 全帧 PNG / GIF 录制（与终端共用截图链路）
 - 断开提示 + Reconnect、错误分类（区分用户主动断开 / 服务端断开 / 网络异常）
 - 保存的 VNC 会话可从会话树双击连接，密码场景复用 `AuthPrompt`
-- `vnc://` QuickConnect 与保存会话共用 VNC panel、认证和网络链路
 - VNC tab 常驻挂载，切换标签时连接不主动销毁
-- 可配置 security/shared/view-only/clipboard/HTML/RTF/大小限制/有限自动重连；旧连接回调不能覆盖重连后的新会话状态
-- detach 仅持久化 256-bit 内存 capability，不把 VNC password 或 vault ref 写入 localStorage
-- TC-117 提供 Linux WebKitGTK/Tauri debug bundle 启动截图 smoke；真实 RFB pixels/input/clipboard 仍由 native fixture 与人工矩阵验证
+- 已修复 VNC 剪贴板与输入延迟、Windows 11 上的 client→server 文本粘贴
+- view-only 与剪贴板方向（disabled / client→server / server→client / bidirectional）由前后端同时执行；None 默认拒绝
+- 当前不启用 Tight/JPEG、VeNCrypt/TLS，也不发送 RFB SetDesktopSize；窗口变化只调整本地显示
 
 ### 9.7 RDP client（IronRDP 0.17）🟡
 
@@ -2273,7 +2243,6 @@ controls:
 
 ### 9.9 已知限制
 - 浏览器预览模式没有 VNC stub（仅 Tauri 桌面下可用）
-- 当前不支持 VeNCrypt/TLS、Tight/JPEG、client SetDesktopSize；传统 VNCAuth 仅应在可信网络或 SSH tunnel 中使用
 
 ---
 

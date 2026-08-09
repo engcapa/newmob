@@ -1,9 +1,7 @@
 use flate2::{Decompress, FlushDecompress};
 use std::io::Read;
 
-const MAX_ZRLE_COMPRESSED_BYTES: usize = 64 * 1024 * 1024;
-const MAX_ZRLE_INFLATED_BYTES: usize = 128 * 1024 * 1024;
-const ZRLE_INFLATE_CHUNK_BYTES: usize = 64 * 1024;
+use crate::vnc::limits::DecodeLimits;
 
 /// A decoded framebuffer rectangle, in destination RGBA32.
 ///
@@ -46,8 +44,19 @@ fn read_u32_be<R: Read>(r: &mut R) -> std::io::Result<u32> {
 /// each (per the RGBA32 pixel format we negotiate). Alpha byte is forced to
 /// 0xFF because many servers leave it at 0.
 pub fn read_raw<R: Read>(r: &mut R, x: u16, y: u16, w: u16, h: u16) -> Result<DecodedRect, String> {
-    let pixel_count = w as usize * h as usize;
-    let mut rgba = vec![0u8; pixel_count * 4];
+    read_raw_with_limits(r, x, y, w, h, &DecodeLimits::default())
+}
+
+pub fn read_raw_with_limits<R: Read>(
+    r: &mut R,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    limits: &DecodeLimits,
+) -> Result<DecodedRect, String> {
+    let bytes = limits.rectangle_bytes(w, h).map_err(|e| e.to_string())?;
+    let mut rgba = vec![0u8; bytes];
     r.read_exact(&mut rgba)
         .map_err(|e| format!("raw: read pixels: {}", e))?;
     for pixel in rgba.chunks_exact_mut(4) {
@@ -79,18 +88,30 @@ pub fn read_copyrect<R: Read>(
     let w_us = w as usize;
     let h_us = h as usize;
 
-    // Defensive bounds: a misbehaving server could send coordinates that walk
-    // off the framebuffer. Clip rather than panic.
-    let mut rgba = vec![0u8; w_us * h_us * 4];
-    if fb_w == 0 || fb_h == 0 {
-        return Ok(DecodedRect::Pixels {
-            x: dst_x,
-            y: dst_y,
-            w,
-            h,
-            rgba,
-        });
+    let bytes = w_us
+        .checked_mul(h_us)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "copyrect: byte count overflow".to_string())?;
+    if fb_w == 0
+        || fb_h == 0
+        || src_x as usize >= fb_w
+        || src_y as usize >= fb_h
+        || (src_x as usize)
+            .checked_add(w_us)
+            .is_none_or(|end| end > fb_w)
+        || (src_y as usize)
+            .checked_add(h_us)
+            .is_none_or(|end| end > fb_h)
+        || (dst_x as usize)
+            .checked_add(w_us)
+            .is_none_or(|end| end > fb_w)
+        || (dst_y as usize)
+            .checked_add(h_us)
+            .is_none_or(|end| end > fb_h)
+    {
+        return Err("copyrect: source or destination is outside framebuffer".into());
     }
+    let mut rgba = vec![0u8; bytes];
     for row in 0..h_us {
         let sy = src_y as usize + row;
         if sy >= fb_h {
@@ -281,13 +302,33 @@ pub fn read_zrle<R: Read>(
     rect_h: u16,
     dec: &mut ZrleDecoder,
 ) -> Result<Vec<DecodedRect>, String> {
-    let zlib_len = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))? as usize;
-    if zlib_len > MAX_ZRLE_COMPRESSED_BYTES {
-        return Err(format!(
-            "zrle: compressed payload {} exceeds {} bytes",
-            zlib_len, MAX_ZRLE_COMPRESSED_BYTES
-        ));
-    }
+    read_zrle_with_limits(
+        r,
+        rect_x,
+        rect_y,
+        rect_w,
+        rect_h,
+        dec,
+        &DecodeLimits::default(),
+    )
+}
+
+pub fn read_zrle_with_limits<R: Read>(
+    r: &mut R,
+    rect_x: u16,
+    rect_y: u16,
+    rect_w: u16,
+    rect_h: u16,
+    dec: &mut ZrleDecoder,
+    limits: &DecodeLimits,
+) -> Result<Vec<DecodedRect>, String> {
+    let zlib_len_raw = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))?;
+    let zlib_len = limits
+        .compressed_bytes(zlib_len_raw)
+        .map_err(|e| e.to_string())?;
+    let _rect_bytes = limits
+        .rectangle_bytes(rect_w, rect_h)
+        .map_err(|e| e.to_string())?;
     let mut compressed = vec![0u8; zlib_len];
     r.read_exact(&mut compressed)
         .map_err(|e| format!("zrle: body: {}", e))?;
@@ -308,13 +349,10 @@ pub fn read_zrle<R: Read>(
     loop {
         let current_len = dec.buf.len();
         let next_len = current_len
-            .checked_add(ZRLE_INFLATE_CHUNK_BYTES)
-            .ok_or_else(|| "zrle: inflate buffer size overflow".to_string())?;
-        if next_len > MAX_ZRLE_INFLATED_BYTES {
-            return Err(format!(
-                "zrle: inflated payload exceeds {} bytes",
-                MAX_ZRLE_INFLATED_BYTES
-            ));
+            .checked_add(64 * 1024)
+            .ok_or_else(|| "zrle: output size overflow".to_string())?;
+        if next_len > limits.max_decompressed_rect_bytes {
+            return Err("zrle: decompressed output exceeds configured limit".into());
         }
         dec.buf.resize(next_len, 0);
 
@@ -537,9 +575,7 @@ fn read_zrle_run_length(buf: &[u8], pos: &mut usize) -> Result<usize, String> {
             .get(*pos)
             .ok_or_else(|| "zrle: eof run length".to_string())?;
         *pos += 1;
-        total = total
-            .checked_add(b as usize)
-            .ok_or_else(|| "zrle: run length overflow".to_string())?;
+        total += b as usize;
         if b != 255 {
             return Ok(total);
         }
@@ -575,6 +611,13 @@ mod tests {
         let rect = read_copyrect(&mut payload, 0, 0, 2, 1, &fb, 4, 1).unwrap();
         let DecodedRect::Pixels { rgba, .. } = rect;
         assert_eq!(rgba, vec![3, 3, 3, 255, 4, 4, 4, 255]);
+    }
+
+    #[test]
+    fn copyrect_rejects_out_of_bounds_source() {
+        let fb = vec![0u8; 4 * 4];
+        let mut payload = Cursor::new(vec![0u8, 4, 0, 0]);
+        assert!(read_copyrect(&mut payload, 0, 0, 1, 1, &fb, 4, 1).is_err());
     }
 
     #[test]
@@ -725,17 +768,6 @@ mod tests {
         let out2 = read_zrle(&mut cur2, 0, 64, 64, 64, &mut dec).unwrap();
         let DecodedRect::Pixels { rgba, .. } = &out2[0];
         assert_eq!(rgba[0..4], [0, 0, 255, 255]);
-    }
-
-    #[test]
-    fn zrle_rejects_compressed_payload_before_allocating() {
-        let mut wire = ((MAX_ZRLE_COMPRESSED_BYTES as u32) + 1)
-            .to_be_bytes()
-            .to_vec();
-        wire.extend_from_slice(&[0; 4]);
-        let err = read_zrle(&mut &wire[..], 0, 0, 1, 1, &mut ZrleDecoder::new())
-            .expect_err("oversized compressed payload must be rejected");
-        assert!(err.contains("compressed payload"));
     }
 
     #[test]

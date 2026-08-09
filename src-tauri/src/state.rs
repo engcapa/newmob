@@ -82,6 +82,7 @@ pub struct AppState {
     pub sockscap: Arc<SocksCapRuntime>,
     pub servers: Arc<ServerRegistry>,
     pub vnc_sessions: Arc<RwLock<HashMap<String, VncSession>>>,
+    pub vnc_detach_claims: Arc<RwLock<HashMap<String, crate::vnc::VncDetachClaim>>>,
     pub rdp_sessions: Arc<RwLock<HashMap<String, RdpSession>>>,
     /// Live database client connections (MySQL/PostgreSQL/Oracle/SQL Server/StarRocks/ClickHouse/Redis),
     /// keyed by session id. Each `DbSession` wraps the per-engine connection
@@ -209,6 +210,7 @@ impl AppState {
             sockscap: Arc::new(SocksCapRuntime::new()),
             servers: Arc::new(ServerRegistry::new()),
             vnc_sessions: Arc::new(RwLock::new(HashMap::new())),
+            vnc_detach_claims: Arc::new(RwLock::new(HashMap::new())),
             rdp_sessions: Arc::new(RwLock::new(HashMap::new())),
             db_connections: Arc::new(RwLock::new(HashMap::new())),
             hbase_sessions: Arc::new(RwLock::new(HashMap::new())),
