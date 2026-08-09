@@ -58,7 +58,6 @@ pub(crate) const ENCODE_TIMEOUT: Duration = Duration::from_millis(250);
 /// frame arrives. Flush only after two normal capture intervals have elapsed,
 /// preserving pipelining during motion while bounding a static first frame.
 const ENCODE_FLUSH_DELAY: Duration = Duration::from_millis(75);
-const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
 /// How long the ACK window may stay full without a single acknowledgement
 /// arriving before the client is treated as no longer consuming EGFX.
 ///
@@ -964,7 +963,7 @@ unsafe extern "C-unwind" fn on_h264_encoded(
     } else if sample.is_null() {
         Err(anyhow::anyhow!("VideoToolbox dropped an H.264 frame"))
     } else {
-        unsafe { sample_to_annex_b(&*sample) }
+        unsafe { sample_to_avc(&*sample) }
     };
     if state
         .sender
@@ -1008,12 +1007,14 @@ unsafe fn pixel_buffer_as_image_buffer(pixel_buffer: &CFRetained<CVPixelBuffer>)
     unsafe { &*(pixel_buffer.as_ref() as *const CVPixelBuffer).cast::<CVImageBuffer>() }
 }
 
-/// Convert one VideoToolbox sample into the H.264 byte-stream form required by
-/// MS-RDPEGFX. CoreMedia stores encoded samples as AVCC (a big-endian length
-/// before every NAL unit), while RFX_AVC420_BITMAP_STREAM requires Annex B
-/// start codes. Sending AVCC is accepted by the EGFX framing layer but cannot
-/// be decoded by mstsc, leaving the session black and preventing frame ACKs.
-unsafe fn sample_to_annex_b(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> {
+/// Convert one VideoToolbox sample into the AVC byte-stream form required by
+/// `RFX_AVC420_BITMAP_STREAM`. CoreMedia stores encoded samples as AVCC, but
+/// the NAL length prefix is allowed to vary with the encoder configuration;
+/// MS-RDPEGFX requires every NAL in the wire payload to use a four-byte
+/// big-endian length prefix. SPS/PPS live in the format description, so they
+/// are prepended to every frame to make a newly-created surface independently
+/// decodable.
+unsafe fn sample_to_avc(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> {
     let block: CFRetained<CMBlockBuffer> = unsafe { sample.data_buffer() }
         .ok_or_else(|| anyhow::anyhow!("VideoToolbox returned H.264 without a data buffer"))?;
     let data_length = unsafe { block.data_length() };
@@ -1080,18 +1081,24 @@ unsafe fn sample_to_annex_b(sample: &CMSampleBuffer) -> anyhow::Result<Vec<u8>> 
             anyhow::bail!("VideoToolbox returned an empty H.264 parameter set");
         }
         let parameter_set = unsafe { std::slice::from_raw_parts(pointer, length as usize) };
-        append_annex_b_nal(&mut output, parameter_set);
+        append_avc_nal(&mut output, parameter_set)?;
     }
-    avcc_to_annex_b(&h264, nal_header_length, &mut output)?;
+    avcc_to_four_byte(&h264, nal_header_length, &mut output)?;
     Ok(output)
 }
 
-fn append_annex_b_nal(output: &mut Vec<u8>, nal: &[u8]) {
-    output.extend_from_slice(&ANNEX_B_START_CODE);
+fn append_avc_nal(output: &mut Vec<u8>, nal: &[u8]) -> anyhow::Result<()> {
+    let length = u32::try_from(nal.len())
+        .map_err(|_| anyhow::anyhow!("H.264 NAL unit is too large for AVC wire format"))?;
+    if length == 0 {
+        anyhow::bail!("AVC stream contains an empty NAL unit");
+    }
+    output.extend_from_slice(&length.to_be_bytes());
     output.extend_from_slice(nal);
+    Ok(())
 }
 
-fn avcc_to_annex_b(
+fn avcc_to_four_byte(
     avcc: &[u8],
     nal_header_length: usize,
     output: &mut Vec<u8>,
@@ -1121,7 +1128,7 @@ fn avcc_to_annex_b(
                     "AVCC NAL at byte {offset} declares {nal_length} bytes beyond the sample"
                 )
             })?;
-        append_annex_b_nal(output, &avcc[header_end..nal_end]);
+        append_avc_nal(output, &avcc[header_end..nal_end])?;
         offset = nal_end;
         nal_count += 1;
     }
@@ -1137,9 +1144,9 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ACK_STALL_TIMEOUT, ANNEX_B_START_CODE, AckStall, DECODE_STALL_TIMEOUT, DecodeWatch,
-        ENCODE_TIMEOUT, H264Encoder, MAX_FRAMES_IN_FLIGHT, StallVerdict, align_dimension,
-        avcc_to_annex_b, decode_verdict, desktop_monitor, frame_timestamp_ms, stall_verdict,
+        ACK_STALL_TIMEOUT, AckStall, DECODE_STALL_TIMEOUT, DecodeWatch, ENCODE_TIMEOUT,
+        H264Encoder, MAX_FRAMES_IN_FLIGHT, StallVerdict, align_dimension, avcc_to_four_byte,
+        decode_verdict, desktop_monitor, frame_timestamp_ms, stall_verdict,
     };
     use crate::servers::rdp::capture::Frame;
     use ironrdp::pdu::gcc::MonitorFlags;
@@ -1253,20 +1260,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn video_toolbox_emits_an_annex_b_frame_for_rdpegfx() {
+    async fn video_toolbox_emits_an_avc_frame_for_rdpegfx() {
         // 16x16 is the smallest broadly-supported H.264 test surface. This
         // exercises the actual macOS hardware/software codec path without
         // requiring Screen Recording permission or a live RDP client.
         let frame = Frame::bgra(vec![0x80; 16 * 16 * 4], 0, 0, 16, 16, 16 * 4);
         let mut encoder = H264Encoder::new(16, 16).expect("create VideoToolbox encoder");
-        let annex_b = encode_test_frame(&mut encoder, &frame).await;
+        let avc = encode_test_frame(&mut encoder, &frame).await;
+        let nal_types = parse_avc_nal_types(&avc);
 
-        assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
-        let nal_types: Vec<u8> = annex_b
-            .windows(5)
-            .filter(|bytes| bytes[..4] == ANNEX_B_START_CODE)
-            .map(|bytes| bytes[4] & 0x1f)
-            .collect();
         assert!(nal_types.contains(&7), "frame must include an SPS");
         assert!(nal_types.contains(&8), "frame must include a PPS");
         assert!(
@@ -1279,10 +1281,10 @@ mod tests {
     async fn video_toolbox_encodes_non_aligned_desktops_through_a_padded_surface() {
         let frame = Frame::bgra(vec![0x80; 18 * 18 * 4], 0, 0, 18, 18, 18 * 4);
         let mut encoder = H264Encoder::new(18, 18).expect("create padded VideoToolbox encoder");
-        let annex_b = encode_test_frame(&mut encoder, &frame).await;
+        let avc = encode_test_frame(&mut encoder, &frame).await;
 
         assert_eq!((encoder.encoded_width, encoder.encoded_height), (32, 32));
-        assert!(annex_b.starts_with(&ANNEX_B_START_CODE));
+        assert!(!avc.is_empty());
     }
 
     #[test]
@@ -1295,17 +1297,17 @@ mod tests {
     }
 
     #[test]
-    fn converts_avcc_nal_lengths_to_annex_b_start_codes() {
+    fn normalizes_avcc_nal_lengths_to_four_byte_prefixes() {
         let avcc = [0, 0, 0, 2, 0x67, 0xaa, 0, 0, 0, 3, 0x65, 0xbb, 0xcc];
-        let mut annex_b = Vec::new();
-        avcc_to_annex_b(&avcc, 4, &mut annex_b).unwrap();
+        let mut normalized = Vec::new();
+        avcc_to_four_byte(&avcc, 4, &mut normalized).unwrap();
 
         assert_eq!(
-            annex_b,
+            normalized,
             [
-                ANNEX_B_START_CODE.as_slice(),
+                [0, 0, 0, 2].as_slice(),
                 [0x67, 0xaa].as_slice(),
-                ANNEX_B_START_CODE.as_slice(),
+                [0, 0, 0, 3].as_slice(),
                 [0x65, 0xbb, 0xcc].as_slice(),
             ]
             .concat()
@@ -1314,8 +1316,46 @@ mod tests {
 
     #[test]
     fn rejects_truncated_avcc_nal_units() {
-        let mut annex_b = Vec::new();
-        let error = avcc_to_annex_b(&[0, 0, 0, 4, 0x65], 4, &mut annex_b).unwrap_err();
+        let mut normalized = Vec::new();
+        let error = avcc_to_four_byte(&[0, 0, 0, 4, 0x65], 4, &mut normalized).unwrap_err();
         assert!(error.to_string().contains("declares 4 bytes beyond"));
+    }
+
+    #[test]
+    fn normalizes_short_avcc_length_prefixes() {
+        let avcc = [0, 2, 0x67, 0xaa, 0, 3, 0x65, 0xbb, 0xcc];
+        let mut normalized = Vec::new();
+        avcc_to_four_byte(&avcc, 2, &mut normalized).unwrap();
+
+        assert_eq!(
+            normalized,
+            [
+                [0, 0, 0, 2].as_slice(),
+                [0x67, 0xaa].as_slice(),
+                [0, 0, 0, 3].as_slice(),
+                [0x65, 0xbb, 0xcc].as_slice(),
+            ]
+            .concat()
+        );
+    }
+
+    fn parse_avc_nal_types(avc: &[u8]) -> Vec<u8> {
+        let mut offset = 0;
+        let mut types = Vec::new();
+        while offset + 4 <= avc.len() {
+            let length = u32::from_be_bytes([
+                avc[offset],
+                avc[offset + 1],
+                avc[offset + 2],
+                avc[offset + 3],
+            ]) as usize;
+            offset += 4;
+            if length == 0 || offset + length > avc.len() {
+                break;
+            }
+            types.push(avc[offset] & 0x1f);
+            offset += length;
+        }
+        types
     }
 }

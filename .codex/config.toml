@@ -1,0 +1,3 @@
+[agents.executor]
+description = "Implements approved plans through focused code changes and verification."
+config_file = "agents/executor.toml"
