@@ -23,6 +23,8 @@ const MAX_FRAMEBUFFER_BYTES = 256 * 1024 * 1024;
 const MAX_RELAY_TEXT_CHARS = 64 * 1024 * 1024;
 const MAX_CLIPBOARD_FORMAT_CHARS = 16 * 1024 * 1024;
 const MAX_CLIPBOARD_TOTAL_CHARS = 32 * 1024 * 1024;
+const MAX_CURSOR_DIMENSION = 512;
+const MAX_CURSOR_BASE64_CHARS = 2 * 1024 * 1024;
 
 function isVncStage(value: unknown): value is VncStructuredError["stage"] {
   return typeof value === "string" && VNC_STAGES.has(value as VncStructuredError["stage"]);
@@ -209,7 +211,16 @@ export type WsIncoming =
       html?: string;
       rtf?: string;
     }
-  | { type: "ext_clipboard_support"; available: boolean };
+  | { type: "ext_clipboard_support"; available: boolean }
+  | {
+      type: "cursor";
+      visible: boolean;
+      hotspot_x: number;
+      hotspot_y: number;
+      width: number;
+      height: number;
+      png_base64: string;
+    };
 
 /** Parse and minimally validate an incoming WS text message. */
 export function parseWsMessage(data: string): WsIncoming | null {
@@ -253,12 +264,44 @@ export function parseWsMessage(data: string): WsIncoming | null {
           : null;
       case "ext_clipboard_support":
         return typeof msg.available === "boolean" ? value as WsIncoming : null;
+      case "cursor": {
+        if (typeof msg.visible !== "boolean") return null;
+        if (msg.visible === false) {
+          return msg.hotspot_x === 0 && msg.hotspot_y === 0
+            && msg.width === 0 && msg.height === 0 && msg.png_base64 === ""
+            ? value as WsIncoming
+            : null;
+        }
+        const validGeometry = Number.isInteger(msg.hotspot_x)
+          && Number.isInteger(msg.hotspot_y)
+          && Number.isInteger(msg.width)
+          && Number.isInteger(msg.height)
+          && (msg.width as number) > 0
+          && (msg.height as number) > 0
+          && (msg.width as number) <= MAX_CURSOR_DIMENSION
+          && (msg.height as number) <= MAX_CURSOR_DIMENSION
+          && (msg.hotspot_x as number) >= 0
+          && (msg.hotspot_y as number) >= 0
+          && (msg.hotspot_x as number) < (msg.width as number)
+          && (msg.hotspot_y as number) < (msg.height as number);
+        const validPng = typeof msg.png_base64 === "string"
+          && msg.png_base64.length > 0
+          && msg.png_base64.length <= MAX_CURSOR_BASE64_CHARS
+          && msg.png_base64.startsWith("iVBORw0KGgo")
+          && /^[A-Za-z0-9+/]*={0,2}$/.test(msg.png_base64);
+        return validGeometry && validPng ? value as WsIncoming : null;
+      }
       default:
         return null;
     }
   } catch {
     return null;
   }
+}
+
+export function vncCursorToCss(cursor: Extract<WsIncoming, { type: "cursor" }>): string {
+  if (!cursor.visible) return "none";
+  return `url("data:image/png;base64,${cursor.png_base64}") ${cursor.hotspot_x} ${cursor.hotspot_y}, default`;
 }
 
 export function encodeWsAck(): ArrayBuffer {

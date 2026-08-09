@@ -288,6 +288,54 @@ export interface RdpFrameTile {
   rgba: Uint8ClampedArray<ArrayBuffer>;
 }
 
+const MAX_PENDING_RDP_FRAME_TILES = 8192;
+const MAX_PENDING_RDP_FRAME_BYTES = 128 * 1024 * 1024;
+
+export class RdpFrameBatchBuffer {
+  private tiles: RdpFrameTile[] = [];
+  private bytes = 0;
+  private rejected = false;
+
+  push(tile: RdpFrameTile | null, framebufferWidth: number, framebufferHeight: number): void {
+    if (this.rejected) return;
+    const expectedBytes = tile ? tile.w * tile.h * 4 : 0;
+    const valid = tile
+      && tile.w > 0
+      && tile.h > 0
+      && tile.rgba.byteLength === expectedBytes
+      && tile.x + tile.w <= framebufferWidth
+      && tile.y + tile.h <= framebufferHeight;
+    const nextBytes = this.bytes + expectedBytes;
+    if (
+      !valid
+      || this.tiles.length >= MAX_PENDING_RDP_FRAME_TILES
+      || nextBytes > MAX_PENDING_RDP_FRAME_BYTES
+    ) {
+      this.tiles = [];
+      this.bytes = 0;
+      this.rejected = true;
+      return;
+    }
+    this.tiles.push(tile);
+    this.bytes = nextBytes;
+  }
+
+  finish(): { tiles: RdpFrameTile[]; refreshRequired: boolean } {
+    const result = {
+      tiles: this.rejected ? [] : this.tiles,
+      refreshRequired: this.rejected,
+    };
+    this.reset();
+    return result;
+  }
+
+  reset(): void {
+    this.tiles = [];
+    this.bytes = 0;
+    this.rejected = false;
+  }
+}
+
 export interface RdpAudioFrame {
   tag: number;
   sampleRate: number;

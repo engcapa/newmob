@@ -51,7 +51,8 @@ use crate::rdp::transport::open_transport;
 use crate::terminal::network::NetworkSettings;
 
 const WS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
-const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const WS_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Wire-protocol channel tags for the binary WS frames.
@@ -130,7 +131,8 @@ struct WsOutgoingState {
     building_frame: Vec<Vec<u8>>,
     building_bytes: usize,
     drop_building_frame: bool,
-    latest_frame: Option<Vec<Vec<u8>>>,
+    pending_frame: Vec<Vec<u8>>,
+    pending_frame_bytes: usize,
     closed: bool,
 }
 
@@ -156,7 +158,8 @@ impl WsOutgoingQueue {
                 building_frame: Vec::new(),
                 building_bytes: 0,
                 drop_building_frame: false,
-                latest_frame: None,
+                pending_frame: Vec::new(),
+                pending_frame_bytes: 0,
                 closed: false,
             }),
             wake: Notify::new(),
@@ -192,7 +195,24 @@ impl WsOutgoingQueue {
             }
             WsOutgoing::Frame(bytes) if bytes.first() == Some(&channel::FRAME_END) => {
                 if !state.drop_building_frame && !state.building_frame.is_empty() {
-                    state.latest_frame = Some(std::mem::take(&mut state.building_frame));
+                    while state
+                        .pending_frame_bytes
+                        .saturating_add(state.building_bytes)
+                        > MAX_WS_FRAME_BATCH_BYTES
+                        && !state.closed
+                    {
+                        state = self
+                            .space
+                            .wait(state)
+                            .map_err(|_| "RDP WebSocket output queue poisoned".to_string())?;
+                    }
+                    if state.closed {
+                        return Err("RDP WebSocket output queue closed".to_string());
+                    }
+                    let combined_bytes = state.pending_frame_bytes + state.building_bytes;
+                    let batch = std::mem::take(&mut state.building_frame);
+                    state.pending_frame.extend(batch);
+                    state.pending_frame_bytes = combined_bytes;
                 } else {
                     state.building_frame.clear();
                 }
@@ -229,7 +249,9 @@ impl WsOutgoingQueue {
                     self.space.notify_one();
                     return Some(QueuedWsOutgoing::Control(output));
                 }
-                if let Some(frame) = state.latest_frame.take() {
+                if !state.pending_frame.is_empty() {
+                    let frame = std::mem::take(&mut state.pending_frame);
+                    state.pending_frame_bytes = 0;
                     self.space.notify_one();
                     return Some(QueuedWsOutgoing::FrameBatch(frame));
                 }
@@ -245,7 +267,8 @@ impl WsOutgoingQueue {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
             state.control.clear();
-            state.latest_frame = None;
+            state.pending_frame.clear();
+            state.pending_frame_bytes = 0;
             state.building_frame.clear();
         }
         self.space.notify_all();
@@ -412,13 +435,30 @@ async fn run_relay(
 
     // Pump outgoing → WS sink.
     let ws_write = tokio::spawn(async move {
-        while let Some(out) = ws_out_rx.recv().await {
-            let msg = match out {
-                WsOutgoing::Frame(b) => Message::Binary(b.into()),
-                WsOutgoing::Text(t) => Message::Text(t.into()),
-            };
-            if ws_sink.send(msg).await.is_err() {
-                break;
+        let mut ping = tokio::time::interval(WS_PING_INTERVAL);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping.tick().await;
+        loop {
+            tokio::select! {
+                output = ws_out_rx.recv() => {
+                    let Some(out) = output else { break; };
+                    let msg = match out {
+                        WsOutgoing::Frame(b) => Message::Binary(b.into()),
+                        WsOutgoing::Text(t) => Message::Text(t.into()),
+                    };
+                    if ws_sink.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+                _ = ping.tick() => {
+                    if ws_sink
+                        .send(Message::Ping(Vec::new().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }
         }
     });
@@ -722,12 +762,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_output_replaces_stale_frame_batches() {
+    async fn websocket_output_keeps_incremental_frame_batches_in_order() {
         let (sender, mut receiver) = WsOutgoingQueue::new();
         let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME, 1]));
         let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME_END]));
         let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME, 2]));
         let _ = sender.send(WsOutgoing::Frame(vec![channel::FRAME_END]));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(WsOutgoing::Frame(bytes)) if bytes == vec![channel::FRAME, 1]
+        ));
         assert!(matches!(
             receiver.recv().await,
             Some(WsOutgoing::Frame(bytes)) if bytes == vec![channel::FRAME, 2]

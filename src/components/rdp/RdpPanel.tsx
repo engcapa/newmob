@@ -27,12 +27,15 @@ import {
   OUT_AUDIO,
   OUT_CURSOR,
   OUT_FRAME,
+  OUT_FRAME_END,
   parseAudioFrame,
   parseFrameTile,
   parseRdpCursorFrame,
   parseRdpWsText,
   rdpConnect,
   rdpDisconnect,
+  RdpFrameBatchBuffer,
+  type RdpFrameTile,
   rdpCursorToCss,
   rdpTrustCertificate,
   wheelDeltaToRotationUnits,
@@ -123,6 +126,7 @@ export default function RdpPanel({
   const visibleRef = useRef(visible);
   const suppressNextPasteKeyUpRef = useRef(false);
   const pressedScancodesRef = useRef(new Set<number>());
+  const frameBatchRef = useRef(new RdpFrameBatchBuffer());
   const composingRef = useRef(false);
   const initRef = useRef({ host, port, username, password, options, networkSettingsJson });
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
@@ -265,6 +269,7 @@ export default function RdpPanel({
     destroyedRef.current = false;
     lastResizeRequestRef.current = null;
     retryAllowedRef.current = true;
+    frameBatchRef.current.reset();
     setRemoteCursorCss("default");
     store.initConnection(tabId);
 
@@ -309,7 +314,15 @@ export default function RdpPanel({
             const tag = dv.getUint8(0);
             if (tag === OUT_FRAME) {
               const tile = parseFrameTile(event.data);
-              if (tile) drawTile(canvasRef.current, tile);
+              const canvas = canvasRef.current;
+              frameBatchRef.current.push(tile, canvas?.width ?? 0, canvas?.height ?? 0);
+            } else if (tag === OUT_FRAME_END) {
+              const batch = frameBatchRef.current.finish();
+              if (batch.refreshRequired) {
+                sendBinary(encodeRefresh());
+                return;
+              }
+              drawTileBatch(canvasRef.current, batch.tiles);
               if (visibleRef.current) sendBinary(encodeAck());
             } else if (tag === OUT_AUDIO) {
               playAudioFrame(parseAudioFrame(event.data));
@@ -325,6 +338,7 @@ export default function RdpPanel({
                 connectedAtRef.current = Date.now();
                 retryAllowedRef.current = true;
                 store.setConnected(tabId, msg.width, msg.height, msg.protocol, msg.server_name);
+                frameBatchRef.current.reset();
                 resizeCanvas(canvasRef.current, msg.width, msg.height);
                 window.setTimeout(() => requestViewportResize(false), 0);
                 // Nudge the server to repaint the whole desktop shortly after
@@ -486,6 +500,7 @@ export default function RdpPanel({
       }
       closeAudio();
       releaseRemoteInput();
+      frameBatchRef.current.reset();
       const sid = sessionIdRef.current;
       sessionIdRef.current = null;
       if (sid) rdpDisconnect(sid).catch(() => {});
@@ -1037,4 +1052,11 @@ function drawTile(
       : (new Uint8ClampedArray(tile.rgba.buffer, tile.rgba.byteOffset, expected) as Uint8ClampedArray<ArrayBuffer>);
   const img = new ImageData(slice, tile.w, tile.h);
   ctx.putImageData(img, tile.x, tile.y);
+}
+
+function drawTileBatch(
+  canvas: HTMLCanvasElement | null,
+  tiles: RdpFrameTile[],
+) {
+  for (const tile of tiles) drawTile(canvas, tile);
 }

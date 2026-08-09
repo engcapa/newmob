@@ -1,7 +1,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures::{SinkExt, StreamExt};
+use image::{ColorType, ImageEncoder};
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as AsyncMutex;
@@ -20,15 +22,18 @@ use crate::vnc::clipboard::{
     ENCODING_EXTENDED_CLIPBOARD_LEGACY, ExtendedClipboardMsg, FORMAT_HTML, FORMAT_RTF, FORMAT_TEXT,
     SUPPORTED_ACTIONS, build_caps_body, build_notify_body, build_provide_body, build_request_body,
 };
-use crate::vnc::encodings::DecodedRect;
+use crate::vnc::encodings::{DecodedCursor, DecodedRect};
 use crate::vnc::policy::{VncClipboardPolicy, VncSecurityPolicy};
 use crate::vnc::queue::{FrameQueueReceiver, FrameQueueSender, QueuedWsOutgoing};
 use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
 
 /// Deadline for the frontend to complete its WebSocket upgrade after we bind.
 const WS_ACCEPT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Maximum time without a ping from the frontend before we tear down.
-const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Native WebSocket ping cadence. Browser engines answer these at the network
+/// layer even when background-tab JavaScript timers are throttled.
+const WS_PING_INTERVAL: Duration = Duration::from_secs(15);
+/// Backstop for a WebView that has stopped servicing the socket entirely.
+const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How often the idle watchdog checks the last-seen timestamp.
 const WS_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const VNC_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -138,6 +143,15 @@ enum WsOutgoingText {
     /// ClientCutText channel is Latin-1 only and would mojibake CJK.
     #[serde(rename = "ext_clipboard_support")]
     ExtClipboardSupport { available: bool },
+    #[serde(rename = "cursor")]
+    Cursor {
+        visible: bool,
+        hotspot_x: u16,
+        hotspot_y: u16,
+        width: u16,
+        height: u16,
+        png_base64: String,
+    },
 }
 
 // ── Public session handle ───────────────────────────────────────────
@@ -267,10 +281,12 @@ pub async fn spawn_vnc_relay(
             1,
             0,
             -223,
+            -239,
             ENCODING_EXTENDED_CLIPBOARD,
             ENCODING_EXTENDED_CLIPBOARD_LEGACY,
         ])?;
         rfb.request_update(false)?;
+        rfb.enter_runtime_mode()?;
         let writer = rfb.take_writer()?;
         Ok::<_, String>((rfb, writer, server_init))
     })
@@ -381,26 +397,43 @@ async fn run_relay(
 
     // Task: pump outgoing messages → WS sink
     let mut ws_write = tokio::spawn(async move {
-        while let Some(out) = ws_out_rx.recv().await {
-            match out {
-                QueuedWsOutgoing::Control(json) => {
-                    if ws_sink.send(Message::Text(json.into())).await.is_err() {
-                        break;
-                    }
-                }
-                QueuedWsOutgoing::Frame(rects) => {
-                    let mut failed = false;
-                    for data in rects {
-                        if ws_sink.send(Message::Binary(data.into())).await.is_err() {
-                            failed = true;
-                            break;
+        let mut ping = tokio::time::interval(WS_PING_INTERVAL);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping.tick().await;
+        loop {
+            tokio::select! {
+                output = ws_out_rx.recv() => {
+                    let Some(out) = output else { break; };
+                    match out {
+                        QueuedWsOutgoing::Control(json) => {
+                            if ws_sink.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        QueuedWsOutgoing::Frame(rects) => {
+                            let mut failed = false;
+                            for data in rects {
+                                if ws_sink.send(Message::Binary(data.into())).await.is_err() {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                            if failed
+                                || ws_sink
+                                    .send(Message::Binary(Vec::new().into()))
+                                    .await
+                                    .is_err()
+                            {
+                                break;
+                            }
                         }
                     }
-                    if failed
-                        || ws_sink
-                            .send(Message::Binary(Vec::new().into()))
-                            .await
-                            .is_err()
+                }
+                _ = ping.tick() => {
+                    if ws_sink
+                        .send(Message::Ping(Vec::new().into()))
+                        .await
+                        .is_err()
                     {
                         break;
                     }
@@ -526,7 +559,7 @@ async fn run_relay(
                 }
             };
             match msg {
-                ServerMessage::FramebufferUpdate { rects } => {
+                ServerMessage::FramebufferUpdate { rects, cursor } => {
                     if (fb_width, fb_height) != published_framebuffer_size {
                         framebuffer_generation = framebuffer_generation.saturating_add(1);
                         published_framebuffer_size = (fb_width, fb_height);
@@ -548,6 +581,16 @@ async fn run_relay(
                         frame.extend_from_slice(&make_frame_header(x, y, w, h));
                         frame.extend_from_slice(&rgba);
                         let _ = ws_out.push_rect(frame);
+                    }
+                    if let Some(cursor) = cursor {
+                        match serialize_cursor(cursor) {
+                            Ok(json) => {
+                                let _ = ws_out.send_control(json);
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "ignoring invalid VNC RichCursor update");
+                            }
+                        }
                     }
                     if ws_out.finish_frame().unwrap_or(false) {
                         let _ = rfb_writer_for_read.lock().await.request_update(false);
@@ -753,8 +796,7 @@ async fn run_relay(
     }
 
     cancel.cancel();
-    // Closing the underlying socket interrupts any blocking read immediately;
-    // the read timeout remains a backstop for broken platform shutdowns.
+    // Closing the underlying socket interrupts the blocking runtime read.
     let _ = shutdown_stream.shutdown(std::net::Shutdown::Both);
     rfb_reader.abort();
     ws_write.abort();
@@ -903,6 +945,39 @@ fn can_send_notify(caps: ServerClipboardCaps) -> bool {
 
 fn can_send_provide(caps: ServerClipboardCaps) -> bool {
     caps.actions == 0 || caps.actions & ACTION_PROVIDE != 0
+}
+
+fn serialize_cursor(cursor: DecodedCursor) -> Result<String, String> {
+    if cursor.width == 0 || cursor.height == 0 {
+        return serde_json::to_string(&WsOutgoingText::Cursor {
+            visible: false,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 0,
+            height: 0,
+            png_base64: String::new(),
+        })
+        .map_err(|e| format!("serialize hidden VNC cursor: {e}"));
+    }
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            &cursor.rgba,
+            u32::from(cursor.width),
+            u32::from(cursor.height),
+            ColorType::Rgba8.into(),
+        )
+        .map_err(|e| format!("encode VNC cursor PNG: {e}"))?;
+    serde_json::to_string(&WsOutgoingText::Cursor {
+        visible: true,
+        hotspot_x: cursor.hotspot_x,
+        hotspot_y: cursor.hotspot_y,
+        width: cursor.width,
+        height: cursor.height,
+        png_base64: BASE64_STANDARD.encode(png),
+    })
+    .map_err(|e| format!("serialize VNC cursor: {e}"))
 }
 
 fn parse_binary_control(bytes: &[u8]) -> Option<VncControl> {
@@ -1125,6 +1200,28 @@ mod tests {
         assert!(matches!(parse_binary_control(&[0]), Some(VncControl::Ack)));
         assert!(parse_binary_control(&[1]).is_none());
         assert!(parse_binary_control(&[3, 0]).is_none());
+    }
+
+    #[test]
+    fn rich_cursor_serializes_as_a_bounded_png_message() {
+        let json = serialize_cursor(DecodedCursor {
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 1,
+            height: 1,
+            rgba: vec![0x12, 0x34, 0x56, 0xff],
+        })
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["type"], "cursor");
+        assert_eq!(value["visible"], true);
+        assert_eq!(value["width"], 1);
+        assert!(
+            value["png_base64"]
+                .as_str()
+                .unwrap()
+                .starts_with("iVBORw0KGgo")
+        );
     }
 
     #[test]
