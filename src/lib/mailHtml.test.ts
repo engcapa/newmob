@@ -4,6 +4,7 @@ import {
   buildMailReaderSrcDoc,
   buildReplyHtml,
   hasRichMailFormatting,
+  markdownToMailHtml,
   isRemoteMailImageSrc,
   mailHtmlHasRemoteImages,
   mailHtmlToPlainText,
@@ -125,6 +126,39 @@ describe("mailHtml", () => {
     expect(forSend).toContain("src=\"cid:logo-1@inline.local\"");
     expect(forSend).not.toContain("data:image");
     expect(forSend).not.toContain("data-taomni-cid");
+  });
+
+  it("renders Markdown as sanitized portable mail HTML", () => {
+    const html = markdownToMailHtml([
+      "# Hello",
+      "",
+      "A **bold** item and [safe link](https://example.com).",
+      "",
+      "| A | B |",
+      "| --- | --- |",
+      "| 1 | 2 |",
+      "",
+      "```ts",
+      "const answer = 42;",
+      "```",
+      "",
+      "<script>alert(1)</script>",
+      "[bad](javascript:alert(1))",
+    ].join("\n"));
+
+    expect(html).toContain("<h1>Hello</h1>");
+    expect(html).toContain("<strong>bold</strong>");
+    expect(html).toContain("<table");
+    expect(html).toContain("<pre");
+    expect(html).toContain("const answer = 42;");
+    expect(html).toContain('target="_blank"');
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain("border-collapse");
+  });
+
+  it("normalizes bare carriage returns in plain text", () => {
+    expect(markdownToMailHtml("one\rtwo")).toContain("one<br>two");
   });
 
   it("round-trips plain text through mail HTML and extracts readable text from lists and paragraphs", () => {

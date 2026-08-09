@@ -1,3 +1,4 @@
+import { Marked } from "marked";
 import DOMPurify, { type Config as DomPurifyConfig } from "dompurify";
 
 const MAIL_ALLOWED_TAGS = [
@@ -15,6 +16,11 @@ const MAIL_ALLOWED_ATTR = [
   "rowspan", "rules", "scope", "size", "span", "src", "style", "summary",
   "target", "title", "type", "valign", "width",
 ];
+
+const MAIL_MARKDOWN = new Marked({
+  gfm: true,
+  breaks: true,
+});
 
 const MAIL_PURIFY_CONFIG: DomPurifyConfig = {
   ALLOWED_TAGS: MAIL_ALLOWED_TAGS,
@@ -837,6 +843,52 @@ export function sanitizeMailComposeHtml(html: string): string {
   installMailPurifyHooks();
   const sanitized = DOMPurify.sanitize(html, MAIL_PURIFY_CONFIG) as unknown as string;
   return sanitized.trim() || "<p><br></p>";
+}
+
+/**
+ * Convert Markdown clipboard text to portable, email-safe HTML.
+ *
+ * This deliberately uses a mail-specific renderer rather than the chat
+ * renderer: compose HTML must survive outside Taomni and use the mail
+ * sanitizer/style policy as its final security boundary.
+ */
+export function markdownToMailHtml(markdown: string): string {
+  const source = markdown.replace(/\r\n?/g, "\n");
+  if (!source.trim()) return "<p><br></p>";
+  const rendered = MAIL_MARKDOWN.parse(source) as string;
+  const styled = addMailMarkdownStyles(rendered);
+  return sanitizeMailComposeHtml(styled);
+}
+
+function addMailMarkdownStyles(html: string): string {
+  if (typeof DOMParser === "undefined") return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  doc.querySelectorAll("blockquote").forEach((node) => {
+    appendNodeStyle(node, "border-left: 2px solid #729fcf; margin: 0.6em 0; padding-left: 0.85em; color: #333333;");
+  });
+  doc.querySelectorAll("pre").forEach((node) => {
+    appendNodeStyle(node, "margin: 0.6em 0; padding: 0.65em 0.8em; overflow: auto; background: #f4f4f5; color: #1f2937; white-space: pre-wrap; word-break: break-word;");
+  });
+  doc.querySelectorAll("pre code").forEach((node) => {
+    appendNodeStyle(node, "font-family: ui-monospace, Consolas, monospace; font-size: 0.92em;");
+  });
+  doc.querySelectorAll("code:not(pre code)").forEach((node) => {
+    appendNodeStyle(node, "font-family: ui-monospace, Consolas, monospace; font-size: 0.92em; background: #f4f4f5; padding: 0.05em 0.35em;");
+  });
+  doc.querySelectorAll("table").forEach((node) => {
+    appendNodeStyle(node, "border-collapse: collapse; border-spacing: 0; max-width: 100%;");
+  });
+  doc.querySelectorAll("th, td").forEach((node) => {
+    appendNodeStyle(node, "border: 1px solid #d4d4d8; padding: 0.25em 0.5em; vertical-align: top; text-align: left;");
+  });
+  doc.querySelectorAll("th").forEach((node) => appendNodeStyle(node, "background: #f4f4f5; font-weight: 600;"));
+  doc.querySelectorAll("hr").forEach((node) => appendNodeStyle(node, "margin: 1em 0; border: none; border-top: 1px solid #d4d4d8;"));
+  return doc.body.innerHTML;
+}
+
+function appendNodeStyle(node: Element, style: string): void {
+  const existing = node.getAttribute("style")?.trim();
+  node.setAttribute("style", existing ? `${existing}; ${style}` : style);
 }
 
 /** Build a compose-time inline image that previews via data URL and sends as cid: */

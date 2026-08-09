@@ -37,6 +37,7 @@ export function RdpSettings({ config, onChange }: Props) {
   const requireControlApproval = config.requireControlApproval !== false;
   const displayId = typeof config.displayId === "string" ? config.displayId : "";
   const platform = getAppPlatform();
+  const supportsDisplaySelection = platform === "macos" || platform === "windows";
   const [captureProbe, setCaptureProbe] = useState<RdpCaptureProbe | null>(null);
   const [captureProbeError, setCaptureProbeError] = useState("");
   const [requestingPermission, setRequestingPermission] = useState<
@@ -69,11 +70,11 @@ export function RdpSettings({ config, onChange }: Props) {
   };
 
   useEffect(() => {
-    if (platform === "macos") void refreshCaptureProbe(false, false);
+    if (supportsDisplaySelection) void refreshCaptureProbe(false, false);
     // Probe when the settings panel is mounted; permission requests remain an
     // explicit user action through the button below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [platform]);
+  }, [supportsDisplaySelection]);
 
   const displayOptions = [
     { value: "", label: t("servers.fields.rdpDisplayPrimary") },
@@ -87,16 +88,18 @@ export function RdpSettings({ config, onChange }: Props) {
 
   return (
     <div className="flex flex-col">
-      <FieldNote tone={platform === "windows" ? "warning" : "info"}>{capabilityNote}</FieldNote>
+      <FieldNote>{capabilityNote}</FieldNote>
+      {supportsDisplaySelection ? (
+        <SelectField
+          label={t("servers.fields.rdpDisplay")}
+          value={displayId}
+          onChange={(value) => onChange({ displayId: value })}
+          options={displayOptions}
+          width={280}
+        />
+      ) : null}
       {platform === "macos" ? (
         <>
-          <SelectField
-            label={t("servers.fields.rdpDisplay")}
-            value={displayId}
-            onChange={(value) => onChange({ displayId: value })}
-            options={displayOptions}
-            width={280}
-          />
           <FormRow label={t("servers.fields.rdpCapturePermission")}>
             <span style={{ color: "var(--taomni-text-muted)" }}>
               {captureProbe?.permission === "granted"
@@ -140,8 +143,10 @@ export function RdpSettings({ config, onChange }: Props) {
               </button>
             </FormRow>
           ) : null}
-          {captureProbeError ? <FieldNote tone="warning">{captureProbeError}</FieldNote> : null}
         </>
+      ) : null}
+      {supportsDisplaySelection && captureProbeError ? (
+        <FieldNote tone="warning">{captureProbeError}</FieldNote>
       ) : null}
       <TextField
         label={t("servers.fields.rdpUsername")}
