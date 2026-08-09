@@ -2498,9 +2498,13 @@ export const zhCN: DeepPartial<typeof en> = {
     sessionsDrawer: "显示会话面板",
   },
   contextMenu: {
+    undo: "撤销",
+    redo: "重做",
     cut: "剪切",
     copy: "复制",
     paste: "粘贴",
+    pasteAsPlainText: "粘贴为纯文本",
+    pasteAsMarkdown: "粘贴为 Markdown",
     selectAll: "全选",
     inspect: "检查元素",
   },

@@ -2513,9 +2513,13 @@ const dict = {
     sessionsDrawer: "Show sessions drawer",
   },
   contextMenu: {
+    undo: "Undo",
+    redo: "Redo",
     cut: "Cut",
     copy: "Copy",
     paste: "Paste",
+    pasteAsPlainText: "Paste as Plain Text",
+    pasteAsMarkdown: "Paste as Markdown",
     selectAll: "Select all",
     inspect: "Inspect",
   },

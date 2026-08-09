@@ -185,6 +185,58 @@ describe("RichMailEditor", () => {
     });
   });
 
+  it("opens a full editing context menu with Markdown and plain-text paste", () => {
+    render(<RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} />);
+
+    fireEvent.contextMenu(screen.getByTestId("mail-compose-editor"));
+
+    expect(screen.getByTestId("mail-compose-context-undo")).toBeInTheDocument();
+    expect(screen.getByTestId("mail-compose-context-copy")).toBeInTheDocument();
+    expect(screen.getByTestId("mail-compose-context-paste")).toBeInTheDocument();
+    expect(screen.getByTestId("mail-compose-paste-plain-text")).toBeInTheDocument();
+    expect(screen.getByTestId("mail-compose-paste-markdown")).toBeInTheDocument();
+    expect(screen.getByTestId("mail-compose-context-select-all")).toBeInTheDocument();
+  });
+
+  it("pastes clipboard text as Markdown from the context menu", async () => {
+    const execCommand = vi.fn();
+    Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(async () => "# Heading\n\n**bold**") },
+    });
+    const onChange = vi.fn();
+    const onRichFormatUsed = vi.fn();
+    render(<RichMailEditor html="<p>Hello</p>" onChange={onChange} onRichFormatUsed={onRichFormatUsed} />);
+
+    fireEvent.contextMenu(screen.getByTestId("mail-compose-editor"));
+    fireEvent.click(screen.getByTestId("mail-compose-paste-markdown"));
+
+    await waitFor(() => {
+      expect(execCommand).toHaveBeenCalledWith("insertHTML", false, expect.stringContaining("<h1>Heading</h1>"));
+    });
+    expect(onRichFormatUsed).toHaveBeenCalledTimes(1);
+  });
+
+  it("pastes clipboard text as plain text without marking rich format", async () => {
+    const execCommand = vi.fn();
+    Object.defineProperty(document, "execCommand", { configurable: true, value: execCommand });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { readText: vi.fn(async () => "<not html>\nnext") },
+    });
+    const onRichFormatUsed = vi.fn();
+    render(<RichMailEditor html="<p>Hello</p>" onChange={vi.fn()} onRichFormatUsed={onRichFormatUsed} />);
+
+    fireEvent.contextMenu(screen.getByTestId("mail-compose-editor"));
+    fireEvent.click(screen.getByTestId("mail-compose-paste-plain-text"));
+
+    await waitFor(() => {
+      expect(execCommand).toHaveBeenCalledWith("insertHTML", false, "&lt;not html&gt;<br>next");
+    });
+    expect(onRichFormatUsed).not.toHaveBeenCalled();
+  });
+
   it("does not call native image paste when plain text is present", async () => {
     const execCommand = vi.fn();
     Object.defineProperty(document, "execCommand", {
