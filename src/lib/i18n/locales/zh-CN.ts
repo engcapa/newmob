@@ -1749,7 +1749,7 @@ export const zhCN: DeepPartial<typeof en> = {
       rdpControlRequired: "键盘和鼠标控制需要此权限",
       rdpUnattendedControl: "通过认证的客户端无需本机确认即可控制这台 Mac。",
       rdpCapWindows:
-        "桌面采集：本构建尚未实现 Windows DXGI/WGC，客户端将看到占位棋盘格画面。真实桌面共享请用 Linux/macOS，或等待 Windows 后端。",
+        "桌面采集：Windows 使用 Windows Graphics Capture（WGC），并提供有界的 GDI 兼容回退。请选择要共享的显示器；键盘和鼠标输入使用原生 SendInput。",
       rdpCapUnknown:
         "桌面采集能力取决于宿主系统；点击 Start 后请查看 Server output 中的 capture 探测结果。",
       sshPortForward:

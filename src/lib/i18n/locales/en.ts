@@ -1764,7 +1764,7 @@ const dict = {
       rdpUnattendedControl:
         "Authenticated clients can control this Mac without a local confirmation prompt.",
       rdpCapWindows:
-        "Desktop capture: Windows DXGI/WGC is not implemented in this build — clients see a placeholder checkerboard. Use Linux/macOS for real desktop sharing, or wait for the Windows backend.",
+        "Desktop capture: Windows uses Windows Graphics Capture (WGC) with a bounded GDI compatibility fallback. Select the display to share; keyboard and pointer input use native SendInput.",
       rdpCapUnknown:
         "Desktop capture support depends on the host OS; check Server output after Start for the capture probe result.",
       sshPortForward:
