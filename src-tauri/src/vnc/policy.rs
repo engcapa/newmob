@@ -42,15 +42,18 @@ pub enum VncSecurityType {
     VncAuth,
     Ra2,
     Ra2ne,
+    /// RFB security type 18. It encrypts the transport but does not
+    /// authenticate the server certificate.
+    AnonymousTls,
 }
 
 impl VncSecurityType {
     pub fn encrypted(self) -> bool {
-        matches!(self, Self::Ra2)
+        matches!(self, Self::Ra2 | Self::AnonymousTls)
     }
 
     pub fn authenticated(self) -> bool {
-        !matches!(self, Self::None)
+        !matches!(self, Self::None | Self::AnonymousTls)
     }
 
     pub fn label(self) -> &'static str {
@@ -59,6 +62,7 @@ impl VncSecurityType {
             Self::VncAuth => "VNCAuth",
             Self::Ra2 => "RA2",
             Self::Ra2ne => "RA2ne",
+            Self::AnonymousTls => "TLS (anonymous)",
         }
     }
 }
@@ -101,6 +105,22 @@ impl VncSecurityPolicy {
         Err(SecurityPolicyError("no supported VNC security type".into()))
     }
 
+    /// Choose an outer security type when the caller can upgrade type 18 to
+    /// TLS before handing the decrypted stream to the RFB engine.
+    pub fn choose_outer(self, offered: &[u8]) -> Result<u8, SecurityPolicyError> {
+        const ANONYMOUS_TLS: u8 = 18;
+
+        if matches!(self, Self::RequireEncryption) {
+            return Err(SecurityPolicyError(
+                "encrypted VNC policy requires authenticated TLS; anonymous RFB TLS does not verify server identity".into(),
+            ));
+        }
+        if offered.contains(&ANONYMOUS_TLS) {
+            return Ok(ANONYMOUS_TLS);
+        }
+        self.choose(offered)
+    }
+
     pub fn allows_v33_none(self) -> bool {
         matches!(self, Self::AllowNone)
     }
@@ -112,6 +132,7 @@ pub fn security_type_kind(value: u8) -> Option<VncSecurityType> {
         2 => Some(VncSecurityType::VncAuth),
         5 | 129 => Some(VncSecurityType::Ra2),
         6 | 130 => Some(VncSecurityType::Ra2ne),
+        18 => Some(VncSecurityType::AnonymousTls),
         _ => None,
     }
 }
@@ -139,6 +160,26 @@ mod tests {
             VncSecurityPolicy::PreferEncryption.choose(&[2, 6, 5]),
             Ok(5)
         );
+    }
+
+    #[test]
+    fn anonymous_tls_is_preferred_for_outer_negotiation() {
+        assert_eq!(
+            VncSecurityPolicy::PreferEncryption.choose_outer(&[2, 18]),
+            Ok(18)
+        );
+        assert_eq!(
+            VncSecurityPolicy::LegacyCompatible.choose_outer(&[18, 2]),
+            Ok(18)
+        );
+    }
+
+    #[test]
+    fn require_encryption_rejects_anonymous_tls_identity() {
+        let error = VncSecurityPolicy::RequireEncryption
+            .choose_outer(&[18, 2])
+            .unwrap_err();
+        assert!(error.0.contains("does not verify server identity"));
     }
 
     #[test]

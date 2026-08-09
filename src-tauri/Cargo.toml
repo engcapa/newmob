@@ -102,6 +102,11 @@ lettre = "0.11.22"
 mail-parser = { version = "0.11.4", features = ["full_encoding"] }
 native-tls = "0.2"
 tokio-native-tls = "0.3"
+# RFB security type 18 uses anonymous TLS, which rustls and the platform
+# native-tls backends intentionally do not offer. OpenSSL is scoped to the VNC
+# transport upgrade and vendored so Windows builds do not require a system SDK.
+openssl = { version = "0.10.81", features = ["vendored"] }
+tokio-openssl = "0.6.5"
 ironrdp = { version = "0.17.0", features = ["core", "connector", "session", "graphics", "input", "cliprdr", "rdpdr", "rdpsnd", "svc", "dvc", "displaycontrol", "server", "acceptor"] }
 ironrdp-tokio = { version = "0.10.0", features = ["reqwest-rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
