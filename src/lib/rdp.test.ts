@@ -27,6 +27,7 @@ import {
   parseFrameTile,
   parseRdpCursorFrame,
   parseRdpWsText,
+  RdpFrameBatchBuffer,
   RDP_CURSOR_BITMAP,
   RDP_CURSOR_DEFAULT,
   RDP_CURSOR_HIDDEN,
@@ -173,6 +174,39 @@ describe("rdp WS frame parser", () => {
   it("returns null when frame is too short", () => {
     const buf = new Uint8Array([OUT_FRAME, 0, 0]);
     expect(parseFrameTile(buf.buffer)).toBeNull();
+  });
+
+  it("keeps incremental tiles in order until the frame boundary", () => {
+    const batch = new RdpFrameBatchBuffer();
+    const first = {
+      tag: OUT_FRAME,
+      x: 0,
+      y: 0,
+      w: 1,
+      h: 1,
+      rgba: new Uint8ClampedArray([1, 2, 3, 255]),
+    };
+    const second = {
+      ...first,
+      x: 1,
+      rgba: new Uint8ClampedArray([4, 5, 6, 255]),
+    };
+    batch.push(first, 2, 1);
+    batch.push(second, 2, 1);
+    expect(batch.finish()).toEqual({ tiles: [first, second], refreshRequired: false });
+  });
+
+  it("rejects a corrupt tile batch and requests a full refresh", () => {
+    const batch = new RdpFrameBatchBuffer();
+    batch.push({
+      tag: OUT_FRAME,
+      x: 0,
+      y: 0,
+      w: 2,
+      h: 1,
+      rgba: new Uint8ClampedArray([1, 2, 3, 255]),
+    }, 2, 1);
+    expect(batch.finish()).toEqual({ tiles: [], refreshRequired: true });
   });
 });
 

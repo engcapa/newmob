@@ -79,15 +79,16 @@ struct SessionOutputState {
     building_frame: Vec<Vec<u8>>,
     building_bytes: usize,
     drop_building_frame: bool,
-    latest_frame: Option<Vec<Vec<u8>>>,
+    pending_frame: Vec<Vec<u8>>,
+    pending_frame_bytes: usize,
     closed: bool,
 }
 
-/// Bounded output relay. Display updates are assembled into a complete frame
-/// batch and replaced by the newest batch; status, cursor, audio and clipboard
-/// messages stay in a bounded reliable queue. A producer only blocks when the
-/// reliable queue is full, so a slow browser cannot accumulate unbounded pixel
-/// memory or make frame age grow without limit.
+/// Bounded output relay. RDP graphics updates are incremental dirty rectangles,
+/// so pending batches must be appended in order rather than replaced by the
+/// newest batch. Replacing one batch leaves untouched canvas regions stale or
+/// black. Status, cursor, audio and clipboard messages use a separate bounded
+/// reliable queue.
 struct SessionOutputQueue {
     state: Mutex<SessionOutputState>,
     wake: Notify,
@@ -111,7 +112,8 @@ impl SessionOutputQueue {
                 building_frame: Vec::new(),
                 building_bytes: 0,
                 drop_building_frame: false,
-                latest_frame: None,
+                pending_frame: Vec::new(),
+                pending_frame_bytes: 0,
                 closed: false,
             }),
             wake: Notify::new(),
@@ -140,8 +142,24 @@ impl SessionOutputQueue {
             }
             SessionOutput::Channel { tag, .. } if tag == channel::FRAME_END => {
                 if !state.drop_building_frame && !state.building_frame.is_empty() {
+                    while state
+                        .pending_frame_bytes
+                        .saturating_add(state.building_bytes)
+                        > MAX_FRAME_BATCH_BYTES
+                        && !state.closed
+                    {
+                        state = self
+                            .space
+                            .wait(state)
+                            .map_err(|_| "rdp output queue poisoned".to_string())?;
+                    }
+                    if state.closed {
+                        return Err("rdp output queue closed".to_string());
+                    }
+                    let combined_bytes = state.pending_frame_bytes + state.building_bytes;
                     let batch = std::mem::take(&mut state.building_frame);
-                    state.latest_frame = Some(batch);
+                    state.pending_frame.extend(batch);
+                    state.pending_frame_bytes = combined_bytes;
                 } else {
                     state.building_frame.clear();
                 }
@@ -178,7 +196,9 @@ impl SessionOutputQueue {
                     self.space.notify_one();
                     return Some(QueuedSessionOutput::Control(output));
                 }
-                if let Some(frame) = state.latest_frame.take() {
+                if !state.pending_frame.is_empty() {
+                    let frame = std::mem::take(&mut state.pending_frame);
+                    state.pending_frame_bytes = 0;
                     self.space.notify_one();
                     return Some(QueuedSessionOutput::FrameBatch(frame));
                 }
@@ -194,7 +214,8 @@ impl SessionOutputQueue {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
             state.control.clear();
-            state.latest_frame = None;
+            state.pending_frame.clear();
+            state.pending_frame_bytes = 0;
             state.building_frame.clear();
         }
         self.space.notify_all();
@@ -2687,7 +2708,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_output_consumer_gets_only_the_latest_frame_batch() {
+    async fn slow_output_consumer_keeps_incremental_frame_batches_in_order() {
         let (mut handle, out_tx, _ctrl_rx) = RdpSessionHandle::new();
         for value in [1_u8, 2_u8] {
             let _ = out_tx.send(SessionOutput::Channel {
@@ -2699,6 +2720,10 @@ mod tests {
                 payload: Vec::new(),
             });
         }
+        assert!(matches!(
+            handle.next_outgoing().await,
+            Some(SessionOutput::Channel { tag: channel::FRAME, payload }) if payload == vec![1]
+        ));
         assert!(matches!(
             handle.next_outgoing().await,
             Some(SessionOutput::Channel { tag: channel::FRAME, payload }) if payload == vec![2]

@@ -10,6 +10,7 @@ import {
   parseWsMessage,
   parseFrameHeader,
   parseVncError,
+  vncCursorToCss,
   keyEventToKeysym,
   mapClientToFramebuffer,
   mouseButtonMask,
@@ -177,6 +178,7 @@ export default function VncPanel({
   // without re-binding.
   const extClipboardSupportedRef = useRef<boolean>(false);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
+  const [remoteCursorCss, setRemoteCursorCss] = useState("none");
   const allowClipboardSend = clipboardPolicy === "bidirectional" || clipboardPolicy === "client-to-server";
   const allowClipboardReceive = clipboardPolicy === "bidirectional" || clipboardPolicy === "server-to-client";
 
@@ -276,6 +278,7 @@ export default function VncPanel({
 
     let cancelled = false;
     suppressReconnectRef.current = false;
+    setRemoteCursorCss("none");
     if (reconnectStableTimerRef.current !== null) {
       window.clearTimeout(reconnectStableTimerRef.current);
       reconnectStableTimerRef.current = null;
@@ -443,6 +446,9 @@ export default function VncPanel({
                   `[vnc.clip] server ExtendedClipboard support: ${msg.available}`,
                 );
                 break;
+              case "cursor":
+                setRemoteCursorCss(vncCursorToCss(msg));
+                break;
             }
           }
         };
@@ -552,6 +558,7 @@ export default function VncPanel({
       serverClipboardWriteInFlightRef.current = 0;
       lastClipboardSyncCheckAtRef.current = 0;
       lastSyncedLocalClipboardTextRef.current = null;
+      setRemoteCursorCss("none");
       const sid = sessionIdRef.current;
       if (sid) {
         vncDisconnect(sid).catch(() => {});
@@ -966,12 +973,12 @@ export default function VncPanel({
           width: "100%",
           height: "100%",
           objectFit: "contain",
-          cursor: conn?.status === "connected" ? "none" : "default",
+          cursor: conn?.status === "connected" ? remoteCursorCss : "default",
         }
       : {
           width: conn?.width ?? 0,
           height: conn?.height ?? 0,
-          cursor: conn?.status === "connected" ? "none" : "default",
+          cursor: conn?.status === "connected" ? remoteCursorCss : "default",
           maxWidth: "none",
           maxHeight: "none",
         };

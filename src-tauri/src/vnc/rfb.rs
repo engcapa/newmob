@@ -7,7 +7,7 @@ use crate::vnc::clipboard::{
     ExtendedClipboardMsg, decode_legacy_cut_text, encode_legacy_cut_text,
     parse_extended_body_with_limits,
 };
-use crate::vnc::encodings::{self, DecodedRect, HextileState, ZrleDecoder};
+use crate::vnc::encodings::{self, DecodedCursor, DecodedRect, HextileState, ZrleDecoder};
 use crate::vnc::limits::DecodeLimits;
 use crate::vnc::policy::VncSecurityPolicy;
 
@@ -747,6 +747,18 @@ impl RfbConnection {
         Ok(())
     }
 
+    /// Authentication uses a bounded read timeout so an unresponsive peer
+    /// cannot hold a connection attempt forever. Once the RFB session is
+    /// established, however, a server may legitimately stay silent while no
+    /// pixels change or while the viewer is hidden. Runtime cancellation closes
+    /// the socket explicitly, so remove the handshake timeout before entering
+    /// the long-lived read loop.
+    pub fn enter_runtime_mode(&self) -> Result<(), String> {
+        self.stream
+            .set_read_timeout(None)
+            .map_err(|e| format!("clear VNC runtime read timeout failed: {e}"))
+    }
+
     /// Split out an independent writer so input events can be sent while the
     /// reader is blocked waiting for the next server message.
     pub fn take_writer(&mut self) -> Result<RfbWriter, String> {
@@ -845,6 +857,7 @@ impl RfbConnection {
         }
 
         let mut decoded: Vec<DecodedRect> = Vec::with_capacity(num_rects);
+        let mut cursor = None;
         for _ in 0..num_rects {
             let x = self.read_u16()?;
             let y = self.read_u16()?;
@@ -855,7 +868,7 @@ impl RfbConnection {
                 self.limits
                     .framebuffer_bytes(w, h)
                     .map_err(|e| e.to_string())?;
-            } else {
+            } else if encoding != -239 {
                 self.limits
                     .rectangle_bytes(w, h)
                     .map_err(|e| e.to_string())?;
@@ -865,7 +878,7 @@ impl RfbConnection {
             {
                 // DesktopSize is the only rectangle allowed to describe a new
                 // framebuffer geometry; pixel rectangles must stay in bounds.
-                if encoding != -223 {
+                if encoding != -223 && encoding != -239 {
                     return Err("framebuffer rectangle is outside the negotiated size".into());
                 }
             }
@@ -958,6 +971,11 @@ impl RfbConnection {
                     self.height = h;
                     self.framebuffer = vec![0u8; size];
                 }
+                -239 => {
+                    cursor = Some(self.decode_via_reader(|reader| {
+                        encodings::read_rich_cursor(reader, x, y, w, h)
+                    })?);
+                }
                 other => {
                     return Err(format!(
                         "unsupported encoding {} — client did not request this",
@@ -967,7 +985,10 @@ impl RfbConnection {
             }
         }
 
-        Ok(ServerMessage::FramebufferUpdate { rects: decoded })
+        Ok(ServerMessage::FramebufferUpdate {
+            rects: decoded,
+            cursor,
+        })
     }
 
     /// Run a decoder closure over a temporary `impl Read` view of the stream.
@@ -1579,10 +1600,15 @@ fn increment_le(counter: &mut [u8; 16]) {
 
 #[derive(Debug)]
 pub enum ServerMessage {
-    FramebufferUpdate { rects: Vec<DecodedRect> },
+    FramebufferUpdate {
+        rects: Vec<DecodedRect>,
+        cursor: Option<DecodedCursor>,
+    },
     SetColourMapEntries,
     Bell,
-    ServerCutText { text: String },
+    ServerCutText {
+        text: String,
+    },
     ExtendedClipboard(ExtendedClipboardMsg),
 }
 
@@ -1801,5 +1827,29 @@ mod tests {
         .unwrap();
         assert!(connection.read_server_message().is_err());
         server.join().unwrap();
+    }
+
+    #[test]
+    fn runtime_mode_clears_the_handshake_read_timeout() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).unwrap();
+        let (_server, _) = listener.accept().unwrap();
+        let connection = RfbConnection::new_stream(
+            client,
+            Duration::from_secs(2),
+            DecodeLimits::default(),
+            VncSecurityPolicy::AllowNone,
+            8,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            connection.stream.read_timeout().unwrap(),
+            Some(Duration::from_secs(2))
+        );
+        connection.enter_runtime_mode().unwrap();
+        assert_eq!(connection.stream.read_timeout().unwrap(), None);
     }
 }

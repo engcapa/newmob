@@ -19,6 +19,7 @@ import {
   vncConnect,
   vncConsumeDetachClaim,
   vncCreateDetachClaim,
+  vncCursorToCss,
   vncTestConnection,
 } from "./vnc";
 
@@ -59,6 +60,11 @@ describe("VNC WebSocket protocol", () => {
       type: "desktop_size", width: 2560, height: 1440, generation: 1,
     });
     expect(parseWsMessage('{"type":"desktop_size","width":0,"height":1440,"generation":1}')).toBeNull();
+    const cursor = parseWsMessage('{"type":"cursor","visible":true,"hotspot_x":1,"hotspot_y":2,"width":16,"height":16,"png_base64":"iVBORw0KGgo="}');
+    expect(cursor).toMatchObject({ type: "cursor", visible: true, hotspot_x: 1, hotspot_y: 2 });
+    expect(cursor?.type === "cursor" ? vncCursorToCss(cursor) : "").toContain("data:image/png;base64,iVBORw0KGgo=");
+    expect(parseWsMessage('{"type":"cursor","visible":true,"hotspot_x":16,"hotspot_y":0,"width":16,"height":16,"png_base64":"iVBORw0KGgo="}')).toBeNull();
+    expect(parseWsMessage('{"type":"cursor","visible":false,"hotspot_x":0,"hotspot_y":0,"width":0,"height":0,"png_base64":""}')).toMatchObject({ type: "cursor", visible: false });
   });
 
   it("validates binary frame geometry and exact payload length", () => {

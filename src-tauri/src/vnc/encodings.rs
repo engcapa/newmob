@@ -18,6 +18,17 @@ pub enum DecodedRect {
     },
 }
 
+#[derive(Debug)]
+pub struct DecodedCursor {
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub rgba: Vec<u8>,
+}
+
+const MAX_CURSOR_DIMENSION: u16 = 512;
+
 // ── Helpers to read big-endian integers from an `impl Read`. ──
 
 fn read_u8<R: Read>(r: &mut R) -> std::io::Result<u8> {
@@ -582,6 +593,71 @@ fn read_zrle_run_length(buf: &[u8], pos: &mut usize) -> Result<usize, String> {
     }
 }
 
+/// Decode the RichCursor pseudo-encoding (-239). Pixel bytes use the 32-bit
+/// RGBA format negotiated for normal rectangles, followed by a one-bit alpha
+/// mask whose rows are padded to whole bytes.
+pub fn read_rich_cursor<R: Read>(
+    reader: &mut R,
+    hotspot_x: u16,
+    hotspot_y: u16,
+    width: u16,
+    height: u16,
+) -> Result<DecodedCursor, String> {
+    if width == 0 || height == 0 {
+        return Ok(DecodedCursor {
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        });
+    }
+    if width > MAX_CURSOR_DIMENSION || height > MAX_CURSOR_DIMENSION {
+        return Err(format!(
+            "rich cursor dimensions {width}x{height} exceed {MAX_CURSOR_DIMENSION}x{MAX_CURSOR_DIMENSION}"
+        ));
+    }
+    if hotspot_x >= width || hotspot_y >= height {
+        return Err(format!(
+            "rich cursor hotspot {hotspot_x},{hotspot_y} lies outside {width}x{height}"
+        ));
+    }
+
+    let pixel_bytes = usize::from(width)
+        .checked_mul(usize::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "rich cursor pixel byte count overflow".to_string())?;
+    let mask_stride = usize::from(width).div_ceil(8);
+    let mask_bytes = mask_stride
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| "rich cursor mask byte count overflow".to_string())?;
+
+    let mut rgba = vec![0u8; pixel_bytes];
+    reader
+        .read_exact(&mut rgba)
+        .map_err(|e| format!("rich cursor pixels: {e}"))?;
+    let mut mask = vec![0u8; mask_bytes];
+    reader
+        .read_exact(&mut mask)
+        .map_err(|e| format!("rich cursor mask: {e}"))?;
+
+    for row in 0..usize::from(height) {
+        for column in 0..usize::from(width) {
+            let mask_byte = mask[row * mask_stride + column / 8];
+            let visible = mask_byte & (0x80 >> (column % 8)) != 0;
+            rgba[(row * usize::from(width) + column) * 4 + 3] = if visible { 255 } else { 0 };
+        }
+    }
+
+    Ok(DecodedCursor {
+        hotspot_x,
+        hotspot_y,
+        width,
+        height,
+        rgba,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -595,6 +671,26 @@ mod tests {
         let rect = read_raw(&mut cur, 0, 0, 2, 1).unwrap();
         let DecodedRect::Pixels { rgba, .. } = rect;
         assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn rich_cursor_applies_bitmask_alpha_and_hotspot() {
+        let mut payload = vec![10, 20, 30, 0, 40, 50, 60, 0, 70, 80, 90, 0];
+        payload.push(0b1010_0000);
+        let mut reader = Cursor::new(payload);
+        let cursor = read_rich_cursor(&mut reader, 1, 0, 3, 1).unwrap();
+        assert_eq!((cursor.hotspot_x, cursor.hotspot_y), (1, 0));
+        assert_eq!((cursor.width, cursor.height), (3, 1));
+        assert_eq!(
+            cursor.rgba,
+            vec![10, 20, 30, 255, 40, 50, 60, 0, 70, 80, 90, 255]
+        );
+    }
+
+    #[test]
+    fn rich_cursor_rejects_invalid_geometry() {
+        assert!(read_rich_cursor(&mut Cursor::new(Vec::<u8>::new()), 3, 0, 3, 1).is_err());
+        assert!(read_rich_cursor(&mut Cursor::new(Vec::<u8>::new()), 0, 0, 513, 1).is_err());
     }
 
     #[test]
