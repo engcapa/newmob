@@ -251,14 +251,25 @@ pub fn clipboard_read_text(state: State<'_, AppState>) -> Result<String, String>
         .lock()
         .map_err(|e| format!("clipboard lock: {}", e))?;
     if guard.is_none() {
-        *guard = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?);
+        *guard = arboard::Clipboard::new().ok();
     }
-    let clipboard = guard
-        .as_mut()
-        .ok_or_else(|| "clipboard unavailable".to_string())?;
-    clipboard
-        .get_text()
-        .map_err(|e| format!("clipboard read: {}", e))
+    let Some(clipboard) = guard.as_mut() else {
+        #[cfg(target_os = "linux")]
+        if let Some(text) = platform::clipboard_read_text_fallback()? {
+            return Ok(text);
+        }
+        return Err("clipboard unavailable".to_string());
+    };
+    match clipboard.get_text() {
+        Ok(text) => Ok(text),
+        Err(error) => {
+            #[cfg(target_os = "linux")]
+            if let Some(text) = platform::clipboard_read_text_fallback()? {
+                return Ok(text);
+            }
+            Err(format!("clipboard read: {}", error))
+        }
+    }
 }
 
 #[tauri::command]
@@ -268,14 +279,115 @@ pub fn clipboard_write_text(text: String, state: State<'_, AppState>) -> Result<
         .lock()
         .map_err(|e| format!("clipboard lock: {}", e))?;
     if guard.is_none() {
-        *guard = Some(arboard::Clipboard::new().map_err(|e| format!("clipboard init: {}", e))?);
+        *guard = arboard::Clipboard::new().ok();
     }
-    let clipboard = guard
-        .as_mut()
-        .ok_or_else(|| "clipboard unavailable".to_string())?;
-    clipboard
-        .set_text(text)
-        .map_err(|e| format!("clipboard write: {}", e))
+    let Some(clipboard) = guard.as_mut() else {
+        #[cfg(target_os = "linux")]
+        if platform::clipboard_write_text_fallback(&text).is_ok() {
+            return Ok(());
+        }
+        return Err("clipboard unavailable".to_string());
+    };
+    match clipboard.set_text(text.clone()) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            #[cfg(target_os = "linux")]
+            if platform::clipboard_write_text_fallback(&text).is_ok() {
+                return Ok(());
+            }
+            Err(format!("clipboard write: {}", error))
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardCapabilities {
+    pub platform: String,
+    pub display_backend: String,
+    pub webkit_api_expected: bool,
+    pub native_backend: String,
+    pub wl_paste: bool,
+    pub wl_copy: bool,
+    pub xclip: bool,
+    pub xsel: bool,
+    pub html_rtf_native: bool,
+}
+
+/// Read-only diagnostics for the Linux WebKitGTK clipboard path. Helper
+/// presence is reported separately from the current selection owner, because
+/// probing ownership would change or block on user clipboard state.
+#[tauri::command]
+pub fn clipboard_capabilities() -> ClipboardCapabilities {
+    #[cfg(target_os = "linux")]
+    {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let x11 = std::env::var_os("DISPLAY").is_some();
+        return ClipboardCapabilities {
+            platform: "linux".into(),
+            display_backend: if wayland && x11 {
+                "wayland+x11".into()
+            } else if wayland {
+                "wayland".into()
+            } else if x11 {
+                "x11".into()
+            } else {
+                "headless".into()
+            },
+            webkit_api_expected: true,
+            native_backend: "arboard".into(),
+            wl_paste: which::which("wl-paste").is_ok(),
+            wl_copy: which::which("wl-copy").is_ok(),
+            xclip: which::which("xclip").is_ok(),
+            xsel: which::which("xsel").is_ok(),
+            html_rtf_native: false,
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        ClipboardCapabilities {
+            platform: "windows".into(),
+            display_backend: "win32".into(),
+            webkit_api_expected: true,
+            native_backend: "arboard".into(),
+            wl_paste: false,
+            wl_copy: false,
+            xclip: false,
+            xsel: false,
+            html_rtf_native: false,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        ClipboardCapabilities {
+            platform: "macos".into(),
+            display_backend: "appkit".into(),
+            webkit_api_expected: true,
+            native_backend: "arboard".into(),
+            wl_paste: false,
+            wl_copy: false,
+            xclip: false,
+            xsel: false,
+            html_rtf_native: false,
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    {
+        ClipboardCapabilities {
+            platform: "unknown".into(),
+            display_backend: "unknown".into(),
+            webkit_api_expected: false,
+            native_backend: "unknown".into(),
+            wl_paste: false,
+            wl_copy: false,
+            xclip: false,
+            xsel: false,
+            html_rtf_native: false,
+        }
+    }
 }
 
 #[tauri::command]
@@ -981,7 +1093,7 @@ return paths as text
 mod platform {
     use super::initial_dir_from;
     use std::path::Path;
-    use std::process::{Command, Output};
+    use std::process::{Command, Output, Stdio};
 
     pub fn select_private_key_file(current_path: Option<&str>) -> Result<Option<String>, String> {
         let initial = initial_dir_from(current_path);
@@ -1022,6 +1134,53 @@ mod platform {
             path
         });
         open_save_dialog("Save as", initial_path.as_deref())
+    }
+
+    /// Best-effort text fallback for environments where arboard cannot answer
+    /// an X11 selection request (or where only a Wayland helper is available).
+    /// A missing owner is reported as `None`, allowing the WebKit clipboard
+    /// API or the caller's normal empty-clipboard handling to decide next.
+    pub fn clipboard_read_text_fallback() -> Result<Option<String>, String> {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if let Ok(Some(text)) = run_clipboard_reader("wl-paste", &["--no-newline"]) {
+                return Ok(Some(text));
+            }
+        }
+        if std::env::var_os("DISPLAY").is_some() {
+            if let Ok(Some(text)) =
+                run_clipboard_reader("xclip", &["-selection", "clipboard", "-o"])
+            {
+                return Ok(Some(text));
+            }
+            if let Ok(Some(text)) = run_clipboard_reader("xsel", &["--clipboard", "--output"]) {
+                return Ok(Some(text));
+            }
+        }
+        Ok(None)
+    }
+
+    /// `wl-copy` exits after handing ownership to the compositor. X11 owners
+    /// are deliberately not spawned here: a synchronous xclip/xsel fallback
+    /// would either block forever or lose ownership as soon as the helper is
+    /// killed. arboard remains the authoritative X11 writer.
+    pub fn clipboard_write_text_fallback(text: &str) -> Result<(), String> {
+        if std::env::var_os("WAYLAND_DISPLAY").is_none() {
+            return Err("no Wayland clipboard helper available".into());
+        }
+        let mut child = Command::new("wl-copy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("wl-copy: {}", e))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            std::io::Write::write_all(&mut stdin, text.as_bytes())
+                .map_err(|e| format!("wl-copy stdin: {}", e))?;
+        }
+        let status = child.wait().map_err(|e| format!("wl-copy: {}", e))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("wl-copy exited with {}", status))
+        }
     }
 
     fn open_file_dialog_multi(

@@ -404,6 +404,7 @@
 - `[data-testid="welcome-open-home-folder"]` — interactive [optional] — F1.6.open-home-folder
 - `button[aria-label="Open as administrator"]` — interactive [optional] — F1.6.open-as-administrator
 - `text="New session…"` — interactive — F1.6.new-session-card
+- `[data-testid="welcome-new-session"]` — interactive — F1.6.new-session-button
 - `[data-testid="welcome-recent-sessions"]` — display — F1.6.recent-sessions-panel
 - `[data-testid="welcome-recent-filter"]` — interactive — F1.6.recent-filter
 - `[data-testid="welcome-recent-type-filter"]` — interactive — F1.6.recent-type-filter
@@ -557,6 +558,7 @@
 ## sessions (F6.2)
 
 - `[data-testid="sidebar"]` — display — F6.2.sidebar
+- `[data-testid="side-tab-sessions"]` — interactive [optional] — F6.2.side-tab-sessions
 - `[data-testid="session-tree"]` — display — F6.2.session-tree
 - `[data-testid="session-tree-item"]` — interactive — F6.2.session-tree-item
 - `[data-testid="session-search"]` — interactive — F6.2.session-search
@@ -1053,3 +1055,14 @@
 - `[data-testid="vnc-floating-toolbar"]` — display [optional] — F9.6.floating-toolbar
 - `[data-testid="vnc-scale-toggle"]` — interactive [optional] — F9.6.scale-toggle
 - `[data-testid="vnc-reconnect"]` — interactive [optional] — F9.6.reconnect
+- `[data-testid="vnc-connection-security"]` — display [optional] — F9.6.security-status
+- `[data-testid="vnc-client-options"]` — display — F9.6.client-options
+- `[data-testid="vnc-security-policy"]` — interactive — F9.6.security-policy
+- `[data-testid="vnc-clipboard-policy"]` — interactive — F9.6.clipboard-policy
+- `[data-testid="vnc-shared"]` — interactive — F9.6.shared
+- `[data-testid="vnc-view-only"]` — interactive — F9.6.view-only
+- `[data-testid="vnc-clipboard-html"]` — interactive — F9.6.clipboard-html
+- `[data-testid="vnc-clipboard-rtf"]` — interactive — F9.6.clipboard-rtf
+- `[data-testid="vnc-auto-reconnect"]` — interactive — F9.6.auto-reconnect
+- `[data-testid="vnc-reconnect-attempts"]` — interactive — F9.6.reconnect-attempts
+- `[data-testid="vnc-clipboard-limit"]` — interactive — F9.6.clipboard-limit

@@ -1,8 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { VncClientOptions, VncClipboardPolicy } from "../types/vnc";
 
 export interface VncConnectResult {
   session_id: string;
   ws_port: number;
+  ws_token: string;
   width: number;
   height: number;
   name: string;
@@ -13,12 +15,26 @@ export async function vncConnect(
   port: number,
   username?: string | null,
   password?: string,
+  networkSettingsJson?: string | null,
+  clientOptions?: VncClientOptions,
+  credentialCapability?: string | null,
 ): Promise<VncConnectResult> {
   return invoke<VncConnectResult>("vnc_connect", {
     host,
     port,
     username: username?.trim() || null,
     password: password ?? null,
+    networkSettingsJson: networkSettingsJson ?? null,
+    clientOptionsJson: clientOptions ? JSON.stringify(clientOptions) : null,
+    credentialCapability: credentialCapability ?? null,
+  });
+}
+
+export async function vncCreateCredentialCapability(
+  credential?: string,
+): Promise<string | null> {
+  return invoke<string | null>("vnc_create_credential_capability", {
+    credential: credential ?? null,
   });
 }
 
@@ -31,12 +47,16 @@ export async function vncTestConnection(
   port: number,
   username?: string | null,
   password?: string,
+  networkSettingsJson?: string | null,
+  clientOptions?: VncClientOptions,
 ): Promise<string> {
   return invoke("vnc_test_connection", {
     host,
     port,
     username: username?.trim() || null,
     password: password ?? null,
+    networkSettingsJson: networkSettingsJson ?? null,
+    clientOptionsJson: clientOptions ? JSON.stringify(clientOptions) : null,
   });
 }
 
@@ -57,8 +77,19 @@ export type WsOutgoing =
 
 /** WebSocket message types received from the VNC relay. */
 export type WsIncoming =
-  | { type: "connected"; width: number; height: number; name: string }
-  | { type: "disconnected"; reason: string }
+  | {
+      type: "connected";
+      width: number;
+      height: number;
+      name: string;
+      security?: string;
+      protocol?: string;
+      encrypted?: boolean;
+      view_only?: boolean;
+      clipboard_policy?: VncClipboardPolicy;
+    }
+  | { type: "resize"; width: number; height: number; frame_id?: number }
+  | { type: "disconnected"; reason: string; code?: string; retryable?: boolean }
   | { type: "bell" }
   | { type: "clipboard"; text: string }
   | {
@@ -78,8 +109,12 @@ export function parseWsMessage(data: string): WsIncoming | null {
   }
 }
 
-export function encodeWsAck(): ArrayBuffer {
-  return new Uint8Array([0]).buffer;
+export function encodeWsAck(frameId = 0): ArrayBuffer {
+  const bytes = new Uint8Array(5);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 0;
+  view.setUint32(1, frameId >>> 0);
+  return bytes.buffer;
 }
 
 export function encodeWsPing(): ArrayBuffer {
@@ -117,7 +152,7 @@ export function encodeWsResize(width: number, height: number): ArrayBuffer {
 /** Parse a binary frame header: [x(2B), y(2B), w(2B), h(2B)] — all big-endian. */
 export function parseFrameHeader(
   data: ArrayBuffer,
-): { x: number; y: number; w: number; h: number } | null {
+): { x: number; y: number; w: number; h: number; frameId: number } | null {
   if (data.byteLength < 12) return null;
   const dv = new DataView(data);
   return {
@@ -125,11 +160,43 @@ export function parseFrameHeader(
     y: dv.getUint16(2),
     w: dv.getUint16(4),
     h: dv.getUint16(6),
+    frameId: dv.getUint32(8),
   };
 }
 
 /** Map a DOM KeyboardEvent to an RFB keysym. */
 export function keyEventToKeysym(e: KeyboardEvent): number {
+  const codeMap: Record<string, number> = {
+    ShiftLeft: 0xffe1,
+    ShiftRight: 0xffe2,
+    ControlLeft: 0xffe3,
+    ControlRight: 0xffe4,
+    MetaLeft: 0xffeb,
+    MetaRight: 0xffec,
+    Numpad0: 0xffb0,
+    Numpad1: 0xffb1,
+    Numpad2: 0xffb2,
+    Numpad3: 0xffb3,
+    Numpad4: 0xffb4,
+    Numpad5: 0xffb5,
+    Numpad6: 0xffb6,
+    Numpad7: 0xffb7,
+    Numpad8: 0xffb8,
+    Numpad9: 0xffb9,
+    NumpadDecimal: 0xffae,
+    NumpadDivide: 0xffaf,
+    NumpadMultiply: 0xffaa,
+    NumpadSubtract: 0xffad,
+    NumpadAdd: 0xffab,
+    NumpadEnter: 0xff8d,
+    NumpadEqual: 0xffbd,
+  };
+  if (e.key === "AltGraph") return 0xfe03;
+  if (e.code === "AltRight") return e.ctrlKey ? 0xfe03 : 0xffea;
+  if (e.code === "AltLeft") return 0xffe9;
+  if (codeMap[e.code] !== undefined) return codeMap[e.code];
+  const functionKey = /^F([1-9]|1[0-9]|2[0-4])$/.exec(e.key);
+  if (functionKey) return 0xffbd + Number.parseInt(functionKey[1], 10);
   // Printable characters
   if (e.key.length === 1) {
     return e.key.charCodeAt(0);
@@ -174,30 +241,18 @@ export function keyEventToKeysym(e: KeyboardEvent): number {
       return 0xffeb;
     case "CapsLock":
       return 0xffe5;
-    case "F1":
-      return 0xffbe;
-    case "F2":
-      return 0xffbf;
-    case "F3":
-      return 0xffc0;
-    case "F4":
-      return 0xffc1;
-    case "F5":
-      return 0xffc2;
-    case "F6":
-      return 0xffc3;
-    case "F7":
-      return 0xffc4;
-    case "F8":
-      return 0xffc5;
-    case "F9":
-      return 0xffc6;
-    case "F10":
-      return 0xffc7;
-    case "F11":
-      return 0xffc8;
-    case "F12":
-      return 0xffc9;
+    case "NumLock":
+      return 0xff7f;
+    case "ScrollLock":
+      return 0xff14;
+    case "Pause":
+      return 0xff13;
+    case "PrintScreen":
+      return 0xff61;
+    case "ContextMenu":
+      return 0xff67;
+    case "Clear":
+      return 0xff0b;
     default:
       return 0;
   }

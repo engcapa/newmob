@@ -366,6 +366,7 @@ export function WelcomePanel({
             />
           )}
           <ActionCard
+            testId="welcome-new-session"
             icon={<Plus className="w-5 h-5" />}
             title={t("welcome.newSessionTitle")}
             desc={t("welcome.newSessionDesc")}

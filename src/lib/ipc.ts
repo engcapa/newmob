@@ -699,6 +699,7 @@ export async function historyClear(hostKey: string | null): Promise<void> {
 export interface VncConnectResult {
   session_id: string;
   ws_port: number;
+  ws_token: string;
   width: number;
   height: number;
   name: string;
@@ -709,6 +710,8 @@ export async function vncConnect(
   port: number,
   username?: string | null,
   password?: string,
+  networkSettingsJson?: string | null,
+  clientOptionsJson?: string | null,
 ): Promise<VncConnectResult> {
   return withVaultLockedNotice(() =>
     invoke<VncConnectResult>("vnc_connect", {
@@ -716,6 +719,8 @@ export async function vncConnect(
       port,
       username: username?.trim() || null,
       password: password ?? null,
+      networkSettingsJson: networkSettingsJson ?? null,
+      clientOptionsJson: clientOptionsJson ?? null,
     }),
   );
 }
@@ -729,6 +734,8 @@ export async function vncTestConnection(
   port: number,
   username?: string | null,
   password?: string,
+  networkSettingsJson?: string | null,
+  clientOptionsJson?: string | null,
 ): Promise<string> {
   return withVaultLockedNotice(() =>
     invoke("vnc_test_connection", {
@@ -736,6 +743,8 @@ export async function vncTestConnection(
       port,
       username: username?.trim() || null,
       password: password ?? null,
+      networkSettingsJson: networkSettingsJson ?? null,
+      clientOptionsJson: clientOptionsJson ?? null,
     }),
   );
 }

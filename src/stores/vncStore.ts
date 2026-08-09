@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { VncClipboardPolicy } from "../types/vnc";
 
 export type VncConnectionStatus =
   | "disconnected"
@@ -13,6 +14,11 @@ export interface VncConnectionState {
   width: number;
   height: number;
   name: string;
+  security: string | null;
+  protocol: string | null;
+  encrypted: boolean;
+  viewOnly: boolean;
+  clipboardPolicy: VncClipboardPolicy;
   error: string | null;
 }
 
@@ -26,7 +32,13 @@ interface VncStore {
     width: number,
     height: number,
     name: string,
+    security?: string,
+    protocol?: string,
+    encrypted?: boolean,
+    viewOnly?: boolean,
+    clipboardPolicy?: VncClipboardPolicy,
   ) => void;
+  setDimensions: (tabId: string, width: number, height: number) => void;
   setDisconnected: (tabId: string, reason?: string) => void;
   removeConnection: (tabId: string) => void;
 }
@@ -45,6 +57,11 @@ export const useVncStore = create<VncStore>((set) => ({
           width: 0,
           height: 0,
           name: "",
+          security: null,
+          protocol: null,
+          encrypted: false,
+          viewOnly: false,
+          clipboardPolicy: "bidirectional",
           error: null,
         },
       },
@@ -66,7 +83,7 @@ export const useVncStore = create<VncStore>((set) => ({
     }));
   },
 
-  setConnected(tabId, width, height, name) {
+  setConnected(tabId, width, height, name, security, protocol, encrypted, viewOnly, clipboardPolicy) {
     set((s) => ({
       connections: {
         ...s.connections,
@@ -76,10 +93,28 @@ export const useVncStore = create<VncStore>((set) => ({
           width,
           height,
           name,
+          security: security ?? null,
+          protocol: protocol ?? null,
+          encrypted: encrypted ?? false,
+          viewOnly: viewOnly ?? false,
+          clipboardPolicy: clipboardPolicy ?? "bidirectional",
           error: null,
         } as VncConnectionState,
       },
     }));
+  },
+
+  setDimensions(tabId, width, height) {
+    set((s) => {
+      const connection = s.connections[tabId];
+      if (!connection) return s;
+      return {
+        connections: {
+          ...s.connections,
+          [tabId]: { ...connection, width, height },
+        },
+      };
+    });
   },
 
   setDisconnected(tabId, reason) {

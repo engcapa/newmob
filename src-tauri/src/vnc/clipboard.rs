@@ -24,10 +24,13 @@
 //                 screenshot/clipboard PNG path instead)
 //   files 0x10   (not used; file transfer uses TightVNC/UltraVNC FT)
 
+use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use std::io::{Read, Write};
+
+pub const MAX_CLIPBOARD_FORMAT_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_CLIPBOARD_DECODED_BYTES: usize = 32 * 1024 * 1024;
 
 pub const ENCODING_EXTENDED_CLIPBOARD: i32 = 0xC0A1_E5CEu32 as i32;
 // Older Taomni builds advertised this incorrect value. Keeping it in the
@@ -142,7 +145,10 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
             // bit set in `formats`.
             let mut decoder = ZlibDecoder::new(payload);
             let mut decoded = Vec::new();
-            if decoder.read_to_end(&mut decoded).is_err() {
+            let decoded_result = decoder
+                .take((MAX_CLIPBOARD_DECODED_BYTES + 1) as u64)
+                .read_to_end(&mut decoded);
+            if decoded_result.is_err() || decoded.len() > MAX_CLIPBOARD_DECODED_BYTES {
                 return Some(ExtendedClipboardMsg::Provide {
                     formats,
                     formats_data: ClipboardFormats::default(),
@@ -163,7 +169,9 @@ pub fn parse_extended_body(body: &[u8]) -> Option<ExtendedClipboardMsg> {
                         decoded[cursor + 3],
                     ]) as usize;
                     cursor += 4;
-                    if decoded.len() < cursor + len {
+                    if len > MAX_CLIPBOARD_FORMAT_BYTES
+                        || decoded.len() < cursor.saturating_add(len)
+                    {
                         break;
                     }
                     let raw = &decoded[cursor..cursor + len];
@@ -240,6 +248,12 @@ pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
             };
             let mut buf = value.as_bytes().to_vec();
             buf.push(0);
+            if buf.len() > MAX_CLIPBOARD_FORMAT_BYTES {
+                return Err(format!(
+                    "clipboard format exceeds {} bytes",
+                    MAX_CLIPBOARD_FORMAT_BYTES
+                ));
+            }
             payload.extend_from_slice(&(buf.len() as u32).to_be_bytes());
             payload.extend_from_slice(&buf);
         }
@@ -257,6 +271,12 @@ pub fn build_provide_body(data: &ClipboardFormats) -> Result<Vec<u8>, String> {
             .map_err(|e| format!("zlib finish: {}", e))?;
     }
     let mut body = Vec::with_capacity(4 + compressed.len());
+    if body.capacity() > MAX_CLIPBOARD_FORMAT_BYTES {
+        return Err(format!(
+            "extended clipboard body exceeds {} bytes",
+            MAX_CLIPBOARD_FORMAT_BYTES
+        ));
+    }
     body.extend_from_slice(&(ACTION_PROVIDE | formats).to_be_bytes());
     body.extend_from_slice(&compressed);
     Ok(body)
@@ -400,6 +420,27 @@ mod tests {
     #[test]
     fn truncated_body_returns_none() {
         assert!(parse_extended_body(&[1, 2]).is_none());
+    }
+
+    #[test]
+    fn provide_rejects_format_larger_than_limit() {
+        let mut plain = Vec::new();
+        plain.extend_from_slice(&((MAX_CLIPBOARD_FORMAT_BYTES as u32) + 1).to_be_bytes());
+        plain.push(0);
+        let mut compressed = Vec::new();
+        {
+            let mut encoder = ZlibEncoder::new(&mut compressed, Compression::default());
+            encoder.write_all(&plain).unwrap();
+            encoder.finish().unwrap();
+        }
+        let mut body = (ACTION_PROVIDE | FORMAT_TEXT).to_be_bytes().to_vec();
+        body.extend_from_slice(&compressed);
+        match parse_extended_body(&body) {
+            Some(ExtendedClipboardMsg::Provide { formats_data, .. }) => {
+                assert!(formats_data.text.is_none());
+            }
+            other => panic!("expected bounded Provide result, got {:?}", other),
+        }
     }
 
     #[test]
