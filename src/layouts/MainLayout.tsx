@@ -105,6 +105,7 @@ import { getSessionNetworkSettings, toNetworkSettingsPayload } from "../lib/netw
 import { loadResizableLayout, saveResizableLayout } from "../lib/resizableLayout";
 import { parsePathMappings } from "../components/filebrowser/PathMappingsEditor";
 import { parseRdpOptions } from "../types/rdp";
+import { parseVncClientOptions } from "../types/vnc";
 import type { LocalShellSelection } from "../types";
 import { ChatDrawer } from "../components/chat/ChatDrawer";
 import { TaoRibbon } from "../components/tao/TaoRibbon";
@@ -121,6 +122,7 @@ import { listQueryTabs, setActiveQueryTab } from "../lib/queryRegistry";
 import { t as tr, useT } from "../lib/i18n";
 import { gitInitRepo, gitProbePath, gitRepoName } from "../lib/git";
 import { alertAppDialog, confirmAppDialog } from "../lib/appDialogs";
+import { vncCreateCredentialCapability } from "../lib/vnc";
 
 const VncPanel = lazy(() => import("../components/vnc/VncPanel"));
 const RdpPanel = lazy(() => import("../components/rdp/RdpPanel"));
@@ -1169,18 +1171,35 @@ export function MainLayout() {
   const openDetachedVnc = useCallback(
     (tabId: string, info: NonNullable<Tab["vnc"]>, title: string) => {
       const detachedId = `${tabId}__detached`;
-      const payload: DetachedVncParams = {
-        tabId,
-        sessionId: info.sessionId,
-        host: info.host,
-        port: info.port,
-        username: info.username ?? null,
-        password: info.password,
-        title,
+      const openWithCapability = (credentialCapability: string | null) => {
+        const payload: DetachedVncParams = {
+          tabId,
+          sessionId: info.sessionId,
+          host: info.host,
+          port: info.port,
+          username: info.username ?? null,
+          credentialCapability,
+          networkSettingsJson: info.networkSettingsJson ?? null,
+          clientOptions: info.clientOptions,
+          title,
+        };
+        openDetachedGenericWindow("vnc", tabId, detachedId, payload, title);
       };
-      openDetachedGenericWindow("vnc", tabId, detachedId, payload, title);
+      if (info.credentialCapability) {
+        openWithCapability(info.credentialCapability);
+        return;
+      }
+      void vncCreateCredentialCapability(info.password)
+        .then(openWithCapability)
+        .catch((error) => {
+          setStatusMessage(
+            tr("status.detachWindowError", {
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        });
     },
-    [openDetachedGenericWindow],
+    [openDetachedGenericWindow, setStatusMessage],
   );
 
   const openDetachedTerminal = useCallback(
@@ -1366,6 +1385,9 @@ export function MainLayout() {
               port: p.port,
               username: p.username ?? undefined,
               password: p.password,
+              credentialCapability: p.credentialCapability,
+              networkSettingsJson: p.networkSettingsJson ?? null,
+              clientOptions: p.clientOptions,
             },
           });
           setStatusMessage(tr("status.reattached"));
@@ -1660,6 +1682,7 @@ export function MainLayout() {
 
   const openVncTab = useCallback((session: SessionConfig, password?: string) => {
     const id = `vnc-${session.id}-${Date.now()}`;
+    const clientOptions = parseVncClientOptions(parseSessionOptions(session.options_json));
     addTab({
       id,
       type: "vnc",
@@ -1672,9 +1695,12 @@ export function MainLayout() {
         port: session.port,
         username: session.username,
         password,
+        networkSettingsJson: JSON.stringify(toNetworkSettingsPayload(getSessionNetworkSettings(session.options_json))),
+        clientOptions,
       },
     });
-  }, [addTab]);
+    void markConnected(session.id);
+  }, [addTab, markConnected]);
 
   const openRdpTab = useCallback((session: SessionConfig, password?: string) => {
     const id = `rdp-${session.id}-${Date.now()}`;
@@ -2591,13 +2617,20 @@ export function MainLayout() {
             openSshTab(session, authMethod, parsed.authData);
           }
         }
+      } else if (session.session_type === "VNC") {
+        if (session.auth_method === "Password") {
+          awaitingManualAuthRef.current = true;
+          setPendingAuth({ kind: "session", session });
+        } else {
+          openVncTab(session, parsed.authData ?? undefined);
+        }
       } else {
         openUnsupportedTab(session);
       }
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [openBrowserSession, openCommandTerminalTab, openLocalTab, openMailTab, openRdpTab, openSftpTab, openSshTab, openUnsupportedTab, setStatusMessage]);
+  }, [openBrowserSession, openCommandTerminalTab, openLocalTab, openMailTab, openRdpTab, openSftpTab, openSshTab, openUnsupportedTab, openVncTab, setStatusMessage]);
 
   const openPlaceholderTab = useCallback((title: string, message: string) => {
     addTab({
@@ -3915,6 +3948,9 @@ export function MainLayout() {
                           port={tab.vnc.port}
                           username={tab.vnc.username}
                           password={tab.vnc.password}
+                          credentialCapability={tab.vnc.credentialCapability}
+                          networkSettingsJson={tab.vnc.networkSettingsJson}
+                          clientOptions={tab.vnc.clientOptions}
                           visible={isActive}
                         />
                       </Suspense>

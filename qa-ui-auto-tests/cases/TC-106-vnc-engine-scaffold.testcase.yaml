@@ -1,21 +1,26 @@
 id: TC-106
-title: VNC RFB engine module is present in the build
+title: VNC production policy controls are available
 description: |
-  Coverage smoke for F9.1. Confirms that the VNC client modules
-  (src/lib/vnc, vncStore) are in the bundle by querying the page's
-  scripts; if the modules were tree-shaken away, this assertion fails.
-
-  Real RFB protocol testing requires a configured VNC server (no fixture
-  exists in our config), so this case is passive scaffolding only.
+  Coverage smoke for F9.1. Confirms the VNC protocol route exposes explicit
+  security, clipboard, shared/view-only and bounded reconnect controls. The
+  RFB handshake, security downgrade and decode behavior are covered by Rust
+  conformance tests rather than inferred from browser selectors.
 covers: [F9.1]
-tags: [smoke, p1, vnc, scaffolding-only]
+tags: [smoke, p1, vnc, security]
 modes: [browser]
 fixtures: [reset_db]
 timeout_sec: 20
 steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="sidebar"]'
-  - click: '[data-testid="session-new"]'
+  - click: '[data-testid="welcome-new-session"]'
   - wait_for: '[data-testid="session-editor"]'
-  - assert_visible: '[data-testid="session-proto-vnc"]'
+  - click: '[data-testid="session-proto-vnc"]'
+  - assert_visible: '[data-testid="vnc-client-options"]'
+  - select_option: { selector: '[data-testid="vnc-security-policy"]', value: require-encryption }
+  - select_option: { selector: '[data-testid="vnc-clipboard-policy"]', value: server-to-client }
+  - set_check: { selector: '[data-testid="vnc-shared"]', checked: false }
+  - set_check: { selector: '[data-testid="vnc-view-only"]', checked: true }
+  - set_check: { selector: '[data-testid="vnc-auto-reconnect"]', checked: false }
+  - fill: { selector: '[data-testid="vnc-reconnect-attempts"]', value: "0" }
   - screenshot: 106-vnc-engine-scaffold.png

@@ -93,6 +93,13 @@ import {
   type RdpOptions,
 } from "../../types/rdp";
 import {
+  parseVncClientOptions,
+  serializeVncClientOptions,
+  type VncClientOptions,
+  type VncClipboardPolicy,
+  type VncSecurityPolicy,
+} from "../../types/vnc";
+import {
   parseLocalShellOptions,
   serializeLocalShellOptions,
   type LocalShellOptions,
@@ -393,15 +400,18 @@ function Checkbox({
   checked,
   onChange,
   disabled,
+  testId,
 }: {
   checked: boolean;
   onChange?: (v: boolean) => void;
   disabled?: boolean;
+  testId?: string;
 }) {
   return (
     <input
       type="checkbox"
       className="taomni-checkbox"
+      data-testid={testId}
       data-checked={checked}
       checked={checked}
       disabled={disabled}
@@ -2533,6 +2543,11 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
   const [hbaseKrb5ConfPath, setHBaseKrb5ConfPath] = useState(() => optionString(initialOptions, "hbaseKrb5ConfPath", ""));
   const [hbaseSitePath, setHBaseSitePath] = useState(() => optionString(initialOptions, "hbaseSitePath", ""));
 
+  /* --- VNC client policy and recovery options --- */
+  const [vncOptions, setVncOptions] = useState<VncClientOptions>(() =>
+    parseVncClientOptions(initialOptions),
+  );
+
   /* --- proxy session options --- */
   const [proxyKind, setProxyKind] = useState<"http" | "socks5">(() => {
     const v = optionString(initialOptions, "proxyKind", "http");
@@ -2864,6 +2879,8 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
       proto === "RDP"
         ? (JSON.parse(serializeRdpOptions(rdpOptions)) as Record<string, unknown>)
         : {};
+    const vncOverrides: Record<string, unknown> =
+      proto === "VNC" ? serializeVncClientOptions(vncOptions) : {};
     const dbOverrides: Record<string, unknown> = isDb
       ? {
           dbDatabase,
@@ -2969,6 +2986,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
       ...(proto === "SFTP" ? { pathMappings } : {}),
       ...wslOverrides,
       ...rdpOverrides,
+      ...vncOverrides,
       ...dbOverrides,
       ...proxyOverrides,
       ...mailOverrides,
@@ -3423,6 +3441,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     setLocalShellOptions(parseLocalShellOptions(session?.options_json));
     setWslOptions(parseWslOptions(session?.options_json));
     setRdpOptions(parseRdpOptions(session?.options_json));
+    setVncOptions(parseVncClientOptions(nextOptions));
     setPathMappings(parsePathMappingsFromOptions(session?.options_json));
     const restoredMailProvider = initialMailProvider(nextOptions, session?.host);
     setMailProvider(restoredMailProvider);
@@ -4241,6 +4260,148 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
                   </div>
                 </>
               )}
+            </div>
+          </div>
+        )}
+
+        {proto === "VNC" && (
+          <div
+            data-testid="vnc-client-options"
+            className="px-4 py-3 border-b shrink-0"
+            style={{ borderColor: "var(--taomni-divider)" }}
+          >
+            <div
+              className="text-[12px] font-semibold mb-2 flex items-center gap-2"
+              style={{ color: "var(--taomni-accent)" }}
+            >
+              <Shield className="w-3.5 h-3.5" />
+              {t("sessionEditor2.vncOptionsTitle")}
+            </div>
+            <div className="grid grid-cols-12 gap-2 items-center">
+              <label className="col-span-2 text-[12px] text-right" htmlFor="vnc-security-policy">
+                {t("sessionEditor2.vncSecurityPolicy")}
+              </label>
+              <select
+                id="vnc-security-policy"
+                data-testid="vnc-security-policy"
+                className="taomni-input col-span-4"
+                value={vncOptions.securityPolicy}
+                onChange={(event) => setVncOptions((current) => ({
+                  ...current,
+                  securityPolicy: event.target.value as VncSecurityPolicy,
+                }))}
+              >
+                <option value="require-encryption">{t("sessionEditor2.vncSecurityRequire")}</option>
+                <option value="prefer-encryption">{t("sessionEditor2.vncSecurityPrefer")}</option>
+                <option value="legacy-compatible">{t("sessionEditor2.vncSecurityLegacy")}</option>
+                <option value="allow-none">{t("sessionEditor2.vncSecurityAllowNone")}</option>
+              </select>
+
+              <label className="col-span-2 text-[12px] text-right" htmlFor="vnc-clipboard-policy">
+                {t("sessionEditor2.vncClipboardPolicy")}
+              </label>
+              <select
+                id="vnc-clipboard-policy"
+                data-testid="vnc-clipboard-policy"
+                className="taomni-input col-span-4"
+                value={vncOptions.clipboardPolicy}
+                onChange={(event) => setVncOptions((current) => ({
+                  ...current,
+                  clipboardPolicy: event.target.value as VncClipboardPolicy,
+                }))}
+              >
+                <option value="disabled">{t("sessionEditor2.vncClipboardDisabled")}</option>
+                <option value="client-to-server">{t("sessionEditor2.vncClipboardClientToServer")}</option>
+                <option value="server-to-client">{t("sessionEditor2.vncClipboardServerToClient")}</option>
+                <option value="bidirectional">{t("sessionEditor2.vncClipboardBidirectional")}</option>
+              </select>
+
+              <div className="col-span-2" />
+              <div className="col-span-10 flex flex-wrap items-center gap-x-5 gap-y-2 text-[12px]">
+                <label className="flex items-center gap-1.5">
+                  <Checkbox
+                    testId="vnc-shared"
+                    checked={vncOptions.shared}
+                    onChange={(value) => setVncOptions((current) => ({ ...current, shared: value }))}
+                  />
+                  {t("sessionEditor2.vncShared")}
+                </label>
+                <label className="flex items-center gap-1.5">
+                  <Checkbox
+                    testId="vnc-view-only"
+                    checked={vncOptions.viewOnly}
+                    onChange={(value) => setVncOptions((current) => ({ ...current, viewOnly: value }))}
+                  />
+                  {t("sessionEditor2.vncViewOnly")}
+                </label>
+                <label className="flex items-center gap-1.5">
+                  <Checkbox
+                    testId="vnc-clipboard-html"
+                    checked={vncOptions.allowHtmlClipboard}
+                    onChange={(value) => setVncOptions((current) => ({
+                      ...current,
+                      allowHtmlClipboard: value,
+                    }))}
+                  />
+                  {t("sessionEditor2.vncClipboardHtml")}
+                </label>
+                <label className="flex items-center gap-1.5">
+                  <Checkbox
+                    testId="vnc-clipboard-rtf"
+                    checked={vncOptions.allowRtfClipboard}
+                    onChange={(value) => setVncOptions((current) => ({
+                      ...current,
+                      allowRtfClipboard: value,
+                    }))}
+                  />
+                  {t("sessionEditor2.vncClipboardRtf")}
+                </label>
+                <label className="flex items-center gap-1.5">
+                  <Checkbox
+                    testId="vnc-auto-reconnect"
+                    checked={vncOptions.autoReconnect}
+                    onChange={(value) => setVncOptions((current) => ({
+                      ...current,
+                      autoReconnect: value,
+                    }))}
+                  />
+                  {t("sessionEditor2.vncAutoReconnect")}
+                </label>
+                <label className="flex items-center gap-1.5">
+                  {t("sessionEditor2.vncReconnectAttempts")}
+                  <input
+                    data-testid="vnc-reconnect-attempts"
+                    className="taomni-input w-16"
+                    type="number"
+                    min={0}
+                    max={10}
+                    value={vncOptions.maxReconnectAttempts}
+                    onChange={(event) => setVncOptions((current) => ({
+                      ...current,
+                      maxReconnectAttempts: Math.max(
+                        0,
+                        Math.min(10, Number.parseInt(event.target.value, 10) || 0),
+                      ),
+                    }))}
+                  />
+                </label>
+                <label className="flex items-center gap-1.5">
+                  {t("sessionEditor2.vncClipboardLimit")}
+                  <select
+                    data-testid="vnc-clipboard-limit"
+                    className="taomni-input w-24"
+                    value={vncOptions.maxClipboardBytes}
+                    onChange={(event) => setVncOptions((current) => ({
+                      ...current,
+                      maxClipboardBytes: Number.parseInt(event.target.value, 10),
+                    }))}
+                  >
+                    <option value={1024 * 1024}>1 MiB</option>
+                    <option value={4 * 1024 * 1024}>4 MiB</option>
+                    <option value={16 * 1024 * 1024}>16 MiB</option>
+                  </select>
+                </label>
+              </div>
             </div>
           </div>
         )}

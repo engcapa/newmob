@@ -1,0 +1,15 @@
+id: TC-117
+title: Linux WebKitGTK launches the VNC-capable desktop bundle
+description: |
+  Native Linux release-path smoke for F9.6. tauri-driver starts the compiled
+  Tauri binary through WebKitWebDriver and captures the first WebKitGTK frame.
+  Protocol pixels, input and system clipboard remain covered by QEMU/Rust and
+  the documented X11/Wayland real-machine matrix.
+covers: [F9.6]
+tags: [smoke, p0, vnc, linux, webkitgtk]
+modes: [native]
+fixtures: []
+timeout_sec: 45
+steps:
+  - open: ${cfg.app.base_url}
+  - screenshot: 117-vnc-linux-webkitgtk.png

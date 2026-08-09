@@ -36,6 +36,7 @@ import {
 } from "../../lib/detachedSession";
 import { closeCurrentDetachedWindow } from "../../lib/detachWindowing";
 import type { RdpOptions } from "../../types/rdp";
+import type { VncClientOptions } from "../../types/vnc";
 import type { DbConnectInfo, Tab, TabKind } from "../../types";
 import type { TerminalProfile } from "../../lib/terminalProfile";
 import type { CommandTerminalConnectInfo, SshConnectInfo } from "../terminal/TerminalPanel";
@@ -80,6 +81,9 @@ export interface DetachedVncParams {
   port: number;
   username?: string | null;
   password?: string;
+  credentialCapability?: string | null;
+  networkSettingsJson?: string | null;
+  clientOptions?: VncClientOptions;
   title?: string;
 }
 
@@ -532,6 +536,9 @@ function renderInner(
             port={p.port}
             username={p.username ?? undefined}
             password={p.password}
+            credentialCapability={p.credentialCapability}
+            networkSettingsJson={p.networkSettingsJson ?? null}
+            clientOptions={p.clientOptions}
             visible
             detachedWindowControls={detachedWindowControls}
           />

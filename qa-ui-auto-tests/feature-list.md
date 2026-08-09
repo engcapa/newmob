@@ -267,6 +267,9 @@ controls:
   - id: new-session-card
     selector: 'text="New session…"'
     kind: interactive
+  - id: new-session-button
+    selector: '[data-testid="welcome-new-session"]'
+    kind: interactive
   - id: recent-sessions-panel
     selector: '[data-testid="welcome-recent-sessions"]'
     kind: display
@@ -1146,6 +1149,10 @@ controls:
   - id: sidebar
     selector: '[data-testid="sidebar"]'
     kind: display
+  - id: side-tab-sessions
+    selector: '[data-testid="side-tab-sessions"]'
+    kind: interactive
+    optional: true       # compact rail entry when the main sidebar is collapsed
   - id: session-tree
     selector: '[data-testid="session-tree"]'
     kind: display
@@ -2048,27 +2055,29 @@ controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas su
 - 本地动态端口 WebSocket relay：VNC server ↔ 前端 Canvas（前端不再直接持有 TCP 套接字）
 
 ### 9.2 RFB 握手与认证 ✅
-- 安全类型：None、VNC password、RealVNC RA2 / RA2ne（128 / 256 位 AES）
+- 安全类型：VNC password、RealVNC RA2 / RA2ne（128 / 256 位 AES）；None 默认拒绝，仅 `allow-none` 显式策略允许
 - RA2 子模式：USER_PASS、PASS-only；公钥位长度合法性校验（1024–8192 bit）
+- 安全类型按强度选择，连接状态展示实际 RFB 版本、认证类型与传输是否加密
 
 ### 9.3 编码与画面 ✅
 - 解码器：Raw（0）、CopyRect（1）、Hextile（5）、ZRLE（16，单一持久 zlib 流）
-- 伪编码：DesktopSize（-223）+ 自动 SetDesktopSize 回写，远端分辨率切换不掉线
+- 伪编码：DesktopSize（-223），后端通过带 frame id 的 resize 消息原子同步前端；未声明支持 client SetDesktopSize
 - ZRLE 单 zlib 状态贯穿整个 session，已修复历史的 "zrle: eof cpixel" 间歇性断连
 - 像素格式 `set_pixel_format_rgba()` 协商成 little-endian RGBA，前端按位图直接渲染
 - Tight 编码暂未启用（解码器尚未 RFC-conformant，避免 stream 失步）
+- FramebufferUpdate 以逻辑帧批处理，rendered ACK 在 Canvas 实际绘制后发送；慢消费者只保留最新帧，丢帧后请求全量恢复
 
 ### 9.4 ExtendedClipboard 互通 ✅
 - 实现 ExtendedClipboard 伪编码（`0xC0A1E5CE` + 旧 draft 值 `-1063` 双广告兼容）
 - 支持 actions：caps / request / peek / notify / provide
 - 支持 formats：text (UTF-8)、HTML、RTF（zlib 压缩）
 - 老服务器（vino 等）回落 legacy `ServerCutText / ClientCutText` 路径，并已修复中文剪贴板丢失 / Windows 11 端到端粘贴乱码 / 非 ASCII 粘贴丢失等回归
-- 前端 ↔ 后端剪贴板桥：`vncStore` 协调，文本/HTML/RTF 选择性传输
+- 前端 ↔ 后端剪贴板桥：四向策略、单格式大小上限和 HTML/RTF 显式开关均由 relay 强制执行
 
 ### 9.5 输入处理 ✅
 - 鼠标：左/中/右键、滚轮、拖拽（pointer capture）
-- 键盘：包含 RealVNC 输入修复，组合键正确转发
-- 剪贴板：双向同步，自动切换 Extended / Legacy
+- 键盘：左右修饰键、AltGr、数字键盘、锁定键、F1-F24、失焦全释放；view-only 前后端双重阻止输入
+- 剪贴板：disabled / 单向 / 双向同步，自动切换 Extended / Legacy
 
 ### 9.6 前端 `VncPanel` ✅
 
@@ -2079,6 +2088,7 @@ area: vnc
 components: [VncPanel, FloatingToolbar, CaptureToolbar]
 files:
   - src/components/vnc/VncPanel.tsx
+  - src/components/session/SessionEditor.tsx
 controls:
   - id: panel-root
     selector: '[data-testid="vnc-panel"]'
@@ -2100,6 +2110,40 @@ controls:
     selector: '[data-testid="vnc-reconnect"]'
     kind: interactive
     optional: true          # only on disconnected/error state
+  - id: security-status
+    selector: '[data-testid="vnc-connection-security"]'
+    kind: display
+    optional: true
+  - id: client-options
+    selector: '[data-testid="vnc-client-options"]'
+    kind: display
+  - id: security-policy
+    selector: '[data-testid="vnc-security-policy"]'
+    kind: interactive
+  - id: clipboard-policy
+    selector: '[data-testid="vnc-clipboard-policy"]'
+    kind: interactive
+  - id: shared
+    selector: '[data-testid="vnc-shared"]'
+    kind: interactive
+  - id: view-only
+    selector: '[data-testid="vnc-view-only"]'
+    kind: interactive
+  - id: clipboard-html
+    selector: '[data-testid="vnc-clipboard-html"]'
+    kind: interactive
+  - id: clipboard-rtf
+    selector: '[data-testid="vnc-clipboard-rtf"]'
+    kind: interactive
+  - id: auto-reconnect
+    selector: '[data-testid="vnc-auto-reconnect"]'
+    kind: interactive
+  - id: reconnect-attempts
+    selector: '[data-testid="vnc-reconnect-attempts"]'
+    kind: interactive
+  - id: clipboard-limit
+    selector: '[data-testid="vnc-clipboard-limit"]'
+    kind: interactive
 -->
 
 - Canvas 画面渲染 + fit / 1:1 缩放
@@ -2107,8 +2151,11 @@ controls:
 - 内嵌 `CaptureToolbar`：可见区域 PNG / 全帧 PNG / GIF 录制（与终端共用截图链路）
 - 断开提示 + Reconnect、错误分类（区分用户主动断开 / 服务端断开 / 网络异常）
 - 保存的 VNC 会话可从会话树双击连接，密码场景复用 `AuthPrompt`
+- `vnc://` QuickConnect 与保存会话共用 VNC panel、认证和网络链路
 - VNC tab 常驻挂载，切换标签时连接不主动销毁
-- 已修复 VNC 剪贴板与输入延迟、Windows 11 上的 client→server 文本粘贴
+- 可配置 security/shared/view-only/clipboard/HTML/RTF/大小限制/有限自动重连；旧连接回调不能覆盖重连后的新会话状态
+- detach 仅持久化 256-bit 内存 capability，不把 VNC password 或 vault ref 写入 localStorage
+- TC-117 提供 Linux WebKitGTK/Tauri debug bundle 启动截图 smoke；真实 RFB pixels/input/clipboard 仍由 native fixture 与人工矩阵验证
 
 ### 9.7 RDP client（IronRDP 0.17）🟡
 
@@ -2225,8 +2272,8 @@ controls:
 - **e2e 测试限制**：浏览器预览模式无法 spawn `wsl.exe`，且发行版探测受 Windows 门控，TC-112 仅验证表单挂载 / 自由文本回落 / 保存往返，真实启动需 Windows 手动回归
 
 ### 9.9 已知限制
-- QuickConnect 的 VNC URL 尚未接入主流程（已保存的 VNC 会话连接路径不受影响）
 - 浏览器预览模式没有 VNC stub（仅 Tauri 桌面下可用）
+- 当前不支持 VeNCrypt/TLS、Tight/JPEG、client SetDesktopSize；传统 VNCAuth 仅应在可信网络或 SSH tunnel 中使用
 
 ---
 
@@ -4932,5 +4979,4 @@ controls:
 >
 > - Ribbon `Tools`（除 Tunneling 之外的网络工具）
 > - Ribbon `Packages`、`Macros`
-> - QuickConnect 的 VNC URL 入口（已保存 VNC 会话可连接，QuickConnect 尚未接入 VNC client）
 > - SFTP 底部的 "Cross-host transfer (remote ↔ remote)" 按钮（disabled 占位）

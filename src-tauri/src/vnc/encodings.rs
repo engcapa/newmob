@@ -1,6 +1,10 @@
 use flate2::{Decompress, FlushDecompress};
 use std::io::Read;
 
+const MAX_ZRLE_COMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_ZRLE_INFLATED_BYTES: usize = 128 * 1024 * 1024;
+const ZRLE_INFLATE_CHUNK_BYTES: usize = 64 * 1024;
+
 /// A decoded framebuffer rectangle, in destination RGBA32.
 ///
 /// `Copy` rectangles are resolved against the framebuffer inside the decoder,
@@ -278,6 +282,12 @@ pub fn read_zrle<R: Read>(
     dec: &mut ZrleDecoder,
 ) -> Result<Vec<DecodedRect>, String> {
     let zlib_len = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))? as usize;
+    if zlib_len > MAX_ZRLE_COMPRESSED_BYTES {
+        return Err(format!(
+            "zrle: compressed payload {} exceeds {} bytes",
+            zlib_len, MAX_ZRLE_COMPRESSED_BYTES
+        ));
+    }
     let mut compressed = vec![0u8; zlib_len];
     r.read_exact(&mut compressed)
         .map_err(|e| format!("zrle: body: {}", e))?;
@@ -297,7 +307,16 @@ pub fn read_zrle<R: Read>(
     let mut src_consumed = 0usize;
     loop {
         let current_len = dec.buf.len();
-        dec.buf.resize(current_len + 64 * 1024, 0);
+        let next_len = current_len
+            .checked_add(ZRLE_INFLATE_CHUNK_BYTES)
+            .ok_or_else(|| "zrle: inflate buffer size overflow".to_string())?;
+        if next_len > MAX_ZRLE_INFLATED_BYTES {
+            return Err(format!(
+                "zrle: inflated payload exceeds {} bytes",
+                MAX_ZRLE_INFLATED_BYTES
+            ));
+        }
+        dec.buf.resize(next_len, 0);
 
         let input_slice: &[u8] = if src_consumed < compressed.len() {
             &compressed[src_consumed..]
@@ -518,7 +537,9 @@ fn read_zrle_run_length(buf: &[u8], pos: &mut usize) -> Result<usize, String> {
             .get(*pos)
             .ok_or_else(|| "zrle: eof run length".to_string())?;
         *pos += 1;
-        total += b as usize;
+        total = total
+            .checked_add(b as usize)
+            .ok_or_else(|| "zrle: run length overflow".to_string())?;
         if b != 255 {
             return Ok(total);
         }
@@ -560,7 +581,7 @@ mod tests {
     fn hextile_raw_subencoding_reads_exact_bytes() {
         let mut payload = vec![HEXTILE_RAW]; // subenc byte
         payload.extend_from_slice(&[255, 0, 0, 0, 0, 255, 0, 0]); // 2 pixels
-                                                                  // 2x1 rect, exactly one tile
+        // 2x1 rect, exactly one tile
         let mut cur = Cursor::new(&payload);
         let mut st = HextileState::new();
         let out = read_hextile(&mut cur, 0, 0, 2, 1, &mut st).unwrap();
@@ -597,8 +618,8 @@ mod tests {
 
     #[test]
     fn zrle_solid_tile_with_persistent_stream() {
-        use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        use flate2::write::ZlibEncoder;
         use std::io::Write;
 
         // One 64x64 ZRLE tile, subenc=1 (solid), CPIXEL = [R,G,B] = [255,0,0].
@@ -624,8 +645,8 @@ mod tests {
 
     #[test]
     fn zrle_plain_rle_with_run_length_continuation() {
-        use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        use flate2::write::ZlibEncoder;
         use std::io::Write;
 
         // subenc=128, colour = green (0,255,0), run length = 1 + 255 + 0 = 256
@@ -704,6 +725,17 @@ mod tests {
         let out2 = read_zrle(&mut cur2, 0, 64, 64, 64, &mut dec).unwrap();
         let DecodedRect::Pixels { rgba, .. } = &out2[0];
         assert_eq!(rgba[0..4], [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn zrle_rejects_compressed_payload_before_allocating() {
+        let mut wire = ((MAX_ZRLE_COMPRESSED_BYTES as u32) + 1)
+            .to_be_bytes()
+            .to_vec();
+        wire.extend_from_slice(&[0; 4]);
+        let err = read_zrle(&mut &wire[..], 0, 0, 1, 1, &mut ZrleDecoder::new())
+            .expect_err("oversized compressed payload must be rejected");
+        assert!(err.contains("compressed payload"));
     }
 
     #[test]

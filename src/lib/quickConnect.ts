@@ -133,7 +133,9 @@ export function parseQuickConnectInput(input: string): ParsedQuickConnect {
   const port = sessionType === "Serial" ? 0 : (parsed.port ?? DEFAULT_PORTS[sessionType] ?? 22);
   const username = parsed.username ?? (sessionType === "SSH" || sessionType === "SFTP" ? "root" : null);
   const authMethod: AuthMethod =
-    sessionType === "SSH" || sessionType === "RDP" || sessionType === "Mail" ? "Password" : "None";
+    sessionType === "SSH" || sessionType === "RDP" || sessionType === "VNC" || sessionType === "Mail"
+      ? "Password"
+      : "None";
   const titlePrefix = username ? `${username}@` : "";
   const optionsJson = sessionType === "Mail"
     ? JSON.stringify({
