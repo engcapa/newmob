@@ -6670,6 +6670,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "openssl-src"
+version = "300.6.1+3.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "openssl-sys"
 version = "0.9.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6677,6 +6686,7 @@ checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
 dependencies = [
  "cc",
  "libc",
+ "openssl-src",
  "pkg-config",
  "vcpkg",
 ]
@@ -10320,6 +10330,7 @@ dependencies = [
  "objc2-screen-capture-kit",
  "objc2-video-toolbox",
  "openh264",
+ "openssl",
  "oracle",
  "pbkdf2",
  "pipewire",
@@ -10373,6 +10384,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-opengauss",
+ "tokio-openssl",
  "tokio-rustls 0.26.4",
  "tokio-tungstenite",
  "tokio-util 0.7.18",
@@ -11099,6 +11111,17 @@ dependencies = [
  "socket2 0.4.10",
  "tokio",
  "tokio-util 0.6.10",
+]
+
+[[package]]
+name = "tokio-openssl"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "59df6849caa43bb7567f9a36f863c447d95a11d5903c9cc334ba32576a27eadd"
+dependencies = [
+ "openssl",
+ "openssl-sys",
+ "tokio",
 ]
 
 [[package]]

@@ -38,6 +38,12 @@ impl VncError {
             ("dns-failed", VncStage::Dns, true)
         } else if lower.contains("proxy") || lower.contains("jump host") {
             ("network-route-failed", VncStage::Proxy, true)
+        } else if lower.contains("authentication timed out") {
+            ("authentication-timeout", VncStage::Authentication, true)
+        } else if lower.contains("security negotiation timed out") {
+            ("security-timeout", VncStage::Security, true)
+        } else if lower.contains("vnc tls") {
+            ("tls-failed", VncStage::Security, false)
         } else if lower.contains("vencrypt/tls")
             || (lower.contains("security policy") && lower.contains("unavailable"))
         {
@@ -113,5 +119,28 @@ mod tests {
     fn bounds_error_messages() {
         assert!(VncError::classify("x".repeat(3000)).message.len() <= 2051);
         assert!(VncError::classify("中".repeat(1000)).message.len() <= 2051);
+    }
+
+    #[test]
+    fn authentication_timeout_is_retryable_and_stage_specific() {
+        let error = VncError::classify(
+            "VNC authentication timed out while waiting for the security result",
+        );
+        assert_eq!(error.code, "authentication-timeout");
+        assert_eq!(error.stage, VncStage::Authentication);
+        assert!(error.retryable);
+    }
+
+    #[test]
+    fn tls_and_security_timeouts_have_security_stage_errors() {
+        let timeout = VncError::classify("VNC security negotiation timed out");
+        assert_eq!(timeout.code, "security-timeout");
+        assert_eq!(timeout.stage, VncStage::Security);
+        assert!(timeout.retryable);
+
+        let tls = VncError::classify("VNC TLS handshake failed: no shared cipher");
+        assert_eq!(tls.code, "tls-failed");
+        assert_eq!(tls.stage, VncStage::Security);
+        assert!(!tls.retryable);
     }
 }

@@ -15,6 +15,7 @@ const SEC_TYPE_NONE: u8 = 1;
 const SEC_TYPE_VNC_AUTH: u8 = 2;
 const SEC_TYPE_RA2_128: u8 = 5;
 const SEC_TYPE_RA2NE_128: u8 = 6;
+pub(crate) const SEC_TYPE_ANONYMOUS_TLS: u8 = 18;
 const SEC_TYPE_RA2_256: u8 = 129;
 const SEC_TYPE_RA2NE_256: u8 = 130;
 
@@ -23,6 +24,43 @@ const RA2_SUBTYPE_PASS: u8 = 2;
 const RA2_MIN_KEY_BITS: usize = 1024;
 const RA2_MAX_KEY_BITS: usize = 8192;
 const RA2_AES_FRAME_MAX: usize = 8192;
+
+pub(crate) fn negotiate_protocol_version(
+    server_banner: &[u8; 12],
+) -> Result<([u8; 12], u8), String> {
+    if &server_banner[..4] != b"RFB " || server_banner[11] != b'\n' {
+        return Err(format!(
+            "invalid RFB version: {:?}",
+            String::from_utf8_lossy(server_banner)
+        ));
+    }
+
+    let major: u32 = std::str::from_utf8(&server_banner[4..7])
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3);
+    let minor: u32 = std::str::from_utf8(&server_banner[8..11])
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(3);
+
+    let (reply, negotiated_minor) = if major > 3 || minor >= 8 {
+        (*b"RFB 003.008\n", 8)
+    } else if minor >= 7 {
+        (*b"RFB 003.007\n", 7)
+    } else {
+        (*b"RFB 003.003\n", 3)
+    };
+    Ok((reply, negotiated_minor))
+}
+
+fn authentication_read_error(action: &str, error: Error) -> String {
+    if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) {
+        format!("VNC authentication timed out while {action}")
+    } else {
+        format!("VNC authentication failed while {action}: {error}")
+    }
+}
 
 #[derive(Debug)]
 pub struct ServerInit {
@@ -41,12 +79,20 @@ pub struct RfbConnection {
     pub framebuffer: Vec<u8>,
     limits: DecodeLimits,
     security_policy: VncSecurityPolicy,
+    pending_security: Option<PendingSecurity>,
+    outer_security_type: Option<u8>,
     /// Negotiated protocol minor version (3, 7, or 8).
     proto_minor: u8,
     /// Hextile bg/fg carry across tiles per the RFB spec.
     hextile_state: HextileState,
     /// ZRLE uses a single zlib stream for the whole session.
     zrle_decoder: ZrleDecoder,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PendingSecurity {
+    V33(u32),
+    Selected(u8),
 }
 
 pub struct RfbWriter {
@@ -92,6 +138,47 @@ impl RfbConnection {
         security_policy: VncSecurityPolicy,
         limits: DecodeLimits,
     ) -> Result<Self, String> {
+        let mut conn = Self::new_stream(stream, timeout, limits, security_policy, 8, None, None)?;
+
+        conn.handshake_protocol_version()?;
+        Ok(conn)
+    }
+
+    pub(crate) fn from_negotiated_stream(
+        stream: TcpStream,
+        timeout: Duration,
+        security_policy: VncSecurityPolicy,
+        limits: DecodeLimits,
+        proto_minor: u8,
+        pending_security: Option<PendingSecurity>,
+        outer_security_type: Option<u8>,
+    ) -> Result<Self, String> {
+        Self::new_stream(
+            stream,
+            timeout,
+            limits,
+            security_policy,
+            proto_minor,
+            pending_security,
+            outer_security_type,
+        )
+    }
+
+    fn new_stream(
+        stream: TcpStream,
+        timeout: Duration,
+        limits: DecodeLimits,
+        security_policy: VncSecurityPolicy,
+        proto_minor: u8,
+        pending_security: Option<PendingSecurity>,
+        outer_security_type: Option<u8>,
+    ) -> Result<Self, String> {
+        // Tokio's `TcpStream::into_std` intentionally preserves nonblocking
+        // mode. The RFB decoder is synchronous, so restore blocking semantics
+        // before applying bounded socket timeouts.
+        stream
+            .set_nonblocking(false)
+            .map_err(|e| format!("set blocking mode failed: {}", e))?;
         stream
             .set_read_timeout(Some(timeout))
             .map_err(|e| format!("set read timeout failed: {}", e))?;
@@ -102,7 +189,7 @@ impl RfbConnection {
             .set_nodelay(true)
             .map_err(|e| format!("set_nodelay failed: {}", e))?;
 
-        let mut conn = RfbConnection {
+        Ok(Self {
             stream,
             secure_io: None,
             width: 0,
@@ -112,17 +199,37 @@ impl RfbConnection {
             framebuffer: Vec::new(),
             limits,
             security_policy,
-            proto_minor: 8,
+            pending_security,
+            outer_security_type,
+            proto_minor,
             hextile_state: HextileState::new(),
             zrle_decoder: ZrleDecoder::new(),
-        };
-
-        conn.handshake_protocol_version()?;
-        Ok(conn)
+        })
     }
 
     pub fn protocol_version(&self) -> String {
         format!("3.{}", self.proto_minor)
+    }
+
+    pub fn security_label(&self) -> String {
+        let inner = self
+            .security_type
+            .and_then(crate::vnc::policy::security_type_kind)
+            .map(|kind| kind.label())
+            .unwrap_or("Unknown");
+        if self.outer_security_type == Some(SEC_TYPE_ANONYMOUS_TLS) {
+            format!("TLS (anonymous) + {inner}")
+        } else {
+            inner.to_string()
+        }
+    }
+
+    pub fn encrypted(&self) -> bool {
+        self.outer_security_type == Some(SEC_TYPE_ANONYMOUS_TLS)
+            || self
+                .security_type
+                .and_then(crate::vnc::policy::security_type_kind)
+                .is_some_and(|kind| kind.encrypted())
     }
 
     pub fn shutdown_handle(&self) -> Result<TcpStream, String> {
@@ -138,36 +245,11 @@ impl RfbConnection {
         self.read_exact(&mut buf)
             .map_err(|e| format!("read protocol version: {}", e))?;
 
-        if &buf[..4] != b"RFB " || buf[11] != b'\n' {
-            return Err(format!(
-                "invalid RFB version: {:?}",
-                String::from_utf8_lossy(&buf)
-            ));
-        }
-
-        // Parse "RFB MMM.NNN\n": major = buf[4..7], minor = buf[8..11]
-        let major: u32 = std::str::from_utf8(&buf[4..7])
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3);
-        let minor: u32 = std::str::from_utf8(&buf[8..11])
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(3);
-
-        // Any major > 3 (e.g. 4.x, 5.x) is a modern server — negotiate 3.8.
-        // Within major 3: use the highest version we support (3.8 > 3.7 > 3.3).
-        let (reply, negotiated_minor) = if major > 3 || minor >= 8 {
-            (b"RFB 003.008\n" as &[u8], 8u8)
-        } else if minor >= 7 {
-            (b"RFB 003.007\n" as &[u8], 7u8)
-        } else {
-            (b"RFB 003.003\n" as &[u8], 3u8)
-        };
+        let (reply, negotiated_minor) = negotiate_protocol_version(&buf)?;
 
         self.proto_minor = negotiated_minor;
 
-        self.write_all(reply)
+        self.write_all(&reply)
             .map_err(|e| format!("write protocol version: {}", e))?;
         self.flush().map_err(|e| format!("flush: {}", e))?;
 
@@ -190,45 +272,29 @@ impl RfbConnection {
         policy: VncSecurityPolicy,
     ) -> Result<ServerInit, String> {
         self.security_policy = policy;
-        // RFB 3.3: server dictates the security type directly as a u32
+        if matches!(self.pending_security, Some(PendingSecurity::V33(_))) {
+            let Some(PendingSecurity::V33(sec_type)) = self.pending_security.take() else {
+                unreachable!();
+            };
+            return self.authenticate_v33_with_policy(password, policy, Some(sec_type));
+        }
+        // RFB 3.3: server dictates the security type directly as a u32.
         if self.proto_minor <= 3 {
-            return self.authenticate_v33_with_policy(password, policy);
+            return self.authenticate_v33_with_policy(password, policy, None);
         }
 
-        // RFB 3.7 / 3.8: server sends a list of security types
-        let mut sec_buf = [0u8; 1];
-        self.read_exact(&mut sec_buf)
-            .map_err(|e| format!("read security types count: {}", e))?;
-
-        let num_types = sec_buf[0] as usize;
-
-        if num_types == 0 {
-            let mut len_buf = [0u8; 4];
-            self.read_exact(&mut len_buf)
-                .map_err(|e| format!("read sec failure len: {}", e))?;
-            let reason_len = u32::from_be_bytes(len_buf) as usize;
-            if reason_len > self.limits.max_reason_bytes {
-                return Err("VNC failure reason exceeds configured limit".into());
-            }
-            let mut reason = vec![0u8; reason_len];
-            self.read_exact(&mut reason)
-                .map_err(|e| format!("read sec failure reason: {}", e))?;
-            return Err(format!(
-                "server rejected connection: {}",
-                String::from_utf8_lossy(&reason)
-            ));
-        }
-
-        let mut types = vec![0u8; num_types];
-        self.read_exact(&mut types)
-            .map_err(|e| format!("read security types: {}", e))?;
-
-        let chosen = self.security_policy.choose(&types).map_err(|e| e.0)?;
+        let (chosen, write_selection) = match self.pending_security.take() {
+            Some(PendingSecurity::Selected(chosen)) => (chosen, false),
+            Some(PendingSecurity::V33(_)) => unreachable!(),
+            None => (self.read_and_choose_security_type()?, true),
+        };
         self.security_type = Some(chosen);
 
-        self.write_all(&[chosen])
-            .map_err(|e| format!("write security type: {}", e))?;
-        self.flush().map_err(|e| format!("flush: {}", e))?;
+        if write_selection {
+            self.write_all(&[chosen])
+                .map_err(|e| format!("write security type: {}", e))?;
+            self.flush().map_err(|e| format!("flush: {}", e))?;
+        }
 
         match chosen {
             SEC_TYPE_NONE => {} // None — no auth
@@ -247,7 +313,7 @@ impl RfbConnection {
         if self.proto_minor >= 8 || chosen != 1 {
             let mut result_buf = [0u8; 4];
             self.read_exact(&mut result_buf)
-                .map_err(|e| format!("read security result: {}", e))?;
+                .map_err(|e| authentication_read_error("waiting for the security result", e))?;
             let result = u32::from_be_bytes(result_buf);
             if result != 0 {
                 // 3.8 sends a reason string; 3.7 does not
@@ -283,16 +349,51 @@ impl RfbConnection {
         self.read_server_init()
     }
 
+    fn read_and_choose_security_type(&mut self) -> Result<u8, String> {
+        let mut sec_buf = [0u8; 1];
+        self.read_exact(&mut sec_buf)
+            .map_err(|e| authentication_read_error("reading the security type count", e))?;
+
+        let num_types = sec_buf[0] as usize;
+        if num_types == 0 {
+            let mut len_buf = [0u8; 4];
+            self.read_exact(&mut len_buf)
+                .map_err(|e| authentication_read_error("reading the rejection reason", e))?;
+            let reason_len = u32::from_be_bytes(len_buf) as usize;
+            if reason_len > self.limits.max_reason_bytes {
+                return Err("VNC failure reason exceeds configured limit".into());
+            }
+            let mut reason = vec![0u8; reason_len];
+            self.read_exact(&mut reason)
+                .map_err(|e| authentication_read_error("reading the rejection reason", e))?;
+            return Err(format!(
+                "server rejected connection: {}",
+                String::from_utf8_lossy(&reason)
+            ));
+        }
+
+        let mut types = vec![0u8; num_types];
+        self.read_exact(&mut types)
+            .map_err(|e| authentication_read_error("reading the security types", e))?;
+        self.security_policy.choose(&types).map_err(|e| e.0)
+    }
+
     /// RFB 3.3 security handshake: server sends a u32 security type, no client choice.
     fn authenticate_v33_with_policy(
         &mut self,
         password: Option<&str>,
         policy: VncSecurityPolicy,
+        pending_security_type: Option<u32>,
     ) -> Result<ServerInit, String> {
-        let mut buf = [0u8; 4];
-        self.read_exact(&mut buf)
-            .map_err(|e| format!("read v3.3 security type: {}", e))?;
-        let sec_type = u32::from_be_bytes(buf);
+        let sec_type = match pending_security_type {
+            Some(value) => value,
+            None => {
+                let mut buf = [0u8; 4];
+                self.read_exact(&mut buf)
+                    .map_err(|e| authentication_read_error("reading the security type", e))?;
+                u32::from_be_bytes(buf)
+            }
+        };
         if sec_type == 1 && !policy.allows_v33_none() {
             return Err(
                 "server offers unauthenticated VNC; enable allow-none explicitly to continue"
@@ -319,7 +420,7 @@ impl RfbConnection {
                 // SecurityResult
                 let mut result_buf = [0u8; 4];
                 self.read_exact(&mut result_buf)
-                    .map_err(|e| format!("read v3.3 security result: {}", e))?;
+                    .map_err(|e| authentication_read_error("waiting for the security result", e))?;
                 let result = u32::from_be_bytes(result_buf);
                 if result != 0 {
                     return Err(format!("authentication failed (result={})", result));
@@ -338,7 +439,7 @@ impl RfbConnection {
     fn vnc_auth_des(&mut self, password: &str) -> Result<(), String> {
         let mut challenge = [0u8; 16];
         self.read_exact(&mut challenge)
-            .map_err(|e| format!("read VNC challenge: {}", e))?;
+            .map_err(|e| authentication_read_error("reading the VNC challenge", e))?;
 
         let response = vnc_des_encrypt(password, &challenge);
 

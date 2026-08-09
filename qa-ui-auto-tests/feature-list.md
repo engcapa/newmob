@@ -2042,14 +2042,16 @@ files:
 controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas surface is owned by F9.6
 -->
 
-- Rust 端 VNC 模块：`src-tauri/src/vnc/{mod,rfb,ws,encodings,clipboard,error,limits,policy,queue}.rs`
+- Rust 端 VNC 模块：`src-tauri/src/vnc/{mod,rfb,tls,ws,encodings,clipboard,error,limits,policy,queue}.rs`
 - Tauri 命令：`vnc_connect / vnc_disconnect / vnc_test_connection / vnc_create_detach_claim / vnc_consume_detach_claim`
 - 本地动态端口 WebSocket relay：VNC server ↔ 前端 Canvas（前端不再直接持有 TCP 套接字）
 
 ### 9.2 RFB 握手与认证 ✅
-- 安全类型：None（仅显式 `allow-none`）、VNC password、RealVNC RA2 / RA2ne（128 / 256 位 AES）
+- 安全类型：None（仅显式 `allow-none`）、VNC password、RFB 18 anonymous TLS + 内层安全协商、RealVNC RA2 / RA2ne（128 / 256 位 AES）
 - RA2 子模式：USER_PASS、PASS-only；公钥位长度合法性校验（1024–8192 bit）
-- `RequireEncryption` 在没有 VeNCrypt/TLS 实现时 fail closed，并返回 `security-policy-unsupported`；RA2 提供加密但不验证服务器证书身份
+- TCP 建连使用独立 15 秒 deadline；RFB 安全协商和认证使用 45 秒 timeout，支持服务端认证限速/延迟，并将超时标记为可重试的 authentication/security 阶段错误
+- Tokio socket 交给同步 RFB 解码器前恢复 blocking mode，避免 `WouldBlock` 被误报为认证超时
+- RFB 18 TLS 使用匿名密码套件，能够加密传输但不验证服务器身份；`RequireEncryption` 继续 fail closed，VeNCrypt/X509 TLS 和证书校验仍未实现
 
 ### 9.3 编码与画面 ✅
 - 解码器：Raw（0）、CopyRect（1）、Hextile（5）、ZRLE（16，单一持久 zlib 流）
@@ -2125,7 +2127,7 @@ controls:
 - VNC tab 常驻挂载，切换标签时连接不主动销毁
 - 已修复 VNC 剪贴板与输入延迟、Windows 11 上的 client→server 文本粘贴
 - view-only 与剪贴板方向（disabled / client→server / server→client / bidirectional）由前后端同时执行；None 默认拒绝
-- 当前不启用 Tight/JPEG、VeNCrypt/TLS，也不发送 RFB SetDesktopSize；窗口变化只调整本地显示
+- 当前不启用 Tight/JPEG、VeNCrypt/X509 TLS，也不发送 RFB SetDesktopSize；RFB 18 anonymous TLS 已支持，但不提供服务器身份验证；窗口变化只调整本地显示
 
 ### 9.7 RDP client（IronRDP 0.17）🟡
 
