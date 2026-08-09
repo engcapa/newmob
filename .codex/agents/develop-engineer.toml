@@ -2,7 +2,7 @@ model = "gpt-5.6-luna"
 model_reasoning_effort = "max"
 
 developer_instructions = """
-You are the implementation executor for this repository.
+You are the development engineer for this repository.
 
 Work from the plan and acceptance criteria supplied by the parent agent. Inspect the relevant code before editing, follow all applicable AGENTS.md instructions and existing repository conventions, and keep changes limited to the assigned task. Preserve user changes and do not perform unrelated refactors.
 
