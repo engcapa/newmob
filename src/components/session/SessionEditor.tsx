@@ -131,7 +131,7 @@ type Proto =
   | "MySQL" | "PostgreSQL" | "PanWeiDB" | "Oracle" | "SQLServer" | "StarRocks" | "ClickHouse" | "Presto" | "Redis" | "HBaseShell"
   | "Proxy" | "Mail";
 
-type SectionTab = "advanced" | "terminal" | "appearance" | "network" | "bookmark" | "rdp" | "database" | "mappings" | "proxy" | "objectstorage" | "mail";
+type SectionTab = "advanced" | "terminal" | "appearance" | "network" | "bookmark" | "rdp" | "vnc" | "database" | "mappings" | "proxy" | "objectstorage" | "mail";
 type MailSecurityMode = "TLS" | "STARTTLS" | "None";
 type MailProvider = "custom" | "gmail" | "outlook";
 type MailAuthMode = "password" | "oauth2";
@@ -2673,6 +2673,25 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     parseRdpOptions(session?.options_json),
   );
 
+  /* --- VNC production policies --- */
+  const [vncSecurityPolicy, setVncSecurityPolicy] = useState<
+    "require-encryption" | "prefer-encryption" | "legacy-compatible" | "allow-none"
+  >(() => {
+    const value = optionString(initialOptions, "vncSecurityPolicy", "prefer-encryption");
+    return value === "require-encryption" || value === "legacy-compatible" || value === "allow-none"
+      ? value
+      : "prefer-encryption";
+  });
+  const [vncViewOnly, setVncViewOnly] = useState(() => optionBoolean(initialOptions, "vncViewOnly", false));
+  const [vncClipboardPolicy, setVncClipboardPolicy] = useState<
+    "disabled" | "client-to-server" | "server-to-client" | "bidirectional"
+  >(() => {
+    const value = optionString(initialOptions, "vncClipboardPolicy", "bidirectional");
+    return value === "disabled" || value === "client-to-server" || value === "server-to-client"
+      ? value
+      : "bidirectional";
+  });
+
   /* --- SFTP path mappings --- */
   const [pathMappings, setPathMappings] = useState<SftpPathMapping[]>(() =>
     parsePathMappingsFromOptions(session?.options_json),
@@ -2864,6 +2883,10 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
       proto === "RDP"
         ? (JSON.parse(serializeRdpOptions(rdpOptions)) as Record<string, unknown>)
         : {};
+    const vncOverrides: Record<string, unknown> =
+      proto === "VNC"
+        ? { vncSecurityPolicy, vncViewOnly, vncClipboardPolicy }
+        : {};
     const dbOverrides: Record<string, unknown> = isDb
       ? {
           dbDatabase,
@@ -2969,6 +2992,7 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
       ...(proto === "SFTP" ? { pathMappings } : {}),
       ...wslOverrides,
       ...rdpOverrides,
+      ...vncOverrides,
       ...dbOverrides,
       ...proxyOverrides,
       ...mailOverrides,
@@ -3423,6 +3447,23 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
     setLocalShellOptions(parseLocalShellOptions(session?.options_json));
     setWslOptions(parseWslOptions(session?.options_json));
     setRdpOptions(parseRdpOptions(session?.options_json));
+    {
+      const policy = optionString(nextOptions, "vncSecurityPolicy", "prefer-encryption");
+      setVncSecurityPolicy(
+        policy === "require-encryption" || policy === "legacy-compatible" || policy === "allow-none"
+          ? policy
+          : "prefer-encryption",
+      );
+    }
+    setVncViewOnly(optionBoolean(nextOptions, "vncViewOnly", false));
+    {
+      const policy = optionString(nextOptions, "vncClipboardPolicy", "bidirectional");
+      setVncClipboardPolicy(
+        policy === "disabled" || policy === "client-to-server" || policy === "server-to-client"
+          ? policy
+          : "bidirectional",
+      );
+    }
     setPathMappings(parsePathMappingsFromOptions(session?.options_json));
     const restoredMailProvider = initialMailProvider(nextOptions, session?.host);
     setMailProvider(restoredMailProvider);
@@ -3980,6 +4021,8 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
         // (terminal appearance is meaningless for a graphical RDP session).
         ...(isRdp
           ? [{ id: "rdp" as SectionTab, label: t("rdp.options.title"), icon: <Monitor className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
+          : proto === "VNC"
+            ? [{ id: "vnc" as SectionTab, label: "VNC policies", icon: <Monitor className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
           : supportsTerminalAppearance
             ? [{ id: "terminal" as SectionTab, label: t("sessionEditor2.sectionTerminal"), icon: <TerminalIcon className="w-3 h-3 inline -mt-0.5 mr-1" /> }]
             : []),
@@ -3989,6 +4032,8 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
 
   const fallbackSection: SectionTab = isRdp
     ? "rdp"
+    : proto === "VNC"
+      ? "vnc"
     : supportsTerminalAppearance
       ? "terminal"
       : isSSH
@@ -4013,6 +4058,8 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           ? fallbackSection
           : section === "rdp" && !isRdp
             ? fallbackSection
+            : section === "vnc" && proto !== "VNC"
+              ? fallbackSection
             : section === "mappings" && proto !== "SFTP"
               ? fallbackSection
               : section === "terminal" && !supportsTerminalAppearance
@@ -4489,6 +4536,35 @@ export function SessionEditor({ session, defaultGroupPath = null, initialProto, 
           {activeSection === "rdp" && (
             <div data-testid="session-rdp-section">
               <RdpOptionsForm options={rdpOptions} onChange={setRdpOptions} />
+            </div>
+          )}
+          {activeSection === "vnc" && proto === "VNC" && (
+            <div data-testid="session-vnc-policies" className="grid grid-cols-12 gap-x-3 gap-y-3 text-[12px]">
+              <Field label="Security policy">
+                <select data-testid="session-vnc-security-policy" className="taomni-input w-64" value={vncSecurityPolicy} onChange={(event) => setVncSecurityPolicy(event.target.value as typeof vncSecurityPolicy)}>
+                  <option value="prefer-encryption">Prefer strongest supported</option>
+                  <option value="require-encryption">Require encrypted RA2</option>
+                  <option value="legacy-compatible">Legacy compatible (no None)</option>
+                  <option value="allow-none">Allow unauthenticated None</option>
+                </select>
+              </Field>
+              <Field label="Clipboard">
+                <select data-testid="session-vnc-clipboard-policy" className="taomni-input w-64" value={vncClipboardPolicy} onChange={(event) => setVncClipboardPolicy(event.target.value as typeof vncClipboardPolicy)}>
+                  <option value="bidirectional">Bidirectional</option>
+                  <option value="client-to-server">Client to server</option>
+                  <option value="server-to-client">Server to client</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+              </Field>
+              <Field label="Input">
+                <label className="flex items-center gap-2">
+                  <input data-testid="session-vnc-view-only" type="checkbox" className="taomni-checkbox" checked={vncViewOnly} onChange={(event) => setVncViewOnly(event.target.checked)} />
+                  View only (keyboard and pointer input disabled)
+                </label>
+              </Field>
+              <div className="col-span-12 rounded border px-3 py-2 text-[11px] text-[var(--taomni-text-muted)]" style={{ borderColor: "var(--taomni-divider)" }}>
+                VNCAuth and RA2ne authenticate but do not encrypt framebuffer traffic. None is rejected unless explicitly allowed.
+              </div>
             </div>
           )}
           {activeSection === "mail" && isMail && (

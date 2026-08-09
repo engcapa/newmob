@@ -1,11 +1,15 @@
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 use crate::vnc::clipboard::{
-    decode_legacy_cut_text, encode_legacy_cut_text, parse_extended_body, ExtendedClipboardMsg,
+    ExtendedClipboardMsg, decode_legacy_cut_text, encode_legacy_cut_text,
+    parse_extended_body_with_limits,
 };
 use crate::vnc::encodings::{self, DecodedRect, HextileState, ZrleDecoder};
+use crate::vnc::limits::DecodeLimits;
+use crate::vnc::policy::VncSecurityPolicy;
 
 const SEC_TYPE_NONE: u8 = 1;
 const SEC_TYPE_VNC_AUTH: u8 = 2;
@@ -33,7 +37,10 @@ pub struct RfbConnection {
     pub width: u16,
     pub height: u16,
     pub name: String,
-    framebuffer: Vec<u8>,
+    pub security_type: Option<u8>,
+    pub framebuffer: Vec<u8>,
+    limits: DecodeLimits,
+    security_policy: VncSecurityPolicy,
     /// Negotiated protocol minor version (3, 7, or 8).
     proto_minor: u8,
     /// Hextile bg/fg carry across tiles per the RFB spec.
@@ -51,9 +58,46 @@ pub struct RfbWriter {
 
 impl RfbConnection {
     pub fn connect(host: &str, port: u16) -> Result<Self, String> {
+        Self::connect_with_options(
+            host,
+            port,
+            None,
+            VncSecurityPolicy::default(),
+            DecodeLimits::default(),
+        )
+    }
+
+    pub fn connect_with_options(
+        host: &str,
+        port: u16,
+        timeout: Option<Duration>,
+        security_policy: VncSecurityPolicy,
+        limits: DecodeLimits,
+    ) -> Result<Self, String> {
         let addr = format!("{}:{}", host, port);
-        let stream =
-            TcpStream::connect(&addr).map_err(|e| format!("TCP connect to {}: {}", addr, e))?;
+        let timeout = timeout.unwrap_or(Duration::from_secs(15));
+        let socket_addr = addr
+            .to_socket_addrs()
+            .map_err(|e| format!("DNS lookup for {}: {}", host, e))?
+            .next()
+            .ok_or_else(|| format!("DNS lookup for {} returned no addresses", host))?;
+        let stream = TcpStream::connect_timeout(&socket_addr, timeout)
+            .map_err(|e| format!("TCP connect to {}: {}", addr, e))?;
+        Self::from_stream(stream, timeout, security_policy, limits)
+    }
+
+    pub fn from_stream(
+        stream: TcpStream,
+        timeout: Duration,
+        security_policy: VncSecurityPolicy,
+        limits: DecodeLimits,
+    ) -> Result<Self, String> {
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|e| format!("set read timeout failed: {}", e))?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|e| format!("set write timeout failed: {}", e))?;
         stream
             .set_nodelay(true)
             .map_err(|e| format!("set_nodelay failed: {}", e))?;
@@ -64,7 +108,10 @@ impl RfbConnection {
             width: 0,
             height: 0,
             name: String::new(),
+            security_type: None,
             framebuffer: Vec::new(),
+            limits,
+            security_policy,
             proto_minor: 8,
             hextile_state: HextileState::new(),
             zrle_decoder: ZrleDecoder::new(),
@@ -72,6 +119,16 @@ impl RfbConnection {
 
         conn.handshake_protocol_version()?;
         Ok(conn)
+    }
+
+    pub fn protocol_version(&self) -> String {
+        format!("3.{}", self.proto_minor)
+    }
+
+    pub fn shutdown_handle(&self) -> Result<TcpStream, String> {
+        self.stream
+            .try_clone()
+            .map_err(|e| format!("clone VNC shutdown handle: {e}"))
     }
 
     /// Perform protocol version handshake.
@@ -123,9 +180,19 @@ impl RfbConnection {
         username: Option<&str>,
         password: Option<&str>,
     ) -> Result<ServerInit, String> {
+        self.authenticate_with_policy(username, password, self.security_policy)
+    }
+
+    pub fn authenticate_with_policy(
+        &mut self,
+        username: Option<&str>,
+        password: Option<&str>,
+        policy: VncSecurityPolicy,
+    ) -> Result<ServerInit, String> {
+        self.security_policy = policy;
         // RFB 3.3: server dictates the security type directly as a u32
         if self.proto_minor <= 3 {
-            return self.authenticate_v33(password);
+            return self.authenticate_v33_with_policy(password, policy);
         }
 
         // RFB 3.7 / 3.8: server sends a list of security types
@@ -140,6 +207,9 @@ impl RfbConnection {
             self.read_exact(&mut len_buf)
                 .map_err(|e| format!("read sec failure len: {}", e))?;
             let reason_len = u32::from_be_bytes(len_buf) as usize;
+            if reason_len > self.limits.max_reason_bytes {
+                return Err("VNC failure reason exceeds configured limit".into());
+            }
             let mut reason = vec![0u8; reason_len];
             self.read_exact(&mut reason)
                 .map_err(|e| format!("read sec failure reason: {}", e))?;
@@ -153,24 +223,8 @@ impl RfbConnection {
         self.read_exact(&mut types)
             .map_err(|e| format!("read security types: {}", e))?;
 
-        let chosen = if types.contains(&SEC_TYPE_NONE) {
-            SEC_TYPE_NONE
-        } else if types.contains(&SEC_TYPE_RA2NE_256) {
-            SEC_TYPE_RA2NE_256
-        } else if types.contains(&SEC_TYPE_RA2NE_128) {
-            SEC_TYPE_RA2NE_128
-        } else if types.contains(&SEC_TYPE_VNC_AUTH) {
-            SEC_TYPE_VNC_AUTH
-        } else if types.contains(&SEC_TYPE_RA2_256) {
-            SEC_TYPE_RA2_256
-        } else if types.contains(&SEC_TYPE_RA2_128) {
-            SEC_TYPE_RA2_128
-        } else {
-            return Err(format!(
-                "no supported security type (server offers: {:?})",
-                types
-            ));
-        };
+        let chosen = self.security_policy.choose(&types).map_err(|e| e.0)?;
+        self.security_type = Some(chosen);
 
         self.write_all(&[chosen])
             .map_err(|e| format!("write security type: {}", e))?;
@@ -202,6 +256,9 @@ impl RfbConnection {
                     self.read_exact(&mut len_buf)
                         .map_err(|e| format!("read auth failure len: {}", e))?;
                     let reason_len = u32::from_be_bytes(len_buf) as usize;
+                    if reason_len > self.limits.max_reason_bytes {
+                        return Err("VNC authentication reason exceeds configured limit".into());
+                    }
                     let mut reason = vec![0u8; reason_len];
                     self.read_exact(&mut reason)
                         .map_err(|e| format!("read auth failure reason: {}", e))?;
@@ -227,26 +284,26 @@ impl RfbConnection {
     }
 
     /// RFB 3.3 security handshake: server sends a u32 security type, no client choice.
-    fn authenticate_v33(&mut self, password: Option<&str>) -> Result<ServerInit, String> {
+    fn authenticate_v33_with_policy(
+        &mut self,
+        password: Option<&str>,
+        policy: VncSecurityPolicy,
+    ) -> Result<ServerInit, String> {
         let mut buf = [0u8; 4];
         self.read_exact(&mut buf)
             .map_err(|e| format!("read v3.3 security type: {}", e))?;
         let sec_type = u32::from_be_bytes(buf);
+        if sec_type == 1 && !policy.allows_v33_none() {
+            return Err(
+                "server offers unauthenticated VNC; enable allow-none explicitly to continue"
+                    .into(),
+            );
+        }
+        if !matches!(sec_type, 1 | 2) {
+            return Err(format!("unsupported v3.3 security type: {}", sec_type));
+        }
+        self.security_type = Some(sec_type as u8);
         match sec_type {
-            0 => {
-                // Connection failed — server sends a reason string
-                let mut len_buf = [0u8; 4];
-                self.read_exact(&mut len_buf)
-                    .map_err(|e| format!("read v3.3 failure len: {}", e))?;
-                let reason_len = u32::from_be_bytes(len_buf) as usize;
-                let mut reason = vec![0u8; reason_len];
-                self.read_exact(&mut reason)
-                    .map_err(|e| format!("read v3.3 failure reason: {}", e))?;
-                Err(format!(
-                    "server rejected connection: {}",
-                    String::from_utf8_lossy(&reason)
-                ))
-            }
             1 => {
                 // None — no authentication, proceed directly to ClientInit
                 self.write_all(&[1])
@@ -488,13 +545,22 @@ impl RfbConnection {
 
         // Name length + name
         let name_len = u32::from_be_bytes([buf[20], buf[21], buf[22], buf[23]]) as usize;
+        if name_len > self.limits.max_server_string_bytes {
+            return Err("VNC server name exceeds configured limit".into());
+        }
+        self.limits
+            .framebuffer_bytes(self.width, self.height)
+            .map_err(|e| e.to_string())?;
         let mut name_bytes = vec![0u8; name_len];
         self.read_exact(&mut name_bytes)
             .map_err(|e| format!("read server name: {}", e))?;
         self.name = String::from_utf8_lossy(&name_bytes).to_string();
 
-        // Allocate framebuffer (RGBA 32-bit)
-        let fb_size = self.width as usize * self.height as usize * 4;
+        // Allocate framebuffer (RGBA 32-bit) only after applying hard limits.
+        let fb_size = self
+            .limits
+            .framebuffer_bytes(self.width, self.height)
+            .map_err(|e| e.to_string())?;
         self.framebuffer = vec![0u8; fb_size];
 
         Ok(ServerInit {
@@ -512,7 +578,7 @@ impl RfbConnection {
         msg[1] = 0; // padding
         msg[2] = 0; // padding
         msg[3] = 0; // padding
-                    // Pixel format:
+        // Pixel format:
         msg[4] = 32; // bits-per-pixel
         msg[5] = 24; // depth: 24 so ZRLE's CPIXEL rule kicks in
         msg[6] = 0; // big-endian false (little-endian)
@@ -539,10 +605,16 @@ impl RfbConnection {
 
     /// Request encodings in preference order.
     pub fn set_encodings(&mut self, encodings: &[i32]) -> Result<(), String> {
-        let mut msg = vec![0u8; 4 + encodings.len() * 4];
+        let count = u16::try_from(encodings.len())
+            .map_err(|_| "too many VNC encodings requested".to_string())?;
+        let message_len = encodings
+            .len()
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(4))
+            .ok_or_else(|| "VNC encoding list length overflow".to_string())?;
+        let mut msg = vec![0u8; message_len];
         msg[0] = 2; // SetEncodings
         msg[1] = 0;
-        let count = encodings.len() as u16;
         msg[2..4].copy_from_slice(&count.to_be_bytes());
 
         for (i, enc) in encodings.iter().enumerate() {
@@ -609,7 +681,12 @@ impl RfbConnection {
                     .map_err(|e| format!("read colourmap padding: {}", e))?;
                 let _first = self.read_u16()?;
                 let count = self.read_u16()?;
-                let entry_size = 6 * count as usize;
+                let entry_size = (count as usize)
+                    .checked_mul(6)
+                    .ok_or_else(|| "colour-map byte count overflow".to_string())?;
+                if entry_size > self.limits.max_server_string_bytes {
+                    return Err("colour-map payload exceeds configured limit".into());
+                }
                 let mut entries = vec![0u8; entry_size];
                 self.read_exact(&mut entries)
                     .map_err(|e| format!("read colourmap entries: {}", e))?;
@@ -622,16 +699,19 @@ impl RfbConnection {
                 let len_signed = self.read_i32()?;
                 if len_signed < 0 {
                     // ExtendedClipboard rides on ServerCutText with a negative length.
-                    let len = (-len_signed) as usize;
+                    let len = len_signed
+                        .checked_abs()
+                        .ok_or_else(|| "extended clipboard length overflow".to_string())?
+                        as usize;
                     // Reasonable cap so a corrupt server can't make us allocate
                     // a 4 GiB buffer.
-                    if len > 16 * 1024 * 1024 {
-                        return Err(format!("extended clipboard body too large: {}", len));
+                    if len > self.limits.max_clipboard_decompressed_bytes {
+                        return Err("extended clipboard body exceeds configured limit".into());
                     }
                     let mut body = vec![0u8; len];
                     self.read_exact(&mut body)
                         .map_err(|e| format!("read ext clipboard: {}", e))?;
-                    match parse_extended_body(&body) {
+                    match parse_extended_body_with_limits(&body, &self.limits)? {
                         Some(msg) => Ok(ServerMessage::ExtendedClipboard(msg)),
                         None => {
                             // Unknown action — return a no-op so the relay keeps running.
@@ -640,8 +720,8 @@ impl RfbConnection {
                     }
                 } else {
                     let len = len_signed as usize;
-                    if len > 16 * 1024 * 1024 {
-                        return Err(format!("legacy clipboard body too large: {}", len));
+                    if len > self.limits.max_clipboard_format_bytes {
+                        return Err("legacy clipboard body exceeds configured limit".into());
                     }
                     let mut text = vec![0u8; len];
                     self.read_exact(&mut text)
@@ -658,20 +738,43 @@ impl RfbConnection {
     fn read_framebuffer_update(&mut self) -> Result<ServerMessage, String> {
         self.read_exact(&mut [0u8; 1])
             .map_err(|e| format!("read fu padding: {}", e))?;
-        let num_rects = self.read_u16()?;
+        let num_rects = self.read_u16()? as usize;
+        if num_rects > self.limits.max_rectangles_per_update {
+            return Err("framebuffer update contains too many rectangles".into());
+        }
 
-        let mut decoded: Vec<DecodedRect> = Vec::new();
+        let mut decoded: Vec<DecodedRect> = Vec::with_capacity(num_rects);
         for _ in 0..num_rects {
             let x = self.read_u16()?;
             let y = self.read_u16()?;
             let w = self.read_u16()?;
             let h = self.read_u16()?;
             let encoding = self.read_i32()?;
+            if encoding == -223 {
+                self.limits
+                    .framebuffer_bytes(w, h)
+                    .map_err(|e| e.to_string())?;
+            } else {
+                self.limits
+                    .rectangle_bytes(w, h)
+                    .map_err(|e| e.to_string())?;
+            }
+            if x.checked_add(w).is_none_or(|end| end > self.width)
+                || y.checked_add(h).is_none_or(|end| end > self.height)
+            {
+                // DesktopSize is the only rectangle allowed to describe a new
+                // framebuffer geometry; pixel rectangles must stay in bounds.
+                if encoding != -223 {
+                    return Err("framebuffer rectangle is outside the negotiated size".into());
+                }
+            }
 
             match encoding {
                 0 => {
-                    let rect =
-                        self.decode_via_reader(|reader| encodings::read_raw(reader, x, y, w, h))?;
+                    let limits = self.limits;
+                    let rect = self.decode_via_reader(|reader| {
+                        encodings::read_raw_with_limits(reader, x, y, w, h, &limits)
+                    })?;
                     self.write_to_fb(&rect);
                     decoded.push(rect);
                 }
@@ -720,6 +823,7 @@ impl RfbConnection {
                     decoded.extend(rects);
                 }
                 16 => {
+                    let limits = self.limits;
                     let Self {
                         stream,
                         secure_io,
@@ -728,7 +832,15 @@ impl RfbConnection {
                     } = self;
                     let rects = {
                         let mut reader = RfbStreamReader::new(stream, secure_io.as_mut());
-                        encodings::read_zrle(&mut reader, x, y, w, h, zrle_decoder)?
+                        encodings::read_zrle_with_limits(
+                            &mut reader,
+                            x,
+                            y,
+                            w,
+                            h,
+                            zrle_decoder,
+                            &limits,
+                        )?
                     };
                     for r in &rects {
                         self.write_to_fb(r);
@@ -737,9 +849,13 @@ impl RfbConnection {
                 }
                 -223 => {
                     // DesktopSize pseudo-encoding: no payload, just a resize.
+                    let size = self
+                        .limits
+                        .framebuffer_bytes(w, h)
+                        .map_err(|e| e.to_string())?;
                     self.width = w;
                     self.height = h;
-                    self.framebuffer = vec![0u8; w as usize * h as usize * 4];
+                    self.framebuffer = vec![0u8; size];
                 }
                 other => {
                     return Err(format!(
@@ -916,6 +1032,9 @@ impl RfbWriter {
 
     /// Send PointerEvent.
     pub fn send_pointer_event(&mut self, x: u16, y: u16, buttons: u8) -> Result<(), String> {
+        if self.width == 0 || self.height == 0 || x >= self.width || y >= self.height {
+            return Err("pointer coordinates are outside the remote framebuffer".into());
+        }
         let mut msg = [0u8; 6];
         msg[0] = 5;
         msg[1] = buttons;
@@ -932,10 +1051,18 @@ impl RfbWriter {
     /// Send ClientCutText (clipboard).
     pub fn send_client_cut_text(&mut self, text: &str) -> Result<(), String> {
         let text_bytes = encode_legacy_cut_text(text);
-        let mut msg = vec![0u8; 8 + text_bytes.len()];
+        DecodeLimits::default()
+            .clipboard_bytes(text_bytes.len())
+            .map_err(|error| error.to_string())?;
+        let text_len = u32::try_from(text_bytes.len())
+            .map_err(|_| "clipboard text exceeds RFB length limit".to_string())?;
+        let message_len = 8usize
+            .checked_add(text_bytes.len())
+            .ok_or_else(|| "clipboard message length overflow".to_string())?;
+        let mut msg = vec![0u8; message_len];
         msg[0] = 6;
         msg[1..4].copy_from_slice(&[0u8; 3]);
-        msg[4..8].copy_from_slice(&(text_bytes.len() as u32).to_be_bytes());
+        msg[4..8].copy_from_slice(&text_len.to_be_bytes());
         msg[8..].copy_from_slice(&text_bytes);
 
         self.write_all(&msg)
@@ -948,8 +1075,21 @@ impl RfbWriter {
     /// Send an ExtendedClipboard body. The wire frame is a ClientCutText (msg
     /// type 6) with a *negative* length signaling the extended payload.
     pub fn send_extended_clipboard(&mut self, body: &[u8]) -> Result<(), String> {
-        let neg_len = -(body.len() as i32);
-        let mut msg = Vec::with_capacity(8 + body.len());
+        if body.len() < 4 {
+            return Err("extended clipboard body is truncated".into());
+        }
+        if body.len() > DecodeLimits::default().max_clipboard_decompressed_bytes {
+            return Err("extended clipboard body exceeds configured limit".into());
+        }
+        let body_len = i32::try_from(body.len())
+            .map_err(|_| "extended clipboard body exceeds RFB length limit".to_string())?;
+        let neg_len = body_len
+            .checked_neg()
+            .ok_or_else(|| "extended clipboard length overflow".to_string())?;
+        let capacity = 8usize
+            .checked_add(body.len())
+            .ok_or_else(|| "extended clipboard message length overflow".to_string())?;
+        let mut msg = Vec::with_capacity(capacity);
         msg.push(6);
         msg.extend_from_slice(&[0u8; 3]); // padding
         msg.extend_from_slice(&neg_len.to_be_bytes());
@@ -1347,8 +1487,8 @@ pub enum ServerMessage {
 
 /// VNC DES authentication: encrypt the 16-byte challenge with a key derived from the password.
 fn vnc_des_encrypt(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
-    use des::cipher::{Array, BlockCipherEncrypt, KeyInit};
     use des::Des;
+    use des::cipher::{Array, BlockCipherEncrypt, KeyInit};
 
     // Build key: password truncated/padded to 8 bytes, each byte's bits reversed
     let mut key_bytes = [0u8; 8];
@@ -1384,6 +1524,88 @@ fn reverse_bits(b: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    fn write_server_init(stream: &mut TcpStream, width: u16, height: u16, name: &[u8]) {
+        let mut init = Vec::with_capacity(24 + name.len());
+        init.extend_from_slice(&width.to_be_bytes());
+        init.extend_from_slice(&height.to_be_bytes());
+        init.extend_from_slice(&[32, 24, 0, 1]);
+        init.extend_from_slice(&255u16.to_be_bytes());
+        init.extend_from_slice(&255u16.to_be_bytes());
+        init.extend_from_slice(&255u16.to_be_bytes());
+        init.extend_from_slice(&[0, 8, 16, 0, 0, 0]);
+        init.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        init.extend_from_slice(name);
+        stream.write_all(&init).unwrap();
+    }
+
+    fn start_fixture(
+        minor: u16,
+        security: u32,
+        width: u16,
+        height: u16,
+        name: &[u8],
+    ) -> (u16, thread::JoinHandle<()>) {
+        let name = name.to_vec();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let banner = format!("RFB 003.{minor:03}\n");
+            stream.write_all(banner.as_bytes()).unwrap();
+            let mut client_banner = [0u8; 12];
+            stream.read_exact(&mut client_banner).unwrap();
+
+            if minor <= 3 {
+                stream.write_all(&security.to_be_bytes()).unwrap();
+            } else {
+                let security_type = security as u8;
+                stream.write_all(&[1, security_type]).unwrap();
+                let mut chosen = [0u8; 1];
+                if stream.read_exact(&mut chosen).is_err() {
+                    return;
+                }
+                assert_eq!(chosen[0], security_type);
+            }
+
+            if security == 2 {
+                let challenge = [0x5au8; 16];
+                stream.write_all(&challenge).unwrap();
+                let mut response = [0u8; 16];
+                stream.read_exact(&mut response).unwrap();
+                assert_eq!(response, vnc_des_encrypt("passw0rd", &challenge));
+                stream.write_all(&0u32.to_be_bytes()).unwrap();
+            } else if minor >= 8 {
+                stream.write_all(&0u32.to_be_bytes()).unwrap();
+            }
+
+            let mut client_init = [0u8; 1];
+            stream.read_exact(&mut client_init).unwrap();
+            assert_eq!(client_init[0], 1);
+            write_server_init(&mut stream, width, height, &name);
+        });
+        (port, handle)
+    }
+
+    fn connect_fixture(
+        port: u16,
+        policy: VncSecurityPolicy,
+        limits: DecodeLimits,
+    ) -> Result<ServerInit, String> {
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut connection =
+            RfbConnection::from_stream(stream, Duration::from_secs(2), policy, limits)?;
+        connection.authenticate(None, Some("passw0rd"))
+    }
 
     #[test]
     fn test_reverse_bits() {
@@ -1400,5 +1622,83 @@ mod tests {
         // Verify the response is 16 bytes and not all zeros
         assert_eq!(response.len(), 16);
         assert!(response.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn supports_rfb_33_37_and_38_none_fixtures() {
+        for minor in [3, 7, 8] {
+            let (port, server) = start_fixture(minor, 1, 800, 600, b"fixture");
+            let result =
+                connect_fixture(port, VncSecurityPolicy::AllowNone, DecodeLimits::default())
+                    .unwrap();
+            assert_eq!((result.width, result.height), (800, 600));
+            assert_eq!(result.name, "fixture");
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_none_fixture_without_explicit_opt_in() {
+        let (port, server) = start_fixture(8, 1, 800, 600, b"fixture");
+        let result = connect_fixture(
+            port,
+            VncSecurityPolicy::PreferEncryption,
+            DecodeLimits::default(),
+        );
+        assert!(result.unwrap_err().contains("allow-none"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn authenticates_vncauth_fixture_and_reads_server_init() {
+        let (port, server) = start_fixture(8, 2, 1024, 768, b"auth fixture");
+        let result = connect_fixture(
+            port,
+            VncSecurityPolicy::PreferEncryption,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert_eq!((result.width, result.height), (1024, 768));
+        assert_eq!(result.name, "auth fixture");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn server_init_limits_dimensions_and_name_before_allocation() {
+        let mut limits = DecodeLimits::default();
+        limits.max_framebuffer_dimension = 100;
+        let (port, server) = start_fixture(8, 1, 101, 80, b"fixture");
+        let result = connect_fixture(port, VncSecurityPolicy::AllowNone, limits);
+        assert!(result.unwrap_err().contains("dimensions exceed"));
+        server.join().unwrap();
+
+        let mut limits = DecodeLimits::default();
+        limits.max_server_string_bytes = 4;
+        let (port, server) = start_fixture(8, 1, 80, 60, b"too long");
+        let result = connect_fixture(port, VncSecurityPolicy::AllowNone, limits);
+        assert!(result.unwrap_err().contains("server name exceeds"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn server_disconnect_is_reported_without_panicking() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"RFB 003.008\n").unwrap();
+            let mut client_banner = [0u8; 12];
+            stream.read_exact(&mut client_banner).unwrap();
+        });
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let mut connection = RfbConnection::from_stream(
+            stream,
+            Duration::from_secs(2),
+            VncSecurityPolicy::AllowNone,
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert!(connection.read_server_message().is_err());
+        server.join().unwrap();
     }
 }

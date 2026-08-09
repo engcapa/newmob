@@ -13,6 +13,9 @@ export interface VncConnectionState {
   width: number;
   height: number;
   name: string;
+  protocol: string;
+  security: string;
+  encrypted: boolean;
   error: string | null;
 }
 
@@ -26,7 +29,11 @@ interface VncStore {
     width: number,
     height: number,
     name: string,
+    protocol?: string,
+    security?: string,
+    encrypted?: boolean,
   ) => void;
+  setDesktopSize: (tabId: string, width: number, height: number) => void;
   setDisconnected: (tabId: string, reason?: string) => void;
   removeConnection: (tabId: string) => void;
 }
@@ -45,6 +52,9 @@ export const useVncStore = create<VncStore>((set) => ({
           width: 0,
           height: 0,
           name: "",
+          protocol: "",
+          security: "",
+          encrypted: false,
           error: null,
         },
       },
@@ -66,7 +76,7 @@ export const useVncStore = create<VncStore>((set) => ({
     }));
   },
 
-  setConnected(tabId, width, height, name) {
+  setConnected(tabId, width, height, name, protocol = "", security = "", encrypted = false) {
     set((s) => ({
       connections: {
         ...s.connections,
@@ -76,10 +86,26 @@ export const useVncStore = create<VncStore>((set) => ({
           width,
           height,
           name,
+          protocol,
+          security,
+          encrypted,
           error: null,
         } as VncConnectionState,
       },
     }));
+  },
+
+  setDesktopSize(tabId, width, height) {
+    set((s) => {
+      const connection = s.connections[tabId];
+      if (!connection) return s;
+      return {
+        connections: {
+          ...s.connections,
+          [tabId]: { ...connection, width, height },
+        },
+      };
+    });
   },
 
   setDisconnected(tabId, reason) {

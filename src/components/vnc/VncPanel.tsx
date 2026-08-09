@@ -6,10 +6,12 @@ import {
   encodeWsKey,
   encodeWsPing,
   encodeWsPointer,
-  encodeWsResize,
+  encodeWsRefresh,
   parseWsMessage,
   parseFrameHeader,
+  parseVncError,
   keyEventToKeysym,
+  mapClientToFramebuffer,
   mouseButtonMask,
 } from "../../lib/vnc";
 import type { WsOutgoing } from "../../lib/vnc";
@@ -39,6 +41,10 @@ export interface VncPanelProps {
   port: number;
   username?: string | null;
   password?: string;
+  networkSettingsJson?: string | null;
+  securityPolicy?: "require-encryption" | "prefer-encryption" | "legacy-compatible" | "allow-none";
+  viewOnly?: boolean;
+  clipboardPolicy?: "disabled" | "client-to-server" | "server-to-client" | "bidirectional";
   visible: boolean;
   onDetach?: () => void;
   detachedWindowControls?: {
@@ -50,8 +56,13 @@ export interface VncPanelProps {
 
 type ScaleMode = "fit" | "one";
 const PASTE_KEY_DELAY_MS = 120;
+const MAX_PENDING_RECTS = 4096;
+const MAX_PENDING_FRAME_BYTES = 128 * 1024 * 1024;
 const CLIPBOARD_SYNC_INTERVAL_MS = 750;
 const CLIPBOARD_SYNC_MIN_INTERVAL_MS = 250;
+const MAX_RECONNECT_ATTEMPTS = 3;
+const RECONNECT_DELAYS_MS = [750, 1500, 3000] as const;
+const RECONNECT_STABLE_MS = 30_000;
 type PendingFrame = {
   x: number;
   y: number;
@@ -108,6 +119,10 @@ export default function VncPanel({
   port,
   username,
   password,
+  networkSettingsJson,
+  securityPolicy,
+  viewOnly = false,
+  clipboardPolicy = "bidirectional",
   visible,
   onDetach,
   detachedWindowControls,
@@ -118,11 +133,29 @@ export default function VncPanel({
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const frameBufferRef = useRef<PendingFrame[]>([]);
+  const pendingFrameBytesRef = useRef(0);
+  const dropFrameUntilBoundaryRef = useRef(false);
+  const framebufferSizeRef = useRef({ width: 0, height: 0 });
+  const framebufferGenerationRef = useRef(0);
+  const pressedKeysymsRef = useRef(new Set<number>());
   const rafRef = useRef<number>(0);
   const destroyedRef = useRef(false);
-  const disconnectedByServerRef = useRef(false);
-  const connectArgsRef = useRef({ host, port, username, password });
+  const suppressReconnectRef = useRef(false);
+  const connectArgsRef = useRef({
+    host,
+    port,
+    username,
+    password,
+    networkSettingsJson,
+    securityPolicy,
+    viewOnly,
+    clipboardPolicy,
+  });
   const heartbeatTimerRef = useRef<number | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectStableTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const connectGenerationRef = useRef(0);
   const visibleRef = useRef(visible);
   const ackPendingRef = useRef(false);
   const pasteDelayTimerRef = useRef<number | null>(null);
@@ -144,6 +177,8 @@ export default function VncPanel({
   // without re-binding.
   const extClipboardSupportedRef = useRef<boolean>(false);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
+  const allowClipboardSend = clipboardPolicy === "bidirectional" || clipboardPolicy === "client-to-server";
+  const allowClipboardReceive = clipboardPolicy === "bidirectional" || clipboardPolicy === "server-to-client";
 
   const store = useVncStore();
   const conn = store.connections[tabId];
@@ -160,9 +195,13 @@ export default function VncPanel({
     }
   }, []);
 
+  const requestFullRefresh = useCallback(() => {
+    sendWsBinary(encodeWsRefresh());
+  }, [sendWsBinary]);
+
   const syncLocalClipboardToServer = useCallback(
     (reason: string, force = false): Promise<void> => {
-      if (destroyedRef.current || wsRef.current?.readyState !== WebSocket.OPEN) {
+      if (!allowClipboardSend || destroyedRef.current || wsRef.current?.readyState !== WebSocket.OPEN) {
         return Promise.resolve();
       }
       if (serverClipboardWriteInFlightRef.current > 0) {
@@ -214,34 +253,70 @@ export default function VncPanel({
       clipboardSyncPromiseRef.current = tracked;
       return clipboardSyncPromiseRef.current;
     },
-    [sendWs],
+    [allowClipboardSend, sendWs],
   );
+
+  const scheduleReconnectRef = useRef<() => void>(() => {});
 
   // ── connect logic, callable for retry ─────────────────────────────
   const doConnect = useCallback(() => {
-    const { host: h, port: p, username: user, password: pw } = connectArgsRef.current;
+    const {
+      host: h,
+      port: p,
+      username: user,
+      password: pw,
+      networkSettingsJson: ns,
+      securityPolicy: policy,
+      viewOnly: readOnly,
+      clipboardPolicy: clipboardDirection,
+    } = connectArgsRef.current;
+    const generation = ++connectGenerationRef.current;
     destroyedRef.current = false;
     store.initConnection(tabId);
 
     let cancelled = false;
-    disconnectedByServerRef.current = false;
+    suppressReconnectRef.current = false;
+    if (reconnectStableTimerRef.current !== null) {
+      window.clearTimeout(reconnectStableTimerRef.current);
+      reconnectStableTimerRef.current = null;
+    }
+    const previousSessionId = sessionIdRef.current;
+    sessionIdRef.current = null;
+    if (previousSessionId) {
+      void vncDisconnect(previousSessionId).catch(() => {});
+    }
 
     (async () => {
       try {
-        const result = await vncConnect(h, p, user, pw);
-        if (cancelled || destroyedRef.current) {
+        const result = await vncConnect(
+          h,
+          p,
+          user,
+          pw,
+          ns,
+          policy,
+          readOnly,
+          clipboardDirection,
+        );
+        if (cancelled || destroyedRef.current || generation !== connectGenerationRef.current) {
           vncDisconnect(result.session_id).catch(() => {});
           return;
         }
 
         sessionIdRef.current = result.session_id;
+        framebufferSizeRef.current = { width: result.width, height: result.height };
+        framebufferGenerationRef.current = 0;
         store.setConnecting(tabId, result.session_id, result.ws_port);
 
-        const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}`);
+        const ws = new WebSocket(`ws://127.0.0.1:${result.ws_port}/vnc`, `taomni-vnc.${result.ws_token}`);
         ws.binaryType = "arraybuffer";
         wsRef.current = ws;
 
         ws.onopen = () => {
+          if (generation !== connectGenerationRef.current) {
+            ws.close();
+            return;
+          }
           if (heartbeatTimerRef.current !== null) {
             window.clearInterval(heartbeatTimerRef.current);
           }
@@ -254,36 +329,80 @@ export default function VncPanel({
         };
 
         ws.onmessage = (event) => {
-          if (destroyedRef.current) return;
+          if (destroyedRef.current || generation !== connectGenerationRef.current) return;
           if (event.data instanceof ArrayBuffer) {
             if (event.data.byteLength === 0) {
-              if (visibleRef.current) {
+              if (dropFrameUntilBoundaryRef.current) {
+                dropFrameUntilBoundaryRef.current = false;
+                frameBufferRef.current = [];
+                pendingFrameBytesRef.current = 0;
                 ackPendingRef.current = false;
-                sendWsBinary(encodeWsAck());
-              } else {
-                ackPendingRef.current = true;
+                requestFullRefresh();
+                return;
               }
+              // ACK only after the render loop has drained and painted the
+              // logical frame. Hidden tabs retain one pending ACK and resume
+              // with the newest bounded mailbox content when made visible.
+              ackPendingRef.current = true;
               return;
             }
+            if (dropFrameUntilBoundaryRef.current) return;
             const header = parseFrameHeader(event.data);
-            if (!header) return;
+            const framebuffer = framebufferSizeRef.current;
+            if (!header
+              || header.x + header.w > framebuffer.width
+              || header.y + header.h > framebuffer.height) {
+              frameBufferRef.current = [];
+              pendingFrameBytesRef.current = 0;
+              dropFrameUntilBoundaryRef.current = true;
+              return;
+            }
             const rgba = new Uint8ClampedArray(
               event.data as ArrayBuffer,
               12,
             ) as Uint8ClampedArray<ArrayBuffer>;
-            frameBufferRef.current.push({ ...header, rgba });
+            const queue = frameBufferRef.current;
+            const nextBytes = pendingFrameBytesRef.current + rgba.byteLength;
+            if (queue.length >= MAX_PENDING_RECTS || nextBytes > MAX_PENDING_FRAME_BYTES) {
+              queue.length = 0;
+              pendingFrameBytesRef.current = 0;
+              dropFrameUntilBoundaryRef.current = true;
+              return;
+            }
+            queue.push({ ...header, rgba });
+            pendingFrameBytesRef.current += rgba.byteLength;
           } else {
             const msg = parseWsMessage(event.data as string);
             if (!msg) return;
             switch (msg.type) {
               case "connected":
-                store.setConnected(tabId, msg.width, msg.height, msg.name);
+                framebufferSizeRef.current = { width: msg.width, height: msg.height };
+                framebufferGenerationRef.current = 0;
+                store.setConnected(tabId, msg.width, msg.height, msg.name, msg.protocol, msg.security, msg.encrypted);
+                reconnectStableTimerRef.current = window.setTimeout(() => {
+                  if (generation === connectGenerationRef.current) {
+                    reconnectAttemptRef.current = 0;
+                  }
+                  reconnectStableTimerRef.current = null;
+                }, RECONNECT_STABLE_MS);
+                break;
+              case "desktop_size":
+                if (msg.generation <= framebufferGenerationRef.current) break;
+                framebufferGenerationRef.current = msg.generation;
+                framebufferSizeRef.current = { width: msg.width, height: msg.height };
+                frameBufferRef.current = [];
+                pendingFrameBytesRef.current = 0;
+                dropFrameUntilBoundaryRef.current = false;
+                ackPendingRef.current = false;
+                store.setDesktopSize(tabId, msg.width, msg.height);
                 break;
               case "disconnected":
-                disconnectedByServerRef.current = true;
+                suppressReconnectRef.current = !msg.retryable;
                 store.setDisconnected(tabId, msg.reason);
+                if (msg.retryable) scheduleReconnectRef.current();
                 break;
               case "clipboard":
+                if (!allowClipboardReceive) break;
                 serverClipboardWriteInFlightRef.current += 1;
                 writeClipboardText(msg.text)
                   .then(() => {
@@ -298,6 +417,7 @@ export default function VncPanel({
                   });
                 break;
               case "ext_clipboard":
+                if (!allowClipboardReceive) break;
                 serverClipboardWriteInFlightRef.current += 1;
                 writeMultiFormat({
                   text: msg.text ?? "",
@@ -328,24 +448,28 @@ export default function VncPanel({
         };
 
         ws.onclose = () => {
-          wsRef.current = null;
+          if (wsRef.current === ws) wsRef.current = null;
+          if (generation !== connectGenerationRef.current) return;
           if (heartbeatTimerRef.current !== null) {
             window.clearInterval(heartbeatTimerRef.current);
             heartbeatTimerRef.current = null;
           }
-          if (!destroyedRef.current && !disconnectedByServerRef.current) {
+          if (!destroyedRef.current && !suppressReconnectRef.current) {
             store.setDisconnected(tabId, tr("vnc.closedConnection"));
+            scheduleReconnectRef.current();
           }
         };
 
         ws.onerror = () => {
-          if (!destroyedRef.current) {
+          if (!destroyedRef.current && generation === connectGenerationRef.current) {
             store.setDisconnected(tabId, tr("vnc.websocketError"));
           }
         };
       } catch (err) {
-        if (!cancelled && !destroyedRef.current) {
-          store.setDisconnected(tabId, String(err));
+        if (!cancelled && !destroyedRef.current && generation === connectGenerationRef.current) {
+          const structured = parseVncError(err);
+          store.setDisconnected(tabId, structured.message);
+          if (structured.retryable) scheduleReconnectRef.current();
         }
       }
     })();
@@ -353,11 +477,34 @@ export default function VncPanel({
     return () => {
       cancelled = true;
     };
-  }, [host, port, username, password, tabId, store]);
+  }, [host, port, username, password, networkSettingsJson, securityPolicy, viewOnly, clipboardPolicy, allowClipboardReceive, tabId, store, requestFullRefresh]);
+
+  scheduleReconnectRef.current = () => {
+    if (destroyedRef.current || reconnectTimerRef.current !== null) return;
+    const attempt = reconnectAttemptRef.current;
+    if (attempt >= MAX_RECONNECT_ATTEMPTS) return;
+    reconnectAttemptRef.current += 1;
+    reconnectTimerRef.current = window.setTimeout(() => {
+      reconnectTimerRef.current = null;
+      if (!destroyedRef.current) doConnect();
+    }, RECONNECT_DELAYS_MS[attempt]);
+  };
+
+  useEffect(() => {
+    connectArgsRef.current = {
+      host,
+      port,
+      username,
+      password,
+      networkSettingsJson,
+      securityPolicy,
+      viewOnly,
+      clipboardPolicy,
+    };
+  }, [host, port, username, password, networkSettingsJson, securityPolicy, viewOnly, clipboardPolicy]);
 
   // ── Mount / unmount ───────────────────────────────────────────────
   useEffect(() => {
-    connectArgsRef.current = { host, port, username, password };
     let cancel: (() => void) | undefined;
     const connectTimer = window.setTimeout(() => {
       cancel = doConnect();
@@ -367,8 +514,22 @@ export default function VncPanel({
       window.clearTimeout(connectTimer);
       cancel?.();
       destroyedRef.current = true;
+      connectGenerationRef.current += 1;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       frameBufferRef.current = [];
+      pendingFrameBytesRef.current = 0;
+      dropFrameUntilBoundaryRef.current = false;
+      framebufferSizeRef.current = { width: 0, height: 0 };
+      framebufferGenerationRef.current = 0;
+      pressedKeysymsRef.current.clear();
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (reconnectStableTimerRef.current !== null) {
+        window.clearTimeout(reconnectStableTimerRef.current);
+        reconnectStableTimerRef.current = null;
+      }
       if (heartbeatTimerRef.current !== null) {
         window.clearInterval(heartbeatTimerRef.current);
         heartbeatTimerRef.current = null;
@@ -408,13 +569,13 @@ export default function VncPanel({
   }, [visible]);
 
   useEffect(() => {
-    if (!visible || conn?.status !== "connected") return;
+    if (!visible || conn?.status !== "connected" || !allowClipboardSend) return;
     void syncLocalClipboardToServer("connect", true);
     const timer = window.setInterval(() => {
       void syncLocalClipboardToServer("poll");
     }, CLIPBOARD_SYNC_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [visible, conn?.status, syncLocalClipboardToServer]);
+  }, [visible, conn?.status, allowClipboardSend, syncLocalClipboardToServer]);
 
   // ── Canvas rendering loop ────────────────────────────────────────
   useEffect(() => {
@@ -430,9 +591,12 @@ export default function VncPanel({
       if (!running || destroyedRef.current) return;
 
       const frames = frameBufferRef.current;
+      let rendered = false;
+      let renderFailed = false;
+      const hadPendingFrames = frames.length > 0;
       if (frames.length > 0) {
         const pending = frames.splice(0, frames.length);
-        frames.length = 0;
+        pendingFrameBytesRef.current = 0;
 
         if (canvas.width !== conn.width || canvas.height !== conn.height) {
           canvas.width = conn.width || 1;
@@ -440,20 +604,27 @@ export default function VncPanel({
         }
 
         for (const frame of pending) {
-          if (frame.rgba.length !== frame.w * frame.h * 4) continue;
+          if (frame.rgba.length !== frame.w * frame.h * 4) {
+            renderFailed = true;
+            continue;
+          }
           const imgData = new ImageData(frame.rgba, frame.w || 1, frame.h || 1);
           try {
             ctx.putImageData(imgData, frame.x, frame.y);
+            rendered = true;
           } catch {
-            // size mismatch, skip
+            renderFailed = true;
           }
         }
 
       }
 
-      if (ackPendingRef.current) {
+      if (ackPendingRef.current && (!hadPendingFrames || (rendered && !renderFailed))) {
         ackPendingRef.current = false;
         sendWsBinary(encodeWsAck());
+      } else if (ackPendingRef.current && hadPendingFrames) {
+        ackPendingRef.current = false;
+        requestFullRefresh();
       }
 
       rafRef.current = requestAnimationFrame(render);
@@ -465,7 +636,7 @@ export default function VncPanel({
       running = false;
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [visible, conn?.status, conn?.width, conn?.height, sendWsBinary]);
+  }, [visible, conn?.status, conn?.width, conn?.height, sendWsBinary, requestFullRefresh]);
 
   // ── Keyboard ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -570,8 +741,14 @@ export default function VncPanel({
       })();
     };
 
+    const releaseAllInput = () => {
+      pressedKeysymsRef.current.forEach((keysym) => sendWsBinary(encodeWsKey(false, keysym)));
+      pressedKeysymsRef.current.clear();
+      sendWsBinary(encodeWsPointer(0, 0, 0));
+    };
+
     const handleKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
+      if (viewOnly || e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)
         return;
 
       const pendingPaste = pasteInFlightRef.current;
@@ -602,7 +779,10 @@ export default function VncPanel({
       const keysym = keyEventToKeysym(e);
       if (keysym === 0) return;
       e.preventDefault();
-      sendWsBinary(encodeWsKey(e.type === "keydown", keysym));
+      const down = e.type === "keydown";
+      sendWsBinary(encodeWsKey(down, keysym));
+      if (down) pressedKeysymsRef.current.add(keysym);
+      else pressedKeysymsRef.current.delete(keysym);
     };
 
     window.addEventListener("keydown", handleKey);
@@ -611,6 +791,7 @@ export default function VncPanel({
     // Keep the paste listener as a secondary path — useful when the OS
     // dispatches a paste event directly to the WebView.
     const handlePaste = (e: ClipboardEvent) => {
+      if (!allowClipboardSend) return;
       const text = e.clipboardData?.getData("text/plain") ?? "";
       const html = e.clipboardData?.getData("text/html") || undefined;
       const rtf = e.clipboardData?.getData("text/rtf") || undefined;
@@ -621,13 +802,17 @@ export default function VncPanel({
       sendWs({ type: "ext_clipboard", text, html, rtf });
     };
     window.addEventListener("paste", handlePaste);
+    window.addEventListener("blur", releaseAllInput);
+    document.addEventListener("visibilitychange", releaseAllInput);
 
     return () => {
       window.removeEventListener("keydown", handleKey);
       window.removeEventListener("keyup", handleKey);
       window.removeEventListener("paste", handlePaste);
+      window.removeEventListener("blur", releaseAllInput);
+      document.removeEventListener("visibilitychange", releaseAllInput);
     };
-  }, [visible, conn?.status, sendWs, sendWsBinary]);
+  }, [visible, conn?.status, viewOnly, allowClipboardSend, sendWs, sendWsBinary]);
 
   // ── Pointer ───────────────────────────────────────────────────────
   const getFbCoords = useCallback(
@@ -635,35 +820,9 @@ export default function VncPanel({
       const canvas = canvasRef.current;
       const fbWidth = conn?.width ?? 0;
       const fbHeight = conn?.height ?? 0;
-      if (!canvas || fbWidth <= 0 || fbHeight <= 0) return { x: 0, y: 0 };
+      if (!canvas) return null;
       const rect = canvas.getBoundingClientRect();
-      if (rect.width <= 0 || rect.height <= 0) return { x: 0, y: 0 };
-
-      let contentLeft = rect.left;
-      let contentTop = rect.top;
-      let contentWidth = rect.width;
-      let contentHeight = rect.height;
-
-      if (scaleMode === "fit") {
-        const fbAspect = fbWidth / fbHeight;
-        const rectAspect = rect.width / rect.height;
-        if (rectAspect > fbAspect) {
-          contentWidth = rect.height * fbAspect;
-          contentLeft += (rect.width - contentWidth) / 2;
-        } else {
-          contentHeight = rect.width / fbAspect;
-          contentTop += (rect.height - contentHeight) / 2;
-        }
-      }
-
-      const scaleX = fbWidth / contentWidth;
-      const scaleY = fbHeight / contentHeight;
-      const x = Math.round((clientX - contentLeft) * scaleX);
-      const y = Math.round((clientY - contentTop) * scaleY);
-      return {
-        x: Math.max(0, Math.min(fbWidth - 1, x)),
-        y: Math.max(0, Math.min(fbHeight - 1, y)),
-      };
+      return mapClientToFramebuffer(clientX, clientY, rect, fbWidth, fbHeight, scaleMode);
     },
     [conn?.width, conn?.height, scaleMode],
   );
@@ -687,14 +846,20 @@ export default function VncPanel({
 
   const handlePointer = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
-      if (conn?.status !== "connected") return;
+      if (viewOnly || conn?.status !== "connected") return;
       if (delayedPointerDownRef.current?.pointerId === e.pointerId) {
         e.preventDefault();
         return;
       }
       e.preventDefault();
       void syncLocalClipboardToServer("pointer");
-      const { x, y } = getFbCoords(e.clientX, e.clientY);
+      const mapped = getFbCoords(e.clientX, e.clientY);
+      if (!mapped) return;
+      const allowOutside = ((e.type === "pointerup" || e.type === "pointercancel")
+        && (lastPointerSentRef.current?.buttons ?? 0) !== 0)
+        || (e.type === "pointermove" && e.buttons !== 0);
+      if (!mapped.inside && !allowOutside) return;
+      const { x, y } = mapped;
       const buttons = mouseButtonMask(e.nativeEvent);
       const pointer = { x, y, buttons };
 
@@ -715,20 +880,22 @@ export default function VncPanel({
       pendingPointerRef.current = null;
       sendPointerNow(pointer);
     },
-    [conn?.status, getFbCoords, sendPointerNow, syncLocalClipboardToServer],
+    [viewOnly, conn?.status, getFbCoords, sendPointerNow, syncLocalClipboardToServer],
   );
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
+      const mapped = getFbCoords(e.clientX, e.clientY);
+      if (!mapped?.inside) return;
       e.currentTarget.focus({ preventScroll: true });
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
       } catch {
         // Pointer capture can fail if the event was already cancelled.
       }
-      if (conn?.status === "connected" && (e.button === 1 || e.button === 2)) {
+      if (!viewOnly && conn?.status === "connected" && (e.button === 1 || e.button === 2)) {
         e.preventDefault();
-        const { x, y } = getFbCoords(e.clientX, e.clientY);
+        const { x, y } = mapped;
         const delayed: DelayedPointerDown = {
           pointerId: e.pointerId,
           down: { x, y, buttons: mouseButtonMask(e.nativeEvent) },
@@ -749,7 +916,7 @@ export default function VncPanel({
       }
       handlePointer(e);
     },
-    [conn?.status, getFbCoords, handlePointer, sendPointerNow, syncLocalClipboardToServer],
+    [viewOnly, conn?.status, getFbCoords, handlePointer, sendPointerNow, syncLocalClipboardToServer],
   );
 
   const handlePointerUp = useCallback(
@@ -757,8 +924,10 @@ export default function VncPanel({
       const delayed = delayedPointerDownRef.current;
       if (delayed?.pointerId === e.pointerId) {
         e.preventDefault();
-        const { x, y } = getFbCoords(e.clientX, e.clientY);
-        delayed.up = { x, y, buttons: mouseButtonMask(e.nativeEvent) };
+        const mapped = getFbCoords(e.clientX, e.clientY);
+        if (mapped) {
+          delayed.up = { x: mapped.x, y: mapped.y, buttons: mouseButtonMask(e.nativeEvent) };
+        }
         try {
           e.currentTarget.releasePointerCapture(e.pointerId);
         } catch {
@@ -778,41 +947,17 @@ export default function VncPanel({
 
   const handleWheel = useCallback(
     (e: React.WheelEvent<HTMLCanvasElement>) => {
-      if (conn?.status !== "connected") return;
+      if (viewOnly || conn?.status !== "connected") return;
       e.preventDefault();
-      const { x, y } = getFbCoords(e.clientX, e.clientY);
+      const mapped = getFbCoords(e.clientX, e.clientY);
+      if (!mapped?.inside) return;
+      const { x, y } = mapped;
       const wheelButton = e.deltaY < 0 ? 8 : 16;
       sendWsBinary(encodeWsPointer(x, y, wheelButton));
       setTimeout(() => sendWsBinary(encodeWsPointer(x, y, 0)), 50);
     },
-    [conn?.status, getFbCoords, sendWsBinary],
+    [viewOnly, conn?.status, getFbCoords, sendWsBinary],
   );
-
-  // ── Resize → set_desktop_size ─────────────────────────────────────
-  useEffect(() => {
-    if (!visible || conn?.status !== "connected") return;
-    const container = containerRef.current;
-    if (!container) return;
-
-    let timer: ReturnType<typeof setTimeout>;
-    const observer = new ResizeObserver((entries) => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        const entry = entries[0];
-        if (!entry) return;
-        const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          sendWsBinary(encodeWsResize(Math.round(width), Math.round(height)));
-        }
-      }, 300);
-    });
-    observer.observe(container);
-
-    return () => {
-      observer.disconnect();
-      clearTimeout(timer);
-    };
-  }, [visible, conn?.status, sendWsBinary]);
 
   // ── Canvas CSS size for scaling ───────────────────────────────────
   const canvasStyle: React.CSSProperties =
@@ -968,14 +1113,20 @@ export default function VncPanel({
           <button
             data-testid="vnc-reconnect"
             onClick={() => {
-              // Cleanup old session
-              const sid = sessionIdRef.current;
-              if (sid) vncDisconnect(sid).catch(() => {});
               if (wsRef.current) {
                 wsRef.current.close();
                 wsRef.current = null;
               }
-              // Reconnect
+              // Manual reconnect resets the bounded backoff budget.
+              reconnectAttemptRef.current = 0;
+              if (reconnectTimerRef.current !== null) {
+                window.clearTimeout(reconnectTimerRef.current);
+                reconnectTimerRef.current = null;
+              }
+              if (reconnectStableTimerRef.current !== null) {
+                window.clearTimeout(reconnectStableTimerRef.current);
+                reconnectStableTimerRef.current = null;
+              }
               doConnect();
             }}
             style={{

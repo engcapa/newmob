@@ -74,6 +74,7 @@ import {
   type ReattachMessage,
 } from "../lib/detachedSession";
 import type { DetachedRdpParams, DetachedVncParams, DetachedTerminalParams, DetachedDbParams } from "../components/detached/DetachedSessionWindow";
+import { redactVncHandoff, vncConsumeDetachClaim, vncCreateDetachClaim } from "../lib/vnc";
 import { Columns2, Grid2X2, Lock, Rows3, Unlock, X } from "lucide-react";
 import type { SftpTabInfo, Tab, DbConnectInfo, HBaseConnectInfo, MailConnectionSecurity, MailTabInfo, MailAuthMode, MailProvider, CodeWorkspaceRootInfo, CodeWorkspaceTabInfo, GitWorkspaceRootInfo, RecentWorkspace } from "../types";
 import { computeNewTerminalTitle, newWorkspaceInstanceId, recentWorkspaceIdFromParts, useAppStore, type TerminalSplitLayout } from "../stores/appStore";
@@ -1169,18 +1170,33 @@ export function MainLayout() {
   const openDetachedVnc = useCallback(
     (tabId: string, info: NonNullable<Tab["vnc"]>, title: string) => {
       const detachedId = `${tabId}__detached`;
-      const payload: DetachedVncParams = {
-        tabId,
-        sessionId: info.sessionId,
+      void vncCreateDetachClaim({
         host: info.host,
         port: info.port,
         username: info.username ?? null,
         password: info.password,
-        title,
-      };
-      openDetachedGenericWindow("vnc", tabId, detachedId, payload, title);
+        network_settings_json: info.networkSettingsJson ?? null,
+        security_policy: info.securityPolicy ?? "prefer-encryption",
+        view_only: info.viewOnly ?? false,
+        clipboard_policy: info.clipboardPolicy ?? "bidirectional",
+      }).then((claimId) => {
+        // The browser-persisted handoff contains only an opaque one-time id;
+        // password/proxy secrets stay in backend memory.
+        const payload = redactVncHandoff<DetachedVncParams>({
+          tabId,
+          sessionId: info.sessionId,
+          host: info.host,
+          port: info.port,
+          username: info.username,
+          networkSettingsJson: info.networkSettingsJson,
+          title,
+        }, claimId);
+        openDetachedGenericWindow("vnc", tabId, detachedId, payload, title);
+      }).catch((error) => {
+        setStatusMessage(error instanceof Error ? error.message : String(error));
+      });
     },
-    [openDetachedGenericWindow],
+    [openDetachedGenericWindow, setStatusMessage],
   );
 
   const openDetachedTerminal = useCallback(
@@ -1283,7 +1299,7 @@ export function MainLayout() {
     // window dedupes them without blocking a legitimate later re-detach.
     const recentReattach = new Map<string, number>();
     const BURST_WINDOW_MS = 1500;
-    const handle = (msg: ReattachMessage) => {
+    const handle = async (msg: ReattachMessage) => {
       const burstKey = `${msg.kind}.${msg.id}`;
       const now = Date.now();
       const last = recentReattach.get(burstKey);
@@ -1352,7 +1368,22 @@ export function MainLayout() {
           break;
         }
         case "vnc": {
-          const p = msg.payload as DetachedVncParams | undefined;
+          let p = msg.payload as DetachedVncParams | undefined;
+          if (p?.claimId && !p.host) {
+            const claim = await vncConsumeDetachClaim(p.claimId);
+            p = {
+              ...p,
+              claimId: undefined,
+              host: claim.host,
+              port: claim.port,
+              username: claim.username,
+              password: claim.password,
+              networkSettingsJson: claim.network_settings_json,
+              securityPolicy: claim.security_policy,
+              viewOnly: claim.view_only,
+              clipboardPolicy: claim.clipboard_policy as DetachedVncParams["clipboardPolicy"],
+            };
+          }
           if (!p?.host) return;
           addTab({
             id: reattachTabId,
@@ -1366,6 +1397,10 @@ export function MainLayout() {
               port: p.port,
               username: p.username ?? undefined,
               password: p.password,
+              networkSettingsJson: p.networkSettingsJson ?? null,
+              securityPolicy: p.securityPolicy,
+              viewOnly: p.viewOnly,
+              clipboardPolicy: p.clipboardPolicy,
             },
           });
           setStatusMessage(tr("status.reattached"));
@@ -1421,10 +1456,10 @@ export function MainLayout() {
       }
       clearReattachHandoff(msg.kind, msg.id);
     };
-    const unsub = subscribeReattach(handle);
+    const unsub = subscribeReattach((msg) => { void handle(msg); });
     // Drain any envelopes left by detached windows that closed abruptly
     // before we subscribed.
-    drainPendingReattach().forEach(handle);
+    drainPendingReattach().forEach((msg) => { void handle(msg); });
     return unsub;
   }, [addTab, setActiveTab, setStatusMessage]);
 
@@ -1660,6 +1695,12 @@ export function MainLayout() {
 
   const openVncTab = useCallback((session: SessionConfig, password?: string) => {
     const id = `vnc-${session.id}-${Date.now()}`;
+    const options = parseSessionOptions(session.options_json);
+    const rawPolicy = typeof options.vncSecurityPolicy === "string" ? options.vncSecurityPolicy : "prefer-encryption";
+    const securityPolicy = rawPolicy === "require-encryption" || rawPolicy === "legacy-compatible" || rawPolicy === "allow-none"
+      ? rawPolicy
+      : "prefer-encryption";
+    const ns = toNetworkSettingsPayload(getSessionNetworkSettings(session.options_json));
     addTab({
       id,
       type: "vnc",
@@ -1672,6 +1713,13 @@ export function MainLayout() {
         port: session.port,
         username: session.username,
         password,
+        networkSettingsJson: JSON.stringify(ns),
+        securityPolicy,
+        viewOnly: options.vncViewOnly === true,
+        clipboardPolicy:
+          options.vncClipboardPolicy === "disabled" || options.vncClipboardPolicy === "client-to-server" || options.vncClipboardPolicy === "server-to-client"
+            ? options.vncClipboardPolicy
+            : "bidirectional",
       },
     });
   }, [addTab]);
@@ -2577,6 +2625,7 @@ export function MainLayout() {
         session.session_type === "SSH"
         || session.session_type === "SFTP"
         || session.session_type === "RDP"
+        || session.session_type === "VNC"
       ) {
         if (session.auth_method === "Password") {
           awaitingManualAuthRef.current = true;
@@ -2587,6 +2636,8 @@ export function MainLayout() {
             openSftpTab(session, authMethod, parsed.authData);
           } else if (session.session_type === "RDP") {
             openRdpTab(session, parsed.authData ?? undefined);
+          } else if (session.session_type === "VNC") {
+            openVncTab(session, parsed.authData ?? undefined);
           } else {
             openSshTab(session, authMethod, parsed.authData);
           }
@@ -2597,7 +2648,7 @@ export function MainLayout() {
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [openBrowserSession, openCommandTerminalTab, openLocalTab, openMailTab, openRdpTab, openSftpTab, openSshTab, openUnsupportedTab, setStatusMessage]);
+  }, [openBrowserSession, openCommandTerminalTab, openLocalTab, openMailTab, openRdpTab, openSftpTab, openSshTab, openVncTab, openUnsupportedTab, setStatusMessage]);
 
   const openPlaceholderTab = useCallback((title: string, message: string) => {
     addTab({
@@ -3915,6 +3966,10 @@ export function MainLayout() {
                           port={tab.vnc.port}
                           username={tab.vnc.username}
                           password={tab.vnc.password}
+                          networkSettingsJson={tab.vnc.networkSettingsJson}
+                          securityPolicy={tab.vnc.securityPolicy}
+                          viewOnly={tab.vnc.viewOnly}
+                          clipboardPolicy={tab.vnc.clipboardPolicy}
                           visible={isActive}
                         />
                       </Suspense>

@@ -327,7 +327,6 @@
 ## main (F1.2)
 
 - `[data-testid="collapsed-sidebar-rail"]` — interactive [optional] — F1.2.collapsed-sidebar-rail
-- `[data-testid="compact-sidebar-drawer"]` — display [optional] — F1.2.compact-sidebar-drawer
 - `[data-testid="main-sidebar-resize-handle"]` — display — F1.2.sidebar-resize-handle
 
 ## main/detach (F-Detach-1)
@@ -557,6 +556,7 @@
 ## sessions (F6.2)
 
 - `[data-testid="sidebar"]` — display — F6.2.sidebar
+- `[data-testid="side-tab-sessions"]` — interactive — F6.2.side-tab-sessions
 - `[data-testid="session-tree"]` — display — F6.2.session-tree
 - `[data-testid="session-tree-item"]` — interactive — F6.2.session-tree-item
 - `[data-testid="session-search"]` — interactive — F6.2.session-search
@@ -1050,6 +1050,9 @@
 
 - `[data-testid="vnc-panel"]` — display — F9.6.panel-root
 - `[data-testid="vnc-canvas"]` — display — F9.6.canvas
-- `[data-testid="vnc-floating-toolbar"]` — display [optional] — F9.6.floating-toolbar
 - `[data-testid="vnc-scale-toggle"]` — interactive [optional] — F9.6.scale-toggle
 - `[data-testid="vnc-reconnect"]` — interactive [optional] — F9.6.reconnect
+- `[data-testid="session-vnc-policies"]` — display [optional] — F9.6.policy-settings
+- `[data-testid="session-vnc-security-policy"]` — interactive [optional] — F9.6.security-policy
+- `[data-testid="session-vnc-clipboard-policy"]` — interactive [optional] — F9.6.clipboard-policy
+- `[data-testid="session-vnc-view-only"]` — interactive [optional] — F9.6.view-only

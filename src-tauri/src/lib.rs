@@ -632,6 +632,8 @@ pub fn run() {
             vnc::vnc_connect,
             vnc::vnc_disconnect,
             vnc::vnc_test_connection,
+            vnc::vnc_create_detach_claim,
+            vnc::vnc_consume_detach_claim,
             rdp::rdp_connect,
             rdp::rdp_disconnect,
             rdp::rdp_test_connection,

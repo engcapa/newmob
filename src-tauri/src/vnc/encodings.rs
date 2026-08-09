@@ -1,6 +1,8 @@
 use flate2::{Decompress, FlushDecompress};
 use std::io::Read;
 
+use crate::vnc::limits::DecodeLimits;
+
 /// A decoded framebuffer rectangle, in destination RGBA32.
 ///
 /// `Copy` rectangles are resolved against the framebuffer inside the decoder,
@@ -42,8 +44,19 @@ fn read_u32_be<R: Read>(r: &mut R) -> std::io::Result<u32> {
 /// each (per the RGBA32 pixel format we negotiate). Alpha byte is forced to
 /// 0xFF because many servers leave it at 0.
 pub fn read_raw<R: Read>(r: &mut R, x: u16, y: u16, w: u16, h: u16) -> Result<DecodedRect, String> {
-    let pixel_count = w as usize * h as usize;
-    let mut rgba = vec![0u8; pixel_count * 4];
+    read_raw_with_limits(r, x, y, w, h, &DecodeLimits::default())
+}
+
+pub fn read_raw_with_limits<R: Read>(
+    r: &mut R,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    limits: &DecodeLimits,
+) -> Result<DecodedRect, String> {
+    let bytes = limits.rectangle_bytes(w, h).map_err(|e| e.to_string())?;
+    let mut rgba = vec![0u8; bytes];
     r.read_exact(&mut rgba)
         .map_err(|e| format!("raw: read pixels: {}", e))?;
     for pixel in rgba.chunks_exact_mut(4) {
@@ -75,18 +88,30 @@ pub fn read_copyrect<R: Read>(
     let w_us = w as usize;
     let h_us = h as usize;
 
-    // Defensive bounds: a misbehaving server could send coordinates that walk
-    // off the framebuffer. Clip rather than panic.
-    let mut rgba = vec![0u8; w_us * h_us * 4];
-    if fb_w == 0 || fb_h == 0 {
-        return Ok(DecodedRect::Pixels {
-            x: dst_x,
-            y: dst_y,
-            w,
-            h,
-            rgba,
-        });
+    let bytes = w_us
+        .checked_mul(h_us)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "copyrect: byte count overflow".to_string())?;
+    if fb_w == 0
+        || fb_h == 0
+        || src_x as usize >= fb_w
+        || src_y as usize >= fb_h
+        || (src_x as usize)
+            .checked_add(w_us)
+            .is_none_or(|end| end > fb_w)
+        || (src_y as usize)
+            .checked_add(h_us)
+            .is_none_or(|end| end > fb_h)
+        || (dst_x as usize)
+            .checked_add(w_us)
+            .is_none_or(|end| end > fb_w)
+        || (dst_y as usize)
+            .checked_add(h_us)
+            .is_none_or(|end| end > fb_h)
+    {
+        return Err("copyrect: source or destination is outside framebuffer".into());
     }
+    let mut rgba = vec![0u8; bytes];
     for row in 0..h_us {
         let sy = src_y as usize + row;
         if sy >= fb_h {
@@ -277,7 +302,33 @@ pub fn read_zrle<R: Read>(
     rect_h: u16,
     dec: &mut ZrleDecoder,
 ) -> Result<Vec<DecodedRect>, String> {
-    let zlib_len = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))? as usize;
+    read_zrle_with_limits(
+        r,
+        rect_x,
+        rect_y,
+        rect_w,
+        rect_h,
+        dec,
+        &DecodeLimits::default(),
+    )
+}
+
+pub fn read_zrle_with_limits<R: Read>(
+    r: &mut R,
+    rect_x: u16,
+    rect_y: u16,
+    rect_w: u16,
+    rect_h: u16,
+    dec: &mut ZrleDecoder,
+    limits: &DecodeLimits,
+) -> Result<Vec<DecodedRect>, String> {
+    let zlib_len_raw = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))?;
+    let zlib_len = limits
+        .compressed_bytes(zlib_len_raw)
+        .map_err(|e| e.to_string())?;
+    let _rect_bytes = limits
+        .rectangle_bytes(rect_w, rect_h)
+        .map_err(|e| e.to_string())?;
     let mut compressed = vec![0u8; zlib_len];
     r.read_exact(&mut compressed)
         .map_err(|e| format!("zrle: body: {}", e))?;
@@ -297,7 +348,13 @@ pub fn read_zrle<R: Read>(
     let mut src_consumed = 0usize;
     loop {
         let current_len = dec.buf.len();
-        dec.buf.resize(current_len + 64 * 1024, 0);
+        let next_len = current_len
+            .checked_add(64 * 1024)
+            .ok_or_else(|| "zrle: output size overflow".to_string())?;
+        if next_len > limits.max_decompressed_rect_bytes {
+            return Err("zrle: decompressed output exceeds configured limit".into());
+        }
+        dec.buf.resize(next_len, 0);
 
         let input_slice: &[u8] = if src_consumed < compressed.len() {
             &compressed[src_consumed..]
@@ -557,10 +614,17 @@ mod tests {
     }
 
     #[test]
+    fn copyrect_rejects_out_of_bounds_source() {
+        let fb = vec![0u8; 4 * 4];
+        let mut payload = Cursor::new(vec![0u8, 4, 0, 0]);
+        assert!(read_copyrect(&mut payload, 0, 0, 1, 1, &fb, 4, 1).is_err());
+    }
+
+    #[test]
     fn hextile_raw_subencoding_reads_exact_bytes() {
         let mut payload = vec![HEXTILE_RAW]; // subenc byte
         payload.extend_from_slice(&[255, 0, 0, 0, 0, 255, 0, 0]); // 2 pixels
-                                                                  // 2x1 rect, exactly one tile
+        // 2x1 rect, exactly one tile
         let mut cur = Cursor::new(&payload);
         let mut st = HextileState::new();
         let out = read_hextile(&mut cur, 0, 0, 2, 1, &mut st).unwrap();
@@ -597,8 +661,8 @@ mod tests {
 
     #[test]
     fn zrle_solid_tile_with_persistent_stream() {
-        use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        use flate2::write::ZlibEncoder;
         use std::io::Write;
 
         // One 64x64 ZRLE tile, subenc=1 (solid), CPIXEL = [R,G,B] = [255,0,0].
@@ -624,8 +688,8 @@ mod tests {
 
     #[test]
     fn zrle_plain_rle_with_run_length_continuation() {
-        use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        use flate2::write::ZlibEncoder;
         use std::io::Write;
 
         // subenc=128, colour = green (0,255,0), run length = 1 + 255 + 0 = 256

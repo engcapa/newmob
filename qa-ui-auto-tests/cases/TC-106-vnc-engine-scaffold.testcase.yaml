@@ -15,7 +15,7 @@ timeout_sec: 20
 steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="sidebar"]'
-  - click: '[data-testid="session-new"]'
+  - click: 'text="New session…"'
   - wait_for: '[data-testid="session-editor"]'
   - assert_visible: '[data-testid="session-proto-vnc"]'
   - screenshot: 106-vnc-engine-scaffold.png

@@ -19,7 +19,7 @@ timeout_sec: 45
 steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="sidebar"]'
-  - click: '[data-testid="session-new"]'
+  - click: 'text="New session…"'
   - wait_for: '[data-testid="session-editor"]'
   - click: '[data-testid="session-proto-vnc"]'
   - fill:
@@ -34,9 +34,15 @@ steps:
       selector: '[data-testid="session-name"]'
       value: qa-ui-auto-vnc
   - click: '[data-testid="session-save"]'
+  - click: '[data-testid="side-tab-sessions"]'
   - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-vnc"]'
   # Open the VNC tab — the panel mounts immediately, regardless of dial state.
   - open_session: { name: qa-ui-auto-vnc, double_click: true }
+  - wait_for: '[data-testid="auth-prompt"]'
+  - fill:
+      selector: '[data-testid="auth-password"]'
+      value: qa-ui-auto-password
+  - click: '[data-testid="auth-submit"]'
   - wait_for:
       selector: '[data-testid="vnc-panel"]'
       timeout_sec: 10

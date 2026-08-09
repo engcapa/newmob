@@ -25,6 +25,19 @@ describe("parseQuickConnectInput", () => {
     });
   });
 
+  it("parses VNC URLs through the password prompt path", () => {
+    const parsed = parseQuickConnectInput("vnc://alice@desktop.example.test:5901");
+
+    expect(parsed.config).toMatchObject({
+      session_type: "VNC",
+      host: "desktop.example.test",
+      port: 5901,
+      username: "alice",
+      auth_method: "Password",
+    });
+    expect(parsed.authData).toBeNull();
+  });
+
   it.each([
     ["ftp://ops@files.example.test:2121", "FTP", "files.example.test", 2121, "ops"],
     ["rlogin://bob@legacy.example.test", "Rlogin", "legacy.example.test", 513, "bob"],
