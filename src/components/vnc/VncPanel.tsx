@@ -966,12 +966,12 @@ export default function VncPanel({
           width: "100%",
           height: "100%",
           objectFit: "contain",
-          cursor: "default",
+          cursor: conn?.status === "connected" ? "none" : "default",
         }
       : {
           width: conn?.width ?? 0,
           height: conn?.height ?? 0,
-          cursor: "default",
+          cursor: conn?.status === "connected" ? "none" : "default",
           maxWidth: "none",
           maxHeight: "none",
         };
