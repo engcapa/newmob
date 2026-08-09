@@ -5,6 +5,7 @@ pub mod limits;
 pub mod policy;
 pub mod queue;
 pub mod rfb;
+pub mod tls;
 pub mod ws;
 
 use serde::{Deserialize, Serialize};
@@ -283,14 +284,34 @@ pub async fn vnc_test_connection(
             crate::terminal::resolve_jump_credentials(&state, settings)?;
         }
         let policy = security_policy.unwrap_or_default();
-        let transport = dial_vnc_transport(host, port, network).await?;
+        let transport = dial_vnc_transport(host.clone(), port, network).await?;
         let forward_task = transport.network_forward_task;
+        let prepared = match crate::vnc::tls::prepare_rfb_transport(
+            transport.stream,
+            &host,
+            policy,
+            crate::vnc::ws::VNC_AUTH_TIMEOUT,
+        )
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(task) = forward_task {
+                    task.abort();
+                }
+                return Err(error);
+            }
+        };
+        let tls_task = prepared.tls_task;
         let handshake = tokio::task::spawn_blocking(move || {
-            let mut rfb = crate::vnc::rfb::RfbConnection::from_stream(
-                transport.stream,
-                std::time::Duration::from_secs(15),
+            let mut rfb = crate::vnc::rfb::RfbConnection::from_negotiated_stream(
+                prepared.stream,
+                crate::vnc::ws::VNC_AUTH_TIMEOUT,
                 policy,
                 crate::vnc::limits::DecodeLimits::default(),
+                prepared.proto_minor,
+                prepared.pending_security,
+                prepared.outer_security_type,
             )?;
             let init =
                 rfb.authenticate_with_policy(username.as_deref(), resolved.as_deref(), policy)?;
@@ -301,6 +322,9 @@ pub async fn vnc_test_connection(
         })
         .await;
         if let Some(task) = forward_task {
+            task.abort();
+        }
+        if let Some(task) = tls_task {
             task.abort();
         }
         handshake.map_err(|e| format!("VNC handshake worker failed: {e}"))?

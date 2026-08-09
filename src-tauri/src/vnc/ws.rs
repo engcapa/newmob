@@ -21,7 +21,7 @@ use crate::vnc::clipboard::{
     SUPPORTED_ACTIONS, build_caps_body, build_notify_body, build_provide_body, build_request_body,
 };
 use crate::vnc::encodings::DecodedRect;
-use crate::vnc::policy::{VncClipboardPolicy, VncSecurityPolicy, security_type_kind};
+use crate::vnc::policy::{VncClipboardPolicy, VncSecurityPolicy};
 use crate::vnc::queue::{FrameQueueReceiver, FrameQueueSender, QueuedWsOutgoing};
 use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
 
@@ -32,6 +32,7 @@ const WS_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the idle watchdog checks the last-seen timestamp.
 const WS_IDLE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const VNC_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const VNC_AUTH_TIMEOUT: Duration = Duration::from_secs(45);
 const VNC_WS_PATH: &str = "/vnc";
 
 // ── Messages for internal channels ──────────────────────────────────
@@ -147,6 +148,7 @@ pub struct VncSession {
     pub ws_token: String,
     pub cancel: CancellationToken,
     pub network_forward_task: Option<tokio::task::JoinHandle<()>>,
+    pub tls_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Drop for VncSession {
@@ -155,11 +157,14 @@ impl Drop for VncSession {
         if let Some(task) = self.network_forward_task.as_ref() {
             task.abort();
         }
+        if let Some(task) = self.tls_task.as_ref() {
+            task.abort();
+        }
     }
 }
 
 pub(crate) struct VncDialedTransport {
-    pub stream: std::net::TcpStream,
+    pub stream: TcpStream,
     pub network_forward_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -195,11 +200,8 @@ pub(crate) async fn dial_vnc_transport(
                 .await
                 .map_err(|e| format!("VNC TCP connection failed: {e}"))?,
         };
-        let stream = socket
-            .into_std()
-            .map_err(|e| format!("VNC transport conversion failed: {e}"))?;
         Ok(VncDialedTransport {
-            stream,
+            stream: socket,
             network_forward_task: forward_guard.0.take(),
         })
     })
@@ -233,15 +235,25 @@ pub async fn spawn_vnc_relay(
     // through the shared loopback forwarder, allowing the synchronous RA2
     // framing code to keep its tested std::net transport while the upstream
     // network path remains fully asynchronous and cancellable.
-    let transport = dial_vnc_transport(host, port, network).await?;
+    let transport = dial_vnc_transport(host.clone(), port, network).await?;
     let mut network_forward_guard = ForwardTaskGuard(transport.network_forward_task);
-    let std_stream = transport.stream;
+    let prepared = crate::vnc::tls::prepare_rfb_transport(
+        transport.stream,
+        &host,
+        security_policy,
+        VNC_AUTH_TIMEOUT,
+    )
+    .await?;
+    let mut tls_guard = ForwardTaskGuard(prepared.tls_task);
     let (rfb, writer, server_init) = tokio::task::spawn_blocking(move || {
-        let mut rfb = RfbConnection::from_stream(
-            std_stream,
-            Duration::from_secs(15),
+        let mut rfb = RfbConnection::from_negotiated_stream(
+            prepared.stream,
+            VNC_AUTH_TIMEOUT,
             security_policy,
             crate::vnc::limits::DecodeLimits::default(),
+            prepared.proto_minor,
+            prepared.pending_security,
+            prepared.outer_security_type,
         )?;
         let server_init = rfb.authenticate_with_policy(
             username.as_deref(),
@@ -287,17 +299,13 @@ pub async fn spawn_vnc_relay(
 
     // Send connected notification with the actual negotiated security, never
     // just the requested policy.
-    let negotiated = rfb.security_type.and_then(security_type_kind);
     let connected = serde_json::to_string(&WsOutgoingText::Connected {
         width: server_init.width,
         height: server_init.height,
         name: server_init.name.clone(),
         protocol: rfb.protocol_version(),
-        security: negotiated
-            .map(|kind| kind.label())
-            .unwrap_or("Unknown")
-            .to_string(),
-        encrypted: negotiated.is_some_and(|kind| kind.encrypted()),
+        security: rfb.security_label(),
+        encrypted: rfb.encrypted(),
     })
     .unwrap();
     let _ = ws_out_tx.send_critical_control(connected);
@@ -337,6 +345,7 @@ pub async fn spawn_vnc_relay(
         ws_token,
         cancel,
         network_forward_task: network_forward_guard.0.take(),
+        tls_task: tls_guard.0.take(),
     })
 }
 
