@@ -4,7 +4,7 @@
  * helpers in `components/filebrowser/SftpDetachedWindow.tsx` are now thin
  * wrappers around this module.
  *
- *   1. Main window writes a credential blob to localStorage with
+ *   1. Main window writes a short-lived connection handoff to localStorage with
  *      `writeDetachedHandoff(kind, payload)`.
  *   2. Main window asks the backend (Tauri) — or the browser stub — to
  *      open a new window pointed at `index.html#<kind>=<id>`.
@@ -63,7 +63,10 @@ export function writeDetachedHandoff<T>(
   payload: T,
 ): void {
   try {
-    const env: HandoffEnvelope<T> = { payload, createdAt: Date.now() };
+    const env: HandoffEnvelope<T> = {
+      payload: sanitizeDetachedPayload(kind, payload),
+      createdAt: Date.now(),
+    };
     localStorage.setItem(handoffKey(kind, id), JSON.stringify(env));
     if (kind === "sftp") {
       // Mirror to the legacy key so older code paths still find it.
@@ -72,6 +75,18 @@ export function writeDetachedHandoff<T>(
   } catch {
     /* quota / serialization — ignore */
   }
+}
+
+function sanitizeDetachedPayload<T>(kind: DetachedKind, payload: T): T {
+  if (kind !== "vnc" || !payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return payload;
+  }
+  const safe = { ...(payload as Record<string, unknown>) };
+  delete safe.password;
+  if (typeof safe.credentialRef === "string" && !safe.credentialRef.startsWith("vault:")) {
+    delete safe.credentialRef;
+  }
+  return safe as T;
 }
 
 export function consumeDetachedHandoff<T>(

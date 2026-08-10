@@ -573,6 +573,8 @@ pub fn run() {
             config::temporary_file_path,
             config::clipboard_read_text,
             config::clipboard_write_text,
+            config::clipboard_read_multi_format,
+            config::clipboard_write_multi_format,
             config::clipboard_capabilities,
             config::clipboard_read_files,
             config::clipboard_write_files,

@@ -261,6 +261,7 @@ objc2 = "0.6.4"
 block2 = "0.6.2"
 dispatch2 = "0.3.1"
 objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSError"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSPasteboard"] }
 objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "objc2-core-video"] }
 objc2-core-video = { version = "0.3.2", features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVReturn"] }
 objc2-core-foundation = "0.3.2"

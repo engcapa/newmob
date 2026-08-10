@@ -390,6 +390,39 @@ pub fn clipboard_capabilities() -> ClipboardCapabilities {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardMultiFormat {
+    pub text: String,
+    pub html: Option<String>,
+    pub rtf: Option<String>,
+}
+
+#[tauri::command]
+pub fn clipboard_read_multi_format() -> Result<ClipboardMultiFormat, String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::clipboard_read_multi_format()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("native multi-format clipboard is only available on macOS".to_string())
+    }
+}
+
+#[tauri::command]
+pub fn clipboard_write_multi_format(payload: ClipboardMultiFormat) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        platform::clipboard_write_multi_format(&payload)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = payload;
+        Err("native multi-format clipboard is only available on macOS".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn clipboard_read_files(state: State<'_, AppState>) -> Result<Vec<String>, String> {
     let native = platform::clipboard_read_files().unwrap_or_default();
@@ -926,7 +959,93 @@ mod tests {
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use objc2_app_kit::{
+        NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSPasteboardTypeString,
+    };
+    use objc2_foundation::{NSData, NSString};
     use std::process::Command;
+
+    use super::ClipboardMultiFormat;
+
+    const MAX_FORMAT_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+
+    pub fn clipboard_read_multi_format() -> Result<ClipboardMultiFormat, String> {
+        let pasteboard = NSPasteboard::generalPasteboard();
+        let text = pasteboard
+            .stringForType(unsafe { NSPasteboardTypeString })
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let html = pasteboard
+            .stringForType(unsafe { NSPasteboardTypeHTML })
+            .map(|value| value.to_string());
+        let rtf = match pasteboard.dataForType(unsafe { NSPasteboardTypeRTF }) {
+            Some(value) => {
+                // NSData is immutable here and retained for the duration of the copy.
+                let bytes = unsafe { value.as_bytes_unchecked() }.to_vec();
+                Some(String::from_utf8(bytes).map_err(|_| {
+                    "macOS clipboard RTF is not valid UTF-8 and cannot be sent losslessly"
+                        .to_string()
+                })?)
+            }
+            None => None,
+        };
+        let payload = ClipboardMultiFormat { text, html, rtf };
+        validate_multi_format(&payload)?;
+        Ok(payload)
+    }
+
+    pub fn clipboard_write_multi_format(payload: &ClipboardMultiFormat) -> Result<(), String> {
+        validate_multi_format(payload)?;
+        let pasteboard = NSPasteboard::generalPasteboard();
+        pasteboard.clearContents();
+        if !pasteboard.setString_forType(&NSString::from_str(&payload.text), unsafe {
+            NSPasteboardTypeString
+        }) {
+            return Err("macOS clipboard rejected plain text".to_string());
+        }
+        if let Some(html) = payload.html.as_deref() {
+            if !pasteboard
+                .setString_forType(&NSString::from_str(html), unsafe { NSPasteboardTypeHTML })
+            {
+                return Err("macOS clipboard rejected HTML".to_string());
+            }
+        }
+        if let Some(rtf) = payload.rtf.as_deref() {
+            let data = NSData::with_bytes(rtf.as_bytes());
+            if !pasteboard.setData_forType(Some(&data), unsafe { NSPasteboardTypeRTF }) {
+                return Err("macOS clipboard rejected RTF".to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_multi_format(payload: &ClipboardMultiFormat) -> Result<(), String> {
+        let mut total = 0usize;
+        for value in [
+            Some(payload.text.as_str()),
+            payload.html.as_deref(),
+            payload.rtf.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.len() > MAX_FORMAT_BYTES {
+                return Err(format!(
+                    "macOS clipboard format exceeds {MAX_FORMAT_BYTES} byte limit"
+                ));
+            }
+            total = total
+                .checked_add(value.len())
+                .ok_or_else(|| "macOS clipboard total size overflow".to_string())?;
+        }
+        if total > MAX_TOTAL_BYTES {
+            return Err(format!(
+                "macOS clipboard payload exceeds {MAX_TOTAL_BYTES} byte limit"
+            ));
+        }
+        Ok(())
+    }
 
     pub fn select_private_key_file(_current_path: Option<&str>) -> Result<Option<String>, String> {
         run_osascript(r#"POSIX path of (choose file with prompt "Select private key")"#)
