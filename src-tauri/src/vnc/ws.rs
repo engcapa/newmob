@@ -22,7 +22,10 @@ use crate::vnc::clipboard::{
     ENCODING_EXTENDED_CLIPBOARD_LEGACY, ExtendedClipboardMsg, FORMAT_HTML, FORMAT_RTF, FORMAT_TEXT,
     SUPPORTED_ACTIONS, build_caps_body, build_notify_body, build_provide_body, build_request_body,
 };
-use crate::vnc::encodings::{DecodedCursor, DecodedRect};
+use crate::vnc::encodings::{
+    DecodedCursor, DecodedRect, ENCODING_DESKTOP_SIZE, ENCODING_POINTER_POS, ENCODING_RICH_CURSOR,
+    ENCODING_X_CURSOR,
+};
 use crate::vnc::policy::{VncClipboardPolicy, VncSecurityPolicy};
 use crate::vnc::queue::{FrameQueueReceiver, FrameQueueSender, QueuedWsOutgoing};
 use crate::vnc::rfb::{RfbConnection, RfbWriter, ServerMessage};
@@ -152,6 +155,8 @@ enum WsOutgoingText {
         height: u16,
         png_base64: String,
     },
+    #[serde(rename = "pointer_pos")]
+    PointerPos { x: u16, y: u16 },
 }
 
 // ── Public session handle ───────────────────────────────────────────
@@ -280,8 +285,10 @@ pub async fn spawn_vnc_relay(
             5,
             1,
             0,
-            -223,
-            -239,
+            ENCODING_DESKTOP_SIZE,
+            ENCODING_POINTER_POS,
+            ENCODING_X_CURSOR,
+            ENCODING_RICH_CURSOR,
             ENCODING_EXTENDED_CLIPBOARD,
             ENCODING_EXTENDED_CLIPBOARD_LEGACY,
         ])?;
@@ -559,7 +566,11 @@ async fn run_relay(
                 }
             };
             match msg {
-                ServerMessage::FramebufferUpdate { rects, cursor } => {
+                ServerMessage::FramebufferUpdate {
+                    rects,
+                    cursor,
+                    pointer_pos,
+                } => {
                     if (fb_width, fb_height) != published_framebuffer_size {
                         framebuffer_generation = framebuffer_generation.saturating_add(1);
                         published_framebuffer_size = (fb_width, fb_height);
@@ -588,9 +599,17 @@ async fn run_relay(
                                 let _ = ws_out.send_control(json);
                             }
                             Err(error) => {
-                                tracing::warn!(%error, "ignoring invalid VNC RichCursor update");
+                                tracing::warn!(%error, "ignoring invalid VNC cursor update");
                             }
                         }
+                    }
+                    if let Some(pointer_pos) = pointer_pos {
+                        let json = serde_json::to_string(&WsOutgoingText::PointerPos {
+                            x: pointer_pos.x,
+                            y: pointer_pos.y,
+                        })
+                        .unwrap();
+                        let _ = ws_out.send_control(json);
                     }
                     if ws_out.finish_frame().unwrap_or(false) {
                         let _ = rfb_writer_for_read.lock().await.request_update(false);
@@ -1105,6 +1124,9 @@ async fn accept_authorized_ws(
             },
             _ = cancel.cancelled() => return Err("VNC relay cancelled".into()),
         };
+        stream
+            .set_nodelay(true)
+            .map_err(|error| format!("configure VNC WebSocket TCP_NODELAY: {error}"))?;
 
         let protocol = expected_protocol.clone();
         let callback = move |request: &Request, mut response: Response| {
@@ -1221,6 +1243,16 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("iVBORw0KGgo")
+        );
+    }
+
+    #[test]
+    fn pointer_position_serializes_as_a_small_control_message() {
+        let json = serde_json::to_string(&WsOutgoingText::PointerPos { x: 123, y: 456 }).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "type": "pointer_pos", "x": 123, "y": 456 })
         );
     }
 
