@@ -105,6 +105,7 @@ import { getSessionNetworkSettings, toNetworkSettingsPayload } from "../lib/netw
 import { loadResizableLayout, saveResizableLayout } from "../lib/resizableLayout";
 import { parsePathMappings } from "../components/filebrowser/PathMappingsEditor";
 import { parseRdpOptions } from "../types/rdp";
+import { parseVncOptions } from "../types/vnc";
 import type { LocalShellSelection } from "../types";
 import { ChatDrawer } from "../components/chat/ChatDrawer";
 import { TaoRibbon } from "../components/tao/TaoRibbon";
@@ -1168,6 +1169,11 @@ export function MainLayout() {
 
   const openDetachedVnc = useCallback(
     (tabId: string, info: NonNullable<Tab["vnc"]>, title: string) => {
+      const credentialRef = info.password?.startsWith("vault:") ? info.password : undefined;
+      if (info.password && !credentialRef) {
+        setStatusMessage("Save the VNC password in the vault before detaching this session.");
+        return;
+      }
       const detachedId = `${tabId}__detached`;
       const payload: DetachedVncParams = {
         tabId,
@@ -1175,12 +1181,14 @@ export function MainLayout() {
         host: info.host,
         port: info.port,
         username: info.username ?? null,
-        password: info.password,
+        credentialRef,
+        options: info.options,
+        networkSettingsJson: info.networkSettingsJson ?? null,
         title,
       };
       openDetachedGenericWindow("vnc", tabId, detachedId, payload, title);
     },
-    [openDetachedGenericWindow],
+    [openDetachedGenericWindow, setStatusMessage],
   );
 
   const openDetachedTerminal = useCallback(
@@ -1365,7 +1373,9 @@ export function MainLayout() {
               host: p.host,
               port: p.port,
               username: p.username ?? undefined,
-              password: p.password,
+              password: p.credentialRef,
+              options: p.options,
+              networkSettingsJson: p.networkSettingsJson ?? null,
             },
           });
           setStatusMessage(tr("status.reattached"));
@@ -1660,6 +1670,8 @@ export function MainLayout() {
 
   const openVncTab = useCallback((session: SessionConfig, password?: string) => {
     const id = `vnc-${session.id}-${Date.now()}`;
+    const opts = parseVncOptions(session.options_json);
+    const ns = toNetworkSettingsPayload(getSessionNetworkSettings(session.options_json));
     addTab({
       id,
       type: "vnc",
@@ -1672,6 +1684,8 @@ export function MainLayout() {
         port: session.port,
         username: session.username,
         password,
+        options: opts,
+        networkSettingsJson: JSON.stringify(ns),
       },
     });
   }, [addTab]);
@@ -2577,6 +2591,7 @@ export function MainLayout() {
         session.session_type === "SSH"
         || session.session_type === "SFTP"
         || session.session_type === "RDP"
+        || session.session_type === "VNC"
       ) {
         if (session.auth_method === "Password") {
           awaitingManualAuthRef.current = true;
@@ -2587,6 +2602,8 @@ export function MainLayout() {
             openSftpTab(session, authMethod, parsed.authData);
           } else if (session.session_type === "RDP") {
             openRdpTab(session, parsed.authData ?? undefined);
+          } else if (session.session_type === "VNC") {
+            openVncTab(session, parsed.authData ?? undefined);
           } else {
             openSshTab(session, authMethod, parsed.authData);
           }
@@ -2597,7 +2614,7 @@ export function MainLayout() {
     } catch (err) {
       setStatusMessage(err instanceof Error ? err.message : String(err));
     }
-  }, [openBrowserSession, openCommandTerminalTab, openLocalTab, openMailTab, openRdpTab, openSftpTab, openSshTab, openUnsupportedTab, setStatusMessage]);
+  }, [openBrowserSession, openCommandTerminalTab, openLocalTab, openMailTab, openRdpTab, openSftpTab, openSshTab, openUnsupportedTab, openVncTab, setStatusMessage]);
 
   const openPlaceholderTab = useCallback((title: string, message: string) => {
     addTab({
@@ -3915,6 +3932,8 @@ export function MainLayout() {
                           port={tab.vnc.port}
                           username={tab.vnc.username}
                           password={tab.vnc.password}
+                          options={tab.vnc.options}
+                          networkSettingsJson={tab.vnc.networkSettingsJson ?? null}
                           visible={isActive}
                         />
                       </Suspense>

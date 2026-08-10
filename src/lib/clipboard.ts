@@ -111,6 +111,10 @@ export async function writeText(text: string): Promise<void> {
 
 export async function writeMultiFormat(payload: MultiFormatPayload): Promise<void> {
   const { text, html, rtf } = payload;
+  if (isTauriRuntime() && getAppPlatform() === "macos") {
+    await invoke("clipboard_write_multi_format", { payload });
+    return;
+  }
   const hasItem = typeof ClipboardItem !== "undefined" && navigator.clipboard?.write;
 
   if (hasItem && (html || rtf)) {
@@ -188,6 +192,13 @@ export async function readClipboardImageFiles(): Promise<File[]> {
 
 /** Read multi-format clipboard. Returns text plus html/rtf when available. */
 export async function readMultiFormat(): Promise<PasteResult> {
+  if (isTauriRuntime() && getAppPlatform() === "macos") {
+    try {
+      return await invoke<PasteResult>("clipboard_read_multi_format");
+    } catch {
+      // Fall through to the same text/browser fallback used in development.
+    }
+  }
   const text = await readText();
   const result: PasteResult = { text };
 

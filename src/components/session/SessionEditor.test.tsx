@@ -756,7 +756,7 @@ describe("SessionEditor SSH settings tabs", { timeout: 15_000 }, () => {
 
   it.each([
     ["SFTP", "advanced-ssh-settings"],
-    ["VNC", "network-settings"],
+    ["VNC", "session-vnc-section"],
     ["Browser", "network-settings"],
   ])("hides Terminal settings for %s sessions", async (initialProto, expectedSectionTestId) => {
     renderEditor(undefined, { initialProto });

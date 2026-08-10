@@ -23,6 +23,8 @@ import type {
   LanSignal,
   LanTransferProgress,
 } from "../types";
+import type { NetworkSettingsPayload } from "./networkSettings";
+import type { VncOptions } from "../types/vnc";
 
 export interface LocalShellOption {
   id: string;
@@ -699,6 +701,7 @@ export async function historyClear(hostKey: string | null): Promise<void> {
 export interface VncConnectResult {
   session_id: string;
   ws_port: number;
+  ws_token: string;
   width: number;
   height: number;
   name: string;
@@ -709,6 +712,8 @@ export async function vncConnect(
   port: number,
   username?: string | null,
   password?: string,
+  options?: VncOptions,
+  networkSettings?: NetworkSettingsPayload | null,
 ): Promise<VncConnectResult> {
   return withVaultLockedNotice(() =>
     invoke<VncConnectResult>("vnc_connect", {
@@ -716,6 +721,8 @@ export async function vncConnect(
       port,
       username: username?.trim() || null,
       password: password ?? null,
+      optionsJson: options ? JSON.stringify(options) : null,
+      networkSettingsJson: networkSettings ? JSON.stringify(networkSettings) : null,
     }),
   );
 }
@@ -729,6 +736,8 @@ export async function vncTestConnection(
   port: number,
   username?: string | null,
   password?: string,
+  options?: VncOptions,
+  networkSettings?: NetworkSettingsPayload | null,
 ): Promise<string> {
   return withVaultLockedNotice(() =>
     invoke("vnc_test_connection", {
@@ -736,6 +745,8 @@ export async function vncTestConnection(
       port,
       username: username?.trim() || null,
       password: password ?? null,
+      optionsJson: options ? JSON.stringify(options) : null,
+      networkSettingsJson: networkSettings ? JSON.stringify(networkSettings) : null,
     }),
   );
 }

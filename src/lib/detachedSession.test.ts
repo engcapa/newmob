@@ -49,6 +49,17 @@ describe("detachedSession handoff round-trip", () => {
     expect(consumeDetachedHandoff("vnc", "tab-2")).toBeNull();
   });
 
+  it("never persists a VNC plaintext password", () => {
+    writeDetachedHandoff("vnc", "secret-tab", {
+      host: "localhost",
+      password: "do-not-store",
+      credentialRef: "also-not-a-reference",
+    });
+    const raw = localStorage.getItem("taomni.detached.vnc.secret-tab") ?? "";
+    expect(raw).not.toContain("do-not-store");
+    expect(raw).not.toContain("also-not-a-reference");
+  });
+
   it("clearDetachedHandoff removes the entry without throwing", () => {
     writeDetachedHandoff("terminal", "tab-3", { x: true });
     clearDetachedHandoff("terminal", "tab-3");

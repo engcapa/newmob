@@ -1,0 +1,7 @@
+{
+  "app": {
+    "security": {
+      "csp": "default-src 'self' tauri: asset:; connect-src 'self' ipc: http://ipc.localhost ws://127.0.0.1:* http://127.0.0.1:* https:; img-src 'self' asset: http://asset.localhost data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; font-src 'self' asset: http://asset.localhost data:; worker-src 'self' blob:; media-src 'self' asset: http://asset.localhost blob: data:; frame-src 'self' https:;"
+    }
+  }
+}

@@ -2,6 +2,7 @@ import type { SshConnectInfo } from "../components/terminal/TerminalPanel";
 import type { TerminalProfile } from "../lib/terminalProfile";
 import type { NetworkSettingsPayload } from "../lib/networkSettings";
 import type { RdpOptions } from "./rdp";
+import type { VncOptions } from "./vnc";
 import type { ObjectStorageConfig } from "./objectStorage";
 import type { LaunchPreparation } from "../lib/sockscap";
 
@@ -143,6 +144,8 @@ export interface VncConnectInfo {
   port: number;
   username?: string | null;
   password?: string;
+  options: VncOptions;
+  networkSettingsJson?: string | null;
 }
 
 /**

@@ -1,14 +1,18 @@
 use std::collections::VecDeque;
 use std::io::{Error, ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 use crate::vnc::clipboard::{
-    decode_legacy_cut_text, encode_legacy_cut_text, parse_extended_body, ExtendedClipboardMsg,
+    ExtendedClipboardMsg, decode_legacy_cut_text, encode_legacy_cut_text, parse_extended_body,
 };
 use crate::vnc::encodings::{self, DecodedRect, HextileState, ZrleDecoder};
+use crate::vnc::limits::DecodeLimits;
+use crate::vnc::options::{VncOptions, VncSecurityPolicy};
 
 const SEC_TYPE_NONE: u8 = 1;
 const SEC_TYPE_VNC_AUTH: u8 = 2;
+const SEC_TYPE_VENCRYPT: u8 = 19;
 const SEC_TYPE_RA2_128: u8 = 5;
 const SEC_TYPE_RA2NE_128: u8 = 6;
 const SEC_TYPE_RA2_256: u8 = 129;
@@ -19,6 +23,23 @@ const RA2_SUBTYPE_PASS: u8 = 2;
 const RA2_MIN_KEY_BITS: usize = 1024;
 const RA2_MAX_KEY_BITS: usize = 8192;
 const RA2_AES_FRAME_MAX: usize = 8192;
+const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const VENCRYPT_VERSION: [u8; 2] = [0, 2];
+const VENCRYPT_MAX_SUBTYPES: usize = 32;
+const VENCRYPT_TLS_NONE: u32 = 257;
+const VENCRYPT_TLS_VNC: u32 = 258;
+const VENCRYPT_TLS_PLAIN: u32 = 259;
+const VENCRYPT_X509_NONE: u32 = 260;
+const VENCRYPT_X509_VNC: u32 = 261;
+const VENCRYPT_X509_PLAIN: u32 = 262;
+
+#[derive(Debug, Clone)]
+pub struct SecurityInfo {
+    pub protocol_version: String,
+    pub security_type: String,
+    pub encrypted: bool,
+    pub identity_verified: bool,
+}
 
 #[derive(Debug)]
 pub struct ServerInit {
@@ -40,6 +61,9 @@ pub struct RfbConnection {
     hextile_state: HextileState,
     /// ZRLE uses a single zlib stream for the whole session.
     zrle_decoder: ZrleDecoder,
+    limits: DecodeLimits,
+    security_info: SecurityInfo,
+    vencrypt_transport_protected: bool,
 }
 
 pub struct RfbWriter {
@@ -52,8 +76,57 @@ pub struct RfbWriter {
 impl RfbConnection {
     pub fn connect(host: &str, port: u16) -> Result<Self, String> {
         let addr = format!("{}:{}", host, port);
-        let stream =
-            TcpStream::connect(&addr).map_err(|e| format!("TCP connect to {}: {}", addr, e))?;
+        let addresses = (host, port)
+            .to_socket_addrs()
+            .map_err(|error| format!("DNS lookup for {addr}: {error}"))?
+            .collect::<Vec<_>>();
+        if addresses.is_empty() {
+            return Err(format!("DNS lookup for {addr} returned no addresses"));
+        }
+        let mut last_error = None;
+        let mut connected = None;
+        for address in addresses {
+            match TcpStream::connect_timeout(&address, DIRECT_CONNECT_TIMEOUT) {
+                Ok(stream) => {
+                    connected = Some(stream);
+                    break;
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        let stream = connected.ok_or_else(|| {
+            format!(
+                "TCP connect to {addr}: {}",
+                last_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "no address succeeded".to_string())
+            )
+        })?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|error| format!("set read timeout failed: {error}"))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .map_err(|error| format!("set write timeout failed: {error}"))?;
+        Self::from_stream(stream, DecodeLimits::default())
+    }
+
+    pub fn from_stream(stream: TcpStream, limits: DecodeLimits) -> Result<Self, String> {
+        Self::from_stream_inner(stream, limits, false)
+    }
+
+    pub(crate) fn from_vencrypt_bridge(
+        stream: TcpStream,
+        limits: DecodeLimits,
+    ) -> Result<Self, String> {
+        Self::from_stream_inner(stream, limits, true)
+    }
+
+    fn from_stream_inner(
+        stream: TcpStream,
+        limits: DecodeLimits,
+        vencrypt_transport_protected: bool,
+    ) -> Result<Self, String> {
         stream
             .set_nodelay(true)
             .map_err(|e| format!("set_nodelay failed: {}", e))?;
@@ -68,6 +141,14 @@ impl RfbConnection {
             proto_minor: 8,
             hextile_state: HextileState::new(),
             zrle_decoder: ZrleDecoder::new(),
+            limits,
+            security_info: SecurityInfo {
+                protocol_version: "RFB 3.8".to_string(),
+                security_type: "unnegotiated".to_string(),
+                encrypted: false,
+                identity_verified: false,
+            },
+            vencrypt_transport_protected,
         };
 
         conn.handshake_protocol_version()?;
@@ -81,7 +162,7 @@ impl RfbConnection {
         self.read_exact(&mut buf)
             .map_err(|e| format!("read protocol version: {}", e))?;
 
-        if &buf[..4] != b"RFB " || buf[11] != b'\n' {
+        if &buf[..4] != b"RFB " || buf[7] != b'.' || buf[11] != b'\n' {
             return Err(format!(
                 "invalid RFB version: {:?}",
                 String::from_utf8_lossy(&buf)
@@ -92,15 +173,20 @@ impl RfbConnection {
         let major: u32 = std::str::from_utf8(&buf[4..7])
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(3);
+            .ok_or_else(|| format!("invalid RFB major version: {:?}", &buf[4..7]))?;
         let minor: u32 = std::str::from_utf8(&buf[8..11])
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(3);
+            .ok_or_else(|| format!("invalid RFB minor version: {:?}", &buf[8..11]))?;
+        if major != 3 {
+            return Err(format!("unsupported RFB major version: {major}"));
+        }
+        if minor < 3 {
+            return Err(format!("unsupported RFB minor version: {minor}"));
+        }
 
-        // Any major > 3 (e.g. 4.x, 5.x) is a modern server — negotiate 3.8.
-        // Within major 3: use the highest version we support (3.8 > 3.7 > 3.3).
-        let (reply, negotiated_minor) = if major > 3 || minor >= 8 {
+        // Use the highest version we support (3.8 > 3.7 > 3.3).
+        let (reply, negotiated_minor) = if minor >= 8 {
             (b"RFB 003.008\n" as &[u8], 8u8)
         } else if minor >= 7 {
             (b"RFB 003.007\n" as &[u8], 7u8)
@@ -109,6 +195,7 @@ impl RfbConnection {
         };
 
         self.proto_minor = negotiated_minor;
+        self.security_info.protocol_version = format!("RFB 3.{negotiated_minor}");
 
         self.write_all(reply)
             .map_err(|e| format!("write protocol version: {}", e))?;
@@ -123,9 +210,18 @@ impl RfbConnection {
         username: Option<&str>,
         password: Option<&str>,
     ) -> Result<ServerInit, String> {
+        self.authenticate_with_options(username, password, &VncOptions::default())
+    }
+
+    pub fn authenticate_with_options(
+        &mut self,
+        username: Option<&str>,
+        password: Option<&str>,
+        options: &VncOptions,
+    ) -> Result<ServerInit, String> {
         // RFB 3.3: server dictates the security type directly as a u32
         if self.proto_minor <= 3 {
-            return self.authenticate_v33(password);
+            return self.authenticate_v33(username, password, options);
         }
 
         // RFB 3.7 / 3.8: server sends a list of security types
@@ -140,6 +236,7 @@ impl RfbConnection {
             self.read_exact(&mut len_buf)
                 .map_err(|e| format!("read sec failure len: {}", e))?;
             let reason_len = u32::from_be_bytes(len_buf) as usize;
+            self.validate_text_length(reason_len, "security failure reason")?;
             let mut reason = vec![0u8; reason_len];
             self.read_exact(&mut reason)
                 .map_err(|e| format!("read sec failure reason: {}", e))?;
@@ -153,24 +250,13 @@ impl RfbConnection {
         self.read_exact(&mut types)
             .map_err(|e| format!("read security types: {}", e))?;
 
-        let chosen = if types.contains(&SEC_TYPE_NONE) {
-            SEC_TYPE_NONE
-        } else if types.contains(&SEC_TYPE_RA2NE_256) {
-            SEC_TYPE_RA2NE_256
-        } else if types.contains(&SEC_TYPE_RA2NE_128) {
-            SEC_TYPE_RA2NE_128
-        } else if types.contains(&SEC_TYPE_VNC_AUTH) {
-            SEC_TYPE_VNC_AUTH
-        } else if types.contains(&SEC_TYPE_RA2_256) {
-            SEC_TYPE_RA2_256
-        } else if types.contains(&SEC_TYPE_RA2_128) {
-            SEC_TYPE_RA2_128
-        } else {
-            return Err(format!(
-                "no supported security type (server offers: {:?})",
-                types
-            ));
-        };
+        let chosen = choose_security_type(&types, options.security_policy, options.allow_none)?;
+        self.security_info.security_type = security_type_name(chosen).to_string();
+        self.security_info.encrypted = matches!(
+            chosen,
+            SEC_TYPE_RA2_128 | SEC_TYPE_RA2_256 | SEC_TYPE_VENCRYPT
+        );
+        self.security_info.identity_verified = false;
 
         self.write_all(&[chosen])
             .map_err(|e| format!("write security type: {}", e))?;
@@ -181,6 +267,9 @@ impl RfbConnection {
             SEC_TYPE_VNC_AUTH => {
                 let pwd = password.unwrap_or("");
                 self.vnc_auth_des(pwd)?;
+            }
+            SEC_TYPE_VENCRYPT => {
+                self.authenticate_vencrypt(username, password, options)?;
             }
             SEC_TYPE_RA2_128 | SEC_TYPE_RA2NE_128 | SEC_TYPE_RA2_256 | SEC_TYPE_RA2NE_256 => {
                 let pwd = password.unwrap_or("");
@@ -202,6 +291,7 @@ impl RfbConnection {
                     self.read_exact(&mut len_buf)
                         .map_err(|e| format!("read auth failure len: {}", e))?;
                     let reason_len = u32::from_be_bytes(len_buf) as usize;
+                    self.validate_text_length(reason_len, "authentication failure reason")?;
                     let mut reason = vec![0u8; reason_len];
                     self.read_exact(&mut reason)
                         .map_err(|e| format!("read auth failure reason: {}", e))?;
@@ -219,7 +309,7 @@ impl RfbConnection {
         }
 
         // ClientInit: send shared flag
-        self.write_all(&[1])
+        self.write_all(&[u8::from(options.shared)])
             .map_err(|e| format!("write client init: {}", e))?;
         self.flush().map_err(|e| format!("flush: {}", e))?;
 
@@ -227,7 +317,12 @@ impl RfbConnection {
     }
 
     /// RFB 3.3 security handshake: server sends a u32 security type, no client choice.
-    fn authenticate_v33(&mut self, password: Option<&str>) -> Result<ServerInit, String> {
+    fn authenticate_v33(
+        &mut self,
+        username: Option<&str>,
+        password: Option<&str>,
+        options: &VncOptions,
+    ) -> Result<ServerInit, String> {
         let mut buf = [0u8; 4];
         self.read_exact(&mut buf)
             .map_err(|e| format!("read v3.3 security type: {}", e))?;
@@ -239,6 +334,7 @@ impl RfbConnection {
                 self.read_exact(&mut len_buf)
                     .map_err(|e| format!("read v3.3 failure len: {}", e))?;
                 let reason_len = u32::from_be_bytes(len_buf) as usize;
+                self.validate_text_length(reason_len, "RFB 3.3 failure reason")?;
                 let mut reason = vec![0u8; reason_len];
                 self.read_exact(&mut reason)
                     .map_err(|e| format!("read v3.3 failure reason: {}", e))?;
@@ -248,13 +344,28 @@ impl RfbConnection {
                 ))
             }
             1 => {
+                if !options.allow_none {
+                    return Err(
+                        "security policy rejected RFB None authentication; enable allow-none explicitly"
+                            .to_string(),
+                    );
+                }
+                if options.security_policy == VncSecurityPolicy::RequireEncryption {
+                    return Err("security policy requires full-session encryption".to_string());
+                }
+                self.security_info.security_type = security_type_name(SEC_TYPE_NONE).to_string();
                 // None — no authentication, proceed directly to ClientInit
-                self.write_all(&[1])
+                self.write_all(&[u8::from(options.shared)])
                     .map_err(|e| format!("write client init: {}", e))?;
                 self.flush().map_err(|e| format!("flush: {}", e))?;
                 self.read_server_init()
             }
             2 => {
+                if options.security_policy == VncSecurityPolicy::RequireEncryption {
+                    return Err("security policy requires full-session encryption".to_string());
+                }
+                self.security_info.security_type =
+                    security_type_name(SEC_TYPE_VNC_AUTH).to_string();
                 // VNC Authentication
                 let pwd = password.unwrap_or("");
                 self.vnc_auth_des(pwd)?;
@@ -268,7 +379,23 @@ impl RfbConnection {
                     return Err(format!("authentication failed (result={})", result));
                 }
 
-                self.write_all(&[1])
+                self.write_all(&[u8::from(options.shared)])
+                    .map_err(|e| format!("write client init: {}", e))?;
+                self.flush().map_err(|e| format!("flush: {}", e))?;
+                self.read_server_init()
+            }
+            19 => {
+                self.security_info.security_type =
+                    security_type_name(SEC_TYPE_VENCRYPT).to_string();
+                self.security_info.encrypted = true;
+                self.security_info.identity_verified = false;
+                self.authenticate_vencrypt(username, password, options)?;
+
+                let result = self.read_u32()?;
+                if result != 0 {
+                    return Err(format!("authentication failed (result={result})"));
+                }
+                self.write_all(&[u8::from(options.shared)])
                     .map_err(|e| format!("write client init: {}", e))?;
                 self.flush().map_err(|e| format!("flush: {}", e))?;
                 self.read_server_init()
@@ -290,6 +417,94 @@ impl RfbConnection {
         self.flush().map_err(|e| format!("flush: {}", e))?;
 
         Ok(())
+    }
+
+    /// VeNCrypt security type 19. The transport bridge performs the TLS
+    /// handshake after the subtype is selected; this method handles the
+    /// decrypted subtype authentication payload.
+    fn authenticate_vencrypt(
+        &mut self,
+        username: Option<&str>,
+        password: Option<&str>,
+        options: &VncOptions,
+    ) -> Result<(), String> {
+        let server_version = [self.read_u8()?, self.read_u8()?];
+        if server_version[0] != 0 || server_version[1] == 0 {
+            return Err(format!(
+                "unsupported VeNCrypt version {}.{}",
+                server_version[0], server_version[1]
+            ));
+        }
+        self.write_all(&VENCRYPT_VERSION)
+            .map_err(|error| format!("write VeNCrypt version: {error}"))?;
+        self.flush()
+            .map_err(|error| format!("flush VeNCrypt version: {error}"))?;
+
+        let status = self.read_u8()?;
+        if status != 0 {
+            return Err(format!("VeNCrypt negotiation failed (status={status})"));
+        }
+
+        let count = usize::from(self.read_u8()?);
+        if count == 0 || count > VENCRYPT_MAX_SUBTYPES {
+            return Err(format!("invalid VeNCrypt subtype count: {count}"));
+        }
+        let mut subtypes = Vec::with_capacity(count);
+        for _ in 0..count {
+            subtypes.push(self.read_u32()?);
+        }
+        let subtype =
+            choose_vencrypt_subtype(&subtypes, options.security_policy, username, password)?;
+        if !self.vencrypt_transport_protected {
+            return Err(
+                "VeNCrypt requires the certificate-validating TLS transport bridge".to_string(),
+            );
+        }
+        self.write_all(&subtype.to_be_bytes())
+            .map_err(|error| format!("write VeNCrypt subtype: {error}"))?;
+        self.flush()
+            .map_err(|error| format!("flush VeNCrypt subtype: {error}"))?;
+
+        self.security_info.security_type = format!(
+            "VeNCrypt/{}",
+            vencrypt_subtype_name(subtype).unwrap_or("unknown")
+        );
+        self.security_info.encrypted = true;
+        // The bridge only exposes the stream after native-tls has validated
+        // the server certificate and hostname.
+        self.security_info.identity_verified = true;
+
+        match subtype {
+            VENCRYPT_X509_NONE => Ok(()),
+            VENCRYPT_X509_VNC => {
+                let password = password.unwrap_or("");
+                self.vnc_auth_des(password)
+            }
+            VENCRYPT_X509_PLAIN => {
+                let username = username.filter(|value| !value.is_empty()).ok_or_else(|| {
+                    "VeNCrypt Plain authentication requires a username".to_string()
+                })?;
+                let password = password.ok_or_else(|| {
+                    "VeNCrypt Plain authentication requires a password".to_string()
+                })?;
+                self.write_vencrypt_string(username, "username")?;
+                self.write_vencrypt_string(password, "password")?;
+                self.flush()
+                    .map_err(|error| format!("flush VeNCrypt credentials: {error}"))
+            }
+            _ => Err(format!("unsupported VeNCrypt subtype: {subtype}")),
+        }
+    }
+
+    fn write_vencrypt_string(&mut self, value: &str, label: &str) -> Result<(), String> {
+        let bytes = value.as_bytes();
+        self.validate_text_length(bytes.len(), label)?;
+        let length =
+            u32::try_from(bytes.len()).map_err(|_| format!("VeNCrypt {label} is too long"))?;
+        self.write_all(&length.to_be_bytes())
+            .map_err(|error| format!("write VeNCrypt {label} length: {error}"))?;
+        self.write_all(bytes)
+            .map_err(|error| format!("write VeNCrypt {label}: {error}"))
     }
 
     /// RealVNC RSA-AES authentication (RA2/RA2ne, 128- and 256-bit variants).
@@ -473,6 +688,7 @@ impl RfbConnection {
 
         self.width = u16::from_be_bytes([buf[0], buf[1]]);
         self.height = u16::from_be_bytes([buf[2], buf[3]]);
+        let fb_size = self.limits.framebuffer_bytes(self.width, self.height)?;
 
         // Parsed pixel format from server (we override with RGBA via SetPixelFormat)
         let _bpp = buf[4];
@@ -488,13 +704,13 @@ impl RfbConnection {
 
         // Name length + name
         let name_len = u32::from_be_bytes([buf[20], buf[21], buf[22], buf[23]]) as usize;
+        self.validate_text_length(name_len, "server name")?;
         let mut name_bytes = vec![0u8; name_len];
         self.read_exact(&mut name_bytes)
             .map_err(|e| format!("read server name: {}", e))?;
         self.name = String::from_utf8_lossy(&name_bytes).to_string();
 
         // Allocate framebuffer (RGBA 32-bit)
-        let fb_size = self.width as usize * self.height as usize * 4;
         self.framebuffer = vec![0u8; fb_size];
 
         Ok(ServerInit {
@@ -512,7 +728,7 @@ impl RfbConnection {
         msg[1] = 0; // padding
         msg[2] = 0; // padding
         msg[3] = 0; // padding
-                    // Pixel format:
+        // Pixel format:
         msg[4] = 32; // bits-per-pixel
         msg[5] = 24; // depth: 24 so ZRLE's CPIXEL rule kicks in
         msg[6] = 0; // big-endian false (little-endian)
@@ -539,10 +755,16 @@ impl RfbConnection {
 
     /// Request encodings in preference order.
     pub fn set_encodings(&mut self, encodings: &[i32]) -> Result<(), String> {
-        let mut msg = vec![0u8; 4 + encodings.len() * 4];
+        let count = u16::try_from(encodings.len())
+            .map_err(|_| "VNC encoding list exceeds u16 count".to_string())?;
+        let message_len = encodings
+            .len()
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(4))
+            .ok_or_else(|| "VNC encoding message size overflow".to_string())?;
+        let mut msg = vec![0u8; message_len];
         msg[0] = 2; // SetEncodings
         msg[1] = 0;
-        let count = encodings.len() as u16;
         msg[2..4].copy_from_slice(&count.to_be_bytes());
 
         for (i, enc) in encodings.iter().enumerate() {
@@ -601,7 +823,15 @@ impl RfbConnection {
     /// place. `FramebufferUpdate` is returned with the already-decoded rects
     /// so callers never have to know about the specific wire encoding.
     pub fn read_server_message(&mut self) -> Result<ServerMessage, String> {
-        let msg_type = self.read_u8()?;
+        let mut message_type = [0u8; 1];
+        match self.read_exact(&mut message_type) {
+            Ok(()) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Ok(ServerMessage::Idle);
+            }
+            Err(error) => return Err(format!("read server message type: {error}")),
+        }
+        let msg_type = message_type[0];
         match msg_type {
             0 => self.read_framebuffer_update(),
             1 => {
@@ -609,7 +839,9 @@ impl RfbConnection {
                     .map_err(|e| format!("read colourmap padding: {}", e))?;
                 let _first = self.read_u16()?;
                 let count = self.read_u16()?;
-                let entry_size = 6 * count as usize;
+                let entry_size = 6usize
+                    .checked_mul(count as usize)
+                    .ok_or_else(|| "colourmap entry size overflow".to_string())?;
                 let mut entries = vec![0u8; entry_size];
                 self.read_exact(&mut entries)
                     .map_err(|e| format!("read colourmap entries: {}", e))?;
@@ -622,25 +854,27 @@ impl RfbConnection {
                 let len_signed = self.read_i32()?;
                 if len_signed < 0 {
                     // ExtendedClipboard rides on ServerCutText with a negative length.
-                    let len = (-len_signed) as usize;
-                    // Reasonable cap so a corrupt server can't make us allocate
-                    // a 4 GiB buffer.
-                    if len > 16 * 1024 * 1024 {
+                    let len = len_signed
+                        .checked_abs()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .ok_or_else(|| "invalid extended clipboard body length".to_string())?;
+                    if len > self.limits.max_clipboard_total_bytes {
                         return Err(format!("extended clipboard body too large: {}", len));
                     }
                     let mut body = vec![0u8; len];
                     self.read_exact(&mut body)
                         .map_err(|e| format!("read ext clipboard: {}", e))?;
-                    match parse_extended_body(&body) {
-                        Some(msg) => Ok(ServerMessage::ExtendedClipboard(msg)),
-                        None => {
+                    match parse_extended_body(&body, &self.limits) {
+                        Ok(Some(msg)) => Ok(ServerMessage::ExtendedClipboard(msg)),
+                        Ok(None) => {
                             // Unknown action — return a no-op so the relay keeps running.
                             Ok(ServerMessage::SetColourMapEntries)
                         }
+                        Err(error) => Err(error),
                     }
                 } else {
                     let len = len_signed as usize;
-                    if len > 16 * 1024 * 1024 {
+                    if len > self.limits.max_clipboard_format_bytes {
                         return Err(format!("legacy clipboard body too large: {}", len));
                     }
                     let mut text = vec![0u8; len];
@@ -659,6 +893,12 @@ impl RfbConnection {
         self.read_exact(&mut [0u8; 1])
             .map_err(|e| format!("read fu padding: {}", e))?;
         let num_rects = self.read_u16()?;
+        if num_rects > self.limits.max_rectangles {
+            return Err(format!(
+                "framebuffer update rectangle count {} exceeds limit {}",
+                num_rects, self.limits.max_rectangles
+            ));
+        }
 
         let mut decoded: Vec<DecodedRect> = Vec::new();
         for _ in 0..num_rects {
@@ -667,6 +907,11 @@ impl RfbConnection {
             let w = self.read_u16()?;
             let h = self.read_u16()?;
             let encoding = self.read_i32()?;
+
+            if encoding != -223 {
+                self.limits
+                    .validate_rectangle(x, y, w, h, self.width, self.height)?;
+            }
 
             match encoding {
                 0 => {
@@ -724,11 +969,12 @@ impl RfbConnection {
                         stream,
                         secure_io,
                         zrle_decoder,
+                        limits,
                         ..
                     } = self;
                     let rects = {
                         let mut reader = RfbStreamReader::new(stream, secure_io.as_mut());
-                        encodings::read_zrle(&mut reader, x, y, w, h, zrle_decoder)?
+                        encodings::read_zrle(&mut reader, x, y, w, h, zrle_decoder, limits)?
                     };
                     for r in &rects {
                         self.write_to_fb(r);
@@ -737,9 +983,10 @@ impl RfbConnection {
                 }
                 -223 => {
                     // DesktopSize pseudo-encoding: no payload, just a resize.
+                    let framebuffer_bytes = self.limits.framebuffer_bytes(w, h)?;
                     self.width = w;
                     self.height = h;
-                    self.framebuffer = vec![0u8; w as usize * h as usize * 4];
+                    self.framebuffer = vec![0u8; framebuffer_bytes];
                 }
                 other => {
                     return Err(format!(
@@ -836,6 +1083,29 @@ impl RfbConnection {
     #[allow(dead_code)]
     pub fn take_full_frame(&self) -> Vec<u8> {
         self.framebuffer.clone()
+    }
+
+    pub fn security_info(&self) -> SecurityInfo {
+        self.security_info.clone()
+    }
+
+    pub fn set_io_timeout(&self, timeout: Duration) -> Result<(), String> {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| format!("configure VNC read deadline: {error}"))?;
+        self.stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|error| format!("configure VNC write deadline: {error}"))
+    }
+
+    fn validate_text_length(&self, length: usize, label: &str) -> Result<(), String> {
+        if length > self.limits.max_text_bytes {
+            return Err(format!(
+                "{label} length {length} exceeds limit {}",
+                self.limits.max_text_bytes
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -948,7 +1218,16 @@ impl RfbWriter {
     /// Send an ExtendedClipboard body. The wire frame is a ClientCutText (msg
     /// type 6) with a *negative* length signaling the extended payload.
     pub fn send_extended_clipboard(&mut self, body: &[u8]) -> Result<(), String> {
-        let neg_len = -(body.len() as i32);
+        let max_body = DecodeLimits::default().max_clipboard_total_bytes;
+        if body.len() > max_body {
+            return Err(format!(
+                "extended clipboard body {} exceeds limit {max_body}",
+                body.len()
+            ));
+        }
+        let body_len = i32::try_from(body.len())
+            .map_err(|_| "extended clipboard body exceeds RFB length range".to_string())?;
+        let neg_len = -body_len;
         let mut msg = Vec::with_capacity(8 + body.len());
         msg.push(6);
         msg.extend_from_slice(&[0u8; 3]); // padding
@@ -1338,6 +1617,7 @@ fn increment_le(counter: &mut [u8; 16]) {
 
 #[derive(Debug)]
 pub enum ServerMessage {
+    Idle,
     FramebufferUpdate { rects: Vec<DecodedRect> },
     SetColourMapEntries,
     Bell,
@@ -1345,10 +1625,102 @@ pub enum ServerMessage {
     ExtendedClipboard(ExtendedClipboardMsg),
 }
 
+fn security_type_name(security_type: u8) -> &'static str {
+    match security_type {
+        SEC_TYPE_NONE => "None",
+        SEC_TYPE_VNC_AUTH => "VNCAuth",
+        SEC_TYPE_VENCRYPT => "VeNCrypt",
+        SEC_TYPE_RA2_128 => "RA2-128",
+        SEC_TYPE_RA2NE_128 => "RA2ne-128",
+        SEC_TYPE_RA2_256 => "RA2-256",
+        SEC_TYPE_RA2NE_256 => "RA2ne-256",
+        _ => "Unknown",
+    }
+}
+
+fn choose_security_type(
+    offered: &[u8],
+    policy: VncSecurityPolicy,
+    allow_none: bool,
+) -> Result<u8, String> {
+    let preference: &[u8] = match policy {
+        VncSecurityPolicy::RequireEncryption => {
+            &[SEC_TYPE_VENCRYPT, SEC_TYPE_RA2_256, SEC_TYPE_RA2_128]
+        }
+        VncSecurityPolicy::PreferEncryption | VncSecurityPolicy::LegacyCompatible => &[
+            SEC_TYPE_VENCRYPT,
+            SEC_TYPE_RA2_256,
+            SEC_TYPE_RA2_128,
+            SEC_TYPE_RA2NE_256,
+            SEC_TYPE_RA2NE_128,
+            SEC_TYPE_VNC_AUTH,
+            SEC_TYPE_NONE,
+        ],
+    };
+    preference
+        .iter()
+        .copied()
+        .find(|security_type| {
+            offered.contains(security_type) && (*security_type != SEC_TYPE_NONE || allow_none)
+        })
+        .ok_or_else(|| {
+            if policy == VncSecurityPolicy::RequireEncryption {
+                format!(
+                    "security policy requires full-session encryption; server offers {:?}",
+                    offered
+                )
+            } else if offered.contains(&SEC_TYPE_NONE) && !allow_none {
+                "security policy rejected None authentication; enable allow-none explicitly"
+                    .to_string()
+            } else {
+                format!("no supported security type (server offers: {:?})", offered)
+            }
+        })
+}
+
+fn vencrypt_subtype_name(subtype: u32) -> Option<&'static str> {
+    Some(match subtype {
+        VENCRYPT_TLS_NONE => "TLSNone",
+        VENCRYPT_TLS_VNC => "TLSVnc",
+        VENCRYPT_TLS_PLAIN => "TLSPlain",
+        VENCRYPT_X509_NONE => "X509None",
+        VENCRYPT_X509_VNC => "X509Vnc",
+        VENCRYPT_X509_PLAIN => "X509Plain",
+        _ => return None,
+    })
+}
+
+fn choose_vencrypt_subtype(
+    offered: &[u32],
+    _policy: VncSecurityPolicy,
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<u32, String> {
+    let has_username = username.is_some_and(|value| !value.is_empty());
+    let has_password = password.is_some();
+    let preference: &[u32] = if has_username && has_password {
+        &[VENCRYPT_X509_PLAIN, VENCRYPT_X509_VNC, VENCRYPT_X509_NONE]
+    } else if has_password {
+        &[VENCRYPT_X509_VNC, VENCRYPT_X509_NONE]
+    } else {
+        &[VENCRYPT_X509_NONE]
+    };
+    preference
+        .iter()
+        .copied()
+        .find(|subtype| offered.contains(subtype))
+        .ok_or_else(|| {
+            format!(
+                "no supported VeNCrypt subtype for the supplied credentials; server offers {:?}",
+                offered
+            )
+        })
+}
+
 /// VNC DES authentication: encrypt the 16-byte challenge with a key derived from the password.
 fn vnc_des_encrypt(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
-    use des::cipher::{Array, BlockCipherEncrypt, KeyInit};
     use des::Des;
+    use des::cipher::{Array, BlockCipherEncrypt, KeyInit};
 
     // Build key: password truncated/padded to 8 bytes, each byte's bits reversed
     let mut key_bytes = [0u8; 8];
@@ -1384,6 +1756,10 @@ fn reverse_bits(b: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vnc::limits::HARD_MAX_TEXT_BYTES;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     #[test]
     fn test_reverse_bits() {
@@ -1400,5 +1776,392 @@ mod tests {
         // Verify the response is 16 bytes and not all zeros
         assert_eq!(response.len(), 16);
         assert!(response.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn strongest_security_is_selected_and_none_requires_opt_in() {
+        let options = VncOptions::default();
+        assert_eq!(
+            choose_security_type(
+                &[SEC_TYPE_NONE, SEC_TYPE_VNC_AUTH, SEC_TYPE_RA2_256],
+                options.security_policy,
+                options.allow_none,
+            )
+            .unwrap(),
+            SEC_TYPE_RA2_256
+        );
+        assert!(
+            choose_security_type(
+                &[SEC_TYPE_NONE],
+                options.security_policy,
+                options.allow_none,
+            )
+            .is_err()
+        );
+        assert!(
+            choose_security_type(
+                &[SEC_TYPE_VNC_AUTH],
+                VncSecurityPolicy::RequireEncryption,
+                false,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn vencrypt_prefers_authenticated_subtypes_when_credentials_exist() {
+        assert_eq!(
+            choose_security_type(
+                &[SEC_TYPE_VNC_AUTH, SEC_TYPE_VENCRYPT, SEC_TYPE_RA2_128],
+                VncSecurityPolicy::PreferEncryption,
+                false,
+            )
+            .unwrap(),
+            SEC_TYPE_VENCRYPT
+        );
+        assert_eq!(
+            choose_vencrypt_subtype(
+                &[VENCRYPT_X509_NONE, VENCRYPT_X509_VNC, VENCRYPT_X509_PLAIN,],
+                VncSecurityPolicy::PreferEncryption,
+                Some("alice"),
+                Some("secret"),
+            )
+            .unwrap(),
+            VENCRYPT_X509_PLAIN
+        );
+        assert_eq!(
+            choose_vencrypt_subtype(
+                &[VENCRYPT_X509_NONE, VENCRYPT_X509_VNC],
+                VncSecurityPolicy::PreferEncryption,
+                None,
+                Some("secret"),
+            )
+            .unwrap(),
+            VENCRYPT_X509_VNC
+        );
+        assert_eq!(
+            choose_vencrypt_subtype(
+                &[VENCRYPT_X509_NONE],
+                VncSecurityPolicy::RequireEncryption,
+                None,
+                None,
+            )
+            .unwrap(),
+            VENCRYPT_X509_NONE
+        );
+        assert!(
+            choose_vencrypt_subtype(
+                &[VENCRYPT_X509_PLAIN],
+                VncSecurityPolicy::PreferEncryption,
+                None,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            choose_vencrypt_subtype(
+                &[VENCRYPT_TLS_NONE, VENCRYPT_TLS_VNC, VENCRYPT_TLS_PLAIN],
+                VncSecurityPolicy::PreferEncryption,
+                Some("alice"),
+                Some("secret"),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fixture_vencrypt_x509_plain_negotiates_credentials_and_security_info() {
+        let (stream, server) = fixture_stream(|mut peer| {
+            negotiate_38(&mut peer);
+            peer.write_all(&[1, SEC_TYPE_VENCRYPT]).unwrap();
+            let mut chosen = [0u8; 1];
+            peer.read_exact(&mut chosen).unwrap();
+            assert_eq!(chosen, [SEC_TYPE_VENCRYPT]);
+            peer.write_all(&VENCRYPT_VERSION).unwrap();
+            let mut client_version = [0u8; 2];
+            peer.read_exact(&mut client_version).unwrap();
+            assert_eq!(client_version, VENCRYPT_VERSION);
+            peer.write_all(&[0, 1]).unwrap();
+            peer.write_all(&VENCRYPT_X509_PLAIN.to_be_bytes()).unwrap();
+            let mut subtype = [0u8; 4];
+            peer.read_exact(&mut subtype).unwrap();
+            assert_eq!(u32::from_be_bytes(subtype), VENCRYPT_X509_PLAIN);
+
+            let mut len = [0u8; 4];
+            peer.read_exact(&mut len).unwrap();
+            let username_len = u32::from_be_bytes(len) as usize;
+            let mut username = vec![0u8; username_len];
+            peer.read_exact(&mut username).unwrap();
+            peer.read_exact(&mut len).unwrap();
+            let password_len = u32::from_be_bytes(len) as usize;
+            let mut password = vec![0u8; password_len];
+            peer.read_exact(&mut password).unwrap();
+            assert_eq!(username, b"alice");
+            assert_eq!(password, b"secret");
+            peer.write_all(&0u32.to_be_bytes()).unwrap();
+            let mut shared = [0u8; 1];
+            peer.read_exact(&mut shared).unwrap();
+            assert_eq!(shared, [1]);
+            write_server_init(&mut peer, 1, 1, "vencrypt-fixture");
+        });
+
+        let mut connection =
+            RfbConnection::from_vencrypt_bridge(stream, DecodeLimits::default()).unwrap();
+        let server_init = connection
+            .authenticate_with_options(Some("alice"), Some("secret"), &VncOptions::default())
+            .unwrap();
+        assert_eq!((server_init.width, server_init.height), (1, 1));
+        let security = connection.security_info();
+        assert_eq!(security.security_type, "VeNCrypt/X509Plain");
+        assert!(security.encrypted);
+        assert!(security.identity_verified);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn vencrypt_refuses_to_send_credentials_without_tls_bridge() {
+        let (stream, server) = fixture_stream(|mut peer| {
+            negotiate_38(&mut peer);
+            peer.write_all(&[1, SEC_TYPE_VENCRYPT]).unwrap();
+            let mut chosen = [0u8; 1];
+            peer.read_exact(&mut chosen).unwrap();
+            assert_eq!(chosen, [SEC_TYPE_VENCRYPT]);
+            peer.write_all(&VENCRYPT_VERSION).unwrap();
+            let mut client_version = [0u8; 2];
+            peer.read_exact(&mut client_version).unwrap();
+            peer.write_all(&[0, 1]).unwrap();
+            peer.write_all(&VENCRYPT_X509_PLAIN.to_be_bytes()).unwrap();
+        });
+
+        let mut connection = RfbConnection::from_stream(stream, DecodeLimits::default()).unwrap();
+        let error = connection
+            .authenticate_with_options(Some("alice"), Some("secret"), &VncOptions::default())
+            .unwrap_err();
+        assert!(error.contains("certificate-validating TLS transport bridge"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn protocol_fixture_negotiates_33_37_and_38() {
+        for (banner, expected) in [
+            (b"RFB 003.003\n".as_slice(), "RFB 3.3"),
+            (b"RFB 003.007\n".as_slice(), "RFB 3.7"),
+            (b"RFB 003.008\n".as_slice(), "RFB 3.8"),
+        ] {
+            let (stream, server) = fixture_stream(move |mut peer| {
+                peer.write_all(banner).unwrap();
+                let mut reply = [0u8; 12];
+                peer.read_exact(&mut reply).unwrap();
+            });
+            let connection = RfbConnection::from_stream(stream, DecodeLimits::default()).unwrap();
+            assert_eq!(connection.security_info().protocol_version, expected);
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn protocol_fixture_rejects_malformed_and_unsupported_banners() {
+        for (banner, expected_error) in [
+            (b"RFB 003X008\n".as_slice(), "invalid RFB version"),
+            (b"RFB 00x.008\n".as_slice(), "invalid RFB major version"),
+            (b"RFB 003.002\n".as_slice(), "unsupported RFB minor version"),
+            (b"RFB 004.008\n".as_slice(), "unsupported RFB major version"),
+        ] {
+            let (stream, server) = fixture_stream(move |mut peer| {
+                peer.write_all(banner).unwrap();
+            });
+            let error = RfbConnection::from_stream(stream, DecodeLimits::default())
+                .err()
+                .expect("malformed protocol banner must be rejected");
+            assert!(error.contains(expected_error), "unexpected error: {error}");
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn extended_clipboard_minimum_signed_length_is_rejected_without_panicking() {
+        let (stream, server) = fixture_stream(|mut peer| {
+            negotiate_38(&mut peer);
+            let mut message = [0u8; 8];
+            message[0] = 3;
+            message[4..8].copy_from_slice(&i32::MIN.to_be_bytes());
+            peer.write_all(&message).unwrap();
+        });
+
+        let mut connection = RfbConnection::from_stream(stream, DecodeLimits::default()).unwrap();
+        let error = connection.read_server_message().unwrap_err();
+        assert!(error.contains("invalid extended clipboard body length"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fixture_vnc_auth_raw_frame_and_desktop_size() {
+        let (stream, server) = fixture_stream(|mut peer| {
+            negotiate_38(&mut peer);
+            peer.write_all(&[2, SEC_TYPE_NONE, SEC_TYPE_VNC_AUTH])
+                .unwrap();
+            let mut chosen = [0u8; 1];
+            peer.read_exact(&mut chosen).unwrap();
+            assert_eq!(chosen[0], SEC_TYPE_VNC_AUTH);
+            let challenge = [7u8; 16];
+            peer.write_all(&challenge).unwrap();
+            let mut response = [0u8; 16];
+            peer.read_exact(&mut response).unwrap();
+            assert_eq!(response, vnc_des_encrypt("fixture-pass", &challenge));
+            peer.write_all(&0u32.to_be_bytes()).unwrap();
+            let mut shared = [0u8; 1];
+            peer.read_exact(&mut shared).unwrap();
+            assert_eq!(shared, [1]);
+            write_server_init(&mut peer, 2, 1, "fixture");
+
+            let mut raw = Vec::new();
+            raw.extend_from_slice(&[0, 0, 0, 1]);
+            raw.extend_from_slice(&0u16.to_be_bytes());
+            raw.extend_from_slice(&0u16.to_be_bytes());
+            raw.extend_from_slice(&2u16.to_be_bytes());
+            raw.extend_from_slice(&1u16.to_be_bytes());
+            raw.extend_from_slice(&0i32.to_be_bytes());
+            raw.extend_from_slice(&[1, 2, 3, 0, 4, 5, 6, 0]);
+            peer.write_all(&raw).unwrap();
+
+            let mut resize = Vec::new();
+            resize.extend_from_slice(&[0, 0, 0, 1]);
+            resize.extend_from_slice(&0u16.to_be_bytes());
+            resize.extend_from_slice(&0u16.to_be_bytes());
+            resize.extend_from_slice(&4u16.to_be_bytes());
+            resize.extend_from_slice(&3u16.to_be_bytes());
+            resize.extend_from_slice(&(-223i32).to_be_bytes());
+            peer.write_all(&resize).unwrap();
+        });
+
+        let mut connection = RfbConnection::from_stream(stream, DecodeLimits::default()).unwrap();
+        let server_init = connection
+            .authenticate_with_options(None, Some("fixture-pass"), &VncOptions::default())
+            .unwrap();
+        assert_eq!((server_init.width, server_init.height), (2, 1));
+        match connection.read_server_message().unwrap() {
+            ServerMessage::FramebufferUpdate { rects } => match &rects[0] {
+                DecodedRect::Pixels { rgba, .. } => {
+                    assert_eq!(rgba, &[1, 2, 3, 255, 4, 5, 6, 255]);
+                }
+            },
+            other => panic!("expected framebuffer update, got {other:?}"),
+        }
+        match connection.read_server_message().unwrap() {
+            ServerMessage::FramebufferUpdate { rects } => assert!(rects.is_empty()),
+            other => panic!("expected resize update, got {other:?}"),
+        }
+        assert_eq!((connection.width, connection.height), (4, 3));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn repeated_desktop_size_updates_remain_atomic_and_bounded() {
+        let (stream, server) = fixture_stream(|mut peer| {
+            negotiate_38(&mut peer);
+            for index in 0..50u16 {
+                let width = 800 + index * 7;
+                let height = 600 + index * 3;
+                let mut resize = Vec::with_capacity(16);
+                resize.extend_from_slice(&[0, 0, 0, 1]);
+                resize.extend_from_slice(&0u16.to_be_bytes());
+                resize.extend_from_slice(&0u16.to_be_bytes());
+                resize.extend_from_slice(&width.to_be_bytes());
+                resize.extend_from_slice(&height.to_be_bytes());
+                resize.extend_from_slice(&(-223i32).to_be_bytes());
+                peer.write_all(&resize).unwrap();
+            }
+        });
+
+        let mut connection = RfbConnection::from_stream(stream, DecodeLimits::default()).unwrap();
+        for index in 0..50u16 {
+            let width = 800 + index * 7;
+            let height = 600 + index * 3;
+            match connection.read_server_message().unwrap() {
+                ServerMessage::FramebufferUpdate { rects } => assert!(rects.is_empty()),
+                other => panic!("expected resize update, got {other:?}"),
+            }
+            assert_eq!((connection.width, connection.height), (width, height));
+            assert_eq!(
+                connection.framebuffer.len(),
+                usize::from(width) * usize::from(height) * 4
+            );
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn fixture_rejects_oversized_server_name_before_reading_payload() {
+        let (stream, server) = fixture_stream(|mut peer| {
+            negotiate_38(&mut peer);
+            peer.write_all(&[1, SEC_TYPE_NONE]).unwrap();
+            let mut chosen = [0u8; 1];
+            peer.read_exact(&mut chosen).unwrap();
+            assert_eq!(chosen, [SEC_TYPE_NONE]);
+            peer.write_all(&0u32.to_be_bytes()).unwrap();
+            let mut shared = [0u8; 1];
+            peer.read_exact(&mut shared).unwrap();
+            let mut init = server_init_header(1, 1);
+            init[20..24].copy_from_slice(&((HARD_MAX_TEXT_BYTES + 1) as u32).to_be_bytes());
+            peer.write_all(&init).unwrap();
+        });
+        let mut connection = RfbConnection::from_stream(stream, DecodeLimits::default()).unwrap();
+        let options = VncOptions {
+            allow_none: true,
+            ..VncOptions::default()
+        };
+        let error = connection
+            .authenticate_with_options(None, None, &options)
+            .unwrap_err();
+        assert!(error.contains("exceeds"));
+        server.join().unwrap();
+    }
+
+    fn fixture_stream(
+        server: impl FnOnce(TcpStream) + Send + 'static,
+    ) -> (TcpStream, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            server(stream);
+        });
+        let stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        (stream, task)
+    }
+
+    fn negotiate_38(peer: &mut TcpStream) {
+        peer.write_all(b"RFB 003.008\n").unwrap();
+        let mut reply = [0u8; 12];
+        peer.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"RFB 003.008\n");
+    }
+
+    fn server_init_header(width: u16, height: u16) -> [u8; 24] {
+        let mut init = [0u8; 24];
+        init[0..2].copy_from_slice(&width.to_be_bytes());
+        init[2..4].copy_from_slice(&height.to_be_bytes());
+        init[4] = 32;
+        init[5] = 24;
+        init[7] = 1;
+        init[8..10].copy_from_slice(&255u16.to_be_bytes());
+        init[10..12].copy_from_slice(&255u16.to_be_bytes());
+        init[12..14].copy_from_slice(&255u16.to_be_bytes());
+        init[14] = 16;
+        init[15] = 8;
+        init
+    }
+
+    fn write_server_init(peer: &mut TcpStream, width: u16, height: u16, name: &str) {
+        let mut init = server_init_header(width, height);
+        init[20..24].copy_from_slice(&(name.len() as u32).to_be_bytes());
+        peer.write_all(&init).unwrap();
+        peer.write_all(name.as_bytes()).unwrap();
     }
 }

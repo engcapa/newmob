@@ -25,6 +25,20 @@ describe("parseQuickConnectInput", () => {
     });
   });
 
+  it("parses VNC URLs into the password flow without persisting credentials", () => {
+    const parsed = parseQuickConnectInput("vnc://alice@mac.example.test:5901");
+
+    expect(parsed.config).toMatchObject({
+      session_type: "VNC",
+      host: "mac.example.test",
+      port: 5901,
+      username: "alice",
+      auth_method: "Password",
+    });
+    expect(parsed.authData).toBeNull();
+    expect(parsed.config.options_json).not.toContain("password");
+  });
+
   it.each([
     ["ftp://ops@files.example.test:2121", "FTP", "files.example.test", 2121, "ops"],
     ["rlogin://bob@legacy.example.test", "Rlogin", "legacy.example.test", 513, "bob"],

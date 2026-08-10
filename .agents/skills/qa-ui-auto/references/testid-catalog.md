@@ -623,6 +623,13 @@
 - `[data-testid="terminal-settings"]` — display [optional] — F6.3.terminal-body
 - `[data-testid="network-settings"]` — display — F6.3.network-body
 - `[data-testid="bookmark-settings"]` — display — F6.3.bookmark-body
+- `[data-testid="session-vnc-section"]` — display [optional] — F6.3.vnc-body
+- `[data-testid="vnc-security-policy"]` — interactive [optional] — F6.3.vnc-security-policy
+- `[data-testid="vnc-allow-none"]` — interactive [optional] — F6.3.vnc-allow-none
+- `[data-testid="vnc-view-only"]` — interactive [optional] — F6.3.vnc-view-only
+- `[data-testid="vnc-clipboard-policy"]` — interactive [optional] — F6.3.vnc-clipboard-policy
+- `[data-testid="vnc-clipboard-text-only"]` — interactive [optional] — F6.3.vnc-clipboard-text-only
+- `[data-testid="vnc-reconnect-attempts"]` — interactive [optional] — F6.3.vnc-reconnect-attempts
 - `input[aria-label="Execute command"]` — interactive — F6.3.advanced-execute-command
 - `input[aria-label="SSH password"]` — interactive [optional] — F6.3.advanced-ssh-password
 - `[data-testid="session-save-in-vault"]` — interactive [optional] — F6.3.save-in-vault
@@ -1050,6 +1057,6 @@
 
 - `[data-testid="vnc-panel"]` — display — F9.6.panel-root
 - `[data-testid="vnc-canvas"]` — display — F9.6.canvas
-- `[data-testid="vnc-floating-toolbar"]` — display [optional] — F9.6.floating-toolbar
+- `[data-testid="vnc-security-status"]` — display [optional] — F9.6.vnc-security-status
 - `[data-testid="vnc-scale-toggle"]` — interactive [optional] — F9.6.scale-toggle
 - `[data-testid="vnc-reconnect"]` — interactive [optional] — F9.6.reconnect
