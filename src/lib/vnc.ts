@@ -204,6 +204,7 @@ export type WsIncoming =
     }
   | { type: "bell" }
   | { type: "desktop_size"; width: number; height: number; generation: number }
+  | { type: "pointer_pos"; x: number; y: number }
   | { type: "clipboard"; text: string }
   | {
       type: "ext_clipboard";
@@ -243,6 +244,15 @@ export function parseWsMessage(data: string): WsIncoming | null {
         return validFramebufferSize(msg.width, msg.height)
           && Number.isSafeInteger(msg.generation)
           && (msg.generation as number) > 0
+          ? value as WsIncoming
+          : null;
+      case "pointer_pos":
+        return Number.isInteger(msg.x)
+          && Number.isInteger(msg.y)
+          && (msg.x as number) >= 0
+          && (msg.y as number) >= 0
+          && (msg.x as number) <= 0xffff
+          && (msg.y as number) <= 0xffff
           ? value as WsIncoming
           : null;
       case "disconnected":

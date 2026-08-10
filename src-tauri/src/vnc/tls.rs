@@ -24,6 +24,9 @@ pub(crate) async fn prepare_rfb_transport(
     policy: VncSecurityPolicy,
     timeout: Duration,
 ) -> Result<PreparedRfbTransport, String> {
+    socket
+        .set_nodelay(true)
+        .map_err(|e| format!("configure VNC upstream TCP_NODELAY: {e}"))?;
     tokio::time::timeout(timeout, negotiate_outer_security(socket, host, policy))
         .await
         .map_err(|_| "VNC security negotiation timed out".to_string())?
@@ -173,6 +176,12 @@ async fn anonymous_tls_transport(
         .accept()
         .await
         .map_err(|e| format!("accept VNC TLS bridge: {e}"))?;
+    local_client
+        .set_nodelay(true)
+        .map_err(|e| format!("configure VNC TLS client bridge TCP_NODELAY: {e}"))?;
+    local_bridge
+        .set_nodelay(true)
+        .map_err(|e| format!("configure VNC TLS relay bridge TCP_NODELAY: {e}"))?;
 
     let tls_task = tokio::spawn(async move {
         if let Err(error) = tokio::io::copy_bidirectional(&mut local_bridge, &mut tls).await {
@@ -194,14 +203,17 @@ async fn anonymous_tls_transport(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use openssl::dh::Dh;
     use openssl::ssl::{Ssl, SslAcceptor};
     use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
     use super::*;
-    use crate::vnc::rfb::RfbConnection;
+    use crate::vnc::encodings::{
+        ENCODING_DESKTOP_SIZE, ENCODING_POINTER_POS, ENCODING_RICH_CURSOR, ENCODING_X_CURSOR,
+    };
+    use crate::vnc::rfb::{RfbConnection, ServerMessage};
 
     async fn write_server_init<S: AsyncWrite + Unpin>(
         stream: &mut S,
@@ -288,6 +300,7 @@ mod tests {
         });
 
         let socket = TcpStream::connect(address).await.unwrap();
+        socket.set_nodelay(false).unwrap();
         let prepared = prepare_rfb_transport(
             socket,
             "127.0.0.1",
@@ -296,6 +309,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(prepared.stream.nodelay().unwrap());
         let started = Instant::now();
         let init = tokio::task::spawn_blocking(move || {
             let mut connection = RfbConnection::from_negotiated_stream(
@@ -412,17 +426,86 @@ mod tests {
                 prepared.outer_security_type,
             )?;
             let init = connection.authenticate(username.as_deref(), Some(&password))?;
-            Ok::<_, String>((init, connection.security_label(), connection.encrypted()))
+            let security = connection.security_label();
+            let encrypted = connection.encrypted();
+            connection.set_pixel_format_rgba()?;
+            connection.set_encodings(&[
+                16,
+                5,
+                1,
+                0,
+                ENCODING_DESKTOP_SIZE,
+                ENCODING_POINTER_POS,
+                ENCODING_X_CURSOR,
+                ENCODING_RICH_CURSOR,
+            ])?;
+            let frame_started = Instant::now();
+            connection.request_update(false)?;
+            let (rect_count, cursor_shape, pointer_pos) = loop {
+                if let ServerMessage::FramebufferUpdate {
+                    rects,
+                    cursor,
+                    pointer_pos,
+                } = connection.read_server_message()?
+                {
+                    break (rects.len(), cursor.is_some(), pointer_pos.is_some());
+                }
+            };
+            let mut writer = connection.take_writer()?;
+            let pointer_started = Instant::now();
+            let probe_seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos();
+            let pointer_x = (probe_seed % u32::from(init.width)) as u16;
+            let pointer_y = (probe_seed.rotate_left(13) % u32::from(init.height)) as u16;
+            writer.send_pointer_event(pointer_x, pointer_y, 0)?;
+            writer.request_update(true)?;
+            let (pointer_rect_count, pointer_cursor, pointer_position) = loop {
+                if let ServerMessage::FramebufferUpdate {
+                    rects,
+                    cursor,
+                    pointer_pos,
+                } = connection.read_server_message()?
+                {
+                    break (rects.len(), cursor.is_some(), pointer_pos);
+                }
+            };
+            Ok::<_, String>((
+                init,
+                security,
+                encrypted,
+                rect_count,
+                cursor_shape,
+                pointer_pos,
+                frame_started.elapsed(),
+                pointer_rect_count,
+                pointer_cursor,
+                pointer_position,
+                pointer_started.elapsed(),
+            ))
         })
         .await
         .unwrap()
         .unwrap();
 
         println!(
-            "connected {}x{} '{}' via {}",
-            result.0.width, result.0.height, result.0.name, result.1
+            "connected {}x{} '{}' via {}; first frame rects={} cursor={} pointer_pos={} in {:?}; pointer update rects={} cursor={} pointer_pos={:?} in {:?}",
+            result.0.width,
+            result.0.height,
+            result.0.name,
+            result.1,
+            result.3,
+            result.4,
+            result.5,
+            result.6,
+            result.7,
+            result.8,
+            result.9,
+            result.10,
         );
         assert!(result.2);
+        assert!(result.3 > 0 || result.4 || result.5);
         if let Some(task) = tls_task {
             task.abort();
         }

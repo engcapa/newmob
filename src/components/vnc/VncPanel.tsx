@@ -16,6 +16,10 @@ import {
   mouseButtonMask,
 } from "../../lib/vnc";
 import type { WsOutgoing } from "../../lib/vnc";
+import {
+  VncPointerScheduler,
+  type VncPointerState,
+} from "../../lib/vncPointerScheduler";
 import { useVncStore } from "../../stores/vncStore";
 import { useAppStore } from "../../stores/appStore";
 import { ExternalLink, Maximize, Maximize2, Minimize, Minimize2, RefreshCw } from "lucide-react";
@@ -71,15 +75,10 @@ type PendingFrame = {
   h: number;
   rgba: Uint8ClampedArray<ArrayBuffer>;
 };
-type PointerState = {
-  x: number;
-  y: number;
-  buttons: number;
-};
 type DelayedPointerDown = {
   pointerId: number;
-  down: PointerState;
-  up: PointerState | null;
+  down: VncPointerState;
+  up: VncPointerState | null;
 };
 
 function modifierKeysymFromKey(key: string): number | null {
@@ -160,9 +159,8 @@ export default function VncPanel({
   const visibleRef = useRef(visible);
   const ackPendingRef = useRef(false);
   const pasteDelayTimerRef = useRef<number | null>(null);
-  const pointerRafRef = useRef<number | null>(null);
-  const pendingPointerRef = useRef<PointerState | null>(null);
-  const lastPointerSentRef = useRef<PointerState | null>(null);
+  const pointerSchedulerRef = useRef<VncPointerScheduler | null>(null);
+  const lastPointerSentRef = useRef<VncPointerState | null>(null);
   const delayedPointerDownRef = useRef<DelayedPointerDown | null>(null);
   const clipboardSyncPromiseRef = useRef<Promise<void> | null>(null);
   const serverClipboardWriteInFlightRef = useRef(0);
@@ -177,6 +175,7 @@ export default function VncPanel({
   // pseudo-encoding. Stored as a ref so input handlers read the latest value
   // without re-binding.
   const extClipboardSupportedRef = useRef<boolean>(false);
+  const cursorShapeReceivedRef = useRef(false);
   const [scaleMode, setScaleMode] = useState<ScaleMode>("fit");
   const [remoteCursorCss, setRemoteCursorCss] = useState("none");
   const allowClipboardSend = clipboardPolicy === "bidirectional" || clipboardPolicy === "client-to-server";
@@ -191,10 +190,12 @@ export default function VncPanel({
     }
   }, []);
 
-  const sendWsBinary = useCallback((data: ArrayBuffer) => {
+  const sendWsBinary = useCallback((data: ArrayBuffer): boolean => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(data);
+      return true;
     }
+    return false;
   }, []);
 
   const requestFullRefresh = useCallback(() => {
@@ -278,6 +279,9 @@ export default function VncPanel({
 
     let cancelled = false;
     suppressReconnectRef.current = false;
+    pointerSchedulerRef.current?.reset();
+    lastPointerSentRef.current = null;
+    cursorShapeReceivedRef.current = false;
     setRemoteCursorCss("none");
     if (reconnectStableTimerRef.current !== null) {
       window.clearTimeout(reconnectStableTimerRef.current);
@@ -447,7 +451,13 @@ export default function VncPanel({
                 );
                 break;
               case "cursor":
+                cursorShapeReceivedRef.current = true;
                 setRemoteCursorCss(vncCursorToCss(msg));
+                break;
+              case "pointer_pos":
+                if (!cursorShapeReceivedRef.current) {
+                  setRemoteCursorCss("default");
+                }
                 break;
             }
           }
@@ -545,15 +555,13 @@ export default function VncPanel({
         pasteDelayTimerRef.current = null;
       }
       ackPendingRef.current = false;
-      if (pointerRafRef.current !== null) {
-        cancelAnimationFrame(pointerRafRef.current);
-        pointerRafRef.current = null;
-      }
-      pendingPointerRef.current = null;
+      pointerSchedulerRef.current?.dispose();
+      pointerSchedulerRef.current = null;
       lastPointerSentRef.current = null;
       delayedPointerDownRef.current = null;
       pasteInFlightRef.current = null;
       extClipboardSupportedRef.current = false;
+      cursorShapeReceivedRef.current = false;
       clipboardSyncPromiseRef.current = null;
       serverClipboardWriteInFlightRef.current = 0;
       lastClipboardSyncCheckAtRef.current = 0;
@@ -835,7 +843,7 @@ export default function VncPanel({
   );
 
   const sendPointerNow = useCallback(
-    (pointer: PointerState) => {
+    (pointer: VncPointerState) => {
       const last = lastPointerSentRef.current;
       if (
         last &&
@@ -845,11 +853,19 @@ export default function VncPanel({
       ) {
         return;
       }
-      lastPointerSentRef.current = pointer;
-      sendWsBinary(encodeWsPointer(pointer.x, pointer.y, pointer.buttons));
+      if (sendWsBinary(encodeWsPointer(pointer.x, pointer.y, pointer.buttons))) {
+        lastPointerSentRef.current = pointer;
+      }
     },
     [sendWsBinary],
   );
+
+  const pointerScheduler = useCallback(() => {
+    if (!pointerSchedulerRef.current) {
+      pointerSchedulerRef.current = new VncPointerScheduler({ send: sendPointerNow });
+    }
+    return pointerSchedulerRef.current;
+  }, [sendPointerNow]);
 
   const handlePointer = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -871,23 +887,13 @@ export default function VncPanel({
       const pointer = { x, y, buttons };
 
       if (e.type === "pointermove") {
-        pendingPointerRef.current = pointer;
-        if (pointerRafRef.current === null) {
-          pointerRafRef.current = requestAnimationFrame(() => {
-            pointerRafRef.current = null;
-            const pending = pendingPointerRef.current;
-            pendingPointerRef.current = null;
-            if (!pending || destroyedRef.current || conn?.status !== "connected") return;
-            sendPointerNow(pending);
-          });
-        }
+        pointerScheduler().move(pointer);
         return;
       }
 
-      pendingPointerRef.current = null;
-      sendPointerNow(pointer);
+      pointerScheduler().sendNow(pointer);
     },
-    [viewOnly, conn?.status, getFbCoords, sendPointerNow, syncLocalClipboardToServer],
+    [viewOnly, conn?.status, getFbCoords, pointerScheduler, syncLocalClipboardToServer],
   );
 
   const handlePointerDown = useCallback(
@@ -909,6 +915,7 @@ export default function VncPanel({
           up: null,
         };
         delayedPointerDownRef.current = delayed;
+        pointerSchedulerRef.current?.cancelPending();
         void (async () => {
           await syncLocalClipboardToServer("button", true);
           await new Promise((resolve) => window.setTimeout(resolve, PASTE_KEY_DELAY_MS));

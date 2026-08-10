@@ -60,6 +60,11 @@ describe("VNC WebSocket protocol", () => {
       type: "desktop_size", width: 2560, height: 1440, generation: 1,
     });
     expect(parseWsMessage('{"type":"desktop_size","width":0,"height":1440,"generation":1}')).toBeNull();
+    expect(parseWsMessage('{"type":"pointer_pos","x":123,"y":456}')).toEqual({
+      type: "pointer_pos", x: 123, y: 456,
+    });
+    expect(parseWsMessage('{"type":"pointer_pos","x":65536,"y":0}')).toBeNull();
+    expect(parseWsMessage('{"type":"pointer_pos","x":1.5,"y":0}')).toBeNull();
     const cursor = parseWsMessage('{"type":"cursor","visible":true,"hotspot_x":1,"hotspot_y":2,"width":16,"height":16,"png_base64":"iVBORw0KGgo="}');
     expect(cursor).toMatchObject({ type: "cursor", visible: true, hotspot_x: 1, hotspot_y: 2 });
     expect(cursor?.type === "cursor" ? vncCursorToCss(cursor) : "").toContain("data:image/png;base64,iVBORw0KGgo=");

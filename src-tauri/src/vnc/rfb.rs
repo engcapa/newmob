@@ -7,7 +7,10 @@ use crate::vnc::clipboard::{
     ExtendedClipboardMsg, decode_legacy_cut_text, encode_legacy_cut_text,
     parse_extended_body_with_limits,
 };
-use crate::vnc::encodings::{self, DecodedCursor, DecodedRect, HextileState, ZrleDecoder};
+use crate::vnc::encodings::{
+    self, DecodedCursor, DecodedPointerPosition, DecodedRect, ENCODING_DESKTOP_SIZE,
+    ENCODING_POINTER_POS, ENCODING_RICH_CURSOR, ENCODING_X_CURSOR, HextileState, ZrleDecoder,
+};
 use crate::vnc::limits::DecodeLimits;
 use crate::vnc::policy::VncSecurityPolicy;
 
@@ -858,17 +861,22 @@ impl RfbConnection {
 
         let mut decoded: Vec<DecodedRect> = Vec::with_capacity(num_rects);
         let mut cursor = None;
+        let mut pointer_pos = None;
         for _ in 0..num_rects {
             let x = self.read_u16()?;
             let y = self.read_u16()?;
             let w = self.read_u16()?;
             let h = self.read_u16()?;
             let encoding = self.read_i32()?;
-            if encoding == -223 {
+            if encoding == ENCODING_DESKTOP_SIZE {
                 self.limits
                     .framebuffer_bytes(w, h)
                     .map_err(|e| e.to_string())?;
-            } else if encoding != -239 {
+            } else if encoding == ENCODING_POINTER_POS {
+                if w != 0 || h != 0 {
+                    return Err("pointer position encoding must have zero dimensions".into());
+                }
+            } else if encoding != ENCODING_RICH_CURSOR && encoding != ENCODING_X_CURSOR {
                 self.limits
                     .rectangle_bytes(w, h)
                     .map_err(|e| e.to_string())?;
@@ -878,7 +886,11 @@ impl RfbConnection {
             {
                 // DesktopSize is the only rectangle allowed to describe a new
                 // framebuffer geometry; pixel rectangles must stay in bounds.
-                if encoding != -223 && encoding != -239 {
+                if encoding != ENCODING_DESKTOP_SIZE
+                    && encoding != ENCODING_RICH_CURSOR
+                    && encoding != ENCODING_X_CURSOR
+                    && encoding != ENCODING_POINTER_POS
+                {
                     return Err("framebuffer rectangle is outside the negotiated size".into());
                 }
             }
@@ -961,7 +973,7 @@ impl RfbConnection {
                     }
                     decoded.extend(rects);
                 }
-                -223 => {
+                ENCODING_DESKTOP_SIZE => {
                     // DesktopSize pseudo-encoding: no payload, just a resize.
                     let size = self
                         .limits
@@ -971,10 +983,18 @@ impl RfbConnection {
                     self.height = h;
                     self.framebuffer = vec![0u8; size];
                 }
-                -239 => {
+                ENCODING_RICH_CURSOR => {
                     cursor = Some(self.decode_via_reader(|reader| {
                         encodings::read_rich_cursor(reader, x, y, w, h)
                     })?);
+                }
+                ENCODING_X_CURSOR => {
+                    cursor = Some(self.decode_via_reader(|reader| {
+                        encodings::read_x_cursor(reader, x, y, w, h)
+                    })?);
+                }
+                ENCODING_POINTER_POS => {
+                    pointer_pos = Some(DecodedPointerPosition { x, y });
                 }
                 other => {
                     return Err(format!(
@@ -988,6 +1008,7 @@ impl RfbConnection {
         Ok(ServerMessage::FramebufferUpdate {
             rects: decoded,
             cursor,
+            pointer_pos,
         })
     }
 
@@ -1603,6 +1624,7 @@ pub enum ServerMessage {
     FramebufferUpdate {
         rects: Vec<DecodedRect>,
         cursor: Option<DecodedCursor>,
+        pointer_pos: Option<DecodedPointerPosition>,
     },
     SetColourMapEntries,
     Bell,
@@ -1851,5 +1873,137 @@ mod tests {
         );
         connection.enter_runtime_mode().unwrap();
         assert_eq!(connection.stream.read_timeout().unwrap(), None);
+    }
+
+    #[test]
+    fn decodes_pointer_position_pseudo_encoding_without_a_pixel_payload() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut update = Vec::new();
+            update.extend_from_slice(&[0, 0, 0, 1]);
+            update.extend_from_slice(&320u16.to_be_bytes());
+            update.extend_from_slice(&240u16.to_be_bytes());
+            update.extend_from_slice(&0u16.to_be_bytes());
+            update.extend_from_slice(&0u16.to_be_bytes());
+            update.extend_from_slice(&ENCODING_POINTER_POS.to_be_bytes());
+            stream.write_all(&update).unwrap();
+
+            let mut invalid = Vec::new();
+            invalid.extend_from_slice(&[0, 0, 0, 1]);
+            invalid.extend_from_slice(&320u16.to_be_bytes());
+            invalid.extend_from_slice(&240u16.to_be_bytes());
+            invalid.extend_from_slice(&1u16.to_be_bytes());
+            invalid.extend_from_slice(&0u16.to_be_bytes());
+            invalid.extend_from_slice(&ENCODING_POINTER_POS.to_be_bytes());
+            stream.write_all(&invalid).unwrap();
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        let mut connection = RfbConnection::new_stream(
+            stream,
+            Duration::from_secs(2),
+            DecodeLimits::default(),
+            VncSecurityPolicy::AllowNone,
+            8,
+            None,
+            None,
+        )
+        .unwrap();
+        connection.width = 800;
+        connection.height = 600;
+        connection.framebuffer = vec![0; 800 * 600 * 4];
+
+        match connection.read_server_message().unwrap() {
+            ServerMessage::FramebufferUpdate {
+                rects,
+                cursor,
+                pointer_pos,
+            } => {
+                assert!(rects.is_empty());
+                assert!(cursor.is_none());
+                assert_eq!(pointer_pos, Some(DecodedPointerPosition { x: 320, y: 240 }));
+            }
+            other => panic!("expected pointer position update, got {other:?}"),
+        }
+        assert!(connection.read_server_message().is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn decodes_visible_and_hidden_x_cursor_pseudo_encodings() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+
+            let mut visible = Vec::new();
+            visible.extend_from_slice(&[0, 0, 0, 1]);
+            visible.extend_from_slice(&1u16.to_be_bytes());
+            visible.extend_from_slice(&0u16.to_be_bytes());
+            visible.extend_from_slice(&2u16.to_be_bytes());
+            visible.extend_from_slice(&1u16.to_be_bytes());
+            visible.extend_from_slice(&ENCODING_X_CURSOR.to_be_bytes());
+            visible.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
+            visible.extend_from_slice(&[0b1000_0000]);
+            visible.extend_from_slice(&[0b1100_0000]);
+            stream.write_all(&visible).unwrap();
+
+            let mut hidden = Vec::new();
+            hidden.extend_from_slice(&[0, 0, 0, 1]);
+            hidden.extend_from_slice(&0u16.to_be_bytes());
+            hidden.extend_from_slice(&0u16.to_be_bytes());
+            hidden.extend_from_slice(&0u16.to_be_bytes());
+            hidden.extend_from_slice(&0u16.to_be_bytes());
+            hidden.extend_from_slice(&ENCODING_X_CURSOR.to_be_bytes());
+            stream.write_all(&hidden).unwrap();
+        });
+
+        let stream = TcpStream::connect(address).unwrap();
+        let mut connection = RfbConnection::new_stream(
+            stream,
+            Duration::from_secs(2),
+            DecodeLimits::default(),
+            VncSecurityPolicy::AllowNone,
+            8,
+            None,
+            None,
+        )
+        .unwrap();
+        connection.width = 800;
+        connection.height = 600;
+        connection.framebuffer = vec![0; 800 * 600 * 4];
+
+        match connection.read_server_message().unwrap() {
+            ServerMessage::FramebufferUpdate {
+                rects,
+                cursor: Some(cursor),
+                pointer_pos,
+            } => {
+                assert!(rects.is_empty());
+                assert!(pointer_pos.is_none());
+                assert_eq!((cursor.hotspot_x, cursor.hotspot_y), (1, 0));
+                assert_eq!((cursor.width, cursor.height), (2, 1));
+                assert_eq!(cursor.rgba, vec![1, 2, 3, 255, 4, 5, 6, 255]);
+            }
+            other => panic!("expected visible X cursor update, got {other:?}"),
+        }
+
+        match connection.read_server_message().unwrap() {
+            ServerMessage::FramebufferUpdate {
+                rects,
+                cursor: Some(cursor),
+                pointer_pos,
+            } => {
+                assert!(rects.is_empty());
+                assert!(pointer_pos.is_none());
+                assert_eq!((cursor.width, cursor.height), (0, 0));
+                assert!(cursor.rgba.is_empty());
+            }
+            other => panic!("expected hidden X cursor update, got {other:?}"),
+        }
+
+        server.join().unwrap();
     }
 }

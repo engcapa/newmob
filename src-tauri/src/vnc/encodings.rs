@@ -27,6 +27,20 @@ pub struct DecodedCursor {
     pub rgba: Vec<u8>,
 }
 
+/// Cursor position delivered by the RFB PointerPos pseudo-encoding (-232).
+/// The encoding uses the rectangle header only; its width and height must be
+/// zero and no payload follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedPointerPosition {
+    pub x: u16,
+    pub y: u16,
+}
+
+pub const ENCODING_DESKTOP_SIZE: i32 = -223;
+pub const ENCODING_POINTER_POS: i32 = -232;
+pub const ENCODING_RICH_CURSOR: i32 = -239;
+pub const ENCODING_X_CURSOR: i32 = -240;
+
 const MAX_CURSOR_DIMENSION: u16 = 512;
 
 // ── Helpers to read big-endian integers from an `impl Read`. ──
@@ -658,6 +672,91 @@ pub fn read_rich_cursor<R: Read>(
     })
 }
 
+/// Decode the XCursor pseudo-encoding (-240). The payload contains foreground
+/// and background RGB colours, followed by one-bit image and transparency
+/// bitmaps whose rows are padded to whole bytes. A set image bit selects the
+/// foreground colour; a set mask bit makes the pixel visible.
+pub fn read_x_cursor<R: Read>(
+    reader: &mut R,
+    hotspot_x: u16,
+    hotspot_y: u16,
+    width: u16,
+    height: u16,
+) -> Result<DecodedCursor, String> {
+    if width == 0 || height == 0 {
+        return Ok(DecodedCursor {
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        });
+    }
+    if width > MAX_CURSOR_DIMENSION || height > MAX_CURSOR_DIMENSION {
+        return Err(format!(
+            "X cursor dimensions {width}x{height} exceed {MAX_CURSOR_DIMENSION}x{MAX_CURSOR_DIMENSION}"
+        ));
+    }
+    if hotspot_x >= width || hotspot_y >= height {
+        return Err(format!(
+            "X cursor hotspot {hotspot_x},{hotspot_y} lies outside {width}x{height}"
+        ));
+    }
+
+    let pixel_count = usize::from(width)
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| "X cursor pixel count overflow".to_string())?;
+    let rgba_bytes = pixel_count
+        .checked_mul(4)
+        .ok_or_else(|| "X cursor RGBA byte count overflow".to_string())?;
+    let bitmap_stride = usize::from(width).div_ceil(8);
+    let bitmap_bytes = bitmap_stride
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| "X cursor bitmap byte count overflow".to_string())?;
+
+    let mut colours = [0u8; 6];
+    reader
+        .read_exact(&mut colours)
+        .map_err(|e| format!("X cursor colours: {e}"))?;
+    let mut bitmap = vec![0u8; bitmap_bytes];
+    reader
+        .read_exact(&mut bitmap)
+        .map_err(|e| format!("X cursor bitmap: {e}"))?;
+    let mut mask = vec![0u8; bitmap_bytes];
+    reader
+        .read_exact(&mut mask)
+        .map_err(|e| format!("X cursor mask: {e}"))?;
+
+    let mut rgba = vec![0u8; rgba_bytes];
+    for row in 0..usize::from(height) {
+        for column in 0..usize::from(width) {
+            let bit = 0x80 >> (column % 8);
+            let bitmap_offset = row * bitmap_stride + column / 8;
+            let colour_offset = if bitmap[bitmap_offset] & bit != 0 {
+                0
+            } else {
+                3
+            };
+            let rgba_offset = (row * usize::from(width) + column) * 4;
+            rgba[rgba_offset..rgba_offset + 3]
+                .copy_from_slice(&colours[colour_offset..colour_offset + 3]);
+            rgba[rgba_offset + 3] = if mask[bitmap_offset] & bit != 0 {
+                255
+            } else {
+                0
+            };
+        }
+    }
+
+    Ok(DecodedCursor {
+        hotspot_x,
+        hotspot_y,
+        width,
+        height,
+        rgba,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,6 +790,42 @@ mod tests {
     fn rich_cursor_rejects_invalid_geometry() {
         assert!(read_rich_cursor(&mut Cursor::new(Vec::<u8>::new()), 3, 0, 3, 1).is_err());
         assert!(read_rich_cursor(&mut Cursor::new(Vec::<u8>::new()), 0, 0, 513, 1).is_err());
+    }
+
+    #[test]
+    fn x_cursor_applies_colours_bitmap_mask_and_hotspot() {
+        let mut payload = vec![10, 20, 30, 40, 50, 60];
+        payload.extend_from_slice(&[0b1010_0000, 0b0100_0000]);
+        payload.extend_from_slice(&[0b1100_0000, 0b0110_0000]);
+        let mut reader = Cursor::new(payload);
+        let cursor = read_x_cursor(&mut reader, 2, 1, 3, 2).unwrap();
+
+        assert_eq!((cursor.hotspot_x, cursor.hotspot_y), (2, 1));
+        assert_eq!((cursor.width, cursor.height), (3, 2));
+        assert_eq!(
+            cursor.rgba,
+            vec![
+                10, 20, 30, 255, 40, 50, 60, 255, 10, 20, 30, 0, 40, 50, 60, 0, 10, 20, 30, 255,
+                40, 50, 60, 255,
+            ]
+        );
+        assert_eq!(reader.position() as usize, reader.get_ref().len());
+    }
+
+    #[test]
+    fn x_cursor_rejects_invalid_geometry_and_truncated_payloads() {
+        assert!(read_x_cursor(&mut Cursor::new(Vec::<u8>::new()), 3, 0, 3, 1).is_err());
+        assert!(read_x_cursor(&mut Cursor::new(Vec::<u8>::new()), 0, 0, 513, 1).is_err());
+        assert!(read_x_cursor(&mut Cursor::new(vec![0; 7]), 0, 0, 8, 1).is_err());
+    }
+
+    #[test]
+    fn zero_sized_x_cursor_is_hidden_without_consuming_payload() {
+        let mut reader = Cursor::new(vec![1, 2, 3]);
+        let cursor = read_x_cursor(&mut reader, 12, 34, 0, 10).unwrap();
+        assert_eq!((cursor.width, cursor.height), (0, 0));
+        assert!(cursor.rgba.is_empty());
+        assert_eq!(reader.position(), 0);
     }
 
     #[test]
