@@ -1,22 +1,25 @@
 id: TC-107
-title: Saved VNC session mounts the authenticated panel path
+title: Saved VNC session opens the VNC panel scaffolding
 description: |
-  Browser wiring coverage for the saved-session route. It creates a VNC
-  bookmark, opens the tab and verifies that the relay-backed panel and canvas
-  mount even when no VNC fixture is configured. It does not claim a successful
-  RFB handshake; those assertions live in Rust fixtures and manual WKWebView
-  release checks.
+  Coverage smoke for F9.6. Creates a VNC session bookmark and double-clicks
+  to open it. The panel mounts immediately (the canvas inside is hidden
+  until conn.status === "connected"), so we assert the vnc-panel testid
+  is present without requiring a real RFB handshake. The auth prompt
+  also fires for the configured host; we dismiss it.
+
+  Because the configured cfg.ssh.host is not necessarily a VNC server, we
+  do NOT actually authenticate — the test only confirms the protocol
+  selector + auth flow + panel mount path is wired up. Real VNC connection
+  testing requires a configured VNC fixture.
 covers: [F9.6]
-tags: [smoke, p0, vnc]
+tags: [smoke, p1, vnc, scaffolding-only]
 modes: [browser]
 fixtures: [reset_db]
 timeout_sec: 45
 steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="sidebar"]'
-  - click: '[data-testid="side-tab-sessions"]'
-  - wait_for: '[data-testid="session-new"]'
-  - click: '[data-testid="session-new"]'
+  - click: 'text="New session…"'
   - wait_for: '[data-testid="session-editor"]'
   - click: '[data-testid="session-proto-vnc"]'
   - fill:
@@ -31,11 +34,15 @@ steps:
       selector: '[data-testid="session-name"]'
       value: qa-ui-auto-vnc
   - click: '[data-testid="session-save"]'
+  - click: '[data-testid="side-tab-sessions"]'
   - wait_for: '[data-testid="session-tree-item"][data-session-name="qa-ui-auto-vnc"]'
-  # Authenticate with a one-shot test credential before the panel mounts.
+  # Open the VNC tab — the panel mounts immediately, regardless of dial state.
   - open_session: { name: qa-ui-auto-vnc, double_click: true }
   - wait_for: '[data-testid="auth-prompt"]'
-  - auth: qa-vnc-one-shot
+  - fill:
+      selector: '[data-testid="auth-password"]'
+      value: qa-ui-auto-password
+  - click: '[data-testid="auth-submit"]'
   - wait_for:
       selector: '[data-testid="vnc-panel"]'
       timeout_sec: 10
@@ -45,4 +52,4 @@ steps:
       selector: '[data-testid="vnc-canvas"]'
       state: attached
       timeout_sec: 5
-  - screenshot: 107-vnc-panel.png
+  - screenshot: 107-vnc-saved.png

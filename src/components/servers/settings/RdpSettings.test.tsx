@@ -4,13 +4,14 @@ import type { RdpCaptureProbe, ServerConfig } from "../../../lib/servers";
 import { RdpSettings } from "./RdpSettings";
 
 const mocks = vi.hoisted(() => ({
+  platform: "macos" as "macos" | "windows",
   probe: vi.fn<
     (requestCapture?: boolean, requestControl?: boolean) => Promise<RdpCaptureProbe>
   >(),
 }));
 
 vi.mock("../../../lib/runtime", () => ({
-  getAppPlatform: () => "macos",
+  getAppPlatform: () => mocks.platform,
 }));
 
 vi.mock("../../../lib/servers", () => ({
@@ -29,6 +30,7 @@ const config: ServerConfig = {
 
 describe("RdpSettings macOS permissions", () => {
   beforeEach(() => {
+    mocks.platform = "macos";
     mocks.probe.mockReset();
     mocks.probe.mockResolvedValue({
       permission: "granted",
@@ -47,5 +49,32 @@ describe("RdpSettings macOS permissions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Grant permission…" }));
 
     await waitFor(() => expect(mocks.probe).toHaveBeenCalledWith(false, true));
+  });
+
+  it("reports the Windows capture backend and exposes display selection", async () => {
+    mocks.platform = "windows";
+    mocks.probe.mockResolvedValue({
+      permission: "notRequired",
+      controlPermission: "notRequired",
+      displays: [
+        {
+          id: "1",
+          name: "Primary display",
+          width: 1920,
+          height: 1080,
+          primary: true,
+        },
+      ],
+      summary: "Windows: Windows Graphics Capture with GDI compatibility fallback",
+    });
+
+    render(<RdpSettings config={config} onChange={vi.fn()} />);
+
+    await waitFor(() => expect(mocks.probe).toHaveBeenCalledWith(false, false));
+    expect(screen.getByText(/Windows Graphics Capture \(WGC\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/not implemented/i)).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("option", { name: /Primary display.*1920×1080/ }),
+    ).toBeInTheDocument();
   });
 });

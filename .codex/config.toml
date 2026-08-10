@@ -1,0 +1,3 @@
+[agents."develop-engineer"]
+description = "Implements approved plans through focused code changes and verification."
+config_file = "agents/develop-engineer.toml"

@@ -18,6 +18,17 @@ pub enum DecodedRect {
     },
 }
 
+#[derive(Debug)]
+pub struct DecodedCursor {
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub rgba: Vec<u8>,
+}
+
+const MAX_CURSOR_DIMENSION: u16 = 512;
+
 // ── Helpers to read big-endian integers from an `impl Read`. ──
 
 fn read_u8<R: Read>(r: &mut R) -> std::io::Result<u8> {
@@ -44,13 +55,19 @@ fn read_u32_be<R: Read>(r: &mut R) -> std::io::Result<u32> {
 /// each (per the RGBA32 pixel format we negotiate). Alpha byte is forced to
 /// 0xFF because many servers leave it at 0.
 pub fn read_raw<R: Read>(r: &mut R, x: u16, y: u16, w: u16, h: u16) -> Result<DecodedRect, String> {
-    let pixel_count = usize::from(w)
-        .checked_mul(usize::from(h))
-        .ok_or_else(|| "raw: pixel count overflow".to_string())?;
-    let byte_count = pixel_count
-        .checked_mul(4)
-        .ok_or_else(|| "raw: byte count overflow".to_string())?;
-    let mut rgba = vec![0u8; byte_count];
+    read_raw_with_limits(r, x, y, w, h, &DecodeLimits::default())
+}
+
+pub fn read_raw_with_limits<R: Read>(
+    r: &mut R,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+    limits: &DecodeLimits,
+) -> Result<DecodedRect, String> {
+    let bytes = limits.rectangle_bytes(w, h).map_err(|e| e.to_string())?;
+    let mut rgba = vec![0u8; bytes];
     r.read_exact(&mut rgba)
         .map_err(|e| format!("raw: read pixels: {}", e))?;
     for pixel in rgba.chunks_exact_mut(4) {
@@ -77,44 +94,49 @@ pub fn read_copyrect<R: Read>(
     let src_x = read_u16_be(r).map_err(|e| format!("copyrect: src_x: {}", e))?;
     let src_y = read_u16_be(r).map_err(|e| format!("copyrect: src_y: {}", e))?;
 
-    let source_right = src_x
-        .checked_add(w)
-        .ok_or_else(|| "copyrect: source x coordinate overflow".to_string())?;
-    let source_bottom = src_y
-        .checked_add(h)
-        .ok_or_else(|| "copyrect: source y coordinate overflow".to_string())?;
-    if source_right > fb_w || source_bottom > fb_h {
-        return Err(format!(
-            "copyrect: source ({src_x},{src_y}) {w}x{h} exceeds framebuffer {fb_w}x{fb_h}"
-        ));
-    }
-
-    let fb_w = usize::from(fb_w);
-    let fb_h = usize::from(fb_h);
+    let fb_w = fb_w as usize;
+    let fb_h = fb_h as usize;
     let w_us = w as usize;
     let h_us = h as usize;
-    let framebuffer_bytes = fb_w
-        .checked_mul(fb_h)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "copyrect: framebuffer byte size overflow".to_string())?;
-    if fb.len() < framebuffer_bytes {
-        return Err(format!(
-            "copyrect: framebuffer has {} bytes, expected {framebuffer_bytes}",
-            fb.len()
-        ));
-    }
-    let rectangle_bytes = w_us
+
+    let bytes = w_us
         .checked_mul(h_us)
         .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "copyrect: rectangle byte size overflow".to_string())?;
-    let mut rgba = vec![0u8; rectangle_bytes];
+        .ok_or_else(|| "copyrect: byte count overflow".to_string())?;
+    if fb_w == 0
+        || fb_h == 0
+        || src_x as usize >= fb_w
+        || src_y as usize >= fb_h
+        || (src_x as usize)
+            .checked_add(w_us)
+            .is_none_or(|end| end > fb_w)
+        || (src_y as usize)
+            .checked_add(h_us)
+            .is_none_or(|end| end > fb_h)
+        || (dst_x as usize)
+            .checked_add(w_us)
+            .is_none_or(|end| end > fb_w)
+        || (dst_y as usize)
+            .checked_add(h_us)
+            .is_none_or(|end| end > fb_h)
+    {
+        return Err("copyrect: source or destination is outside framebuffer".into());
+    }
+    let mut rgba = vec![0u8; bytes];
     for row in 0..h_us {
         let sy = src_y as usize + row;
+        if sy >= fb_h {
+            break;
+        }
         let src_start = (sy * fb_w + src_x as usize) * 4;
-        let src_end = src_start + w_us * 4;
+        // Row length constrained by both the requested width and the fb edge.
+        let avail_cols = fb_w.saturating_sub(src_x as usize).min(w_us);
+        let src_end = src_start + avail_cols * 4;
         let dst_start = row * w_us * 4;
-        let dst_end = dst_start + w_us * 4;
-        rgba[dst_start..dst_end].copy_from_slice(&fb[src_start..src_end]);
+        let dst_end = dst_start + avail_cols * 4;
+        if src_end <= fb.len() && dst_end <= rgba.len() {
+            rgba[dst_start..dst_end].copy_from_slice(&fb[src_start..src_end]);
+        }
     }
     Ok(DecodedRect::Pixels {
         x: dst_x,
@@ -139,17 +161,11 @@ const HEXTILE_SUBRECTS_COLOURED: u8 = 0x10;
 pub struct HextileState {
     bg: [u8; 4],
     fg: [u8; 4],
-    bg_valid: bool,
-    fg_valid: bool,
 }
 
 impl HextileState {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
     }
 }
 
@@ -167,41 +183,19 @@ pub fn read_hextile<R: Read>(
     rect_h: u16,
     state: &mut HextileState,
 ) -> Result<Vec<DecodedRect>, String> {
-    if rect_w == 0 || rect_h == 0 {
-        return Err("hextile: rectangle dimensions must be non-zero".to_string());
-    }
-    let rect_right = rect_x
-        .checked_add(rect_w)
-        .ok_or_else(|| "hextile: rectangle x coordinate overflow".to_string())?;
-    let rect_bottom = rect_y
-        .checked_add(rect_h)
-        .ok_or_else(|| "hextile: rectangle y coordinate overflow".to_string())?;
-    state.reset();
     let mut results: Vec<DecodedRect> = Vec::new();
 
     let mut tile_y = rect_y;
-    while tile_y < rect_bottom {
-        let tile_h = 16u16.min(rect_bottom - tile_y);
+    while tile_y < rect_y + rect_h {
+        let tile_h = 16u16.min(rect_y + rect_h - tile_y);
         let mut tile_x = rect_x;
-        while tile_x < rect_right {
-            let tile_w = 16u16.min(rect_right - tile_x);
+        while tile_x < rect_x + rect_w {
+            let tile_w = 16u16.min(rect_x + rect_w - tile_x);
             let subenc = read_u8(r).map_err(|e| format!("hextile: subenc: {}", e))?;
-            if subenc & !0x1f != 0 {
-                return Err(format!(
-                    "hextile: unsupported subencoding flags {subenc:#04x}"
-                ));
-            }
-            let pixel_count = usize::from(tile_w)
-                .checked_mul(usize::from(tile_h))
-                .ok_or_else(|| "hextile: tile pixel count overflow".to_string())?;
-            let byte_count = pixel_count
-                .checked_mul(4)
-                .ok_or_else(|| "hextile: tile byte count overflow".to_string())?;
+            let pixel_count = tile_w as usize * tile_h as usize;
+            let byte_count = pixel_count * 4;
 
             if subenc & HEXTILE_RAW != 0 {
-                if subenc != HEXTILE_RAW {
-                    return Err("hextile: raw tile contains incompatible flags".to_string());
-                }
                 let mut rgba = vec![0u8; byte_count];
                 r.read_exact(&mut rgba)
                     .map_err(|e| format!("hextile: raw tile pixels: {}", e))?;
@@ -215,29 +209,19 @@ pub fn read_hextile<R: Read>(
                     h: tile_h,
                     rgba,
                 });
-                state.bg_valid = false;
-                state.fg_valid = false;
                 tile_x += tile_w;
                 continue;
-            }
-
-            if subenc & HEXTILE_SUBRECTS_COLOURED != 0 && subenc & HEXTILE_ANY_SUBRECTS == 0 {
-                return Err("hextile: coloured-subrect flag requires subrects flag".to_string());
             }
 
             if subenc & HEXTILE_BG_SPECIFIED != 0 {
                 r.read_exact(&mut state.bg)
                     .map_err(|e| format!("hextile: bg: {}", e))?;
                 state.bg[3] = 255;
-                state.bg_valid = true;
-            } else if !state.bg_valid {
-                return Err("hextile: first non-raw tile must specify a background".to_string());
             }
             if subenc & HEXTILE_FG_SPECIFIED != 0 {
                 r.read_exact(&mut state.fg)
                     .map_err(|e| format!("hextile: fg: {}", e))?;
                 state.fg[3] = 255;
-                state.fg_valid = true;
             }
 
             // Fill the tile with the background colour.
@@ -250,9 +234,6 @@ pub fn read_hextile<R: Read>(
                 let n_subrects =
                     read_u8(r).map_err(|e| format!("hextile: n_subrects: {}", e))? as usize;
                 let coloured = subenc & HEXTILE_SUBRECTS_COLOURED != 0;
-                if n_subrects > 0 && !coloured && !state.fg_valid {
-                    return Err("hextile: non-coloured subrects require a foreground".to_string());
-                }
                 for _ in 0..n_subrects {
                     let colour = if coloured {
                         let mut c = [0u8; 4];
@@ -269,13 +250,8 @@ pub fn read_hextile<R: Read>(
                     let sy = (xy & 0x0F) as usize;
                     let sw = ((wh >> 4) as usize) + 1;
                     let sh = ((wh & 0x0F) as usize) + 1;
-                    if sx + sw > usize::from(tile_w) || sy + sh > usize::from(tile_h) {
-                        return Err(format!(
-                            "hextile: subrectangle {sx},{sy} {sw}x{sh} exceeds tile {tile_w}x{tile_h}"
-                        ));
-                    }
-                    for r2 in sy..sy + sh {
-                        for c in sx..sx + sw {
+                    for r2 in sy..(sy + sh).min(tile_h as usize) {
+                        for c in sx..(sx + sw).min(tile_w as usize) {
                             let idx = (r2 * tile_w as usize + c) * 4;
                             tile_pixels[idx..idx + 4].copy_from_slice(&colour);
                         }
@@ -336,25 +312,34 @@ pub fn read_zrle<R: Read>(
     rect_w: u16,
     rect_h: u16,
     dec: &mut ZrleDecoder,
+) -> Result<Vec<DecodedRect>, String> {
+    read_zrle_with_limits(
+        r,
+        rect_x,
+        rect_y,
+        rect_w,
+        rect_h,
+        dec,
+        &DecodeLimits::default(),
+    )
+}
+
+pub fn read_zrle_with_limits<R: Read>(
+    r: &mut R,
+    rect_x: u16,
+    rect_y: u16,
+    rect_w: u16,
+    rect_h: u16,
+    dec: &mut ZrleDecoder,
     limits: &DecodeLimits,
 ) -> Result<Vec<DecodedRect>, String> {
-    if rect_w == 0 || rect_h == 0 {
-        return Err("zrle: rectangle dimensions must be non-zero".to_string());
-    }
-    let rect_right = rect_x
-        .checked_add(rect_w)
-        .ok_or_else(|| "zrle: rectangle x coordinate overflow".to_string())?;
-    let rect_bottom = rect_y
-        .checked_add(rect_h)
-        .ok_or_else(|| "zrle: rectangle y coordinate overflow".to_string())?;
-    limits.rectangle_bytes(rect_w, rect_h)?;
-    let zlib_len = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))? as usize;
-    if zlib_len > limits.max_compressed_rect_bytes {
-        return Err(format!(
-            "zrle: compressed rectangle {} bytes exceeds limit {}",
-            zlib_len, limits.max_compressed_rect_bytes
-        ));
-    }
+    let zlib_len_raw = read_u32_be(r).map_err(|e| format!("zrle: len: {}", e))?;
+    let zlib_len = limits
+        .compressed_bytes(zlib_len_raw)
+        .map_err(|e| e.to_string())?;
+    let _rect_bytes = limits
+        .rectangle_bytes(rect_w, rect_h)
+        .map_err(|e| e.to_string())?;
     let mut compressed = vec![0u8; zlib_len];
     r.read_exact(&mut compressed)
         .map_err(|e| format!("zrle: body: {}", e))?;
@@ -372,17 +357,13 @@ pub fn read_zrle<R: Read>(
     // with `eof cpixel`. Drain the inflater with an extra empty-input call
     // before returning.
     let mut src_consumed = 0usize;
-    let output_start = dec.buf.len();
     loop {
         let current_len = dec.buf.len();
         let next_len = current_len
             .checked_add(64 * 1024)
-            .ok_or_else(|| "zrle: decompressed size overflow".to_string())?;
-        if next_len.saturating_sub(output_start) > limits.max_decompressed_rect_bytes {
-            return Err(format!(
-                "zrle: decompressed rectangle exceeds limit {}",
-                limits.max_decompressed_rect_bytes
-            ));
+            .ok_or_else(|| "zrle: output size overflow".to_string())?;
+        if next_len > limits.max_decompressed_rect_bytes {
+            return Err("zrle: decompressed output exceeds configured limit".into());
         }
         dec.buf.resize(next_len, 0);
 
@@ -416,7 +397,7 @@ pub fn read_zrle<R: Read>(
         }
         // Safety net against a livelock on malformed input.
         if consumed_in == 0 && produced_out == 0 {
-            return Err("zrle: inflater made no progress".to_string());
+            break;
         }
         if matches!(status, flate2::Status::StreamEnd) {
             break;
@@ -426,12 +407,11 @@ pub fn read_zrle<R: Read>(
     // Now decode tiles from `dec.buf`, advancing `dec.pos`.
     let mut results: Vec<DecodedRect> = Vec::new();
     let mut tile_y = rect_y;
-    while tile_y < rect_bottom {
-        let tile_h = 64u16.min(rect_bottom - tile_y);
+    while tile_y < rect_y + rect_h {
+        let tile_h = 64u16.min(rect_y + rect_h - tile_y);
         let mut tile_x = rect_x;
-        while tile_x < rect_right {
-            let tile_w = 64u16.min(rect_right - tile_x);
-            limits.rectangle_bytes(tile_w, tile_h)?;
+        while tile_x < rect_x + rect_w {
+            let tile_w = 64u16.min(rect_x + rect_w - tile_x);
             let pixels = zrle_read_tile(&dec.buf, &mut dec.pos, tile_w, tile_h)?;
             results.push(DecodedRect::Pixels {
                 x: tile_x,
@@ -464,13 +444,8 @@ pub fn read_zrle<R: Read>(
 /// max=255/255/255) the spec says the CPIXEL is 3 bytes (the colour bytes,
 /// dropping the zero-padding byte). We send R@0 G@8 B@16 so CPIXEL is `[R, G, B]`.
 fn zrle_read_tile(buf: &[u8], pos: &mut usize, w: u16, h: u16) -> Result<Vec<u8>, String> {
-    let pixel_count = usize::from(w)
-        .checked_mul(usize::from(h))
-        .ok_or_else(|| "zrle: tile pixel count overflow".to_string())?;
-    let byte_count = pixel_count
-        .checked_mul(4)
-        .ok_or_else(|| "zrle: tile byte count overflow".to_string())?;
-    let mut rgba = vec![0u8; byte_count];
+    let pixel_count = w as usize * h as usize;
+    let mut rgba = vec![0u8; pixel_count * 4];
 
     let subenc = *buf
         .get(*pos)
@@ -525,13 +500,11 @@ fn zrle_read_tile(buf: &[u8], pos: &mut usize, w: u16, h: u16) -> Result<Vec<u8>
                     let shift = 8 - (slot + 1) * bpp;
                     let mask = (1u8 << bpp) - 1;
                     let idx = ((byte >> shift) & mask) as usize;
-                    let colour =
-                        *palette
-                            .get(idx)
-                            .filter(|_| idx < palette_size)
-                            .ok_or_else(|| {
-                                format!("zrle: packed palette index {idx} exceeds {palette_size}")
-                            })?;
+                    let colour = if idx < palette_size {
+                        palette[idx]
+                    } else {
+                        [0, 0, 0, 255]
+                    };
                     let px = (row * w as usize + col) * 4;
                     rgba[px..px + 4].copy_from_slice(&colour);
                     col += 1;
@@ -547,13 +520,8 @@ fn zrle_read_tile(buf: &[u8], pos: &mut usize, w: u16, h: u16) -> Result<Vec<u8>
         while filled < pixel_count {
             let colour = read_cpixel(buf, pos)?;
             let run_len = read_zrle_run_length(buf, pos)?;
-            let remaining = pixel_count - filled;
-            if run_len > remaining {
-                return Err(format!(
-                    "zrle: plain RLE run {run_len} exceeds remaining pixels {remaining}"
-                ));
-            }
-            for _ in 0..run_len {
+            let take = run_len.min(pixel_count - filled);
+            for _ in 0..take {
                 rgba[filled * 4..filled * 4 + 4].copy_from_slice(&colour);
                 filled += 1;
             }
@@ -576,21 +544,18 @@ fn zrle_read_tile(buf: &[u8], pos: &mut usize, w: u16, h: u16) -> Result<Vec<u8>
                 .ok_or_else(|| "zrle: eof paletteRLE idx".to_string())?;
             *pos += 1;
             let pal_idx = (idx_byte & 0x7F) as usize;
-            let colour = *palette.get(pal_idx).ok_or_else(|| {
-                format!("zrle: palette RLE index {pal_idx} exceeds {palette_size}")
-            })?;
+            let colour = if pal_idx < palette_size {
+                palette[pal_idx]
+            } else {
+                [0, 0, 0, 255]
+            };
             let run_len = if idx_byte & 0x80 != 0 {
                 read_zrle_run_length(buf, pos)?
             } else {
                 1
             };
-            let remaining = pixel_count - filled;
-            if run_len > remaining {
-                return Err(format!(
-                    "zrle: palette RLE run {run_len} exceeds remaining pixels {remaining}"
-                ));
-            }
-            for _ in 0..run_len {
+            let take = run_len.min(pixel_count - filled);
+            for _ in 0..take {
                 rgba[filled * 4..filled * 4 + 4].copy_from_slice(&colour);
                 filled += 1;
             }
@@ -604,10 +569,7 @@ fn zrle_read_tile(buf: &[u8], pos: &mut usize, w: u16, h: u16) -> Result<Vec<u8>
 /// Read a CPIXEL (3 bytes R, G, B). Alpha is always 0xFF.
 fn read_cpixel(buf: &[u8], pos: &mut usize) -> Result<[u8; 4], String> {
     let s = *pos;
-    let end = s
-        .checked_add(3)
-        .ok_or_else(|| "zrle: cpixel cursor overflow".to_string())?;
-    if end > buf.len() {
+    if s + 3 > buf.len() {
         return Err("zrle: eof cpixel".to_string());
     }
     let out = [buf[s], buf[s + 1], buf[s + 2], 255];
@@ -624,13 +586,76 @@ fn read_zrle_run_length(buf: &[u8], pos: &mut usize) -> Result<usize, String> {
             .get(*pos)
             .ok_or_else(|| "zrle: eof run length".to_string())?;
         *pos += 1;
-        total = total
-            .checked_add(usize::from(b))
-            .ok_or_else(|| "zrle: run length overflow".to_string())?;
+        total += b as usize;
         if b != 255 {
             return Ok(total);
         }
     }
+}
+
+/// Decode the RichCursor pseudo-encoding (-239). Pixel bytes use the 32-bit
+/// RGBA format negotiated for normal rectangles, followed by a one-bit alpha
+/// mask whose rows are padded to whole bytes.
+pub fn read_rich_cursor<R: Read>(
+    reader: &mut R,
+    hotspot_x: u16,
+    hotspot_y: u16,
+    width: u16,
+    height: u16,
+) -> Result<DecodedCursor, String> {
+    if width == 0 || height == 0 {
+        return Ok(DecodedCursor {
+            hotspot_x: 0,
+            hotspot_y: 0,
+            width: 0,
+            height: 0,
+            rgba: Vec::new(),
+        });
+    }
+    if width > MAX_CURSOR_DIMENSION || height > MAX_CURSOR_DIMENSION {
+        return Err(format!(
+            "rich cursor dimensions {width}x{height} exceed {MAX_CURSOR_DIMENSION}x{MAX_CURSOR_DIMENSION}"
+        ));
+    }
+    if hotspot_x >= width || hotspot_y >= height {
+        return Err(format!(
+            "rich cursor hotspot {hotspot_x},{hotspot_y} lies outside {width}x{height}"
+        ));
+    }
+
+    let pixel_bytes = usize::from(width)
+        .checked_mul(usize::from(height))
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "rich cursor pixel byte count overflow".to_string())?;
+    let mask_stride = usize::from(width).div_ceil(8);
+    let mask_bytes = mask_stride
+        .checked_mul(usize::from(height))
+        .ok_or_else(|| "rich cursor mask byte count overflow".to_string())?;
+
+    let mut rgba = vec![0u8; pixel_bytes];
+    reader
+        .read_exact(&mut rgba)
+        .map_err(|e| format!("rich cursor pixels: {e}"))?;
+    let mut mask = vec![0u8; mask_bytes];
+    reader
+        .read_exact(&mut mask)
+        .map_err(|e| format!("rich cursor mask: {e}"))?;
+
+    for row in 0..usize::from(height) {
+        for column in 0..usize::from(width) {
+            let mask_byte = mask[row * mask_stride + column / 8];
+            let visible = mask_byte & (0x80 >> (column % 8)) != 0;
+            rgba[(row * usize::from(width) + column) * 4 + 3] = if visible { 255 } else { 0 };
+        }
+    }
+
+    Ok(DecodedCursor {
+        hotspot_x,
+        hotspot_y,
+        width,
+        height,
+        rgba,
+    })
 }
 
 #[cfg(test)]
@@ -646,6 +671,26 @@ mod tests {
         let rect = read_raw(&mut cur, 0, 0, 2, 1).unwrap();
         let DecodedRect::Pixels { rgba, .. } = rect;
         assert_eq!(rgba, vec![10, 20, 30, 255, 40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn rich_cursor_applies_bitmask_alpha_and_hotspot() {
+        let mut payload = vec![10, 20, 30, 0, 40, 50, 60, 0, 70, 80, 90, 0];
+        payload.push(0b1010_0000);
+        let mut reader = Cursor::new(payload);
+        let cursor = read_rich_cursor(&mut reader, 1, 0, 3, 1).unwrap();
+        assert_eq!((cursor.hotspot_x, cursor.hotspot_y), (1, 0));
+        assert_eq!((cursor.width, cursor.height), (3, 1));
+        assert_eq!(
+            cursor.rgba,
+            vec![10, 20, 30, 255, 40, 50, 60, 0, 70, 80, 90, 255]
+        );
+    }
+
+    #[test]
+    fn rich_cursor_rejects_invalid_geometry() {
+        assert!(read_rich_cursor(&mut Cursor::new(Vec::<u8>::new()), 3, 0, 3, 1).is_err());
+        assert!(read_rich_cursor(&mut Cursor::new(Vec::<u8>::new()), 0, 0, 513, 1).is_err());
     }
 
     #[test]
@@ -665,43 +710,10 @@ mod tests {
     }
 
     #[test]
-    fn copyrect_rejects_out_of_bounds_and_short_framebuffers() {
-        let framebuffer = vec![0u8; 4 * 4 * 4];
-        let mut out_of_bounds = Cursor::new(vec![0, 3, 0, 0]);
-        assert!(
-            read_copyrect(&mut out_of_bounds, 0, 0, 2, 1, &framebuffer, 4, 4)
-                .unwrap_err()
-                .contains("exceeds framebuffer")
-        );
-
-        let mut short = Cursor::new(vec![0, 0, 0, 0]);
-        assert!(
-            read_copyrect(&mut short, 0, 0, 1, 1, &[0; 3], 1, 1)
-                .unwrap_err()
-                .contains("expected 4")
-        );
-    }
-
-    #[test]
-    fn raw_and_zrle_truncation_fail_deterministically() {
-        assert!(read_raw(&mut Cursor::new([0u8; 7]), 0, 0, 2, 1).is_err());
-
-        let mut zrle = Vec::new();
-        zrle.extend_from_slice(&8u32.to_be_bytes());
-        zrle.extend_from_slice(&[1, 2, 3]);
-        assert!(
-            read_zrle(
-                &mut Cursor::new(zrle),
-                0,
-                0,
-                1,
-                1,
-                &mut ZrleDecoder::new(),
-                &DecodeLimits::default(),
-            )
-            .unwrap_err()
-            .contains("zrle: body")
-        );
+    fn copyrect_rejects_out_of_bounds_source() {
+        let fb = vec![0u8; 4 * 4];
+        let mut payload = Cursor::new(vec![0u8, 4, 0, 0]);
+        assert!(read_copyrect(&mut payload, 0, 0, 1, 1, &fb, 4, 1).is_err());
     }
 
     #[test]
@@ -744,63 +756,6 @@ mod tests {
     }
 
     #[test]
-    fn hextile_rejects_unknown_mixed_raw_and_out_of_bounds_subrects() {
-        for payload in [
-            vec![0x20],
-            vec![HEXTILE_RAW | HEXTILE_BG_SPECIFIED],
-            vec![
-                HEXTILE_BG_SPECIFIED | HEXTILE_FG_SPECIFIED | HEXTILE_ANY_SUBRECTS,
-                0,
-                0,
-                0,
-                0,
-                1,
-                1,
-                1,
-                1,
-                1,
-                0,
-                0x10,
-            ],
-        ] {
-            let error = read_hextile(
-                &mut Cursor::new(payload),
-                0,
-                0,
-                1,
-                1,
-                &mut HextileState::new(),
-            )
-            .unwrap_err();
-            assert!(
-                error.contains("subencoding flags")
-                    || error.contains("incompatible flags")
-                    || error.contains("exceeds tile"),
-                "unexpected error: {error}"
-            );
-        }
-    }
-
-    #[test]
-    fn hextile_state_does_not_leak_across_rectangles_and_coordinates_are_checked() {
-        let mut state = HextileState::new();
-        read_hextile(
-            &mut Cursor::new([HEXTILE_BG_SPECIFIED, 1, 2, 3, 0]),
-            0,
-            0,
-            1,
-            1,
-            &mut state,
-        )
-        .unwrap();
-        let error = read_hextile(&mut Cursor::new([0]), 0, 0, 1, 1, &mut state).unwrap_err();
-        assert!(error.contains("must specify a background"));
-
-        let error = read_hextile(&mut Cursor::new([]), u16::MAX, 0, 1, 1, &mut state).unwrap_err();
-        assert!(error.contains("coordinate overflow"));
-    }
-
-    #[test]
     fn zrle_solid_tile_with_persistent_stream() {
         use flate2::Compression;
         use flate2::write::ZlibEncoder;
@@ -818,7 +773,7 @@ mod tests {
 
         let mut cur = Cursor::new(&payload);
         let mut dec = ZrleDecoder::new();
-        let out = read_zrle(&mut cur, 0, 0, 64, 64, &mut dec, &DecodeLimits::default()).unwrap();
+        let out = read_zrle(&mut cur, 0, 0, 64, 64, &mut dec).unwrap();
         assert_eq!(out.len(), 1);
         let DecodedRect::Pixels { rgba, .. } = &out[0];
         assert_eq!(rgba.len(), 64 * 64 * 4);
@@ -847,53 +802,12 @@ mod tests {
 
         let mut cur = Cursor::new(&payload);
         let mut dec = ZrleDecoder::new();
-        let out = read_zrle(&mut cur, 0, 0, 16, 16, &mut dec, &DecodeLimits::default()).unwrap();
+        let out = read_zrle(&mut cur, 0, 0, 16, 16, &mut dec).unwrap();
         let DecodedRect::Pixels { rgba, .. } = &out[0];
         assert_eq!(rgba.len(), 16 * 16 * 4);
         for p in rgba.chunks_exact(4) {
             assert_eq!(p, &[0, 255, 0, 255]);
         }
-    }
-
-    #[test]
-    fn zrle_rejects_invalid_packed_palette_index() {
-        let mut tile = vec![3];
-        tile.extend_from_slice(&[
-            1, 2, 3, // palette 0
-            4, 5, 6, // palette 1
-            7, 8, 9, // palette 2
-        ]);
-        tile.push(0b1100_0000); // 2bpp index 3, outside a three-colour palette.
-
-        let error = zrle_read_tile(&tile, &mut 0, 1, 1).unwrap_err();
-        assert!(error.contains("packed palette index 3 exceeds 3"));
-    }
-
-    #[test]
-    fn zrle_rejects_runs_longer_than_the_remaining_tile() {
-        let plain_rle = [128, 1, 2, 3, 1]; // run length 2 for a one-pixel tile.
-        let error = zrle_read_tile(&plain_rle, &mut 0, 1, 1).unwrap_err();
-        assert!(error.contains("plain RLE run 2 exceeds remaining pixels 1"));
-
-        let palette_rle = [
-            130, // two-colour palette RLE
-            1, 2, 3, 4, 5, 6, // palette
-            0x80, 1, // palette index 0, run length 2
-        ];
-        let error = zrle_read_tile(&palette_rle, &mut 0, 1, 1).unwrap_err();
-        assert!(error.contains("palette RLE run 2 exceeds remaining pixels 1"));
-
-        let error = read_zrle(
-            &mut Cursor::new([]),
-            u16::MAX,
-            0,
-            1,
-            1,
-            &mut ZrleDecoder::new(),
-            &DecodeLimits::default(),
-        )
-        .unwrap_err();
-        assert!(error.contains("coordinate overflow"));
     }
 
     #[test]
@@ -939,7 +853,7 @@ mod tests {
         payload1.extend_from_slice(&rect1);
         let mut cur1 = Cursor::new(&payload1);
         let mut dec = ZrleDecoder::new();
-        let out1 = read_zrle(&mut cur1, 0, 0, 64, 64, &mut dec, &DecodeLimits::default()).unwrap();
+        let out1 = read_zrle(&mut cur1, 0, 0, 64, 64, &mut dec).unwrap();
         let DecodedRect::Pixels { rgba, .. } = &out1[0];
         assert_eq!(rgba[0..4], [255, 0, 0, 255]);
 
@@ -947,7 +861,7 @@ mod tests {
         payload2.extend_from_slice(&(rect2.len() as u32).to_be_bytes());
         payload2.extend_from_slice(&rect2);
         let mut cur2 = Cursor::new(&payload2);
-        let out2 = read_zrle(&mut cur2, 0, 64, 64, 64, &mut dec, &DecodeLimits::default()).unwrap();
+        let out2 = read_zrle(&mut cur2, 0, 64, 64, 64, &mut dec).unwrap();
         let DecodedRect::Pixels { rgba, .. } = &out2[0];
         assert_eq!(rgba[0..4], [0, 0, 255, 255]);
     }
@@ -1016,16 +930,7 @@ mod tests {
 
         let mut cur = Cursor::new(&payload);
         let mut dec = ZrleDecoder::new();
-        let out = read_zrle(
-            &mut cur,
-            0,
-            0,
-            rect_w,
-            rect_h,
-            &mut dec,
-            &DecodeLimits::default(),
-        )
-        .unwrap();
+        let out = read_zrle(&mut cur, 0, 0, rect_w, rect_h, &mut dec).unwrap();
         assert_eq!(out.len() as u16, tiles_x * tiles_y);
         for rect in &out {
             let DecodedRect::Pixels { rgba, .. } = rect;

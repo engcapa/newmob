@@ -20,6 +20,27 @@ export interface PasteResult {
   rtf?: string;
 }
 
+export interface ClipboardCapabilities {
+  platform: string;
+  displayBackend: string;
+  webkitApiExpected: boolean;
+  nativeBackend: string;
+  wlPaste: boolean;
+  wlCopy: boolean;
+  xclip: boolean;
+  xsel: boolean;
+  htmlRtfNative: boolean;
+}
+
+export async function probeClipboardCapabilities(): Promise<ClipboardCapabilities | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    return await invoke<ClipboardCapabilities>("clipboard_capabilities");
+  } catch {
+    return null;
+  }
+}
+
 function fallbackCopyText(text: string): boolean {
   if (typeof document === "undefined") return false;
   const textarea = document.createElement("textarea");

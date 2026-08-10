@@ -2,7 +2,6 @@ import type { SshConnectInfo } from "../components/terminal/TerminalPanel";
 import type { TerminalProfile } from "../lib/terminalProfile";
 import type { NetworkSettingsPayload } from "../lib/networkSettings";
 import type { RdpOptions } from "./rdp";
-import type { VncOptions } from "./vnc";
 import type { ObjectStorageConfig } from "./objectStorage";
 import type { LaunchPreparation } from "../lib/sockscap";
 
@@ -138,16 +137,6 @@ export interface LanSecurityEvent {
 /** Call kind. */
 export type LanCallKind = "audio" | "video";
 
-export interface VncConnectInfo {
-  sessionId: string;
-  host: string;
-  port: number;
-  username?: string | null;
-  password?: string;
-  options: VncOptions;
-  networkSettingsJson?: string | null;
-}
-
 /**
  * Connection parameters for a database client tab (MySQL / PostgreSQL /
  * PanWeiDB / Oracle / SQL Server / StarRocks / ClickHouse / Presto / Redis). Mirrors the Rust `DbConfig` (camelCase). The password
@@ -230,6 +219,18 @@ export interface RdpConnectInfo {
   options: RdpOptions;
   /** JSON blob mirroring the SSH `networkSettings` shape; null = direct. */
   networkSettingsJson?: string | null;
+}
+
+export interface VncConnectInfo {
+  sessionId: string;
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string;
+  networkSettingsJson?: string | null;
+  securityPolicy?: "require-encryption" | "prefer-encryption" | "legacy-compatible" | "allow-none";
+  viewOnly?: boolean;
+  clipboardPolicy?: "disabled" | "client-to-server" | "server-to-client" | "bidirectional";
 }
 
 export interface ProxyTestTabInfo {

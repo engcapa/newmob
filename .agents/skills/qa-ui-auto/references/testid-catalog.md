@@ -327,7 +327,6 @@
 ## main (F1.2)
 
 - `[data-testid="collapsed-sidebar-rail"]` — interactive [optional] — F1.2.collapsed-sidebar-rail
-- `[data-testid="compact-sidebar-drawer"]` — display [optional] — F1.2.compact-sidebar-drawer
 - `[data-testid="main-sidebar-resize-handle"]` — display — F1.2.sidebar-resize-handle
 
 ## main/detach (F-Detach-1)
@@ -557,6 +556,7 @@
 ## sessions (F6.2)
 
 - `[data-testid="sidebar"]` — display — F6.2.sidebar
+- `[data-testid="side-tab-sessions"]` — interactive — F6.2.side-tab-sessions
 - `[data-testid="session-tree"]` — display — F6.2.session-tree
 - `[data-testid="session-tree-item"]` — interactive — F6.2.session-tree-item
 - `[data-testid="session-search"]` — interactive — F6.2.session-search
@@ -623,13 +623,6 @@
 - `[data-testid="terminal-settings"]` — display [optional] — F6.3.terminal-body
 - `[data-testid="network-settings"]` — display — F6.3.network-body
 - `[data-testid="bookmark-settings"]` — display — F6.3.bookmark-body
-- `[data-testid="session-vnc-section"]` — display [optional] — F6.3.vnc-body
-- `[data-testid="vnc-security-policy"]` — interactive [optional] — F6.3.vnc-security-policy
-- `[data-testid="vnc-allow-none"]` — interactive [optional] — F6.3.vnc-allow-none
-- `[data-testid="vnc-view-only"]` — interactive [optional] — F6.3.vnc-view-only
-- `[data-testid="vnc-clipboard-policy"]` — interactive [optional] — F6.3.vnc-clipboard-policy
-- `[data-testid="vnc-clipboard-text-only"]` — interactive [optional] — F6.3.vnc-clipboard-text-only
-- `[data-testid="vnc-reconnect-attempts"]` — interactive [optional] — F6.3.vnc-reconnect-attempts
 - `input[aria-label="Execute command"]` — interactive — F6.3.advanced-execute-command
 - `input[aria-label="SSH password"]` — interactive [optional] — F6.3.advanced-ssh-password
 - `[data-testid="session-save-in-vault"]` — interactive [optional] — F6.3.save-in-vault
@@ -1057,6 +1050,9 @@
 
 - `[data-testid="vnc-panel"]` — display — F9.6.panel-root
 - `[data-testid="vnc-canvas"]` — display — F9.6.canvas
-- `[data-testid="vnc-security-status"]` — display [optional] — F9.6.vnc-security-status
 - `[data-testid="vnc-scale-toggle"]` — interactive [optional] — F9.6.scale-toggle
 - `[data-testid="vnc-reconnect"]` — interactive [optional] — F9.6.reconnect
+- `[data-testid="session-vnc-policies"]` — display [optional] — F9.6.policy-settings
+- `[data-testid="session-vnc-security-policy"]` — interactive [optional] — F9.6.security-policy
+- `[data-testid="session-vnc-clipboard-policy"]` — interactive [optional] — F9.6.clipboard-policy
+- `[data-testid="session-vnc-view-only"]` — interactive [optional] — F9.6.view-only

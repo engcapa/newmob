@@ -83,7 +83,15 @@ Dark-mode slide gallery captured from local dev builds, including the `5000` bro
 - pnpm
 - Rust 1.94+
 - `protoc` for Protocol Buffers, required by the native HBase client build
+- A complete Perl 5 distribution, required to build the vendored OpenSSL used
+  by VNC anonymous TLS. Git for Windows' bundled Perl is not complete enough.
 - Tauri system dependencies, including WebView2 on Windows and WebKitGTK on Linux
+
+Install Perl with `winget install --id StrawberryPerl.StrawberryPerl --exact`
+on Windows, `sudo apt-get install perl` on Debian/Ubuntu, or `brew install perl`
+on macOS. After a Windows installation, open a new terminal so `perl` is on
+`PATH`. Homebrew's keg-only Perl can be enabled in the current shell with
+`export PATH="$(brew --prefix perl)/bin:$PATH"`.
 
 Install dependencies:
 

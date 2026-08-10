@@ -756,7 +756,7 @@ describe("SessionEditor SSH settings tabs", { timeout: 15_000 }, () => {
 
   it.each([
     ["SFTP", "advanced-ssh-settings"],
-    ["VNC", "session-vnc-section"],
+    ["VNC", "session-vnc-policies"],
     ["Browser", "network-settings"],
   ])("hides Terminal settings for %s sessions", async (initialProto, expectedSectionTestId) => {
     renderEditor(undefined, { initialProto });
@@ -765,6 +765,24 @@ describe("SessionEditor SSH settings tabs", { timeout: 15_000 }, () => {
     expect(screen.queryByRole("button", { name: /terminal settings/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId("terminal-settings")).not.toBeInTheDocument();
     expect(screen.queryByTestId("terminal-appearance-settings")).not.toBeInTheDocument();
+  });
+
+  it("persists VNC security, clipboard, and view-only policies", async () => {
+    const user = userEvent.setup();
+    renderEditor(undefined, { initialProto: "VNC" });
+
+    await user.type(screen.getByTestId("session-host"), "vnc.example.test");
+    await user.selectOptions(screen.getByTestId("session-vnc-security-policy"), "require-encryption");
+    await user.selectOptions(screen.getByTestId("session-vnc-clipboard-policy"), "server-to-client");
+    await user.click(screen.getByTestId("session-vnc-view-only"));
+    await user.click(screen.getByRole("button", { name: "OK" }));
+
+    expect(ipcMocks.saveSession).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(ipcMocks.saveSession.mock.calls[0][0].options_json)).toMatchObject({
+      vncSecurityPolicy: "require-encryption",
+      vncClipboardPolicy: "server-to-client",
+      vncViewOnly: true,
+    });
   });
 
   it.each([

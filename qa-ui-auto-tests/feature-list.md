@@ -33,10 +33,6 @@ controls:
     selector: '[data-testid="collapsed-sidebar-rail"]'
     kind: interactive
     optional: true       # only when sidebar collapsed
-  - id: compact-sidebar-drawer
-    selector: '[data-testid="compact-sidebar-drawer"]'
-    kind: display
-    optional: true       # only in compact mode after Show sessions drawer
   - id: sidebar-resize-handle
     selector: '[data-testid="main-sidebar-resize-handle"]'
     kind: display    # drag handle — meaningless to click; existence is the assertion
@@ -1146,6 +1142,9 @@ controls:
   - id: sidebar
     selector: '[data-testid="sidebar"]'
     kind: display
+  - id: side-tab-sessions
+    selector: '[data-testid="side-tab-sessions"]'
+    kind: interactive
   - id: session-tree
     selector: '[data-testid="session-tree"]'
     kind: display
@@ -1392,34 +1391,6 @@ controls:
   - id: bookmark-body
     selector: '[data-testid="bookmark-settings"]'
     kind: display
-  - id: vnc-body
-    selector: '[data-testid="session-vnc-section"]'
-    kind: display
-    optional: true        # only visible for VNC proto
-  - id: vnc-security-policy
-    selector: '[data-testid="vnc-security-policy"]'
-    kind: interactive
-    optional: true
-  - id: vnc-allow-none
-    selector: '[data-testid="vnc-allow-none"]'
-    kind: interactive
-    optional: true
-  - id: vnc-view-only
-    selector: '[data-testid="vnc-view-only"]'
-    kind: interactive
-    optional: true
-  - id: vnc-clipboard-policy
-    selector: '[data-testid="vnc-clipboard-policy"]'
-    kind: interactive
-    optional: true
-  - id: vnc-clipboard-text-only
-    selector: '[data-testid="vnc-clipboard-text-only"]'
-    kind: interactive
-    optional: true
-  - id: vnc-reconnect-attempts
-    selector: '[data-testid="vnc-reconnect-attempts"]'
-    kind: interactive
-    optional: true
   # Advanced SSH inputs (aria-label fallback — selectors will fail when label text changes; promote to testids later)
   - id: advanced-execute-command
     selector: 'input[aria-label="Execute command"]'
@@ -2071,20 +2042,20 @@ files:
 controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas surface is owned by F9.6
 -->
 
-- Rust 端 VNC 模块：`src-tauri/src/vnc/{mod, rfb, ws, encodings, clipboard, limits, options, transport, error}.rs`
-- Tauri 命令：`vnc_connect / vnc_disconnect / vnc_test_connection`
-- `vnc_get_diagnostics` 提供脱敏的协商、尺寸、帧与丢帧统计；网络路径复用 direct/HTTP CONNECT/SOCKS5/SSH jump 配置
+- Rust 端 VNC 模块：`src-tauri/src/vnc/{mod,rfb,tls,ws,encodings,clipboard,error,limits,policy,queue}.rs`
+- Tauri 命令：`vnc_connect / vnc_disconnect / vnc_test_connection / vnc_create_detach_claim / vnc_consume_detach_claim`
 - 本地动态端口 WebSocket relay：VNC server ↔ 前端 Canvas（前端不再直接持有 TCP 套接字）
 
 ### 9.2 RFB 握手与认证 ✅
-- 安全类型：VeNCrypt X509 TLS（X509None、X509Vnc、X509Plain，系统信任链与主机名校验）、VNC password、RealVNC RA2 / RA2ne（128 / 256 位 AES）；匿名 TLS-family 子类型不声明支持，None 默认拒绝且必须显式允许
-- 安全策略：Require encryption / Prefer encryption / Legacy compatible；连接状态显示实际协议、安全类型和是否加密
+- 安全类型：None（仅显式 `allow-none`）、VNC password、RFB 18 anonymous TLS + 内层安全协商、RealVNC RA2 / RA2ne（128 / 256 位 AES）
 - RA2 子模式：USER_PASS、PASS-only；公钥位长度合法性校验（1024–8192 bit）
+- TCP 建连使用独立 15 秒 deadline；RFB 安全协商和认证使用 45 秒 timeout，支持服务端认证限速/延迟，并将超时标记为可重试的 authentication/security 阶段错误
+- Tokio socket 交给同步 RFB 解码器前恢复 blocking mode，避免 `WouldBlock` 被误报为认证超时
+- RFB 18 TLS 使用匿名密码套件，能够加密传输但不验证服务器身份；`RequireEncryption` 继续 fail closed，VeNCrypt/X509 TLS 和证书校验仍未实现
 
 ### 9.3 编码与画面 ✅
 - 解码器：Raw（0）、CopyRect（1）、Hextile（5）、ZRLE（16，单一持久 zlib 流）
-- 伪编码：支持服务端 DesktopSize（-223），远端分辨率切换时原子更新 framebuffer 与 Canvas；客户端 SetDesktopSize 未实现且不会被声明
-- Retina/非 Retina 坐标换算始终使用 RFB framebuffer、Canvas backing 与 CSS display 三层尺寸，devicePixelRatio 不直接改写远端坐标；50 次连续 DesktopSize 有回归测试
+- 伪编码：DesktopSize（-223）接收；窗口变化仅调整本地 fit，不宣称或发送 SetDesktopSize；丢帧恢复时才请求全量刷新
 - ZRLE 单 zlib 状态贯穿整个 session，已修复历史的 "zrle: eof cpixel" 间歇性断连
 - 像素格式 `set_pixel_format_rgba()` 协商成 little-endian RGBA，前端按位图直接渲染
 - Tight 编码暂未启用（解码器尚未 RFC-conformant，避免 stream 失步）
@@ -2098,8 +2069,7 @@ controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas su
 
 ### 9.5 输入处理 ✅
 - 鼠标：左/中/右键、滚轮、拖拽（pointer capture）
-- 键盘：包含 RealVNC 输入修复、左右修饰键、Command/Option、数字键盘与 F1-F24 映射；IME/dead-key 通过隐藏焦点入口提交 Unicode keysym
-- blur、visibilitychange、标签隐藏、断开和卸载会释放全部已按下键/按钮；延迟粘贴保留左右 Command 并同步物理 keyup 状态
+- 键盘：包含 RealVNC 输入修复，组合键正确转发
 - 剪贴板：双向同步，自动切换 Extended / Legacy
 
 ### 9.6 前端 `VncPanel` ✅
@@ -2108,10 +2078,13 @@ controls: []   # backend-only — RFB protocol + WebSocket bridge; the canvas su
 id: F9.6
 status: done
 area: vnc
-components: [VncPanel, FloatingToolbar, CaptureToolbar]
+components: [VncPanel, FloatingToolbar, CaptureToolbar, SessionEditor]
 files:
   - src/components/vnc/VncPanel.tsx
+  - src/components/session/SessionEditor.tsx
 controls:
+  # Detach/reattach/fullscreen controls rendered by VncPanel are owned by
+  # F-Detach-1 to avoid duplicate selector ownership.
   - id: panel-root
     selector: '[data-testid="vnc-panel"]'
     kind: display
@@ -2120,10 +2093,6 @@ controls:
     kind: display       # pointer / wheel / context-menu handlers fire only after a live RFB session;
                         # without a configured VNC fixture we can only verify the canvas is attached.
                         # Driving it is left to feature-flagged conformance tests.
-  - id: vnc-security-status
-    selector: '[data-testid="vnc-security-status"]'
-    kind: display
-    optional: true          # only renders after a successful handshake
   - id: scale-toggle
     selector: '[data-testid="vnc-scale-toggle"]'
     kind: interactive
@@ -2132,16 +2101,33 @@ controls:
     selector: '[data-testid="vnc-reconnect"]'
     kind: interactive
     optional: true          # only on disconnected/error state
+  - id: policy-settings
+    selector: '[data-testid="session-vnc-policies"]'
+    kind: display
+    optional: true          # only while editing a VNC session
+  - id: security-policy
+    selector: '[data-testid="session-vnc-security-policy"]'
+    kind: interactive
+    optional: true
+  - id: clipboard-policy
+    selector: '[data-testid="session-vnc-clipboard-policy"]'
+    kind: interactive
+    optional: true
+  - id: view-only
+    selector: '[data-testid="session-vnc-view-only"]'
+    kind: interactive
+    optional: true
 -->
 
 - Canvas 画面渲染 + fit / 1:1 缩放
 - 浮动 `FloatingToolbar`：可拖拽 / 折叠 / 位置持久化
 - 内嵌 `CaptureToolbar`：可见区域 PNG / 全帧 PNG / GIF 录制（与终端共用截图链路）
 - 断开提示 + Reconnect、错误分类（区分用户主动断开 / 服务端断开 / 网络异常）
-- 自动重连仅处理 retryable 网络错误，认证/证书/策略错误不重试；指数退避、抖动和次数均有界，重连前丢弃旧会话未渲染帧
 - 保存的 VNC 会话可从会话树双击连接，密码场景复用 `AuthPrompt`
 - VNC tab 常驻挂载，切换标签时连接不主动销毁
 - 已修复 VNC 剪贴板与输入延迟、Windows 11 上的 client→server 文本粘贴
+- view-only 与剪贴板方向（disabled / client→server / server→client / bidirectional）由前后端同时执行；None 默认拒绝
+- 当前不启用 Tight/JPEG、VeNCrypt/X509 TLS，也不发送 RFB SetDesktopSize；RFB 18 anonymous TLS 已支持，但不提供服务器身份验证；窗口变化只调整本地显示
 
 ### 9.7 RDP client（IronRDP 0.17）🟡
 
@@ -2258,9 +2244,7 @@ controls:
 - **e2e 测试限制**：浏览器预览模式无法 spawn `wsl.exe`，且发行版探测受 Windows 门控，TC-112 仅验证表单挂载 / 自由文本回落 / 保存往返，真实启动需 Windows 手动回归
 
 ### 9.9 已知限制
-- 浏览器预览模式只验证编辑器、QuickConnect 路由和面板挂载；不会伪造 Rust RFB/Tauri relay
-- Tight/JPEG 和 macOS Screen Sharing 的 Apple 私有认证不在当前 macOS 生产矩阵中；VeNCrypt/TLS 使用系统信任链与主机名校验，暂不支持自定义 CA、证书 pinning 或客户端证书
-- 客户端不声明 SetDesktopSize；窗口尺寸只改变本地 fit/1:1 显示
+- 浏览器预览模式没有 VNC stub（仅 Tauri 桌面下可用）
 
 ---
 

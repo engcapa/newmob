@@ -2,22 +2,64 @@ pub mod clipboard;
 pub mod encodings;
 pub mod error;
 pub mod limits;
-pub mod options;
+pub mod policy;
+pub mod queue;
 pub mod rfb;
-pub mod transport;
+pub mod tls;
 pub mod ws;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
-use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::state::AppState;
-use crate::terminal::network::NetworkSettings;
-use crate::vnc::error::{VncError, VncStage};
-use crate::vnc::limits::DecodeLimits;
-use crate::vnc::options::VncOptions;
-use crate::vnc::ws::{VncControl, VncDiagnostics, VncSpawnConfig, spawn_vnc_relay};
+use crate::vnc::policy::VncClipboardPolicy;
+use crate::vnc::ws::{VncControl, dial_vnc_transport, spawn_vnc_relay};
+
+const MAX_DETACH_CLAIMS: usize = 64;
+const MAX_DETACH_FIELD_BYTES: usize = 64 * 1024;
+const DETACH_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+type VncDetachClaims =
+    std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, VncDetachClaim>>>;
+
+fn structured_error(error: String) -> String {
+    crate::vnc::error::VncError::classify(error).json()
+}
+
+fn parse_network_settings(
+    raw: Option<&str>,
+) -> Result<Option<crate::terminal::network::NetworkSettings>, String> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    serde_json::from_str(raw)
+        .map(Some)
+        .map_err(|error| format!("invalid VNC network settings: {error}"))
+}
+
+fn validate_connect_inputs(
+    host: &str,
+    port: u16,
+    username: Option<&str>,
+    password: Option<&str>,
+    network_settings_json: Option<&str>,
+) -> Result<(), String> {
+    if host.trim().is_empty() || port == 0 {
+        return Err("VNC host and port are required".into());
+    }
+    if host.len() > 1024 {
+        return Err("VNC host exceeds the configured size limit".into());
+    }
+    if [username, password, network_settings_json]
+        .into_iter()
+        .flatten()
+        .any(|value| value.len() > MAX_DETACH_FIELD_BYTES)
+    {
+        return Err("VNC connection input exceeds the configured size limit".into());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Serialize)]
 pub struct VncConnectResult {
@@ -29,6 +71,66 @@ pub struct VncConnectResult {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VncDetachClaim {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub network_settings_json: Option<String>,
+    pub security_policy: crate::vnc::policy::VncSecurityPolicy,
+    pub view_only: bool,
+    pub clipboard_policy: VncClipboardPolicy,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VncDetachClaimResult {
+    pub claim_id: String,
+}
+
+async fn store_detach_claim(
+    claims: &VncDetachClaims,
+    claim: VncDetachClaim,
+    ttl: std::time::Duration,
+    max_claims: usize,
+) -> Result<String, String> {
+    validate_connect_inputs(
+        &claim.host,
+        claim.port,
+        claim.username.as_deref(),
+        claim.password.as_deref(),
+        claim.network_settings_json.as_deref(),
+    )?;
+
+    let claim_id = Uuid::new_v4().to_string();
+    {
+        let mut pending = claims.write().await;
+        if pending.len() >= max_claims {
+            return Err("too many pending VNC detach claims".into());
+        }
+        pending.insert(claim_id.clone(), claim);
+    }
+
+    let expiry_claims = claims.clone();
+    let expiry_id = claim_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(ttl).await;
+        expiry_claims.write().await.remove(&expiry_id);
+    });
+    Ok(claim_id)
+}
+
+async fn consume_detach_claim(
+    claims: &VncDetachClaims,
+    claim_id: &str,
+) -> Result<VncDetachClaim, String> {
+    claims
+        .write()
+        .await
+        .remove(claim_id)
+        .ok_or_else(|| "VNC detach claim is missing or expired".to_string())
+}
+
 /// Connect to a VNC server. Returns WS port + framebuffer info.
 #[tauri::command]
 pub async fn vnc_connect(
@@ -37,27 +139,54 @@ pub async fn vnc_connect(
     port: u16,
     username: Option<String>,
     password: Option<String>,
-    options_json: Option<String>,
     network_settings_json: Option<String>,
-) -> Result<VncConnectResult, VncError> {
+    security_policy: Option<crate::vnc::policy::VncSecurityPolicy>,
+    view_only: Option<bool>,
+    clipboard_policy: Option<VncClipboardPolicy>,
+) -> Result<VncConnectResult, String> {
+    validate_connect_inputs(
+        &host,
+        port,
+        username.as_deref(),
+        password.as_deref(),
+        network_settings_json.as_deref(),
+    )
+    .map_err(structured_error)?;
     let session_id = Uuid::new_v4().to_string();
 
-    let resolved_password = resolve_secret(&state, password.as_deref())?;
-    let options = VncOptions::from_json(options_json.as_deref()).map_err(|error| {
-        VncError::new("VNC_INVALID_OPTIONS", VncStage::Initializing, false, error)
-    })?;
-    let mut network = NetworkSettings::from_json(network_settings_json.as_deref());
-    resolve_network_settings(&state, &mut network)?;
+    let resolved_password = match password.as_deref() {
+        Some(p) => state
+            .vault
+            .resolve(p)
+            .map_err(structured_error)?
+            .map(|z| (*z).clone())
+            .or(Some(p.to_string())),
+        None => None,
+    };
 
-    let session = spawn_vnc_relay(VncSpawnConfig {
+    let mut network =
+        parse_network_settings(network_settings_json.as_deref()).map_err(structured_error)?;
+    if let Some(n) = network.as_mut() {
+        crate::terminal::resolve_proxy_session(&state, n).map_err(structured_error)?;
+        n.resolve_proxy_pass(&state.vault)
+            .map_err(structured_error)?;
+        n.resolve_jump_secret(&state.vault)
+            .map_err(structured_error)?;
+        crate::terminal::resolve_jump_credentials(&state, n).map_err(structured_error)?;
+    }
+    let policy = security_policy.unwrap_or_default();
+    let session = spawn_vnc_relay(
         host,
         port,
         username,
-        password: resolved_password,
-        options,
+        resolved_password,
         network,
-    })
-    .await?;
+        policy,
+        view_only.unwrap_or(false),
+        clipboard_policy.unwrap_or_default(),
+    )
+    .await
+    .map_err(structured_error)?;
 
     let result = VncConnectResult {
         session_id: session_id.clone(),
@@ -75,20 +204,46 @@ pub async fn vnc_connect(
         .await
         .insert(session_id.clone(), session);
     let reaper_sessions = state.vnc_sessions.clone();
+    let reaper_id = session_id.clone();
     tokio::spawn(async move {
         reaper_cancel.cancelled().await;
-        reaper_sessions.write().await.remove(&session_id);
+        reaper_sessions.write().await.remove(&reaper_id);
     });
 
     Ok(result)
 }
 
+/// Store a one-time, in-memory detach claim. Sensitive fields never cross
+/// localStorage/sessionStorage; the detached WebView receives only `claim_id`.
+#[tauri::command]
+pub async fn vnc_create_detach_claim(
+    state: State<'_, AppState>,
+    claim: VncDetachClaim,
+) -> Result<VncDetachClaimResult, String> {
+    let claim_id = store_detach_claim(
+        &state.vnc_detach_claims,
+        claim,
+        DETACH_CLAIM_TTL,
+        MAX_DETACH_CLAIMS,
+    )
+    .await?;
+    Ok(VncDetachClaimResult { claim_id })
+}
+
+#[tauri::command]
+pub async fn vnc_consume_detach_claim(
+    state: State<'_, AppState>,
+    claim_id: String,
+) -> Result<VncDetachClaim, String> {
+    consume_detach_claim(&state.vnc_detach_claims, &claim_id).await
+}
+
 /// Disconnect a VNC session.
 #[tauri::command]
 pub async fn vnc_disconnect(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
-    let mut sessions = state.vnc_sessions.write().await;
-    if let Some(session) = sessions.remove(&session_id) {
-        let _ = session.control_tx.try_send(VncControl::Disconnect);
+    let session = state.vnc_sessions.write().await.remove(&session_id);
+    if let Some(session) = session {
+        let _ = session.control_tx.send(VncControl::Disconnect).await;
         session.cancel.cancel();
     }
     Ok(())
@@ -102,120 +257,149 @@ pub async fn vnc_test_connection(
     port: u16,
     username: Option<String>,
     password: Option<String>,
-    options_json: Option<String>,
     network_settings_json: Option<String>,
-) -> Result<String, VncError> {
-    let resolved_password = resolve_secret(&state, password.as_deref())?;
-    let options = VncOptions::from_json(options_json.as_deref()).map_err(|error| {
-        VncError::new("VNC_INVALID_OPTIONS", VncStage::Initializing, false, error)
-    })?;
-    let mut network = NetworkSettings::from_json(network_settings_json.as_deref());
-    resolve_network_settings(&state, &mut network)?;
-
-    let cancel = CancellationToken::new();
-    let transport = transport::open_transport(&host, port, network.as_ref(), &cancel)
-        .await
-        .map_err(VncError::from_transport)?;
-    let transport::VncTransport {
-        stream,
-        mut bridge_task,
-    } = transport;
-    let handshake = tokio::task::spawn_blocking(move || {
-        let mut rfb = rfb::RfbConnection::from_vencrypt_bridge(stream, DecodeLimits::default())?;
-        let server = rfb.authenticate_with_options(
+    security_policy: Option<crate::vnc::policy::VncSecurityPolicy>,
+) -> Result<String, String> {
+    let result = async {
+        validate_connect_inputs(
+            &host,
+            port,
             username.as_deref(),
-            resolved_password.as_deref(),
-            &options,
+            password.as_deref(),
+            network_settings_json.as_deref(),
         )?;
-        Ok::<_, String>((server, rfb.security_info()))
-    });
-    let result = tokio::select! {
-        result = tokio::time::timeout(std::time::Duration::from_secs(30), handshake) => result,
-        error = transport::wait_for_bridge_end(&mut bridge_task) => {
-            cancel.cancel();
-            bridge_task.take();
-            return Err(VncError::from_transport(error));
+        let resolved = match password.as_deref() {
+            Some(p) => state
+                .vault
+                .resolve(p)?
+                .map(|z| (*z).clone())
+                .or(Some(p.to_string())),
+            None => None,
+        };
+        let mut network = parse_network_settings(network_settings_json.as_deref())?;
+        if let Some(settings) = network.as_mut() {
+            crate::terminal::resolve_proxy_session(&state, settings)?;
+            settings.resolve_proxy_pass(&state.vault)?;
+            settings.resolve_jump_secret(&state.vault)?;
+            crate::terminal::resolve_jump_credentials(&state, settings)?;
         }
-    };
-    cancel.cancel();
-    if let Some(task) = bridge_task.take() {
-        task.abort();
-    }
-    let (server, security) = match result {
-        Ok(Ok(Ok(value))) => value,
-        Ok(Ok(Err(error))) => {
-            return Err(VncError::from_protocol(VncStage::Negotiating, error));
-        }
-        Ok(Err(error)) => {
-            return Err(VncError::new(
-                "VNC_WORKER_FAILED",
-                VncStage::Negotiating,
-                false,
-                error.to_string(),
-            ));
-        }
-        Err(_) => {
-            return Err(VncError::new(
-                "VNC_HANDSHAKE_TIMEOUT",
-                VncStage::Negotiating,
-                true,
-                "VNC handshake timed out after 30 seconds",
-            ));
-        }
-    };
-    Ok(format!(
-        "VNC connection OK - protocol={}, security={}, desktop={}x{}, server={}",
-        security.protocol_version, security.security_type, server.width, server.height, server.name
-    ))
-}
-
-#[tauri::command]
-pub async fn vnc_get_diagnostics(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<VncDiagnostics, String> {
-    let diagnostics = state
-        .vnc_sessions
-        .read()
+        let policy = security_policy.unwrap_or_default();
+        let transport = dial_vnc_transport(host.clone(), port, network).await?;
+        let forward_task = transport.network_forward_task;
+        let prepared = match crate::vnc::tls::prepare_rfb_transport(
+            transport.stream,
+            &host,
+            policy,
+            crate::vnc::ws::VNC_AUTH_TIMEOUT,
+        )
         .await
-        .get(&session_id)
-        .map(|session| session.diagnostics.clone())
-        .ok_or_else(|| "VNC session not found".to_string())?;
-    let snapshot = diagnostics.lock().await.clone();
-    Ok(snapshot)
-}
-
-fn resolve_secret(state: &AppState, value: Option<&str>) -> Result<Option<String>, VncError> {
-    match value {
-        Some(value) if !value.is_empty() => state
-            .vault
-            .resolve(value)
-            .map(|resolved| {
-                resolved
-                    .map(|plain| (*plain).clone())
-                    .or(Some(value.to_string()))
-            })
-            .map_err(|error| {
-                VncError::new(
-                    "VNC_CREDENTIAL_UNAVAILABLE",
-                    VncStage::Authenticating,
-                    false,
-                    error,
-                )
-            }),
-        _ => Ok(None),
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(task) = forward_task {
+                    task.abort();
+                }
+                return Err(error);
+            }
+        };
+        let tls_task = prepared.tls_task;
+        let handshake = tokio::task::spawn_blocking(move || {
+            let mut rfb = crate::vnc::rfb::RfbConnection::from_negotiated_stream(
+                prepared.stream,
+                crate::vnc::ws::VNC_AUTH_TIMEOUT,
+                policy,
+                crate::vnc::limits::DecodeLimits::default(),
+                prepared.proto_minor,
+                prepared.pending_security,
+                prepared.outer_security_type,
+            )?;
+            let init =
+                rfb.authenticate_with_policy(username.as_deref(), resolved.as_deref(), policy)?;
+            Ok::<_, String>(format!(
+                "Connection successful: {}x{} - {}",
+                init.width, init.height, init.name
+            ))
+        })
+        .await;
+        if let Some(task) = forward_task {
+            task.abort();
+        }
+        if let Some(task) = tls_task {
+            task.abort();
+        }
+        handshake.map_err(|e| format!("VNC handshake worker failed: {e}"))?
     }
+    .await;
+    result.map_err(|error| crate::vnc::error::VncError::classify(error).json())
 }
 
-fn resolve_network_settings(
-    state: &State<'_, AppState>,
-    network: &mut Option<NetworkSettings>,
-) -> Result<(), VncError> {
-    let Some(settings) = network.as_mut() else {
-        return Ok(());
-    };
-    crate::terminal::resolve_proxy_session(state, settings)
-        .and_then(|_| settings.resolve_proxy_pass(&state.vault))
-        .and_then(|_| crate::terminal::resolve_jump_credentials(state, settings))
-        .map_err(VncError::from_transport)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn detach_claim() -> VncDetachClaim {
+        VncDetachClaim {
+            host: "vnc.internal".into(),
+            port: 5900,
+            username: Some("alice".into()),
+            password: Some("secret".into()),
+            network_settings_json: None,
+            security_policy: crate::vnc::policy::VncSecurityPolicy::PreferEncryption,
+            view_only: false,
+            clipboard_policy: VncClipboardPolicy::Bidirectional,
+        }
+    }
+
+    #[test]
+    fn malformed_network_settings_are_rejected() {
+        assert!(parse_network_settings(Some("{")).is_err());
+        assert!(parse_network_settings(Some("  ")).unwrap().is_none());
+    }
+
+    #[test]
+    fn invalid_connection_inputs_are_rejected_without_echoing_secrets() {
+        let error = validate_connect_inputs("", 5900, None, Some("secret"), None).unwrap_err();
+        assert!(!error.contains("secret"));
+        assert!(validate_connect_inputs("host", 0, None, None, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn detach_claim_is_consumed_once_and_capacity_is_bounded() {
+        let claims = VncDetachClaims::default();
+        let claim_id = store_detach_claim(
+            &claims,
+            detach_claim(),
+            std::time::Duration::from_secs(60),
+            1,
+        )
+        .await
+        .unwrap();
+        assert!(
+            store_detach_claim(
+                &claims,
+                detach_claim(),
+                std::time::Duration::from_secs(60),
+                1,
+            )
+            .await
+            .is_err()
+        );
+
+        let consumed = consume_detach_claim(&claims, &claim_id).await.unwrap();
+        assert_eq!(consumed.password.as_deref(), Some("secret"));
+        assert!(consume_detach_claim(&claims, &claim_id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn detach_claim_expires_after_ttl() {
+        let claims = VncDetachClaims::default();
+        let ttl = std::time::Duration::from_millis(20);
+        let claim_id = store_detach_claim(&claims, detach_claim(), ttl, 1)
+            .await
+            .unwrap();
+
+        tokio::time::sleep(ttl + std::time::Duration::from_millis(30)).await;
+        tokio::task::yield_now().await;
+        assert!(consume_detach_claim(&claims, &claim_id).await.is_err());
+    }
 }

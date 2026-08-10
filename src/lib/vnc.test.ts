@@ -1,147 +1,246 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocks = vi.hoisted(() => ({ invoke: vi.fn() }));
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }));
+
 import {
   codePointToKeysym,
-  clientPointToFramebuffer,
-  encodeWsAck,
+  encodeWsKey,
+  encodeWsPointer,
+  encodeWsRefresh,
+  iterCodePoints,
   keyEventToKeysym,
-  normalizeVncError,
-  parseFrameBatch,
-  pasteModifierKeysyms,
-  shouldAutoReconnect,
-  vncReconnectDelayMs,
+  mapClientToFramebuffer,
+  parseFrameHeader,
+  parseVncError,
+  parseWsMessage,
+  redactVncHandoff,
+  vncConnect,
+  vncConsumeDetachClaim,
+  vncCreateDetachClaim,
+  vncCursorToCss,
+  vncTestConnection,
 } from "./vnc";
-import { DEFAULT_VNC_OPTIONS, parseVncOptions, serializeVncOptions } from "../types/vnc";
 
-function frameBatch(): ArrayBuffer {
-  const bytes = new Uint8Array(22 + 12 + 8);
-  const view = new DataView(bytes.buffer);
-  bytes.set([0x54, 0x56, 0x4e, 0x43, 1, 1], 0);
-  view.setBigUint64(8, 9n);
-  view.setUint16(16, 2);
-  view.setUint16(18, 1);
-  view.setUint16(20, 1);
-  view.setUint16(22, 0);
-  view.setUint16(24, 0);
-  view.setUint16(26, 2);
-  view.setUint16(28, 1);
-  view.setUint32(30, 8);
-  bytes.set([1, 2, 3, 255, 4, 5, 6, 255], 34);
-  return bytes.buffer;
+function keyEvent(key: string, code = "", location = 0): KeyboardEvent {
+  return new KeyboardEvent("keydown", { key, code, location });
 }
 
-describe("VNC relay protocol", () => {
-  it("parses a complete atomic frame batch", () => {
-    const parsed = parseFrameBatch(frameBatch());
-    expect(parsed?.frameId).toBe(9);
-    expect(parsed?.width).toBe(2);
-    expect(parsed?.rects[0]?.rgba.length).toBe(8);
+describe("VNC WebSocket protocol", () => {
+  beforeEach(() => mocks.invoke.mockReset());
+
+  it("encodes binary controls in network byte order", () => {
+    expect([...new Uint8Array(encodeWsKey(true, 0xff0d))]).toEqual([2, 1, 0, 0, 0xff, 0x0d]);
+    expect([...new Uint8Array(encodeWsPointer(0x1234, 0xabcd, 5))]).toEqual([3, 5, 0x12, 0x34, 0xab, 0xcd]);
+    expect([...new Uint8Array(encodeWsRefresh())]).toEqual([4]);
   });
 
-  it("rejects truncated, trailing, and out-of-bounds batches", () => {
-    const valid = new Uint8Array(frameBatch());
-    expect(parseFrameBatch(valid.slice(0, valid.length - 1).buffer)).toBeNull();
-    const trailing = new Uint8Array(valid.length + 1);
-    trailing.set(valid);
-    expect(parseFrameBatch(trailing.buffer)).toBeNull();
-    const outOfBounds = new Uint8Array(valid);
-    new DataView(outOfBounds.buffer).setUint16(26, 3);
-    expect(parseFrameBatch(outOfBounds.buffer)).toBeNull();
-  });
-
-  it("encodes a frame id ACK and keeps legacy zero compatible", () => {
-    const ack = new Uint8Array(encodeWsAck(42));
-    expect(ack[0]).toBe(0);
-    expect(new DataView(ack.buffer).getBigUint64(1)).toBe(42n);
-    expect(new Uint8Array(encodeWsAck()).length).toBe(9);
-  });
-});
-
-describe("VNC options and input", () => {
-  it("rejects None and rich clipboard by default", () => {
-    expect(DEFAULT_VNC_OPTIONS.allowNone).toBe(false);
-    expect(DEFAULT_VNC_OPTIONS.clipboardTextOnly).toBe(true);
-    const parsed = parseVncOptions(
-      JSON.stringify({ allowNone: true, clipboardTextOnly: true, allowHtmlClipboard: true }),
-    );
-    expect(parsed.allowNone).toBe(true);
-    expect(parsed.allowHtmlClipboard).toBe(false);
-  });
-
-  it("round trips bounded reconnect and clipboard settings", () => {
-    const parsed = parseVncOptions(
-      JSON.stringify({ reconnectMaxAttempts: 255, clipboardMaxBytes: 999999999 }),
-    );
-    expect(parsed.reconnectMaxAttempts).toBe(10);
-    expect(parsed.clipboardMaxBytes).toBe(16 * 1024 * 1024);
-    expect(parseVncOptions(serializeVncOptions(parsed))).toEqual(parsed);
-  });
-
-  it("maps macOS modifiers and Unicode keysyms", () => {
-    expect(codePointToKeysym("界".codePointAt(0)!)).toBe(0x0100754c);
-    expect(keyEventToKeysym(new KeyboardEvent("keydown", { key: "Meta", location: 2 }))).toBe(
-      0xffec,
-    );
-    expect(keyEventToKeysym(new KeyboardEvent("keydown", { key: "Enter", location: 3 }))).toBe(
-      0xff8d,
-    );
-  });
-
-  it("preserves the exact macOS modifier side during delayed paste", () => {
-    const event = new KeyboardEvent("keydown", { key: "v", metaKey: true });
-    expect([...pasteModifierKeysyms(event, new Set([0xffec]))]).toEqual([0xffec]);
-    expect([...pasteModifierKeysyms(event, new Set())]).toEqual([0xffeb]);
-  });
-
-  it("maps fit and 1:1 CSS coordinates to remote pixels without applying DPR", () => {
-    const squareBounds = { left: 100, top: 50, width: 1000, height: 1000 };
-    expect(clientPointToFramebuffer(600, 550, squareBounds, 1920, 1080, "fit")).toEqual({
-      x: 960,
-      y: 540,
+  it("parses structured backend errors", () => {
+    expect(parseVncError('{"code":"tcp-failed","stage":"tcp","retryable":true,"message":"timeout"}')).toEqual({
+      code: "tcp-failed", stage: "tcp", retryable: true, message: "timeout",
     });
-    expect(clientPointToFramebuffer(100, 50, squareBounds, 1920, 1080, "fit")).toEqual({
-      x: 0,
-      y: 0,
+    expect(parseVncError(new Error("legacy"))).toMatchObject({ code: "vnc-error", message: "legacy" });
+  });
+
+  it("rejects malformed text messages", () => {
+    expect(parseWsMessage("not-json")).toBeNull();
+    expect(parseWsMessage('{"type":"connected","width":"1","height":1,"name":"x"}')).toBeNull();
+    expect(parseWsMessage('{"type":"unknown"}')).toBeNull();
+    expect(parseWsMessage('{"type":"disconnected","reason":"closed"}')).toBeNull();
+    expect(parseWsMessage('{"type":"disconnected","code":"connection-lost","stage":"runtime","retryable":true,"reason":"closed"}')).toMatchObject({
+      type: "disconnected", retryable: true, reason: "closed",
     });
-    expect(
-      clientPointToFramebuffer(
-        1060,
-        590,
-        { left: 100, top: 50, width: 1920, height: 1080 },
-        1920,
-        1080,
-        "one",
-      ),
-    ).toEqual({ x: 960, y: 540 });
+    expect(parseWsMessage('{"type":"connected","width":1,"height":2,"name":"x","protocol":"3.8","security":"VNCAuth","encrypted":false}')).toEqual({
+      type: "connected", width: 1, height: 2, name: "x", protocol: "3.8", security: "VNCAuth", encrypted: false,
+    });
+    expect(parseWsMessage('{"type":"connected","width":16385,"height":1,"name":"x","protocol":"3.8","security":"VNCAuth","encrypted":false}')).toBeNull();
+    expect(parseWsMessage('{"type":"disconnected","code":"closed","stage":"invalid","retryable":false,"reason":"closed"}')).toBeNull();
+    expect(parseWsMessage('{"type":"desktop_size","width":2560,"height":1440,"generation":1}')).toEqual({
+      type: "desktop_size", width: 2560, height: 1440, generation: 1,
+    });
+    expect(parseWsMessage('{"type":"desktop_size","width":0,"height":1440,"generation":1}')).toBeNull();
+    const cursor = parseWsMessage('{"type":"cursor","visible":true,"hotspot_x":1,"hotspot_y":2,"width":16,"height":16,"png_base64":"iVBORw0KGgo="}');
+    expect(cursor).toMatchObject({ type: "cursor", visible: true, hotspot_x: 1, hotspot_y: 2 });
+    expect(cursor?.type === "cursor" ? vncCursorToCss(cursor) : "").toContain("data:image/png;base64,iVBORw0KGgo=");
+    expect(parseWsMessage('{"type":"cursor","visible":true,"hotspot_x":16,"hotspot_y":0,"width":16,"height":16,"png_base64":"iVBORw0KGgo="}')).toBeNull();
+    expect(parseWsMessage('{"type":"cursor","visible":false,"hotspot_x":0,"hotspot_y":0,"width":0,"height":0,"png_base64":""}')).toMatchObject({ type: "cursor", visible: false });
   });
-});
 
-describe("VNC error normalization", () => {
-  it("accepts Tauri object and JSON-string errors without exposing credentials", () => {
-    const error = normalizeVncError(
-      JSON.stringify({ code: "VNC_AUTH_FAILED", retryable: false, sanitizedMessage: "authentication failed" }),
+  it("validates binary frame geometry and exact payload length", () => {
+    const good = new ArrayBuffer(12 + 2 * 3 * 4);
+    const view = new DataView(good);
+    view.setUint16(4, 2);
+    view.setUint16(6, 3);
+    expect(parseFrameHeader(good)).toEqual({ x: 0, y: 0, w: 2, h: 3 });
+    expect(parseFrameHeader(good.slice(0, -1))).toBeNull();
+    view.setUint32(8, 1);
+    expect(parseFrameHeader(good)).toBeNull();
+  });
+
+  it("removes credentials and network secrets from persisted detach handoffs", () => {
+    const redacted = redactVncHandoff({
+      host: "vnc.internal",
+      port: 5900,
+      username: "alice",
+      password: "top-secret",
+      networkSettingsJson: '{"proxyPass":"proxy-secret"}',
+    }, "claim-1");
+    expect(redacted).toMatchObject({ host: "", port: 0, username: null, claimId: "claim-1" });
+    expect(JSON.stringify(redacted)).not.toContain("top-secret");
+    expect(JSON.stringify(redacted)).not.toContain("proxy-secret");
+  });
+
+  it("forwards network and policy options through connect and connection testing", async () => {
+    mocks.invoke
+      .mockResolvedValueOnce({ session_id: "vnc-1", ws_port: 41000, ws_token: "token", width: 1, height: 1, name: "fixture" })
+      .mockResolvedValueOnce("Connection successful");
+
+    await vncConnect(
+      "vnc.example.test",
+      5901,
+      " alice ",
+      "password",
+      '{"proxy_kind":"socks5"}',
+      "require-encryption",
+      true,
+      "server-to-client",
     );
-    expect(error.code).toBe("VNC_AUTH_FAILED");
-    expect(error.sanitizedMessage).not.toContain("password");
+    await vncTestConnection(
+      "vnc.example.test",
+      5901,
+      " alice ",
+      "password",
+      '{"proxy_kind":"socks5"}',
+      "require-encryption",
+    );
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "vnc_connect", {
+      host: "vnc.example.test",
+      port: 5901,
+      username: "alice",
+      password: "password",
+      networkSettingsJson: '{"proxy_kind":"socks5"}',
+      securityPolicy: "require-encryption",
+      viewOnly: true,
+      clipboardPolicy: "server-to-client",
+    });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "vnc_test_connection", {
+      host: "vnc.example.test",
+      port: 5901,
+      username: "alice",
+      password: "password",
+      networkSettingsJson: '{"proxy_kind":"socks5"}',
+      securityPolicy: "require-encryption",
+    });
   });
 
-  it("retries only retryable network failures within the configured bound", () => {
-    const network = {
-      code: "VNC_CONNECTION_LOST",
-      stage: "runtime",
-      retryable: true,
-      sanitizedMessage: "connection lost",
+  it("creates and consumes one-time detach claims through backend memory", async () => {
+    const claim = {
+      host: "vnc.internal",
+      port: 5900,
+      username: "alice",
+      password: "secret",
+      network_settings_json: null,
+      security_policy: "prefer-encryption" as const,
+      view_only: false,
+      clipboard_policy: "bidirectional" as const,
     };
-    const certificate = { ...network, code: "VNC_TLS_FAILED", retryable: false };
-    expect(shouldAutoReconnect(network, true, 0, 5)).toBe(true);
-    expect(shouldAutoReconnect(network, true, 5, 5)).toBe(false);
-    expect(shouldAutoReconnect(network, false, 0, 5)).toBe(false);
-    expect(shouldAutoReconnect(certificate, true, 0, 5)).toBe(false);
+    mocks.invoke.mockResolvedValueOnce({ claim_id: "claim-1" }).mockResolvedValueOnce(claim);
+
+    await expect(vncCreateDetachClaim(claim)).resolves.toBe("claim-1");
+    await expect(vncConsumeDetachClaim("claim-1")).resolves.toEqual(claim);
+
+    expect(mocks.invoke).toHaveBeenNthCalledWith(1, "vnc_create_detach_claim", { claim });
+    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "vnc_consume_detach_claim", { claimId: "claim-1" });
+  });
+});
+
+describe("VNC keysyms", () => {
+  it("distinguishes right-side modifiers and keypad keys", () => {
+    expect(keyEventToKeysym(keyEvent("Control", "ControlRight", KeyboardEvent.DOM_KEY_LOCATION_RIGHT))).toBe(0xffe4);
+    expect(keyEventToKeysym(keyEvent("Enter", "NumpadEnter", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD))).toBe(0xff8d);
+    expect(keyEventToKeysym(keyEvent("1", "Numpad1", KeyboardEvent.DOM_KEY_LOCATION_NUMPAD))).toBe(0xffb1);
+    expect(keyEventToKeysym(keyEvent("AltGraph", "AltRight", KeyboardEvent.DOM_KEY_LOCATION_RIGHT))).toBe(0xfe03);
+    expect(keyEventToKeysym(keyEvent("F24", "F24"))).toBe(0xffd5);
   });
 
-  it("uses bounded exponential reconnect delays with bounded jitter", () => {
-    expect(vncReconnectDelayMs(0, 0)).toBe(500);
-    expect(vncReconnectDelayMs(1, 0)).toBe(1000);
-    expect(vncReconnectDelayMs(9, 1)).toBe(10_249);
-    expect(vncReconnectDelayMs(100, -1)).toBe(10_000);
+  it("maps Unicode code points and preserves surrogate pairs", () => {
+    expect(codePointToKeysym(0x41)).toBe(0x41);
+    expect(codePointToKeysym(0x4e2d)).toBe(0x01004e2d);
+    expect(keyEventToKeysym(keyEvent("中", "KeyA"))).toBe(0x01004e2d);
+    expect(keyEventToKeysym(keyEvent("😀", "KeyA"))).toBe(0x0101f600);
+    expect(codePointToKeysym(0x110000)).toBe(0);
+    expect([...iterCodePoints("A😀")]).toEqual([0x41, 0x1f600]);
+  });
+});
+
+describe("VNC pointer coordinates", () => {
+  it("maps 1:1 CSS coordinates without using device pixel ratio", () => {
+    expect(mapClientToFramebuffer(
+      1060,
+      590,
+      { left: 100, top: 50, width: 1920, height: 1080 },
+      1920,
+      1080,
+      "one",
+    )).toEqual({ x: 960, y: 540, inside: true });
+  });
+
+  it("accounts for horizontal and vertical fit-mode letterboxing", () => {
+    expect(mapClientToFramebuffer(
+      500,
+      500,
+      { left: 0, top: 0, width: 1000, height: 1000 },
+      1600,
+      900,
+      "fit",
+    )).toEqual({ x: 800, y: 450, inside: true });
+    expect(mapClientToFramebuffer(
+      500,
+      500,
+      { left: 0, top: 0, width: 1000, height: 1000 },
+      900,
+      1600,
+      "fit",
+    )).toEqual({ x: 450, y: 800, inside: true });
+  });
+
+  it("marks letterbox input outside while retaining clamped release coordinates", () => {
+    expect(mapClientToFramebuffer(
+      500,
+      100,
+      { left: 0, top: 0, width: 1000, height: 1000 },
+      1600,
+      900,
+      "fit",
+    )).toEqual({ x: 800, y: 0, inside: false });
+    expect(mapClientToFramebuffer(
+      -20,
+      1200,
+      { left: 0, top: 0, width: 1000, height: 1000 },
+      1600,
+      900,
+      "fit",
+    )).toEqual({ x: 0, y: 899, inside: false });
+  });
+
+  it("rejects invalid framebuffer or viewport geometry", () => {
+    expect(mapClientToFramebuffer(
+      0,
+      0,
+      { left: 0, top: 0, width: 0, height: 100 },
+      1920,
+      1080,
+      "fit",
+    )).toBeNull();
+    expect(mapClientToFramebuffer(
+      Number.NaN,
+      0,
+      { left: 0, top: 0, width: 100, height: 100 },
+      1920,
+      1080,
+      "fit",
+    )).toBeNull();
   });
 });

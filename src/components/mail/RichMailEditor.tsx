@@ -27,7 +27,9 @@ import {
   Smile,
   Underline,
 } from "lucide-react";
-import { mailHtmlToPlainText, sanitizeMailComposeHtml } from "../../lib/mailHtml";
+import { markdownToMailHtml, mailHtmlToPlainText, sanitizeMailComposeHtml } from "../../lib/mailHtml";
+import { readClipboardImageFiles, readMultiFormat, readText } from "../../lib/clipboard";
+import { useT } from "../../lib/i18n";
 import { isOsFileDrag, preventDefaultForOsFileDrag } from "../../lib/osFileDrop";
 import { useContextMenu, type MenuItem } from "../ContextMenu";
 
@@ -99,9 +101,11 @@ export function RichMailEditor({
   dragActive = false,
 }: RichMailEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
+  const selectionRef = useRef<Range | null>(null);
   const [color, setColor] = useState("#1f2937");
   const [localDrag, setLocalDrag] = useState(false);
   const editorMenu = useContextMenu();
+  const t = useT();
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -121,20 +125,75 @@ export function RichMailEditor({
     editorRef.current?.focus();
   };
 
+  const isRangeInEditor = (range: Range | null): range is Range => {
+    const editor = editorRef.current;
+    return !!editor && !!range && editor.contains(range.commonAncestorContainer);
+  };
+
+  const saveSelection = () => {
+    const selection = window.getSelection();
+    if (selection?.rangeCount && isRangeInEditor(selection.getRangeAt(0))) {
+      selectionRef.current = selection.getRangeAt(0).cloneRange();
+    }
+  };
+
+  const restoreSelection = () => {
+    const range = selectionRef.current;
+    if (!isRangeInEditor(range)) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  };
+
+  const focusAndRestoreSelection = () => {
+    focusEditor();
+    restoreSelection();
+  };
+
   const exec = (command: string, value?: string, rich = true) => {
     if (disabled) return;
-    focusEditor();
+    focusAndRestoreSelection();
     document.execCommand(command, false, value);
+    saveSelection();
     if (rich) onRichFormatUsed?.();
     emitChange();
   };
 
   const insertHtml = (value: string, rich = true) => {
-    if (disabled) return;
-    focusEditor();
+    if (disabled || !value) return;
+    focusAndRestoreSelection();
     document.execCommand("insertHTML", false, value);
+    saveSelection();
     if (rich) onRichFormatUsed?.();
     emitChange();
+  };
+
+  const pasteClipboard = async (mode: "normal" | "plain" | "markdown") => {
+    if (disabled) return;
+    if (mode === "plain" || mode === "markdown") {
+      const text = await readText();
+      if (!text.trim()) return;
+      insertHtml(mode === "markdown" ? markdownToMailHtml(text) : plainTextFragment(text), mode === "markdown");
+      return;
+    }
+    const data = await readMultiFormat();
+    const imageFiles = await readClipboardImageFiles();
+    if (onPasteImages && imageFiles.length > 0) {
+      const snippets = await onPasteImages(imageFiles);
+      for (const snippet of snippets) insertHtml(snippet, true);
+      return;
+    }
+    if (onPasteImages && !data.html?.trim() && !data.text.trim()) {
+      const snippets = await onPasteImages([]);
+      for (const snippet of snippets) insertHtml(snippet, true);
+      return;
+    }
+    if (data.html?.trim()) {
+      insertHtml(sanitizeMailComposeHtml(data.html), true);
+    } else if (data.text) {
+      insertHtml(plainTextFragment(data.text), false);
+    }
   };
 
   const handlePaste = (event: ClipboardEvent<HTMLDivElement>) => {
@@ -143,9 +202,6 @@ export function RichMailEditor({
     const pastedHtml = event.clipboardData?.getData("text/html") ?? "";
     const pastedText = event.clipboardData?.getData("text/plain") ?? "";
     const imageFiles = clipboardImageFiles(event.clipboardData);
-    // Linux WebKitGTK often omits image/* from the paste event even when the
-    // OS clipboard holds a screenshot. When there is no text/html payload,
-    // let the parent try native clipboard image read.
     const maybeNativeImageOnly =
       !!onPasteImages && imageFiles.length === 0 && !pastedHtml.trim() && !pastedText.trim();
 
@@ -158,7 +214,7 @@ export function RichMailEditor({
             if (snippet) insertHtml(snippet, true);
           }
         } catch {
-          // Parent surfaces errors via compose status/error.
+          // Parent surfaces errors via compose status/compose error.
         }
       })();
       return;
@@ -167,9 +223,9 @@ export function RichMailEditor({
     event.preventDefault();
     if (pastedHtml) {
       insertHtml(sanitizeMailComposeHtml(pastedHtml), true);
-      return;
+    } else if (pastedText) {
+      insertHtml(plainTextFragment(pastedText), false);
     }
-    if (pastedText) insertHtml(escapeHtml(pastedText).replace(/\r?\n/g, "<br>"), false);
   };
 
   const handleDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
@@ -258,6 +314,28 @@ export function RichMailEditor({
     testId: `mail-compose-emoji-${emoji.id}`,
     onClick: () => insertHtml(emoji.value, false),
   }));
+
+  const editingMenuItems = (): MenuItem[] => [
+    { label: t("contextMenu.undo"), testId: "mail-compose-context-undo", shortcut: shortcut("Z"), onClick: () => exec("undo", undefined, false) },
+    { label: t("contextMenu.redo"), testId: "mail-compose-context-redo", shortcut: shortcut("Y"), onClick: () => exec("redo", undefined, false) },
+    { label: "", separator: true },
+    { label: t("contextMenu.cut"), testId: "mail-compose-context-cut", shortcut: shortcut("X"), onClick: () => exec("cut", undefined, false) },
+    { label: t("contextMenu.copy"), testId: "mail-compose-context-copy", shortcut: shortcut("C"), onClick: () => exec("copy", undefined, false) },
+    { label: t("contextMenu.paste"), testId: "mail-compose-context-paste", shortcut: shortcut("V"), onClick: () => void pasteClipboard("normal") },
+    { label: t("contextMenu.pasteAsPlainText"), testId: "mail-compose-paste-plain-text", onClick: () => void pasteClipboard("plain") },
+    { label: t("contextMenu.pasteAsMarkdown"), testId: "mail-compose-paste-markdown", onClick: () => void pasteClipboard("markdown") },
+    { label: "", separator: true },
+    { label: t("contextMenu.selectAll"), testId: "mail-compose-context-select-all", shortcut: shortcut("A"), onClick: () => exec("selectAll", undefined, false) },
+  ];
+
+  const handleEditorContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    const selection = window.getSelection();
+    const hasSelectedText = !!selection && selection.rangeCount > 0 && !selection.isCollapsed && isRangeInEditor(selection.getRangeAt(0));
+    if (!hasSelectedText) placeCaretAtPoint(event.clientX, event.clientY);
+    saveSelection();
+    editorMenu.show(event, editingMenuItems());
+  };
 
   const insertMenuItems = (): MenuItem[] => [
     {
@@ -396,8 +474,12 @@ export function RichMailEditor({
           role="textbox"
           aria-label="Message body"
           data-testid="mail-compose-editor"
-          onInput={emitChange}
+          onInput={() => {
+            saveSelection();
+            emitChange();
+          }}
           onPaste={handlePaste}
+          onContextMenu={handleEditorContextMenu}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
@@ -496,6 +578,37 @@ function hasFilePayload(data: DataTransfer | null): boolean {
   if (!data) return false;
   if ((data.files?.length ?? 0) > 0) return true;
   return Array.from(data.types ?? []).some((type) => type === "Files" || type === "text/uri-list");
+}
+
+function placeCaretAtPoint(x: number, y: number): void {
+  const doc = document as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  const selection = window.getSelection();
+  if (!selection) return;
+  const position = doc.caretPositionFromPoint?.(x, y);
+  if (position) {
+    const range = document.createRange();
+    range.setStart(position.offsetNode, position.offset);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return;
+  }
+  const range = doc.caretRangeFromPoint?.(x, y);
+  if (range) {
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+}
+
+function plainTextFragment(value: string): string {
+  return escapeHtml(value).replace(/\r\n?|\n/g, "<br>");
+}
+
+function shortcut(key: string): string {
+  return `${navigator.platform.toLowerCase().includes("mac") ? "Cmd" : "Ctrl"}+${key}`;
 }
 
 function escapeHtml(value: string): string {

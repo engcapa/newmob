@@ -36,7 +36,6 @@ import {
 } from "../../lib/detachedSession";
 import { closeCurrentDetachedWindow } from "../../lib/detachWindowing";
 import type { RdpOptions } from "../../types/rdp";
-import { DEFAULT_VNC_OPTIONS, type VncOptions } from "../../types/vnc";
 import type { DbConnectInfo, Tab, TabKind } from "../../types";
 import type { TerminalProfile } from "../../lib/terminalProfile";
 import type { CommandTerminalConnectInfo, SshConnectInfo } from "../terminal/TerminalPanel";
@@ -44,6 +43,7 @@ import type { LocalShellSelection } from "../../types";
 import { useT, t as tr } from "../../lib/i18n";
 import { useAppTheme } from "../../lib/appTheme";
 import { isTauriRuntime } from "../../lib/runtime";
+import { redactVncHandoff, vncConsumeDetachClaim, vncCreateDetachClaim } from "../../lib/vnc";
 import {
   TerminalPanel,
   type TerminalReattachState,
@@ -80,10 +80,13 @@ export interface DetachedVncParams {
   host: string;
   port: number;
   username?: string | null;
-  credentialRef?: string;
-  options: VncOptions;
+  password?: string;
   networkSettingsJson?: string | null;
+  securityPolicy?: "require-encryption" | "prefer-encryption" | "legacy-compatible" | "allow-none";
+  viewOnly?: boolean;
+  clipboardPolicy?: "disabled" | "client-to-server" | "server-to-client" | "bidirectional";
   title?: string;
+  claimId?: string;
 }
 
 export interface DetachedTerminalParams {
@@ -142,6 +145,33 @@ export default function DetachedSessionWindow({
     consumeDetachedHandoff<unknown>(kind, id),
   );
   const [handoffTimedOut, setHandoffTimedOut] = useState(false);
+
+  useEffect(() => {
+    if (kind !== "vnc" || !params) return;
+    const current = params as DetachedVncParams;
+    if (!current.claimId || current.host) return;
+    let cancelled = false;
+    void vncConsumeDetachClaim(current.claimId)
+      .then((claim) => {
+        if (cancelled) return;
+        setParams({
+          ...current,
+          claimId: undefined,
+          host: claim.host,
+          port: claim.port,
+          username: claim.username,
+          password: claim.password,
+          networkSettingsJson: claim.network_settings_json,
+          securityPolicy: claim.security_policy,
+          viewOnly: claim.view_only,
+          clipboardPolicy: claim.clipboard_policy as DetachedVncParams["clipboardPolicy"],
+        } satisfies DetachedVncParams);
+      })
+      .catch(() => {
+        if (!cancelled) setHandoffTimedOut(true);
+      });
+    return () => { cancelled = true; };
+  }, [kind, params]);
 
   useEffect(() => {
     if (params) return;
@@ -264,7 +294,22 @@ export default function DetachedSessionWindow({
     if (reattachingRef.current) return;
     if (!params) return;
     reattachingRef.current = true;
-    broadcastReattach(kind, id, mergeTerminalReattachState(state));
+    let payload = mergeTerminalReattachState(state);
+    if (kind === "vnc") {
+      const current = params as DetachedVncParams;
+      const claimId = await vncCreateDetachClaim({
+        host: current.host,
+        port: current.port,
+        username: current.username,
+        password: current.password,
+        network_settings_json: current.networkSettingsJson,
+        security_policy: current.securityPolicy ?? "prefer-encryption",
+        view_only: current.viewOnly ?? false,
+        clipboard_policy: current.clipboardPolicy ?? "bidirectional",
+      });
+      payload = redactVncHandoff(current, claimId);
+    }
+    broadcastReattach(kind, id, payload);
     clearDetachedHandoff(kind, id);
     try {
       if (tauri) {
@@ -295,7 +340,10 @@ export default function DetachedSessionWindow({
     if (!tauri) {
       const handler = () => {
         if (params && !reattachingRef.current) {
-          broadcastReattach(kind, id, mergeTerminalReattachState());
+          const payload = kind === "vnc"
+            ? redactVncHandoff(params as DetachedVncParams)
+            : mergeTerminalReattachState();
+          broadcastReattach(kind, id, payload);
         }
         clearDetachedHandoff(kind, id);
       };
@@ -527,6 +575,7 @@ function renderInner(
     }
     case "vnc": {
       const p = params as DetachedVncParams;
+      if (!p.host || !p.port) return <LoadingScreen label={tr("vnc.loading")} />;
       return (
         <Suspense fallback={<LoadingScreen label={tr("vnc.loading")} />}>
           <VncPanel
@@ -534,9 +583,11 @@ function renderInner(
             host={p.host}
             port={p.port}
             username={p.username ?? undefined}
-            password={p.credentialRef}
-            options={p.options ?? DEFAULT_VNC_OPTIONS}
+            password={p.password}
             networkSettingsJson={p.networkSettingsJson ?? null}
+            securityPolicy={p.securityPolicy}
+            viewOnly={p.viewOnly}
+            clipboardPolicy={p.clipboardPolicy}
             visible
             detachedWindowControls={detachedWindowControls}
           />

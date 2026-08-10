@@ -1,6 +1,87 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { NetworkSettingsPayload } from "./networkSettings";
-import type { VncClipboardPolicy, VncOptions } from "../types/vnc";
+
+export interface VncStructuredError {
+  code: string;
+  stage: "dns" | "tcp" | "proxy" | "rfb" | "security" | "authentication" | "initialization" | "runtime" | "relay";
+  retryable: boolean;
+  message: string;
+}
+
+const VNC_STAGES = new Set<VncStructuredError["stage"]>([
+  "dns",
+  "tcp",
+  "proxy",
+  "rfb",
+  "security",
+  "authentication",
+  "initialization",
+  "runtime",
+  "relay",
+]);
+const MAX_FRAMEBUFFER_DIMENSION = 16_384;
+const MAX_FRAMEBUFFER_BYTES = 256 * 1024 * 1024;
+const MAX_RELAY_TEXT_CHARS = 64 * 1024 * 1024;
+const MAX_CLIPBOARD_FORMAT_CHARS = 16 * 1024 * 1024;
+const MAX_CLIPBOARD_TOTAL_CHARS = 32 * 1024 * 1024;
+const MAX_CURSOR_DIMENSION = 512;
+const MAX_CURSOR_BASE64_CHARS = 2 * 1024 * 1024;
+
+function isVncStage(value: unknown): value is VncStructuredError["stage"] {
+  return typeof value === "string" && VNC_STAGES.has(value as VncStructuredError["stage"]);
+}
+
+function validFramebufferSize(width: unknown, height: unknown): width is number {
+  if (!Number.isInteger(width) || !Number.isInteger(height)) return false;
+  const w = width as number;
+  const h = height as number;
+  return w > 0
+    && h > 0
+    && w <= MAX_FRAMEBUFFER_DIMENSION
+    && h <= MAX_FRAMEBUFFER_DIMENSION
+    && w * h * 4 <= MAX_FRAMEBUFFER_BYTES;
+}
+
+function validClipboardFormats(...formats: unknown[]): boolean {
+  let total = 0;
+  for (const format of formats) {
+    if (format === undefined) continue;
+    if (typeof format !== "string" || format.length > MAX_CLIPBOARD_FORMAT_CHARS) return false;
+    total += format.length;
+    if (total > MAX_CLIPBOARD_TOTAL_CHARS) return false;
+  }
+  return true;
+}
+
+export function parseVncError(value: unknown): VncStructuredError {
+  const text = value instanceof Error ? value.message : String(value);
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const error = parsed as Record<string, unknown>;
+      if (typeof error.code === "string" && error.code.length <= 128
+        && isVncStage(error.stage)
+        && typeof error.retryable === "boolean"
+        && typeof error.message === "string" && error.message.length <= 2048) {
+        return error as unknown as VncStructuredError;
+      }
+    }
+  } catch {
+    // Legacy backend error; retain a sanitized generic shape.
+  }
+  return { code: "vnc-error", stage: "runtime", retryable: false, message: text.slice(0, 2048) };
+}
+
+export type VncSecurityPolicy =
+  | "require-encryption"
+  | "prefer-encryption"
+  | "legacy-compatible"
+  | "allow-none";
+
+export type VncClipboardPolicy =
+  | "disabled"
+  | "client-to-server"
+  | "server-to-client"
+  | "bidirectional";
 
 export interface VncConnectResult {
   session_id: string;
@@ -11,46 +92,67 @@ export interface VncConnectResult {
   name: string;
 }
 
-export interface VncError {
-  code: string;
-  stage: string;
-  retryable: boolean;
-  sanitizedMessage: string;
-}
-
-export interface VncDiagnostics {
-  correlationId: string;
-  state: string;
-  protocolVersion: string;
-  securityType: string;
-  encrypted: boolean;
-  identityVerified: boolean;
-  width: number;
-  height: number;
-  framesReceived: number;
-  rectanglesReceived: number;
-  framesRendered: number;
-  framesDropped: number;
-  bytesToWebview: number;
-  lastError?: VncError | null;
-}
-
 export async function vncConnect(
   host: string,
   port: number,
-  username: string | null | undefined,
-  password: string | undefined,
-  options: VncOptions,
-  networkSettings: NetworkSettingsPayload | null = null,
+  username?: string | null,
+  password?: string,
+  networkSettingsJson?: string | null,
+  securityPolicy: VncSecurityPolicy = "prefer-encryption",
+  viewOnly = false,
+  clipboardPolicy: VncClipboardPolicy = "bidirectional",
 ): Promise<VncConnectResult> {
   return invoke<VncConnectResult>("vnc_connect", {
     host,
     port,
     username: username?.trim() || null,
     password: password ?? null,
-    optionsJson: JSON.stringify(options),
-    networkSettingsJson: networkSettings ? JSON.stringify(networkSettings) : null,
+    networkSettingsJson: networkSettingsJson ?? null,
+    securityPolicy,
+    viewOnly,
+    clipboardPolicy,
   });
+}
+
+export interface VncDetachClaim {
+  host: string;
+  port: number;
+  username?: string | null;
+  password?: string;
+  network_settings_json?: string | null;
+  security_policy: VncSecurityPolicy;
+  view_only: boolean;
+  clipboard_policy: VncClipboardPolicy;
+}
+
+export async function vncCreateDetachClaim(claim: VncDetachClaim): Promise<string> {
+  const result = await invoke<{ claim_id: string }>("vnc_create_detach_claim", { claim });
+  return result.claim_id;
+}
+
+export async function vncConsumeDetachClaim(claimId: string): Promise<VncDetachClaim> {
+  return invoke<VncDetachClaim>("vnc_consume_detach_claim", { claimId });
+}
+
+export function redactVncHandoff<
+  T extends {
+    host: string;
+    port: number;
+    username?: string | null;
+    password?: string;
+    networkSettingsJson?: string | null;
+    claimId?: string;
+  },
+>(params: T, claimId?: string): T {
+  return {
+    ...params,
+    host: claimId ? "" : params.host,
+    port: claimId ? 0 : params.port,
+    username: claimId ? null : params.username,
+    password: undefined,
+    networkSettingsJson: null,
+    claimId,
+  };
 }
 
 export async function vncDisconnect(sessionId: string): Promise<void> {
@@ -60,150 +162,150 @@ export async function vncDisconnect(sessionId: string): Promise<void> {
 export async function vncTestConnection(
   host: string,
   port: number,
-  username: string | null | undefined,
-  password: string | undefined,
-  options: VncOptions,
-  networkSettings: NetworkSettingsPayload | null = null,
+  username?: string | null,
+  password?: string,
+  networkSettingsJson?: string | null,
+  securityPolicy: VncSecurityPolicy = "prefer-encryption",
 ): Promise<string> {
   return invoke("vnc_test_connection", {
     host,
     port,
     username: username?.trim() || null,
     password: password ?? null,
-    optionsJson: JSON.stringify(options),
-    networkSettingsJson: networkSettings ? JSON.stringify(networkSettings) : null,
+    networkSettingsJson: networkSettingsJson ?? null,
+    securityPolicy,
   });
 }
 
-export async function vncGetDiagnostics(sessionId: string): Promise<VncDiagnostics> {
-  return invoke<VncDiagnostics>("vnc_get_diagnostics", { sessionId });
-}
-
+/** WebSocket message types sent to the VNC relay. */
 export type WsOutgoing =
   | { type: "ack" }
   | { type: "ping" }
   | { type: "key"; down: boolean; keysym: number }
   | { type: "pointer"; x: number; y: number; buttons: number }
   | { type: "clipboard"; text: string }
-  | { type: "ext_clipboard"; text?: string; html?: string; rtf?: string };
-
-export type WsIncoming =
   | {
-      type: "connected";
-      width: number;
-      height: number;
-      name: string;
-      protocol_version: string;
-      security_type: string;
-      encrypted: boolean;
-      identity_verified: boolean;
-      view_only: boolean;
-      clipboard_policy: VncClipboardPolicy;
+      type: "ext_clipboard";
+      text?: string;
+      html?: string;
+      rtf?: string;
     }
+  | { type: "refresh" };
+
+/** WebSocket message types received from the VNC relay. */
+export type WsIncoming =
+  | { type: "connected"; width: number; height: number; name: string; protocol: string; security: string; encrypted: boolean }
   | {
       type: "disconnected";
       code: string;
-      stage: string;
+      stage: VncStructuredError["stage"];
       retryable: boolean;
-      sanitizedMessage: string;
-      reason?: string;
+      reason: string;
     }
   | { type: "bell" }
+  | { type: "desktop_size"; width: number; height: number; generation: number }
   | { type: "clipboard"; text: string }
-  | { type: "ext_clipboard"; text?: string; html?: string; rtf?: string }
-  | { type: "ext_clipboard_support"; available: boolean };
-
-export interface VncFrameRect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  rgba: Uint8ClampedArray<ArrayBuffer>;
-}
-
-export interface VncFrameBatch {
-  frameId: number;
-  width: number;
-  height: number;
-  rects: VncFrameRect[];
-}
-
-const FRAME_HEADER_BYTES = 22;
-const RECT_HEADER_BYTES = 12;
-const MAX_FRAME_BYTES = 64 * 1024 * 1024;
-const MAX_RECTANGLES = 4096;
-
-export function parseWsMessage(data: string): WsIncoming | null {
-  try {
-    const parsed = JSON.parse(data) as unknown;
-    if (!parsed || typeof parsed !== "object" || typeof (parsed as { type?: unknown }).type !== "string") {
-      return null;
+  | {
+      type: "ext_clipboard";
+      text?: string;
+      html?: string;
+      rtf?: string;
     }
-    return parsed as WsIncoming;
+  | { type: "ext_clipboard_support"; available: boolean }
+  | {
+      type: "cursor";
+      visible: boolean;
+      hotspot_x: number;
+      hotspot_y: number;
+      width: number;
+      height: number;
+      png_base64: string;
+    };
+
+/** Parse and minimally validate an incoming WS text message. */
+export function parseWsMessage(data: string): WsIncoming | null {
+  if (data.length > MAX_RELAY_TEXT_CHARS) return null;
+  try {
+    const value: unknown = JSON.parse(data);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const msg = value as Record<string, unknown>;
+    if (typeof msg.type !== "string") return null;
+    switch (msg.type) {
+      case "connected":
+        return validFramebufferSize(msg.width, msg.height)
+          && typeof msg.name === "string" && msg.name.length <= 64 * 1024
+          && typeof msg.protocol === "string" && msg.protocol.length <= 128
+          && typeof msg.security === "string" && msg.security.length <= 128
+          && typeof msg.encrypted === "boolean"
+          ? value as WsIncoming
+          : null;
+      case "desktop_size":
+        return validFramebufferSize(msg.width, msg.height)
+          && Number.isSafeInteger(msg.generation)
+          && (msg.generation as number) > 0
+          ? value as WsIncoming
+          : null;
+      case "disconnected":
+        return typeof msg.code === "string" && msg.code.length <= 128
+          && isVncStage(msg.stage)
+          && typeof msg.retryable === "boolean"
+          && typeof msg.reason === "string" && msg.reason.length <= 2048
+          ? value as WsIncoming
+          : null;
+      case "bell":
+        return value as WsIncoming;
+      case "clipboard":
+        return typeof msg.text === "string" && validClipboardFormats(msg.text)
+          ? value as WsIncoming
+          : null;
+      case "ext_clipboard":
+        return validClipboardFormats(msg.text, msg.html, msg.rtf)
+          ? value as WsIncoming
+          : null;
+      case "ext_clipboard_support":
+        return typeof msg.available === "boolean" ? value as WsIncoming : null;
+      case "cursor": {
+        if (typeof msg.visible !== "boolean") return null;
+        if (msg.visible === false) {
+          return msg.hotspot_x === 0 && msg.hotspot_y === 0
+            && msg.width === 0 && msg.height === 0 && msg.png_base64 === ""
+            ? value as WsIncoming
+            : null;
+        }
+        const validGeometry = Number.isInteger(msg.hotspot_x)
+          && Number.isInteger(msg.hotspot_y)
+          && Number.isInteger(msg.width)
+          && Number.isInteger(msg.height)
+          && (msg.width as number) > 0
+          && (msg.height as number) > 0
+          && (msg.width as number) <= MAX_CURSOR_DIMENSION
+          && (msg.height as number) <= MAX_CURSOR_DIMENSION
+          && (msg.hotspot_x as number) >= 0
+          && (msg.hotspot_y as number) >= 0
+          && (msg.hotspot_x as number) < (msg.width as number)
+          && (msg.hotspot_y as number) < (msg.height as number);
+        const validPng = typeof msg.png_base64 === "string"
+          && msg.png_base64.length > 0
+          && msg.png_base64.length <= MAX_CURSOR_BASE64_CHARS
+          && msg.png_base64.startsWith("iVBORw0KGgo")
+          && /^[A-Za-z0-9+/]*={0,2}$/.test(msg.png_base64);
+        return validGeometry && validPng ? value as WsIncoming : null;
+      }
+      default:
+        return null;
+    }
   } catch {
     return null;
   }
 }
 
-export function parseFrameBatch(data: ArrayBuffer): VncFrameBatch | null {
-  if (data.byteLength < FRAME_HEADER_BYTES || data.byteLength > MAX_FRAME_BYTES) return null;
-  const view = new DataView(data);
-  if (
-    view.getUint8(0) !== 0x54 ||
-    view.getUint8(1) !== 0x56 ||
-    view.getUint8(2) !== 0x4e ||
-    view.getUint8(3) !== 0x43 ||
-    view.getUint8(4) !== 1 ||
-    view.getUint8(5) !== 1
-  ) {
-    return null;
-  }
-  const frameIdBig = view.getBigUint64(8);
-  if (frameIdBig > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  const width = view.getUint16(16);
-  const height = view.getUint16(18);
-  const rectangleCount = view.getUint16(20);
-  if (width === 0 || height === 0 || rectangleCount > MAX_RECTANGLES) return null;
-
-  let offset = FRAME_HEADER_BYTES;
-  const rects: VncFrameRect[] = [];
-  for (let index = 0; index < rectangleCount; index += 1) {
-    if (offset + RECT_HEADER_BYTES > data.byteLength) return null;
-    const x = view.getUint16(offset);
-    const y = view.getUint16(offset + 2);
-    const w = view.getUint16(offset + 4);
-    const h = view.getUint16(offset + 6);
-    const payloadLength = view.getUint32(offset + 8);
-    offset += RECT_HEADER_BYTES;
-    const expectedLength = w * h * 4;
-    if (
-      w === 0 ||
-      h === 0 ||
-      x + w > width ||
-      y + h > height ||
-      payloadLength !== expectedLength ||
-      offset + payloadLength > data.byteLength
-    ) {
-      return null;
-    }
-    rects.push({
-      x,
-      y,
-      w,
-      h,
-      rgba: new Uint8ClampedArray(data, offset, payloadLength),
-    });
-    offset += payloadLength;
-  }
-  if (offset !== data.byteLength) return null;
-  return { frameId: Number(frameIdBig), width, height, rects };
+export function vncCursorToCss(cursor: Extract<WsIncoming, { type: "cursor" }>): string {
+  if (!cursor.visible) return "none";
+  return `url("data:image/png;base64,${cursor.png_base64}") ${cursor.hotspot_x} ${cursor.hotspot_y}, default`;
 }
 
-export function encodeWsAck(frameId = 0): ArrayBuffer {
-  const bytes = new Uint8Array(9);
-  bytes[0] = 0;
-  new DataView(bytes.buffer).setBigUint64(1, BigInt(Math.max(0, Math.floor(frameId))));
-  return bytes.buffer;
+export function encodeWsAck(): ArrayBuffer {
+  return new Uint8Array([0]).buffer;
 }
 
 export function encodeWsPing(): ArrayBuffer {
@@ -229,193 +331,241 @@ export function encodeWsPointer(x: number, y: number, buttons: number): ArrayBuf
   return bytes.buffer;
 }
 
-export function keyEventToKeysym(event: KeyboardEvent): number {
-  if (event.key.length === 1) {
-    return codePointToKeysym(event.key.codePointAt(0) ?? 0);
+export function encodeWsRefresh(): ArrayBuffer {
+  return new Uint8Array([4]).buffer;
+}
+
+/** Parse a binary frame header: [x(2B), y(2B), w(2B), h(2B)] — all big-endian. */
+export function parseFrameHeader(
+  data: ArrayBuffer,
+): { x: number; y: number; w: number; h: number } | null {
+  if (data.byteLength < 12) return null;
+  const dv = new DataView(data);
+  const x = dv.getUint16(0);
+  const y = dv.getUint16(2);
+  const w = dv.getUint16(4);
+  const h = dv.getUint16(6);
+  if (w === 0 || h === 0 || dv.getUint32(8) !== 0) return null;
+  const expected = w * h * 4;
+  if (!Number.isSafeInteger(expected) || data.byteLength !== 12 + expected) return null;
+  return { x, y, w, h };
+}
+
+/** Map a DOM KeyboardEvent to an RFB keysym. */
+export function keyEventToKeysym(e: KeyboardEvent): number {
+  if (e.code.startsWith("Numpad")) {
+    const keypad: Record<string, number> = {
+      Numpad0: 0xffb0,
+      Numpad1: 0xffb1,
+      Numpad2: 0xffb2,
+      Numpad3: 0xffb3,
+      Numpad4: 0xffb4,
+      Numpad5: 0xffb5,
+      Numpad6: 0xffb6,
+      Numpad7: 0xffb7,
+      Numpad8: 0xffb8,
+      Numpad9: 0xffb9,
+      NumpadDecimal: 0xffae,
+      NumpadDivide: 0xffaf,
+      NumpadMultiply: 0xffaa,
+      NumpadSubtract: 0xffad,
+      NumpadAdd: 0xffab,
+      NumpadEnter: 0xff8d,
+      NumpadEqual: 0xffbd,
+      NumpadComma: 0xffac,
+    };
+    const keysym = keypad[e.code];
+    if (keysym !== undefined) return keysym;
   }
-  if (event.key.startsWith("F") && /^F(?:[1-9]|1[0-9]|2[0-4])$/.test(event.key)) {
-    return 0xffbd + Number(event.key.slice(1));
+  // Printable characters
+  const printable = [...e.key];
+  if (printable.length === 1) {
+    return codePointToKeysym(printable[0].codePointAt(0) ?? 0);
   }
-  const right = event.location === KeyboardEvent.DOM_KEY_LOCATION_RIGHT;
-  const keypad = event.location === KeyboardEvent.DOM_KEY_LOCATION_NUMPAD;
-  switch (event.key) {
-    case "Backspace": return 0xff08;
-    case "Tab": return 0xff09;
-    case "Enter": return keypad ? 0xff8d : 0xff0d;
-    case "Escape": return 0xff1b;
-    case "Insert": return 0xff63;
-    case "Delete": return 0xffff;
-    case "Home": return 0xff50;
-    case "End": return 0xff57;
-    case "PageUp": return 0xff55;
-    case "PageDown": return 0xff56;
-    case "ArrowLeft": return 0xff51;
-    case "ArrowUp": return 0xff52;
-    case "ArrowRight": return 0xff53;
-    case "ArrowDown": return 0xff54;
-    case "Shift": return right ? 0xffe2 : 0xffe1;
-    case "Control": return right ? 0xffe4 : 0xffe3;
-    case "Alt": return right ? 0xffea : 0xffe9;
-    case "Meta": return right ? 0xffec : 0xffeb;
-    case "CapsLock": return 0xffe5;
-    case "NumLock": return 0xff7f;
-    case "ScrollLock": return 0xff14;
-    case "Pause": return 0xff13;
-    case "PrintScreen": return 0xff61;
-    case "Clear": return 0xff0b;
-    default: return 0;
+  // Named keys
+  switch (e.key) {
+    case "Backspace":
+      return 0xff08;
+    case "Tab":
+      return 0xff09;
+    case "Enter":
+      return 0xff0d;
+    case "Escape":
+      return 0xff1b;
+    case "Insert":
+      return 0xff63;
+    case "Delete":
+      return 0xffff;
+    case "Home":
+      return 0xff50;
+    case "End":
+      return 0xff57;
+    case "PageUp":
+      return 0xff55;
+    case "PageDown":
+      return 0xff56;
+    case "ArrowLeft":
+      return 0xff51;
+    case "ArrowUp":
+      return 0xff52;
+    case "ArrowRight":
+      return 0xff53;
+    case "ArrowDown":
+      return 0xff54;
+    case "Shift":
+      return e.location === KeyboardEvent.DOM_KEY_LOCATION_RIGHT ? 0xffe2 : 0xffe1;
+    case "Control":
+      return e.location === KeyboardEvent.DOM_KEY_LOCATION_RIGHT ? 0xffe4 : 0xffe3;
+    case "Alt":
+      return e.location === KeyboardEvent.DOM_KEY_LOCATION_RIGHT ? 0xffea : 0xffe9;
+    case "Meta":
+      return e.location === KeyboardEvent.DOM_KEY_LOCATION_RIGHT ? 0xffec : 0xffeb;
+    case "AltGraph":
+      return 0xfe03;
+    case "CapsLock":
+      return 0xffe5;
+    case "NumLock":
+      return 0xff7f;
+    case "ScrollLock":
+      return 0xff14;
+    case "PrintScreen":
+      return 0xff61;
+    case "Pause":
+      return 0xff13;
+    case "ContextMenu":
+      return 0xff67;
+    case "F1":
+      return 0xffbe;
+    case "F2":
+      return 0xffbf;
+    case "F3":
+      return 0xffc0;
+    case "F4":
+      return 0xffc1;
+    case "F5":
+      return 0xffc2;
+    case "F6":
+      return 0xffc3;
+    case "F7":
+      return 0xffc4;
+    case "F8":
+      return 0xffc5;
+    case "F9":
+      return 0xffc6;
+    case "F10":
+      return 0xffc7;
+    case "F11":
+      return 0xffc8;
+    case "F12":
+      return 0xffc9;
+    default: {
+      const functionMatch = /^F(1[3-9]|2[0-4])$/.exec(e.key);
+      if (functionMatch) return 0xffbd + Number(functionMatch[1]);
+      return 0;
+    }
   }
 }
 
-export function mouseButtonMask(event: MouseEvent | PointerEvent): number {
+/** Map mouse buttons to RFB button mask. */
+export function mouseButtonMask(e: MouseEvent | PointerEvent): number {
   let mask = 0;
-  if (event.buttons & 1) mask |= 1;
-  if (event.buttons & 2) mask |= 4;
-  if (event.buttons & 4) mask |= 2;
+  if (e.buttons & 1) mask |= 1; // left
+  if (e.buttons & 2) mask |= 4; // right
+  if (e.buttons & 4) mask |= 2; // middle
   return mask;
 }
 
-const MODIFIER_KEYSYM_GROUPS = [
-  { flag: "shiftKey", left: 0xffe1, right: 0xffe2 },
-  { flag: "ctrlKey", left: 0xffe3, right: 0xffe4 },
-  { flag: "altKey", left: 0xffe9, right: 0xffea },
-  { flag: "metaKey", left: 0xffeb, right: 0xffec },
-] as const;
-
-export function pasteModifierKeysyms(
-  event: KeyboardEvent,
-  pressedKeysyms: ReadonlySet<number>,
-): Set<number> {
-  const modifiers = new Set<number>();
-  for (const group of MODIFIER_KEYSYM_GROUPS) {
-    if (!event[group.flag]) continue;
-    let foundExactSide = false;
-    for (const keysym of [group.left, group.right]) {
-      if (pressedKeysyms.has(keysym)) {
-        modifiers.add(keysym);
-        foundExactSide = true;
-      }
-    }
-    if (!foundExactSide) modifiers.add(group.left);
-  }
-  return modifiers;
+export interface VncViewportRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
-export function clientPointToFramebuffer(
+export interface VncFramebufferPoint {
+  x: number;
+  y: number;
+  /** False when the pointer is in fit-mode letterboxing or outside the canvas. */
+  inside: boolean;
+}
+
+/**
+ * Convert CSS-pixel pointer coordinates to remote framebuffer coordinates.
+ * Device pixel ratio deliberately does not participate: RFB input follows the
+ * remote logical framebuffer while the DOM event and canvas bounds are both in
+ * CSS pixels.
+ */
+export function mapClientToFramebuffer(
   clientX: number,
   clientY: number,
-  bounds: { left: number; top: number; width: number; height: number },
+  viewport: VncViewportRect,
   framebufferWidth: number,
   framebufferHeight: number,
   scaleMode: "fit" | "one",
-): { x: number; y: number } {
-  if (
-    !Number.isFinite(clientX) ||
-    !Number.isFinite(clientY) ||
-    !Number.isFinite(framebufferWidth) ||
-    !Number.isFinite(framebufferHeight) ||
-    bounds.width <= 0 ||
-    bounds.height <= 0 ||
-    framebufferWidth <= 0 ||
-    framebufferHeight <= 0
-  ) {
-    return { x: 0, y: 0 };
+): VncFramebufferPoint | null {
+  if (![clientX, clientY, viewport.left, viewport.top, viewport.width, viewport.height]
+    .every(Number.isFinite)
+    || !Number.isInteger(framebufferWidth)
+    || !Number.isInteger(framebufferHeight)
+    || viewport.width <= 0
+    || viewport.height <= 0
+    || framebufferWidth <= 0
+    || framebufferHeight <= 0) {
+    return null;
   }
 
-  let contentLeft = bounds.left;
-  let contentTop = bounds.top;
-  let contentWidth = bounds.width;
-  let contentHeight = bounds.height;
+  let contentLeft = viewport.left;
+  let contentTop = viewport.top;
+  let contentWidth = viewport.width;
+  let contentHeight = viewport.height;
+
   if (scaleMode === "fit") {
     const framebufferAspect = framebufferWidth / framebufferHeight;
-    const boundsAspect = bounds.width / bounds.height;
-    if (boundsAspect > framebufferAspect) {
-      contentWidth = bounds.height * framebufferAspect;
-      contentLeft += (bounds.width - contentWidth) / 2;
+    const viewportAspect = viewport.width / viewport.height;
+    if (viewportAspect > framebufferAspect) {
+      contentWidth = viewport.height * framebufferAspect;
+      contentLeft += (viewport.width - contentWidth) / 2;
     } else {
-      contentHeight = bounds.width / framebufferAspect;
-      contentTop += (bounds.height - contentHeight) / 2;
+      contentHeight = viewport.width / framebufferAspect;
+      contentTop += (viewport.height - contentHeight) / 2;
     }
   }
 
-  const x = Math.round((clientX - contentLeft) * (framebufferWidth / contentWidth));
-  const y = Math.round((clientY - contentTop) * (framebufferHeight / contentHeight));
+  const inside = clientX >= contentLeft
+    && clientX < contentLeft + contentWidth
+    && clientY >= contentTop
+    && clientY < contentTop + contentHeight;
+  const x = Math.round((clientX - contentLeft) * framebufferWidth / contentWidth);
+  const y = Math.round((clientY - contentTop) * framebufferHeight / contentHeight);
   return {
     x: Math.max(0, Math.min(framebufferWidth - 1, x)),
     y: Math.max(0, Math.min(framebufferHeight - 1, y)),
+    inside,
   };
 }
 
-export function codePointToKeysym(codePoint: number): number {
-  if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return 0;
-  if (codePoint <= 0xff) return codePoint;
-  return 0x01000000 | codePoint;
+/**
+ * Map a Unicode code point to an RFB keysym.
+ *
+ * Latin-1 (≤ U+00FF) maps directly — that's also the X11 keysym range. Code
+ * points above 0xFF use the X.org "Unicode keysym" extension: 0x01000000 |
+ * codepoint. GNOME (vino), KDE, TigerVNC, RealVNC, and X.Org all accept it,
+ * which is the only way to deliver CJK/Emoji to a server that doesn't speak
+ * ExtendedClipboard (the legacy ClientCutText channel is Latin-1 and
+ * physically can't carry those characters).
+ */
+export function codePointToKeysym(cp: number): number {
+  if (!Number.isInteger(cp) || cp < 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) {
+    return 0;
+  }
+  if (cp <= 0xff) return cp;
+  return 0x01000000 | cp;
 }
 
+/** Iterate Unicode code points in a string (handles surrogate pairs). */
 export function* iterCodePoints(text: string): Generator<number> {
-  for (const character of text) {
-    const codePoint = character.codePointAt(0);
-    if (codePoint !== undefined) yield codePoint;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (cp !== undefined) yield cp;
   }
-}
-
-export function normalizeVncError(error: unknown): VncError {
-  let value = error;
-  if (typeof value === "string") {
-    const message = value;
-    try {
-      value = JSON.parse(value) as unknown;
-    } catch {
-      return {
-        code: "VNC_UNKNOWN",
-        stage: "runtime",
-        retryable: false,
-        sanitizedMessage: message,
-      };
-    }
-  }
-  if (value && typeof value === "object") {
-    const raw = value as Record<string, unknown>;
-    return {
-      code: typeof raw.code === "string" ? raw.code : "VNC_UNKNOWN",
-      stage: typeof raw.stage === "string" ? raw.stage : "runtime",
-      retryable: raw.retryable === true,
-      sanitizedMessage:
-        typeof raw.sanitizedMessage === "string"
-          ? raw.sanitizedMessage
-          : typeof raw.sanitized_message === "string"
-            ? raw.sanitized_message
-            : typeof raw.reason === "string"
-              ? raw.reason
-            : "VNC connection failed",
-    };
-  }
-  return {
-    code: "VNC_UNKNOWN",
-    stage: "runtime",
-    retryable: false,
-    sanitizedMessage: String(error),
-  };
-}
-
-export function shouldAutoReconnect(
-  error: VncError,
-  enabled: boolean,
-  attempts: number,
-  maxAttempts: number,
-): boolean {
-  return (
-    enabled &&
-    error.retryable &&
-    Number.isInteger(attempts) &&
-    Number.isInteger(maxAttempts) &&
-    attempts >= 0 &&
-    attempts < Math.max(0, maxAttempts)
-  );
-}
-
-export function vncReconnectDelayMs(attempt: number, jitterUnit = Math.random()): number {
-  const boundedAttempt = Math.max(0, Math.min(30, Math.floor(attempt)));
-  const boundedJitter = Math.max(0, Math.min(0.999999, jitterUnit));
-  return Math.min(10_000, 500 * 2 ** boundedAttempt) + Math.floor(boundedJitter * 250);
 }

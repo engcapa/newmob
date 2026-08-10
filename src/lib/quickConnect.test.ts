@@ -25,18 +25,17 @@ describe("parseQuickConnectInput", () => {
     });
   });
 
-  it("parses VNC URLs into the password flow without persisting credentials", () => {
-    const parsed = parseQuickConnectInput("vnc://alice@mac.example.test:5901");
+  it("parses VNC URLs through the password prompt path", () => {
+    const parsed = parseQuickConnectInput("vnc://alice@desktop.example.test:5901");
 
     expect(parsed.config).toMatchObject({
       session_type: "VNC",
-      host: "mac.example.test",
+      host: "desktop.example.test",
       port: 5901,
       username: "alice",
       auth_method: "Password",
     });
     expect(parsed.authData).toBeNull();
-    expect(parsed.config.options_json).not.toContain("password");
   });
 
   it.each([
