@@ -145,13 +145,23 @@ export default function DetachedSessionWindow({
     consumeDetachedHandoff<unknown>(kind, id),
   );
   const [handoffTimedOut, setHandoffTimedOut] = useState(false);
+  // A VNC claim is one-shot. Keep its in-flight request stable when StrictMode
+  // replays this effect so the successful first consumption is not discarded.
+  const vncClaimRequestRef = useRef<{
+    claimId: string;
+    request: ReturnType<typeof vncConsumeDetachClaim>;
+  } | null>(null);
 
   useEffect(() => {
     if (kind !== "vnc" || !params) return;
     const current = params as DetachedVncParams;
     if (!current.claimId || current.host) return;
+    const request = vncClaimRequestRef.current?.claimId === current.claimId
+      ? vncClaimRequestRef.current.request
+      : vncConsumeDetachClaim(current.claimId);
+    vncClaimRequestRef.current = { claimId: current.claimId, request };
     let cancelled = false;
-    void vncConsumeDetachClaim(current.claimId)
+    void request
       .then((claim) => {
         if (cancelled) return;
         setParams({
@@ -409,7 +419,11 @@ export default function DetachedSessionWindow({
     };
   }, [kind, id]);
 
-  if (!params) {
+  const waitingForVncClaim = kind === "vnc"
+    && !!params
+    && (!(params as DetachedVncParams).host || !(params as DetachedVncParams).port);
+
+  if (!params || waitingForVncClaim) {
     return (
       <div
         className="w-screen h-screen flex items-center justify-center p-6"
