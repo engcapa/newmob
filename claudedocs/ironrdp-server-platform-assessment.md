@@ -3,12 +3,12 @@
 ## 文档信息
 
 - 评估日期：2026-08-07
-- 最近更新：2026-08-07（macOS 原生链路实施完成）
+- 最近更新：2026-08-10（Win11 激活断开回归的兼容策略修复）
 - 评估对象：Taomni 当前本地 RDP Server 实现
 - 核心依赖：`ironrdp 0.17`、`ironrdp-tokio 0.10`、vendored `ironrdp-server 0.13`、`ironrdp-egfx 0.3`
 - 目标平台：macOS、Windows、Linux
 - 外网资料：通过 `http://192.168.0.110:31028` 代理核对
-- 实施基线：`3fd37189`（`feat(rdp): optimize the native macOS capture pipeline`）
+- 原生优化基线：`3fd37189`（`feat(rdp): optimize the native macOS capture pipeline`）；当前默认已恢复 bitmap/服务端尺寸兼容路径
 - 变更性质：架构评估及实施结果记录；本轮已落地 macOS 原生捕获、输入、编码和权限链路
 
 ## 一、结论
@@ -51,7 +51,7 @@ Taomni 当前计划已经明确产品不是 Windows RDS 或 TeamViewer 替代品
 
 | 平台 / 场景 | 当前支持状态 | 当前实现 / 推荐实现 | 验证状态与主要限制 |
 |---|---|---|---|
-| macOS 当前控制台共享 | **核心链路已实现，发布候选** | IronRDP + ScreenCaptureKit + CoreGraphics/Accessibility + VideoToolbox AVC420；`xcap` 捕获回退 | macOS 本机构建和自动化回归已通过；仍需 mstsc、Windows App、macOS 客户端和 FreeRDP 真机矩阵。需要 Screen Recording 与 Accessibility 权限，不覆盖登录窗口和安全桌面 |
+| macOS 当前控制台共享 | **核心链路已实现，回归修复待真机确认** | IronRDP + ScreenCaptureKit + CoreGraphics/Accessibility + 默认 bitmap；VideoToolbox AVC420 为实验开关；`xcap` 捕获回退 | Win11 激活断开已完成代码侧修复，仍需 mstsc、Windows App、macOS 客户端和 FreeRDP 真机矩阵。需要 Screen Recording 与 Accessibility 权限，不覆盖登录窗口和安全桌面 |
 | Windows 当前控制台共享 | **代码层已实现，发布候选待真机验证** | IronRDP + Windows Graphics Capture 连续捕获；原生 GDI BitBlt 兼容回退；latest-frame mailbox；显示器拓扑重建与恢复 | 自动化编译/单测已通过；仍需 mstsc、Windows App、FreeRDP 真机互操作、DPI/多显示器/锁屏和长稳性能矩阵 |
 | Windows 远程登录 / 独立会话 | **不由 Taomni 内嵌服务器提供** | 使用系统 Remote Desktop Service | 通常要求 Pro/Enterprise；语义是远程登录，不等价于与本地用户同时共享控制台 |
 | Linux X11 控制台共享 | **代码与自动化门槛已达标** | XShm/XDamage 区域捕获 + XRandR 几何监听 + `enigo`/XTest 输入 + bitmap 更新 | SHM resize 重建、GetImage 降级、resize-before-frame 和边界测试已通过；仍需真机多屏/旋转/缩放、锁屏及高分辨率性能矩阵 |
@@ -68,10 +68,10 @@ macOS 是当前最适合继续使用 IronRDP 的平台。Taomni 已经采用 Scr
 
 1. 捕获线程在服务就绪前预热 ScreenCaptureKit，并用 latest-frame mailbox 替换过期全帧，避免编码慢时反压原生捕获回调。
 2. 保留原生 `CVPixelBuffer`/IOSurface 直到 VideoToolbox 编码；bitmap 回退才按需读回 BGRA，并在帧克隆间共享读回缓存。
-3. 协商客户端初始桌面尺寸，通过 `SCStream::updateConfiguration` 在采集源缩放；发布新尺寸首帧后才确认尺寸，输入映射同步使用已确认尺寸。
+3. 已实现客户端初始桌面尺寸与 `SCStream::updateConfiguration` 源端缩放；因该路径位于激活阶段且 resize 可失败，当前通过 `TAOMNI_RDP_EXPERIMENTAL_CLIENT_SIZE=1` 显式启用。
 4. Retina 与副屏坐标从 RDP 像素空间映射到 Quartz 全局逻辑坐标；鼠标事件改用 CoreGraphics，键盘继续由专用输入线程处理。
 5. 设置页同时展示并请求 Screen Recording 与 Accessibility 权限；输入线程周期性检查 Accessibility 撤销并停止注入。
-6. 协商成功时默认使用 EGFX/AVC420 与 VideoToolbox；编码、输出通道、ACK 或解码进度异常时删除 surface，并自动回退到 bitmap 全帧恢复。
+6. 已实现 EGFX/AVC420 与 VideoToolbox，以及编码、输出通道、ACK 或解码进度异常后的 bitmap 回退；当前默认使用 bitmap，`TAOMNI_RDP_EXPERIMENTAL_AVC420=1` 仅用于互操作测试。
 
 仍需完成：真实客户端兼容矩阵、显示器热插拔、睡眠唤醒、锁屏行为和量化性能基准。登录窗口与安全桌面明确不在普通用户态控制台共享范围内。
 
@@ -156,7 +156,7 @@ vendored server 保持一个 RDP display/input/channel 状态机，但在主连�
 
 ### 显示、剪贴板和自动化测试
 
-- macOS 在客户端协商 EGFX/AVC420 成功且 VideoToolbox 可用时默认走系统 H.264 编码；不支持或运行中停滞时自动回退 bitmap。当前实现没有强制或记录 VideoToolbox 是否选中硬件编码器，因此不能把实际硬件加速视为已验证。Windows/Linux 仍主要使用 bitmap，高分辨率性能风险未消除。
+- macOS 默认走 bitmap 兼容路径；设置 `TAOMNI_RDP_EXPERIMENTAL_AVC420=1` 后，客户端协商 EGFX/AVC420 成功且 VideoToolbox 可用时走系统 H.264 编码，不支持或运行中停滞时自动回退 bitmap。当前实现没有强制或记录 VideoToolbox 是否选中硬件编码器，因此不能把实际硬件加速视为已验证。三平台默认 bitmap 的高分辨率性能风险未消除。
 - 剪贴板目前仅支持 Unicode 文本，图片和文件不在范围内：[clipboard.rs](/Users/zhyhang/code/person/taomni/src-tauri/src/servers/rdp/clipboard.rs:1)。
 - 浏览器自动化用例不会真正启动 RDP 服务，因此不能代表协议互操作覆盖：[TC-auto-F-Servers-1](/Users/zhyhang/code/person/taomni/qa-ui-auto-tests/cases/auto/TC-auto-F-Servers-1-servers-dialog.testcase.yaml:14)。
 
@@ -168,9 +168,9 @@ vendored server 保持一个 RDP display/input/channel 状态机，但在主连�
 |---|---|---|
 | 保持 IronRDP 协议内核并升级到当前版本 | **已达标** | 完成 server、connector、Tokio 和 EGFX 依赖升级，保留本地兼容修改 |
 | macOS 原生低时延捕获 | **代码层已达标** | ScreenCaptureKit 预热、自驱动采帧、latest-frame mailbox、静态桌面 idle 与捕获失败分离 |
-| 客户端尺寸与 Retina/副屏一致性 | **代码层已达标** | 初始尺寸协商、源端原生缩放、新尺寸首帧后确认、动态输入坐标映射 |
+| 客户端尺寸与 Retina/副屏一致性 | **实现已完成，默认关闭待互操作** | 默认使用服务端捕获尺寸；实验开关提供初始尺寸协商、源端原生缩放、新尺寸首帧后确认；动态输入坐标映射继续启用 |
 | macOS 可控输入与权限边界 | **代码层已达标** | CoreGraphics 鼠标、Accessibility 预检/请求/撤销检测、无权限时保持可查看但停止控制 |
-| macOS VideoToolbox H.264 | **代码层已达标** | AVC420 默认协商、VideoToolbox 异步编码、原生 pixel buffer 生命周期管理；实际硬件/软件编码器选择待增加观测 |
+| macOS VideoToolbox H.264 | **实现已完成，默认关闭待互操作** | 实验开关提供 AVC420 协商、VideoToolbox 异步编码、原生 pixel buffer 生命周期管理；实际硬件/软件编码器选择待增加观测 |
 | 有界背压和自动降级 | **已达标** | 编码在途帧上限为 2；编码硬超时 250 ms；ACK/解码停滞时销毁 EGFX surface 并恢复 bitmap |
 | Linux X11 动态显示 | **代码层已达标** | XRandR 监听、根窗口几何检测、SHM 重建/GetImage 降级、resize 先于新尺寸全帧 |
 | Linux Wayland 捕获与控制 | **代码层已达标** | Wayland 优先路由、RemoteDesktop Portal 联合授权、持久 PipeWire stream、Portal 输入与流失败收口 |
@@ -188,13 +188,13 @@ vendored server 保持一个 RDP display/input/channel 状态机，但在主连�
 |---|---|---|
 | 捕获时延 | ScreenCaptureKit 自己节流，不再被外层重复 sleep；新全帧覆盖 mailbox 中的旧全帧，客户端优先拿到较新的画面 | 尚无端到端输入到显示延迟的 p50/p95 数据 |
 | 捕获开销 | ScreenCaptureKit 变更流不再对每个 Retina 全帧做额外去重哈希 | 尚无不同分辨率下 CPU 占用对比 |
-| 像素拷贝 | 对齐尺寸下，AVC 路径把原生 `CVPixelBuffer` 直接交给 VideoToolbox，不生成整帧 BGRA 副本；非 16 对齐时直接逐行写入 padding buffer；bitmap 读回只发生在需要时且跨 clone 缓存 | 不能称为全链路“绝对零拷贝”；VideoToolbox、RDP 打包和回退仍可能产生内部缓冲 |
-| 编码吞吐 | VideoToolbox AVC420 取代 macOS 高频全帧 bitmap；编码与捕获异步，最多保留 2 个在途输入，避免无界积压 | 尚未记录 VideoToolbox 实际选择硬件还是软件编码器，也没有 1080p/Retina/4K 的稳定 FPS、CPU/GPU 和码率数据 |
+| 像素拷贝 | 启用 AVC 实验路径时，对齐尺寸下把原生 `CVPixelBuffer` 直接交给 VideoToolbox；默认 bitmap 路径按需读回 BGRA 并跨 clone 缓存 | 默认路径仍有整帧像素读回；不能称为全链路“绝对零拷贝” |
+| 编码吞吐 | 启用 AVC 实验路径时，编码与捕获异步且最多保留 2 个在途输入，避免无界积压 | 实验路径尚未通过 Win11 互操作，也没有 1080p/Retina/4K 的稳定 FPS、CPU/GPU 和码率数据 |
 | 小更新交互 | RDP TCP socket 启用 `TCP_NODELAY`，降低输入响应和小更新被 Nagle 延迟的风险 | 不是网络 RTT 保证，也没有公网/弱网数据 |
-| 尾帧与故障恢复 | 尝试配置 `MaxFrameDelayCount=1`；不支持时在 75 ms idle 后 flush，单帧等待超过 250 ms 切换 bitmap；ACK 或 `totalFramesDecoded` 连续停滞 1.5 s 后删除 EGFX surface 并回退 bitmap | 250 ms 是内部编码等待预算，不是端到端延迟上限；降级期间可能短暂降低画质或帧率 |
-| 分辨率缩放 | 客户端请求较小桌面时由 ScreenCaptureKit 在源端输出目标尺寸，减少后续每帧像素数量和编码输入规模 | 节省比例取决于客户端请求尺寸和画面内容，尚未做实测对照 |
+| 尾帧与故障恢复 | AVC 实验路径尝试配置 `MaxFrameDelayCount=1`；单帧超时或 ACK/decoded progress 停滞后回退 bitmap | 客户端若在首个协议错误后直接断开，运行时回退无法挽救，因此当前不能作为默认路径 |
+| 分辨率缩放 | 客户端尺寸实验路径可由 ScreenCaptureKit 在源端输出目标尺寸 | resize 位于初始激活阶段且可失败，必须先完成真机尺寸一致性验证 |
 
-因此当前性能结论应表述为：**macOS 已具备低延迟 VideoToolbox 编码所需的正确数据流和有界队列，预期优于原来的逐帧 BGRA + bitmap 路径；是否命中硬件编码器以及实际提升幅度尚待真机观测和基准确认。**
+因此当前性能结论应表述为：**macOS 已具备低延迟 VideoToolbox 编码所需的数据流和有界队列，但发布默认仍是 bitmap 兼容路径；只有完成真实客户端互操作后，才能评估是否恢复硬件编码默认值及其实际收益。**
 
 建议发布前至少记录以下矩阵：1080p、Retina 原生尺寸和 4K；静态桌面、文本滚动、窗口拖动和视频播放；分别采集 capture/encode/send p50/p95、端到端延迟、稳定 FPS、CPU/GPU、内存、码率、丢帧/替换帧数和 bitmap fallback 次数。客户端至少覆盖 Windows mstsc、Windows App、macOS Microsoft Remote Desktop 和 FreeRDP。
 
