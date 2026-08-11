@@ -1,10 +1,16 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { emit } from "@tauri-apps/api/event";
 import type { LspDocumentStatus } from "../../../lib/editor/lsp";
 import { SDK_REGISTRY_CHANGED_EVENT } from "../../../lib/editor/sdk";
 import type { CodeWorkspaceRootInfo } from "../../../types";
 import type { LspFileState, OpenFileState } from "./codeWorkspaceModel";
-import { useWorkspaceLspSession } from "./useWorkspaceLspSession";
+import {
+  LSP_DIAGNOSTICS_REFRESH_EVENT,
+  useWorkspaceLspSession,
+} from "./useWorkspaceLspSession";
+
+vi.mock("@tauri-apps/api/event", () => import("../../../stubs/tauri-event"));
 
 const lspMocks = vi.hoisted(() => ({
   lspDetectServers: vi.fn(),
@@ -147,6 +153,31 @@ describe("useWorkspaceLspSession", () => {
     expect(lspMocks.lspCloseDocument).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceId: "workspace-1" }),
     );
+  });
+
+  it("refreshes active open-file diagnostics when the server invalidates pull results", async () => {
+    const openFilesRef = { current: { [file.key]: file } };
+    const { result, unmount } = renderHook(() => useWorkspaceLspSession({
+      workspaceInstanceId: "workspace-1",
+      roots,
+      openFilesRef,
+      updateLspFiles: vi.fn(),
+      onError: vi.fn(),
+    }));
+
+    await act(async () => result.current.syncDocument(file, "open"));
+    lspMocks.lspGetDiagnostics.mockClear();
+    await act(async () => {
+      await emit(LSP_DIAGNOSTICS_REFRESH_EVENT, { workspaceId: "workspace-other" });
+      await emit(LSP_DIAGNOSTICS_REFRESH_EVENT, { workspaceId: "workspace-1" });
+    });
+
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalledOnce());
+    expect(lspMocks.lspGetDiagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      workspaceId: "workspace-1",
+      filePath: "src/main.ts",
+    }));
+    unmount();
   });
 
   it("routes library sources through the origin project session and never syncs them", async () => {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   lspChangeDocument,
   lspCloseDocument,
@@ -63,6 +64,7 @@ interface DocumentSyncQueue {
 }
 
 const LSP_DIAGNOSTICS_IDLE_DELAY_MS = 750;
+export const LSP_DIAGNOSTICS_REFRESH_EVENT = "lsp://diagnostics-refresh";
 
 /**
  * LSP feature responses all carry a document status.  Most responses for an
@@ -129,6 +131,7 @@ export interface WorkspaceLspSessionController {
   ) => LspDocumentDescriptor;
   /** True when the language server has the given buffer and no didChange is in flight. */
   isDocumentSynced: (key: string, text: string) => boolean;
+  documentVersion: (key: string) => number | null;
   syncDocument: (file: OpenFileState, mode: "open" | "change") => Promise<void>;
   saveDocument: (file: OpenFileState, text: string) => Promise<void>;
   closeDocument: (file: OpenFileState) => void;
@@ -389,6 +392,29 @@ export function useWorkspaceLspSession({
     }, LSP_DIAGNOSTICS_IDLE_DELAY_MS);
   }, [openFilesRef, refreshDiagnostics]);
 
+  // LSP 3.17 pull providers can invalidate their cached report at any time
+  // (for example after a build or dependency refresh). The backend forwards
+  // `workspace/diagnostic/refresh`; refresh every currently open, active
+  // document immediately instead of waiting for the idle timer.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    void listen<{ workspaceId?: unknown }>(LSP_DIAGNOSTICS_REFRESH_EVENT, (event) => {
+      if (event.payload?.workspaceId !== workspaceInstanceId) return;
+      for (const file of Object.values(openFilesRef.current)) {
+        if (file.library || !documentActiveRef.current[file.key]) continue;
+        void refreshDiagnostics(file);
+      }
+    }).then((next) => {
+      if (disposed) next();
+      else unlisten = next;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openFilesRef, refreshDiagnostics, workspaceInstanceId]);
+
   /**
    * Live didChange traffic must not thrash the status pill spinner. Only show
    * "busy/starting" while the document is not yet active (first open or
@@ -400,6 +426,8 @@ export function useWorkspaceLspSession({
     const queue = syncQueuesRef.current[key];
     return !queue || queue.closed;
   }, []);
+
+  const documentVersion = useCallback((key: string) => versionRef.current[key] ?? null, []);
 
   const syncDocument = useCallback(async (file: OpenFileState, mode: "open" | "change") => {
     if (file.loading) return;
@@ -633,6 +661,7 @@ export function useWorkspaceLspSession({
     descriptorForFile,
     descriptorForPath,
     isDocumentSynced,
+    documentVersion,
     syncDocument,
     saveDocument,
     closeDocument,

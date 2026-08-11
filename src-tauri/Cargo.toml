@@ -74,6 +74,8 @@ regex = "1"
 # Code Workspace Find in Files. These are the same traversal and matching
 # primitives used by ripgrep, including gitignore support and binary detection.
 ignore = "0.4"
+globset = "0.4"
+notify = "8.2"
 grep-matcher = "0.1"
 grep-regex = "0.1"
 grep-searcher = "0.1"

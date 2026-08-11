@@ -470,9 +470,9 @@ export interface WorkspaceDiagnosticFile {
 }
 
 /**
- * All diagnostics stored across the workspace's active sessions, including files
- * the user never opened (jdtls publishes project-wide after a build). Used by the
- * Problems panel's "whole project" mode; the panel polls this while open.
+ * Refresh pull-capable LSP 3.17 servers, then return diagnostics stored across
+ * the workspace's active sessions, including files the user never opened. The
+ * Problems panel polls this while whole-project scope is open.
  */
 export function lspWorkspaceDiagnostics(workspaceId: string): Promise<WorkspaceDiagnosticFile[]> {
   return invoke<WorkspaceDiagnosticFile[]>("lsp_workspace_diagnostics", { workspaceId });
@@ -576,11 +576,58 @@ export function lspRangeFormatting(
 export interface LspFileTextEdits {
   uri: string;
   path: string | null;
+  /** VersionedTextDocumentIdentifier.version; null/omitted accepts the current version. */
+  version?: number | null;
   edits: LspTextEdit[];
+  /** ChangeAnnotation ids referenced by AnnotatedTextEdit entries in this document. */
+  annotationIds?: string[];
 }
+
+export interface LspChangeAnnotation {
+  id: string;
+  label: string;
+  needsConfirmation: boolean;
+  description: string | null;
+}
+
+export type LspWorkspaceEditOperation =
+  | {
+    kind: "text";
+    document: LspFileTextEdits;
+  }
+  | {
+    kind: "create";
+    uri: string;
+    path: string | null;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+    annotationId: string | null;
+  }
+  | {
+    kind: "rename";
+    oldUri: string;
+    oldPath: string | null;
+    newUri: string;
+    newPath: string | null;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+    annotationId: string | null;
+  }
+  | {
+    kind: "delete";
+    uri: string;
+    path: string | null;
+    recursive: boolean;
+    ignoreIfNotExists: boolean;
+    annotationId: string | null;
+  };
 
 export interface LspWorkspaceEdit {
   documentEdits: LspFileTextEdits[];
+  /** Ordered LSP documentChanges. Older local producers may omit this field. */
+  operations?: LspWorkspaceEditOperation[];
+  /** Normalized entries from WorkspaceEdit.changeAnnotations. */
+  changeAnnotations?: LspChangeAnnotation[];
 }
 
 export interface LspCodeAction {
@@ -598,6 +645,11 @@ export interface LspCodeActionsResult {
   actions: LspCodeAction[];
 }
 
+export interface LspCodeActionResolveResult {
+  status: LspDocumentStatus;
+  action: LspCodeAction | null;
+}
+
 export function lspCodeActions(
   descriptor: LspDocumentDescriptor,
   range: LspRange,
@@ -611,6 +663,183 @@ export function lspCodeActions(
     endCharacter: range.end.character,
     diagnostics: diagnostics ?? null,
   });
+}
+
+export function lspCodeActionResolve(
+  descriptor: LspDocumentDescriptor,
+  action: unknown,
+): Promise<LspCodeActionResolveResult> {
+  return invoke<LspCodeActionResolveResult>("lsp_code_action_resolve", {
+    ...documentArgs(descriptor),
+    action,
+  });
+}
+
+export function lspExecuteCommand(
+  descriptor: LspDocumentDescriptor,
+  command: string,
+  argumentsValue?: unknown,
+): Promise<unknown> {
+  const argumentsList = Array.isArray(argumentsValue)
+    ? argumentsValue
+    : argumentsValue == null
+      ? []
+      : [argumentsValue];
+  return invoke<unknown>("lsp_execute_command", {
+    ...documentArgs(descriptor),
+    command,
+    arguments: argumentsList,
+  });
+}
+
+export interface LspWorkspaceApplyEditRequest {
+  requestId: string;
+  workspaceId: string;
+  label: string | null;
+  edit: LspWorkspaceEdit;
+}
+
+export interface LspShowMessageAction {
+  title: string;
+  [key: string]: unknown;
+}
+
+export interface LspShowMessageRequest {
+  requestId: string;
+  workspaceId: string;
+  serverLabel: string;
+  /** LSP MessageType: 1 error, 2 warning, 3 info, 4 log. */
+  messageType: number;
+  message: string;
+  actions: LspShowMessageAction[];
+}
+
+export interface LspShowMessageCancelled {
+  requestId: string;
+  workspaceId: string;
+  reason: string;
+}
+
+export interface LspShowMessageNotification {
+  workspaceId: string;
+  serverLabel: string;
+  messageType: number;
+  message: string;
+}
+
+export interface LspWorkDoneProgressEvent {
+  workspaceId: string;
+  presetId: string;
+  serverLabel: string;
+  rootUri: string;
+  token: string | number;
+  kind: "begin" | "report" | "end";
+  title: string | null;
+  message: string | null;
+  percentage: number | null;
+  cancellable: boolean;
+}
+
+export interface LspWorkspaceFileOperationTarget {
+  path: string;
+  isDirectory: boolean;
+}
+
+export interface LspWorkspaceFileRenameTarget {
+  oldPath: string;
+  newPath: string;
+  isDirectory: boolean;
+}
+
+export type LspWorkspaceFileOperation =
+  | { kind: "create"; files: LspWorkspaceFileOperationTarget[] }
+  | { kind: "rename"; files: LspWorkspaceFileRenameTarget[] }
+  | { kind: "delete"; files: LspWorkspaceFileOperationTarget[] };
+
+export interface LspWatchedFileChange {
+  path: string;
+  /** LSP FileChangeType: 1 = created, 2 = changed, 3 = deleted. */
+  type: 1 | 2 | 3;
+}
+
+export interface LspExternalFileChange {
+  workspaceId: string;
+  path: string;
+  type: 1 | 2 | 3;
+}
+
+export function lspResolveWorkspaceEdit(
+  requestId: string,
+  workspaceId: string,
+  applied: boolean,
+  failureReason: string | null = null,
+  failedChange: number | null = null,
+): Promise<void> {
+  return invoke<void>("lsp_resolve_workspace_edit", {
+    requestId,
+    workspaceId,
+    applied,
+    failureReason,
+    failedChange,
+  });
+}
+
+export function lspResolveShowMessageRequest(
+  requestId: string,
+  workspaceId: string,
+  actionIndex: number | null,
+): Promise<void> {
+  return invoke<void>("lsp_resolve_show_message_request", {
+    requestId,
+    workspaceId,
+    actionIndex,
+  });
+}
+
+export function lspCancelWorkDoneProgress(
+  workspaceId: string,
+  presetId: string,
+  rootUri: string,
+  token: string | number,
+): Promise<boolean> {
+  return invoke<boolean>("lsp_cancel_work_done_progress", {
+    workspaceId,
+    presetId,
+    rootUri,
+    token,
+  });
+}
+
+export function lspWorkspaceWillFileOperation(
+  workspaceId: string,
+  operation: LspWorkspaceFileOperation,
+): Promise<number> {
+  return invoke<number>("lsp_workspace_will_file_operation", { workspaceId, operation });
+}
+
+export function lspWorkspaceDidFileOperation(
+  workspaceId: string,
+  operation: LspWorkspaceFileOperation,
+): Promise<number> {
+  return invoke<number>("lsp_workspace_did_file_operation", { workspaceId, operation });
+}
+
+export function lspWorkspaceDidChangeWatchedFiles(
+  workspaceId: string,
+  changes: LspWatchedFileChange[],
+): Promise<number> {
+  return invoke<number>("lsp_workspace_did_change_watched_files", { workspaceId, changes });
+}
+
+export function lspStartWorkspaceWatcher(
+  workspaceId: string,
+  roots: string[],
+): Promise<void> {
+  return invoke<void>("lsp_start_workspace_watcher", { workspaceId, roots });
+}
+
+export function lspStopWorkspaceWatcher(workspaceId: string): Promise<void> {
+  return invoke<void>("lsp_stop_workspace_watcher", { workspaceId });
 }
 
 export interface LspWorkspaceSymbol {

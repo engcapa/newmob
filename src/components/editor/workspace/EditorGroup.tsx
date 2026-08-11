@@ -69,6 +69,8 @@ interface EditorGroupProps {
   groupId: EditorGroupId;
   workspaceInstanceId: string;
   visible: boolean;
+  /** Temporarily blocks mutations while an external resource edit is committing. */
+  readOnly?: boolean;
   openOrder: string[];
   openFiles: Record<string, OpenFileViewModel>;
   activeKey: string | null;
@@ -103,6 +105,8 @@ interface EditorGroupProps {
   revealTarget: EditorRevealTarget | null;
   editorPaneRef: MutableRefObject<HTMLElement | null>;
   editorPaneStyle: CSSProperties;
+  softWrap?: boolean;
+  columnSelectionMode?: boolean;
   onActivate: (key: string) => void;
   onActivateGroup: () => void;
   onClose: (key: string) => void;
@@ -161,6 +165,7 @@ export function EditorGroup({
   groupId,
   workspaceInstanceId,
   visible,
+  readOnly = false,
   openOrder,
   openFiles,
   activeKey,
@@ -190,6 +195,8 @@ export function EditorGroup({
   revealTarget,
   editorPaneRef,
   editorPaneStyle,
+  softWrap = false,
+  columnSelectionMode = false,
   onActivate,
   onActivateGroup,
   onClose,
@@ -544,7 +551,7 @@ export function EditorGroup({
                         gitBlame={activeGitBlame}
                         reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                         // Library sources (JDK / dependency classes) cannot be written back.
-                        readOnly={!!activeFile.library}
+                        readOnly={readOnly || !!activeFile.library}
                         onChange={(doc) => {
                           if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
                           onChangeText(activeFile.key, doc);
@@ -566,6 +573,8 @@ export function EditorGroup({
                           activeCapabilities?.completionTriggerCharacters,
                         )}
                         signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
+                        softWrap={softWrap}
+                        columnSelectionMode={columnSelectionMode}
                       />
                     </div>
                     {renderMarkdownPreview(activeFile, onOpenMarkdownHref)}
@@ -592,6 +601,7 @@ export function EditorGroup({
                     onToggleBreakpoint={onToggleBreakpoint}
                     onEditBreakpoint={onEditBreakpoint}
                     reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
+                    readOnly={readOnly || !!activeFile.library}
                     onChange={(doc) => {
                       if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
                       onChangeText(activeFile.key, doc);
@@ -613,6 +623,8 @@ export function EditorGroup({
                       activeCapabilities?.completionTriggerCharacters,
                     )}
                     signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
+                    softWrap={softWrap}
+                    columnSelectionMode={columnSelectionMode}
                   />
                 )}
               </div>

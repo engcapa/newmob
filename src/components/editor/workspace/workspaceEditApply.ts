@@ -1,17 +1,44 @@
-import type { LspFileTextEdits, LspWorkspaceEdit } from "../../../lib/editor/lsp";
+import type {
+  LspChangeAnnotation,
+  LspFileTextEdits,
+  LspWorkspaceEdit,
+  LspWorkspaceEditOperation,
+} from "../../../lib/editor/lsp";
 import { applyLspTextEditsToString } from "./lspTextEdits";
+import {
+  buildWorkspaceEditPreview,
+  workspaceEditOperations,
+  type WorkspaceEditPreview,
+} from "./workspaceEditPreview";
 
 export type WorkspaceEditApplyOutcome =
-  | { path: string; status: "applied-open"; dirty: boolean }
-  | { path: string; status: "applied-disk" }
-  | { path: string; status: "skipped"; reason: string }
-  | { path: string; status: "failed"; reason: string };
+  | { operationIndex: number; path: string; status: "applied-open"; dirty: boolean }
+  | { operationIndex: number; path: string; status: "applied-disk" }
+  | { operationIndex: number; path: string; status: "applied-create" }
+  | { operationIndex: number; path: string; status: "applied-rename" }
+  | { operationIndex: number; path: string; status: "applied-delete" }
+  | { operationIndex: number; path: string; status: "noop" }
+  | { operationIndex: number | null; path: string; status: "skipped"; reason: string }
+  | { operationIndex: number | null; path: string; status: "failed"; reason: string };
+
+export interface WorkspaceEditApplyResponse {
+  applied: boolean;
+  failureReason: string | null;
+  failedChange: number | null;
+}
 
 export interface WorkspaceEditApplyHooks {
   /** Resolve absolute path from a file URI / server path. */
   resolvePath: (file: LspFileTextEdits) => string | null;
   /** Return open buffer text + dirty flag, or null if not open. */
-  getOpenBuffer: (absolutePath: string) => { text: string; dirty: boolean; key: string } | null;
+  getOpenBuffer: (absolutePath: string) => {
+    text: string;
+    dirty: boolean;
+    key: string;
+    version?: number | null;
+    /** True only when the LSP server has this exact buffer text. */
+    lspSynced?: boolean;
+  } | null;
   /**
    * Apply text to an open buffer.
    * For dirty buffers this leaves the buffer dirty; for clean buffers the
@@ -27,6 +54,111 @@ export interface WorkspaceEditApplyHooks {
   readDisk: (absolutePath: string) => Promise<{ text: string; hash: string } | null>;
   /** Write disk contents for a closed file (with hash precheck when available). */
   writeDisk: (absolutePath: string, text: string, expectedHash: string | null) => Promise<void>;
+  /** Apply LSP CreateFile semantics and synchronize workspace UI state. */
+  createFile?: (operation: Extract<LspWorkspaceEditOperation, { kind: "create" }>) => Promise<void>;
+  /** Apply LSP RenameFile semantics and synchronize workspace UI state. */
+  renameFile?: (operation: Extract<LspWorkspaceEditOperation, { kind: "rename" }>) => Promise<void>;
+  /** Apply LSP DeleteFile semantics and synchronize workspace UI state. */
+  deleteFile?: (operation: Extract<LspWorkspaceEditOperation, { kind: "delete" }>) => Promise<void>;
+  /** Confirm a multi-file/resource edit before the first mutation. */
+  confirmWorkspaceEdit?: (preview: WorkspaceEditPreview) => Promise<boolean>;
+  /** Confirm server-declared change annotations before any mutation is applied. */
+  confirmChangeAnnotations?: (annotations: LspChangeAnnotation[]) => Promise<boolean>;
+}
+
+async function applyTextDocumentEdit(
+  file: LspFileTextEdits,
+  operationIndex: number,
+  hooks: WorkspaceEditApplyHooks,
+): Promise<WorkspaceEditApplyOutcome> {
+  const path = hooks.resolvePath(file);
+  if (!path) {
+    return { operationIndex, path: file.uri, status: "skipped", reason: "unresolvable path" };
+  }
+  if (!file.edits.length) return { operationIndex, path, status: "noop" };
+  try {
+    const open = hooks.getOpenBuffer(path);
+    if (file.version != null && !open) {
+      return {
+        operationIndex,
+        path,
+        status: "failed",
+        reason: `versioned document ${file.version} is not open`,
+      };
+    }
+    if (open) {
+      if (file.version != null && open.version !== file.version) {
+        return {
+          operationIndex,
+          path,
+          status: "failed",
+          reason: `document version mismatch (expected ${file.version}, current ${open.version ?? "unknown"})`,
+        };
+      }
+      if (file.version != null && open.lspSynced !== true) {
+        return {
+          operationIndex,
+          path,
+          status: "failed",
+          reason: `document version ${file.version} has unsynchronized buffer changes`,
+        };
+      }
+      const next = applyLspTextEditsToString(open.text, file.edits);
+      if (!open.dirty) {
+        hooks.applyToOpenBuffer(open.key, next);
+        await hooks.saveOpenBuffer(open.key, next);
+        return { operationIndex, path, status: "applied-open", dirty: false };
+      }
+      hooks.applyToOpenBuffer(open.key, next);
+      return { operationIndex, path, status: "applied-open", dirty: true };
+    }
+    const disk = await hooks.readDisk(path);
+    if (!disk) {
+      return { operationIndex, path, status: "failed", reason: "file not found on disk" };
+    }
+    const next = applyLspTextEditsToString(disk.text, file.edits);
+    await hooks.writeDisk(path, next, disk.hash);
+    return { operationIndex, path, status: "applied-disk" };
+  } catch (error) {
+    return {
+      operationIndex,
+      path,
+      status: "failed",
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function workspaceEditAnnotationPreflight(edit: LspWorkspaceEdit): {
+  confirmations: LspChangeAnnotation[];
+  error: string | null;
+} {
+  const referencedIds = new Set<string>();
+  for (const operation of workspaceEditOperations(edit)) {
+    if (operation.kind === "text") {
+      for (const id of operation.document.annotationIds ?? []) referencedIds.add(id);
+    } else if (operation.annotationId) {
+      referencedIds.add(operation.annotationId);
+    }
+  }
+  if (referencedIds.size === 0) return { confirmations: [], error: null };
+
+  const annotations = new Map((edit.changeAnnotations ?? []).map((annotation) => (
+    [annotation.id, annotation]
+  )));
+  const missing = [...referencedIds].filter((id) => !annotations.has(id));
+  if (missing.length > 0) {
+    return {
+      confirmations: [],
+      error: `WorkspaceEdit references unknown change annotation: ${missing.join(", ")}`,
+    };
+  }
+  return {
+    confirmations: [...referencedIds]
+      .map((id) => annotations.get(id)!)
+      .filter((annotation) => annotation.needsConfirmation),
+    error: null,
+  };
 }
 
 /**
@@ -34,61 +166,128 @@ export interface WorkspaceEditApplyHooks {
  * - open clean → apply to buffer and save (result dirty=false)
  * - open dirty → apply to buffer, keep dirty (result dirty=true)
  * - unopened → write disk with hash precheck when provided
- * Failures do not roll back already-applied files.
+ * Failures do not roll back already-applied files, but stop later ordered
+ * documentChanges so failedChange identifies the first unapplied boundary.
  */
 export async function applyWorkspaceEdit(
   edit: LspWorkspaceEdit,
   hooks: WorkspaceEditApplyHooks,
 ): Promise<WorkspaceEditApplyOutcome[]> {
-  const outcomes: WorkspaceEditApplyOutcome[] = [];
-  for (const file of edit.documentEdits) {
-    const path = hooks.resolvePath(file);
-    if (!path) {
-      outcomes.push({ path: file.uri, status: "skipped", reason: "unresolvable path" });
-      continue;
+  const annotationPreflight = workspaceEditAnnotationPreflight(edit);
+  if (annotationPreflight.error) {
+    return [{
+      operationIndex: null,
+      path: "WorkspaceEdit",
+      status: "failed",
+      reason: annotationPreflight.error,
+    }];
+  }
+  const preview = buildWorkspaceEditPreview(edit);
+  if (preview.requiresConfirmation && hooks.confirmWorkspaceEdit) {
+    try {
+      const confirmed = await hooks.confirmWorkspaceEdit(preview);
+      if (!confirmed) {
+        return [{
+          operationIndex: null,
+          path: "WorkspaceEdit",
+          status: "skipped",
+          reason: "WorkspaceEdit preview was declined",
+        }];
+      }
+    } catch (error) {
+      return [{
+        operationIndex: null,
+        path: "WorkspaceEdit",
+        status: "failed",
+        reason: error instanceof Error ? error.message : String(error),
+      }];
     }
-    if (!file.edits.length) {
-      outcomes.push({ path, status: "skipped", reason: "no text edits" });
-      continue;
+  } else if (annotationPreflight.confirmations.length > 0) {
+    if (!hooks.confirmChangeAnnotations) {
+      return [{
+        operationIndex: null,
+        path: "WorkspaceEdit",
+        status: "failed",
+        reason: "WorkspaceEdit requires change confirmation, but no confirmation UI is available",
+      }];
     }
     try {
-      const open = hooks.getOpenBuffer(path);
-      if (open) {
-        const next = applyLspTextEditsToString(open.text, file.edits);
-        if (!open.dirty) {
-          // Clean open buffer: apply then save so the user is not left with
-          // an unexpected dirty marker after rename / code action / replace.
-          hooks.applyToOpenBuffer(open.key, next);
-          await hooks.saveOpenBuffer(open.key, next);
-          outcomes.push({ path, status: "applied-open", dirty: false });
-        } else {
-          hooks.applyToOpenBuffer(open.key, next);
-          outcomes.push({ path, status: "applied-open", dirty: true });
-        }
-        continue;
+      const confirmed = await hooks.confirmChangeAnnotations(annotationPreflight.confirmations);
+      if (!confirmed) {
+        return [{
+          operationIndex: null,
+          path: "WorkspaceEdit",
+          status: "skipped",
+          reason: "WorkspaceEdit change confirmation was declined",
+        }];
       }
-      const disk = await hooks.readDisk(path);
-      if (!disk) {
-        outcomes.push({ path, status: "failed", reason: "file not found on disk" });
-        continue;
+    } catch (error) {
+      return [{
+        operationIndex: null,
+        path: "WorkspaceEdit",
+        status: "failed",
+        reason: error instanceof Error ? error.message : String(error),
+      }];
+    }
+  }
+  const outcomes: WorkspaceEditApplyOutcome[] = [];
+  for (const [operationIndex, operation] of workspaceEditOperations(edit).entries()) {
+    if (operation.kind === "text") {
+      const outcome = await applyTextDocumentEdit(operation.document, operationIndex, hooks);
+      outcomes.push(outcome);
+      if (outcome.status === "failed" || outcome.status === "skipped") break;
+      continue;
+    }
+    const path = operation.kind === "rename"
+      ? operation.newPath ?? operation.newUri
+      : operation.path ?? operation.uri;
+    try {
+      if (operation.kind === "create") {
+        if (!hooks.createFile) throw new Error("CreateFile is not supported by this workspace");
+        await hooks.createFile(operation);
+        outcomes.push({ operationIndex, path, status: "applied-create" });
+      } else if (operation.kind === "rename") {
+        if (!hooks.renameFile) throw new Error("RenameFile is not supported by this workspace");
+        await hooks.renameFile(operation);
+        outcomes.push({ operationIndex, path, status: "applied-rename" });
+      } else {
+        if (!hooks.deleteFile) throw new Error("DeleteFile is not supported by this workspace");
+        await hooks.deleteFile(operation);
+        outcomes.push({ operationIndex, path, status: "applied-delete" });
       }
-      const next = applyLspTextEditsToString(disk.text, file.edits);
-      await hooks.writeDisk(path, next, disk.hash);
-      outcomes.push({ path, status: "applied-disk" });
     } catch (error) {
       outcomes.push({
+        operationIndex,
         path,
         status: "failed",
         reason: error instanceof Error ? error.message : String(error),
       });
+      break;
     }
   }
   return outcomes;
 }
 
+export function workspaceEditApplyResponse(
+  outcomes: WorkspaceEditApplyOutcome[],
+): WorkspaceEditApplyResponse {
+  const failure = outcomes.find((outcome) => (
+    outcome.status === "failed" || outcome.status === "skipped"
+  ));
+  if (!failure) {
+    return { applied: true, failureReason: null, failedChange: null };
+  }
+  return {
+    applied: false,
+    failureReason: failure.reason,
+    failedChange: failure.operationIndex,
+  };
+}
+
 export function summarizeWorkspaceEditOutcomes(outcomes: WorkspaceEditApplyOutcome[]): string {
   const applied = outcomes.filter((item) => item.status.startsWith("applied")).length;
+  const unchanged = outcomes.filter((item) => item.status === "noop").length;
   const failed = outcomes.filter((item) => item.status === "failed").length;
   const skipped = outcomes.filter((item) => item.status === "skipped").length;
-  return `Applied ${applied}, failed ${failed}, skipped ${skipped}`;
+  return `Applied ${applied}, unchanged ${unchanged}, failed ${failed}, skipped ${skipped}`;
 }

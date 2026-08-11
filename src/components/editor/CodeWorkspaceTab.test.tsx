@@ -12,6 +12,8 @@ import type {
 } from "../../lib/editor/lsp";
 import type { WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab } from "./CodeWorkspaceTab";
+import { emit } from "@tauri-apps/api/event";
+import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceListDir: vi.fn(),
@@ -32,6 +34,7 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceCreateDir: vi.fn(),
   workspaceDeletePath: vi.fn(),
   workspaceRenamePath: vi.fn(),
+  workspaceApplyResourceOperation: vi.fn(),
 }));
 
 const lspMocks = vi.hoisted(() => ({
@@ -73,7 +76,17 @@ const lspMocks = vi.hoisted(() => ({
   lspFormatting: vi.fn(),
   lspRangeFormatting: vi.fn(),
   lspCodeActions: vi.fn(),
+  lspCodeActionResolve: vi.fn(),
   lspWorkspaceSymbols: vi.fn(),
+  lspExecuteCommand: vi.fn(),
+  lspResolveWorkspaceEdit: vi.fn(),
+  lspResolveShowMessageRequest: vi.fn(),
+  lspCancelWorkDoneProgress: vi.fn(),
+  lspWorkspaceDidFileOperation: vi.fn(),
+  lspWorkspaceDidChangeWatchedFiles: vi.fn(),
+  lspStartWorkspaceWatcher: vi.fn(),
+  lspStopWorkspaceWatcher: vi.fn(),
+  lspWorkspaceWillFileOperation: vi.fn(),
 }));
 
 const ipcMocks = vi.hoisted(() => ({
@@ -116,6 +129,14 @@ vi.mock("../../lib/clipboard", () => clipboardMocks);
 
 vi.mock("../../lib/settingsNavigation", () => settingsNavigationMocks);
 
+// CodeWorkspaceTab is rendered in isolation (without the app-level dialog
+// provider). Auto-confirm preview-only WorkspaceEdits so those tests can
+// continue to assert the resource operation lifecycle itself.
+vi.mock("../../lib/appDialogs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/appDialogs")>()),
+  confirmAppDialog: vi.fn(async () => true),
+}));
+
 const gitMocks = vi.hoisted(() => ({
   gitSnapshot: vi.fn(),
   gitIgnorePath: vi.fn(),
@@ -129,6 +150,8 @@ const gitMocks = vi.hoisted(() => ({
 vi.mock("../../lib/editor/workspace", () => workspaceMocks);
 
 vi.mock("../../lib/editor/lsp", () => lspMocks);
+
+vi.mock("@tauri-apps/api/event", () => import("../../stubs/tauri-event"));
 
 vi.mock("../../lib/ipc", () => ipcMocks);
 
@@ -280,6 +303,7 @@ describe("CodeWorkspaceTab", () => {
     workspaceMocks.workspaceCreateDir.mockReset();
     workspaceMocks.workspaceDeletePath.mockReset();
     workspaceMocks.workspaceRenamePath.mockReset();
+    workspaceMocks.workspaceApplyResourceOperation.mockReset();
     lspMocks.lspDetectServers.mockReset();
     lspMocks.lspSetJavaHome.mockReset().mockResolvedValue(undefined);
     lspMocks.lspSetJavaVmargs.mockReset().mockResolvedValue("-Xms1024m -Xmx1024m");
@@ -316,6 +340,15 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspInlayHints.mockReset();
     lspMocks.lspSemanticTokens.mockReset();
     lspMocks.lspSelectionRanges.mockReset();
+    lspMocks.lspExecuteCommand.mockReset().mockResolvedValue(null);
+    lspMocks.lspResolveWorkspaceEdit.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspResolveShowMessageRequest.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspCancelWorkDoneProgress.mockReset().mockResolvedValue(false);
+    lspMocks.lspWorkspaceDidChangeWatchedFiles.mockReset().mockResolvedValue(0);
+    lspMocks.lspStartWorkspaceWatcher.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspStopWorkspaceWatcher.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspWorkspaceDidFileOperation.mockReset().mockResolvedValue(1);
+    lspMocks.lspWorkspaceWillFileOperation.mockReset().mockResolvedValue(1);
     lspMocks.lspDocumentSymbols.mockResolvedValue({ status: documentStatus(), symbols: [] });
     lspMocks.lspDocumentHighlights.mockResolvedValue({ status: documentStatus(), highlights: [] });
     lspMocks.lspInlayHints.mockResolvedValue({ status: documentStatus(), hints: [] });
@@ -338,6 +371,11 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspRangeFormatting.mockResolvedValue({ status: documentStatus(), edits: [] });
     lspMocks.lspCodeActions.mockReset();
     lspMocks.lspCodeActions.mockResolvedValue({ status: documentStatus(), actions: [] });
+    lspMocks.lspCodeActionResolve.mockReset();
+    lspMocks.lspCodeActionResolve.mockImplementation(async (_descriptor: unknown, raw: unknown) => ({
+      status: documentStatus({ available: true, active: true }),
+      action: raw,
+    }));
     lspMocks.lspWorkspaceSymbols.mockReset();
     lspMocks.lspWorkspaceSymbols.mockResolvedValue({ status: documentStatus(), symbols: [] });
     lspMocks.lspPrepareCallHierarchy.mockResolvedValue({ status: documentStatus(), items: [] });
@@ -1423,6 +1461,22 @@ describe("CodeWorkspaceTab", () => {
         title: "Insert space",
         kind: "quickfix",
         isPreferred: true,
+        edit: null,
+        command: null,
+        commandArguments: null,
+        raw: {
+          title: "Insert space",
+          kind: "quickfix",
+          data: { fixId: "space" },
+        },
+      }],
+    });
+    lspMocks.lspCodeActionResolve.mockResolvedValue({
+      status: documentStatus({ available: true, active: true }),
+      action: {
+        title: "Insert space",
+        kind: "quickfix",
+        isPreferred: true,
         edit: {
           documentEdits: [{
             uri: "file:///repo/app/src/main.ts",
@@ -1438,8 +1492,8 @@ describe("CodeWorkspaceTab", () => {
         },
         command: null,
         commandArguments: null,
-        raw: {},
-      }],
+        raw: { title: "Insert space", data: { fixId: "space" } },
+      },
     });
 
     renderWorkspace(workspace);
@@ -1449,7 +1503,107 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(window, { key: "Enter", altKey: true });
     await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole("button", { name: "Insert space" }));
+    await waitFor(() => expect(lspMocks.lspCodeActionResolve).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ data: { fixId: "space" } }),
+    ));
     await waitFor(() => expect(screen.getByText(/unsaved|Applied/i)).toBeTruthy());
+  });
+
+  it("makes the active editor read-only while a resource WorkspaceEdit is in flight", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-resource-action",
+      workspaceInstanceId: "instance-resource-action",
+      name: "Resource action",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;"));
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({
+      path: "/repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: {
+        completion: false,
+        signatureHelp: false,
+        hover: false,
+        definition: false,
+        typeDefinition: false,
+        implementation: false,
+        references: false,
+        documentSymbol: false,
+        workspaceSymbol: false,
+        rename: false,
+        formatting: false,
+        rangeFormatting: false,
+        codeAction: true,
+        documentHighlight: false,
+        callHierarchy: false,
+        typeHierarchy: false,
+        inlayHint: false,
+        selectionRange: false,
+        semanticTokens: false,
+        completionTriggerCharacters: [],
+        signatureTriggerCharacters: [],
+      },
+    }));
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: documentStatus({ available: true, active: true }),
+      actions: [{
+        title: "Rename file",
+        kind: "refactor.rename",
+        isPreferred: true,
+        edit: {
+          documentEdits: [],
+          operations: [{
+            kind: "rename",
+            oldUri: "file:///repo/app/src/main.ts",
+            oldPath: "/repo/app/src/main.ts",
+            newUri: "file:///repo/app/src/renamed.ts",
+            newPath: "/repo/app/src/renamed.ts",
+            overwrite: false,
+            ignoreIfExists: false,
+            annotationId: null,
+          }],
+        },
+        command: null,
+        commandArguments: null,
+        raw: {},
+      }],
+    });
+    let finishResourceOperation!: (value: { ignored: boolean }) => void;
+    workspaceMocks.workspaceApplyResourceOperation.mockReturnValue(new Promise((resolve) => {
+      finishResourceOperation = resolve;
+    }));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Rename file" }));
+
+    await waitFor(() => expect(workspaceMocks.workspaceApplyResourceOperation).toHaveBeenCalled());
+    await waitFor(() => expect(
+      screen.getByTestId("code-workspace-editor").querySelector(".cm-content"),
+    ).toHaveAttribute("aria-readonly", "true"));
+
+    await act(async () => finishResourceOperation({ ignored: false }));
+    await waitFor(() => expect(
+      screen.getByTestId("code-workspace-editor").querySelector(".cm-content"),
+    ).not.toHaveAttribute("aria-readonly"));
+    expect(workspaceMocks.workspaceApplyResourceOperation).toHaveBeenCalledWith("/repo/app", {
+      kind: "rename",
+      fromPath: "src/main.ts",
+      toPath: "src/renamed.ts",
+      toRepoRoot: "/repo/app",
+      overwrite: false,
+      ignoreIfExists: false,
+    });
+    expect(Object.keys(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-resource-action").openFiles,
+    )).toContain("root:app:src/renamed.ts");
   });
 
   it("formats the active document through LSP when formatting is advertised", async () => {
@@ -1625,6 +1779,122 @@ describe("CodeWorkspaceTab", () => {
     ));
     expect(lspMocks.lspFormatting).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(screen.queryByText(/unsaved/)).not.toBeInTheDocument());
+    expect(lspMocks.lspWorkspaceDidChangeWatchedFiles).toHaveBeenCalledWith(
+      "instance-format-on-save",
+      [{ path: "/repo/app/src/main.ts", type: 2 }],
+    );
+  });
+
+  it("queues an external dirty-buffer conflict and applies a merge against the latest disk hash", async () => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-external-conflict",
+      workspaceInstanceId: "instance-external-conflict",
+      name: "External conflict",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    let disk = file("src/main.ts", "const value = 1;", { hash: "hash-base" });
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockImplementation(async () => disk);
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    const key = "root:app:src/main.ts";
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-external-conflict")
+        .openFiles[key]?.text,
+    ).toBe("const value = 1;"));
+
+    act(() => {
+      useCodeWorkspaceStore.getState().updateOpenFiles(
+        "instance-external-conflict",
+        (current) => ({
+          ...current,
+          [key]: {
+            ...current[key]!,
+            text: "const value = 2;",
+            dirty: true,
+          },
+        }),
+      );
+    });
+    disk = file("src/main.ts", "const value = 3;", { hash: "hash-external" });
+    await act(async () => {
+      await emit("lsp://external-file-change", {
+        workspaceId: "instance-external-conflict",
+        path: "/repo/app/src/main.ts",
+        type: 2,
+      });
+    });
+
+    expect(await screen.findByTestId("external-file-conflict-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Merge" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Merge result" }), {
+      target: { value: "const value = 4;" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply Merge" }));
+
+    await waitFor(() => {
+      const merged = selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-external-conflict",
+      ).openFiles[key];
+      expect(merged?.text).toBe("const value = 4;");
+      expect(merged?.savedText).toBe("const value = 3;");
+      expect(merged?.hash).toBe("hash-external");
+      expect(merged?.dirty).toBe(true);
+    });
+    expect(screen.queryByTestId("external-file-conflict-dialog")).not.toBeInTheDocument();
+  });
+
+  it("restores a crash snapshot into the live editor without replacing the disk baseline", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-recovery",
+      workspaceInstanceId: "instance-recovery",
+      name: "Recovery",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;", { hash: "disk-hash" }));
+    window.localStorage.setItem(
+      `${WORKSPACE_RECOVERY_STORAGE_PREFIX}:instance-recovery`,
+      JSON.stringify([{
+        workspaceId: "instance-recovery",
+        key: "root:app:src/main.ts",
+        ref: { kind: "root", rootId: "app", path: "src/main.ts" },
+        path: "src/main.ts",
+        text: "const value = 2;",
+        savedText: "const value = 1;",
+        eol: "LF",
+        hash: "disk-hash",
+        mtime: 1,
+        size: 16,
+        capturedAt: Date.now(),
+      }]),
+    );
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(screen.getByTestId("workspace-recovery-dialog")).toBeInTheDocument());
+    expect(await screen.findByTestId("workspace-recovery-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Recover selected" }));
+    await waitFor(() => {
+      const recovered = selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-recovery",
+      ).openFiles["root:app:src/main.ts"];
+      expect(recovered?.text).toBe("const value = 2;");
+      expect(recovered?.savedText).toBe("const value = 1;");
+      expect(recovered?.hash).toBe("disk-hash");
+      expect(recovered?.dirty).toBe(true);
+    });
+    expect(screen.queryByTestId("workspace-recovery-dialog")).not.toBeInTheDocument();
   });
 
   it("opens call and type hierarchy from capability-gated shortcuts", async () => {

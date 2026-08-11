@@ -14,6 +14,10 @@ export interface WorkspaceEntry {
 export interface WorkspaceFile {
   path: string;
   text: string;
+  /** Backend-decoded text encoding; older browser fixtures may omit it. */
+  encoding?: string;
+  /** Whether the on-disk UTF-8 bytes begin with EF BB BF. */
+  bom?: boolean;
   size: number;
   mtime: number;
   hash: string;
@@ -392,5 +396,42 @@ export function workspaceRenamePath(
     repoRoot,
     fromPath,
     toPath,
+  });
+}
+
+export type WorkspaceResourceOperation =
+  | {
+    kind: "create";
+    path: string;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+  }
+  | {
+    kind: "rename";
+    fromPath: string;
+    toPath: string;
+    /** Destination workspace root; omitted for a rename within repoRoot. */
+    toRepoRoot?: string;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+  }
+  | {
+    kind: "delete";
+    path: string;
+    recursive: boolean;
+    ignoreIfNotExists: boolean;
+  };
+
+export interface WorkspaceResourceOperationResult {
+  ignored: boolean;
+}
+
+export function workspaceApplyResourceOperation(
+  repoRoot: string,
+  operation: WorkspaceResourceOperation,
+): Promise<WorkspaceResourceOperationResult> {
+  return invoke<WorkspaceResourceOperationResult>("workspace_apply_resource_operation", {
+    repoRoot,
+    operation,
   });
 }

@@ -77,6 +77,10 @@ export interface WorkspaceNavigationController {
   suppressNextHistoryRecord: () => void;
   /** Remember the live caret so tab switches keep accurate history positions. */
   noteCaretPosition: (key: string, position: WorkspaceNavPosition) => void;
+  /** Remap or remove history/recent references after LSP resource operations. */
+  reconcileFileReferences: (
+    transform: (ref: CodeWorkspaceFileRef) => CodeWorkspaceFileRef | null,
+  ) => void;
   openRecentFiles: () => void;
   pickRecentFile: (entry: RecentFileEntry) => void;
 }
@@ -205,6 +209,62 @@ export function useWorkspaceNavigation({
     navHistoryRef.current.suppress = true;
   }, []);
 
+  const reconcileFileReferences = useCallback((
+    transform: (ref: CodeWorkspaceFileRef) => CodeWorkspaceFileRef | null,
+  ) => {
+    const nav = navHistoryRef.current;
+    const knownRefs = new Map<string, CodeWorkspaceFileRef>();
+    for (const entry of nav.stack) knownRefs.set(fileKey(entry.ref), entry.ref);
+    for (const ref of recentFilesRef.current) knownRefs.set(fileKey(ref), ref);
+    for (const file of Object.values(openFilesRef.current ?? {})) {
+      knownRefs.set(file.key, file.ref);
+    }
+
+    const nextStack: WorkspaceNavLocation[] = [];
+    let nextIndex = -1;
+    nav.stack.forEach((entry, index) => {
+      const ref = transform(entry.ref);
+      if (!ref) return;
+      nextStack.push({ ...entry, ref });
+      if (index <= nav.index) nextIndex = nextStack.length - 1;
+    });
+    nav.stack = nextStack;
+    nav.index = nextStack.length === 0 ? -1 : Math.max(0, Math.min(nextIndex, nextStack.length - 1));
+
+    const seenRecent = new Set<string>();
+    recentFilesRef.current = recentFilesRef.current.flatMap((ref) => {
+      const next = transform(ref);
+      if (!next) return [];
+      const key = fileKey(next);
+      if (seenRecent.has(key)) return [];
+      seenRecent.add(key);
+      return [next];
+    });
+
+    const nextCaret: Record<string, WorkspaceNavPosition> = {};
+    for (const [key, position] of Object.entries(caretByKeyRef.current)) {
+      const ref = knownRefs.get(key);
+      if (!ref) {
+        nextCaret[key] = position;
+        continue;
+      }
+      const next = transform(ref);
+      if (next) nextCaret[fileKey(next)] = position;
+    }
+    caretByKeyRef.current = nextCaret;
+    const previousRef = previousActiveKeyRef.current
+      ? knownRefs.get(previousActiveKeyRef.current)
+      : null;
+    if (previousRef) {
+      const next = transform(previousRef);
+      previousActiveKeyRef.current = next ? fileKey(next) : null;
+    }
+    setNavCan({
+      back: nav.index > 0,
+      forward: nav.index >= 0 && nav.index < nav.stack.length - 1,
+    });
+  }, [openFilesRef]);
+
   useEffect(() => {
     if (!activeKey) {
       previousActiveKeyRef.current = null;
@@ -325,6 +385,7 @@ export function useWorkspaceNavigation({
     recordNavigationLocation,
     suppressNextHistoryRecord,
     noteCaretPosition,
+    reconcileFileReferences,
     openRecentFiles,
     pickRecentFile,
   };

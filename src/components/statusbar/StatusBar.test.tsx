@@ -140,6 +140,36 @@ describe("StatusBar code-workspace segments", () => {
     render(<StatusBar />);
     expect(screen.getByTestId("status-bar-workspace-large-file")).toBeInTheDocument();
   });
+
+  it("exposes encoding and line-ending actions when the editor provides them", () => {
+    const cycleEol = vi.fn();
+    const toggleBom = vi.fn();
+    useCodeWorkspaceStatusStore.setState({
+      status: {
+        tabId: "ws-tab",
+        line: 1,
+        column: 1,
+        encoding: "UTF-8",
+        eol: "LF",
+        languageId: null,
+        lspActive: false,
+        lspLabel: null,
+        lspError: false,
+        gitBranch: null,
+        gitAhead: 0,
+        gitBehind: 0,
+        fontSize: 14,
+        largeFile: false,
+      },
+      actions: { cycleEol, toggleBom },
+    });
+
+    render(<StatusBar />);
+    fireEvent.click(screen.getByTestId("status-bar-workspace-encoding"));
+    fireEvent.click(screen.getByTestId("status-bar-workspace-eol"));
+    expect(toggleBom).toHaveBeenCalledOnce();
+    expect(cycleEol).toHaveBeenCalledOnce();
+  });
 });
 
 describe("StatusBar copyable/truncated text", () => {

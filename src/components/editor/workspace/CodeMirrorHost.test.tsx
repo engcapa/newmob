@@ -206,4 +206,32 @@ describe("CodeMirrorHost search", () => {
     fireEvent.keyDown(content, { key: "w", code: "KeyW", ctrlKey: true });
     await waitFor(() => expect(onExpandSelection).toHaveBeenCalledWith(expect.objectContaining({ empty: true })));
   });
+
+  it("supports dynamic soft wrapping without recreating the editor", async () => {
+    const rendered = renderEditor("a very long logical line", vi.fn(), { softWrap: true });
+    const editor = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(editor).toHaveClass("cm-lineWrapping");
+
+    rendered.rerender(
+      <CodeMirrorHost
+        path="src/example.ts"
+        doc="a very long logical line"
+        visible
+        diagnostics={[]}
+        reveal={null}
+        softWrap={false}
+        onChange={rendered.onChange}
+        onSave={vi.fn()}
+        onHover={vi.fn(async () => null)}
+        onDefinition={vi.fn(async () => false)}
+        onReferences={vi.fn(async () => undefined)}
+      />,
+    );
+    await waitFor(() => expect(editor).not.toHaveClass("cm-lineWrapping"));
+  });
+
+  it("uses rectangular selection for an ordinary drag in column mode", () => {
+    const rendered = renderEditor("one\ntwo", vi.fn(), { columnSelectionMode: true });
+    expect(rendered.container.firstElementChild).toHaveAttribute("data-column-selection", "true");
+  });
 });

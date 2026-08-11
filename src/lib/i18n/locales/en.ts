@@ -2650,6 +2650,8 @@ const dict = {
     increaseTextSize: "Increase code text size",
     fontSizeAria: "Code font size",
     enableLigaturesAria: "Enable code font ligatures",
+    softWrapLabel: "Soft wrap long lines",
+    enableSoftWrapAria: "Enable soft wrapping in the code editor",
     themeLabel: "Theme",
     themeAria: "Code theme",
     themeFollowApp: "Match app theme",

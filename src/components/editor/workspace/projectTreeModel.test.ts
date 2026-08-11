@@ -81,6 +81,12 @@ describe("project tree model helpers", () => {
     expect(applyEditorEol(normalized.text, normalized.eol)).toBe("a\r\nb\r\n");
   });
 
+  it("strips a UTF-8 BOM from the editor buffer before saving metadata", () => {
+    const normalized = normalizeEditorText("\uFEFFhello\r\n");
+    expect(normalized).toEqual({ text: "hello\n", eol: "CRLF" });
+    expect(applyEditorEol(normalized.text, normalized.eol)).toBe("hello\r\n");
+  });
+
   it("gitChange helpers read the rootId:path map", () => {
     const change: GitChange = {
       path: "src/a.ts",

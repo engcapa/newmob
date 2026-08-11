@@ -193,6 +193,17 @@ function CodeViewAppearanceSettingsContent({
             />
             <span className="text-[12px]">{t("terminalAppearance.ligaturesLabel")}</span>
           </label>
+
+          <label className="col-span-12 md:col-span-4 inline-flex items-center gap-1.5 pb-1">
+            <input
+              className="taomni-checkbox"
+              type="checkbox"
+              aria-label={t("codeViewAppearance.enableSoftWrapAria")}
+              checked={profile.softWrap}
+              onChange={(event) => updateProfile({ softWrap: event.target.checked })}
+            />
+            <span className="text-[12px]">{t("codeViewAppearance.softWrapLabel")}</span>
+          </label>
         </div>
       </section>
 

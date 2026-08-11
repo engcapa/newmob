@@ -1,5 +1,11 @@
 use crate::sdk::{JavaRuntimeConfiguration, SdkManager, WorkspaceSdkEnvironment};
 use crate::state::AppState;
+use globset::GlobBuilder;
+use notify::event::{ModifyKind, RenameMode};
+use notify::{
+    Config as NotifyConfig, Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode,
+    Watcher,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, hash_map::DefaultHasher};
@@ -10,10 +16,10 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
-use tokio::sync::{Mutex, Notify, RwLock, oneshot};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc, oneshot};
 
 const REQUEST_TIMEOUT_SECS: u64 = 8;
 /// Project-scope jdtls `executeCommand`s (java-debug's `resolveMainClass` /
@@ -47,6 +53,24 @@ const MAX_VIRTUAL_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 3;
 const EXIT_TIMEOUT_SECS: u64 = 2;
 const COMMAND_AVAILABILITY_TTL: Duration = Duration::from_secs(30);
+const WORKSPACE_APPLY_EDIT_TIMEOUT_SECS: u64 = 30;
+const SHOW_MESSAGE_REQUEST_TIMEOUT_SECS: u64 = 300;
+const WORKSPACE_DIAGNOSTIC_TIMEOUT_SECS: u64 = 30;
+const WORKSPACE_APPLY_EDIT_EVENT: &str = "lsp://workspace-apply-edit";
+const SHOW_MESSAGE_REQUEST_EVENT: &str = "lsp://show-message-request";
+const SHOW_MESSAGE_CANCELLED_EVENT: &str = "lsp://show-message-cancelled";
+const SHOW_MESSAGE_EVENT: &str = "lsp://show-message";
+const WORK_DONE_PROGRESS_EVENT: &str = "lsp://work-done-progress";
+const DIAGNOSTICS_REFRESH_EVENT: &str = "lsp://diagnostics-refresh";
+const EXTERNAL_FILE_CHANGE_EVENT: &str = "lsp://external-file-change";
+const JSON_RPC_METHOD_NOT_FOUND: i64 = -32601;
+const JSON_RPC_INVALID_PARAMS: i64 = -32602;
+const JSON_RPC_INTERNAL_ERROR: i64 = -32603;
+const LSP_REQUEST_CANCELLED: i64 = -32800;
+const WATCH_KIND_CREATE: u8 = 1;
+const WATCH_KIND_CHANGE: u8 = 2;
+const WATCH_KIND_DELETE: u8 = 4;
+const WATCH_KIND_ALL: u8 = WATCH_KIND_CREATE | WATCH_KIND_CHANGE | WATCH_KIND_DELETE;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -503,6 +527,371 @@ struct PendingResponse {
     document_uri: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspWorkspaceApplyEditResponse {
+    pub applied: bool,
+    pub failure_reason: Option<String>,
+    pub failed_change: Option<u32>,
+}
+
+impl LspWorkspaceApplyEditResponse {
+    fn failed(reason: impl Into<String>) -> Self {
+        Self {
+            applied: false,
+            failure_reason: Some(reason.into()),
+            failed_change: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspWorkspaceApplyEditRequest {
+    request_id: String,
+    workspace_id: String,
+    label: Option<String>,
+    edit: LspWorkspaceEdit,
+}
+
+struct PendingWorkspaceApplyEdit {
+    workspace_id: String,
+    sender: oneshot::Sender<LspWorkspaceApplyEditResponse>,
+}
+
+struct PendingShowMessageRequest {
+    workspace_id: String,
+    actions: Vec<Value>,
+    sender: oneshot::Sender<Option<Value>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspShowMessageRequestEvent {
+    request_id: String,
+    workspace_id: String,
+    server_label: String,
+    message_type: u32,
+    message: String,
+    actions: Vec<Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspShowMessageCancelledEvent {
+    request_id: String,
+    workspace_id: String,
+    reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspShowMessageEvent {
+    workspace_id: String,
+    server_label: String,
+    message_type: u32,
+    message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspWorkDoneProgressEvent {
+    workspace_id: String,
+    preset_id: String,
+    server_label: String,
+    root_uri: String,
+    token: Value,
+    kind: String,
+    title: Option<String>,
+    message: Option<String>,
+    percentage: Option<u32>,
+    cancellable: bool,
+}
+
+/// Server-initiated `workspace/diagnostic/refresh` notification for the
+/// renderer. Pull diagnostics are otherwise only refreshed by the Problems
+/// poller; forwarding this event keeps open-file squiggles and the project
+/// Problems view in sync as soon as the server invalidates its report.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspDiagnosticsRefreshEvent {
+    workspace_id: String,
+    preset_id: String,
+    root_uri: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LspExternalFileChangeEvent {
+    workspace_id: String,
+    path: String,
+    #[serde(rename = "type")]
+    change_type: u8,
+}
+
+struct LspClientRequestBridge {
+    app: OnceLock<AppHandle>,
+    pending_workspace_edits: StdMutex<HashMap<String, PendingWorkspaceApplyEdit>>,
+    pending_show_messages: StdMutex<HashMap<String, PendingShowMessageRequest>>,
+    next_request_id: AtomicU64,
+}
+
+impl LspClientRequestBridge {
+    fn new() -> Self {
+        Self {
+            app: OnceLock::new(),
+            pending_workspace_edits: StdMutex::new(HashMap::new()),
+            pending_show_messages: StdMutex::new(HashMap::new()),
+            next_request_id: AtomicU64::new(1),
+        }
+    }
+
+    fn attach_app(&self, app: AppHandle) {
+        let _ = self.app.set(app);
+    }
+
+    async fn apply_workspace_edit(
+        &self,
+        workspace_id: &str,
+        label: Option<String>,
+        edit: LspWorkspaceEdit,
+    ) -> LspWorkspaceApplyEditResponse {
+        let Some(app) = self.app.get().cloned() else {
+            return LspWorkspaceApplyEditResponse::failed(
+                "Code Workspace frontend is unavailable to apply the edit",
+            );
+        };
+        let request_id = format!(
+            "{}:{}",
+            workspace_id,
+            self.next_request_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let (sender, receiver) = oneshot::channel();
+        self.pending_workspace_edits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                request_id.clone(),
+                PendingWorkspaceApplyEdit {
+                    workspace_id: workspace_id.to_string(),
+                    sender,
+                },
+            );
+        let payload = LspWorkspaceApplyEditRequest {
+            request_id: request_id.clone(),
+            workspace_id: workspace_id.to_string(),
+            label,
+            edit,
+        };
+        if let Err(error) = app.emit(WORKSPACE_APPLY_EDIT_EVENT, payload) {
+            self.pending_workspace_edits
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&request_id);
+            return LspWorkspaceApplyEditResponse::failed(format!(
+                "Cannot dispatch WorkspaceEdit to the editor: {error}"
+            ));
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(WORKSPACE_APPLY_EDIT_TIMEOUT_SECS),
+            receiver,
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => LspWorkspaceApplyEditResponse::failed(
+                "Code Workspace closed before applying the edit",
+            ),
+            Err(_) => {
+                self.pending_workspace_edits
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&request_id);
+                LspWorkspaceApplyEditResponse::failed("WorkspaceEdit application timed out")
+            }
+        }
+    }
+
+    fn resolve_workspace_edit(
+        &self,
+        request_id: &str,
+        workspace_id: &str,
+        response: LspWorkspaceApplyEditResponse,
+    ) -> Result<(), String> {
+        let mut pending = self
+            .pending_workspace_edits
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let Some(entry) = pending.remove(request_id) else {
+            return Err(format!(
+                "no pending LSP WorkspaceEdit request '{request_id}'"
+            ));
+        };
+        if entry.workspace_id != workspace_id {
+            pending.insert(request_id.to_string(), entry);
+            return Err("WorkspaceEdit response does not match the target workspace".into());
+        }
+        let _ = entry.sender.send(response);
+        Ok(())
+    }
+
+    fn start_show_message_request(
+        &self,
+        workspace_id: &str,
+        server_label: &str,
+        message_type: u32,
+        message: String,
+        actions: Vec<Value>,
+    ) -> Result<(String, oneshot::Receiver<Option<Value>>), String> {
+        let app = self.app.get().cloned().ok_or_else(|| {
+            "Code Workspace frontend is unavailable to show the message".to_string()
+        })?;
+        let request_id = format!(
+            "{}:message:{}",
+            workspace_id,
+            self.next_request_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let (sender, receiver) = oneshot::channel();
+        self.pending_show_messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                request_id.clone(),
+                PendingShowMessageRequest {
+                    workspace_id: workspace_id.to_string(),
+                    actions: actions.clone(),
+                    sender,
+                },
+            );
+        let payload = LspShowMessageRequestEvent {
+            request_id: request_id.clone(),
+            workspace_id: workspace_id.to_string(),
+            server_label: server_label.to_string(),
+            message_type,
+            message,
+            actions,
+        };
+        if let Err(error) = app.emit(SHOW_MESSAGE_REQUEST_EVENT, payload) {
+            self.pending_show_messages
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&request_id);
+            return Err(format!(
+                "Cannot dispatch language server message to the editor: {error}"
+            ));
+        }
+        Ok((request_id, receiver))
+    }
+
+    async fn wait_for_show_message(
+        &self,
+        request_id: &str,
+        receiver: oneshot::Receiver<Option<Value>>,
+    ) -> Result<Option<Value>, String> {
+        match tokio::time::timeout(
+            Duration::from_secs(SHOW_MESSAGE_REQUEST_TIMEOUT_SECS),
+            receiver,
+        )
+        .await
+        {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(_)) => Err("Language server message request was cancelled".into()),
+            Err(_) => {
+                self.cancel_show_message(request_id, "Message request timed out");
+                Err("Language server message request timed out waiting for user input".into())
+            }
+        }
+    }
+
+    fn resolve_show_message(
+        &self,
+        request_id: &str,
+        workspace_id: &str,
+        action_index: Option<u32>,
+    ) -> Result<(), String> {
+        let mut pending = self
+            .pending_show_messages
+            .lock()
+            .map_err(|error| error.to_string())?;
+        let Some(entry) = pending.remove(request_id) else {
+            return Err(format!("no pending LSP message request '{request_id}'"));
+        };
+        if entry.workspace_id != workspace_id {
+            pending.insert(request_id.to_string(), entry);
+            return Err(
+                "Language server message response does not match the target workspace".into(),
+            );
+        }
+        let selected = match action_index {
+            Some(index) => match entry.actions.get(index as usize).cloned() {
+                Some(action) => Some(action),
+                None => {
+                    pending.insert(request_id.to_string(), entry);
+                    return Err(format!(
+                        "Language server message action {index} is out of range"
+                    ));
+                }
+            },
+            None => None,
+        };
+        let _ = entry.sender.send(selected);
+        Ok(())
+    }
+
+    fn cancel_show_message(&self, request_id: &str, reason: &str) -> bool {
+        let entry = self
+            .pending_show_messages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(request_id);
+        let Some(entry) = entry else {
+            return false;
+        };
+        if let Some(app) = self.app.get() {
+            let _ = app.emit(
+                SHOW_MESSAGE_CANCELLED_EVENT,
+                LspShowMessageCancelledEvent {
+                    request_id: request_id.to_string(),
+                    workspace_id: entry.workspace_id,
+                    reason: reason.to_string(),
+                },
+            );
+        }
+        true
+    }
+
+    fn emit_show_message(&self, payload: LspShowMessageEvent) {
+        if let Some(app) = self.app.get() {
+            let _ = app.emit(SHOW_MESSAGE_EVENT, payload);
+        }
+    }
+
+    fn emit_work_done_progress(&self, payload: LspWorkDoneProgressEvent) {
+        if let Some(app) = self.app.get() {
+            let _ = app.emit(WORK_DONE_PROGRESS_EVENT, payload);
+        }
+    }
+
+    fn emit_diagnostics_refresh(&self, payload: LspDiagnosticsRefreshEvent) {
+        if let Some(app) = self.app.get() {
+            let _ = app.emit(DIAGNOSTICS_REFRESH_EVENT, payload);
+        }
+    }
+
+    fn emit_external_file_change(&self, payload: LspExternalFileChangeEvent) {
+        if let Some(app) = self.app.get() {
+            let _ = app.emit(EXTERNAL_FILE_CHANGE_EVENT, payload);
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DynamicCapabilityRegistration {
+    id: String,
+    method: String,
+    register_options: Value,
+}
+
 #[derive(Clone, Copy)]
 struct CachedCommandAvailability {
     available: bool,
@@ -531,8 +920,30 @@ struct SemanticTokensCache {
     data: Vec<u64>,
 }
 
+#[derive(Clone, Debug)]
+struct WorkDoneProgressState {
+    token: Value,
+    cancellable: bool,
+    title: Option<String>,
+}
+
 type LspSessionRegistry = Arc<Mutex<HashMap<String, LspSessionEntry>>>;
 type LspLastErrorRegistry = Arc<Mutex<HashMap<String, String>>>;
+
+struct WorkspaceWatcherHandle {
+    stop: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceWatchTarget {
+    /// Whether notify should recurse below the requested directory.
+    recursive: bool,
+    /// Logical path used to discard events outside the requested workspace root
+    /// or loose file. For a missing loose file this is the file itself, not its
+    /// parent directory.
+    filter_path: PathBuf,
+}
 
 pub struct LspManager {
     sessions: LspSessionRegistry,
@@ -541,6 +952,9 @@ pub struct LspManager {
     /// after the process dies with `available=true, active=false`.
     last_errors: LspLastErrorRegistry,
     sdk: Arc<SdkManager>,
+    client_bridge: Arc<LspClientRequestBridge>,
+    workspace_watchers: Arc<Mutex<HashMap<String, WorkspaceWatcherHandle>>>,
+    local_watched_events: Arc<StdMutex<HashMap<(String, String, u8), Instant>>>,
 }
 
 enum LspSessionEntry {
@@ -567,11 +981,25 @@ struct LspSession {
     preset: LspServerPreset,
     command: LspServerCommandPreset,
     root_uri: String,
+    root_name: String,
     stdin: Mutex<ChildStdin>,
     pending: Mutex<HashMap<u64, PendingResponse>>,
+    incoming_show_message_requests: Mutex<HashMap<String, String>>,
     opened_documents: RwLock<HashSet<String>>,
     diagnostics: RwLock<HashMap<String, Vec<LspDiagnostic>>>,
+    diagnostic_result_ids: RwLock<HashMap<String, String>>,
+    diagnostic_pull_lock: Mutex<()>,
+    /// Partial `workspace/diagnostic` reports are delivered through
+    /// `$/progress` using a request-scoped token. Keep the raw report items
+    /// until the matching final response arrives, then apply the complete
+    /// report atomically.
+    diagnostic_partial_results: Mutex<HashMap<String, Vec<Value>>>,
+    diagnostic_provider_generation: AtomicU64,
     capabilities: RwLock<Option<LspCapabilitySummary>>,
+    server_capabilities: RwLock<Value>,
+    client_configuration: RwLock<Value>,
+    work_done_progress: RwLock<HashMap<String, WorkDoneProgressState>>,
+    dynamic_capabilities: RwLock<HashMap<String, DynamicCapabilityRegistration>>,
     text_document_sync_kind: AtomicU8,
     semantic_token_types: RwLock<Vec<String>>,
     semantic_token_modifiers: RwLock<Vec<String>>,
@@ -582,6 +1010,7 @@ struct LspSession {
     shutting_down: AtomicBool,
     child: Mutex<Child>,
     stderr_tail: Mutex<String>,
+    client_bridge: Arc<LspClientRequestBridge>,
 }
 
 #[derive(Clone)]
@@ -610,6 +1039,218 @@ impl LspManager {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             last_errors: Arc::new(Mutex::new(HashMap::new())),
             sdk,
+            client_bridge: Arc::new(LspClientRequestBridge::new()),
+            workspace_watchers: Arc::new(Mutex::new(HashMap::new())),
+            local_watched_events: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
+    pub fn attach_app(&self, app: AppHandle) {
+        self.client_bridge.attach_app(app);
+    }
+
+    async fn stop_workspace_watcher(&self, workspace_id: &str) {
+        let handle = self.workspace_watchers.lock().await.remove(workspace_id);
+        let Some(mut handle) = handle else {
+            return;
+        };
+        if let Some(stop) = handle.stop.take() {
+            let _ = stop.send(());
+        }
+        handle.task.abort();
+    }
+
+    async fn start_workspace_watcher(
+        &self,
+        workspace_id: &str,
+        roots: Vec<String>,
+    ) -> Result<(), String> {
+        let mut roots = roots
+            .into_iter()
+            .map(|root| root.trim().to_string())
+            .filter(|root| !root.is_empty())
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        for root in &roots {
+            if !Path::new(root).is_absolute() {
+                return Err(format!(
+                    "workspace watcher requires an absolute root path: {root}"
+                ));
+            }
+        }
+        self.stop_workspace_watcher(workspace_id).await;
+        if roots.is_empty() {
+            return Ok(());
+        }
+
+        let (event_sender, mut event_receiver) = mpsc::unbounded_channel();
+        let mut watcher = RecommendedWatcher::new(
+            move |event| {
+                let _ = event_sender.send(event);
+            },
+            NotifyConfig::default(),
+        )
+        .map_err(|error| format!("cannot initialize workspace file watcher: {error}"))?;
+        let mut watched_roots = 0;
+        let mut root_errors = Vec::new();
+        let mut watch_targets = Vec::new();
+        let mut watch_registrations: HashMap<String, (PathBuf, bool, Vec<String>)> = HashMap::new();
+        for root in &roots {
+            let requested = PathBuf::from(root);
+            let (watch_path, recursive, filter_path) = if requested.is_dir() {
+                (requested.clone(), true, requested)
+            } else if requested.exists() {
+                // notify accepts files on all supported backends, but recursive
+                // mode is rejected by some platform watchers for a file path.
+                (requested.clone(), false, requested)
+            } else if let Some(parent) = requested.parent().filter(|parent| parent.is_dir()) {
+                // A loose file can be deleted before the workspace opens it. Keep
+                // watching its parent so a later recreate is observable, while
+                // filtering sibling events below.
+                (parent.to_path_buf(), false, requested)
+            } else {
+                root_errors.push(format!("{root}: parent directory does not exist"));
+                continue;
+            };
+            let mut registration_key = normalized_file_operation_path(&watch_path);
+            if cfg!(windows) {
+                registration_key.make_ascii_lowercase();
+            }
+            let registration = watch_registrations
+                .entry(registration_key)
+                .or_insert_with(|| (watch_path, false, Vec::new()));
+            registration.1 |= recursive;
+            registration.2.push(root.clone());
+            watch_targets.push(WorkspaceWatchTarget {
+                recursive,
+                filter_path,
+            });
+        }
+        let mut watch_registrations = watch_registrations.into_values().collect::<Vec<_>>();
+        watch_registrations.sort_by(|left, right| {
+            normalized_file_operation_path(&left.0).cmp(&normalized_file_operation_path(&right.0))
+        });
+        for (watch_path, recursive, requested_roots) in watch_registrations {
+            let mode = if recursive {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
+            match watcher.watch(&watch_path, mode) {
+                Ok(()) => watched_roots += 1,
+                Err(error) => root_errors.push(format!("{}: {error}", requested_roots.join(", "))),
+            }
+        }
+        if watched_roots == 0 {
+            return Err(format!(
+                "cannot watch workspace roots: {}",
+                root_errors.join("; ")
+            ));
+        }
+
+        let (stop_sender, mut stop_receiver) = oneshot::channel();
+        let workspace_id = workspace_id.to_string();
+        let watcher_workspace_id = workspace_id.clone();
+        let sessions = self.sessions.clone();
+        let client_bridge = self.client_bridge.clone();
+        let local_events = self.local_watched_events.clone();
+        let task = tokio::spawn(async move {
+            // Keep the watcher alive for the lifetime of this task.
+            let _watcher = watcher;
+            let mut recent_external: HashMap<(String, u8), Instant> = HashMap::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stop_receiver => break,
+                    event = event_receiver.recv() => {
+                        let Some(event) = event else { break; };
+                        let Ok(event) = event else {
+                            log::warn!("workspace file watcher failed: {event:?}");
+                            continue;
+                        };
+                        let changes = notify_event_changes(&event);
+                        if changes.is_empty() {
+                            continue;
+                        }
+                        let changes = changes
+                            .into_iter()
+                            .filter(|change| {
+                                workspace_watch_target_matches(&watch_targets, &change.path)
+                            })
+                            .collect::<Vec<_>>();
+                        if changes.is_empty() {
+                            continue;
+                        }
+                        let now = Instant::now();
+                        recent_external.retain(|_, seen| now.duration_since(*seen) < Duration::from_millis(250));
+                        let mut forwarded = Vec::new();
+                        for change in changes {
+                            let key = (change.path.clone(), change.change_type);
+                            let locally_emitted = local_watched_event_suppressed(
+                                &local_events,
+                                &watcher_workspace_id,
+                                &change.path,
+                                change.change_type,
+                                now,
+                            );
+                            if locally_emitted || recent_external.contains_key(&key) {
+                                continue;
+                            }
+                            recent_external.insert(key, now);
+                            forwarded.push(change);
+                        }
+                        if forwarded.is_empty() {
+                            continue;
+                        }
+                        for change in &forwarded {
+                            client_bridge.emit_external_file_change(LspExternalFileChangeEvent {
+                                workspace_id: watcher_workspace_id.clone(),
+                                path: change.path.clone(),
+                                change_type: change.change_type,
+                            });
+                        }
+                        let _ = notify_watched_file_sessions(&sessions, &watcher_workspace_id, &forwarded).await;
+                    }
+                }
+            }
+        });
+        self.workspace_watchers.lock().await.insert(
+            workspace_id,
+            WorkspaceWatcherHandle {
+                stop: Some(stop_sender),
+                task,
+            },
+        );
+        if !root_errors.is_empty() {
+            log::warn!(
+                "workspace watcher started with unavailable roots: {}",
+                root_errors.join("; ")
+            );
+        }
+        Ok(())
+    }
+
+    fn mark_local_watched_events(&self, workspace_id: &str, changes: &[LspWatchedFileChange]) {
+        let now = Instant::now();
+        let mut local = self
+            .local_watched_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        local.retain(|_, at| now.duration_since(*at) < Duration::from_secs(3));
+        for change in changes {
+            let path = normalized_file_operation_path(Path::new(&change.path));
+            let mut event_types = vec![change.change_type];
+            // Atomic replacement is reported as Create/Remove by some notify
+            // backends even though the logical operation is Changed. Mark the
+            // equivalent variants for the short local-event suppression window.
+            if change.change_type == 2 {
+                event_types.extend([1, 3]);
+            } else {
+                event_types.push(2);
+            }
+            for change_type in event_types {
+                local.insert((workspace_id.to_string(), path.clone(), change_type), now);
+            }
         }
     }
 
@@ -849,6 +1490,7 @@ impl LspManager {
             sdk_environment,
             self.sessions.clone(),
             self.last_errors.clone(),
+            self.client_bridge.clone(),
             map_key.clone(),
             start.clone(),
         )
@@ -907,6 +1549,7 @@ impl LspManager {
     }
 
     async fn stop_workspace(&self, workspace_id: &str) -> usize {
+        self.stop_workspace_watcher(workspace_id).await;
         let (starts, ready) = {
             let mut sessions = self.sessions.lock().await;
             let matching: Vec<String> = sessions
@@ -1021,6 +1664,11 @@ impl LspManager {
         };
         let mut notified = 0;
         for session in sessions {
+            if method == "workspace/didChangeConfiguration"
+                && let Some(settings) = params.get("settings")
+            {
+                session.merge_client_configuration(settings).await;
+            }
             if session.notify(method, params.clone()).await.is_ok() {
                 notified += 1;
             }
@@ -1028,14 +1676,193 @@ impl LspManager {
         notified
     }
 
-    /// Collect every stored diagnostic across ready sessions for `workspace_id`
-    /// (M7-C). Includes files the user never opened — jdtls publishes project-wide
-    /// after a build — de-duplicated per file (later sessions win) and sorted by
-    /// path. Library / virtual (`jdt://`, non-`file:`) URIs are skipped.
-    async fn workspace_diagnostics(&self, workspace_id: &str) -> Vec<WorkspaceDiagnosticFile> {
+    async fn cancel_work_done_progress(
+        &self,
+        workspace_id: &str,
+        preset_id: &str,
+        root_uri: &str,
+        token: &Value,
+    ) -> Result<bool, String> {
+        if !is_progress_token(token) {
+            return Err("work-done progress token must be a string or integer".into());
+        }
         let sessions: Vec<Arc<LspSession>> = {
             let guard = self.sessions.lock().await;
             guard
+                .values()
+                .filter_map(|entry| match entry {
+                    LspSessionEntry::Ready(session)
+                        if session.key.workspace_id == workspace_id
+                            && session.key.preset_id == preset_id
+                            && session.root_uri == root_uri =>
+                    {
+                        Some(session.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut cancelled = false;
+        for session in sessions {
+            cancelled |= session.cancel_work_done_progress(token).await?;
+        }
+        Ok(cancelled)
+    }
+
+    async fn workspace_file_operation_sessions(&self, workspace_id: &str) -> Vec<Arc<LspSession>> {
+        let guard = self.sessions.lock().await;
+        let mut sessions = guard
+            .iter()
+            .filter_map(|(key, entry)| match entry {
+                LspSessionEntry::Ready(session) if session.key.workspace_id == workspace_id => {
+                    Some((key.clone(), session.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by(|left, right| left.0.cmp(&right.0));
+        sessions.into_iter().map(|(_, session)| session).collect()
+    }
+
+    async fn will_workspace_file_operation(
+        &self,
+        workspace_id: &str,
+        operation: &LspWorkspaceFileOperation,
+    ) -> Result<usize, String> {
+        let method = operation.will_method();
+        let sessions = self.workspace_file_operation_sessions(workspace_id).await;
+        let mut requested = 0;
+        let mut applied_edits = 0;
+        for session in sessions {
+            let Some(params) = session
+                .workspace_file_operation_params(method, operation)
+                .await?
+            else {
+                continue;
+            };
+            requested += 1;
+            let result = session.request(method, params).await.map_err(|error| {
+                format!(
+                    "{} could not prepare for {}: {error}",
+                    session.preset.display_name,
+                    operation.label()
+                )
+            })?;
+            if result.is_null() {
+                continue;
+            }
+            if !result.is_object() {
+                return Err(format!(
+                    "{} returned an invalid {method} result",
+                    session.preset.display_name
+                ));
+            }
+            let edit = parse_workspace_edit(&result);
+            if edit.operations.is_empty() {
+                continue;
+            }
+            let response = self
+                .client_bridge
+                .apply_workspace_edit(
+                    workspace_id,
+                    Some(format!(
+                        "{} before {}",
+                        session.preset.display_name,
+                        operation.label()
+                    )),
+                    edit,
+                )
+                .await;
+            if !response.applied {
+                let failed_change = response
+                    .failed_change
+                    .map(|index| format!(" at change {index}"))
+                    .unwrap_or_default();
+                let partial = (applied_edits > 0)
+                    .then(|| {
+                        format!("; {applied_edits} earlier server edit(s) were already applied")
+                    })
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Cannot continue {}: {}{}{}",
+                    operation.label(),
+                    response
+                        .failure_reason
+                        .unwrap_or_else(|| "language-server edit was not applied".into()),
+                    failed_change,
+                    partial
+                ));
+            }
+            applied_edits += 1;
+        }
+        Ok(requested)
+    }
+
+    async fn did_workspace_file_operation(
+        &self,
+        workspace_id: &str,
+        operation: &LspWorkspaceFileOperation,
+    ) -> usize {
+        let method = operation.did_method();
+        let sessions = self.workspace_file_operation_sessions(workspace_id).await;
+        let mut notified = 0;
+        for session in sessions {
+            let params = match session
+                .workspace_file_operation_params(method, operation)
+                .await
+            {
+                Ok(Some(params)) => params,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::warn!(
+                        "cannot prepare {method} for {}: {error}",
+                        session.preset.display_name
+                    );
+                    continue;
+                }
+            };
+            match session.notify(method, params).await {
+                Ok(()) => notified += 1,
+                Err(error) => log::warn!(
+                    "cannot notify {} with {method}: {error}",
+                    session.preset.display_name
+                ),
+            }
+        }
+        let watched_changes = operation.watched_file_changes();
+        if !watched_changes.is_empty() {
+            let watched_sessions = self
+                .did_change_watched_files(workspace_id, &watched_changes)
+                .await;
+            log::debug!(
+                "lsp: forwarded {} watched-file event batch(es) after {}",
+                watched_sessions,
+                operation.label()
+            );
+        }
+        notified
+    }
+
+    async fn did_change_watched_files(
+        &self,
+        workspace_id: &str,
+        changes: &[LspWatchedFileChange],
+    ) -> usize {
+        if changes.is_empty() {
+            return 0;
+        }
+        self.mark_local_watched_events(workspace_id, changes);
+        notify_watched_file_sessions(&self.sessions, workspace_id, changes).await
+    }
+
+    /// Refresh pull-capable servers, then collect every stored diagnostic across
+    /// ready sessions for `workspace_id` (M7-C). Includes files the user never
+    /// opened, de-duplicated per file (later sessions win) and sorted by path.
+    /// Library / virtual (`jdt://`, non-`file:`) URIs are skipped.
+    async fn workspace_diagnostics(&self, workspace_id: &str) -> Vec<WorkspaceDiagnosticFile> {
+        let sessions: Vec<Arc<LspSession>> = {
+            let guard = self.sessions.lock().await;
+            let mut sessions = guard
                 .values()
                 .filter_map(|entry| match entry {
                     LspSessionEntry::Ready(session) if session.key.workspace_id == workspace_id => {
@@ -1043,8 +1870,27 @@ impl LspManager {
                     }
                     _ => None,
                 })
-                .collect()
+                .collect::<Vec<_>>();
+            sessions.sort_by(|left, right| left.key.map_key().cmp(&right.key.map_key()));
+            sessions
         };
+        let pull_results = futures::future::join_all(
+            sessions
+                .iter()
+                .map(|session| session.pull_workspace_diagnostics()),
+        )
+        .await;
+        for (session, result) in sessions.iter().zip(pull_results) {
+            if let Err(error) = result {
+                // Keep publishDiagnostics data available when a server's advertised
+                // pull provider fails. This path may run on a short polling interval,
+                // so avoid repeating the same failure as a warning-level toast/log.
+                log::debug!(
+                    "lsp: workspace/diagnostic failed for {}: {error}",
+                    session.preset.display_name
+                );
+            }
+        }
         let mut by_path: HashMap<String, WorkspaceDiagnosticFile> = HashMap::new();
         for session in sessions {
             for (uri, diagnostics) in session.diagnostics.read().await.iter() {
@@ -1068,6 +1914,50 @@ impl LspManager {
         files.sort_by(|a, b| a.path.cmp(&b.path));
         files
     }
+}
+
+async fn notify_watched_file_sessions(
+    sessions_registry: &LspSessionRegistry,
+    workspace_id: &str,
+    changes: &[LspWatchedFileChange],
+) -> usize {
+    let guard = sessions_registry.lock().await;
+    let mut sessions = guard
+        .iter()
+        .filter_map(|(key, entry)| match entry {
+            LspSessionEntry::Ready(session) if session.key.workspace_id == workspace_id => {
+                Some((key.clone(), session.clone()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    drop(guard);
+    sessions.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut notified = 0;
+    for (_, session) in sessions {
+        let params = match session.watched_file_params(changes).await {
+            Ok(Some(params)) => params,
+            Ok(None) => continue,
+            Err(error) => {
+                log::warn!(
+                    "cannot prepare workspace/didChangeWatchedFiles for {}: {error}",
+                    session.preset.display_name
+                );
+                continue;
+            }
+        };
+        match session
+            .notify("workspace/didChangeWatchedFiles", params)
+            .await
+        {
+            Ok(()) => notified += 1,
+            Err(error) => log::warn!(
+                "cannot notify {} with workspace/didChangeWatchedFiles: {error}",
+                session.preset.display_name
+            ),
+        }
+    }
+    notified
 }
 
 /// One file's diagnostics for the workspace-wide Problems view (M7-C).
@@ -1173,6 +2063,10 @@ fn session_start_error_status(
 }
 
 impl LspSession {
+    async fn merge_client_configuration(&self, patch: &Value) {
+        merge_json_value(&mut *self.client_configuration.write().await, patch);
+    }
+
     async fn spawn(
         key: LspSessionKey,
         preset: LspServerPreset,
@@ -1182,6 +2076,7 @@ impl LspSession {
         sdk_environment: WorkspaceSdkEnvironment,
         sessions: LspSessionRegistry,
         last_errors: LspLastErrorRegistry,
+        client_bridge: Arc<LspClientRequestBridge>,
         map_key: String,
         start: Arc<LspSessionStart>,
     ) -> Result<Arc<Self>, String> {
@@ -1219,6 +2114,15 @@ impl LspSession {
         }
         let initialization_options =
             lsp_initialization_options(&preset, &command, &sdk_environment);
+        let client_configuration = initialization_options
+            .get("settings")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        let root_name = root_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("workspace")
+            .to_string();
         process
             .current_dir(&root_path)
             .stdin(Stdio::piped())
@@ -1244,11 +2148,21 @@ impl LspSession {
             preset,
             command,
             root_uri,
+            root_name,
             stdin: Mutex::new(stdin),
             pending: Mutex::new(HashMap::new()),
+            incoming_show_message_requests: Mutex::new(HashMap::new()),
             opened_documents: RwLock::new(HashSet::new()),
             diagnostics: RwLock::new(HashMap::new()),
+            diagnostic_result_ids: RwLock::new(HashMap::new()),
+            diagnostic_pull_lock: Mutex::new(()),
+            diagnostic_partial_results: Mutex::new(HashMap::new()),
+            diagnostic_provider_generation: AtomicU64::new(0),
             capabilities: RwLock::new(None),
+            server_capabilities: RwLock::new(Value::Null),
+            client_configuration: RwLock::new(client_configuration),
+            work_done_progress: RwLock::new(HashMap::new()),
+            dynamic_capabilities: RwLock::new(HashMap::new()),
             text_document_sync_kind: AtomicU8::new(1),
             semantic_token_types: RwLock::new(Vec::new()),
             semantic_token_modifiers: RwLock::new(Vec::new()),
@@ -1259,6 +2173,7 @@ impl LspSession {
             shutting_down: AtomicBool::new(false),
             child: Mutex::new(child),
             stderr_tail: Mutex::new(String::new()),
+            client_bridge,
         });
 
         tokio::spawn(read_stdout(
@@ -1278,28 +2193,43 @@ impl LspSession {
             "initializationOptions": initialization_options,
             "workspaceFolders": [{
                 "uri": session.root_uri,
-                "name": root_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("workspace")
+                "name": session.root_name
             }],
             "capabilities": {
+                "window": {
+                    "workDoneProgress": true,
+                    "showMessage": {
+                        "messageActionItem": {
+                            "additionalPropertiesSupport": true
+                        }
+                    }
+                },
+                "general": {
+                    "staleRequestSupport": {
+                        "cancel": true,
+                        "retryOnContentModified": []
+                    }
+                },
                 "textDocument": {
                     "synchronization": {
-                        "dynamicRegistration": false,
+                        "dynamicRegistration": true,
                         "didSave": true
                     },
                     "hover": {
+                        "dynamicRegistration": true,
                         "contentFormat": ["markdown", "plaintext"]
                     },
                     "definition": {
+                        "dynamicRegistration": true,
                         "linkSupport": true
                     },
+                    "typeDefinition": { "dynamicRegistration": true, "linkSupport": true },
+                    "implementation": { "dynamicRegistration": true, "linkSupport": true },
                     "references": {
-                        "dynamicRegistration": false
+                        "dynamicRegistration": true
                     },
                     "completion": {
-                        "dynamicRegistration": false,
+                        "dynamicRegistration": true,
                         "contextSupport": true,
                         "completionItem": {
                             "snippetSupport": true,
@@ -1314,6 +2244,7 @@ impl LspSession {
                         }
                     },
                     "signatureHelp": {
+                        "dynamicRegistration": true,
                         "contextSupport": true,
                         "signatureInformation": {
                             "documentationFormat": ["markdown", "plaintext"],
@@ -1322,13 +2253,31 @@ impl LspSession {
                         }
                     },
                     "documentSymbol": {
+                        "dynamicRegistration": true,
                         "hierarchicalDocumentSymbolSupport": true
                     },
+                    "documentHighlight": { "dynamicRegistration": true },
+                    "codeAction": {
+                        "dynamicRegistration": true,
+                        "isPreferredSupport": true,
+                        "dataSupport": true,
+                        "resolveSupport": {
+                            "properties": ["edit", "command"]
+                        }
+                    },
+                    "formatting": { "dynamicRegistration": true },
+                    "rangeFormatting": { "dynamicRegistration": true },
+                    "rename": { "dynamicRegistration": true, "prepareSupport": true },
+                    "callHierarchy": { "dynamicRegistration": true },
+                    "typeHierarchy": { "dynamicRegistration": true },
+                    "inlayHint": { "dynamicRegistration": true },
+                    "selectionRange": { "dynamicRegistration": true },
                     "publishDiagnostics": {
                         "relatedInformation": true,
                         "versionSupport": true
                     },
                     "semanticTokens": {
+                        "dynamicRegistration": true,
                         "requests": { "full": { "delta": true }, "range": false },
                         "tokenTypes": [
                             "namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
@@ -1345,10 +2294,7 @@ impl LspSession {
                         "multilineTokenSupport": true
                     }
                 },
-                "workspace": {
-                    "workspaceFolders": true,
-                    "configuration": false
-                }
+                "workspace": workspace_client_capabilities()
             }
         });
         let initialize_timeout = initialize_timeout_secs(&session.command);
@@ -1378,14 +2324,8 @@ impl LspSession {
             .get("capabilities")
             .cloned()
             .unwrap_or(Value::Null);
-        *session.capabilities.write().await = Some(capability_summary_from(&server_caps));
-        session
-            .text_document_sync_kind
-            .store(text_document_sync_kind(&server_caps), Ordering::SeqCst);
-        let (token_types, token_modifiers) = semantic_token_legend_from(&server_caps);
-        *session.semantic_token_types.write().await = token_types;
-        *session.semantic_token_modifiers.write().await = token_modifiers;
-        *session.semantic_tokens_delta.write().await = semantic_token_delta_supported(&server_caps);
+        *session.server_capabilities.write().await = server_caps;
+        session.refresh_capabilities().await;
         if let Some(error) = start.cancellation.lock().await.clone() {
             session.abort(&error).await;
             return Err(error);
@@ -1395,6 +2335,231 @@ impl LspSession {
             return Err(error);
         }
         Ok(session)
+    }
+
+    async fn refresh_capabilities(&self) {
+        let server_capabilities = self.server_capabilities.read().await.clone();
+        let mut registrations = self
+            .dynamic_capabilities
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        registrations.sort_by(|left, right| left.id.cmp(&right.id));
+        let (summary, token_types, token_modifiers, semantic_delta) =
+            capability_state_from(&server_capabilities, &registrations);
+        self.text_document_sync_kind
+            .store(summary.text_document_sync_kind, Ordering::SeqCst);
+        *self.capabilities.write().await = Some(summary);
+        *self.semantic_token_types.write().await = token_types;
+        *self.semantic_token_modifiers.write().await = token_modifiers;
+        *self.semantic_tokens_delta.write().await = semantic_delta;
+        self.semantic_tokens_cache.write().await.clear();
+    }
+
+    async fn register_capability_values(&self, registrations: Vec<DynamicCapabilityRegistration>) {
+        if registrations.is_empty() {
+            return;
+        }
+        let resets_diagnostic_results = registrations
+            .iter()
+            .any(|registration| registration.method == "workspace/diagnostic");
+        let mut current = self.dynamic_capabilities.write().await;
+        for registration in registrations {
+            current.insert(registration.id.clone(), registration);
+        }
+        drop(current);
+        if resets_diagnostic_results {
+            self.diagnostic_provider_generation
+                .fetch_add(1, Ordering::SeqCst);
+            self.diagnostic_result_ids.write().await.clear();
+        }
+        self.refresh_capabilities().await;
+    }
+
+    async fn unregister_capability_ids(&self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut current = self.dynamic_capabilities.write().await;
+        let mut resets_diagnostic_results = false;
+        for id in ids {
+            if current
+                .remove(&id)
+                .is_some_and(|registration| registration.method == "workspace/diagnostic")
+            {
+                resets_diagnostic_results = true;
+            }
+        }
+        drop(current);
+        if resets_diagnostic_results {
+            self.diagnostic_provider_generation
+                .fetch_add(1, Ordering::SeqCst);
+            self.diagnostic_result_ids.write().await.clear();
+        }
+        self.refresh_capabilities().await;
+    }
+
+    async fn workspace_file_operation_params(
+        &self,
+        method: &str,
+        operation: &LspWorkspaceFileOperation,
+    ) -> Result<Option<Value>, String> {
+        let server_capabilities = self.server_capabilities.read().await.clone();
+        let registrations = self
+            .dynamic_capabilities
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(filters) =
+            file_operation_filters_from(&server_capabilities, &registrations, method)
+        else {
+            return Ok(None);
+        };
+        workspace_file_operation_params(&self.root_uri, operation, &filters)
+    }
+
+    async fn watched_file_params(
+        &self,
+        changes: &[LspWatchedFileChange],
+    ) -> Result<Option<Value>, String> {
+        let registrations = self
+            .dynamic_capabilities
+            .read()
+            .await
+            .values()
+            .filter(|registration| registration.method == "workspace/didChangeWatchedFiles")
+            .cloned()
+            .collect::<Vec<_>>();
+        if registrations.is_empty() {
+            return Ok(None);
+        }
+
+        let mut events = Vec::new();
+        let mut seen = HashSet::new();
+        for change in changes {
+            let Some(watch_kind) = watch_kind_for_change(change.change_type) else {
+                return Err(format!(
+                    "workspace/didChangeWatchedFiles has invalid file change type {}",
+                    change.change_type
+                ));
+            };
+            let uri = file_operation_uri(&change.path)?;
+            if !registrations.iter().any(|registration| {
+                watched_file_registration_matches(registration, &self.root_uri, &uri, watch_kind)
+            }) {
+                continue;
+            }
+            if seen.insert((uri.clone(), change.change_type)) {
+                events.push(json!({ "uri": uri, "type": change.change_type }));
+            }
+        }
+        Ok((!events.is_empty()).then(|| json!({ "changes": events })))
+    }
+
+    /// Pull project diagnostics when the server implements LSP 3.17's
+    /// `workspace/diagnostic`. Push diagnostics remain authoritative for
+    /// servers without this provider, and remain as a fallback if a pull fails.
+    async fn pull_workspace_diagnostics(&self) -> Result<bool, String> {
+        let provider = {
+            let server_capabilities = self.server_capabilities.read().await.clone();
+            let registrations = self
+                .dynamic_capabilities
+                .read()
+                .await
+                .values()
+                .cloned()
+                .collect::<Vec<_>>();
+            workspace_diagnostic_provider_options(&server_capabilities, &registrations)
+        };
+        let Some(provider) = provider else {
+            return Ok(false);
+        };
+
+        // The Problems panel polls this command. If the prior pull is still in
+        // flight, serve its cached data instead of queuing another project-wide
+        // request behind it.
+        let Ok(_guard) = self.diagnostic_pull_lock.try_lock() else {
+            return Ok(false);
+        };
+        let provider_generation = self.diagnostic_provider_generation.load(Ordering::SeqCst);
+        let mut previous_result_ids = self
+            .diagnostic_result_ids
+            .read()
+            .await
+            .iter()
+            .map(|(uri, value)| json!({ "uri": uri, "value": value }))
+            .collect::<Vec<_>>();
+        previous_result_ids.sort_by(|left, right| {
+            left.get("uri")
+                .and_then(Value::as_str)
+                .cmp(&right.get("uri").and_then(Value::as_str))
+        });
+        let mut params = json!({ "previousResultIds": previous_result_ids });
+        if let Some(identifier) = provider.get("identifier").and_then(Value::as_str) {
+            params["identifier"] = json!(identifier);
+        }
+        let partial_token = format!(
+            "workspace-diagnostic:{}",
+            self.next_id.fetch_add(1, Ordering::SeqCst)
+        );
+        let partial_token_key = progress_token_key(&json!(partial_token));
+        self.diagnostic_partial_results
+            .lock()
+            .await
+            .insert(partial_token_key.clone(), Vec::new());
+        params["partialResultToken"] = json!(partial_token);
+        let response = self
+            .request_with_timeout(
+                "workspace/diagnostic",
+                params,
+                WORKSPACE_DIAGNOSTIC_TIMEOUT_SECS,
+            )
+            .await;
+        let partial_items = self
+            .diagnostic_partial_results
+            .lock()
+            .await
+            .remove(&partial_token_key)
+            .unwrap_or_default();
+        let response = merge_workspace_diagnostic_partial_results(response?, partial_items)?;
+        if self.diagnostic_provider_generation.load(Ordering::SeqCst) != provider_generation {
+            return Ok(false);
+        }
+        let mut diagnostics = self.diagnostics.write().await;
+        let mut result_ids = self.diagnostic_result_ids.write().await;
+        apply_workspace_diagnostic_report(&response, &mut diagnostics, &mut result_ids)?;
+        Ok(true)
+    }
+
+    async fn apply_server_workspace_edit(&self, params: Option<&Value>) -> Value {
+        let Some(edit_value) = params.and_then(|value| value.get("edit")) else {
+            return json!({
+                "applied": false,
+                "failureReason": "workspace/applyEdit request did not include an edit"
+            });
+        };
+        let label = params
+            .and_then(|value| value.get("label"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        let response = self
+            .client_bridge
+            .apply_workspace_edit(
+                &self.key.workspace_id,
+                label,
+                parse_workspace_edit(edit_value),
+            )
+            .await;
+        serde_json::to_value(response).unwrap_or_else(|error| {
+            json!({
+                "applied": false,
+                "failureReason": format!("Cannot serialize WorkspaceEdit result: {error}")
+            })
+        })
     }
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), String> {
@@ -1479,11 +2644,204 @@ impl LspSession {
             .map_err(|e| format!("flush LSP message: {e}"))
     }
 
-    async fn handle_message(&self, message: Value) {
-        if let Some(id) = message.get("id").and_then(message_id) {
+    async fn send_server_result(&self, response_id: Value, result: Value) {
+        let _ = self
+            .write_message(&json!({
+                "jsonrpc": "2.0",
+                "id": response_id,
+                "result": result,
+            }))
+            .await;
+    }
+
+    async fn send_server_error(&self, response_id: Value, code: i64, message: impl Into<String>) {
+        let _ = self
+            .write_message(&json!({
+                "jsonrpc": "2.0",
+                "id": response_id,
+                "error": {
+                    "code": code,
+                    "message": message.into()
+                }
+            }))
+            .await;
+    }
+
+    async fn configuration_response(&self, params: Option<&Value>) -> Result<Value, String> {
+        let items = params
+            .and_then(|value| value.get("items"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| "workspace/configuration requires an items array".to_string())?;
+        let configuration = self.client_configuration.read().await.clone();
+        Ok(Value::Array(
+            items
+                .iter()
+                .map(|item| {
+                    let section = item.get("section").and_then(Value::as_str);
+                    configuration_section_value(&configuration, section)
+                })
+                .collect(),
+        ))
+    }
+
+    async fn register_work_done_progress(&self, params: Option<&Value>) -> Result<Value, String> {
+        let token = params
+            .and_then(|value| value.get("token"))
+            .filter(|token| is_progress_token(token))
+            .cloned()
+            .ok_or_else(|| {
+                "window/workDoneProgress/create requires a string or integer token".to_string()
+            })?;
+        let key = progress_token_key(&token);
+        let mut progress = self.work_done_progress.write().await;
+        if progress.contains_key(&key) {
+            return Err(format!(
+                "work-done progress token '{key}' is already registered"
+            ));
+        }
+        progress.insert(
+            key,
+            WorkDoneProgressState {
+                token,
+                cancellable: false,
+                title: None,
+            },
+        );
+        Ok(Value::Null)
+    }
+
+    async fn handle_progress_notification(&self, params: Option<&Value>) {
+        let Some(params) = params else {
+            return;
+        };
+        let Some(token) = params
+            .get("token")
+            .filter(|token| is_progress_token(token))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(value) = params.get("value") else {
+            return;
+        };
+        let key = progress_token_key(&token);
+        if let Some(items) = value.get("items").and_then(Value::as_array) {
+            let mut partial_results = self.diagnostic_partial_results.lock().await;
+            if let Some(collected) = partial_results.get_mut(&key) {
+                collected.extend(items.iter().cloned());
+                return;
+            }
+        }
+        let Some(kind) = value.get("kind").and_then(Value::as_str) else {
+            return;
+        };
+        if !matches!(kind, "begin" | "report" | "end") {
+            return;
+        }
+        let mut progress = self.work_done_progress.write().await;
+        let (title, message, percentage, cancellable) = match kind {
+            "begin" => {
+                let title = value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+                let cancellable = value
+                    .get("cancellable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                progress.insert(
+                    key.clone(),
+                    WorkDoneProgressState {
+                        token: token.clone(),
+                        cancellable,
+                        title: title.clone(),
+                    },
+                );
+                (
+                    title,
+                    progress_message(value),
+                    progress_percentage(value),
+                    cancellable,
+                )
+            }
+            "report" => {
+                let state = progress
+                    .entry(key.clone())
+                    .or_insert_with(|| WorkDoneProgressState {
+                        token: token.clone(),
+                        cancellable: false,
+                        title: None,
+                    });
+                if let Some(cancellable_value) = value.get("cancellable").and_then(Value::as_bool) {
+                    state.cancellable = cancellable_value;
+                }
+                let title = state.title.clone();
+                (
+                    title,
+                    progress_message(value),
+                    progress_percentage(value),
+                    state.cancellable,
+                )
+            }
+            "end" => {
+                let state = progress.remove(&key);
+                (
+                    state.as_ref().and_then(|state| state.title.clone()),
+                    progress_message(value),
+                    progress_percentage(value),
+                    state
+                        .as_ref()
+                        .map(|state| state.cancellable)
+                        .unwrap_or(false),
+                )
+            }
+            _ => return,
+        };
+        drop(progress);
+        self.client_bridge
+            .emit_work_done_progress(LspWorkDoneProgressEvent {
+                workspace_id: self.key.workspace_id.clone(),
+                preset_id: self.key.preset_id.clone(),
+                server_label: self.preset.display_name.clone(),
+                root_uri: self.root_uri.clone(),
+                token,
+                kind: kind.to_string(),
+                title,
+                message,
+                percentage,
+                cancellable,
+            });
+    }
+
+    async fn cancel_work_done_progress(&self, token: &Value) -> Result<bool, String> {
+        let key = progress_token_key(token);
+        let mut progress = self.work_done_progress.write().await;
+        let Some(state) = progress.get_mut(&key) else {
+            return Ok(false);
+        };
+        if !state.cancellable {
+            return Ok(false);
+        }
+        state.cancellable = false;
+        let token = state.token.clone();
+        drop(progress);
+        self.notify("window/workDoneProgress/cancel", json!({ "token": token }))
+            .await?;
+        Ok(true)
+    }
+
+    async fn handle_message(self: &Arc<Self>, message: Value) {
+        if let Some(response_id) = message.get("id").cloned() {
             // Response to one of our requests.
             if message.get("method").is_none() {
-                let pending = self.pending.lock().await.remove(&id);
+                let pending_id = response_id
+                    .as_u64()
+                    .or_else(|| response_id.as_str().and_then(|id| id.parse::<u64>().ok()));
+                let pending = if let Some(id) = pending_id {
+                    self.pending.lock().await.remove(&id)
+                } else {
+                    None
+                };
                 if let Some(pending) = pending {
                     let response = if let Some(error) = message.get("error") {
                         Err(error
@@ -1499,25 +2857,218 @@ impl LspSession {
                 return;
             }
 
-            // Server → client request. Always answer so servers that wait on
-            // registerCapability / configuration do not stall after initialize.
             let method = message.get("method").and_then(Value::as_str).unwrap_or("");
-            let result = server_request_result(method, message.get("params"));
-            let _ = self
-                .write_message(&json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": result,
-                }))
-                .await;
+            let params = message.get("params").cloned();
+            match method {
+                "workspace/applyEdit" => {
+                    let session = Arc::clone(self);
+                    tokio::spawn(async move {
+                        let result = session.apply_server_workspace_edit(params.as_ref()).await;
+                        session.send_server_result(response_id, result).await;
+                    });
+                }
+                "window/showMessageRequest" => {
+                    let Some(request) = parse_show_message_request(params.as_ref()) else {
+                        self.send_server_error(
+                            response_id,
+                            JSON_RPC_INVALID_PARAMS,
+                            "window/showMessageRequest has invalid params",
+                        )
+                        .await;
+                        return;
+                    };
+                    let Some(server_id) = json_rpc_id_key(&response_id) else {
+                        self.send_server_error(
+                            response_id,
+                            -32600,
+                            "Server request id must be a string or number",
+                        )
+                        .await;
+                        return;
+                    };
+                    let (frontend_id, receiver) =
+                        match self.client_bridge.start_show_message_request(
+                            &self.key.workspace_id,
+                            &self.preset.display_name,
+                            request.message_type,
+                            request.message,
+                            request.actions,
+                        ) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                self.send_server_error(response_id, JSON_RPC_INTERNAL_ERROR, error)
+                                    .await;
+                                return;
+                            }
+                        };
+                    let duplicate = self
+                        .incoming_show_message_requests
+                        .lock()
+                        .await
+                        .insert(server_id.clone(), frontend_id.clone());
+                    if duplicate.is_some() {
+                        self.client_bridge
+                            .cancel_show_message(&frontend_id, "Duplicate server request id");
+                        self.send_server_error(
+                            response_id,
+                            -32600,
+                            "A server request with this id is already pending",
+                        )
+                        .await;
+                        return;
+                    }
+                    let session = Arc::clone(self);
+                    tokio::spawn(async move {
+                        let result = session
+                            .client_bridge
+                            .wait_for_show_message(&frontend_id, receiver)
+                            .await;
+                        let owns_request = session
+                            .incoming_show_message_requests
+                            .lock()
+                            .await
+                            .remove(&server_id)
+                            .is_some_and(|id| id == frontend_id);
+                        if !owns_request {
+                            return;
+                        }
+                        match result {
+                            Ok(value) => {
+                                session
+                                    .send_server_result(response_id, value.unwrap_or(Value::Null))
+                                    .await
+                            }
+                            Err(error) => {
+                                session
+                                    .send_server_error(response_id, LSP_REQUEST_CANCELLED, error)
+                                    .await
+                            }
+                        }
+                    });
+                }
+                "client/registerCapability" => {
+                    let result =
+                        match parse_dynamic_capability_registrations_checked(params.as_ref()) {
+                            Ok(registrations) => {
+                                self.register_capability_values(registrations).await;
+                                Ok(Value::Null)
+                            }
+                            Err(error) => Err(error),
+                        };
+                    match result {
+                        Ok(value) => self.send_server_result(response_id, value).await,
+                        Err(error) => {
+                            self.send_server_error(response_id, JSON_RPC_INVALID_PARAMS, error)
+                                .await
+                        }
+                    }
+                }
+                "client/unregisterCapability" => {
+                    match parse_dynamic_capability_unregistrations_checked(params.as_ref()) {
+                        Ok(ids) => {
+                            self.unregister_capability_ids(ids).await;
+                            self.send_server_result(response_id, Value::Null).await;
+                        }
+                        Err(error) => {
+                            self.send_server_error(response_id, JSON_RPC_INVALID_PARAMS, error)
+                                .await;
+                        }
+                    }
+                }
+                "workspace/configuration" => {
+                    match self.configuration_response(params.as_ref()).await {
+                        Ok(value) => self.send_server_result(response_id, value).await,
+                        Err(error) => {
+                            self.send_server_error(response_id, JSON_RPC_INVALID_PARAMS, error)
+                                .await
+                        }
+                    }
+                }
+                "workspace/workspaceFolders" => {
+                    self.send_server_result(
+                        response_id,
+                        json!([{ "uri": self.root_uri, "name": self.root_name }]),
+                    )
+                    .await;
+                }
+                "window/workDoneProgress/create" => {
+                    match self.register_work_done_progress(params.as_ref()).await {
+                        Ok(value) => self.send_server_result(response_id, value).await,
+                        Err(error) => {
+                            self.send_server_error(response_id, JSON_RPC_INVALID_PARAMS, error)
+                                .await
+                        }
+                    }
+                }
+                "workspace/diagnostic/refresh" => {
+                    self.client_bridge
+                        .emit_diagnostics_refresh(LspDiagnosticsRefreshEvent {
+                            workspace_id: self.key.workspace_id.clone(),
+                            preset_id: self.key.preset_id.clone(),
+                            root_uri: self.root_uri.clone(),
+                        });
+                    self.send_server_result(response_id, Value::Null).await;
+                }
+                "workspace/semanticTokens/refresh"
+                | "workspace/inlayHint/refresh"
+                | "workspace/codeLens/refresh"
+                | "workspace/foldingRange/refresh"
+                | "workspace/inlineValue/refresh" => {
+                    self.send_server_result(response_id, Value::Null).await;
+                }
+                _ => {
+                    self.send_server_error(
+                        response_id,
+                        JSON_RPC_METHOD_NOT_FOUND,
+                        format!("Unsupported language server request: {method}"),
+                    )
+                    .await;
+                }
+            }
             return;
         }
 
         let Some(method) = message.get("method").and_then(Value::as_str) else {
             return;
         };
+        let params = message.get("params");
+        if method == "$/cancelRequest" {
+            let Some(cancel_id) = params.and_then(|value| value.get("id")).cloned() else {
+                return;
+            };
+            let Some(server_id) = json_rpc_id_key(&cancel_id) else {
+                return;
+            };
+            let frontend_id = self
+                .incoming_show_message_requests
+                .lock()
+                .await
+                .remove(&server_id);
+            if let Some(frontend_id) = frontend_id {
+                self.client_bridge
+                    .cancel_show_message(&frontend_id, "Cancelled by the language server");
+                self.send_server_error(cancel_id, LSP_REQUEST_CANCELLED, "Request cancelled")
+                    .await;
+            }
+            return;
+        }
+        if method == "$/progress" {
+            self.handle_progress_notification(params).await;
+            return;
+        }
+        if method == "window/showMessage" {
+            if let Some(notification) = parse_show_message_notification(params) {
+                self.client_bridge.emit_show_message(LspShowMessageEvent {
+                    workspace_id: self.key.workspace_id.clone(),
+                    server_label: self.preset.display_name.clone(),
+                    message_type: notification.message_type,
+                    message: notification.message,
+                });
+            }
+            return;
+        }
         if method == "textDocument/publishDiagnostics" {
-            let Some(params) = message.get("params") else {
+            let Some(params) = params else {
                 return;
             };
             let Some(uri) = params.get("uri").and_then(Value::as_str) else {
@@ -1590,6 +3141,10 @@ impl LspSession {
         for response in pending.into_values() {
             let _ = response.sender.send(Err(error.to_string()));
         }
+        let incoming = std::mem::take(&mut *self.incoming_show_message_requests.lock().await);
+        for frontend_id in incoming.into_values() {
+            self.client_bridge.cancel_show_message(&frontend_id, error);
+        }
     }
 }
 
@@ -1616,6 +3171,41 @@ fn initialize_timeout_secs(command: &LspServerCommandPreset) -> u64 {
     } else {
         INITIALIZE_TIMEOUT_SECS
     }
+}
+
+fn workspace_client_capabilities() -> Value {
+    json!({
+        "applyEdit": true,
+        "workspaceEdit": {
+            "documentChanges": true,
+            "resourceOperations": ["create", "rename", "delete"],
+            "failureHandling": "abort",
+            "changeAnnotationSupport": {
+                "groupsOnLabel": false
+            }
+        },
+        "workspaceFolders": true,
+        "configuration": true,
+        "diagnostics": {
+            "refreshSupport": true,
+            "relatedDocumentSupport": true
+        },
+        "fileOperations": {
+            "dynamicRegistration": true,
+            "didCreate": true,
+            "willCreate": true,
+            "didRename": true,
+            "willRename": true,
+            "didDelete": true,
+            "willDelete": true
+        },
+        "didChangeWatchedFiles": {
+            "dynamicRegistration": true
+        },
+        "symbol": {
+            "dynamicRegistration": true
+        }
+    })
 }
 
 /// Build a process command for an LSP server binary.
@@ -2555,23 +4145,109 @@ fn ensure_jdtls_data_dir(data_dir: &Path, workspace_root: &Path) -> Result<(), S
     Ok(())
 }
 
-fn server_request_result(method: &str, params: Option<&Value>) -> Value {
-    match method {
-        "workspace/configuration" => {
-            let count = params
-                .and_then(|value| value.get("items"))
-                .and_then(Value::as_array)
-                .map(Vec::len)
-                .unwrap_or(0);
-            Value::Array(vec![Value::Null; count])
-        }
-        "window/showMessageRequest" => Value::Null,
-        "window/workDoneProgress/create"
-        | "client/registerCapability"
-        | "client/unregisterCapability"
-        | "workspace/workspaceFolders" => Value::Null,
-        _ => Value::Null,
+struct ParsedShowMessage {
+    message_type: u32,
+    message: String,
+    actions: Vec<Value>,
+}
+
+fn parse_show_message_request(params: Option<&Value>) -> Option<ParsedShowMessage> {
+    let params = params?;
+    let message_type = params.get("type").and_then(Value::as_u64)?;
+    if !(1..=4).contains(&message_type) {
+        return None;
     }
+    let message = params.get("message").and_then(Value::as_str)?.to_string();
+    let actions = match params.get("actions") {
+        None => Vec::new(),
+        Some(Value::Array(actions)) => actions
+            .iter()
+            .filter(|action| action.get("title").and_then(Value::as_str).is_some())
+            .cloned()
+            .collect(),
+        Some(_) => return None,
+    };
+    if params
+        .get("actions")
+        .and_then(Value::as_array)
+        .is_some_and(|items| items.len() != actions.len())
+    {
+        return None;
+    }
+    Some(ParsedShowMessage {
+        message_type: message_type as u32,
+        message,
+        actions,
+    })
+}
+
+fn parse_show_message_notification(params: Option<&Value>) -> Option<ParsedShowMessage> {
+    let mut parsed = parse_show_message_request(params)?;
+    parsed.actions.clear();
+    Some(parsed)
+}
+
+fn is_progress_token(value: &Value) -> bool {
+    value.is_string() || value.as_i64().is_some() || value.as_u64().is_some()
+}
+
+fn progress_token_key(value: &Value) -> String {
+    match value {
+        Value::String(value) => format!("s:{value}"),
+        Value::Number(value) => format!("n:{value}"),
+        _ => value.to_string(),
+    }
+}
+
+fn progress_message(value: &Value) -> Option<String> {
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+}
+
+fn progress_percentage(value: &Value) -> Option<u32> {
+    value
+        .get("percentage")
+        .and_then(Value::as_u64)
+        .map(|percentage| percentage.min(100) as u32)
+}
+
+fn json_rpc_id_key(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(format!("s:{value}")),
+        Value::Number(value) => Some(format!("n:{value}")),
+        _ => None,
+    }
+}
+
+fn configuration_section_value(configuration: &Value, section: Option<&str>) -> Value {
+    let Some(section) = section.map(str::trim).filter(|section| !section.is_empty()) else {
+        return configuration.clone();
+    };
+    let mut current = configuration;
+    for part in section.split('.') {
+        let Some(next) = current.get(part) else {
+            return Value::Null;
+        };
+        current = next;
+    }
+    current.clone()
+}
+
+fn merge_json_value(target: &mut Value, patch: &Value) {
+    if let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) {
+        for (key, value) in patch {
+            match target.get_mut(key) {
+                Some(existing) => merge_json_value(existing, value),
+                None => {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        return;
+    }
+    *target = patch.clone();
 }
 
 async fn read_stdout(
@@ -2797,6 +4473,180 @@ pub async fn lsp_document_status(
             custom_server_command.as_ref(),
         )
         .await)
+}
+
+#[tauri::command]
+pub async fn lsp_execute_command(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+    command: String,
+    arguments: Vec<Value>,
+) -> Result<Value, String> {
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+        .ok_or_else(|| "Language server is not active for this document".to_string())?;
+    session
+        .request_with_timeout(
+            "workspace/executeCommand",
+            json!({ "command": command, "arguments": arguments }),
+            JAVA_COMMAND_TIMEOUT_SECS,
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn lsp_resolve_workspace_edit(
+    state: State<'_, AppState>,
+    request_id: String,
+    workspace_id: String,
+    applied: bool,
+    failure_reason: Option<String>,
+    failed_change: Option<u32>,
+) -> Result<(), String> {
+    state.lsp.client_bridge.resolve_workspace_edit(
+        &request_id,
+        &workspace_id,
+        LspWorkspaceApplyEditResponse {
+            applied,
+            failure_reason,
+            failed_change,
+        },
+    )
+}
+
+#[tauri::command]
+pub async fn lsp_resolve_show_message_request(
+    state: State<'_, AppState>,
+    request_id: String,
+    workspace_id: String,
+    action_index: Option<u32>,
+) -> Result<(), String> {
+    state
+        .lsp
+        .client_bridge
+        .resolve_show_message(&request_id, &workspace_id, action_index)
+}
+
+#[tauri::command]
+pub async fn lsp_cancel_work_done_progress(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    preset_id: String,
+    root_uri: String,
+    token: Value,
+) -> Result<bool, String> {
+    state
+        .lsp
+        .cancel_work_done_progress(&workspace_id, &preset_id, &root_uri, &token)
+        .await
+}
+
+#[tauri::command]
+pub async fn lsp_workspace_will_file_operation(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    operation: LspWorkspaceFileOperation,
+) -> Result<usize, String> {
+    let workspace_id = workspace_id.trim();
+    let workspace_id = if workspace_id.is_empty() {
+        "default"
+    } else {
+        workspace_id
+    };
+    state
+        .lsp
+        .will_workspace_file_operation(workspace_id, &operation)
+        .await
+}
+
+#[tauri::command]
+pub async fn lsp_workspace_did_file_operation(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    operation: LspWorkspaceFileOperation,
+) -> Result<usize, String> {
+    let workspace_id = workspace_id.trim();
+    let workspace_id = if workspace_id.is_empty() {
+        "default"
+    } else {
+        workspace_id
+    };
+    Ok(state
+        .lsp
+        .did_workspace_file_operation(workspace_id, &operation)
+        .await)
+}
+
+#[tauri::command]
+pub async fn lsp_workspace_did_change_watched_files(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    changes: Vec<LspWatchedFileChange>,
+) -> Result<usize, String> {
+    let workspace_id = workspace_id.trim();
+    let workspace_id = if workspace_id.is_empty() {
+        "default"
+    } else {
+        workspace_id
+    };
+    for change in &changes {
+        if !Path::new(&change.path).is_absolute() {
+            return Err(format!(
+                "workspace/didChangeWatchedFiles requires an absolute path: {}",
+                change.path
+            ));
+        }
+        if watch_kind_for_change(change.change_type).is_none() {
+            return Err(format!(
+                "workspace/didChangeWatchedFiles has invalid file change type {}",
+                change.change_type
+            ));
+        }
+    }
+    Ok(state
+        .lsp
+        .did_change_watched_files(workspace_id, &changes)
+        .await)
+}
+
+#[tauri::command]
+pub async fn lsp_start_workspace_watcher(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    roots: Vec<String>,
+) -> Result<(), String> {
+    let workspace_id = workspace_id.trim();
+    let workspace_id = if workspace_id.is_empty() {
+        "default"
+    } else {
+        workspace_id
+    };
+    state.lsp.start_workspace_watcher(workspace_id, roots).await
+}
+
+#[tauri::command]
+pub async fn lsp_stop_workspace_watcher(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<(), String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("workspace id is required".into());
+    }
+    state.lsp.stop_workspace_watcher(workspace_id).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -3115,10 +4965,10 @@ pub async fn lsp_get_diagnostics(
     })
 }
 
-/// All diagnostics stored across the workspace's ready sessions (M7-C), including
-/// files the user never opened (jdtls publishes project-wide after a build). The
-/// frontend uses this for the Problems panel's "whole project" mode and refreshes
-/// it on the `lsp:diagnostics-updated` event. Empty when no session is active.
+/// Refresh LSP 3.17 pull-capable servers, then return diagnostics stored across
+/// the workspace's ready sessions (M7-C), including files the user never opened.
+/// Servers without `workspace/diagnostic` keep using publishDiagnostics data.
+/// Empty when no session is active.
 #[tauri::command]
 pub async fn lsp_workspace_diagnostics(
     state: State<'_, AppState>,
@@ -3582,14 +5432,171 @@ pub struct LspFormattingResult {
 pub struct LspFileTextEdits {
     pub uri: String,
     pub path: Option<String>,
+    pub version: Option<i64>,
     pub edits: Vec<LspTextEdit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotation_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspChangeAnnotation {
+    pub id: String,
+    pub label: String,
+    pub needs_confirmation: bool,
+    pub description: Option<String>,
 }
 
 /// Normalized workspace edit for clients (rename / code actions / replace).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LspWorkspaceEditOperation {
+    Text {
+        document: LspFileTextEdits,
+    },
+    Create {
+        uri: String,
+        path: Option<String>,
+        overwrite: bool,
+        ignore_if_exists: bool,
+        annotation_id: Option<String>,
+    },
+    Rename {
+        old_uri: String,
+        old_path: Option<String>,
+        new_uri: String,
+        new_path: Option<String>,
+        overwrite: bool,
+        ignore_if_exists: bool,
+        annotation_id: Option<String>,
+    },
+    Delete {
+        uri: String,
+        path: Option<String>,
+        recursive: bool,
+        ignore_if_not_exists: bool,
+        annotation_id: Option<String>,
+    },
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LspWorkspaceEdit {
     pub document_edits: Vec<LspFileTextEdits>,
+    #[serde(default)]
+    pub operations: Vec<LspWorkspaceEditOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub change_annotations: Vec<LspChangeAnnotation>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspWorkspaceFileOperationTarget {
+    pub path: String,
+    #[serde(default)]
+    pub is_directory: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspWorkspaceFileRenameTarget {
+    pub old_path: String,
+    pub new_path: String,
+    #[serde(default)]
+    pub is_directory: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LspWorkspaceFileOperation {
+    Create {
+        files: Vec<LspWorkspaceFileOperationTarget>,
+    },
+    Rename {
+        files: Vec<LspWorkspaceFileRenameTarget>,
+    },
+    Delete {
+        files: Vec<LspWorkspaceFileOperationTarget>,
+    },
+}
+
+/// A local filesystem event forwarded to language servers that registered
+/// `workspace/didChangeWatchedFiles` watchers. The numeric `type` values are
+/// the LSP FileChangeType enum: 1 = created, 2 = changed, 3 = deleted.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LspWatchedFileChange {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub change_type: u8,
+}
+
+impl LspWorkspaceFileOperation {
+    fn will_method(&self) -> &'static str {
+        match self {
+            Self::Create { .. } => "workspace/willCreateFiles",
+            Self::Rename { .. } => "workspace/willRenameFiles",
+            Self::Delete { .. } => "workspace/willDeleteFiles",
+        }
+    }
+
+    fn did_method(&self) -> &'static str {
+        match self {
+            Self::Create { .. } => "workspace/didCreateFiles",
+            Self::Rename { .. } => "workspace/didRenameFiles",
+            Self::Delete { .. } => "workspace/didDeleteFiles",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Create { .. } => "creating files",
+            Self::Rename { .. } => "renaming files",
+            Self::Delete { .. } => "deleting files",
+        }
+    }
+
+    fn watched_file_changes(&self) -> Vec<LspWatchedFileChange> {
+        match self {
+            Self::Create { files } => files
+                .iter()
+                .map(|file| LspWatchedFileChange {
+                    path: file.path.clone(),
+                    change_type: 1,
+                })
+                .collect(),
+            Self::Delete { files } => files
+                .iter()
+                .map(|file| LspWatchedFileChange {
+                    path: file.path.clone(),
+                    change_type: 3,
+                })
+                .collect(),
+            Self::Rename { files } => files
+                .iter()
+                .flat_map(|file| {
+                    [
+                        LspWatchedFileChange {
+                            path: file.old_path.clone(),
+                            change_type: 3,
+                        },
+                        LspWatchedFileChange {
+                            path: file.new_path.clone(),
+                            change_type: 1,
+                        },
+                    ]
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -3610,6 +5617,13 @@ pub struct LspCodeAction {
 pub struct LspCodeActionsResult {
     pub status: LspDocumentStatus,
     pub actions: Vec<LspCodeAction>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspCodeActionResolveResult {
+    pub status: LspDocumentStatus,
+    pub action: Option<LspCodeAction>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5075,6 +7089,74 @@ pub async fn lsp_code_actions(
     })
 }
 
+/// Resolve a lazily populated CodeAction only after the user selects it.
+/// Servers are allowed to return just `title`/`data` from codeAction and fill
+/// in the edit or command during `codeAction/resolve`; merge the response with
+/// the original object so omitted fields remain available to the client.
+#[tauri::command]
+pub async fn lsp_code_action_resolve(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    root_path: Option<String>,
+    file_path: String,
+    action: Value,
+    language_id: Option<String>,
+    server_command_id: Option<String>,
+    custom_server_command: Option<LspCustomServerCommand>,
+) -> Result<LspCodeActionResolveResult, String> {
+    if !action.is_object() {
+        return Err("codeAction/resolve requires an object action".into());
+    }
+    let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
+    let session = match state
+        .lsp
+        .active_session(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await
+    {
+        Some(session) => session,
+        None => {
+            let status = state
+                .lsp
+                .document_status(
+                    &document,
+                    server_command_id.as_deref(),
+                    custom_server_command.as_ref(),
+                )
+                .await;
+            return Ok(LspCodeActionResolveResult {
+                status,
+                action: parse_code_action(&action),
+            });
+        }
+    };
+    let resolved = session
+        .request("codeAction/resolve", action.clone())
+        .await?;
+    let merged = if resolved.is_null() {
+        action
+    } else {
+        merge_code_action_values(&action, &resolved)
+    };
+    let parsed = parse_code_action(&merged)
+        .ok_or_else(|| "codeAction/resolve returned an invalid CodeAction".to_string())?;
+    let status = state
+        .lsp
+        .document_status(
+            &document,
+            server_command_id.as_deref(),
+            custom_server_command.as_ref(),
+        )
+        .await;
+    Ok(LspCodeActionResolveResult {
+        status,
+        action: Some(parsed),
+    })
+}
+
 #[tauri::command]
 pub async fn lsp_formatting(
     state: State<'_, AppState>,
@@ -5719,12 +7801,6 @@ fn command_line(command: &str, args: &[String]) -> String {
     }
 }
 
-fn message_id(value: &Value) -> Option<u64> {
-    value
-        .as_u64()
-        .or_else(|| value.as_str().and_then(|id| id.parse::<u64>().ok()))
-}
-
 fn request_document_uri(params: &Value) -> Option<&str> {
     params
         .pointer("/textDocument/uri")
@@ -5818,6 +7894,147 @@ fn has_provider(capabilities: &Value, key: &str) -> bool {
     }
 }
 
+fn workspace_diagnostic_provider_options(
+    server_capabilities: &Value,
+    registrations: &[DynamicCapabilityRegistration],
+) -> Option<Value> {
+    if let Some(registration) = registrations
+        .iter()
+        .filter(|registration| registration.method == "workspace/diagnostic")
+        .min_by(|left, right| left.id.cmp(&right.id))
+    {
+        return Some(registration.register_options.clone());
+    }
+    let provider = server_capabilities.get("diagnosticProvider")?;
+    provider
+        .get("workspaceDiagnostics")
+        .and_then(Value::as_bool)
+        .filter(|supported| *supported)
+        .map(|_| provider.clone())
+}
+
+struct WorkspaceDiagnosticUpdate {
+    uri: String,
+    diagnostics: Option<Vec<LspDiagnostic>>,
+    /// `None` keeps the prior id; `Some(None)` clears it; `Some(Some(id))` replaces it.
+    result_id: Option<Option<String>>,
+}
+
+fn collect_workspace_diagnostic_document_report(
+    uri: &str,
+    report: &Value,
+    updates: &mut Vec<WorkspaceDiagnosticUpdate>,
+) -> Result<(), String> {
+    let kind = report.get("kind").and_then(Value::as_str).unwrap_or("full");
+    let diagnostics = match kind {
+        "full" => {
+            let items = report
+                .get("items")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    format!("workspace/diagnostic full report for '{uri}' is missing items")
+                })?
+                .iter()
+                .filter_map(parse_diagnostic)
+                .collect();
+            Some(items)
+        }
+        "unchanged" => None,
+        _ => {
+            return Err(format!(
+                "workspace/diagnostic returned an unsupported report kind '{kind}'"
+            ));
+        }
+    };
+    let result_id = if let Some(result_id) = report.get("resultId").and_then(Value::as_str) {
+        Some(Some(result_id.to_string()))
+    } else if kind == "full" {
+        Some(None)
+    } else {
+        None
+    };
+    updates.push(WorkspaceDiagnosticUpdate {
+        uri: uri.to_string(),
+        diagnostics,
+        result_id,
+    });
+
+    if let Some(related_documents) = report.get("relatedDocuments").and_then(Value::as_object) {
+        for (related_uri, related_report) in related_documents {
+            collect_workspace_diagnostic_document_report(related_uri, related_report, updates)?;
+        }
+    }
+    Ok(())
+}
+
+/// Combine zero or more `$/progress` partial diagnostic chunks with the final
+/// `workspace/diagnostic` response. The protocol permits the server to send
+/// partial chunks before the final report; applying them only after validation
+/// keeps a malformed final response from partially replacing cached diagnostics.
+fn merge_workspace_diagnostic_partial_results(
+    mut response: Value,
+    partial_items: Vec<Value>,
+) -> Result<Value, String> {
+    if partial_items.is_empty() {
+        return Ok(response);
+    }
+    let object = response
+        .as_object_mut()
+        .ok_or_else(|| "workspace/diagnostic final response must be an object".to_string())?;
+    let final_items = object
+        .get_mut("items")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            "workspace/diagnostic final response is missing an items array".to_string()
+        })?;
+    let mut merged = partial_items;
+    merged.append(final_items);
+    *final_items = merged;
+    Ok(response)
+}
+
+fn apply_workspace_diagnostic_report(
+    response: &Value,
+    diagnostics: &mut HashMap<String, Vec<LspDiagnostic>>,
+    result_ids: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    let items = response
+        .get("items")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "workspace/diagnostic response is missing an items array".to_string())?;
+    let mut updates = Vec::new();
+    for (index, report) in items.iter().enumerate() {
+        let uri = report.get("uri").and_then(Value::as_str).ok_or_else(|| {
+            format!("workspace/diagnostic item {index} is missing a document URI")
+        })?;
+        collect_workspace_diagnostic_document_report(uri, report, &mut updates)?;
+    }
+    if let Some(related_documents) = response.get("relatedDocuments").and_then(Value::as_object) {
+        for (related_uri, related_report) in related_documents {
+            collect_workspace_diagnostic_document_report(
+                related_uri,
+                related_report,
+                &mut updates,
+            )?;
+        }
+    }
+    for update in updates {
+        if let Some(next) = update.diagnostics {
+            diagnostics.insert(update.uri.clone(), next);
+        }
+        match update.result_id {
+            Some(Some(result_id)) => {
+                result_ids.insert(update.uri, result_id);
+            }
+            Some(None) => {
+                result_ids.remove(&update.uri);
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
 fn provider_strings(capabilities: &Value, key: &str, field: &str) -> Vec<String> {
     capabilities
         .get(key)
@@ -5831,6 +8048,439 @@ fn provider_strings(capabilities: &Value, key: &str, field: &str) -> Vec<String>
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn file_operation_capability_key(method: &str) -> Option<&'static str> {
+    match method {
+        "workspace/willCreateFiles" => Some("willCreate"),
+        "workspace/didCreateFiles" => Some("didCreate"),
+        "workspace/willRenameFiles" => Some("willRename"),
+        "workspace/didRenameFiles" => Some("didRename"),
+        "workspace/willDeleteFiles" => Some("willDelete"),
+        "workspace/didDeleteFiles" => Some("didDelete"),
+        _ => None,
+    }
+}
+
+fn file_operation_filters_from_options(options: &Value) -> Vec<Value> {
+    options
+        .get("filters")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn file_operation_filters_from(
+    server_capabilities: &Value,
+    registrations: &[DynamicCapabilityRegistration],
+    method: &str,
+) -> Option<Vec<Value>> {
+    let capability_key = file_operation_capability_key(method)?;
+    let mut supported = false;
+    let mut filters = Vec::new();
+    if let Some(options) = server_capabilities
+        .get("workspace")
+        .and_then(|workspace| workspace.get("fileOperations"))
+        .and_then(|operations| operations.get(capability_key))
+    {
+        supported = true;
+        filters.extend(file_operation_filters_from_options(options));
+    }
+    for registration in registrations
+        .iter()
+        .filter(|registration| registration.method == method)
+    {
+        supported = true;
+        filters.extend(file_operation_filters_from_options(
+            &registration.register_options,
+        ));
+    }
+    supported.then_some(filters)
+}
+
+fn file_operation_uri(path: &str) -> Result<String, String> {
+    let path = Path::new(path);
+    if !path.is_absolute() {
+        return Err(format!(
+            "LSP workspace file operation requires an absolute path: {}",
+            path.display()
+        ));
+    }
+    url::Url::from_file_path(path)
+        .map(|uri| uri.to_string())
+        .map_err(|_| format!("Cannot convert path to file URI: {}", path.display()))
+}
+
+fn normalized_file_operation_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+fn relative_file_operation_path(root: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()
+        .map(normalized_file_operation_path)
+}
+
+#[cfg(windows)]
+fn relative_file_operation_path(root: &Path, path: &Path) -> Option<String> {
+    let root = normalized_file_operation_path(root);
+    let path = normalized_file_operation_path(path);
+    let root = root.trim_end_matches('/');
+    if path.eq_ignore_ascii_case(root) {
+        return Some(String::new());
+    }
+    let boundary = root.len();
+    if path.len() <= boundary
+        || !path[..boundary].eq_ignore_ascii_case(root)
+        || path.as_bytes().get(boundary) != Some(&b'/')
+    {
+        return None;
+    }
+    Some(path[boundary + 1..].to_string())
+}
+
+fn file_operation_match_paths(root_uri: &str, uri: &str) -> Option<Vec<String>> {
+    let root = url::Url::parse(root_uri).ok()?.to_file_path().ok()?;
+    let file_url = url::Url::parse(uri).ok()?;
+    if file_url.scheme() != "file" {
+        return None;
+    }
+    let file = file_url.to_file_path().ok()?;
+    let relative = relative_file_operation_path(&root, &file)?;
+    let absolute = normalized_file_operation_path(&file);
+    let mut paths = Vec::new();
+    for candidate in [
+        relative,
+        absolute.clone(),
+        absolute.trim_start_matches('/').to_string(),
+    ] {
+        if !candidate.is_empty() && !paths.contains(&candidate) {
+            paths.push(candidate);
+        }
+    }
+    Some(paths)
+}
+
+fn notify_change(path: &Path, change_type: u8) -> Option<LspWatchedFileChange> {
+    path.is_absolute().then(|| LspWatchedFileChange {
+        path: normalized_file_operation_path(path),
+        change_type,
+    })
+}
+
+fn normalized_watch_path_equals(left: &str, right: &str) -> bool {
+    if cfg!(windows) {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn normalized_watch_path_is_under(root: &str, path: &str) -> bool {
+    let root = root.trim_end_matches('/');
+    if root.is_empty() {
+        return path.starts_with('/');
+    }
+    if normalized_watch_path_equals(root, path.trim_end_matches('/')) {
+        return true;
+    }
+    let boundary = root.len();
+    path.len() > boundary
+        && path.get(..boundary).is_some_and(|prefix| {
+            if cfg!(windows) {
+                prefix.eq_ignore_ascii_case(root)
+            } else {
+                prefix == root
+            }
+        })
+        && path.as_bytes().get(boundary) == Some(&b'/')
+}
+
+fn workspace_watch_target_matches(targets: &[WorkspaceWatchTarget], path: &str) -> bool {
+    targets.iter().any(|target| {
+        let filter = normalized_file_operation_path(&target.filter_path);
+        if target.recursive {
+            normalized_watch_path_is_under(&filter, path)
+        } else {
+            normalized_watch_path_equals(filter.trim_end_matches('/'), path.trim_end_matches('/'))
+        }
+    })
+}
+
+fn local_watched_event_suppressed(
+    events: &StdMutex<HashMap<(String, String, u8), Instant>>,
+    workspace_id: &str,
+    path: &str,
+    change_type: u8,
+    now: Instant,
+) -> bool {
+    let mut events = events
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    events.retain(|_, at| now.duration_since(*at) < Duration::from_secs(3));
+    let normalized_path = normalized_file_operation_path(Path::new(path));
+    let mut candidates = vec![change_type];
+    if change_type == 1 || change_type == 3 {
+        candidates.push(2);
+    }
+    candidates.into_iter().any(|candidate| {
+        events
+            .remove(&(workspace_id.to_string(), normalized_path.clone(), candidate))
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(3))
+    })
+}
+
+fn notify_event_changes(event: &NotifyEvent) -> Vec<LspWatchedFileChange> {
+    let mut changes = match event.kind {
+        EventKind::Create(_) => event
+            .paths
+            .iter()
+            .filter_map(|path| notify_change(path, 1))
+            .collect(),
+        EventKind::Remove(_) => event
+            .paths
+            .iter()
+            .filter_map(|path| notify_change(path, 3))
+            .collect(),
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() >= 2 => {
+            let mut changes = Vec::new();
+            if let Some(change) = notify_change(&event.paths[0], 3) {
+                changes.push(change);
+            }
+            if let Some(change) = event.paths.last().and_then(|path| notify_change(path, 1)) {
+                changes.push(change);
+            }
+            changes
+        }
+        EventKind::Modify(ModifyKind::Name(RenameMode::From)) => event
+            .paths
+            .iter()
+            .filter_map(|path| notify_change(path, 3))
+            .collect(),
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => event
+            .paths
+            .iter()
+            .filter_map(|path| notify_change(path, 1))
+            .collect(),
+        EventKind::Modify(ModifyKind::Name(_)) => event
+            .paths
+            .iter()
+            .filter_map(|path| notify_change(path, if path.exists() { 1 } else { 3 }))
+            .collect(),
+        EventKind::Modify(_) | EventKind::Any => event
+            .paths
+            .iter()
+            .filter_map(|path| notify_change(path, 2))
+            .collect(),
+        EventKind::Access(_) | EventKind::Other => Vec::new(),
+    };
+    let mut seen = HashSet::new();
+    changes.retain(|change| seen.insert((change.path.clone(), change.change_type)));
+    changes
+}
+
+fn watch_kind_for_change(change_type: u8) -> Option<u8> {
+    match change_type {
+        1 => Some(WATCH_KIND_CREATE),
+        2 => Some(WATCH_KIND_CHANGE),
+        3 => Some(WATCH_KIND_DELETE),
+        _ => None,
+    }
+}
+
+fn relative_pattern_base_path(pattern: &Value) -> Option<PathBuf> {
+    let base = pattern.get("baseUri")?;
+    let uri = base
+        .as_str()
+        .or_else(|| base.get("uri").and_then(Value::as_str))?;
+    url::Url::parse(uri).ok()?.to_file_path().ok()
+}
+
+fn watched_file_match_paths(
+    root_uri: &str,
+    uri: &str,
+    relative_base: Option<&Path>,
+) -> Option<Vec<String>> {
+    if let Some(base) = relative_base {
+        let file_url = url::Url::parse(uri).ok()?;
+        if file_url.scheme() != "file" {
+            return None;
+        }
+        let file = file_url.to_file_path().ok()?;
+        let relative = relative_file_operation_path(base, &file)?;
+        let absolute = normalized_file_operation_path(&file);
+        let mut paths = vec![relative];
+        if !absolute.is_empty() && !paths.contains(&absolute) {
+            paths.push(absolute.clone());
+        }
+        let trimmed = absolute.trim_start_matches('/').to_string();
+        if !trimmed.is_empty() && !paths.contains(&trimmed) {
+            paths.push(trimmed);
+        }
+        return Some(paths);
+    }
+    file_operation_match_paths(root_uri, uri)
+}
+
+fn watched_file_glob_matches(
+    root_uri: &str,
+    uri: &str,
+    glob_pattern: &str,
+    relative_base: Option<&Path>,
+) -> bool {
+    let glob_pattern = glob_pattern.replace('\\', "/");
+    let matcher = match GlobBuilder::new(&glob_pattern)
+        .case_insensitive(cfg!(windows))
+        .literal_separator(true)
+        .build()
+    {
+        Ok(glob) => glob.compile_matcher(),
+        Err(error) => {
+            log::warn!("ignoring invalid LSP watched-file glob '{glob_pattern}': {error}");
+            return false;
+        }
+    };
+    watched_file_match_paths(root_uri, uri, relative_base)
+        .is_some_and(|paths| paths.iter().any(|path| matcher.is_match(path)))
+}
+
+fn watched_file_registration_matches(
+    registration: &DynamicCapabilityRegistration,
+    root_uri: &str,
+    uri: &str,
+    watch_kind: u8,
+) -> bool {
+    let watchers = registration
+        .register_options
+        .get("watchers")
+        .and_then(Value::as_array);
+    let Some(watchers) = watchers else {
+        return false;
+    };
+    watchers.iter().any(|watcher| {
+        let Some(glob_pattern) = watcher.get("globPattern") else {
+            return false;
+        };
+        let kind = watcher
+            .get("kind")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::from(WATCH_KIND_ALL));
+        if kind > u64::from(WATCH_KIND_ALL) || (kind as u8 & watch_kind) == 0 {
+            return false;
+        }
+        match glob_pattern {
+            Value::String(glob) => watched_file_glob_matches(root_uri, uri, glob, None),
+            Value::Object(pattern) => {
+                let Some(glob) = pattern.get("pattern").and_then(Value::as_str) else {
+                    return false;
+                };
+                let relative_base = relative_pattern_base_path(&json!(pattern));
+                watched_file_glob_matches(root_uri, uri, glob, relative_base.as_deref())
+            }
+            _ => false,
+        }
+    })
+}
+
+fn file_operation_filter_matches(
+    filter: &Value,
+    root_uri: &str,
+    uri: &str,
+    is_directory: bool,
+) -> bool {
+    let Ok(uri_value) = url::Url::parse(uri) else {
+        return false;
+    };
+    if let Some(scheme) = filter.get("scheme").and_then(Value::as_str)
+        && !uri_value.scheme().eq_ignore_ascii_case(scheme)
+    {
+        return false;
+    }
+    let Some(pattern) = filter.get("pattern") else {
+        return false;
+    };
+    match pattern.get("matches").and_then(Value::as_str) {
+        Some("file") if is_directory => return false,
+        Some("folder") if !is_directory => return false,
+        Some("file" | "folder") | None => {}
+        Some(_) => return false,
+    }
+    let Some(glob) = pattern.get("glob").and_then(Value::as_str) else {
+        return false;
+    };
+    let ignore_case = pattern
+        .get("options")
+        .and_then(|options| options.get("ignoreCase"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let matcher = match GlobBuilder::new(glob)
+        .case_insensitive(ignore_case)
+        .literal_separator(true)
+        .build()
+    {
+        Ok(glob) => glob.compile_matcher(),
+        Err(error) => {
+            log::warn!("ignoring invalid LSP file operation glob '{glob}': {error}");
+            return false;
+        }
+    };
+    file_operation_match_paths(root_uri, uri)
+        .is_some_and(|paths| paths.iter().any(|path| matcher.is_match(path)))
+}
+
+fn file_operation_matches_filters(
+    filters: &[Value],
+    root_uri: &str,
+    uri: &str,
+    is_directory: bool,
+) -> bool {
+    filters
+        .iter()
+        .any(|filter| file_operation_filter_matches(filter, root_uri, uri, is_directory))
+}
+
+fn workspace_file_operation_params(
+    root_uri: &str,
+    operation: &LspWorkspaceFileOperation,
+    filters: &[Value],
+) -> Result<Option<Value>, String> {
+    let files = match operation {
+        LspWorkspaceFileOperation::Create { files }
+        | LspWorkspaceFileOperation::Delete { files } => files
+            .iter()
+            .map(|file| {
+                let uri = file_operation_uri(&file.path)?;
+                Ok(
+                    file_operation_matches_filters(filters, root_uri, &uri, file.is_directory)
+                        .then(|| json!({ "uri": uri })),
+                )
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+        LspWorkspaceFileOperation::Rename { files } => files
+            .iter()
+            .map(|file| {
+                let old_uri = file_operation_uri(&file.old_path)?;
+                let new_uri = file_operation_uri(&file.new_path)?;
+                let matches =
+                    file_operation_matches_filters(filters, root_uri, &old_uri, file.is_directory)
+                        || file_operation_matches_filters(
+                            filters,
+                            root_uri,
+                            &new_uri,
+                            file.is_directory,
+                        );
+                Ok(matches.then(|| json!({ "oldUri": old_uri, "newUri": new_uri })))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+    };
+    Ok((!files.is_empty()).then(|| json!({ "files": files })))
 }
 
 fn capability_summary_from(capabilities: &Value) -> LspCapabilitySummary {
@@ -5866,6 +8516,224 @@ fn capability_summary_from(capabilities: &Value) -> LspCapabilitySummary {
             "triggerCharacters",
         ),
     }
+}
+
+fn parse_dynamic_capability_registrations(
+    params: Option<&Value>,
+) -> Vec<DynamicCapabilityRegistration> {
+    params
+        .and_then(|value| value.get("registrations"))
+        .and_then(Value::as_array)
+        .map(|registrations| {
+            registrations
+                .iter()
+                .filter_map(|registration| {
+                    Some(DynamicCapabilityRegistration {
+                        id: registration.get("id")?.as_str()?.to_string(),
+                        method: registration.get("method")?.as_str()?.to_string(),
+                        register_options: registration
+                            .get("registerOptions")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Strict parser used for the JSON-RPC `client/registerCapability` request.
+///
+/// The permissive parser above is intentionally useful when reconstructing a
+/// capability snapshot from server data, but a request must distinguish a
+/// valid empty registration list from malformed parameters. Silently dropping
+/// malformed entries leaves the server waiting on a capability it believes we
+/// registered, so return `-32602` instead.
+fn parse_dynamic_capability_registrations_checked(
+    params: Option<&Value>,
+) -> Result<Vec<DynamicCapabilityRegistration>, String> {
+    let params = params.ok_or_else(|| "client/registerCapability requires params".to_string())?;
+    let registrations = params
+        .get("registrations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "client/registerCapability requires a registrations array".to_string())?;
+    registrations
+        .iter()
+        .enumerate()
+        .map(|(index, registration)| {
+            let object = registration.as_object().ok_or_else(|| {
+                format!("client/registerCapability registration {index} must be an object")
+            })?;
+            let id = object
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    format!("client/registerCapability registration {index} has an invalid id")
+                })?;
+            let method = object
+                .get("method")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|method| !method.is_empty())
+                .ok_or_else(|| {
+                    format!("client/registerCapability registration {index} has an invalid method")
+                })?;
+            Ok(DynamicCapabilityRegistration {
+                id: id.to_string(),
+                method: method.to_string(),
+                register_options: object
+                    .get("registerOptions")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            })
+        })
+        .collect()
+}
+
+fn parse_dynamic_capability_unregistrations(params: Option<&Value>) -> Vec<String> {
+    params
+        .and_then(|value| {
+            value
+                .get("unregisterations")
+                .or_else(|| value.get("unregistrations"))
+        })
+        .and_then(Value::as_array)
+        .map(|registrations| {
+            registrations
+                .iter()
+                .filter_map(|registration| registration.get("id").and_then(Value::as_str))
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_dynamic_capability_unregistrations_checked(
+    params: Option<&Value>,
+) -> Result<Vec<String>, String> {
+    let params = params.ok_or_else(|| "client/unregisterCapability requires params".to_string())?;
+    let registrations = params
+        .get("unregisterations")
+        .or_else(|| params.get("unregistrations"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            "client/unregisterCapability requires an unregisterations array".to_string()
+        })?;
+    registrations
+        .iter()
+        .enumerate()
+        .map(|(index, registration)| {
+            let id = registration
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    format!("client/unregisterCapability registration {index} has an invalid id")
+                })?;
+            Ok(id.to_string())
+        })
+        .collect()
+}
+
+fn option_strings(options: &Value, field: &str) -> Vec<String> {
+    options
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.contains(&value) {
+            target.push(value);
+        }
+    }
+}
+
+fn apply_dynamic_capability(
+    summary: &mut LspCapabilitySummary,
+    registration: &DynamicCapabilityRegistration,
+) {
+    match registration.method.as_str() {
+        "textDocument/completion" => {
+            summary.completion = true;
+            extend_unique(
+                &mut summary.completion_trigger_characters,
+                option_strings(&registration.register_options, "triggerCharacters"),
+            );
+        }
+        "textDocument/signatureHelp" => {
+            summary.signature_help = true;
+            extend_unique(
+                &mut summary.signature_trigger_characters,
+                option_strings(&registration.register_options, "triggerCharacters"),
+            );
+        }
+        "textDocument/hover" => summary.hover = true,
+        "textDocument/definition" => summary.definition = true,
+        "textDocument/typeDefinition" => summary.type_definition = true,
+        "textDocument/implementation" => summary.implementation = true,
+        "textDocument/references" => summary.references = true,
+        "textDocument/documentSymbol" => summary.document_symbol = true,
+        "workspace/symbol" => summary.workspace_symbol = true,
+        "textDocument/rename" => summary.rename = true,
+        "textDocument/formatting" => summary.formatting = true,
+        "textDocument/rangeFormatting" => summary.range_formatting = true,
+        "textDocument/codeAction" => summary.code_action = true,
+        "textDocument/documentHighlight" => summary.document_highlight = true,
+        "textDocument/prepareCallHierarchy" => summary.call_hierarchy = true,
+        "textDocument/prepareTypeHierarchy" => summary.type_hierarchy = true,
+        "textDocument/inlayHint" => summary.inlay_hint = true,
+        "textDocument/selectionRange" => summary.selection_range = true,
+        "textDocument/semanticTokens" => summary.semantic_tokens = true,
+        "textDocument/didChange" => {
+            summary.text_document_sync_kind = registration
+                .register_options
+                .get("syncKind")
+                .and_then(Value::as_u64)
+                .map(|kind| {
+                    if kind == 2 {
+                        2
+                    } else if kind == 0 {
+                        0
+                    } else {
+                        1
+                    }
+                })
+                .unwrap_or(1);
+        }
+        _ => {}
+    }
+}
+
+fn capability_state_from(
+    server_capabilities: &Value,
+    registrations: &[DynamicCapabilityRegistration],
+) -> (LspCapabilitySummary, Vec<String>, Vec<String>, bool) {
+    let mut summary = capability_summary_from(server_capabilities);
+    let mut semantic_provider = None;
+    for registration in registrations {
+        apply_dynamic_capability(&mut summary, registration);
+        if registration.method == "textDocument/semanticTokens" {
+            semantic_provider = Some(registration.register_options.clone());
+        }
+    }
+    let semantic_capabilities = semantic_provider
+        .map(|provider| json!({ "semanticTokensProvider": provider }))
+        .unwrap_or_else(|| server_capabilities.clone());
+    let (token_types, token_modifiers) = semantic_token_legend_from(&semantic_capabilities);
+    let semantic_delta = semantic_token_delta_supported(&semantic_capabilities);
+    (summary, token_types, token_modifiers, semantic_delta)
 }
 
 fn text_document_sync_kind(capabilities: &Value) -> u8 {
@@ -5916,47 +8784,192 @@ fn parse_text_edits(value: &Value) -> Vec<LspTextEdit> {
         .unwrap_or_default()
 }
 
+fn text_edit_annotation_ids(value: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(edits) = value.as_array() {
+        for id in edits
+            .iter()
+            .filter_map(|edit| edit.get("annotationId").and_then(Value::as_str))
+        {
+            if !ids.iter().any(|existing| existing == id) {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+fn parse_change_annotations(value: &Value) -> Vec<LspChangeAnnotation> {
+    let mut annotations = value
+        .get("changeAnnotations")
+        .and_then(Value::as_object)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|(id, annotation)| {
+                    Some(LspChangeAnnotation {
+                        id: id.clone(),
+                        label: annotation.get("label")?.as_str()?.to_string(),
+                        needs_confirmation: annotation
+                            .get("needsConfirmation")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        description: annotation
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    annotations.sort_by(|left, right| left.id.cmp(&right.id));
+    annotations
+}
+
 fn parse_workspace_edit(value: &Value) -> LspWorkspaceEdit {
     let mut document_edits: Vec<LspFileTextEdits> = Vec::new();
+    let mut operations: Vec<LspWorkspaceEditOperation> = Vec::new();
     if let Some(changes) = value.get("changes").and_then(Value::as_object) {
         for (uri, edits) in changes {
-            document_edits.push(LspFileTextEdits {
+            let document = LspFileTextEdits {
                 uri: uri.clone(),
                 path: path_from_uri(uri),
+                version: None,
                 edits: parse_text_edits(edits),
-            });
+                annotation_ids: text_edit_annotation_ids(edits),
+            };
+            document_edits.push(document.clone());
+            operations.push(LspWorkspaceEditOperation::Text { document });
         }
     }
     if let Some(document_changes) = value.get("documentChanges").and_then(Value::as_array) {
         for change in document_changes {
-            // TextDocumentEdit: { textDocument: { uri }, edits: [...] }
-            // Skip CreateFile/RenameFile/DeleteFile for now.
-            let Some(uri) = change
-                .get("textDocument")
-                .and_then(|doc| doc.get("uri"))
+            let annotation_id = change
+                .get("annotationId")
                 .and_then(Value::as_str)
-            else {
-                continue;
-            };
-            let edits = change
-                .get("edits")
-                .map(parse_text_edits)
-                .unwrap_or_default();
-            if edits.is_empty() {
-                continue;
-            }
-            if let Some(existing) = document_edits.iter_mut().find(|item| item.uri == uri) {
-                existing.edits.extend(edits);
-            } else {
-                document_edits.push(LspFileTextEdits {
-                    uri: uri.to_string(),
-                    path: path_from_uri(uri),
-                    edits,
-                });
+                .map(ToString::to_string);
+            let options = change.get("options").unwrap_or(&Value::Null);
+            match change.get("kind").and_then(Value::as_str) {
+                Some("create") => {
+                    let Some(uri) = change.get("uri").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    operations.push(LspWorkspaceEditOperation::Create {
+                        uri: uri.to_string(),
+                        path: path_from_uri(uri),
+                        overwrite: options
+                            .get("overwrite")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        ignore_if_exists: options
+                            .get("ignoreIfExists")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        annotation_id,
+                    });
+                }
+                Some("rename") => {
+                    let Some(old_uri) = change.get("oldUri").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let Some(new_uri) = change.get("newUri").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    operations.push(LspWorkspaceEditOperation::Rename {
+                        old_uri: old_uri.to_string(),
+                        old_path: path_from_uri(old_uri),
+                        new_uri: new_uri.to_string(),
+                        new_path: path_from_uri(new_uri),
+                        overwrite: options
+                            .get("overwrite")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        ignore_if_exists: options
+                            .get("ignoreIfExists")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        annotation_id,
+                    });
+                }
+                Some("delete") => {
+                    let Some(uri) = change.get("uri").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    operations.push(LspWorkspaceEditOperation::Delete {
+                        uri: uri.to_string(),
+                        path: path_from_uri(uri),
+                        recursive: options
+                            .get("recursive")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        ignore_if_not_exists: options
+                            .get("ignoreIfNotExists")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                        annotation_id,
+                    });
+                }
+                _ => {
+                    let Some(uri) = change
+                        .get("textDocument")
+                        .and_then(|doc| doc.get("uri"))
+                        .and_then(Value::as_str)
+                    else {
+                        continue;
+                    };
+                    let document = LspFileTextEdits {
+                        uri: uri.to_string(),
+                        path: path_from_uri(uri),
+                        version: change
+                            .get("textDocument")
+                            .and_then(|document| document.get("version"))
+                            .and_then(Value::as_i64),
+                        edits: change
+                            .get("edits")
+                            .map(parse_text_edits)
+                            .unwrap_or_default(),
+                        annotation_ids: change
+                            .get("edits")
+                            .map(text_edit_annotation_ids)
+                            .unwrap_or_default(),
+                    };
+                    if let Some(existing) = document_edits
+                        .iter_mut()
+                        .find(|item| item.uri == document.uri)
+                    {
+                        existing.edits.extend(document.edits.clone());
+                        extend_unique(
+                            &mut existing.annotation_ids,
+                            document.annotation_ids.clone(),
+                        );
+                    } else {
+                        document_edits.push(document.clone());
+                    }
+                    operations.push(LspWorkspaceEditOperation::Text { document });
+                }
             }
         }
     }
-    LspWorkspaceEdit { document_edits }
+    LspWorkspaceEdit {
+        document_edits,
+        operations,
+        change_annotations: parse_change_annotations(value),
+    }
+}
+
+fn merge_code_action_values(original: &Value, resolved: &Value) -> Value {
+    let Some(original_object) = original.as_object() else {
+        return resolved.clone();
+    };
+    let Some(resolved_object) = resolved.as_object() else {
+        return original.clone();
+    };
+    let mut merged = original_object.clone();
+    for (key, value) in resolved_object {
+        merged.insert(key.clone(), value.clone());
+    }
+    Value::Object(merged)
 }
 
 fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
@@ -7297,6 +10310,600 @@ mod tests {
     }
 
     #[test]
+    fn workspace_client_capabilities_advertise_supported_edits() {
+        let capabilities = workspace_client_capabilities();
+
+        assert_eq!(capabilities["applyEdit"], json!(true));
+        assert_eq!(
+            capabilities["workspaceEdit"]["documentChanges"],
+            json!(true)
+        );
+        assert_eq!(
+            capabilities["workspaceEdit"]["resourceOperations"],
+            json!(["create", "rename", "delete"])
+        );
+        assert_eq!(
+            capabilities["workspaceEdit"]["failureHandling"],
+            json!("abort")
+        );
+        assert_eq!(
+            capabilities["workspaceEdit"]["changeAnnotationSupport"]["groupsOnLabel"],
+            json!(false)
+        );
+        assert_eq!(capabilities["workspaceFolders"], json!(true));
+        assert_eq!(capabilities["configuration"], json!(true));
+        assert_eq!(capabilities["diagnostics"]["refreshSupport"], json!(true));
+        assert_eq!(
+            capabilities["diagnostics"]["relatedDocumentSupport"],
+            json!(true)
+        );
+        assert_eq!(
+            capabilities["fileOperations"],
+            json!({
+                "dynamicRegistration": true,
+                "didCreate": true,
+                "willCreate": true,
+                "didRename": true,
+                "willRename": true,
+                "didDelete": true,
+                "willDelete": true
+            })
+        );
+        assert_eq!(
+            capabilities["didChangeWatchedFiles"],
+            json!({ "dynamicRegistration": true })
+        );
+        assert_eq!(capabilities["symbol"]["dynamicRegistration"], json!(true));
+    }
+
+    #[test]
+    fn watched_file_globs_honor_kind_root_and_relative_patterns() {
+        let root = tempfile::tempdir().unwrap();
+        let root_uri = url::Url::from_directory_path(root.path())
+            .unwrap()
+            .to_string();
+        let java_uri = url::Url::from_file_path(root.path().join("src/Main.java"))
+            .unwrap()
+            .to_string();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_uri = url::Url::from_file_path(outside.path().join("src/Main.java"))
+            .unwrap()
+            .to_string();
+        let registration = DynamicCapabilityRegistration {
+            id: "java-watch".into(),
+            method: "workspace/didChangeWatchedFiles".into(),
+            register_options: json!({
+                "watchers": [{
+                    "globPattern": "**/*.java",
+                    "kind": WATCH_KIND_CREATE
+                }]
+            }),
+        };
+
+        assert!(watched_file_registration_matches(
+            &registration,
+            &root_uri,
+            &java_uri,
+            WATCH_KIND_CREATE,
+        ));
+        assert!(!watched_file_registration_matches(
+            &registration,
+            &root_uri,
+            &java_uri,
+            WATCH_KIND_CHANGE,
+        ));
+        assert!(!watched_file_registration_matches(
+            &registration,
+            &root_uri,
+            &outside_uri,
+            WATCH_KIND_CREATE,
+        ));
+
+        let base = root.path().join("src");
+        let base_uri = url::Url::from_directory_path(&base).unwrap().to_string();
+        let relative_registration = DynamicCapabilityRegistration {
+            id: "kotlin-watch".into(),
+            method: "workspace/didChangeWatchedFiles".into(),
+            register_options: json!({
+                "watchers": [{
+                    "globPattern": {
+                        "baseUri": { "uri": base_uri },
+                        "pattern": "**/*.kt"
+                    }
+                }]
+            }),
+        };
+        let kotlin_uri = url::Url::from_file_path(base.join("nested/Main.kt"))
+            .unwrap()
+            .to_string();
+        let wrong_uri = url::Url::from_file_path(root.path().join("Main.kt"))
+            .unwrap()
+            .to_string();
+        assert!(watched_file_registration_matches(
+            &relative_registration,
+            &root_uri,
+            &kotlin_uri,
+            WATCH_KIND_CHANGE,
+        ));
+        assert!(!watched_file_registration_matches(
+            &relative_registration,
+            &root_uri,
+            &wrong_uri,
+            WATCH_KIND_CHANGE,
+        ));
+    }
+
+    #[test]
+    fn watched_file_changes_use_lsp_types_and_split_renames() {
+        let operation: LspWorkspaceFileOperation = serde_json::from_value(json!({
+            "kind": "rename",
+            "files": [{
+                "oldPath": "/repo/src/Old.java",
+                "newPath": "/repo/src/New.java",
+                "isDirectory": false
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            operation.watched_file_changes(),
+            vec![
+                LspWatchedFileChange {
+                    path: "/repo/src/Old.java".into(),
+                    change_type: 3,
+                },
+                LspWatchedFileChange {
+                    path: "/repo/src/New.java".into(),
+                    change_type: 1,
+                },
+            ]
+        );
+        let changed: LspWatchedFileChange = serde_json::from_value(json!({
+            "path": "/repo/src/Main.java",
+            "type": 2
+        }))
+        .unwrap();
+        assert_eq!(changed.change_type, 2);
+        assert_eq!(
+            watch_kind_for_change(changed.change_type),
+            Some(WATCH_KIND_CHANGE)
+        );
+        assert!(watch_kind_for_change(9).is_none());
+    }
+
+    #[test]
+    fn native_watcher_events_normalize_create_change_delete_and_rename() {
+        let root = tempfile::tempdir().unwrap();
+        let old_path = root.path().join("Old.java");
+        let new_path = root.path().join("New.java");
+        let rename = NotifyEvent::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(old_path.clone())
+            .add_path(new_path.clone());
+        assert_eq!(
+            notify_event_changes(&rename),
+            vec![
+                LspWatchedFileChange {
+                    path: old_path.to_string_lossy().into_owned(),
+                    change_type: 3,
+                },
+                LspWatchedFileChange {
+                    path: new_path.to_string_lossy().into_owned(),
+                    change_type: 1,
+                },
+            ]
+        );
+
+        let changed = NotifyEvent::new(EventKind::Modify(ModifyKind::Any))
+            .add_path(new_path.clone())
+            .add_path(new_path.clone());
+        assert_eq!(notify_event_changes(&changed).len(), 1);
+        assert_eq!(notify_event_changes(&changed)[0].change_type, 2);
+
+        let removed = NotifyEvent::new(EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(new_path.clone());
+        assert_eq!(notify_event_changes(&removed)[0].change_type, 3);
+    }
+
+    #[test]
+    fn workspace_watcher_filters_recursive_roots_and_loose_files() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("src").join("Main.java");
+        let sibling = root.path().join("outside.txt");
+        let loose = root.path().join("notes.txt");
+        let targets = vec![
+            WorkspaceWatchTarget {
+                recursive: true,
+                filter_path: root.path().to_path_buf(),
+            },
+            WorkspaceWatchTarget {
+                recursive: false,
+                filter_path: loose.clone(),
+            },
+        ];
+        assert!(workspace_watch_target_matches(
+            &targets,
+            &normalized_file_operation_path(&nested)
+        ));
+        assert!(workspace_watch_target_matches(
+            &targets,
+            &normalized_file_operation_path(&loose)
+        ));
+        assert!(workspace_watch_target_matches(
+            &[WorkspaceWatchTarget {
+                recursive: false,
+                filter_path: loose.clone(),
+            }],
+            &normalized_file_operation_path(&loose)
+        ));
+        assert!(!workspace_watch_target_matches(
+            &[WorkspaceWatchTarget {
+                recursive: false,
+                filter_path: loose,
+            }],
+            &normalized_file_operation_path(&sibling)
+        ));
+    }
+
+    #[test]
+    fn local_watcher_suppression_handles_atomic_save_event_variants() {
+        let events = StdMutex::new(HashMap::new());
+        let now = Instant::now();
+        let path = "/repo/src/Main.java";
+        events
+            .lock()
+            .unwrap()
+            .insert(("workspace".into(), path.into(), 2), now);
+        assert!(local_watched_event_suppressed(
+            &events,
+            "workspace",
+            path,
+            1,
+            now,
+        ));
+        assert!(!local_watched_event_suppressed(
+            &events,
+            "workspace",
+            path,
+            3,
+            now,
+        ));
+
+        events
+            .lock()
+            .unwrap()
+            .insert(("workspace".into(), path.into(), 3), now);
+        assert!(local_watched_event_suppressed(
+            &events,
+            "workspace",
+            path,
+            3,
+            now,
+        ));
+    }
+
+    #[test]
+    fn workspace_diagnostic_provider_supports_static_and_dynamic_registration() {
+        let static_capabilities = json!({
+            "diagnosticProvider": {
+                "identifier": "typescript",
+                "workspaceDiagnostics": true
+            }
+        });
+        assert_eq!(
+            workspace_diagnostic_provider_options(&static_capabilities, &[]).unwrap()["identifier"],
+            json!("typescript")
+        );
+        assert!(
+            workspace_diagnostic_provider_options(
+                &json!({ "diagnosticProvider": { "workspaceDiagnostics": false } }),
+                &[]
+            )
+            .is_none()
+        );
+
+        let registrations = vec![DynamicCapabilityRegistration {
+            id: "pull".into(),
+            method: "workspace/diagnostic".into(),
+            register_options: json!({ "identifier": "dynamic" }),
+        }];
+        assert_eq!(
+            workspace_diagnostic_provider_options(&Value::Null, &registrations).unwrap()["identifier"],
+            json!("dynamic")
+        );
+    }
+
+    #[test]
+    fn workspace_diagnostic_reports_apply_full_unchanged_and_related_documents_atomically() {
+        let main_uri = "file:///repo/src/main.rs";
+        let unchanged_uri = "file:///repo/src/lib.rs";
+        let related_uri = "file:///repo/Cargo.toml";
+        let old = LspDiagnostic {
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: Some(2),
+            code: None,
+            source: Some("old".into()),
+            message: "keep".into(),
+        };
+        let mut diagnostics = HashMap::from([(unchanged_uri.to_string(), vec![old])]);
+        let mut result_ids = HashMap::from([
+            (main_uri.to_string(), "old-main".to_string()),
+            (unchanged_uri.to_string(), "old-lib".to_string()),
+        ]);
+        let response = json!({
+            "items": [
+                {
+                    "uri": main_uri,
+                    "kind": "full",
+                    "resultId": "main-2",
+                    "items": [{
+                        "range": {
+                            "start": { "line": 2, "character": 3 },
+                            "end": { "line": 2, "character": 7 }
+                        },
+                        "severity": 1,
+                        "source": "rustc",
+                        "message": "broken"
+                    }]
+                },
+                {
+                    "uri": unchanged_uri,
+                    "kind": "unchanged",
+                    "resultId": "lib-2"
+                }
+            ],
+            "relatedDocuments": {
+                (related_uri): {
+                    "kind": "full",
+                    "resultId": "cargo-1",
+                    "items": []
+                }
+            }
+        });
+
+        apply_workspace_diagnostic_report(&response, &mut diagnostics, &mut result_ids).unwrap();
+        assert_eq!(diagnostics[main_uri][0].message, "broken");
+        assert_eq!(diagnostics[unchanged_uri][0].message, "keep");
+        assert!(diagnostics[related_uri].is_empty());
+        assert_eq!(result_ids[main_uri], "main-2");
+        assert_eq!(result_ids[unchanged_uri], "lib-2");
+        assert_eq!(result_ids[related_uri], "cargo-1");
+
+        let before_diagnostics = diagnostics.clone();
+        let before_result_ids = result_ids.clone();
+        assert!(
+            apply_workspace_diagnostic_report(
+                &json!({
+                    "items": [
+                        { "uri": main_uri, "kind": "full", "items": [] },
+                        { "uri": unchanged_uri, "kind": "invalid" }
+                    ]
+                }),
+                &mut diagnostics,
+                &mut result_ids,
+            )
+            .is_err()
+        );
+        assert_eq!(diagnostics.len(), before_diagnostics.len());
+        assert_eq!(
+            diagnostics[main_uri][0].message,
+            before_diagnostics[main_uri][0].message
+        );
+        assert_eq!(result_ids, before_result_ids);
+    }
+
+    #[test]
+    fn workspace_diagnostic_partial_items_precede_final_items() {
+        let response = merge_workspace_diagnostic_partial_results(
+            json!({
+                "items": [{
+                    "uri": "file:///repo/src/final.rs",
+                    "kind": "full",
+                    "items": []
+                }]
+            }),
+            vec![
+                json!({
+                    "uri": "file:///repo/src/first.rs",
+                    "kind": "full",
+                    "items": []
+                }),
+                json!({
+                    "uri": "file:///repo/src/second.rs",
+                    "kind": "unchanged",
+                    "resultId": "second-1"
+                }),
+            ],
+        )
+        .unwrap();
+        let uris = response["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["uri"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uris,
+            vec![
+                "file:///repo/src/first.rs",
+                "file:///repo/src/second.rs",
+                "file:///repo/src/final.rs"
+            ]
+        );
+        assert!(
+            merge_workspace_diagnostic_partial_results(
+                json!({ "kind": "full" }),
+                vec![json!({ "uri": "file:///repo/a" })]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn file_operation_filters_merge_static_and_dynamic_capabilities() {
+        let server_capabilities = json!({
+            "workspace": {
+                "fileOperations": {
+                    "willRename": {
+                        "filters": [{ "scheme": "file", "pattern": { "glob": "**/*.rs" } }]
+                    }
+                }
+            }
+        });
+        let registrations = vec![DynamicCapabilityRegistration {
+            id: "rename-files".into(),
+            method: "workspace/willRenameFiles".into(),
+            register_options: json!({
+                "filters": [{ "scheme": "file", "pattern": { "glob": "**/*.toml" } }]
+            }),
+        }];
+
+        let filters = file_operation_filters_from(
+            &server_capabilities,
+            &registrations,
+            "workspace/willRenameFiles",
+        )
+        .expect("rename support");
+        assert_eq!(filters.len(), 2);
+        assert_eq!(filters[0]["pattern"]["glob"], json!("**/*.rs"));
+        assert_eq!(filters[1]["pattern"]["glob"], json!("**/*.toml"));
+        assert!(
+            file_operation_filters_from(
+                &server_capabilities,
+                &registrations,
+                "workspace/willCreateFiles"
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn file_operation_filters_honor_root_glob_kind_scheme_and_case() {
+        let root = tempfile::tempdir().unwrap();
+        let root_uri = url::Url::from_directory_path(root.path())
+            .unwrap()
+            .to_string();
+        let source_uri = url::Url::from_file_path(root.path().join("src/Main.JAVA"))
+            .unwrap()
+            .to_string();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_uri = url::Url::from_file_path(outside.path().join("Main.JAVA"))
+            .unwrap()
+            .to_string();
+        let file_filter = json!({
+            "scheme": "file",
+            "pattern": {
+                "glob": "**/*.java",
+                "matches": "file",
+                "options": { "ignoreCase": true }
+            }
+        });
+
+        assert!(file_operation_filter_matches(
+            &file_filter,
+            &root_uri,
+            &source_uri,
+            false
+        ));
+        assert!(!file_operation_filter_matches(
+            &file_filter,
+            &root_uri,
+            &source_uri,
+            true
+        ));
+        assert!(!file_operation_filter_matches(
+            &file_filter,
+            &root_uri,
+            &outside_uri,
+            false
+        ));
+        assert!(!file_operation_filter_matches(
+            &json!({
+                "scheme": "untitled",
+                "pattern": { "glob": "**/*" }
+            }),
+            &root_uri,
+            &source_uri,
+            false
+        ));
+    }
+
+    #[test]
+    fn workspace_file_operation_params_filter_batches_and_preserve_rename_uris() {
+        let root = tempfile::tempdir().unwrap();
+        let root_uri = url::Url::from_directory_path(root.path())
+            .unwrap()
+            .to_string();
+        let old_path = root.path().join("src/Main.java");
+        let new_path = root.path().join("src/Main.kt");
+        let ignored_old_path = root.path().join("README.md");
+        let ignored_new_path = root.path().join("README.txt");
+        let operation = LspWorkspaceFileOperation::Rename {
+            files: vec![
+                LspWorkspaceFileRenameTarget {
+                    old_path: old_path.to_string_lossy().into_owned(),
+                    new_path: new_path.to_string_lossy().into_owned(),
+                    is_directory: false,
+                },
+                LspWorkspaceFileRenameTarget {
+                    old_path: ignored_old_path.to_string_lossy().into_owned(),
+                    new_path: ignored_new_path.to_string_lossy().into_owned(),
+                    is_directory: false,
+                },
+            ],
+        };
+        let filters = vec![json!({
+            "scheme": "file",
+            "pattern": { "glob": "**/*.java", "matches": "file" }
+        })];
+
+        let params = workspace_file_operation_params(&root_uri, &operation, &filters)
+            .unwrap()
+            .expect("one matching rename");
+        assert_eq!(params["files"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            params["files"][0]["oldUri"],
+            json!(url::Url::from_file_path(old_path).unwrap().to_string())
+        );
+        assert_eq!(
+            params["files"][0]["newUri"],
+            json!(url::Url::from_file_path(new_path).unwrap().to_string())
+        );
+    }
+
+    #[test]
+    fn deserializes_workspace_file_operation_camel_case_contract() {
+        let operation: LspWorkspaceFileOperation = serde_json::from_value(json!({
+            "kind": "rename",
+            "files": [{
+                "oldPath": "/repo/src/Old.java",
+                "newPath": "/repo/src/New.java",
+                "isDirectory": false
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(operation.will_method(), "workspace/willRenameFiles");
+        assert_eq!(operation.did_method(), "workspace/didRenameFiles");
+        match operation {
+            LspWorkspaceFileOperation::Rename { files } => {
+                assert_eq!(files.len(), 1);
+                assert_eq!(files[0].old_path, "/repo/src/Old.java");
+                assert_eq!(files[0].new_path, "/repo/src/New.java");
+                assert!(!files[0].is_directory);
+            }
+            _ => panic!("expected rename operation"),
+        }
+    }
+
+    #[test]
     fn jdtls_initialization_uses_project_java_runtimes() {
         let root = PathBuf::from(if cfg!(windows) { r"C:\repo" } else { "/repo" });
         let mut environment = WorkspaceSdkEnvironment::passthrough(&root, &root);
@@ -7773,19 +11380,64 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
     }
 
     #[test]
-    fn server_request_result_answers_configuration_with_matching_length() {
-        let params = json!({
-            "items": [
-                { "section": "java" },
-                { "section": "editor" }
-            ]
+    fn server_configuration_sections_are_resolved_without_silent_nulls() {
+        let configuration = json!({
+            "java": { "autobuild": { "enabled": true } },
+            "editor": { "tabSize": 2 }
         });
-        let result = server_request_result("workspace/configuration", Some(&params));
-        assert_eq!(result, json!([null, null]));
         assert_eq!(
-            server_request_result("client/registerCapability", None),
+            configuration_section_value(&configuration, Some("java.autobuild")),
+            json!({ "enabled": true })
+        );
+        assert_eq!(
+            configuration_section_value(&configuration, Some("missing")),
             Value::Null
         );
+        assert_eq!(
+            configuration_section_value(&configuration, None),
+            configuration
+        );
+    }
+
+    #[test]
+    fn server_message_requests_preserve_action_payloads_and_validate_indices() {
+        let parsed = parse_show_message_request(Some(&json!({
+            "type": 2,
+            "message": "Choose",
+            "actions": [{ "title": "Keep", "command": "keep" }, { "title": "Drop" }]
+        })))
+        .expect("valid message request");
+        assert_eq!(parsed.message_type, 2);
+        assert_eq!(parsed.actions[0]["command"], "keep");
+        assert!(
+            parse_show_message_request(Some(&json!({
+                "type": 2,
+                "message": "Choose",
+                "actions": [{ "label": "missing title" }]
+            })))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn progress_tokens_are_type_sensitive_and_percentages_are_bounded() {
+        assert_ne!(
+            progress_token_key(&json!(1)),
+            progress_token_key(&json!("1"))
+        );
+        assert_eq!(
+            progress_percentage(&json!({ "percentage": 120 })),
+            Some(100)
+        );
+        assert_eq!(progress_percentage(&json!({ "percentage": 42 })), Some(42));
+        assert!(is_progress_token(&json!("build")));
+        assert!(!is_progress_token(&Value::Null));
+    }
+
+    #[test]
+    fn unknown_server_request_uses_standard_json_rpc_method_not_found_code() {
+        assert_eq!(JSON_RPC_METHOD_NOT_FOUND, -32601);
+        assert_eq!(LSP_REQUEST_CANCELLED, -32800);
     }
 
     #[test]
@@ -8073,6 +11725,93 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert!(!summary.formatting);
         assert!(!summary.type_hierarchy);
         assert!(!summary.workspace_symbol);
+    }
+
+    #[test]
+    fn dynamic_capabilities_register_and_unregister_independently() {
+        let base = json!({ "hoverProvider": true });
+        let params = json!({
+            "registrations": [
+                {
+                    "id": "completion-one",
+                    "method": "textDocument/completion",
+                    "registerOptions": { "triggerCharacters": ["."] }
+                },
+                {
+                    "id": "completion-two",
+                    "method": "textDocument/completion",
+                    "registerOptions": { "triggerCharacters": [":"] }
+                },
+                {
+                    "id": "semantic",
+                    "method": "textDocument/semanticTokens",
+                    "registerOptions": {
+                        "legend": { "tokenTypes": ["class"], "tokenModifiers": ["static"] },
+                        "full": { "delta": true }
+                    }
+                }
+            ]
+        });
+        let registrations = parse_dynamic_capability_registrations(Some(&params));
+        let (summary, token_types, token_modifiers, delta) =
+            capability_state_from(&base, &registrations);
+        assert!(summary.hover);
+        assert!(summary.completion);
+        assert_eq!(summary.completion_trigger_characters, vec![".", ":"]);
+        assert!(summary.semantic_tokens);
+        assert_eq!(token_types, vec!["class"]);
+        assert_eq!(token_modifiers, vec!["static"]);
+        assert!(delta);
+
+        let unregister = json!({
+            "unregisterations": [{ "id": "completion-one", "method": "textDocument/completion" }]
+        });
+        assert_eq!(
+            parse_dynamic_capability_unregistrations(Some(&unregister)),
+            vec!["completion-one"]
+        );
+        let remaining = registrations
+            .into_iter()
+            .filter(|registration| registration.id != "completion-one")
+            .collect::<Vec<_>>();
+        let (summary, _, _, _) = capability_state_from(&base, &remaining);
+        assert!(summary.completion);
+        assert_eq!(summary.completion_trigger_characters, vec![":"]);
+    }
+
+    #[test]
+    fn dynamic_capability_request_validation_accepts_empty_and_rejects_malformed_entries() {
+        let empty = json!({ "registrations": [] });
+        assert_eq!(
+            parse_dynamic_capability_registrations_checked(Some(&empty)).unwrap(),
+            Vec::<DynamicCapabilityRegistration>::new()
+        );
+        assert!(parse_dynamic_capability_registrations_checked(None).is_err());
+        assert!(parse_dynamic_capability_registrations_checked(Some(&json!({}))).is_err());
+        assert!(
+            parse_dynamic_capability_registrations_checked(Some(&json!({
+                "registrations": [{ "id": "", "method": "textDocument/hover" }]
+            })))
+            .is_err()
+        );
+        assert!(
+            parse_dynamic_capability_registrations_checked(Some(&json!({
+                "registrations": [{ "id": "hover", "method": 42 }]
+            })))
+            .is_err()
+        );
+
+        let unregister_empty = json!({ "unregisterations": [] });
+        assert_eq!(
+            parse_dynamic_capability_unregistrations_checked(Some(&unregister_empty)).unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(
+            parse_dynamic_capability_unregistrations_checked(Some(&json!({
+                "unregisterations": [{ "id": "" }]
+            })))
+            .is_err()
+        );
     }
 
     #[test]
@@ -8393,6 +12132,256 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert_eq!(
             actions[1].command.as_deref(),
             Some("source.organizeImports")
+        );
+    }
+
+    #[test]
+    fn code_action_resolve_merges_deferred_fields_with_original_data() {
+        let original = json!({
+            "title": "Add import",
+            "kind": "quickfix",
+            "data": { "fixId": 7 }
+        });
+        let resolved = json!({
+            "title": "Add import",
+            "edit": {
+                "changes": {
+                    "file:///repo/src/main.ts": [{
+                        "range": {
+                            "start": { "line": 0, "character": 0 },
+                            "end": { "line": 0, "character": 0 }
+                        },
+                        "newText": "import x;\n"
+                    }]
+                }
+            }
+        });
+
+        let merged = merge_code_action_values(&original, &resolved);
+        assert_eq!(merged["data"]["fixId"], 7);
+        let parsed = parse_code_action(&merged).expect("merged CodeAction should parse");
+        assert_eq!(parsed.kind.as_deref(), Some("quickfix"));
+        assert_eq!(
+            parsed.edit.as_ref().map(|edit| edit.document_edits.len()),
+            Some(1)
+        );
+        assert_eq!(parsed.raw["data"]["fixId"], 7);
+    }
+
+    #[test]
+    fn preserves_workspace_edit_resource_operation_order_and_options() {
+        let edit = parse_workspace_edit(&json!({
+            "changeAnnotations": {
+                "text-1": {
+                    "label": "Update generated source",
+                    "needsConfirmation": true,
+                    "description": "The file is generated"
+                },
+                "rename-1": { "label": "Rename generated source" }
+            },
+            "documentChanges": [
+                {
+                    "kind": "create",
+                    "uri": "file:///repo/src/new.ts",
+                    "options": { "overwrite": true, "ignoreIfExists": false }
+                },
+                {
+                    "textDocument": { "uri": "file:///repo/src/new.ts", "version": 1 },
+                    "edits": [{
+                        "range": {
+                            "start": { "line": 0, "character": 0 },
+                            "end": { "line": 0, "character": 0 }
+                        },
+                        "newText": "content",
+                        "annotationId": "text-1"
+                    }]
+                },
+                {
+                    "kind": "rename",
+                    "oldUri": "file:///repo/src/new.ts",
+                    "newUri": "file:///repo/src/final.ts",
+                    "annotationId": "rename-1",
+                    "options": { "ignoreIfExists": true }
+                },
+                {
+                    "kind": "delete",
+                    "uri": "file:///repo/src/final.ts",
+                    "options": { "recursive": true, "ignoreIfNotExists": true }
+                }
+            ]
+        }));
+        assert_eq!(edit.operations.len(), 4);
+        assert_eq!(edit.document_edits.len(), 1);
+        assert_eq!(edit.change_annotations.len(), 2);
+        assert_eq!(edit.change_annotations[1].id, "text-1");
+        assert!(edit.change_annotations[1].needs_confirmation);
+        assert!(matches!(
+            &edit.operations[0],
+            LspWorkspaceEditOperation::Create {
+                overwrite: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &edit.operations[1],
+            LspWorkspaceEditOperation::Text { document }
+                if document.edits.len() == 1
+                    && document.version == Some(1)
+                    && document.annotation_ids == ["text-1"]
+        ));
+        assert!(matches!(
+            &edit.operations[2],
+            LspWorkspaceEditOperation::Rename {
+                ignore_if_exists: true,
+                annotation_id: Some(annotation_id),
+                ..
+            } if annotation_id == "rename-1"
+        ));
+        assert!(matches!(
+            &edit.operations[3],
+            LspWorkspaceEditOperation::Delete {
+                recursive: true,
+                ignore_if_not_exists: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn serializes_workspace_edit_and_apply_response_with_camel_case_contract() {
+        let edit = LspWorkspaceEdit {
+            document_edits: Vec::new(),
+            operations: vec![LspWorkspaceEditOperation::Rename {
+                old_uri: "file:///repo/old.ts".into(),
+                old_path: Some("/repo/old.ts".into()),
+                new_uri: "file:///repo/new.ts".into(),
+                new_path: Some("/repo/new.ts".into()),
+                overwrite: true,
+                ignore_if_exists: false,
+                annotation_id: Some("rename-1".into()),
+            }],
+            change_annotations: vec![LspChangeAnnotation {
+                id: "rename-1".into(),
+                label: "Rename source".into(),
+                needs_confirmation: true,
+                description: Some("Public API change".into()),
+            }],
+        };
+        let value = serde_json::to_value(edit).unwrap();
+        assert_eq!(value["documentEdits"], json!([]));
+        assert_eq!(value["operations"][0]["kind"], "rename");
+        assert_eq!(value["operations"][0]["oldUri"], "file:///repo/old.ts");
+        assert_eq!(value["operations"][0]["newPath"], "/repo/new.ts");
+        assert_eq!(value["operations"][0]["ignoreIfExists"], false);
+        assert_eq!(value["operations"][0]["annotationId"], "rename-1");
+        assert_eq!(value["changeAnnotations"][0]["needsConfirmation"], true);
+
+        let response = serde_json::to_value(LspWorkspaceApplyEditResponse {
+            applied: false,
+            failure_reason: Some("disk changed".into()),
+            failed_change: Some(2),
+        })
+        .unwrap();
+        assert_eq!(
+            response,
+            json!({
+                "applied": false,
+                "failureReason": "disk changed",
+                "failedChange": 2
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_apply_edit_bridge_validates_workspace_before_resolving() {
+        let bridge = LspClientRequestBridge::new();
+        let (sender, receiver) = oneshot::channel();
+        bridge.pending_workspace_edits.lock().unwrap().insert(
+            "request-1".into(),
+            PendingWorkspaceApplyEdit {
+                workspace_id: "workspace-a".into(),
+                sender,
+            },
+        );
+        let response = LspWorkspaceApplyEditResponse {
+            applied: false,
+            failure_reason: Some("hash mismatch".into()),
+            failed_change: Some(1),
+        };
+
+        let mismatch = bridge
+            .resolve_workspace_edit("request-1", "workspace-b", response.clone())
+            .unwrap_err();
+        assert!(mismatch.contains("does not match"));
+        assert!(
+            bridge
+                .pending_workspace_edits
+                .lock()
+                .unwrap()
+                .contains_key("request-1")
+        );
+
+        bridge
+            .resolve_workspace_edit("request-1", "workspace-a", response.clone())
+            .unwrap();
+        let received = receiver.await.unwrap();
+        assert_eq!(received.applied, response.applied);
+        assert_eq!(received.failure_reason, response.failure_reason);
+        assert_eq!(received.failed_change, response.failed_change);
+        assert!(
+            bridge
+                .resolve_workspace_edit("request-1", "workspace-a", response)
+                .unwrap_err()
+                .contains("no pending")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_apply_edit_bridge_fails_when_frontend_is_unavailable() {
+        let bridge = LspClientRequestBridge::new();
+        let response = bridge
+            .apply_workspace_edit("workspace-a", None, LspWorkspaceEdit::default())
+            .await;
+        assert!(!response.applied);
+        assert!(
+            response
+                .failure_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("frontend is unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn show_message_bridge_validates_workspace_and_action_index() {
+        let bridge = LspClientRequestBridge::new();
+        let (sender, receiver) = oneshot::channel();
+        bridge.pending_show_messages.lock().unwrap().insert(
+            "message-1".into(),
+            PendingShowMessageRequest {
+                workspace_id: "workspace-a".into(),
+                actions: vec![json!({ "title": "Keep", "value": 1 })],
+                sender,
+            },
+        );
+        assert!(
+            bridge
+                .resolve_show_message("message-1", "workspace-b", Some(0))
+                .unwrap_err()
+                .contains("target workspace")
+        );
+        assert!(
+            bridge
+                .resolve_show_message("message-1", "workspace-a", Some(3))
+                .unwrap_err()
+                .contains("out of range")
+        );
+        bridge
+            .resolve_show_message("message-1", "workspace-a", Some(0))
+            .unwrap();
+        assert_eq!(
+            receiver.await.unwrap(),
+            Some(json!({ "title": "Keep", "value": 1 }))
         );
     }
 

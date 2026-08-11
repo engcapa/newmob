@@ -36,6 +36,15 @@ export interface CodeWorkspaceEditorGroupState {
   pinnedKeys: string[];
 }
 
+export type CodeWorkspaceFileKeyChanges = Record<string, string | null>;
+
+export interface CodeWorkspaceFileStateReplacement {
+  openFiles: Record<string, OpenFileState>;
+  lspFiles: Record<string, LspFileState>;
+  /** Old key -> new key, or null when a resource operation removed the file. */
+  keyChanges: CodeWorkspaceFileKeyChanges;
+}
+
 function createEditorGroup(id: EditorGroupId): CodeWorkspaceEditorGroupState {
   return { id, openOrder: [], activeKey: null, previewKey: null, pinnedKeys: [] };
 }
@@ -140,6 +149,70 @@ function resolveUpdater<T>(prev: T, updater: Updater<T>): T {
   return typeof updater === "function" ? (updater as (prev: T) => T)(prev) : updater;
 }
 
+function remappedFileKey(
+  key: string,
+  keyChanges: CodeWorkspaceFileKeyChanges,
+  validKeys: ReadonlySet<string>,
+): string | null {
+  const mapped = Object.prototype.hasOwnProperty.call(keyChanges, key) ? keyChanges[key] : key;
+  return mapped != null && validKeys.has(mapped) ? mapped : null;
+}
+
+function remapFileKeyList(
+  keys: readonly string[],
+  keyChanges: CodeWorkspaceFileKeyChanges,
+  validKeys: ReadonlySet<string>,
+): string[] {
+  const seen = new Set<string>();
+  const next: string[] = [];
+  for (const key of keys) {
+    const mapped = remappedFileKey(key, keyChanges, validKeys);
+    if (!mapped || seen.has(mapped)) continue;
+    seen.add(mapped);
+    next.push(mapped);
+  }
+  return next;
+}
+
+function reconcileEditorGroupFiles(
+  group: CodeWorkspaceEditorGroupState,
+  keyChanges: CodeWorkspaceFileKeyChanges,
+  validKeys: ReadonlySet<string>,
+): CodeWorkspaceEditorGroupState {
+  const activeIndex = group.activeKey ? group.openOrder.indexOf(group.activeKey) : -1;
+  const openOrder = remapFileKeyList(group.openOrder, keyChanges, validKeys);
+  const mappedActive = group.activeKey
+    ? remappedFileKey(group.activeKey, keyChanges, validKeys)
+    : null;
+  const activeKey = mappedActive && openOrder.includes(mappedActive)
+    ? mappedActive
+    : openOrder[Math.min(Math.max(activeIndex, 0), Math.max(openOrder.length - 1, 0))] ?? null;
+  const mappedPreview = group.previewKey
+    ? remappedFileKey(group.previewKey, keyChanges, validKeys)
+    : null;
+  return {
+    ...group,
+    openOrder,
+    activeKey,
+    previewKey: mappedPreview && openOrder.includes(mappedPreview) ? mappedPreview : null,
+    pinnedKeys: remapFileKeyList(group.pinnedKeys, keyChanges, validKeys)
+      .filter((key) => openOrder.includes(key)),
+  };
+}
+
+function remapMarkdownModes(
+  current: CodeWorkspaceInstanceUi["markdownModes"],
+  keyChanges: CodeWorkspaceFileKeyChanges,
+  validKeys: ReadonlySet<string>,
+): CodeWorkspaceInstanceUi["markdownModes"] {
+  const next: CodeWorkspaceInstanceUi["markdownModes"] = {};
+  for (const [key, mode] of Object.entries(current)) {
+    const mapped = remappedFileKey(key, keyChanges, validKeys);
+    if (mapped) next[mapped] = mode;
+  }
+  return next;
+}
+
 interface CodeWorkspaceStoreState {
   byInstanceId: Record<string, CodeWorkspaceInstanceUi>;
   ensureInstance: (instanceId: string) => void;
@@ -156,6 +229,7 @@ interface CodeWorkspaceStoreState {
   setActiveEditorGroup: (instanceId: string, groupId: EditorGroupId) => void;
   setSplitOrientation: (instanceId: string, orientation: EditorSplitOrientation | null) => void;
   setMarkdownMode: (instanceId: string, fileKey: string, mode: "edit" | "preview" | "split") => void;
+  replaceFileState: (instanceId: string, replacement: CodeWorkspaceFileStateReplacement) => void;
   updateOpenFiles: (instanceId: string, updater: Updater<Record<string, OpenFileState>>) => void;
   updateLspFiles: (instanceId: string, updater: Updater<Record<string, LspFileState>>) => void;
   updateExpandedRootIds: (instanceId: string, updater: Updater<string[]>) => void;
@@ -300,6 +374,44 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
           [instanceId]: {
             ...current,
             markdownModes: { ...current.markdownModes, [fileKey]: mode },
+          },
+        },
+      };
+    });
+  },
+
+  replaceFileState: (instanceId, replacement) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      const validKeys = new Set(Object.keys(replacement.openFiles));
+      const editorGroups: CodeWorkspaceInstanceUi["editorGroups"] = {
+        primary: reconcileEditorGroupFiles(
+          current.editorGroups.primary,
+          replacement.keyChanges,
+          validKeys,
+        ),
+        secondary: reconcileEditorGroupFiles(
+          current.editorGroups.secondary,
+          replacement.keyChanges,
+          validKeys,
+        ),
+      };
+      const activeGroup = editorGroups[current.activeEditorGroupId];
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            openFiles: replacement.openFiles,
+            lspFiles: replacement.lspFiles,
+            editorGroups,
+            openOrder: activeGroup.openOrder,
+            activeKey: activeGroup.activeKey,
+            markdownModes: remapMarkdownModes(current.markdownModes, replacement.keyChanges, validKeys),
+            recentFilesOpen: false,
+            recentEntries: [],
+            locationPeek: null,
           },
         },
       };

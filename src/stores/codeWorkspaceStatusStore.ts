@@ -2,6 +2,14 @@ import { create } from "zustand";
 
 export type WorkspaceEol = "LF" | "CRLF" | "CR";
 
+export interface CodeWorkspaceLspProgress {
+  key: string;
+  label: string;
+  message: string | null;
+  percentage: number | null;
+  cancellable: boolean;
+}
+
 export interface CodeWorkspaceStatusSegments {
   tabId: string;
   /** 1-based line for display. */
@@ -20,11 +28,18 @@ export interface CodeWorkspaceStatusSegments {
   fontSize: number;
   /** Large-file mode: semantic tokens / inlay hints / highlight are downgraded. */
   largeFile: boolean;
+  /** Most recently updated server work-done task, when one is active. */
+  lspProgress?: CodeWorkspaceLspProgress | null;
 }
 
 export interface CodeWorkspaceStatusActions {
   openLanguagePanel?: () => void;
   openGitManager?: () => void;
+  cancelLspProgress?: () => void;
+  /** Cycle the active editor's on-disk line ending and mark it dirty. */
+  cycleEol?: () => void;
+  /** Toggle preservation of the UTF-8 byte-order marker and mark it dirty. */
+  toggleBom?: () => void;
 }
 
 interface CodeWorkspaceStatusStoreState {
@@ -54,7 +69,12 @@ function segmentsEqual(
     && left.gitAhead === right.gitAhead
     && left.gitBehind === right.gitBehind
     && left.fontSize === right.fontSize
-    && left.largeFile === right.largeFile;
+    && left.largeFile === right.largeFile
+    && left.lspProgress?.key === right.lspProgress?.key
+    && left.lspProgress?.label === right.lspProgress?.label
+    && left.lspProgress?.message === right.lspProgress?.message
+    && left.lspProgress?.percentage === right.lspProgress?.percentage
+    && left.lspProgress?.cancellable === right.lspProgress?.cancellable;
 }
 
 export function detectWorkspaceEol(text: string): WorkspaceEol {

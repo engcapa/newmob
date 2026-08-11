@@ -1478,6 +1478,12 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       const trimmed = typeof raw === "string" ? raw.trim() : "";
       return (trimmed || "-Xms1024m -Xmx1024m") as T;
     }
+    case "lsp_resolve_show_message_request": {
+      return undefined as T;
+    }
+    case "lsp_cancel_work_done_progress": {
+      return false as T;
+    }
     case "lsp_detect_servers": {
       return stubLspServerStatuses() as T;
     }
@@ -1489,6 +1495,10 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       return stubLspDocumentStatus(args as InvokeArgs) as T;
     }
     case "lsp_stop_workspace": {
+      return 0 as T;
+    }
+    case "lsp_workspace_will_file_operation":
+    case "lsp_workspace_did_file_operation": {
       return 0 as T;
     }
     case "lsp_get_diagnostics": {
@@ -1574,6 +1584,12 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         ranges: [],
       } as T;
     }
+    case "lsp_code_action_resolve": {
+      return {
+        status: stubLspDocumentStatus(args as InvokeArgs),
+        action: null,
+      } as T;
+    }
     case "lsp_semantic_tokens": {
       return {
         status: stubLspDocumentStatus(args as InvokeArgs),
@@ -1641,9 +1657,12 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       const path = args?.path as string;
       const target = joinWorkspacePath(repoRoot, path);
       const [entry, text] = await Promise.all([vfsStat(target), vfsReadText(target)]);
+      const bom = text.startsWith("\uFEFF");
       return {
         path: relativeWorkspacePath(repoRoot, entry.path),
-        text,
+        text: bom ? text.slice(1) : text,
+        encoding: "UTF-8",
+        bom,
         size: entry.size,
         mtime: entry.mtime,
         hash: await sha256Hex(text),
@@ -1652,9 +1671,12 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
     case "workspace_read_loose_file": {
       const path = args?.path as string;
       const [entry, text] = await Promise.all([vfsStat(path), vfsReadText(path)]);
+      const bom = text.startsWith("\uFEFF");
       return {
         path: entry.path,
-        text,
+        text: bom ? text.slice(1) : text,
+        encoding: "UTF-8",
+        bom,
         size: entry.size,
         mtime: entry.mtime,
         hash: await sha256Hex(text),
@@ -1678,7 +1700,9 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       const entry = await vfsStat(target);
       return {
         path: relativeWorkspacePath(repoRoot, entry.path),
-        text: contents,
+        text: contents.startsWith("\uFEFF") ? contents.slice(1) : contents,
+        encoding: "UTF-8",
+        bom: contents.startsWith("\uFEFF"),
         size: entry.size,
         mtime: entry.mtime,
         hash: await sha256Hex(contents),
@@ -1700,7 +1724,9 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       const entry = await vfsStat(path);
       return {
         path: entry.path,
-        text: contents,
+        text: contents.startsWith("\uFEFF") ? contents.slice(1) : contents,
+        encoding: "UTF-8",
+        bom: contents.startsWith("\uFEFF"),
         size: entry.size,
         mtime: entry.mtime,
         hash: await sha256Hex(contents),
@@ -1723,7 +1749,9 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       const entry = await vfsStat(target);
       return {
         path: relativeWorkspacePath(repoRoot, entry.path),
-        text: contents,
+        text: contents.startsWith("\uFEFF") ? contents.slice(1) : contents,
+        encoding: "UTF-8",
+        bom: contents.startsWith("\uFEFF"),
         size: entry.size,
         mtime: entry.mtime,
         hash: await sha256Hex(contents),

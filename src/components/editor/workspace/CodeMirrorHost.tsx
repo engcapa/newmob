@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type MutableRefObject,
+} from "react";
 import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   EditorView,
@@ -134,6 +140,10 @@ interface CodeMirrorHostProps {
   onContextMenu?: (info: EditorContextMenuRequest) => void;
   completionTriggers?: string[];
   signatureTriggers?: string[];
+  /** Wrap logical lines at the viewport edge (IDEA soft-wrap mode). */
+  softWrap?: boolean;
+  /** When enabled, a normal mouse drag creates a rectangular selection. */
+  columnSelectionMode?: boolean;
 }
 
 /** Payload for the editor context menu (coordinates + clipboard helpers). */
@@ -155,7 +165,12 @@ export interface EditorContextMenuRequest {
  * only document changes are rejected (IDEA's decompiled-source behaviour).
  */
 function readOnlyExtension(readOnly: boolean): Extension {
-  return readOnly ? EditorState.readOnly.of(true) : [];
+  return readOnly
+    ? [
+      EditorState.readOnly.of(true),
+      EditorView.contentAttributes.of({ "aria-readonly": "true" }),
+    ]
+    : [];
 }
 
 const WORKSPACE_EDITOR_STYLE = EditorView.theme({
@@ -342,6 +357,8 @@ export function CodeMirrorHost({
   onContextMenu,
   completionTriggers,
   signatureTriggers,
+  softWrap = false,
+  columnSelectionMode = false,
   debugBreakpoints,
   debugCurrentLine,
   debugInlineValues,
@@ -360,6 +377,7 @@ export function CodeMirrorHost({
   const debugCompartment = useRef(new Compartment());
   const signatureCompartment = useRef(new Compartment());
   const readOnlyCompartment = useRef(new Compartment());
+  const wrappingCompartment = useRef(new Compartment());
   const signatureShownRef = useRef(false);
   /** True while applying a prop-driven doc replace so it is not treated as a user edit. */
   const applyingExternalDocRef = useRef(false);
@@ -401,6 +419,7 @@ export function CodeMirrorHost({
   const onContextMenuRef = useRef(onContextMenu);
   const completionTriggersRef = useRef(completionTriggers ?? []);
   const signatureTriggersRef = useRef(signatureTriggers ?? []);
+  const columnSelectionModeRef = useRef(columnSelectionMode);
   const pathRef = useRef(path);
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
@@ -464,6 +483,7 @@ export function CodeMirrorHost({
   }), []);
   completionTriggersRef.current = completionTriggers ?? [];
   signatureTriggersRef.current = signatureTriggers ?? [];
+  columnSelectionModeRef.current = columnSelectionMode;
   pathRef.current = path;
 
   const emitSelection = (view: EditorView) => {
@@ -609,7 +629,11 @@ export function CodeMirrorHost({
         drawSelection(),
         rectangularSelection({
           eventFilter: (event) =>
-            event.button === 0 && (event.altKey || (event.ctrlKey && event.shiftKey)),
+            event.button === 0 && (
+              columnSelectionModeRef.current
+              || event.altKey
+              || (event.ctrlKey && event.shiftKey)
+            ),
         }),
         crosshairCursor(),
         history(),
@@ -693,6 +717,7 @@ export function CodeMirrorHost({
         )),
         signatureCompartment.current.of([]),
         readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
+        wrappingCompartment.current.of(softWrap ? EditorView.lineWrapping : []),
         ...lspInteractionExtensions(onHoverRef, onDefinitionRef, onReferencesRef),
         ...codeViewExtensions(),
         WORKSPACE_EDITOR_STYLE,
@@ -853,11 +878,19 @@ export function CodeMirrorHost({
     };
   }, [path]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view) return;
     view.dispatch({ effects: readOnlyCompartment.current.reconfigure(readOnlyExtension(readOnly)) });
   }, [readOnly]);
+
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: wrappingCompartment.current.reconfigure(softWrap ? EditorView.lineWrapping : []),
+    });
+  }, [softWrap]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -975,5 +1008,12 @@ export function CodeMirrorHost({
     view.focus();
   }, [reveal]);
 
-  return <div ref={hostRef} className="h-full w-full" />;
+  return (
+    <div
+      ref={hostRef}
+      data-soft-wrap={softWrap || undefined}
+      data-column-selection={columnSelectionMode || undefined}
+      className="h-full w-full"
+    />
+  );
 }

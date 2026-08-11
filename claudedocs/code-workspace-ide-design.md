@@ -1,8 +1,8 @@
-# Code Workspace 轻量 IDE 化设计方案
+# Code Workspace IntelliJ IDEA Code Editor 对齐方案
 
-> 目标：在现有 Code Workspace 基础上做功能与交互完善，达到"日常代码开发够用"的 IntelliJ IDEA 级体验（非全量对标）。本文档为设计稿，不含实现代码。
+> 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-07-26 · 版本：v3.3（在 M6–M9 基础上新增 **M10 Java Build/Run 可执行闭环**：主类发现、Maven/Gradle/单文件启动、多模块构建任务、项目 Build/Rebuild、顶部运行入口与 wrapper 跨平台修复；详见 §11.G。调试仍使用通用 DAP，普通 Run 不再依赖 java-debug bundle）· 状态：**实施中**（代码与聚焦自动化已交付，M6–M10 真机工程冒烟待回填）
+> 日期：2026-08-12 · 版本：v4.7（严格持平基线；WorkspaceEdit 有序预览与 `codeAction/resolve` 代码闭环）· 状态：**实施中**。已有 M0–M10 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前完成 WorkspaceEdit、server-request、pull diagnostics、`workspace/didChangeWatchedFiles`、Tauri watcher 与基础冲突/崩溃恢复代码切片，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
 > 早期版本：v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -14,28 +14,24 @@
 
 | 领域 | 已有能力 | 载体 |
 |------|----------|------|
-| 工作区模型 | 多根目录（folder/git）+ 松散文件（loose files）、最近工作区 | `CodeWorkspaceTabInfo`，tab 类型 `code-workspace` |
-| 文件树 | tree/compact/flat 三种视图、名称过滤、新建/重命名/删除、Git 状态徽标、树字号缩放 | `CodeWorkspaceTab.tsx`（当前约 3.7k 行单文件，文件树视图壳已抽离） |
-| 编辑器 | CodeMirror 6：行号、折叠、括号匹配、多光标、历史、词级补全、活动行高亮 | 同上 |
-| Markdown | edit/preview/split，Mermaid 渲染 + SVG/PNG 导出 | 同上 |
-| LSP | 10 种语言预设 + 自定义命令；didOpen/Change/Save/Close、publishDiagnostics、hover、definition、references；服务探测 | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts` |
-| Git | 快照/暂存/提交/日志/diff/分支/标签/stash/merge/rebase/cherry-pick/冲突/远端认证 —— 已相当完整 | `src/lib/git.ts`、`components/git/WorkspaceGitManager` |
-| 外观 | code view profile（主题/字号）与设置页共享，编辑区/树独立缩放 | `codeViewProfile.ts` |
+| 工作区模型 | 多根目录（folder/git）+ loose files、布局恢复、最近工作区、tree/compact/flat 文件树 | `CodeWorkspaceTabInfo`、`codeWorkspaceStore`、`useWorkspaceTreeData` |
+| 编辑器 | CodeMirror 6：查找替换、多光标/矩形选择、折叠、注释、IDEA 常用编辑键位、大文件降级、二分屏、preview/pin tab | `CodeMirrorHost.tsx`、`EditorGroup.tsx` |
+| Markdown | edit/preview/split，Mermaid 渲染 + SVG/PNG 导出 | `MarkdownPreview.tsx` |
+| LSP | 10 种语言预设 + 自定义命令；文档同步、诊断、补全、签名、文档、导航/引用/层级、格式化、重命名、Code Action、inlay/semantic token、动态 capability | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts`、`useWorkspaceLspSession.ts` |
+| 搜索与导航 | Find/Replace in Files、Search Everywhere、Go to File/Class/Symbol、Recent Files、前进/后退、Outline/结构弹窗、Problems | `workspace_search.rs`、workspace panels/hooks |
+| 工程执行 | 集成 PTY、任务探测、Java Build/Run、通用 DAP 与 Java 调试/测试基础、SDK/toolchain 探测 | `workspace.rs`、`dap.rs`、Run/Build/Test/Debug panels |
+| Git 与恢复 | gutter/diff、inline blame、完整 Git Manager、本地历史、TODO/书签 | `src/lib/git.ts`、workspace chrome/panels |
+| 外观与扩展入口 | code view profile、编辑区/树独立缩放、LSP 命令/Java 设置 | `codeViewProfile.ts`、Settings |
 
-**明确缺失（vs 日常 IDE 开发）：**
+**当前明确缺失（严格 IDEA parity）：**
 
-1. 编辑器内查找/替换（未引入 `@codemirror/search`）
-2. 语言智能只有"只读四件套"（诊断/悬停/定义/引用）——无补全、签名帮助、快速文档、重命名、格式化、Code Actions、类/符号查找、调用层级、类型层级、实现跳转、用法高亮、inlay hints
-3. 全局内容搜索（Find in Files）——只有文件名过滤
-4. 导航体系：Search Everywhere、Go to File/Class/Symbol、Recent Files、前进/后退
-5. Problems 汇总面板、Outline/结构视图
-6. 编辑区分屏、编辑器 tab 管理（固定/关闭其他/中键关闭）、面包屑
-7. 集成终端（终端目前是独立 tab，与工作区无联动）
-8. Git 编辑器内呈现：gutter 变更标记、inline blame
-9. Run/Tasks（脚本探测与运行）
-10. 本地历史（Local History）
-11. 树右键菜单、拖拽（文件操作目前依赖工具栏按钮）
-12. 仅支持本地文件系统（`workspace.rs` 全部走本地路径）
+1. IDEA PSI/stub index、inspection/data-flow/nullability，以及 safe delete、move class、change signature、extract/inline 等索引式重构。
+2. 完整 project/module/source-set/facet/language-level 模型及 Maven/Gradle 等价导入生命周期。
+3. LSP 客户端剩余协议面：更完整的配置模型与跨请求取消边界；diagnostic partial result/即时 refresh 已形成代码闭环，`workspace/didChangeWatchedFiles` 与 watcher 仍需三端原生验收。
+4. IDEA 级 dirty 冲突/合并与 crash/restart 恢复中心已形成基础代码闭环（含有界行级三方合并）；语义/token 级合并、跨操作 undo，以及网络盘、UNC、大小写-only rename 等文件系统边界仍未完成严格验收。
+5. IDEA 等价的 Run Configuration/Before launch/覆盖率/结构化测试和多语言调试适配矩阵。
+6. 插件扩展点、keymap 编辑器、设置 schema/迁移、无障碍与动作可发现性完整闭环。
+7. Linux/macOS/Windows 原生工程和发行包验收证据。详细清单以 §2.5–§2.7 为准。
 
 ---
 
@@ -43,7 +39,7 @@
 
 ### 2.1 产品定位
 
-Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码、提交代码的主战场。重活（调试、重型重构、Profiling）仍交给外部 IDE，taomni 的差异化是**与终端/SSH/SFTP/AI 的一体化**。
+Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常改代码、查代码、重构、构建、测试、运行、调试和提交代码都必须在工作区内闭环。终端、SSH/SFTP/AI 是额外优势，不是用来掩盖编辑器能力缺口的替代路径。
 
 ### 2.2 范围分级
 
@@ -53,16 +49,83 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 | **P1（体验对齐）** | 编辑区分屏、编辑器 tab 管理、面包屑、集成终端底部面板、调用层级/类型层级、用法高亮、inlay hints、Git gutter/inline blame、Run/Tasks、工作区状态持久化增强 |
 | **P2（差异化/加分）** | 本地历史、TODO/书签面板、语义高亮、AI 深度集成（解释/修复/生成 + diff 应用）、远程工作区（SSH 根目录）探索 |
 
-### 2.3 非目标（明确不做）
+### 2.3 严格持平范围与当前缺口
 
-> **v3.0 范围变更**：原列为非目标的「完整调试器（DAP）」与「构建系统模型」已纳入 §11 的 Java 深度支持计划（M6–M9）。调试改为通用 DAP 框架分阶段实现；构建集成只做依赖树/生命周期/模块视图，不做 IDEA 级 facet 建模。下表为更新后的非目标清单。
+“严格持平”必须覆盖以下编辑器边界；表中尚未完成的能力是待开发项，不得再登记为非目标：
 
-- **索引式重构**（move class、change signature 等超出 LSP 能力的重构）——只做 jdtls code action 提供的重构
-- **IDEA 级 project model / facet 体系**——构建集成止于依赖树/生命周期/模块视图（§11 F），不建完整 facet 模型
-- **插件系统 / 市场**
-- **Profiler / 内存分析器**
-- 不替代现有 Git Manager 的完整功能，只做编辑器内的轻量呈现与入口
-- **远程 jdtls**（在 SSH 主机上运行语言服务器）——仍在 §5.13 spike 之外
+- 编辑、选择、查找替换、多光标、代码折叠、注释、剪贴板、快捷键、编辑器 tab、分屏、面包屑、导航历史和 Recent Files。
+- LSP/IDE 智能：补全、签名帮助、快速文档、诊断、Code Action（含 command-only）、格式化、重命名、引用/实现/类型跳转、符号/类搜索、调用/类型层级、用法高亮、inlay hint、语义 token、selection range，以及完整 WorkspaceEdit 资源操作。
+- IDEA 级索引与工程模型：project/module/source set、依赖解析、facet/语言级别、inspection、data-flow/nullability、全项目符号索引、增量失效与重建。
+- 运行、测试、调试和构建配置：可命名配置、参数/环境/工作目录、Before launch、模块选择、测试树、断点/变量/调用栈和跨平台生命周期。
+- 插件/扩展契约：能力发现、扩展点、版本兼容、设置迁移和禁用/卸载语义。
+- 三端一致性：Linux、macOS、Windows 的路径、快捷键、文件监控、进程生命周期、编码/换行和原生工程冒烟。
+
+以下内容属于产品边界，不属于“Code Editor 严格持平”验收范围：通用数据库客户端、完整 Git 客户端、远程桌面、邮件/聊天、通用 Profiling 产品。它们可以继续作为 taomni 的集成能力，但不得替代上述编辑器能力。
+
+### 2.4 严格持平阶段门禁
+
+每个能力只有在以下门禁全部通过后才能标记为“完成”：
+
+1. **协议门禁**：LSP/DAP/构建工具的请求、通知、反向请求、取消、超时和错误结果均有明确处理；不能以静默 `null` 作为成功。
+2. **状态门禁**：磁盘文件、dirty buffer、编辑器 tab、索引、树和 Git 状态在创建/重命名/删除/外部变更后保持一致。
+3. **三端门禁**：Linux、macOS、Windows 至少各有一套真实工程冒烟记录；浏览器 stub 只能验证纯前端逻辑，不能证明原生闭环。
+4. **回归门禁**：聚焦单测、Rust 集成/协议测试和 `qa-ui-auto --diff` 均通过，并补齐新增可交互控件的覆盖。
+5. **可观测门禁**：用户可见的失败原因、取消和部分成功结果可追踪；日志不泄露源码、凭据或完整工作区内容。
+
+### 2.5 当前 Gap 清单（权威基线）
+
+状态定义：`代码闭环` 仅表示当前仓库存在实现和聚焦自动化，不等于严格完成；`严格完成` 必须同时通过 §2.4 五项门禁。2026-08-11 的结论是：**没有任何跨平台能力可以只凭当前 Linux 自动化标记为三端严格完成**。
+
+| 优先级 | 能力域 | 当前可用基线 | 与 IntelliJ IDEA Code Editor 的关键 Gap | 严格状态 |
+|--------|--------|--------------|------------------------------------------|----------|
+| P0 | 编辑内核 | CodeMirror 6、查找替换、多光标/矩形选择、折叠、注释、soft wrap、列选择模式、UTF-8 BOM/EOL 状态与转换、基础键位 | 非 UTF-8 编码识别/转换、code style/缩进检测、列选择完整键位、超大文件和二进制文件完整降级语义未形成统一模型 | 未完成 |
+| P0 | WorkspaceEdit / Code Action | 有序 text/create/rename/delete、edit-before-command、command-only、延迟 `codeAction/resolve`、反向 `workspace/applyEdit`、用户文件操作 `will*/did*Files`、版本与 dirty buffer 防护、`changeAnnotations.needsConfirmation`、多文件/资源操作有序预览确认、基础冲突 UI | 跨操作 undo、取消和冲突 UI 的语义合并仍缺 | 代码闭环，未严格完成 |
+| P0 | LSP 客户端协议 | initialize/动态 capability、文档同步与智能请求；反向 applyEdit/message/configuration/workDone progress；标准错误/取消；LSP 3.17 workspace pull diagnostics（full/unchanged/related/partial/refresh）；`workspace/didChangeWatchedFiles` 静态/动态注册与 kind/glob 过滤 | 配置仅覆盖当前 session 设置；已开始落盘的资源操作不可安全中断；watcher 的 macOS/Windows 原生行为尚未验收 | 代码闭环，未严格完成 |
+| P0 | 文件系统一致性 | 多根、loose file、hash 写入保护；资源 rename 支持跨根与跨文件系统回退；应用内变更通知；Tauri 原生递归 watcher、rename 归一化与前端刷新；dirty 冲突三选一、有界崩溃恢复快照与行级三方合并 | 语义/token 级合并、跨操作 undo、大小写-only rename、锁定文件/权限变化、网络盘/UNC，以及三端打包应用验收 | 代码闭环，未严格完成 |
+| P0 | 索引与重构 | LSP workspace symbol、rename、部分 jdtls action | 无 IDEA PSI/stub index、inspection profile、data-flow/nullability、safe delete、move class、change signature、extract/inline、全项目引用增量索引 | 核心差距 |
+| P0 | 工程模型 | 多根、SDK 探测、Java module/任务/依赖树基础 | 无统一 project/module/source-set/facet/language-level 模型；Maven/Gradle 增量导入、冲突模型和离线状态不等价 | 核心差距 |
+| P1 | 导航与编辑器 UX | Search Everywhere、Recent Files、历史、分屏、tab、面包屑、Outline | action 搜索排序/上下文、preview/固定语义边界、导航落点恢复、拖拽停靠、keymap 编辑器、无障碍完整验收尚缺 | 未完成 |
+| P1 | Run/Test/Debug | Java Run/Build、通用 DAP、断点/变量/调用栈、测试发现基础 | 命名 Run Configuration、Before launch、覆盖率、结构化测试协议、多语言 adapter、热替换和失败重跑矩阵不完整 | 未完成 |
+| P1 | 扩展与设置 | LSP 自定义命令及部分语言设置 | 无 IDEA 级插件扩展点、版本兼容、禁用/卸载、设置 schema/迁移与扩展隔离 | 核心差距 |
+| P1 | 可靠性与可观测 | 请求超时、标准错误、work-done progress/取消、部分结果摘要、部分本地历史；崩溃/重启恢复快照与恢复中心 | 协议 trace 脱敏、批量重构恢复、跨操作 undo 和性能基准门禁未闭环 | 未完成 |
+
+### 2.6 Linux / macOS / Windows Gap
+
+| 平台 | 当前证据 | 平台特有 Gap | 严格验收清单 |
+|------|----------|--------------|----------------|
+| Linux | 当前环境通过 TypeScript/Vitest/Rust 自动化；有 `cfg(unix)` 路径 | 尚无打包后的 Tauri 真机记录；Wayland/X11 快捷键与剪贴板、inotify 上限、跨 mount rename/symlink、PTY shell、JDK/LSP/DAP 进程树需实测 | Ubuntu Wayland + X11；大小写敏感 FS；跨文件系统资源操作；Java/TS/Python/Rust/C++ 工程；安装包升级/恢复 |
+| macOS | 无本轮本机执行证据；Tauri WebDriver 本身不支持 macOS | `Cmd`/`Option` keymap 与原生菜单、APFS 大小写模式、quarantine/notarization、zsh/login PATH、应用退出后的子进程清理均未验收 | Intel + Apple Silicon 至少一套；Cmd 系快捷键；大小写-only rename；签名包；JDK/LSP/DAP/PTY 冒烟 |
+| Windows | 有条件编译代码和部分 Rust 单测，但本轮未在 Windows 执行 | drive/UNC/长路径/盘符大小写、CRLF、文件占用和杀毒软件竞争、rename overwrite、junction/symlink 权限、PowerShell/cmd、WebView2、Job Object 进程树未闭环 | Windows 11；NTFS + UNC；CRLF/UTF-8 BOM；锁定文件失败恢复；Java/TS/Python/Rust/C++；MSI/NSIS 升级 |
+
+三端共同必须保存同一套验收产物：版本与机器信息、工程 fixture、操作步骤、LSP/DAP trace 摘要、失败截图/日志、结果时间戳。浏览器 stub 和单平台单测不能替代这些证据。
+
+### 2.7 P0-A/P0-B 实施清单（2026-08-11）
+
+- [x] 保留 LSP `documentChanges` 顺序并支持 TextDocumentEdit/CreateFile/RenameFile/DeleteFile。
+- [x] Code Action 按 edit 后 command 执行，支持 command-only；edit 部分失败时不执行 command。
+- [x] 服务器反向 `workspace/applyEdit` 具备前端桥、30 秒超时、workspace 校验、`failureReason`/`failedChange` 回传。
+- [x] 动态 capability 注册/注销刷新前端 capability 摘要。
+- [x] 版本化编辑同时校验 LSP version 与“该文本已完成同步”，避免未发送输入被旧 edit 覆盖。
+- [x] WorkspaceEdit 串行执行；资源操作期间双编辑器组只读；后端完成后基于最新 buffer 快照提交 tab/LSP/导航/树/书签状态。
+- [x] Create/Rename/Delete 遵循 option 优先级；rename overwrite 失败恢复旧目标；跨文件系统复制保留符号链接；拒绝 CreateFile 覆盖目录和目录移入自身。
+- [x] `changeAnnotations.needsConfirmation` 在任何修改前统一确认；拒绝不修改 buffer/磁盘，并按协议回传未应用原因。
+- [x] 用户主动创建/重命名/删除接入 `workspace/will*Files` + `workspace/did*Files`；按静态/动态 capability、scheme/glob/kind 和 session root 筛选，`will*` 返回的 edit 复用 `workspace/applyEdit` 前端桥并在落盘前完成。
+- [x] server-request/notification 分发：`window/showMessageRequest` 多 action 与超时/取消、`window/showMessage`、work-done progress/取消、workspace configuration/folders、已知 refresh、未知 method `-32601`、无效参数 `-32602`。
+- [x] LSP 3.17 `workspace/diagnostic` fallback：按静态/动态 provider 启用、跨 session 并发、resultId full/unchanged、relatedDocuments、partial result token、失败回退 push 缓存、响应原子应用。
+- [x] `workspace/diagnostic/refresh`：转发到前端并立即刷新打开文件和 Problems 聚合，不再只依赖轮询。
+- [x] 编辑器格式元数据：UTF-8 BOM 无损读写、状态栏显示/切换 BOM，LF/CRLF/CR 状态栏循环转换并进入现有 dirty/hash 保存链路。
+- [x] 应用内文件变更通知：创建/删除/重命名、保存和 WorkspaceEdit 写盘均转发 `workspace/didChangeWatchedFiles`，并抑制短窗口内的重复本地事件。
+- [x] `workspace/didChangeWatchedFiles`：动态 watcher 注册/注销、字符串 glob/`RelativePattern`、`kind` 位掩码、Create/Change/Delete 与 rename 拆分、参数校验和去重。
+- [x] WorkspaceEdit 预检/预览：统计受影响文件、文本编辑和资源操作，保留 `documentChanges` 顺序，展示资源路径与实际引用的 change annotations；多文件或资源操作在首个 mutation 前确认，拒绝时零修改。
+- [x] `codeAction/resolve`：initialize 声明延迟 `edit`/`command` 解析能力；保留原始 CodeAction/data，用户选中后 resolve 并合并结果；请求失败回退原动作且不破坏 edit-before-command。
+- [x] Tauri 原生 watcher 代码链路：多根目录与 loose file 递归监控、事件归一化、workspace 生命周期启停、前端外部变更刷新与干净 buffer 自动 reload。
+- [ ] macOS/Windows/Linux 打包应用中的原生 watcher 真机验收：锁定文件、权限错误、大小写-only rename、网络盘/UNC、跨文件系统和 watcher 上限。
+- [x] dirty buffer 外部变更基础恢复 UI：三选一（保留本地/载入磁盘/手工合并）、删除保护；新增有界本地恢复快照与恢复中心（Recover/Discard/Decide later）。
+- [x] 基础行级三方自动合并：非重叠改动自动组合，重叠改动生成可编辑冲突标记。
+- [ ] IDEA 级语义/token 合并、跨操作 undo、恢复快照的三端打包应用验收。
+- [ ] Linux/macOS/Windows 原生工程矩阵与发行包冒烟。
+
+当前协议边界：`workspace/configuration` 对未知 section 返回 `null`，尚无 IDEA 等价的全局设置 schema；WorkspaceEdit 一旦开始磁盘资源操作，不会在操作中途响应取消，以避免主动制造部分落盘状态，跨操作事务/undo 仍待实现。原生 watcher 与恢复中心已有 Linux/浏览器自动化证据，但三端打包应用、网络盘/UNC、大小写-only rename、语义/token 合并仍不能宣称严格完成。
 
 ---
 
@@ -515,7 +578,7 @@ src/stores/
 | | `lsp_document_highlight` | 用法高亮 |
 | | `lsp_prepare_rename` / `lsp_rename` | 返回 WorkspaceEdit（按文件分组序列化） |
 | | `lsp_formatting` / `lsp_range_formatting` | TextEdit[] |
-| | `lsp_code_actions` / `lsp_execute_command` | applyEdit 回推 → Tauri event `lsp:apply-edit` + oneshot 应答（复用 cc_bridge HITL 模式） |
+| | `lsp_code_actions` / `lsp_code_action_resolve` / `lsp_execute_command` | 延迟 action 解析；applyEdit 回推 → Tauri event `lsp:apply-edit` + oneshot 应答（复用 cc_bridge HITL 模式） |
 | | `lsp_document_symbols` / `lsp_workspace_symbols` | Outline / Go to Class·Symbol |
 | | `lsp_call_hierarchy_prepare` / `_incoming` / `_outgoing` | 调用层级 |
 | | `lsp_type_hierarchy_prepare` / `_supertypes` / `_subtypes` | 类型层级 |
@@ -648,7 +711,7 @@ src/stores/
 - [x] Go to Class / Go to Symbol（`lsp_workspace_symbols` + SE Classes/Symbols）— `4040d6f`
 - [x] 类型声明/实现跳转 + 多结果 peek — `e373d0d`
 - [x] 重命名（prepareRename + rename + §5.2.9 WorkspaceEdit 应用规则）— `e7873ef`；open-clean 保存路径 — `5d87203`
-- [x] Code Actions / Alt+Enter（客户端 WorkspaceEdit 应用；server 回推 applyEdit oneshot 仍可增强）— `b049952` + `5d87203`
+- [x] Code Actions / Alt+Enter（客户端 WorkspaceEdit + command-only；server 回推 `workspace/applyEdit` 桥已接入）— `b049952` + `5d87203` + v4.1 P0-A
 - [x] 树键盘导航（↑↓←→/Enter/F2/Delete）；拖拽仍为 P1 — `1d8fa2f`
 - [x] 替换（Replace in Files via shared WorkspaceEdit applier）— `e7873ef` + `5d87203`
 
@@ -692,7 +755,7 @@ src/stores/
 - [x] 合并门禁 8 例 Windows 失败已修复（clipboard URI ×4、pushd ×1、git 根 ×3）— `f6c1f36`
 - [ ] **⚠ 真机验证欠账（由用户执行）**：M0–M5 能力仍以单测/构建为主；`pnpm tauri dev` 冒烟结果回填本节
 - [ ] ⚠ M0 继续瘦身：树数据、LSP session、Git snapshot、导航与文件动作 controller 已抽离；命令注册、header/layout 大段继续下沉，目标装配壳 <400 行（当前约 4.4k 行）
-- [ ] ⚠ 下列增强项可选收口：server 回推 `workspace/applyEdit` oneshot；树/tab 拖拽停靠（P1）；`WorkspaceFs` 生产只读链路
+- [ ] ⚠ 严格持平后续项：watcher 三端真机验收、语义/token 合并、跨操作 undo；树/tab 拖拽停靠；`WorkspaceFs` 生产只读链路
 
 ### 8.2 下一步待办（建议顺序）
 
@@ -707,8 +770,8 @@ src/stores/
 3. **🔶 继续 M0 瘦身（目标装配壳 <400）**
    Git snapshot、导航与文件动作 controller 已抽离 — `cbc40ec`、`057006a`、`d97b2cb`。下一步组件化命令注册和 header/layout；当前壳体约 4.4k 行。
 
-4. **（可选）体验补丁**
-   工作区级保存时格式化与 Git ignore 已交付 — `4ff2ed7`、`6b41676`。剩余：server 回推 `workspace/applyEdit` oneshot；树/tab 拖拽停靠；评估把 `WorkspaceFs` 接入一条生产只读链路。
+4. **🔶 P0 协议继续闭环**
+   server 回推 `workspace/applyEdit`、有序资源操作、change annotation 确认、command-only、用户文件操作 `will*/did*Files`、server-request 分发、pull diagnostics、`workspace/didChangeWatchedFiles`/watcher 与基础冲突/恢复中心/行级三方合并代码链路已于 v4.1–v4.4 接入。下一步按 §2.7 完成三端原生验收、语义/token 合并和跨操作 undo；树/tab 拖拽与 `WorkspaceFs` 生产链路随后推进。
 
 5. **✅ 合入主干**
    M0–M5 已由 PR #361 合入 `main`；后续收口分支待独立合并，真机冒烟结果可在后续独立补录。
@@ -724,7 +787,7 @@ src/stores/
 |------|------|------|
 | M0 重构回归 | 4.4k 行组件拆迁易碎 | 行为不变原则 + 聚焦测试 + 回归清单；按 controller/面板分多个提交 |
 | LSP 服务器差异 | completion/rename/hierarchy 各 server capability 差异大 | §5.2.0 capability 驱动开关；不支持则置灰 + hint；§5.2.12 矩阵仅作方向参考 |
-| WorkspaceEdit 非原子 | 跨文件重命名部分失败 | 如实呈现结果清单（§5.2.9），不承诺原子性 |
+| WorkspaceEdit 非原子 | 跨文件重命名可能部分成功 | 有序执行在首次失败处停止并呈现结果；单个 overwrite 资源操作使用备份/恢复保护旧目标，但不虚构跨操作事务 |
 | 补全性能/竞态 | 高频输入下请求风暴、过期回填 | 防抖 + 请求代际取消；resolve 惰性化；isIncomplete 续查 |
 | 快捷键冲突 | IDEA 键位与应用/系统习惯冲突（Ctrl+W/N/P 等） | when-context 路由；冲突项文档化并留别名 |
 | 搜索性能 | 超大仓库 Find in Files | 流式分批 + 上限截断 + 可取消；ignore crate 跳过 .gitignore |
@@ -810,11 +873,11 @@ src/stores/
 
 **Spike（前置，硬门槛）**：验证 jdtls `workspace/executeCommand: java.buildWorkspace`（或 `java.project.build` 全量）是否对**未打开的含错文件**主动 `publishDiagnostics`。
 - **命中**：走下方后端聚合方案。
-- **未命中**：退用 LSP 3.17 pull 诊断 `workspace/diagnostic`（需 server 声明 `diagnosticProvider.workspaceDiagnostics`）。
+- **未命中**：退用 LSP 3.17 pull 诊断 `workspace/diagnostic`（需 server 声明 `diagnosticProvider.workspaceDiagnostics`）；v4.2 已实现此 fallback，仍需真机确认具体 server 返回质量。
 
 **后端**：
 - `LspSession.diagnostics` 已按 URI 全量存储（不限打开文档，`lsp.rs:529`）。新增 `lsp_workspace_diagnostics(workspace_id)` 返回**全部已收到诊断**（含未打开文件）。
-- 新增 Tauri event（如 `lsp:diagnostics-updated`），在收到 `publishDiagnostics` 时通知前端刷新（现为轮询/按文档拉取）。
+- 收到 `publishDiagnostics` 继续写入 session 缓存；pull provider 通过 Problems 面板轮询触发，暂不依赖后台 stdout task 持有 `AppHandle`。
 - 触发点：项目导入完成、保存、手动「重新构建项目」按钮；防抖合并。
 
 **前端**：Problems 面板加 **「全项目 / 打开的文件」** 切换；未打开文件诊断点击即打开定位；徽标计数含全项目；「重新构建项目」入口（状态栏或面板工具条）。
@@ -822,10 +885,11 @@ src/stores/
 **交付物**：spike 报告 → 后端全项目诊断命令 + event → Problems 面板切换 + 构建触发入口。
 
 **🔶 已交付基础设施（M7-C，`083999f` 后端 + C-2 前端提交）——spike 无关、优雅降级**：
-- **后端 `083999f`**：`lsp_workspace_diagnostics(workspace_id)` 聚合该 workspace 全部 ready session 已收到的诊断（含未打开文件,按 path 去重排序,跳过 `jdt://`/非 file URI）→ `WorkspaceDiagnosticFile{path,uri,diagnostics}`;`lsp_build_workspace(descriptor)` 走 `workspace/executeCommand: java.buildWorkspace(full=true)` 触发「重新构建项目」。诊断本就按 URI 全量存储,故此为纯读聚合——**对 spike 结果不敏感**:命中则「全项目」显示未打开文件诊断,未命中则等同「打开的文件」。
+- **后端 `083999f`**：`lsp_workspace_diagnostics(workspace_id)` 聚合该 workspace 全部 ready session 已收到的诊断（含未打开文件，按 path 去重排序，跳过 `jdt://`/非 file URI）→ `WorkspaceDiagnosticFile{path,uri,diagnostics}`；`lsp_build_workspace(descriptor)` 走 jdtls 自定义 `java/buildWorkspace(full=true)` request 触发「重新构建项目」。v4.2 之前此聚合依赖 server 主动 push，v4.2 起再叠加标准 pull fallback。
 - **⚠ 事件推送改为轮询(架构变更)**：原计划的 `lsp:diagnostics-updated` event push **已放弃**——在 LSP session 的 stdout 后台任务里持有 `AppHandle`/`Emitter` 会确定性触发 Windows 测试二进制启动失败(`STATUS_ENTRYPOINT_NOT_FOUND` 0xC0000139,与 emit 调用无关,移除 AppHandle 字段即恢复)。改为**前端轮询**:Problems 面板处于「全项目」且打开时每 ~1.5s 拉 `lsp_workspace_diagnostics` + 重建后重取。与既有按文件诊断同为 pull 式,无功能损失。
 - **前端 C-2**：Problems 面板「全项目 / 打开的文件」切换;「全项目」轮询聚合诊断;点未打开文件诊断即 `problemPathToRef`(复用 `relativePathWithinRoot`)映射回 `{kind:root,rootId,path}` → openFile + reveal;徽标随激活 scope 计数;「Rebuild」按钮(仅全项目)→ `lspBuildWorkspace`。文案沿用 ProblemsPanel 既有硬编码英文约定(不引 i18n)。
-- **⬜ 仍待你真机 spike**:验证 jdtls `java.buildWorkspace` 是否对**未打开含错文件**推送 `publishDiagnostics`。`pnpm tauri dev` → Maven/Gradle 工程含 A.java(有错,不打开)/B.java(打开) → 点「Rebuild」→ 看「全项目」是否列出 A.java 的错。**命中**:C 完整可用。**未命中**:补 LSP 3.17 pull 诊断 `workspace/diagnostic` 回退(需 server 声明 `diagnosticProvider.workspaceDiagnostics`)。测试:后端 `file_path_from_uri`;前端 ProblemsPanel scope 切换/rebuild/空态/加载态。`cargo test` 902、`pnpm test` 205 文件 / 1633 全绿。
+- **✅ v4.5 pull fallback 代码闭环**：`lsp_workspace_diagnostics` 对声明静态 `diagnosticProvider.workspaceDiagnostics` 或动态 `workspace/diagnostic` 的 session 发起 LSP 3.17 pull；携带 previous resultId 与 partial-result token，支持 full/unchanged、relatedDocuments、分片合并和 `workspace/diagnostic/refresh` 即时失效，跨 session 并发，慢请求去重，失败继续使用 `publishDiagnostics` 缓存，损坏响应不部分覆盖已有状态。
+- **⬜ 仍待三端真机 spike**：Maven/Gradle 工程含 A.java（有错且不打开）/B.java（打开）→ 点「Rebuild」→ 验证 push 或 pull 是否稳定列出 A.java，记录 jdtls provider capability、响应与耗时；并在支持 pull diagnostics 的 TypeScript/Rust/Python server 上各做一例真实工程验证。
 
 ### 11.Bundle jdtls 扩展加载基建（M8，D/E 共享硬前提，规模 M）
 

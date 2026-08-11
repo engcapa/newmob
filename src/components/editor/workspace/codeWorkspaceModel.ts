@@ -314,6 +314,7 @@ export function makeLibraryFile(info: LibraryBufferInfo, text: string): OpenFile
     text: normalized.text,
     savedText: normalized.text,
     eol: normalized.eol,
+    bom: false,
     hash: `library:${hashString(info.uri)}`,
     mtime: 0,
     size: normalized.text.length,
@@ -675,11 +676,12 @@ export function matchesTreeFilter(name: string, path: string, filter: string): b
  * buffer and remember the original style so save can restore it.
  */
 export function normalizeEditorText(text: string): { text: string; eol: OpenFileEol } {
+  const source = text.startsWith("\uFEFF") ? text.slice(1) : text;
   let eol: OpenFileEol = "LF";
-  if (text.includes("\r\n")) eol = "CRLF";
-  else if (text.includes("\r")) eol = "CR";
+  if (source.includes("\r\n")) eol = "CRLF";
+  else if (source.includes("\r")) eol = "CR";
   return {
-    text: text.replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
+    text: source.replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
     eol,
   };
 }
@@ -1285,6 +1287,7 @@ export function makeLoadingFile(ref: CodeWorkspaceFileRef, roots: CodeWorkspaceR
     text: "",
     savedText: "",
     eol: "LF",
+    bom: false,
     hash: "",
     mtime: 0,
     size: 0,

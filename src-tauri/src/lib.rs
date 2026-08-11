@@ -133,6 +133,9 @@ pub fn run() {
                 ai_ctx,
                 lanchat_state,
             ));
+            app.state::<AppState>()
+                .lsp
+                .attach_app(app.handle().clone());
             app.manage(workspace_search::WorkspaceSearchState::default());
             let local_history = local_history::init_local_history(app.handle())
                 .expect("failed to init local history store");
@@ -492,6 +495,7 @@ pub fn run() {
             workspace::workspace_create_dir,
             workspace::workspace_delete_path,
             workspace::workspace_rename_path,
+            workspace::workspace_apply_resource_operation,
             local_history::history_snapshot,
             local_history::history_list,
             local_history::history_read,
@@ -507,6 +511,15 @@ pub fn run() {
             lsp::lsp_discover_java_bundles,
             lsp::lsp_detect_servers,
             lsp::lsp_document_status,
+            lsp::lsp_execute_command,
+            lsp::lsp_resolve_workspace_edit,
+            lsp::lsp_resolve_show_message_request,
+            lsp::lsp_cancel_work_done_progress,
+            lsp::lsp_workspace_will_file_operation,
+            lsp::lsp_workspace_did_file_operation,
+            lsp::lsp_workspace_did_change_watched_files,
+            lsp::lsp_start_workspace_watcher,
+            lsp::lsp_stop_workspace_watcher,
             lsp::lsp_open_document,
             lsp::lsp_change_document,
             lsp::lsp_save_document,
@@ -537,6 +550,7 @@ pub fn run() {
             lsp::lsp_formatting,
             lsp::lsp_range_formatting,
             lsp::lsp_code_actions,
+            lsp::lsp_code_action_resolve,
             lsp::lsp_prepare_rename,
             lsp::lsp_rename,
             lsp::lsp_workspace_symbols,

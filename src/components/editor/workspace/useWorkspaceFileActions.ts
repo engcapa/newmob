@@ -3,11 +3,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirmAppDialog, promptAppDialog } from "../../../lib/appDialogs";
 import { writeText } from "../../../lib/clipboard";
 import {
+  lspWorkspaceDidFileOperation,
+  lspWorkspaceWillFileOperation,
+  type LspWorkspaceFileOperation,
+  type LspWorkspaceEditOperation,
+} from "../../../lib/editor/lsp";
+import {
   workspaceCreateDir,
   workspaceCreateFile,
-  workspaceDeletePath,
   workspaceReadFile,
-  workspaceRenamePath,
   type WorkspaceGitRoot,
 } from "../../../lib/editor/workspace";
 import { gitIgnorePath } from "../../../lib/git";
@@ -22,7 +26,6 @@ import {
   basename,
   errorMessage,
   fileKey,
-  fileMeta,
   fileRefUnder,
   gitPathForWorkspacePath,
   gitRootForWorkspacePath,
@@ -31,8 +34,6 @@ import {
   makeRoot,
   normalizeFsPath,
   parentPath,
-  remapFileRef,
-  remapRelativePath,
   rootDirKey,
   type DirectoryState,
   type OpenFileState,
@@ -45,6 +46,7 @@ type UpdaterSetter<T> = (updater: Updater<T>) => void;
 type RootDirectory = { rootId: string; path: string };
 
 interface UseWorkspaceFileActionsOptions {
+  workspaceId: string;
   roots: CodeWorkspaceRootInfo[];
   gitRoots: WorkspaceGitRoot[];
   selected: TreeSelection | null;
@@ -71,6 +73,9 @@ interface UseWorkspaceFileActionsOptions {
   resetTreeData: () => void;
   removeTreeDataRoot: (rootId: string) => void;
   openFile: (ref: CodeWorkspaceFileRef, options?: { preview?: boolean }) => Promise<void>;
+  applyResourceOperation: (
+    operation: Exclude<LspWorkspaceEditOperation, { kind: "text" }>,
+  ) => Promise<void>;
   notifyWorkspacePathGitChanged: (rootId: string, path: string) => void;
   onStatus: (message: string) => void;
 }
@@ -89,13 +94,19 @@ export interface WorkspaceFileActionsController {
   renameSelected: (target?: TreeSelection) => Promise<void>;
   deleteSelected: (target?: TreeSelection) => Promise<void>;
   revealInExplorer: (rootId: string, path: string) => Promise<void>;
-  stageTreeClipboard: (mode: "copy" | "cut", rootId: string, path: string) => void;
+  stageTreeClipboard: (
+    mode: "copy" | "cut",
+    rootId: string,
+    path: string,
+    isDirectory?: boolean,
+  ) => void;
   canPasteTreeClipboard: () => boolean;
   pasteTreeClipboard: (target: RootDirectory) => Promise<void>;
   ignoreWorkspacePath: (rootId: string, path: string, directory: boolean) => Promise<void>;
 }
 
 export function useWorkspaceFileActions({
+  workspaceId,
   roots,
   gitRoots,
   selected,
@@ -122,14 +133,36 @@ export function useWorkspaceFileActions({
   resetTreeData,
   removeTreeDataRoot,
   openFile,
+  applyResourceOperation,
   notifyWorkspacePathGitChanged,
   onStatus,
 }: UseWorkspaceFileActionsOptions): WorkspaceFileActionsController {
-  const treeClipboardRef = useRef<{ mode: "copy" | "cut"; rootId: string; path: string } | null>(null);
+  const treeClipboardRef = useRef<{
+    mode: "copy" | "cut";
+    rootId: string;
+    path: string;
+    isDirectory: boolean;
+  } | null>(null);
   const findRoot = useCallback(
     (rootId: string) => rootsRef.current?.find((root) => root.id === rootId) ?? null,
     [rootsRef],
   );
+  const prepareWorkspaceFileOperation = useCallback(
+    (operation: LspWorkspaceFileOperation) => (
+      lspWorkspaceWillFileOperation(workspaceId, operation)
+    ),
+    [workspaceId],
+  );
+  const notifyWorkspaceFileOperationCompleted = useCallback(async (
+    operation: LspWorkspaceFileOperation,
+  ): Promise<string | null> => {
+    try {
+      await lspWorkspaceDidFileOperation(workspaceId, operation);
+      return null;
+    } catch (error) {
+      return `language server notification failed: ${errorMessage(error)}`;
+    }
+  }, [workspaceId]);
 
   const copyTreePath = useCallback(async (rootId: string, path: string, absolute: boolean) => {
     const root = findRoot(rootId);
@@ -241,17 +274,36 @@ export function useWorkspaceFileActions({
       ? name.trim().replace(/\\/g, "/").replace(/^\/+/, "")
       : joinRelativePath(directory.path, name);
     try {
+      const operation: LspWorkspaceFileOperation = {
+        kind: "create",
+        files: [{ path: absoluteWorkspacePath(root, path), isDirectory: false }],
+      };
+      await prepareWorkspaceFileOperation(operation);
       const file = await workspaceCreateFile(root.path, path);
+      const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(file.path));
       const ref: CodeWorkspaceFileRef = { kind: "root", rootId: root.id, path: file.path };
       setSelected({ kind: "file", ref });
       await openFile(ref);
       notifyWorkspacePathGitChanged(root.id, file.path);
-      onStatus(`Created ${root.name} / ${file.path}`);
+      onStatus([
+        `Created ${root.name} / ${file.path}`,
+        notificationError,
+      ].filter(Boolean).join("; "));
     } catch (error) {
       onStatus(errorMessage(error));
     }
-  }, [findRoot, loadDir, notifyWorkspacePathGitChanged, onStatus, openFile, selectedRootDirectory, setSelected]);
+  }, [
+    findRoot,
+    loadDir,
+    notifyWorkspacePathGitChanged,
+    onStatus,
+    notifyWorkspaceFileOperationCompleted,
+    openFile,
+    prepareWorkspaceFileOperation,
+    selectedRootDirectory,
+    setSelected,
+  ]);
 
   const createDir = useCallback(async (target?: RootDirectory) => {
     const directory = target ?? selectedRootDirectory;
@@ -271,16 +323,35 @@ export function useWorkspaceFileActions({
       ? name.trim().replace(/\\/g, "/").replace(/^\/+/, "")
       : joinRelativePath(directory.path, name);
     try {
+      const operation: LspWorkspaceFileOperation = {
+        kind: "create",
+        files: [{ path: absoluteWorkspacePath(root, path), isDirectory: true }],
+      };
+      await prepareWorkspaceFileOperation(operation);
       const entry = await workspaceCreateDir(root.path, path);
+      const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(entry.path));
       setExpandedDirs((current) => new Set(current).add(rootDirKey(root.id, parentPath(entry.path))));
       setSelected({ kind: "dir", rootId: root.id, path: entry.path });
       notifyWorkspacePathGitChanged(root.id, entry.path);
-      onStatus(`Created ${root.name} / ${entry.path}`);
+      onStatus([
+        `Created ${root.name} / ${entry.path}`,
+        notificationError,
+      ].filter(Boolean).join("; "));
     } catch (error) {
       onStatus(errorMessage(error));
     }
-  }, [findRoot, loadDir, notifyWorkspacePathGitChanged, onStatus, selectedRootDirectory, setExpandedDirs, setSelected]);
+  }, [
+    findRoot,
+    loadDir,
+    notifyWorkspacePathGitChanged,
+    onStatus,
+    notifyWorkspaceFileOperationCompleted,
+    prepareWorkspaceFileOperation,
+    selectedRootDirectory,
+    setExpandedDirs,
+    setSelected,
+  ]);
 
   const renameSelected = useCallback(async (target?: TreeSelection) => {
     const selection = target ?? selected;
@@ -326,66 +397,47 @@ export function useWorkspaceFileActions({
     if (!nextName || nextName === basename(rootTarget.path)) return;
     const nextPath = joinRelativePath(parentPath(rootTarget.path), nextName);
     try {
-      const entry = await workspaceRenamePath(root.path, rootTarget.path, nextPath);
-      const newPath = entry.path;
-      await loadDir(root.id, parentPath(rootTarget.path));
-      await loadDir(root.id, parentPath(newPath));
-      setExpandedDirs((current) => {
-        const next = new Set<string>();
-        for (const item of current) {
-          const [id, path] = item.split(":", 2);
-          next.add(id === root.id
-            ? rootDirKey(root.id, remapRelativePath(path, rootTarget.path, newPath))
-            : item);
-        }
-        return next;
+      const isDirectory = selection.kind === "dir";
+      const operation: LspWorkspaceFileOperation = {
+        kind: "rename",
+        files: [{
+          oldPath: absoluteWorkspacePath(root, rootTarget.path),
+          newPath: absoluteWorkspacePath(root, nextPath),
+          isDirectory,
+        }],
+      };
+      await prepareWorkspaceFileOperation(operation);
+      await applyResourceOperation({
+        kind: "rename",
+        oldUri: "",
+        oldPath: absoluteWorkspacePath(root, rootTarget.path),
+        newUri: "",
+        newPath: absoluteWorkspacePath(root, nextPath),
+        overwrite: false,
+        ignoreIfExists: false,
+        annotationId: null,
       });
-      const currentOpenFiles = openFilesRef.current ?? {};
-      const remappedKeys = new Map<string, string>();
-      const remappedOpenFiles: Record<string, OpenFileState> = {};
-      for (const [currentKey, file] of Object.entries(currentOpenFiles)) {
-          const ref = remapFileRef(file.ref, root.id, rootTarget.path, newPath);
-          const meta = fileMeta(ref, rootsRef.current ?? [], looseFilesRef.current ?? []);
-          const nextKey = fileKey(ref);
-          remappedKeys.set(currentKey, nextKey);
-          remappedOpenFiles[nextKey] = {
-            ...file,
-            ref,
-            key: nextKey,
-            path: meta.path,
-            title: meta.title,
-            subtitle: meta.subtitle,
-            languagePath: meta.languagePath,
-          };
-      }
-      setOpenFiles(remappedOpenFiles);
-      setOpenOrder((current) => current.map((key) => remappedKeys.get(key) ?? key));
-      setActiveKey((current) => current ? remappedKeys.get(current) ?? current : null);
-      setSelected(entry.fileType === "dir"
-        ? { kind: "dir", rootId: root.id, path: newPath }
-        : { kind: "file", ref: { kind: "root", rootId: root.id, path: newPath } });
-      notifyWorkspacePathGitChanged(root.id, rootTarget.path);
-      notifyWorkspacePathGitChanged(root.id, newPath);
-      onStatus(`Renamed to ${root.name} / ${newPath}`);
+      const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
+      await loadDir(root.id, parentPath(rootTarget.path));
+      await loadDir(root.id, parentPath(nextPath));
+      onStatus([
+        `Renamed to ${root.name} / ${nextPath}`,
+        notificationError,
+      ].filter(Boolean).join("; "));
     } catch (error) {
       onStatus(errorMessage(error));
     }
   }, [
+    applyResourceOperation,
     findRoot,
     loadDir,
     looseFilesRef,
-    notifyWorkspacePathGitChanged,
     onStatus,
-    openFilesRef,
-    rootsRef,
+    notifyWorkspaceFileOperationCompleted,
+    prepareWorkspaceFileOperation,
     selected,
-    setActiveKey,
-    setExpandedDirs,
     setLooseFiles,
-    setOpenFiles,
-    setOpenOrder,
     setRoots,
-    setSelected,
   ]);
 
   const deleteSelected = useCallback(async (target?: TreeSelection) => {
@@ -443,50 +495,54 @@ export function useWorkspaceFileActions({
     if (!rootTarget) return;
     const root = findRoot(rootTarget.rootId);
     if (!root) return;
+    const hasDirtyBuffers = Object.values(openFilesRef.current ?? {}).some((file) => (
+      file.dirty && fileRefUnder(file.ref, root.id, rootTarget.path)
+    ));
     const confirmed = await confirmAppDialog({
       title: "Delete",
-      message: `Delete ${root.name} / ${rootTarget.path}?`,
+      message: hasDirtyBuffers
+        ? `Delete ${root.name} / ${rootTarget.path}? Unsaved editor changes under this path will be discarded.`
+        : `Delete ${root.name} / ${rootTarget.path}?`,
       confirmLabel: "Delete",
       danger: true,
     });
     if (!confirmed) return;
     try {
-      await workspaceDeletePath(root.path, rootTarget.path, selection.kind === "dir");
+      const isDirectory = selection.kind === "dir";
+      const operation: LspWorkspaceFileOperation = {
+        kind: "delete",
+        files: [{
+          path: absoluteWorkspacePath(root, rootTarget.path),
+          isDirectory,
+        }],
+      };
+      await prepareWorkspaceFileOperation(operation);
+      await applyResourceOperation({
+        kind: "delete",
+        uri: "",
+        path: absoluteWorkspacePath(root, rootTarget.path),
+        recursive: isDirectory,
+        ignoreIfNotExists: false,
+        annotationId: null,
+      });
+      const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));
-      const removedKeys = new Set(Object.entries(openFilesRef.current ?? {})
-        .filter(([, file]) => fileRefUnder(file.ref, root.id, rootTarget.path))
-        .map(([key]) => key));
-      const remainingOpen = (openOrderRef.current ?? []).filter((key) => !removedKeys.has(key));
-      setExpandedDirs((current) => {
-        const next = new Set<string>();
-        for (const item of current) {
-          const [id, path] = item.split(":", 2);
-          if (id !== root.id || (path !== rootTarget.path && !path.startsWith(`${rootTarget.path}/`))) {
-            next.add(item);
-          }
-        }
-        return next;
-      });
-      setOpenFiles((current) => Object.fromEntries(Object.entries(current).filter(([, file]) => (
-        !fileRefUnder(file.ref, root.id, rootTarget.path)
-      ))));
-      setOpenOrder(remainingOpen);
-      setActiveKey((current) => {
-        return current && removedKeys.has(current) ? remainingOpen[0] ?? null : current;
-      });
-      setSelected(null);
-      notifyWorkspacePathGitChanged(root.id, rootTarget.path);
-      onStatus(`Deleted ${root.name} / ${rootTarget.path}`);
+      onStatus([
+        `Deleted ${root.name} / ${rootTarget.path}`,
+        notificationError,
+      ].filter(Boolean).join("; "));
     } catch (error) {
       onStatus(errorMessage(error));
     }
   }, [
+    applyResourceOperation,
     findRoot,
     loadDir,
-    notifyWorkspacePathGitChanged,
     onStatus,
+    notifyWorkspaceFileOperationCompleted,
     openFilesRef,
     openOrderRef,
+    prepareWorkspaceFileOperation,
     removeTreeDataRoot,
     selected,
     setActiveKey,
@@ -510,8 +566,13 @@ export function useWorkspaceFileActions({
     }
   }, [findRoot, onStatus]);
 
-  const stageTreeClipboard = useCallback((mode: "copy" | "cut", rootId: string, path: string) => {
-    treeClipboardRef.current = { mode, rootId, path };
+  const stageTreeClipboard = useCallback((
+    mode: "copy" | "cut",
+    rootId: string,
+    path: string,
+    isDirectory = false,
+  ) => {
+    treeClipboardRef.current = { mode, rootId, path, isDirectory };
     onStatus(mode === "cut" ? "Cut to clipboard" : "Copied to clipboard");
   }, [onStatus]);
 
@@ -533,21 +594,62 @@ export function useWorkspaceFileActions({
     const destPath = target.path ? `${target.path}/${name}` : name;
     try {
       if (clip.mode === "cut") {
-        await workspaceRenamePath(root.path, clip.path, destPath);
+        const operation: LspWorkspaceFileOperation = {
+          kind: "rename",
+          files: [{
+            oldPath: absoluteWorkspacePath(root, clip.path),
+            newPath: absoluteWorkspacePath(root, destPath),
+            isDirectory: clip.isDirectory,
+          }],
+        };
+        await prepareWorkspaceFileOperation(operation);
+        await applyResourceOperation({
+          kind: "rename",
+          oldUri: "",
+          oldPath: absoluteWorkspacePath(root, clip.path),
+          newUri: "",
+          newPath: absoluteWorkspacePath(root, destPath),
+          overwrite: false,
+          ignoreIfExists: false,
+          annotationId: null,
+        });
+        const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
         treeClipboardRef.current = null;
-        onStatus(`Moved to ${destPath}`);
+        await loadDir(clip.rootId, parentPath(clip.path) || "");
+        await loadDir(target.rootId, target.path);
+        onStatus([
+          `Moved to ${destPath}`,
+          notificationError,
+        ].filter(Boolean).join("; "));
       } else {
         const file = await workspaceReadFile(root.path, clip.path);
+        const operation: LspWorkspaceFileOperation = {
+          kind: "create",
+          files: [{ path: absoluteWorkspacePath(root, destPath), isDirectory: false }],
+        };
+        await prepareWorkspaceFileOperation(operation);
         await workspaceCreateFile(root.path, destPath, file.text);
-        onStatus(`Copied to ${destPath}`);
+        const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
+        await loadDir(clip.rootId, parentPath(clip.path) || "");
+        await loadDir(target.rootId, target.path);
+        notifyWorkspacePathGitChanged(target.rootId, destPath);
+        onStatus([
+          `Copied to ${destPath}`,
+          notificationError,
+        ].filter(Boolean).join("; "));
       }
-      await loadDir(clip.rootId, parentPath(clip.path) || "");
-      await loadDir(target.rootId, target.path);
-      notifyWorkspacePathGitChanged(target.rootId, destPath);
     } catch (error) {
       onStatus(errorMessage(error));
     }
-  }, [findRoot, loadDir, notifyWorkspacePathGitChanged, onStatus]);
+  }, [
+    applyResourceOperation,
+    findRoot,
+    loadDir,
+    notifyWorkspacePathGitChanged,
+    onStatus,
+    notifyWorkspaceFileOperationCompleted,
+    prepareWorkspaceFileOperation,
+  ]);
 
   const ignoreWorkspacePath = useCallback(async (
     rootId: string,
