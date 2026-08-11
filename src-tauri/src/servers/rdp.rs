@@ -75,6 +75,26 @@ use input::RdpInput;
 use metrics::RdpMetrics;
 
 const CONTROL_APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(target_os = "macos")]
+const EXPERIMENTAL_AVC420_ENV: &str = "TAOMNI_RDP_EXPERIMENTAL_AVC420";
+#[cfg(target_os = "macos")]
+const EXPERIMENTAL_CLIENT_SIZE_ENV: &str = "TAOMNI_RDP_EXPERIMENTAL_CLIENT_SIZE";
+
+#[cfg(target_os = "macos")]
+fn experimental_feature_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .as_deref()
+        .is_some_and(experimental_feature_value)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn experimental_feature_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
 
 /// Pending local approvals are registered by the dedicated RDP server thread
 /// and resolved by the main-window command handler.
@@ -176,7 +196,11 @@ impl ControlGate {
         }
     }
 
-    pub(crate) fn ensure_approved(&self) -> bool {
+    /// Return immediately with the current control decision. The first input
+    /// event starts a background approval waiter and is dropped; it must never
+    /// block IronRDP's single-threaded connection reactor while mstsc is still
+    /// completing activation.
+    pub(crate) fn ensure_approved(self: &Arc<Self>) -> bool {
         let (peer, request_id) = {
             let Ok(mut state) = self.state.lock() else {
                 return false;
@@ -213,15 +237,42 @@ impl ControlGate {
             .app
             .emit_to("main", "server://rdp/connection-request", request)
             .is_ok();
-        let approved = delivered && self.wait_for_approval(&request_id, &receiver);
-        self.approvals.cancel(&request_id);
+        if !delivered {
+            self.approvals.cancel(&request_id);
+            self.complete_approval(peer, &request_id, false);
+            self.log.line(
+                "RDP control denied because the local approval prompt could not be delivered",
+            );
+            return false;
+        }
 
-        let approved = self
+        let gate = Arc::clone(self);
+        let waiter_request_id = request_id.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("rdp-control-approval".to_string())
+            .spawn(move || {
+                let approved = gate.wait_for_approval(&waiter_request_id, &receiver);
+                gate.approvals.cancel(&waiter_request_id);
+                gate.complete_approval(peer, &waiter_request_id, approved);
+            })
+        {
+            self.approvals.cancel(&request_id);
+            self.complete_approval(peer, &request_id, false);
+            self.log.line(format!(
+                "RDP control denied because the approval waiter could not start: {error}"
+            ));
+        }
+
+        false
+    }
+
+    fn complete_approval(&self, peer: SocketAddr, request_id: &str, approved: bool) {
+        let applied = self
             .state
             .lock()
             .ok()
             .filter(|state| {
-                state.peer == Some(peer) && state.request_id.as_deref() == Some(request_id.as_str())
+                state.peer == Some(peer) && state.request_id.as_deref() == Some(request_id)
             })
             .map(|mut state| {
                 state.request_id = None;
@@ -230,18 +281,19 @@ impl ControlGate {
                 } else {
                     ControlDecision::Denied
                 };
-                approved
+                true
             })
             .unwrap_or(false);
-        self.log.line(format!(
-            "RDP control from {peer} {}",
-            if approved {
-                "approved locally"
-            } else {
-                "denied, cancelled, or timed out"
-            }
-        ));
-        approved
+        if applied {
+            self.log.line(format!(
+                "RDP control from {peer} {}",
+                if approved {
+                    "approved locally"
+                } else {
+                    "denied, cancelled, or timed out"
+                }
+            ));
+        }
     }
 
     fn wait_for_approval(
@@ -358,7 +410,7 @@ impl ConnectionHandler for ConnectionPolicy {
         if let Some(gate) = &self.control_gate {
             gate.end_session();
         }
-        let reason = error.map(ToString::to_string);
+        let reason = error.map(|error| format!("{error:#}"));
         self.log.line(format!(
             "RDP client {peer} disconnected after {:.1}s{}",
             duration.as_secs_f64(),
@@ -540,8 +592,8 @@ async fn spawn_server(
                 let mut server = match build_server(&params, &log, thread_cancel.clone()) {
                     Ok(s) => s,
                     Err(e) => {
-                        let _ = ready_tx.send(Err(e.to_string()));
-                        log.line(format!("RDP server: {}", e));
+                        let _ = ready_tx.send(Err(format!("{e:#}")));
+                        log.line(format!("RDP server: {e:#}"));
                         return;
                     }
                 };
@@ -568,7 +620,7 @@ async fn spawn_server(
                     res = &mut run => {
                         let message = res
                             .err()
-                            .map(|e| e.to_string())
+                            .map(|e| format!("{e:#}"))
                             .unwrap_or_else(|| "RDP listener stopped before becoming ready".to_string());
                         let _ = ready_tx.send(Err(message));
                         return;
@@ -582,7 +634,7 @@ async fn spawn_server(
                 tokio::select! {
                     res = &mut run => {
                         if let Err(e) = res {
-                            log.line(format!("RDP server error: {}", e));
+                            log.line(format!("RDP server error: {e:#}"));
                         }
                     }
                     _ = thread_cancel.cancelled() => {
@@ -670,6 +722,11 @@ fn build_server(
     };
     #[cfg(target_os = "macos")]
     let honor_client_desktop_size = display.supports_client_size();
+    #[cfg(target_os = "macos")]
+    let honor_client_desktop_size =
+        honor_client_desktop_size && experimental_feature_enabled(EXPERIMENTAL_CLIENT_SIZE_ENV);
+    #[cfg(target_os = "macos")]
+    let enable_avc420 = experimental_feature_enabled(EXPERIMENTAL_AVC420_ENV);
     let input = RdpInput::new(
         log.clone(),
         params.view_only,
@@ -704,10 +761,27 @@ fn build_server(
             #[cfg(target_os = "macos")]
             let builder = builder.with_honor_client_desktop_size(honor_client_desktop_size);
             #[cfg(target_os = "macos")]
-            let builder = {
-                log.line("RDP display transport: EGFX/AVC420 with decoded-frame bitmap fallback");
+            let builder = if enable_avc420 {
+                log.line(format!(
+                    "RDP display transport: experimental EGFX/AVC420 enabled by {EXPERIMENTAL_AVC420_ENV}"
+                ));
                 builder.with_gfx_factory(Some(Box::new(gfx.factory())))
+            } else {
+                log.line(format!(
+                    "RDP display transport: bitmap compatibility mode; set {EXPERIMENTAL_AVC420_ENV}=1 only for AVC420 interoperability testing"
+                ));
+                builder
             };
+            #[cfg(target_os = "macos")]
+            if honor_client_desktop_size {
+                log.line(format!(
+                    "RDP desktop sizing: experimental client-requested size enabled by {EXPERIMENTAL_CLIENT_SIZE_ENV}"
+                ));
+            } else {
+                log.line(format!(
+                    "RDP desktop sizing: server capture size compatibility mode; set {EXPERIMENTAL_CLIENT_SIZE_ENV}=1 only for resize interoperability testing"
+                ));
+            }
             builder
                 .with_connection_handler(Some(connection_handler))
                 .build()
@@ -718,7 +792,7 @@ fn build_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalBroker, SecurityMode, SocketAddr};
+    use super::{ApprovalBroker, SecurityMode, SocketAddr, experimental_feature_value};
 
     #[test]
     fn production_security_accepts_only_hybrid() {
@@ -744,5 +818,21 @@ mod tests {
         assert_eq!(receiver.recv().unwrap(), true);
         assert!(!broker.resolve("request-1", false));
         assert!(!broker.resolve("missing", true));
+    }
+
+    #[test]
+    fn experimental_rdp_features_require_an_explicit_truthy_value() {
+        for enabled in ["1", "true", "TRUE", " yes ", "on"] {
+            assert!(
+                experimental_feature_value(enabled),
+                "{enabled} should opt in"
+            );
+        }
+        for disabled in ["", "0", "false", "no", "off", "unexpected"] {
+            assert!(
+                !experimental_feature_value(disabled),
+                "{disabled} should keep compatibility mode"
+            );
+        }
     }
 }

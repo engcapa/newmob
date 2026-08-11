@@ -4,6 +4,16 @@
 >
 > 目标：对 macOS 上的 RDP client 与 RDP server 做真实环境发布认证。阶段 1～3 完成的是代码侧安全、完整性和生命周期基线；只有本清单的发布门禁全部通过后，才将二者标记为“生产可用”。
 
+## 0. Win11 -> macOS 激活断开专项（2026-08-10）
+
+代码分析与兼容策略修复见 [rdp-server-win11-macos-activation-regression.md](claudedocs/rdp-server-win11-macos-activation-regression.md)。以下项目必须在 macOS + Windows 11 真机完成：
+
+- [ ] 默认 bitmap + 服务端捕获尺寸路径下，审批弹窗分别停留 1/10/25 秒后允许，均可进入桌面。
+- [ ] 审批前桌面显示不被阻塞且输入无效；审批后键盘、鼠标和滚轮生效。
+- [ ] 单独开启 `TAOMNI_RDP_EXPERIMENTAL_AVC420=1` 做 A/B，保存首帧、EGFX ACK/decoded progress 和断开错误链。
+- [ ] 单独开启 `TAOMNI_RDP_EXPERIMENTAL_CLIENT_SIZE=1` 做 A/B，保存请求尺寸、ScreenCaptureKit resize 结果和首帧尺寸。
+- [ ] 覆盖拒绝、30 秒超时、断开后旧审批失效以及再次连接。
+
 ## 1. 真实互操作矩阵
 
 ### RDP client
