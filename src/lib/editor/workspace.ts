@@ -85,7 +85,8 @@ export interface JavaRunTarget {
   cwd: string;
   buildSystem: "maven" | "gradle" | "source-file";
   modulePath: string;
-  execution: WorkspaceTaskExecution;
+  /** Structured executable/argv contract. Optional for older browser fixtures and persisted mocks. */
+  execution?: WorkspaceTaskExecution;
   environment?: WorkspaceTaskEnvironment;
 }
 
@@ -168,6 +169,16 @@ export interface ExecutionRunConfiguration {
   sourceFile?: string;
   preLaunchTargets: string[];
   debugConfigurationId?: string;
+  /** User-configured VM/runtime options layered over the detected target. */
+  runtimeOptions?: string[];
+  /** Optional dotenv file loaded immediately before launch. */
+  envFile?: string;
+  /** Original detected configuration for a persisted named copy. */
+  baseConfigurationId?: string;
+  /** Provider-specific placement for user program arguments. */
+  argumentStrategy?: "append" | "maven-exec" | "gradle-javaexec";
+  /** Preserve append semantics for inherited task-scoped environment values. */
+  environmentModes?: Record<string, "append" | "replace">;
 }
 
 export interface ExecutionDebugConfiguration {
@@ -181,6 +192,8 @@ export interface ExecutionDebugConfiguration {
   preLaunchTargets: string[];
   sourceFile?: string;
   launchConfig: Record<string, unknown>;
+  /** Optional dotenv file inherited from the associated run configuration. */
+  envFile?: string;
 }
 
 export interface WorkspaceExecutionModel {

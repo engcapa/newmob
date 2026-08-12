@@ -212,6 +212,10 @@ pub struct LspDiagnostic {
     pub code: Option<String>,
     pub source: Option<String>,
     pub message: String,
+    pub tags: Vec<u8>,
+    pub related_information: Vec<LspDiagnosticRelatedInformation>,
+    pub code_description: Option<String>,
+    pub data: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -220,6 +224,13 @@ pub struct LspLocation {
     pub uri: String,
     pub path: Option<String>,
     pub range: LspRange,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LspDiagnosticRelatedInformation {
+    pub location: LspLocation,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -428,6 +439,8 @@ pub struct LspCapabilitySummary {
     pub inlay_hint: bool,
     pub selection_range: bool,
     pub semantic_tokens: bool,
+    pub workspace_diagnostics: bool,
+    pub code_action_kinds: Vec<String>,
     pub completion_trigger_characters: Vec<String>,
     pub signature_trigger_characters: Vec<String>,
 }
@@ -2274,7 +2287,14 @@ impl LspSession {
                     "selectionRange": { "dynamicRegistration": true },
                     "publishDiagnostics": {
                         "relatedInformation": true,
-                        "versionSupport": true
+                        "versionSupport": true,
+                        "tagSupport": { "valueSet": [1, 2] },
+                        "codeDescriptionSupport": true,
+                        "dataSupport": true
+                    },
+                    "diagnostic": {
+                        "dynamicRegistration": true,
+                        "relatedDocumentSupport": true
                     },
                     "semanticTokens": {
                         "dynamicRegistration": true,
@@ -7027,6 +7047,7 @@ pub async fn lsp_code_actions(
     end_line: u32,
     end_character: u32,
     diagnostics: Option<Vec<Value>>,
+    only: Option<Vec<String>>,
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
@@ -7057,6 +7078,7 @@ pub async fn lsp_code_actions(
             });
         }
     };
+    let context = code_action_context(diagnostics.unwrap_or_default(), only);
     let result = session
         .request(
             "textDocument/codeAction",
@@ -7066,11 +7088,7 @@ pub async fn lsp_code_actions(
                     "start": { "line": start_line, "character": start_character },
                     "end": { "line": end_line, "character": end_character },
                 },
-                "context": {
-                    "diagnostics": diagnostics.unwrap_or_default(),
-                    "only": null,
-                    "triggerKind": 1,
-                },
+                "context": context,
             }),
         )
         .await
@@ -7852,7 +7870,63 @@ fn parse_diagnostic(value: &Value) -> Option<LspDiagnostic> {
             .and_then(Value::as_str)
             .map(ToString::to_string),
         message: value.get("message")?.as_str()?.to_string(),
+        tags: value
+            .get("tags")
+            .and_then(Value::as_array)
+            .map(|tags| {
+                tags.iter()
+                    .filter_map(Value::as_u64)
+                    .filter_map(|tag| u8::try_from(tag).ok())
+                    .filter(|tag| matches!(tag, 1 | 2))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        related_information: value
+            .get("relatedInformation")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .take(64)
+                    .filter_map(|item| {
+                        Some(LspDiagnosticRelatedInformation {
+                            location: parse_location(item.get("location")?)?,
+                            message: item.get("message")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        code_description: value
+            .pointer("/codeDescription/href")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        data: value.get("data").and_then(bounded_diagnostic_data),
     })
+}
+
+fn bounded_diagnostic_data(value: &Value) -> Option<Value> {
+    serde_json::to_vec(value)
+        .ok()
+        .filter(|encoded| encoded.len() <= 64 * 1024)
+        .map(|_| value.clone())
+}
+
+fn code_action_context(diagnostics: Vec<Value>, only: Option<Vec<String>>) -> Value {
+    let mut context = json!({
+        "diagnostics": diagnostics,
+        "triggerKind": 1,
+    });
+    let kinds = only
+        .unwrap_or_default()
+        .into_iter()
+        .map(|kind| kind.trim().to_string())
+        .filter(|kind| !kind.is_empty())
+        .collect::<Vec<_>>();
+    if !kinds.is_empty() {
+        context["only"] = json!(kinds);
+    }
+    context
 }
 
 fn hover_contents(value: &Value) -> Option<String> {
@@ -8505,6 +8579,8 @@ fn capability_summary_from(capabilities: &Value) -> LspCapabilitySummary {
         inlay_hint: has_provider(capabilities, "inlayHintProvider"),
         selection_range: has_provider(capabilities, "selectionRangeProvider"),
         semantic_tokens: has_provider(capabilities, "semanticTokensProvider"),
+        workspace_diagnostics: workspace_diagnostic_provider_options(capabilities, &[]).is_some(),
+        code_action_kinds: provider_strings(capabilities, "codeActionProvider", "codeActionKinds"),
         completion_trigger_characters: provider_strings(
             capabilities,
             "completionProvider",
@@ -8689,13 +8765,20 @@ fn apply_dynamic_capability(
         "textDocument/rename" => summary.rename = true,
         "textDocument/formatting" => summary.formatting = true,
         "textDocument/rangeFormatting" => summary.range_formatting = true,
-        "textDocument/codeAction" => summary.code_action = true,
+        "textDocument/codeAction" => {
+            summary.code_action = true;
+            extend_unique(
+                &mut summary.code_action_kinds,
+                option_strings(&registration.register_options, "codeActionKinds"),
+            );
+        }
         "textDocument/documentHighlight" => summary.document_highlight = true,
         "textDocument/prepareCallHierarchy" => summary.call_hierarchy = true,
         "textDocument/prepareTypeHierarchy" => summary.type_hierarchy = true,
         "textDocument/inlayHint" => summary.inlay_hint = true,
         "textDocument/selectionRange" => summary.selection_range = true,
         "textDocument/semanticTokens" => summary.semantic_tokens = true,
+        "workspace/diagnostic" => summary.workspace_diagnostics = true,
         "textDocument/didChange" => {
             summary.text_document_sync_kind = registration
                 .register_options
@@ -10629,8 +10712,12 @@ mod tests {
             },
             severity: Some(2),
             code: None,
+            code_description: None,
             source: Some("old".into()),
             message: "keep".into(),
+            tags: Vec::new(),
+            related_information: Vec::new(),
+            data: None,
         };
         let mut diagnostics = HashMap::from([(unchanged_uri.to_string(), vec![old])]);
         let mut result_ids = HashMap::from([
@@ -11725,6 +11812,52 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert!(!summary.formatting);
         assert!(!summary.type_hierarchy);
         assert!(!summary.workspace_symbol);
+    }
+
+    #[test]
+    fn parses_diagnostic_metadata_and_bounds_provider_data() {
+        let related = json!({
+            "location": {
+                "uri": "file:///repo/src/sink.ts",
+                "range": { "start": { "line": 2, "character": 1 }, "end": { "line": 2, "character": 4 } }
+            },
+            "message": "value reaches sink"
+        });
+        let value = json!({
+            "range": { "start": { "line": 1, "character": 0 }, "end": { "line": 1, "character": 2 } },
+            "severity": 2,
+            "code": 6133,
+            "source": "typescript",
+            "message": "unused",
+            "tags": [1, 2, 9],
+            "relatedInformation": [related],
+            "codeDescription": { "href": "https://example.test/6133" },
+            "data": { "rule": "unused" }
+        });
+        let parsed = parse_diagnostic(&value).expect("diagnostic");
+        assert_eq!(parsed.code.as_deref(), Some("6133"));
+        assert_eq!(parsed.tags, vec![1, 2]);
+        assert_eq!(parsed.related_information.len(), 1);
+        assert_eq!(
+            parsed.code_description.as_deref(),
+            Some("https://example.test/6133")
+        );
+        assert_eq!(parsed.data, Some(json!({ "rule": "unused" })));
+
+        let oversized = json!({ "payload": "x".repeat(64 * 1024) });
+        assert!(bounded_diagnostic_data(&oversized).is_none());
+    }
+
+    #[test]
+    fn code_action_context_omits_empty_only_and_trims_kinds() {
+        let without_only = code_action_context(vec![], Some(vec![" ".into(), "".into()]));
+        assert!(without_only.get("only").is_none());
+        let with_only = code_action_context(
+            vec![],
+            Some(vec![" refactor.extract ".into(), "quickfix".into()]),
+        );
+        assert_eq!(with_only["only"], json!(["refactor.extract", "quickfix"]));
+        assert_eq!(with_only["triggerKind"], json!(1));
     }
 
     #[test]

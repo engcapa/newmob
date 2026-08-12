@@ -66,6 +66,11 @@ steps:
   - click: '[data-testid="code-workspace-bottom-tab-build"]'
   - assert_visible: '[data-testid="code-workspace-build-panel"]'
   - click: '[data-testid="build-panel-refresh"]'
+  - click: '[data-testid="code-workspace-bottom-tab-analysis"]'
+  - assert_visible: '[data-testid="code-workspace-analysis-panel"]'
+  - assert_visible: '[data-testid="analysis-lsp-status"]'
+  - assert_visible: '[data-testid="analysis-inspection-profile"]'
+  - assert_visible: '[data-testid="analysis-data-flow"]'
   - click: '[data-testid="code-workspace-bottom-tab-debug"]'
   - assert_visible: '[data-testid="code-workspace-debug-panel"]'
   - screenshot: auto-F25-1-multilanguage-execution-controls.png

@@ -108,6 +108,7 @@
 - `[data-testid="code-workspace-tab"]` — display — F25.1.workspace
 - `[data-testid="code-workspace-build-project"]` — interactive [optional] — F25.1.build-current-project
 - `[data-testid="code-workspace-run-target"]` — interactive [optional] — F25.1.run-current-target
+- `[data-testid="code-workspace-active-run-configuration"]` — interactive [optional] — F25.1.active-run-configuration
 - `[data-testid="code-workspace-debug-target"]` — interactive [optional] — F25.1.debug-current-target
 - `[data-testid="code-workspace-bottom-tab-run"]` — interactive — F25.1.run-tab
 - `[data-testid="code-workspace-bottom-tab-build"]` — interactive — F25.1.build-tab
@@ -120,19 +121,27 @@
 - `[data-testid="run-panel-refresh"]` — interactive — F25.1.refresh-run-targets
 - `[data-testid^="run-panel-configuration-run:"]` — interactive [optional] — F25.1.run-configuration
 - `[data-testid^="run-panel-configuration-edit-run:"]` — interactive [optional] — F25.1.run-configuration-edit
+- `[data-testid^="run-panel-configuration-copy-run:"]` — interactive [optional] — F25.1.run-configuration-copy
 - `[data-testid="run-configuration-editor"]` — display [optional] — F25.1.run-configuration-editor
+- `[data-testid="run-configuration-name"]` — interactive [optional] — F25.1.run-configuration-name
 - `[data-testid="run-configuration-cwd"]` — interactive [optional] — F25.1.run-configuration-cwd
 - `[data-testid="run-configuration-args"]` — interactive [optional] — F25.1.run-configuration-args
+- `[data-testid="run-configuration-vm-options"]` — interactive [optional] — F25.1.run-configuration-vm-options
+- `[data-testid="run-configuration-env-file"]` — interactive [optional] — F25.1.run-configuration-env-file
+- `[data-testid="run-configuration-before-launch"]` — display [optional] — F25.1.run-configuration-before-launch
 - `[data-testid="run-configuration-env"]` — interactive [optional] — F25.1.run-configuration-env
 - `[data-testid="run-configuration-save"]` — interactive [optional] — F25.1.run-configuration-save
 - `[data-testid="run-configuration-reset"]` — interactive [optional] — F25.1.run-configuration-reset
+- `[data-testid="run-configuration-delete"]` — interactive [optional] — F25.1.run-configuration-delete
 - `[data-testid="code-workspace-build-panel"]` — display — F25.1.build-panel
 - `[data-testid="build-panel-error"]` — display [optional] — F25.1.build-error
+- `[data-testid="build-panel-execution-error"]` — display [optional] — F25.1.build-execution-error
 - `[data-testid="build-panel-build-project"]` — interactive [optional] — F25.1.build-project
 - `[data-testid="build-panel-rebuild-project"]` — interactive [optional] — F25.1.rebuild-project
 - `[data-testid="build-panel-refresh"]` — interactive — F25.1.refresh-build-targets
 - `[data-testid^="build-panel-target-build:"]` — interactive [optional] — F25.1.build-target
 - `[data-testid="code-workspace-debug-panel"]` — display — F25.1.debug-panel
+- `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="workspace-build-run-tools-dialog"]` — display — F25.1.tools-dialog
 - `[data-testid="workspace-build-run-tools-close"]` — interactive — F25.1.tools-close
 - `[data-testid="workspace-build-run-tools-cancel"]` — interactive — F25.1.tools-cancel
@@ -157,6 +166,11 @@
 - `[data-testid="workspace-tool-netcoredbg"]` — interactive — F25.1.tool-netcoredbg
 - `[data-testid="workspace-maven-run-jvm-args"]` — interactive — F25.1.maven-jvm-args
 - `[data-testid="workspace-maven-inherit-argline"]` — interactive — F25.1.inherit-maven-argline
+- `[data-testid="code-workspace-bottom-tab-analysis"]` — interactive — F25.1.analysis-tab
+- `[data-testid="code-workspace-analysis-panel"]` — display — F25.1.analysis-panel
+- `[data-testid="analysis-lsp-status"]` — display — F25.1.analysis-lsp-status
+- `[data-testid="analysis-inspection-profile"]` — display — F25.1.analysis-inspection-profile
+- `[data-testid="analysis-data-flow"]` — display — F25.1.analysis-data-flow
 
 ## database/hbase (F-DB-3)
 

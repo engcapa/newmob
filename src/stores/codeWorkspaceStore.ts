@@ -14,6 +14,7 @@ import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/co
 
 export type BottomDockTabId =
   | "problems"
+  | "analysis"
   | "search"
   | "references"
   | "call-hierarchy"

@@ -1535,6 +1535,81 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(screen.getByText(/unsaved|Applied/i)).toBeTruthy());
   });
 
+  it("keeps provider diagnostics unchanged when inspection severity affects editor chrome", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-profile-actions",
+      workspaceInstanceId: "instance-profile-actions",
+      name: "Profile actions",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const providerDiagnostic = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      severity: 2,
+      code: "unused-value",
+      source: "typescript",
+      message: "Value is never read",
+      data: { providerToken: "original" },
+    };
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.inspectionProfile.v1.instance-profile-actions",
+      JSON.stringify({
+        version: 1,
+        rules: { "typescript:unused-value": { enabled: true, severity: 1 } },
+      }),
+    );
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x"));
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: {
+        completion: false,
+        signatureHelp: false,
+        hover: false,
+        definition: false,
+        typeDefinition: false,
+        implementation: false,
+        references: false,
+        documentSymbol: false,
+        workspaceSymbol: false,
+        rename: false,
+        formatting: false,
+        rangeFormatting: false,
+        codeAction: true,
+        documentHighlight: false,
+        callHierarchy: false,
+        typeHierarchy: false,
+        inlayHint: false,
+        selectionRange: false,
+        semanticTokens: false,
+        completionTriggerCharacters: [],
+        signatureTriggerCharacters: [],
+      },
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [providerDiagnostic] });
+
+    const rendered = renderWorkspace(workspace);
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled(), { timeout: 3_000 });
+    await waitFor(() => expect(rendered.container.querySelector(".cm-lsp-diagnostic-error")).toBeTruthy());
+    const bulb = rendered.container.querySelector('[data-testid="code-workspace-lightbulb"]');
+    expect(bulb).toBeTruthy();
+    fireEvent.mouseDown(bulb!);
+
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalled());
+    expect(lspMocks.lspCodeActions.mock.calls.at(-1)?.[2]).toEqual([
+      expect.objectContaining({
+        severity: 2,
+        code: "unused-value",
+        data: { providerToken: "original" },
+      }),
+    ]);
+  });
+
   it("makes the active editor read-only while a resource WorkspaceEdit is in flight", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",

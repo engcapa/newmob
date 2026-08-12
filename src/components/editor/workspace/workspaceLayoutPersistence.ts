@@ -36,6 +36,7 @@ export interface WorkspaceLayoutSnapshot {
 
 const BOTTOM_DOCK_TABS: BottomDockTabId[] = [
   "problems",
+  "analysis",
   "search",
   "references",
   "call-hierarchy",

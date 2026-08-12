@@ -72,6 +72,27 @@ describe("DebugPanel", () => {
     expect(onStart).toHaveBeenCalledTimes(1);
   });
 
+  it("selects the active Run/Debug configuration from the panel", () => {
+    const onActiveConfigurationChange = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession()}
+        onStart={vi.fn()}
+        onOpenFrame={vi.fn()}
+        configurations={[
+          { id: "run:default", label: "Default" },
+          { id: "run:local", label: "Local" },
+        ]}
+        activeConfigurationId="run:default"
+        onActiveConfigurationChange={onActiveConfigurationChange}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("debug-active-configuration"), {
+      target: { value: "run:local" },
+    });
+    expect(onActiveConfigurationChange).toHaveBeenCalledWith("run:local");
+  });
+
   it("explains the desktop requirement in the browser preview", () => {
     render(
       <DebugPanel

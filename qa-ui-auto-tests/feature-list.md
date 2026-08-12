@@ -4748,16 +4748,24 @@ controls:
 id: F25.1
 status: partial
 area: code-workspace/execution
-components: [CodeWorkspaceTab, RunPanel, BuildPanel, BottomDock, WorkspaceBuildRunToolsDialog]
+components: [CodeWorkspaceTab, RunPanel, BuildPanel, DebugPanel, ProblemsPanel, AnalysisPanel, BottomDock, WorkspaceBuildRunToolsDialog]
 files:
   - src/components/sidebar/Sidebar.tsx
   - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/executionPlan.ts
+  - src/components/editor/workspace/inspectionProfile.ts
+  - src/components/editor/workspace/runConfigurationPersistence.ts
   - src/components/editor/workspace/panels/RunPanel.tsx
   - src/components/editor/workspace/panels/BuildPanel.tsx
   - src/components/editor/workspace/panels/BottomDock.tsx
   - src/components/editor/workspace/WorkspaceBuildRunToolsDialog.tsx
   - src/components/editor/workspace/panels/DebugPanel.tsx
+  - src/components/editor/workspace/panels/ProblemsPanel.tsx
+  - src/components/editor/workspace/panels/AnalysisPanel.tsx
+  - src/lib/editor/lsp.ts
+  - src/lib/editor/workspace.ts
   - src/lib/terminal/commandInput.ts
+  - src-tauri/src/lsp.rs
   - src-tauri/src/workspace_execution.rs
   - src-tauri/src/dap.rs
 controls:
@@ -4775,6 +4783,10 @@ controls:
     selector: '[data-testid="code-workspace-run-target"]'
     kind: interactive
     optional: true       # enabled only when the active file maps to a run configuration
+  - id: active-run-configuration
+    selector: '[data-testid="code-workspace-active-run-configuration"]'
+    kind: interactive
+    optional: true       # rendered when the active source file has multiple configurations
   - id: debug-current-target
     selector: '[data-testid="code-workspace-debug-target"]'
     kind: interactive
@@ -4815,9 +4827,17 @@ controls:
     selector: '[data-testid^="run-panel-configuration-edit-run:"]'
     kind: interactive
     optional: true       # requires a language fixture with a detected run target
+  - id: run-configuration-copy
+    selector: '[data-testid^="run-panel-configuration-copy-run:"]'
+    kind: interactive
+    optional: true       # requires a language fixture with a detected run target
   - id: run-configuration-editor
     selector: '[data-testid="run-configuration-editor"]'
     kind: display
+    optional: true
+  - id: run-configuration-name
+    selector: '[data-testid="run-configuration-name"]'
+    kind: interactive
     optional: true
   - id: run-configuration-cwd
     selector: '[data-testid="run-configuration-cwd"]'
@@ -4826,6 +4846,18 @@ controls:
   - id: run-configuration-args
     selector: '[data-testid="run-configuration-args"]'
     kind: interactive
+    optional: true
+  - id: run-configuration-vm-options
+    selector: '[data-testid="run-configuration-vm-options"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-env-file
+    selector: '[data-testid="run-configuration-env-file"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-before-launch
+    selector: '[data-testid="run-configuration-before-launch"]'
+    kind: display
     optional: true
   - id: run-configuration-env
     selector: '[data-testid="run-configuration-env"]'
@@ -4839,6 +4871,10 @@ controls:
     selector: '[data-testid="run-configuration-reset"]'
     kind: interactive
     optional: true
+  - id: run-configuration-delete
+    selector: '[data-testid="run-configuration-delete"]'
+    kind: interactive
+    optional: true       # rendered only while editing a named copy
   - id: build-panel
     selector: '[data-testid="code-workspace-build-panel"]'
     kind: display
@@ -4846,6 +4882,10 @@ controls:
     selector: '[data-testid="build-panel-error"]'
     kind: display
     optional: true       # rendered only when target discovery fails
+  - id: build-execution-error
+    selector: '[data-testid="build-panel-execution-error"]'
+    kind: display
+    optional: true       # rendered only when a target exits unsuccessfully
   - id: build-project
     selector: '[data-testid="build-panel-build-project"]'
     kind: interactive
@@ -4864,6 +4904,10 @@ controls:
   - id: debug-panel
     selector: '[data-testid="code-workspace-debug-panel"]'
     kind: display
+  - id: debug-active-configuration
+    selector: '[data-testid="debug-active-configuration"]'
+    kind: interactive
+    optional: true       # rendered when the active source has a Run/Debug configuration
   - id: tools-dialog
     selector: '[data-testid="workspace-build-run-tools-dialog"]'
     kind: display
@@ -4936,12 +4980,28 @@ controls:
   - id: inherit-maven-argline
     selector: '[data-testid="workspace-maven-inherit-argline"]'
     kind: interactive
+  - id: analysis-tab
+    selector: '[data-testid="code-workspace-bottom-tab-analysis"]'
+    kind: interactive
+  - id: analysis-panel
+    selector: '[data-testid="code-workspace-analysis-panel"]'
+    kind: display
+  - id: analysis-lsp-status
+    selector: '[data-testid="analysis-lsp-status"]'
+    kind: display
+  - id: analysis-inspection-profile
+    selector: '[data-testid="analysis-inspection-profile"]'
+    kind: display
+  - id: analysis-data-flow
+    selector: '[data-testid="analysis-data-flow"]'
+    kind: display
 -->
 
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
-- Run/Build 面板区分一等运行配置/构建目标与兼容任务；运行配置的 args、env、cwd 按 workspace 和 stable id 本地保存。
+- Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
 - 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
-- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补。
+- Analysis/Problems 面板呈现 provider capability、CodeActionKind、semantic token、诊断元数据、related locations 与可持久化 inspection 展示规则；这些能力依赖 language server，不等同于 IDEA PSI、原生 inspection 或 data-flow 引擎。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；compound/shared configuration、coverage、结构化测试结果、PSI/index 和原生 data-flow 仍未完成。
 
 ---
 

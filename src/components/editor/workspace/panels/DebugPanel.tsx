@@ -40,6 +40,10 @@ interface DebugPanelProps {
    * pressing start would work.
    */
   runtimeAvailable?: boolean;
+  /** Run/Debug configurations associated with the active source file. */
+  configurations?: Array<{ id: string; label: string }>;
+  activeConfigurationId?: string | null;
+  onActiveConfigurationChange?: (configurationId: string) => void;
 }
 
 /** One expandable variables node (D4) — children fetched lazily on expand. */
@@ -374,6 +378,9 @@ export function DebugPanel({
   editingBreakpoint = null,
   onEditingBreakpointChange,
   runtimeAvailable = true,
+  configurations = [],
+  activeConfigurationId = null,
+  onActiveConfigurationChange,
 }: DebugPanelProps) {
   const { state } = debug;
   const running = !!state && state.status !== "terminated";
@@ -535,6 +542,20 @@ export function DebugPanel({
           <span className="ml-1 text-[10px] text-[var(--taomni-text-muted)]">
             {state.status}{state.stoppedReason ? ` · ${state.stoppedReason}` : ""}
           </span>
+        )}
+        {!running && configurations.length > 0 && (
+          <select
+            data-testid="debug-active-configuration"
+            aria-label="Debug configuration"
+            title="Select Run/Debug configuration"
+            value={activeConfigurationId ?? configurations[0].id}
+            onChange={(event) => onActiveConfigurationChange?.(event.target.value)}
+            className="ml-2 h-6 min-w-0 max-w-52 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
+          >
+            {configurations.map((configuration) => (
+              <option key={configuration.id} value={configuration.id}>{configuration.label}</option>
+            ))}
+          </select>
         )}
         <div className="ml-auto flex items-center gap-0.5 rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] p-0.5 shadow-xs">
           {!running && (

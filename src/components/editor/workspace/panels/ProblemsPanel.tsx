@@ -25,6 +25,9 @@ interface ProblemsPanelProps {
   rebuilding?: boolean;
   /** True while the project-scope diagnostics are (re)loading. */
   loading?: boolean;
+  /** Display-only inspection transform. Callbacks still receive the provider diagnostic. */
+  diagnosticTransform?: (diagnostic: LspDiagnostic) => LspDiagnostic | null;
+  onOpenRelatedInformation?: (diagnostic: LspDiagnostic) => void;
 }
 
 type SeverityKind = "error" | "warning" | "info";
@@ -50,6 +53,8 @@ export function ProblemsPanel({
   onRebuild,
   rebuilding,
   loading,
+  diagnosticTransform,
+  onOpenRelatedInformation,
 }: ProblemsPanelProps) {
   const projectScope = scope === "project";
   const [visible, setVisible] = useState<Record<SeverityKind, boolean>>({
@@ -58,21 +63,28 @@ export function ProblemsPanel({
     info: true,
   });
   const contextMenu = useContextMenu();
+  const profiledFiles = useMemo(() => files.map((file) => ({
+    ...file,
+    diagnostics: file.diagnostics.flatMap((original) => {
+      const display = diagnosticTransform ? diagnosticTransform(original) : original;
+      return display ? [{ original, display }] : [];
+    }),
+  })), [diagnosticTransform, files]);
   const counts = useMemo(() => {
     const next: Record<SeverityKind, number> = { error: 0, warning: 0, info: 0 };
-    for (const file of files) {
-      for (const diagnostic of file.diagnostics) next[severityKind(diagnostic.severity)] += 1;
+    for (const file of profiledFiles) {
+      for (const diagnostic of file.diagnostics) next[severityKind(diagnostic.display.severity)] += 1;
     }
     return next;
-  }, [files]);
+  }, [profiledFiles]);
   const filteredFiles = useMemo(
-    () => files
+    () => profiledFiles
       .map((file) => ({
         ...file,
-        diagnostics: file.diagnostics.filter((diagnostic) => visible[severityKind(diagnostic.severity)]),
+        diagnostics: file.diagnostics.filter(({ display }) => visible[severityKind(display.severity)]),
       }))
       .filter((file) => file.diagnostics.length > 0),
-    [files, visible],
+    [profiledFiles, visible],
   );
 
   return (
@@ -144,7 +156,7 @@ export function ProblemsPanel({
               <span className="min-w-0 flex-1 truncate">{file.subtitle}</span>
               <span className="shrink-0 text-[10px] tabular-nums">{file.diagnostics.length}</span>
             </div>
-            {file.diagnostics.map((diagnostic, index) => {
+            {file.diagnostics.map(({ original, display: diagnostic }, index) => {
               const kind = severityKind(diagnostic.severity);
               const detail = [diagnostic.source, diagnostic.code].filter(Boolean).join(" · ");
               return (
@@ -152,7 +164,7 @@ export function ProblemsPanel({
                   key={`${diagnostic.range.start.line}:${diagnostic.range.start.character}:${diagnostic.message}:${index}`}
                   type="button"
                   className="min-h-7 w-full min-w-0 flex items-start gap-2 px-4 py-1 text-left hover:bg-[var(--taomni-code-active-line-bg)]"
-                  onClick={() => onOpenProblem(file.key, diagnostic)}
+                  onClick={() => onOpenProblem(file.key, original)}
                   onContextMenu={(event) => contextMenu.show(event, [
                     {
                       label: "Copy Message",
@@ -161,14 +173,26 @@ export function ProblemsPanel({
                     {
                       label: "Quick Fix",
                       disabled: !onQuickFix,
-                      onClick: () => onQuickFix?.(file.key, diagnostic),
+                      onClick: () => onQuickFix?.(file.key, original),
                     },
+                    ...(diagnostic.relatedInformation?.length && onOpenRelatedInformation
+                      ? [{
+                          label: `Show related locations (${diagnostic.relatedInformation.length})`,
+                          onClick: () => onOpenRelatedInformation(original),
+                        }]
+                      : []),
                   ])}
                 >
                   <SeverityIcon kind={kind} />
                   <span className="min-w-0 flex-1">
                     <span className="block break-words text-[var(--taomni-code-text)]">{diagnostic.message}</span>
                     {detail && <span className="block truncate text-[10px] text-[var(--taomni-code-muted)]">{detail}</span>}
+                    {diagnostic.tags?.includes(1) && (
+                      <span className="block text-[10px] text-[var(--taomni-code-muted)]">unnecessary</span>
+                    )}
+                    {diagnostic.tags?.includes(2) && (
+                      <span className="block text-[10px] text-[var(--taomni-code-muted)]">deprecated</span>
+                    )}
                   </span>
                   <span className="shrink-0 font-mono text-[10px] text-[var(--taomni-code-muted)]">
                     {diagnostic.range.start.line + 1}:{diagnostic.range.start.character + 1}

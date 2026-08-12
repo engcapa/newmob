@@ -51,6 +51,7 @@ describe("BuildPanel", () => {
     fireEvent.click(await screen.findByTestId("build-panel-task-Maven:package"));
     expect(onRunTask).toHaveBeenCalledWith(
       expect.objectContaining({ command: "mvn package", rootId: "app", rootName: "app" }),
+      expect.any(Function),
     );
   });
 
@@ -65,7 +66,7 @@ describe("BuildPanel", () => {
   });
 
   it("offers project build and rebuild actions with compile semantics", async () => {
-    const onRunTask = vi.fn();
+    const onRunTask = vi.fn((_task, onExit?: (exitCode: number) => void) => onExit?.(0));
     render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={onRunTask} />);
     await screen.findByTestId("build-panel-task-Maven:compile");
 
@@ -73,12 +74,13 @@ describe("BuildPanel", () => {
     expect(onRunTask).toHaveBeenCalledWith(expect.objectContaining({
       label: "compile",
       command: "mvn compile",
-    }));
+    }), expect.any(Function));
+    await waitFor(() => expect(screen.getByTestId("build-panel-rebuild-project")).not.toBeDisabled());
     fireEvent.click(screen.getByTestId("build-panel-rebuild-project"));
     expect(onRunTask).toHaveBeenCalledWith(expect.objectContaining({
       label: "rebuild",
       command: "mvn clean compile",
-    }));
+    }), expect.any(Function));
   });
 
   it("shows an empty state when no tasks are detected", async () => {
@@ -210,6 +212,86 @@ describe("BuildPanel", () => {
 
     expect(await screen.findByText("Build targets")).toBeInTheDocument();
     fireEvent.click(screen.getByText("Build all packages"));
-    expect(onRunTask).toHaveBeenCalledWith(expect.objectContaining({ command: "go build ./..." }));
+    expect(onRunTask).toHaveBeenCalledWith(
+      expect.objectContaining({ command: "go build ./..." }),
+      expect.any(Function),
+    );
+  });
+
+  it("runs recursive structured dependencies once and stops before the target on failure", async () => {
+    workspaceMocks.workspaceTaskTree.mockResolvedValue([]);
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [], runConfigurations: [], debugConfigurations: [], tools: [],
+      buildTargets: [
+        {
+          id: "configure", projectId: "project:cmake", label: "Configure", kind: "configure",
+          command: { executable: "cmake", args: ["-S", "."], cwd: "/repo/app", env: {}, display: "cmake -S .", source: "path" },
+          dependsOn: [],
+        },
+        {
+          id: "generate", projectId: "project:cmake", label: "Generate", kind: "build",
+          command: { executable: "cmake", args: ["--build", ".", "--target", "generate"], cwd: "/repo/app", env: {}, display: "cmake --build . --target generate", source: "path" },
+          dependsOn: ["configure"],
+        },
+        {
+          id: "build", projectId: "project:cmake", label: "Build", kind: "build",
+          command: { executable: "cmake", args: ["--build", "."], cwd: "/repo/app", env: {}, display: "cmake --build .", source: "path" },
+          dependsOn: ["configure", "generate"],
+        },
+      ],
+    });
+    const launched: string[] = [];
+    const onRunTask = vi.fn((task, onExit?: (exitCode: number) => void) => {
+      launched.push(task.id);
+      onExit?.(task.id === "generate" ? 2 : 0);
+    });
+    render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={onRunTask} />);
+
+    fireEvent.click(await screen.findByTestId("build-panel-target-build"));
+    await waitFor(() => expect(launched).toEqual(["configure", "generate"]));
+    expect(launched).not.toContain("build");
+    expect(screen.getByTestId("build-panel-execution-error")).toHaveTextContent(
+      "Build stopped at Generate (exit 2)",
+    );
+  });
+
+  it("rebuilds every structured project as clean then build", async () => {
+    workspaceMocks.workspaceTaskTree.mockResolvedValue([]);
+    const target = (
+      id: string,
+      projectId: string,
+      kind: "clean" | "build",
+      label: string,
+    ) => ({
+      id, projectId, label, kind,
+      command: { executable: id, args: [], cwd: "/repo/app", env: {}, display: id, source: "path" },
+      dependsOn: [],
+    });
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [
+        { id: "cargo", provider: "cargo", root: "/repo/app", manifest: "/repo/app/Cargo.toml", module: "app", languages: ["rust"], toolchain: "cargo", diagnostics: [] },
+        { id: "cmake", provider: "cmake", root: "/repo/app/native", manifest: "/repo/app/native/CMakeLists.txt", module: "native", languages: ["cpp"], toolchain: "cmake", diagnostics: [] },
+      ],
+      runConfigurations: [], debugConfigurations: [], tools: [],
+      buildTargets: [
+        target("cargo-clean", "cargo", "clean", "Clean"),
+        target("cargo-build", "cargo", "build", "Build"),
+        target("cmake-clean", "cmake", "clean", "Clean"),
+        target("cmake-build", "cmake", "build", "Build"),
+      ],
+    });
+    const launched: string[] = [];
+    const onRunTask = vi.fn((task, onExit?: (exitCode: number) => void) => {
+      launched.push(task.id);
+      onExit?.(0);
+    });
+    render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={onRunTask} />);
+
+    const rebuild = await screen.findByTestId("build-panel-rebuild-project");
+    await waitFor(() => expect(rebuild).not.toBeDisabled());
+    fireEvent.click(rebuild);
+    await waitFor(() => expect(launched).toEqual([
+      "cargo-clean", "cargo-build", "cmake-clean", "cmake-build",
+    ]));
   });
 });

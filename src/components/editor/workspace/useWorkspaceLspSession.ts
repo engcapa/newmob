@@ -101,10 +101,14 @@ function sameDiagnostics(left: LspDiagnostic[], right: LspDiagnostic[]): boolean
       || a.severity !== b.severity
       || a.code !== b.code
       || a.source !== b.source
+      || a.codeDescription !== b.codeDescription
       || a.range.start.line !== b.range.start.line
       || a.range.start.character !== b.range.start.character
       || a.range.end.line !== b.range.end.line
       || a.range.end.character !== b.range.end.character
+      || JSON.stringify(a.tags ?? []) !== JSON.stringify(b.tags ?? [])
+      || JSON.stringify(a.relatedInformation ?? []) !== JSON.stringify(b.relatedInformation ?? [])
+      || JSON.stringify(a.data ?? null) !== JSON.stringify(b.data ?? null)
     ) {
       return false;
     }

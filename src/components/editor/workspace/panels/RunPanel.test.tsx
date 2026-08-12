@@ -2,11 +2,16 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRef } from "react";
 import { RunPanel, type RunPanelHandle } from "./RunPanel";
+import {
+  readActiveRunConfigurationSelection,
+  writeActiveRunConfigurationSelection,
+} from "../runConfigurationPersistence";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceDetectTasks: vi.fn(),
   workspaceExecutionModel: vi.fn(),
   workspaceJavaRunTargets: vi.fn(),
+  workspaceReadLooseFile: vi.fn(),
 }));
 
 vi.mock("../../../../lib/editor/workspace", () => workspaceMocks);
@@ -24,6 +29,7 @@ describe("RunPanel", () => {
       source: "package.json",
     }]);
     workspaceMocks.workspaceJavaRunTargets.mockReset().mockResolvedValue([]);
+    workspaceMocks.workspaceReadLooseFile.mockReset().mockResolvedValue({ text: "FROM_FILE=yes\nMODE=file" });
     workspaceMocks.workspaceExecutionModel.mockReset().mockResolvedValue({
       projects: [],
       buildTargets: [],
@@ -103,12 +109,13 @@ describe("RunPanel", () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: /com\.example\.App/ }));
+    expect(await screen.findByText("Run configurations")).toBeInTheDocument();
+    fireEvent.click(await screen.findByTestId("run-panel-configuration-java-main:src/main/java/com/example/App.java"));
     expect(onRun).toHaveBeenCalledWith(
       expect.objectContaining({
         label: "com.example.App",
         command: "./mvnw -q compile exec:java",
-        source: "Java · maven",
+        configuration: true,
       }),
       expect.any(Function),
     );
@@ -155,5 +162,91 @@ describe("RunPanel", () => {
       command: "cargo run --bin app --",
       configuration: true,
     }), expect.any(Function));
+  });
+
+  it("edits and copies named configurations with VM, dotenv, env, and Before launch settings", async () => {
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [],
+      buildTargets: [{
+        id: "build:compile", projectId: "project:app", label: "Compile", kind: "build",
+        command: { executable: "cargo", args: ["build"], cwd: "/repo/app", env: {}, display: "cargo build", source: "path" },
+        dependsOn: [],
+      }],
+      runConfigurations: [{
+        id: "run:app", projectId: "project:app", label: "Run app", kind: "bin",
+        command: { executable: "cargo", args: ["run", "--"], cwd: "/repo/app", env: {}, display: "cargo run --", source: "path" },
+        preLaunchTargets: [],
+      }],
+      debugConfigurations: [], tools: [],
+    });
+    const onRun = vi.fn((_task, onExit: (exitCode: number) => void) => onExit(0));
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={onRun} />);
+
+    fireEvent.click(await screen.findByLabelText("Edit run configuration Run app"));
+    fireEvent.change(screen.getByTestId("run-configuration-name"), { target: { value: "Local app" } });
+    fireEvent.change(screen.getByTestId("run-configuration-vm-options"), { target: { value: "-Xmx1g" } });
+    fireEvent.change(screen.getByTestId("run-configuration-args"), { target: { value: "--verbose" } });
+    fireEvent.change(screen.getByTestId("run-configuration-env-file"), { target: { value: ".env" } });
+    fireEvent.change(screen.getByTestId("run-configuration-env"), { target: { value: "MODE=explicit" } });
+    fireEvent.click(screen.getByTestId("run-configuration-before-launch-build:compile"));
+    fireEvent.click(screen.getByTestId("run-configuration-save"));
+
+    expect(await screen.findByTestId("run-panel-configuration-run:app")).toHaveTextContent("Local app");
+    fireEvent.click(screen.getByLabelText("Copy run configuration Local app"));
+    expect(await screen.findByDisplayValue("Local app copy")).toBeInTheDocument();
+    expect(screen.getByTestId("run-configuration-vm-options")).toHaveValue("-Xmx1g");
+    expect(screen.getByTestId("run-configuration-env-file")).toHaveValue(".env");
+
+    const namedId = JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.runConfigurations.v1.ws") ?? "{}",
+    ) as Record<string, unknown>;
+    const copyId = Object.keys(namedId).find((id) => id.includes(":user:"));
+    expect(copyId).toBeTruthy();
+    writeActiveRunConfigurationSelection("ws", "/repo/app/src/main.rs", copyId!);
+    fireEvent.click(screen.getByTestId("run-configuration-delete"));
+    await waitFor(() => expect(screen.queryByDisplayValue("Local app copy")).not.toBeInTheDocument());
+    expect(readActiveRunConfigurationSelection("ws", "/repo/app/src/main.rs")).toBe("run:app");
+
+    fireEvent.click(screen.getByTestId("run-panel-configuration-run:app"));
+    await waitFor(() => expect(onRun).toHaveBeenCalledTimes(2));
+    expect(onRun.mock.calls[0][0]).toMatchObject({ label: "Compile", command: "cargo build" });
+    expect(onRun.mock.calls[1][0]).toMatchObject({
+      label: "Local app",
+      environment: { FROM_FILE: { value: "yes", mode: "replace" }, MODE: { value: "explicit", mode: "replace" } },
+    });
+  });
+
+  it("reports dotenv read failures in Run History without launching", async () => {
+    workspaceMocks.workspaceReadLooseFile.mockRejectedValue(new Error("read /repo/app/.env: denied"));
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [], buildTargets: [], debugConfigurations: [], tools: [],
+      runConfigurations: [{
+        id: "run:app", projectId: "project:app", label: "Run app", kind: "bin",
+        command: { executable: "cargo", args: ["run"], cwd: "/repo/app", env: {}, display: "cargo run", source: "path" },
+        preLaunchTargets: [], envFile: ".env",
+      }],
+    });
+    const onRun = vi.fn();
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={onRun} />);
+
+    fireEvent.click(await screen.findByText("Run app"));
+    expect(await screen.findByText("read /repo/app/.env: denied")).toBeInTheDocument();
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("reports a missing Before launch target without starting the run", async () => {
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [], buildTargets: [], debugConfigurations: [], tools: [],
+      runConfigurations: [{
+        id: "run:app", projectId: "project:app", label: "Run app", kind: "bin",
+        command: { executable: "cargo", args: ["run"], cwd: "/repo/app", env: {}, display: "cargo run", source: "path" },
+        preLaunchTargets: ["build:missing"],
+      }],
+    });
+    const onRun = vi.fn();
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={onRun} />);
+    fireEvent.click(await screen.findByText("Run app"));
+    expect(await screen.findByText(/Before launch target is missing/)).toBeInTheDocument();
+    expect(onRun).not.toHaveBeenCalled();
   });
 });

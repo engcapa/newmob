@@ -65,6 +65,10 @@ export interface LspCapabilitySummary {
   inlayHint: boolean;
   selectionRange: boolean;
   semanticTokens: boolean;
+  /** Whole-project pull diagnostics (`workspace/diagnostic`). */
+  workspaceDiagnostics?: boolean;
+  /** CodeActionKind values explicitly advertised by the server. Empty means unknown. */
+  codeActionKinds?: string[];
   completionTriggerCharacters: string[];
   signatureTriggerCharacters: string[];
 }
@@ -106,12 +110,23 @@ export interface LspDiagnostic {
   code: string | null;
   source: string | null;
   message: string;
+  /** LSP DiagnosticTag: 1 = unnecessary, 2 = deprecated. */
+  tags?: number[];
+  relatedInformation?: LspDiagnosticRelatedInformation[];
+  codeDescription?: string | null;
+  /** Bounded opaque provider data, echoed back for code actions when present. */
+  data?: unknown;
 }
 
 export interface LspLocation {
   uri: string;
   path: string | null;
   range: LspRange;
+}
+
+export interface LspDiagnosticRelatedInformation {
+  location: LspLocation;
+  message: string;
 }
 
 export interface LspDiagnosticsResult {
@@ -654,6 +669,7 @@ export function lspCodeActions(
   descriptor: LspDocumentDescriptor,
   range: LspRange,
   diagnostics?: unknown[] | null,
+  only?: string[] | null,
 ): Promise<LspCodeActionsResult> {
   return invoke<LspCodeActionsResult>("lsp_code_actions", {
     ...documentArgs(descriptor),
@@ -662,6 +678,7 @@ export function lspCodeActions(
     endLine: range.end.line,
     endCharacter: range.end.character,
     diagnostics: diagnostics ?? null,
+    only: only?.length ? only : null,
   });
 }
 

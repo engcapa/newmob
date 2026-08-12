@@ -17,6 +17,7 @@ import {
 } from "react-resizable-panels";
 import {
   AlertTriangle,
+  Activity,
   ArrowLeft,
   ArrowRight,
   Braces,
@@ -66,6 +67,7 @@ import {
   type WorkspaceExecutionModel,
   type ExecutionRunConfiguration,
   type ExecutionDebugConfiguration,
+  type ExecutionBuildTarget,
   type WorkspaceToolConfig,
 } from "../../lib/editor/workspace";
 import {
@@ -279,9 +281,18 @@ import { WorkspaceBuildRunToolsDialog } from "./workspace/WorkspaceBuildRunTools
 import {
   applyRunConfigurationOverride,
   applyRunOverrideToDebugConfiguration,
+  applyRunOverrideToJavaLaunch,
+  javaRunTargetToExecutionRunConfiguration,
+  materializeRunConfigurations,
+  mergeDebugEnvironment,
+  parseDotEnv,
+  readActiveRunConfigurationSelection,
   readRunConfigurationOverrides,
+  resolveEnvironmentFilePath,
   RUN_CONFIGURATION_CHANGED_EVENT,
+  writeActiveRunConfigurationSelection,
 } from "./workspace/runConfigurationPersistence";
+import { executeTaskPlan, resolveBuildTargetPlan } from "./workspace/executionPlan";
 import { FileTreePane } from "./workspace/FileTreePane";
 import { ProjectTree } from "./workspace/ProjectTree";
 import { MarkdownPreview } from "./workspace/MarkdownPreview";
@@ -547,6 +558,7 @@ import {
 } from "./workspace/panels/TerminalDockPanel";
 import { RunPanel, type RunPanelHandle, type WorkspaceTaskItem } from "./workspace/panels/RunPanel";
 import { BuildPanel } from "./workspace/panels/BuildPanel";
+import { AnalysisPanel } from "./workspace/panels/AnalysisPanel";
 import { TestsPanel } from "./workspace/panels/TestsPanel";
 import { javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
 import { DebugPanel } from "./workspace/panels/DebugPanel";
@@ -562,6 +574,14 @@ import type { DebugBreakpointMarker } from "./workspace/debugEditorChrome";
 import type { EditorRevealTarget } from "./workspace/EditorGroup";
 import { LspMessageRequestDialog } from "./workspace/LspMessageRequestDialog";
 import { useWorkspaceLspClientEvents } from "./workspace/useWorkspaceLspClientEvents";
+import {
+  applyInspectionProfile,
+  readInspectionProfile,
+  updateInspectionRule,
+  writeInspectionProfile,
+  type InspectionProfile,
+  type InspectionRule,
+} from "./workspace/inspectionProfile";
 import { ExternalFileConflictDialog } from "./workspace/ExternalFileConflictDialog";
 import { WorkspaceRecoveryDialog } from "./workspace/WorkspaceRecoveryDialog";
 import { FileEncodingDialog } from "./workspace/FileEncodingDialog";
@@ -1067,6 +1087,19 @@ export function CodeWorkspaceTab({
     primary: [],
     secondary: [],
   });
+  const [inspectionProfile, setInspectionProfile] = useState<InspectionProfile>(
+    () => readInspectionProfile(workspaceInstanceId),
+  );
+  useEffect(() => {
+    setInspectionProfile(readInspectionProfile(workspaceInstanceId));
+  }, [workspaceInstanceId]);
+  const updateInspectionProfileRule = useCallback((id: string, patch: Partial<InspectionRule>) => {
+    setInspectionProfile((current) => {
+      const next = updateInspectionRule(current, id, patch);
+      writeInspectionProfile(workspaceInstanceId, next);
+      return next;
+    });
+  }, [workspaceInstanceId]);
   const [gitHeadTextByFile, setGitHeadTextByFile] = useState<Record<string, { sourceKey: string; text: string | null }>>({});
   const [gitBlameByGroup, setGitBlameByGroup] = useState<Record<EditorGroupId, GitBlameLine | null>>({
     primary: null,
@@ -3553,6 +3586,10 @@ export function CodeWorkspaceTab({
   const deferredOpenFiles = useDeferredValue(openFiles);
   const activeLspState = activeKey ? lspFiles[activeKey] ?? null : null;
   const activeCapabilities = activeLspState?.status?.capabilities ?? null;
+  const inspectionTransform = useCallback(
+    (diagnostic: LspDiagnostic): LspDiagnostic | null => applyInspectionProfile(diagnostic, inspectionProfile),
+    [inspectionProfile],
+  );
   const activeLspDocumentIsSynced = Boolean(
     activeFile
     && !activeFile.loading
@@ -5339,6 +5376,7 @@ export function CodeWorkspaceTab({
     file: OpenFileState,
     range: LspRange,
     diagnostics: LspDiagnostic[] = [],
+    only: string[] = [],
   ): Promise<LspCodeAction[]> => {
     const descriptor = lspDescriptorForFile(file);
     if (!descriptor) return [];
@@ -5354,7 +5392,12 @@ export function CodeWorkspaceTab({
           code: item.code,
           source: item.source,
           message: item.message,
+          tags: item.tags,
+          relatedInformation: item.relatedInformation,
+          codeDescription: item.codeDescription ? { href: item.codeDescription } : undefined,
+          data: item.data,
         })),
+        only,
       );
       updateLspStatusForFile(file, result.status);
       return result.actions;
@@ -5420,13 +5463,20 @@ export function CodeWorkspaceTab({
     file: OpenFileState,
     range: LspRange,
     diagnostics: LspDiagnostic[] = [],
+    only: string[] = [],
+    sectionLabel = "code actions",
   ) => {
-    const actions = await requestCodeActions(file, range, diagnostics);
-    if (!actions.length) {
-      setStatusMessage("No code actions available");
+    const actions = await requestCodeActions(file, range, diagnostics, only);
+    const filtered = only.length === 0
+      ? actions
+      : actions.filter((action) => only.some((kind) => (
+        action.kind === kind || action.kind?.startsWith(`${kind}.`)
+      )));
+    if (!filtered.length) {
+      setStatusMessage(`No ${sectionLabel} provided by the language server`);
       return;
     }
-    const sorted = [...actions].sort((a, b) => {
+    const sorted = [...filtered].sort((a, b) => {
       const aQuick = a.kind?.includes("quickfix") ? 0 : 1;
       const bQuick = b.kind?.includes("quickfix") ? 0 : 1;
       if (aQuick !== bQuick) return aQuick - bQuick;
@@ -5438,6 +5488,26 @@ export function CodeWorkspaceTab({
       onClick: () => void runCodeAction(action, file),
     })));
   }, [openTreeContextMenuAt, requestCodeActions, runCodeAction, setStatusMessage]);
+
+  const openRefactorActions = useCallback(async (only: string[], sectionLabel: string) => {
+    const file = activeFile;
+    if (!file || file.loading || file.library) return;
+    const selection = editorSelectionRef.current;
+    const range: LspRange = {
+      start: selection.start,
+      end: selection.empty ? selection.start : selection.end,
+    };
+    const rect = editorPaneRef.current?.getBoundingClientRect();
+    await showCodeActionsMenu(
+      (rect?.left ?? 0) + 80,
+      (rect?.top ?? 0) + 80,
+      file,
+      range,
+      [],
+      only,
+      sectionLabel,
+    );
+  }, [activeFile, showCodeActionsMenu]);
 
   const openCodeActionsAtCursor = useCallback(async () => {
     const file = activeFile;
@@ -5876,6 +5946,51 @@ export function CodeWorkspaceTab({
       run: () => void safeDeleteSymbolRef.current(),
     },
     {
+      id: "workspace.extractMethod",
+      title: "Extract Method",
+      category: "Refactor",
+      keywords: ["refactor", "extract", "method", "function"],
+      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+        && !activeFile.library && !!activeCapabilities?.codeAction,
+      run: () => void openRefactorActions(["refactor.extract", "refactor.extract.function", "refactor.extract.method"], "Extract Method/Function actions"),
+    },
+    {
+      id: "workspace.extractVariable",
+      title: "Extract Variable",
+      category: "Refactor",
+      keywords: ["refactor", "extract", "variable", "local"],
+      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+        && !activeFile.library && !!activeCapabilities?.codeAction,
+      run: () => void openRefactorActions(["refactor.extract.variable", "refactor.extract.constant"], "Extract Variable/Constant actions"),
+    },
+    {
+      id: "workspace.inline",
+      title: "Inline",
+      category: "Refactor",
+      keywords: ["refactor", "inline", "variable", "method", "function"],
+      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+        && !activeFile.library && !!activeCapabilities?.codeAction,
+      run: () => void openRefactorActions(["refactor.inline"], "Inline actions"),
+    },
+    {
+      id: "workspace.changeSignature",
+      title: "Change Signature",
+      category: "Refactor",
+      keywords: ["refactor", "signature", "parameters", "arguments"],
+      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+        && !activeFile.library && !!activeCapabilities?.codeAction,
+      run: () => void openRefactorActions(["refactor.rewrite.changeSignature", "refactor.changeSignature"], "Change Signature actions"),
+    },
+    {
+      id: "workspace.moveRefactor",
+      title: "Move",
+      category: "Refactor",
+      keywords: ["refactor", "move", "symbol", "class"],
+      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+        && !activeFile.library && !!activeCapabilities?.codeAction,
+      run: () => void openRefactorActions(["refactor.move", "refactor.rewrite"], "Move actions"),
+    },
+    {
       id: "workspace.aiExplainSyntax",
       title: t("codeWorkspaceAi.commandExplainSyntax"),
       category: "AI",
@@ -6056,6 +6171,16 @@ export function CodeWorkspaceTab({
       keywords: ["run", "task", "script"],
       run: () => {
         setBottomDockTab("run");
+        setBottomDockOpen(true);
+      },
+    },
+    {
+      id: "workspace.showAnalysis",
+      title: "Show Code Analysis",
+      category: "Analyze",
+      keywords: ["inspection", "data flow", "diagnostics", "lsp", "psi"],
+      run: () => {
+        setBottomDockTab("analysis");
         setBottomDockOpen(true);
       },
     },
@@ -6297,6 +6422,7 @@ export function CodeWorkspaceTab({
     openHierarchy,
     openLooseFile,
     openQuickDocumentation,
+    openRefactorActions,
     openRecentFiles,
     openSearchEverywhere,
     openStructurePopup,
@@ -6933,7 +7059,9 @@ export function CodeWorkspaceTab({
 
   // Poll project diagnostics while the Problems panel is open in project scope.
   useEffect(() => {
-    if (!(bottomDockOpen && bottomDockTab === "problems" && problemsScope === "project")) return;
+    if (!(bottomDockOpen
+      && (bottomDockTab === "problems" || bottomDockTab === "analysis")
+      && problemsScope === "project")) return;
     let cancelled = false;
     setProjectProblemsLoading(true);
     void refreshProjectProblems().finally(() => {
@@ -6965,18 +7093,20 @@ export function CodeWorkspaceTab({
   }, [lspDescriptorForPath, refreshProjectProblems, setStatusMessage]);
 
   const problemsScopeFiles = problemsScope === "project" ? projectProblemFiles : problemFiles;
+  const analysisFiles = problemsScopeFiles;
   const activeProblemCounts = useMemo(
     () => problemsScopeFiles.reduce(
       (counts, file) => {
         for (const diagnostic of file.diagnostics) {
-          if (diagnostic.severity === 1) counts.errors += 1;
-          else if (diagnostic.severity === 2) counts.warnings += 1;
+          const display = inspectionTransform(diagnostic);
+          if (display?.severity === 1) counts.errors += 1;
+          else if (display?.severity === 2) counts.warnings += 1;
         }
         return counts;
       },
       { errors: 0, warnings: 0 },
     ),
-    [problemsScopeFiles],
+    [inspectionTransform, problemsScopeFiles],
   );
 
   const openProblem = useCallback(
@@ -6996,6 +7126,11 @@ export function CodeWorkspaceTab({
     [openFile, problemPathToRef, revealEditorLocation],
   );
 
+  const openRelatedDiagnostic = useCallback((diagnostic: LspDiagnostic) => {
+    const location = diagnostic.relatedInformation?.[0]?.location;
+    if (location) void openLspLocation(location);
+  }, [openLspLocation]);
+
   // M8 E: Java test discovery + terminal run. Discovery targets the active .java
   // file; running builds a Maven/Gradle command and reuses the terminal runner.
   const activeFileIsJava = !!activeFile
@@ -7004,6 +7139,7 @@ export function CodeWorkspaceTab({
   const [javaRunBusy, setJavaRunBusy] = useState(false);
   const [projectBuildBusy, setProjectBuildBusy] = useState(false);
   const [activeExecutionModel, setActiveExecutionModel] = useState<WorkspaceExecutionModel | null>(null);
+  const [javaFallbackConfiguration, setJavaFallbackConfiguration] = useState<ExecutionRunConfiguration | null>(null);
   const [runConfigurationRevision, setRunConfigurationRevision] = useState(0);
 
   useEffect(() => {
@@ -7021,19 +7157,32 @@ export function CodeWorkspaceTab({
     const file = openFilesRef.current[activeKey ?? ""];
     if (!file || file.ref.kind !== "root" || file.library) {
       setActiveExecutionModel(null);
+      setJavaFallbackConfiguration(null);
       return;
     }
     const root = findRoot(file.ref.rootId);
     const absolute = absolutePathForOpenFile(file);
     if (!root || !absolute) {
       setActiveExecutionModel(null);
+      setJavaFallbackConfiguration(null);
       return;
     }
     let cancelled = false;
     setActiveExecutionModel(null);
+    setJavaFallbackConfiguration(null);
     void workspaceExecutionModel(root.path, absolute, toolConfigRef.current)
       .then((model) => {
-        if (!cancelled) setActiveExecutionModel(model);
+        if (cancelled) return;
+        setActiveExecutionModel(model);
+        if (activeFileIsJava) {
+          void workspaceJavaRunTarget(root.path, file.ref.path, toolConfigRef.current)
+            .then((target) => {
+              if (!cancelled) setJavaFallbackConfiguration(javaRunTargetToExecutionRunConfiguration(target));
+            })
+            .catch(() => {
+              if (!cancelled) setJavaFallbackConfiguration(null);
+            });
+        }
       })
       .catch((error) => {
         if (!cancelled) setStatusMessage(`Run target discovery failed: ${errorMessage(error)}`);
@@ -7041,21 +7190,36 @@ export function CodeWorkspaceTab({
     return () => {
       cancelled = true;
     };
-  }, [absolutePathForOpenFile, activeKey, findRoot, setStatusMessage, toolConfig]);
+  }, [absolutePathForOpenFile, activeFileIsJava, activeKey, findRoot, setStatusMessage, toolConfig]);
 
-  const activeRunConfiguration = useMemo<ExecutionRunConfiguration | null>(() => {
-    if (!activeExecutionModel || !activeFile || activeFile.ref.kind !== "root") return null;
+  const activeRunConfigurations = useMemo<ExecutionRunConfiguration[]>(() => {
+    if (!activeExecutionModel || !activeFile || activeFile.ref.kind !== "root") return [];
     const absolute = absolutePathForOpenFile(activeFile);
-    if (!absolute) return null;
+    if (!absolute) return [];
     const normalized = normalizeFsPath(absolute);
-    const matches = activeExecutionModel.runConfigurations.filter((configuration) =>
+    const configurations = javaFallbackConfiguration
+      ? [
+          ...activeExecutionModel.runConfigurations.filter((configuration) => (
+            !configuration.sourceFile
+            || normalizeFsPath(configuration.sourceFile) !== normalizeFsPath(javaFallbackConfiguration.sourceFile ?? "")
+          )),
+          javaFallbackConfiguration,
+        ]
+      : activeExecutionModel.runConfigurations;
+    const matches = configurations.filter((configuration) =>
       configuration.sourceFile && normalizeFsPath(configuration.sourceFile) === normalized,
     );
-    const detected = matches.find((configuration) => configuration.kind !== "module") ?? matches[0] ?? null;
-    if (!detected) return null;
-    const override = readRunConfigurationOverrides(workspaceInstanceId)[detected.id];
-    return applyRunConfigurationOverride(detected, override);
-  }, [absolutePathForOpenFile, activeExecutionModel, activeFile, runConfigurationRevision, workspaceInstanceId]);
+    return materializeRunConfigurations(matches, readRunConfigurationOverrides(workspaceInstanceId));
+  }, [absolutePathForOpenFile, activeExecutionModel, activeFile, javaFallbackConfiguration, runConfigurationRevision, workspaceInstanceId]);
+
+  const activeRunConfiguration = useMemo<ExecutionRunConfiguration | null>(() => {
+    const candidates = activeRunConfigurations.filter((configuration) => configuration.kind !== "module");
+    if (candidates.length === 0) return null;
+    const selectedId = activeFile
+      ? readActiveRunConfigurationSelection(workspaceInstanceId, absolutePathForOpenFile(activeFile) ?? "")
+      : null;
+    return candidates.find((configuration) => configuration.id === selectedId) ?? candidates[0];
+  }, [absolutePathForOpenFile, activeFile, activeRunConfigurations, runConfigurationRevision, workspaceInstanceId]);
 
   const activeDebugConfiguration = useMemo<ExecutionDebugConfiguration | null>(() => {
     const id = activeRunConfiguration?.debugConfigurationId;
@@ -7066,6 +7230,15 @@ export function CodeWorkspaceTab({
     return applyRunOverrideToDebugConfiguration(detected, override);
   }, [activeExecutionModel, activeRunConfiguration, runConfigurationRevision, workspaceInstanceId]);
 
+  const activeRunConfigurationOverride = useMemo(() => {
+    if (!activeRunConfiguration) return undefined;
+    const overrides = readRunConfigurationOverrides(workspaceInstanceId);
+    return overrides[activeRunConfiguration.id]
+      ?? (activeRunConfiguration.baseConfigurationId
+        ? overrides[activeRunConfiguration.baseConfigurationId]
+        : undefined);
+  }, [activeRunConfiguration, runConfigurationRevision, workspaceInstanceId]);
+
   const launchWorkspaceTask = useCallback((task: WorkspaceTaskItem, onExit?: (exitCode: number) => void) => {
     if (runPanelRef.current) {
       runPanelRef.current.run(task, onExit);
@@ -7074,7 +7247,84 @@ export function CodeWorkspaceTab({
     }
   }, [runWorkspaceTask]);
 
-  /** IDEA-style Shift+F10: save and run the main class declared by this file. */
+  const runTaskAndWait = useCallback(async (task: WorkspaceTaskItem): Promise<void> => {
+    const result = await executeTaskPlan([task], (next, onExit) => launchWorkspaceTask(next, onExit));
+    if (result.exitCode !== 0) {
+      throw new Error(`${result.failed?.label ?? task.label} exited with ${result.exitCode}`);
+    }
+  }, [launchWorkspaceTask]);
+
+  const taskForRunConfiguration = useCallback((
+    configuration: ExecutionRunConfiguration,
+    root: CodeWorkspaceRootInfo,
+    source: string,
+  ): WorkspaceTaskItem => ({
+    id: configuration.id,
+    label: configuration.label,
+    command: configuration.command.display,
+    cwd: configuration.command.cwd,
+    source,
+    rootId: root.id,
+    rootName: root.name,
+    configuration: true,
+    runConfiguration: configuration,
+    execution: {
+      executable: configuration.command.executable,
+      args: configuration.command.args,
+      source: configuration.command.source,
+      error: configuration.command.error,
+    },
+    environment: Object.fromEntries(Object.entries(configuration.command.env).map(([name, value]) => [
+      name,
+      { value, mode: configuration.environmentModes?.[name] ?? "replace" },
+    ])),
+    dependsOn: configuration.preLaunchTargets,
+    buildTargets: activeExecutionModel?.buildTargets,
+  }), [activeExecutionModel]);
+
+  const executeBeforeLaunch = useCallback(async (
+    targetIds: readonly string[],
+    targets: readonly ExecutionBuildTarget[],
+    root: CodeWorkspaceRootInfo,
+  ): Promise<void> => {
+    if (targetIds.length === 0) return;
+    const plan = resolveBuildTargetPlan(targetIds, targets);
+    const tasks = plan.map((target): WorkspaceTaskItem => ({
+      id: target.id,
+      label: target.label,
+      command: target.command.display,
+      cwd: target.command.cwd,
+      source: "Before launch",
+      rootId: root.id,
+      rootName: root.name,
+      execution: {
+        executable: target.command.executable,
+        args: target.command.args,
+        source: target.command.source,
+        error: target.command.error,
+      },
+      environment: Object.fromEntries(Object.entries(target.command.env).map(([name, value]) => [
+        name,
+        { value, mode: "replace" as const },
+      ])),
+    }));
+    const result = await executeTaskPlan(tasks, (task, onExit) => runWorkspaceTask(task, onExit));
+    if (result.exitCode !== 0) {
+      throw new Error(`Before launch failed: ${result.failed?.label ?? "build target"} exited with ${result.exitCode}`);
+    }
+  }, [runWorkspaceTask]);
+
+  const readEnvironmentFile = useCallback(async (
+    cwd: string,
+    envFile: string | undefined,
+  ): Promise<Record<string, string>> => {
+    if (!envFile?.trim()) return {};
+    const path = resolveEnvironmentFilePath(cwd, envFile);
+    const file = await workspaceReadLooseFile(path, 1024 * 1024);
+    return parseDotEnv(file.text);
+  }, []);
+
+  /** Compatibility fallback for a Java source file without a structured provider configuration. */
   const runActiveJavaFile = useCallback(() => {
     if (javaRunBusy) return;
     void (async () => {
@@ -7089,19 +7339,14 @@ export function CodeWorkspaceTab({
         if (file.dirty) {
           await saveOpenBufferText(file.key, file.text);
         }
-        const target = await workspaceJavaRunTarget(root.path, file.ref.path, toolConfigRef.current);
-        launchWorkspaceTask({
-          id: target.id,
-          label: target.label,
-          command: target.command,
-          cwd: target.cwd,
-          source: `Java · ${target.buildSystem === "source-file" ? "JDK" : target.buildSystem}`,
-          rootId: root.id,
-          rootName: root.name,
-          execution: target.execution,
-          environment: target.environment,
-        });
-        setStatusMessage(`Running ${target.mainClass}`);
+        const detected = javaRunTargetToExecutionRunConfiguration(
+          await workspaceJavaRunTarget(root.path, file.ref.path, toolConfigRef.current),
+        );
+        const override = readRunConfigurationOverrides(workspaceInstanceId)[detected.id];
+        const configuration = applyRunConfigurationOverride(detected, override);
+        const task = taskForRunConfiguration(configuration, root, "Java · compatibility");
+        await runTaskAndWait(task);
+        setStatusMessage(`Running ${configuration.label}`);
       } catch (error) {
         setStatusMessage(errorMessage(error));
         setBottomDockTab("run");
@@ -7114,15 +7359,17 @@ export function CodeWorkspaceTab({
     activeKey,
     findRoot,
     javaRunBusy,
-    launchWorkspaceTask,
+    runTaskAndWait,
     saveOpenBufferText,
+    taskForRunConfiguration,
+    workspaceInstanceId,
     setBottomDockOpen,
     setBottomDockTab,
     setStatusMessage,
   ]);
 
   const runActiveTarget = useCallback(() => {
-    if (activeFileIsJava) {
+    if (activeFileIsJava && !activeRunConfiguration) {
       runActiveJavaFile();
       return;
     }
@@ -7136,27 +7383,11 @@ export function CodeWorkspaceTab({
       try {
         if (file.dirty) await saveOpenBufferText(file.key, file.text);
         const project = activeExecutionModel?.projects.find((item) => item.id === activeRunConfiguration.projectId);
-        launchWorkspaceTask({
-          id: activeRunConfiguration.id,
-          label: activeRunConfiguration.label,
-          command: activeRunConfiguration.command.display,
-          cwd: activeRunConfiguration.command.cwd,
-          source: project ? `${project.languages.join("/")} · ${project.provider}` : "Run configuration",
-          rootId: root.id,
-          rootName: root.name,
-          configuration: true,
-          runConfiguration: activeRunConfiguration,
-          execution: {
-            executable: activeRunConfiguration.command.executable,
-            args: activeRunConfiguration.command.args,
-            source: activeRunConfiguration.command.source,
-            error: activeRunConfiguration.command.error,
-          },
-          environment: Object.fromEntries(Object.entries(activeRunConfiguration.command.env).map(([name, value]) => [
-            name,
-            { value, mode: "replace" as const },
-          ])),
-        });
+        await runTaskAndWait(taskForRunConfiguration(
+          activeRunConfiguration,
+          root,
+          project ? `${project.languages.join("/")} · ${project.provider}` : "Run configuration",
+        ));
         setStatusMessage(`Running ${activeRunConfiguration.label}`);
       } catch (error) {
         setStatusMessage(errorMessage(error));
@@ -7173,8 +7404,9 @@ export function CodeWorkspaceTab({
     activeRunConfiguration,
     findRoot,
     javaRunBusy,
-    launchWorkspaceTask,
     runActiveJavaFile,
+    runTaskAndWait,
+    taskForRunConfiguration,
     saveOpenBufferText,
     setBottomDockOpen,
     setBottomDockTab,
@@ -7182,106 +7414,106 @@ export function CodeWorkspaceTab({
   ]);
 
   /** IDEA-style Ctrl+F9: compile the active root using its real build tool. */
-  const buildActiveProject = useCallback((rebuild = false) => {
+  const buildActiveProject = useCallback(async (rebuild = false) => {
     if (projectBuildBusy) return;
-    void (async () => {
-      const file = openFilesRef.current[activeKey ?? ""];
-      const root = file?.ref.kind === "root"
-        ? findRoot(file.ref.rootId)
-        : rootsRef.current[0] ?? null;
-      if (!root) return;
-      setProjectBuildBusy(true);
-      try {
-        const absolute = file ? absolutePathForOpenFile(file) : undefined;
-        const executionModel = await workspaceExecutionModel(root.path, absolute ?? undefined, toolConfigRef.current);
-        const normalizedActive = absolute ? normalizeFsPath(absolute) : null;
-        const project = executionModel.projects
-          .filter((candidate) => !normalizedActive || normalizedActive === normalizeFsPath(candidate.root)
-            || normalizedActive.startsWith(`${normalizeFsPath(candidate.root)}/`))
-          .sort((left, right) => right.root.length - left.root.length)[0];
-        const structuredTarget = !rebuild && project
-          ? executionModel.buildTargets.find((target) => target.projectId === project.id && target.kind === "build")
-          : null;
-        if (structuredTarget) {
-          const toTask = (target: typeof structuredTarget): WorkspaceTaskItem => ({
-            id: target.id,
-            label: target.label,
-            command: target.command.display,
-            cwd: target.command.cwd,
-            source: `${project.languages.join("/")} · ${project.provider}`,
-            rootId: root.id,
-            rootName: root.name,
-            execution: {
-              executable: target.command.executable,
-              args: target.command.args,
-              source: target.command.source,
-              error: target.command.error,
-            },
-            environment: Object.fromEntries(Object.entries(target.command.env).map(([name, value]) => [
-              name,
-              { value, mode: "replace" as const },
-            ])),
-          });
-          const prerequisites = structuredTarget.dependsOn
-            .map((id) => executionModel.buildTargets.find((target) => target.id === id))
-            .filter((target): target is typeof structuredTarget => !!target);
-          const queue = [...prerequisites, structuredTarget].map(toTask);
-          const runNext = (index: number) => {
-            const task = queue[index];
-            if (!task) return;
-            launchWorkspaceTask(task, (exitCode) => {
-              if (exitCode === 0) runNext(index + 1);
-            });
-          };
-          runNext(0);
-          setStatusMessage(`Building ${project.module}`);
-          return;
+    const file = openFilesRef.current[activeKey ?? ""];
+    const root = file?.ref.kind === "root"
+      ? findRoot(file.ref.rootId)
+      : rootsRef.current[0] ?? null;
+    if (!root) return;
+    setProjectBuildBusy(true);
+    try {
+      const absolute = file ? absolutePathForOpenFile(file) : undefined;
+      const executionModel = await workspaceExecutionModel(root.path, absolute ?? undefined, toolConfigRef.current);
+      const normalizedActive = absolute ? normalizeFsPath(absolute) : null;
+      const project = executionModel.projects
+        .filter((candidate) => !normalizedActive || normalizedActive === normalizeFsPath(candidate.root)
+          || normalizedActive.startsWith(`${normalizeFsPath(candidate.root)}/`))
+        .sort((left, right) => right.root.length - left.root.length)[0];
+      const buildTarget = project
+        ? executionModel.buildTargets.find((target) => target.projectId === project.id && target.kind === "build")
+        : null;
+      const cleanTarget = project
+        ? executionModel.buildTargets.find((target) => target.projectId === project.id && target.kind === "clean")
+        : null;
+      if (buildTarget && (!rebuild || cleanTarget)) {
+        const toTask = (target: ExecutionBuildTarget): WorkspaceTaskItem => ({
+          id: target.id,
+          label: target.label,
+          command: target.command.display,
+          cwd: target.command.cwd,
+          source: project ? `${project.languages.join("/")} · ${project.provider}` : "Build target",
+          rootId: root.id,
+          rootName: root.name,
+          execution: {
+            executable: target.command.executable,
+            args: target.command.args,
+            source: target.command.source,
+            error: target.command.error,
+          },
+          environment: Object.fromEntries(Object.entries(target.command.env).map(([name, value]) => [
+            name,
+            { value, mode: "replace" as const },
+          ])),
+          dependsOn: target.dependsOn,
+        });
+        const requestedIds = rebuild && cleanTarget
+          ? [cleanTarget.id, buildTarget.id]
+          : [buildTarget.id];
+        const plan = resolveBuildTargetPlan(requestedIds, executionModel.buildTargets)
+          .map(toTask);
+        const result = await executeTaskPlan(plan, (task, onExit) => launchWorkspaceTask(task, onExit));
+        if (result.exitCode !== 0) {
+          throw new Error(`Build stopped at ${result.failed?.label ?? "a prerequisite"} (exit ${result.exitCode})`);
         }
-        const groups = await workspaceTaskTree(root.path, toolConfigRef.current);
-        const preferred = rebuild
-          ? [["Maven", "rebuild"], ["Gradle", "rebuild"]]
-          : [
-              ["Maven", "compile"],
-              ["Gradle", "classes"],
-              ["Gradle", "build"],
-              ["Cargo.toml", "build"],
-              ["package.json", "build"],
-              ["Makefile", "build"],
-            ];
-        let selected: WorkspaceTaskItem | null = null;
-        for (const [source, label] of preferred) {
-          const task = groups
-            .find((group) => group.source === source)
-            ?.tasks.find((candidate) => candidate.label === label);
-          if (task) {
-            selected = { ...task, rootId: root.id, rootName: root.name };
-            break;
-          }
+        setStatusMessage(`${rebuild ? "Rebuilt" : "Built"} ${project?.module ?? root.name}`);
+        return;
+      }
+      const groups = await workspaceTaskTree(root.path, toolConfigRef.current);
+      const preferred = rebuild
+        ? [["Maven", "rebuild"], ["Gradle", "rebuild"], ["Cargo.toml", "rebuild"]]
+        : [
+            ["Maven", "compile"],
+            ["Gradle", "classes"],
+            ["Gradle", "build"],
+            ["Cargo.toml", "build"],
+            ["package.json", "build"],
+            ["Makefile", "build"],
+          ];
+      let selected: WorkspaceTaskItem | null = null;
+      for (const [source, label] of preferred) {
+        const task = groups
+          .find((group) => group.source === source)
+          ?.tasks.find((candidate) => candidate.label === label);
+        if (task) {
+          selected = { ...task, rootId: root.id, rootName: root.name };
+          break;
         }
-        if (!selected) {
-          setStatusMessage(rebuild
-            ? "No Maven or Gradle rebuild task was detected for this project"
-            : "No build task was detected for this project");
-          setBottomDockTab("build");
-          setBottomDockOpen(true);
-          return;
-        }
-        launchWorkspaceTask(selected);
-        setStatusMessage(`${rebuild ? "Rebuilding" : "Building"} ${root.name}`);
-      } catch (error) {
-        setStatusMessage(errorMessage(error));
+      }
+      if (!selected) {
+        setStatusMessage(rebuild
+          ? "No rebuild task was detected for this project"
+          : "No build task was detected for this project");
         setBottomDockTab("build");
         setBottomDockOpen(true);
-      } finally {
-        setProjectBuildBusy(false);
+        return;
       }
-    })();
+      await runTaskAndWait(selected);
+      setStatusMessage(`${rebuild ? "Rebuilt" : "Built"} ${root.name}`);
+    } catch (error) {
+      setStatusMessage(errorMessage(error));
+      setBottomDockTab("build");
+      setBottomDockOpen(true);
+    } finally {
+      setProjectBuildBusy(false);
+    }
   }, [
     activeKey,
     absolutePathForOpenFile,
     findRoot,
     launchWorkspaceTask,
     projectBuildBusy,
+    runTaskAndWait,
     setBottomDockOpen,
     setBottomDockTab,
     setStatusMessage,
@@ -7553,23 +7785,31 @@ export function CodeWorkspaceTab({
   const [javaMainCandidates, setJavaMainCandidates] = useState<{
     candidates: JavaMainClassOption[];
     launch: Record<string, unknown>;
+    override?: ReturnType<typeof readRunConfigurationOverrides>[string];
+    environment: Record<string, string>;
   } | null>(null);
 
   /** Start a Java debug session, optionally pinned to an explicit main class. */
   const launchJavaDebug = useCallback(
-    (launch: Record<string, unknown>, main?: JavaMainClassOption) => {
+    (
+      launch: Record<string, unknown>,
+      main?: JavaMainClassOption,
+      override = activeRunConfigurationOverride,
+      environment: Record<string, string> = {},
+    ) => {
       const config = main
         ? { ...launch, mainClass: main.mainClass, projectName: main.projectName }
         : launch;
+      const configured = applyRunOverrideToJavaLaunch(config, override, environment);
       if (main) {
         // Resolving the classpath + asking java-debug for a port is another
         // multi-second server round trip: name the target so the panel is not
         // blank while it runs.
         debug.reportStartupProgress(`Launching ${main.mainClass}…`);
       }
-      void debug.startDebug(config).catch((err) => setStatusMessage(errorMessage(err)));
+      void debug.startDebug(configured).catch((err) => setStatusMessage(errorMessage(err)));
     },
-    [debug, setStatusMessage],
+    [activeRunConfigurationOverride, debug, setStatusMessage],
   );
 
   /** Build a Java launch config for the active file and start debugging. */
@@ -7598,8 +7838,23 @@ export function CodeWorkspaceTab({
     // take tens of seconds on a cold project.
     debug.reportStartupProgress(`Starting debug for ${file.title}`);
     void (async () => {
-      // Save + build before launching so breakpoints bind to current bytecode.
-      if (!(await prepareJavaLaunch(rootId, descriptor))) return;
+      try {
+        if (file.dirty) await saveOpenBufferText(file.key, file.text);
+        await executeBeforeLaunch(
+          activeRunConfiguration?.preLaunchTargets ?? [],
+          activeExecutionModel?.buildTargets ?? [],
+          root,
+        );
+      } catch (error) {
+        const message = `Cannot start debug: ${errorMessage(error)}`;
+        setStatusMessage(message);
+        debug.reportStartupFailure(message);
+        return;
+      }
+      // jdtls remains the Java-specific compiler/diagnostic barrier. When a
+      // structured Before launch build already ran, do not compile twice.
+      if (!(activeRunConfiguration?.preLaunchTargets.length)
+        && !(await prepareJavaLaunch(rootId, descriptor))) return;
       // Resolve the runnable main up front: launch the active-file / sole main
       // directly, or prompt when several mains exist (never run an arbitrary one).
       debug.reportStartupProgress("Resolving main class…");
@@ -7623,13 +7878,60 @@ export function CodeWorkspaceTab({
         return;
       }
       if (resolution.kind === "choose") {
+        let dotenv: Record<string, string> = {};
+        try {
+          dotenv = await readEnvironmentFile(
+            activeRunConfiguration?.command.cwd ?? root.path,
+            activeRunConfiguration?.envFile,
+          );
+        } catch (error) {
+          const message = `Cannot start debug: ${errorMessage(error)}`;
+          setStatusMessage(message);
+          debug.reportStartupFailure(message);
+          return;
+        }
         debug.reportStartupProgress("Waiting for a main class to be picked…");
-        setJavaMainCandidates({ candidates: resolution.candidates, launch });
+        setJavaMainCandidates({
+          candidates: resolution.candidates,
+          launch,
+          override: activeRunConfigurationOverride,
+          environment: dotenv,
+        });
         return;
       }
-      launchJavaDebug(launch, resolution.main);
+      let dotenv: Record<string, string> = {};
+      try {
+        dotenv = await readEnvironmentFile(
+          activeRunConfiguration?.command.cwd ?? root.path,
+          activeRunConfiguration?.envFile,
+        );
+      } catch (error) {
+        const message = `Cannot start debug: ${errorMessage(error)}`;
+        setStatusMessage(message);
+        debug.reportStartupFailure(message);
+        return;
+      }
+      launchJavaDebug(launch, resolution.main, activeRunConfigurationOverride, dotenv);
     })();
-  }, [activeKey, debug, findRoot, lspDescriptorForFile, absolutePathForOpenFile, launchJavaDebug, prepareJavaLaunch, setBottomDockOpen, setBottomDockTab, setStatusMessage, workspaceInstanceId]);
+  }, [
+    activeExecutionModel,
+    activeKey,
+    activeRunConfiguration,
+    activeRunConfigurationOverride,
+    debug,
+    executeBeforeLaunch,
+    findRoot,
+    lspDescriptorForFile,
+    absolutePathForOpenFile,
+    launchJavaDebug,
+    prepareJavaLaunch,
+    readEnvironmentFile,
+    saveOpenBufferText,
+    setBottomDockOpen,
+    setBottomDockTab,
+    setStatusMessage,
+    workspaceInstanceId,
+  ]);
 
   const startDebugActiveTarget = useCallback(() => {
     if (activeFileIsJava) {
@@ -7643,22 +7945,42 @@ export function CodeWorkspaceTab({
     }
     const file = openFilesRef.current[activeKey ?? ""];
     if (!file || file.ref.kind !== "root" || file.library) return;
+    const rootId = file.ref.rootId;
     setBottomDockTab("debug");
     setBottomDockOpen(true);
     debug.reportStartupProgress(`Starting ${configuration.label}`);
     void (async () => {
       try {
         if (file.dirty) await saveOpenBufferText(file.key, file.text);
-        await debug.startDebug(configuration.launchConfig, configuration.adapterId);
+        const root = findRoot(rootId);
+        if (!root) throw new Error("Cannot resolve the active workspace root");
+        await executeBeforeLaunch(
+          configuration.preLaunchTargets,
+          activeExecutionModel?.buildTargets ?? [],
+          root,
+        );
+        const cwd = (() => {
+          const value = configuration.launchConfig.adapterCwd;
+          return typeof value === "string" && value.trim() ? value : root.path;
+        })();
+        const dotenv = await readEnvironmentFile(cwd, configuration.envFile);
+        const launch = mergeDebugEnvironment(configuration, dotenv);
+        await debug.startDebug(launch.launchConfig, launch.adapterId);
       } catch (error) {
-        setStatusMessage(errorMessage(error));
+        const message = `Debug failed to start: ${errorMessage(error)}`;
+        setStatusMessage(message);
+        debug.reportStartupFailure(message);
       }
     })();
   }, [
     activeDebugConfiguration,
+    activeExecutionModel,
     activeFileIsJava,
     activeKey,
     debug,
+    executeBeforeLaunch,
+    findRoot,
+    readEnvironmentFile,
     saveOpenBufferText,
     setBottomDockOpen,
     setBottomDockTab,
@@ -7884,7 +8206,10 @@ export function CodeWorkspaceTab({
     const group = editorGroups[groupId];
     const groupFile = group.activeKey ? openFiles[group.activeKey] ?? null : null;
     const groupLspState = group.activeKey ? lspFiles[group.activeKey] ?? null : null;
-    const groupDiagnostics = groupLspState?.diagnostics ?? [];
+    const groupDiagnostics = (groupLspState?.diagnostics ?? []).flatMap((diagnostic) => {
+      const display = inspectionTransform(diagnostic);
+      return display ? [display] : [];
+    });
     const groupCapabilities = groupLspState?.status?.capabilities ?? null;
     const groupMarkdownMode = groupFile && isMarkdownPath(groupFile.languagePath)
       ? markdownModes[groupFile.key] ?? "edit"
@@ -8150,6 +8475,28 @@ export function CodeWorkspaceTab({
           disabled={!activeFileRunnable || javaRunBusy}
           onClick={runActiveTarget}
         />
+        {activeRunConfigurations.length > 1 && activeFile && (() => {
+          const sourceFile = absolutePathForOpenFile(activeFile);
+          if (!sourceFile) return null;
+          return (
+            <select
+              data-testid="code-workspace-active-run-configuration"
+              aria-label="Active run configuration"
+              title="Select active Run/Debug configuration"
+              value={activeRunConfiguration?.id ?? ""}
+              onChange={(event) => writeActiveRunConfigurationSelection(
+                workspaceInstanceId,
+                sourceFile,
+                event.target.value || null,
+              )}
+              className="h-6 max-w-44 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
+            >
+              {activeRunConfigurations.map((configuration) => (
+                <option key={configuration.id} value={configuration.id}>{configuration.label}</option>
+              ))}
+            </select>
+          );
+        })()}
         <IconButton
           label={
             activeFileRunnable && !debugRuntimeAvailable
@@ -8451,6 +8798,25 @@ export function CodeWorkspaceTab({
                 onRebuild={() => void rebuildProject()}
                 rebuilding={rebuildingProject}
                 loading={problemsScope === "project" && projectProblemsLoading}
+                diagnosticTransform={inspectionTransform}
+                onOpenRelatedInformation={openRelatedDiagnostic}
+              />
+            ),
+          },
+          {
+            id: "analysis",
+            label: "Analysis",
+            icon: <Activity className="h-3.5 w-3.5" />,
+            badge: activeProblemCounts.errors + activeProblemCounts.warnings || undefined,
+            content: (
+              <AnalysisPanel
+                files={analysisFiles}
+                status={activeLspState?.status ?? null}
+                semanticTokenCount={semanticTokensByGroup[activeEditorGroupId]?.length ?? 0}
+                profile={inspectionProfile}
+                onUpdateRule={updateInspectionProfileRule}
+                onOpenLocation={(location) => void openLspLocation(location)}
+                onOpenDiagnostic={openProblem}
               />
             ),
           },
@@ -8612,6 +8978,19 @@ export function CodeWorkspaceTab({
                 editingBreakpoint={editingBreakpoint}
                 onEditingBreakpointChange={setEditingBreakpoint}
                 runtimeAvailable={debugRuntimeAvailable}
+                configurations={activeRunConfigurations
+                  .filter((configuration) => configuration.kind !== "module")
+                  .map((configuration) => ({ id: configuration.id, label: configuration.label }))}
+                activeConfigurationId={activeRunConfiguration?.id ?? null}
+                onActiveConfigurationChange={(configurationId) => {
+                  if (!activeFile) return;
+                  const sourceFile = absolutePathForOpenFile(activeFile);
+                  if (sourceFile) writeActiveRunConfigurationSelection(
+                    workspaceInstanceId,
+                    sourceFile,
+                    configurationId,
+                  );
+                }}
               />
             ),
           },
@@ -8765,7 +9144,7 @@ export function CodeWorkspaceTab({
         onPick={(main) => {
           const pending = javaMainCandidates;
           setJavaMainCandidates(null);
-          if (pending) launchJavaDebug(pending.launch, main);
+          if (pending) launchJavaDebug(pending.launch, main, pending.override, pending.environment);
         }}
       />
     </div>

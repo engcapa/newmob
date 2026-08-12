@@ -1,11 +1,21 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExecutionDebugConfiguration, ExecutionRunConfiguration } from "../../../lib/editor/workspace";
 import {
+  applyRunOverrideToJavaLaunch,
   applyRunConfigurationOverride,
   applyRunOverrideToDebugConfiguration,
+  createNamedRunConfiguration,
+  materializeRunConfigurations,
+  mergeDebugEnvironment,
+  parseDotEnv,
   parseEnvironmentLines,
+  readActiveRunConfigurationSelection,
+  readActiveRunConfigurationSelections,
   readRunConfigurationOverrides,
+  splitCompatibilityCommand,
   writeRunConfigurationOverride,
+  writeActiveRunConfigurationSelection,
+  javaRunTargetToExecutionRunConfiguration,
 } from "./runConfigurationPersistence";
 
 const run: ExecutionRunConfiguration = {
@@ -27,6 +37,134 @@ const run: ExecutionRunConfiguration = {
 afterEach(() => window.localStorage.clear());
 
 describe("run configuration persistence", () => {
+  it("materializes Java fallback targets as configurable run configurations", () => {
+    const configuration = javaRunTargetToExecutionRunConfiguration({
+      id: "java-main:src/Main.java",
+      label: "demo.Main",
+      mainClass: "demo.Main",
+      filePath: "/repo/src/Main.java",
+      command: "./gradlew :app:taomniRun",
+      cwd: "/repo",
+      buildSystem: "gradle",
+      modulePath: "app",
+      execution: {
+        executable: "./gradlew",
+        args: [":app:taomniRun"],
+        source: "wrapper",
+      },
+      environment: { MAVEN_OPTS: { value: "-Xmx1g", mode: "append" } },
+    });
+    expect(configuration).toMatchObject({
+      id: "java-main:src/Main.java",
+      kind: "java-main",
+      sourceFile: "/repo/src/Main.java",
+      command: {
+        executable: "./gradlew",
+        args: [":app:taomniRun"],
+        cwd: "/repo",
+        env: { MAVEN_OPTS: "-Xmx1g" },
+      },
+      argumentStrategy: "gradle-javaexec",
+      environmentModes: { MAVEN_OPTS: "append" },
+    });
+  });
+
+  it("recovers executable and quoted argv from legacy Java target commands", () => {
+    expect(splitCompatibilityCommand("./mvnw -q -Dexec.mainClass='com.acme.App' compile exec:java"))
+      .toEqual(["./mvnw", "-q", "-Dexec.mainClass=com.acme.App", "compile", "exec:java"]);
+    expect(splitCompatibilityCommand("java \"/repo/My App.java\" ''"))
+      .toEqual(["java", "/repo/My App.java", ""]);
+    expect(splitCompatibilityCommand("\"C:\\Program Files\\Java\\bin\\java.exe\" \"C:\\repo\\My App.java\""))
+      .toEqual(["C:\\Program Files\\Java\\bin\\java.exe", "C:\\repo\\My App.java"]);
+    expect(splitCompatibilityCommand("\\\\server\\share\\java.exe Main"))
+      .toEqual(["\\\\server\\share\\java.exe", "Main"]);
+
+    const configuration = javaRunTargetToExecutionRunConfiguration({
+      id: "java-main:src/Main.java",
+      label: "Main",
+      mainClass: "Main",
+      filePath: "/repo/src/Main.java",
+      command: "java '/repo/src/Main.java'",
+      cwd: "/repo",
+      buildSystem: "source-file",
+      modulePath: ".",
+    });
+    expect(configuration.command).toMatchObject({
+      executable: "java",
+      args: ["/repo/src/Main.java"],
+    });
+  });
+
+  it("places Java program arguments in Maven and Gradle runner options", () => {
+    const base = javaRunTargetToExecutionRunConfiguration({
+      id: "java-main:src/Main.java", label: "Main", mainClass: "Main",
+      filePath: "/repo/src/Main.java", cwd: "/repo", modulePath: ".",
+      command: "mvn compile exec:java", buildSystem: "maven",
+      execution: {
+        executable: "mvn",
+        args: ["-Dexec.mainClass=Main", "compile", "exec:java"],
+        source: "path",
+      },
+    });
+    expect(applyRunConfigurationOverride(base, {
+      args: ["hello world", "--verbose"], cwd: "", env: {},
+    }).command.args).toContain("-Dexec.args='hello world' --verbose");
+
+    const gradle = {
+      ...base,
+      argumentStrategy: "gradle-javaexec" as const,
+      command: { ...base.command, executable: "gradle", args: ["taomniRun"] },
+    };
+    expect(applyRunConfigurationOverride(gradle, {
+      args: ["hello world"], cwd: "", env: {},
+    }).command.args).toEqual(["taomniRun", "--args", "'hello world'"]);
+  });
+
+  it("clears provider program-argument slots without removing required argv", () => {
+    const maven: ExecutionRunConfiguration = {
+      ...run,
+      argumentStrategy: "maven-exec",
+      command: {
+        ...run.command,
+        executable: "mvn",
+        args: ["compile", "exec:java", "-Dexec.mainClass=Main", "-Dexec.args=stale"],
+      },
+    };
+    expect(applyRunConfigurationOverride(maven, { args: [], cwd: "", env: {} }).command.args)
+      .toEqual(["compile", "exec:java", "-Dexec.mainClass=Main"]);
+
+    const gradle: ExecutionRunConfiguration = {
+      ...run,
+      argumentStrategy: "gradle-javaexec",
+      command: {
+        ...run.command,
+        executable: "gradle",
+        args: ["taomniRun", "--console=plain", "--args", "stale"],
+      },
+    };
+    expect(applyRunConfigurationOverride(gradle, { args: [], cwd: "", env: {} }).command.args)
+      .toEqual(["taomniRun", "--console=plain"]);
+
+    // Generic providers keep their structural argv because the frontend cannot
+    // infer where a provider-specific program-argument delimiter begins.
+    expect(applyRunConfigurationOverride(run, { args: [], cwd: "", env: {} }).command.args)
+      .toEqual(run.command.args);
+  });
+
+  it("preserves inherited append environment semantics unless explicitly overridden", () => {
+    const base = javaRunTargetToExecutionRunConfiguration({
+      id: "java-main:src/Main.java", label: "Main", mainClass: "Main",
+      filePath: "/repo/src/Main.java", cwd: "/repo", modulePath: ".",
+      command: "mvn exec:java", buildSystem: "maven",
+      execution: { executable: "mvn", args: ["exec:java"], source: "path" },
+      environment: { MAVEN_OPTS: { value: "--add-opens=a/b=c", mode: "append" } },
+    });
+    expect(base.environmentModes).toEqual({ MAVEN_OPTS: "append" });
+    expect(applyRunConfigurationOverride(base, {
+      args: [], cwd: "", env: { MAVEN_OPTS: "-Xmx2g" },
+    }).environmentModes).toEqual({ MAVEN_OPTS: "replace" });
+  });
+
   it("isolates overrides by workspace and appends program arguments", () => {
     writeRunConfigurationOverride("workspace-a", run.id, {
       args: ["hello world", "--verbose"],
@@ -61,9 +199,76 @@ describe("run configuration persistence", () => {
     });
   });
 
+  it("maps VM options and dotenv values into DAP and Java launch payloads", () => {
+    const debug: ExecutionDebugConfiguration = {
+      id: "debug:demo",
+      projectId: "project:demo",
+      label: "Debug demo",
+      adapterId: "lldb",
+      request: "launch",
+      available: true,
+      preLaunchTargets: [],
+      launchConfig: { arguments: { args: ["provider"], env: { EXPLICIT: "yes" } } },
+    };
+    const override = {
+      args: ["user"], vmOptions: ["-Xmx1g"], cwd: "/repo/tools", env: { MODE: "test" }, envFile: ".env",
+    };
+    const applied = applyRunOverrideToDebugConfiguration(debug, override);
+    expect(applied).toMatchObject({ envFile: ".env" });
+    expect(applied.launchConfig).toMatchObject({
+      arguments: {
+        args: ["provider", "user"],
+        vmArgs: ["-Xmx1g"],
+        env: { EXPLICIT: "yes", MODE: "test" },
+      },
+    });
+    const dotenv = mergeDebugEnvironment(applied, { MODE: "file", FILE_ONLY: "1" });
+    expect(dotenv.launchConfig).toMatchObject({
+      arguments: { env: { MODE: "test", FILE_ONLY: "1", EXPLICIT: "yes" } },
+    });
+    expect(applyRunOverrideToJavaLaunch({ env: { PROVIDER: "1" } }, override, { MODE: "file" }))
+      .toMatchObject({
+        args: ["user"], vmArgs: ["-Xmx1g"], cwd: "/repo/tools",
+        env: { PROVIDER: "1", MODE: "test" },
+      });
+  });
+
+  it("creates named copies anchored to the detected configuration", () => {
+    writeRunConfigurationOverride("workspace-a", run.id, {
+      name: "Tuned", args: ["--verbose"], vmOptions: ["-Xmx1g"], cwd: "/repo/tools",
+      env: { MODE: "test" }, envFile: ".env", preLaunchTargets: ["build:demo"],
+    });
+    const tuned = applyRunConfigurationOverride(run, readRunConfigurationOverrides("workspace-a")[run.id]);
+    const firstId = createNamedRunConfiguration("workspace-a", tuned, "Local");
+    const first = materializeRunConfigurations([run], readRunConfigurationOverrides("workspace-a"))
+      .find((configuration) => configuration.id === firstId)!;
+    const secondId = createNamedRunConfiguration("workspace-a", first, "Second");
+    const overrides = readRunConfigurationOverrides("workspace-a");
+    expect(overrides[firstId]).toMatchObject({
+      baseConfigurationId: run.id,
+      args: ["--verbose"],
+      vmOptions: ["-Xmx1g"],
+      envFile: ".env",
+    });
+    expect(overrides[secondId].baseConfigurationId).toBe(run.id);
+  });
+
   it("parses only valid environment assignments", () => {
     expect(parseEnvironmentLines("A=1\nINVALID\nNOT-VALID=x\nEMPTY=\nB=two=parts")).toEqual({
       A: "1", EMPTY: "", B: "two=parts",
     });
+    expect(parseDotEnv("# comment\nexport A=1\nB='two words'\nBAD NAME=x\nC=three=parts"))
+      .toEqual({ A: "1", B: "two words", C: "three=parts" });
+  });
+
+  it("persists the active Run/Debug configuration by normalized source path", () => {
+    writeActiveRunConfigurationSelection("workspace-a", "C:\\repo\\src\\Main.java", "run:local");
+    expect(readActiveRunConfigurationSelection("workspace-a", "C:/repo/src/Main.java"))
+      .toBe("run:local");
+    expect(readActiveRunConfigurationSelections("workspace-b")).toEqual({});
+
+    writeActiveRunConfigurationSelection("workspace-a", "C:/repo/src/Main.java", null);
+    expect(readActiveRunConfigurationSelection("workspace-a", "C:/repo/src/Main.java"))
+      .toBeNull();
   });
 });
