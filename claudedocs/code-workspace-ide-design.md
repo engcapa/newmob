@@ -2,7 +2,7 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-12 · 版本：v4.7（严格持平基线；WorkspaceEdit 有序预览与 `codeAction/resolve` 代码闭环）· 状态：**实施中**。已有 M0–M10 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前完成 WorkspaceEdit、server-request、pull diagnostics、`workspace/didChangeWatchedFiles`、Tauri watcher 与基础冲突/崩溃恢复代码切片，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-12 · 版本：v4.8（严格持平基线；字符集闭环、跨文件事务 undo 与 Safe Delete 代码闭环）· 状态：**实施中**。已有 M0–M10 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前完成 WorkspaceEdit 有序预览、事务级 undo/redo、非 UTF-8 读写、Safe Delete、server-request、pull diagnostics、`workspace/didChangeWatchedFiles`、Tauri watcher 与基础冲突/崩溃恢复代码切片，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
 > 早期版本：v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -25,10 +25,10 @@
 
 **当前明确缺失（严格 IDEA parity）：**
 
-1. IDEA PSI/stub index、inspection/data-flow/nullability，以及 safe delete、move class、change signature、extract/inline 等索引式重构。
+1. IDEA PSI/stub index、inspection/data-flow/nullability，以及 move class、change signature、extract/inline 等索引式重构；Safe Delete 已有引用感知的代码闭环，但仍不是 IDEA PSI 级声明重构。
 2. 完整 project/module/source-set/facet/language-level 模型及 Maven/Gradle 等价导入生命周期。
 3. LSP 客户端剩余协议面：更完整的配置模型与跨请求取消边界；diagnostic partial result/即时 refresh 已形成代码闭环，`workspace/didChangeWatchedFiles` 与 watcher 仍需三端原生验收。
-4. IDEA 级 dirty 冲突/合并与 crash/restart 恢复中心已形成基础代码闭环（含有界行级三方合并）；语义/token 级合并、跨操作 undo，以及网络盘、UNC、大小写-only rename 等文件系统边界仍未完成严格验收。
+4. IDEA 级 dirty 冲突/合并与 crash/restart 恢复中心已形成基础代码闭环（含有界行级三方合并）；跨文件 WorkspaceEdit 已支持有界事务级 undo/redo，语义/token 级合并、目录/symlink/特殊文件历史、网络盘、UNC、大小写-only rename 等文件系统边界仍未完成严格验收。
 5. IDEA 等价的 Run Configuration/Before launch/覆盖率/结构化测试和多语言调试适配矩阵。
 6. 插件扩展点、keymap 编辑器、设置 schema/迁移、无障碍与动作可发现性完整闭环。
 7. Linux/macOS/Windows 原生工程和发行包验收证据。详细清单以 §2.5–§2.7 为准。
@@ -78,16 +78,16 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 
 | 优先级 | 能力域 | 当前可用基线 | 与 IntelliJ IDEA Code Editor 的关键 Gap | 严格状态 |
 |--------|--------|--------------|------------------------------------------|----------|
-| P0 | 编辑内核 | CodeMirror 6、查找替换、多光标/矩形选择、折叠、注释、soft wrap、列选择模式、UTF-8 BOM/EOL 状态与转换、基础键位 | 非 UTF-8 编码识别/转换、code style/缩进检测、列选择完整键位、超大文件和二进制文件完整降级语义未形成统一模型 | 未完成 |
-| P0 | WorkspaceEdit / Code Action | 有序 text/create/rename/delete、edit-before-command、command-only、延迟 `codeAction/resolve`、反向 `workspace/applyEdit`、用户文件操作 `will*/did*Files`、版本与 dirty buffer 防护、`changeAnnotations.needsConfirmation`、多文件/资源操作有序预览确认、基础冲突 UI | 跨操作 undo、取消和冲突 UI 的语义合并仍缺 | 代码闭环，未严格完成 |
+| P0 | 编辑内核 | CodeMirror 6、查找替换、多光标/矩形选择、折叠、注释、soft wrap、列选择模式、UTF-8/UTF-16/常见 legacy charset 读写、BOM/EOL 状态与转换、基础键位 | code style/缩进检测、列选择完整键位、超大文件和二进制文件完整降级语义未形成统一模型；编码识别/转换仍需三端发行包验收 | 代码闭环，未严格完成 |
+| P0 | WorkspaceEdit / Code Action | 有序 text/create/rename/delete、edit-before-command、command-only、延迟 `codeAction/resolve`、反向 `workspace/applyEdit`、用户文件操作 `will*/did*Files`、版本与 dirty buffer 防护、`changeAnnotations.needsConfirmation`、多文件/资源操作有序预览确认、事务级 undo/redo、基础冲突 UI | 事务仅覆盖可读普通文件；取消和冲突 UI 的语义合并仍缺 | 代码闭环，未严格完成 |
 | P0 | LSP 客户端协议 | initialize/动态 capability、文档同步与智能请求；反向 applyEdit/message/configuration/workDone progress；标准错误/取消；LSP 3.17 workspace pull diagnostics（full/unchanged/related/partial/refresh）；`workspace/didChangeWatchedFiles` 静态/动态注册与 kind/glob 过滤 | 配置仅覆盖当前 session 设置；已开始落盘的资源操作不可安全中断；watcher 的 macOS/Windows 原生行为尚未验收 | 代码闭环，未严格完成 |
-| P0 | 文件系统一致性 | 多根、loose file、hash 写入保护；资源 rename 支持跨根与跨文件系统回退；应用内变更通知；Tauri 原生递归 watcher、rename 归一化与前端刷新；dirty 冲突三选一、有界崩溃恢复快照与行级三方合并 | 语义/token 级合并、跨操作 undo、大小写-only rename、锁定文件/权限变化、网络盘/UNC，以及三端打包应用验收 | 代码闭环，未严格完成 |
-| P0 | 索引与重构 | LSP workspace symbol、rename、部分 jdtls action | 无 IDEA PSI/stub index、inspection profile、data-flow/nullability、safe delete、move class、change signature、extract/inline、全项目引用增量索引 | 核心差距 |
+| P0 | 文件系统一致性 | 多根、loose file、hash 写入保护；资源 rename 支持跨根与跨文件系统回退；应用内变更通知；Tauri 原生递归 watcher、rename 归一化与前端刷新；dirty 冲突三选一、有界崩溃恢复快照与行级三方合并；普通文件 WorkspaceEdit 事务 undo/redo | 语义/token 级合并、目录/symlink/特殊文件历史、大小写-only rename、锁定文件/权限变化、网络盘/UNC，以及三端打包应用验收 | 代码闭环，未严格完成 |
+| P0 | 索引与重构 | LSP workspace symbol、rename、引用感知 Safe Delete（声明与引用作为单一事务）及部分 jdtls action | 无 IDEA PSI/stub index、inspection profile、data-flow/nullability、move class、change signature、extract/inline、全项目引用增量索引 | 核心差距 |
 | P0 | 工程模型 | 多根、SDK 探测、Java module/任务/依赖树基础 | 无统一 project/module/source-set/facet/language-level 模型；Maven/Gradle 增量导入、冲突模型和离线状态不等价 | 核心差距 |
 | P1 | 导航与编辑器 UX | Search Everywhere、Recent Files、历史、分屏、tab、面包屑、Outline | action 搜索排序/上下文、preview/固定语义边界、导航落点恢复、拖拽停靠、keymap 编辑器、无障碍完整验收尚缺 | 未完成 |
 | P1 | Run/Test/Debug | Java Run/Build、通用 DAP、断点/变量/调用栈、测试发现基础 | 命名 Run Configuration、Before launch、覆盖率、结构化测试协议、多语言 adapter、热替换和失败重跑矩阵不完整 | 未完成 |
 | P1 | 扩展与设置 | LSP 自定义命令及部分语言设置 | 无 IDEA 级插件扩展点、版本兼容、禁用/卸载、设置 schema/迁移与扩展隔离 | 核心差距 |
-| P1 | 可靠性与可观测 | 请求超时、标准错误、work-done progress/取消、部分结果摘要、部分本地历史；崩溃/重启恢复快照与恢复中心 | 协议 trace 脱敏、批量重构恢复、跨操作 undo 和性能基准门禁未闭环 | 未完成 |
+| P1 | 可靠性与可观测 | 请求超时、标准错误、work-done progress/取消、部分结果摘要、部分本地历史；崩溃/重启恢复快照与恢复中心；跨文件事务 undo/redo 失败保留历史 | 协议 trace 脱敏、批量重构恢复、目录/symlink 事务、性能基准门禁和三端发行包验收未闭环 | 未完成 |
 
 ### 2.6 Linux / macOS / Windows Gap
 
@@ -114,6 +114,7 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 - [x] LSP 3.17 `workspace/diagnostic` fallback：按静态/动态 provider 启用、跨 session 并发、resultId full/unchanged、relatedDocuments、partial result token、失败回退 push 缓存、响应原子应用。
 - [x] `workspace/diagnostic/refresh`：转发到前端并立即刷新打开文件和 Problems 聚合，不再只依赖轮询。
 - [x] 编辑器格式元数据：UTF-8 BOM 无损读写、状态栏显示/切换 BOM，LF/CRLF/CR 状态栏循环转换并进入现有 dirty/hash 保存链路。
+- [x] 字符集闭环：自动识别 UTF-8/UTF-16 与常见 legacy charset；状态栏编码入口支持显式 Reload 与 Convert on Save；非 UTF-8 写入拒绝不可表示字符并保留 BOM/hash。
 - [x] 应用内文件变更通知：创建/删除/重命名、保存和 WorkspaceEdit 写盘均转发 `workspace/didChangeWatchedFiles`，并抑制短窗口内的重复本地事件。
 - [x] `workspace/didChangeWatchedFiles`：动态 watcher 注册/注销、字符串 glob/`RelativePattern`、`kind` 位掩码、Create/Change/Delete 与 rename 拆分、参数校验和去重。
 - [x] WorkspaceEdit 预检/预览：统计受影响文件、文本编辑和资源操作，保留 `documentChanges` 顺序，展示资源路径与实际引用的 change annotations；多文件或资源操作在首个 mutation 前确认，拒绝时零修改。
@@ -122,10 +123,11 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 - [ ] macOS/Windows/Linux 打包应用中的原生 watcher 真机验收：锁定文件、权限错误、大小写-only rename、网络盘/UNC、跨文件系统和 watcher 上限。
 - [x] dirty buffer 外部变更基础恢复 UI：三选一（保留本地/载入磁盘/手工合并）、删除保护；新增有界本地恢复快照与恢复中心（Recover/Discard/Decide later）。
 - [x] 基础行级三方自动合并：非重叠改动自动组合，重叠改动生成可编辑冲突标记。
-- [ ] IDEA 级语义/token 合并、跨操作 undo、恢复快照的三端打包应用验收。
+- [x] 普通文件 WorkspaceEdit 事务级 undo/redo：多文件 text/create/rename/delete 回放、tab/group 恢复、失败保留历史；Safe Delete 通过 prepareRename + definition + references 生成单一可撤销事务。
+- [ ] IDEA 级语义/token 合并、目录/symlink/特殊文件 undo、恢复快照的三端打包应用验收。
 - [ ] Linux/macOS/Windows 原生工程矩阵与发行包冒烟。
 
-当前协议边界：`workspace/configuration` 对未知 section 返回 `null`，尚无 IDEA 等价的全局设置 schema；WorkspaceEdit 一旦开始磁盘资源操作，不会在操作中途响应取消，以避免主动制造部分落盘状态，跨操作事务/undo 仍待实现。原生 watcher 与恢复中心已有 Linux/浏览器自动化证据，但三端打包应用、网络盘/UNC、大小写-only rename、语义/token 合并仍不能宣称严格完成。
+当前协议边界：`workspace/configuration` 对未知 section 返回 `null`，尚无 IDEA 等价的全局设置 schema；WorkspaceEdit 一旦开始磁盘资源操作，不会在操作中途响应取消，以避免主动制造部分落盘状态。事务 undo 只对可读普通文件建立历史，目录、symlink、特殊文件或不可读资源会明确报告不可撤销；原生 watcher、编码转换与恢复中心已有 Linux/浏览器自动化证据，但三端打包应用、网络盘/UNC、大小写-only rename、语义/token 合并仍不能宣称严格完成。
 
 ---
 
@@ -315,6 +317,9 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 - 已打开且 dirty 的 buffer → 应用到 buffer，保持 dirty，由用户保存；
 - 未打开的文件 → 后端直接改盘（带 hash 预检，文件被外部修改则该文件跳过并报告）；
 - 任一文件失败不回滚已成功文件，结果面板明确列出成功/失败清单（LSP 语义下无法保证原子性，如实呈现）。
+- 普通文件事务历史：首个 mutation 前捕获文本、存在性、编码/BOM 与打开 tab/group；成功后将整组操作压入一个 undo 单元，`Ctrl/Cmd+Z` 与 `Ctrl/Cmd+Shift+Z` 串行回放。目录、symlink、特殊文件或不可读资源不建立历史，并在状态栏说明原因。
+
+**Safe Delete（Alt+Delete）**：先调用 `prepareRename` 确认符号范围，再查询 declaration 与 references；引用面板先展示影响范围，确认后生成删除声明/引用的单一 WorkspaceEdit。缺少可靠范围、引用/重命名能力或目标是 library source 时拒绝猜测删除。
 
 **格式化（Ctrl+Alt+L）**：整文件/选区；"保存时格式化"为工作区级开关（默认关）。server 无 formatter（如 pyright）时置灰 + 提示外部格式化器方向（P2 规划"外部 formatter 命令"配置，如 ruff/black/prettier）。
 
@@ -585,6 +590,8 @@ src/stores/
 | | `lsp_inlay_hints` | 视口 range 请求 |
 | | `lsp_selection_range` / `lsp_folding_range` | 智能选区 / 折叠（P1/P2） |
 | | `LspDocumentStatus.capabilities` 扩展 | server capabilities 摘要下发（§5.2.0） |
+| workspace.rs | `workspace_read_file_with_encoding` / `workspace_read_loose_file_with_encoding` | 按用户选择的字符集解码并返回 encoding/BOM 元数据 |
+| | `workspace_write_file_encoded` / `workspace_write_loose_file_encoded` | 按字符集无损编码写入，保留 hash 预检与原子替换 |
 | 新 workspace_search.rs | `workspace_search_start` / `_cancel` | ignore + grep-searcher，事件流式返回 |
 | | `workspace_replace_in_files` | 带 hash 预检的批量替换 |
 | workspace.rs 扩展 | `workspace_copy_path` / `workspace_move_path` | 树复制/移动 |
@@ -667,7 +674,7 @@ src/stores/
 
 ### 8.1 进度明细（勾选清单）
 
-> 更新于 2026-07-12（v2.10）；自动化门禁于 2026-07-25 在 `fix/code-workspace-nav-history-and-library-goto` 复核恢复全绿（见下方横切事项）。M0–M5 已由 PR #361 合入 `main`；后续收口位于 `feat/code-workspace-followups`。功能按代码、提交与自动化门禁复核；真机冒烟由用户执行并待回填，M0 壳拆分技术债继续消化。完成度按本节拆分条目计数，已完成项附提交号。
+> 更新于 2026-08-12（v4.8）；自动化门禁与本轮字符集、事务 undo、Safe Delete 聚焦回归已复核。M0–M5 已由 PR #361 合入 `main`；当前收口位于 `feat/code-workspace-idea-parity`。功能按代码与自动化门禁复核；Linux/macOS/Windows 真机冒烟由用户执行并待回填，不能据此宣称严格持平。完成度按本节拆分条目计数，新增代码闭环项在横切事项记录。
 
 **M0 前置重构 — 🔶 清单项齐，壳体继续瘦身中**
 
@@ -752,10 +759,13 @@ src/stores/
 - [x] 代码与自动化复核（2026-07-12 v2.8）：全量 Vitest **159 文件 / 1267 项**通过（`--testTimeout=15000 --maxWorkers=4`）；`pnpm build` 通过；全量 `cargo test` 通过（lib **748 passed / 11 ignored**，其余 integration/doc tests 全绿）
 - [x] **自动化门禁恢复全绿（2026-07-25）**：全量 Vitest **164 文件 / 1304 项**通过；`pnpm build` 通过；全量 `cargo test` 全绿（lib **892 passed / 0 failed / 11 ignored**，其余 integration/doc tests 全绿）。原 v2.10 记录的 3 例 Windows `rdp::cliprdr::uri_list_*` 前导斜杠断言失败已修（测试辅助 `uri_path` 误对 Unix 风格路径剥前导斜杠，生产 `uri_list_to_paths` 保留斜杠属有意行为）；顺带修复 v2.10 后由 `11382ec` 引入的同类 Windows 失败 `chat::acp` grok 图片 `file://` URI 断言（`\\?\` 前缀不对称比较）。两处均只改测试、生产代码零改动 — `d2861f4`
 - [x] WorkspaceEdit §5.2.9 三态规则收口（open-clean 应用后保存、open-dirty 保持 dirty、未打开写盘 + hash 预检）— `workspaceEditApply` + `5d87203`
+- [x] WorkspaceEdit 事务 undo/redo：普通文件快照、编码/BOM 元数据、跨文件单步回放与 tab/group 恢复；失败时保留原历史。
+- [x] 非 UTF-8 编辑闭环：Rust `encoding_rs`/`chardetng` 检测与无损写入、前端状态栏 Reload/Convert 入口、浏览器 UTF-16 stub；二进制与 lossy legacy 保存明确拒绝。
+- [x] Safe Delete Symbol：Alt+Delete/右键/命令入口，引用面板预览与确认，声明/引用跨文件删除作为一个事务；无可靠 LSP 范围或 library source 时拒绝猜测。
 - [x] 合并门禁 8 例 Windows 失败已修复（clipboard URI ×4、pushd ×1、git 根 ×3）— `f6c1f36`
 - [ ] **⚠ 真机验证欠账（由用户执行）**：M0–M5 能力仍以单测/构建为主；`pnpm tauri dev` 冒烟结果回填本节
 - [ ] ⚠ M0 继续瘦身：树数据、LSP session、Git snapshot、导航与文件动作 controller 已抽离；命令注册、header/layout 大段继续下沉，目标装配壳 <400 行（当前约 4.4k 行）
-- [ ] ⚠ 严格持平后续项：watcher 三端真机验收、语义/token 合并、跨操作 undo；树/tab 拖拽停靠；`WorkspaceFs` 生产只读链路
+- [ ] ⚠ 严格持平后续项：watcher/编码/事务 undo 三端真机验收、语义/token 合并、目录/symlink undo；树/tab 拖拽停靠；`WorkspaceFs` 生产只读链路
 
 ### 8.2 下一步待办（建议顺序）
 
@@ -770,8 +780,8 @@ src/stores/
 3. **🔶 继续 M0 瘦身（目标装配壳 <400）**
    Git snapshot、导航与文件动作 controller 已抽离 — `cbc40ec`、`057006a`、`d97b2cb`。下一步组件化命令注册和 header/layout；当前壳体约 4.4k 行。
 
-4. **🔶 P0 协议继续闭环**
-   server 回推 `workspace/applyEdit`、有序资源操作、change annotation 确认、command-only、用户文件操作 `will*/did*Files`、server-request 分发、pull diagnostics、`workspace/didChangeWatchedFiles`/watcher 与基础冲突/恢复中心/行级三方合并代码链路已于 v4.1–v4.4 接入。下一步按 §2.7 完成三端原生验收、语义/token 合并和跨操作 undo；树/tab 拖拽与 `WorkspaceFs` 生产链路随后推进。
+4. **🔶 P0 协议与编辑器收口**
+   server 回推 `workspace/applyEdit`、有序资源操作、change annotation 确认、command-only、用户文件操作 `will*/did*Files`、server-request 分发、pull diagnostics、`workspace/didChangeWatchedFiles`/watcher、基础冲突/恢复中心、行级三方合并、字符集转换、事务 undo/redo 与 Safe Delete 代码链路已接入。下一步按 §2.7 完成三端原生验收、语义/token 合并和不可回滚资源边界；树/tab 拖拽与 `WorkspaceFs` 生产链路随后推进。
 
 5. **✅ 合入主干**
    M0–M5 已由 PR #361 合入 `main`；后续收口分支待独立合并，真机冒烟结果可在后续独立补录。

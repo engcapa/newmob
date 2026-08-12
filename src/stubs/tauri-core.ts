@@ -725,6 +725,87 @@ async function sha256Hex(text: string): Promise<string> {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+async function sha256Bytes(bytes: Uint8Array): Promise<string> {
+  if (globalThis.crypto?.subtle) {
+    const input = new Uint8Array(bytes.byteLength);
+    input.set(bytes);
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", input.buffer);
+    return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  let hash = 0x811c9dc5;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function normalizedStubEncoding(label: string): string {
+  return label.trim().replace(/_/g, "-").toLowerCase();
+}
+
+function decodeStubBytes(raw: Uint8Array, label: string): { text: string; bom: boolean; encoding: string } {
+  const normalized = normalizedStubEncoding(label);
+  let bytes = raw;
+  let bom = false;
+  if (normalized === "utf-8" && bytes.length >= 3
+    && bytes.slice(0, 3).every((byte, index) => byte === [0xef, 0xbb, 0xbf][index])) {
+    bytes = bytes.slice(3);
+    bom = true;
+  } else if (normalized === "utf-16le" && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    bytes = bytes.slice(2);
+    bom = true;
+  } else if (normalized === "utf-16be" && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    bytes = bytes.slice(2);
+    bom = true;
+  }
+  const decoderLabel = normalized === "gbk" ? "gbk" : normalized;
+  let text: string;
+  try {
+    text = new TextDecoder(decoderLabel, { fatal: true }).decode(bytes);
+  } catch (error) {
+    throw new Error(`Browser preview cannot decode ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { text, bom, encoding: label.trim() || "UTF-8" };
+}
+
+function encodeStubText(text: string, label: string, bom: boolean): Uint8Array {
+  const normalized = normalizedStubEncoding(label);
+  let bytes: Uint8Array;
+  if (normalized === "utf-8") {
+    bytes = new TextEncoder().encode(text);
+  } else if (normalized === "utf-16le" || normalized === "utf-16be") {
+    const output = new Uint8Array(text.length * 2);
+    let offset = 0;
+    for (const unit of text) {
+      const codePoint = unit.codePointAt(0)!;
+      const units = codePoint > 0xffff
+        ? [0xd800 + ((codePoint - 0x10000) >> 10), 0xdc00 + ((codePoint - 0x10000) & 0x3ff)]
+        : [codePoint];
+      for (const value of units) {
+        if (normalized === "utf-16le") {
+          output[offset++] = value & 0xff;
+          output[offset++] = value >> 8;
+        } else {
+          output[offset++] = value >> 8;
+          output[offset++] = value & 0xff;
+        }
+      }
+    }
+    bytes = output.slice(0, offset);
+  } else {
+    throw new Error(`Browser preview cannot encode ${label}; use the desktop app for legacy charsets`);
+  }
+  if (!bom) return bytes;
+  const marker = normalized === "utf-8"
+    ? [0xef, 0xbb, 0xbf]
+    : normalized === "utf-16le" ? [0xff, 0xfe] : [0xfe, 0xff];
+  const result = new Uint8Array(marker.length + bytes.length);
+  result.set(marker);
+  result.set(bytes, marker.length);
+  return result;
+}
+
 /** No-op plugin-listener shim so plugins that import `addPluginListener`
  *  (e.g. @tauri-apps/plugin-notification) load in browser preview. */
 export class PluginListener {
@@ -1100,6 +1181,25 @@ function stubSaveMailDraft(accountId: string, draft: Record<string, unknown>): S
     ...drafts.filter((item) => !(item.accountId === accountId && item.id === id)),
   ]);
   return saved;
+}
+
+async function readStubWorkspaceEncodedFile(
+  path: string,
+  repoRoot: string | null,
+  encoding: string,
+): Promise<{ filePath: string; bytes: Uint8Array; text: string; bom: boolean; encoding: string; entry: Awaited<ReturnType<typeof vfsStat>> }> {
+  const target = repoRoot ? joinWorkspacePath(repoRoot, path) : path;
+  const [entry, arrayBuffer] = await Promise.all([vfsStat(target), vfsReadBytes(target)]);
+  const bytes = new Uint8Array(arrayBuffer);
+  const decoded = decodeStubBytes(bytes, encoding);
+  return {
+    filePath: repoRoot ? relativeWorkspacePath(repoRoot, entry.path) : entry.path,
+    bytes,
+    text: decoded.text,
+    bom: decoded.bom,
+    encoding: decoded.encoding,
+    entry,
+  };
 }
 
 export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions): Promise<T> {
@@ -1682,6 +1782,35 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         hash: await sha256Hex(text),
       } as T;
     }
+    case "workspace_read_file_with_encoding": {
+      const repoRoot = (args?.repoRoot as string) || VFS_ROOT;
+      const path = args?.path as string;
+      const encoding = (args?.encoding as string) || "UTF-8";
+      const file = await readStubWorkspaceEncodedFile(path, repoRoot, encoding);
+      return {
+        path: file.filePath,
+        text: file.text,
+        encoding: file.encoding,
+        bom: file.bom,
+        size: file.entry.size,
+        mtime: file.entry.mtime,
+        hash: await sha256Bytes(file.bytes),
+      } as T;
+    }
+    case "workspace_read_loose_file_with_encoding": {
+      const path = args?.path as string;
+      const encoding = (args?.encoding as string) || "UTF-8";
+      const file = await readStubWorkspaceEncodedFile(path, null, encoding);
+      return {
+        path: file.filePath,
+        text: file.text,
+        encoding: file.encoding,
+        bom: file.bom,
+        size: file.entry.size,
+        mtime: file.entry.mtime,
+        hash: await sha256Bytes(file.bytes),
+      } as T;
+    }
     case "workspace_write_file": {
       const repoRoot = (args?.repoRoot as string) || VFS_ROOT;
       const path = args?.path as string;
@@ -1730,6 +1859,38 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         size: entry.size,
         mtime: entry.mtime,
         hash: await sha256Hex(contents),
+      } as T;
+    }
+    case "workspace_write_file_encoded":
+    case "workspace_write_loose_file_encoded": {
+      const isRoot = cmd === "workspace_write_file_encoded";
+      const repoRoot = isRoot ? ((args?.repoRoot as string) || VFS_ROOT) : null;
+      const path = args?.path as string;
+      const target = repoRoot ? joinWorkspacePath(repoRoot, path) : path;
+      assertWorkspaceWritablePath(path);
+      const expectedHash = (args?.expectedHash as string | null | undefined)?.trim();
+      const currentBytes = new Uint8Array(await vfsReadBytes(target));
+      if (expectedHash) {
+        const currentHash = await sha256Bytes(currentBytes);
+        if (currentHash !== expectedHash) {
+          throw new Error(`File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
+        }
+      }
+      const encoding = (args?.encoding as string) || "UTF-8";
+      const bytes = encodeStubText((args?.contents as string) ?? "", encoding, !!args?.bom);
+      const storedBytes = new Uint8Array(bytes.byteLength);
+      storedBytes.set(bytes);
+      await vfsWriteBytes(target, storedBytes.buffer);
+      const entry = await vfsStat(target);
+      const decoded = decodeStubBytes(bytes, encoding);
+      return {
+        path: repoRoot ? relativeWorkspacePath(repoRoot, entry.path) : entry.path,
+        text: decoded.text,
+        encoding: decoded.encoding,
+        bom: decoded.bom,
+        size: entry.size,
+        mtime: entry.mtime,
+        hash: await sha256Bytes(bytes),
       } as T;
     }
     case "workspace_create_file": {

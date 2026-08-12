@@ -341,10 +341,8 @@ export function StatusBar() {
           </StatusSegment>
           <StatusSegment
             testId="status-bar-workspace-encoding"
-            title={workspaceStatus.encoding === "UTF-8 BOM"
-              ? "UTF-8 with BOM · click to remove BOM"
-              : "UTF-8 · click to add BOM"}
-            onClick={workspaceActions?.toggleBom}
+            title={`${workspaceStatus.encoding} · open file encoding options`}
+            onClick={workspaceActions?.chooseEncoding ?? workspaceActions?.toggleBom}
           >
             {workspaceStatus.encoding}
           </StatusSegment>

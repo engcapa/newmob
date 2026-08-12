@@ -51,12 +51,16 @@ import {
   workspaceListDir,
   workspaceReadFile,
   workspaceReadLooseFile,
+  workspaceReadFileWithEncoding,
+  workspaceReadLooseFileWithEncoding,
   workspaceJavaRunTarget,
   workspaceExecutionModel,
   workspaceTaskTree,
   workspaceApplyResourceOperation,
   workspaceWriteFile,
   workspaceWriteLooseFile,
+  workspaceWriteFileEncoded,
+  workspaceWriteLooseFileEncoded,
   type WorkspaceFile,
   type WorkspaceGitRoot,
   type WorkspaceExecutionModel,
@@ -215,8 +219,19 @@ import {
 } from "./workspace/workspaceEditApply";
 import {
   formatWorkspaceEditPreview,
+  workspaceEditOperations,
   type WorkspaceEditPreview,
 } from "./workspace/workspaceEditPreview";
+import {
+  buildWorkspacePathSnapshotEdit,
+  WorkspaceEditHistory,
+  type WorkspaceEditHistoryEntry,
+  type WorkspaceEditPathSnapshot,
+} from "./workspace/workspaceEditHistory";
+import {
+  buildSafeDeleteWorkspaceEdit,
+  safeDeleteFileCount,
+} from "./workspace/safeDelete";
 import { executeCodeAction } from "./workspace/codeActionExecution";
 import {
   transformWorkspaceResourceExpandedDirKeys,
@@ -363,9 +378,15 @@ function isJavaBuildFile(languagePath: string): boolean {
     || name === "settings.gradle.kts";
 }
 
+function encodingSupportsBom(encoding: string): boolean {
+  const normalized = encoding.trim().toLowerCase().replace(/_/g, "-");
+  return normalized === "utf-8" || normalized === "utf-16le" || normalized === "utf-16be";
+}
+
 interface ExternalDiskSnapshot {
   text: string;
   eol: OpenFileState["eol"];
+  encoding: string;
   bom: boolean;
   hash: string;
   mtime: number;
@@ -383,6 +404,21 @@ interface PendingExternalFileConflict {
 interface PendingExternalFileEvent {
   change: LspExternalFileChange;
   timer: number;
+}
+
+interface WorkspaceEditTabSnapshot {
+  activeGroupId: EditorGroupId;
+  splitOrientation: EditorSplitOrientation | null;
+  files: Array<{
+    path: string;
+    ref: CodeWorkspaceFileRef;
+    groups: Array<{
+      id: EditorGroupId;
+      active: boolean;
+      preview: boolean;
+      pinned: boolean;
+    }>;
+  }>;
 }
 
 const EXTERNAL_FILE_EVENT_SETTLE_MS = 140;
@@ -404,6 +440,7 @@ function externalDiskSnapshot(file: WorkspaceFile): ExternalDiskSnapshot {
   return {
     text: normalized.text,
     eol: normalized.eol,
+    encoding: file.encoding ?? "UTF-8",
     bom: file.bom ?? file.text.startsWith("\uFEFF"),
     hash: file.hash,
     mtime: file.mtime,
@@ -527,6 +564,7 @@ import { LspMessageRequestDialog } from "./workspace/LspMessageRequestDialog";
 import { useWorkspaceLspClientEvents } from "./workspace/useWorkspaceLspClientEvents";
 import { ExternalFileConflictDialog } from "./workspace/ExternalFileConflictDialog";
 import { WorkspaceRecoveryDialog } from "./workspace/WorkspaceRecoveryDialog";
+import { FileEncodingDialog } from "./workspace/FileEncodingDialog";
 import {
   readWorkspaceRecoveryEntries,
   reconcileWorkspaceRecoveryEntries,
@@ -728,6 +766,7 @@ export function CodeWorkspaceTab({
   const pendingExternalFileEventsRef = useRef(new Map<string, PendingExternalFileEvent>());
   const [workspaceRecoveryEntries, setWorkspaceRecoveryEntries] = useState<WorkspaceRecoveryEntry[]>([]);
   const [workspaceRecoveryOpen, setWorkspaceRecoveryOpen] = useState(false);
+  const [fileEncodingDialogOpen, setFileEncodingDialogOpen] = useState(false);
   const pendingWorkspaceRecoveryKeysRef = useRef(new Set<string>());
 
   const setBottomDockOpen = useCallback((open: boolean | ((prev: boolean) => boolean)) => {
@@ -1091,9 +1130,25 @@ export function CodeWorkspaceTab({
   const aiRewriteStateRef = useRef(aiRewriteState);
   aiRewriteStateRef.current = aiRewriteState;
   const workspaceCommandRunnerRef = useRef<(commandId: string, context?: WorkspaceCommandContext) => boolean>(() => false);
+  // CodeMirror owns character-level history. This separate stack groups a
+  // multi-file WorkspaceEdit into one IDEA-style transaction.
+  const workspaceEditHistoryRef = useRef<WorkspaceEditHistory | null>(null);
+  if (workspaceEditHistoryRef.current === null) {
+    workspaceEditHistoryRef.current = new WorkspaceEditHistory();
+  }
+  const [workspaceEditHistoryRevision, setWorkspaceEditHistoryRevision] = useState(0);
+  const workspaceEditHistory = workspaceEditHistoryRef.current;
+  const workspaceEditHistorySequenceRef = useRef(0);
+  const replayWorkspacePathSnapshotsRef = useRef<(
+    snapshots: readonly WorkspaceEditPathSnapshot[],
+  ) => Promise<void>>(async () => {
+    throw new Error("Workspace resource history is not ready");
+  });
+  const replayWorkspaceEncodingRef = useRef<Map<string, { encoding: string; bom: boolean }> | null>(null);
   const goToTypeDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToImplementationRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const renameSymbolRef = useRef<() => Promise<void>>(async () => {});
+  const safeDeleteSymbolRef = useRef<() => Promise<void>>(async () => {});
   // Hover enriches the AI prompt with type information. The LSP hover callback
   // is declared further down, so read it through a ref.
   const getLspHoverRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<string | null>>(
@@ -1113,6 +1168,11 @@ export function CodeWorkspaceTab({
   const runPanelRef = useRef<RunPanelHandle | null>(null);
   const runActiveJavaFileRef = useRef<() => void>(() => {});
   const buildActiveProjectRef = useRef<(rebuild?: boolean) => void>(() => {});
+
+  useEffect(() => {
+    workspaceEditHistory.clear();
+    setWorkspaceEditHistoryRevision((revision) => revision + 1);
+  }, [workspaceEditHistory, workspaceInstanceId]);
 
   // Per-workspace Maven/Gradle executable overrides (project wrapper still wins;
   // this is the "configured" tier between wrapper and PATH). Persisted per
@@ -1528,6 +1588,7 @@ export function CodeWorkspaceTab({
             text: normalized.text,
             savedText: normalized.text,
             eol: normalized.eol,
+            encoding: file.encoding ?? "UTF-8",
             bom: file.bom ?? file.text.startsWith("\uFEFF"),
             hash: file.hash,
             mtime: file.mtime,
@@ -1610,6 +1671,9 @@ export function CodeWorkspaceTab({
       const next: OpenFileState = {
         ...latest,
         text: recovered,
+        eol: entry.eol,
+        encoding: entry.encoding ?? latest.encoding ?? "UTF-8",
+        bom: entry.bom ?? latest.bom ?? false,
         dirty: recovered !== latest.savedText,
         error: null,
       };
@@ -2344,6 +2408,14 @@ export function CodeWorkspaceTab({
   const queueEditorTextUpdate = useCallback((key: string, text: string) => {
     const file = openFilesRef.current[key];
     if (!file || file.text === text) return;
+    // Once the user starts a new character-level edit, CodeMirror becomes the
+    // active undo owner. Retaining an older cross-file transaction here would
+    // make Ctrl/Cmd+Z skip over the fresh typing and surprise the user.
+    const historyState = workspaceEditHistory.state();
+    if (historyState.canUndo || historyState.canRedo) {
+      workspaceEditHistory.clear();
+      setWorkspaceEditHistoryRevision((revision) => revision + 1);
+    }
     const next: OpenFileState = {
       ...file,
       text,
@@ -2364,7 +2436,7 @@ export function CodeWorkspaceTab({
       flushPendingEditorText,
       EDITOR_TEXT_COMMIT_IDLE_DELAY_MS,
     );
-  }, [flushPendingEditorText, scheduleLiveLspSync]);
+  }, [flushPendingEditorText, scheduleLiveLspSync, workspaceEditHistory]);
 
   const absolutePathForOpenFile = useCallback((file: OpenFileState): string | null => {
     // Library sources live inside a JAR / the language server, not on disk.
@@ -2374,6 +2446,146 @@ export function CodeWorkspaceTab({
     if (!root) return null;
     return absoluteWorkspacePath(root, file.ref.path);
   }, [findRoot]);
+
+  const readWorkspaceEditPathSnapshot = useCallback(async (
+    absolutePath: string,
+  ): Promise<WorkspaceEditPathSnapshot | null> => {
+    const normalizedPath = normalizeFsPath(absolutePath);
+    for (const root of rootsRef.current) {
+      const relative = relativePathWithinRoot(root.path, normalizedPath);
+      if (relative === null) continue;
+      if (!relative) return null;
+      try {
+        const entries = await workspaceListDir(root.path, parentPath(relative));
+        const entry = entries.find((candidate) => candidate.path === relative);
+        if (!entry) return { path: normalizedPath, exists: false, text: null };
+        // Restoring a directory, symlink, or special node as a regular file
+        // would be data loss. Those transactions remain deliberately ineligible.
+        if (entry.fileType !== "file") return null;
+        const open = Object.values(openFilesRef.current).find((file) => {
+          const path = absolutePathForOpenFile(file);
+          return path != null && normalizeFsPath(path) === normalizedPath;
+        });
+        if (open) return {
+          path: normalizedPath,
+          exists: true,
+          text: open.text,
+          encoding: open.encoding ?? "UTF-8",
+          bom: open.bom ?? false,
+        };
+        const file = await workspaceReadFile(root.path, relative);
+        return {
+          path: normalizedPath,
+          exists: true,
+          text: file.text,
+          encoding: file.encoding ?? "UTF-8",
+          bom: file.bom ?? false,
+        };
+      } catch {
+        return null;
+      }
+    }
+    const open = Object.values(openFilesRef.current).find((file) => {
+      const path = absolutePathForOpenFile(file);
+      return path != null && normalizeFsPath(path) === normalizedPath;
+    });
+    if (open) return {
+      path: normalizedPath,
+      exists: true,
+      text: open.text,
+      encoding: open.encoding ?? "UTF-8",
+      bom: open.bom ?? false,
+    };
+    try {
+      const file = await workspaceReadLooseFile(normalizedPath);
+      return {
+        path: normalizedPath,
+        exists: true,
+        text: file.text,
+        encoding: file.encoding ?? "UTF-8",
+        bom: file.bom ?? false,
+      };
+    } catch {
+      return { path: normalizedPath, exists: false, text: null };
+    }
+  }, [absolutePathForOpenFile]);
+
+  const captureWorkspaceEditPathSnapshots = useCallback(async (
+    edit: LspWorkspaceEdit,
+  ): Promise<WorkspaceEditPathSnapshot[] | null> => {
+    const paths: string[] = [];
+    const seen = new Set<string>();
+    const add = (path: string | null) => {
+      if (!path) return false;
+      const normalized = normalizeFsPath(path);
+      if (!seen.has(normalized)) {
+        seen.add(normalized);
+        paths.push(normalized);
+      }
+      return true;
+    };
+    for (const operation of workspaceEditOperations(edit)) {
+      if (operation.kind === "text") {
+        if (!add(operation.document.path)) return null;
+      } else if (operation.kind === "rename") {
+        if (!add(operation.oldPath) || !add(operation.newPath)) return null;
+      } else if (!add(operation.path)) {
+        return null;
+      }
+    }
+    const snapshots = await Promise.all(paths.map(readWorkspaceEditPathSnapshot));
+    return snapshots.every((snapshot): snapshot is WorkspaceEditPathSnapshot => snapshot !== null)
+      ? snapshots
+      : null;
+  }, [readWorkspaceEditPathSnapshot]);
+
+  const captureWorkspaceEditTabSnapshot = useCallback((
+    paths: readonly string[],
+  ): WorkspaceEditTabSnapshot => {
+    const pathSet = new Set(paths.map(normalizeFsPath));
+    const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+    const files = Object.values(openFilesRef.current).flatMap((file) => {
+      const absolutePath = absolutePathForOpenFile(file);
+      if (!absolutePath || !pathSet.has(normalizeFsPath(absolutePath))) return [];
+      const groups = (["primary", "secondary"] as const).flatMap((id) => {
+        const group = ui.editorGroups[id];
+        if (!group.openOrder.includes(file.key)) return [];
+        return [{
+          id,
+          active: group.activeKey === file.key,
+          preview: group.previewKey === file.key,
+          pinned: group.pinnedKeys.includes(file.key),
+        }];
+      });
+      return groups.length > 0 ? [{ path: normalizeFsPath(absolutePath), ref: file.ref, groups }] : [];
+    });
+    return {
+      activeGroupId: ui.activeEditorGroupId,
+      splitOrientation: ui.splitOrientation,
+      files,
+    };
+  }, [absolutePathForOpenFile, workspaceInstanceId]);
+
+  const restoreWorkspaceEditTabs = useCallback(async (snapshot: WorkspaceEditTabSnapshot) => {
+    if (snapshot.files.some((file) => file.groups.some((group) => group.id === "secondary"))) {
+      setStoreSplitOrientation(workspaceInstanceId, snapshot.splitOrientation ?? "vertical");
+    }
+    for (const file of snapshot.files) {
+      for (const group of file.groups) {
+        await openFile(file.ref, { preview: group.preview, groupId: group.id });
+        const key = fileKey(file.ref);
+        updateEditorGroup(group.id, (current) => ({
+          ...current,
+          activeKey: group.active ? key : current.activeKey,
+          previewKey: group.preview ? key : current.previewKey === key ? null : current.previewKey,
+          pinnedKeys: group.pinned
+            ? [...new Set([...current.pinnedKeys, key])]
+            : current.pinnedKeys.filter((candidate) => candidate !== key),
+        }));
+      }
+    }
+    activateEditorGroup(snapshot.activeGroupId);
+  }, [activateEditorGroup, openFile, setStoreSplitOrientation, updateEditorGroup, workspaceInstanceId]);
 
   /**
    * Persist an open buffer with an explicit text payload.
@@ -2645,10 +2857,44 @@ export function CodeWorkspaceTab({
         const historyText = `${file.bom ? "\uFEFF" : ""}${applyEditorEol(file.savedText, file.eol)}`;
         await historySnapshot(historyPath, historyText, "save").catch(() => null);
       }
-      const diskText = `${file.bom ? "\uFEFF" : ""}${applyEditorEol(textToSave.replace(/^\uFEFF/, ""), file.eol)}`;
+      // BOM is a byte-level concern. Keep it out of the JavaScript buffer and
+      // let the backend encode it together with the selected charset.
+      const diskText = applyEditorEol(textToSave.replace(/^\uFEFF/, ""), file.eol);
+      const encoding = file.encoding ?? "UTF-8";
+      // Keep the established UTF-8 path compatible with browser/test shims;
+      // non-UTF-8 files must use the byte-aware desktop command.
+      const encodedWriter = encoding.toLowerCase() !== "utf-8"
+        && typeof workspaceWriteFileEncoded === "function"
+        && typeof workspaceWriteLooseFileEncoded === "function";
       const saved = file.ref.kind === "root"
-        ? await workspaceWriteFile(findRoot(file.ref.rootId)?.path ?? "", file.ref.path, diskText, file.hash)
-        : await workspaceWriteLooseFile(file.ref.path, diskText, file.hash);
+        ? encodedWriter
+          ? await workspaceWriteFileEncoded(
+            findRoot(file.ref.rootId)?.path ?? "",
+            file.ref.path,
+            diskText,
+            file.hash,
+            encoding,
+            file.bom ?? false,
+          )
+          : await workspaceWriteFile(
+            findRoot(file.ref.rootId)?.path ?? "",
+            file.ref.path,
+            `${file.bom ? "\uFEFF" : ""}${diskText}`,
+            file.hash,
+          )
+        : encodedWriter
+          ? await workspaceWriteLooseFileEncoded(
+            file.ref.path,
+            diskText,
+            file.hash,
+            encoding,
+            file.bom ?? false,
+          )
+          : await workspaceWriteLooseFile(
+            file.ref.path,
+            `${file.bom ? "\uFEFF" : ""}${diskText}`,
+            file.hash,
+          );
       const savedPath = absolutePathForOpenFile(file);
       if (savedPath) {
         await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
@@ -2663,6 +2909,7 @@ export function CodeWorkspaceTab({
         text: normalized.text,
         savedText: normalized.text,
         eol: normalized.eol,
+        encoding: saved.encoding ?? file.encoding ?? "UTF-8",
         bom: savedBom,
         hash: saved.hash,
         mtime: saved.mtime,
@@ -2688,6 +2935,7 @@ export function CodeWorkspaceTab({
             : false,
           savedText: normalized.text,
           eol: normalized.eol,
+          encoding: saved.encoding ?? file.encoding ?? "UTF-8",
           bom: savedBom,
           hash: saved.hash,
           mtime: saved.mtime,
@@ -2852,6 +3100,7 @@ export function CodeWorkspaceTab({
             text: normalized.text,
             savedText: normalized.text,
             eol: normalized.eol,
+            encoding: reloaded.encoding ?? file.encoding ?? "UTF-8",
             bom: reloaded.bom ?? reloaded.text.startsWith("\uFEFF"),
             hash: reloaded.hash,
             mtime: reloaded.mtime,
@@ -2881,9 +3130,18 @@ export function CodeWorkspaceTab({
   );
 
   const readDiskSnapshot = useCallback(async (file: OpenFileState): Promise<ExternalDiskSnapshot> => {
+    const preferredEncoding = file.encoding ?? "UTF-8";
     const disk = file.ref.kind === "root"
-      ? await workspaceReadFile(findRoot(file.ref.rootId)?.path ?? "", file.ref.path)
-      : await workspaceReadLooseFile(file.ref.path);
+      ? preferredEncoding !== "UTF-8" && typeof workspaceReadFileWithEncoding === "function"
+        ? await workspaceReadFileWithEncoding(
+          findRoot(file.ref.rootId)?.path ?? "",
+          file.ref.path,
+          preferredEncoding,
+        )
+        : await workspaceReadFile(findRoot(file.ref.rootId)?.path ?? "", file.ref.path)
+      : preferredEncoding !== "UTF-8" && typeof workspaceReadLooseFileWithEncoding === "function"
+        ? await workspaceReadLooseFileWithEncoding(file.ref.path, preferredEncoding)
+        : await workspaceReadLooseFile(file.ref.path);
     return externalDiskSnapshot(disk);
   }, [findRoot]);
 
@@ -2894,6 +3152,7 @@ export function CodeWorkspaceTab({
       text: disk.text,
       savedText: disk.text,
       eol: disk.eol,
+      encoding: disk.encoding,
       bom: disk.bom,
       hash: disk.hash,
       mtime: disk.mtime,
@@ -2971,6 +3230,7 @@ export function CodeWorkspaceTab({
           ...(current[file.key] ?? latest),
           savedText: disk.text,
           eol: disk.eol,
+          encoding: disk.encoding,
           bom: disk.bom,
           hash: disk.hash,
           mtime: disk.mtime,
@@ -2989,6 +3249,7 @@ export function CodeWorkspaceTab({
         [file.key]: {
           ...(current[file.key] ?? latest),
           eol: disk.eol,
+          encoding: disk.encoding,
           bom: disk.bom,
           hash: disk.hash,
           mtime: disk.mtime,
@@ -3115,6 +3376,7 @@ export function CodeWorkspaceTab({
             ...latest,
             savedText: conflict.disk.text,
             eol: conflict.disk.eol,
+            encoding: conflict.disk.encoding,
             bom: conflict.disk.bom,
             hash: conflict.disk.hash,
             mtime: conflict.disk.mtime,
@@ -3180,6 +3442,7 @@ export function CodeWorkspaceTab({
       text: normalized.text,
       savedText: disk.text,
       eol: disk.eol,
+      encoding: disk.encoding,
       bom: disk.bom,
       hash: disk.hash,
       mtime: disk.mtime,
@@ -3729,6 +3992,86 @@ export function CodeWorkspaceTab({
     onOpenGitManager(gitManagerPayload);
   }, [gitManagerPayload, onOpenGitManager]);
 
+  const reloadActiveFileWithEncoding = useCallback(async (encoding: string) => {
+    const key = activeKey;
+    const file = key ? openFilesRef.current[key] : null;
+    if (!key || !file || file.library || file.loading || file.saving) return;
+    if (file.dirty) {
+      const confirmed = await confirmAppDialog({
+        title: "Reload file with encoding",
+        message: `Discard unsaved changes in ${file.subtitle} and decode it as ${encoding}?`,
+        confirmLabel: "Reload",
+        danger: true,
+      });
+      if (!confirmed) return;
+    }
+    if (typeof workspaceReadFileWithEncoding !== "function"
+      || typeof workspaceReadLooseFileWithEncoding !== "function") {
+      throw new Error("Explicit file encoding is available in the desktop workspace only");
+    }
+    setOpenFiles((current) => ({
+      ...current,
+      [key]: { ...(current[key] ?? file), loading: true, error: null },
+    }));
+    try {
+      const reloaded = file.ref.kind === "root"
+        ? await workspaceReadFileWithEncoding(findRoot(file.ref.rootId)?.path ?? "", file.ref.path, encoding)
+        : await workspaceReadLooseFileWithEncoding(file.ref.path, encoding);
+      const normalized = normalizeEditorText(reloaded.text);
+      const next: OpenFileState = {
+        ...file,
+        text: normalized.text,
+        savedText: normalized.text,
+        eol: normalized.eol,
+        encoding: reloaded.encoding ?? encoding,
+        bom: reloaded.bom ?? false,
+        hash: reloaded.hash,
+        mtime: reloaded.mtime,
+        size: reloaded.size,
+        loading: false,
+        saving: false,
+        dirty: false,
+        error: null,
+      };
+      openFilesRef.current = { ...openFilesRef.current, [key]: next };
+      setOpenFiles((current) => ({ ...current, [key]: next }));
+      setFileEncodingDialogOpen(false);
+      setStatusMessage(`Reloaded ${file.subtitle} as ${next.encoding}${next.bom ? " BOM" : ""}`);
+    } catch (error) {
+      const message = errorMessage(error);
+      setOpenFiles((current) => ({
+        ...current,
+        [key]: { ...(current[key] ?? file), loading: false, saving: false, error: message },
+      }));
+      setStatusMessage(message);
+      throw error instanceof Error ? error : new Error(message);
+    }
+  }, [activeKey, findRoot, setStatusMessage]);
+
+  const convertActiveFileEncoding = useCallback((encoding: string, bom: boolean) => {
+    const key = activeKey;
+    const file = key ? openFilesRef.current[key] : null;
+    if (!key || !file || file.library || file.loading || file.saving) return;
+    const effectiveBom = encodingSupportsBom(encoding) && bom;
+    setOpenFiles((current) => ({
+      ...current,
+      [key]: {
+        ...(current[key] ?? file),
+        encoding,
+        bom: effectiveBom,
+        dirty: true,
+        error: null,
+      },
+    }));
+    setStatusMessage(`${file.subtitle}: save as ${encoding}${effectiveBom ? " BOM" : ""}`);
+  }, [activeKey, setStatusMessage]);
+
+  const openFileEncodingDialog = useCallback(() => {
+    const file = activeKey ? openFilesRef.current[activeKey] : null;
+    if (!file || file.library || file.loading || file.saving) return;
+    setFileEncodingDialogOpen(true);
+  }, [activeKey]);
+
   const cycleActiveFileEol = useCallback(() => {
     const key = activeKey;
     const file = key ? openFilesRef.current[key] : null;
@@ -3754,6 +4097,10 @@ export function CodeWorkspaceTab({
     const key = activeKey;
     const file = key ? openFilesRef.current[key] : null;
     if (!key || !file || file.library || file.loading || file.saving) return;
+    if (!encodingSupportsBom(file.encoding ?? "UTF-8")) {
+      setStatusMessage(`${file.subtitle}: BOM is only available for UTF-8 and UTF-16 encodings`);
+      return;
+    }
     const nextBom = !(file.bom ?? false);
     setOpenFiles((current) => ({
       ...current,
@@ -3764,7 +4111,7 @@ export function CodeWorkspaceTab({
         error: null,
       },
     }));
-    setStatusMessage(`${file.subtitle}: UTF-8 ${nextBom ? "BOM enabled" : "BOM disabled"}; save to apply`);
+    setStatusMessage(`${file.subtitle}: ${file.encoding ?? "UTF-8"} ${nextBom ? "BOM enabled" : "BOM disabled"}; save to apply`);
   }, [activeKey, setOpenFiles, setStatusMessage]);
 
   useEffect(() => {
@@ -3779,7 +4126,9 @@ export function CodeWorkspaceTab({
       tabId,
       line: cursor.line + 1,
       column: cursor.character + 1,
-      encoding: activeFile?.bom ? "UTF-8 BOM" : "UTF-8",
+      encoding: activeFile
+        ? `${activeFile.encoding ?? "UTF-8"}${activeFile.bom ? " BOM" : ""}`
+        : "UTF-8",
       eol: activeFile?.eol ?? "LF",
       languageId: status?.languageId ?? activeLanguageId,
       lspActive: !!status?.active,
@@ -3803,6 +4152,7 @@ export function CodeWorkspaceTab({
   }, [
     activeEditorGroupId,
     activeFile?.bom,
+    activeFile?.encoding,
     activeFile?.eol,
     activeFileIsLarge,
     activeGitRoot,
@@ -3836,6 +4186,7 @@ export function CodeWorkspaceTab({
       openGitManager: gitManagerPayload.roots.length > 0 && onOpenGitManager ? openGitManager : undefined,
       cycleEol: activeFile && !activeFile.library ? cycleActiveFileEol : undefined,
       toggleBom: activeFile && !activeFile.library ? toggleActiveFileBom : undefined,
+      chooseEncoding: activeFile && !activeFile.library ? openFileEncodingDialog : undefined,
       cancelLspProgress: activeLspProgress?.cancellable
         ? () => cancelLspProgress(activeLspProgress)
         : undefined,
@@ -3845,6 +4196,7 @@ export function CodeWorkspaceTab({
     onOpenGitManager,
     openGitManager,
     cycleActiveFileEol,
+    openFileEncodingDialog,
     toggleActiveFileBom,
     activeFile,
     openLanguageServersSettings,
@@ -4652,12 +5004,21 @@ export function CodeWorkspaceTab({
   type WorkspaceEditApplyOptions = {
     preview?: boolean;
     label?: string | null;
+    /** Internal history replay must not create another history entry. */
+    recordHistory?: boolean;
   };
 
   const applyLspWorkspaceEditNow = useCallback(async (
     edit: LspWorkspaceEdit,
     options: WorkspaceEditApplyOptions = {},
   ) => {
+    const orderedOperations = workspaceEditOperations(edit);
+    const beforeSnapshots = options.recordHistory !== false && orderedOperations.length > 0
+      ? await captureWorkspaceEditPathSnapshots(edit)
+      : null;
+    const beforeTabs = beforeSnapshots
+      ? captureWorkspaceEditTabSnapshot(beforeSnapshots.map((snapshot) => snapshot.path))
+      : null;
     const outcomes = await applyWorkspaceEdit(edit, {
       resolvePath: (file) => {
         if (file.path) return normalizeFsPath(file.path);
@@ -4689,19 +5050,32 @@ export function CodeWorkspaceTab({
           if (rel === null) continue;
           try {
             const disk = await workspaceReadFile(root.path, rel);
-            return { text: disk.text, hash: disk.hash };
+            return {
+              text: disk.text,
+              hash: disk.hash,
+              encoding: disk.encoding ?? "UTF-8",
+              bom: disk.bom ?? false,
+            };
           } catch {
             return null;
           }
         }
         try {
           const disk = await workspaceReadLooseFile(absolutePath);
-          return { text: disk.text, hash: disk.hash };
+          return {
+            text: disk.text,
+            hash: disk.hash,
+            encoding: disk.encoding ?? "UTF-8",
+            bom: disk.bom ?? false,
+          };
         } catch {
           return null;
         }
       },
-      writeDisk: async (absolutePath, text, expectedHash) => {
+      writeDisk: async (absolutePath, text, expectedHash, encoding = "UTF-8", bom = false) => {
+        const replayMetadata = replayWorkspaceEncodingRef.current?.get(normalizeFsPath(absolutePath));
+        const effectiveEncoding = replayMetadata?.encoding ?? encoding;
+        const effectiveBom = replayMetadata?.bom ?? bom;
         // Snapshot current disk contents before bulk WorkspaceEdit writes.
         try {
           let oldText: string | null = null;
@@ -4731,14 +5105,22 @@ export function CodeWorkspaceTab({
         for (const root of rootsRef.current) {
           const rel = relativePathWithinRoot(root.path, absolutePath);
           if (rel === null) continue;
-          await workspaceWriteFile(root.path, rel, text, expectedHash);
+          if (effectiveEncoding.toLowerCase() !== "utf-8" && typeof workspaceWriteFileEncoded === "function") {
+            await workspaceWriteFileEncoded(root.path, rel, text, expectedHash, effectiveEncoding, effectiveBom);
+          } else {
+            await workspaceWriteFile(root.path, rel, `${effectiveBom ? "\uFEFF" : ""}${text}`, expectedHash);
+          }
           await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
             path: absolutePath,
             type: 2,
           }]).catch(() => 0);
           return;
         }
-        await workspaceWriteLooseFile(absolutePath, text, expectedHash);
+        if (effectiveEncoding.toLowerCase() !== "utf-8" && typeof workspaceWriteLooseFileEncoded === "function") {
+          await workspaceWriteLooseFileEncoded(absolutePath, text, expectedHash, effectiveEncoding, effectiveBom);
+        } else {
+          await workspaceWriteLooseFile(absolutePath, `${effectiveBom ? "\uFEFF" : ""}${text}`, expectedHash);
+        }
         await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
           path: absolutePath,
           type: 2,
@@ -4781,20 +5163,96 @@ export function CodeWorkspaceTab({
     ))) {
       refreshTree();
     }
-    setStatusMessage(summarizeWorkspaceEditOutcomes(outcomes));
+    const mutated = outcomes.some((outcome) => outcome.status.startsWith("applied"));
+    let historyUnavailable = options.recordHistory !== false
+      && orderedOperations.length > 0
+      && beforeSnapshots === null
+      && mutated;
+    if (beforeSnapshots && mutated) {
+      const afterSnapshots = await captureWorkspaceEditPathSnapshots(edit);
+      if (!afterSnapshots) historyUnavailable = true;
+      const changed = afterSnapshots?.some((snapshot, index) => (
+        snapshot.path !== beforeSnapshots[index]?.path
+        || snapshot.exists !== beforeSnapshots[index]?.exists
+        || snapshot.text !== beforeSnapshots[index]?.text
+        || snapshot.encoding !== beforeSnapshots[index]?.encoding
+        || snapshot.bom !== beforeSnapshots[index]?.bom
+      ));
+      if (afterSnapshots && changed) {
+        const afterTabs = captureWorkspaceEditTabSnapshot(
+          afterSnapshots.map((snapshot) => snapshot.path),
+        );
+        workspaceEditHistorySequenceRef.current += 1;
+        const label = options.label?.trim() || "Workspace edit";
+        const entry: WorkspaceEditHistoryEntry = {
+          id: `${workspaceInstanceId}:${workspaceEditHistorySequenceRef.current}`,
+          label,
+          affectedPaths: beforeSnapshots.map((snapshot) => snapshot.path),
+          undo: async () => {
+            await replayWorkspacePathSnapshotsRef.current(beforeSnapshots);
+            if (beforeTabs) await restoreWorkspaceEditTabs(beforeTabs);
+          },
+          redo: async () => {
+            await replayWorkspacePathSnapshotsRef.current(afterSnapshots);
+            await restoreWorkspaceEditTabs(afterTabs);
+          },
+        };
+        workspaceEditHistory.push(entry);
+        setWorkspaceEditHistoryRevision((revision) => revision + 1);
+      }
+    }
+    setStatusMessage([
+      summarizeWorkspaceEditOutcomes(outcomes),
+      historyUnavailable ? "Undo unavailable: workspace resource snapshot is incomplete" : null,
+    ].filter(Boolean).join("; "));
     return outcomes;
   }, [
     absolutePathForOpenFile,
     applyLspResourceOperation,
+    captureWorkspaceEditPathSnapshots,
+    captureWorkspaceEditTabSnapshot,
     formatWorkspaceEditPreview,
     isLspDocumentSynced,
     lspDocumentVersion,
     refreshTree,
     saveOpenBufferText,
     setStatusMessage,
+    restoreWorkspaceEditTabs,
     updateFileText,
+    workspaceEditHistory,
     workspaceInstanceId,
   ]);
+
+  replayWorkspacePathSnapshotsRef.current = async (snapshots) => {
+    const currentSnapshots = await Promise.all(
+      snapshots.map((snapshot) => readWorkspaceEditPathSnapshot(snapshot.path)),
+    );
+    if (!currentSnapshots.every(
+      (snapshot): snapshot is WorkspaceEditPathSnapshot => snapshot !== null,
+    )) {
+      throw new Error("A workspace history path is not a regular file");
+    }
+    replayWorkspaceEncodingRef.current = new Map(
+      snapshots
+        .filter((snapshot) => snapshot.exists)
+        .map((snapshot) => [
+          normalizeFsPath(snapshot.path),
+          { encoding: snapshot.encoding ?? "UTF-8", bom: snapshot.bom ?? false },
+        ]),
+    );
+    try {
+      const outcomes = await applyLspWorkspaceEditNow(
+        buildWorkspacePathSnapshotEdit(currentSnapshots, snapshots),
+        { recordHistory: false },
+      );
+      const response = workspaceEditApplyResponse(outcomes);
+      if (!response.applied) {
+        throw new Error(response.failureReason ?? "Workspace history replay failed");
+      }
+    } finally {
+      replayWorkspaceEncodingRef.current = null;
+    }
+  };
 
   const applyLspWorkspaceEdit = useCallback((
     edit: LspWorkspaceEdit,
@@ -4804,6 +5262,37 @@ export function CodeWorkspaceTab({
     workspaceEditQueueRef.current = pending.then(() => undefined, () => undefined);
     return pending;
   }, [applyLspWorkspaceEditNow]);
+
+  const workspaceEditHistoryState = useMemo(
+    () => workspaceEditHistory.state(),
+    [workspaceEditHistory, workspaceEditHistoryRevision],
+  );
+
+  const undoWorkspaceEdit = useCallback(async () => {
+    try {
+      const result = await workspaceEditHistory.undo();
+      if (result) {
+        setStatusMessage(`Undid ${result.entry.label} (${result.entry.affectedPaths.length} files)`);
+      }
+    } catch (error) {
+      setStatusMessage(`Cannot undo workspace edit: ${errorMessage(error)}`);
+    } finally {
+      setWorkspaceEditHistoryRevision((revision) => revision + 1);
+    }
+  }, [setStatusMessage, workspaceEditHistory]);
+
+  const redoWorkspaceEdit = useCallback(async () => {
+    try {
+      const result = await workspaceEditHistory.redo();
+      if (result) {
+        setStatusMessage(`Redid ${result.entry.label} (${result.entry.affectedPaths.length} files)`);
+      }
+    } catch (error) {
+      setStatusMessage(`Cannot redo workspace edit: ${errorMessage(error)}`);
+    } finally {
+      setWorkspaceEditHistoryRevision((revision) => revision + 1);
+    }
+  }, [setStatusMessage, workspaceEditHistory]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -5376,6 +5865,17 @@ export function CodeWorkspaceTab({
       run: () => void renameSymbolRef.current(),
     },
     {
+      id: "workspace.safeDeleteSymbol",
+      title: "Safe Delete Symbol",
+      category: "Refactor",
+      keybinding: "Alt+Delete",
+      keywords: ["refactor", "delete", "safe delete", "usages"],
+      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+        && !activeFile.library
+        && (!activeCapabilities || (!!activeCapabilities.references && !!activeCapabilities.rename)),
+      run: () => void safeDeleteSymbolRef.current(),
+    },
+    {
       id: "workspace.aiExplainSyntax",
       title: t("codeWorkspaceAi.commandExplainSyntax"),
       category: "AI",
@@ -5568,6 +6068,36 @@ export function CodeWorkspaceTab({
       run: () => {
         if (!runPanelRef.current?.rerunLast()) setStatusMessage("No workspace task has run yet");
       },
+    },
+    {
+      id: "workspace.undoWorkspaceEdit",
+      title: workspaceEditHistoryState.undoLabel
+        ? `Undo ${workspaceEditHistoryState.undoLabel}`
+        : "Undo Workspace Edit",
+      category: "Edit",
+      keybinding: "Ctrl+Z",
+      keybindings: ["Cmd+Z"],
+      keywords: ["undo", "workspace edit", "refactor"],
+      when: (context) => context.focus !== "tree"
+        && context.focus !== "terminal"
+        && workspaceEditHistoryState.canUndo
+        && !workspaceEditHistoryState.busy,
+      run: () => void undoWorkspaceEdit(),
+    },
+    {
+      id: "workspace.redoWorkspaceEdit",
+      title: workspaceEditHistoryState.redoLabel
+        ? `Redo ${workspaceEditHistoryState.redoLabel}`
+        : "Redo Workspace Edit",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+Z",
+      keybindings: ["Cmd+Shift+Z"],
+      keywords: ["redo", "workspace edit", "refactor"],
+      when: (context) => context.focus !== "tree"
+        && context.focus !== "terminal"
+        && workspaceEditHistoryState.canRedo
+        && !workspaceEditHistoryState.busy,
+      run: () => void redoWorkspaceEdit(),
     },
     {
       id: "workspace.save",
@@ -5798,6 +6328,9 @@ export function CodeWorkspaceTab({
     toggleProjectTree,
     toggleOutlinePane,
     toggleTodosPane,
+    undoWorkspaceEdit,
+    redoWorkspaceEdit,
+    workspaceEditHistoryState,
   ]);
 
   const executeWorkspaceCommand = useCallback((
@@ -6100,6 +6633,94 @@ export function CodeWorkspaceTab({
   }, [activeFile, applyLspWorkspaceEdit, lspDescriptorForFile, setStatusMessage, updateLspStatusForFile]);
   renameSymbolRef.current = renameSymbolAtCursor;
 
+  const safeDeleteSymbolAtCursor = useCallback(async () => {
+    const file = activeFile;
+    if (!file || file.loading) return;
+    if (file.library) {
+      setStatusMessage(`${file.title} is a read-only library source`);
+      return;
+    }
+    const descriptor = lspDescriptorForFile(file);
+    if (!descriptor) return;
+    const caps = lspFilesRef.current[file.key]?.status?.capabilities;
+    if (caps && (!caps.references || !caps.rename)) {
+      setStatusMessage("Safe Delete requires references and rename support from the language server");
+      return;
+    }
+    const position = editorSelectionRef.current.start;
+    try {
+      const prepared = await lspPrepareRename(descriptor, position);
+      updateLspStatusForFile(file, prepared.status);
+      if (!prepared.range) {
+        setStatusMessage(prepared.message ?? "Cannot determine a safe symbol range here");
+        return;
+      }
+      const [references, definition] = await Promise.all([
+        lspReferences(descriptor, position, true),
+        lspDefinition(descriptor, position).catch(() => null),
+      ]);
+      updateLspStatusForFile(file, references.status);
+      if (definition) updateLspStatusForFile(file, definition.status);
+      setBottomDockOpen(true);
+      setBottomDockTab("references");
+      setReferencesResult({
+        loading: false,
+        origin: `Safe Delete · ${file.subtitle}`,
+        locations: references.locations,
+        error: null,
+      });
+
+      const currentPath = absolutePathForOpenFile(file);
+      if (!currentPath) {
+        setStatusMessage("Safe Delete cannot resolve the active file path");
+        return;
+      }
+      const declarationLocation = definition?.locations.find((location) => location.path) ?? null;
+      const declaration = declarationLocation?.path
+        ? {
+          uri: declarationLocation.uri,
+          path: declarationLocation.path,
+          range: declarationLocation.range,
+        }
+        : {
+          uri: "",
+          path: currentPath,
+          range: prepared.range,
+        };
+      const deletion = buildSafeDeleteWorkspaceEdit(declaration, references.locations);
+      const line = file.text.split("\n")[prepared.range.start.line] ?? "";
+      const symbol = prepared.range.start.line === prepared.range.end.line
+        ? line.slice(prepared.range.start.character, prepared.range.end.character).trim()
+        : "";
+      const fileCount = safeDeleteFileCount(deletion.locations);
+      const confirmed = await confirmAppDialog({
+        title: "Safe Delete Symbol",
+        message: [
+          `Delete ${symbol ? `"${symbol}"` : "the selected symbol"} and ${deletion.usageCount} reference${deletion.usageCount === 1 ? "" : "s"}?`,
+          `${deletion.locations.length} occurrence${deletion.locations.length === 1 ? "" : "s"} across ${fileCount} file${fileCount === 1 ? "" : "s"} will be changed.`,
+          "The complete operation can be undone as one workspace edit.",
+        ].join("\n"),
+        confirmLabel: "Delete Symbol",
+        danger: true,
+      });
+      if (!confirmed) {
+        setStatusMessage("Safe Delete cancelled; references remain open for review");
+        return;
+      }
+      await applyLspWorkspaceEdit(deletion.edit, { label: "Safe delete symbol" });
+    } catch (error) {
+      setStatusMessage(`Cannot safely delete symbol: ${errorMessage(error)}`);
+    }
+  }, [
+    absolutePathForOpenFile,
+    activeFile,
+    applyLspWorkspaceEdit,
+    lspDescriptorForFile,
+    setStatusMessage,
+    updateLspStatusForFile,
+  ]);
+  safeDeleteSymbolRef.current = safeDeleteSymbolAtCursor;
+
   const findReferences = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
       const descriptor = lspDescriptorForFile(file);
@@ -6199,6 +6820,7 @@ export function CodeWorkspaceTab({
           callHierarchy: () => { void openHierarchy("call"); },
           typeHierarchy: () => { void openHierarchy("type"); },
           rename: () => { void renameSymbolAtCursor(); },
+          safeDelete: () => { void safeDeleteSymbolAtCursor(); },
           quickDocumentation: () => { void openQuickDocumentation(); },
           codeActions: (x, y) => {
             const diagnostics = (lspFilesRef.current[file.key]?.diagnostics ?? []).filter((item) => (
@@ -6225,6 +6847,7 @@ export function CodeWorkspaceTab({
     openHierarchy,
     openQuickDocumentation,
     renameSymbolAtCursor,
+    safeDeleteSymbolAtCursor,
     runEditorAiActionAtCursor,
     showCodeActionsMenu,
     t,
@@ -8071,6 +8694,17 @@ export function CodeWorkspaceTab({
           onRecoverAll={recoverAllWorkspaceEntries}
           onDiscardAll={discardAllWorkspaceRecoveryEntries}
           onClose={() => setWorkspaceRecoveryOpen(false)}
+        />
+      )}
+      {visible && fileEncodingDialogOpen && activeFile && !activeFile.library && (
+        <FileEncodingDialog
+          path={activeFile.path}
+          currentEncoding={activeFile.encoding ?? "UTF-8"}
+          currentBom={activeFile.bom ?? false}
+          dirty={activeFile.dirty}
+          onReload={(encoding) => reloadActiveFileWithEncoding(encoding)}
+          onConvert={convertActiveFileEncoding}
+          onClose={() => setFileEncodingDialogOpen(false)}
         />
       )}
       {localHistoryTarget && openFiles[localHistoryTarget.key] && (

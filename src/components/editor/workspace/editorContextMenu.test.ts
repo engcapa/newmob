@@ -9,6 +9,7 @@ const actions = {
   callHierarchy: vi.fn(),
   typeHierarchy: vi.fn(),
   rename: vi.fn(),
+  safeDelete: vi.fn(),
   quickDocumentation: vi.fn(),
   codeActions: vi.fn(),
   format: vi.fn(),
@@ -60,6 +61,7 @@ describe("buildEditorContextMenuItems", () => {
     expect(items.find((i) => i.testId === "editor-context-call-hierarchy")?.disabled).toBe(true);
     expect(items.find((i) => i.testId === "editor-context-type-hierarchy")?.disabled).toBe(false);
     expect(items.find((i) => i.testId === "editor-context-rename")?.disabled).toBe(true);
+    expect(items.find((i) => i.testId === "editor-context-safe-delete")?.disabled).toBe(true);
     expect(items.find((i) => i.testId === "editor-context-cut")?.disabled).toBe(false);
     expect(items.find((i) => i.testId === "editor-context-format")?.label).toBe("Format Selection");
   });

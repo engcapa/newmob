@@ -4,6 +4,7 @@ import mermaid from "mermaid";
 import { StrictMode, useCallback, useRef, useState, type ComponentProps } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { selectCodeWorkspaceUi, useCodeWorkspaceStore } from "../../stores/codeWorkspaceStore";
+import { useCodeWorkspaceStatusStore } from "../../stores/codeWorkspaceStatusStore";
 import { DEFAULT_CODE_VIEW_PROFILE, saveCodeViewProfile } from "../../lib/codeViewProfile";
 import type { CodeWorkspaceTabInfo } from "../../types";
 import type {
@@ -14,6 +15,7 @@ import type { WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
+import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceListDir: vi.fn(),
@@ -28,8 +30,12 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceDependencyTree: vi.fn(),
   workspaceReadFile: vi.fn(),
   workspaceReadLooseFile: vi.fn(),
+  workspaceReadFileWithEncoding: vi.fn(),
+  workspaceReadLooseFileWithEncoding: vi.fn(),
   workspaceWriteFile: vi.fn(),
   workspaceWriteLooseFile: vi.fn(),
+  workspaceWriteFileEncoded: vi.fn(),
+  workspaceWriteLooseFileEncoded: vi.fn(),
   workspaceCreateFile: vi.fn(),
   workspaceCreateDir: vi.fn(),
   workspaceDeletePath: vi.fn(),
@@ -51,6 +57,8 @@ const lspMocks = vi.hoisted(() => ({
   lspGetDiagnostics: vi.fn(),
   lspHover: vi.fn(),
   lspDefinition: vi.fn(),
+  lspPrepareRename: vi.fn(),
+  lspRename: vi.fn(),
   lspReadUriContents: vi.fn(),
   lspDownloadSources: vi.fn(),
   lspReloadProject: vi.fn(),
@@ -297,8 +305,12 @@ describe("CodeWorkspaceTab", () => {
     workspaceMocks.workspaceDependencyTree.mockReset().mockResolvedValue([]);
     workspaceMocks.workspaceReadFile.mockReset();
     workspaceMocks.workspaceReadLooseFile.mockReset();
+    workspaceMocks.workspaceReadFileWithEncoding.mockReset();
+    workspaceMocks.workspaceReadLooseFileWithEncoding.mockReset();
     workspaceMocks.workspaceWriteFile.mockReset();
     workspaceMocks.workspaceWriteLooseFile.mockReset();
+    workspaceMocks.workspaceWriteFileEncoded.mockReset();
+    workspaceMocks.workspaceWriteLooseFileEncoded.mockReset();
     workspaceMocks.workspaceCreateFile.mockReset();
     workspaceMocks.workspaceCreateDir.mockReset();
     workspaceMocks.workspaceDeletePath.mockReset();
@@ -326,6 +338,8 @@ describe("CodeWorkspaceTab", () => {
     dapMocks.dapResolveJavaMainClasses.mockReset();
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
+    lspMocks.lspPrepareRename.mockReset();
+    lspMocks.lspRename.mockReset();
     lspMocks.lspReadUriContents.mockReset();
     lspMocks.lspDownloadSources.mockReset();
     lspMocks.lspReferences.mockReset();
@@ -398,6 +412,17 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspChangeDocument.mockResolvedValue(documentStatus({ active: true, available: true }));
     lspMocks.lspSaveDocument.mockResolvedValue(documentStatus({ active: true, available: true }));
     lspMocks.lspCloseDocument.mockResolvedValue(documentStatus());
+    lspMocks.lspPrepareRename.mockResolvedValue({
+      status: documentStatus(),
+      allowed: false,
+      range: null,
+      placeholder: null,
+      message: null,
+    });
+    lspMocks.lspRename.mockResolvedValue({
+      status: documentStatus(),
+      edit: { documentEdits: [], operations: [] },
+    });
     lspMocks.lspGetDiagnostics.mockResolvedValue({
       status: documentStatus(),
       diagnostics: [],
@@ -2998,5 +3023,246 @@ describe("CodeWorkspaceTab", () => {
     });
     expect(screen.queryByTestId("code-workspace-project-collapsed-rail")).toBeNull();
     expect(screen.getByTestId("code-workspace-tree-collapse")).toBeInTheDocument();
+  });
+
+  it("opens the encoding chooser from workspace status and saves through the encoded writer", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-encoding-save",
+      workspaceInstanceId: "instance-encoding-save",
+      name: "Encoding Save",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.txt" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main.txt",
+      "你好",
+      { encoding: "UTF-8", bom: false },
+    ));
+    workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(file(
+      "src/main.txt",
+      "你好",
+      { encoding: "GBK", bom: false, hash: "hash-gbk" },
+    ));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.txt");
+    await waitFor(() => expect(useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding)
+      .toBeTypeOf("function"));
+
+    act(() => useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding?.());
+    expect(await screen.findByTestId("file-encoding-dialog")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Encoding"), { target: { value: "GBK" } });
+    fireEvent.click(screen.getByRole("button", { name: "Convert on Save" }));
+
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-encoding-save")
+        .openFiles["root:app:src/main.txt"]?.dirty,
+    ).toBe(true));
+    fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/main.txt",
+      "你好",
+      "hash-src/main.txt",
+      "GBK",
+      false,
+    ));
+    expect(workspaceMocks.workspaceWriteFile).not.toHaveBeenCalled();
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-encoding-save")
+        .openFiles["root:app:src/main.txt"]?.dirty,
+    ).toBe(false));
+  });
+
+  it("reloads the active file with an explicit encoding from the status action", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-encoding-reload",
+      workspaceInstanceId: "instance-encoding-reload",
+      name: "Encoding Reload",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/legacy.txt" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/legacy.txt",
+      "caf\u00E9",
+      { encoding: "windows-1252", bom: false },
+    ));
+    workspaceMocks.workspaceReadFileWithEncoding.mockResolvedValue(file(
+      "src/legacy.txt",
+      "caf\u00E9",
+      { encoding: "UTF-16LE", bom: true, hash: "hash-utf16" },
+    ));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/legacy.txt");
+    await waitFor(() => expect(useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding)
+      .toBeTypeOf("function"));
+    act(() => useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding?.());
+    await screen.findByTestId("file-encoding-dialog");
+
+    fireEvent.change(screen.getByLabelText("Encoding"), { target: { value: "UTF-16LE" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reload from Disk" }));
+
+    await waitFor(() => expect(workspaceMocks.workspaceReadFileWithEncoding).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/legacy.txt",
+      "UTF-16LE",
+    ));
+    await waitFor(() => {
+      const open = selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-encoding-reload",
+      ).openFiles["root:app:src/legacy.txt"];
+      expect(open?.encoding).toBe("UTF-16LE");
+      expect(open?.bom).toBe(true);
+      expect(open?.dirty).toBe(false);
+    });
+    expect(screen.queryByTestId("file-encoding-dialog")).toBeNull();
+  });
+
+  it("applies Safe Delete across files as one undoable workspace transaction", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-safe-delete",
+      workspaceInstanceId: "instance-safe-delete",
+      name: "Safe Delete",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const disk = new Map([
+      ["src/main.ts", "const answer = 42;"],
+      ["src/use.ts", "use(answer);"],
+    ]);
+    workspaceMocks.workspaceListDir.mockImplementation(async (_root: string, path = "") => (
+      path === "src"
+        ? [entry("main.ts", "src/main.ts"), entry("use.ts", "src/use.ts")]
+        : []
+    ));
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => {
+      const text = disk.get(path);
+      if (text === undefined) throw new Error(`missing fixture ${path}`);
+      return file(path, text, { hash: `hash-${path}` });
+    });
+    workspaceMocks.workspaceWriteFile.mockImplementation(async (
+      _root: string,
+      path: string,
+      text: string,
+    ) => {
+      disk.set(path, text);
+      return file(path, text, { hash: `hash-${path}-${text}` });
+    });
+    const capabilities = {
+      completion: false,
+      signatureHelp: false,
+      hover: false,
+      definition: true,
+      typeDefinition: false,
+      implementation: false,
+      references: true,
+      documentSymbol: false,
+      workspaceSymbol: false,
+      rename: true,
+      formatting: false,
+      rangeFormatting: false,
+      codeAction: false,
+      documentHighlight: false,
+      callHierarchy: false,
+      typeHierarchy: false,
+      inlayHint: false,
+      selectionRange: false,
+      semanticTokens: false,
+      completionTriggerCharacters: [],
+      signatureTriggerCharacters: [],
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities,
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspSaveDocument.mockResolvedValue(activeStatus);
+    const declarationRange = {
+      start: { line: 0, character: 6 },
+      end: { line: 0, character: 12 },
+    };
+    lspMocks.lspPrepareRename.mockResolvedValue({
+      status: activeStatus,
+      allowed: true,
+      range: declarationRange,
+      placeholder: "answer",
+      message: null,
+    });
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: "file:///repo/app/src/main.ts",
+        path: "/repo/app/src/main.ts",
+        range: declarationRange,
+      }],
+    });
+    lspMocks.lspReferences.mockResolvedValue({
+      status: activeStatus,
+      locations: [
+        {
+          uri: "file:///repo/app/src/main.ts",
+          path: "/repo/app/src/main.ts",
+          range: declarationRange,
+        },
+        {
+          uri: "file:///repo/app/src/use.ts",
+          path: "/repo/app/src/use.ts",
+          range: {
+            start: { line: 0, character: 4 },
+            end: { line: 0, character: 10 },
+          },
+        },
+      ],
+    });
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    const rendered = renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/main.ts");
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+    fireEvent.keyDown(content!, { key: "Delete", code: "Delete", altKey: true });
+
+    await waitFor(() => expect(lspMocks.lspPrepareRename).toHaveBeenCalled());
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFile).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/main.ts",
+      "const  = 42;",
+      expect.any(String),
+    ));
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFile).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/use.ts",
+      "use();",
+      "hash-src/use.ts",
+    ));
+    await waitFor(() => expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.enabled)
+      .toBe(true));
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.title)
+      .toBe("Undo Safe delete symbol");
+    expect(disk.get("src/main.ts")).toBe("const  = 42;");
+    expect(disk.get("src/use.ts")).toBe("use();");
+
+    await act(async () => {
+      registrationRef.current?.execute("workspace.undoWorkspaceEdit");
+    });
+    await waitFor(() => expect(disk.get("src/main.ts")).toBe("const answer = 42;"));
+    expect(disk.get("src/use.ts")).toBe("use(answer);");
   });
 });

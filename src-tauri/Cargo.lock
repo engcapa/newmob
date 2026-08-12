@@ -1388,6 +1388,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chardetng"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14b8f0b65b7b08ae3c8187e8d77174de20cb6777864c6b832d8ad365999cf1ea"
+dependencies = [
+ "cfg-if 1.0.4",
+ "encoding_rs",
+ "memchr",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10357,6 +10368,7 @@ dependencies = [
  "bytes",
  "cbc 0.2.1",
  "cc",
+ "chardetng",
  "chrono",
  "core-foundation 0.10.1",
  "cpal",
@@ -10364,6 +10376,7 @@ dependencies = [
  "des",
  "dirs",
  "dispatch2",
+ "encoding_rs",
  "enigo",
  "flate2",
  "font-kit",

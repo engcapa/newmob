@@ -51,9 +51,20 @@ export interface WorkspaceEditApplyHooks {
    */
   saveOpenBuffer: (key: string, nextText: string) => Promise<void>;
   /** Read disk contents for a closed file. */
-  readDisk: (absolutePath: string) => Promise<{ text: string; hash: string } | null>;
+  readDisk: (absolutePath: string) => Promise<{
+    text: string;
+    hash: string;
+    encoding?: string;
+    bom?: boolean;
+  } | null>;
   /** Write disk contents for a closed file (with hash precheck when available). */
-  writeDisk: (absolutePath: string, text: string, expectedHash: string | null) => Promise<void>;
+  writeDisk: (
+    absolutePath: string,
+    text: string,
+    expectedHash: string | null,
+    encoding?: string,
+    bom?: boolean,
+  ) => Promise<void>;
   /** Apply LSP CreateFile semantics and synchronize workspace UI state. */
   createFile?: (operation: Extract<LspWorkspaceEditOperation, { kind: "create" }>) => Promise<void>;
   /** Apply LSP RenameFile semantics and synchronize workspace UI state. */
@@ -117,7 +128,13 @@ async function applyTextDocumentEdit(
       return { operationIndex, path, status: "failed", reason: "file not found on disk" };
     }
     const next = applyLspTextEditsToString(disk.text, file.edits);
-    await hooks.writeDisk(path, next, disk.hash);
+    if (disk.encoding !== undefined || disk.bom !== undefined) {
+      await hooks.writeDisk(path, next, disk.hash, disk.encoding, disk.bom);
+    } else {
+      // Preserve the compact legacy hook call for integrations that have not
+      // opted into charset metadata yet.
+      await hooks.writeDisk(path, next, disk.hash);
+    }
     return { operationIndex, path, status: "applied-disk" };
   } catch (error) {
     return {

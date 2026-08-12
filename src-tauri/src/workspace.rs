@@ -1,4 +1,6 @@
 use crate::state::AppState;
+use chardetng::EncodingDetector;
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,8 +38,9 @@ pub struct WorkspaceEntry {
 pub struct WorkspaceFile {
     pub path: String,
     pub text: String,
-    /// Decoded editor encoding. Code Workspace currently accepts UTF-8 text;
-    /// `bom` records the byte-order marker independently so it can round-trip.
+    /// Decoded editor encoding (for example UTF-8, GBK, or windows-1252).
+    /// `bom` records a Unicode byte-order marker independently so it can
+    /// round-trip without exposing it as an editor character.
     pub encoding: String,
     pub bom: bool,
     pub size: u64,
@@ -2016,6 +2019,56 @@ pub fn workspace_read_loose_file(
     loose_file_from_bytes(&target, bytes, meta)
 }
 
+/// Re-decode an existing file using an explicit user-selected encoding. The
+/// default read commands remain auto-detecting for backwards compatibility.
+#[tauri::command]
+pub fn workspace_read_file_with_encoding(
+    repo_root: String,
+    path: String,
+    max_bytes: Option<u64>,
+    encoding: String,
+) -> Result<WorkspaceFile, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    let target = resolve_existing_path(&root, &path)?;
+    let meta = fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?;
+    if !meta.is_file() {
+        return Err(format!("Not a file: {}", target.display()));
+    }
+    let limit = max_bytes.unwrap_or(DEFAULT_MAX_TEXT_BYTES);
+    if meta.len() > limit {
+        return Err(format!(
+            "File is {} bytes, exceeds text editor limit of {} bytes",
+            meta.len(),
+            limit
+        ));
+    }
+    let bytes = fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
+    file_from_bytes_with_encoding(&root, &target, bytes, meta, Some(&encoding))
+}
+
+#[tauri::command]
+pub fn workspace_read_loose_file_with_encoding(
+    path: String,
+    max_bytes: Option<u64>,
+    encoding: String,
+) -> Result<WorkspaceFile, String> {
+    let target = resolve_existing_loose_file_path(&path)?;
+    let meta = fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?;
+    if !meta.is_file() {
+        return Err(format!("Not a file: {}", target.display()));
+    }
+    let limit = max_bytes.unwrap_or(DEFAULT_MAX_TEXT_BYTES);
+    if meta.len() > limit {
+        return Err(format!(
+            "File is {} bytes, exceeds text editor limit of {} bytes",
+            meta.len(),
+            limit
+        ));
+    }
+    let bytes = fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
+    loose_file_from_bytes_with_encoding(&target, bytes, meta, Some(&encoding))
+}
+
 #[tauri::command]
 pub fn workspace_write_file(
     repo_root: String,
@@ -2138,6 +2191,45 @@ pub fn workspace_write_loose_file(
     }
 
     workspace_read_loose_file(path, None)
+}
+
+/// Write text using the selected editor encoding while retaining the existing
+/// hash-precondition and atomic replacement guarantees.
+#[tauri::command]
+pub fn workspace_write_file_encoded(
+    repo_root: String,
+    path: String,
+    contents: String,
+    expected_hash: Option<String>,
+    encoding: String,
+    bom: Option<bool>,
+) -> Result<WorkspaceFile, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    let target = resolve_writable_path(&root, &path)?;
+    reject_protected_write(&root, &target)?;
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))?;
+    write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
+    workspace_read_file_with_encoding(repo_root, path, None, encoding)
+}
+
+#[tauri::command]
+pub fn workspace_write_loose_file_encoded(
+    path: String,
+    contents: String,
+    expected_hash: Option<String>,
+    encoding: String,
+    bom: Option<bool>,
+) -> Result<WorkspaceFile, String> {
+    let target = resolve_writable_loose_file_path(&path)?;
+    reject_protected_loose_write(&target)?;
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))?;
+    write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
+    loose_file_from_bytes_with_encoding(
+        &target,
+        fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?,
+        fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?,
+        Some(&encoding),
+    )
 }
 
 #[tauri::command]
@@ -2974,17 +3066,71 @@ fn workspace_entry(root: &Path, path: &Path) -> Result<WorkspaceEntry, String> {
     })
 }
 
+fn write_workspace_bytes(
+    target: &Path,
+    bytes: Vec<u8>,
+    expected_hash: Option<&str>,
+) -> Result<(), String> {
+    if let Some(expected) = expected_hash
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let current = fs::read(target).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "Cannot compare expected hash; file does not exist: {}",
+                    target.display()
+                )
+            } else {
+                format!("read {}: {error}", target.display())
+            }
+        })?;
+        let current_hash = sha256_hex(&current);
+        if !current_hash.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "File changed on disk; expected hash {expected}, found {current_hash}"
+            ));
+        }
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("Cannot resolve parent for {}", target.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("mkdir {}: {error}", parent.display()))?;
+    let tmp = parent.join(format!(".taomni-write-{}", uuid::Uuid::new_v4().simple()));
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|error| format!("open {}: {error}", tmp.display()))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("write {}: {error}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("sync {}: {error}", tmp.display()))?;
+    }
+    if let Err(error) = replace_file(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "rename {} -> {}: {error}",
+            tmp.display(),
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
 fn file_from_bytes(
     root: &Path,
     target: &Path,
     bytes: Vec<u8>,
     meta: fs::Metadata,
 ) -> Result<WorkspaceFile, String> {
-    let (text, bom) = decode_utf8_workspace_file(&bytes)?;
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, None)?;
     Ok(WorkspaceFile {
         path: relative_path(root, target)?,
         text,
-        encoding: "UTF-8".into(),
+        encoding,
         bom,
         size: meta.len(),
         mtime: mtime_secs(&meta),
@@ -2997,11 +3143,11 @@ fn loose_file_from_bytes(
     bytes: Vec<u8>,
     meta: fs::Metadata,
 ) -> Result<WorkspaceFile, String> {
-    let (text, bom) = decode_utf8_workspace_file(&bytes)?;
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, None)?;
     Ok(WorkspaceFile {
         path: path_for_display(target),
         text,
-        encoding: "UTF-8".into(),
+        encoding,
         bom,
         size: meta.len(),
         mtime: mtime_secs(&meta),
@@ -3009,15 +3155,195 @@ fn loose_file_from_bytes(
     })
 }
 
-fn decode_utf8_workspace_file(bytes: &[u8]) -> Result<(String, bool), String> {
+fn file_from_bytes_with_encoding(
+    root: &Path,
+    target: &Path,
+    bytes: Vec<u8>,
+    meta: fs::Metadata,
+    requested_encoding: Option<&str>,
+) -> Result<WorkspaceFile, String> {
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, requested_encoding)?;
+    Ok(WorkspaceFile {
+        path: relative_path(root, target)?,
+        text,
+        encoding,
+        bom,
+        size: meta.len(),
+        mtime: mtime_secs(&meta),
+        hash: sha256_hex(&bytes),
+    })
+}
+
+fn loose_file_from_bytes_with_encoding(
+    target: &Path,
+    bytes: Vec<u8>,
+    meta: fs::Metadata,
+    requested_encoding: Option<&str>,
+) -> Result<WorkspaceFile, String> {
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, requested_encoding)?;
+    Ok(WorkspaceFile {
+        path: path_for_display(target),
+        text,
+        encoding,
+        bom,
+        size: meta.len(),
+        mtime: mtime_secs(&meta),
+        hash: sha256_hex(&bytes),
+    })
+}
+
+fn decode_workspace_bytes(
+    bytes: &[u8],
+    requested_encoding: Option<&str>,
+) -> Result<(String, String, bool), String> {
     const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
-    let (payload, bom) = bytes
-        .strip_prefix(UTF8_BOM)
-        .map_or((bytes, false), |payload| (payload, true));
-    let text = std::str::from_utf8(payload)
-        .map_err(|error| format!("File is not valid UTF-8: {error}"))?
-        .to_string();
-    Ok((text, bom))
+    const UTF16LE_BOM: &[u8] = b"\xFF\xFE";
+    const UTF16BE_BOM: &[u8] = b"\xFE\xFF";
+
+    let (encoding, payload, bom) = if let Some(label) = requested_encoding {
+        let encoding = encoding_for_label(label)?;
+        let (payload, bom) = if encoding == UTF_8 && bytes.starts_with(UTF8_BOM) {
+            (&bytes[UTF8_BOM.len()..], true)
+        } else if encoding == UTF_16LE && bytes.starts_with(UTF16LE_BOM) {
+            (&bytes[UTF16LE_BOM.len()..], true)
+        } else if encoding == UTF_16BE && bytes.starts_with(UTF16BE_BOM) {
+            (&bytes[UTF16BE_BOM.len()..], true)
+        } else {
+            (bytes, false)
+        };
+        (encoding, payload, bom)
+    } else if bytes.starts_with(UTF8_BOM) {
+        (UTF_8, &bytes[UTF8_BOM.len()..], true)
+    } else if bytes.starts_with(UTF16LE_BOM) {
+        (UTF_16LE, &bytes[UTF16LE_BOM.len()..], true)
+    } else if bytes.starts_with(UTF16BE_BOM) {
+        (UTF_16BE, &bytes[UTF16BE_BOM.len()..], true)
+    } else if let Some(encoding) = detect_utf16_without_bom(bytes) {
+        (encoding, bytes, false)
+    } else if std::str::from_utf8(bytes).is_ok() {
+        (UTF_8, bytes, false)
+    } else {
+        let mut detector = EncodingDetector::new();
+        detector.feed(bytes, true);
+        (detector.guess(None, true), bytes, false)
+    };
+
+    let text = encoding
+        .decode_without_bom_handling_and_without_replacement(payload)
+        .ok_or_else(|| {
+            format!(
+                "File cannot be decoded as {} without data loss",
+                encoding.name()
+            )
+        })?
+        .into_owned();
+    if encoding != UTF_16LE
+        && encoding != UTF_16BE
+        && (looks_binary_bytes(bytes)
+            || (requested_encoding.is_none()
+                && encoding != UTF_8
+                && looks_suspicious_legacy_bytes(bytes, &text)))
+    {
+        return Err("File appears to be binary; open it in a binary-capable viewer".into());
+    }
+    Ok((text, encoding.name().to_string(), bom))
+}
+
+fn encoding_for_label(label: &str) -> Result<&'static Encoding, String> {
+    let normalized = label.trim().replace('_', "-");
+    Encoding::for_label(normalized.as_bytes())
+        .ok_or_else(|| format!("Unsupported text encoding: {label}"))
+}
+
+fn detect_utf16_without_bom(bytes: &[u8]) -> Option<&'static Encoding> {
+    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+        return None;
+    }
+    let pairs = bytes.chunks_exact(2);
+    let mut even_zeroes = 0usize;
+    let mut odd_zeroes = 0usize;
+    for pair in pairs {
+        if pair[0] == 0 {
+            even_zeroes += 1;
+        }
+        if pair[1] == 0 {
+            odd_zeroes += 1;
+        }
+    }
+    let total = bytes.len() / 2;
+    if odd_zeroes * 3 >= total * 2 {
+        Some(UTF_16LE)
+    } else if even_zeroes * 3 >= total * 2 {
+        Some(UTF_16BE)
+    } else {
+        None
+    }
+}
+
+fn looks_binary_bytes(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let controls = bytes
+        .iter()
+        .filter(|&&byte| byte == 0 || (byte < 0x09) || (byte > 0x0D && byte < 0x20))
+        .count();
+    controls * 100 > bytes.len() * 2
+}
+
+/// Legacy single-byte encodings can decode every byte sequence, so a tiny
+/// arbitrary high-byte blob must not silently become editable text. Keep this
+/// conservative: real legacy documents normally contain either whitespace,
+/// ASCII punctuation, or enough bytes to establish a text sample.
+fn looks_suspicious_legacy_bytes(bytes: &[u8], text: &str) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    if bytes.len() <= 4 && bytes.iter().all(|byte| *byte >= 0x80) {
+        return true;
+    }
+    if bytes.len() < 16 {
+        let has_text_shape = bytes
+            .iter()
+            .any(|byte| matches!(*byte, b' '..=b'~' | b'\t' | b'\n' | b'\r'));
+        if !has_text_shape {
+            return true;
+        }
+    }
+    text.chars().all(|character| character.is_control())
+}
+
+fn encode_workspace_text(contents: &str, label: &str, bom: bool) -> Result<Vec<u8>, String> {
+    let encoding = encoding_for_label(label)?;
+    let mut bytes = if encoding == UTF_16LE || encoding == UTF_16BE {
+        let mut output = Vec::with_capacity(contents.len() * 2);
+        for unit in contents.encode_utf16() {
+            let encoded = if encoding == UTF_16LE {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            };
+            output.extend_from_slice(&encoded);
+        }
+        output
+    } else {
+        let (encoded, _, had_errors) = encoding.encode(contents);
+        if had_errors {
+            return Err(format!(
+                "Text contains characters not representable in {}",
+                encoding.name()
+            ));
+        }
+        encoded.into_owned()
+    };
+    if bom && encoding == UTF_8 {
+        bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
+    } else if bom && encoding == UTF_16LE {
+        bytes.splice(0..0, [0xFF, 0xFE]);
+    } else if bom && encoding == UTF_16BE {
+        bytes.splice(0..0, [0xFE, 0xFF]);
+    }
+    Ok(bytes)
 }
 
 fn path_for_display(path: &Path) -> String {
@@ -3142,7 +3468,122 @@ mod tests {
 
         let error =
             workspace_read_loose_file(path.to_string_lossy().to_string(), None).unwrap_err();
-        assert!(error.contains("not valid UTF-8"));
+        assert!(error.contains("binary") || error.contains("decoded"));
+    }
+
+    #[test]
+    fn reads_utf16_bom_and_round_trips_selected_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf16.txt");
+        let bytes = encode_workspace_text("hello\r\n世界", "UTF-16LE", true).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let path_string = path.to_string_lossy().to_string();
+
+        let file = workspace_read_loose_file(path_string.clone(), None).unwrap();
+        assert_eq!(file.encoding, "UTF-16LE");
+        assert!(file.bom);
+        assert_eq!(file.text, "hello\r\n世界");
+
+        let saved = workspace_write_loose_file_encoded(
+            path_string,
+            "changed\n世界".into(),
+            Some(file.hash),
+            "UTF-16LE".into(),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(saved.encoding, "UTF-16LE");
+        assert!(saved.bom);
+        assert_eq!(saved.text, "changed\n世界");
+    }
+
+    #[test]
+    fn auto_detects_utf16_without_a_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf16-no-bom.txt");
+        let bytes = encode_workspace_text("hello", "UTF-16BE", false).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let file = workspace_read_loose_file(path.to_string_lossy().to_string(), None).unwrap();
+        assert_eq!(file.encoding, "UTF-16BE");
+        assert!(!file.bom);
+        assert_eq!(file.text, "hello");
+    }
+
+    #[test]
+    fn auto_detects_short_utf16_without_a_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short-utf16.txt");
+        fs::write(
+            &path,
+            encode_workspace_text("A", "UTF-16LE", false).unwrap(),
+        )
+        .unwrap();
+
+        let file = workspace_read_loose_file(path.to_string_lossy().to_string(), None).unwrap();
+        assert_eq!(file.encoding, "UTF-16LE");
+        assert_eq!(file.text, "A");
+    }
+
+    #[test]
+    fn round_trips_windows_1252() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("windows-1252.txt");
+        let path_string = path.to_string_lossy().to_string();
+        let saved = workspace_write_loose_file_encoded(
+            path_string.clone(),
+            "café – €".into(),
+            None,
+            "windows-1252".into(),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(saved.encoding, "windows-1252");
+        assert_eq!(saved.text, "café – €");
+        assert_eq!(
+            workspace_read_loose_file(path_string, None).unwrap().text,
+            "café – €"
+        );
+    }
+
+    #[test]
+    fn decodes_and_encodes_gbk_without_lossy_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gbk.txt");
+        // "中文" in GBK.
+        fs::write(&path, [0xd6, 0xd0, 0xce, 0xc4]).unwrap();
+        let path_string = path.to_string_lossy().to_string();
+        let file = workspace_read_loose_file_with_encoding(path_string.clone(), None, "GBK".into())
+            .unwrap();
+        assert_eq!(file.encoding, "GBK");
+        assert_eq!(file.text, "中文");
+
+        let saved = workspace_write_loose_file_encoded(
+            path_string,
+            "中文".into(),
+            Some(file.hash),
+            "GBK".into(),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(saved.text, "中文");
+        assert_eq!(fs::read(path).unwrap(), [0xd6, 0xd0, 0xce, 0xc4]);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_legacy_encoding_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latin.txt");
+        fs::write(&path, b"plain").unwrap();
+        let error = workspace_write_loose_file_encoded(
+            path.to_string_lossy().to_string(),
+            "emoji 😀".into(),
+            None,
+            "windows-1252".into(),
+            Some(false),
+        )
+        .unwrap_err();
+        assert!(error.contains("not representable"));
     }
 
     #[test]

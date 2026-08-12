@@ -34,7 +34,9 @@ export interface OpenFileViewModel {
   savedText: string;
   /** Original on-disk line ending style; applied on write. */
   eol: OpenFileEol;
-  /** Preserve an UTF-8 BOM independently from the editor text. */
+  /** Backend-decoded charset; legacy snapshots may omit it and default to UTF-8. */
+  encoding?: string;
+  /** Preserve a Unicode byte-order marker independently from editor text. */
   bom?: boolean;
   hash: string;
   mtime: number;

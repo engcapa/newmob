@@ -71,6 +71,10 @@ thiserror = "2"
 reqwest = { version = "0.13", features = ["rustls", "json", "stream", "query", "socks", "blocking"], default-features = false }
 heck = "0.5"
 regex = "1"
+# Code Workspace text decoding/encoding. chardetng provides deterministic
+# cross-platform detection; encoding_rs performs standards-based conversion.
+encoding_rs = "0.8"
+chardetng = "0.1"
 # Code Workspace Find in Files. These are the same traversal and matching
 # primitives used by ripgrep, including gitignore support and binary detection.
 ignore = "0.4"

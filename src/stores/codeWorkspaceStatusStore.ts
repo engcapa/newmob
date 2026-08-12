@@ -40,6 +40,8 @@ export interface CodeWorkspaceStatusActions {
   cycleEol?: () => void;
   /** Toggle preservation of the UTF-8 byte-order marker and mark it dirty. */
   toggleBom?: () => void;
+  /** Open the charset/BOM chooser for the active editor. */
+  chooseEncoding?: () => void;
 }
 
 interface CodeWorkspaceStatusStoreState {

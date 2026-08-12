@@ -14,6 +14,8 @@ export interface WorkspaceRecoveryEntry {
   text: string;
   savedText: string;
   eol: OpenFileState["eol"];
+  encoding?: string;
+  bom?: boolean;
   hash: string;
   mtime: number;
   size: number;
@@ -64,6 +66,10 @@ function normalizeEntry(value: unknown, workspaceId: string): WorkspaceRecoveryE
     text: source.text,
     savedText: source.savedText,
     eol,
+    encoding: typeof source.encoding === "string" && source.encoding.trim()
+      ? source.encoding
+      : "UTF-8",
+    bom: source.bom === true,
     hash: typeof source.hash === "string" ? source.hash : "",
     mtime: typeof source.mtime === "number" && Number.isFinite(source.mtime) ? source.mtime : 0,
     size: typeof source.size === "number" && Number.isFinite(source.size) ? source.size : 0,
@@ -169,6 +175,8 @@ export function reconcileWorkspaceRecoveryEntries(
         text: file.text,
         savedText: file.savedText,
         eol: file.eol,
+        encoding: file.encoding ?? "UTF-8",
+        bom: file.bom ?? false,
         hash: file.hash,
         mtime: file.mtime,
         size: file.size,

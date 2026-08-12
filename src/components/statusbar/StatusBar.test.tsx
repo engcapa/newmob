@@ -144,6 +144,7 @@ describe("StatusBar code-workspace segments", () => {
   it("exposes encoding and line-ending actions when the editor provides them", () => {
     const cycleEol = vi.fn();
     const toggleBom = vi.fn();
+    const chooseEncoding = vi.fn();
     useCodeWorkspaceStatusStore.setState({
       status: {
         tabId: "ws-tab",
@@ -161,13 +162,14 @@ describe("StatusBar code-workspace segments", () => {
         fontSize: 14,
         largeFile: false,
       },
-      actions: { cycleEol, toggleBom },
+      actions: { cycleEol, toggleBom, chooseEncoding },
     });
 
     render(<StatusBar />);
     fireEvent.click(screen.getByTestId("status-bar-workspace-encoding"));
     fireEvent.click(screen.getByTestId("status-bar-workspace-eol"));
-    expect(toggleBom).toHaveBeenCalledOnce();
+    expect(chooseEncoding).toHaveBeenCalledOnce();
+    expect(toggleBom).not.toHaveBeenCalled();
     expect(cycleEol).toHaveBeenCalledOnce();
   });
 });

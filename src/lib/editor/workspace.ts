@@ -334,6 +334,34 @@ export function workspaceReadLooseFile(
   });
 }
 
+/** Read a workspace file using an explicit charset selected in the editor. */
+export function workspaceReadFileWithEncoding(
+  repoRoot: string,
+  path: string,
+  encoding: string,
+  maxBytes?: number,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_read_file_with_encoding", {
+    repoRoot,
+    path,
+    maxBytes: maxBytes ?? null,
+    encoding,
+  });
+}
+
+/** Read a loose file using an explicit charset selected in the editor. */
+export function workspaceReadLooseFileWithEncoding(
+  path: string,
+  encoding: string,
+  maxBytes?: number,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_read_loose_file_with_encoding", {
+    path,
+    maxBytes: maxBytes ?? null,
+    encoding,
+  });
+}
+
 export function workspaceWriteFile(
   repoRoot: string,
   path: string,
@@ -357,6 +385,42 @@ export function workspaceWriteLooseFile(
     path,
     contents,
     expectedHash: expectedHash ?? null,
+  });
+}
+
+/** Persist a workspace file using an explicit charset and BOM preference. */
+export function workspaceWriteFileEncoded(
+  repoRoot: string,
+  path: string,
+  contents: string,
+  expectedHash: string | null | undefined,
+  encoding: string,
+  bom = false,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_write_file_encoded", {
+    repoRoot,
+    path,
+    contents,
+    expectedHash: expectedHash ?? null,
+    encoding,
+    bom,
+  });
+}
+
+/** Persist a loose file using an explicit charset and BOM preference. */
+export function workspaceWriteLooseFileEncoded(
+  path: string,
+  contents: string,
+  expectedHash: string | null | undefined,
+  encoding: string,
+  bom = false,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_write_loose_file_encoded", {
+    path,
+    contents,
+    expectedHash: expectedHash ?? null,
+    encoding,
+    bom,
   });
 }
 
