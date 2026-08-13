@@ -1,9 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRef } from "react";
 import { RunPanel, type RunPanelHandle } from "./RunPanel";
 import {
   readActiveRunConfigurationSelection,
+  readRunConfigurationOverrides,
+  writeRunConfigurationOverride,
   writeActiveRunConfigurationSelection,
 } from "../runConfigurationPersistence";
 
@@ -164,6 +166,57 @@ describe("RunPanel", () => {
     }), expect.any(Function));
   });
 
+  it("surfaces shared configuration provenance and keeps local overrides local", async () => {
+    workspaceMocks.workspaceJavaRunTargets.mockResolvedValue([{
+      id: "java-main:src/App.java",
+      label: "App",
+      mainClass: "App",
+      filePath: "/repo/app/src/App.java",
+      command: "java App",
+      cwd: "/repo/app",
+      buildSystem: "single-file",
+      modulePath: ".",
+    }]);
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [],
+      buildTargets: [],
+      runConfigurations: [{
+        id: "shared-run:team",
+        projectId: "shared:workspace",
+        label: "Team launch",
+        kind: "shared",
+        configurationSource: "shared",
+        sourceFile: "/repo/app/src/App.java",
+        command: {
+          executable: "cargo",
+          args: ["run"],
+          cwd: "/repo/app",
+          env: {},
+          display: "cargo run",
+          source: "path",
+        },
+        preLaunchTargets: [],
+      }],
+      debugConfigurations: [],
+      tools: [],
+      diagnostics: ["invalid optional configuration was ignored"],
+    });
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={vi.fn()} />);
+
+    const configuration = await screen.findByTestId("run-panel-configuration-shared-run:team");
+    expect(screen.getByTestId("run-panel-configuration-source-shared-run:team"))
+      .toHaveAttribute("data-configuration-source", "shared");
+    expect(screen.getByTestId("run-panel-execution-diagnostics"))
+      .toHaveTextContent("invalid optional configuration was ignored");
+
+    fireEvent.click(screen.getByLabelText("Edit run configuration Team launch"));
+    fireEvent.change(screen.getByTestId("run-configuration-name"), { target: { value: "Local launch" } });
+    fireEvent.click(screen.getByTestId("run-configuration-save"));
+    const local = await screen.findByTestId("run-panel-configuration-source-shared-run:team");
+    expect(local).toHaveAttribute("data-configuration-source", "local");
+    expect(configuration).toBeInTheDocument();
+  });
+
   it("edits and copies named configurations with VM, dotenv, env, and Before launch settings", async () => {
     workspaceMocks.workspaceExecutionModel.mockResolvedValue({
       projects: [],
@@ -197,10 +250,8 @@ describe("RunPanel", () => {
     expect(screen.getByTestId("run-configuration-vm-options")).toHaveValue("-Xmx1g");
     expect(screen.getByTestId("run-configuration-env-file")).toHaveValue(".env");
 
-    const namedId = JSON.parse(
-      window.localStorage.getItem("taomni.codeWorkspace.runConfigurations.v1.ws") ?? "{}",
-    ) as Record<string, unknown>;
-    const copyId = Object.keys(namedId).find((id) => id.includes(":user:"));
+    const named = readRunConfigurationOverrides("ws", "app");
+    const copyId = Object.keys(named).find((id) => id.includes(":user:"));
     expect(copyId).toBeTruthy();
     writeActiveRunConfigurationSelection("ws", "/repo/app/src/main.rs", copyId!);
     fireEvent.click(screen.getByTestId("run-configuration-delete"));
@@ -214,6 +265,85 @@ describe("RunPanel", () => {
       label: "Local app",
       environment: { FROM_FILE: { value: "yes", mode: "replace" }, MODE: { value: "explicit", mode: "replace" } },
     });
+  });
+
+  it("resets local launch fields to provider or shared configuration defaults", async () => {
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [],
+      buildTargets: [{
+        id: "build:compile", projectId: "project:app", label: "Compile", kind: "build",
+        command: { executable: "cargo", args: ["build"], cwd: "/repo/app", env: {}, display: "cargo build", source: "path" },
+        dependsOn: [],
+      }],
+      runConfigurations: [{
+        id: "run:app", projectId: "project:app", label: "Shared app", kind: "bin",
+        command: { executable: "node", args: ["app.js"], cwd: "/repo/app", env: {}, display: "node app.js", source: "path" },
+        runtimeOptions: ["--trace-warnings"],
+        envFile: ".env.shared",
+        preLaunchTargets: ["build:compile"],
+      }],
+      debugConfigurations: [], tools: [],
+    });
+    writeRunConfigurationOverride("ws", "run:app", {
+      name: "Local app",
+      args: [],
+      vmOptions: ["--inspect"],
+      cwd: "",
+      env: {},
+      envFile: ".env.local",
+      preLaunchTargets: [],
+    });
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={vi.fn()} />);
+
+    fireEvent.click(await screen.findByLabelText("Edit run configuration Local app"));
+    expect(screen.getByTestId("run-configuration-vm-options")).toHaveValue("--inspect");
+    expect(screen.getByTestId("run-configuration-env-file")).toHaveValue(".env.local");
+    expect(screen.getByTestId("run-configuration-before-launch-build:compile")).not.toBeChecked();
+
+    fireEvent.click(screen.getByTestId("run-configuration-reset"));
+    expect(screen.getByTestId("run-configuration-name")).toHaveValue("Shared app");
+    expect(screen.getByTestId("run-configuration-vm-options")).toHaveValue("--trace-warnings");
+    expect(screen.getByTestId("run-configuration-env-file")).toHaveValue(".env.shared");
+    expect(screen.getByTestId("run-configuration-before-launch-build:compile")).toBeChecked();
+    await waitFor(() => expect(screen.getByTestId("run-panel-configuration-run:app"))
+      .toHaveTextContent("Shared app"));
+  });
+
+  it("keeps same-id run configuration overrides isolated between roots", async () => {
+    const multiRoots = [
+      { id: "one", name: "one", path: "/repo/one", kind: "git" as const },
+      { id: "two", name: "two", path: "/repo/two", kind: "git" as const },
+    ];
+    workspaceMocks.workspaceExecutionModel.mockImplementation(async (rootPath: string) => ({
+      projects: [], buildTargets: [], debugConfigurations: [], tools: [],
+      runConfigurations: [{
+        id: "shared-run:dev", projectId: `project:${rootPath}`, label: "Dev", kind: "bin",
+        command: { executable: "node", args: ["app.js"], cwd: rootPath, env: {}, display: "node app.js", source: "path" },
+        preLaunchTargets: [],
+      }],
+    }));
+    writeRunConfigurationOverride("ws", "shared-run:dev", {
+      name: "One dev", args: [], cwd: "", env: {},
+    }, "one");
+    writeRunConfigurationOverride("ws", "shared-run:dev", {
+      name: "Two dev", args: [], cwd: "", env: {},
+    }, "two");
+
+    render(<RunPanel workspaceInstanceId="ws" roots={multiRoots} active onRun={vi.fn()} />);
+
+    const rows = await screen.findAllByTestId("run-panel-configuration-shared-run:dev");
+    expect(rows).toHaveLength(2);
+    expect(screen.getByText("One dev")).toBeInTheDocument();
+    expect(screen.getByText("Two dev")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("Edit run configuration Two dev"));
+    expect(screen.getByTestId("run-configuration-name")).toHaveValue("Two dev");
+    fireEvent.change(screen.getByTestId("run-configuration-name"), { target: { value: "Two changed" } });
+    fireEvent.click(screen.getByTestId("run-configuration-save"));
+    await waitFor(() => expect(within(screen.getByTestId("run-panel-configurations-two"))
+      .getByText("Two changed")).toBeInTheDocument());
+    expect(readRunConfigurationOverrides("ws", "one")["shared-run:dev"].name).toBe("One dev");
+    expect(readRunConfigurationOverrides("ws", "two")["shared-run:dev"].name).toBe("Two changed");
   });
 
   it("reports dotenv read failures in Run History without launching", async () => {
@@ -248,5 +378,180 @@ describe("RunPanel", () => {
     fireEvent.click(await screen.findByText("Run app"));
     expect(await screen.findByText(/Before launch target is missing/)).toBeInTheDocument();
     expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("executes compound Run children in order and honors stopOnFailure", async () => {
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [], buildTargets: [], debugConfigurations: [], tools: [],
+      runConfigurations: [
+        {
+          id: "run:first", projectId: "project:app", label: "First", kind: "bin",
+          command: { executable: "node", args: ["first.js"], cwd: "/repo/app", env: {}, display: "node first.js", source: "path" },
+          preLaunchTargets: [],
+        },
+        {
+          id: "run:second", projectId: "project:app", label: "Second", kind: "bin",
+          command: { executable: "node", args: ["second.js"], cwd: "/repo/app", env: {}, display: "node second.js", source: "path" },
+          preLaunchTargets: [],
+        },
+        {
+          id: "run:all", projectId: "project:app", label: "All", kind: "compound",
+          command: { executable: "__taomni_compound__", args: [], cwd: "/repo/app", env: {}, display: "Compound configuration", source: "configured" },
+          preLaunchTargets: [],
+          compoundConfigurationIds: ["run:first", "run:second"],
+          compoundStopOnFailure: true,
+        },
+      ],
+    });
+    const launched: string[] = [];
+    const onRun = vi.fn((task, onExit: (exitCode: number) => void) => {
+      launched.push(task.label);
+      onExit(task.label === "First" ? 7 : 0);
+    });
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={onRun} />);
+
+    fireEvent.click(await screen.findByText("All"));
+    await waitFor(() => expect(launched).toEqual(["First"]));
+    expect(onRun).not.toHaveBeenCalledWith(expect.objectContaining({ label: "Second" }), expect.any(Function));
+    expect(await screen.findByText("exit 7")).toBeInTheDocument();
+  });
+
+  it("rejects an unavailable compound child before starting any child", async () => {
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [], buildTargets: [], debugConfigurations: [], tools: [],
+      runConfigurations: [
+        {
+          id: "run:ready", projectId: "project:app", label: "Ready", kind: "bin",
+          command: { executable: "node", args: ["ready.js"], cwd: "/repo/app", env: {}, display: "node ready.js", source: "path" },
+          preLaunchTargets: [],
+        },
+        {
+          id: "run:missing", projectId: "project:app", label: "Missing", kind: "bin",
+          command: {
+            executable: "missing-runtime", args: [], cwd: "/repo/app", env: {},
+            display: "missing-runtime", source: "path", error: "missing-runtime was not found",
+          },
+          preLaunchTargets: [],
+        },
+        {
+          id: "run:all", projectId: "project:app", label: "All", kind: "compound",
+          command: { executable: "__taomni_compound__", args: [], cwd: "/repo/app", env: {}, display: "Compound configuration", source: "configured" },
+          preLaunchTargets: [], compoundConfigurationIds: ["run:ready", "run:missing"],
+        },
+      ],
+    });
+    const onRun = vi.fn();
+    render(<RunPanel workspaceInstanceId="ws" roots={roots} active onRun={onRun} />);
+
+    fireEvent.click(await screen.findByText("All"));
+    expect(await screen.findByText(/missing-runtime was not found/)).toBeInTheDocument();
+    expect(onRun).not.toHaveBeenCalled();
+  });
+
+  it("runs a toolbar compound from its catalog before inactive panel discovery", async () => {
+    const child = {
+      id: "run:first", projectId: "project:app", label: "First", kind: "bin",
+      command: {
+        executable: "node", args: ["first.js"], cwd: "/repo/app", env: {},
+        display: "node first.js", source: "path" as const,
+      },
+      preLaunchTargets: [],
+    };
+    const compound = {
+      id: "run:all", projectId: "project:app", label: "All", kind: "compound",
+      command: {
+        executable: "__taomni_compound__", args: [], cwd: "/repo/app", env: {},
+        display: "Compound configuration", source: "configured" as const,
+      },
+      preLaunchTargets: [],
+      compoundConfigurationIds: [child.id],
+      compoundStopOnFailure: true,
+    };
+    const handle = createRef<RunPanelHandle>();
+    const launched: string[] = [];
+    const onRun = vi.fn((task, onExit: (exitCode: number) => void) => {
+      launched.push(task.execution?.executable ?? "");
+      onExit(0);
+    });
+    render(
+      <RunPanel
+        ref={handle}
+        workspaceInstanceId="ws"
+        roots={roots}
+        active={false}
+        onRun={onRun}
+      />,
+    );
+
+    act(() => {
+      handle.current?.run({
+        id: compound.id,
+        label: compound.label,
+        command: compound.command.display,
+        cwd: compound.command.cwd,
+        source: "Run configuration",
+        rootId: "app",
+        rootName: "app",
+        configuration: true,
+        runConfiguration: compound,
+        configurationCatalog: [child, compound],
+        execution: {
+          executable: compound.command.executable,
+          args: [],
+          source: "configured",
+        },
+      });
+    });
+
+    await waitFor(() => expect(launched).toEqual(["node"]));
+    expect(onRun).not.toHaveBeenCalledWith(
+      expect.objectContaining({ execution: expect.objectContaining({ executable: "__taomni_compound__" }) }),
+      expect.any(Function),
+    );
+    expect(workspaceMocks.workspaceDetectTasks).not.toHaveBeenCalled();
+    expect(workspaceMocks.workspaceJavaRunTargets).not.toHaveBeenCalled();
+    expect(workspaceMocks.workspaceExecutionModel).not.toHaveBeenCalled();
+  });
+
+  it("does not launch a sentinel for an invalid compound configuration", async () => {
+    const invalidConfiguration = {
+      id: "run:invalid", projectId: "project:app", label: "Invalid compound", kind: "compound",
+      command: {
+        executable: "__taomni_compound__", args: [], cwd: "/repo/app", env: {},
+        display: "Compound configuration", source: "configured" as const,
+        error: "Compound configuration has no valid Run children",
+      },
+      preLaunchTargets: [], compoundConfigurationIds: [],
+    };
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [], buildTargets: [], debugConfigurations: [], tools: [],
+      runConfigurations: [invalidConfiguration],
+    });
+    const handle = createRef<RunPanelHandle>();
+    const onRun = vi.fn();
+    render(<RunPanel ref={handle} workspaceInstanceId="ws" roots={roots} active onRun={onRun} />);
+
+    const button = await screen.findByTestId("run-panel-configuration-run:invalid");
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute("title", "Compound configuration has no valid Run children");
+    handle.current?.run({
+      id: invalidConfiguration.id,
+      label: invalidConfiguration.label,
+      command: invalidConfiguration.command.display,
+      cwd: invalidConfiguration.command.cwd,
+      source: "Run configuration",
+      rootId: "app",
+      rootName: "app",
+      configuration: true,
+      runConfiguration: invalidConfiguration,
+      execution: {
+        executable: invalidConfiguration.command.executable,
+        args: [],
+        source: "configured",
+        error: invalidConfiguration.command.error,
+      },
+    });
+    expect(onRun).not.toHaveBeenCalled();
+    expect(await screen.findByText("Compound configuration has no valid Run children")).toBeInTheDocument();
   });
 });

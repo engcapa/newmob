@@ -41,9 +41,36 @@ interface DebugPanelProps {
    */
   runtimeAvailable?: boolean;
   /** Run/Debug configurations associated with the active source file. */
-  configurations?: Array<{ id: string; label: string }>;
+  configurations?: Array<{
+    id: string;
+    label: string;
+    source?: "provider" | "shared" | "local";
+    /** False when the adapter/configuration cannot be launched on this host. */
+    available?: boolean;
+    /** Human-readable reason surfaced when `available` is false. */
+    diagnostic?: string;
+  }>;
   activeConfigurationId?: string | null;
   onActiveConfigurationChange?: (configurationId: string) => void;
+}
+
+function configurationSourceLabel(
+  source: NonNullable<DebugPanelProps["configurations"]>[number]["source"],
+): string {
+  switch (source) {
+    case "shared":
+      return "Shared";
+    case "local":
+      return "Local";
+    case "provider":
+      return "Provider";
+    default:
+      return "Detected";
+  }
+}
+
+function configurationAvailabilityLabel(available: boolean | undefined): string {
+  return available === false ? " [Unavailable]" : "";
 }
 
 /** One expandable variables node (D4) — children fetched lazily on expand. */
@@ -394,6 +421,13 @@ export function DebugPanel({
   const [consoleInput, setConsoleInput] = useState("");
   const [edit, setEdit] = useState<VarEditState>({ node: null, value: "" });
   const consoleRef = useRef<HTMLDivElement | null>(null);
+  const activeConfiguration = configurations.find((configuration) => (
+    configuration.id === (activeConfigurationId ?? configurations[0]?.id)
+  )) ?? configurations[0] ?? null;
+  const configurationDiagnostic = activeConfiguration && (
+    activeConfiguration.diagnostic?.trim()
+    || (activeConfiguration.available === false ? "Debug configuration is unavailable" : "")
+  ) || null;
 
   // Stable hook callbacks (useCallback in useCodeDebugSession) — effects key on
   // these instead of the per-render `debug` object so a parent re-render does
@@ -553,9 +587,26 @@ export function DebugPanel({
             className="ml-2 h-6 min-w-0 max-w-52 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
           >
             {configurations.map((configuration) => (
-              <option key={configuration.id} value={configuration.id}>{configuration.label}</option>
+              <option
+                key={configuration.id}
+                value={configuration.id}
+                data-configuration-available={configuration.available === false ? "false" : "true"}
+              >
+                {configuration.label} [{configurationSourceLabel(configuration.source)}]
+                {configurationAvailabilityLabel(configuration.available)}
+              </option>
             ))}
           </select>
+        )}
+        {!running && configurationDiagnostic && (
+          <div
+            data-testid="debug-configuration-diagnostic"
+            role="status"
+            className="max-w-64 truncate text-[10px] text-amber-600 dark:text-amber-400"
+            title={configurationDiagnostic}
+          >
+            {configurationDiagnostic}
+          </div>
         )}
         <div className="ml-auto flex items-center gap-0.5 rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] p-0.5 shadow-xs">
           {!running && (

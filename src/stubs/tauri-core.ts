@@ -1977,6 +1977,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         runConfigurations: [],
         debugConfigurations: [],
         tools: [],
+        diagnostics: [],
       } as T;
     }
     case "create_ssh_terminal": {

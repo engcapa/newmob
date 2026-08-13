@@ -30,7 +30,11 @@ import {
   writeRunConfigurationOverride,
   writeActiveRunConfigurationSelection,
 } from "../runConfigurationPersistence";
-import { executeTaskPlan, resolveBuildTargetPlan } from "../executionPlan";
+import {
+  executeCompoundConfiguration,
+  executeTaskPlan,
+  resolveBuildTargetPlan,
+} from "../executionPlan";
 import type { ExecutionBuildTarget } from "../../../../lib/editor/workspace";
 
 export interface WorkspaceTaskItem extends WorkspaceTask {
@@ -39,12 +43,17 @@ export interface WorkspaceTaskItem extends WorkspaceTask {
   custom?: boolean;
   configuration?: boolean;
   runConfiguration?: ExecutionRunConfiguration;
+  /** Provider/shared values before workspace-local overrides. */
+  runConfigurationDefaults?: ExecutionRunConfiguration;
   dependsOn?: string[];
   /** Explicit target catalog for toolbar-launched configurations. */
   buildTargets?: ExecutionBuildTarget[];
   /** Structured target identity retained by the Build panel. */
   projectId?: string;
   buildKind?: ExecutionBuildTarget["kind"];
+  /** Full configuration catalog used when a toolbar launch starts a compound
+   * before the Run panel has performed its own discovery. */
+  configurationCatalog?: ExecutionRunConfiguration[];
 }
 
 interface RunHistoryEntry {
@@ -73,6 +82,19 @@ interface RunPanelProps {
   onConfigureTools?: () => void;
 }
 
+function configurationSourceLabel(source: ExecutionRunConfiguration["configurationSource"]): string {
+  switch (source) {
+    case "shared":
+      return "Shared";
+    case "local":
+      return "Local";
+    case "provider":
+      return "Provider";
+    default:
+      return "Detected";
+  }
+}
+
 function customTasksKey(workspaceInstanceId: string): string {
   return `taomni.codeWorkspace.customTasks.v1.${workspaceInstanceId}`;
 }
@@ -86,6 +108,39 @@ function readCustomTasks(workspaceInstanceId: string): WorkspaceTaskItem[] {
   } catch {
     return [];
   }
+}
+
+function taskForExecutionConfiguration(
+  configuration: ExecutionRunConfiguration,
+  root: Pick<CodeWorkspaceRootInfo, "id" | "name">,
+  source: string,
+  buildTargets: ExecutionBuildTarget[],
+  defaults: ExecutionRunConfiguration = configuration,
+): WorkspaceTaskItem {
+  return {
+    id: configuration.id,
+    label: configuration.label,
+    command: configuration.command.display,
+    cwd: configuration.command.cwd,
+    source,
+    rootId: root.id,
+    rootName: root.name,
+    configuration: true,
+    runConfiguration: configuration,
+    runConfigurationDefaults: defaults,
+    execution: {
+      executable: configuration.command.executable,
+      args: configuration.command.args,
+      source: configuration.command.source,
+      error: configuration.command.error,
+    },
+    environment: Object.fromEntries(Object.entries(configuration.command.env).map(([name, value]) => [
+      name,
+      { value, mode: configuration.environmentModes?.[name] ?? "replace" },
+    ])),
+    dependsOn: configuration.preLaunchTargets,
+    buildTargets,
+  };
 }
 
 export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPanel({
@@ -107,7 +162,10 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
   const [loaded, setLoaded] = useState(false);
   const [customCommand, setCustomCommand] = useState("");
   const [customRootId, setCustomRootId] = useState(roots[0]?.id ?? "");
-  const [editingConfigurationId, setEditingConfigurationId] = useState<string | null>(null);
+  const [editingConfiguration, setEditingConfiguration] = useState<{
+    rootId: string;
+    configurationId: string;
+  } | null>(null);
   const [configurationDraft, setConfigurationDraft] = useState({
     name: "",
     cwd: "",
@@ -118,17 +176,18 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
     preLaunchTargets: "",
   });
   const [buildTargetsByRoot, setBuildTargetsByRoot] = useState<Record<string, ExecutionBuildTarget[]>>({});
+  const [executionDiagnostics, setExecutionDiagnostics] = useState<Record<string, string[]>>({});
 
   const openConfigurationEditor = useCallback((task: WorkspaceTaskItem) => {
-    const override = readRunConfigurationOverrides(workspaceInstanceId)[task.id];
-    setEditingConfigurationId(task.id);
+    const override = readRunConfigurationOverrides(workspaceInstanceId, task.rootId)[task.id];
+    setEditingConfiguration({ rootId: task.rootId, configurationId: task.id });
     setConfigurationDraft({
       name: override?.name ?? task.label,
       cwd: override?.cwd ?? "",
       args: override?.args.join("\n") ?? "",
-      vmOptions: override?.vmOptions?.join("\n") ?? "",
+      vmOptions: (override?.vmOptions ?? task.runConfiguration?.runtimeOptions ?? []).join("\n"),
       env: formatEnvironmentLines(override?.env ?? {}),
-      envFile: override?.envFile ?? "",
+      envFile: override?.envFile ?? task.runConfiguration?.envFile ?? "",
       preLaunchTargets: (override?.preLaunchTargets ?? task.runConfiguration?.preLaunchTargets ?? []).join("\n"),
     });
   }, [workspaceInstanceId]);
@@ -151,19 +210,57 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
     };
   }, []);
 
+  const runBeforeLaunch = useCallback(async (task: WorkspaceTaskItem): Promise<number> => {
+    const targetIds = task.runConfiguration?.preLaunchTargets ?? [];
+    if (targetIds.length === 0) return 0;
+    const targets = task.buildTargets ?? buildTargetsByRoot[task.rootId] ?? [];
+    const resolved = resolveBuildTargetPlan(targetIds, targets);
+    const plan = resolved.map((target): WorkspaceTaskItem => ({
+        id: target.id,
+        label: target.label,
+        command: target.command.display,
+        cwd: target.command.cwd,
+        source: "Before launch",
+        rootId: task.rootId,
+        rootName: task.rootName,
+        execution: {
+          executable: target.command.executable,
+          args: target.command.args,
+          source: target.command.source as "wrapper" | "configured" | "path",
+          error: target.command.error,
+        },
+        environment: Object.fromEntries(Object.entries(target.command.env).map(([name, value]) => [
+          name,
+          { value, mode: "replace" as const },
+        ])),
+    }));
+    const result = await executeTaskPlan(plan, (next, done) => onRun(next, done));
+    return result.exitCode;
+  }, [buildTargetsByRoot, onRun]);
+
+  const runSingleTask = useCallback(async (task: WorkspaceTaskItem): Promise<number> => {
+    const beforeLaunchExit = await runBeforeLaunch(task);
+    if (beforeLaunchExit !== 0) return beforeLaunchExit;
+    const launchTask = await configuredTask(task);
+    const result = await executeTaskPlan([launchTask], (next, done) => onRun(next, done));
+    return result.exitCode;
+  }, [configuredTask, onRun, runBeforeLaunch]);
+
   const refresh = useCallback(async () => {
     if (roots.length === 0) {
       setDetectedTasks([]);
       setRunConfigurations([]);
       setBuildTargetsByRoot({});
+      setExecutionDiagnostics({});
       setLoaded(true);
       return;
     }
     setLoading(true);
     setError(null);
+    setExecutionDiagnostics({});
     try {
-      const overrides = readRunConfigurationOverrides(workspaceInstanceId);
       const groups = await Promise.all(roots.map(async (root) => {
+        const overrides = readRunConfigurationOverrides(workspaceInstanceId, root.id);
         const [tasks, javaTargets, executionModel] = await Promise.all([
           workspaceDetectTasks(root.path, toolConfig),
           workspaceJavaRunTargets(root.path, toolConfig),
@@ -179,48 +276,47 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
         const javaSourceFiles = new Set(javaConfigurations.flatMap((configuration) => (
           configuration.sourceFile ? [configuration.sourceFile.replace(/\\/g, "/")] : []
         )));
+        const discoveredConfigurations = [
+          ...executionModel.runConfigurations.filter((configuration) => (
+            configuration.configurationSource === "shared"
+            || !configuration.sourceFile
+            || !javaSourceFiles.has(configuration.sourceFile.replace(/\\/g, "/"))
+          )),
+          ...javaConfigurations,
+        ];
+        const defaultsById = new Map(discoveredConfigurations.map((configuration) => [
+          configuration.id,
+          configuration,
+        ]));
         const configurations = materializeRunConfigurations(
-          [
-            ...executionModel.runConfigurations.filter((configuration) => (
-              !configuration.sourceFile
-              || !javaSourceFiles.has(configuration.sourceFile.replace(/\\/g, "/"))
-            )),
-            ...javaConfigurations,
-          ],
+          discoveredConfigurations,
           overrides,
         ).map((configuration): WorkspaceTaskItem => {
           const project = projectById.get(configuration.projectId);
-          return {
-            id: configuration.id,
-            label: configuration.label,
-            command: configuration.command.display,
-            cwd: configuration.command.cwd,
-            source: project ? `${project.languages.join("/")} · ${project.provider}` : "Run configuration",
-            rootId: root.id,
-            rootName: root.name,
-            configuration: true,
-            runConfiguration: configuration,
-            execution: {
-              executable: configuration.command.executable,
-              args: configuration.command.args,
-              source: configuration.command.source,
-              error: configuration.command.error,
-            },
-            environment: Object.fromEntries(Object.entries(configuration.command.env).map(([name, value]) => [
-              name,
-              { value, mode: configuration.environmentModes?.[name] ?? "replace" },
-            ])),
-            dependsOn: configuration.preLaunchTargets,
-            buildTargets: executionModel.buildTargets,
-          };
+          return taskForExecutionConfiguration(
+            configuration,
+            root,
+            project ? `${project.languages.join("/")} · ${project.provider}` : "Run configuration",
+            executionModel.buildTargets,
+            defaultsById.get(configuration.baseConfigurationId ?? configuration.id),
+          );
         });
-        return { tasks: detected, configurations, buildTargets: executionModel.buildTargets };
+        return {
+          tasks: detected,
+          configurations,
+          buildTargets: executionModel.buildTargets,
+          diagnostics: executionModel.diagnostics ?? [],
+        };
       }));
       setDetectedTasks(groups.flatMap((group) => group.tasks));
       setRunConfigurations(groups.flatMap((group) => group.configurations));
       setBuildTargetsByRoot(Object.fromEntries(roots.map((root, index) => [
         root.id,
         groups[index]?.buildTargets ?? [],
+      ])));
+      setExecutionDiagnostics(Object.fromEntries(roots.map((root, index) => [
+        root.id,
+        groups[index]?.diagnostics ?? [],
       ])));
       setLoaded(true);
     } catch (reason) {
@@ -232,9 +328,9 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
   }, [roots, toolConfig, workspaceInstanceId]);
 
   const deleteNamedConfiguration = useCallback((configuration: WorkspaceTaskItem) => {
-    const override = readRunConfigurationOverrides(workspaceInstanceId)[configuration.id];
+    const override = readRunConfigurationOverrides(workspaceInstanceId, configuration.rootId)[configuration.id];
     if (!override?.baseConfigurationId) return;
-    writeRunConfigurationOverride(workspaceInstanceId, configuration.id, null);
+    writeRunConfigurationOverride(workspaceInstanceId, configuration.id, null, configuration.rootId);
     const selections = readActiveRunConfigurationSelections(workspaceInstanceId);
     for (const [sourceFile, selectedId] of Object.entries(selections)) {
       if (selectedId === configuration.id) {
@@ -245,7 +341,7 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
         );
       }
     }
-    setEditingConfigurationId(null);
+    setEditingConfiguration(null);
     void refresh();
   }, [refresh, workspaceInstanceId]);
 
@@ -287,9 +383,66 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
         : historyEntry));
       afterExit?.(exitCode);
     };
-    const launch = (nextTask: WorkspaceTaskItem, done: (exitCode: number) => void) => {
-      onRun(nextTask, done);
-    };
+    if (task.execution?.error) {
+      finishHistory(1, task.execution.error);
+      return;
+    }
+    const compoundIds = task.runConfiguration?.compoundConfigurationIds;
+    if (task.runConfiguration?.kind === "compound" && (
+      !compoundIds?.length || !!task.runConfiguration.command.error
+    )) {
+      finishHistory(
+        1,
+        task.runConfiguration.command.error ?? "Compound configuration has no valid Run children",
+      );
+      return;
+    }
+    if (compoundIds?.length) {
+      const candidates = task.configurationCatalog !== undefined
+        ? task.configurationCatalog.map((configuration) => taskForExecutionConfiguration(
+            configuration,
+            { id: task.rootId, name: task.rootName },
+            "Run configuration",
+            task.buildTargets ?? buildTargetsByRoot[task.rootId] ?? [],
+          ))
+        : runConfigurations.filter((item) => item.rootId === task.rootId);
+      const configurationNodes = candidates
+        .filter((item) => item.id !== task.id && item.runConfiguration)
+        .map((item) => ({
+          ...item.runConfiguration!,
+          id: item.id,
+        }));
+      const rootNode = {
+        ...task.runConfiguration,
+        id: task.id,
+      };
+      const taskById = new Map(candidates.map((item) => [item.id, item]));
+      const run = async () => {
+        try {
+          const result = await executeCompoundConfiguration(
+            rootNode,
+            configurationNodes,
+            async (node) => {
+              const candidate = node.id === task.id ? task : taskById.get(node.id);
+              if (!candidate) return 1;
+              return runBeforeLaunch(candidate);
+            },
+            async (node) => {
+              const candidate = node.id === task.id ? task : taskById.get(node.id);
+              if (!candidate) return 1;
+              const launchTask = await configuredTask(candidate);
+              const result = await executeTaskPlan([launchTask], (next, done) => onRun(next, done));
+              return result.exitCode;
+            },
+          );
+          finishHistory(result.exitCode);
+        } catch (error) {
+          finishHistory(1, error instanceof Error ? error.message : String(error));
+        }
+      };
+      void run();
+      return;
+    }
     // Keep the common task path synchronous. This preserves the integrated
     // terminal's immediate-start behavior; only configured env files or
     // Before launch targets need asynchronous planning.
@@ -298,47 +451,15 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
       return;
     }
     const run = async () => {
-      let plan: WorkspaceTaskItem[] = [];
-      if (task.configuration && task.runConfiguration?.preLaunchTargets?.length) {
-        try {
-          const targets = task.buildTargets ?? buildTargetsByRoot[task.rootId] ?? [];
-          const resolved = resolveBuildTargetPlan(task.runConfiguration.preLaunchTargets, targets);
-          plan = resolved.map((target): WorkspaceTaskItem => ({
-            id: target.id,
-            label: target.label,
-            command: target.command.display,
-            cwd: target.command.cwd,
-            source: "Before launch",
-            rootId: task.rootId,
-            rootName: task.rootName,
-            execution: {
-              executable: target.command.executable,
-              args: target.command.args,
-              source: target.command.source as "wrapper" | "configured" | "path",
-              error: target.command.error,
-            },
-            environment: Object.fromEntries(Object.entries(target.command.env).map(([name, value]) => [
-              name,
-              { value, mode: "replace" as const },
-            ])),
-          }));
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          finishHistory(1, message);
-          return;
-        }
+      try {
+        const exitCode = await runSingleTask(task);
+        finishHistory(exitCode);
+      } catch (error) {
+        finishHistory(1, error instanceof Error ? error.message : String(error));
       }
-      const launchTask = await configuredTask(task);
-      const result = await executeTaskPlan(
-        [...plan, launchTask],
-        (next, done) => launch(next, done),
-      );
-      finishHistory(result.exitCode);
     };
-    void run().catch((error) => {
-      finishHistory(1, error instanceof Error ? error.message : String(error));
-    });
-  }, [buildTargetsByRoot, configuredTask, onRun]);
+    void run();
+  }, [buildTargetsByRoot, configuredTask, onRun, runBeforeLaunch, runConfigurations, runSingleTask]);
 
   useImperativeHandle(ref, () => ({
     run: runTask,
@@ -367,14 +488,16 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
   }, [runConfigurations]);
 
   const renderTask = (task: WorkspaceTaskItem) => {
+    const isCompound = !!task.runConfiguration?.compoundConfigurationIds?.length;
     const toolError = task.execution?.error;
     return (
-      <div key={task.id} className="group flex items-center gap-1 rounded hover:bg-[var(--taomni-code-active-line-bg)]">
+      <div key={`${task.rootId}:${task.id}`} className="group flex items-center gap-1 rounded hover:bg-[var(--taomni-code-active-line-bg)]">
         <button
           type="button"
           data-testid={task.configuration ? `run-panel-configuration-${task.id}` : undefined}
+          data-configuration-kind={isCompound ? "compound" : undefined}
           className="flex min-w-0 flex-1 items-center gap-1 px-1 py-1 text-left"
-          title={toolError ? toolError : `${task.command} — ${task.cwd}`}
+          title={toolError ? toolError : isCompound ? "Compound configuration" : `${task.command} — ${task.cwd}`}
           onClick={() => runTask(task)}
           disabled={!!toolError}
         >
@@ -383,6 +506,16 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
             : <Play className="h-3 w-3 shrink-0 text-emerald-500" />}
           <span className="truncate">{task.label}</span>
           <span className="ml-auto shrink-0 text-[10px] text-[var(--taomni-code-muted)]">{task.source}</span>
+          {task.runConfiguration && (
+            <span
+              data-testid={`run-panel-configuration-source-${task.id}`}
+              data-configuration-source={task.runConfiguration.configurationSource ?? "detected"}
+              className="shrink-0 text-[10px] text-[var(--taomni-code-muted)]"
+              title={`Configuration source: ${configurationSourceLabel(task.runConfiguration.configurationSource)}`}
+            >
+              {configurationSourceLabel(task.runConfiguration.configurationSource)}
+            </span>
+          )}
         </button>
         {task.custom && (
           <button
@@ -405,9 +538,9 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
               const base = task.runConfiguration;
               if (!base) return;
               const copyName = `${task.label} copy`;
-              const id = createNamedRunConfiguration(workspaceInstanceId, base, copyName);
-              const copy = readRunConfigurationOverrides(workspaceInstanceId)[id];
-              setEditingConfigurationId(id);
+              const id = createNamedRunConfiguration(workspaceInstanceId, base, copyName, task.rootId);
+              const copy = readRunConfigurationOverrides(workspaceInstanceId, task.rootId)[id];
+              setEditingConfiguration({ rootId: task.rootId, configurationId: id });
               setConfigurationDraft({
                 name: copy?.name ?? copyName,
                 cwd: copy?.cwd ?? "",
@@ -518,6 +651,20 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(180px,1fr)_minmax(220px,1fr)] divide-x divide-[var(--taomni-code-border)]">
         <div className="min-h-0 overflow-auto p-2">
           {error && <div className="mb-2 text-red-500">{error}</div>}
+          {Object.values(executionDiagnostics).some((items) => items.length > 0) && (
+            <div
+              data-testid="run-panel-execution-diagnostics"
+              role="status"
+              className="mb-2 space-y-1 border-b border-amber-500/30 pb-2 text-amber-600 dark:text-amber-400"
+            >
+              <div className="font-medium">Execution configuration diagnostics</div>
+              {roots.flatMap((root) => (executionDiagnostics[root.id] ?? []).map((diagnostic) => (
+                <div key={`${root.id}:${diagnostic}`} className="whitespace-pre-wrap">
+                  {root.name}: {diagnostic}
+                </div>
+              )))}
+            </div>
+          )}
           {!loading && tasks.length === 0 && runConfigurations.length === 0 && (
             <div className="text-[var(--taomni-code-muted)]">No run configurations or tasks detected</div>
           )}
@@ -549,8 +696,11 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
           })}
         </div>
         <div className="min-h-0 overflow-auto p-2">
-          {editingConfigurationId && (() => {
-            const configuration = runConfigurations.find((item) => item.id === editingConfigurationId);
+          {editingConfiguration && (() => {
+            const configuration = runConfigurations.find((item) => (
+              item.id === editingConfiguration.configurationId
+              && item.rootId === editingConfiguration.rootId
+            ));
             if (!configuration) return null;
             return (
               <div data-testid="run-configuration-editor" className="mb-3 space-y-2 border-b border-[var(--taomni-code-border)] pb-3">
@@ -575,15 +725,22 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                       title="Reset run configuration overrides"
                       className="h-6 w-6 rounded"
                       onClick={() => {
-                        writeRunConfigurationOverride(workspaceInstanceId, configuration.id, null);
+                        const defaults = configuration.runConfigurationDefaults
+                          ?? configuration.runConfiguration;
+                        writeRunConfigurationOverride(
+                          workspaceInstanceId,
+                          configuration.id,
+                          null,
+                          configuration.rootId,
+                        );
                         setConfigurationDraft({
-                          name: configuration.runConfiguration?.label ?? configuration.label,
+                          name: defaults?.label ?? configuration.label,
                           cwd: "",
                           args: "",
-                          vmOptions: "",
+                          vmOptions: defaults?.runtimeOptions?.join("\n") ?? "",
                           env: "",
-                          envFile: "",
-                          preLaunchTargets: configuration.runConfiguration?.preLaunchTargets.join("\n") ?? "",
+                          envFile: defaults?.envFile ?? "",
+                          preLaunchTargets: defaults?.preLaunchTargets.join("\n") ?? "",
                         });
                         void refresh();
                       }}
@@ -598,7 +755,10 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                     title="Save run configuration"
                     className="h-6 w-6 rounded"
                     onClick={() => {
-                      const existing = readRunConfigurationOverrides(workspaceInstanceId)[configuration.id];
+                      const existing = readRunConfigurationOverrides(
+                        workspaceInstanceId,
+                        configuration.rootId,
+                      )[configuration.id];
                       writeRunConfigurationOverride(workspaceInstanceId, configuration.id, {
                         name: configurationDraft.name,
                         baseConfigurationId: existing?.baseConfigurationId ?? "",
@@ -611,7 +771,7 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                           .split(/\r?\n/)
                           .map((value) => value.trim())
                           .filter(Boolean),
-                      });
+                      }, configuration.rootId);
                       void refresh();
                     }}
                   >

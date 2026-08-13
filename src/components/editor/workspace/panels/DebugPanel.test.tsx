@@ -93,6 +93,45 @@ describe("DebugPanel", () => {
     expect(onActiveConfigurationChange).toHaveBeenCalledWith("run:local");
   });
 
+  it("labels shared and local configuration provenance in the chooser", () => {
+    render(
+      <DebugPanel
+        debug={makeSession()}
+        onStart={vi.fn()}
+        onOpenFrame={vi.fn()}
+        configurations={[
+          { id: "shared-run:team", label: "Team", source: "shared" },
+          { id: "run:local", label: "Local", source: "local" },
+        ]}
+        activeConfigurationId="shared-run:team"
+      />,
+    );
+    expect(screen.getByRole("option", { name: "Team [Shared]" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Local [Local]" })).toBeInTheDocument();
+  });
+
+  it("surfaces an unavailable configuration diagnostic without hiding the choice", () => {
+    render(
+      <DebugPanel
+        debug={makeSession()}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        configurations={[{
+          id: "compound-debug",
+          label: "All services",
+          source: "shared",
+          available: false,
+          diagnostic: "Compound Debug requires grouped multi-session DAP support",
+        }]}
+        activeConfigurationId="compound-debug"
+      />,
+    );
+    expect(screen.getByRole("option", { name: /All services \[Shared\] \[Unavailable\]/ })).toBeInTheDocument();
+    expect(screen.getByTestId("debug-configuration-diagnostic")).toHaveTextContent(
+      "Compound Debug requires grouped multi-session DAP support",
+    );
+  });
+
   it("explains the desktop requirement in the browser preview", () => {
     render(
       <DebugPanel

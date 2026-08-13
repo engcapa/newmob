@@ -4831,6 +4831,14 @@ controls:
     selector: '[data-testid^="run-panel-configuration-copy-run:"]'
     kind: interactive
     optional: true       # requires a language fixture with a detected run target
+  - id: run-configuration-source
+    selector: '[data-testid^="run-panel-configuration-source-"]'
+    kind: display
+    optional: true       # rendered for detected Run/Debug configurations
+  - id: execution-diagnostics
+    selector: '[data-testid="run-panel-execution-diagnostics"]'
+    kind: display
+    optional: true       # rendered when provider/shared configuration validation reports errors
   - id: run-configuration-editor
     selector: '[data-testid="run-configuration-editor"]'
     kind: display
@@ -4908,6 +4916,10 @@ controls:
     selector: '[data-testid="debug-active-configuration"]'
     kind: interactive
     optional: true       # rendered when the active source has a Run/Debug configuration
+  - id: debug-configuration-diagnostic
+    selector: '[data-testid="debug-configuration-diagnostic"]'
+    kind: display
+    optional: true       # rendered when the selected configuration cannot be debugged
   - id: tools-dialog
     selector: '[data-testid="workspace-build-run-tools-dialog"]'
     kind: display
@@ -5001,7 +5013,7 @@ controls:
 - Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
 - 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
 - Analysis/Problems 面板呈现 provider capability、CodeActionKind、semantic token、诊断元数据、related locations 与可持久化 inspection 展示规则；这些能力依赖 language server，不等同于 IDEA PSI、原生 inspection 或 data-flow 引擎。
-- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；compound/shared configuration、coverage、结构化测试结果、PSI/index 和原生 data-flow 仍未完成。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration 与嵌套 compound Run 已形成代码闭环，compound Debug 仍因 grouped multi-session DAP 不可用而明确禁用；coverage、结构化测试结果、PSI/index 和原生 data-flow 仍未完成。
 
 ---
 

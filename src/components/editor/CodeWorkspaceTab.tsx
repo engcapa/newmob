@@ -7197,20 +7197,39 @@ export function CodeWorkspaceTab({
     const absolute = absolutePathForOpenFile(activeFile);
     if (!absolute) return [];
     const normalized = normalizeFsPath(absolute);
+    const activeRootId = activeFile.ref.kind === "root" ? activeFile.ref.rootId : null;
+    const activeRoot = activeRootId ? roots.find((root) => root.id === activeRootId) : undefined;
+    if (!activeRoot) return [];
+    const normalizedRoot = normalizeFsPath(activeRoot.path);
+    const projectRoots = new Map(
+      activeExecutionModel.projects.map((project) => [project.id, normalizeFsPath(project.root)]),
+    );
     const configurations = javaFallbackConfiguration
       ? [
           ...activeExecutionModel.runConfigurations.filter((configuration) => (
-            !configuration.sourceFile
+            configuration.configurationSource === "shared"
+            || !configuration.sourceFile
             || normalizeFsPath(configuration.sourceFile) !== normalizeFsPath(javaFallbackConfiguration.sourceFile ?? "")
           )),
           javaFallbackConfiguration,
         ]
       : activeExecutionModel.runConfigurations;
-    const matches = configurations.filter((configuration) =>
-      configuration.sourceFile && normalizeFsPath(configuration.sourceFile) === normalized,
+    const matches = configurations.filter((configuration) => {
+      const sourceFile = configuration.sourceFile && normalizeFsPath(configuration.sourceFile);
+      if (sourceFile) return sourceFile === normalized && sourceFile.startsWith(`${normalizedRoot}/`);
+      const projectRoot = projectRoots.get(configuration.projectId);
+      // A project-level configuration belongs to the active file only when its
+      // project is rooted below the active workspace root. This keeps multiple
+      // workspace roots and nested Maven/Gradle modules isolated.
+      return !!projectRoot
+        && (projectRoot === normalizedRoot || projectRoot.startsWith(`${normalizedRoot}/`))
+        && (normalized === projectRoot || normalized.startsWith(`${projectRoot}/`));
+    });
+    return materializeRunConfigurations(
+      matches,
+      readRunConfigurationOverrides(workspaceInstanceId, activeRoot.id),
     );
-    return materializeRunConfigurations(matches, readRunConfigurationOverrides(workspaceInstanceId));
-  }, [absolutePathForOpenFile, activeExecutionModel, activeFile, javaFallbackConfiguration, runConfigurationRevision, workspaceInstanceId]);
+  }, [absolutePathForOpenFile, activeExecutionModel, activeFile, javaFallbackConfiguration, roots, runConfigurationRevision, workspaceInstanceId]);
 
   const activeRunConfiguration = useMemo<ExecutionRunConfiguration | null>(() => {
     const candidates = activeRunConfigurations.filter((configuration) => configuration.kind !== "module");
@@ -7226,18 +7245,25 @@ export function CodeWorkspaceTab({
     if (!id || !activeExecutionModel) return null;
     const detected = activeExecutionModel.debugConfigurations.find((configuration) => configuration.id === id) ?? null;
     if (!detected) return null;
-    const override = readRunConfigurationOverrides(workspaceInstanceId)[activeRunConfiguration.id];
-    return applyRunOverrideToDebugConfiguration(detected, override);
-  }, [activeExecutionModel, activeRunConfiguration, runConfigurationRevision, workspaceInstanceId]);
+    const rootId = activeFile?.ref.kind === "root" ? activeFile.ref.rootId : undefined;
+    const override = readRunConfigurationOverrides(workspaceInstanceId, rootId)[activeRunConfiguration.id];
+    return applyRunOverrideToDebugConfiguration(
+      detected,
+      override,
+      activeRunConfiguration.runtimeOptions,
+      activeRunConfiguration.envFile,
+    );
+  }, [activeExecutionModel, activeFile, activeRunConfiguration, runConfigurationRevision, workspaceInstanceId]);
 
   const activeRunConfigurationOverride = useMemo(() => {
     if (!activeRunConfiguration) return undefined;
-    const overrides = readRunConfigurationOverrides(workspaceInstanceId);
+    const rootId = activeFile?.ref.kind === "root" ? activeFile.ref.rootId : undefined;
+    const overrides = readRunConfigurationOverrides(workspaceInstanceId, rootId);
     return overrides[activeRunConfiguration.id]
       ?? (activeRunConfiguration.baseConfigurationId
         ? overrides[activeRunConfiguration.baseConfigurationId]
         : undefined);
-  }, [activeRunConfiguration, runConfigurationRevision, workspaceInstanceId]);
+  }, [activeFile, activeRunConfiguration, runConfigurationRevision, workspaceInstanceId]);
 
   const launchWorkspaceTask = useCallback((task: WorkspaceTaskItem, onExit?: (exitCode: number) => void) => {
     if (runPanelRef.current) {
@@ -7258,29 +7284,35 @@ export function CodeWorkspaceTab({
     configuration: ExecutionRunConfiguration,
     root: CodeWorkspaceRootInfo,
     source: string,
-  ): WorkspaceTaskItem => ({
-    id: configuration.id,
-    label: configuration.label,
-    command: configuration.command.display,
-    cwd: configuration.command.cwd,
-    source,
-    rootId: root.id,
-    rootName: root.name,
-    configuration: true,
-    runConfiguration: configuration,
-    execution: {
-      executable: configuration.command.executable,
-      args: configuration.command.args,
-      source: configuration.command.source,
-      error: configuration.command.error,
-    },
-    environment: Object.fromEntries(Object.entries(configuration.command.env).map(([name, value]) => [
-      name,
-      { value, mode: configuration.environmentModes?.[name] ?? "replace" },
-    ])),
-    dependsOn: configuration.preLaunchTargets,
-    buildTargets: activeExecutionModel?.buildTargets,
-  }), [activeExecutionModel]);
+  ): WorkspaceTaskItem => {
+    const overrides = readRunConfigurationOverrides(workspaceInstanceId, root.id);
+    return {
+      id: configuration.id,
+      label: configuration.label,
+      command: configuration.command.display,
+      cwd: configuration.command.cwd,
+      source,
+      rootId: root.id,
+      rootName: root.name,
+      configuration: true,
+      runConfiguration: configuration,
+      execution: {
+        executable: configuration.command.executable,
+        args: configuration.command.args,
+        source: configuration.command.source,
+        error: configuration.command.error,
+      },
+      environment: Object.fromEntries(Object.entries(configuration.command.env).map(([name, value]) => [
+        name,
+        { value, mode: configuration.environmentModes?.[name] ?? "replace" },
+      ])),
+      dependsOn: configuration.preLaunchTargets,
+      buildTargets: activeExecutionModel?.buildTargets,
+      configurationCatalog: activeExecutionModel
+        ? materializeRunConfigurations(activeExecutionModel.runConfigurations, overrides)
+        : undefined,
+    };
+  }, [activeExecutionModel, runConfigurationRevision, workspaceInstanceId]);
 
   const executeBeforeLaunch = useCallback(async (
     targetIds: readonly string[],
@@ -7342,7 +7374,7 @@ export function CodeWorkspaceTab({
         const detected = javaRunTargetToExecutionRunConfiguration(
           await workspaceJavaRunTarget(root.path, file.ref.path, toolConfigRef.current),
         );
-        const override = readRunConfigurationOverrides(workspaceInstanceId)[detected.id];
+        const override = readRunConfigurationOverrides(workspaceInstanceId, root.id)[detected.id];
         const configuration = applyRunConfigurationOverride(detected, override);
         const task = taskForRunConfiguration(configuration, root, "Java · compatibility");
         await runTaskAndWait(task);
@@ -7369,6 +7401,13 @@ export function CodeWorkspaceTab({
   ]);
 
   const runActiveTarget = useCallback(() => {
+    if (activeRunConfiguration?.kind === "debug-only" || activeRunConfiguration?.command.error) {
+      setStatusMessage(
+        activeRunConfiguration.command.error
+          ?? `${activeRunConfiguration.label} cannot be started with Run`,
+      );
+      return;
+    }
     if (activeFileIsJava && !activeRunConfiguration) {
       runActiveJavaFile();
       return;
@@ -7787,6 +7826,7 @@ export function CodeWorkspaceTab({
     launch: Record<string, unknown>;
     override?: ReturnType<typeof readRunConfigurationOverrides>[string];
     environment: Record<string, string>;
+    runtimeOptions: string[];
   } | null>(null);
 
   /** Start a Java debug session, optionally pinned to an explicit main class. */
@@ -7796,11 +7836,12 @@ export function CodeWorkspaceTab({
       main?: JavaMainClassOption,
       override = activeRunConfigurationOverride,
       environment: Record<string, string> = {},
+      runtimeOptions: readonly string[] = activeRunConfiguration?.runtimeOptions ?? [],
     ) => {
       const config = main
         ? { ...launch, mainClass: main.mainClass, projectName: main.projectName }
         : launch;
-      const configured = applyRunOverrideToJavaLaunch(config, override, environment);
+      const configured = applyRunOverrideToJavaLaunch(config, override, environment, runtimeOptions);
       if (main) {
         // Resolving the classpath + asking java-debug for a port is another
         // multi-second server round trip: name the target so the panel is not
@@ -7809,7 +7850,7 @@ export function CodeWorkspaceTab({
       }
       void debug.startDebug(configured).catch((err) => setStatusMessage(errorMessage(err)));
     },
-    [activeRunConfigurationOverride, debug, setStatusMessage],
+    [activeRunConfiguration, activeRunConfigurationOverride, debug, setStatusMessage],
   );
 
   /** Build a Java launch config for the active file and start debugging. */
@@ -7896,6 +7937,7 @@ export function CodeWorkspaceTab({
           launch,
           override: activeRunConfigurationOverride,
           environment: dotenv,
+          runtimeOptions: [...(activeRunConfiguration?.runtimeOptions ?? [])],
         });
         return;
       }
@@ -7911,7 +7953,13 @@ export function CodeWorkspaceTab({
         debug.reportStartupFailure(message);
         return;
       }
-      launchJavaDebug(launch, resolution.main, activeRunConfigurationOverride, dotenv);
+      launchJavaDebug(
+        launch,
+        resolution.main,
+        activeRunConfigurationOverride,
+        dotenv,
+        activeRunConfiguration?.runtimeOptions,
+      );
     })();
   }, [
     activeExecutionModel,
@@ -7934,8 +7982,19 @@ export function CodeWorkspaceTab({
   ]);
 
   const startDebugActiveTarget = useCallback(() => {
-    if (activeFileIsJava) {
+    // A Java source without a selected structured debug configuration uses the
+    // compatibility jdtls launch path. Once a configuration supplies a debug
+    // entry, honor its availability first so compound/debug-only entries cannot
+    // silently fall through to the compatibility launcher.
+    const canUseJavaCompatibilityDebug = activeFileIsJava
+      && !activeRunConfiguration?.debugConfigurationId
+      && activeRunConfiguration?.kind !== "debug-only";
+    if (canUseJavaCompatibilityDebug && !activeDebugConfiguration) {
       startDebugActiveFile();
+      return;
+    }
+    if (activeFileIsJava && !activeDebugConfiguration) {
+      setStatusMessage("No available debug configuration is associated with the selected Run configuration");
       return;
     }
     const configuration = activeDebugConfiguration;
@@ -8105,9 +8164,15 @@ export function CodeWorkspaceTab({
   // uses the PTY and stays available, so it is deliberately not gated here.
   const debugRuntimeAvailable = isTauriRuntime();
   const activeFileJavaRoot = !!activeFileIsJava && !!activeFile && activeFile.ref.kind === "root";
-  const activeFileRunnable = activeFileJavaRoot || !!activeRunConfiguration;
+  const activeFileRunnable = activeRunConfiguration
+    ? activeRunConfiguration.kind !== "debug-only" && !activeRunConfiguration.command.error
+    : activeFileJavaRoot && activeExecutionModel !== null;
   const activeFileDebuggable = debugRuntimeAvailable && (
-    activeFileJavaRoot || activeDebugConfiguration?.available === true
+    activeDebugConfiguration
+      ? activeDebugConfiguration.available === true
+      : activeFileJavaRoot
+        && !activeRunConfiguration?.debugConfigurationId
+        && activeRunConfiguration?.kind !== "debug-only"
   );
 
   useEffect(() => {
@@ -8980,7 +9045,43 @@ export function CodeWorkspaceTab({
                 runtimeAvailable={debugRuntimeAvailable}
                 configurations={activeRunConfigurations
                   .filter((configuration) => configuration.kind !== "module")
-                  .map((configuration) => ({ id: configuration.id, label: configuration.label }))}
+                  .map((configuration) => {
+                    const detectedDebug = configuration.debugConfigurationId
+                      ? activeExecutionModel?.debugConfigurations.find((candidate) => (
+                        candidate.id === configuration.debugConfigurationId
+                      ))
+                      : undefined;
+                    const rootId = activeFile?.ref.kind === "root" ? activeFile.ref.rootId : undefined;
+                    const override = readRunConfigurationOverrides(workspaceInstanceId, rootId)[configuration.id];
+                    const debugConfiguration = detectedDebug
+                      ? applyRunOverrideToDebugConfiguration(
+                          detectedDebug,
+                          override,
+                          configuration.runtimeOptions,
+                          configuration.envFile,
+                        )
+                      : undefined;
+                    const canUseJavaCompatibilityDebug = activeFileJavaRoot
+                      && !configuration.debugConfigurationId
+                      && configuration.kind !== "debug-only";
+                    const available = debugRuntimeAvailable
+                      && (debugConfiguration
+                        ? debugConfiguration.available === true
+                        : canUseJavaCompatibilityDebug);
+                    const diagnostic = !debugRuntimeAvailable
+                      ? "Debugging is available in the desktop app only"
+                      : debugConfiguration?.diagnostic
+                        ?? (!debugConfiguration && canUseJavaCompatibilityDebug
+                          ? undefined
+                          : "No available debug configuration is associated with this run target");
+                    return {
+                      id: configuration.id,
+                      label: configuration.label,
+                      source: configuration.configurationSource,
+                      available,
+                      diagnostic: available ? undefined : diagnostic,
+                    };
+                  })}
                 activeConfigurationId={activeRunConfiguration?.id ?? null}
                 onActiveConfigurationChange={(configurationId) => {
                   if (!activeFile) return;
@@ -9144,7 +9245,13 @@ export function CodeWorkspaceTab({
         onPick={(main) => {
           const pending = javaMainCandidates;
           setJavaMainCandidates(null);
-          if (pending) launchJavaDebug(pending.launch, main, pending.override, pending.environment);
+          if (pending) launchJavaDebug(
+            pending.launch,
+            main,
+            pending.override,
+            pending.environment,
+            pending.runtimeOptions,
+          );
         }}
       />
     </div>

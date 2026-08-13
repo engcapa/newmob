@@ -29,7 +29,7 @@
 2. 完整 project/module/source-set/facet/language-level 模型及 Maven/Gradle 等价导入生命周期。
 3. LSP 客户端剩余协议面：更完整的配置模型与跨请求取消边界；diagnostic partial result/即时 refresh 已形成代码闭环，`workspace/didChangeWatchedFiles` 与 watcher 仍需三端原生验收。
 4. IDEA 级 dirty 冲突/合并与 crash/restart 恢复中心已形成基础代码闭环（含有界行级三方合并）；跨文件 WorkspaceEdit 已支持有界事务级 undo/redo，语义/token 级合并、目录/symlink/特殊文件历史、网络盘、UNC、大小写-only rename 等文件系统边界仍未完成严格验收。
-5. Run/Debug 已共享命名配置、参数、环境、dotenv、工作目录与 Before launch；仍缺 compound configuration、仓库共享配置文件、coverage、结构化测试结果和完整多语言调试适配矩阵。
+5. Run/Debug 已共享命名配置、参数、环境、dotenv、工作目录与 Before launch，并支持仓库级 `.taomni/run-configurations.json`（v1 迁移、v2 schema、模板、平台覆盖、provider 引用、诊断、debug-only 选择和嵌套 compound Run）。compound Debug 会明确显示 grouped multi-session DAP 尚不可用；coverage、结构化测试结果和完整多语言调试适配矩阵仍缺。
 6. keymap 编辑器、设置 schema/迁移、无障碍与动作可发现性完整闭环。插件生态/第三方扩展点按用户范围明确为 non-goal，不计入持平门禁。
 7. Linux/macOS/Windows 原生工程和发行包验收证据。详细清单以 §2.5–§2.7 为准。
 
@@ -86,7 +86,7 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 | P0 | Inspection / data-flow | provider diagnostic tags/related information/code description/data；按 provider source+code 持久化启停和展示 severity；Analysis 面板展示 capability、semantic token 和 related locations | 这是 provider-backed 展示层，不是 IDEA inspection engine；无统一规则执行、suppression/baseline、跨过程 data-flow、nullability 推断、污点分析和路径证明 | 核心差距 |
 | P0 | 工程模型与 Build | 多根、SDK 探测、Java module/任务/依赖树；Build/Rebuild 多项目目标去重、依赖拓扑、缺失/循环/工具错误预检、失败即停 | 无统一 project/module/source-set/facet/language-level 模型；Maven/Gradle 增量导入、冲突模型、active profile/source set 和离线状态不等价 | 核心差距 |
 | P1 | 导航与编辑器 UX | Search Everywhere、Recent Files、历史、分屏、tab、面包屑、Outline | action 搜索排序/上下文、preview/固定语义边界、导航落点恢复、拖拽停靠、keymap 编辑器、无障碍完整验收尚缺 | 未完成 |
-| P1 | Run/Test/Debug | 结构化 provider 配置；命名副本；program/VM arguments、cwd、env、dotenv、Before launch；按源文件保存 Run/Debug 共享选择；通用 DAP、Java 调试和测试发现基础 | 无 compound configuration、仓库可共享配置文件/模板、coverage、结构化测试结果协议、完整 hot swap、失败重跑和 Java/JS/Python/Go/Rust/C++ adapter 矩阵 | 代码闭环，未严格完成 |
+| P1 | Run/Test/Debug | 结构化 provider 配置；命名副本；program/VM arguments、cwd、env、dotenv、Before launch；按源文件保存 Run/Debug 共享选择；仓库共享配置文件/模板/平台覆盖；嵌套 compound Run；通用 DAP、Java 调试和测试发现基础 | compound Debug 仍缺 grouped multi-session DAP；另缺 coverage、结构化测试结果协议、完整 hot swap、失败重跑和 Java/JS/Python/Go/Rust/C++ adapter 矩阵 | 代码闭环，未严格完成 |
 | P1 | 动作与设置 | LSP 自定义命令、部分语言设置及命令上下文 | 无完整 keymap 编辑、设置 schema/迁移、动作上下文说明和无障碍验收；插件扩展明确不在本次目标 | 核心差距 |
 | P1 | 可靠性与可观测 | 请求超时、标准错误、work-done progress/取消、部分结果摘要、部分本地历史；崩溃/重启恢复快照与恢复中心；跨文件事务 undo/redo 失败保留历史 | 协议 trace 脱敏、批量重构恢复、目录/symlink 事务、性能基准门禁和三端发行包验收未闭环 | 未完成 |
 
@@ -479,7 +479,7 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 - 底部 Run tab：任务列表（按根分组）+ 运行历史；点击任务 → 集成终端新实例以 PTY 运行（保留颜色与交互），Run tab 显示状态（运行中 / 退出码）。
 - `Ctrl+F5` 重跑上一个任务；自定义任务（命令 + cwd，持久化到工作区状态）。
 - 普通 Java Run 复用工作区 PTY 与 SDK 环境（`JAVA_HOME`/`PATH` 由后端 workspace SDK resolution 注入），具有交互 stdin、彩色输出和真实退出码；它与 Debug 解耦，未安装 java-debug bundle 也可执行。
-- 当前代码闭环：Run 配置编辑器支持命名副本、program arguments、VM/runtime options、working directory、显式 env、dotenv 文件、Before launch 依赖选择和按源文件持久化；Run 与 Debug 共享同一配置选择。仍缺 compound/shared configuration、coverage、结构化测试结果和完整 provider/adapter 矩阵；自定义命令继续作为特殊启动需求的兜底。
+- 当前代码闭环：Run 配置编辑器支持命名副本、program arguments、VM/runtime options、working directory、显式 env、dotenv 文件、Before launch 依赖选择和按源文件持久化；Run 与 Debug 共享同一配置选择。仓库共享配置位于 `.taomni/run-configurations.json`，schema 见 [`claudedocs/run-configurations.schema.json`](run-configurations.schema.json)，支持 v1 `runs` 迁移、v2 `configurations`、templates、Linux/macOS/Windows overrides、provider/project 可移植引用、原子诊断、debug-only 条目和嵌套 compound Run（顺序/并行/失败策略）。compound Debug 会保留不可用条目及诊断，避免误启动单 DAP sentinel。仍缺 coverage、结构化测试结果和完整 provider/adapter 矩阵；自定义命令继续作为特殊启动需求的兜底。
 
 ### 5.10 文件树交互完善（P0 部分 + P1 部分）
 
@@ -670,7 +670,7 @@ src/stores/
 | **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | ✅ 代码已交付：Bundle 基建（`4929467`）+ D1 DAP 内核（`b432f0f`）+ D2 Java 适配器（`9edb7b7`）+ E 测试探测/terminal 运行（`daa20fd`）；真机冒烟后置（jdtls 已在 PATH，bundle jar 待配置） |
 | **M9 调试主线 + 收口（P1/P2，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载；debug-test；真机冒烟回填 | XL | ✅ 代码已交付：D3 断点/单步/调用栈/当前行 + D4 变量/监视/console（`b141bad`）+ D5 条件/logpoint/异常断点/热重载 + debug-test；结构化测试结果树（JUnit socket 协议）显式后置；真机冒烟由用户统一验证 |
 | **M10 Java Build/Run 闭环（P0，§11.G）** | 主类发现与普通运行、Maven/Gradle/单文件启动、多模块 task model、Build/Rebuild、wrapper 跨平台与测试运行修复 | M | ✅ 代码已交付：普通 Run 不依赖 java-debug；顶部 `Ctrl+F9` / `Shift+F10`、Run 主类列表、Build/Rebuild、多模块任务与聚焦 Rust/Vitest 覆盖；真实 Maven/Gradle/JDK 工程冒烟待回填 |
-| **M11 执行配置与分析收口（P0/P1）** | Build 依赖拓扑执行；Run/Debug 共享命名配置、参数/env/dotenv/Before launch；provider-backed refactor/inspection/Analysis；诊断元数据与 code-action kind 透传 | M | 🔶 代码闭环：浏览器/单测和 QA 控件已覆盖；compound/shared config、coverage、结构化测试结果、PSI/native data-flow 与三端真机仍待完成 |
+| **M11 执行配置与分析收口（P0/P1）** | Build 依赖拓扑执行；Run/Debug 共享命名配置、参数/env/dotenv/Before launch；仓库共享配置/模板/平台覆盖；嵌套 compound Run；provider-backed refactor/inspection/Analysis；诊断元数据与 code-action kind 透传 | M | 🔶 代码闭环：浏览器/单测和 QA 控件已覆盖；compound Debug、coverage、结构化测试结果、PSI/native data-flow 与三端真机仍待完成 |
 
 依赖关系：M0 是一切前提；M1/M2 内部可并行（后端 LSP 扩展与搜索模块独立）；M3 依赖 M0 的 dock 容器；M4 的层级面板依赖 M0 dock + M2 的 LSP 请求管道。**M6 两条线（A/B）互相独立可并行，且不依赖 M1–M5 之外的新前提；M7 的全项目诊断（C）依赖 M6-A 的 `autobuild`，构建增强（F）独立；M8 的测试/调试依赖 Bundle 基建，DAP 内核（D1）可与 M7 并行起步；M9 的 debug-test 依赖 M8 的 D1–D2；M10 普通 Run 只依赖 M3 PTY + workspace SDK，不依赖 DAP/bundle。** 每个里程碑独立可发布、可验收。M6–M11 的完整拆分见 §11。
 
@@ -790,10 +790,10 @@ src/stores/
    M0–M5 已由 PR #361 合入 `main`；后续收口分支待独立合并，真机冒烟结果可在后续独立补录。
 
 6. **🔶 Java 深度支持（M6–M9，§11 新增）**
-   突破原 §2.3 非目标，深化 Java 工程能力。**M6–M11 代码已交付**（jdtls 设置/大文件、全项目诊断基础设施、构建集成、Bundle、DAP、测试发现、Java Build/Run，以及执行配置与 provider-backed 分析闭环）；真机冒烟仍后置。compound/shared configuration、coverage、结构化测试结果、PSI/native data-flow 和完整多语言 adapter matrix 仍是后续差距。完整方案、命令清单与风险见 §11。
+   突破原 §2.3 非目标，深化 Java 工程能力。**M6–M11 代码已交付**（jdtls 设置/大文件、全项目诊断基础设施、构建集成、Bundle、DAP、测试发现、Java Build/Run，以及执行配置与 provider-backed 分析闭环）；仓库共享 Run/Debug 配置已补齐 schema、迁移、模板、平台覆盖、compound Run 和前端来源/诊断展示。compound Debug 仍等待 grouped multi-session DAP；真机冒烟仍后置。coverage、结构化测试结果、PSI/native data-flow 和完整多语言 adapter matrix 仍是后续差距。完整方案、命令清单与风险见 §11。
 
 7. **🔶 M11 执行配置与分析收口（本轮）**
-   Build/Run/Debug 现在统一通过结构化 execution model 传递 executable/argv/cwd/env/source/error；Build 先解析依赖拓扑并在首个失败处停止；Run 配置支持持久化命名副本、参数、VM/runtime options、工作目录、env、dotenv 和 Before launch；Debug 复用同一 active configuration。重构入口按 provider 声明的 `CodeActionKind` 请求 extract/inline/change signature/move；inspection profile 只改变显示 severity/启停，Code Action 回调保留 provider 原始诊断。`Analysis` 面板展示 LSP capability、semantic token 计数和 related locations，不能冒充 PSI 或原生 data-flow。下一步应优先实现可共享/compound 配置、coverage 与结构化测试结果协议，再决定是否引入 PSI/index 服务。
+   Build/Run/Debug 现在统一通过结构化 execution model 传递 executable/argv/cwd/env/source/error；Build 先解析依赖拓扑并在首个失败处停止；Run 配置支持持久化命名副本、仓库共享配置/模板/平台覆盖、嵌套 compound Run、参数、VM/runtime options、工作目录、env、dotenv 和 Before launch；Debug 复用同一 active configuration，并对不可用 compound Debug 保留明确诊断。重构入口按 provider 声明的 `CodeActionKind` 请求 extract/inline/change signature/move；inspection profile 只改变显示 severity/启停，Code Action 回调保留 provider 原始诊断。`Analysis` 面板展示 LSP capability、semantic token 计数和 related locations，不能冒充 PSI 或原生 data-flow。后续优先实现 grouped multi-session DAP、coverage、结构化测试结果协议，再评估 PSI/index 服务。
 
 ---
 
@@ -926,7 +926,7 @@ jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩
 - **项目重载**：pom.xml/build.gradle 变更 → `java/projectConfigurationUpdate`（Download Sources 路径已部分具备），补「检测到构建文件变化 → 提示重载」。
 - **模块/源集视图**：多模块工程 module 结构（jdtls `java.project.getAll`）。
 
-**本阶段未完成**：IDEA 级 facet/source-set/language-level 建模仍是工程模型 Gap；复杂运行配置参数体系已由 M11 形成基础代码闭环，剩余 compound/shared configuration、active profiles 与 coverage 继续按 §2.5 验收。
+**本阶段未完成**：IDEA 级 facet/source-set/language-level 建模仍是工程模型 Gap；复杂运行配置参数、仓库共享配置和 compound Run 已由 M11 形成基础代码闭环，剩余 compound Debug、active profiles 与 coverage 继续按 §2.5 验收。
 
 **✅ 已交付（M7-F，`ba037ac` + `a0d209c` + `f9abab5` + 模块视图提交）**：
 - **项目重载（F-3，`ba037ac`）**：`lsp_reload_project` 走 active jdtls session 发 `java/projectConfigurationUpdate`（复用 download_sources 管道）；前端保存 pom.xml/build.gradle[.kts]/settings.gradle[.kts] 且 jdtls 活跃时弹「Reload Java project」确认。
@@ -989,7 +989,7 @@ Gradle init script 只写入系统临时目录 `taomni-code-workspace/java-run.i
 #### 11.G.3 当前边界与后续
 
 - M11 已引入独立于展示命令的结构化 `ExecutionRunConfiguration`/`ExecutionDebugConfiguration`：program args、VM/runtime options、env map、dotenv、working directory、Before launch、配置命名与按源文件 active selection 均形成代码闭环，Run/Debug 共享选择；不再从 `WorkspaceTask.command` 反解析生产 argv。
-- 仍未达到 IDEA 完整 Run Configuration：缺 compound configuration、仓库级共享配置/模板、active Maven/Gradle profiles/source set/module selection、coverage 和配置迁移/校验 schema。
+- 仍未达到 IDEA 完整 Run Configuration：compound Run 已支持嵌套、顺序/并行和失败策略；仍缺 grouped compound Debug、active Maven/Gradle profiles/source set/module selection 与 coverage；仓库级共享配置/模板、平台覆盖、配置迁移和校验 schema 已形成代码闭环，但仍需三端发行包验收。
 - Maven 首次运行 exec plugin、Gradle首次解析依赖仍可能访问网络；离线行为由构建工具自身配置决定。
 - Android Gradle、JPMS module-path、定制 Gradle `projectDir` 映射、非文件名顶层 main class 属高级 project model；发现失败时明确报错并保留自定义 task 兜底。
 - Debug 仍走 DAP + java-debug bundle，以保留断点/变量能力；Run 与 Debug 的依赖边界刻意不同。

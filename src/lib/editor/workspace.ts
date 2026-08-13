@@ -179,6 +179,14 @@ export interface ExecutionRunConfiguration {
   argumentStrategy?: "append" | "maven-exec" | "gradle-javaexec";
   /** Preserve append semantics for inherited task-scoped environment values. */
   environmentModes?: Record<string, "append" | "replace">;
+  /** Provider-discovered, repository-shared, or local configuration origin. */
+  configurationSource?: "provider" | "shared" | "local";
+  /** Child configuration ids for an IntelliJ-style compound launch. */
+  compoundConfigurationIds?: string[];
+  /** Run child configurations concurrently when true. */
+  compoundParallel?: boolean;
+  /** Stop launching subsequent children after the first failure. */
+  compoundStopOnFailure?: boolean;
 }
 
 export interface ExecutionDebugConfiguration {
@@ -194,6 +202,12 @@ export interface ExecutionDebugConfiguration {
   launchConfig: Record<string, unknown>;
   /** Optional dotenv file inherited from the associated run configuration. */
   envFile?: string;
+  /** Provider-discovered, repository-shared, or local configuration origin. */
+  configurationSource?: "provider" | "shared" | "local";
+  /** Child debug configuration ids for a compound debug chooser entry. */
+  compoundConfigurationIds?: string[];
+  compoundParallel?: boolean;
+  compoundStopOnFailure?: boolean;
 }
 
 export interface WorkspaceExecutionModel {
@@ -202,6 +216,8 @@ export interface WorkspaceExecutionModel {
   runConfigurations: ExecutionRunConfiguration[];
   debugConfigurations: ExecutionDebugConfiguration[];
   tools: ExecutionToolProbe[];
+  /** Non-fatal provider or repository-shared configuration validation errors. */
+  diagnostics?: string[];
 }
 
 export function workspaceListDir(

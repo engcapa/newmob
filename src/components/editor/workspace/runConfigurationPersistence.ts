@@ -54,6 +54,7 @@ export function javaRunTargetToExecutionRunConfiguration(
         ? "gradle-javaexec"
         : "append",
     environmentModes: Object.fromEntries(Object.entries(target.environment ?? {}).map(([name, value]) => [name, value.mode])),
+    configurationSource: "provider",
   };
 }
 
@@ -110,11 +111,16 @@ export function splitCompatibilityCommand(value: string): string[] {
 }
 
 const KEY_PREFIX = "taomni.codeWorkspace.runConfigurations.v1";
+const SCOPED_KEY_PREFIX = "taomni.codeWorkspace.runConfigurations.v2";
 const ACTIVE_CONFIGURATION_KEY_PREFIX = "taomni.codeWorkspace.activeRunConfiguration.v1";
 export const RUN_CONFIGURATION_CHANGED_EVENT = "taomni:run-configuration-changed";
 
 function storageKey(workspaceInstanceId: string): string {
   return `${KEY_PREFIX}.${workspaceInstanceId}`;
+}
+
+function scopedStorageKey(workspaceInstanceId: string, scopeId: string): string {
+  return `${SCOPED_KEY_PREFIX}.${workspaceInstanceId}.${encodeURIComponent(scopeId)}`;
 }
 
 function activeConfigurationStorageKey(workspaceInstanceId: string): string {
@@ -188,7 +194,7 @@ function normalizeOverride(value: unknown): RunConfigurationOverride | null {
     : [];
   const vmOptions = Array.isArray(candidate.vmOptions)
     ? candidate.vmOptions.filter((item): item is string => typeof item === "string")
-    : [];
+    : undefined;
   const cwd = typeof candidate.cwd === "string" ? candidate.cwd.trim() : "";
   const env: Record<string, string> = {};
   if (candidate.env && typeof candidate.env === "object" && !Array.isArray(candidate.env)) {
@@ -210,14 +216,21 @@ function normalizeOverride(value: unknown): RunConfigurationOverride | null {
     vmOptions,
     cwd,
     env,
-    envFile: typeof candidate.envFile === "string" ? candidate.envFile.trim() : "",
+    envFile: typeof candidate.envFile === "string" ? candidate.envFile.trim() : undefined,
     preLaunchTargets,
   };
 }
 
-export function readRunConfigurationOverrides(workspaceInstanceId: string): RunConfigurationOverrides {
+export function readRunConfigurationOverrides(
+  workspaceInstanceId: string,
+  scopeId?: string,
+): RunConfigurationOverrides {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(storageKey(workspaceInstanceId)) ?? "{}");
+    const scopedKey = scopeId?.trim()
+      ? scopedStorageKey(workspaceInstanceId, scopeId.trim())
+      : null;
+    const scoped = scopedKey ? window.localStorage.getItem(scopedKey) : null;
+    const parsed = JSON.parse(scoped ?? window.localStorage.getItem(storageKey(workspaceInstanceId)) ?? "{}");
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const result: RunConfigurationOverrides = {};
     for (const [id, value] of Object.entries(parsed)) {
@@ -234,22 +247,24 @@ export function writeRunConfigurationOverride(
   workspaceInstanceId: string,
   configurationId: string,
   value: RunConfigurationOverride | null,
+  scopeId?: string,
 ): RunConfigurationOverrides {
-  const current = readRunConfigurationOverrides(workspaceInstanceId);
+  const current = readRunConfigurationOverrides(workspaceInstanceId, scopeId);
   if (value) current[configurationId] = normalizeOverride(value) ?? {
     name: "",
     baseConfigurationId: "",
     args: [],
-    vmOptions: [],
     cwd: "",
     env: {},
-    envFile: "",
     preLaunchTargets: null,
   };
   else delete current[configurationId];
-  window.localStorage.setItem(storageKey(workspaceInstanceId), JSON.stringify(current));
+  const key = scopeId?.trim()
+    ? scopedStorageKey(workspaceInstanceId, scopeId.trim())
+    : storageKey(workspaceInstanceId);
+  window.localStorage.setItem(key, JSON.stringify(current));
   window.dispatchEvent(new CustomEvent(RUN_CONFIGURATION_CHANGED_EVENT, {
-    detail: { workspaceInstanceId, configurationId },
+    detail: { workspaceInstanceId, configurationId, scopeId },
   }));
   return current;
 }
@@ -263,6 +278,22 @@ function appendOption(existing: string | undefined, options: readonly string[]):
   return [existing?.trim(), ...options.map((option) => option.trim())]
     .filter((value): value is string => !!value)
     .join(" ");
+}
+
+function appendRuntimeOptions(existing: unknown, options: readonly string[]): string | string[] | undefined {
+  if (options.length === 0) {
+    return typeof existing === "string" || Array.isArray(existing)
+      ? existing as string | string[]
+      : undefined;
+  }
+  if (typeof existing === "string") return appendOption(existing, options);
+  if (Array.isArray(existing)) {
+    return [
+      ...existing.filter((item): item is string => typeof item === "string"),
+      ...options,
+    ];
+  }
+  return [...options];
 }
 
 function runtimeCommand(
@@ -314,9 +345,19 @@ export function applyRunConfigurationOverride(
   configuration: ExecutionRunConfiguration,
   override: RunConfigurationOverride | undefined,
 ): ExecutionRunConfiguration {
-  if (!override) return configuration;
-  const runtimeOptions = override.vmOptions ?? [];
+  const runtimeOptions = override?.vmOptions ?? configuration.runtimeOptions ?? [];
   const runtimeApplied = runtimeCommand(configuration, runtimeOptions);
+  if (!override) {
+    if (runtimeOptions.length === 0) return configuration;
+    const executableName = runtimeApplied.executable.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+    const environmentModes = { ...configuration.environmentModes };
+    if (/^(mvn|mvnw|mvn\.cmd|mvnw\.cmd|mvn\.bat|mvnw\.bat)$/.test(executableName)) {
+      environmentModes.MAVEN_OPTS = "append";
+    } else if (/^(gradle|gradlew|gradle\.bat|gradlew\.bat|gradle\.cmd|gradlew\.cmd|sbt|sbt\.bat)$/.test(executableName)) {
+      environmentModes.JAVA_TOOL_OPTIONS = "append";
+    }
+    return { ...configuration, command: runtimeApplied, environmentModes };
+  }
   const args = configuredProgramArguments({ ...configuration, command: runtimeApplied }, override.args);
   const executable = runtimeApplied.executable;
   const executableName = executable.split(/[\\/]/).pop()?.toLowerCase() ?? "";
@@ -334,9 +375,12 @@ export function applyRunConfigurationOverride(
     label: override.name?.trim() || configuration.label,
     baseConfigurationId: override.baseConfigurationId || configuration.baseConfigurationId,
     preLaunchTargets: override.preLaunchTargets ?? configuration.preLaunchTargets,
-    runtimeOptions: override.vmOptions?.length ? [...override.vmOptions] : undefined,
-    envFile: override.envFile?.trim() || undefined,
+    runtimeOptions: runtimeOptions.length ? [...runtimeOptions] : undefined,
+    envFile: override.envFile === undefined
+      ? configuration.envFile
+      : override.envFile.trim() || undefined,
     environmentModes,
+    configurationSource: "local",
     command: {
       ...runtimeApplied,
       args,
@@ -350,8 +394,12 @@ export function applyRunConfigurationOverride(
 export function applyRunOverrideToDebugConfiguration(
   configuration: ExecutionDebugConfiguration,
   override: RunConfigurationOverride | undefined,
+  inheritedRuntimeOptions: readonly string[] = [],
+  inheritedEnvFile?: string,
 ): ExecutionDebugConfiguration {
-  if (!override) return configuration;
+  if (!override && inheritedRuntimeOptions.length === 0 && (configuration.envFile || !inheritedEnvFile)) {
+    return configuration;
+  }
   const launchConfig = structuredClone(configuration.launchConfig);
   const argumentsValue = launchConfig.arguments;
   const args = argumentsValue && typeof argumentsValue === "object" && !Array.isArray(argumentsValue)
@@ -360,23 +408,23 @@ export function applyRunOverrideToDebugConfiguration(
   const existingArgs = Array.isArray(args.args)
     ? args.args.filter((item): item is string => typeof item === "string")
     : [];
-  args.args = override.args.length > 0 ? [...existingArgs, ...override.args] : existingArgs;
-  const existingVmArgs = Array.isArray(args.vmArgs)
-    ? args.vmArgs.filter((item): item is string => typeof item === "string")
-    : [];
-  args.vmArgs = override.vmOptions?.length
-    ? [...existingVmArgs, ...override.vmOptions]
-    : existingVmArgs;
-  if (override.cwd) args.cwd = override.cwd;
-  args.env = { ...(typeof args.env === "object" && args.env ? args.env : {}), ...override.env };
+  args.args = override?.args.length ? [...existingArgs, ...override.args] : existingArgs;
+  const runtimeOptions = override?.vmOptions ?? inheritedRuntimeOptions;
+  const vmArgs = appendRuntimeOptions(args.vmArgs, runtimeOptions);
+  if (vmArgs !== undefined) args.vmArgs = vmArgs;
+  if (override?.cwd) args.cwd = override.cwd;
+  args.env = { ...(typeof args.env === "object" && args.env ? args.env : {}), ...(override?.env ?? {}) };
   launchConfig.arguments = args;
-  if (override.cwd) launchConfig.adapterCwd = override.cwd;
+  if (override?.cwd) launchConfig.adapterCwd = override.cwd;
   return {
     ...configuration,
-    label: override.name?.trim() || configuration.label,
-    preLaunchTargets: override.preLaunchTargets ?? configuration.preLaunchTargets,
-    envFile: override.envFile?.trim() || undefined,
+    label: override?.name?.trim() || configuration.label,
+    preLaunchTargets: override?.preLaunchTargets ?? configuration.preLaunchTargets,
+    envFile: override?.envFile === undefined
+      ? configuration.envFile ?? inheritedEnvFile
+      : override.envFile.trim() || undefined,
     launchConfig,
+    configurationSource: override ? "local" : configuration.configurationSource,
   };
 }
 
@@ -409,15 +457,18 @@ export function applyRunOverrideToJavaLaunch(
   launchConfig: Record<string, unknown>,
   override: RunConfigurationOverride | undefined,
   environment: Record<string, string> = {},
+  inheritedRuntimeOptions: readonly string[] = [],
 ): Record<string, unknown> {
-  if (!override && Object.keys(environment).length === 0) return launchConfig;
+  const runtimeOptions = override?.vmOptions ?? inheritedRuntimeOptions;
+  if (!override && Object.keys(environment).length === 0 && runtimeOptions.length === 0) return launchConfig;
   const currentEnv = launchConfig.env && typeof launchConfig.env === "object" && !Array.isArray(launchConfig.env)
     ? launchConfig.env as Record<string, unknown>
     : {};
+  const vmArgs = appendRuntimeOptions(launchConfig.vmArgs, runtimeOptions);
   return {
     ...launchConfig,
     ...(override?.args.length ? { args: [...override.args] } : {}),
-    ...(override?.vmOptions?.length ? { vmArgs: [...override.vmOptions] } : {}),
+    ...(vmArgs !== undefined ? { vmArgs } : {}),
     ...(override?.cwd ? { cwd: override.cwd } : {}),
     env: { ...environment, ...currentEnv, ...(override?.env ?? {}) },
   };
@@ -448,12 +499,13 @@ export function createNamedRunConfiguration(
   workspaceInstanceId: string,
   base: ExecutionRunConfiguration,
   name: string,
+  scopeId?: string,
 ): string {
   const normalizedName = name.trim() || `${base.label} copy`;
   const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const originalId = base.baseConfigurationId || base.id;
   const id = `${originalId}:user:${suffix}`;
-  const current = readRunConfigurationOverrides(workspaceInstanceId);
+  const current = readRunConfigurationOverrides(workspaceInstanceId, scopeId);
   const source = current[base.id] ?? current[originalId];
   writeRunConfigurationOverride(workspaceInstanceId, id, {
     name: normalizedName,
@@ -464,7 +516,7 @@ export function createNamedRunConfiguration(
     env: { ...(source?.env ?? {}) },
     envFile: source?.envFile ?? base.envFile ?? "",
     preLaunchTargets: [...(source?.preLaunchTargets ?? base.preLaunchTargets)],
-  });
+  }, scopeId);
   return id;
 }
 

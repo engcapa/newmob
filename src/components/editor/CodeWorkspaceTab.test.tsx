@@ -2684,6 +2684,98 @@ describe("CodeWorkspaceTab", () => {
     );
   });
 
+  it("keeps a shared Java debug-only configuration ahead of compatibility discovery", async () => {
+    runtimeState.tauri = true;
+    const sourcePath = "/repo/app/src/main/java/com/acme/App.java";
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-shared-debug",
+      workspaceInstanceId: "instance-java-shared-debug",
+      name: "Java shared debug",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    workspaceMocks.workspaceJavaRunTarget.mockResolvedValue({
+      id: "java-main:src/main/java/com/acme/App.java",
+      label: "com.acme.App",
+      mainClass: "com.acme.App",
+      filePath: sourcePath,
+      command: "./mvnw compile exec:java",
+      cwd: "/repo/app",
+      buildSystem: "maven",
+      modulePath: ".",
+    });
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [{
+        id: "project:maven",
+        provider: "maven",
+        root: "/repo/app",
+        manifest: "/repo/app/pom.xml",
+        module: "app",
+        languages: ["java"],
+        toolchain: "maven",
+        diagnostics: [],
+      }],
+      buildTargets: [],
+      runConfigurations: [{
+        id: "shared-run:remote",
+        projectId: "project:maven",
+        label: "Remote JVM",
+        kind: "debug-only",
+        configurationSource: "shared",
+        sourceFile: sourcePath,
+        preLaunchTargets: [],
+        debugConfigurationId: "shared-debug:remote",
+        command: {
+          executable: "__taomni_debug_only__",
+          args: [],
+          cwd: "/repo/app",
+          env: {},
+          display: "Debug only",
+          source: "configured",
+          error: "This configuration is debug-only; choose Debug to launch it",
+        },
+      }],
+      debugConfigurations: [{
+        id: "shared-debug:remote",
+        projectId: "project:maven",
+        label: "Remote JVM",
+        adapterId: "java",
+        request: "attach",
+        available: true,
+        preLaunchTargets: [],
+        sourceFile: sourcePath,
+        configurationSource: "shared",
+        launchConfig: { request: "attach", arguments: { hostName: "127.0.0.1", port: 5005 } },
+      }],
+      tools: [],
+    });
+    dapMocks.dapStartSession.mockResolvedValue({
+      sessionId: "shared-java-session",
+      capabilities: {},
+      request: "attach",
+      arguments: { hostName: "127.0.0.1", port: 5005 },
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    await waitFor(() => expect(screen.getByTestId("code-workspace-active-run-configuration")).toHaveValue("shared-run:remote"));
+    expect(screen.getByTestId("code-workspace-run-target")).toBeDisabled();
+    expect(screen.getByTestId("code-workspace-debug-target")).toBeEnabled();
+
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+    await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalledWith(
+      "java",
+      expect.objectContaining({ request: "attach" }),
+    ));
+    expect(workspaceMocks.workspaceJavaRunTarget).toHaveBeenCalled();
+  });
+
   it("uses provider capabilities to run and debug an active non-Java target", async () => {
     runtimeState.tauri = true;
     const workspace: CodeWorkspaceTabInfo = {
@@ -2764,6 +2856,109 @@ describe("CodeWorkspaceTab", () => {
       "delve",
       expect.objectContaining({ adapterCommand: "dlv", adapterCwd: "/repo/app" }),
     ));
+  });
+
+  it("keeps project-level configurations scoped to the active workspace root", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/one",
+      workspaceId: "ws-multi-root-config",
+      workspaceInstanceId: "instance-multi-root-config",
+      name: "Multi-root configurations",
+      roots: [
+        { id: "one", name: "one", path: "/repo/one", kind: "git" },
+        { id: "two", name: "two", path: "/repo/two", kind: "git" },
+      ],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "one", path: "src/main.go" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main.go",
+      "package main\nfunc main() {}\n",
+    ));
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [
+        {
+          id: "project:one",
+          provider: "go",
+          root: "/repo/one",
+          manifest: "/repo/one/go.mod",
+          module: "one",
+          languages: ["go"],
+          toolchain: "go",
+          diagnostics: [],
+        },
+        {
+          id: "project:two",
+          provider: "go",
+          root: "/repo/two",
+          manifest: "/repo/two/go.mod",
+          module: "two",
+          languages: ["go"],
+          toolchain: "go",
+          diagnostics: [],
+        },
+      ],
+      buildTargets: [],
+      runConfigurations: [
+        {
+          id: "shared-run:one",
+          projectId: "project:one",
+          label: "One project launch",
+          kind: "project",
+          configurationSource: "shared",
+          preLaunchTargets: [],
+          command: {
+            executable: "go",
+            args: ["run", "."],
+            cwd: "/repo/one",
+            env: {},
+            display: "go run .",
+            source: "path",
+          },
+        },
+        {
+          id: "shared-run:two",
+          projectId: "project:two",
+          label: "Two project launch",
+          kind: "project",
+          configurationSource: "shared",
+          preLaunchTargets: [],
+          command: {
+            executable: "go",
+            args: ["run", "."],
+            cwd: "/repo/two",
+            env: {},
+            display: "go run .",
+            source: "path",
+          },
+        },
+        {
+          id: "shared-run:one-alt",
+          projectId: "project:one",
+          label: "One alternate launch",
+          kind: "project",
+          configurationSource: "shared",
+          preLaunchTargets: [],
+          command: {
+            executable: "go",
+            args: ["run", "./cmd/alternate"],
+            cwd: "/repo/one",
+            env: {},
+            display: "go run ./cmd/alternate",
+            source: "path",
+          },
+        },
+      ],
+      debugConfigurations: [],
+      tools: [],
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("one / src/main.go");
+    await waitFor(() => expect(screen.getByTestId("code-workspace-active-run-configuration")).toBeInTheDocument());
+    const selector = screen.getByTestId("code-workspace-active-run-configuration");
+    expect(selector).toHaveTextContent("One project launch");
+    expect(selector).not.toHaveTextContent("Two project launch");
   });
 
   it("starts a Java debug session from the toolbar under StrictMode", async () => {

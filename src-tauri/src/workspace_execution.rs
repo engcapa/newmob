@@ -7,7 +7,7 @@
 use crate::workspace::WorkspaceToolConfig;
 use ignore::{DirEntry, WalkBuilder};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +17,8 @@ use std::sync::OnceLock;
 
 const MAX_MANIFEST_DEPTH: usize = 8;
 const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+const SHARED_RUN_CONFIG_RELATIVE_PATH: &str = ".taomni/run-configurations.json";
+const SHARED_RUN_CONFIG_VERSION: u64 = 2;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +83,22 @@ pub struct RunConfiguration {
     pub pre_launch_targets: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub debug_configuration_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_options: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argument_strategy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment_modes: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_configuration_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_parallel: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_stop_on_failure: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -98,6 +116,16 @@ pub struct DebugConfiguration {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_file: Option<String>,
     pub launch_config: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configuration_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_configuration_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_parallel: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_stop_on_failure: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -108,6 +136,193 @@ pub struct WorkspaceExecutionModel {
     pub run_configurations: Vec<RunConfiguration>,
     pub debug_configurations: Vec<DebugConfiguration>,
     pub tools: Vec<ToolProbe>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedConfigurationFile {
+    #[serde(default)]
+    version: Option<u64>,
+    #[serde(default)]
+    configurations: Vec<SharedConfiguration>,
+    /// Version 1 used a top-level `runs` array. It is intentionally kept as
+    /// raw JSON so migration can accept the old command/object spellings.
+    #[serde(default)]
+    runs: Vec<Value>,
+    #[serde(default)]
+    templates: BTreeMap<String, SharedTemplate>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedTemplate {
+    #[serde(flatten)]
+    patch: SharedConfigurationPatch,
+    #[serde(default)]
+    platforms: BTreeMap<String, SharedConfigurationPatch>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedConfiguration {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default, alias = "baseConfigurationId")]
+    base: Option<String>,
+    #[serde(default)]
+    template: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    project_id: Option<String>,
+    #[serde(default)]
+    source_file: Option<String>,
+    #[serde(default, alias = "preLaunchTargets")]
+    before_launch: Option<Vec<String>>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    run: Option<SharedRunSpec>,
+    #[serde(default)]
+    debug: Option<SharedDebugSpec>,
+    #[serde(default)]
+    compound: Option<SharedCompoundSpec>,
+    #[serde(default)]
+    platforms: BTreeMap<String, SharedConfigurationPatch>,
+    // v1 accepted the run fields directly on each entry. Keeping these
+    // optional fields makes migration deterministic and preserves hand-written
+    // files from early Code Workspace previews.
+    #[serde(default)]
+    executable: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    display: Option<String>,
+    #[serde(default)]
+    runtime_options: Option<Vec<String>>,
+    #[serde(default)]
+    env_file: Option<String>,
+    #[serde(default)]
+    argument_strategy: Option<String>,
+    #[serde(default)]
+    environment_modes: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    adapter_id: Option<String>,
+    #[serde(default)]
+    request: Option<String>,
+    #[serde(default)]
+    launch_config: Option<Value>,
+    #[serde(default, alias = "debugConfigurationId")]
+    debug_reference: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedConfigurationPatch {
+    #[serde(default)]
+    source_file: Option<String>,
+    #[serde(default)]
+    before_launch: Option<Vec<String>>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    run: Option<SharedRunSpec>,
+    #[serde(default)]
+    debug: Option<SharedDebugSpec>,
+    #[serde(default)]
+    compound: Option<SharedCompoundSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedCompoundSpec {
+    configurations: Vec<String>,
+    #[serde(default)]
+    parallel: Option<bool>,
+    #[serde(default)]
+    stop_on_failure: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedRunSpec {
+    #[serde(default)]
+    executable: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    display: Option<String>,
+    #[serde(default)]
+    runtime_options: Option<Vec<String>>,
+    #[serde(default)]
+    env_file: Option<String>,
+    #[serde(default)]
+    argument_strategy: Option<String>,
+    #[serde(default)]
+    environment_modes: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedDebugSpec {
+    #[serde(default)]
+    adapter_id: Option<String>,
+    #[serde(default)]
+    request: Option<String>,
+    #[serde(default)]
+    available: Option<bool>,
+    #[serde(default)]
+    launch_config: Option<Value>,
+    #[serde(default)]
+    env_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedSharedConfiguration {
+    id: String,
+    label: String,
+    kind: String,
+    project_id: String,
+    source_file: Option<String>,
+    before_launch: Vec<String>,
+    run: Option<ResolvedSharedRun>,
+    debug: Option<ResolvedSharedDebug>,
+    debug_reference: Option<String>,
+    compound: Option<SharedCompoundSpec>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedSharedRun {
+    executable: String,
+    args: Vec<String>,
+    cwd: String,
+    env: BTreeMap<String, String>,
+    display: Option<String>,
+    runtime_options: Option<Vec<String>>,
+    env_file: Option<String>,
+    argument_strategy: Option<String>,
+    environment_modes: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedSharedDebug {
+    adapter_id: String,
+    request: String,
+    available: Option<bool>,
+    launch_config: Value,
+    env_file: Option<String>,
 }
 
 #[derive(Default)]
@@ -117,6 +332,7 @@ struct ModelBuilder {
     run_configurations: Vec<RunConfiguration>,
     debug_configurations: Vec<DebugConfiguration>,
     tools: BTreeMap<String, ToolProbe>,
+    diagnostics: Vec<String>,
 }
 
 impl ModelBuilder {
@@ -125,12 +341,15 @@ impl ModelBuilder {
         self.build_targets.sort_by(|a, b| a.id.cmp(&b.id));
         self.run_configurations.sort_by(|a, b| a.id.cmp(&b.id));
         self.debug_configurations.sort_by(|a, b| a.id.cmp(&b.id));
+        self.diagnostics.sort();
+        self.diagnostics.dedup();
         WorkspaceExecutionModel {
             projects: self.projects,
             build_targets: self.build_targets,
             run_configurations: self.run_configurations,
             debug_configurations: self.debug_configurations,
             tools: self.tools.into_values().collect(),
+            diagnostics: self.diagnostics,
         }
     }
 
@@ -247,6 +466,11 @@ impl ModelBuilder {
             pre_launch_targets,
             source_file,
             launch_config,
+            env_file: None,
+            configuration_source: Some("provider".to_string()),
+            compound_configuration_ids: None,
+            compound_parallel: None,
+            compound_stop_on_failure: None,
         });
         id
     }
@@ -278,6 +502,14 @@ impl ModelBuilder {
             source_file,
             pre_launch_targets,
             debug_configuration_id,
+            configuration_source: Some("provider".to_string()),
+            runtime_options: None,
+            env_file: None,
+            argument_strategy: None,
+            environment_modes: None,
+            compound_configuration_ids: None,
+            compound_parallel: None,
+            compound_stop_on_failure: None,
         });
     }
 }
@@ -426,6 +658,1386 @@ fn command(tool: &ToolProbe, args: Vec<String>, cwd: &Path) -> ExecutionCommand 
         source: tool.source.clone().unwrap_or_else(|| "path".to_string()),
         error: (tool.state != "available")
             .then(|| format!("{} is unavailable. {}", tool.label, tool.install_hint)),
+    }
+}
+
+fn shared_platform_key() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+fn expand_shared_string(value: &str, workspace_root: &Path, project_root: &Path) -> String {
+    let workspace = path_string(workspace_root);
+    let project = path_string(project_root);
+    value
+        // Match IntelliJ's `$PROJECT_DIR$` contract: it is the selected
+        // project/module root. `${workspaceRoot}` is the explicit escape hatch
+        // for repository/workspace-level files in a multi-project workspace.
+        .replace("$PROJECT_DIR$", &project)
+        .replace("${workspaceRoot}", &workspace)
+        .replace("${projectRoot}", &project)
+}
+
+fn expand_shared_value(value: &mut Value, workspace_root: &Path, project_root: &Path) {
+    match value {
+        Value::String(item) => {
+            *item = expand_shared_string(item, workspace_root, project_root);
+        }
+        Value::Array(items) => {
+            for item in items {
+                expand_shared_value(item, workspace_root, project_root);
+            }
+        }
+        Value::Object(items) => {
+            for item in items.values_mut() {
+                expand_shared_value(item, workspace_root, project_root);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_shared_path(value: &str, workspace_root: &Path, project_root: &Path) -> String {
+    let expanded = expand_shared_string(value, workspace_root, project_root);
+    let path = Path::new(&expanded);
+    if path.is_absolute() {
+        path_string(path)
+    } else {
+        path_string(&project_root.join(path))
+    }
+}
+
+fn resolve_shared_executable(value: &str, workspace_root: &Path, project_root: &Path) -> String {
+    let expanded = expand_shared_string(value, workspace_root, project_root);
+    let path = Path::new(&expanded);
+    if path.is_absolute() || expanded.contains('/') || expanded.contains('\\') {
+        if path.is_absolute() {
+            path_string(path)
+        } else {
+            path_string(&project_root.join(path))
+        }
+    } else {
+        expanded
+    }
+}
+
+fn merge_shared_run(base: &mut SharedRunSpec, patch: SharedRunSpec) {
+    if patch.executable.is_some() {
+        base.executable = patch.executable;
+    }
+    if patch.args.is_some() {
+        base.args = patch.args;
+    }
+    if patch.cwd.is_some() {
+        base.cwd = patch.cwd;
+    }
+    if let Some(env) = patch.env {
+        base.env.get_or_insert_with(BTreeMap::new).extend(env);
+    }
+    if patch.display.is_some() {
+        base.display = patch.display;
+    }
+    if patch.runtime_options.is_some() {
+        base.runtime_options = patch.runtime_options;
+    }
+    if patch.env_file.is_some() {
+        base.env_file = patch.env_file;
+    }
+    if patch.argument_strategy.is_some() {
+        base.argument_strategy = patch.argument_strategy;
+    }
+    if let Some(modes) = patch.environment_modes {
+        base.environment_modes
+            .get_or_insert_with(BTreeMap::new)
+            .extend(modes);
+    }
+}
+
+fn merge_shared_debug(base: &mut SharedDebugSpec, patch: SharedDebugSpec) {
+    if patch.adapter_id.is_some() {
+        base.adapter_id = patch.adapter_id;
+    }
+    if patch.request.is_some() {
+        base.request = patch.request;
+    }
+    if patch.available.is_some() {
+        base.available = patch.available;
+    }
+    if patch.launch_config.is_some() {
+        base.launch_config = patch.launch_config;
+    }
+    if patch.env_file.is_some() {
+        base.env_file = patch.env_file;
+    }
+}
+
+fn apply_shared_platform(configuration: &mut SharedConfiguration) {
+    let Some(patch) = configuration.platforms.remove(shared_platform_key()) else {
+        return;
+    };
+    if patch.source_file.is_some() {
+        configuration.source_file = patch.source_file;
+    }
+    if let Some(before_launch) = patch.before_launch {
+        configuration.before_launch = Some(before_launch);
+    }
+    if patch.kind.is_some() {
+        configuration.kind = patch.kind;
+    }
+    if let Some(run) = patch.run {
+        merge_shared_run(
+            configuration.run.get_or_insert_with(SharedRunSpec::default),
+            run,
+        );
+    }
+    if let Some(debug) = patch.debug {
+        merge_shared_debug(
+            configuration
+                .debug
+                .get_or_insert_with(SharedDebugSpec::default),
+            debug,
+        );
+    }
+    if patch.compound.is_some() {
+        configuration.compound = patch.compound;
+    }
+}
+
+fn merge_shared_configuration_patch(
+    configuration: &mut SharedConfiguration,
+    patch: SharedConfigurationPatch,
+) {
+    if patch.source_file.is_some() {
+        configuration.source_file = patch.source_file;
+    }
+    if patch.before_launch.is_some() {
+        configuration.before_launch = patch.before_launch;
+    }
+    if patch.kind.is_some() {
+        configuration.kind = patch.kind;
+    }
+    if let Some(run) = patch.run {
+        merge_shared_run(
+            configuration.run.get_or_insert_with(SharedRunSpec::default),
+            run,
+        );
+    }
+    if let Some(debug) = patch.debug {
+        merge_shared_debug(
+            configuration
+                .debug
+                .get_or_insert_with(SharedDebugSpec::default),
+            debug,
+        );
+    }
+    if patch.compound.is_some() {
+        configuration.compound = patch.compound;
+    }
+}
+
+fn migrate_shared_file(
+    mut file: SharedConfigurationFile,
+) -> Result<Vec<SharedConfiguration>, String> {
+    let version = file
+        .version
+        .unwrap_or_else(|| if file.runs.is_empty() { 2 } else { 1 });
+    if version == 1 {
+        if !file.configurations.is_empty() && !file.runs.is_empty() {
+            return Err("version 1 cannot contain both `runs` and `configurations`".to_string());
+        }
+        let values = if file.runs.is_empty() {
+            file.configurations
+                .into_iter()
+                .map(|configuration| serde_json::to_value(configuration).unwrap_or(Value::Null))
+                .collect()
+        } else {
+            file.runs
+        };
+        file.configurations = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let mut configuration: SharedConfiguration = serde_json::from_value(value)
+                    .map_err(|error| format!("migrate v1 run at index {index}: {error}"))?;
+                if configuration.run.is_none() {
+                    let has_run = configuration.executable.is_some()
+                        || configuration.args.is_some()
+                        || configuration.cwd.is_some()
+                        || configuration.env.is_some();
+                    if has_run {
+                        configuration.run = Some(SharedRunSpec {
+                            executable: configuration.executable.take(),
+                            args: configuration.args.take(),
+                            cwd: configuration.cwd.take(),
+                            env: configuration.env.take(),
+                            display: configuration.display.take(),
+                            runtime_options: configuration.runtime_options.take(),
+                            env_file: configuration.env_file.take(),
+                            argument_strategy: configuration.argument_strategy.take(),
+                            environment_modes: configuration.environment_modes.take(),
+                        });
+                    }
+                }
+                if configuration.debug.is_none()
+                    && (configuration.adapter_id.is_some() || configuration.launch_config.is_some())
+                {
+                    configuration.debug = Some(SharedDebugSpec {
+                        adapter_id: configuration.adapter_id.take(),
+                        request: configuration.request.take(),
+                        launch_config: configuration.launch_config.take(),
+                        ..SharedDebugSpec::default()
+                    });
+                }
+                Ok(configuration)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+    } else if version != SHARED_RUN_CONFIG_VERSION {
+        return Err(format!(
+            "unsupported version {version}; expected 1 or {SHARED_RUN_CONFIG_VERSION}"
+        ));
+    } else if !file.runs.is_empty() {
+        return Err("version 2 uses `configurations`; remove the legacy `runs` array".to_string());
+    }
+    if file.configurations.is_empty() {
+        return Err(
+            "shared configuration file must contain at least one configuration".to_string(),
+        );
+    }
+    validate_shared_platforms(&file.templates, "templates")?;
+    for configuration in &file.configurations {
+        validate_shared_platform_map(
+            &configuration.platforms,
+            &format!("configuration `{}`", configuration.id),
+        )?;
+    }
+    for configuration in &mut file.configurations {
+        let Some(template_id) = configuration.template.clone() else {
+            continue;
+        };
+        let Some(template) = file.templates.get(&template_id) else {
+            return Err(format!(
+                "configuration `{}` references unknown template `{template_id}`",
+                configuration.id
+            ));
+        };
+        let own_patch = SharedConfigurationPatch {
+            source_file: configuration.source_file.take(),
+            before_launch: configuration.before_launch.take(),
+            kind: configuration.kind.take(),
+            run: configuration.run.take(),
+            debug: configuration.debug.take(),
+            compound: configuration.compound.take(),
+        };
+        merge_shared_configuration_patch(configuration, template.patch.clone());
+        if let Some(platform) = template.platforms.get(shared_platform_key()) {
+            merge_shared_configuration_patch(configuration, platform.clone());
+        }
+        merge_shared_configuration_patch(configuration, own_patch);
+    }
+    Ok(file.configurations)
+}
+
+fn validate_shared_platform_map(
+    platforms: &BTreeMap<String, SharedConfigurationPatch>,
+    field: &str,
+) -> Result<(), String> {
+    for platform in platforms.keys() {
+        if !matches!(platform.as_str(), "linux" | "macos" | "windows") {
+            return Err(format!(
+                "`{field}.platforms` contains unknown platform `{platform}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_shared_platforms(
+    templates: &BTreeMap<String, SharedTemplate>,
+    field: &str,
+) -> Result<(), String> {
+    for (template_id, template) in templates {
+        validate_shared_platform_map(
+            &template.platforms,
+            &format!("{field} template `{template_id}`"),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_shared_identifier(value: &str, field: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("`{field}` must not be empty"));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(format!("`{field}` must not contain control characters"));
+    }
+    Ok(())
+}
+
+fn validate_shared_env(env: &BTreeMap<String, String>, field: &str) -> Result<(), String> {
+    let name_pattern = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").expect("valid env regex");
+    for name in env.keys() {
+        if !name_pattern.is_match(name) {
+            return Err(format!(
+                "`{field}` contains invalid environment name `{name}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_string_list(values: &[String], field: &str) -> Result<(), String> {
+    if let Some(index) = values.iter().position(|value| value.contains('\0')) {
+        return Err(format!("`{field}[{index}]` contains a NUL byte"));
+    }
+    Ok(())
+}
+
+fn provider_project<'a>(
+    builder: &'a ModelBuilder,
+    reference: Option<&str>,
+) -> Result<&'a ProjectModel, String> {
+    let Some(reference) = reference.map(str::trim).filter(|value| !value.is_empty()) else {
+        return if builder.projects.len() == 1 {
+            Ok(&builder.projects[0])
+        } else {
+            Err(
+                "`project` is required when the workspace contains zero or multiple projects"
+                    .to_string(),
+            )
+        };
+    };
+    let mut matches = builder.projects.iter().filter(|project| {
+        project.id == reference
+            || project.module == reference
+            || project.provider == reference
+            || project.root == reference
+    });
+    let Some(project) = matches.next() else {
+        return Err(format!("unknown project `{reference}`"));
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "project reference `{reference}` is ambiguous; use a project id"
+        ));
+    }
+    Ok(project)
+}
+
+fn portable_reference_matches(reference: &str, id: &str, kind: &str, label: &str) -> bool {
+    reference == id
+        || reference == kind
+        || reference == label
+        || reference == format!("{kind}:{label}")
+}
+
+fn provider_run_configuration<'a>(
+    builder: &'a ModelBuilder,
+    reference: &str,
+    project_id: Option<&str>,
+) -> Result<Option<&'a RunConfiguration>, String> {
+    let matches = builder
+        .run_configurations
+        .iter()
+        .filter(|candidate| project_id.is_none_or(|id| candidate.project_id == id))
+        .filter(|candidate| {
+            portable_reference_matches(reference, &candidate.id, &candidate.kind, &candidate.label)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [configuration] => Ok(Some(*configuration)),
+        _ => Err(format!(
+            "provider base `{reference}` is ambiguous; add `project` or use `kind:label`"
+        )),
+    }
+}
+
+fn provider_debug_configuration<'a>(
+    builder: &'a ModelBuilder,
+    reference: &str,
+    project_id: Option<&str>,
+) -> Result<Option<&'a DebugConfiguration>, String> {
+    let matches = builder
+        .debug_configurations
+        .iter()
+        .filter(|candidate| project_id.is_none_or(|id| candidate.project_id == id))
+        .filter(|candidate| {
+            portable_reference_matches(
+                reference,
+                &candidate.id,
+                &candidate.adapter_id,
+                &candidate.label,
+            )
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [configuration] => Ok(Some(*configuration)),
+        _ => Err(format!(
+            "provider base `{reference}` is ambiguous; add `project` or use `adapterId:label`"
+        )),
+    }
+}
+
+fn resolve_build_references(
+    builder: &ModelBuilder,
+    references: Vec<String>,
+    project_id: &str,
+) -> Result<Vec<String>, String> {
+    let mut result = Vec::new();
+    for reference in references {
+        let matches = builder
+            .build_targets
+            .iter()
+            .filter(|target| target.project_id == project_id)
+            .filter(|target| {
+                portable_reference_matches(&reference, &target.id, &target.kind, &target.label)
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => return Err(format!("unknown Before launch target `{reference}`")),
+            [target] => result.push(target.id.clone()),
+            _ => {
+                return Err(format!(
+                    "Before launch target `{reference}` is ambiguous; use `kind:label`"
+                ));
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Resolve a compound child using the same portable reference rules as `base`.
+/// Shared ids are deliberately converted to the generated model ids so the
+/// frontend can execute a compound without knowing repository-file syntax.
+fn resolve_compound_child_id(
+    resolved: &[ResolvedSharedConfiguration],
+    builder: &ModelBuilder,
+    reference: &str,
+    project_id: &str,
+    debug: bool,
+) -> Result<String, String> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err("compound child reference must not be empty".to_string());
+    }
+    let shared = resolved.iter().find(|candidate| {
+        candidate.id == reference
+            || format!("shared-run:{}", candidate.id) == reference
+            || format!("shared-debug:{}", candidate.id) == reference
+    });
+    if let Some(candidate) = shared {
+        if !debug {
+            if candidate.run.is_some() || candidate.compound.is_some() {
+                return Ok(format!("shared-run:{}", candidate.id));
+            }
+        } else if candidate.debug.is_some() || candidate.compound.is_some() {
+            return Ok(format!("shared-debug:{}", candidate.id));
+        } else if let Some(reference) = candidate.debug_reference.as_deref() {
+            // A shared run may inherit its debug target from a provider or
+            // another shared entry. Resolve that reference before emitting the
+            // compound model id.
+            if let Some(debug) = provider_debug_configuration(builder, reference, Some(project_id))?
+            {
+                return Ok(debug.id.clone());
+            }
+            if let Some(run) = provider_run_configuration(builder, reference, Some(project_id))? {
+                if let Some(debug_id) = &run.debug_configuration_id {
+                    return Ok(debug_id.clone());
+                }
+            }
+            if let Some(shared_debug) = resolved.iter().find(|item| item.id == reference) {
+                if shared_debug.debug.is_some() || shared_debug.compound.is_some() {
+                    return Ok(format!("shared-debug:{reference}"));
+                }
+            }
+        }
+        return Err(format!(
+            "compound child `{reference}` does not define a {} target",
+            if debug { "debug" } else { "run" }
+        ));
+    }
+    if debug {
+        if let Some(configuration) =
+            provider_debug_configuration(builder, reference, Some(project_id))?
+        {
+            return Ok(configuration.id.clone());
+        }
+        if let Some(run) = provider_run_configuration(builder, reference, Some(project_id))? {
+            if let Some(debug_id) = &run.debug_configuration_id {
+                return Ok(debug_id.clone());
+            }
+        }
+    } else if let Some(configuration) =
+        provider_run_configuration(builder, reference, Some(project_id))?
+    {
+        return Ok(configuration.id.clone());
+    }
+    Err(format!("unknown compound child `{reference}`"))
+}
+
+fn resolve_compound_children(
+    resolved: &[ResolvedSharedConfiguration],
+    builder: &ModelBuilder,
+    configuration: &ResolvedSharedConfiguration,
+    debug: bool,
+) -> Result<Vec<String>, String> {
+    let Some(compound) = &configuration.compound else {
+        return Err("configuration is not compound".to_string());
+    };
+    let mut result = Vec::with_capacity(compound.configurations.len());
+    for reference in &compound.configurations {
+        let child_id = resolve_compound_child_id(
+            resolved,
+            builder,
+            reference,
+            &configuration.project_id,
+            debug,
+        )?;
+        let child_project = if let Some(shared_id) = child_id.strip_prefix("shared-run:") {
+            resolved
+                .iter()
+                .find(|item| item.id == shared_id)
+                .map(|item| &item.project_id)
+        } else if let Some(shared_id) = child_id.strip_prefix("shared-debug:") {
+            resolved
+                .iter()
+                .find(|item| item.id == shared_id)
+                .map(|item| &item.project_id)
+        } else if debug {
+            builder
+                .debug_configurations
+                .iter()
+                .find(|item| item.id == child_id)
+                .map(|item| &item.project_id)
+        } else {
+            builder
+                .run_configurations
+                .iter()
+                .find(|item| item.id == child_id)
+                .map(|item| &item.project_id)
+        };
+        if child_project.is_some_and(|project| project != &configuration.project_id) {
+            return Err(format!(
+                "compound child `{reference}` belongs to another project"
+            ));
+        }
+        result.push(child_id);
+    }
+    Ok(result)
+}
+
+fn resolve_compound_plan_ids(
+    resolved: &[ResolvedSharedConfiguration],
+    builder: &ModelBuilder,
+    configuration: &ResolvedSharedConfiguration,
+    debug: bool,
+) -> Result<Vec<String>, String> {
+    fn is_cycle_error(error: &str) -> bool {
+        error.contains("compound configuration cycle")
+    }
+
+    fn visit(
+        resolved: &[ResolvedSharedConfiguration],
+        builder: &ModelBuilder,
+        configuration: &ResolvedSharedConfiguration,
+        debug: bool,
+        visiting: &mut Vec<String>,
+    ) -> Result<Vec<String>, String> {
+        if let Some(index) = visiting.iter().position(|id| id == &configuration.id) {
+            let mut cycle = visiting[index..].to_vec();
+            cycle.push(configuration.id.clone());
+            return Err(format!(
+                "compound configuration cycle: {}",
+                cycle.join(" -> ")
+            ));
+        }
+        visiting.push(configuration.id.clone());
+        let child_ids = resolve_compound_children(resolved, builder, configuration, debug)?;
+        for child_id in &child_ids {
+            let shared_id = if debug {
+                child_id.strip_prefix("shared-debug:")
+            } else {
+                child_id.strip_prefix("shared-run:")
+            };
+            let Some(shared_id) = shared_id else {
+                continue;
+            };
+            let Some(child) = resolved.iter().find(|item| item.id == shared_id) else {
+                return Err(format!("unknown compound child `{shared_id}`"));
+            };
+            if child.compound.is_some() {
+                visit(resolved, builder, child, debug, visiting).map_err(|error| {
+                    if is_cycle_error(&error) {
+                        error
+                    } else {
+                        format!(
+                            "compound child `{}` is not valid for {}: {error}",
+                            child.id,
+                            if debug { "Debug" } else { "Run" }
+                        )
+                    }
+                })?;
+            }
+        }
+        visiting.pop();
+        Ok(child_ids)
+    }
+
+    visit(resolved, builder, configuration, debug, &mut Vec::new())
+}
+
+fn validate_compound_configurations(
+    resolved: &[ResolvedSharedConfiguration],
+    builder: &ModelBuilder,
+) -> Result<(), String> {
+    for configuration in resolved.iter().filter(|item| item.compound.is_some()) {
+        let run = resolve_compound_plan_ids(resolved, builder, configuration, false);
+        let debug = resolve_compound_plan_ids(resolved, builder, configuration, true);
+        if let Some(error) = run
+            .as_ref()
+            .err()
+            .filter(|error| error.contains("compound configuration cycle"))
+            .or_else(|| {
+                debug
+                    .as_ref()
+                    .err()
+                    .filter(|error| error.contains("compound configuration cycle"))
+            })
+        {
+            return Err(error.clone());
+        }
+        if let (Err(run_error), Err(debug_error)) = (run, debug) {
+            return Err(format!(
+                "compound configuration `{}` has no valid execution mode; Run: {run_error}; Debug: {debug_error}",
+                configuration.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn run_from_provider(base: &RunConfiguration) -> ResolvedSharedRun {
+    ResolvedSharedRun {
+        executable: base.command.executable.clone(),
+        args: base.command.args.clone(),
+        cwd: base.command.cwd.clone(),
+        env: base.command.env.clone(),
+        display: Some(base.command.display.clone()),
+        runtime_options: base.runtime_options.clone(),
+        env_file: base.env_file.clone(),
+        argument_strategy: base.argument_strategy.clone(),
+        environment_modes: base.environment_modes.clone(),
+    }
+}
+
+fn debug_from_provider(base: &DebugConfiguration) -> ResolvedSharedDebug {
+    ResolvedSharedDebug {
+        adapter_id: base.adapter_id.clone(),
+        request: base.request.clone(),
+        // Re-probe the merged adapter command below. A shared configuration may
+        // replace a provider's missing executable with a repository-specific one.
+        available: None,
+        launch_config: base.launch_config.clone(),
+        env_file: None,
+    }
+}
+
+fn apply_resolved_run(
+    run: &mut ResolvedSharedRun,
+    patch: SharedRunSpec,
+    workspace_root: &Path,
+    project_root: &Path,
+) -> Result<(), String> {
+    if let Some(executable) = patch.executable {
+        run.executable = resolve_shared_executable(&executable, workspace_root, project_root);
+    }
+    if let Some(args) = patch.args {
+        validate_string_list(&args, "run.args")?;
+        run.args = args
+            .into_iter()
+            .map(|value| expand_shared_string(&value, workspace_root, project_root))
+            .collect();
+    }
+    if let Some(cwd) = patch.cwd {
+        run.cwd = resolve_shared_path(&cwd, workspace_root, project_root);
+    }
+    if let Some(env) = patch.env {
+        validate_shared_env(&env, "run.env")?;
+        run.env.extend(env.into_iter().map(|(name, value)| {
+            (
+                name,
+                expand_shared_string(&value, workspace_root, project_root),
+            )
+        }));
+    }
+    if patch.display.is_some() {
+        run.display = patch.display;
+    }
+    if let Some(options) = patch.runtime_options {
+        validate_string_list(&options, "run.runtimeOptions")?;
+        run.runtime_options = Some(options);
+    }
+    if let Some(env_file) = patch.env_file {
+        run.env_file = Some(resolve_shared_path(&env_file, workspace_root, project_root));
+    }
+    if let Some(strategy) = patch.argument_strategy {
+        if !matches!(
+            strategy.as_str(),
+            "append" | "maven-exec" | "gradle-javaexec"
+        ) {
+            return Err(format!("invalid run.argumentStrategy `{strategy}`"));
+        }
+        run.argument_strategy = Some(strategy);
+    }
+    if let Some(modes) = patch.environment_modes {
+        validate_shared_env(&modes, "run.environmentModes")?;
+        if let Some((name, mode)) = modes
+            .iter()
+            .find(|(_, mode)| !matches!(mode.as_str(), "append" | "replace"))
+        {
+            return Err(format!("invalid environment mode `{mode}` for `{name}`"));
+        }
+        run.environment_modes
+            .get_or_insert_with(BTreeMap::new)
+            .extend(modes);
+    }
+    Ok(())
+}
+
+fn apply_resolved_debug(
+    debug: &mut ResolvedSharedDebug,
+    patch: SharedDebugSpec,
+    workspace_root: &Path,
+    project_root: &Path,
+) -> Result<(), String> {
+    if let Some(adapter_id) = patch.adapter_id {
+        validate_shared_identifier(&adapter_id, "debug.adapterId")?;
+        debug.adapter_id = adapter_id;
+    }
+    if let Some(request) = patch.request {
+        if !matches!(request.as_str(), "launch" | "attach") {
+            return Err(format!("invalid debug.request `{request}`"));
+        }
+        debug.request = request;
+    }
+    if patch.available.is_some() {
+        debug.available = patch.available;
+    }
+    if let Some(mut launch_config) = patch.launch_config {
+        if !launch_config.is_object() {
+            return Err("`debug.launchConfig` must be an object".to_string());
+        }
+        expand_shared_value(&mut launch_config, workspace_root, project_root);
+        debug.launch_config = launch_config;
+    }
+    if let Some(env_file) = patch.env_file {
+        debug.env_file = Some(resolve_shared_path(&env_file, workspace_root, project_root));
+    }
+    if let Some(object) = debug.launch_config.as_object_mut() {
+        object.insert("request".to_string(), Value::String(debug.request.clone()));
+    }
+    Ok(())
+}
+
+fn resolve_shared_configuration(
+    mut configuration: SharedConfiguration,
+    builder: &ModelBuilder,
+    workspace_root: &Path,
+) -> Result<ResolvedSharedConfiguration, String> {
+    validate_shared_identifier(&configuration.id, "id")?;
+    apply_shared_platform(&mut configuration);
+    if let Some(compound) = &configuration.compound {
+        if compound.configurations.is_empty() {
+            return Err("compound configuration must list at least one child".to_string());
+        }
+        let mut children = BTreeSet::new();
+        for child in &compound.configurations {
+            validate_shared_identifier(child, "compound.configurations entry")?;
+            if !children.insert(child.trim()) {
+                return Err(format!(
+                    "compound configuration contains duplicate child `{child}`"
+                ));
+            }
+        }
+        if configuration.run.is_some()
+            || configuration.debug.is_some()
+            || configuration.base.is_some()
+            || configuration.debug_reference.is_some()
+        {
+            return Err("compound configuration cannot also define run, debug, base, or debugConfigurationId".to_string());
+        }
+    }
+
+    let requested_project = configuration
+        .project_id
+        .as_deref()
+        .or(configuration.project.as_deref())
+        .map(|reference| provider_project(builder, Some(reference)))
+        .transpose()?;
+    let provider_run = configuration
+        .base
+        .as_deref()
+        .map(|reference| {
+            provider_run_configuration(
+                builder,
+                reference,
+                requested_project.map(|project| project.id.as_str()),
+            )
+        })
+        .transpose()?
+        .flatten();
+    let provider_debug = if provider_run.is_none() {
+        configuration
+            .base
+            .as_deref()
+            .map(|reference| {
+                provider_debug_configuration(
+                    builder,
+                    reference,
+                    requested_project.map(|project| project.id.as_str()),
+                )
+            })
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    if configuration.base.is_some() && provider_run.is_none() && provider_debug.is_none() {
+        return Err(format!(
+            "unknown provider base `{}`",
+            configuration.base.as_deref().unwrap_or_default()
+        ));
+    }
+
+    let project_reference = configuration
+        .project_id
+        .as_deref()
+        .or(configuration.project.as_deref());
+    let standalone_project;
+    let project = if let Some(base) = provider_run {
+        builder
+            .projects
+            .iter()
+            .find(|project| project.id == base.project_id)
+            .ok_or_else(|| format!("provider base `{}` has no project", base.id))?
+    } else if let Some(base) = provider_debug {
+        builder
+            .projects
+            .iter()
+            .find(|project| project.id == base.project_id)
+            .ok_or_else(|| format!("provider base `{}` has no project", base.id))?
+    } else if builder.projects.is_empty() && project_reference.is_none() {
+        standalone_project = ProjectModel {
+            id: "shared:workspace".to_string(),
+            provider: "shared".to_string(),
+            root: path_string(workspace_root),
+            manifest: path_string(&workspace_root.join(SHARED_RUN_CONFIG_RELATIVE_PATH)),
+            module: workspace_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("workspace")
+                .to_string(),
+            languages: Vec::new(),
+            toolchain: "shared".to_string(),
+            diagnostics: Vec::new(),
+        };
+        &standalone_project
+    } else {
+        requested_project.unwrap_or(provider_project(builder, project_reference)?)
+    };
+    if project_reference.is_some()
+        && !matches!(provider_project(builder, project_reference), Ok(candidate) if candidate.id == project.id)
+    {
+        return Err("`project` does not match the selected provider base".to_string());
+    }
+    let project_root = Path::new(&project.root);
+
+    let source_file = configuration
+        .source_file
+        .as_deref()
+        .map(|value| resolve_shared_path(value, workspace_root, project_root))
+        .or_else(|| {
+            provider_run
+                .and_then(|base| base.source_file.clone())
+                .or_else(|| provider_debug.and_then(|base| base.source_file.clone()))
+        });
+    let before_launch_references = configuration.before_launch.clone().unwrap_or_else(|| {
+        provider_run
+            .map(|base| base.pre_launch_targets.clone())
+            .or_else(|| provider_debug.map(|base| base.pre_launch_targets.clone()))
+            .unwrap_or_default()
+    });
+    let before_launch = resolve_build_references(builder, before_launch_references, &project.id)?;
+
+    let mut run = if let Some(base) = provider_run {
+        Some(run_from_provider(base))
+    } else {
+        configuration.run.as_ref().map(|_| ResolvedSharedRun {
+            cwd: project.root.clone(),
+            ..ResolvedSharedRun::default()
+        })
+    };
+    if let Some(patch) = configuration.run {
+        apply_resolved_run(
+            run.get_or_insert_with(|| ResolvedSharedRun {
+                cwd: project.root.clone(),
+                ..ResolvedSharedRun::default()
+            }),
+            patch,
+            workspace_root,
+            project_root,
+        )?;
+    }
+    if let Some(run) = &run {
+        validate_shared_identifier(&run.executable, "run.executable")?;
+    }
+
+    let mut debug = if let Some(base) = provider_debug {
+        Some(debug_from_provider(base))
+    } else if let Some(base) = provider_run.and_then(|run| {
+        run.debug_configuration_id.as_ref().and_then(|id| {
+            builder
+                .debug_configurations
+                .iter()
+                .find(|debug| debug.id == *id)
+        })
+    }) {
+        Some(debug_from_provider(base))
+    } else {
+        configuration
+            .debug
+            .as_ref()
+            .map(|_| ResolvedSharedDebug::default())
+    };
+    if let Some(patch) = configuration.debug {
+        apply_resolved_debug(
+            debug.get_or_insert_with(ResolvedSharedDebug::default),
+            patch,
+            workspace_root,
+            project_root,
+        )?;
+    }
+    if let Some(debug) = &debug {
+        validate_shared_identifier(&debug.adapter_id, "debug.adapterId")?;
+        if !debug.launch_config.is_object() {
+            return Err("`debug.launchConfig` must be an object".to_string());
+        }
+    }
+    if run.is_none() && debug.is_none() && configuration.compound.is_none() {
+        return Err("configuration must define `run`, `debug`, or a provider `base`".to_string());
+    }
+
+    Ok(ResolvedSharedConfiguration {
+        id: configuration.id.trim().to_string(),
+        label: configuration
+            .name
+            .or(configuration.label)
+            .unwrap_or_else(|| configuration.id.clone()),
+        kind: configuration
+            .kind
+            .or_else(|| provider_run.map(|base| base.kind.clone()))
+            .unwrap_or_else(|| "shared".to_string()),
+        project_id: project.id.clone(),
+        source_file,
+        before_launch,
+        run,
+        debug,
+        debug_reference: configuration.debug_reference,
+        compound: configuration.compound,
+    })
+}
+
+fn merge_shared_configurations(builder: &mut ModelBuilder, workspace_root: &Path) {
+    let path = workspace_root.join(SHARED_RUN_CONFIG_RELATIVE_PATH);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            builder.diagnostics.push(format!(
+                "Shared Run/Debug configuration: read {}: {error}",
+                path.display()
+            ));
+            return;
+        }
+    };
+    if contents.len() as u64 > MAX_SOURCE_BYTES {
+        builder.diagnostics.push(format!(
+            "Shared Run/Debug configuration: {} exceeds the 2 MiB limit",
+            path.display()
+        ));
+        return;
+    }
+    let file: SharedConfigurationFile = match serde_json::from_str(&contents) {
+        Ok(file) => file,
+        Err(error) => {
+            builder.diagnostics.push(format!(
+                "Shared Run/Debug configuration: parse {}: {error}",
+                path.display()
+            ));
+            return;
+        }
+    };
+    let configurations = match migrate_shared_file(file) {
+        Ok(configurations) => configurations,
+        Err(error) => {
+            builder
+                .diagnostics
+                .push(format!("Shared Run/Debug configuration: {error}"));
+            return;
+        }
+    };
+    let mut ids = BTreeSet::new();
+    for configuration in &configurations {
+        if !ids.insert(configuration.id.trim().to_string()) {
+            builder.diagnostics.push(format!(
+                "Shared Run/Debug configuration `{}`: duplicate id",
+                configuration.id
+            ));
+        }
+    }
+    if !builder.diagnostics.is_empty() {
+        return;
+    }
+    let known_adapter_ids = ["java", "lldb", "delve", "python", "node", "coreclr"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut resolved = Vec::new();
+    for configuration in configurations {
+        let id = configuration.id.clone();
+        match resolve_shared_configuration(configuration, builder, workspace_root) {
+            Ok(configuration) => resolved.push(configuration),
+            Err(error) => builder
+                .diagnostics
+                .push(format!("Shared Run/Debug configuration `{id}`: {error}")),
+        }
+    }
+    if !builder.diagnostics.is_empty() {
+        return;
+    }
+    if let Err(error) = validate_compound_configurations(&resolved, builder) {
+        builder
+            .diagnostics
+            .push(format!("Shared Run/Debug configuration: {error}"));
+        return;
+    }
+
+    if builder.projects.is_empty() && !resolved.is_empty() {
+        builder.projects.push(ProjectModel {
+            id: "shared:workspace".to_string(),
+            provider: "shared".to_string(),
+            root: path_string(workspace_root),
+            manifest: path_string(&workspace_root.join(SHARED_RUN_CONFIG_RELATIVE_PATH)),
+            module: workspace_root
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("workspace")
+                .to_string(),
+            languages: Vec::new(),
+            toolchain: "shared".to_string(),
+            diagnostics: Vec::new(),
+        });
+    }
+
+    let shared_debug_ids = resolved
+        .iter()
+        .filter(|configuration| {
+            configuration.debug.is_some()
+                || (configuration.compound.is_some()
+                    && resolve_compound_plan_ids(&resolved, builder, configuration, true).is_ok())
+        })
+        .map(|configuration| configuration.id.clone())
+        .collect::<BTreeSet<_>>();
+    let provider_debug_ids = builder
+        .debug_configurations
+        .iter()
+        .map(|configuration| configuration.id.clone())
+        .collect::<BTreeSet<_>>();
+    for configuration in &resolved {
+        let Some(reference) = configuration.debug_reference.as_deref() else {
+            continue;
+        };
+        if !provider_debug_ids.contains(reference) && !shared_debug_ids.contains(reference) {
+            builder.diagnostics.push(format!(
+                "Shared Run/Debug configuration `{}`: unknown debug reference `{reference}`",
+                configuration.id
+            ));
+        }
+    }
+    if !builder.diagnostics.is_empty() {
+        return;
+    }
+    let resolved_snapshot = resolved.clone();
+    for configuration in resolved {
+        let compound_run_plan = configuration
+            .compound
+            .as_ref()
+            .map(|_| resolve_compound_plan_ids(&resolved_snapshot, builder, &configuration, false));
+        let compound_debug_plan = configuration
+            .compound
+            .as_ref()
+            .map(|_| resolve_compound_plan_ids(&resolved_snapshot, builder, &configuration, true));
+        let compound_run_ids = compound_run_plan
+            .as_ref()
+            .and_then(|plan| plan.as_ref().ok())
+            .cloned();
+        let compound_debug_ids = compound_debug_plan
+            .as_ref()
+            .and_then(|plan| plan.as_ref().ok())
+            .cloned();
+        let compound_debug_error = compound_debug_plan
+            .as_ref()
+            .and_then(|plan| plan.as_ref().err())
+            .cloned();
+        let debug_id = configuration
+            .debug
+            .clone()
+            .map(|debug| {
+                let id = format!("shared-debug:{}", configuration.id);
+                let adapter_available = known_adapter_ids.contains(debug.adapter_id.as_str());
+                let adapter_command_available = debug
+                    .launch_config
+                    .get("adapterCommand")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .and_then(resolve_candidate)
+                    .is_some();
+                let available = debug.available.unwrap_or(true)
+                    && adapter_available
+                    && (debug.adapter_id == "java" || adapter_command_available);
+                let diagnostic = if !adapter_available {
+                    Some(format!(
+                        "Debug adapter `{}` is not registered by Code Workspace",
+                        debug.adapter_id
+                    ))
+                } else if debug.adapter_id != "java" && !adapter_command_available {
+                    Some(format!(
+                        "Debug adapter executable for `{}` was not found",
+                        debug.adapter_id
+                    ))
+                } else if !debug.available.unwrap_or(true) {
+                    Some("Shared configuration explicitly disabled this debug target".to_string())
+                } else {
+                    None
+                };
+                builder.debug_configurations.push(DebugConfiguration {
+                    id: id.clone(),
+                    project_id: configuration.project_id.clone(),
+                    label: configuration.label.clone(),
+                    adapter_id: debug.adapter_id,
+                    request: debug.request,
+                    available,
+                    diagnostic,
+                    pre_launch_targets: configuration.before_launch.clone(),
+                    source_file: configuration.source_file.clone(),
+                    launch_config: debug.launch_config,
+                    env_file: debug.env_file,
+                    configuration_source: Some("shared".to_string()),
+                    compound_configuration_ids: configuration
+                        .compound
+                        .as_ref()
+                        .and(compound_debug_ids.clone()),
+                    compound_parallel: configuration
+                        .compound
+                        .as_ref()
+                        .and_then(|compound| compound.parallel),
+                    compound_stop_on_failure: configuration
+                        .compound
+                        .as_ref()
+                        .and_then(|compound| compound.stop_on_failure),
+                });
+                id
+            })
+            .or_else(|| {
+                configuration.debug_reference.as_ref().map(|reference| {
+                    if shared_debug_ids.contains(reference.as_str()) {
+                        format!("shared-debug:{reference}")
+                    } else {
+                        reference.clone()
+                    }
+                })
+            });
+        let project_id = configuration.project_id.clone();
+        let source_file = configuration.source_file.clone();
+        let pre_launch_targets = configuration.before_launch.clone();
+        let project_cwd = builder
+            .projects
+            .iter()
+            .find(|project| project.id == configuration.project_id)
+            .map(|project| project.root.clone())
+            .unwrap_or_else(|| path_string(workspace_root));
+        let label = configuration.label.clone();
+        if let Some(run) = configuration.run {
+            let display = run.display.unwrap_or_else(|| {
+                std::iter::once(shell_preview(&run.executable))
+                    .chain(run.args.iter().map(|arg| shell_preview(arg)))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+            let source = if resolve_candidate(&run.executable).is_some() {
+                "configured"
+            } else {
+                "path"
+            };
+            let error = (resolve_candidate(&run.executable).is_none()).then(|| {
+                format!(
+                    "Shared executable `{}` was not found on this platform",
+                    run.executable
+                )
+            });
+            builder.run_configurations.push(RunConfiguration {
+                id: format!("shared-run:{}", configuration.id),
+                project_id,
+                label: label.clone(),
+                kind: configuration.kind,
+                command: ExecutionCommand {
+                    executable: run.executable,
+                    args: run.args,
+                    cwd: run.cwd,
+                    env: run.env,
+                    display,
+                    source: source.to_string(),
+                    error,
+                },
+                source_file,
+                pre_launch_targets: pre_launch_targets,
+                debug_configuration_id: debug_id,
+                runtime_options: run.runtime_options,
+                env_file: run.env_file,
+                argument_strategy: run.argument_strategy,
+                environment_modes: run.environment_modes,
+                configuration_source: Some("shared".to_string()),
+                compound_configuration_ids: configuration
+                    .compound
+                    .as_ref()
+                    .and(compound_run_ids.clone()),
+                compound_parallel: configuration
+                    .compound
+                    .as_ref()
+                    .and_then(|compound| compound.parallel),
+                compound_stop_on_failure: configuration
+                    .compound
+                    .as_ref()
+                    .and_then(|compound| compound.stop_on_failure),
+            });
+        } else if let Some(debug_configuration_id) = debug_id {
+            // Keep debug-only shared entries selectable by the editor. IDEA
+            // exposes these in the same Run/Debug configuration chooser even
+            // though invoking Run is unavailable; the explicit error keeps the
+            // Run panel from attempting to spawn a sentinel executable.
+            builder.run_configurations.push(RunConfiguration {
+                id: format!("shared-run:{}", configuration.id),
+                project_id,
+                label: configuration.label,
+                kind: "debug-only".to_string(),
+                command: ExecutionCommand {
+                    executable: "__taomni_debug_only__".to_string(),
+                    args: Vec::new(),
+                    cwd: project_cwd,
+                    env: BTreeMap::new(),
+                    display: "Debug only".to_string(),
+                    source: "configured".to_string(),
+                    error: Some(
+                        "This configuration is debug-only; choose Debug to launch it".to_string(),
+                    ),
+                },
+                source_file,
+                pre_launch_targets,
+                debug_configuration_id: Some(debug_configuration_id),
+                runtime_options: None,
+                env_file: None,
+                argument_strategy: None,
+                environment_modes: None,
+                configuration_source: Some("shared".to_string()),
+                compound_configuration_ids: configuration.compound.as_ref().and(compound_run_ids),
+                compound_parallel: configuration
+                    .compound
+                    .as_ref()
+                    .and_then(|compound| compound.parallel),
+                compound_stop_on_failure: configuration
+                    .compound
+                    .as_ref()
+                    .and_then(|compound| compound.stop_on_failure),
+            });
+        } else if configuration.compound.is_some() {
+            let run_ids = compound_run_ids.clone();
+            let debug_ids = compound_debug_ids.clone();
+            let compound_debug_id = format!("shared-debug:{}", configuration.id);
+            let compound = configuration.compound.as_ref().expect("compound exists");
+            let debug_diagnostic = compound_debug_error
+                .map(|error| {
+                    format!(
+                        "Compound Debug is unavailable: {error}. Grouped multi-session DAP support is not available yet"
+                    )
+                })
+                .unwrap_or_else(|| {
+                    "Compound Debug requires grouped multi-session DAP support, which is not available yet"
+                        .to_string()
+                });
+            builder.debug_configurations.push(DebugConfiguration {
+                id: compound_debug_id.clone(),
+                project_id: configuration.project_id.clone(),
+                label: configuration.label.clone(),
+                adapter_id: "compound".to_string(),
+                request: "launch".to_string(),
+                available: false,
+                diagnostic: Some(debug_diagnostic.clone()),
+                pre_launch_targets: configuration.before_launch.clone(),
+                source_file: configuration.source_file.clone(),
+                launch_config: json!({
+                    "request": "launch",
+                    "compoundConfigurations": debug_ids.clone().unwrap_or_default(),
+                    "parallel": compound.parallel.unwrap_or(false),
+                    "stopOnFailure": compound.stop_on_failure.unwrap_or(true),
+                    "unavailableReason": debug_diagnostic,
+                }),
+                env_file: None,
+                configuration_source: Some("shared".to_string()),
+                compound_configuration_ids: debug_ids,
+                compound_parallel: compound.parallel,
+                compound_stop_on_failure: compound.stop_on_failure,
+            });
+            let run_ids = run_ids.unwrap_or_default();
+            let run_error = if run_ids.is_empty() {
+                Some("Compound configuration has no valid Run children".to_string())
+            } else {
+                None
+            };
+            let compound = configuration.compound.as_ref().expect("compound exists");
+            builder.run_configurations.push(RunConfiguration {
+                id: format!("shared-run:{}", configuration.id),
+                project_id: configuration.project_id.clone(),
+                label: configuration.label,
+                kind: "compound".to_string(),
+                command: ExecutionCommand {
+                    executable: "__taomni_compound__".to_string(),
+                    args: Vec::new(),
+                    cwd: project_cwd,
+                    env: BTreeMap::new(),
+                    display: "Compound configuration".to_string(),
+                    source: "configured".to_string(),
+                    error: run_error,
+                },
+                source_file,
+                pre_launch_targets,
+                debug_configuration_id: Some(compound_debug_id),
+                runtime_options: None,
+                env_file: None,
+                argument_strategy: None,
+                environment_modes: None,
+                configuration_source: Some("shared".to_string()),
+                compound_configuration_ids: Some(run_ids),
+                compound_parallel: compound.parallel,
+                compound_stop_on_failure: compound.stop_on_failure,
+            });
+        }
     }
 }
 
@@ -1636,6 +3248,7 @@ pub fn detect_execution_model(
             _ => {}
         }
     }
+    merge_shared_configurations(&mut builder, root);
     Ok(builder.finish())
 }
 
@@ -1794,6 +3407,312 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("Configured executable")
+        );
+    }
+
+    #[test]
+    fn migrates_v1_shared_runs_and_expands_workspace_variables() {
+        let directory = tempfile::tempdir().unwrap();
+        write(
+            &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
+            r#"{
+              "version": 1,
+              "runs": [{
+                "id": "legacy",
+                "name": "Legacy task",
+                "executable": "cargo",
+                "args": ["run", "--manifest-path", "$PROJECT_DIR$/Cargo.toml"],
+                "cwd": "${workspaceRoot}",
+                "env": { "WORKSPACE": "${workspaceRoot}" }
+              }]
+            }"#,
+        );
+        let model = detect_execution_model(directory.path(), None, None).unwrap();
+        assert!(model.diagnostics.is_empty(), "{:?}", model.diagnostics);
+        let run = model
+            .run_configurations
+            .iter()
+            .find(|configuration| configuration.id == "shared-run:legacy")
+            .expect("migrated shared run");
+        assert_eq!(run.label, "Legacy task");
+        assert_eq!(run.command.executable, "cargo");
+        assert_eq!(run.command.cwd, path_string(directory.path()));
+        assert_eq!(run.command.env["WORKSPACE"], path_string(directory.path()));
+        assert_eq!(run.configuration_source.as_deref(), Some("shared"));
+        assert!(run.command.args[2].ends_with("Cargo.toml"));
+        assert!(
+            model
+                .projects
+                .iter()
+                .any(|project| project.id == "shared:workspace")
+        );
+    }
+
+    #[test]
+    fn loads_shared_run_debug_templates_and_current_platform_overrides() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let executable_string = path_string(&executable);
+        write(
+            &directory.path().join("Cargo.toml"),
+            "[package]\nname='demo'\nversion='0.1.0'\n",
+        );
+        write(&directory.path().join("src/main.rs"), "fn main() {}\n");
+        let initial = detect_execution_model(directory.path(), None, None).unwrap();
+        let base = initial
+            .run_configurations
+            .iter()
+            .find(|configuration| configuration.kind == "bin")
+            .expect("provider run");
+        let build = base.pre_launch_targets.first().expect("provider build");
+        let config = json!({
+            "version": 2,
+            "templates": {
+                "integration": {
+                    "run": {
+                        "env": { "FROM_TEMPLATE": "yes" },
+                        "runtimeOptions": ["--trace"]
+                    }
+                }
+            },
+            "configurations": [{
+                "id": "team",
+                "name": "Team launch",
+                "base": base.id,
+                "template": "integration",
+                "sourceFile": "src/main.rs",
+                "beforeLaunch": [build],
+                "run": {
+                    "args": ["--team"],
+                    "cwd": "${projectRoot}",
+                    "envFile": ".env.team"
+                },
+                "debug": {
+                    "adapterId": "lldb",
+                    "request": "attach",
+                    "launchConfig": {
+                        "adapterCommand": executable_string,
+                        "adapterCwd": "${projectRoot}",
+                        "arguments": { "program": "$PROJECT_DIR$/target/demo" }
+                    }
+                },
+                "platforms": {
+                    shared_platform_key(): {
+                        "run": { "env": { "PLATFORM": shared_platform_key() } }
+                    }
+                }
+            }]
+        });
+        write(
+            &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
+            &serde_json::to_string_pretty(&config).unwrap(),
+        );
+
+        let model = detect_execution_model(directory.path(), None, None).unwrap();
+        assert!(model.diagnostics.is_empty(), "{:?}", model.diagnostics);
+        let run = model
+            .run_configurations
+            .iter()
+            .find(|configuration| configuration.id == "shared-run:team")
+            .expect("shared run");
+        assert_eq!(run.command.args, ["--team"]);
+        assert_eq!(run.command.env["FROM_TEMPLATE"], "yes");
+        assert_eq!(run.command.env["PLATFORM"], shared_platform_key());
+        assert_eq!(
+            run.runtime_options.as_deref(),
+            Some(["--trace".to_string()].as_slice())
+        );
+        assert!(run.env_file.as_deref().unwrap().ends_with(".env.team"));
+        assert_eq!(
+            run.debug_configuration_id.as_deref(),
+            Some("shared-debug:team")
+        );
+        assert_eq!(
+            run.source_file.as_deref(),
+            Some(path_string(&directory.path().join("src/main.rs")).as_str())
+        );
+        let debug = model
+            .debug_configurations
+            .iter()
+            .find(|configuration| configuration.id == "shared-debug:team")
+            .expect("shared debug");
+        assert_eq!(debug.request, "attach");
+        assert_eq!(debug.launch_config["request"], "attach");
+        assert_eq!(
+            debug.launch_config["adapterCwd"],
+            path_string(directory.path())
+        );
+        assert!(debug.available);
+    }
+
+    #[test]
+    fn invalid_shared_files_are_atomic_and_report_actionable_diagnostics() {
+        let cases = [
+            (
+                "duplicate",
+                r#"{"version":2,"configurations":[{"id":"same","run":{"executable":"cargo"}},{"id":"same","run":{"executable":"cargo"}}]}"#,
+                "duplicate id",
+            ),
+            (
+                "base",
+                r#"{"version":2,"configurations":[{"id":"bad","base":"run:missing"}]}"#,
+                "unknown provider base",
+            ),
+            (
+                "debug-reference",
+                r#"{"version":2,"configurations":[{"id":"bad","debugConfigurationId":"missing","run":{"executable":"cargo"}}]}"#,
+                "unknown debug reference",
+            ),
+            (
+                "env",
+                r#"{"version":2,"configurations":[{"id":"bad","run":{"executable":"cargo","env":{"NOT VALID":"x"}}}]}"#,
+                "invalid environment name",
+            ),
+            (
+                "before-launch",
+                r#"{"version":2,"configurations":[{"id":"bad","beforeLaunch":["build:missing"],"run":{"executable":"cargo"}}]}"#,
+                "unknown Before launch target",
+            ),
+        ];
+        for (name, contents, expected) in cases {
+            let directory = tempfile::tempdir().unwrap();
+            write(
+                &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
+                contents,
+            );
+            let model = detect_execution_model(directory.path(), None, None).unwrap();
+            assert!(
+                model
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.contains(expected)),
+                "{name}: {:?}",
+                model.diagnostics
+            );
+            assert!(
+                model
+                    .run_configurations
+                    .iter()
+                    .all(
+                        |configuration| configuration.configuration_source.as_deref()
+                            != Some("shared")
+                    ),
+                "{name} partially merged"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_shared_file_is_silent() {
+        let directory = tempfile::tempdir().unwrap();
+        let model = detect_execution_model(directory.path(), None, None).unwrap();
+        assert!(model.diagnostics.is_empty());
+        assert!(model.run_configurations.is_empty());
+    }
+
+    #[test]
+    fn debug_only_shared_configuration_is_exposed_without_becoming_runnable() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = path_string(&std::env::current_exe().unwrap());
+        write(
+            &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
+            &serde_json::to_string(&json!({
+                "version": 2,
+                "configurations": [{
+                    "id": "debug-only",
+                    "debug": {
+                        "adapterId": "lldb",
+                        "request": "launch",
+                        "launchConfig": { "adapterCommand": adapter }
+                    }
+                }]
+            }))
+            .unwrap(),
+        );
+        let model = detect_execution_model(directory.path(), None, None).unwrap();
+        let run = model
+            .run_configurations
+            .iter()
+            .find(|configuration| configuration.id == "shared-run:debug-only")
+            .expect("debug-only chooser entry");
+        assert_eq!(run.kind, "debug-only");
+        assert!(run.command.error.is_some());
+        assert_eq!(run.configuration_source.as_deref(), Some("shared"));
+        let debug = model
+            .debug_configurations
+            .iter()
+            .find(|configuration| configuration.id == "shared-debug:debug-only")
+            .expect("debug-only debug entry");
+        assert!(debug.available);
+        assert_eq!(debug.configuration_source.as_deref(), Some("shared"));
+    }
+
+    #[test]
+    fn compound_run_resolves_children_and_compound_debug_is_explicitly_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        write(
+            &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
+            r#"{
+              "version": 2,
+              "configurations": [
+                {"id":"one","run":{"executable":"cargo","args":["run"]}},
+                {"id":"two","run":{"executable":"cargo","args":["test"]}},
+                {"id":"all","compound":{"configurations":["one","two"],"parallel":true,"stopOnFailure":false}}
+              ]
+            }"#,
+        );
+        let model = detect_execution_model(directory.path(), None, None).unwrap();
+        assert!(model.diagnostics.is_empty(), "{:?}", model.diagnostics);
+        let run = model
+            .run_configurations
+            .iter()
+            .find(|configuration| configuration.id == "shared-run:all")
+            .expect("compound run");
+        assert_eq!(run.kind, "compound");
+        assert_eq!(
+            run.compound_configuration_ids.as_deref(),
+            Some(["shared-run:one".to_string(), "shared-run:two".to_string()].as_slice())
+        );
+        assert_eq!(run.compound_parallel, Some(true));
+        assert_eq!(run.compound_stop_on_failure, Some(false));
+        let debug = model
+            .debug_configurations
+            .iter()
+            .find(|configuration| configuration.id == "shared-debug:all")
+            .expect("compound debug chooser");
+        assert!(!debug.available);
+        assert!(
+            debug
+                .diagnostic
+                .as_deref()
+                .unwrap_or_default()
+                .contains("multi-session DAP")
+        );
+    }
+
+    #[test]
+    fn compound_invalid_child_is_atomic_and_does_not_fall_back_to_empty_plan() {
+        let directory = tempfile::tempdir().unwrap();
+        write(
+            &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
+            r#"{"version":2,"configurations":[{"id":"bad","compound":{"configurations":["missing"]}}]}"#,
+        );
+        let model = detect_execution_model(directory.path(), None, None).unwrap();
+        assert!(
+            model
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("unknown compound child")),
+            "{:?}",
+            model.diagnostics
+        );
+        assert!(
+            model
+                .run_configurations
+                .iter()
+                .all(
+                    |configuration| configuration.configuration_source.as_deref() != Some("shared")
+                )
         );
     }
 }

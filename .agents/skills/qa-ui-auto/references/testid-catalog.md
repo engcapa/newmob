@@ -122,6 +122,8 @@
 - `[data-testid^="run-panel-configuration-run:"]` — interactive [optional] — F25.1.run-configuration
 - `[data-testid^="run-panel-configuration-edit-run:"]` — interactive [optional] — F25.1.run-configuration-edit
 - `[data-testid^="run-panel-configuration-copy-run:"]` — interactive [optional] — F25.1.run-configuration-copy
+- `[data-testid^="run-panel-configuration-source-"]` — display [optional] — F25.1.run-configuration-source
+- `[data-testid="run-panel-execution-diagnostics"]` — display [optional] — F25.1.execution-diagnostics
 - `[data-testid="run-configuration-editor"]` — display [optional] — F25.1.run-configuration-editor
 - `[data-testid="run-configuration-name"]` — interactive [optional] — F25.1.run-configuration-name
 - `[data-testid="run-configuration-cwd"]` — interactive [optional] — F25.1.run-configuration-cwd
@@ -142,6 +144,7 @@
 - `[data-testid^="build-panel-target-build:"]` — interactive [optional] — F25.1.build-target
 - `[data-testid="code-workspace-debug-panel"]` — display — F25.1.debug-panel
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
+- `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
 - `[data-testid="workspace-build-run-tools-dialog"]` — display — F25.1.tools-dialog
 - `[data-testid="workspace-build-run-tools-close"]` — interactive — F25.1.tools-close
 - `[data-testid="workspace-build-run-tools-cancel"]` — interactive — F25.1.tools-cancel

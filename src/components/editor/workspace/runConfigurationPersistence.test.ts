@@ -179,6 +179,60 @@ describe("run configuration persistence", () => {
     expect(readRunConfigurationOverrides("workspace-b")).toEqual({});
   });
 
+  it("isolates duplicate configuration ids by workspace root with legacy fallback", () => {
+    writeRunConfigurationOverride("workspace-a", run.id, {
+      name: "Legacy", args: [], cwd: "", env: {},
+    });
+    expect(readRunConfigurationOverrides("workspace-a", "root-one")[run.id].name).toBe("Legacy");
+    expect(readRunConfigurationOverrides("workspace-a", "root-two")[run.id].name).toBe("Legacy");
+
+    writeRunConfigurationOverride("workspace-a", run.id, {
+      name: "One", args: [], cwd: "", env: {},
+    }, "root-one");
+    writeRunConfigurationOverride("workspace-a", run.id, {
+      name: "Two", args: [], cwd: "", env: {},
+    }, "root-two");
+
+    expect(readRunConfigurationOverrides("workspace-a", "root-one")[run.id].name).toBe("One");
+    expect(readRunConfigurationOverrides("workspace-a", "root-two")[run.id].name).toBe("Two");
+    expect(readRunConfigurationOverrides("workspace-a")[run.id].name).toBe("Legacy");
+  });
+
+  it("inherits configured runtime options for legacy overrides and preserves explicit clearing", () => {
+    const configured: ExecutionRunConfiguration = {
+      ...run,
+      command: {
+        ...run.command,
+        executable: "node",
+        args: ["app.js"],
+        display: "node app.js",
+      },
+      runtimeOptions: ["--inspect", "--trace-warnings"],
+      envFile: ".env.shared",
+    };
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.runConfigurations.v1.workspace-a",
+      JSON.stringify({
+        [configured.id]: { args: [], cwd: "", env: {} },
+      }),
+    );
+
+    const legacyOverride = readRunConfigurationOverrides("workspace-a")[configured.id];
+    expect(legacyOverride.vmOptions).toBeUndefined();
+    expect(applyRunConfigurationOverride(configured, legacyOverride)).toMatchObject({
+      runtimeOptions: ["--inspect", "--trace-warnings"],
+      envFile: ".env.shared",
+      command: { args: ["--inspect", "--trace-warnings", "app.js"] },
+    });
+
+    const cleared = applyRunConfigurationOverride(configured, {
+      args: [], vmOptions: [], cwd: "", env: {}, envFile: "",
+    });
+    expect(cleared.runtimeOptions).toBeUndefined();
+    expect(cleared.envFile).toBeUndefined();
+    expect(cleared.command.args).toEqual(["app.js"]);
+  });
+
   it("applies args, cwd, and env to the matching DAP payload", () => {
     const debug: ExecutionDebugConfiguration = {
       id: "debug:demo",
@@ -231,6 +285,54 @@ describe("run configuration persistence", () => {
         args: ["user"], vmArgs: ["-Xmx1g"], cwd: "/repo/tools",
         env: { PROVIDER: "1", MODE: "test" },
       });
+  });
+
+  it("inherits shared runtime options into DAP and Java debug unless locally cleared", () => {
+    const debug: ExecutionDebugConfiguration = {
+      id: "debug:demo",
+      projectId: "project:demo",
+      label: "Debug demo",
+      adapterId: "java",
+      request: "launch",
+      available: true,
+      preLaunchTargets: [],
+      launchConfig: { arguments: { vmArgs: ["-Dprovider=true"] } },
+    };
+
+    expect(applyRunOverrideToDebugConfiguration(debug, undefined, ["-Xmx1g"]).launchConfig)
+      .toMatchObject({ arguments: { vmArgs: ["-Dprovider=true", "-Xmx1g"] } });
+    expect(applyRunOverrideToDebugConfiguration(debug, undefined, [], ".env.shared").envFile)
+      .toBe(".env.shared");
+    expect(applyRunOverrideToDebugConfiguration(
+      { ...debug, envFile: ".env.debug" },
+      undefined,
+      [],
+      ".env.shared",
+    ).envFile).toBe(".env.debug");
+    expect(applyRunOverrideToDebugConfiguration(
+      debug,
+      { args: [], vmOptions: [], cwd: "", env: {}, envFile: "" },
+      ["-Xmx1g"],
+      ".env.shared",
+    ).launchConfig).toMatchObject({ arguments: { vmArgs: ["-Dprovider=true"] } });
+    expect(applyRunOverrideToDebugConfiguration(
+      debug,
+      { args: [], vmOptions: [], cwd: "", env: {}, envFile: "" },
+      ["-Xmx1g"],
+      ".env.shared",
+    ).envFile).toBeUndefined();
+    expect(applyRunOverrideToJavaLaunch({ vmArgs: ["-Dprovider=true"] }, undefined, {}, ["-Xmx1g"]))
+      .toMatchObject({ vmArgs: ["-Dprovider=true", "-Xmx1g"] });
+    expect(applyRunOverrideToJavaLaunch({ vmArgs: "-Dprovider=true" }, undefined, {}, ["-Xmx1g"]))
+      .toMatchObject({ vmArgs: "-Dprovider=true -Xmx1g" });
+    expect(applyRunOverrideToJavaLaunch({}, undefined, {}, ["-Xmx1g"]))
+      .toMatchObject({ vmArgs: ["-Xmx1g"] });
+    expect(applyRunOverrideToJavaLaunch(
+      {},
+      { args: [], vmOptions: [], cwd: "", env: {} },
+      {},
+      ["-Xmx1g"],
+    )).not.toHaveProperty("vmArgs");
   });
 
   it("creates named copies anchored to the detected configuration", () => {
