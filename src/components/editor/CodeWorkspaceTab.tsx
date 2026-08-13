@@ -194,7 +194,7 @@ import {
 } from "../../lib/ai/answerLanguage";
 import { EditorAiRewriteDialog } from "./workspace/EditorAiRewriteDialog";
 import { confirmAppDialog, promptAppDialog } from "../../lib/appDialogs";
-import { writeText } from "../../lib/clipboard";
+import { readText, writeText } from "../../lib/clipboard";
 import { useContextMenu } from "../ContextMenu";
 import { useChatStore } from "../../stores/chatStore";
 import {
@@ -584,12 +584,21 @@ import type { EditorRevealTarget } from "./workspace/EditorGroup";
 import { LspMessageRequestDialog } from "./workspace/LspMessageRequestDialog";
 import { useWorkspaceLspClientEvents } from "./workspace/useWorkspaceLspClientEvents";
 import {
+  addDiagnosticToInspectionBaseline,
+  addInspectionSuppression,
   applyInspectionProfile,
+  clearInspectionBaseline,
+  importInspectionBaseline,
   readInspectionProfile,
+  removeInspectionBaselineEntry,
+  removeInspectionSuppression,
+  replaceInspectionBaseline,
+  serializeInspectionBaseline,
   updateInspectionRule,
   writeInspectionProfile,
   type InspectionProfile,
   type InspectionRule,
+  type InspectionSuppressionScope,
 } from "./workspace/inspectionProfile";
 import { ExternalFileConflictDialog } from "./workspace/ExternalFileConflictDialog";
 import { WorkspaceRecoveryDialog } from "./workspace/WorkspaceRecoveryDialog";
@@ -1135,13 +1144,16 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     setInspectionProfile(readInspectionProfile(workspaceInstanceId));
   }, [workspaceInstanceId]);
-  const updateInspectionProfileRule = useCallback((id: string, patch: Partial<InspectionRule>) => {
+  const persistInspectionProfile = useCallback((
+    update: (current: InspectionProfile) => InspectionProfile,
+  ) => {
     setInspectionProfile((current) => {
-      const next = updateInspectionRule(current, id, patch);
-      writeInspectionProfile(workspaceInstanceId, next);
-      return next;
+      return writeInspectionProfile(workspaceInstanceId, update(current));
     });
   }, [workspaceInstanceId]);
+  const updateInspectionProfileRule = useCallback((id: string, patch: Partial<InspectionRule>) => {
+    persistInspectionProfile((current) => updateInspectionRule(current, id, patch));
+  }, [persistInspectionProfile]);
   const [gitHeadTextByFile, setGitHeadTextByFile] = useState<Record<string, { sourceKey: string; text: string | null }>>({});
   const [gitBlameByGroup, setGitBlameByGroup] = useState<Record<EditorGroupId, GitBlameLine | null>>({
     primary: null,
@@ -2575,6 +2587,57 @@ export function CodeWorkspaceTab({
     if (!root) return null;
     return absoluteWorkspacePath(root, file.ref.path);
   }, [findRoot]);
+  const inspectionPathForFileKey = useCallback((fileKeyValue: string): string => {
+    const open = openFilesRef.current[fileKeyValue];
+    const ref = open?.ref;
+    if (ref?.kind === "root") {
+      return `root:${ref.rootId}:${normalizeFsPath(ref.path).replace(/^\/+/, "")}`;
+    }
+    if (ref) return `loose:${normalizeFsPath(ref.path)}`;
+    for (const root of rootsRef.current) {
+      const relative = relativePathWithinRoot(root.path, fileKeyValue);
+      if (relative !== null) return `root:${root.id}:${normalizeFsPath(relative).replace(/^\/+/, "")}`;
+    }
+    return normalizeFsPath(fileKeyValue);
+  }, []);
+  const suppressInspection = useCallback((
+    fileKeyValue: string,
+    diagnostic: LspDiagnostic,
+    scope: InspectionSuppressionScope,
+  ) => {
+    const path = inspectionPathForFileKey(fileKeyValue);
+    persistInspectionProfile((current) => addInspectionSuppression(current, diagnostic, path, scope));
+    setStatusMessage(`Suppressed ${diagnostic.source ?? "inspection"}:${diagnostic.code ?? "*"} for ${scope}`);
+  }, [inspectionPathForFileKey, persistInspectionProfile, setStatusMessage]);
+  const addInspectionBaseline = useCallback((fileKeyValue: string, diagnostic: LspDiagnostic) => {
+    const path = inspectionPathForFileKey(fileKeyValue);
+    persistInspectionProfile((current) => addDiagnosticToInspectionBaseline(current, diagnostic, path));
+    setStatusMessage("Added diagnostic to inspection baseline");
+  }, [inspectionPathForFileKey, persistInspectionProfile, setStatusMessage]);
+  const clearInspectionBaselineEntries = useCallback(() => {
+    persistInspectionProfile(clearInspectionBaseline);
+    setStatusMessage("Inspection baseline cleared");
+  }, [persistInspectionProfile, setStatusMessage]);
+  const removeInspectionBaseline = useCallback((key: string) => {
+    persistInspectionProfile((current) => removeInspectionBaselineEntry(current, key));
+  }, [persistInspectionProfile]);
+  const removeInspectionSuppressionEntry = useCallback((key: string) => {
+    persistInspectionProfile((current) => removeInspectionSuppression(current, key));
+  }, [persistInspectionProfile]);
+  const exportInspectionBaseline = useCallback(async () => {
+    const text = serializeInspectionBaseline(inspectionProfile);
+    await writeText(text);
+    setStatusMessage("Inspection baseline copied to clipboard");
+  }, [inspectionProfile, setStatusMessage]);
+  const importInspectionBaselineFromClipboard = useCallback(async () => {
+    try {
+      const text = await readText();
+      persistInspectionProfile((current) => importInspectionBaseline(current, text));
+      setStatusMessage("Inspection baseline imported");
+    } catch (error) {
+      setStatusMessage(errorMessage(error));
+    }
+  }, [persistInspectionProfile, setStatusMessage]);
 
   const readWorkspaceEditPathSnapshot = useCallback(async (
     absolutePath: string,
@@ -3687,7 +3750,9 @@ export function CodeWorkspaceTab({
   const activeLspState = activeKey ? lspFiles[activeKey] ?? null : null;
   const activeCapabilities = activeLspState?.status?.capabilities ?? null;
   const inspectionTransform = useCallback(
-    (diagnostic: LspDiagnostic): LspDiagnostic | null => applyInspectionProfile(diagnostic, inspectionProfile),
+    (diagnostic: LspDiagnostic, path?: string): LspDiagnostic | null => (
+      applyInspectionProfile(diagnostic, inspectionProfile, { path })
+    ),
     [inspectionProfile],
   );
   const activeLspDocumentIsSynced = Boolean(
@@ -7448,10 +7513,10 @@ export function CodeWorkspaceTab({
       const file = deferredOpenFiles[key];
       const diagnostics = lspFiles[key]?.diagnostics ?? [];
       return file && diagnostics.length > 0
-        ? [{ key, title: file.title, subtitle: file.subtitle, diagnostics }]
+        ? [{ key, title: file.title, subtitle: file.subtitle, path: inspectionPathForFileKey(key), diagnostics }]
         : [];
     }),
-    [deferredOpenFiles, lspFiles, openOrder],
+    [deferredOpenFiles, inspectionPathForFileKey, lspFiles, openOrder],
   );
   // M7-C: whole-project Problems. jdtls stores diagnostics for unopened files
   // after a build; we poll the aggregate while the panel is in "project" scope
@@ -7485,13 +7550,14 @@ export function CodeWorkspaceTab({
           key: entry.path,
           title: basename(entry.path),
           subtitle,
+          path: inspectionPathForFileKey(entry.path),
           diagnostics: entry.diagnostics,
         };
       }));
     } catch {
       // No active jdtls session / command unsupported: leave the list as-is.
     }
-  }, [findRoot, problemPathToRef, workspaceInstanceId]);
+  }, [findRoot, inspectionPathForFileKey, problemPathToRef, workspaceInstanceId]);
 
   // A pull-capable server may invalidate workspace diagnostics between polling
   // ticks. Refresh the aggregate immediately when the backend forwards the
@@ -7549,11 +7615,19 @@ export function CodeWorkspaceTab({
 
   const problemsScopeFiles = problemsScope === "project" ? projectProblemFiles : problemFiles;
   const analysisFiles = problemsScopeFiles;
+  const createInspectionBaselineFromScope = useCallback(() => {
+    const sources = problemsScopeFiles.flatMap((file) => file.diagnostics.map((diagnostic) => ({
+      diagnostic,
+      path: inspectionPathForFileKey(file.key),
+    })));
+    persistInspectionProfile((current) => replaceInspectionBaseline(current, sources));
+    setStatusMessage(`Inspection baseline replaced with ${sources.length} provider diagnostic${sources.length === 1 ? "" : "s"}`);
+  }, [inspectionPathForFileKey, persistInspectionProfile, problemsScopeFiles, setStatusMessage]);
   const activeProblemCounts = useMemo(
     () => problemsScopeFiles.reduce(
       (counts, file) => {
         for (const diagnostic of file.diagnostics) {
-          const display = inspectionTransform(diagnostic);
+          const display = inspectionTransform(diagnostic, file.path ?? file.subtitle);
           if (display?.severity === 1) counts.errors += 1;
           else if (display?.severity === 2) counts.warnings += 1;
         }
@@ -8750,7 +8824,10 @@ export function CodeWorkspaceTab({
     };
     const lspDiagnostics = openStates
       .map((file) => {
-        const diagnostics = lspFiles[file.key]?.diagnostics ?? [];
+        const diagnostics = (lspFiles[file.key]?.diagnostics ?? []).flatMap((diagnostic) => {
+          const display = inspectionTransform(diagnostic, inspectionPathForFileKey(file.key));
+          return display ? [display] : [];
+        });
         if (diagnostics.length === 0) return null;
         return {
           file: toContextFile(file),
@@ -8799,6 +8876,8 @@ export function CodeWorkspaceTab({
     deferredActiveFile,
     deferredOpenFiles,
     dirtyFiles,
+    inspectionPathForFileKey,
+    inspectionTransform,
     looseFiles,
     lspFiles,
     openOrder,
@@ -8816,8 +8895,9 @@ export function CodeWorkspaceTab({
     const group = editorGroups[groupId];
     const groupFile = group.activeKey ? openFiles[group.activeKey] ?? null : null;
     const groupLspState = group.activeKey ? lspFiles[group.activeKey] ?? null : null;
+    const groupPath = groupFile ? inspectionPathForFileKey(groupFile.key) : undefined;
     const groupDiagnostics = (groupLspState?.diagnostics ?? []).flatMap((diagnostic) => {
-      const display = inspectionTransform(diagnostic);
+      const display = inspectionTransform(diagnostic, groupPath);
       return display ? [display] : [];
     });
     const groupCapabilities = groupLspState?.status?.capabilities ?? null;
@@ -9403,6 +9483,8 @@ export function CodeWorkspaceTab({
                 files={problemsScopeFiles}
                 onOpenProblem={openProblem}
                 onQuickFix={(fileKey, diagnostic) => void openQuickFixForProblem(fileKey, diagnostic)}
+                onSuppress={suppressInspection}
+                onAddToBaseline={addInspectionBaseline}
                 scope={problemsScope}
                 onScopeChange={setProblemsScope}
                 onRebuild={() => void rebuildProject()}
@@ -9426,6 +9508,12 @@ export function CodeWorkspaceTab({
                 semanticIndex={semanticIndex.snapshot}
                 profile={inspectionProfile}
                 onUpdateRule={updateInspectionProfileRule}
+                onCreateBaseline={createInspectionBaselineFromScope}
+                onClearBaseline={clearInspectionBaselineEntries}
+                onRemoveBaselineEntry={removeInspectionBaseline}
+                onRemoveSuppression={removeInspectionSuppressionEntry}
+                onExportBaseline={() => void exportInspectionBaseline()}
+                onImportBaseline={() => void importInspectionBaselineFromClipboard()}
                 onOpenLocation={(location) => void openLspLocation(location)}
                 onOpenDiagnostic={openProblem}
               />

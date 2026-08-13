@@ -161,4 +161,29 @@ describe("ProblemsPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: /Show related locations/ }));
     expect(onOpenRelatedInformation).toHaveBeenCalledWith(providerDiagnostic);
   });
+
+  it("exposes file/line suppression and baseline actions with the original provider diagnostic", () => {
+    const onSuppress = vi.fn();
+    const onAddToBaseline = vi.fn();
+    render(
+      <ProblemsPanel
+        files={[{ ...files[0], path: "root:app:src/a.ts" }]}
+        onOpenProblem={vi.fn()}
+        onSuppress={onSuppress}
+        onAddToBaseline={onAddToBaseline}
+      />,
+    );
+    const problem = screen.getByRole("button", { name: /Broken expression/ });
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Suppress for line" }));
+    expect(onSuppress).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0], "line");
+
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Suppress for file" }));
+    expect(onSuppress).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0], "file");
+
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Add to inspection baseline" }));
+    expect(onAddToBaseline).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0]);
+  });
 });

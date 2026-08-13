@@ -8,6 +8,8 @@ export interface ProblemFileGroup {
   key: string;
   title: string;
   subtitle: string;
+  /** Stable path identity used by suppression and baseline matching. */
+  path?: string;
   diagnostics: LspDiagnostic[];
 }
 
@@ -17,6 +19,8 @@ interface ProblemsPanelProps {
   files: ProblemFileGroup[];
   onOpenProblem: (fileKey: string, diagnostic: LspDiagnostic) => void;
   onQuickFix?: (fileKey: string, diagnostic: LspDiagnostic) => void;
+  onSuppress?: (fileKey: string, diagnostic: LspDiagnostic, scope: "file" | "line") => void;
+  onAddToBaseline?: (fileKey: string, diagnostic: LspDiagnostic) => void;
   /** "open files" (default) vs "whole project" (M7-C). Omit to hide the toggle. */
   scope?: ProblemsScope;
   onScopeChange?: (scope: ProblemsScope) => void;
@@ -26,7 +30,7 @@ interface ProblemsPanelProps {
   /** True while the project-scope diagnostics are (re)loading. */
   loading?: boolean;
   /** Display-only inspection transform. Callbacks still receive the provider diagnostic. */
-  diagnosticTransform?: (diagnostic: LspDiagnostic) => LspDiagnostic | null;
+  diagnosticTransform?: (diagnostic: LspDiagnostic, path?: string) => LspDiagnostic | null;
   onOpenRelatedInformation?: (diagnostic: LspDiagnostic) => void;
 }
 
@@ -48,6 +52,8 @@ export function ProblemsPanel({
   files,
   onOpenProblem,
   onQuickFix,
+  onSuppress,
+  onAddToBaseline,
   scope,
   onScopeChange,
   onRebuild,
@@ -66,7 +72,7 @@ export function ProblemsPanel({
   const profiledFiles = useMemo(() => files.map((file) => ({
     ...file,
     diagnostics: file.diagnostics.flatMap((original) => {
-      const display = diagnosticTransform ? diagnosticTransform(original) : original;
+      const display = diagnosticTransform ? diagnosticTransform(original, file.path ?? file.subtitle) : original;
       return display ? [{ original, display }] : [];
     }),
   })), [diagnosticTransform, files]);
@@ -175,6 +181,24 @@ export function ProblemsPanel({
                       disabled: !onQuickFix,
                       onClick: () => onQuickFix?.(file.key, original),
                     },
+                    ...(onSuppress
+                      ? [
+                          {
+                            label: "Suppress for line",
+                            onClick: () => onSuppress(file.key, original, "line" as const),
+                          },
+                          {
+                            label: "Suppress for file",
+                            onClick: () => onSuppress(file.key, original, "file" as const),
+                          },
+                        ]
+                      : []),
+                    ...(onAddToBaseline
+                      ? [{
+                          label: "Add to inspection baseline",
+                          onClick: () => onAddToBaseline(file.key, original),
+                        }]
+                      : []),
                     ...(diagnostic.relatedInformation?.length && onOpenRelatedInformation
                       ? [{
                           label: `Show related locations (${diagnostic.relatedInformation.length})`,

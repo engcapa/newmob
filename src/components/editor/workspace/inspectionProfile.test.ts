@@ -3,10 +3,18 @@ import type { LspDiagnostic } from "../../../lib/editor/lsp";
 import {
   applyInspectionProfile,
   applyInspectionProfileToDiagnostics,
+  addDiagnosticToInspectionBaseline,
+  addInspectionSuppression,
+  clearInspectionBaseline,
   defaultInspectionProfile,
   diagnosticInspectionId,
+  importInspectionBaseline,
+  inspectionBaselineEntryKey,
+  inspectionSuppressionKey,
   normalizeInspectionProfile,
   readInspectionProfile,
+  removeInspectionSuppression,
+  serializeInspectionBaseline,
   updateInspectionRule,
   writeInspectionProfile,
 } from "./inspectionProfile";
@@ -38,11 +46,13 @@ describe("inspectionProfile", () => {
         "": { enabled: false },
       },
     })).toEqual({
-      version: 1,
+      version: 2,
       rules: {
         "typescript:unused-value": { enabled: false, severity: null },
         "rustc:E0308": { enabled: true, severity: 1 },
       },
+      suppressions: [],
+      baseline: { createdAt: null, entries: [] },
     });
   });
 
@@ -82,5 +92,52 @@ describe("inspectionProfile", () => {
     const changed = updateInspectionRule(defaultInspectionProfile(), id, { enabled: false, severity: 3 });
     const reset = updateInspectionRule(changed, id, { enabled: true, severity: null });
     expect(reset.rules).toEqual({});
+  });
+
+  it("migrates a v1 profile and persists v2 independently per workspace", () => {
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.inspectionProfile.v1.legacy",
+      JSON.stringify({ version: 1, rules: { "ts:E": { enabled: false } } }),
+    );
+    expect(readInspectionProfile("legacy")).toMatchObject({
+      version: 2,
+      rules: { "ts:E": { enabled: false, severity: null } },
+      suppressions: [],
+    });
+  });
+
+  it("suppresses a provider diagnostic by portable file path and line", () => {
+    const original = diagnostic();
+    let profile = addInspectionSuppression(defaultInspectionProfile(), original, "root:app:src/main.ts", "line");
+    expect(inspectionSuppressionKey(profile.suppressions[0])).toContain("root:app");
+    expect(applyInspectionProfile(original, profile, { path: "root:app:src/main.ts" })).toBeNull();
+    expect(applyInspectionProfile({ ...original, range: { ...original.range, start: { line: 2, character: 2 } } }, profile, { path: "root:app:src/main.ts" })).not.toBeNull();
+    profile = removeInspectionSuppression(profile, inspectionSuppressionKey(profile.suppressions[0]));
+    expect(profile.suppressions).toHaveLength(0);
+  });
+
+  it("matches baseline by provider id, portable path, and normalized message without line numbers", () => {
+    const original = diagnostic({ message: "  Value   is never read\n" });
+    let profile = addDiagnosticToInspectionBaseline(defaultInspectionProfile(), original, "root:app:src/main.ts", 10);
+    const moved = { ...original, range: { ...original.range, start: { line: 99, character: 0 } }, message: "Value is never read" };
+    expect(applyInspectionProfile(moved, profile, { path: "root:app:src/main.ts" })).toBeNull();
+    expect(serializeInspectionBaseline(profile)).toContain('"schema": "taomni.codeWorkspace.inspectionBaseline"');
+    const imported = importInspectionBaseline(clearInspectionBaseline(profile), serializeInspectionBaseline(profile));
+    expect(imported.baseline.entries.map(inspectionBaselineEntryKey)).toEqual(profile.baseline.entries.map(inspectionBaselineEntryKey));
+  });
+
+  it("rejects malformed or unsupported baseline imports", () => {
+    expect(() => importInspectionBaseline(defaultInspectionProfile(), "{}" )).toThrow(/schema|version/i);
+    expect(() => importInspectionBaseline(defaultInspectionProfile(), "not json" )).toThrow(/valid JSON/i);
+  });
+
+  it("drops malformed line suppressions instead of widening them to the whole file", () => {
+    const profile = normalizeInspectionProfile({
+      suppressions: [
+        { inspectionId: "ts:E", path: "root:app:src/main.ts", line: "1" },
+        { inspectionId: "ts:E", path: "root:app:src/main.ts", line: -1 },
+      ],
+    });
+    expect(profile.suppressions).toEqual([]);
   });
 });

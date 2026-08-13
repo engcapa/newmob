@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Activity, CheckCircle2, Circle, ExternalLink, Info, RefreshCw, Route, Server } from "lucide-react";
+import { Activity, CheckCircle2, Circle, Download, ExternalLink, Info, RefreshCw, Route, Server, Trash2, Upload } from "lucide-react";
 import type {
   LspDiagnostic,
   LspDiagnosticRelatedInformation,
@@ -9,11 +9,14 @@ import type {
 import type { InspectionProfile, InspectionRule, InspectionSeverity } from "../inspectionProfile";
 import {
   applyInspectionProfile,
-  applyInspectionProfileToDiagnostics,
   diagnosticInspectionId,
+  inspectionBaselineEntryKey,
   inspectionRuleFor,
+  inspectionSuppressionKey,
+  type InspectionBaselineEntry,
 } from "../inspectionProfile";
 import type { ProblemFileGroup } from "./ProblemsPanel";
+import { classifyProviderAnalysisEvidence } from "../inspectionEvidence";
 import {
   workspaceSemanticIndexStatusLabel,
   type WorkspaceSemanticIndexSnapshot,
@@ -26,6 +29,12 @@ interface AnalysisPanelProps {
   semanticIndex: WorkspaceSemanticIndexSnapshot;
   profile: InspectionProfile;
   onUpdateRule: (id: string, patch: Partial<InspectionRule>) => void;
+  onCreateBaseline: () => void;
+  onClearBaseline: () => void;
+  onRemoveBaselineEntry: (key: string) => void;
+  onRemoveSuppression: (key: string) => void;
+  onExportBaseline: () => void;
+  onImportBaseline: () => void;
   onOpenLocation: (location: LspLocation) => void;
   onOpenDiagnostic: (fileKey: string, diagnostic: LspDiagnostic) => void;
 }
@@ -65,6 +74,12 @@ export function AnalysisPanel({
   semanticIndex,
   profile,
   onUpdateRule,
+  onCreateBaseline,
+  onClearBaseline,
+  onRemoveBaselineEntry,
+  onRemoveSuppression,
+  onExportBaseline,
+  onImportBaseline,
   onOpenLocation,
   onOpenDiagnostic,
 }: AnalysisPanelProps) {
@@ -78,22 +93,24 @@ export function AnalysisPanel({
     return [...ids].sort((left, right) => left.localeCompare(right));
   }, [diagnostics, profile.rules]);
   const effectiveDiagnostics = useMemo(
-    () => applyInspectionProfileToDiagnostics(
-      diagnostics.map(({ diagnostic }) => diagnostic),
-      profile,
-    ),
+    () => diagnostics.flatMap(({ diagnostic, file }) => {
+      const display = applyInspectionProfile(diagnostic, profile, { path: file.path ?? file.subtitle });
+      return display ? [display] : [];
+    }),
     [diagnostics, profile],
   );
   const dataFlow = useMemo(
     () => diagnostics.flatMap(({ file, diagnostic }) => {
-      const display = applyInspectionProfile(diagnostic, profile);
-      return display && (diagnostic.relatedInformation?.length ?? 0) > 0
-        ? [{ file, diagnostic, display }]
+      const display = applyInspectionProfile(diagnostic, profile, { path: file.path ?? file.subtitle });
+      const evidence = display ? classifyProviderAnalysisEvidence(diagnostic) : null;
+      return display && evidence
+        ? [{ file, diagnostic, display, evidence }]
         : [];
     }),
     [diagnostics, profile],
   );
   const capabilities = capabilityRows(status);
+  const baselineEntries: InspectionBaselineEntry[] = profile.baseline.entries;
 
   return (
     <section data-testid="code-workspace-analysis-panel" className="flex h-full min-h-0 flex-col text-[11px]">
@@ -220,6 +237,36 @@ export function AnalysisPanel({
               </div>
             );
           })}
+          <div data-testid="analysis-inspection-baseline" className="space-y-1 rounded border border-[var(--taomni-code-border)] p-2">
+            <div className="flex items-center gap-1">
+              <span className="font-medium">Baseline</span>
+              <span className="text-[10px] text-[var(--taomni-code-muted)]">{baselineEntries.length} entries</span>
+              <span className="ml-auto flex items-center gap-1">
+                <button type="button" data-testid="analysis-baseline-create" className="h-6 rounded px-1.5 text-[10px] hover:bg-[var(--taomni-code-active-line-bg)]" onClick={onCreateBaseline}>Create from scope</button>
+                <button type="button" data-testid="analysis-baseline-import" aria-label="Import inspection baseline" title="Import inspection baseline" className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--taomni-code-active-line-bg)]" onClick={onImportBaseline}><Upload className="h-3 w-3" /></button>
+                <button type="button" data-testid="analysis-baseline-export" aria-label="Export inspection baseline" title="Export inspection baseline" className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--taomni-code-active-line-bg)]" onClick={onExportBaseline} disabled={baselineEntries.length === 0}><Download className="h-3 w-3" /></button>
+                <button type="button" data-testid="analysis-baseline-clear" aria-label="Clear inspection baseline" title="Clear inspection baseline" className="inline-flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--taomni-code-active-line-bg)]" onClick={onClearBaseline} disabled={baselineEntries.length === 0}><Trash2 className="h-3 w-3" /></button>
+              </span>
+            </div>
+            {baselineEntries.length === 0 && <div className="text-[10px] text-[var(--taomni-code-muted)]">No baseline entries. Add a provider diagnostic from Problems.</div>}
+            {baselineEntries.slice(0, 100).map((entry) => (
+              <div key={inspectionBaselineEntryKey(entry)} className="flex min-w-0 items-center gap-1 text-[10px]">
+                <span className="min-w-0 flex-1 truncate" title={`${entry.path}: ${entry.message}`}>{entry.inspectionId} · {entry.path} · {entry.message}</span>
+                <button type="button" aria-label={`Remove baseline ${entry.inspectionId}`} title="Remove baseline entry" className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-[var(--taomni-code-active-line-bg)]" onClick={() => onRemoveBaselineEntry(inspectionBaselineEntryKey(entry))}><Trash2 className="h-3 w-3" /></button>
+              </div>
+            ))}
+            <div className="text-[10px] text-[var(--taomni-code-muted)]">Baseline suppresses matching provider messages only; it is not a native inspection engine.</div>
+          </div>
+          <div data-testid="analysis-inspection-suppressions" className="space-y-1 rounded border border-[var(--taomni-code-border)] p-2">
+            <div className="font-medium">Suppressions · {profile.suppressions.length}</div>
+            {profile.suppressions.length === 0 && <div className="text-[10px] text-[var(--taomni-code-muted)]">No file or line suppressions.</div>}
+            {profile.suppressions.slice(0, 100).map((entry) => (
+              <div key={inspectionSuppressionKey(entry)} className="flex min-w-0 items-center gap-1 text-[10px]">
+                <span className="min-w-0 flex-1 truncate" title={`${entry.path}:${entry.line == null ? "file" : entry.line + 1}`}>{entry.inspectionId} · {entry.path} · {entry.line == null ? "file" : `line ${entry.line + 1}`}</span>
+                <button type="button" aria-label={`Remove suppression ${entry.inspectionId}`} title="Remove suppression" className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-[var(--taomni-code-active-line-bg)]" onClick={() => onRemoveSuppression(inspectionSuppressionKey(entry))}><Trash2 className="h-3 w-3" /></button>
+              </div>
+            ))}
+          </div>
         </section>
 
         <section data-testid="analysis-data-flow" className="space-y-1">
@@ -229,10 +276,11 @@ export function AnalysisPanel({
           </div>
           {dataFlow.length === 0 && (
             <div className="text-[var(--taomni-code-muted)]">
-              No provider-backed data-flow path is available. LSP related locations are required.
+              No provider-backed analysis evidence is available. The language server must return
+              nullability, taint, data-flow, or related-location metadata.
             </div>
           )}
-          {dataFlow.map(({ file, diagnostic, display }, index) => (
+          {dataFlow.map(({ file, diagnostic, display, evidence }, index) => (
             <div key={`${file.key}:${diagnosticInspectionId(diagnostic)}:${index}`} className="rounded border border-[var(--taomni-code-border)] p-2">
               <button
                 type="button"
@@ -242,7 +290,12 @@ export function AnalysisPanel({
                 <span className="min-w-0 flex-1 break-words">{display.message}</span>
                 <ExternalLink className="h-3 w-3 shrink-0" />
               </button>
-              <div className="mt-1 space-y-0.5 border-l border-[var(--taomni-code-border)] pl-2">
+              <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--taomni-code-muted)]">
+                <span data-testid={`analysis-evidence-kind-${evidence.kind}`}>{evidence.label}</span>
+                <span>{evidence.confidence} provider evidence</span>
+                <span>{evidence.source}</span>
+              </div>
+              {diagnostic.relatedInformation && diagnostic.relatedInformation.length > 0 && <div className="mt-1 space-y-0.5 border-l border-[var(--taomni-code-border)] pl-2">
                 {diagnostic.relatedInformation?.map((related, relatedIndex) => (
                   <button
                     key={`${relatedLabel(related)}:${relatedIndex}`}
@@ -254,7 +307,7 @@ export function AnalysisPanel({
                     <span className="shrink-0 font-mono">{relatedLabel(related)}</span>
                   </button>
                 ))}
-              </div>
+              </div>}
             </div>
           ))}
         </section>

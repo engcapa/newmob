@@ -178,6 +178,15 @@
 - `[data-testid="analysis-semantic-index"]` — display — F25.2.analysis-semantic-index
 - `[data-testid="analysis-lsp-status"]` — display — F25.2.analysis-lsp-status
 - `[data-testid="analysis-inspection-profile"]` — display — F25.2.analysis-inspection-profile
+- `[data-testid="analysis-inspection-baseline"]` — display — F25.2.analysis-inspection-baseline
+- `[data-testid="analysis-baseline-create"]` — interactive — F25.2.analysis-baseline-create
+- `[data-testid="analysis-baseline-import"]` — interactive — F25.2.analysis-baseline-import
+- `[data-testid="analysis-baseline-export"]` — interactive [optional] — F25.2.analysis-baseline-export
+- `[data-testid="analysis-baseline-clear"]` — interactive [optional] — F25.2.analysis-baseline-clear
+- `[data-testid="analysis-inspection-suppressions"]` — display — F25.2.analysis-inspection-suppressions
+- `[data-testid="context-menu-item-suppress-for-line"]` — interactive [optional] — F25.2.problems-suppress-line
+- `[data-testid="context-menu-item-suppress-for-file"]` — interactive [optional] — F25.2.problems-suppress-file
+- `[data-testid="context-menu-item-add-to-inspection-baseline"]` — interactive [optional] — F25.2.problems-add-baseline
 - `[data-testid="analysis-data-flow"]` — display — F25.2.analysis-data-flow
 - `[data-testid="references-semantic-index"]` — display [optional] — F25.2.references-semantic-index
 - `[data-testid="search-everywhere-semantic-index"]` — display [optional] — F25.2.search-semantic-index

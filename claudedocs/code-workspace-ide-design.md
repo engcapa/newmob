@@ -2,7 +2,7 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-13 · 版本：v4.10（严格持平基线；Compound Debug 与 provider semantic snapshot 一致性闭环）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前又补齐 grouped multi-session Compound Debug，以及 provider-backed semantic snapshot 的 generation/revision/freshness、统一失效和过期重构写入防护，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-13 · 版本：v4.11（严格持平基线；Inspection suppression/baseline 与 provider analysis evidence 治理）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前又补齐 grouped multi-session Compound Debug、provider-backed semantic snapshot 的 generation/revision/freshness、过期重构写入防护，以及 provider diagnostic 的 suppression/baseline/evidence 展示治理，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
 > 早期版本：v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -29,7 +29,7 @@
 2. 完整 project/module/source-set/facet/language-level 模型及 Maven/Gradle 等价导入生命周期。
 3. LSP 客户端剩余协议面：更完整的配置模型与跨请求取消边界；diagnostic partial result/即时 refresh 已形成代码闭环，`workspace/didChangeWatchedFiles` 与 watcher 仍需三端原生验收。
 4. IDEA 级 dirty 冲突/合并与 crash/restart 恢复中心已形成基础代码闭环（含有界行级三方合并）；跨文件 WorkspaceEdit 已支持有界事务级 undo/redo，语义/token 级合并、目录/symlink/特殊文件历史、网络盘、UNC、大小写-only rename 等文件系统边界仍未完成严格验收。
-5. Run/Debug 已共享命名配置、参数、环境、dotenv、工作目录与 Before launch，并支持仓库级 `.taomni/run-configurations.json`（v1 迁移、v2 schema、模板、平台覆盖、provider 引用、诊断、debug-only 选择和嵌套 compound Run/Debug）。Compound Debug 已支持顺序/并行、失败策略、多 DAP 子会话选择和组级 Stop/Restart；coverage、结构化测试结果和完整多语言调试适配矩阵仍缺。
+5. Run/Debug 已共享命名配置、参数、环境、dotenv、工作目录与 Before launch，并支持仓库级 `.taomni/run-configurations.json`（v1 迁移、v2 schema、模板、平台覆盖、provider 引用、诊断、debug-only 选择和嵌套 compound Run/Debug）。Compound Debug 已支持顺序/并行、失败策略、多 DAP 子会话选择和组级 Stop/Restart；Inspection profile 已支持 provider rule 启停/severity、文件/行 suppression、稳定 provider-message baseline 的创建/导入/导出/移除，Analysis 面板对 provider 返回的 nullability/taint/data-flow/related-location evidence 做有限分类展示；coverage、结构化测试结果、原生 inspection/data-flow 和完整多语言调试适配矩阵仍缺。
 6. keymap 编辑器、设置 schema/迁移、无障碍与动作可发现性完整闭环。插件生态/第三方扩展点按用户范围明确为 non-goal，不计入持平门禁。
 7. Linux/macOS/Windows 原生工程和发行包验收证据。详细清单以 §2.5–§2.7 为准。
 
@@ -83,7 +83,7 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 | P0 | LSP 客户端协议 | initialize/动态 capability、文档同步与智能请求；反向 applyEdit/message/configuration/workDone progress；标准错误/取消；LSP 3.17 workspace pull diagnostics（full/unchanged/related/partial/refresh）；`workspace/didChangeWatchedFiles` 静态/动态注册与 kind/glob 过滤 | 配置仅覆盖当前 session 设置；已开始落盘的资源操作不可安全中断；watcher 的 macOS/Windows 原生行为尚未验收 | 代码闭环，未严格完成 |
 | P0 | 文件系统一致性 | 多根、loose file、hash 写入保护；资源 rename 支持跨根与跨文件系统回退；应用内变更通知；Tauri 原生递归 watcher、rename 归一化与前端刷新；dirty 冲突三选一、有界崩溃恢复快照与行级三方合并；普通文件 WorkspaceEdit 事务 undo/redo | 语义/token 级合并、目录/symlink/特殊文件历史、大小写-only rename、锁定文件/权限变化、网络盘/UNC，以及三端打包应用验收 | 代码闭环，未严格完成 |
 | P0 | 索引与重构 | LSP workspace symbol/rename；引用感知 Safe Delete；按 `CodeActionKind` 暴露 extract method/function、extract variable/constant、inline、change signature、move；provider semantic snapshot 维护 generation/revision/freshness，保存/watcher/资源操作/WorkspaceEdit/根变化/LSP 重启统一失效，Rename/Safe Delete/provider refactor 落盘前拒绝过期结果 | 无 IDEA PSI/stub index 与全项目引用增量索引；snapshot 是 provider 一致性协议而非自有索引，provider 是否提供动作及跨文件正确性仍取决于 language server，尚无 PSI 级语义保证 | 核心差距 |
-| P0 | Inspection / data-flow | provider diagnostic tags/related information/code description/data；按 provider source+code 持久化启停和展示 severity；Analysis 面板展示 capability、semantic token 和 related locations | 这是 provider-backed 展示层，不是 IDEA inspection engine；无统一规则执行、suppression/baseline、跨过程 data-flow、nullability 推断、污点分析和路径证明 | 核心差距 |
+| P0 | Inspection / data-flow | provider diagnostic tags/related information/code description/data；按 provider source+code 持久化启停和展示 severity；文件/行 suppression；稳定 provider-message baseline 的创建、导入、导出、移除；Analysis 面板展示 capability、semantic token、related locations 与有限 nullability/taint/data-flow evidence 分类 | 这是 provider-backed 展示与治理层，不是 IDEA inspection engine；baseline 只改变展示/治理，不执行原生规则；无自有规则执行、PSI/stub 索引、跨过程 data-flow、nullability 推断、污点分析和路径证明；evidence 分类不构造客户端语义图 | 核心差距 |
 | P0 | 工程模型与 Build | 多根、SDK 探测、Java module/任务/依赖树；Build/Rebuild 多项目目标去重、依赖拓扑、缺失/循环/工具错误预检、失败即停 | 无统一 project/module/source-set/facet/language-level 模型；Maven/Gradle 增量导入、冲突模型、active profile/source set 和离线状态不等价 | 核心差距 |
 | P1 | 导航与编辑器 UX | Search Everywhere、Recent Files、历史、分屏、tab、面包屑、Outline | action 搜索排序/上下文、preview/固定语义边界、导航落点恢复、拖拽停靠、keymap 编辑器、无障碍完整验收尚缺 | 未完成 |
 | P1 | Run/Test/Debug | 结构化 provider 配置；命名副本；program/VM arguments、cwd、env、dotenv、Before launch；按源文件保存 Run/Debug 共享选择；仓库共享配置文件/模板/平台覆盖；嵌套 compound Run/Debug；多 DAP 子会话与组级 Stop/Restart；通用 DAP、Java 调试和测试发现基础 | 仍缺 coverage、结构化测试结果协议、完整 hot swap、失败重跑和 Java/JS/Python/Go/Rust/C++ adapter 矩阵 | 代码闭环，未严格完成 |
@@ -677,7 +677,7 @@ src/stores/
 
 ### 8.1 进度明细（勾选清单）
 
-> 更新于 2026-08-13（v4.10）；自动化门禁与本轮 Compound Debug、provider semantic snapshot、过期重构写入防护聚焦回归已复核。M0–M5 已由 PR #361 合入 `main`；当前收口位于 `feat/code-workspace-ide-parity`。功能按代码与自动化门禁复核；Linux/macOS/Windows 真机冒烟由用户执行并待回填，不能据此宣称严格持平。完成度按本节拆分条目计数，新增代码闭环项在横切事项记录。
+> 更新于 2026-08-13（v4.11）；自动化门禁与本轮 Compound Debug、provider semantic snapshot、过期重构写入防护、Inspection suppression/baseline、provider analysis evidence 聚焦回归已复核。M0–M5 已由 PR #361 合入 `main`；当前收口位于 `feat/code-workspace-ide-parity`。功能按代码与自动化门禁复核；Linux/macOS/Windows 真机冒烟由用户执行并待回填，不能据此宣称严格持平。完成度按本节拆分条目计数，新增代码闭环项在横切事项记录。
 
 **M0 前置重构 — 🔶 清单项齐，壳体继续瘦身中**
 

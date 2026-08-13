@@ -88,6 +88,12 @@ describe("AnalysisPanel", () => {
         }}
         profile={defaultInspectionProfile()}
         onUpdateRule={onUpdateRule}
+        onCreateBaseline={vi.fn()}
+        onClearBaseline={vi.fn()}
+        onRemoveBaselineEntry={vi.fn()}
+        onRemoveSuppression={vi.fn()}
+        onExportBaseline={vi.fn()}
+        onImportBaseline={vi.fn()}
         onOpenLocation={onOpenLocation}
         onOpenDiagnostic={onOpenDiagnostic}
       />,
@@ -96,7 +102,8 @@ describe("AnalysisPanel", () => {
     expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("Ready · generation 0");
     expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("IntelliJ PSI/stub guarantees are not available yet");
     expect(screen.getByText("Semantic tokens received: 4")).toBeInTheDocument();
-    expect(screen.getByText("typescript:taint")).toBeInTheDocument();
+    expect(screen.getAllByText("typescript:taint").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId("analysis-evidence-kind-taint")).toHaveTextContent("Taint flow");
     fireEvent.click(screen.getByRole("checkbox", { name: "Enable inspection typescript:taint" }));
     expect(onUpdateRule).toHaveBeenCalledWith("typescript:taint", { enabled: false });
     fireEvent.click(screen.getByText("Sink receives the value"));
@@ -114,11 +121,17 @@ describe("AnalysisPanel", () => {
         semanticIndex={createWorkspaceSemanticIndexSnapshot()}
         profile={updateInspectionRule(defaultInspectionProfile(), "typescript:taint", { enabled: false })}
         onUpdateRule={vi.fn()}
+        onCreateBaseline={vi.fn()}
+        onClearBaseline={vi.fn()}
+        onRemoveBaselineEntry={vi.fn()}
+        onRemoveSuppression={vi.fn()}
+        onExportBaseline={vi.fn()}
+        onImportBaseline={vi.fn()}
         onOpenLocation={vi.fn()}
         onOpenDiagnostic={vi.fn()}
       />,
     );
-    expect(screen.getByText(/provider-backed data-flow path is available/)).toBeInTheDocument();
+    expect(screen.getByText(/provider-backed analysis evidence is available/)).toBeInTheDocument();
     expect(screen.getByText("typescript:taint")).toBeInTheDocument();
   });
 
@@ -132,14 +145,62 @@ describe("AnalysisPanel", () => {
         semanticIndex={createWorkspaceSemanticIndexSnapshot()}
         profile={profile}
         onUpdateRule={vi.fn()}
+        onCreateBaseline={vi.fn()}
+        onClearBaseline={vi.fn()}
+        onRemoveBaselineEntry={vi.fn()}
+        onRemoveSuppression={vi.fn()}
+        onExportBaseline={vi.fn()}
+        onImportBaseline={vi.fn()}
         onOpenLocation={vi.fn()}
         onOpenDiagnostic={vi.fn()}
       />,
     );
 
     expect(screen.getByTestId("analysis-data-flow")).toHaveTextContent(
-      "No provider-backed data-flow path is available",
+      "No provider-backed analysis evidence is available",
     );
     expect(screen.queryByText("Sink receives the value")).not.toBeInTheDocument();
+  });
+
+  it("exposes baseline and suppression management controls", () => {
+    const profile = {
+      ...defaultInspectionProfile(),
+      baseline: {
+        createdAt: 1,
+        entries: [{ inspectionId: "typescript:taint", path: "root:app:src/main.ts", message: "Value reaches a sink" }],
+      },
+      suppressions: [{ inspectionId: "typescript:taint", path: "root:app:src/main.ts", line: 1 }],
+    };
+    const callbacks = {
+      onCreateBaseline: vi.fn(),
+      onClearBaseline: vi.fn(),
+      onRemoveBaselineEntry: vi.fn(),
+      onRemoveSuppression: vi.fn(),
+      onExportBaseline: vi.fn(),
+      onImportBaseline: vi.fn(),
+    };
+    render(
+      <AnalysisPanel
+        files={files}
+        status={null}
+        semanticTokenCount={0}
+        semanticIndex={createWorkspaceSemanticIndexSnapshot()}
+        profile={profile}
+        onUpdateRule={vi.fn()}
+        {...callbacks}
+        onOpenLocation={vi.fn()}
+        onOpenDiagnostic={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("analysis-inspection-baseline")).toHaveTextContent("1 entries");
+    expect(screen.getByTestId("analysis-inspection-suppressions")).toHaveTextContent("line 2");
+    fireEvent.click(screen.getByTestId("analysis-baseline-create"));
+    fireEvent.click(screen.getByTestId("analysis-baseline-clear"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove baseline typescript:taint" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove suppression typescript:taint" }));
+    expect(callbacks.onCreateBaseline).toHaveBeenCalled();
+    expect(callbacks.onClearBaseline).toHaveBeenCalled();
+    expect(callbacks.onRemoveBaselineEntry).toHaveBeenCalled();
+    expect(callbacks.onRemoveSuppression).toHaveBeenCalled();
   });
 });

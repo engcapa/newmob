@@ -127,6 +127,7 @@ vi.mock("../../lib/runtime", async (importOriginal) => ({
 }));
 
 const clipboardMocks = vi.hoisted(() => ({
+  readText: vi.fn(async () => ""),
   writeText: vi.fn(async () => {}),
 }));
 
