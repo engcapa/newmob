@@ -11,7 +11,7 @@ import type {
   LspDocumentStatus,
   LspServerStatus,
 } from "../../lib/editor/lsp";
-import type { WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
+import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
@@ -28,6 +28,7 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceJavaRunTargets: vi.fn(),
   workspaceJavaRunTarget: vi.fn(),
   workspaceTaskTree: vi.fn(),
+  workspaceTestResults: vi.fn(),
   workspaceDependencyTree: vi.fn(),
   workspaceReadFile: vi.fn(),
   workspaceReadLooseFile: vi.fn(),
@@ -182,8 +183,24 @@ vi.mock("../git/diffLanguage", () => ({
 }));
 
 vi.mock("../terminal/TerminalPanel", () => ({
-  TerminalPanel: ({ tabId, initialCwd }: { tabId?: string; initialCwd?: string }) => (
-    <div data-testid="mock-workspace-terminal" data-tab-id={tabId} data-initial-cwd={initialCwd} />
+  TerminalPanel: ({
+    tabId,
+    initialCwd,
+    onTaskExit,
+  }: {
+    tabId?: string;
+    initialCwd?: string;
+    onTaskExit?: (exitCode: number) => void;
+  }) => (
+    <div data-testid="mock-workspace-terminal" data-tab-id={tabId} data-initial-cwd={initialCwd}>
+      <button
+        type="button"
+        data-testid="mock-workspace-terminal-task-exit"
+        onClick={() => onTaskExit?.(0)}
+      >
+        task-exit
+      </button>
+    </div>
   ),
 }));
 
@@ -305,6 +322,15 @@ describe("CodeWorkspaceTab", () => {
     });
     workspaceMocks.workspaceJavaRunTarget.mockReset();
     workspaceMocks.workspaceTaskTree.mockReset().mockResolvedValue([]);
+    workspaceMocks.workspaceTestResults.mockReset().mockResolvedValue({
+      schema: "taomni.codeWorkspace.testResults",
+      version: 1,
+      source: "junit-xml",
+      generatedAt: 1,
+      results: [],
+      summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, durationMs: 0 },
+      diagnostics: [],
+    } satisfies StructuredTestResults);
     workspaceMocks.workspaceDependencyTree.mockReset().mockResolvedValue([]);
     workspaceMocks.workspaceReadFile.mockReset();
     workspaceMocks.workspaceReadLooseFile.mockReset();
@@ -2775,6 +2801,88 @@ describe("CodeWorkspaceTab", () => {
       "data-initial-cwd",
       "/repo/app",
     );
+  });
+
+  it("ingests structured test results after the Java test terminal exits", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-test-results",
+      workspaceInstanceId: "instance-java-test-results",
+      name: "Java test results",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/test/java/com/acme/CalcTest.java" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/test/java/com/acme/CalcTest.java",
+      uri: "file:///repo/app/src/test/java/com/acme/CalcTest.java",
+      presetId: "java",
+      languageId: "java",
+      displayName: "Java",
+      available: true,
+      active: true,
+    });
+    const testItem = {
+      name: "fails",
+      fullName: "com.acme.CalcTest#fails",
+      kind: "method",
+      uri: null,
+      range: null,
+      children: [],
+    };
+    const report: StructuredTestResults = {
+      schema: "taomni.codeWorkspace.testResults",
+      version: 1,
+      source: "junit-xml",
+      generatedAt: 2,
+      results: [{
+        id: "target/surefire-reports/TEST.xml::com.acme.CalcTest#fails",
+        selector: testItem.fullName,
+        name: "fails",
+        className: "com.acme.CalcTest",
+        status: "failed",
+        durationMs: 30,
+        message: "expected 2",
+        details: "stack",
+        filePath: "src/test/java/com/acme/CalcTest.java",
+        line: 12,
+      }],
+      summary: { total: 1, passed: 0, failed: 1, skipped: 0, errors: 0, durationMs: 30 },
+      diagnostics: [],
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/test/java/com/acme/CalcTest.java",
+      "package com.acme; class CalcTest {}",
+    ));
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    workspaceMocks.workspaceTaskTree.mockResolvedValue([{
+      source: "Maven",
+      tasks: [{
+        id: "Maven:test",
+        label: "test",
+        command: "mvn test",
+        cwd: "/repo/app",
+        source: "Maven",
+      }],
+    }]);
+    lspMocks.javaTestDiscover.mockResolvedValue([testItem]);
+    workspaceMocks.workspaceTestResults.mockResolvedValue(report);
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/test/java/com/acme/CalcTest.java");
+    fireEvent.click(screen.getByRole("tab", { name: /Tests/ }));
+    const runButton = await screen.findByTestId(`tests-run-${testItem.fullName}`);
+    fireEvent.click(runButton);
+    await screen.findByTestId("mock-workspace-terminal");
+    fireEvent.click(screen.getByTestId("mock-workspace-terminal-task-exit"));
+
+    await waitFor(() => expect(workspaceMocks.workspaceTestResults).toHaveBeenCalledWith(
+      "/repo/app",
+      expect.any(Number),
+    ));
+    expect(workspaceMocks.workspaceTestResults.mock.calls[0][1]).toBeLessThanOrEqual(Date.now());
   });
 
   it("keeps a shared Java debug-only configuration ahead of compatibility discovery", async () => {

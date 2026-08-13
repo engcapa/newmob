@@ -34,6 +34,7 @@ mod sdk;
 mod state;
 mod tab;
 pub mod terminal;
+mod test_results;
 mod tunnel;
 mod update;
 pub mod vault;
@@ -485,6 +486,7 @@ pub fn run() {
             workspace::workspace_java_run_targets,
             workspace::workspace_java_run_target,
             workspace::workspace_task_tree,
+            test_results::workspace_test_results,
             workspace_execution::workspace_execution_model,
             workspace::workspace_dependency_tree,
             workspace::workspace_read_file,

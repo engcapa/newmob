@@ -4748,7 +4748,7 @@ controls:
 id: F25.1
 status: partial
 area: code-workspace/execution
-components: [CodeWorkspaceTab, RunPanel, BuildPanel, DebugPanel, BottomDock, WorkspaceBuildRunToolsDialog]
+components: [CodeWorkspaceTab, RunPanel, BuildPanel, TestsPanel, DebugPanel, BottomDock, WorkspaceBuildRunToolsDialog]
 files:
   - src/components/sidebar/Sidebar.tsx
   - src/components/editor/CodeWorkspaceTab.tsx
@@ -4756,6 +4756,8 @@ files:
   - src/components/editor/workspace/runConfigurationPersistence.ts
   - src/components/editor/workspace/panels/RunPanel.tsx
   - src/components/editor/workspace/panels/BuildPanel.tsx
+  - src/components/editor/workspace/panels/TestsPanel.tsx
+  - src/components/editor/workspace/panels/testResultTree.ts
   - src/components/editor/workspace/panels/BottomDock.tsx
   - src/components/editor/workspace/WorkspaceBuildRunToolsDialog.tsx
   - src/components/editor/workspace/panels/DebugPanel.tsx
@@ -4763,6 +4765,7 @@ files:
   - src/lib/terminal/commandInput.ts
   - src-tauri/src/lsp.rs
   - src-tauri/src/workspace_execution.rs
+  - src-tauri/src/test_results.rs
   - src-tauri/src/dap.rs
 controls:
   - id: sidebar-entry
@@ -4792,6 +4795,9 @@ controls:
     kind: interactive
   - id: build-tab
     selector: '[data-testid="code-workspace-bottom-tab-build"]'
+    kind: interactive
+  - id: tests-tab
+    selector: '[data-testid="code-workspace-bottom-tab-tests"]'
     kind: interactive
   - id: debug-tab
     selector: '[data-testid="code-workspace-bottom-tab-debug"]'
@@ -4905,6 +4911,33 @@ controls:
     selector: '[data-testid^="build-panel-target-build:"]'
     kind: interactive
     optional: true       # requires a language fixture with a detected build target
+  - id: tests-panel
+    selector: '[data-testid="code-workspace-tests-panel"]'
+    kind: display
+  - id: tests-refresh
+    selector: '[data-testid="tests-refresh"]'
+    kind: interactive
+    optional: true       # enabled only for an active Java source file
+  - id: tests-load-results
+    selector: '[data-testid="tests-load-results"]'
+    kind: interactive
+    optional: true       # enabled only for an active Java workspace root
+  - id: tests-result-summary
+    selector: '[data-testid="tests-result-summary"]'
+    kind: display
+    optional: true       # rendered after a report is loaded or ingestion fails
+  - id: tests-result
+    selector: '[data-testid^="tests-result-"]'
+    kind: display
+    optional: true       # requires a Surefire/Failsafe/Gradle JUnit report
+  - id: tests-rerun
+    selector: '[data-testid^="tests-rerun-"]'
+    kind: interactive
+    optional: true       # requires a structured result and Maven/Gradle runner
+  - id: tests-failure-details
+    selector: '[data-testid^="tests-failure-details-"]'
+    kind: interactive
+    optional: true       # requires a failed result with provider details
   - id: debug-panel
     selector: '[data-testid="code-workspace-debug-panel"]'
     kind: display
@@ -4997,7 +5030,7 @@ controls:
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
 - Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
 - 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
-- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。coverage、结构化测试结果和完整 adapter 矩阵仍未完成。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。Maven Surefire/Failsafe 与 Gradle JUnit XML 已形成结构化结果、失败详情/定位/重跑闭环；coverage 和完整 adapter 矩阵仍未完成。
 
 ### 25.2 Provider 语义快照与重构一致性 🟡
 

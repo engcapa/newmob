@@ -1980,6 +1980,27 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         diagnostics: [],
       } as T;
     }
+    case "workspace_test_results": {
+      // Browser preview has no desktop filesystem or JVM process. Keep the
+      // structured protocol shape so TestsPanel can render an honest empty
+      // result state without pretending that tests were executed.
+      return {
+        schema: "taomni.codeWorkspace.testResults",
+        version: 1,
+        source: "junit-xml",
+        generatedAt: Date.now(),
+        results: [],
+        summary: {
+          total: 0,
+          passed: 0,
+          failed: 0,
+          skipped: 0,
+          errors: 0,
+          durationMs: 0,
+        },
+        diagnostics: ["Structured test results are available only in the Taomni desktop app"],
+      } as T;
+    }
     case "create_ssh_terminal": {
       const cols = (args?.cols as number) ?? 80;
       const rows = (args?.rows as number) ?? 24;

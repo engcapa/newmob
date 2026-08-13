@@ -57,6 +57,7 @@ import {
   workspaceJavaRunTarget,
   workspaceExecutionModel,
   workspaceTaskTree,
+  workspaceTestResults,
   workspaceApplyResourceOperation,
   workspaceWriteFile,
   workspaceWriteLooseFile,
@@ -69,6 +70,8 @@ import {
   type ExecutionDebugConfiguration,
   type ExecutionBuildTarget,
   type WorkspaceToolConfig,
+  type StructuredTestResult,
+  type StructuredTestResults,
 } from "../../lib/editor/workspace";
 import {
   gitBlameLines,
@@ -7667,9 +7670,16 @@ export function CodeWorkspaceTab({
     && activeFile.languagePath.toLowerCase().endsWith(".java");
   const [javaRunBusy, setJavaRunBusy] = useState(false);
   const [projectBuildBusy, setProjectBuildBusy] = useState(false);
+  const [testResultsByRoot, setTestResultsByRoot] = useState<Record<string, StructuredTestResults>>({});
+  const testResultsWorkspaceRef = useRef(workspaceInstanceId);
+  testResultsWorkspaceRef.current = workspaceInstanceId;
   const [activeExecutionModel, setActiveExecutionModel] = useState<WorkspaceExecutionModel | null>(null);
   const [javaFallbackConfiguration, setJavaFallbackConfiguration] = useState<ExecutionRunConfiguration | null>(null);
   const [runConfigurationRevision, setRunConfigurationRevision] = useState(0);
+
+  useEffect(() => {
+    setTestResultsByRoot({});
+  }, [workspaceInstanceId]);
 
   useEffect(() => {
     const onChanged = (event: Event) => {
@@ -8122,6 +8132,29 @@ export function CodeWorkspaceTab({
     return javaTestDiscover(descriptor);
   }, [activeKey, lspDescriptorForFile]);
 
+  const loadTestResultsForRoot = useCallback(async (
+    root: CodeWorkspaceRootInfo,
+    notBeforeMs?: number,
+  ): Promise<StructuredTestResults> => {
+    const results = await workspaceTestResults(root.path, notBeforeMs);
+    const currentRoot = findRoot(root.id);
+    if (
+      mountedRef.current
+      && testResultsWorkspaceRef.current === workspaceInstanceId
+      && currentRoot?.path === root.path
+    ) {
+      setTestResultsByRoot((current) => ({ ...current, [root.id]: results }));
+    }
+    return results;
+  }, [findRoot, mountedRef, workspaceInstanceId]);
+
+  const loadActiveJavaTestResults = useCallback(async (): Promise<StructuredTestResults | null> => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.ref.kind !== "root") return null;
+    const root = findRoot(file.ref.rootId);
+    return root ? loadTestResultsForRoot(root) : null;
+  }, [activeKey, findRoot, loadTestResultsForRoot]);
+
   // Detect the active file's build tool (Maven/Gradle) for the run command; only
   // while the Tests tab is open for a Java file. Cached per detection.
   useEffect(() => {
@@ -8162,6 +8195,7 @@ export function CodeWorkspaceTab({
     const root = findRoot(file.ref.rootId);
     if (!root) return;
     const command = javaTestRunCommand(javaTestBuildTool, item, javaTestCommand);
+    const startedAt = Date.now();
     runWorkspaceTask({
       id: `java-test:${item.fullName}`,
       label: `Test ${item.name}`,
@@ -8170,8 +8204,72 @@ export function CodeWorkspaceTab({
       source: "Test",
       rootId: root.id,
       rootName: root.name,
+    }, (exitCode) => {
+      // The terminal exit code is only execution status; the JUnit report is
+      // the durable test protocol and remains authoritative for individual
+      // cases, skips, errors, and stack traces.
+      // Filesystems with coarse timestamp resolution can report a freshly
+      // written XML file a few milliseconds before the PTY start marker.
+      void loadTestResultsForRoot(root, Math.max(0, startedAt - 2000)).catch((error) => {
+        if (testResultsWorkspaceRef.current !== workspaceInstanceId) return;
+        setStatusMessage(`Test results unavailable after exit ${exitCode}: ${errorMessage(error)}`);
+      });
     });
-  }, [activeKey, findRoot, javaTestBuildTool, javaTestCommand, runWorkspaceTask]);
+  }, [
+    activeKey,
+    findRoot,
+    javaTestBuildTool,
+    javaTestCommand,
+    loadTestResultsForRoot,
+    runWorkspaceTask,
+    setStatusMessage,
+    workspaceInstanceId,
+  ]);
+
+  const rerunStructuredTest = useCallback((result: StructuredTestResult) => {
+    runJavaTest({
+      name: result.name,
+      fullName: result.selector,
+      kind: result.selector.includes("#") ? "method" : "class",
+      uri: null,
+      range: null,
+      children: [],
+    });
+  }, [runJavaTest]);
+
+  const openStructuredTestFailure = useCallback((result: StructuredTestResult) => {
+    if (!result.filePath || result.line == null) {
+      setStatusMessage("This test result has no source location");
+      return;
+    }
+    const file = openFilesRef.current[activeKey ?? ""];
+    const root = file?.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
+    if (!root) {
+      setStatusMessage("Cannot locate the test result outside an active workspace root");
+      return;
+    }
+    const rawPath = normalizeFsPath(result.filePath);
+    const relativePath = rawPath.startsWith("/") || /^[A-Za-z]:\//.test(rawPath)
+      ? null
+      : rawPath.replace(/^\/+/, "");
+    if (relativePath?.split("/").some((segment) => segment === "..")) {
+      setStatusMessage(`Test source is outside the workspace: ${result.filePath}`);
+      return;
+    }
+    const absolute = rawPath.startsWith("/") || /^[A-Za-z]:\//.test(rawPath)
+      ? rawPath
+      : absoluteWorkspacePath(root, rawPath);
+    const ref = problemPathToRef(absolute);
+    if (!ref) {
+      setStatusMessage(`Test source is outside the workspace: ${result.filePath}`);
+      return;
+    }
+    const range: LspRange = {
+      start: { line: Math.max(0, result.line - 1), character: 0 },
+      end: { line: Math.max(0, result.line - 1), character: 0 },
+    };
+    void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
+  }, [activeKey, findRoot, openFile, problemPathToRef, revealEditorLocation, setStatusMessage]);
 
   // M9 debug-test: resolve the test's JUnit launch config (java-test) and start
   // a debug session through the DAP path.
@@ -9659,6 +9757,10 @@ export function CodeWorkspaceTab({
                 active={bottomDockOpen && bottomDockTab === "tests"}
                 onDiscover={discoverActiveJavaTests}
                 onRun={runJavaTest}
+                onRerun={rerunStructuredTest}
+                onLoadResults={activeFile?.ref.kind === "root" ? loadActiveJavaTestResults : undefined}
+                results={activeFile?.ref.kind === "root" ? testResultsByRoot[activeFile.ref.rootId] ?? null : null}
+                onOpenFailure={openStructuredTestFailure}
                 onDebug={debugJavaTest}
                 runDisabled={javaTestBuildTool === null}
               />

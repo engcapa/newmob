@@ -112,6 +112,7 @@
 - `[data-testid="code-workspace-debug-target"]` — interactive [optional] — F25.1.debug-current-target
 - `[data-testid="code-workspace-bottom-tab-run"]` — interactive — F25.1.run-tab
 - `[data-testid="code-workspace-bottom-tab-build"]` — interactive — F25.1.build-tab
+- `[data-testid="code-workspace-bottom-tab-tests"]` — interactive — F25.1.tests-tab
 - `[data-testid="code-workspace-bottom-tab-debug"]` — interactive — F25.1.debug-tab
 - `[data-testid="code-workspace-run-panel"]` — display — F25.1.run-panel
 - `[data-testid="run-panel-custom-command"]` — interactive — F25.1.custom-command
@@ -142,6 +143,13 @@
 - `[data-testid="build-panel-rebuild-project"]` — interactive [optional] — F25.1.rebuild-project
 - `[data-testid="build-panel-refresh"]` — interactive — F25.1.refresh-build-targets
 - `[data-testid^="build-panel-target-build:"]` — interactive [optional] — F25.1.build-target
+- `[data-testid="code-workspace-tests-panel"]` — display — F25.1.tests-panel
+- `[data-testid="tests-refresh"]` — interactive [optional] — F25.1.tests-refresh
+- `[data-testid="tests-load-results"]` — interactive [optional] — F25.1.tests-load-results
+- `[data-testid="tests-result-summary"]` — display [optional] — F25.1.tests-result-summary
+- `[data-testid^="tests-result-"]` — display [optional] — F25.1.tests-result
+- `[data-testid^="tests-rerun-"]` — interactive [optional] — F25.1.tests-rerun
+- `[data-testid^="tests-failure-details-"]` — interactive [optional] — F25.1.tests-failure-details
 - `[data-testid="code-workspace-debug-panel"]` — display — F25.1.debug-panel
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic

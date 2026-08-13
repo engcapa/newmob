@@ -75,6 +75,42 @@ export interface WorkspaceTask {
   environment?: WorkspaceTaskEnvironment;
 }
 
+export type StructuredTestResultStatus = "passed" | "failed" | "skipped" | "error" | "unknown";
+
+export interface StructuredTestResult {
+  id: string;
+  /** Provider-native class/method selector used for a rerun. */
+  selector: string;
+  name: string;
+  className: string;
+  status: StructuredTestResultStatus;
+  durationMs: number | null;
+  message: string | null;
+  details: string | null;
+  /** Optional source path supplied by the test provider (not the report path). */
+  filePath: string | null;
+  line: number | null;
+}
+
+export interface StructuredTestSummary {
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  errors: number;
+  durationMs: number;
+}
+
+export interface StructuredTestResults {
+  schema: string;
+  version: number;
+  source: string;
+  generatedAt: number;
+  results: StructuredTestResult[];
+  summary: StructuredTestSummary;
+  diagnostics: string[];
+}
+
 /** A Java `static void main` entry point with a ready-to-run terminal command. */
 export interface JavaRunTarget {
   id: string;
@@ -316,6 +352,14 @@ export function workspaceTaskTree(
   toolConfig?: WorkspaceToolConfig,
 ): Promise<WorkspaceTaskGroup[]> {
   return invoke<WorkspaceTaskGroup[]>("workspace_task_tree", { repoRoot, toolConfig: toolConfig ?? null });
+}
+
+/** Read bounded JUnit-style results produced below a workspace root. */
+export function workspaceTestResults(repoRoot: string, notBeforeMs?: number): Promise<StructuredTestResults> {
+  return invoke<StructuredTestResults>("workspace_test_results", {
+    repoRoot,
+    notBeforeMs: notBeforeMs ?? null,
+  });
 }
 
 /** A resolved dependency-tree node (Maven / Gradle) for the Build panel (M7 F-1). */
