@@ -16,6 +16,7 @@ import { CodeWorkspaceTab } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
 import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
+import { confirmAppDialog } from "../../lib/appDialogs";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceListDir: vi.fn(),
@@ -282,6 +283,7 @@ function renderWorkspace(
 describe("CodeWorkspaceTab", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    vi.mocked(confirmAppDialog).mockReset().mockResolvedValue(true);
     useAppStore.setState({
       statusMessage: "Ready",
       codeWorkspaceByTab: {},
@@ -1533,6 +1535,96 @@ describe("CodeWorkspaceTab", () => {
       expect.objectContaining({ data: { fixId: "space" } }),
     ));
     await waitFor(() => expect(screen.getByText(/unsaved|Applied/i)).toBeTruthy());
+  });
+
+  it("rejects a provider refactor when the editor changes during preview confirmation", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-stale-refactor",
+      workspaceInstanceId: "instance-stale-refactor",
+      name: "Stale refactor",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: {
+        completion: false,
+        signatureHelp: false,
+        hover: false,
+        definition: false,
+        typeDefinition: false,
+        implementation: false,
+        references: false,
+        documentSymbol: false,
+        workspaceSymbol: false,
+        rename: false,
+        formatting: false,
+        rangeFormatting: false,
+        codeAction: true,
+        documentHighlight: false,
+        callHierarchy: false,
+        typeHierarchy: false,
+        inlayHint: false,
+        selectionRange: false,
+        semanticTokens: false,
+        completionTriggerCharacters: [],
+        signatureTriggerCharacters: [],
+      },
+    });
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;"));
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: activeStatus,
+      actions: [{
+        title: "Extract generated helper",
+        kind: "refactor.extract",
+        isPreferred: true,
+        edit: {
+          documentEdits: [],
+          operations: [{
+            kind: "create",
+            uri: "file:///repo/app/src/generated.ts",
+            path: "/repo/app/src/generated.ts",
+            overwrite: false,
+            ignoreIfExists: false,
+            annotationId: null,
+          }],
+        },
+        command: null,
+        commandArguments: null,
+        raw: {},
+      }],
+    });
+    let resolvePreview!: (confirmed: boolean) => void;
+    vi.mocked(confirmAppDialog).mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      resolvePreview = resolve;
+    }));
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Extract generated helper" }));
+    await waitFor(() => expect(confirmAppDialog).toHaveBeenCalled());
+
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+    fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+    await act(async () => {
+      resolvePreview(true);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain(
+      "Semantic result became stale before changes were applied",
+    ));
+    expect(workspaceMocks.workspaceApplyResourceOperation).not.toHaveBeenCalled();
   });
 
   it("keeps provider diagnostics unchanged when inspection severity affects editor chrome", async () => {

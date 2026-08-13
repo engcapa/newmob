@@ -4,6 +4,11 @@ import { QuickPickOverlay } from "./QuickPickOverlay";
 import { rankFuzzy } from "./fuzzyMatch";
 import { isClassSymbolKind, symbolKindLabel } from "./symbolKinds";
 import type { WorkspaceCommand } from "./workspaceCommands";
+import {
+  workspaceSemanticIndexBuildIsCurrent,
+  workspaceSemanticIndexStatusLabel,
+  type WorkspaceSemanticIndexSnapshot,
+} from "./workspaceSemanticIndex";
 
 export interface GoToFileItem {
   rootId: string;
@@ -21,6 +26,12 @@ export interface GoToSymbolItem {
   character: number;
 }
 
+export interface GoToSymbolQueryResult {
+  symbols: GoToSymbolItem[];
+  semanticGeneration: number | null;
+  semanticRevision: number | null;
+}
+
 export type SearchEverywhereMode = "all" | "classes" | "files" | "symbols" | "actions" | "text";
 
 interface SearchEverywhereProps {
@@ -32,7 +43,8 @@ interface SearchEverywhereProps {
   commands?: WorkspaceCommand[];
   /** When true, Classes/Symbols tabs are shown and fetchSymbols is used. */
   symbolsAvailable?: boolean;
-  fetchSymbols?: (query: string) => Promise<GoToSymbolItem[]>;
+  semanticIndex?: WorkspaceSemanticIndexSnapshot;
+  fetchSymbols?: (query: string) => Promise<GoToSymbolQueryResult>;
   onClose: () => void;
   onOpenFile: (item: GoToFileItem, options?: { split: boolean }) => void;
   onOpenSymbol?: (item: GoToSymbolItem, options?: { split: boolean }) => void;
@@ -71,6 +83,7 @@ export function SearchEverywhere({
   truncated = false,
   commands = [],
   symbolsAvailable = false,
+  semanticIndex,
   fetchSymbols,
   onClose,
   onOpenFile,
@@ -81,6 +94,10 @@ export function SearchEverywhere({
   const [mode, setMode] = useState<SearchEverywhereMode>(initialMode);
   const [query, setQuery] = useState("");
   const [symbols, setSymbols] = useState<GoToSymbolItem[]>([]);
+  const [symbolSnapshot, setSymbolSnapshot] = useState<{
+    generation: number;
+    revision: number;
+  } | null>(null);
   const [symbolsLoading, setSymbolsLoading] = useState(false);
 
   useEffect(() => {
@@ -88,6 +105,7 @@ export function SearchEverywhere({
     setMode(initialMode);
     setQuery("");
     setSymbols([]);
+    setSymbolSnapshot(null);
   }, [initialMode, open]);
 
   const visibleTabs = useMemo(
@@ -105,12 +123,26 @@ export function SearchEverywhere({
     let cancelled = false;
     const handle = window.setTimeout(() => {
       setSymbolsLoading(true);
+      setSymbolSnapshot(null);
       void fetchSymbols(query.trim())
         .then((next) => {
-          if (!cancelled) setSymbols(next);
+          if (!cancelled) {
+            setSymbols(next.symbols);
+            setSymbolSnapshot(
+              next.semanticGeneration == null || next.semanticRevision == null
+                ? null
+                : {
+                  generation: next.semanticGeneration,
+                  revision: next.semanticRevision,
+                },
+            );
+          }
         })
         .catch(() => {
-          if (!cancelled) setSymbols([]);
+          if (!cancelled) {
+            setSymbols([]);
+            setSymbolSnapshot(null);
+          }
         })
         .finally(() => {
           if (!cancelled) setSymbolsLoading(false);
@@ -166,6 +198,16 @@ export function SearchEverywhere({
     : mode === "classes" || mode === "symbols" || mode === "all"
       ? symbolsLoading || (mode === "all" && loading)
       : false;
+  const symbolSnapshotCurrent = !!semanticIndex
+    && !!symbolSnapshot
+    && workspaceSemanticIndexBuildIsCurrent(semanticIndex, symbolSnapshot);
+  const symbolSnapshotLabel = symbolSnapshot
+    ? symbolSnapshotCurrent
+      ? `Ready · generation ${symbolSnapshot.generation}`
+      : `Stale · result generation ${symbolSnapshot.generation}`
+    : semanticIndex
+      ? workspaceSemanticIndexStatusLabel(semanticIndex)
+      : null;
 
   return (
     <QuickPickOverlay
@@ -295,8 +337,15 @@ export function SearchEverywhere({
               <>{truncated ? "file index truncated · " : ""}{items.length} file{items.length === 1 ? "" : "s"}</>
             )}
             {mode === "actions" && <>{commands.length} action{commands.length === 1 ? "" : "s"}</>}
-            {(mode === "classes" || mode === "symbols") && (
-              <>{symbols.length} symbol{symbols.length === 1 ? "" : "s"}</>
+            {(mode === "all" || mode === "classes" || mode === "symbols") && (
+              <>
+                {symbolSnapshotLabel && (
+                  <span data-testid="search-everywhere-semantic-index">
+                    {symbolSnapshotLabel} · {" "}
+                  </span>
+                )}
+                {symbols.length} symbol{symbols.length === 1 ? "" : "s"}
+              </>
             )}
             {mode === "text" && <Type className="inline h-3 w-3" />}
           </span>

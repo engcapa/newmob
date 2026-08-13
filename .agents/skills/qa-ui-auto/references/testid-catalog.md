@@ -170,11 +170,17 @@
 - `[data-testid="workspace-tool-netcoredbg"]` — interactive — F25.1.tool-netcoredbg
 - `[data-testid="workspace-maven-run-jvm-args"]` — interactive — F25.1.maven-jvm-args
 - `[data-testid="workspace-maven-inherit-argline"]` — interactive — F25.1.inherit-maven-argline
-- `[data-testid="code-workspace-bottom-tab-analysis"]` — interactive — F25.1.analysis-tab
-- `[data-testid="code-workspace-analysis-panel"]` — display — F25.1.analysis-panel
-- `[data-testid="analysis-lsp-status"]` — display — F25.1.analysis-lsp-status
-- `[data-testid="analysis-inspection-profile"]` — display — F25.1.analysis-inspection-profile
-- `[data-testid="analysis-data-flow"]` — display — F25.1.analysis-data-flow
+
+## code-workspace/semantic-analysis (F25.2)
+
+- `[data-testid="code-workspace-bottom-tab-analysis"]` — interactive — F25.2.analysis-tab
+- `[data-testid="code-workspace-analysis-panel"]` — display — F25.2.analysis-panel
+- `[data-testid="analysis-semantic-index"]` — display — F25.2.analysis-semantic-index
+- `[data-testid="analysis-lsp-status"]` — display — F25.2.analysis-lsp-status
+- `[data-testid="analysis-inspection-profile"]` — display — F25.2.analysis-inspection-profile
+- `[data-testid="analysis-data-flow"]` — display — F25.2.analysis-data-flow
+- `[data-testid="references-semantic-index"]` — display [optional] — F25.2.references-semantic-index
+- `[data-testid="search-everywhere-semantic-index"]` — display [optional] — F25.2.search-semantic-index
 
 ## database/hbase (F-DB-3)
 

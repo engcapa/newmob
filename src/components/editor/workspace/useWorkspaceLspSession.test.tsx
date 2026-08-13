@@ -146,7 +146,7 @@ describe("useWorkspaceLspSession", () => {
     expect(lspMocks.lspSaveDocument).toHaveBeenCalledWith(
       expect.objectContaining({ filePath: "src/main.ts" }),
       "const value = 2;",
-      1,
+      2,
     );
 
     act(() => result.current.closeDocument(file));
@@ -271,12 +271,14 @@ describe("useWorkspaceLspSession", () => {
 
   it("restarts the workspace LSP session when SDK bindings change", async () => {
     const updateLspFiles = vi.fn();
+    const onRestart = vi.fn();
     renderHook(() => useWorkspaceLspSession({
       workspaceInstanceId: "workspace-sdk-change",
       roots,
       openFilesRef: { current: {} },
       updateLspFiles,
       onError: vi.fn(),
+      onRestart,
     }));
 
     await waitFor(() => expect(lspMocks.lspDetectServers).toHaveBeenCalled());
@@ -287,6 +289,7 @@ describe("useWorkspaceLspSession", () => {
       "workspace-sdk-change",
     ));
     expect(updateLspFiles).toHaveBeenCalled();
+    expect(onRestart).toHaveBeenCalledOnce();
   });
 
   it("coalesces edits during open and follows with only the latest buffer", async () => {

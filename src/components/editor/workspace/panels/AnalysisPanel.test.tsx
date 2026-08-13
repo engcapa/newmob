@@ -4,6 +4,7 @@ import type { LspDocumentStatus } from "../../../../lib/editor/lsp";
 import { defaultInspectionProfile, updateInspectionRule } from "../inspectionProfile";
 import type { ProblemFileGroup } from "./ProblemsPanel";
 import { AnalysisPanel } from "./AnalysisPanel";
+import { createWorkspaceSemanticIndexSnapshot } from "../workspaceSemanticIndex";
 
 function status(): LspDocumentStatus {
   return {
@@ -78,6 +79,13 @@ describe("AnalysisPanel", () => {
         files={files}
         status={status()}
         semanticTokenCount={4}
+        semanticIndex={{
+          ...createWorkspaceSemanticIndexSnapshot(),
+          status: "ready",
+          provider: "language-server",
+          indexedRevision: 0,
+          staleReasons: [],
+        }}
         profile={defaultInspectionProfile()}
         onUpdateRule={onUpdateRule}
         onOpenLocation={onOpenLocation}
@@ -85,6 +93,8 @@ describe("AnalysisPanel", () => {
       />,
     );
     expect(screen.getByText("TypeScript")).toBeInTheDocument();
+    expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("Ready · generation 0");
+    expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("IntelliJ PSI/stub guarantees are not available yet");
     expect(screen.getByText("Semantic tokens received: 4")).toBeInTheDocument();
     expect(screen.getByText("typescript:taint")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: "Enable inspection typescript:taint" }));
@@ -101,6 +111,7 @@ describe("AnalysisPanel", () => {
         files={[{ ...files[0], diagnostics: [{ ...files[0].diagnostics[0], relatedInformation: undefined }] }]}
         status={null}
         semanticTokenCount={0}
+        semanticIndex={createWorkspaceSemanticIndexSnapshot()}
         profile={updateInspectionRule(defaultInspectionProfile(), "typescript:taint", { enabled: false })}
         onUpdateRule={vi.fn()}
         onOpenLocation={vi.fn()}
@@ -118,6 +129,7 @@ describe("AnalysisPanel", () => {
         files={files}
         status={status()}
         semanticTokenCount={0}
+        semanticIndex={createWorkspaceSemanticIndexSnapshot()}
         profile={profile}
         onUpdateRule={vi.fn()}
         onOpenLocation={vi.fn()}

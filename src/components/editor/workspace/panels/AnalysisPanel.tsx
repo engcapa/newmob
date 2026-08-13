@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Activity, CheckCircle2, Circle, ExternalLink, Info, Route, Server } from "lucide-react";
+import { Activity, CheckCircle2, Circle, ExternalLink, Info, RefreshCw, Route, Server } from "lucide-react";
 import type {
   LspDiagnostic,
   LspDiagnosticRelatedInformation,
@@ -14,11 +14,16 @@ import {
   inspectionRuleFor,
 } from "../inspectionProfile";
 import type { ProblemFileGroup } from "./ProblemsPanel";
+import {
+  workspaceSemanticIndexStatusLabel,
+  type WorkspaceSemanticIndexSnapshot,
+} from "../workspaceSemanticIndex";
 
 interface AnalysisPanelProps {
   files: ProblemFileGroup[];
   status: LspDocumentStatus | null;
   semanticTokenCount: number;
+  semanticIndex: WorkspaceSemanticIndexSnapshot;
   profile: InspectionProfile;
   onUpdateRule: (id: string, patch: Partial<InspectionRule>) => void;
   onOpenLocation: (location: LspLocation) => void;
@@ -57,6 +62,7 @@ export function AnalysisPanel({
   files,
   status,
   semanticTokenCount,
+  semanticIndex,
   profile,
   onUpdateRule,
   onOpenLocation,
@@ -99,6 +105,47 @@ export function AnalysisPanel({
         </span>
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2 space-y-3">
+        <section data-testid="analysis-semantic-index" className="space-y-1">
+          <div className="flex items-center gap-1 font-medium">
+            <RefreshCw className={`h-3.5 w-3.5 ${semanticIndex.status === "building" ? "animate-spin" : ""}`} />
+            <span>Semantic index snapshot</span>
+          </div>
+          <div className="space-y-1 rounded border border-[var(--taomni-code-border)] p-2 text-[10px]">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="font-medium">{workspaceSemanticIndexStatusLabel(semanticIndex)}</span>
+              <span className="text-[var(--taomni-code-muted)]">
+                {semanticIndex.provider === "language-server" ? "Language server provider" : "No semantic provider"}
+              </span>
+            </div>
+            <div className="text-[var(--taomni-code-muted)]">
+              Revision {semanticIndex.indexedRevision}/{semanticIndex.revision}
+              {semanticIndex.invalidatedPaths.length > 0
+                ? ` · ${semanticIndex.invalidatedPaths.length} invalidated path${semanticIndex.invalidatedPaths.length === 1 ? "" : "s"}`
+                : ""}
+            </div>
+            {semanticIndex.activeProviders.length > 0 && (
+              <div className="text-[var(--taomni-code-muted)]">
+                Active provider work: {semanticIndex.activeProviders.join(", ")}
+              </div>
+            )}
+            {semanticIndex.staleReasons.length > 0 && (
+              <div className="text-amber-500">
+                Pending invalidation: {semanticIndex.staleReasons.join(", ")}
+              </div>
+            )}
+            {semanticIndex.error && <div className="text-red-500">{semanticIndex.error}</div>}
+            {semanticIndex.lastQuery && (
+              <div className="text-[var(--taomni-code-muted)]">
+                Last query: {semanticIndex.lastQuery.kind} · generation {semanticIndex.lastQuery.generation}
+                {semanticIndex.lastQuery.resultCount !== null ? ` · ${semanticIndex.lastQuery.resultCount} results` : ""}
+              </div>
+            )}
+            <div className="text-[var(--taomni-code-muted)]">
+              Provider-backed consistency metadata only. IntelliJ PSI/stub guarantees are not available yet.
+            </div>
+          </div>
+        </section>
+
         <section data-testid="analysis-lsp-status" className="space-y-1">
           <div className="flex items-center gap-1 font-medium">
             <Server className="h-3.5 w-3.5" />

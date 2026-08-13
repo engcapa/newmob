@@ -270,6 +270,7 @@ import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
 import { type QuickDocContent } from "./workspace/QuickDocPopup";
 import { type LocationPeekState } from "./workspace/LocationPeek";
 import {
+  type GoToSymbolQueryResult,
   type GoToSymbolItem,
   type SearchEverywhereMode,
 } from "./workspace/SearchEverywhere";
@@ -600,6 +601,12 @@ import {
   writeWorkspaceRecoveryEntries,
   type WorkspaceRecoveryEntry,
 } from "./workspace/workspaceRecovery";
+import {
+  changedWorkspaceSemanticBufferPaths,
+  workspaceSemanticIndexBuildIsCurrent,
+  type WorkspaceSemanticIndexBuildToken,
+} from "./workspace/workspaceSemanticIndex";
+import { useWorkspaceSemanticIndex } from "./workspace/useWorkspaceSemanticIndex";
 
 export function CodeWorkspaceTab({
   tabId,
@@ -620,6 +627,7 @@ export function CodeWorkspaceTab({
     () => workspace.workspaceInstanceId ?? workspace.workspaceId ?? workspace.repoRoot?.trim() ?? tabId,
     [tabId, workspace.repoRoot, workspace.workspaceId, workspace.workspaceInstanceId],
   );
+  const semanticIndex = useWorkspaceSemanticIndex(workspaceInstanceId);
   const {
     messageRequest: lspMessageRequest,
     progresses: lspProgresses,
@@ -630,6 +638,13 @@ export function CodeWorkspaceTab({
     visible,
     onStatus: setStatusMessage,
   });
+  const activeSemanticProviders = useMemo(
+    () => lspProgresses.map((progress) => `${progress.serverLabel}:${progress.rootUri}`),
+    [lspProgresses],
+  );
+  useEffect(() => {
+    semanticIndex.setActiveProviders(activeSemanticProviders);
+  }, [activeSemanticProviders, semanticIndex.setActiveProviders]);
   const [editorAiPreferences, setEditorAiPreferences] = useState(
     () => readEditorAiPreferences(workspaceInstanceId),
   );
@@ -783,6 +798,12 @@ export function CodeWorkspaceTab({
   const mountedRef = useMountedRef();
   const [workspaceResourceOperationLocked, setWorkspaceResourceOperationLocked] = useState(false);
   const workspaceEditQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const providerCommandSemanticGuardRef = useRef<{
+    generation: number;
+    revision: number;
+    requireReady: boolean;
+  } | null>(null);
+  const providerCommandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const fileActionResourceOperationRef = useRef<((
     operation: Exclude<LspWorkspaceEditOperation, { kind: "text" }>,
   ) => Promise<void>) | null>(null);
@@ -796,6 +817,9 @@ export function CodeWorkspaceTab({
   const [workspaceRecoveryOpen, setWorkspaceRecoveryOpen] = useState(false);
   const [fileEncodingDialogOpen, setFileEncodingDialogOpen] = useState(false);
   const pendingWorkspaceRecoveryKeysRef = useRef(new Set<string>());
+  const invalidateSemanticAfterLspRestart = useCallback(() => {
+    semanticIndex.invalidate("language-server-restarted");
+  }, [semanticIndex.invalidate]);
 
   const setBottomDockOpen = useCallback((open: boolean | ((prev: boolean) => boolean)) => {
     const prev = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).bottomDockOpen;
@@ -958,7 +982,8 @@ export function CodeWorkspaceTab({
     if (next === current) return;
     openFilesRef.current = next;
     updateStoreOpenFiles(workspaceInstanceId, next);
-  }, [updateStoreOpenFiles, workspaceInstanceId]);
+    semanticIndex.publishCurrent();
+  }, [semanticIndex.publishCurrent, updateStoreOpenFiles, workspaceInstanceId]);
   const setOpenFiles = useCallback((
     updater: Record<string, OpenFileState> | ((prev: Record<string, OpenFileState>) => Record<string, OpenFileState>),
   ) => {
@@ -968,9 +993,18 @@ export function CodeWorkspaceTab({
     const prev = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).openFiles;
     const next = typeof updater === "function" ? updater(prev) : updater;
     if (next === prev) return;
+    const changedPaths = changedWorkspaceSemanticBufferPaths(prev, next);
+    if (changedPaths.length > 0) {
+      semanticIndex.invalidate("document-edited", changedPaths);
+    }
     openFilesRef.current = next;
     updateStoreOpenFiles(workspaceInstanceId, next);
-  }, [flushPendingEditorText, updateStoreOpenFiles, workspaceInstanceId]);
+  }, [
+    flushPendingEditorText,
+    semanticIndex.invalidate,
+    updateStoreOpenFiles,
+    workspaceInstanceId,
+  ]);
 
   /** Pending store teardown, so a StrictMode remount can cancel it (below). */
   const disposeTimerRef = useRef<{ timer: number; instanceId: string } | null>(null);
@@ -1126,6 +1160,7 @@ export function CodeWorkspaceTab({
     locations: [],
     error: null,
   });
+  const referencesRequestSequenceRef = useRef(0);
   const [callHierarchyRoot, setCallHierarchyRoot] = useState<HierarchyRootState | null>(null);
   const [typeHierarchyRoot, setTypeHierarchyRoot] = useState<HierarchyRootState | null>(null);
   const setIntelligencePreferences = useCallback((
@@ -1263,6 +1298,7 @@ export function CodeWorkspaceTab({
     openFilesRef,
     updateLspFiles: setLspFiles,
     onError: setStatusMessage,
+    onRestart: invalidateSemanticAfterLspRestart,
   });
   const treePaneStyle = useMemo(() => ({
     "--taomni-code-tree-font-size": `${treeFontSize}px`,
@@ -1278,6 +1314,17 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     rootsRef.current = roots;
   }, [roots]);
+
+  const semanticRootsFingerprint = useMemo(
+    () => roots.map((root) => `${root.id}:${normalizeFsPath(root.path)}`).sort().join("\u0000"),
+    [roots],
+  );
+  const previousSemanticRootsFingerprintRef = useRef(semanticRootsFingerprint);
+  useEffect(() => {
+    if (previousSemanticRootsFingerprintRef.current === semanticRootsFingerprint) return;
+    previousSemanticRootsFingerprintRef.current = semanticRootsFingerprint;
+    semanticIndex.invalidate("roots-changed", roots.map((root) => root.path));
+  }, [roots, semanticIndex.invalidate, semanticRootsFingerprint]);
 
   useEffect(() => {
     setExternalFileConflicts([]);
@@ -2414,7 +2461,10 @@ export function CodeWorkspaceTab({
    * sensitive feature (completion / signature). Bypasses the typing debounce
    * and waits for the in-flight sync queue to drain for this file.
    */
-  const ensureLspDocumentSynced = useCallback(async (fileKey: string): Promise<OpenFileState | null> => {
+  const ensureLspDocumentSynced = useCallback(async (
+    fileKey: string,
+    requireSynchronized = false,
+  ): Promise<OpenFileState | null> => {
     cancelLiveLspSync(fileKey);
     const kick = () => {
       const latest = openFilesRef.current[fileKey];
@@ -2442,9 +2492,41 @@ export function CodeWorkspaceTab({
     // the live buffer so the feature request can race (CM will re-query on the
     // next keystroke via isIncomplete / abort-on-doc-change).
     const latest = openFilesRef.current[fileKey];
-    if (latest && isLspFeatureReady(lspFilesRef.current[fileKey])) return latest;
+    if (
+      latest
+      && isLspFeatureReady(lspFilesRef.current[fileKey])
+      && (!requireSynchronized || isLspDocumentSynced(fileKey, latest.text))
+    ) return latest;
     return null;
   }, [cancelLiveLspSync, isLspDocumentSynced, syncLspDocument]);
+
+  /**
+   * Semantic mutations are stricter than completion/signature help: every
+   * active provider buffer must be acknowledged before the query is sent.
+   * If the user edits during the barrier, the original action is abandoned.
+   */
+  const ensureWorkspaceSemanticDocumentsSynced = useCallback(async (
+    requiredFileKey: string,
+    expectedRevision: number,
+  ): Promise<OpenFileState | null> => {
+    const candidates = Object.values(openFilesRef.current).filter((candidate) => (
+      !candidate.library
+      && shouldLiveSyncLsp(candidate.languagePath, lspFilesRef.current[candidate.key])
+    ));
+    if (!candidates.some((candidate) => candidate.key === requiredFileKey)) return null;
+    const synchronized = await Promise.all(candidates.map(async (candidate) => {
+      const latest = await ensureLspDocumentSynced(candidate.key, true);
+      const current = openFilesRef.current[candidate.key];
+      return !!latest
+        && !!current
+        && latest.text === current.text
+        && isLspDocumentSynced(candidate.key, current.text);
+    }));
+    if (!synchronized.every(Boolean)) return null;
+    if (semanticIndex.current().revision !== expectedRevision) return null;
+    const required = openFilesRef.current[requiredFileKey];
+    return required && isLspDocumentSynced(requiredFileKey, required.text) ? required : null;
+  }, [ensureLspDocumentSynced, isLspDocumentSynced, semanticIndex.current]);
 
   const queueEditorTextUpdate = useCallback((key: string, text: string) => {
     const file = openFilesRef.current[key];
@@ -2467,6 +2549,7 @@ export function CodeWorkspaceTab({
     // store publication that causes the surrounding workspace to re-render.
     openFilesRef.current = { ...openFilesRef.current, [key]: next };
     pendingEditorTextByFileRef.current.set(key, next);
+    semanticIndex.invalidateSilently("document-edited", [file.path]);
     // Drive didChange from the live buffer only when a language server can
     // actually use it — plain text / missing LSP must not pay IPC cost.
     scheduleLiveLspSync(key);
@@ -2477,7 +2560,12 @@ export function CodeWorkspaceTab({
       flushPendingEditorText,
       EDITOR_TEXT_COMMIT_IDLE_DELAY_MS,
     );
-  }, [flushPendingEditorText, scheduleLiveLspSync, workspaceEditHistory]);
+  }, [
+    flushPendingEditorText,
+    scheduleLiveLspSync,
+    semanticIndex.invalidateSilently,
+    workspaceEditHistory,
+  ]);
 
   const absolutePathForOpenFile = useCallback((file: OpenFileState): string | null => {
     // Library sources live inside a JAR / the language server, not on disk.
@@ -2988,7 +3076,8 @@ export function CodeWorkspaceTab({
       if (file.ref.kind === "root") {
         notifyWorkspacePathGitChanged(file.ref.rootId, file.ref.path);
       }
-      void saveLspDocument(file, textToSave);
+      semanticIndex.invalidate("document-saved", [savedPath ?? file.path]);
+      await saveLspDocument({ ...file, text: textToSave }, textToSave);
     } catch (err) {
       const message = errorMessage(err);
       setOpenFiles((current) => ({
@@ -3008,6 +3097,7 @@ export function CodeWorkspaceTab({
     findRoot,
     notifyWorkspacePathGitChanged,
     saveLspDocument,
+    semanticIndex.invalidate,
     workspaceInstanceId,
   ]);
 
@@ -3227,6 +3317,7 @@ export function CodeWorkspaceTab({
 
   const handleExternalFileChange = useCallback(async (change: LspExternalFileChange) => {
     const normalizedPath = normalizeFsPath(change.path);
+    semanticIndex.invalidate("external-file-change", [normalizedPath]);
     const file = Object.values(openFilesRef.current).find((candidate) => {
       const absolute = absolutePathForOpenFile(candidate);
       return absolute !== null && normalizeFsPath(absolute) === normalizedPath;
@@ -3313,6 +3404,7 @@ export function CodeWorkspaceTab({
     enqueueExternalFileConflict,
     readDiskSnapshot,
     refreshTree,
+    semanticIndex.invalidate,
     setOpenFiles,
     setStatusMessage,
   ]);
@@ -4679,15 +4771,26 @@ export function CodeWorkspaceTab({
     ],
   );
 
-  const fetchWorkspaceSymbols = useCallback(async (query: string): Promise<GoToSymbolItem[]> => {
+  const fetchWorkspaceSymbols = useCallback(async (query: string): Promise<GoToSymbolQueryResult> => {
     const file = activeFile ?? Object.values(openFilesRef.current).find((item) => !item.loading) ?? null;
-    if (!file) return [];
-    const descriptor = lspDescriptorForFile(file);
-    if (!descriptor) return [];
+    const unavailable = (): GoToSymbolQueryResult => {
+      return {
+        symbols: [],
+        semanticGeneration: null,
+        semanticRevision: null,
+      };
+    };
+    if (!file) return unavailable();
+    const expectedRevision = semanticIndex.current().revision;
+    const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
+    if (!live) return unavailable();
+    const descriptor = lspDescriptorForFile(live);
+    if (!descriptor) return unavailable();
+    const buildToken = semanticIndex.beginBuild("language-server");
     try {
       const result = await lspWorkspaceSymbols(descriptor, query);
-      updateLspStatusForFile(file, result.status);
-      return result.symbols.map((symbol) => ({
+      updateLspStatusForFile(live, result.status);
+      const symbols = result.symbols.map((symbol) => ({
         name: symbol.name,
         kind: symbol.kind,
         containerName: symbol.containerName,
@@ -4696,10 +4799,31 @@ export function CodeWorkspaceTab({
         line: symbol.selectionRange.start.line,
         character: symbol.selectionRange.start.character,
       }));
-    } catch {
-      return [];
+      const completion = semanticIndex.finishQuery(buildToken, {
+        kind: "symbols",
+        resultCount: symbols.length,
+      });
+      return completion.accepted
+        ? {
+          symbols,
+          semanticGeneration: buildToken.generation,
+          semanticRevision: buildToken.revision,
+        }
+        : unavailable();
+    } catch (error) {
+      semanticIndex.failBuild(buildToken, errorMessage(error));
+      return unavailable();
     }
-  }, [activeFile, lspDescriptorForFile, updateLspStatusForFile]);
+  }, [
+    activeFile,
+    ensureWorkspaceSemanticDocumentsSynced,
+    lspDescriptorForFile,
+    semanticIndex.beginBuild,
+    semanticIndex.failBuild,
+    semanticIndex.finishQuery,
+    semanticIndex.current,
+    updateLspStatusForFile,
+  ]);
 
   const openWorkspaceSymbol = useCallback(async (
     symbol: GoToSymbolItem,
@@ -5029,13 +5153,21 @@ export function CodeWorkspaceTab({
       flushSync(() => setWorkspaceResourceOperationLocked(true));
     }
     try {
-      return await applyLspResourceOperationUnlocked(operation);
+      const result = await applyLspResourceOperationUnlocked(operation);
+      const paths = operation.kind === "rename"
+        ? [operation.oldPath, operation.newPath]
+        : [operation.path];
+      semanticIndex.invalidate(
+        "resource-operation",
+        paths.filter((path): path is string => !!path),
+      );
+      return result;
     } finally {
       if (mountedRef.current) {
         flushSync(() => setWorkspaceResourceOperationLocked(false));
       }
     }
-  }, [applyLspResourceOperationUnlocked, mountedRef]);
+  }, [applyLspResourceOperationUnlocked, mountedRef, semanticIndex.invalidate]);
 
   useEffect(() => {
     fileActionResourceOperationRef.current = applyLspResourceOperation;
@@ -5049,6 +5181,10 @@ export function CodeWorkspaceTab({
   type WorkspaceEditApplyOptions = {
     preview?: boolean;
     label?: string | null;
+    semanticGeneration?: number;
+    semanticRevision?: number;
+    /** Provider command continuations are exact-revision guarded after their first edit. */
+    semanticRequireReady?: boolean;
     /** Internal history replay must not create another history entry. */
     recordHistory?: boolean;
   };
@@ -5197,6 +5333,21 @@ export function CodeWorkspaceTab({
           confirmLabel: "Apply changes",
         })
         : undefined,
+      preflightMutation: options.semanticGeneration == null || options.semanticRevision == null
+        ? undefined
+        : () => {
+          const current = semanticIndex.current();
+          const semanticToken = {
+            generation: options.semanticGeneration!,
+            revision: options.semanticRevision!,
+          };
+          const valid = options.semanticRequireReady === false
+            ? current.revision === semanticToken.revision
+            : workspaceSemanticIndexBuildIsCurrent(current, semanticToken);
+          if (!valid) {
+            throw new Error("Semantic result became stale before changes were applied; run the action again");
+          }
+        },
       createFile: (operation) => applyLspResourceOperation(operation),
       renameFile: (operation) => applyLspResourceOperation(operation),
       deleteFile: (operation) => applyLspResourceOperation(operation),
@@ -5209,6 +5360,12 @@ export function CodeWorkspaceTab({
       refreshTree();
     }
     const mutated = outcomes.some((outcome) => outcome.status.startsWith("applied"));
+    if (mutated) {
+      semanticIndex.invalidate(
+        "workspace-edit",
+        outcomes.flatMap((outcome) => outcome.status.startsWith("applied") ? [outcome.path] : []),
+      );
+    }
     let historyUnavailable = options.recordHistory !== false
       && orderedOperations.length > 0
       && beforeSnapshots === null
@@ -5263,6 +5420,8 @@ export function CodeWorkspaceTab({
     saveOpenBufferText,
     setStatusMessage,
     restoreWorkspaceEditTabs,
+    semanticIndex.invalidate,
+    semanticIndex.current,
     updateFileText,
     workspaceEditHistory,
     workspaceInstanceId,
@@ -5347,9 +5506,13 @@ export function CodeWorkspaceTab({
       if (request.workspaceId !== workspaceInstanceId) return;
       void (async () => {
         try {
+          const semanticGuard = providerCommandSemanticGuardRef.current;
           const outcomes = await applyLspWorkspaceEdit(request.edit, {
             preview: true,
             label: request.label ?? "Language server changes",
+            semanticGeneration: semanticGuard?.generation,
+            semanticRevision: semanticGuard?.revision,
+            semanticRequireReady: semanticGuard?.requireReady,
           });
           const response = workspaceEditApplyResponse(outcomes);
           await lspResolveWorkspaceEdit(
@@ -5385,11 +5548,22 @@ export function CodeWorkspaceTab({
     range: LspRange,
     diagnostics: LspDiagnostic[] = [],
     only: string[] = [],
-  ): Promise<LspCodeAction[]> => {
-    const descriptor = lspDescriptorForFile(file);
-    if (!descriptor) return [];
+  ): Promise<{
+    actions: LspCodeAction[];
+    semanticToken: WorkspaceSemanticIndexBuildToken | null;
+  }> => {
     const caps = lspFilesRef.current[file.key]?.status?.capabilities;
-    if (caps && !caps.codeAction) return [];
+    if (caps && !caps.codeAction) return { actions: [], semanticToken: null };
+    const semanticQuery = only.some((kind) => kind === "refactor" || kind.startsWith("refactor."));
+    const expectedRevision = semanticIndex.current().revision;
+    const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
+    if (!live) {
+      setStatusMessage(`${semanticQuery ? "Refactor" : "Code actions"} require the language server to finish synchronizing current editor buffers`);
+      return { actions: [], semanticToken: null };
+    }
+    const descriptor = lspDescriptorForFile(live);
+    if (!descriptor) return { actions: [], semanticToken: null };
+    const buildToken = semanticIndex.beginBuild("language-server");
     try {
       const result = await lspCodeActions(
         descriptor,
@@ -5407,15 +5581,44 @@ export function CodeWorkspaceTab({
         })),
         only,
       );
-      updateLspStatusForFile(file, result.status);
-      return result.actions;
-    } catch {
-      return [];
+      updateLspStatusForFile(live, result.status);
+      const completion = semanticIndex.finishQuery(buildToken, {
+        kind: semanticQuery ? "refactor" : "code-action",
+        resultCount: result.actions.length,
+      });
+      return completion.accepted
+        ? { actions: result.actions, semanticToken: buildToken }
+        : { actions: [], semanticToken: null };
+    } catch (error) {
+      semanticIndex.failBuild(buildToken, errorMessage(error));
+      return { actions: [], semanticToken: null };
     }
-  }, [lspDescriptorForFile, updateLspStatusForFile]);
+  }, [
+    ensureWorkspaceSemanticDocumentsSynced,
+    lspDescriptorForFile,
+    semanticIndex.beginBuild,
+    semanticIndex.current,
+    semanticIndex.failBuild,
+    semanticIndex.finishQuery,
+    setStatusMessage,
+    updateLspStatusForFile,
+  ]);
 
-  const runCodeAction = useCallback(async (action: LspCodeAction, file: OpenFileState) => {
+  const runCodeAction = useCallback(async (
+    action: LspCodeAction,
+    file: OpenFileState,
+    semanticToken: WorkspaceSemanticIndexBuildToken | null = null,
+  ) => {
     try {
+      const assertSemanticCurrent = () => {
+        if (
+          semanticToken
+          && !workspaceSemanticIndexBuildIsCurrent(semanticIndex.current(), semanticToken)
+        ) {
+          throw new Error("Refactor result became stale because the workspace changed; request it again");
+        }
+      };
+      assertSemanticCurrent();
       let executableAction = action;
       const raw = action.raw;
       const hasDeferredData = raw != null
@@ -5436,17 +5639,59 @@ export function CodeWorkspaceTab({
           }
         }
       }
+      assertSemanticCurrent();
+      let semanticEditApplied = false;
+      let semanticCommandRevision: number | null = null;
       const result = await executeCodeAction(executableAction, {
-        applyEdit: (edit) => applyLspWorkspaceEdit(edit, {
-          // The applier only opens the dialog for multi-file/resource edits;
-          // single-file quick fixes remain an immediate action.
-          preview: true,
-          label: executableAction.title,
-        }),
+        applyEdit: async (edit) => {
+          const outcomes = await applyLspWorkspaceEdit(edit, {
+            // The applier only opens the dialog for multi-file/resource edits;
+            // single-file quick fixes remain an immediate action.
+            preview: true,
+            label: executableAction.title,
+            semanticGeneration: semanticToken?.generation,
+            semanticRevision: semanticToken?.revision,
+          });
+          semanticEditApplied = !outcomes.some((outcome) => (
+            outcome.status === "failed" || outcome.status === "skipped"
+          ));
+          if (semanticToken && semanticEditApplied) {
+            semanticCommandRevision = semanticIndex.current().revision;
+          }
+          return outcomes;
+        },
         executeCommand: async (command, argumentsValue) => {
           const descriptor = lspDescriptorForFile(file);
           if (!descriptor) throw new Error("Cannot resolve the language server for this code action");
-          return lspExecuteCommand(descriptor, command, argumentsValue);
+          const execute = async () => {
+            if (semanticToken) {
+              const current = semanticIndex.current();
+              if (semanticEditApplied) {
+                if (semanticCommandRevision == null || current.revision !== semanticCommandRevision) {
+                  throw new Error("Refactor command continuation became stale because the workspace changed");
+                }
+              } else {
+                assertSemanticCurrent();
+              }
+              providerCommandSemanticGuardRef.current = {
+                generation: current.generation,
+                revision: semanticEditApplied ? semanticCommandRevision! : semanticToken.revision,
+                requireReady: !semanticEditApplied,
+              };
+            }
+            try {
+              return await lspExecuteCommand(descriptor, command, argumentsValue);
+            } finally {
+              if (semanticToken) {
+                providerCommandSemanticGuardRef.current = null;
+                semanticIndex.invalidate("provider-command");
+              }
+            }
+          };
+          if (!semanticToken) return execute();
+          const pending = providerCommandQueueRef.current.then(execute);
+          providerCommandQueueRef.current = pending.then(() => undefined, () => undefined);
+          return pending;
         },
       });
       if (result.status === "executed-command") {
@@ -5461,6 +5706,8 @@ export function CodeWorkspaceTab({
     applyLspWorkspaceEdit,
     lspCodeActionResolve,
     lspDescriptorForFile,
+    semanticIndex.current,
+    semanticIndex.invalidate,
     setStatusMessage,
     updateLspStatusForFile,
   ]);
@@ -5474,7 +5721,15 @@ export function CodeWorkspaceTab({
     only: string[] = [],
     sectionLabel = "code actions",
   ) => {
-    const actions = await requestCodeActions(file, range, diagnostics, only);
+    const requested = await requestCodeActions(file, range, diagnostics, only);
+    const actions = requested.actions;
+    if (requested.semanticToken && !workspaceSemanticIndexBuildIsCurrent(
+      semanticIndex.current(),
+      requested.semanticToken,
+    )) {
+      setStatusMessage("Refactor actions became stale because the workspace changed; request them again");
+      return;
+    }
     const filtered = only.length === 0
       ? actions
       : actions.filter((action) => only.some((kind) => (
@@ -5493,9 +5748,15 @@ export function CodeWorkspaceTab({
     });
     openTreeContextMenuAt(clientX, clientY, sorted.map((action) => ({
       label: action.title,
-      onClick: () => void runCodeAction(action, file),
+      onClick: () => void runCodeAction(action, file, requested.semanticToken),
     })));
-  }, [openTreeContextMenuAt, requestCodeActions, runCodeAction, setStatusMessage]);
+  }, [
+    openTreeContextMenuAt,
+    requestCodeActions,
+    runCodeAction,
+    semanticIndex.current,
+    setStatusMessage,
+  ]);
 
   const openRefactorActions = useCallback(async (only: string[], sectionLabel: string) => {
     const file = activeFile;
@@ -6720,24 +6981,32 @@ export function CodeWorkspaceTab({
   const renameSymbolAtCursor = useCallback(async () => {
     const file = activeFile;
     if (!file || file.loading) return;
-    const descriptor = lspDescriptorForFile(file);
-    if (!descriptor) return;
     const caps = lspFilesRef.current[file.key]?.status?.capabilities;
     if (caps && !caps.rename) {
       setStatusMessage("Rename is not supported by this language server");
       return;
     }
+    const expectedRevision = semanticIndex.current().revision;
+    const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
+    if (!live) {
+      setStatusMessage("Rename requires the language server to finish synchronizing current editor buffers");
+      return;
+    }
+    const descriptor = lspDescriptorForFile(live);
+    if (!descriptor) return;
     const position = editorSelectionRef.current.start;
+    const buildToken = semanticIndex.beginBuild("language-server");
     try {
       const prepared = await lspPrepareRename(descriptor, position);
-      updateLspStatusForFile(file, prepared.status);
+      updateLspStatusForFile(live, prepared.status);
       if (!prepared.allowed && prepared.range == null && !prepared.placeholder) {
+        semanticIndex.abandonBuild(buildToken);
         setStatusMessage(prepared.message ?? "Cannot rename symbol here");
         return;
       }
       const defaultName = prepared.placeholder
         ?? (() => {
-          const lines = file.text.split("\n");
+          const lines = live.text.split("\n");
           const line = lines[position.line] ?? "";
           if (prepared.range) {
             return line.slice(prepared.range.start.character, prepared.range.end.character);
@@ -6750,21 +7019,61 @@ export function CodeWorkspaceTab({
         initialValue: defaultName,
         confirmLabel: "Rename",
       });
-      if (!nextName || nextName === defaultName) return;
+      if (!nextName || nextName === defaultName) {
+        semanticIndex.abandonBuild(buildToken);
+        return;
+      }
+      const beforeRename = semanticIndex.current();
+      if (
+        beforeRename.revision !== buildToken.revision
+        || beforeRename.activeProviders.length > 0
+      ) {
+        semanticIndex.abandonBuild(buildToken);
+        setStatusMessage("Rename was cancelled because the workspace changed while the dialog was open");
+        return;
+      }
       const renamed = await lspRename(descriptor, position, nextName);
-      updateLspStatusForFile(file, renamed.status);
-      if (!renamed.edit.documentEdits.length) {
+      updateLspStatusForFile(live, renamed.status);
+      const operationCount = workspaceEditOperations(renamed.edit).length;
+      if (operationCount === 0) {
+        semanticIndex.finishQuery(buildToken, { kind: "rename", resultCount: 0 });
         setStatusMessage("Rename produced no edits");
+        return;
+      }
+      const completion = semanticIndex.finishQuery(buildToken, {
+        kind: "rename",
+        resultCount: operationCount,
+      });
+      if (
+        !completion.accepted
+        || !workspaceSemanticIndexBuildIsCurrent(completion.snapshot, buildToken)
+      ) {
+        setStatusMessage("Rename result became stale because the workspace changed; run Rename again");
         return;
       }
       await applyLspWorkspaceEdit(renamed.edit, {
         preview: true,
         label: "Rename symbol",
+        semanticGeneration: buildToken.generation,
+        semanticRevision: buildToken.revision,
       });
     } catch (err) {
+      semanticIndex.failBuild(buildToken, errorMessage(err));
       setStatusMessage(errorMessage(err));
     }
-  }, [activeFile, applyLspWorkspaceEdit, lspDescriptorForFile, setStatusMessage, updateLspStatusForFile]);
+  }, [
+    activeFile,
+    applyLspWorkspaceEdit,
+    ensureWorkspaceSemanticDocumentsSynced,
+    lspDescriptorForFile,
+    semanticIndex.beginBuild,
+    semanticIndex.abandonBuild,
+    semanticIndex.failBuild,
+    semanticIndex.finishQuery,
+    semanticIndex.current,
+    setStatusMessage,
+    updateLspStatusForFile,
+  ]);
   renameSymbolRef.current = renameSymbolAtCursor;
 
   const safeDeleteSymbolAtCursor = useCallback(async () => {
@@ -6774,18 +7083,49 @@ export function CodeWorkspaceTab({
       setStatusMessage(`${file.title} is a read-only library source`);
       return;
     }
-    const descriptor = lspDescriptorForFile(file);
-    if (!descriptor) return;
     const caps = lspFilesRef.current[file.key]?.status?.capabilities;
     if (caps && (!caps.references || !caps.rename)) {
       setStatusMessage("Safe Delete requires references and rename support from the language server");
       return;
     }
+    const expectedRevision = semanticIndex.current().revision;
+    const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
+    if (!live) {
+      referencesRequestSequenceRef.current += 1;
+      setStatusMessage("Safe Delete requires the language server to finish synchronizing current editor buffers");
+      return;
+    }
+    const descriptor = lspDescriptorForFile(live);
+    if (!descriptor) return;
     const position = editorSelectionRef.current.start;
+    referencesRequestSequenceRef.current += 1;
+    const referencesRequestId = referencesRequestSequenceRef.current;
+    setBottomDockOpen(true);
+    setBottomDockTab("references");
+    setReferencesResult({
+      loading: true,
+      origin: `Safe Delete · ${live.subtitle}`,
+      locations: [],
+      error: null,
+      semanticGeneration: null,
+      semanticRevision: null,
+    });
+    const buildToken = semanticIndex.beginBuild("language-server");
     try {
       const prepared = await lspPrepareRename(descriptor, position);
-      updateLspStatusForFile(file, prepared.status);
+      updateLspStatusForFile(live, prepared.status);
       if (!prepared.range) {
+        semanticIndex.abandonBuild(buildToken);
+        if (referencesRequestSequenceRef.current === referencesRequestId) {
+          setReferencesResult({
+            loading: false,
+            origin: `Safe Delete · ${live.subtitle}`,
+            locations: [],
+            error: prepared.message ?? "Cannot determine a safe symbol range here",
+            semanticGeneration: null,
+            semanticRevision: null,
+          });
+        }
         setStatusMessage(prepared.message ?? "Cannot determine a safe symbol range here");
         return;
       }
@@ -6793,18 +7133,41 @@ export function CodeWorkspaceTab({
         lspReferences(descriptor, position, true),
         lspDefinition(descriptor, position).catch(() => null),
       ]);
-      updateLspStatusForFile(file, references.status);
-      if (definition) updateLspStatusForFile(file, definition.status);
-      setBottomDockOpen(true);
-      setBottomDockTab("references");
-      setReferencesResult({
-        loading: false,
-        origin: `Safe Delete · ${file.subtitle}`,
-        locations: references.locations,
-        error: null,
+      updateLspStatusForFile(live, references.status);
+      if (definition) updateLspStatusForFile(live, definition.status);
+      const completion = semanticIndex.finishQuery(buildToken, {
+        kind: "safe-delete",
+        resultCount: references.locations.length,
       });
+      if (completion.accepted && referencesRequestSequenceRef.current === referencesRequestId) {
+        setReferencesResult({
+          loading: false,
+          origin: `Safe Delete · ${live.subtitle}`,
+          locations: references.locations,
+          error: null,
+          semanticGeneration: buildToken.generation,
+          semanticRevision: buildToken.revision,
+        });
+      }
+      if (
+        !completion.accepted
+        || !workspaceSemanticIndexBuildIsCurrent(completion.snapshot, buildToken)
+      ) {
+        if (referencesRequestSequenceRef.current === referencesRequestId) {
+          setReferencesResult({
+            loading: false,
+            origin: `Safe Delete · ${live.subtitle}`,
+            locations: [],
+            error: "Safe Delete references became stale because the workspace changed",
+            semanticGeneration: null,
+            semanticRevision: null,
+          });
+        }
+        setStatusMessage("Safe Delete references became stale because the workspace changed; run Safe Delete again");
+        return;
+      }
 
-      const currentPath = absolutePathForOpenFile(file);
+      const currentPath = absolutePathForOpenFile(live);
       if (!currentPath) {
         setStatusMessage("Safe Delete cannot resolve the active file path");
         return;
@@ -6822,7 +7185,7 @@ export function CodeWorkspaceTab({
           range: prepared.range,
         };
       const deletion = buildSafeDeleteWorkspaceEdit(declaration, references.locations);
-      const line = file.text.split("\n")[prepared.range.start.line] ?? "";
+      const line = live.text.split("\n")[prepared.range.start.line] ?? "";
       const symbol = prepared.range.start.line === prepared.range.end.line
         ? line.slice(prepared.range.start.character, prepared.range.end.character).trim()
         : "";
@@ -6841,15 +7204,36 @@ export function CodeWorkspaceTab({
         setStatusMessage("Safe Delete cancelled; references remain open for review");
         return;
       }
-      await applyLspWorkspaceEdit(deletion.edit, { label: "Safe delete symbol" });
+      await applyLspWorkspaceEdit(deletion.edit, {
+        label: "Safe delete symbol",
+        semanticGeneration: buildToken.generation,
+        semanticRevision: buildToken.revision,
+      });
     } catch (error) {
+      semanticIndex.failBuild(buildToken, errorMessage(error));
+      if (referencesRequestSequenceRef.current === referencesRequestId) {
+        setReferencesResult({
+          loading: false,
+          origin: `Safe Delete · ${live.subtitle}`,
+          locations: [],
+          error: errorMessage(error),
+          semanticGeneration: null,
+          semanticRevision: null,
+        });
+      }
       setStatusMessage(`Cannot safely delete symbol: ${errorMessage(error)}`);
     }
   }, [
     absolutePathForOpenFile,
     activeFile,
     applyLspWorkspaceEdit,
+    ensureWorkspaceSemanticDocumentsSynced,
     lspDescriptorForFile,
+    semanticIndex.beginBuild,
+    semanticIndex.abandonBuild,
+    semanticIndex.failBuild,
+    semanticIndex.finishQuery,
+    semanticIndex.current,
     setStatusMessage,
     updateLspStatusForFile,
   ]);
@@ -6857,8 +7241,8 @@ export function CodeWorkspaceTab({
 
   const findReferences = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
-      const descriptor = lspDescriptorForFile(file);
-      if (!descriptor) return;
+      referencesRequestSequenceRef.current += 1;
+      const requestId = referencesRequestSequenceRef.current;
       setBottomDockOpen(true);
       setBottomDockTab("references");
       setReferencesResult({
@@ -6866,27 +7250,90 @@ export function CodeWorkspaceTab({
         origin: file.subtitle,
         locations: [],
         error: null,
+        semanticGeneration: null,
+        semanticRevision: null,
       });
-      try {
-        const result = await lspReferences(descriptor, position, true);
-        updateLspStatusForFile(file, result.status);
+      const expectedRevision = semanticIndex.current().revision;
+      const live = await ensureWorkspaceSemanticDocumentsSynced(file.key, expectedRevision);
+      if (!live) {
         setReferencesResult({
           loading: false,
           origin: file.subtitle,
+          locations: [],
+          error: "References require the language server to finish synchronizing current editor buffers",
+          semanticGeneration: null,
+          semanticRevision: null,
+        });
+        return;
+      }
+      const descriptor = lspDescriptorForFile(live);
+      if (!descriptor) {
+        if (referencesRequestSequenceRef.current === requestId) {
+          setReferencesResult({
+            loading: false,
+            origin: file.subtitle,
+            locations: [],
+            error: "No language server is available for references",
+            semanticGeneration: null,
+            semanticRevision: null,
+          });
+        }
+        return;
+      }
+      const buildToken = semanticIndex.beginBuild("language-server");
+      try {
+        const result = await lspReferences(descriptor, position, true);
+        updateLspStatusForFile(live, result.status);
+        const completion = semanticIndex.finishQuery(buildToken, {
+          kind: "references",
+          resultCount: result.locations.length,
+        });
+        if (!completion.accepted) {
+          if (referencesRequestSequenceRef.current === requestId) {
+            setReferencesResult({
+              loading: false,
+              origin: live.subtitle,
+              locations: [],
+              error: "References result became stale because the workspace changed",
+              semanticGeneration: null,
+              semanticRevision: null,
+            });
+          }
+          return;
+        }
+        if (referencesRequestSequenceRef.current !== requestId) return;
+        setReferencesResult({
+          loading: false,
+          origin: live.subtitle,
           locations: result.locations,
           error: null,
+          semanticGeneration: buildToken.generation,
+          semanticRevision: buildToken.revision,
         });
         setStatusMessage(`${result.locations.length} reference${result.locations.length === 1 ? "" : "s"} found`);
       } catch (err) {
+        semanticIndex.failBuild(buildToken, errorMessage(err));
+        if (referencesRequestSequenceRef.current !== requestId) return;
         setReferencesResult({
           loading: false,
           origin: file.subtitle,
           locations: [],
           error: errorMessage(err),
+          semanticGeneration: null,
+          semanticRevision: null,
         });
       }
     },
-    [lspDescriptorForFile, setStatusMessage, updateLspStatusForFile],
+    [
+      ensureWorkspaceSemanticDocumentsSynced,
+      lspDescriptorForFile,
+      semanticIndex.beginBuild,
+      semanticIndex.current,
+      semanticIndex.failBuild,
+      semanticIndex.finishQuery,
+      setStatusMessage,
+      updateLspStatusForFile,
+    ],
   );
 
   const showEditorContextMenu = useCallback((
@@ -7773,8 +8220,8 @@ export function CodeWorkspaceTab({
     const root = findRoot(rootId);
     if (!root) return true;
     // Save every dirty file in this root that jdtls builds from: .java sources
-    // and Maven/Gradle build descriptors. Await the disk write AND the LSP save
-    // so didSave reaches jdtls before we ask it to build.
+    // and Maven/Gradle build descriptors. saveOpenBufferText awaits didSave so
+    // jdtls receives it before the build barrier below.
     const dirty = Object.values(openFilesRef.current).filter((f) =>
       f.ref.kind === "root"
       && f.ref.rootId === rootId
@@ -7785,7 +8232,6 @@ export function CodeWorkspaceTab({
     for (const f of dirty) {
       try {
         await saveOpenBufferText(f.key, f.text);
-        await saveLspDocument(f, f.text);
       } catch (err) {
         const message = `Cannot start debug: failed to save ${f.subtitle}: ${errorMessage(err)}`;
         setStatusMessage(message);
@@ -8977,6 +9423,7 @@ export function CodeWorkspaceTab({
                 files={analysisFiles}
                 status={activeLspState?.status ?? null}
                 semanticTokenCount={semanticTokensByGroup[activeEditorGroupId]?.length ?? 0}
+                semanticIndex={semanticIndex.snapshot}
                 profile={inspectionProfile}
                 onUpdateRule={updateInspectionProfileRule}
                 onOpenLocation={(location) => void openLspLocation(location)}
@@ -9012,6 +9459,7 @@ export function CodeWorkspaceTab({
               <ReferencesPanel
                 result={referencesResult}
                 roots={roots}
+                semanticIndex={semanticIndex.snapshot}
                 onOpenLocation={(location) => void openLspLocation(location)}
               />
             ),
@@ -9206,6 +9654,7 @@ export function CodeWorkspaceTab({
         goToFileTruncated={goToFileTruncated}
         searchableCommands={searchableWorkspaceCommands}
         symbolsAvailable={seSymbolsAvailable}
+        semanticIndex={semanticIndex.snapshot}
         fetchWorkspaceSymbols={fetchWorkspaceSymbols}
         onCloseSearchEverywhere={() => setSearchEverywhereOpen(false)}
         onOpenFileItem={openGoToFileItem}

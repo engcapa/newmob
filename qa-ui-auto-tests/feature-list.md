@@ -4748,21 +4748,17 @@ controls:
 id: F25.1
 status: partial
 area: code-workspace/execution
-components: [CodeWorkspaceTab, RunPanel, BuildPanel, DebugPanel, ProblemsPanel, AnalysisPanel, BottomDock, WorkspaceBuildRunToolsDialog]
+components: [CodeWorkspaceTab, RunPanel, BuildPanel, DebugPanel, BottomDock, WorkspaceBuildRunToolsDialog]
 files:
   - src/components/sidebar/Sidebar.tsx
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/executionPlan.ts
-  - src/components/editor/workspace/inspectionProfile.ts
   - src/components/editor/workspace/runConfigurationPersistence.ts
   - src/components/editor/workspace/panels/RunPanel.tsx
   - src/components/editor/workspace/panels/BuildPanel.tsx
   - src/components/editor/workspace/panels/BottomDock.tsx
   - src/components/editor/workspace/WorkspaceBuildRunToolsDialog.tsx
   - src/components/editor/workspace/panels/DebugPanel.tsx
-  - src/components/editor/workspace/panels/ProblemsPanel.tsx
-  - src/components/editor/workspace/panels/AnalysisPanel.tsx
-  - src/lib/editor/lsp.ts
   - src/lib/editor/workspace.ts
   - src/lib/terminal/commandInput.ts
   - src-tauri/src/lsp.rs
@@ -4996,11 +4992,42 @@ controls:
   - id: inherit-maven-argline
     selector: '[data-testid="workspace-maven-inherit-argline"]'
     kind: interactive
+-->
+
+- 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
+- Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
+- 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。coverage、结构化测试结果和完整 adapter 矩阵仍未完成。
+
+### 25.2 Provider 语义快照与重构一致性 🟡
+
+<!-- feature
+id: F25.2
+status: partial
+area: code-workspace/semantic-analysis
+components: [CodeWorkspaceTab, SearchEverywhere, ReferencesPanel, ProblemsPanel, AnalysisPanel]
+files:
+  - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/SearchEverywhere.tsx
+  - src/components/editor/workspace/WorkspacePopupsHost.tsx
+  - src/components/editor/workspace/inspectionProfile.ts
+  - src/components/editor/workspace/workspaceSemanticIndex.ts
+  - src/components/editor/workspace/useWorkspaceSemanticIndex.ts
+  - src/components/editor/workspace/workspaceEditApply.ts
+  - src/components/editor/workspace/useWorkspaceLspSession.ts
+  - src/components/editor/workspace/panels/ProblemsPanel.tsx
+  - src/components/editor/workspace/panels/AnalysisPanel.tsx
+  - src/components/editor/workspace/panels/ReferencesPanel.tsx
+  - src/lib/editor/lsp.ts
+controls:
   - id: analysis-tab
     selector: '[data-testid="code-workspace-bottom-tab-analysis"]'
     kind: interactive
   - id: analysis-panel
     selector: '[data-testid="code-workspace-analysis-panel"]'
+    kind: display
+  - id: analysis-semantic-index
+    selector: '[data-testid="analysis-semantic-index"]'
     kind: display
   - id: analysis-lsp-status
     selector: '[data-testid="analysis-lsp-status"]'
@@ -5011,13 +5038,20 @@ controls:
   - id: analysis-data-flow
     selector: '[data-testid="analysis-data-flow"]'
     kind: display
+  - id: references-semantic-index
+    selector: '[data-testid="references-semantic-index"]'
+    kind: display
+    optional: true       # requires a provider-backed Find Usages request
+  - id: search-semantic-index
+    selector: '[data-testid="search-everywhere-semantic-index"]'
+    kind: display
+    optional: true       # requires workspace-symbol capability and a symbol query
 -->
 
-- 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
-- Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
-- 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
-- Analysis/Problems 面板呈现 provider capability、CodeActionKind、semantic token、诊断元数据、related locations 与可持久化 inspection 展示规则；这些能力依赖 language server，不等同于 IDEA PSI、原生 inspection 或 data-flow 引擎。
-- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环；coverage、结构化测试结果、PSI/index 和原生 data-flow 仍未完成。
+- Analysis/Problems 面板呈现 provider capability、CodeActionKind、semantic token、诊断元数据、related locations 与可持久化 inspection 展示规则。
+- Provider semantic snapshot 以 workspace revision 判定结果新鲜度，generation 仅仲裁异步查询发布顺序；保存、编辑、watcher、资源操作、WorkspaceEdit、工程根变化、LSP/SDK 重启及 provider progress 会统一失效或阻断快照。
+- Rename、Safe Delete、Code Action/Refactor 在查询前等待活跃 editor buffer 的 LSP 同步，并在 resolve、菜单执行、确认对话框结束、WorkspaceEdit 最终 mutation 与 server-initiated `workspace/applyEdit` 前重复校验 revision。
+- References 与 Search Everywhere 绑定各自结果来源，后续无关查询不会把旧列表错误标成 ready；当前仅是 provider 一致性协议，仍不等同于 IntelliJ PSI/stub index。自有索引、原生 inspection/data-flow/nullability 仍未完成。
 
 ---
 

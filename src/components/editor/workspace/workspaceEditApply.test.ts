@@ -153,6 +153,39 @@ describe("applyWorkspaceEdit", () => {
     expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "WorkspaceEdit preview was declined" });
   });
 
+  it("runs the final consistency preflight after confirmation and before mutation", async () => {
+    const calls: string[] = [];
+    const workspaceEdit: LspWorkspaceEdit = {
+      documentEdits: [
+        edit("file:///repo/a.ts", "/repo/a.ts", "A").documentEdits[0]!,
+        edit("file:///repo/b.ts", "/repo/b.ts", "B").documentEdits[0]!,
+      ],
+    };
+    const outcomes = await applyWorkspaceEdit(workspaceEdit, {
+      resolvePath: (file) => file.path,
+      getOpenBuffer: () => ({ text: "x", dirty: true, key: "open" }),
+      applyToOpenBuffer: () => { calls.push("apply"); },
+      saveOpenBuffer: async () => {},
+      readDisk: async () => null,
+      writeDisk: async () => {},
+      confirmWorkspaceEdit: async () => {
+        calls.push("confirm");
+        return true;
+      },
+      preflightMutation: () => {
+        calls.push("preflight");
+        throw new Error("semantic snapshot changed");
+      },
+    });
+
+    expect(calls).toEqual(["confirm", "preflight"]);
+    expect(outcomes[0]).toMatchObject({
+      status: "failed",
+      reason: "semantic snapshot changed",
+    });
+    expect(summarizeWorkspaceEditOutcomes(outcomes)).toContain("semantic snapshot changed");
+  });
+
   it("includes change annotations in a preview and only then applies resources", async () => {
     const confirmed: string[] = [];
     const applyToOpenBuffer = vi.fn();

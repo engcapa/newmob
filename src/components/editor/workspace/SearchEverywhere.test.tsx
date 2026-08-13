@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SearchEverywhere, type GoToFileItem } from "./SearchEverywhere";
 import type { WorkspaceCommand } from "./workspaceCommands";
+import { createWorkspaceSemanticIndexSnapshot } from "./workspaceSemanticIndex";
 
 const items: GoToFileItem[] = [
   { rootId: "root-1", rootName: "app", path: "src/components/editor/CodeWorkspaceTab.tsx" },
@@ -116,17 +117,22 @@ describe("SearchEverywhere", () => {
   it("shows Classes/Symbols when available and routes Text into Find in Files", async () => {
     const onSearchText = vi.fn();
     const onOpenSymbol = vi.fn();
-    const fetchSymbols = vi.fn(async () => [{
-      name: "CodeWorkspaceTab",
-      kind: 5,
-      containerName: "editor",
-      path: "src/CodeWorkspaceTab.tsx",
-      uri: "file:///repo/src/CodeWorkspaceTab.tsx",
-      line: 10,
-      character: 0,
-    }]);
+    const fetchSymbols = vi.fn(async () => ({
+      symbols: [{
+        name: "CodeWorkspaceTab",
+        kind: 5,
+        containerName: "editor",
+        path: "src/CodeWorkspaceTab.tsx",
+        uri: "file:///repo/src/CodeWorkspaceTab.tsx",
+        line: 10,
+        character: 0,
+      }],
+      semanticGeneration: 3,
+      semanticRevision: 4,
+    }));
     renderPopup({
       symbolsAvailable: true,
+      semanticIndex: createWorkspaceSemanticIndexSnapshot(),
       fetchSymbols,
       onSearchText,
       onOpenSymbol,
@@ -136,6 +142,7 @@ describe("SearchEverywhere", () => {
     expect(screen.getByRole("tab", { name: "Symbols" })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Go to class"), { target: { value: "CWT" } });
     expect(await screen.findByText("CodeWorkspaceTab")).toBeInTheDocument();
+    expect(screen.getByTestId("search-everywhere-semantic-index")).toHaveTextContent("Stale · result generation 3");
     fireEvent.keyDown(screen.getByLabelText("Go to class"), { key: "Enter" });
     expect(onOpenSymbol).toHaveBeenCalled();
 

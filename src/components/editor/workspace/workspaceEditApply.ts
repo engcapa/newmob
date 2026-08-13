@@ -75,6 +75,8 @@ export interface WorkspaceEditApplyHooks {
   confirmWorkspaceEdit?: (preview: WorkspaceEditPreview) => Promise<boolean>;
   /** Confirm server-declared change annotations before any mutation is applied. */
   confirmChangeAnnotations?: (annotations: LspChangeAnnotation[]) => Promise<boolean>;
+  /** Final consistency barrier after dialogs and immediately before mutation. */
+  preflightMutation?: () => Promise<void> | void;
 }
 
 async function applyTextDocumentEdit(
@@ -247,6 +249,18 @@ export async function applyWorkspaceEdit(
       }];
     }
   }
+  if (hooks.preflightMutation) {
+    try {
+      await hooks.preflightMutation();
+    } catch (error) {
+      return [{
+        operationIndex: null,
+        path: "WorkspaceEdit",
+        status: "failed",
+        reason: error instanceof Error ? error.message : String(error),
+      }];
+    }
+  }
   const outcomes: WorkspaceEditApplyOutcome[] = [];
   for (const [operationIndex, operation] of workspaceEditOperations(edit).entries()) {
     if (operation.kind === "text") {
@@ -306,5 +320,9 @@ export function summarizeWorkspaceEditOutcomes(outcomes: WorkspaceEditApplyOutco
   const unchanged = outcomes.filter((item) => item.status === "noop").length;
   const failed = outcomes.filter((item) => item.status === "failed").length;
   const skipped = outcomes.filter((item) => item.status === "skipped").length;
-  return `Applied ${applied}, unchanged ${unchanged}, failed ${failed}, skipped ${skipped}`;
+  const firstReason = outcomes.find((item) => (
+    item.status === "failed" || item.status === "skipped"
+  ));
+  const summary = `Applied ${applied}, unchanged ${unchanged}, failed ${failed}, skipped ${skipped}`;
+  return firstReason ? `${summary}: ${firstReason.reason}` : summary;
 }
