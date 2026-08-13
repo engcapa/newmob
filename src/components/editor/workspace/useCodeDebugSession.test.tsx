@@ -18,12 +18,12 @@ vi.mock("../../../lib/editor/dap", () => ({
 const { useCodeDebugSession } = await import("./useCodeDebugSession");
 
 /** `setBreakpoints` payloads sent to the adapter, in call order. */
-function breakpointCalls(): { path: string; lines: number[] }[] {
+function breakpointCalls(): { sessionId: string; path: string; lines: number[] }[] {
   return dapSendRequest.mock.calls
     .filter((call) => call[1] === "setBreakpoints")
     .map((call) => {
       const args = call[2] as { source: { path: string }; breakpoints: { line: number }[] };
-      return { path: args.source.path, lines: args.breakpoints.map((bp) => bp.line) };
+      return { sessionId: String(call[0]), path: args.source.path, lines: args.breakpoints.map((bp) => bp.line) };
     });
 }
 
@@ -260,6 +260,36 @@ describe("useCodeDebugSession", () => {
     ]);
   });
 
+  it("carries startup lines reported in one React batch into the adapter session", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    let handler: ((payload: { sessionId: string; event: string; message: unknown }) => void) | null = null;
+    listenDapEvents.mockImplementation((_id: string, callback: typeof handler) => {
+      handler = callback;
+      return Promise.resolve(() => {});
+    });
+    dapStartSession.mockResolvedValue({
+      sessionId: "sess-1",
+      capabilities: {},
+      request: "launch",
+      arguments: { mainClass: "App" },
+    });
+
+    await act(async () => {
+      result.current.reportStartupProgress("Starting debug for App.java");
+      result.current.reportStartupProgress("Building project…");
+      result.current.reportStartupProgress("Launching com.acme.App…");
+      await result.current.startDebug({ filePath: "/repo/App.java" });
+    });
+
+    expect(handler).not.toBeNull();
+    expect(result.current.state?.sessionId).toBe("sess-1");
+    expect(result.current.state?.output.map((line) => line.text)).toEqual([
+      "Starting debug for App.java\n",
+      "Building project…\n",
+      "Launching com.acme.App…\n",
+    ]);
+  });
+
   it("replaces a terminated run's console when the next start reports progress", () => {
     // Progress from a new attempt must not read as output of the finished one.
     const { result } = renderHook(() => useCodeDebugSession("ws-1"));
@@ -303,7 +333,7 @@ describe("useCodeDebugSession", () => {
         message: { body: { category: "stdout", output: "hello\n" } },
       });
     });
-    act(() => result.current.terminate());
+    await act(async () => result.current.terminate());
 
     // IDEA leaves the output visible after Stop; only the next run replaces it.
     expect(result.current.state?.status).toBe("terminated");
@@ -312,6 +342,179 @@ describe("useCodeDebugSession", () => {
 
     act(() => result.current.clearConsole());
     expect(result.current.state?.output).toEqual([]);
+  });
+
+  it("starts parallel compound children and broadcasts breakpoints to every live session", async () => {
+    const handlers = new Map<string, (payload: { sessionId: string; event: string; message: unknown }) => void>();
+    listenDapEvents.mockImplementation((id: string, handler: (payload: {
+      sessionId: string; event: string; message: unknown;
+    }) => void) => {
+      handlers.set(id, handler);
+      return Promise.resolve(() => handlers.delete(id));
+    });
+    dapStartSession.mockImplementation((_adapterId: string, config: Record<string, unknown>) => Promise.resolve({
+      sessionId: String(config.sessionId),
+      capabilities: {},
+      request: "launch",
+      arguments: config,
+    }));
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    let started!: Promise<void>;
+    act(() => {
+      started = result.current.startDebugGroup({
+        id: "all",
+        label: "All services",
+        parallel: true,
+        children: [
+          { id: "api", label: "API", adapterId: "java", launchConfig: { sessionId: "sess-api" } },
+          { id: "web", label: "Web", adapterId: "node", launchConfig: { sessionId: "sess-web" } },
+        ],
+      });
+    });
+    await waitFor(() => expect(handlers.size).toBe(2));
+    expect(dapStartSession).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      handlers.get("sess-api")?.({ sessionId: "sess-api", event: "initialized", message: {} });
+      handlers.get("sess-web")?.({ sessionId: "sess-web", event: "initialized", message: {} });
+      await started;
+    });
+    expect(result.current.sessions.map((session) => session.label)).toEqual(["API", "Web"]);
+
+    act(() => result.current.toggleBreakpoint("/repo/App.java", 12));
+    await waitFor(() => expect(breakpointCalls()).toHaveLength(2));
+    expect(breakpointCalls().map((call) => call.sessionId).sort()).toEqual(["sess-api", "sess-web"]);
+
+    act(() => {
+      handlers.get("sess-web")?.({
+        sessionId: "sess-web",
+        event: "stopped",
+        message: { body: { reason: "breakpoint", threadId: 7 } },
+      });
+    });
+    await waitFor(() => expect(result.current.activeSessionId).toBe("sess-web"));
+    expect(result.current.state?.status).toBe("stopped");
+
+    act(() => {
+      handlers.get("sess-web")?.({ sessionId: "sess-web", event: "terminated", message: {} });
+    });
+    await waitFor(() => expect(result.current.activeSessionId).toBe("sess-api"));
+    expect(result.current.state?.status).toBe("running");
+
+    await act(async () => result.current.terminate());
+    expect(dapTerminate).toHaveBeenCalledWith("sess-api");
+    expect(dapTerminate).toHaveBeenCalledWith("sess-web");
+    expect(result.current.sessions.every((session) => session.status === "terminated")).toBe(true);
+  });
+
+  it("waits for each sequential compound child before starting the next", async () => {
+    const handlers = new Map<string, (payload: { sessionId: string; event: string; message: unknown }) => void>();
+    listenDapEvents.mockImplementation((id: string, handler: (payload: {
+      sessionId: string; event: string; message: unknown;
+    }) => void) => {
+      handlers.set(id, handler);
+      return Promise.resolve(() => handlers.delete(id));
+    });
+    dapStartSession.mockImplementation((_adapterId: string, config: Record<string, unknown>) => Promise.resolve({
+      sessionId: String(config.sessionId), capabilities: {}, request: "launch", arguments: config,
+    }));
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    let started!: Promise<void>;
+    act(() => {
+      started = result.current.startDebugGroup({
+        id: "all", label: "All", children: [
+          { id: "one", label: "One", adapterId: "java", launchConfig: { sessionId: "sess-1" } },
+          { id: "two", label: "Two", adapterId: "java", launchConfig: { sessionId: "sess-2" } },
+        ],
+      });
+    });
+    await waitFor(() => expect(handlers.has("sess-1")).toBe(true));
+    expect(dapStartSession).toHaveBeenCalledTimes(1);
+    act(() => handlers.get("sess-1")?.({ sessionId: "sess-1", event: "initialized", message: {} }));
+    await waitFor(() => expect(handlers.has("sess-2")).toBe(true));
+    expect(dapStartSession).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      handlers.get("sess-2")?.({ sessionId: "sess-2", event: "initialized", message: {} });
+      await started;
+    });
+    expect(result.current.sessions.map((session) => session.targetId)).toEqual(["one", "two"]);
+  });
+
+  it("stops already-started children when a parallel compound child fails", async () => {
+    const handlers = new Map<string, (payload: { sessionId: string; event: string; message: unknown }) => void>();
+    listenDapEvents.mockImplementation((id: string, handler: (payload: {
+      sessionId: string; event: string; message: unknown;
+    }) => void) => {
+      handlers.set(id, handler);
+      return Promise.resolve(() => handlers.delete(id));
+    });
+    dapStartSession.mockImplementation((_adapterId: string, config: Record<string, unknown>) => Promise.resolve({
+      sessionId: String(config.sessionId), capabilities: {}, request: "launch", arguments: config,
+    }));
+    let rejectBadLaunch!: (error: Error) => void;
+    dapSendRequest.mockImplementation((id: string, command: string) => {
+      if (id === "sess-bad" && command === "launch") {
+        return new Promise((_resolve, reject) => { rejectBadLaunch = reject; });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const started = result.current.startDebugGroup({
+      id: "all", label: "All", parallel: true, children: [
+        { id: "ready", label: "Ready", adapterId: "java", launchConfig: { sessionId: "sess-ready" } },
+        { id: "bad", label: "Bad", adapterId: "java", launchConfig: { sessionId: "sess-bad" } },
+      ],
+    });
+    const failed = started.then(() => null, (error: unknown) => error);
+    await waitFor(() => expect(handlers.size).toBe(2));
+    act(() => {
+      handlers.get("sess-ready")?.({ sessionId: "sess-ready", event: "initialized", message: {} });
+      rejectBadLaunch(new Error("adapter rejected launch"));
+    });
+    await expect(failed).resolves.toMatchObject({ message: "adapter rejected launch" });
+    await waitFor(() => expect(dapTerminate).toHaveBeenCalledWith("sess-ready"));
+    expect(dapTerminate).toHaveBeenCalledWith("sess-bad");
+    await waitFor(() => {
+      expect(result.current.sessions.every((session) => session.status === "terminated")).toBe(true);
+    });
+  });
+
+  it("keeps successful children alive when compound stopOnFailure is disabled", async () => {
+    const handlers = new Map<string, (payload: { sessionId: string; event: string; message: unknown }) => void>();
+    listenDapEvents.mockImplementation((id: string, handler: (payload: {
+      sessionId: string; event: string; message: unknown;
+    }) => void) => {
+      handlers.set(id, handler);
+      return Promise.resolve(() => handlers.delete(id));
+    });
+    dapStartSession.mockImplementation((_adapterId: string, config: Record<string, unknown>) => Promise.resolve({
+      sessionId: String(config.sessionId), capabilities: {}, request: "launch", arguments: config,
+    }));
+    let rejectBadLaunch!: (error: Error) => void;
+    dapSendRequest.mockImplementation((id: string, command: string) => {
+      if (id === "sess-bad" && command === "launch") {
+        return new Promise((_resolve, reject) => { rejectBadLaunch = reject; });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const started = result.current.startDebugGroup({
+      id: "all", label: "All", parallel: true, stopOnFailure: false, children: [
+        { id: "ready", label: "Ready", adapterId: "java", launchConfig: { sessionId: "sess-ready" } },
+        { id: "bad", label: "Bad", adapterId: "java", launchConfig: { sessionId: "sess-bad" } },
+      ],
+    });
+    const failed = started.then(() => null, (error: unknown) => error);
+    await waitFor(() => expect(handlers.size).toBe(2));
+    act(() => {
+      handlers.get("sess-ready")?.({ sessionId: "sess-ready", event: "initialized", message: {} });
+      rejectBadLaunch(new Error("adapter rejected launch"));
+    });
+    await expect(failed).resolves.toMatchObject({ message: "adapter rejected launch" });
+    expect(dapTerminate).not.toHaveBeenCalledWith("sess-ready");
+    expect(result.current.sessions.find((session) => session.id === "sess-ready")?.status).toBe("running");
+    await waitFor(() => {
+      expect(result.current.sessions.find((session) => session.id === "sess-bad")?.status).toBe("terminated");
+    });
   });
 
   it("only evaluates hovers while stopped", async () => {

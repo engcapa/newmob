@@ -410,7 +410,10 @@ export function DebugPanel({
   onActiveConfigurationChange,
 }: DebugPanelProps) {
   const { state } = debug;
-  const running = !!state && state.status !== "terminated";
+  const running = debug.sessions.length > 0
+    ? debug.sessions.some((session) => session.status !== "terminated")
+    : !!state && state.status !== "terminated";
+  const activeRunning = !!state && state.status !== "terminated";
   const stopped = state?.status === "stopped";
   const canSetVariable = debug.capabilities.supportsSetVariable === true;
   const canRestartFrame = debug.capabilities.supportsRestartFrame === true;
@@ -662,7 +665,7 @@ export function DebugPanel({
                 data-testid="debug-pause"
                 className={`${controlBtn} hover:bg-amber-500/15`}
                 onClick={() => debug.step("pause")}
-                disabled={stopped}
+                disabled={!activeRunning || stopped}
                 title="Pause"
               >
                 <Pause className="h-4 w-4 text-amber-500 dark:text-amber-400" />
@@ -702,6 +705,7 @@ export function DebugPanel({
                 data-testid="debug-hot-reload"
                 className={`${controlBtn} hover:bg-orange-500/15`}
                 onClick={() => debug.hotReload()}
+                disabled={!activeRunning}
                 title="Hot reload changed classes"
               >
                 <FlameKindling className="h-4 w-4 text-orange-500 dark:text-orange-400" />
@@ -728,6 +732,28 @@ export function DebugPanel({
           )}
         </div>
       </div>
+      {debug.sessions.length > 1 && (
+        <div className="h-8 shrink-0 flex items-center gap-2 border-b border-[var(--taomni-code-border)] px-2">
+          <span className="shrink-0 text-[10px] text-[var(--taomni-text-muted)]">Session</span>
+          <select
+            data-testid="debug-active-session"
+            aria-label="Debug session"
+            title="Select compound debug session"
+            value={debug.activeSessionId ?? debug.sessions[0].id}
+            onChange={(event) => debug.selectSession(event.target.value)}
+            className="h-6 min-w-0 flex-1 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
+          >
+            {debug.sessions.map((session) => (
+              <option key={session.id} value={session.id}>
+                {session.label} [{session.status}{session.stoppedReason ? `: ${session.stoppedReason}` : ""}]
+              </option>
+            ))}
+          </select>
+          <span className="shrink-0 text-[10px] text-[var(--taomni-text-muted)]">
+            {debug.sessions.filter((session) => session.status !== "terminated").length}/{debug.sessions.length}
+          </span>
+        </div>
+      )}
       <div className="min-h-0 flex-1 overflow-auto">
         {!state && (
           <div className="px-3 py-2 text-[var(--taomni-text-muted)]" data-testid="debug-empty-state">

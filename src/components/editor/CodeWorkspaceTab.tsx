@@ -292,7 +292,11 @@ import {
   RUN_CONFIGURATION_CHANGED_EVENT,
   writeActiveRunConfigurationSelection,
 } from "./workspace/runConfigurationPersistence";
-import { executeTaskPlan, resolveBuildTargetPlan } from "./workspace/executionPlan";
+import {
+  executeTaskPlan,
+  resolveBuildTargetPlan,
+  validateCompoundExecutionGraph,
+} from "./workspace/executionPlan";
 import { FileTreePane } from "./workspace/FileTreePane";
 import { ProjectTree } from "./workspace/ProjectTree";
 import { MarkdownPreview } from "./workspace/MarkdownPreview";
@@ -563,7 +567,11 @@ import { TestsPanel } from "./workspace/panels/TestsPanel";
 import { javaTestRunCommand, type JavaTestBuildTool } from "./workspace/panels/javaTestRun";
 import { DebugPanel } from "./workspace/panels/DebugPanel";
 import { JavaMainClassPicker } from "./workspace/JavaMainClassPicker";
-import { useCodeDebugSession } from "./workspace/useCodeDebugSession";
+import {
+  useCodeDebugSession,
+  type DebugLaunchGroup,
+  type DebugLaunchNode,
+} from "./workspace/useCodeDebugSession";
 import {
   dapResolveJavaMainClasses,
   type JavaMainClassOption,
@@ -7255,6 +7263,29 @@ export function CodeWorkspaceTab({
     );
   }, [activeExecutionModel, activeFile, activeRunConfiguration, runConfigurationRevision, workspaceInstanceId]);
 
+  const activeDebugConfigurationCatalog = useMemo<ExecutionDebugConfiguration[]>(() => {
+    if (!activeExecutionModel || !activeFile || activeFile.ref.kind !== "root") return [];
+    const overrides = readRunConfigurationOverrides(workspaceInstanceId, activeFile.ref.rootId);
+    const runByDebugId = new Map<string, ExecutionRunConfiguration>();
+    for (const run of activeRunConfigurations) {
+      if (run.debugConfigurationId && !runByDebugId.has(run.debugConfigurationId)) {
+        runByDebugId.set(run.debugConfigurationId, run);
+      }
+    }
+    return activeExecutionModel.debugConfigurations.map((configuration) => {
+      const run = runByDebugId.get(configuration.id);
+      const override = run
+        ? overrides[run.id] ?? (run.baseConfigurationId ? overrides[run.baseConfigurationId] : undefined)
+        : undefined;
+      return applyRunOverrideToDebugConfiguration(
+        configuration,
+        override,
+        run?.runtimeOptions,
+        run?.envFile,
+      );
+    });
+  }, [activeExecutionModel, activeFile, activeRunConfigurations, runConfigurationRevision, workspaceInstanceId]);
+
   const activeRunConfigurationOverride = useMemo(() => {
     if (!activeRunConfiguration) return undefined;
     const rootId = activeFile?.ref.kind === "root" ? activeFile.ref.rootId : undefined;
@@ -8013,18 +8044,84 @@ export function CodeWorkspaceTab({
         if (file.dirty) await saveOpenBufferText(file.key, file.text);
         const root = findRoot(rootId);
         if (!root) throw new Error("Cannot resolve the active workspace root");
+        const catalog = activeDebugConfigurationCatalog;
+        const buildTargets = activeExecutionModel?.buildTargets ?? [];
+        const resolveRoot = (candidate: ExecutionDebugConfiguration): CodeWorkspaceRootInfo => {
+          const project = activeExecutionModel?.projects.find((item) => item.id === candidate.projectId);
+          const projectRoot = project && roots.find((item) => (
+            normalizeFsPath(item.path) === normalizeFsPath(project.root)
+            || normalizeFsPath(project.root).startsWith(`${normalizeFsPath(item.path)}/`)
+          ));
+          if (!projectRoot || projectRoot.id !== root.id) {
+            throw new Error(`Compound Debug child belongs to another workspace root: ${candidate.label}`);
+          }
+          return projectRoot;
+        };
+        const nodes = validateCompoundExecutionGraph(
+          configuration,
+          catalog.filter((candidate) => candidate.id !== configuration.id),
+        );
+        const validated = new Map<string, ExecutionDebugConfiguration>();
+        const collectReachable = (candidate: ExecutionDebugConfiguration) => {
+          if (validated.has(candidate.id)) return;
+          if (!candidate.available) {
+            throw new Error(candidate.diagnostic || `Debug configuration is unavailable: ${candidate.label}`);
+          }
+          resolveRoot(candidate);
+          resolveBuildTargetPlan(candidate.preLaunchTargets, buildTargets);
+          validated.set(candidate.id, candidate);
+          for (const childId of candidate.compoundConfigurationIds ?? []) {
+            const child = nodes.get(childId);
+            if (!child) throw new Error(`Compound Debug child is missing: ${childId}`);
+            collectReachable(child);
+          }
+        };
+        collectReachable(configuration);
+        // Resolve every dotenv before any build or adapter process starts. A
+        // malformed/missing later child must never leave a half-launched group.
+        const launches = new Map<string, ExecutionDebugConfiguration>();
+        await Promise.all(Array.from(validated.values()).map(async (candidate) => {
+          if (candidate.compoundConfigurationIds !== undefined) return;
+          const candidateRoot = resolveRoot(candidate);
+          const cwdValue = candidate.launchConfig.adapterCwd;
+          const cwd = typeof cwdValue === "string" && cwdValue.trim() ? cwdValue : candidateRoot.path;
+          const dotenv = await readEnvironmentFile(cwd, candidate.envFile);
+          launches.set(candidate.id, mergeDebugEnvironment(candidate, dotenv));
+        }));
+        const buildPlan = (candidate: ExecutionDebugConfiguration): DebugLaunchNode => {
+          const childIds = candidate.compoundConfigurationIds;
+          if (childIds === undefined) {
+            const launch = launches.get(candidate.id);
+            if (!launch) throw new Error(`Compound Debug launch was not resolved: ${candidate.label}`);
+            return {
+              id: launch.id,
+              label: launch.label,
+              adapterId: launch.adapterId,
+              launchConfig: launch.launchConfig,
+            };
+          }
+          return {
+            id: candidate.id,
+            label: candidate.label,
+            parallel: candidate.compoundParallel,
+            stopOnFailure: candidate.compoundStopOnFailure,
+            children: childIds.map((childId) => {
+              const child = validated.get(childId);
+              if (!child) throw new Error(`Compound Debug child is missing: ${childId}`);
+              return buildPlan(child);
+            }),
+          } satisfies DebugLaunchGroup;
+        };
+        // Before-launch tasks are completed for the validated graph before DAP
+        // startup. Resolve the union once so shared dependencies execute once.
         await executeBeforeLaunch(
-          configuration.preLaunchTargets,
-          activeExecutionModel?.buildTargets ?? [],
+          Array.from(validated.values()).flatMap((candidate) => candidate.preLaunchTargets),
+          buildTargets,
           root,
         );
-        const cwd = (() => {
-          const value = configuration.launchConfig.adapterCwd;
-          return typeof value === "string" && value.trim() ? value : root.path;
-        })();
-        const dotenv = await readEnvironmentFile(cwd, configuration.envFile);
-        const launch = mergeDebugEnvironment(configuration, dotenv);
-        await debug.startDebug(launch.launchConfig, launch.adapterId);
+        const plan = buildPlan(configuration);
+        if ("children" in plan) await debug.startDebugGroup(plan);
+        else await debug.startDebug(plan.launchConfig, plan.adapterId);
       } catch (error) {
         const message = `Debug failed to start: ${errorMessage(error)}`;
         setStatusMessage(message);
@@ -8033,6 +8130,7 @@ export function CodeWorkspaceTab({
     })();
   }, [
     activeDebugConfiguration,
+    activeDebugConfigurationCatalog,
     activeExecutionModel,
     activeFileIsJava,
     activeKey,
@@ -8040,6 +8138,7 @@ export function CodeWorkspaceTab({
     executeBeforeLaunch,
     findRoot,
     readEnvironmentFile,
+    roots,
     saveOpenBufferText,
     setBottomDockOpen,
     setBottomDockTab,

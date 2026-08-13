@@ -17,7 +17,11 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     setBreakpointsMuted: vi.fn(),
     removeAllBreakpoints: vi.fn(),
     frameVariables: {},
+    sessions: [],
+    activeSessionId: null,
+    selectSession: vi.fn(),
     startDebug: vi.fn().mockResolvedValue(undefined),
+    startDebugGroup: vi.fn().mockResolvedValue(undefined),
     restart: vi.fn(),
     canRestart: false,
     toggleBreakpoint: vi.fn(),
@@ -253,6 +257,28 @@ describe("DebugPanel", () => {
     );
     fireEvent.click(screen.getByTestId("debug-restart"));
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("switches between child sessions in a compound debug launch", () => {
+    const selectSession = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [
+            { id: "s1", targetId: "api", label: "API", adapterId: "java", status: "stopped", stoppedReason: "breakpoint" },
+            { id: "s2", targetId: "web", label: "Web", adapterId: "node", status: "running", stoppedReason: null },
+          ],
+          activeSessionId: "s1",
+          selectSession,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("option", { name: "API [stopped: breakpoint]" })).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("debug-active-session"), { target: { value: "s2" } });
+    expect(selectSession).toHaveBeenCalledWith("s2");
   });
 
   it("toggles an exception filter through the session", () => {

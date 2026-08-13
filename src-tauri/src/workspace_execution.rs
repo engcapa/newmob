@@ -1971,24 +1971,18 @@ fn merge_shared_configurations(builder: &mut ModelBuilder, workspace_root: &Path
             let debug_ids = compound_debug_ids.clone();
             let compound_debug_id = format!("shared-debug:{}", configuration.id);
             let compound = configuration.compound.as_ref().expect("compound exists");
-            let debug_diagnostic = compound_debug_error
-                .map(|error| {
-                    format!(
-                        "Compound Debug is unavailable: {error}. Grouped multi-session DAP support is not available yet"
-                    )
-                })
-                .unwrap_or_else(|| {
-                    "Compound Debug requires grouped multi-session DAP support, which is not available yet"
-                        .to_string()
-                });
+            let debug_diagnostic =
+                compound_debug_error.map(|error| format!("Compound Debug is unavailable: {error}"));
+            let debug_available =
+                debug_diagnostic.is_none() && debug_ids.as_ref().is_some_and(|ids| !ids.is_empty());
             builder.debug_configurations.push(DebugConfiguration {
                 id: compound_debug_id.clone(),
                 project_id: configuration.project_id.clone(),
                 label: configuration.label.clone(),
                 adapter_id: "compound".to_string(),
                 request: "launch".to_string(),
-                available: false,
-                diagnostic: Some(debug_diagnostic.clone()),
+                available: debug_available,
+                diagnostic: debug_diagnostic.clone(),
                 pre_launch_targets: configuration.before_launch.clone(),
                 source_file: configuration.source_file.clone(),
                 launch_config: json!({
@@ -2037,6 +2031,75 @@ fn merge_shared_configurations(builder: &mut ModelBuilder, workspace_root: &Path
                 compound_parallel: compound.parallel,
                 compound_stop_on_failure: compound.stop_on_failure,
             });
+        }
+    }
+
+    // Compound entries are emitted alongside their leaves, so a parent may be
+    // seen before a nested child. Resolve availability after the complete graph
+    // exists and propagate an unavailable leaf/child diagnostic to every parent.
+    let mut availability = builder
+        .debug_configurations
+        .iter()
+        .map(|configuration| {
+            (
+                configuration.id.clone(),
+                (
+                    configuration.available,
+                    configuration.diagnostic.clone(),
+                    configuration.compound_configuration_ids.clone(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let compound_ids = availability
+        .iter()
+        .filter_map(|(id, (_, _, children))| children.as_ref().map(|_| id.clone()))
+        .collect::<Vec<_>>();
+    for _ in 0..compound_ids.len().max(1) {
+        let mut changed = false;
+        for id in &compound_ids {
+            let Some((true, _, Some(children))) = availability.get(id).cloned() else {
+                continue;
+            };
+            if let Some(child_id) = children.iter().find(|child_id| {
+                availability
+                    .get(*child_id)
+                    .is_none_or(|(available, _, _)| !available)
+            }) {
+                let reason = availability
+                    .get(child_id)
+                    .and_then(|(_, diagnostic, _)| diagnostic.clone())
+                    .unwrap_or_else(|| "debug configuration is unavailable".to_string());
+                availability.insert(
+                    id.clone(),
+                    (
+                        false,
+                        Some(format!(
+                            "Compound Debug child `{child_id}` is unavailable: {reason}"
+                        )),
+                        Some(children),
+                    ),
+                );
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for configuration in &mut builder.debug_configurations {
+        let Some((available, diagnostic, _)) = availability.get(&configuration.id) else {
+            continue;
+        };
+        configuration.available = *available;
+        configuration.diagnostic = diagnostic.clone();
+        if configuration.compound_configuration_ids.is_some() {
+            if let Some(object) = configuration.launch_config.as_object_mut() {
+                object.insert(
+                    "unavailableReason".to_string(),
+                    diagnostic.clone().map(Value::String).unwrap_or(Value::Null),
+                );
+            }
         }
     }
 }
@@ -3648,18 +3711,28 @@ mod tests {
     }
 
     #[test]
-    fn compound_run_resolves_children_and_compound_debug_is_explicitly_unavailable() {
+    fn compound_run_and_debug_resolve_children_with_group_launch_semantics() {
         let directory = tempfile::tempdir().unwrap();
+        let adapter = path_string(&std::env::current_exe().unwrap());
         write(
             &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
-            r#"{
-              "version": 2,
-              "configurations": [
-                {"id":"one","run":{"executable":"cargo","args":["run"]}},
-                {"id":"two","run":{"executable":"cargo","args":["test"]}},
-                {"id":"all","compound":{"configurations":["one","two"],"parallel":true,"stopOnFailure":false}}
-              ]
-            }"#,
+            &serde_json::to_string(&json!({
+                "version": 2,
+                "configurations": [
+                    {
+                        "id": "one",
+                        "run": {"executable": "cargo", "args": ["run"]},
+                        "debug": {"adapterId": "lldb", "launchConfig": {"adapterCommand": adapter}}
+                    },
+                    {
+                        "id": "two",
+                        "run": {"executable": "cargo", "args": ["test"]},
+                        "debug": {"adapterId": "lldb", "launchConfig": {"adapterCommand": adapter}}
+                    },
+                    {"id":"all","compound":{"configurations":["one","two"],"parallel":true,"stopOnFailure":false}}
+                ]
+            }))
+            .unwrap(),
         );
         let model = detect_execution_model(directory.path(), None, None).unwrap();
         assert!(model.diagnostics.is_empty(), "{:?}", model.diagnostics);
@@ -3680,14 +3753,62 @@ mod tests {
             .iter()
             .find(|configuration| configuration.id == "shared-debug:all")
             .expect("compound debug chooser");
-        assert!(!debug.available);
-        assert!(
-            debug
-                .diagnostic
-                .as_deref()
-                .unwrap_or_default()
-                .contains("multi-session DAP")
+        assert!(debug.available, "{:?}", debug.diagnostic);
+        assert_eq!(
+            debug.compound_configuration_ids.as_deref(),
+            Some(
+                [
+                    "shared-debug:one".to_string(),
+                    "shared-debug:two".to_string()
+                ]
+                .as_slice()
+            )
         );
+        assert_eq!(debug.compound_parallel, Some(true));
+        assert_eq!(debug.compound_stop_on_failure, Some(false));
+    }
+
+    #[test]
+    fn compound_debug_propagates_unavailable_leaf_diagnostics() {
+        let directory = tempfile::tempdir().unwrap();
+        let adapter = path_string(&std::env::current_exe().unwrap());
+        write(
+            &directory.path().join(SHARED_RUN_CONFIG_RELATIVE_PATH),
+            &serde_json::to_string(&json!({
+                "version": 2,
+                "configurations": [
+                    {
+                        "id": "disabled",
+                        "debug": {
+                            "adapterId": "lldb",
+                            "available": false,
+                            "launchConfig": {"adapterCommand": adapter}
+                        }
+                    },
+                    {"id": "nested", "compound": {"configurations": ["disabled"]}},
+                    {"id": "all", "compound": {"configurations": ["nested"]}}
+                ]
+            }))
+            .unwrap(),
+        );
+        let model = detect_execution_model(directory.path(), None, None).unwrap();
+        for id in ["shared-debug:nested", "shared-debug:all"] {
+            let debug = model
+                .debug_configurations
+                .iter()
+                .find(|configuration| configuration.id == id)
+                .expect("compound debug chooser");
+            assert!(!debug.available, "{id} should be unavailable");
+            assert!(
+                debug
+                    .diagnostic
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("unavailable"),
+                "{id}: {:?}",
+                debug.diagnostic
+            );
+        }
     }
 
     #[test]

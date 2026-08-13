@@ -39,6 +39,32 @@ import {
 /** Breakpoints keyed by absolute file path. */
 export type BreakpointMap = Record<string, DebugBreakpoint[]>;
 
+export interface DebugLaunchTarget {
+  id: string;
+  label: string;
+  adapterId: string;
+  launchConfig: Record<string, unknown>;
+}
+
+export interface DebugLaunchGroup {
+  id: string;
+  label: string;
+  children: DebugLaunchNode[];
+  parallel?: boolean;
+  stopOnFailure?: boolean;
+}
+
+export type DebugLaunchNode = DebugLaunchTarget | DebugLaunchGroup;
+
+export interface DebugSessionSummary {
+  id: string;
+  targetId: string;
+  label: string;
+  adapterId: string;
+  status: DebugSessionState["status"];
+  stoppedReason: string | null;
+}
+
 /** Message text from a rejected DAP request, for console surfacing. */
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -64,8 +90,15 @@ export interface CodeDebugSession {
   removeAllBreakpoints: () => void;
   /** Locals of the selected frame as `name → value`, for editor inline values. */
   frameVariables: Record<string, string>;
+  /** Every child in the current single or compound debug launch. */
+  sessions: DebugSessionSummary[];
+  /** Session shown by the stack, variables, watches and console views. */
+  activeSessionId: string | null;
+  selectSession: (sessionId: string) => void;
   /** Start a debug session with a resolved launch config (adapter defaults to Java). */
   startDebug: (launchConfig: Record<string, unknown>, adapterId?: string) => Promise<void>;
+  /** Start a validated compound launch while retaining every child DAP session. */
+  startDebugGroup: (plan: DebugLaunchGroup) => Promise<void>;
   /** Re-run the last launch config (IDEA rerun). */
   restart: () => void;
   canRestart: boolean;
@@ -129,6 +162,58 @@ export interface CodeDebugSession {
   currentLocation: { path: string; line: number } | null;
 }
 
+interface DebugSessionRecord {
+  id: string;
+  order: number;
+  targetId: string;
+  label: string;
+  adapterId: string;
+  launchConfig: Record<string, unknown>;
+  state: DebugSessionState;
+  capabilities: Record<string, unknown>;
+  availableFilters: { filter: string; label: string }[];
+  breakpointRuntime: Record<string, Record<number, BreakpointRuntimeState>>;
+  frameVariables: Record<string, string>;
+  initialized: boolean;
+  launchAccepted: boolean;
+  live: boolean;
+  unlisten: UnlistenFn | null;
+  stopEpoch: number;
+  bpIdIndex: Map<number, { path: string }>;
+  syncGeneration: Map<string, number>;
+  tempRunToCursor: { path: string } | null;
+  abortScopeIds: string[];
+  ready: Promise<void>;
+  readyResolve: () => void;
+  readyReject: (error: unknown) => void;
+  readySettled: boolean;
+}
+
+type LastDebugLaunch =
+  | { kind: "single"; config: Record<string, unknown>; adapterId: string }
+  | { kind: "group"; plan: DebugLaunchGroup };
+
+function isDebugLaunchGroup(node: DebugLaunchNode): node is DebugLaunchGroup {
+  return "children" in node;
+}
+
+function validateDebugLaunchGroup(plan: DebugLaunchGroup): void {
+  const visiting = new Set<DebugLaunchNode>();
+  const visit = (node: DebugLaunchNode) => {
+    if (visiting.has(node)) throw new Error(`Compound Debug cycle at ${node.label}`);
+    if (!node.id.trim()) throw new Error("Compound Debug contains an empty configuration id");
+    if (!isDebugLaunchGroup(node)) {
+      if (!node.adapterId.trim()) throw new Error(`Debug adapter is missing for ${node.label}`);
+      return;
+    }
+    if (node.children.length === 0) throw new Error(`Compound Debug has no children: ${node.label}`);
+    visiting.add(node);
+    for (const child of node.children) visit(child);
+    visiting.delete(node);
+  };
+  visit(plan);
+}
+
 function breakpointsKey(workspaceInstanceId: string): string {
   return `taomni.codeWorkspace.debugBreakpoints.v1.${workspaceInstanceId}`;
 }
@@ -179,14 +264,18 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const [canRestart, setCanRestart] = useState(false);
   const [breakpointsMuted, setBreakpointsMutedState] = useState(false);
   const [frameVariables, setFrameVariables] = useState<Record<string, string>>({});
+  const [sessions, setSessions] = useState<DebugSessionSummary[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 
+  const sessionsRef = useRef(new Map<string, DebugSessionRecord>());
+  const abortedScopesRef = useRef(new Set<string>());
+  const activeSessionIdRef = useRef<string | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const capabilitiesRef = useRef<Record<string, unknown>>({});
   const breakpointsRef = useRef(breakpoints);
   const mutedRef = useRef(breakpointsMuted);
   const exceptionFiltersRef = useRef(exceptionFilters);
   const stateRef = useRef<DebugSessionState | null>(null);
-  const unlistenRef = useRef<UnlistenFn | null>(null);
   const mountedRef = useMountedRef();
   /** Bumped on every `stopped` event; async work checks it to drop stale results. */
   const stopEpochRef = useRef(0);
@@ -196,7 +285,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const syncGenerationRef = useRef(new Map<string, number>());
   /** Pending run-to-cursor: its transient breakpoint is removed on the next stop. */
   const tempRunToCursorRef = useRef<{ path: string } | null>(null);
-  const lastLaunchRef = useRef<{ config: Record<string, unknown>; adapterId: string } | null>(null);
+  const lastLaunchRef = useRef<LastDebugLaunch | null>(null);
   /** Whether the adapter has emitted `initialized` for the current session. */
   const initializedRef = useRef(false);
   breakpointsRef.current = breakpoints;
@@ -204,12 +293,66 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   exceptionFiltersRef.current = exceptionFilters;
   stateRef.current = state;
 
+  const publishSessionList = useCallback(() => {
+    if (!mountedRef.current) return;
+    setSessions(Array.from(sessionsRef.current.values())
+      .sort((left, right) => left.order - right.order)
+      .map((record) => ({
+        id: record.id,
+        targetId: record.targetId,
+        label: record.label,
+        adapterId: record.adapterId,
+        status: record.state.status,
+        stoppedReason: record.state.stoppedReason,
+      })));
+  }, []);
+
+  const publishActiveSession = useCallback((record: DebugSessionRecord | null) => {
+    activeSessionIdRef.current = record?.id ?? null;
+    sessionIdRef.current = record?.live ? record.id : null;
+    capabilitiesRef.current = record?.capabilities ?? {};
+    stopEpochRef.current = record?.stopEpoch ?? 0;
+    bpIdIndexRef.current = record?.bpIdIndex ?? new Map();
+    syncGenerationRef.current = record?.syncGeneration ?? new Map();
+    tempRunToCursorRef.current = record?.tempRunToCursor ?? null;
+    initializedRef.current = record?.initialized ?? false;
+    stateRef.current = record?.state ?? null;
+    if (!mountedRef.current) return;
+    setActiveSessionId(record?.id ?? null);
+    setState(record?.state ?? null);
+    setCapabilities(record?.capabilities ?? {});
+    setAvailableFilters(record?.availableFilters ?? []);
+    setBreakpointRuntime(record?.breakpointRuntime ?? {});
+    setFrameVariables(record?.frameVariables ?? {});
+  }, []);
+
+  const updateSessionState = useCallback((
+    sessionId: string,
+    updater: (current: DebugSessionState) => DebugSessionState,
+  ) => {
+    const record = sessionsRef.current.get(sessionId);
+    if (!record) return;
+    record.state = updater(record.state);
+    if (activeSessionIdRef.current === sessionId) {
+      stateRef.current = record.state;
+      if (mountedRef.current) setState(record.state);
+    }
+    publishSessionList();
+  }, [publishSessionList]);
+
+  const selectSession = useCallback((sessionId: string) => {
+    const record = sessionsRef.current.get(sessionId);
+    if (record) publishActiveSession(record);
+  }, [publishActiveSession]);
+
   // Drop the adapter session with the hook. `mountedRef` re-arms itself (see
   // useMountedRef) so the StrictMode dev double-invoke cannot leave it false.
   useEffect(() => () => {
-    unlistenRef.current?.();
-    const id = sessionIdRef.current;
-    if (id) void dapTerminate(id).catch(() => {});
+    for (const record of sessionsRef.current.values()) {
+      record.unlisten?.();
+      if (record.live) void dapTerminate(record.id).catch(() => {});
+    }
+    sessionsRef.current.clear();
   }, []);
 
   // Inline values are only meaningful while stopped: drop them the moment the
@@ -217,7 +360,13 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   // editor gutter.
   const debugStatus = state?.status ?? null;
   useEffect(() => {
-    if (debugStatus !== "stopped") setFrameVariables({});
+    if (debugStatus !== "stopped") {
+      const active = activeSessionIdRef.current
+        ? sessionsRef.current.get(activeSessionIdRef.current)
+        : undefined;
+      if (active) active.frameVariables = {};
+      setFrameVariables({});
+    }
   }, [debugStatus]);
 
   const persistBreakpoints = useCallback((next: BreakpointMap) => {
@@ -236,16 +385,28 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     }
   }, [workspaceInstanceId]);
 
+  const updateActiveState = useCallback((
+    updater: (current: DebugSessionState) => DebugSessionState,
+  ) => {
+    const id = activeSessionIdRef.current;
+    if (id && sessionsRef.current.has(id)) {
+      updateSessionState(id, updater);
+      return;
+    }
+    setState((prev) => (prev ? updater(prev) : prev));
+  }, [updateSessionState]);
+
   const logConsole = useCallback((category: string, text: string) => {
-    setState((prev) => {
-      if (!prev || !text) return prev;
-      return { ...prev, output: [...prev.output, { category, text }].slice(-2000) };
-    });
-  }, []);
+    if (!text) return;
+    updateActiveState((prev) => ({
+      ...prev,
+      output: [...prev.output, { category, text }].slice(-2000),
+    }));
+  }, [updateActiveState]);
 
   const clearConsole = useCallback(() => {
-    setState((prev) => (prev && prev.output.length > 0 ? { ...prev, output: [] } : prev));
-  }, []);
+    updateActiveState((prev) => (prev.output.length > 0 ? { ...prev, output: [] } : prev));
+  }, [updateActiveState]);
 
   /**
    * Show a launch failure in the Debug panel. When a session is already present
@@ -259,14 +420,29 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const reportStartupFailure = useCallback((message: string) => {
     if (!mountedRef.current) return;
     const text = message.endsWith("\n") ? message : `${message}\n`;
-    setState((prev) => appendConsoleLine(
-      prev
-        ? { ...prev, status: "terminated" }
-        : { ...initialDebugState(""), status: "terminated" },
-      "stderr",
-      text,
-    ));
-  }, []);
+    const active = activeSessionIdRef.current;
+    if (active && sessionsRef.current.has(active)) {
+      const record = sessionsRef.current.get(active)!;
+      updateSessionState(active, (prev) => appendConsoleLine(
+        record.live ? prev : { ...prev, status: "terminated" },
+        "stderr",
+        text,
+      ));
+    } else {
+      // Pre-adapter steps can complete in one React batch. Mirror the update
+      // synchronously so a following startDebug can carry every queued line.
+      const current = stateRef.current;
+      const next = appendConsoleLine(
+        current
+          ? { ...current, status: "terminated" }
+          : { ...initialDebugState(""), status: "terminated" },
+        "stderr",
+        text,
+      );
+      stateRef.current = next;
+      setState(next);
+    }
+  }, [updateSessionState]);
 
   /**
    * Show a pre-launch step in the panel. Seeds a `starting` session (empty id →
@@ -278,12 +454,22 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const reportStartupProgress = useCallback((message: string) => {
     if (!mountedRef.current) return;
     const text = message.endsWith("\n") ? message : `${message}\n`;
-    setState((prev) => appendConsoleLine(
-      prev && prev.status !== "terminated" ? prev : initialDebugState(""),
-      "console",
-      text,
-    ));
-  }, []);
+    const active = activeSessionIdRef.current;
+    if (active && sessionsRef.current.has(active)) {
+      updateSessionState(active, (prev) => appendConsoleLine(prev, "console", text));
+    } else {
+      // Keep the inert startup session coherent before React flushes state.
+      // Build, resolve and launch commonly finish inside the same async batch.
+      const current = stateRef.current;
+      const next = appendConsoleLine(
+        current && current.status !== "terminated" ? current : initialDebugState(""),
+        "console",
+        text,
+      );
+      stateRef.current = next;
+      setState(next);
+    }
+  }, [updateSessionState]);
 
   /**
    * Push a file's breakpoints to the adapter and record the bindings it
@@ -299,50 +485,60 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
    */
   const syncBreakpointsForPath = useCallback(async (
     path: string,
-    options: { list?: DebugBreakpoint[]; extraTempLine?: number } = {},
+    options: { list?: DebugBreakpoint[]; extraTempLine?: number; sessionIds?: readonly string[] } = {},
   ) => {
-    const id = sessionIdRef.current;
-    if (!id) return;
     const stored = options.list ?? breakpointsRef.current[path] ?? [];
     const plan = planBreakpointSync(stored, {
       muted: mutedRef.current,
       extraLine: options.extraTempLine,
     });
-    // Two quick toggles on the same file put two requests in flight; an older
-    // response landing last would otherwise re-apply the set it was built from
-    // and undo the newer change.
-    const generation = (syncGenerationRef.current.get(path) ?? 0) + 1;
-    syncGenerationRef.current.set(path, generation);
-    // Breakpoints are keyed by our internal (forward-slash) path, but the adapter
-    // needs the OS-native form (Windows: lowercase drive + backslashes) or it
-    // leaves them unverified.
-    const args = buildSetBreakpointsArgs(path, plan);
-    args.source.path = toAdapterSourcePath(path);
-    const body = await dapSendRequest(id, "setBreakpoints", args).catch((error) => {
-      // A failed setBreakpoints means the file's breakpoints are NOT armed —
-      // previously silent, so the user saw red dots that could never bind.
-      logConsole("stderr", `setBreakpoints for ${path.split(/[\\/]/).pop() ?? path} failed: ${errorText(error)}\n`);
-      return null;
-    });
-    if (body == null || !mountedRef.current) return;
-    if (syncGenerationRef.current.get(path) !== generation) return; // superseded
-    const bindings = parseSetBreakpointsResponse(plan, body);
-    for (const binding of bindings) {
-      if (binding.id != null) bpIdIndexRef.current.set(binding.id, { path });
-    }
-    setBreakpointRuntime((prev) => ({ ...prev, [path]: breakpointVerificationMap(plan, bindings) }));
-    if (options.extraTempLine == null) {
-      const reconciled = reconcileBreakpointLines(plan, bindings);
-      if (JSON.stringify(reconciled) !== JSON.stringify(plan.sorted)) {
-        const next = { ...breakpointsRef.current };
-        if (reconciled.length > 0) next[path] = reconciled;
-        else delete next[path];
-        breakpointsRef.current = next;
-        setBreakpoints(next);
-        persistBreakpoints(next);
+    const requestedIds = options.sessionIds ?? Array.from(sessionsRef.current.values())
+      .filter((record) => record.live)
+      .map((record) => record.id);
+    await Promise.all(requestedIds.map(async (id) => {
+      const record = sessionsRef.current.get(id);
+      if (!record?.live) return;
+      // Two quick toggles on the same file put two requests in flight; an older
+      // response landing last would otherwise re-apply the set it was built from.
+      const generation = (record.syncGeneration.get(path) ?? 0) + 1;
+      record.syncGeneration.set(path, generation);
+      const args = buildSetBreakpointsArgs(path, plan);
+      args.source.path = toAdapterSourcePath(path);
+      const body = await dapSendRequest(id, "setBreakpoints", args).catch((error) => {
+        updateSessionState(id, (current) => appendConsoleLine(
+          current,
+          "stderr",
+          `setBreakpoints for ${path.split(/[\\/]/).pop() ?? path} failed: ${errorText(error)}\n`,
+        ));
+        return null;
+      });
+      if (body == null || !mountedRef.current) return;
+      const current = sessionsRef.current.get(id);
+      if (!current || current.syncGeneration.get(path) !== generation) return;
+      const bindings = parseSetBreakpointsResponse(plan, body);
+      for (const binding of bindings) {
+        if (binding.id != null) current.bpIdIndex.set(binding.id, { path });
       }
-    }
-  }, [persistBreakpoints, logConsole]);
+      current.breakpointRuntime = {
+        ...current.breakpointRuntime,
+        [path]: breakpointVerificationMap(plan, bindings),
+      };
+      if (activeSessionIdRef.current === id) setBreakpointRuntime(current.breakpointRuntime);
+      // Different adapters may bind the same source differently. Only the
+      // selected session is allowed to move the persisted gutter breakpoint.
+      if (options.extraTempLine == null && activeSessionIdRef.current === id) {
+        const reconciled = reconcileBreakpointLines(plan, bindings);
+        if (JSON.stringify(reconciled) !== JSON.stringify(plan.sorted)) {
+          const next = { ...breakpointsRef.current };
+          if (reconciled.length > 0) next[path] = reconciled;
+          else delete next[path];
+          breakpointsRef.current = next;
+          setBreakpoints(next);
+          persistBreakpoints(next);
+        }
+      }
+    }));
+  }, [persistBreakpoints, updateSessionState]);
 
   /**
    * Single mutation path for the breakpoint map. Updates the ref synchronously
@@ -371,7 +567,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
    */
   const refreshFrameVariables = useCallback(async (frameId: number, epoch: number) => {
     const id = sessionIdRef.current;
-    if (!id) return;
+    const record = id ? sessionsRef.current.get(id) : undefined;
+    if (!id || !record) return;
     const scopesBody = await dapSendRequest(id, "scopes", { frameId }).catch(() => null);
     const scopes = (scopesBody as { scopes?: unknown } | null)?.scopes;
     const localRef = Array.isArray(scopes)
@@ -381,7 +578,10 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       : undefined;
     const ref = typeof localRef?.variablesReference === "number" ? localRef.variablesReference : 0;
     if (ref <= 0) {
-      if (mountedRef.current && stopEpochRef.current === epoch) setFrameVariables({});
+      if (mountedRef.current && record.stopEpoch === epoch) {
+        record.frameVariables = {};
+        if (activeSessionIdRef.current === id) setFrameVariables({});
+      }
       return;
     }
     const body = await dapSendRequest(id, "variables", { variablesReference: ref }).catch(() => null);
@@ -393,153 +593,273 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         if (typeof rec.name === "string" && typeof rec.value === "string") map[rec.name] = rec.value;
       }
     }
-    if (mountedRef.current && stopEpochRef.current === epoch) setFrameVariables(map);
+    if (mountedRef.current && record.stopEpoch === epoch) {
+      record.frameVariables = map;
+      if (activeSessionIdRef.current === id) setFrameVariables(map);
+    }
   }, []);
 
   /** After a `stopped` event, pull threads + stack + exception details for the UI. */
   const refreshStoppedContext = useCallback(async (
+    sessionId: string,
     threadId: number | null,
     reason: string | null,
     epoch: number,
   ) => {
-    const id = sessionIdRef.current;
-    if (!id) return;
-    const threadsBody = await dapSendRequest(id, "threads").catch(() => null);
+    const record = sessionsRef.current.get(sessionId);
+    if (!record) return;
+    const threadsBody = await dapSendRequest(sessionId, "threads").catch(() => null);
     const threads = parseThreads(threadsBody);
     const tid = threadId ?? threads[0]?.id ?? null;
     let frames: DebugStackFrame[] = [];
     if (tid != null) {
-      const stackBody = await dapSendRequest(id, "stackTrace", { threadId: tid, startFrame: 0, levels: 40 })
+      const stackBody = await dapSendRequest(sessionId, "stackTrace", { threadId: tid, startFrame: 0, levels: 40 })
         .catch(() => null);
       frames = parseStackFrames(stackBody);
     }
-    if (!mountedRef.current || stopEpochRef.current !== epoch) return;
-    setState((prev) => (prev && prev.status === "stopped"
+    if (!mountedRef.current || record.stopEpoch !== epoch) return;
+    updateSessionState(sessionId, (prev) => (prev.status === "stopped"
       ? { ...prev, threads, frames, selectedThreadId: tid, selectedFrameId: frames[0]?.id ?? null }
       : prev));
-    if (frames[0]) void refreshFrameVariables(frames[0].id, epoch);
+    if (frames[0] && activeSessionIdRef.current === sessionId) {
+      void refreshFrameVariables(frames[0].id, epoch);
+    }
     // IDEA-style exception details when the stop is an exception break.
     if (
       tid != null
       && typeof reason === "string" && reason.toLowerCase().includes("exception")
-      && capabilitiesRef.current.supportsExceptionInfoRequest === true
+      && record.capabilities.supportsExceptionInfoRequest === true
     ) {
       const info = parseExceptionInfo(
-        await dapSendRequest(id, "exceptionInfo", { threadId: tid }).catch(() => null),
+        await dapSendRequest(sessionId, "exceptionInfo", { threadId: tid }).catch(() => null),
       );
-      if (info && mountedRef.current && stopEpochRef.current === epoch) {
-        setState((prev) => (prev && prev.status === "stopped" ? { ...prev, exceptionInfo: info } : prev));
+      if (info && mountedRef.current && record.stopEpoch === epoch) {
+        updateSessionState(sessionId, (prev) => (prev.status === "stopped" ? { ...prev, exceptionInfo: info } : prev));
       }
     }
-  }, [refreshFrameVariables]);
+  }, [refreshFrameVariables, updateSessionState]);
 
   const handleEvent = useCallback((payload: DapEventPayload) => {
-    if (payload.sessionId !== sessionIdRef.current) return;
-    setState((prev) => (prev ? reduceDebugEvent(prev, payload.event, payload.message) : prev));
+    const record = sessionsRef.current.get(payload.sessionId);
+    if (!record) return;
+    updateSessionState(payload.sessionId, (prev) => reduceDebugEvent(prev, payload.event, payload.message));
     if (payload.event === "initialized") {
-      initializedRef.current = true;
+      record.initialized = true;
+      if (record.launchAccepted && !record.readySettled) {
+        record.readySettled = true;
+        record.readyResolve();
+      }
+      if (activeSessionIdRef.current === record.id) initializedRef.current = true;
       // Configure breakpoints before the debuggee runs, then release it.
       void (async () => {
-        const id = sessionIdRef.current;
-        if (!id) return;
+        const id = record.id;
+        if (!record.live) return;
         for (const path of Object.keys(breakpointsRef.current)) {
-          if ((breakpointsRef.current[path] ?? []).length > 0) await syncBreakpointsForPath(path);
+          if ((breakpointsRef.current[path] ?? []).length > 0) {
+            await syncBreakpointsForPath(path, { sessionIds: [id] });
+          }
         }
-        const filters = selectExceptionFilters(capabilitiesRef.current, exceptionFiltersRef.current);
+        const filters = selectExceptionFilters(record.capabilities, exceptionFiltersRef.current);
         // Configuration-step failures used to be swallowed, leaving the session
         // stuck "running" with no clue why. Surface them on the console so the
         // user (and support) can see where setup broke.
         await dapSendRequest(id, "setExceptionBreakpoints", { filters }).catch((error) => {
-          logConsole("stderr", `setExceptionBreakpoints failed: ${errorText(error)}\n`);
+          updateSessionState(id, (current) => appendConsoleLine(
+            current,
+            "stderr",
+            `setExceptionBreakpoints failed: ${errorText(error)}\n`,
+          ));
         });
         await dapSend(id, "configurationDone").catch((error) => {
-          logConsole("stderr", `configurationDone failed: ${errorText(error)}\n`);
+          updateSessionState(id, (current) => appendConsoleLine(
+            current,
+            "stderr",
+            `configurationDone failed: ${errorText(error)}\n`,
+          ));
         });
       })();
     } else if (payload.event === "stopped") {
-      stopEpochRef.current += 1;
+      record.stopEpoch += 1;
+      // Follow the child that actually paused, as IDEA does for compound runs.
+      publishActiveSession(record);
       // Run-to-cursor's transient breakpoint is one-shot: restore the user set.
-      const temp = tempRunToCursorRef.current;
+      const temp = record.tempRunToCursor;
+      record.tempRunToCursor = null;
       tempRunToCursorRef.current = null;
-      if (temp) void syncBreakpointsForPath(temp.path);
+      if (temp) void syncBreakpointsForPath(temp.path, { sessionIds: [record.id] });
       const body = (payload.message as { body?: { threadId?: number; reason?: string } })?.body;
-      void refreshStoppedContext(body?.threadId ?? null, body?.reason ?? null, stopEpochRef.current);
+      void refreshStoppedContext(record.id, body?.threadId ?? null, body?.reason ?? null, record.stopEpoch);
     } else if (payload.event === "breakpoint") {
       const parsed = parseBreakpointEvent(payload.message);
-      const entry = parsed?.id != null ? bpIdIndexRef.current.get(parsed.id) : undefined;
+      const entry = parsed?.id != null ? record.bpIdIndex.get(parsed.id) : undefined;
       if (parsed && parsed.line != null && entry) {
         const { path } = entry;
         const { line, verified } = parsed;
         const runtime: BreakpointRuntimeState = verified
           ? { status: "verified", message: null }
           : { status: parsed.bindReason === "failed" ? "failed" : "pending", message: parsed.message };
-        setBreakpointRuntime((prev) => ({
-          ...prev,
-          [path]: { ...(prev[path] ?? {}), [line]: runtime },
-        }));
+        record.breakpointRuntime = {
+          ...record.breakpointRuntime,
+          [path]: { ...(record.breakpointRuntime[path] ?? {}), [line]: runtime },
+        };
+        if (activeSessionIdRef.current === record.id) setBreakpointRuntime(record.breakpointRuntime);
       }
     } else if (payload.event === "terminated" || payload.event === "exited") {
       // Free the backend session (drops the adapter transport / child); the final
       // state stays visible in the panel until the next start.
-      const id = sessionIdRef.current;
-      sessionIdRef.current = null;
-      if (id) void dapTerminate(id).catch(() => {});
-      unlistenRef.current?.();
-      unlistenRef.current = null;
-      bpIdIndexRef.current.clear();
-      tempRunToCursorRef.current = null;
-      if (mountedRef.current) setBreakpointRuntime({});
+      record.live = false;
+      if (!record.readySettled) {
+        record.readySettled = true;
+        record.readyReject(new Error(`${record.label} terminated before the debug adapter became ready`));
+      }
+      record.unlisten?.();
+      record.unlisten = null;
+      record.bpIdIndex.clear();
+      record.tempRunToCursor = null;
+      record.breakpointRuntime = {};
+      record.frameVariables = {};
+      void dapTerminate(record.id).catch(() => {});
+      if (activeSessionIdRef.current === record.id) {
+        const fallback = Array.from(sessionsRef.current.values())
+          .filter((candidate) => candidate.live)
+          .sort((left, right) => left.order - right.order)[0] ?? record;
+        publishActiveSession(fallback);
+      } else {
+        publishSessionList();
+      }
     }
-  }, [refreshStoppedContext, syncBreakpointsForPath, logConsole]);
-  const startDebug = useCallback(async (
-    launchConfig: Record<string, unknown>,
-    adapterId = "java",
-  ) => {
-    // One session at a time: tear down any prior one first.
-    const prior = sessionIdRef.current;
-    sessionIdRef.current = null;
-    unlistenRef.current?.();
-    unlistenRef.current = null;
-    if (prior) await dapTerminate(prior).catch(() => {});
-    bpIdIndexRef.current.clear();
-    tempRunToCursorRef.current = null;
-    if (mountedRef.current) setBreakpointRuntime({});
+  }, [publishActiveSession, publishSessionList, refreshStoppedContext, syncBreakpointsForPath, updateSessionState]);
 
-    lastLaunchRef.current = { config: launchConfig, adapterId };
+  const terminateSessions = useCallback(async (scopeIds?: ReadonlySet<string>) => {
+    const records = Array.from(sessionsRef.current.values()).filter((record) => (
+      !scopeIds || record.abortScopeIds.some((scopeId) => scopeIds.has(scopeId))
+    ));
+    await Promise.all(records.map(async (record) => {
+      record.unlisten?.();
+      record.unlisten = null;
+      const live = record.live;
+      record.live = false;
+      record.state = {
+        ...record.state,
+        status: "terminated",
+        stoppedThreadId: null,
+        selectedThreadId: null,
+        selectedFrameId: null,
+        frames: [],
+        exceptionInfo: null,
+      };
+      record.breakpointRuntime = {};
+      record.frameVariables = {};
+      record.bpIdIndex.clear();
+      record.tempRunToCursor = null;
+      if (live) await dapTerminate(record.id).catch(() => {});
+      if (!record.readySettled) {
+        record.readySettled = true;
+        record.readyReject(new Error(`${record.label} was stopped before startup completed`));
+      }
+    }));
+    if (!scopeIds) {
+      const active = activeSessionIdRef.current
+        ? sessionsRef.current.get(activeSessionIdRef.current) ?? null
+        : null;
+      publishActiveSession(active);
+    } else {
+      const active = activeSessionIdRef.current
+        ? sessionsRef.current.get(activeSessionIdRef.current) ?? null
+        : null;
+      if (active && !active.live) {
+        const fallback = Array.from(sessionsRef.current.values()).find((record) => record.live)
+          ?? active;
+        publishActiveSession(fallback);
+      }
+    }
+    publishSessionList();
+  }, [publishActiveSession, publishSessionList]);
+
+  const clearSessions = useCallback(async () => {
+    await terminateSessions();
+    sessionsRef.current.clear();
+    abortedScopesRef.current.clear();
+    publishActiveSession(null);
+    publishSessionList();
+  }, [publishActiveSession, publishSessionList, terminateSessions]);
+
+  const launchTarget = useCallback(async (
+    target: DebugLaunchTarget,
+    order: number,
+    abortScopeIds: string[],
+  ): Promise<DebugSessionRecord> => {
     let result: Awaited<ReturnType<typeof dapStartSession>>;
     try {
-      result = await dapStartSession(adapterId, launchConfig);
+      result = await dapStartSession(target.adapterId, target.launchConfig);
     } catch (error) {
       // Adapter resolution failures (no jdtls session, no main class, no
       // debug bundle, classpath/port resolution) reject here. Surface them in
       // the Debug panel — not just the caller's status bar — then rethrow so
       // existing callers keep their behavior.
-      reportStartupFailure(`Debug failed to start: ${errorText(error)}`);
       throw error;
     }
-    sessionIdRef.current = result.sessionId;
-    capabilitiesRef.current = result.capabilities;
+    if (abortScopeIds.some((scopeId) => abortedScopesRef.current.has(scopeId))) {
+      await dapTerminate(result.sessionId).catch(() => {});
+      throw new Error(`Debug launch was cancelled after another child failed: ${target.label}`);
+    }
     const filters = Array.isArray(result.capabilities.exceptionBreakpointFilters)
       ? (result.capabilities.exceptionBreakpointFilters as { filter: string; label: string }[])
         .filter((f) => f && typeof f.filter === "string")
       : [];
-    if (mountedRef.current) {
-      setAvailableFilters(filters);
-      setCapabilities(result.capabilities);
-      setCanRestart(true);
-      // Carry the pre-launch progress lines (reportStartupProgress seeds an
-      // inert session with an empty id) into the real session so the console
-      // reads as one continuous startup log instead of resetting on launch.
-      setState((prev) => {
-        const carried = prev && prev.sessionId === "" ? prev.output : [];
-        const fresh = initialDebugState(result.sessionId);
-        return carried.length > 0 ? { ...fresh, output: carried } : fresh;
-      });
-    }
+    const carried = sessionsRef.current.size === 0 && stateRef.current?.sessionId === ""
+      ? stateRef.current.output
+      : [];
+    const initial = initialDebugState(result.sessionId);
+    let readyResolve = () => {};
+    let readyReject = (_error: unknown) => {};
+    const ready = new Promise<void>((resolve, reject) => {
+      readyResolve = resolve;
+      readyReject = reject;
+    });
+    // A single-session caller does not await readiness; keep a rejected launch
+    // from becoming an unhandled promise while the DAP error is surfaced below.
+    void ready.catch(() => {});
+    const record: DebugSessionRecord = {
+      id: result.sessionId,
+      order,
+      targetId: target.id,
+      label: target.label,
+      adapterId: target.adapterId,
+      launchConfig: target.launchConfig,
+      state: { ...initial, status: "running", output: carried },
+      capabilities: result.capabilities,
+      availableFilters: filters,
+      breakpointRuntime: {},
+      frameVariables: {},
+      initialized: false,
+      launchAccepted: false,
+      live: true,
+      unlisten: null,
+      stopEpoch: 0,
+      bpIdIndex: new Map(),
+      syncGeneration: new Map(),
+      tempRunToCursor: null,
+      abortScopeIds,
+      ready,
+      readyResolve,
+      readyReject,
+      readySettled: false,
+    };
+    sessionsRef.current.set(record.id, record);
+    publishSessionList();
+    if (mountedRef.current) setCanRestart(true);
+    if (!activeSessionIdRef.current) publishActiveSession(record);
     // Listen before firing launch so the `initialized` event can't be missed.
-    unlistenRef.current = await listenDapEvents(result.sessionId, handleEvent);
-    setState((prev) => (prev ? { ...prev, status: "running" } : prev));
-    initializedRef.current = false;
+    try {
+      record.unlisten = await listenDapEvents(result.sessionId, handleEvent);
+    } catch (error) {
+      sessionsRef.current.delete(record.id);
+      record.live = false;
+      await dapTerminate(record.id).catch(() => {});
+      publishSessionList();
+      throw error;
+    }
     // Fire launch/attach as a correlated request but do NOT await it here: the
     // response only arrives after configurationDone (awaiting would deadlock
     // the initialized → setBreakpoints → configurationDone sequence). The
@@ -547,36 +867,138 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     // adapter never emits `initialized`, so without this the error response is
     // silently dropped and the UI sits at "running" forever.
     const launchedSession = result.sessionId;
-    void dapSendRequest(launchedSession, result.request, result.arguments).catch((error) => {
-      if (sessionIdRef.current !== launchedSession) return; // already torn down
-      const message = error instanceof Error ? error.message : String(error);
-      sessionIdRef.current = null;
-      unlistenRef.current?.();
-      unlistenRef.current = null;
-      void dapTerminate(launchedSession).catch(() => {});
-      if (mountedRef.current) {
-        setBreakpointRuntime({});
-        setState((prev) => (prev && prev.sessionId === launchedSession
-          ? appendConsoleLine({ ...prev, status: "terminated" }, "stderr", `Launch failed: ${message}\n`)
-          : prev));
+    void dapSendRequest(launchedSession, result.request, result.arguments).then(() => {
+      const launched = sessionsRef.current.get(launchedSession);
+      if (!launched?.live) return;
+      launched.launchAccepted = true;
+      if (launched.initialized && !launched.readySettled) {
+        launched.readySettled = true;
+        launched.readyResolve();
       }
+    }).catch((error) => {
+      const launched = sessionsRef.current.get(launchedSession);
+      if (!launched?.live) return;
+      const message = error instanceof Error ? error.message : String(error);
+      launched.live = false;
+      if (!launched.readySettled) {
+        launched.readySettled = true;
+        launched.readyReject(error);
+      }
+      launched.unlisten?.();
+      launched.unlisten = null;
+      void dapTerminate(launchedSession).catch(() => {});
+      launched.breakpointRuntime = {};
+      launched.frameVariables = {};
+      updateSessionState(launchedSession, (prev) => appendConsoleLine(
+        { ...prev, status: "terminated" },
+        "stderr",
+        `Launch failed: ${message}\n`,
+      ));
+      if (activeSessionIdRef.current === launchedSession) publishActiveSession(launched);
     });
     // Watchdog: if the adapter never becomes ready, say so instead of showing
     // an eternally-running empty session.
     window.setTimeout(() => {
-      if (sessionIdRef.current !== launchedSession || initializedRef.current) return;
-      logConsole(
+      const launched = sessionsRef.current.get(launchedSession);
+      if (!launched?.live || launched.initialized) return;
+      updateSessionState(launchedSession, (prev) => appendConsoleLine(
+        prev,
         "console",
         "Still waiting for the debug adapter to become ready (no 'initialized' event after 15s). "
           + "The project may have build errors, or the launch is stalled.\n",
-      );
+      ));
     }, 15_000);
-  }, [handleEvent, logConsole, reportStartupFailure]);
+    return record;
+  }, [handleEvent, publishActiveSession, publishSessionList, updateSessionState]);
+
+  const startDebug = useCallback(async (
+    launchConfig: Record<string, unknown>,
+    adapterId = "java",
+  ) => {
+    const startupOutput = stateRef.current?.sessionId === "" ? stateRef.current.output : [];
+    await clearSessions();
+    if (startupOutput.length > 0) {
+      const startup = { ...initialDebugState(""), output: startupOutput };
+      stateRef.current = startup;
+      if (mountedRef.current) setState(startup);
+    }
+    lastLaunchRef.current = { kind: "single", config: launchConfig, adapterId };
+    try {
+      await launchTarget({ id: "single", label: "Debug", adapterId, launchConfig }, 0, []);
+      if (mountedRef.current) setCanRestart(true);
+    } catch (error) {
+      reportStartupFailure(`Debug failed to start: ${errorText(error)}`);
+      throw error;
+    }
+  }, [clearSessions, launchTarget, reportStartupFailure]);
+
+  const startDebugGroup = useCallback(async (plan: DebugLaunchGroup) => {
+    validateDebugLaunchGroup(plan);
+    const startupOutput = stateRef.current?.sessionId === "" ? stateRef.current.output : [];
+    await clearSessions();
+    if (startupOutput.length > 0) {
+      const startup = { ...initialDebugState(""), output: startupOutput };
+      stateRef.current = startup;
+      if (mountedRef.current) setState(startup);
+    }
+    lastLaunchRef.current = { kind: "group", plan: structuredClone(plan) };
+    let order = 0;
+    const runNode = async (node: DebugLaunchNode, parentScopes: string[]): Promise<void> => {
+      if (!isDebugLaunchGroup(node)) {
+        const launchOrder = order;
+        order += 1;
+        const record = await launchTarget(node, launchOrder, parentScopes);
+        await record.ready;
+        return;
+      }
+      const scopes = [...parentScopes, node.id];
+      const runChild = (child: DebugLaunchNode) => runNode(child, scopes);
+      if (node.parallel) {
+        if (node.stopOnFailure !== false) {
+          try {
+            await Promise.all(node.children.map(runChild));
+          } catch (error) {
+            abortedScopesRef.current.add(node.id);
+            await terminateSessions(new Set([node.id]));
+            throw error;
+          }
+        } else {
+          const results = await Promise.allSettled(node.children.map(runChild));
+          const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+          if (failure) throw failure.reason;
+        }
+        return;
+      }
+      let firstFailure: unknown = null;
+      for (const child of node.children) {
+        try {
+          await runChild(child);
+        } catch (error) {
+          firstFailure ??= error;
+          if (node.stopOnFailure !== false) {
+            abortedScopesRef.current.add(node.id);
+            await terminateSessions(new Set([node.id]));
+            throw error;
+          }
+        }
+      }
+      if (firstFailure) throw firstFailure;
+    };
+    try {
+      await runNode(plan, []);
+      if (mountedRef.current) setCanRestart(true);
+    } catch (error) {
+      reportStartupFailure(`Compound Debug failed to start: ${errorText(error)}`);
+      throw error;
+    }
+  }, [clearSessions, launchTarget, reportStartupFailure, terminateSessions]);
 
   const restart = useCallback(() => {
     const last = lastLaunchRef.current;
-    if (last) void startDebug(last.config, last.adapterId).catch(() => {});
-  }, [startDebug]);
+    if (!last) return;
+    if (last.kind === "group") void startDebugGroup(last.plan).catch(() => {});
+    else void startDebug(last.config, last.adapterId).catch(() => {});
+  }, [startDebug, startDebugGroup]);
 
   const toggleBreakpoint = useCallback((path: string, line: number) => {
     mutateBreakpoints(path, (list) => (
@@ -617,10 +1039,10 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
 
   const setExceptionFilters = useCallback((ids: string[]) => {
     setExceptionFiltersState(ids);
-    const id = sessionIdRef.current;
-    if (id) {
-      const filters = selectExceptionFilters(capabilitiesRef.current, ids);
-      void dapSendRequest(id, "setExceptionBreakpoints", { filters }).catch(() => {});
+    for (const record of sessionsRef.current.values()) {
+      if (!record.live) continue;
+      const filters = selectExceptionFilters(record.capabilities, ids);
+      void dapSendRequest(record.id, "setExceptionBreakpoints", { filters }).catch(() => {});
     }
   }, []);
 
@@ -645,7 +1067,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
 
   const step = useCallback((action: DebugStepAction) => {
     const id = sessionIdRef.current;
-    if (!id) return;
+    const record = id ? sessionsRef.current.get(id) : undefined;
+    if (!id || !record) return;
     void (async () => {
       if (action === "pause") {
         // `pause` requires a threadId; while running we may not have one yet.
@@ -657,71 +1080,77 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         await dapSendRequest(id, "pause", { threadId: tid }).catch(() => {});
         return; // The adapter answers with a `stopped` event.
       }
-      const epoch = stopEpochRef.current;
+      const epoch = record.stopEpoch;
       const tid = stateRef.current?.selectedThreadId ?? stateRef.current?.stoppedThreadId;
       try {
         await dapSendRequest(id, stepCommandFor(action), tid != null ? { threadId: tid } : {});
         // Adapters need not emit `continued` after an explicit resume/step —
         // flip to running optimistically unless a newer stop already landed.
-        if (mountedRef.current && stopEpochRef.current === epoch) {
-          setState((prev) => (prev && prev.status === "stopped" ? markResumed(prev) : prev));
+        if (mountedRef.current && record.stopEpoch === epoch) {
+          updateSessionState(id, (prev) => (prev.status === "stopped" ? markResumed(prev) : prev));
         }
       } catch {
         // Request failed (e.g. already running): keep the current state.
       }
     })();
-  }, []);
+  }, [updateSessionState]);
 
   const runToCursor = useCallback((path: string, line: number) => {
     const id = sessionIdRef.current;
     const current = stateRef.current;
-    if (!id || !current || current.status !== "stopped") return;
+    const record = id ? sessionsRef.current.get(id) : undefined;
+    if (!id || !record || !current || current.status !== "stopped") return;
     void (async () => {
       const needsTemp = !(breakpointsRef.current[path] ?? []).some(
         (bp) => bp.line === line && bp.enabled !== false,
       ) || mutedRef.current;
       if (needsTemp) {
-        tempRunToCursorRef.current = { path };
-        await syncBreakpointsForPath(path, { extraTempLine: line });
+        record.tempRunToCursor = { path };
+        tempRunToCursorRef.current = record.tempRunToCursor;
+        await syncBreakpointsForPath(path, { extraTempLine: line, sessionIds: [id] });
       }
-      const epoch = stopEpochRef.current;
+      const epoch = record.stopEpoch;
       const tid = current.selectedThreadId ?? current.stoppedThreadId;
       try {
         await dapSendRequest(id, "continue", tid != null ? { threadId: tid } : {});
-        if (mountedRef.current && stopEpochRef.current === epoch) {
-          setState((prev) => (prev && prev.status === "stopped" ? markResumed(prev) : prev));
+        if (mountedRef.current && record.stopEpoch === epoch) {
+          updateSessionState(id, (prev) => (prev.status === "stopped" ? markResumed(prev) : prev));
         }
       } catch {
         // Continue failed: restore the user's breakpoints right away.
         if (needsTemp) {
+          record.tempRunToCursor = null;
           tempRunToCursorRef.current = null;
-          await syncBreakpointsForPath(path);
+          await syncBreakpointsForPath(path, { sessionIds: [id] });
         }
       }
     })();
-  }, [syncBreakpointsForPath]);
+  }, [syncBreakpointsForPath, updateSessionState]);
 
   const selectThread = useCallback((threadId: number) => {
     const id = sessionIdRef.current;
-    if (!id || stateRef.current?.status !== "stopped") return;
+    const record = id ? sessionsRef.current.get(id) : undefined;
+    if (!id || !record || stateRef.current?.status !== "stopped") return;
     void (async () => {
-      const epoch = stopEpochRef.current;
+      const epoch = record.stopEpoch;
       const stackBody = await dapSendRequest(id, "stackTrace", { threadId, startFrame: 0, levels: 40 })
         .catch(() => null);
       const frames = parseStackFrames(stackBody);
-      if (!mountedRef.current || stopEpochRef.current !== epoch) return;
-      setState((prev) => (prev && prev.status === "stopped"
+      if (!mountedRef.current || record.stopEpoch !== epoch) return;
+      updateSessionState(id, (prev) => (prev.status === "stopped"
         ? { ...prev, selectedThreadId: threadId, frames, selectedFrameId: frames[0]?.id ?? null }
         : prev));
       if (frames[0]) void refreshFrameVariables(frames[0].id, epoch);
     })();
-  }, [refreshFrameVariables]);
+  }, [refreshFrameVariables, updateSessionState]);
 
   const selectFrame = useCallback((frameId: number) => {
-    setState((prev) => (prev && prev.status === "stopped" ? { ...prev, selectedFrameId: frameId } : prev));
+    const id = sessionIdRef.current;
+    if (!id) return;
+    updateSessionState(id, (prev) => (prev.status === "stopped" ? { ...prev, selectedFrameId: frameId } : prev));
     // Inline values follow the frame the user is inspecting.
     void refreshFrameVariables(frameId, stopEpochRef.current);
-  }, [refreshFrameVariables]);
+  }, [refreshFrameVariables, updateSessionState]);
 
   const restartFrame = useCallback((frameId: number) => {
     const id = sessionIdRef.current;
@@ -827,30 +1256,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   }, []);
 
   const terminate = useCallback(() => {
-    const id = sessionIdRef.current;
-    unlistenRef.current?.();
-    unlistenRef.current = null;
-    sessionIdRef.current = null;
-    bpIdIndexRef.current.clear();
-    tempRunToCursorRef.current = null;
-    if (id) void dapTerminate(id).catch(() => {});
-    if (mountedRef.current) {
-      // Mark terminated rather than clearing: IDEA keeps the console and the
-      // final state readable after Stop, until the next run replaces it.
-      setState((prev) => (prev
-        ? {
-          ...prev,
-          status: "terminated",
-          stoppedThreadId: null,
-          selectedThreadId: null,
-          selectedFrameId: null,
-          frames: [],
-          exceptionInfo: null,
-        }
-        : prev));
-      setBreakpointRuntime({});
-    }
-  }, []);
+    void terminateSessions();
+  }, [terminateSessions]);
 
   return {
     state,
@@ -864,7 +1271,11 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setBreakpointsMuted,
     removeAllBreakpoints,
     frameVariables,
+    sessions,
+    activeSessionId,
+    selectSession,
     startDebug,
+    startDebugGroup,
     restart,
     canRestart,
     toggleBreakpoint,

@@ -145,6 +145,7 @@
 - `[data-testid="code-workspace-debug-panel"]` — display — F25.1.debug-panel
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
+- `[data-testid="debug-active-session"]` — interactive [optional] — F25.1.debug-active-session
 - `[data-testid="workspace-build-run-tools-dialog"]` — display — F25.1.tools-dialog
 - `[data-testid="workspace-build-run-tools-close"]` — interactive — F25.1.tools-close
 - `[data-testid="workspace-build-run-tools-cancel"]` — interactive — F25.1.tools-cancel
