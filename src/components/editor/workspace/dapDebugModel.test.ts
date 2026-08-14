@@ -5,31 +5,36 @@ import {
   buildDataBreakpointInfoArgs,
   buildSetBreakpointsArgs,
   buildSetDataBreakpointsArgs,
+  buildSetExceptionBreakpointsArgs,
   buildSetFunctionBreakpointsArgs,
   currentLocation,
   dataBreakpointKey,
   dataBreakpointVerificationMap,
   defaultDataBreakpointAccessType,
+  exceptionBreakpointVerificationMap,
   functionBreakpointVerificationMap,
   hoverExpressionAt,
   initialDebugState,
   inlineValueLabel,
   markResumed,
+  mergeExceptionBreakpointDefaults,
   parseBreakpointEvent,
   parseDataBreakpointInfo,
   parseEvaluate,
+  parseExceptionBreakpointFilters,
   parseExceptionInfo,
   parseSetBreakpointsResponse,
   parseSetDataBreakpointsResponse,
+  parseSetExceptionBreakpointsResponse,
   parseSetFunctionBreakpointsResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
   planDataBreakpointSync,
+  planExceptionBreakpointSync,
   planFunctionBreakpointSync,
   reconcileBreakpointLines,
   reduceDebugEvent,
-  selectExceptionFilters,
   stepCommandFor,
   toAdapterSourcePath,
   type DebugStackFrame,
@@ -331,15 +336,99 @@ describe("dapDebugModel", () => {
     expect(parseBreakpointEvent(null)).toBeNull();
   });
 
-  it("selects only exception filters the adapter advertises", () => {
+  it("parses exception filters and seeds adapter defaults without overriding choices", () => {
     const caps = {
       exceptionBreakpointFilters: [
-        { filter: "caught", label: "Caught Exceptions" },
+        {
+          filter: "caught",
+          label: "Caught Exceptions",
+          description: "Pause on handled exceptions",
+          default: true,
+          supportsCondition: true,
+          conditionDescription: "Exception class or expression",
+        },
         { filter: "uncaught", label: "Uncaught Exceptions" },
+        { filter: "caught", label: "duplicate" },
+        { label: "invalid" },
       ],
     };
-    expect(selectExceptionFilters(caps, ["uncaught", "unknown"])).toEqual(["uncaught"]);
-    expect(selectExceptionFilters({}, ["uncaught"])).toEqual([]);
+    const filters = parseExceptionBreakpointFilters(caps);
+    expect(filters).toEqual([
+      {
+        filter: "caught",
+        label: "Caught Exceptions",
+        description: "Pause on handled exceptions",
+        default: true,
+        supportsCondition: true,
+        conditionDescription: "Exception class or expression",
+      },
+      {
+        filter: "uncaught",
+        label: "Uncaught Exceptions",
+        description: undefined,
+        default: false,
+        supportsCondition: false,
+        conditionDescription: undefined,
+      },
+    ]);
+    const seeded = mergeExceptionBreakpointDefaults([
+      { adapterId: "java", filterId: "caught", enabled: false },
+      { adapterId: "node", filterId: "all", enabled: true },
+    ], "java", filters);
+    expect(seeded).toEqual([
+      { adapterId: "java", filterId: "caught", enabled: false },
+      { adapterId: "node", filterId: "all", enabled: true },
+      { adapterId: "java", filterId: "uncaught", enabled: false },
+    ]);
+    expect(mergeExceptionBreakpointDefaults(seeded, "java", filters)).toBe(seeded);
+    expect(parseExceptionBreakpointFilters({})).toEqual([]);
+  });
+
+  it("builds conditional exception filters with a legacy fallback and positional bindings", () => {
+    const filters = parseExceptionBreakpointFilters({
+      exceptionBreakpointFilters: [
+        { filter: "caught", label: "Caught", supportsCondition: true },
+        { filter: "uncaught", label: "Uncaught" },
+      ],
+    });
+    const settings = [
+      { adapterId: "java", filterId: "caught", enabled: true, condition: " IOException " },
+      { adapterId: "java", filterId: "uncaught", enabled: true },
+      { adapterId: "node", filterId: "caught", enabled: true },
+    ];
+    const plan = planExceptionBreakpointSync(settings, filters, {
+      adapterId: "java",
+      supportsFilterOptions: true,
+    });
+    expect(buildSetExceptionBreakpointsArgs(plan)).toEqual({
+      filters: ["uncaught"],
+      filterOptions: [{ filterId: "caught", condition: "IOException" }],
+    });
+    expect(plan.sent.map((breakpoint) => breakpoint.filterId)).toEqual(["uncaught", "caught"]);
+
+    const bindings = parseSetExceptionBreakpointsResponse(plan, {
+      breakpoints: [
+        { id: 7, verified: true },
+        { id: 8, verified: false, reason: "failed", message: "Invalid condition" },
+      ],
+    });
+    expect(bindings.map((binding) => binding.filterId)).toEqual(["uncaught", "caught"]);
+    expect(exceptionBreakpointVerificationMap(plan, bindings)).toEqual({
+      uncaught: { status: "verified", message: null },
+      caught: { status: "failed", message: "Invalid condition" },
+    });
+
+    const legacy = planExceptionBreakpointSync(settings, filters, {
+      adapterId: "java",
+      supportsFilterOptions: false,
+    });
+    expect(buildSetExceptionBreakpointsArgs(legacy)).toEqual({ filters: ["caught", "uncaught"] });
+    const muted = planExceptionBreakpointSync(settings, filters, {
+      adapterId: "java",
+      muted: true,
+      supportsFilterOptions: true,
+    });
+    expect(buildSetExceptionBreakpointsArgs(muted)).toEqual({ filters: [] });
   });
 
   it("parses threads and stack frames tolerantly", () => {

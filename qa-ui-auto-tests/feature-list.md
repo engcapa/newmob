@@ -5047,6 +5047,26 @@ controls:
     selector: '[data-testid="debug-data-breakpoint-notice"]'
     kind: display
     optional: true       # rendered after live adapter discovery succeeds or fails
+  - id: debug-exception-breakpoints
+    selector: '[data-testid="debug-exception-breakpoints"]'
+    kind: display
+    optional: true       # requires a live adapter advertising exception filters
+  - id: debug-exception-breakpoint-row
+    selector: '[data-testid="debug-exception-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered for each adapter-advertised exception filter
+  - id: debug-exception-breakpoint-enabled
+    selector: '[data-testid^="debug-exception-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each adapter-advertised exception filter
+  - id: debug-exception-breakpoint-condition
+    selector: '[data-testid^="debug-exception-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionFilterOptions and a conditional filter
+  - id: debug-exception-breakpoint-binding
+    selector: '[data-testid^="debug-exception-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live adapter with a pending or failed binding
   - id: tools-dialog
     selector: '[data-testid="workspace-build-run-tools-dialog"]'
     kind: display
@@ -5124,7 +5144,7 @@ controls:
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
 - Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
 - 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
-- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。Maven Surefire/Failsafe 与 Gradle JUnit XML 已形成结构化结果、失败详情/定位/重跑闭环；coverage 和完整 adapter 矩阵仍未完成。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。标准 source/function/data/exception breakpoints 已覆盖 adapter scope、条件、Mute/Remove All、configurationDone 前同步和绑定状态，其中 exception filters 同时兼容 `filters` 与 capability-gated `filterOptions`。Maven Surefire/Failsafe 与 Gradle JUnit XML 已形成结构化结果、失败详情/定位/重跑闭环；coverage 和完整 adapter 矩阵仍未完成。
 
 ### 25.2 Provider 语义快照与重构一致性 🟡
 

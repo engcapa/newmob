@@ -23,6 +23,7 @@ import {
   dataBreakpointKey,
   type DebugBreakpoint,
   type DebugDataBreakpoint,
+  type DebugExceptionBreakpoint,
   type DebugFunctionBreakpoint,
   type DebugStackFrame,
 } from "../dapDebugModel";
@@ -685,6 +686,95 @@ function DataBreakpointEditor({
         initialValue={breakpoint.hitCondition ?? ""}
         onCommit={(value) => onChange({ hitCondition: value.trim() || undefined })}
       />
+    </div>
+  );
+}
+
+/** Adapter-advertised exception filters with optional DAP filter conditions. */
+function ExceptionBreakpointsView({ debug }: { debug: CodeDebugSession }) {
+  const activeSession = debug.sessions.find((session) => session.id === debug.activeSessionId)
+    ?? debug.sessions[0]
+    ?? null;
+  const settings = new Map(debug.exceptionBreakpoints
+    .filter((breakpoint) => breakpoint.adapterId === activeSession?.adapterId)
+    .map((breakpoint) => [breakpoint.filterId, breakpoint]));
+  const supportsFilterOptions = debug.capabilities.supportsExceptionFilterOptions === true;
+  const field = "min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none";
+  return (
+    <div data-testid="debug-exception-breakpoints">
+      {debug.availableExceptionFilters.map((filter, index) => {
+        const setting: DebugExceptionBreakpoint = settings.get(filter.filter) ?? {
+          adapterId: activeSession?.adapterId ?? "",
+          filterId: filter.filter,
+          enabled: filter.default,
+        };
+        const runtime = debug.exceptionBreakpointRuntime[filter.filter];
+        const bindingHint = setting.enabled
+          && !debug.breakpointsMuted
+          && runtime
+          && runtime.status !== "verified"
+          ? runtime
+          : null;
+        const canSetCondition = filter.supportsCondition && supportsFilterOptions;
+        return (
+          <div
+            key={filter.filter}
+            data-testid="debug-exception-breakpoint-row"
+            data-exception-filter={filter.filter}
+            className="border-t border-[var(--taomni-code-border)]/40 first:border-t-0"
+          >
+            <label
+              className="flex items-center gap-2 px-3 py-0.5 hover:bg-[var(--taomni-hover-bg)]"
+              title={filter.description}
+            >
+              <input
+                type="checkbox"
+                data-testid={`debug-exception-breakpoint-enabled-${index}`}
+                checked={setting.enabled}
+                onChange={(event) => debug.setExceptionBreakpointOptions(
+                  filter.filter,
+                  { enabled: event.target.checked },
+                )}
+              />
+              <span className="min-w-0 flex-1 truncate">
+                {filter.label}
+                {setting.condition && (
+                  <span className="ml-2 text-amber-500">if {setting.condition}</span>
+                )}
+                {bindingHint && (
+                  <span
+                    data-testid={`debug-exception-breakpoint-binding-${index}`}
+                    className={`ml-2 ${
+                      bindingHint.status === "failed"
+                        ? "text-rose-500"
+                        : "text-[var(--taomni-text-muted)]"
+                    }`}
+                    title={bindingHint.message ?? undefined}
+                  >
+                    {bindingHint.status === "failed" ? "not bound" : "pending"}
+                  </span>
+                )}
+              </span>
+            </label>
+            {canSetCondition && (
+              <div className="bg-[var(--taomni-code-bg)] px-3 pb-1.5 pt-1">
+                <CommitField
+                  label="Condition"
+                  testId={`debug-exception-breakpoint-condition-${index}`}
+                  className={field}
+                  placeholder={filter.conditionDescription ?? "break only when true"}
+                  maxLength={4096}
+                  initialValue={setting.condition ?? ""}
+                  onCommit={(value) => debug.setExceptionBreakpointOptions(
+                    filter.filter,
+                    { condition: value.trim() || undefined },
+                  )}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1387,22 +1477,7 @@ export function DebugPanel({
             </Section>
             {debug.availableExceptionFilters.length > 0 && (
               <Section title="Exception Breakpoints">
-                {debug.availableExceptionFilters.map((f) => (
-                  <label key={f.filter} className="flex items-center gap-2 px-3 py-0.5">
-                    <input
-                      type="checkbox"
-                      data-testid={`debug-exception-${f.filter}`}
-                      checked={debug.enabledExceptionFilters.includes(f.filter)}
-                      onChange={(e) => {
-                        const next = e.target.checked
-                          ? [...debug.enabledExceptionFilters, f.filter]
-                          : debug.enabledExceptionFilters.filter((id) => id !== f.filter);
-                        debug.setExceptionFilters(next);
-                      }}
-                    />
-                    {f.label}
-                  </label>
-                ))}
+                <ExceptionBreakpointsView debug={debug} />
               </Section>
             )}
           </>

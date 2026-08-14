@@ -178,6 +178,11 @@
 - `[data-testid="debug-data-breakpoint-unsupported"]` — display [optional] — F25.1.debug-data-breakpoint-unsupported
 - `[data-testid="debug-variable-data-breakpoint"]` — interactive [optional] — F25.1.debug-variable-data-breakpoint
 - `[data-testid="debug-data-breakpoint-notice"]` — display [optional] — F25.1.debug-data-breakpoint-notice
+- `[data-testid="debug-exception-breakpoints"]` — display [optional] — F25.1.debug-exception-breakpoints
+- `[data-testid="debug-exception-breakpoint-row"]` — display [optional] — F25.1.debug-exception-breakpoint-row
+- `[data-testid^="debug-exception-breakpoint-enabled-"]` — interactive [optional] — F25.1.debug-exception-breakpoint-enabled
+- `[data-testid^="debug-exception-breakpoint-condition-"]` — interactive [optional] — F25.1.debug-exception-breakpoint-condition
+- `[data-testid^="debug-exception-breakpoint-binding-"]` — display [optional] — F25.1.debug-exception-breakpoint-binding
 - `[data-testid="workspace-build-run-tools-dialog"]` — display — F25.1.tools-dialog
 - `[data-testid="workspace-build-run-tools-close"]` — interactive — F25.1.tools-close
 - `[data-testid="workspace-build-run-tools-cancel"]` — interactive — F25.1.tools-cancel

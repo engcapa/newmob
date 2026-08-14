@@ -13,9 +13,10 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     functionBreakpointRuntime: {},
     dataBreakpoints: [],
     dataBreakpointRuntime: {},
+    exceptionBreakpoints: [],
+    exceptionBreakpointRuntime: {},
     capabilities: {},
     availableExceptionFilters: [],
-    enabledExceptionFilters: [],
     watchExpressions: [],
     breakpointsMuted: false,
     setBreakpointsMuted: vi.fn(),
@@ -37,7 +38,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     addDataBreakpoint: vi.fn().mockResolvedValue({ added: true, message: "Watching value" }),
     setDataBreakpointOptions: vi.fn(),
     removeDataBreakpoint: vi.fn(),
-    setExceptionFilters: vi.fn(),
+    setExceptionBreakpointOptions: vi.fn(),
     addWatchExpression: vi.fn(),
     removeWatchExpression: vi.fn(),
     step: vi.fn(),
@@ -291,22 +292,61 @@ describe("DebugPanel", () => {
     expect(selectSession).toHaveBeenCalledWith("s2");
   });
 
-  it("toggles an exception filter through the session", () => {
-    const setExceptionFilters = vi.fn();
+  it("configures and reports a conditional exception filter through the session", () => {
+    const setExceptionBreakpointOptions = vi.fn();
     render(
       <DebugPanel
         debug={makeSession({
           state: stoppedState(),
-          availableExceptionFilters: [{ filter: "uncaught", label: "Uncaught Exceptions" }],
-          enabledExceptionFilters: [],
-          setExceptionFilters,
+          sessions: [
+            {
+              id: "s1",
+              targetId: "app",
+              label: "App",
+              adapterId: "java",
+              status: "stopped",
+              stoppedReason: "breakpoint",
+            },
+          ],
+          activeSessionId: "s1",
+          capabilities: { supportsExceptionFilterOptions: true },
+          availableExceptionFilters: [{
+            filter: "caught",
+            label: "Caught Exceptions",
+            description: "Pause on handled exceptions",
+            default: false,
+            supportsCondition: true,
+            conditionDescription: "Exception class",
+          }],
+          exceptionBreakpoints: [{
+            adapterId: "java",
+            filterId: "caught",
+            enabled: true,
+          }],
+          exceptionBreakpointRuntime: {
+            caught: { status: "failed", message: "Invalid condition" },
+          },
+          setExceptionBreakpointOptions,
         })}
         onStart={null}
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByTestId("debug-exception-uncaught"));
-    expect(setExceptionFilters).toHaveBeenCalledWith(["uncaught"]);
+    expect(screen.getByTestId("debug-exception-breakpoints")).toBeInTheDocument();
+    expect(screen.getByText("Caught Exceptions").closest("label")).toHaveAttribute(
+      "title",
+      "Pause on handled exceptions",
+    );
+    expect(screen.getByTestId("debug-exception-breakpoint-binding-0")).toHaveTextContent("not bound");
+    fireEvent.click(screen.getByTestId("debug-exception-breakpoint-enabled-0"));
+    expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", { enabled: false });
+    fireEvent.change(screen.getByTestId("debug-exception-breakpoint-condition-0"), {
+      target: { value: "exception instanceof IOException" },
+    });
+    fireEvent.keyDown(screen.getByTestId("debug-exception-breakpoint-condition-0"), { key: "Enter" });
+    expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", {
+      condition: "exception instanceof IOException",
+    });
   });
 
   it("lists every workspace breakpoint and reveals one on click", () => {

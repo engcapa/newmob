@@ -56,6 +56,22 @@ function dataBreakpointCalls(): {
     }));
 }
 
+function exceptionBreakpointCalls(): {
+  sessionId: string;
+  filters: string[];
+  filterOptions?: { filterId: string; condition: string }[];
+}[] {
+  return dapSendRequest.mock.calls
+    .filter((call) => call[1] === "setExceptionBreakpoints")
+    .map((call) => ({
+      sessionId: String(call[0]),
+      ...(call[2] as {
+        filters: string[];
+        filterOptions?: { filterId: string; condition: string }[];
+      }),
+    }));
+}
+
 /** Start a session and return the adapter's event handler. */
 async function startSession(
   start: (config: Record<string, unknown>) => Promise<void>,
@@ -230,6 +246,179 @@ describe("useCodeDebugSession", () => {
     expect(breakpointCalls()[0].lines).toEqual([4]);
   });
 
+  it("persists adapter defaults and binds conditional exception filters before configurationDone", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string, args?: unknown) => {
+      if (command !== "setExceptionBreakpoints") return Promise.resolve({ breakpoints: [] });
+      const request = args as {
+        filters: string[];
+        filterOptions?: { filterId: string; condition: string }[];
+      };
+      return Promise.resolve({
+        breakpoints: [
+          ...request.filters,
+          ...(request.filterOptions ?? []).map((option) => option.filterId),
+        ].map((_filterId, index) => ({ id: 70 + index, verified: true })),
+      });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, {
+      supportsExceptionFilterOptions: true,
+      exceptionBreakpointFilters: [
+        {
+          filter: "caught",
+          label: "Caught",
+          default: true,
+          supportsCondition: true,
+          conditionDescription: "Exception class",
+        },
+        { filter: "uncaught", label: "Uncaught" },
+      ],
+    });
+
+    expect(result.current.availableExceptionFilters[0]).toMatchObject({
+      filter: "caught",
+      default: true,
+      supportsCondition: true,
+    });
+    expect(result.current.exceptionBreakpoints).toEqual([
+      { adapterId: "java", filterId: "caught", enabled: true },
+      { adapterId: "java", filterId: "uncaught", enabled: false },
+    ]);
+    act(() => result.current.setExceptionBreakpointOptions("caught", {
+      condition: " exception instanceof IOException ",
+    }));
+    expect(JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.debugExceptionBreakpoints.v1.ws-1") ?? "[]",
+    )).toEqual([
+      {
+        adapterId: "java",
+        filterId: "caught",
+        enabled: true,
+        condition: "exception instanceof IOException",
+      },
+      { adapterId: "java", filterId: "uncaught", enabled: false },
+    ]);
+
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(exceptionBreakpointCalls()).toEqual([{
+      sessionId: "sess-1",
+      filters: [],
+      filterOptions: [{
+        filterId: "caught",
+        condition: "exception instanceof IOException",
+      }],
+    }]));
+    expect(result.current.exceptionBreakpointRuntime.caught).toEqual({
+      status: "verified",
+      message: null,
+    });
+    const exceptionCallIndex = dapSendRequest.mock.calls.findIndex(
+      (call) => call[1] === "setExceptionBreakpoints",
+    );
+    const configurationDoneIndex = dapSend.mock.calls.findIndex(
+      (call) => call[1] === "configurationDone",
+    );
+    expect(dapSendRequest.mock.invocationCallOrder[exceptionCallIndex]).toBeLessThan(
+      dapSend.mock.invocationCallOrder[configurationDoneIndex],
+    );
+
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "breakpoint",
+      message: {
+        body: {
+          reason: "changed",
+          breakpoint: { id: 70, verified: false, reason: "failed", message: "Invalid condition" },
+        },
+      },
+    }));
+    expect(result.current.exceptionBreakpointRuntime.caught).toEqual({
+      status: "failed",
+      message: "Invalid condition",
+    });
+  });
+
+  it("mutes, restores, and removes exception breakpoints with the global breakpoint actions", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, {
+      exceptionBreakpointFilters: [{
+        filter: "uncaught",
+        label: "Uncaught",
+        default: true,
+      }],
+    });
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(1));
+    expect(exceptionBreakpointCalls()[0].filters).toEqual(["uncaught"]);
+
+    act(() => result.current.setBreakpointsMuted(true));
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(2));
+    expect(exceptionBreakpointCalls()[1].filters).toEqual([]);
+    expect(result.current.exceptionBreakpoints[0].enabled).toBe(true);
+
+    act(() => result.current.setBreakpointsMuted(false));
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(3));
+    expect(exceptionBreakpointCalls()[2].filters).toEqual(["uncaught"]);
+
+    act(() => result.current.removeAllBreakpoints());
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(4));
+    expect(exceptionBreakpointCalls()[3].filters).toEqual([]);
+    expect(result.current.exceptionBreakpoints[0].enabled).toBe(false);
+    expect(JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.debugExceptionBreakpoints.v1.ws-1") ?? "[]",
+    )[0].enabled).toBe(false);
+  });
+
+  it("ignores a stale exception-breakpoint response after a newer replacement", async () => {
+    const resolvers: ((body: unknown) => void)[] = [];
+    let exceptionRequestCount = 0;
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command !== "setExceptionBreakpoints") return Promise.resolve({ breakpoints: [] });
+      exceptionRequestCount += 1;
+      if (exceptionRequestCount === 1) {
+        return Promise.resolve({ breakpoints: [{ id: 80, verified: true }] });
+      }
+      return new Promise((resolve) => resolvers.push(resolve));
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, {
+      exceptionBreakpointFilters: [{
+        filter: "uncaught",
+        label: "Uncaught",
+        default: true,
+      }],
+    });
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.exceptionBreakpointRuntime.uncaught).toEqual({
+      status: "verified",
+      message: null,
+    }));
+
+    act(() => {
+      result.current.setExceptionBreakpointOptions("uncaught", { enabled: false });
+      result.current.setExceptionBreakpointOptions("uncaught", { enabled: true });
+    });
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    await act(async () => {
+      resolvers[1]({ breakpoints: [{ id: 82, verified: true }] });
+      resolvers[0]({ breakpoints: [] });
+      await Promise.resolve();
+    });
+    expect(result.current.exceptionBreakpointRuntime.uncaught).toEqual({
+      status: "verified",
+      message: null,
+    });
+  });
+
   it("persists and binds function breakpoints before configurationDone", async () => {
     dapSendRequest.mockImplementation((_id: string, command: string) => {
       if (command === "setFunctionBreakpoints") {
@@ -247,7 +436,10 @@ describe("useCodeDebugSession", () => {
       window.localStorage.getItem("taomni.codeWorkspace.debugFunctionBreakpoints.v1.ws-1") ?? "[]",
     )).toEqual([{ name: "Service.run", condition: "ready", hitCondition: "3" }]);
 
-    const emit = await startSession(result.current.startDebug, { supportsFunctionBreakpoints: true });
+    const emit = await startSession(result.current.startDebug, {
+      supportsFunctionBreakpoints: true,
+      exceptionBreakpointFilters: [{ filter: "uncaught", label: "Uncaught" }],
+    });
     await act(async () => {
       emit({ sessionId: "sess-1", event: "initialized", message: {} });
       await Promise.resolve();
@@ -677,6 +869,7 @@ describe("useCodeDebugSession", () => {
       await Promise.resolve();
     });
     expect(dataBreakpointCalls()).toEqual([]);
+    expect(exceptionBreakpointCalls()).toEqual([]);
     await waitFor(() => expect(result.current.dataBreakpointRuntime).toEqual({
       [dataBreakpointKey(result.current.dataBreakpoints[0])]: {
         status: "failed",
@@ -692,7 +885,9 @@ describe("useCodeDebugSession", () => {
       return Promise.resolve({ breakpoints: [] });
     });
     const { result } = renderHook(() => useCodeDebugSession("ws-1"));
-    const emit = await startSession(result.current.startDebug);
+    const emit = await startSession(result.current.startDebug, {
+      exceptionBreakpointFilters: [{ filter: "uncaught", label: "Uncaught", default: true }],
+    });
     await act(async () => {
       emit({ sessionId: "sess-1", event: "initialized", message: {} });
       await Promise.resolve();
@@ -837,9 +1032,15 @@ describe("useCodeDebugSession", () => {
       handlers.set(id, handler);
       return Promise.resolve(() => handlers.delete(id));
     });
-    dapStartSession.mockImplementation((_adapterId: string, config: Record<string, unknown>) => Promise.resolve({
+    dapStartSession.mockImplementation((adapterId: string, config: Record<string, unknown>) => Promise.resolve({
       sessionId: String(config.sessionId),
-      capabilities: { supportsFunctionBreakpoints: true },
+      capabilities: {
+        supportsFunctionBreakpoints: true,
+        supportsExceptionFilterOptions: true,
+        exceptionBreakpointFilters: adapterId === "java"
+          ? [{ filter: "caught", label: "Caught", default: true, supportsCondition: true }]
+          : [{ filter: "all", label: "All exceptions", default: true }],
+      },
       request: "launch",
       arguments: config,
     }));
@@ -864,6 +1065,22 @@ describe("useCodeDebugSession", () => {
       await started;
     });
     expect(result.current.sessions.map((session) => session.label)).toEqual(["API", "Web"]);
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(2));
+    expect(exceptionBreakpointCalls().map((call) => [call.sessionId, call.filters]).sort()).toEqual([
+      ["sess-api", ["caught"]],
+      ["sess-web", ["all"]],
+    ]);
+
+    act(() => {
+      result.current.selectSession("sess-api");
+      result.current.setExceptionBreakpointOptions("caught", { condition: "IOException" });
+    });
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(3));
+    expect(exceptionBreakpointCalls()[2]).toEqual({
+      sessionId: "sess-api",
+      filters: [],
+      filterOptions: [{ filterId: "caught", condition: "IOException" }],
+    });
 
     act(() => result.current.toggleBreakpoint("/repo/App.java", 12));
     await waitFor(() => expect(breakpointCalls()).toHaveLength(2));
@@ -888,6 +1105,9 @@ describe("useCodeDebugSession", () => {
     });
     await waitFor(() => expect(result.current.activeSessionId).toBe("sess-web"));
     expect(result.current.state?.status).toBe("stopped");
+    act(() => result.current.setExceptionBreakpointOptions("all", { enabled: false }));
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(4));
+    expect(exceptionBreakpointCalls()[3]).toEqual({ sessionId: "sess-web", filters: [] });
 
     act(() => {
       handlers.get("sess-web")?.({ sessionId: "sess-web", event: "terminated", message: {} });

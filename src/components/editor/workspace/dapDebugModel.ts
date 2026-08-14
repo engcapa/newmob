@@ -65,6 +65,24 @@ export interface DebugDataBreakpointInfo {
   canPersist: boolean;
 }
 
+/** One exception filter advertised by the adapter's initialize response. */
+export interface DebugExceptionBreakpointFilter {
+  filter: string;
+  label: string;
+  description?: string;
+  default: boolean;
+  supportsCondition: boolean;
+  conditionDescription?: string;
+}
+
+/** Workspace-persisted exception-breakpoint choice, scoped to one adapter. */
+export interface DebugExceptionBreakpoint {
+  adapterId: string;
+  filterId: string;
+  enabled: boolean;
+  condition?: string;
+}
+
 /** True unless the breakpoint was explicitly disabled. */
 export function isBreakpointEnabled(bp: DebugBreakpoint): boolean {
   return bp.enabled !== false;
@@ -627,19 +645,164 @@ export function parseBreakpointEvent(
   };
 }
 
-/** Pick exception-breakpoint filters to enable from the adapter's advertised set. */
-export function selectExceptionFilters(
+/** Parse and de-duplicate the adapter's exception-filter capability metadata. */
+export function parseExceptionBreakpointFilters(
   capabilities: Record<string, unknown>,
-  enabledIds: string[],
-): string[] {
+): DebugExceptionBreakpointFilter[] {
   const filters = capabilities.exceptionBreakpointFilters;
   if (!Array.isArray(filters)) return [];
-  const available = new Set(
-    filters
-      .map((f) => (f && typeof f === "object" ? (f as Record<string, unknown>).filter : null))
-      .filter((id): id is string => typeof id === "string"),
-  );
-  return enabledIds.filter((id) => available.has(id));
+  const out: DebugExceptionBreakpointFilter[] = [];
+  const seen = new Set<string>();
+  for (const value of filters) {
+    const filter = asRecord(value);
+    const id = typeof filter.filter === "string" ? filter.filter : "";
+    if (!id.trim() || seen.has(id)) continue;
+    seen.add(id);
+    const label = typeof filter.label === "string" && filter.label.trim()
+      ? filter.label.trim()
+      : id;
+    out.push({
+      filter: id,
+      label,
+      description: typeof filter.description === "string" && filter.description.trim()
+        ? filter.description.trim()
+        : undefined,
+      default: filter.default === true,
+      supportsCondition: filter.supportsCondition === true,
+      conditionDescription: typeof filter.conditionDescription === "string"
+        && filter.conditionDescription.trim()
+        ? filter.conditionDescription.trim()
+        : undefined,
+    });
+  }
+  return out;
+}
+
+/** Stable identity for persisted adapter-specific exception settings. */
+export function exceptionBreakpointKey(
+  breakpoint: Pick<DebugExceptionBreakpoint, "adapterId" | "filterId">,
+): string {
+  return JSON.stringify([breakpoint.adapterId, breakpoint.filterId]);
+}
+
+/**
+ * Seed newly advertised filters from the adapter's `default` flag while
+ * retaining every explicit user choice (including disabled filters).
+ */
+export function mergeExceptionBreakpointDefaults(
+  list: DebugExceptionBreakpoint[],
+  adapterId: string,
+  filters: readonly DebugExceptionBreakpointFilter[],
+): DebugExceptionBreakpoint[] {
+  const known = new Set(list.map(exceptionBreakpointKey));
+  const additions = filters.flatMap((filter) => {
+    const breakpoint: DebugExceptionBreakpoint = {
+      adapterId,
+      filterId: filter.filter,
+      enabled: filter.default,
+    };
+    return known.has(exceptionBreakpointKey(breakpoint)) ? [] : [breakpoint];
+  });
+  return additions.length > 0 ? [...list, ...additions] : list;
+}
+
+export interface ExceptionBreakpointSyncPlan {
+  /** Settings matching filters advertised by this adapter, in advertised order. */
+  applicable: DebugExceptionBreakpoint[];
+  /** Enabled filters sent through the backward-compatible `filters` array. */
+  plain: DebugExceptionBreakpoint[];
+  /** Enabled filters sent with a condition through `filterOptions`. */
+  conditional: DebugExceptionBreakpoint[];
+  /** Positional response order: `filters` first, then `filterOptions`. */
+  sent: DebugExceptionBreakpoint[];
+}
+
+/** Plan a replacing exception-breakpoint request for one adapter session. */
+export function planExceptionBreakpointSync(
+  list: DebugExceptionBreakpoint[],
+  filters: readonly DebugExceptionBreakpointFilter[],
+  context: { adapterId: string; muted?: boolean; supportsFilterOptions?: boolean },
+): ExceptionBreakpointSyncPlan {
+  const byKey = new Map(list.map((breakpoint) => [exceptionBreakpointKey(breakpoint), breakpoint]));
+  const applicable = filters.map((filter) => {
+    const fallback: DebugExceptionBreakpoint = {
+      adapterId: context.adapterId,
+      filterId: filter.filter,
+      enabled: filter.default,
+    };
+    return byKey.get(exceptionBreakpointKey(fallback)) ?? fallback;
+  });
+  const enabled = context.muted ? [] : applicable.filter((breakpoint) => breakpoint.enabled);
+  const metadata = new Map(filters.map((filter) => [filter.filter, filter]));
+  const conditional = context.supportsFilterOptions
+    ? enabled.filter((breakpoint) => (
+        metadata.get(breakpoint.filterId)?.supportsCondition === true
+        && !!breakpoint.condition?.trim()
+      ))
+    : [];
+  const conditionalIds = new Set(conditional.map((breakpoint) => breakpoint.filterId));
+  const plain = enabled.filter((breakpoint) => !conditionalIds.has(breakpoint.filterId));
+  return { applicable, plain, conditional, sent: [...plain, ...conditional] };
+}
+
+/** Build standard DAP `setExceptionBreakpoints` arguments with legacy fallback. */
+export function buildSetExceptionBreakpointsArgs(plan: ExceptionBreakpointSyncPlan) {
+  const args: {
+    filters: string[];
+    filterOptions?: { filterId: string; condition: string }[];
+  } = {
+    filters: plan.plain.map((breakpoint) => breakpoint.filterId),
+  };
+  if (plan.conditional.length > 0) {
+    args.filterOptions = plan.conditional.map((breakpoint) => ({
+      filterId: breakpoint.filterId,
+      condition: breakpoint.condition!.trim(),
+    }));
+  }
+  return args;
+}
+
+/** Positional binding returned by `setExceptionBreakpoints`. */
+export interface ExceptionBreakpointBinding {
+  id: number | null;
+  verified: boolean;
+  filterId: string;
+  message?: string | null;
+  reason?: "pending" | "failed" | null;
+}
+
+/** Parse exception-filter bindings in `filters` then `filterOptions` order. */
+export function parseSetExceptionBreakpointsResponse(
+  plan: ExceptionBreakpointSyncPlan,
+  body: unknown,
+): ExceptionBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((breakpoint, index) => {
+    const rec = asRecord(list[index]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      filterId: breakpoint.filterId,
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+    };
+  });
+}
+
+/** Verification state per exception filter for the selected adapter session. */
+export function exceptionBreakpointVerificationMap(
+  plan: ExceptionBreakpointSyncPlan,
+  bindings: ExceptionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  plan.sent.forEach((breakpoint, index) => {
+    const binding = bindings[index];
+    out[breakpoint.filterId] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
