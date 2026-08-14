@@ -4760,7 +4760,9 @@ files:
   - src/components/editor/workspace/panels/testResultTree.ts
   - src/components/editor/workspace/panels/BottomDock.tsx
   - src/components/editor/workspace/WorkspaceBuildRunToolsDialog.tsx
+  - src/components/editor/workspace/dapDebugModel.ts
   - src/components/editor/workspace/panels/DebugPanel.tsx
+  - src/components/editor/workspace/useCodeDebugSession.ts
   - src/lib/editor/workspace.ts
   - src/lib/terminal/commandInput.ts
   - src-tauri/src/lsp.rs
@@ -4953,6 +4955,47 @@ controls:
     selector: '[data-testid="debug-active-session"]'
     kind: interactive
     optional: true       # rendered while a compound Debug launch has multiple child sessions
+  - id: debug-function-breakpoints
+    selector: '[data-testid="debug-function-breakpoints"]'
+    kind: display
+  - id: debug-function-breakpoint-input
+    selector: '[data-testid="debug-function-breakpoint-input"]'
+    kind: interactive
+  - id: debug-function-breakpoint-add
+    selector: '[data-testid="debug-function-breakpoint-add"]'
+    kind: interactive
+  - id: debug-function-breakpoint-row
+    selector: '[data-testid="debug-function-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered after a function/method breakpoint is saved
+  - id: debug-function-breakpoint-enabled
+    selector: '[data-testid^="debug-function-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each saved function/method breakpoint
+  - id: debug-function-breakpoint-edit
+    selector: '[data-testid^="debug-function-breakpoint-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each saved function/method breakpoint
+  - id: debug-function-breakpoint-condition
+    selector: '[data-testid^="debug-function-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # rendered while editing a function/method breakpoint
+  - id: debug-function-breakpoint-hit
+    selector: '[data-testid^="debug-function-breakpoint-hit-"]'
+    kind: interactive
+    optional: true       # rendered while editing a function/method breakpoint
+  - id: debug-function-breakpoint-remove
+    selector: '[data-testid^="debug-function-breakpoint-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each saved function/method breakpoint
+  - id: debug-function-breakpoint-binding
+    selector: '[data-testid^="debug-function-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live adapter with a pending or failed binding
+  - id: debug-function-breakpoint-unsupported
+    selector: '[data-testid="debug-function-breakpoint-unsupported"]'
+    kind: display
+    optional: true       # requires a live adapter without function-breakpoint support
   - id: tools-dialog
     selector: '[data-testid="workspace-build-run-tools-dialog"]'
     kind: display

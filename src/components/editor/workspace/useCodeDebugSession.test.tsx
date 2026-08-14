@@ -27,6 +27,20 @@ function breakpointCalls(): { sessionId: string; path: string; lines: number[] }
     });
 }
 
+function functionBreakpointCalls(): {
+  sessionId: string;
+  breakpoints: { name: string; condition?: string; hitCondition?: string }[];
+}[] {
+  return dapSendRequest.mock.calls
+    .filter((call) => call[1] === "setFunctionBreakpoints")
+    .map((call) => ({
+      sessionId: String(call[0]),
+      breakpoints: (call[2] as {
+        breakpoints: { name: string; condition?: string; hitCondition?: string }[];
+      }).breakpoints,
+    }));
+}
+
 /** Start a session and return the adapter's event handler. */
 async function startSession(
   start: (config: Record<string, unknown>) => Promise<void>,
@@ -201,6 +215,159 @@ describe("useCodeDebugSession", () => {
     expect(breakpointCalls()[0].lines).toEqual([4]);
   });
 
+  it("persists and binds function breakpoints before configurationDone", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "setFunctionBreakpoints") {
+        return Promise.resolve({ breakpoints: [{ id: 41, verified: true }] });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.addFunctionBreakpoint("Service.run"));
+    act(() => result.current.setFunctionBreakpointOptions("Service.run", {
+      condition: "ready",
+      hitCondition: "3",
+    }));
+    expect(JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.debugFunctionBreakpoints.v1.ws-1") ?? "[]",
+    )).toEqual([{ name: "Service.run", condition: "ready", hitCondition: "3" }]);
+
+    const emit = await startSession(result.current.startDebug, { supportsFunctionBreakpoints: true });
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.functionBreakpointRuntime["Service.run"]).toEqual({
+      status: "verified",
+      message: null,
+    }));
+    expect(functionBreakpointCalls()).toEqual([{
+      sessionId: "sess-1",
+      breakpoints: [{ name: "Service.run", condition: "ready", hitCondition: "3" }],
+    }]);
+    const commands = dapSendRequest.mock.calls.map((call) => call[1]);
+    expect(commands.indexOf("setFunctionBreakpoints")).toBeLessThan(
+      commands.indexOf("setExceptionBreakpoints"),
+    );
+    expect(dapSend).toHaveBeenCalledWith("sess-1", "configurationDone");
+
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "breakpoint",
+      message: {
+        body: {
+          reason: "changed",
+          breakpoint: {
+            id: 41,
+            verified: false,
+            reason: "failed",
+            message: "method unloaded",
+          },
+        },
+      },
+    }));
+    expect(result.current.functionBreakpointRuntime["Service.run"]).toEqual({
+      status: "failed",
+      message: "method unloaded",
+    });
+  });
+
+  it("normalizes function-breakpoint fields before storing or syncing them", () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const longName = "n".repeat(1100);
+    const longCondition = "c".repeat(4200);
+    const longHitCondition = "7".repeat(4200);
+
+    act(() => result.current.addFunctionBreakpoint(`  ${longName}  `));
+    const name = result.current.functionBreakpoints[0].name;
+    expect(name).toHaveLength(1024);
+    act(() => result.current.setFunctionBreakpointOptions(name, {
+      condition: `  ${longCondition}  `,
+      hitCondition: `  ${longHitCondition}  `,
+    }));
+
+    expect(result.current.functionBreakpoints[0].condition).toHaveLength(4096);
+    expect(result.current.functionBreakpoints[0].hitCondition).toHaveLength(4096);
+    act(() => result.current.setFunctionBreakpointOptions(name, { condition: "   " }));
+    expect(result.current.functionBreakpoints[0].condition).toBeUndefined();
+    expect(JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.debugFunctionBreakpoints.v1.ws-1") ?? "[]",
+    )).toEqual(result.current.functionBreakpoints);
+  });
+
+  it("ignores a stale function-breakpoint response after a newer edit", async () => {
+    const resolvers: ((body: unknown) => void)[] = [];
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "setFunctionBreakpoints") {
+        return new Promise((resolve) => resolvers.push(resolve));
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.addFunctionBreakpoint("Service.run"));
+    const emit = await startSession(result.current.startDebug, { supportsFunctionBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    await waitFor(() => expect(resolvers).toHaveLength(1));
+
+    act(() => result.current.setFunctionBreakpointOptions("Service.run", { condition: "ready" }));
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    await act(async () => {
+      resolvers[1]({ breakpoints: [{ id: 52, verified: true }] });
+      resolvers[0]({
+        breakpoints: [{ id: 51, verified: false, reason: "failed", message: "stale" }],
+      });
+      await Promise.resolve();
+    });
+    expect(result.current.functionBreakpointRuntime["Service.run"]).toEqual({
+      status: "verified",
+      message: null,
+    });
+  });
+
+  it("drops a function-breakpoint response that arrives after termination", async () => {
+    let resolveFunctionBreakpoints: ((body: unknown) => void) | null = null;
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "setFunctionBreakpoints") {
+        return new Promise((resolve) => { resolveFunctionBreakpoints = resolve; });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.addFunctionBreakpoint("Service.run"));
+    const emit = await startSession(result.current.startDebug, { supportsFunctionBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    await waitFor(() => expect(resolveFunctionBreakpoints).not.toBeNull());
+    expect(result.current.functionBreakpointRuntime["Service.run"]).toEqual({
+      status: "pending",
+      message: null,
+    });
+
+    await act(async () => result.current.terminate());
+    await waitFor(() => expect(result.current.state?.status).toBe("terminated"));
+    expect(result.current.functionBreakpointRuntime).toEqual({});
+    await act(async () => {
+      resolveFunctionBreakpoints?.({ breakpoints: [{ id: 61, verified: true }] });
+      await Promise.resolve();
+    });
+    expect(result.current.functionBreakpointRuntime).toEqual({});
+  });
+
+  it("keeps saved function breakpoints visible when the adapter is unsupported", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    act(() => result.current.addFunctionBreakpoint("Service.run"));
+    const emit = await startSession(result.current.startDebug);
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.functionBreakpointRuntime["Service.run"]).toEqual({
+      status: "failed",
+      message: "The selected debug adapter does not support function breakpoints",
+    }));
+    expect(functionBreakpointCalls()).toEqual([]);
+    expect(result.current.functionBreakpoints).toEqual([{ name: "Service.run" }]);
+  });
+
   it("surfaces a failed configuration step on the console instead of swallowing it", async () => {
     dapSendRequest.mockImplementation((_id: string, command: string) => {
       if (command === "setExceptionBreakpoints") return Promise.reject(new Error("adapter rejected filters"));
@@ -354,7 +521,7 @@ describe("useCodeDebugSession", () => {
     });
     dapStartSession.mockImplementation((_adapterId: string, config: Record<string, unknown>) => Promise.resolve({
       sessionId: String(config.sessionId),
-      capabilities: {},
+      capabilities: { supportsFunctionBreakpoints: true },
       request: "launch",
       arguments: config,
     }));
@@ -383,6 +550,16 @@ describe("useCodeDebugSession", () => {
     act(() => result.current.toggleBreakpoint("/repo/App.java", 12));
     await waitFor(() => expect(breakpointCalls()).toHaveLength(2));
     expect(breakpointCalls().map((call) => call.sessionId).sort()).toEqual(["sess-api", "sess-web"]);
+
+    act(() => result.current.addFunctionBreakpoint("Service.run"));
+    await waitFor(() => expect(functionBreakpointCalls()).toHaveLength(4));
+    expect(functionBreakpointCalls().slice(-2).map((call) => call.sessionId).sort()).toEqual([
+      "sess-api",
+      "sess-web",
+    ]);
+    expect(functionBreakpointCalls().slice(-2).every((call) => (
+      call.breakpoints[0]?.name === "Service.run"
+    ))).toBe(true);
 
     act(() => {
       handlers.get("sess-web")?.({

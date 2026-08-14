@@ -154,6 +154,17 @@
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
 - `[data-testid="debug-active-session"]` — interactive [optional] — F25.1.debug-active-session
+- `[data-testid="debug-function-breakpoints"]` — display — F25.1.debug-function-breakpoints
+- `[data-testid="debug-function-breakpoint-input"]` — interactive — F25.1.debug-function-breakpoint-input
+- `[data-testid="debug-function-breakpoint-add"]` — interactive — F25.1.debug-function-breakpoint-add
+- `[data-testid="debug-function-breakpoint-row"]` — display [optional] — F25.1.debug-function-breakpoint-row
+- `[data-testid^="debug-function-breakpoint-enabled-"]` — interactive [optional] — F25.1.debug-function-breakpoint-enabled
+- `[data-testid^="debug-function-breakpoint-edit-"]` — interactive [optional] — F25.1.debug-function-breakpoint-edit
+- `[data-testid^="debug-function-breakpoint-condition-"]` — interactive [optional] — F25.1.debug-function-breakpoint-condition
+- `[data-testid^="debug-function-breakpoint-hit-"]` — interactive [optional] — F25.1.debug-function-breakpoint-hit
+- `[data-testid^="debug-function-breakpoint-remove-"]` — interactive [optional] — F25.1.debug-function-breakpoint-remove
+- `[data-testid^="debug-function-breakpoint-binding-"]` — display [optional] — F25.1.debug-function-breakpoint-binding
+- `[data-testid="debug-function-breakpoint-unsupported"]` — display [optional] — F25.1.debug-function-breakpoint-unsupported
 - `[data-testid="workspace-build-run-tools-dialog"]` — display — F25.1.tools-dialog
 - `[data-testid="workspace-build-run-tools-close"]` — interactive — F25.1.tools-close
 - `[data-testid="workspace-build-run-tools-cancel"]` — interactive — F25.1.tools-cancel

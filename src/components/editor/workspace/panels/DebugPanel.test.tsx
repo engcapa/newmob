@@ -9,6 +9,8 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     state: null,
     breakpoints: {},
     breakpointRuntime: {},
+    functionBreakpoints: [],
+    functionBreakpointRuntime: {},
     capabilities: {},
     availableExceptionFilters: [],
     enabledExceptionFilters: [],
@@ -27,6 +29,9 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     toggleBreakpoint: vi.fn(),
     setBreakpointOptions: vi.fn(),
     removeBreakpoint: vi.fn(),
+    addFunctionBreakpoint: vi.fn(),
+    setFunctionBreakpointOptions: vi.fn(),
+    removeFunctionBreakpoint: vi.fn(),
     setExceptionFilters: vi.fn(),
     addWatchExpression: vi.fn(),
     removeWatchExpression: vi.fn(),
@@ -338,6 +343,59 @@ describe("DebugPanel", () => {
     expect(setBreakpointOptions).toHaveBeenCalledWith("/repo/A.java", 12, { enabled: false });
     fireEvent.click(screen.getByTestId("debug-breakpoint-remove-12"));
     expect(removeBreakpoint).toHaveBeenCalledWith("/repo/A.java", 12);
+  });
+
+  it("adds, edits, disables and removes a function breakpoint", () => {
+    const addFunctionBreakpoint = vi.fn();
+    const setFunctionBreakpointOptions = vi.fn();
+    const removeFunctionBreakpoint = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          functionBreakpoints: [{ name: "Service.run" }],
+          addFunctionBreakpoint,
+          setFunctionBreakpointOptions,
+          removeFunctionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByTestId("debug-function-breakpoint-input");
+    fireEvent.change(input, { target: { value: "Controller.handle" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(addFunctionBreakpoint).toHaveBeenCalledWith("Controller.handle");
+
+    fireEvent.click(screen.getByTestId("debug-function-breakpoint-enabled-0"));
+    expect(setFunctionBreakpointOptions).toHaveBeenCalledWith("Service.run", { enabled: false });
+    fireEvent.click(screen.getByTestId("debug-function-breakpoint-edit-0"));
+    const condition = screen.getByTestId("debug-function-breakpoint-condition-0");
+    fireEvent.change(condition, { target: { value: "ready" } });
+    fireEvent.keyDown(condition, { key: "Enter" });
+    expect(setFunctionBreakpointOptions).toHaveBeenCalledWith("Service.run", { condition: "ready" });
+    fireEvent.click(screen.getByTestId("debug-function-breakpoint-remove-0"));
+    expect(removeFunctionBreakpoint).toHaveBeenCalledWith("Service.run");
+  });
+
+  it("surfaces an adapter that cannot arm saved function breakpoints", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: { ...initialDebugState("s1"), status: "running" },
+          functionBreakpoints: [{ name: "Service.run" }],
+          functionBreakpointRuntime: {
+            "Service.run": { status: "failed", message: "unsupported" },
+          },
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    expect(screen.getByTestId("debug-function-breakpoint-unsupported")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-function-breakpoint-input")).toBeDisabled();
+    expect(screen.getByTestId("debug-function-breakpoint-binding-0")).toHaveTextContent("not bound");
   });
 
   it("edits a breakpoint's condition inline instead of through modal prompts", () => {

@@ -3,7 +3,9 @@ import {
   appendConsoleLine,
   breakpointVerificationMap,
   buildSetBreakpointsArgs,
+  buildSetFunctionBreakpointsArgs,
   currentLocation,
+  functionBreakpointVerificationMap,
   hoverExpressionAt,
   initialDebugState,
   inlineValueLabel,
@@ -12,9 +14,11 @@ import {
   parseEvaluate,
   parseExceptionInfo,
   parseSetBreakpointsResponse,
+  parseSetFunctionBreakpointsResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
+  planFunctionBreakpointSync,
   reconcileBreakpointLines,
   reduceDebugEvent,
   selectExceptionFilters,
@@ -70,6 +74,60 @@ describe("dapDebugModel", () => {
     const muted = planBreakpointSync(stored, { muted: true });
     expect(muted.sent).toEqual([]);
     expect(muted.sorted).toHaveLength(3);
+  });
+
+  it("plans and builds standard function breakpoints with conditions", () => {
+    const stored = [
+      { name: "Service.run", condition: " ready " },
+      { name: "Controller.handle", hitCondition: " 3 " },
+      { name: "Worker.skip", enabled: false },
+    ];
+    const plan = planFunctionBreakpointSync(stored);
+    expect(plan.sorted.map((breakpoint) => breakpoint.name)).toEqual([
+      "Controller.handle",
+      "Service.run",
+      "Worker.skip",
+    ]);
+    expect(buildSetFunctionBreakpointsArgs(plan)).toEqual({
+      breakpoints: [
+        { name: "Controller.handle", hitCondition: "3" },
+        { name: "Service.run", condition: "ready" },
+      ],
+    });
+    expect(planFunctionBreakpointSync(stored, { muted: true }).sent).toEqual([]);
+  });
+
+  it("parses function-breakpoint verification by request order", () => {
+    const plan = planFunctionBreakpointSync([
+      { name: "Service.run" },
+      { name: "Controller.handle" },
+    ]);
+    const bindings = parseSetFunctionBreakpointsResponse(plan, {
+      breakpoints: [
+        { id: 7, verified: true },
+        { id: 8, verified: false, reason: "failed", message: "method not found" },
+      ],
+    });
+    expect(bindings).toEqual([
+      {
+        id: 7,
+        verified: true,
+        name: "Controller.handle",
+        message: null,
+        reason: null,
+      },
+      {
+        id: 8,
+        verified: false,
+        name: "Service.run",
+        message: "method not found",
+        reason: "failed",
+      },
+    ]);
+    expect(functionBreakpointVerificationMap(plan, bindings)).toEqual({
+      "Controller.handle": { status: "verified", message: null },
+      "Service.run": { status: "failed", message: "method not found" },
+    });
   });
 
   it("inserts a run-to-cursor breakpoint in line order without storing it", () => {

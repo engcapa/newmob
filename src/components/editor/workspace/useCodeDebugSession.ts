@@ -13,16 +13,20 @@ import {
   appendConsoleLine,
   breakpointVerificationMap,
   buildSetBreakpointsArgs,
+  buildSetFunctionBreakpointsArgs,
   currentLocation,
+  functionBreakpointVerificationMap,
   initialDebugState,
   markResumed,
   parseBreakpointEvent,
   parseEvaluate,
   parseExceptionInfo,
   parseSetBreakpointsResponse,
+  parseSetFunctionBreakpointsResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
+  planFunctionBreakpointSync,
   reconcileBreakpointLines,
   reduceDebugEvent,
   selectExceptionFilters,
@@ -30,6 +34,7 @@ import {
   toAdapterSourcePath,
   type BreakpointRuntimeState,
   type DebugBreakpoint,
+  type DebugFunctionBreakpoint,
   type DebugSessionState,
   type DebugStackFrame,
   type DebugStepAction,
@@ -76,6 +81,10 @@ export interface CodeDebugSession {
   breakpoints: BreakpointMap;
   /** Adapter binding state per path → line → runtime status (session-scoped). */
   breakpointRuntime: Record<string, Record<number, BreakpointRuntimeState>>;
+  /** Persistent DAP function/method breakpoints, shared by compound children. */
+  functionBreakpoints: DebugFunctionBreakpoint[];
+  /** Function binding state for the selected adapter session. */
+  functionBreakpointRuntime: Record<string, BreakpointRuntimeState>;
   /** Adapter capabilities from `initialize` — gates optional UI (restartFrame, setVariable…). */
   capabilities: Record<string, unknown>;
   /** Exception-breakpoint filter ids the adapter advertised (D5). */
@@ -106,6 +115,9 @@ export interface CodeDebugSession {
   setBreakpointOptions: (path: string, line: number, options: Partial<DebugBreakpoint>) => void;
   /** Remove one breakpoint outright (breakpoints view). */
   removeBreakpoint: (path: string, line: number) => void;
+  addFunctionBreakpoint: (name: string) => void;
+  setFunctionBreakpointOptions: (name: string, options: Partial<DebugFunctionBreakpoint>) => void;
+  removeFunctionBreakpoint: (name: string) => void;
   setExceptionFilters: (ids: string[]) => void;
   addWatchExpression: (expr: string) => void;
   removeWatchExpression: (index: number) => void;
@@ -173,14 +185,16 @@ interface DebugSessionRecord {
   capabilities: Record<string, unknown>;
   availableFilters: { filter: string; label: string }[];
   breakpointRuntime: Record<string, Record<number, BreakpointRuntimeState>>;
+  functionBreakpointRuntime: Record<string, BreakpointRuntimeState>;
   frameVariables: Record<string, string>;
   initialized: boolean;
   launchAccepted: boolean;
   live: boolean;
   unlisten: UnlistenFn | null;
   stopEpoch: number;
-  bpIdIndex: Map<number, { path: string }>;
+  bpIdIndex: Map<number, { kind: "source"; path: string } | { kind: "function"; name: string }>;
   syncGeneration: Map<string, number>;
+  functionSyncGeneration: number;
   tempRunToCursor: { path: string } | null;
   abortScopeIds: string[];
   ready: Promise<void>;
@@ -222,6 +236,46 @@ function watchesKey(workspaceInstanceId: string): string {
   return `taomni.codeWorkspace.debugWatches.v1.${workspaceInstanceId}`;
 }
 
+function functionBreakpointsKey(workspaceInstanceId: string): string {
+  return `taomni.codeWorkspace.debugFunctionBreakpoints.v1.${workspaceInstanceId}`;
+}
+
+const MAX_FUNCTION_BREAKPOINTS = 256;
+const MAX_FUNCTION_BREAKPOINT_NAME_LENGTH = 1024;
+const MAX_FUNCTION_BREAKPOINT_EXPRESSION_LENGTH = 4096;
+
+function normalizeFunctionBreakpoint(value: unknown): DebugFunctionBreakpoint | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const name = typeof raw.name === "string"
+    ? raw.name.trim().slice(0, MAX_FUNCTION_BREAKPOINT_NAME_LENGTH)
+    : "";
+  if (!name) return null;
+  const normalizeExpression = (expression: unknown): string | undefined => {
+    if (typeof expression !== "string") return undefined;
+    return expression.trim().slice(0, MAX_FUNCTION_BREAKPOINT_EXPRESSION_LENGTH) || undefined;
+  };
+  return {
+    name,
+    condition: normalizeExpression(raw.condition),
+    hitCondition: normalizeExpression(raw.hitCondition),
+    enabled: typeof raw.enabled === "boolean" ? raw.enabled : undefined,
+  };
+}
+
+function normalizeFunctionBreakpoints(values: readonly unknown[]): DebugFunctionBreakpoint[] {
+  const normalized: DebugFunctionBreakpoint[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const breakpoint = normalizeFunctionBreakpoint(value);
+    if (!breakpoint || seen.has(breakpoint.name)) continue;
+    seen.add(breakpoint.name);
+    normalized.push(breakpoint);
+    if (normalized.length >= MAX_FUNCTION_BREAKPOINTS) break;
+  }
+  return normalized;
+}
+
 function readBreakpoints(workspaceInstanceId: string): BreakpointMap {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(breakpointsKey(workspaceInstanceId)) ?? "{}");
@@ -253,10 +307,27 @@ function readWatches(workspaceInstanceId: string): string[] {
     return [];
   }
 }
+
+function readFunctionBreakpoints(workspaceInstanceId: string): DebugFunctionBreakpoint[] {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(functionBreakpointsKey(workspaceInstanceId)) ?? "[]",
+    );
+    return Array.isArray(parsed) ? normalizeFunctionBreakpoints(parsed) : [];
+  } catch {
+    return [];
+  }
+}
 export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSession {
   const [state, setState] = useState<DebugSessionState | null>(null);
   const [breakpoints, setBreakpoints] = useState<BreakpointMap>(() => readBreakpoints(workspaceInstanceId));
   const [breakpointRuntime, setBreakpointRuntime] = useState<Record<string, Record<number, BreakpointRuntimeState>>>({});
+  const [functionBreakpoints, setFunctionBreakpoints] = useState<DebugFunctionBreakpoint[]>(
+    () => readFunctionBreakpoints(workspaceInstanceId),
+  );
+  const [functionBreakpointRuntime, setFunctionBreakpointRuntime] = useState<
+    Record<string, BreakpointRuntimeState>
+  >({});
   const [capabilities, setCapabilities] = useState<Record<string, unknown>>({});
   const [exceptionFilters, setExceptionFiltersState] = useState<string[]>([]);
   const [availableFilters, setAvailableFilters] = useState<{ filter: string; label: string }[]>([]);
@@ -273,6 +344,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const sessionIdRef = useRef<string | null>(null);
   const capabilitiesRef = useRef<Record<string, unknown>>({});
   const breakpointsRef = useRef(breakpoints);
+  const functionBreakpointsRef = useRef(functionBreakpoints);
   const mutedRef = useRef(breakpointsMuted);
   const exceptionFiltersRef = useRef(exceptionFilters);
   const stateRef = useRef<DebugSessionState | null>(null);
@@ -289,6 +361,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   /** Whether the adapter has emitted `initialized` for the current session. */
   const initializedRef = useRef(false);
   breakpointsRef.current = breakpoints;
+  functionBreakpointsRef.current = functionBreakpoints;
   mutedRef.current = breakpointsMuted;
   exceptionFiltersRef.current = exceptionFilters;
   stateRef.current = state;
@@ -323,6 +396,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setCapabilities(record?.capabilities ?? {});
     setAvailableFilters(record?.availableFilters ?? []);
     setBreakpointRuntime(record?.breakpointRuntime ?? {});
+    setFunctionBreakpointRuntime(record?.functionBreakpointRuntime ?? {});
     setFrameVariables(record?.frameVariables ?? {});
   }, []);
 
@@ -372,6 +446,14 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const persistBreakpoints = useCallback((next: BreakpointMap) => {
     try {
       window.localStorage.setItem(breakpointsKey(workspaceInstanceId), JSON.stringify(next));
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [workspaceInstanceId]);
+
+  const persistFunctionBreakpoints = useCallback((next: DebugFunctionBreakpoint[]) => {
+    try {
+      window.localStorage.setItem(functionBreakpointsKey(workspaceInstanceId), JSON.stringify(next));
     } catch {
       // Ignore storage failures.
     }
@@ -517,7 +599,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       if (!current || current.syncGeneration.get(path) !== generation) return;
       const bindings = parseSetBreakpointsResponse(plan, body);
       for (const binding of bindings) {
-        if (binding.id != null) current.bpIdIndex.set(binding.id, { path });
+        if (binding.id != null) current.bpIdIndex.set(binding.id, { kind: "source", path });
       }
       current.breakpointRuntime = {
         ...current.breakpointRuntime,
@@ -539,6 +621,84 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       }
     }));
   }, [persistBreakpoints, updateSessionState]);
+
+  /** Push the workspace function/method breakpoints to every eligible session. */
+  const syncFunctionBreakpoints = useCallback(async (
+    options: {
+      list?: DebugFunctionBreakpoint[];
+      sessionIds?: readonly string[];
+    } = {},
+  ) => {
+    const stored = options.list ?? functionBreakpointsRef.current;
+    const plan = planFunctionBreakpointSync(stored, { muted: mutedRef.current });
+    const requestedIds = options.sessionIds ?? Array.from(sessionsRef.current.values())
+      .filter((record) => record.live && record.initialized)
+      .map((record) => record.id);
+    await Promise.all(requestedIds.map(async (id) => {
+      const record = sessionsRef.current.get(id);
+      if (!record?.live || !record.initialized) return;
+      const generation = record.functionSyncGeneration + 1;
+      record.functionSyncGeneration = generation;
+      for (const [breakpointId, entry] of record.bpIdIndex) {
+        if (entry.kind === "function") record.bpIdIndex.delete(breakpointId);
+      }
+
+      const publishRuntime = (runtime: Record<string, BreakpointRuntimeState>) => {
+        const current = sessionsRef.current.get(id);
+        if (!current?.live || current.functionSyncGeneration !== generation) return;
+        current.functionBreakpointRuntime = runtime;
+        if (activeSessionIdRef.current === id && mountedRef.current) {
+          setFunctionBreakpointRuntime(runtime);
+        }
+      };
+
+      if (record.capabilities.supportsFunctionBreakpoints !== true) {
+        publishRuntime(Object.fromEntries(plan.sent.map((breakpoint) => [
+          breakpoint.name,
+          {
+            status: "failed" as const,
+            message: "The selected debug adapter does not support function breakpoints",
+          },
+        ])));
+        return;
+      }
+
+      publishRuntime(Object.fromEntries(plan.sent.map((breakpoint) => [
+        breakpoint.name,
+        { status: "pending" as const, message: null },
+      ])));
+
+      const body = await dapSendRequest(
+        id,
+        "setFunctionBreakpoints",
+        buildSetFunctionBreakpointsArgs(plan),
+      ).catch((error) => {
+        const current = sessionsRef.current.get(id);
+        if (!current?.live || current.functionSyncGeneration !== generation) return null;
+        const message = errorText(error);
+        updateSessionState(id, (current) => appendConsoleLine(
+          current,
+          "stderr",
+          `setFunctionBreakpoints failed: ${message}\n`,
+        ));
+        publishRuntime(Object.fromEntries(plan.sent.map((breakpoint) => [
+          breakpoint.name,
+          { status: "failed" as const, message },
+        ])));
+        return null;
+      });
+      if (body == null || !mountedRef.current) return;
+      const current = sessionsRef.current.get(id);
+      if (!current?.live || current.functionSyncGeneration !== generation) return;
+      const bindings = parseSetFunctionBreakpointsResponse(plan, body);
+      for (const binding of bindings) {
+        if (binding.id != null) {
+          current.bpIdIndex.set(binding.id, { kind: "function", name: binding.name });
+        }
+      }
+      publishRuntime(functionBreakpointVerificationMap(plan, bindings));
+    }));
+  }, [updateSessionState]);
 
   /**
    * Single mutation path for the breakpoint map. Updates the ref synchronously
@@ -659,6 +819,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
             await syncBreakpointsForPath(path, { sessionIds: [id] });
           }
         }
+        await syncFunctionBreakpoints({ sessionIds: [id] });
         const filters = selectExceptionFilters(record.capabilities, exceptionFiltersRef.current);
         // Configuration-step failures used to be swallowed, leaving the session
         // stuck "running" with no clue why. Surface them on the console so the
@@ -692,22 +853,35 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     } else if (payload.event === "breakpoint") {
       const parsed = parseBreakpointEvent(payload.message);
       const entry = parsed?.id != null ? record.bpIdIndex.get(parsed.id) : undefined;
-      if (parsed && parsed.line != null && entry) {
-        const { path } = entry;
-        const { line, verified } = parsed;
+      if (parsed && entry) {
+        const { verified } = parsed;
         const runtime: BreakpointRuntimeState = verified
           ? { status: "verified", message: null }
           : { status: parsed.bindReason === "failed" ? "failed" : "pending", message: parsed.message };
-        record.breakpointRuntime = {
-          ...record.breakpointRuntime,
-          [path]: { ...(record.breakpointRuntime[path] ?? {}), [line]: runtime },
-        };
-        if (activeSessionIdRef.current === record.id) setBreakpointRuntime(record.breakpointRuntime);
+        if (entry.kind === "source" && parsed.line != null) {
+          record.breakpointRuntime = {
+            ...record.breakpointRuntime,
+            [entry.path]: {
+              ...(record.breakpointRuntime[entry.path] ?? {}),
+              [parsed.line]: runtime,
+            },
+          };
+          if (activeSessionIdRef.current === record.id) setBreakpointRuntime(record.breakpointRuntime);
+        } else if (entry.kind === "function") {
+          record.functionBreakpointRuntime = {
+            ...record.functionBreakpointRuntime,
+            [entry.name]: runtime,
+          };
+          if (activeSessionIdRef.current === record.id) {
+            setFunctionBreakpointRuntime(record.functionBreakpointRuntime);
+          }
+        }
       }
     } else if (payload.event === "terminated" || payload.event === "exited") {
       // Free the backend session (drops the adapter transport / child); the final
       // state stays visible in the panel until the next start.
       record.live = false;
+      record.functionSyncGeneration += 1;
       if (!record.readySettled) {
         record.readySettled = true;
         record.readyReject(new Error(`${record.label} terminated before the debug adapter became ready`));
@@ -717,6 +891,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       record.bpIdIndex.clear();
       record.tempRunToCursor = null;
       record.breakpointRuntime = {};
+      record.functionBreakpointRuntime = {};
       record.frameVariables = {};
       void dapTerminate(record.id).catch(() => {});
       if (activeSessionIdRef.current === record.id) {
@@ -728,7 +903,14 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         publishSessionList();
       }
     }
-  }, [publishActiveSession, publishSessionList, refreshStoppedContext, syncBreakpointsForPath, updateSessionState]);
+  }, [
+    publishActiveSession,
+    publishSessionList,
+    refreshStoppedContext,
+    syncBreakpointsForPath,
+    syncFunctionBreakpoints,
+    updateSessionState,
+  ]);
 
   const terminateSessions = useCallback(async (scopeIds?: ReadonlySet<string>) => {
     const records = Array.from(sessionsRef.current.values()).filter((record) => (
@@ -739,6 +921,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       record.unlisten = null;
       const live = record.live;
       record.live = false;
+      record.functionSyncGeneration += 1;
       record.state = {
         ...record.state,
         status: "terminated",
@@ -749,6 +932,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         exceptionInfo: null,
       };
       record.breakpointRuntime = {};
+      record.functionBreakpointRuntime = {};
       record.frameVariables = {};
       record.bpIdIndex.clear();
       record.tempRunToCursor = null;
@@ -831,6 +1015,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       capabilities: result.capabilities,
       availableFilters: filters,
       breakpointRuntime: {},
+      functionBreakpointRuntime: {},
       frameVariables: {},
       initialized: false,
       launchAccepted: false,
@@ -839,6 +1024,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       stopEpoch: 0,
       bpIdIndex: new Map(),
       syncGeneration: new Map(),
+      functionSyncGeneration: 0,
       tempRunToCursor: null,
       abortScopeIds,
       ready,
@@ -856,6 +1042,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     } catch (error) {
       sessionsRef.current.delete(record.id);
       record.live = false;
+      record.functionSyncGeneration += 1;
       await dapTerminate(record.id).catch(() => {});
       publishSessionList();
       throw error;
@@ -880,6 +1067,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       if (!launched?.live) return;
       const message = error instanceof Error ? error.message : String(error);
       launched.live = false;
+      launched.functionSyncGeneration += 1;
       if (!launched.readySettled) {
         launched.readySettled = true;
         launched.readyReject(error);
@@ -888,6 +1076,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       launched.unlisten = null;
       void dapTerminate(launchedSession).catch(() => {});
       launched.breakpointRuntime = {};
+      launched.functionBreakpointRuntime = {};
       launched.frameVariables = {};
       updateSessionState(launchedSession, (prev) => appendConsoleLine(
         { ...prev, status: "terminated" },
@@ -1020,6 +1209,44 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     ));
   }, [mutateBreakpoints]);
 
+  const mutateFunctionBreakpoints = useCallback((
+    updater: (current: DebugFunctionBreakpoint[]) => DebugFunctionBreakpoint[],
+  ) => {
+    const current = functionBreakpointsRef.current;
+    const updated = updater(current);
+    if (updated === current) return;
+    const next = normalizeFunctionBreakpoints(updated);
+    functionBreakpointsRef.current = next;
+    setFunctionBreakpoints(next);
+    persistFunctionBreakpoints(next);
+    void syncFunctionBreakpoints({ list: next });
+  }, [persistFunctionBreakpoints, syncFunctionBreakpoints]);
+
+  const addFunctionBreakpoint = useCallback((rawName: string) => {
+    const name = rawName.trim().slice(0, MAX_FUNCTION_BREAKPOINT_NAME_LENGTH);
+    if (!name) return;
+    mutateFunctionBreakpoints((current) => (
+      current.some((breakpoint) => breakpoint.name === name)
+        ? current
+        : [...current, { name }]
+    ));
+  }, [mutateFunctionBreakpoints]);
+
+  const setFunctionBreakpointOptions = useCallback((
+    name: string,
+    options: Partial<DebugFunctionBreakpoint>,
+  ) => {
+    mutateFunctionBreakpoints((current) => current.map((breakpoint) => (
+      breakpoint.name === name
+        ? { ...breakpoint, ...options, name: breakpoint.name }
+        : breakpoint
+    )));
+  }, [mutateFunctionBreakpoints]);
+
+  const removeFunctionBreakpoint = useCallback((name: string) => {
+    mutateFunctionBreakpoints((current) => current.filter((breakpoint) => breakpoint.name !== name));
+  }, [mutateFunctionBreakpoints]);
+
   /** IDEA "Mute Breakpoints": re-push every file with the new suppression. */
   const setBreakpointsMuted = useCallback((muted: boolean) => {
     mutedRef.current = muted;
@@ -1027,7 +1254,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     for (const path of Object.keys(breakpointsRef.current)) {
       void syncBreakpointsForPath(path);
     }
-  }, [syncBreakpointsForPath]);
+    void syncFunctionBreakpoints();
+  }, [syncBreakpointsForPath, syncFunctionBreakpoints]);
 
   const removeAllBreakpoints = useCallback(() => {
     const paths = Object.keys(breakpointsRef.current);
@@ -1035,7 +1263,16 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setBreakpoints({});
     persistBreakpoints({});
     for (const path of paths) void syncBreakpointsForPath(path, { list: [] });
-  }, [persistBreakpoints, syncBreakpointsForPath]);
+    functionBreakpointsRef.current = [];
+    setFunctionBreakpoints([]);
+    persistFunctionBreakpoints([]);
+    void syncFunctionBreakpoints({ list: [] });
+  }, [
+    persistBreakpoints,
+    persistFunctionBreakpoints,
+    syncBreakpointsForPath,
+    syncFunctionBreakpoints,
+  ]);
 
   const setExceptionFilters = useCallback((ids: string[]) => {
     setExceptionFiltersState(ids);
@@ -1263,6 +1500,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     state,
     breakpoints,
     breakpointRuntime,
+    functionBreakpoints,
+    functionBreakpointRuntime,
     capabilities,
     availableExceptionFilters: availableFilters,
     enabledExceptionFilters: exceptionFilters,
@@ -1281,6 +1520,9 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     toggleBreakpoint,
     setBreakpointOptions,
     removeBreakpoint,
+    addFunctionBreakpoint,
+    setFunctionBreakpointOptions,
+    removeFunctionBreakpoint,
     setExceptionFilters,
     addWatchExpression,
     removeWatchExpression,

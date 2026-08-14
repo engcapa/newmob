@@ -8,7 +8,7 @@ covers: [F25.1, F25.2]
 tags: [auto-generated, smoke, needs-review, code-workspace]
 modes: [browser]
 fixtures: [reset_db]
-timeout_sec: 45
+timeout_sec: 60
 steps:
   - open: ${cfg.app.base_url}
   - wait_for: '[data-testid="welcome-panel"]'
@@ -81,4 +81,19 @@ steps:
   - assert_visible: '[data-testid="analysis-data-flow"]'
   - click: '[data-testid="code-workspace-bottom-tab-debug"]'
   - assert_visible: '[data-testid="code-workspace-debug-panel"]'
+  - assert_visible: '[data-testid="debug-function-breakpoints"]'
+  - fill: { selector: '[data-testid="debug-function-breakpoint-input"]', value: "Service.run" }
+  - click: '[data-testid="debug-function-breakpoint-add"]'
+  - assert_visible: '[data-testid="debug-function-breakpoint-row"][data-function-name="Service.run"]'
+  - set_check: { selector: '[data-testid^="debug-function-breakpoint-enabled-"]', checked: false }
+  - set_check: { selector: '[data-testid^="debug-function-breakpoint-enabled-"]', checked: true }
+  - click: '[data-testid^="debug-function-breakpoint-edit-"]'
+  - fill: { selector: '[data-testid^="debug-function-breakpoint-condition-"]', value: "ready" }
+  - press: { selector: '[data-testid^="debug-function-breakpoint-condition-"]', key: "Enter" }
+  - fill: { selector: '[data-testid^="debug-function-breakpoint-hit-"]', value: "3" }
+  - press: { selector: '[data-testid^="debug-function-breakpoint-hit-"]', key: "Enter" }
+  - assert_text: { selector: '[data-testid="debug-function-breakpoint-row"]', contains: "if ready" }
+  - assert_text: { selector: '[data-testid="debug-function-breakpoint-row"]', contains: "hit 3" }
+  - click: '[data-testid^="debug-function-breakpoint-remove-"]'
+  - assert_count: { selector: '[data-testid="debug-function-breakpoint-row"]', equal: 0 }
   - screenshot: auto-F25-1-multilanguage-execution-controls.png

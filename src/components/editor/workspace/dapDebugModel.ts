@@ -23,6 +23,15 @@ export interface DebugBreakpoint {
   enabled?: boolean;
 }
 
+/** A DAP function/method breakpoint, independent of any source path. */
+export interface DebugFunctionBreakpoint {
+  name: string;
+  condition?: string;
+  hitCondition?: string;
+  /** Undefined means enabled, matching source-breakpoint persistence. */
+  enabled?: boolean;
+}
+
 /** True unless the breakpoint was explicitly disabled. */
 export function isBreakpointEnabled(bp: DebugBreakpoint): boolean {
   return bp.enabled !== false;
@@ -218,6 +227,37 @@ export function planBreakpointSync(
   return { sorted, sent, indexes };
 }
 
+export interface FunctionBreakpointSyncPlan {
+  /** Full persisted set, sorted deterministically by function name. */
+  sorted: DebugFunctionBreakpoint[];
+  /** Enabled entries sent to an adapter that supports function breakpoints. */
+  sent: DebugFunctionBreakpoint[];
+}
+
+/** Decide which function breakpoints are armed for one adapter session. */
+export function planFunctionBreakpointSync(
+  list: DebugFunctionBreakpoint[],
+  options: { muted?: boolean } = {},
+): FunctionBreakpointSyncPlan {
+  const sorted = list.slice().sort((left, right) => left.name.localeCompare(right.name));
+  return {
+    sorted,
+    sent: options.muted ? [] : sorted.filter((breakpoint) => breakpoint.enabled !== false),
+  };
+}
+
+/** Build standard DAP `setFunctionBreakpoints` request arguments. */
+export function buildSetFunctionBreakpointsArgs(plan: FunctionBreakpointSyncPlan) {
+  return {
+    breakpoints: plan.sent.map((breakpoint) => {
+      const entry: Record<string, unknown> = { name: breakpoint.name };
+      if (breakpoint.condition?.trim()) entry.condition = breakpoint.condition.trim();
+      if (breakpoint.hitCondition?.trim()) entry.hitCondition = breakpoint.hitCondition.trim();
+      return entry;
+    }),
+  };
+}
+
 /**
  * Build DAP `setBreakpoints` arguments for one source file from a sync plan.
  * The response's `breakpoints` array corresponds 1:1, in order, to `plan.sent`
@@ -248,6 +288,15 @@ export interface BreakpointBinding {
   /** DAP `message`: why a breakpoint could not be verified (shown to the user). */
   message?: string | null;
   /** DAP `reason`: `"pending"` (may verify later) or `"failed"` (needs action). */
+  reason?: "pending" | "failed" | null;
+}
+
+/** Positional binding returned by `setFunctionBreakpoints`. */
+export interface FunctionBreakpointBinding {
+  id: number | null;
+  verified: boolean;
+  name: string;
+  message?: string | null;
   reason?: "pending" | "failed" | null;
 }
 
@@ -286,14 +335,50 @@ export function parseSetBreakpointsResponse(
   });
 }
 
+/** Parse the positional response to `setFunctionBreakpoints`. */
+export function parseSetFunctionBreakpointsResponse(
+  plan: FunctionBreakpointSyncPlan,
+  body: unknown,
+): FunctionBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((breakpoint, index) => {
+    const rec = asRecord(list[index]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      name: breakpoint.name,
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+    };
+  });
+}
+
 /** Map a raw binding's `verified`/`reason` to a display runtime status. */
-export function bindingRuntimeStatus(binding: BreakpointBinding): BreakpointRuntimeState {
+export function bindingRuntimeStatus(
+  binding: Pick<BreakpointBinding, "verified" | "message" | "reason">,
+): BreakpointRuntimeState {
   if (binding.verified) return { status: "verified", message: null };
   // Unverified: `failed` means the adapter gave up; anything else (incl. an
   // explicit `pending`, or no reason yet) is treated as pending so the gutter
   // shows "not bound yet" rather than a hard failure.
   const status = binding.reason === "failed" ? "failed" : "pending";
   return { status, message: binding.message ?? null };
+}
+
+/** Verification state per persisted function name for the active session. */
+export function functionBreakpointVerificationMap(
+  plan: FunctionBreakpointSyncPlan,
+  bindings: FunctionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  plan.sent.forEach((breakpoint, index) => {
+    const binding = bindings[index];
+    out[breakpoint.name] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
 }
 
 /**
