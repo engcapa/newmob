@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DebugPanel } from "./DebugPanel";
 import type { CodeDebugSession } from "../useCodeDebugSession";
@@ -11,6 +11,8 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     breakpointRuntime: {},
     functionBreakpoints: [],
     functionBreakpointRuntime: {},
+    dataBreakpoints: [],
+    dataBreakpointRuntime: {},
     capabilities: {},
     availableExceptionFilters: [],
     enabledExceptionFilters: [],
@@ -32,6 +34,9 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     addFunctionBreakpoint: vi.fn(),
     setFunctionBreakpointOptions: vi.fn(),
     removeFunctionBreakpoint: vi.fn(),
+    addDataBreakpoint: vi.fn().mockResolvedValue({ added: true, message: "Watching value" }),
+    setDataBreakpointOptions: vi.fn(),
+    removeDataBreakpoint: vi.fn(),
     setExceptionFilters: vi.fn(),
     addWatchExpression: vi.fn(),
     removeWatchExpression: vi.fn(),
@@ -396,6 +401,94 @@ describe("DebugPanel", () => {
     expect(screen.getByTestId("debug-function-breakpoint-unsupported")).toBeInTheDocument();
     expect(screen.getByTestId("debug-function-breakpoint-input")).toBeDisabled();
     expect(screen.getByTestId("debug-function-breakpoint-binding-0")).toHaveTextContent("not bound");
+  });
+
+  it("creates a data breakpoint from a stopped variable", async () => {
+    const addDataBreakpoint = vi.fn().mockResolvedValue({
+      added: true,
+      message: "Watching Service.count",
+    });
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: { supportsDataBreakpoints: true },
+          addDataBreakpoint,
+          fetchScopes: vi.fn().mockResolvedValue({
+            scopes: [{ name: "Locals", variablesReference: 2 }],
+          }),
+          fetchVariables: vi.fn().mockResolvedValue({
+            variables: [{ name: "count", value: "3", variablesReference: 0 }],
+          }),
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    const action = await screen.findByTestId("debug-variable-data-breakpoint");
+    fireEvent.click(action);
+    await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith({
+      name: "count",
+      variablesReference: 2,
+      frameId: undefined,
+    }));
+    expect(await screen.findByTestId("debug-data-breakpoint-notice")).toHaveTextContent(
+      "Watching Service.count",
+    );
+  });
+
+  it("edits, disables and removes a data watchpoint", () => {
+    const setDataBreakpointOptions = vi.fn();
+    const removeDataBreakpoint = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          dataBreakpoints: [{
+            dataId: "field:Service.count",
+            description: "Service.count",
+            adapterId: "java",
+            accessTypes: ["read", "write"],
+            accessType: "write",
+            canPersist: true,
+          }],
+          setDataBreakpointOptions,
+          removeDataBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-enabled-0"));
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { enabled: false },
+    );
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-access-0"), {
+      target: { value: "read" },
+    });
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { accessType: "read" },
+    );
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-edit-0"));
+    const condition = screen.getByTestId("debug-data-breakpoint-condition-0");
+    fireEvent.change(condition, { target: { value: "ready" } });
+    fireEvent.keyDown(condition, { key: "Enter" });
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { condition: "ready" },
+    );
+    const hit = screen.getByTestId("debug-data-breakpoint-hit-0");
+    fireEvent.change(hit, { target: { value: "4" } });
+    fireEvent.keyDown(hit, { key: "Enter" });
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { hitCondition: "4" },
+    );
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-remove-0"));
+    expect(removeDataBreakpoint).toHaveBeenCalledWith(expect.any(String));
   });
 
   it("edits a breakpoint's condition inline instead of through modal prompts", () => {

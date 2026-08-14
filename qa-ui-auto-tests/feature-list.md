@@ -4996,6 +4996,57 @@ controls:
     selector: '[data-testid="debug-function-breakpoint-unsupported"]'
     kind: display
     optional: true       # requires a live adapter without function-breakpoint support
+  - id: debug-data-breakpoints
+    selector: '[data-testid="debug-data-breakpoints"]'
+    kind: display
+  - id: debug-data-breakpoint-row
+    selector: '[data-testid="debug-data-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered after an adapter has resolved a data breakpoint
+  - id: debug-data-breakpoint-enabled
+    selector: '[data-testid^="debug-data-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each resolved data breakpoint
+  - id: debug-data-breakpoint-access
+    selector: '[data-testid^="debug-data-breakpoint-access-"]'
+    kind: interactive
+    optional: true       # requires adapter-advertised access modes
+  - id: debug-data-breakpoint-edit
+    selector: '[data-testid^="debug-data-breakpoint-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each resolved data breakpoint
+  - id: debug-data-breakpoint-condition
+    selector: '[data-testid^="debug-data-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # rendered while editing a resolved data breakpoint
+  - id: debug-data-breakpoint-hit
+    selector: '[data-testid^="debug-data-breakpoint-hit-"]'
+    kind: interactive
+    optional: true       # rendered while editing a resolved data breakpoint
+  - id: debug-data-breakpoint-remove
+    selector: '[data-testid^="debug-data-breakpoint-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each resolved data breakpoint
+  - id: debug-data-breakpoint-binding
+    selector: '[data-testid^="debug-data-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live adapter with a pending or failed binding
+  - id: debug-data-breakpoint-scope
+    selector: '[data-testid^="debug-data-breakpoint-scope-"]'
+    kind: display
+    optional: true       # rendered for each adapter- or session-scoped data id
+  - id: debug-data-breakpoint-unsupported
+    selector: '[data-testid="debug-data-breakpoint-unsupported"]'
+    kind: display
+    optional: true       # requires saved data ids and an unsupported live adapter
+  - id: debug-variable-data-breakpoint
+    selector: '[data-testid="debug-variable-data-breakpoint"]'
+    kind: interactive
+    optional: true       # requires a supported adapter stopped on a variable or watch expression
+  - id: debug-data-breakpoint-notice
+    selector: '[data-testid="debug-data-breakpoint-notice"]'
+    kind: display
+    optional: true       # rendered after live adapter discovery succeeds or fails
   - id: tools-dialog
     selector: '[data-testid="workspace-build-run-tools-dialog"]'
     kind: display

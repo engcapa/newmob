@@ -16,6 +16,7 @@ vi.mock("../../../lib/editor/dap", () => ({
 }));
 
 const { useCodeDebugSession } = await import("./useCodeDebugSession");
+const { dataBreakpointKey } = await import("./dapDebugModel");
 
 /** `setBreakpoints` payloads sent to the adapter, in call order. */
 function breakpointCalls(): { sessionId: string; path: string; lines: number[] }[] {
@@ -37,6 +38,20 @@ function functionBreakpointCalls(): {
       sessionId: String(call[0]),
       breakpoints: (call[2] as {
         breakpoints: { name: string; condition?: string; hitCondition?: string }[];
+      }).breakpoints,
+    }));
+}
+
+function dataBreakpointCalls(): {
+  sessionId: string;
+  breakpoints: { dataId: string; accessType?: string; condition?: string; hitCondition?: string }[];
+}[] {
+  return dapSendRequest.mock.calls
+    .filter((call) => call[1] === "setDataBreakpoints")
+    .map((call) => ({
+      sessionId: String(call[0]),
+      breakpoints: (call[2] as {
+        breakpoints: { dataId: string; accessType?: string; condition?: string; hitCondition?: string }[];
       }).breakpoints,
     }));
 }
@@ -366,6 +381,309 @@ describe("useCodeDebugSession", () => {
     }));
     expect(functionBreakpointCalls()).toEqual([]);
     expect(result.current.functionBreakpoints).toEqual([{ name: "Service.run" }]);
+  });
+
+  it("restores persisted data breakpoints before configurationDone", async () => {
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.debugDataBreakpoints.v1.ws-1",
+      JSON.stringify([{
+        dataId: "field:Service.count",
+        description: "Service.count",
+        adapterId: "java",
+        accessTypes: ["write"],
+        accessType: "write",
+        condition: "ready",
+        canPersist: true,
+      }]),
+    );
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "setDataBreakpoints") {
+        return Promise.resolve({ breakpoints: [{ id: 80, verified: true }] });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    expect(result.current.dataBreakpoints).toHaveLength(1);
+
+    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+
+    await waitFor(() => expect(dapSend).toHaveBeenCalledWith("sess-1", "configurationDone"));
+    expect(dataBreakpointCalls()).toEqual([{
+      sessionId: "sess-1",
+      breakpoints: [{
+        dataId: "field:Service.count",
+        accessType: "write",
+        condition: "ready",
+      }],
+    }]);
+    const setDataIndex = dapSendRequest.mock.calls.findIndex((call) => call[1] === "setDataBreakpoints");
+    const configurationDoneIndex = dapSend.mock.calls.findIndex((call) => call[1] === "configurationDone");
+    expect(dapSendRequest.mock.invocationCallOrder[setDataIndex]).toBeLessThan(
+      dapSend.mock.invocationCallOrder[configurationDoneIndex],
+    );
+  });
+
+  it("discovers, persists, arms, edits and removes a data breakpoint", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "dataBreakpointInfo") {
+        return Promise.resolve({
+          dataId: "field:Service.count",
+          description: "Service.count",
+          accessTypes: ["read", "write"],
+          canPersist: true,
+        });
+      }
+      if (command === "setDataBreakpoints") {
+        const args = dapSendRequest.mock.calls.at(-1)?.[2] as { breakpoints: unknown[] };
+        return Promise.resolve({
+          breakpoints: args.breakpoints.map((_entry, index) => ({ id: 81 + index, verified: true })),
+        });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(dataBreakpointCalls()).toHaveLength(1));
+    expect(dataBreakpointCalls()[0].breakpoints).toEqual([]);
+
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "stopped",
+      message: { body: { threadId: 1, reason: "breakpoint" } },
+    }));
+    await waitFor(() => expect(result.current.state?.status).toBe("stopped"));
+    let addResult: { added: boolean; message: string } | undefined;
+    await act(async () => {
+      addResult = await result.current.addDataBreakpoint({ name: "count", variablesReference: 2, frameId: 10 });
+    });
+    expect(addResult?.added).toBe(true);
+    await waitFor(() => expect(result.current.dataBreakpoints).toHaveLength(1));
+    const breakpoint = result.current.dataBreakpoints[0];
+    const key = dataBreakpointKey(breakpoint);
+    expect(breakpoint.canPersist).toBe(true);
+    expect(JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.debugDataBreakpoints.v1.ws-1") ?? "[]",
+    )).toEqual(result.current.dataBreakpoints);
+    expect(dapSendRequest.mock.calls.some((call) => (
+      call[1] === "dataBreakpointInfo"
+      && (call[2] as { name: string; variablesReference?: number }).name === "count"
+      && (call[2] as { variablesReference?: number }).variablesReference === 2
+      && !(call[2] as { frameId?: number }).frameId
+    ))).toBe(true);
+    await waitFor(() => expect(result.current.dataBreakpointRuntime[key]).toEqual({
+      status: "verified",
+      message: null,
+    }));
+
+    act(() => result.current.setDataBreakpointOptions(key, {
+      accessType: "read",
+      condition: "ready",
+      hitCondition: "2",
+    }));
+    await waitFor(() => expect(dataBreakpointCalls().at(-1)?.breakpoints).toEqual([{
+      dataId: "field:Service.count",
+      accessType: "read",
+      condition: "ready",
+      hitCondition: "2",
+    }]));
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "breakpoint",
+      message: {
+        body: {
+          breakpoint: { id: 81, verified: false, reason: "failed", message: "field unloaded" },
+        },
+      },
+    }));
+    expect(result.current.dataBreakpointRuntime[key]).toEqual({
+      status: "failed",
+      message: "field unloaded",
+    });
+    act(() => result.current.removeDataBreakpoint(key));
+    await waitFor(() => expect(result.current.dataBreakpoints).toEqual([]));
+    expect(dataBreakpointCalls().at(-1)?.breakpoints).toEqual([]);
+  });
+
+  it("rejects a data breakpoint when execution resumes during discovery", async () => {
+    let resolveInfo: ((body: unknown) => void) | null = null;
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "dataBreakpointInfo") {
+        return new Promise((resolve) => { resolveInfo = resolve; });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "stopped",
+      message: { body: { threadId: 1, reason: "breakpoint" } },
+    }));
+    await waitFor(() => expect(result.current.state?.status).toBe("stopped"));
+
+    let pending!: Promise<{ added: boolean; message: string }>;
+    act(() => {
+      pending = result.current.addDataBreakpoint({ name: "count", frameId: 10 });
+    });
+    await waitFor(() => expect(resolveInfo).not.toBeNull());
+    act(() => emit({ sessionId: "sess-1", event: "continued", message: {} }));
+    expect(result.current.state?.status).toBe("running");
+
+    let addResult: { added: boolean; message: string } | undefined;
+    await act(async () => {
+      resolveInfo?.({
+        dataId: "frame-local:count",
+        description: "count",
+        canPersist: false,
+      });
+      addResult = await pending;
+    });
+    expect(addResult).toEqual({
+      added: false,
+      message: "Execution resumed before the data breakpoint was resolved",
+    });
+    expect(result.current.dataBreakpoints).toEqual([]);
+  });
+
+  it("ignores a stale data-breakpoint response after a newer edit", async () => {
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.debugDataBreakpoints.v1.ws-1",
+      JSON.stringify([{
+        dataId: "field:Service.count",
+        description: "Service.count",
+        adapterId: "java",
+        accessTypes: ["read", "write"],
+        accessType: "write",
+        canPersist: true,
+      }]),
+    );
+    const resolvers: ((body: unknown) => void)[] = [];
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "setDataBreakpoints") {
+        return new Promise((resolve) => resolvers.push(resolve));
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    await waitFor(() => expect(resolvers).toHaveLength(1));
+    const key = dataBreakpointKey(result.current.dataBreakpoints[0]);
+
+    act(() => result.current.setDataBreakpointOptions(key, { condition: "ready" }));
+    await waitFor(() => expect(resolvers).toHaveLength(2));
+    await act(async () => {
+      resolvers[1]({ breakpoints: [{ id: 102, verified: true }] });
+      resolvers[0]({
+        breakpoints: [{ id: 101, verified: false, reason: "failed", message: "stale" }],
+      });
+      await Promise.resolve();
+    });
+    expect(result.current.dataBreakpointRuntime[key]).toEqual({
+      status: "verified",
+      message: null,
+    });
+  });
+
+  it("drops a data-breakpoint response that arrives after termination", async () => {
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.debugDataBreakpoints.v1.ws-1",
+      JSON.stringify([{
+        dataId: "field:Service.count",
+        description: "Service.count",
+        adapterId: "java",
+        accessTypes: ["write"],
+        accessType: "write",
+        canPersist: true,
+      }]),
+    );
+    let resolveDataBreakpoints: ((body: unknown) => void) | null = null;
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "setDataBreakpoints") {
+        return new Promise((resolve) => { resolveDataBreakpoints = resolve; });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    await waitFor(() => expect(resolveDataBreakpoints).not.toBeNull());
+    expect(Object.values(result.current.dataBreakpointRuntime)).toEqual([{
+      status: "pending",
+      message: null,
+    }]);
+
+    await act(async () => result.current.terminate());
+    await waitFor(() => expect(result.current.state?.status).toBe("terminated"));
+    expect(result.current.dataBreakpointRuntime).toEqual({});
+    await act(async () => {
+      resolveDataBreakpoints?.({ breakpoints: [{ id: 103, verified: true }] });
+      await Promise.resolve();
+    });
+    expect(result.current.dataBreakpointRuntime).toEqual({});
+  });
+
+  it("keeps non-persistent data ids session-scoped and removes them on termination", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "dataBreakpointInfo") {
+        return Promise.resolve({ dataId: "frame-local:count", description: "count", canPersist: false });
+      }
+      if (command === "setDataBreakpoints") return Promise.resolve({ breakpoints: [{ id: 91, verified: true }] });
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "stopped",
+      message: { body: { threadId: 1, reason: "breakpoint" } },
+    }));
+    await waitFor(() => expect(result.current.state?.status).toBe("stopped"));
+    await act(async () => {
+      await result.current.addDataBreakpoint({ name: "count", frameId: 10 });
+    });
+    await waitFor(() => expect(result.current.dataBreakpoints).toHaveLength(1));
+    expect(result.current.dataBreakpoints[0].canPersist).toBe(false);
+    expect(result.current.dataBreakpoints[0].sessionId).toBe("sess-1");
+    expect(window.localStorage.getItem("taomni.codeWorkspace.debugDataBreakpoints.v1.ws-1")).toBe("[]");
+
+    act(() => result.current.terminate());
+    await waitFor(() => expect(result.current.dataBreakpoints).toEqual([]));
+  });
+
+  it("does not send persisted data ids to an unsupported adapter", async () => {
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.debugDataBreakpoints.v1.ws-1",
+      JSON.stringify([{
+        dataId: "field:count",
+        description: "Service.count",
+        adapterId: "java",
+        accessTypes: ["write"],
+        accessType: "write",
+        canPersist: true,
+      }]),
+    );
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug);
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    expect(dataBreakpointCalls()).toEqual([]);
+    await waitFor(() => expect(result.current.dataBreakpointRuntime).toEqual({
+      [dataBreakpointKey(result.current.dataBreakpoints[0])]: {
+        status: "failed",
+        message: "The selected debug adapter does not support data breakpoints",
+      },
+    }));
+    expect(result.current.dataBreakpoints).toHaveLength(1);
   });
 
   it("surfaces a failed configuration step on the console instead of swallowing it", async () => {

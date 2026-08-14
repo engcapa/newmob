@@ -82,6 +82,7 @@ steps:
   - click: '[data-testid="code-workspace-bottom-tab-debug"]'
   - assert_visible: '[data-testid="code-workspace-debug-panel"]'
   - assert_visible: '[data-testid="debug-function-breakpoints"]'
+  - assert_visible: '[data-testid="debug-data-breakpoints"]'
   - fill: { selector: '[data-testid="debug-function-breakpoint-input"]', value: "Service.run" }
   - click: '[data-testid="debug-function-breakpoint-add"]'
   - assert_visible: '[data-testid="debug-function-breakpoint-row"][data-function-name="Service.run"]'

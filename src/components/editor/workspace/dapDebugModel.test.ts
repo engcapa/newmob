@@ -2,22 +2,30 @@ import { describe, expect, it } from "vitest";
 import {
   appendConsoleLine,
   breakpointVerificationMap,
+  buildDataBreakpointInfoArgs,
   buildSetBreakpointsArgs,
+  buildSetDataBreakpointsArgs,
   buildSetFunctionBreakpointsArgs,
   currentLocation,
+  dataBreakpointKey,
+  dataBreakpointVerificationMap,
+  defaultDataBreakpointAccessType,
   functionBreakpointVerificationMap,
   hoverExpressionAt,
   initialDebugState,
   inlineValueLabel,
   markResumed,
   parseBreakpointEvent,
+  parseDataBreakpointInfo,
   parseEvaluate,
   parseExceptionInfo,
   parseSetBreakpointsResponse,
+  parseSetDataBreakpointsResponse,
   parseSetFunctionBreakpointsResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
+  planDataBreakpointSync,
   planFunctionBreakpointSync,
   reconcileBreakpointLines,
   reduceDebugEvent,
@@ -128,6 +136,91 @@ describe("dapDebugModel", () => {
       "Controller.handle": { status: "verified", message: null },
       "Service.run": { status: "failed", message: "method not found" },
     });
+  });
+
+  it("discovers and scopes standard DAP data breakpoints", () => {
+    expect(buildDataBreakpointInfoArgs({ name: "count", variablesReference: 17, frameId: 3 })).toEqual({
+      name: "count",
+      variablesReference: 17,
+    });
+    expect(buildDataBreakpointInfoArgs({ name: "service.count", frameId: 3 })).toEqual({
+      name: "service.count",
+      frameId: 3,
+    });
+    const info = parseDataBreakpointInfo({
+      dataId: "field:Service.count",
+      description: "Service.count",
+      accessTypes: ["read", "write", "write", "invalid"],
+      canPersist: true,
+    });
+    expect(info).toEqual({
+      dataId: "field:Service.count",
+      description: "Service.count",
+      accessTypes: ["read", "write"],
+      canPersist: true,
+    });
+    expect(defaultDataBreakpointAccessType(info.accessTypes)).toBe("write");
+    expect(parseDataBreakpointInfo({ dataId: null, description: "not watchable" }).dataId).toBeNull();
+  });
+
+  it("builds replacing data-breakpoint requests and maps verification", () => {
+    const stored = [
+      {
+        dataId: "field:count",
+        description: "Service.count",
+        adapterId: "java",
+        accessTypes: ["read", "write"] as const,
+        accessType: "write" as const,
+        condition: " ready ",
+        canPersist: true,
+      },
+      {
+        dataId: "address:temp",
+        description: "temporary",
+        adapterId: "java",
+        accessTypes: ["write"] as const,
+        hitCondition: " 2 ",
+        canPersist: false,
+        sessionId: "session-1",
+      },
+      {
+        dataId: "field:other",
+        description: "Other.value",
+        adapterId: "node",
+        accessTypes: [] as const,
+        canPersist: true,
+      },
+    ];
+    const plan = planDataBreakpointSync(stored.map((entry) => ({
+      ...entry,
+      accessTypes: [...entry.accessTypes],
+    })), {
+      adapterId: "java",
+      sessionId: "session-1",
+    });
+    expect(plan.applicable).toHaveLength(2);
+    expect(buildSetDataBreakpointsArgs(plan)).toEqual({
+      breakpoints: [
+        { dataId: "field:count", accessType: "write", condition: "ready" },
+        { dataId: "address:temp", hitCondition: "2" },
+      ],
+    });
+    const bindings = parseSetDataBreakpointsResponse(plan, {
+      breakpoints: [
+        { id: 71, verified: true },
+        { id: 72, verified: false, reason: "failed", message: "address expired" },
+      ],
+    });
+    expect(bindings.map((binding) => binding.key)).toEqual(plan.sent.map(dataBreakpointKey));
+    expect(dataBreakpointVerificationMap(plan, bindings)).toEqual({
+      [dataBreakpointKey(plan.sent[0])]: { status: "verified", message: null },
+      [dataBreakpointKey(plan.sent[1])]: { status: "failed", message: "address expired" },
+    });
+    expect(planDataBreakpointSync(plan.sorted, {
+      adapterId: "java",
+      sessionId: "session-1",
+      muted: true,
+    }).sent).toEqual([]);
   });
 
   it("inserts a run-to-cursor breakpoint in line order without storing it", () => {

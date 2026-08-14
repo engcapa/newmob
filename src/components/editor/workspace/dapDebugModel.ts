@@ -32,6 +32,39 @@ export interface DebugFunctionBreakpoint {
   enabled?: boolean;
 }
 
+export type DebugDataBreakpointAccessType = "read" | "write" | "readWrite";
+
+/**
+ * A DAP data breakpoint/watchpoint. Persistent data ids are scoped to one
+ * adapter; non-persistent ids are scoped to the suspended session that issued
+ * `dataBreakpointInfo` and are never written to workspace storage.
+ */
+export interface DebugDataBreakpoint {
+  dataId: string;
+  description: string;
+  adapterId: string;
+  accessTypes: DebugDataBreakpointAccessType[];
+  accessType?: DebugDataBreakpointAccessType;
+  condition?: string;
+  hitCondition?: string;
+  enabled?: boolean;
+  canPersist: boolean;
+  sessionId?: string;
+}
+
+export interface DebugDataBreakpointTarget {
+  name: string;
+  variablesReference?: number;
+  frameId?: number;
+}
+
+export interface DebugDataBreakpointInfo {
+  dataId: string | null;
+  description: string;
+  accessTypes: DebugDataBreakpointAccessType[];
+  canPersist: boolean;
+}
+
 /** True unless the breakpoint was explicitly disabled. */
 export function isBreakpointEnabled(bp: DebugBreakpoint): boolean {
   return bp.enabled !== false;
@@ -239,7 +272,7 @@ export function planFunctionBreakpointSync(
   list: DebugFunctionBreakpoint[],
   options: { muted?: boolean } = {},
 ): FunctionBreakpointSyncPlan {
-  const sorted = list.slice().sort((left, right) => left.name.localeCompare(right.name));
+  const sorted = list.slice().sort((left, right) => compareText(left.name, right.name));
   return {
     sorted,
     sent: options.muted ? [] : sorted.filter((breakpoint) => breakpoint.enabled !== false),
@@ -251,6 +284,103 @@ export function buildSetFunctionBreakpointsArgs(plan: FunctionBreakpointSyncPlan
   return {
     breakpoints: plan.sent.map((breakpoint) => {
       const entry: Record<string, unknown> = { name: breakpoint.name };
+      if (breakpoint.condition?.trim()) entry.condition = breakpoint.condition.trim();
+      if (breakpoint.hitCondition?.trim()) entry.hitCondition = breakpoint.hitCondition.trim();
+      return entry;
+    }),
+  };
+}
+
+/** Build a standard DAP `dataBreakpointInfo` request from a variable/expression. */
+export function buildDataBreakpointInfoArgs(target: DebugDataBreakpointTarget) {
+  const args: Record<string, unknown> = { name: target.name };
+  if (typeof target.variablesReference === "number" && target.variablesReference > 0) {
+    args.variablesReference = target.variablesReference;
+  } else if (typeof target.frameId === "number") {
+    args.frameId = target.frameId;
+  }
+  return args;
+}
+
+/** Parse adapter-owned data id and access modes without inventing a fallback id. */
+export function parseDataBreakpointInfo(body: unknown): DebugDataBreakpointInfo {
+  const rec = asRecord(body);
+  const accessTypes: DebugDataBreakpointAccessType[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(rec.accessTypes)) {
+    for (const value of rec.accessTypes) {
+      if (
+        (value === "read" || value === "write" || value === "readWrite")
+        && !seen.has(value)
+      ) {
+        seen.add(value);
+        accessTypes.push(value);
+      }
+    }
+  }
+  return {
+    dataId: typeof rec.dataId === "string" && rec.dataId.length > 0 ? rec.dataId : null,
+    description: typeof rec.description === "string" ? rec.description : "",
+    accessTypes,
+    canPersist: rec.canPersist === true,
+  };
+}
+
+/** IDEA defaults a watchpoint to modification when the adapter offers it. */
+export function defaultDataBreakpointAccessType(
+  accessTypes: readonly DebugDataBreakpointAccessType[],
+): DebugDataBreakpointAccessType | undefined {
+  if (accessTypes.includes("write")) return "write";
+  return accessTypes[0];
+}
+
+/** Stable identity for UI/runtime maps; the opaque data id is never parsed. */
+export function dataBreakpointKey(breakpoint: DebugDataBreakpoint): string {
+  return JSON.stringify([
+    breakpoint.sessionId ? "session" : "adapter",
+    breakpoint.sessionId ?? breakpoint.adapterId,
+    breakpoint.dataId,
+  ]);
+}
+
+export interface DataBreakpointSyncPlan {
+  sorted: DebugDataBreakpoint[];
+  /** Breakpoints owned by this adapter/session, including disabled entries. */
+  applicable: DebugDataBreakpoint[];
+  /** Enabled and unmuted entries sent in request order. */
+  sent: DebugDataBreakpoint[];
+}
+
+/** Scope persistent data ids by adapter and transient ids by their owner session. */
+export function planDataBreakpointSync(
+  list: DebugDataBreakpoint[],
+  context: { adapterId: string; sessionId: string; muted?: boolean },
+): DataBreakpointSyncPlan {
+  const sorted = list.slice().sort((left, right) => (
+    compareText(left.adapterId, right.adapterId)
+    || compareText(left.description, right.description)
+    || compareText(left.dataId, right.dataId)
+  ));
+  const applicable = sorted.filter((breakpoint) => (
+    breakpoint.sessionId
+      ? breakpoint.sessionId === context.sessionId
+      : breakpoint.canPersist && breakpoint.adapterId === context.adapterId
+  ));
+  return {
+    sorted,
+    applicable,
+    sent: context.muted
+      ? []
+      : applicable.filter((breakpoint) => breakpoint.enabled !== false),
+  };
+}
+
+/** Build the replacing `setDataBreakpoints` payload required by DAP. */
+export function buildSetDataBreakpointsArgs(plan: DataBreakpointSyncPlan) {
+  return {
+    breakpoints: plan.sent.map((breakpoint) => {
+      const entry: Record<string, unknown> = { dataId: breakpoint.dataId };
+      if (breakpoint.accessType) entry.accessType = breakpoint.accessType;
       if (breakpoint.condition?.trim()) entry.condition = breakpoint.condition.trim();
       if (breakpoint.hitCondition?.trim()) entry.hitCondition = breakpoint.hitCondition.trim();
       return entry;
@@ -296,6 +426,15 @@ export interface FunctionBreakpointBinding {
   id: number | null;
   verified: boolean;
   name: string;
+  message?: string | null;
+  reason?: "pending" | "failed" | null;
+}
+
+/** Positional binding returned by `setDataBreakpoints`. */
+export interface DataBreakpointBinding {
+  id: number | null;
+  verified: boolean;
+  key: string;
   message?: string | null;
   reason?: "pending" | "failed" | null;
 }
@@ -354,6 +493,25 @@ export function parseSetFunctionBreakpointsResponse(
   });
 }
 
+/** Parse `setDataBreakpoints`; response order matches the replacing request. */
+export function parseSetDataBreakpointsResponse(
+  plan: DataBreakpointSyncPlan,
+  body: unknown,
+): DataBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((breakpoint, index) => {
+    const rec = asRecord(list[index]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      key: dataBreakpointKey(breakpoint),
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+    };
+  });
+}
+
 /** Map a raw binding's `verified`/`reason` to a display runtime status. */
 export function bindingRuntimeStatus(
   binding: Pick<BreakpointBinding, "verified" | "message" | "reason">,
@@ -375,6 +533,21 @@ export function functionBreakpointVerificationMap(
   plan.sent.forEach((breakpoint, index) => {
     const binding = bindings[index];
     out[breakpoint.name] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
+}
+
+/** Verification state per data-breakpoint identity for the selected session. */
+export function dataBreakpointVerificationMap(
+  plan: DataBreakpointSyncPlan,
+  bindings: DataBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  plan.sent.forEach((breakpoint, index) => {
+    const binding = bindings[index];
+    out[dataBreakpointKey(breakpoint)] = binding
       ? bindingRuntimeStatus(binding)
       : { status: "pending", message: null };
   });
@@ -471,6 +644,10 @@ export function selectExceptionFilters(
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 /** Parse a `threads` response body into our thread list. */

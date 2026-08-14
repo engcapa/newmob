@@ -7,6 +7,7 @@ import {
   ChevronDown,
   ChevronRight,
   CirclePlay,
+  Crosshair,
   Eraser,
   FlameKindling,
   Pause,
@@ -19,7 +20,9 @@ import {
 import type { CodeDebugSession } from "../useCodeDebugSession";
 import {
   sortedBreakpoints,
+  dataBreakpointKey,
   type DebugBreakpoint,
+  type DebugDataBreakpoint,
   type DebugFunctionBreakpoint,
   type DebugStackFrame,
 } from "../dapDebugModel";
@@ -87,8 +90,14 @@ interface VarNode {
   variablesReference: number;
   /** `variablesReference` of the container (scope/object) this node lives in. */
   parentRef: number;
+  /** Watch roots are expressions; scope roots are not valid data targets. */
+  dataBreakpointExpression: boolean;
   children: VarNode[] | null; // null = not yet loaded
   expanded: boolean;
+}
+
+function variableDataBreakpointTargetKey(node: VarNode): string {
+  return `${node.parentRef}:${node.dataBreakpointExpression ? "expression" : "variable"}:${node.name}`;
 }
 
 function parseVariables(body: unknown, parentRef: number): VarNode[] {
@@ -103,6 +112,7 @@ function parseVariables(body: unknown, parentRef: number): VarNode[] {
       type: typeof rec.type === "string" ? rec.type : null,
       variablesReference: typeof rec.variablesReference === "number" ? rec.variablesReference : 0,
       parentRef,
+      dataBreakpointExpression: false,
       children: null,
       expanded: false,
     }];
@@ -132,6 +142,8 @@ function VariableRow({
   onEditSubmit,
   onEditCancel,
   onRemove,
+  onAddDataBreakpoint,
+  addingDataBreakpointKey,
 }: {
   node: VarNode;
   depth: number;
@@ -144,9 +156,14 @@ function VariableRow({
   onEditCancel?: () => void;
   /** Present on watch roots: remove the watch expression. */
   onRemove?: () => void;
+  /** Present while stopped when the adapter supports data breakpoints. */
+  onAddDataBreakpoint?: (node: VarNode) => void;
+  addingDataBreakpointKey?: string | null;
 }) {
   const expandable = node.variablesReference > 0;
   const editing = edit?.node === node;
+  const dataTargetKey = variableDataBreakpointTargetKey(node);
+  const dataBreakpointEligible = node.parentRef > 0 || node.dataBreakpointExpression;
   return (
     <>
       <div
@@ -183,15 +200,32 @@ function VariableRow({
             = {node.value}
           </span>
         )}
-        {onRemove && (
-          <button
-            type="button"
-            className="ml-auto shrink-0 text-[var(--taomni-text-muted)] opacity-0 group-hover:opacity-100"
-            onClick={onRemove}
-            title="Remove watch"
-          >
-            ×
-          </button>
+        {(onRemove || (dataBreakpointEligible && onAddDataBreakpoint)) && (
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            {dataBreakpointEligible && onAddDataBreakpoint && (
+              <button
+                type="button"
+                data-testid="debug-variable-data-breakpoint"
+                className="text-[var(--taomni-text-muted)] opacity-0 group-hover:opacity-100 hover:text-rose-500 disabled:opacity-30"
+                onClick={() => onAddDataBreakpoint(node)}
+                disabled={addingDataBreakpointKey === dataTargetKey}
+                title={`Add data breakpoint for ${node.name}`}
+                aria-label={`Add data breakpoint for ${node.name}`}
+              >
+                <Crosshair className="h-3 w-3" />
+              </button>
+            )}
+            {onRemove && (
+              <button
+                type="button"
+                className="text-[var(--taomni-text-muted)] opacity-0 group-hover:opacity-100"
+                onClick={onRemove}
+                title="Remove watch"
+              >
+                ×
+              </button>
+            )}
+          </div>
         )}
       </div>
       {node.expanded && node.children?.map((child, i) => (
@@ -205,6 +239,8 @@ function VariableRow({
           onEditChange={onEditChange}
           onEditSubmit={onEditSubmit}
           onEditCancel={onEditCancel}
+          onAddDataBreakpoint={onAddDataBreakpoint}
+          addingDataBreakpointKey={addingDataBreakpointKey}
         />
       ))}
     </>
@@ -305,6 +341,7 @@ function BreakpointsView({
         );
       })}
       <FunctionBreakpointsView debug={debug} />
+      <DataBreakpointsView debug={debug} />
     </>
   );
 }
@@ -470,6 +507,188 @@ function FunctionBreakpointEditor({
   );
 }
 
+/** DAP data breakpoints/watchpoints discovered from Variables or Watch. */
+function DataBreakpointsView({ debug }: { debug: CodeDebugSession }) {
+  const [editingKey, setEditingKey] = useState<string | null>(null);
+  const entries = debug.dataBreakpoints.slice().sort((left, right) => (
+    left.adapterId < right.adapterId ? -1
+      : left.adapterId > right.adapterId ? 1
+        : left.description < right.description ? -1
+          : left.description > right.description ? 1
+            : left.dataId < right.dataId ? -1 : left.dataId > right.dataId ? 1 : 0
+  ));
+  const active = !!debug.state && debug.state.status !== "terminated";
+  const activeSession = debug.sessions.find((session) => session.id === debug.activeSessionId)
+    ?? debug.sessions[0]
+    ?? null;
+  const supported = debug.capabilities.supportsDataBreakpoints === true;
+  const appliesToActiveSession = (breakpoint: DebugDataBreakpoint) => (
+    breakpoint.sessionId
+      ? breakpoint.sessionId === activeSession?.id
+      : breakpoint.adapterId === activeSession?.adapterId
+  );
+  const hasUnsupportedEntries = active && !supported && entries.some((breakpoint) => (
+    appliesToActiveSession(breakpoint) && breakpoint.enabled !== false
+  ));
+
+  return (
+    <div
+      data-testid="debug-data-breakpoints"
+      className="mt-1 border-t border-[var(--taomni-code-border)]/60 pt-1"
+    >
+      <div className="flex items-center gap-2 px-3 py-1">
+        <span className="text-[10px] font-medium text-[var(--taomni-text-muted)]">Data watchpoints</span>
+        <span className="ml-auto text-[10px] tabular-nums text-[var(--taomni-text-muted)]">{entries.length}</span>
+      </div>
+      {hasUnsupportedEntries && (
+        <div data-testid="debug-data-breakpoint-unsupported" className="px-3 pb-1 text-[10px] text-amber-500">
+          The active debug adapter does not support data breakpoints.
+        </div>
+      )}
+      {entries.length === 0 && <Empty text="No data watchpoints." />}
+      {entries.map((breakpoint, index) => {
+        const key = dataBreakpointKey(breakpoint);
+        const disabled = breakpoint.enabled === false;
+        const applicable = appliesToActiveSession(breakpoint);
+        const runtime = debug.dataBreakpointRuntime[key];
+        const bindingHint = active && applicable && !disabled && runtime && runtime.status !== "verified"
+          ? runtime
+          : null;
+        const open = editingKey === key;
+        return (
+          <div
+            key={key}
+            data-testid="debug-data-breakpoint-row"
+            data-data-breakpoint-persistent={breakpoint.canPersist ? "true" : "false"}
+            className="border-t border-[var(--taomni-code-border)]/40"
+          >
+            <div className="group flex items-center gap-2 px-3 py-0.5 hover:bg-[var(--taomni-hover-bg)]">
+              <input
+                type="checkbox"
+                data-testid={`debug-data-breakpoint-enabled-${index}`}
+                checked={!disabled}
+                title={disabled ? "Enable data breakpoint" : "Disable data breakpoint"}
+                onChange={(event) => debug.setDataBreakpointOptions(key, { enabled: event.target.checked })}
+              />
+              <span
+                className={`min-w-0 flex-1 truncate font-mono ${
+                  disabled ? "text-[var(--taomni-text-muted)] line-through" : ""
+                }`}
+                title={breakpoint.description}
+              >
+                {breakpoint.description}
+                {breakpoint.condition && <span className="ml-2 text-amber-500">if {breakpoint.condition}</span>}
+                {breakpoint.hitCondition && <span className="ml-2 text-amber-500">hit {breakpoint.hitCondition}</span>}
+                {bindingHint && (
+                  <span
+                    data-testid={`debug-data-breakpoint-binding-${index}`}
+                    className={`ml-2 ${bindingHint.status === "failed" ? "text-rose-500" : "text-[var(--taomni-text-muted)]"}`}
+                    title={bindingHint.message ?? undefined}
+                  >
+                    {bindingHint.status === "failed" ? "not bound" : "pending"}
+                  </span>
+                )}
+              </span>
+              {breakpoint.accessTypes.length > 0 ? (
+                <select
+                  data-testid={`debug-data-breakpoint-access-${index}`}
+                  aria-label={`Access type for ${breakpoint.description}`}
+                  className="h-5 max-w-24 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
+                  value={breakpoint.accessType ?? ""}
+                  onChange={(event) => debug.setDataBreakpointOptions(key, {
+                    accessType: event.target.value as DebugDataBreakpoint["accessType"],
+                  })}
+                >
+                  {breakpoint.accessTypes.map((accessType) => (
+                    <option key={accessType} value={accessType}>{dataAccessTypeLabel(accessType)}</option>
+                  ))}
+                </select>
+              ) : (
+                <span className="shrink-0 text-[10px] text-[var(--taomni-text-muted)]">default</span>
+              )}
+              <span
+                data-testid={`debug-data-breakpoint-scope-${index}`}
+                className="shrink-0 text-[10px] text-[var(--taomni-text-muted)]"
+                title={breakpoint.canPersist
+                  ? `Saved for ${breakpoint.adapterId} debug sessions`
+                  : "Available only in the debug session that created it"}
+              >
+                {breakpoint.canPersist ? breakpoint.adapterId : "session"}
+              </span>
+              <button
+                type="button"
+                data-testid={`debug-data-breakpoint-edit-${index}`}
+                className="shrink-0 text-[10px] text-[var(--taomni-text-muted)] opacity-0 group-hover:opacity-100"
+                onClick={() => setEditingKey(open ? null : key)}
+              >
+                {open ? "Done" : "Edit"}
+              </button>
+              <button
+                type="button"
+                data-testid={`debug-data-breakpoint-remove-${index}`}
+                className="shrink-0 opacity-0 group-hover:opacity-100 hover:text-rose-500"
+                title="Remove data breakpoint"
+                onClick={() => debug.removeDataBreakpoint(key)}
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+            {open && (
+              <DataBreakpointEditor
+                breakpoint={breakpoint}
+                index={index}
+                onChange={(options) => debug.setDataBreakpointOptions(key, options)}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function dataAccessTypeLabel(accessType: NonNullable<DebugDataBreakpoint["accessType"]>): string {
+  switch (accessType) {
+    case "read": return "Read";
+    case "write": return "Write";
+    case "readWrite": return "Read/write";
+  }
+}
+
+function DataBreakpointEditor({
+  breakpoint,
+  index,
+  onChange,
+}: {
+  breakpoint: DebugDataBreakpoint;
+  index: number;
+  onChange: (options: Partial<DebugDataBreakpoint>) => void;
+}) {
+  const field = "min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none";
+  return (
+    <div className="space-y-1 bg-[var(--taomni-code-bg)] px-3 pb-1.5 pt-1">
+      <CommitField
+        label="Condition"
+        testId={`debug-data-breakpoint-condition-${index}`}
+        className={field}
+        placeholder="break only when true"
+        maxLength={4096}
+        initialValue={breakpoint.condition ?? ""}
+        onCommit={(value) => onChange({ condition: value.trim() || undefined })}
+      />
+      <CommitField
+        label="Hit count"
+        testId={`debug-data-breakpoint-hit-${index}`}
+        className={field}
+        placeholder="e.g. 5"
+        maxLength={4096}
+        initialValue={breakpoint.hitCondition ?? ""}
+        onCommit={(value) => onChange({ hitCondition: value.trim() || undefined })}
+      />
+    </div>
+  );
+}
+
 /** The condition / hit count / log message fields for one breakpoint. */
 function BreakpointEditor({
   breakpoint,
@@ -594,6 +813,11 @@ export function DebugPanel({
   const [watchInput, setWatchInput] = useState("");
   const [consoleInput, setConsoleInput] = useState("");
   const [edit, setEdit] = useState<VarEditState>({ node: null, value: "" });
+  const [addingDataBreakpointKey, setAddingDataBreakpointKey] = useState<string | null>(null);
+  const [dataBreakpointNotice, setDataBreakpointNotice] = useState<{
+    added: boolean;
+    message: string;
+  } | null>(null);
   const consoleRef = useRef<HTMLDivElement | null>(null);
   const activeConfiguration = configurations.find((configuration) => (
     configuration.id === (activeConfigurationId ?? configurations[0]?.id)
@@ -606,10 +830,29 @@ export function DebugPanel({
   // Stable hook callbacks (useCallback in useCodeDebugSession) — effects key on
   // these instead of the per-render `debug` object so a parent re-render does
   // not re-fetch scopes / re-evaluate watches against the adapter.
-  const { fetchScopes, fetchVariables, evaluate, setVariable: sessionSetVariable } = debug;
+  const {
+    addDataBreakpoint: sessionAddDataBreakpoint,
+    fetchScopes,
+    fetchVariables,
+    evaluate,
+    setVariable: sessionSetVariable,
+  } = debug;
 
   // On each stop, load the selected frame's scopes → variables (D4).
   const frameId = stopped ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
+  const canAddDataBreakpoint = stopped && debug.capabilities.supportsDataBreakpoints === true;
+  const addDataBreakpointForNode = useCallback(async (node: VarNode) => {
+    const targetKey = variableDataBreakpointTargetKey(node);
+    setAddingDataBreakpointKey(targetKey);
+    setDataBreakpointNotice(null);
+    const result = await sessionAddDataBreakpoint({
+      name: node.name,
+      variablesReference: node.parentRef > 0 ? node.parentRef : undefined,
+      frameId: node.parentRef > 0 ? undefined : frameId ?? undefined,
+    });
+    setDataBreakpointNotice(result);
+    setAddingDataBreakpointKey((current) => current === targetKey ? null : current);
+  }, [frameId, sessionAddDataBreakpoint]);
   useEffect(() => {
     setEdit({ node: null, value: "" });
     if (frameId == null) {
@@ -639,6 +882,7 @@ export function DebugPanel({
           type: null,
           variablesReference: scope.ref,
           parentRef: 0,
+          dataBreakpointExpression: false,
           children: vars,
           expanded: true,
         });
@@ -655,6 +899,7 @@ export function DebugPanel({
     if (!stopped || frameId == null) {
       setWatchNodes(watchExpressions.map((expr) => ({
         name: expr, value: "", type: null, variablesReference: 0, parentRef: 0, children: null, expanded: false,
+        dataBreakpointExpression: true,
       })));
       return;
     }
@@ -667,6 +912,7 @@ export function DebugPanel({
           type: result.type,
           variablesReference: result.variablesReference,
           parentRef: 0,
+          dataBreakpointExpression: true,
           children: null,
           expanded: false,
         };
@@ -1065,8 +1311,21 @@ export function DebugPanel({
                     onEditChange={(value) => setEdit((current) => ({ ...current, value }))}
                     onEditSubmit={submitEdit}
                     onEditCancel={cancelEdit}
+                    onAddDataBreakpoint={canAddDataBreakpoint ? addDataBreakpointForNode : undefined}
+                    addingDataBreakpointKey={addingDataBreakpointKey}
                   />
                 ))}
+              {dataBreakpointNotice && (
+                <div
+                  data-testid="debug-data-breakpoint-notice"
+                  role="status"
+                  className={`px-3 py-1 text-[10px] ${
+                    dataBreakpointNotice.added ? "text-emerald-500" : "text-rose-500"
+                  }`}
+                >
+                  {dataBreakpointNotice.message}
+                </div>
+              )}
             </Section>
             <Section title="Watch">
               <div className="flex items-center gap-1 px-3 py-1">
@@ -1086,6 +1345,8 @@ export function DebugPanel({
                   depth={0}
                   onExpand={expandWatch}
                   onRemove={() => debug.removeWatchExpression(i)}
+                  onAddDataBreakpoint={canAddDataBreakpoint ? addDataBreakpointForNode : undefined}
+                  addingDataBreakpointKey={addingDataBreakpointKey}
                 />
               ))}
             </Section>
