@@ -4955,6 +4955,10 @@ controls:
     selector: '[data-testid="debug-active-session"]'
     kind: interactive
     optional: true       # rendered while a compound Debug launch has multiple child sessions
+  - id: debug-breakpoint-mode
+    selector: '[data-testid^="debug-breakpoint-mode-"]'
+    kind: interactive
+    optional: true       # rendered while editing a source breakpoint and the adapter advertises source modes
   - id: debug-function-breakpoints
     selector: '[data-testid="debug-function-breakpoints"]'
     kind: display
@@ -4999,6 +5003,10 @@ controls:
   - id: debug-data-breakpoints
     selector: '[data-testid="debug-data-breakpoints"]'
     kind: display
+  - id: debug-data-breakpoint-mode
+    selector: '[data-testid="debug-data-breakpoint-mode"]'
+    kind: interactive
+    optional: true       # rendered when the active adapter advertises data breakpoint modes
   - id: debug-data-breakpoint-row
     selector: '[data-testid="debug-data-breakpoint-row"]'
     kind: display
@@ -5063,6 +5071,10 @@ controls:
     selector: '[data-testid^="debug-exception-breakpoint-condition-"]'
     kind: interactive
     optional: true       # requires supportsExceptionFilterOptions and a conditional filter
+  - id: debug-exception-breakpoint-mode
+    selector: '[data-testid^="debug-exception-breakpoint-mode-"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionFilterOptions and an exception breakpoint mode
   - id: debug-exception-breakpoint-binding
     selector: '[data-testid^="debug-exception-breakpoint-binding-"]'
     kind: display

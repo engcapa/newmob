@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   appendConsoleLine,
+  breakpointModesFor,
   breakpointVerificationMap,
   buildDataBreakpointInfoArgs,
   buildSetBreakpointsArgs,
@@ -21,6 +22,7 @@ import {
   markResumed,
   mergeExceptionBreakpointDefaults,
   parseBreakpointEvent,
+  parseBreakpointModes,
   parseDataBreakpointInfo,
   parseEvaluate,
   parseExceptionBreakpointFilters,
@@ -36,6 +38,7 @@ import {
   planExceptionBreakpointSync,
   planFunctionBreakpointSync,
   reconcileBreakpointLines,
+  resolveBreakpointMode,
   reduceDebugEvent,
   stepCommandFor,
   toAdapterSourcePath,
@@ -76,6 +79,61 @@ describe("dapDebugModel", () => {
       { line: 12, logMessage: "hit {x}" },
       { line: 20 },
     ]);
+  });
+
+  it("parses breakpoint modes by applicability and uses the first applicable mode as default", () => {
+    const modes = parseBreakpointModes({
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["source", "data"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["source"] },
+        { mode: "software", label: "duplicate", appliesTo: ["exception"] },
+        { mode: "invalid", label: "No applicability", appliesTo: [] },
+        { mode: "", label: "empty", appliesTo: ["source"] },
+      ],
+    });
+    expect(modes).toEqual([
+      {
+        mode: "software",
+        label: "Software",
+        description: undefined,
+        appliesTo: ["source", "data", "exception"],
+      },
+      {
+        mode: "hardware",
+        label: "Hardware",
+        description: undefined,
+        appliesTo: ["source"],
+      },
+    ]);
+    expect(breakpointModesFor(modes, "source").map((mode) => mode.mode)).toEqual([
+      "software",
+      "hardware",
+    ]);
+    expect(resolveBreakpointMode(undefined, modes, "source")).toBe("software");
+    expect(resolveBreakpointMode("hardware", modes, "source")).toBe("hardware");
+    // A stale mode from another adapter is rejected in favor of the default.
+    expect(resolveBreakpointMode("hardware", modes, "data")).toBe("software");
+  });
+
+  it("adds a source mode only when it is advertised for that adapter", () => {
+    const plan = planBreakpointSync([{
+      line: 8,
+      adapterModes: { java: "hardware", node: "not-advertised" },
+    }]);
+    const modes = parseBreakpointModes({
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["source"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["source"] },
+      ],
+    });
+    expect(buildSetBreakpointsArgs("/repo/App.java", plan, {
+      adapterId: "java",
+      breakpointModes: modes,
+    }).breakpoints).toEqual([{ line: 8, mode: "hardware" }]);
+    expect(buildSetBreakpointsArgs("/repo/App.java", plan, {
+      adapterId: "node",
+      breakpointModes: modes,
+    }).breakpoints).toEqual([{ line: 8, mode: "software" }]);
   });
 
   it("omits disabled and muted breakpoints from the request but keeps them stored", () => {
@@ -146,9 +204,10 @@ describe("dapDebugModel", () => {
   });
 
   it("discovers and scopes standard DAP data breakpoints", () => {
-    expect(buildDataBreakpointInfoArgs({ name: "count", variablesReference: 17, frameId: 3 })).toEqual({
+    expect(buildDataBreakpointInfoArgs({ name: "count", variablesReference: 17, frameId: 3, mode: "hardware" })).toEqual({
       name: "count",
       variablesReference: 17,
+      mode: "hardware",
     });
     expect(buildDataBreakpointInfoArgs({ name: "service.count", frameId: 3 })).toEqual({
       name: "service.count",
@@ -228,6 +287,26 @@ describe("dapDebugModel", () => {
       sessionId: "session-1",
       muted: true,
     }).sent).toEqual([]);
+  });
+
+  it("places an advertised exception mode in filterOptions without inventing a condition", () => {
+    const filters = parseExceptionBreakpointFilters({
+      exceptionBreakpointFilters: [{ filter: "all", label: "All", default: true }],
+    });
+    const modes = parseBreakpointModes({
+      breakpointModes: [{ mode: "hardware", label: "Hardware", appliesTo: ["exception"] }],
+    });
+    const plan = planExceptionBreakpointSync([
+      { adapterId: "java", filterId: "all", enabled: true, mode: "hardware" },
+    ], [], filters, {
+      adapterId: "java",
+      supportsFilterOptions: true,
+      breakpointModes: modes,
+    });
+    expect(buildSetExceptionBreakpointsArgs(plan)).toEqual({
+      filters: [],
+      filterOptions: [{ filterId: "all", mode: "hardware" }],
+    });
   });
 
   it("inserts a run-to-cursor breakpoint in line order without storing it", () => {

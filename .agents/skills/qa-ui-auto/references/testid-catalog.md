@@ -154,6 +154,7 @@
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
 - `[data-testid="debug-active-session"]` — interactive [optional] — F25.1.debug-active-session
+- `[data-testid^="debug-breakpoint-mode-"]` — interactive [optional] — F25.1.debug-breakpoint-mode
 - `[data-testid="debug-function-breakpoints"]` — display — F25.1.debug-function-breakpoints
 - `[data-testid="debug-function-breakpoint-input"]` — interactive — F25.1.debug-function-breakpoint-input
 - `[data-testid="debug-function-breakpoint-add"]` — interactive — F25.1.debug-function-breakpoint-add
@@ -166,6 +167,7 @@
 - `[data-testid^="debug-function-breakpoint-binding-"]` — display [optional] — F25.1.debug-function-breakpoint-binding
 - `[data-testid="debug-function-breakpoint-unsupported"]` — display [optional] — F25.1.debug-function-breakpoint-unsupported
 - `[data-testid="debug-data-breakpoints"]` — display — F25.1.debug-data-breakpoints
+- `[data-testid="debug-data-breakpoint-mode"]` — interactive [optional] — F25.1.debug-data-breakpoint-mode
 - `[data-testid="debug-data-breakpoint-row"]` — display [optional] — F25.1.debug-data-breakpoint-row
 - `[data-testid^="debug-data-breakpoint-enabled-"]` — interactive [optional] — F25.1.debug-data-breakpoint-enabled
 - `[data-testid^="debug-data-breakpoint-access-"]` — interactive [optional] — F25.1.debug-data-breakpoint-access
@@ -182,6 +184,7 @@
 - `[data-testid="debug-exception-breakpoint-row"]` — display [optional] — F25.1.debug-exception-breakpoint-row
 - `[data-testid^="debug-exception-breakpoint-enabled-"]` — interactive [optional] — F25.1.debug-exception-breakpoint-enabled
 - `[data-testid^="debug-exception-breakpoint-condition-"]` — interactive [optional] — F25.1.debug-exception-breakpoint-condition
+- `[data-testid^="debug-exception-breakpoint-mode-"]` — interactive [optional] — F25.1.debug-exception-breakpoint-mode
 - `[data-testid^="debug-exception-breakpoint-binding-"]` — display [optional] — F25.1.debug-exception-breakpoint-binding
 - `[data-testid="debug-exception-rules"]` — display [optional] — F25.1.debug-exception-rules
 - `[data-testid="debug-exception-rule-input"]` — interactive [optional] — F25.1.debug-exception-rule-input

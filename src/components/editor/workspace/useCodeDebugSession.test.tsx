@@ -19,12 +19,25 @@ const { useCodeDebugSession } = await import("./useCodeDebugSession");
 const { dataBreakpointKey } = await import("./dapDebugModel");
 
 /** `setBreakpoints` payloads sent to the adapter, in call order. */
-function breakpointCalls(): { sessionId: string; path: string; lines: number[] }[] {
+function breakpointCalls(): {
+  sessionId: string;
+  path: string;
+  lines: number[];
+  modes: (string | undefined)[];
+}[] {
   return dapSendRequest.mock.calls
     .filter((call) => call[1] === "setBreakpoints")
     .map((call) => {
-      const args = call[2] as { source: { path: string }; breakpoints: { line: number }[] };
-      return { sessionId: String(call[0]), path: args.source.path, lines: args.breakpoints.map((bp) => bp.line) };
+      const args = call[2] as {
+        source: { path: string };
+        breakpoints: { line: number; mode?: string }[];
+      };
+      return {
+        sessionId: String(call[0]),
+        path: args.source.path,
+        lines: args.breakpoints.map((bp) => bp.line),
+        modes: args.breakpoints.map((bp) => bp.mode),
+      };
     });
 }
 
@@ -59,7 +72,7 @@ function dataBreakpointCalls(): {
 function exceptionBreakpointCalls(): {
   sessionId: string;
   filters: string[];
-  filterOptions?: { filterId: string; condition: string }[];
+  filterOptions?: { filterId: string; condition?: string; mode?: string }[];
   exceptionOptions?: Array<{
     path?: Array<{ names: string[]; negate?: boolean }>;
     breakMode: string;
@@ -71,7 +84,7 @@ function exceptionBreakpointCalls(): {
       sessionId: String(call[0]),
       ...(call[2] as {
         filters: string[];
-        filterOptions?: { filterId: string; condition: string }[];
+        filterOptions?: { filterId: string; condition?: string; mode?: string }[];
         exceptionOptions?: Array<{
           path?: Array<{ names: string[]; negate?: boolean }>;
           breakMode: string;
@@ -135,6 +148,34 @@ describe("useCodeDebugSession", () => {
     act(() => result.current.toggleBreakpoint("/repo/App.java", 12));
     await waitFor(() => expect(breakpointCalls()).toHaveLength(3));
     expect(breakpointCalls()[2].lines).toEqual([7]);
+  });
+
+  it("persists and sends a source breakpoint mode only to the active adapter", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, {
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["source"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["source"] },
+      ],
+    });
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    act(() => result.current.toggleBreakpoint("/repo/App.java", 12));
+    await waitFor(() => expect(breakpointCalls()).toHaveLength(1));
+    expect(breakpointCalls()[0].modes).toEqual(["software"]);
+
+    act(() => result.current.setBreakpointMode("/repo/App.java", 12, "hardware"));
+    await waitFor(() => expect(breakpointCalls()).toHaveLength(2));
+    expect(breakpointCalls()[1].modes).toEqual(["hardware"]);
+    expect(result.current.breakpoints["/repo/App.java"]).toEqual([{
+      line: 12,
+      adapterModes: { java: "hardware" },
+    }]);
+    expect(JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.debugBreakpoints.v1.ws-1") ?? "{}",
+    )).toEqual(result.current.breakpoints);
   });
 
   it("pushes a condition as soon as it is set, without a second toggle", async () => {
@@ -347,6 +388,33 @@ describe("useCodeDebugSession", () => {
       status: "failed",
       message: "Invalid condition",
     });
+  });
+
+  it("sends a selected exception breakpoint mode through filterOptions", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, {
+      supportsExceptionFilterOptions: true,
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["exception"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["exception"] },
+      ],
+      exceptionBreakpointFilters: [{ filter: "all", label: "All", default: true }],
+    });
+    await act(async () => {
+      emit({ sessionId: "sess-1", event: "initialized", message: {} });
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(1));
+    expect(exceptionBreakpointCalls()[0].filterOptions).toEqual([{
+      filterId: "all",
+      mode: "software",
+    }]);
+    act(() => result.current.setExceptionBreakpointOptions("all", { mode: "hardware" }));
+    await waitFor(() => expect(exceptionBreakpointCalls()).toHaveLength(2));
+    expect(exceptionBreakpointCalls()[1].filterOptions).toEqual([{
+      filterId: "all",
+      mode: "hardware",
+    }]);
   });
 
   it("persists, binds, mutes, and removes capability-gated exception path rules", async () => {
@@ -765,7 +833,13 @@ describe("useCodeDebugSession", () => {
     const { result } = renderHook(() => useCodeDebugSession("ws-1"));
     expect(result.current.dataBreakpoints).toHaveLength(1);
 
-    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    const emit = await startSession(result.current.startDebug, {
+      supportsDataBreakpoints: true,
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["data"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["data"] },
+      ],
+    });
     act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
 
     await waitFor(() => expect(dapSend).toHaveBeenCalledWith("sess-1", "configurationDone"));
@@ -803,7 +877,13 @@ describe("useCodeDebugSession", () => {
       return Promise.resolve({ breakpoints: [] });
     });
     const { result } = renderHook(() => useCodeDebugSession("ws-1"));
-    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    const emit = await startSession(result.current.startDebug, {
+      supportsDataBreakpoints: true,
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["data"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["data"] },
+      ],
+    });
     await act(async () => {
       emit({ sessionId: "sess-1", event: "initialized", message: {} });
       await Promise.resolve();
@@ -819,7 +899,12 @@ describe("useCodeDebugSession", () => {
     await waitFor(() => expect(result.current.state?.status).toBe("stopped"));
     let addResult: { added: boolean; message: string } | undefined;
     await act(async () => {
-      addResult = await result.current.addDataBreakpoint({ name: "count", variablesReference: 2, frameId: 10 });
+      addResult = await result.current.addDataBreakpoint({
+        name: "count",
+        variablesReference: 2,
+        frameId: 10,
+        mode: "hardware",
+      });
     });
     expect(addResult?.added).toBe(true);
     await waitFor(() => expect(result.current.dataBreakpoints).toHaveLength(1));
@@ -833,6 +918,7 @@ describe("useCodeDebugSession", () => {
       call[1] === "dataBreakpointInfo"
       && (call[2] as { name: string; variablesReference?: number }).name === "count"
       && (call[2] as { variablesReference?: number }).variablesReference === 2
+      && (call[2] as { mode?: string }).mode === "hardware"
       && !(call[2] as { frameId?: number }).frameId
     ))).toBe(true);
     await waitFor(() => expect(result.current.dataBreakpointRuntime[key]).toEqual({

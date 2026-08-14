@@ -19,10 +19,14 @@ import {
 } from "lucide-react";
 import type { CodeDebugSession } from "../useCodeDebugSession";
 import {
+  breakpointModesFor,
   sortedBreakpoints,
   dataBreakpointKey,
   exceptionBreakpointRuleLabel,
+  parseBreakpointModes,
+  resolveBreakpointMode,
   type DebugBreakpoint,
+  type DebugBreakpointMode,
   type DebugDataBreakpoint,
   type DebugExceptionBreakpoint,
   type DebugExceptionBreakpointRule,
@@ -261,12 +265,22 @@ function BreakpointsView({
   editing,
   setEditing,
   onOpenBreakpoint,
+  dataBreakpointModes,
+  dataBreakpointMode,
+  onDataBreakpointModeChange,
 }: {
   debug: CodeDebugSession;
   editing: { path: string; line: number } | null;
   setEditing: (target: { path: string; line: number } | null) => void;
   onOpenBreakpoint?: (path: string, line: number) => void;
+  dataBreakpointModes: DebugBreakpointMode[];
+  dataBreakpointMode: string | undefined;
+  onDataBreakpointModeChange: (mode: string) => void;
 }) {
+  const activeSession = debug.sessions.find((session) => session.id === debug.activeSessionId)
+    ?? debug.sessions[0]
+    ?? null;
+  const sourceModes = breakpointModesFor(parseBreakpointModes(debug.capabilities), "source");
   const entries = Object.entries(debug.breakpoints)
     .flatMap(([path, list]) => sortedBreakpoints(list).map((bp) => ({ path, bp })))
     .sort((a, b) => a.path.localeCompare(b.path) || a.bp.line - b.bp.line);
@@ -286,6 +300,10 @@ function BreakpointsView({
         const bindingHint = sessionRunning && !disabled && runtime && runtime.status !== "verified"
           ? { status: runtime.status, message: runtime.message }
           : null;
+        const sourceMode = activeSession
+          ? resolveBreakpointMode(bp.adapterModes?.[activeSession.adapterId], sourceModes, "source")
+          : undefined;
+        const sourceModeMetadata = sourceModes.find((mode) => mode.mode === sourceMode);
         return (
           <div key={`${path}:${bp.line}`} className="border-b border-[var(--taomni-code-border)]/40 last:border-b-0">
             <div className="group flex items-center gap-2 px-3 py-0.5 hover:bg-[var(--taomni-hover-bg)]">
@@ -307,6 +325,11 @@ function BreakpointsView({
                 {bp.condition && <span className="ml-2 text-amber-500">if {bp.condition}</span>}
                 {bp.hitCondition && <span className="ml-2 text-amber-500">hit {bp.hitCondition}</span>}
                 {bp.logMessage && <span className="ml-2 text-sky-500">log</span>}
+                {sourceModeMetadata && (
+                  <span className="ml-2 text-emerald-600 dark:text-emerald-400">
+                    {sourceModeMetadata.label}
+                  </span>
+                )}
                 {bindingHint && (
                   <span
                     data-testid={`debug-breakpoint-binding-${bp.line}`}
@@ -338,14 +361,22 @@ function BreakpointsView({
             {open && (
               <BreakpointEditor
                 breakpoint={bp}
+                adapterId={activeSession?.adapterId ?? null}
+                modes={sourceModes}
                 onChange={(options) => debug.setBreakpointOptions(path, bp.line, options)}
+                onModeChange={(mode) => debug.setBreakpointMode(path, bp.line, mode)}
               />
             )}
           </div>
         );
       })}
       <FunctionBreakpointsView debug={debug} />
-      <DataBreakpointsView debug={debug} />
+      <DataBreakpointsView
+        debug={debug}
+        modes={dataBreakpointModes}
+        newMode={dataBreakpointMode}
+        onNewModeChange={onDataBreakpointModeChange}
+      />
     </>
   );
 }
@@ -512,7 +543,17 @@ function FunctionBreakpointEditor({
 }
 
 /** DAP data breakpoints/watchpoints discovered from Variables or Watch. */
-function DataBreakpointsView({ debug }: { debug: CodeDebugSession }) {
+function DataBreakpointsView({
+  debug,
+  modes,
+  newMode,
+  onNewModeChange,
+}: {
+  debug: CodeDebugSession;
+  modes: DebugBreakpointMode[];
+  newMode: string | undefined;
+  onNewModeChange: (mode: string) => void;
+}) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
   const entries = debug.dataBreakpoints.slice().sort((left, right) => (
     left.adapterId < right.adapterId ? -1
@@ -542,6 +583,21 @@ function DataBreakpointsView({ debug }: { debug: CodeDebugSession }) {
     >
       <div className="flex items-center gap-2 px-3 py-1">
         <span className="text-[10px] font-medium text-[var(--taomni-text-muted)]">Data watchpoints</span>
+        {modes.length > 0 && (
+          <select
+            data-testid="debug-data-breakpoint-mode"
+            aria-label="Mode for new data breakpoint"
+            title={modes.find((mode) => mode.mode === newMode)?.description
+              ?? "Mode for new data breakpoints"}
+            className="h-5 min-w-0 max-w-28 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
+            value={newMode ?? modes[0].mode}
+            onChange={(event) => onNewModeChange(event.target.value)}
+          >
+            {modes.map((mode) => (
+              <option key={mode.mode} value={mode.mode}>{mode.label}</option>
+            ))}
+          </select>
+        )}
         <span className="ml-auto text-[10px] tabular-nums text-[var(--taomni-text-muted)]">{entries.length}</span>
       </div>
       {hasUnsupportedEntries && (
@@ -557,6 +613,11 @@ function DataBreakpointsView({ debug }: { debug: CodeDebugSession }) {
         const runtime = debug.dataBreakpointRuntime[key];
         const bindingHint = active && applicable && !disabled && runtime && runtime.status !== "verified"
           ? runtime
+          : null;
+        const modeLabel = breakpoint.mode
+          ? (breakpoint.adapterId === activeSession?.adapterId
+            ? modes.find((mode) => mode.mode === breakpoint.mode)?.label ?? breakpoint.mode
+            : breakpoint.mode)
           : null;
         const open = editingKey === key;
         return (
@@ -583,6 +644,7 @@ function DataBreakpointsView({ debug }: { debug: CodeDebugSession }) {
                 {breakpoint.description}
                 {breakpoint.condition && <span className="ml-2 text-amber-500">if {breakpoint.condition}</span>}
                 {breakpoint.hitCondition && <span className="ml-2 text-amber-500">hit {breakpoint.hitCondition}</span>}
+                {modeLabel && <span className="ml-2 text-emerald-600 dark:text-emerald-400">{modeLabel}</span>}
                 {bindingHint && (
                   <span
                     data-testid={`debug-data-breakpoint-binding-${index}`}
@@ -702,6 +764,7 @@ function ExceptionBreakpointsView({ debug }: { debug: CodeDebugSession }) {
     .filter((breakpoint) => breakpoint.adapterId === activeSession?.adapterId)
     .map((breakpoint) => [breakpoint.filterId, breakpoint]));
   const supportsFilterOptions = debug.capabilities.supportsExceptionFilterOptions === true;
+  const exceptionModes = breakpointModesFor(parseBreakpointModes(debug.capabilities), "exception");
   const field = "min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none";
   return (
     <div data-testid="debug-exception-breakpoints">
@@ -719,6 +782,8 @@ function ExceptionBreakpointsView({ debug }: { debug: CodeDebugSession }) {
           ? runtime
           : null;
         const canSetCondition = filter.supportsCondition && supportsFilterOptions;
+        const canSetMode = supportsFilterOptions && exceptionModes.length > 0;
+        const mode = resolveBreakpointMode(setting.mode, exceptionModes, "exception");
         return (
           <div
             key={filter.filter}
@@ -759,20 +824,42 @@ function ExceptionBreakpointsView({ debug }: { debug: CodeDebugSession }) {
                 )}
               </span>
             </label>
-            {canSetCondition && (
-              <div className="bg-[var(--taomni-code-bg)] px-3 pb-1.5 pt-1">
-                <CommitField
-                  label="Condition"
-                  testId={`debug-exception-breakpoint-condition-${index}`}
-                  className={field}
-                  placeholder={filter.conditionDescription ?? "break only when true"}
-                  maxLength={4096}
-                  initialValue={setting.condition ?? ""}
-                  onCommit={(value) => debug.setExceptionBreakpointOptions(
-                    filter.filter,
-                    { condition: value.trim() || undefined },
-                  )}
-                />
+            {(canSetCondition || canSetMode) && (
+              <div className="space-y-1 bg-[var(--taomni-code-bg)] px-3 pb-1.5 pt-1">
+                {canSetMode && (
+                  <label className="flex items-center gap-2">
+                    <span className="w-16 shrink-0 text-[var(--taomni-text-muted)]">Mode</span>
+                    <select
+                      data-testid={`debug-exception-breakpoint-mode-${index}`}
+                      aria-label={`Breakpoint mode for ${filter.label}`}
+                      title={exceptionModes.find((entry) => entry.mode === mode)?.description}
+                      className="h-5 min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 text-[11px] outline-none"
+                      value={mode ?? exceptionModes[0].mode}
+                      onChange={(event) => debug.setExceptionBreakpointOptions(
+                        filter.filter,
+                        { mode: event.target.value },
+                      )}
+                    >
+                      {exceptionModes.map((entry) => (
+                        <option key={entry.mode} value={entry.mode}>{entry.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                {canSetCondition && (
+                  <CommitField
+                    label="Condition"
+                    testId={`debug-exception-breakpoint-condition-${index}`}
+                    className={field}
+                    placeholder={filter.conditionDescription ?? "break only when true"}
+                    maxLength={4096}
+                    initialValue={setting.condition ?? ""}
+                    onCommit={(value) => debug.setExceptionBreakpointOptions(
+                      filter.filter,
+                      { condition: value.trim() || undefined },
+                    )}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1038,18 +1125,44 @@ function ExceptionBreakpointRulesView({
 /** The condition / hit count / log message fields for one breakpoint. */
 function BreakpointEditor({
   breakpoint,
+  adapterId,
+  modes,
   onChange,
+  onModeChange,
 }: {
   breakpoint: DebugBreakpoint;
+  adapterId: string | null;
+  modes: DebugBreakpointMode[];
   onChange: (options: Partial<DebugBreakpoint>) => void;
+  onModeChange: (mode: string) => void;
 }) {
   const field = "min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none";
   // Committed on blur / Enter so every keystroke does not re-push to the adapter.
-  const commit = (key: keyof DebugBreakpoint) => (value: string) => {
+  const commit = (key: "condition" | "hitCondition" | "logMessage") => (value: string) => {
     onChange({ [key]: value.trim() || undefined });
   };
+  const mode = adapterId
+    ? resolveBreakpointMode(breakpoint.adapterModes?.[adapterId], modes, "source")
+    : undefined;
   return (
     <div className="space-y-1 bg-[var(--taomni-code-bg)] px-3 pb-1.5 pt-1">
+      {adapterId && modes.length > 0 && (
+        <label className="flex items-center gap-2">
+          <span className="w-16 shrink-0 text-[var(--taomni-text-muted)]">Mode</span>
+          <select
+            data-testid={`debug-breakpoint-mode-${breakpoint.line}`}
+            aria-label={`Breakpoint mode at line ${breakpoint.line}`}
+            title={modes.find((entry) => entry.mode === mode)?.description}
+            className="h-5 min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 text-[11px] outline-none"
+            value={mode ?? modes[0].mode}
+            onChange={(event) => onModeChange(event.target.value)}
+          >
+            {modes.map((entry) => (
+              <option key={entry.mode} value={entry.mode}>{entry.label}</option>
+            ))}
+          </select>
+        </label>
+      )}
       <CommitField
         label="Condition"
         testId={`debug-breakpoint-condition-${breakpoint.line}`}
@@ -1160,6 +1273,7 @@ export function DebugPanel({
   const [consoleInput, setConsoleInput] = useState("");
   const [edit, setEdit] = useState<VarEditState>({ node: null, value: "" });
   const [addingDataBreakpointKey, setAddingDataBreakpointKey] = useState<string | null>(null);
+  const [preferredDataBreakpointMode, setPreferredDataBreakpointMode] = useState("");
   const [dataBreakpointNotice, setDataBreakpointNotice] = useState<{
     added: boolean;
     message: string;
@@ -1187,6 +1301,12 @@ export function DebugPanel({
   // On each stop, load the selected frame's scopes → variables (D4).
   const frameId = stopped ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
   const canAddDataBreakpoint = stopped && debug.capabilities.supportsDataBreakpoints === true;
+  const dataBreakpointModes = breakpointModesFor(parseBreakpointModes(debug.capabilities), "data");
+  const dataBreakpointMode = resolveBreakpointMode(
+    preferredDataBreakpointMode || undefined,
+    dataBreakpointModes,
+    "data",
+  );
   const addDataBreakpointForNode = useCallback(async (node: VarNode) => {
     const targetKey = variableDataBreakpointTargetKey(node);
     setAddingDataBreakpointKey(targetKey);
@@ -1195,10 +1315,11 @@ export function DebugPanel({
       name: node.name,
       variablesReference: node.parentRef > 0 ? node.parentRef : undefined,
       frameId: node.parentRef > 0 ? undefined : frameId ?? undefined,
+      mode: dataBreakpointMode,
     });
     setDataBreakpointNotice(result);
     setAddingDataBreakpointKey((current) => current === targetKey ? null : current);
-  }, [frameId, sessionAddDataBreakpoint]);
+  }, [dataBreakpointMode, frameId, sessionAddDataBreakpoint]);
   useEffect(() => {
     setEdit({ node: null, value: "" });
     if (frameId == null) {
@@ -1554,6 +1675,9 @@ export function DebugPanel({
             editing={editingBreakpoint}
             setEditing={(target) => onEditingBreakpointChange?.(target)}
             onOpenBreakpoint={onOpenBreakpoint}
+            dataBreakpointModes={dataBreakpointModes}
+            dataBreakpointMode={dataBreakpointMode}
+            onDataBreakpointModeChange={setPreferredDataBreakpointMode}
           />
         </Section>
         {state && (

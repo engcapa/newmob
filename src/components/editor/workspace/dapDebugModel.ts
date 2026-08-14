@@ -21,6 +21,8 @@ export interface DebugBreakpoint {
    * before this field existed stay armed).
    */
   enabled?: boolean;
+  /** Adapter-specific source-breakpoint mode ids (for example hardware/software). */
+  adapterModes?: Record<string, string>;
 }
 
 /** A DAP function/method breakpoint, independent of any source path. */
@@ -33,6 +35,21 @@ export interface DebugFunctionBreakpoint {
 }
 
 export type DebugDataBreakpointAccessType = "read" | "write" | "readWrite";
+
+export type DebugBreakpointModeApplicability =
+  | "source"
+  | "exception"
+  | "data"
+  | "instruction"
+  | (string & {});
+
+/** One breakpoint mode advertised by the adapter's initialize response. */
+export interface DebugBreakpointMode {
+  mode: string;
+  label: string;
+  description?: string;
+  appliesTo: DebugBreakpointModeApplicability[];
+}
 
 /**
  * A DAP data breakpoint/watchpoint. Persistent data ids are scoped to one
@@ -47,6 +64,8 @@ export interface DebugDataBreakpoint {
   accessType?: DebugDataBreakpointAccessType;
   condition?: string;
   hitCondition?: string;
+  /** Mode used when resolving this adapter-owned data id. */
+  mode?: string;
   enabled?: boolean;
   canPersist: boolean;
   sessionId?: string;
@@ -56,6 +75,8 @@ export interface DebugDataBreakpointTarget {
   name: string;
   variablesReference?: number;
   frameId?: number;
+  /** Sent only in the capability-gated `dataBreakpointInfo` request. */
+  mode?: string;
 }
 
 export interface DebugDataBreakpointInfo {
@@ -81,6 +102,8 @@ export interface DebugExceptionBreakpoint {
   filterId: string;
   enabled: boolean;
   condition?: string;
+  /** Adapter-advertised mode sent through `ExceptionFilterOptions`. */
+  mode?: string;
 }
 
 export type DebugExceptionBreakMode = "never" | "always" | "unhandled" | "userUnhandled";
@@ -330,6 +353,66 @@ export function buildSetFunctionBreakpointsArgs(plan: FunctionBreakpointSyncPlan
   };
 }
 
+/** Parse, de-duplicate, and merge DAP breakpoint-mode capability metadata. */
+export function parseBreakpointModes(
+  capabilities: Record<string, unknown>,
+): DebugBreakpointMode[] {
+  const advertised = capabilities.breakpointModes;
+  if (!Array.isArray(advertised)) return [];
+  const out: DebugBreakpointMode[] = [];
+  const byId = new Map<string, DebugBreakpointMode>();
+  for (const value of advertised) {
+    const raw = asRecord(value);
+    const mode = typeof raw.mode === "string" ? raw.mode.trim() : "";
+    if (!mode || mode.length > 1024 || !Array.isArray(raw.appliesTo)) continue;
+    const appliesTo = Array.from(new Set(raw.appliesTo.flatMap((entry) => (
+      typeof entry === "string" && entry.trim() && entry.length <= 128
+        ? [entry.trim() as DebugBreakpointModeApplicability]
+        : []
+    ))));
+    if (appliesTo.length === 0) continue;
+    const existing = byId.get(mode);
+    if (existing) {
+      existing.appliesTo = Array.from(new Set([...existing.appliesTo, ...appliesTo]));
+      continue;
+    }
+    const label = typeof raw.label === "string" && raw.label.trim()
+      ? raw.label.trim().slice(0, 1024)
+      : mode;
+    const parsed: DebugBreakpointMode = {
+      mode,
+      label,
+      description: typeof raw.description === "string" && raw.description.trim()
+        ? raw.description.trim().slice(0, 4096)
+        : undefined,
+      appliesTo,
+    };
+    byId.set(mode, parsed);
+    out.push(parsed);
+  }
+  return out;
+}
+
+/** Modes in adapter order; the first is the protocol-recommended UI default. */
+export function breakpointModesFor(
+  modes: readonly DebugBreakpointMode[],
+  applicability: DebugBreakpointModeApplicability,
+): DebugBreakpointMode[] {
+  return modes.filter((mode) => mode.appliesTo.includes(applicability));
+}
+
+/** Keep a valid saved mode, otherwise use the first applicable advertised mode. */
+export function resolveBreakpointMode(
+  preferred: string | undefined,
+  modes: readonly DebugBreakpointMode[],
+  applicability: DebugBreakpointModeApplicability,
+): string | undefined {
+  const applicable = breakpointModesFor(modes, applicability);
+  return applicable.some((candidate) => candidate.mode === preferred)
+    ? preferred
+    : applicable[0]?.mode;
+}
+
 /** Build a standard DAP `dataBreakpointInfo` request from a variable/expression. */
 export function buildDataBreakpointInfoArgs(target: DebugDataBreakpointTarget) {
   const args: Record<string, unknown> = { name: target.name };
@@ -338,6 +421,7 @@ export function buildDataBreakpointInfoArgs(target: DebugDataBreakpointTarget) {
   } else if (typeof target.frameId === "number") {
     args.frameId = target.frameId;
   }
+  if (target.mode?.trim()) args.mode = target.mode.trim();
   return args;
 }
 
@@ -432,7 +516,14 @@ export function buildSetDataBreakpointsArgs(plan: DataBreakpointSyncPlan) {
  * The response's `breakpoints` array corresponds 1:1, in order, to `plan.sent`
  * (see parseSetBreakpointsResponse).
  */
-export function buildSetBreakpointsArgs(path: string, plan: BreakpointSyncPlan) {
+export function buildSetBreakpointsArgs(
+  path: string,
+  plan: BreakpointSyncPlan,
+  options: {
+    adapterId?: string;
+    breakpointModes?: readonly DebugBreakpointMode[];
+  } = {},
+) {
   return {
     source: { path, name: path.split(/[\\/]/).pop() ?? path },
     breakpoints: plan.sent.map((bp) => {
@@ -440,6 +531,12 @@ export function buildSetBreakpointsArgs(path: string, plan: BreakpointSyncPlan) 
       if (bp.condition && bp.condition.trim()) entry.condition = bp.condition.trim();
       if (bp.hitCondition && bp.hitCondition.trim()) entry.hitCondition = bp.hitCondition.trim();
       if (bp.logMessage && bp.logMessage.trim()) entry.logMessage = bp.logMessage.trim();
+      const mode = resolveBreakpointMode(
+        options.adapterId ? bp.adapterModes?.[options.adapterId] : undefined,
+        options.breakpointModes ?? [],
+        "source",
+      );
+      if (mode) entry.mode = mode;
       return entry;
     }),
     // Ask the adapter to re-verify from source lines.
@@ -752,8 +849,8 @@ export interface ExceptionBreakpointSyncPlan {
   applicableRules: DebugExceptionBreakpointRule[];
   /** Enabled filters sent through the backward-compatible `filters` array. */
   plain: DebugExceptionBreakpoint[];
-  /** Enabled filters sent with a condition through `filterOptions`. */
-  conditional: DebugExceptionBreakpoint[];
+  /** Enabled filters sent with a condition and/or mode through `filterOptions`. */
+  options: ExceptionBreakpointFilterOption[];
   /** Enabled rules sent through capability-gated `exceptionOptions`. */
   rules: DebugExceptionBreakpointRule[];
   /** Positional response order: `filters`, `filterOptions`, then `exceptionOptions`. */
@@ -763,6 +860,12 @@ export interface ExceptionBreakpointSyncPlan {
 export type ExceptionBreakpointSyncTarget =
   | { kind: "filter"; breakpoint: DebugExceptionBreakpoint }
   | { kind: "rule"; rule: DebugExceptionBreakpointRule };
+
+export interface ExceptionBreakpointFilterOption {
+  breakpoint: DebugExceptionBreakpoint;
+  condition?: string;
+  mode?: string;
+}
 
 /** Plan a replacing exception-breakpoint request for one adapter session. */
 export function planExceptionBreakpointSync(
@@ -774,6 +877,7 @@ export function planExceptionBreakpointSync(
     muted?: boolean;
     supportsFilterOptions?: boolean;
     supportsExceptionOptions?: boolean;
+    breakpointModes?: readonly DebugBreakpointMode[];
   },
 ): ExceptionBreakpointSyncPlan {
   const byKey = new Map(list.map((breakpoint) => [exceptionBreakpointKey(breakpoint), breakpoint]));
@@ -787,31 +891,38 @@ export function planExceptionBreakpointSync(
   });
   const enabled = context.muted ? [] : applicable.filter((breakpoint) => breakpoint.enabled);
   const metadata = new Map(filters.map((filter) => [filter.filter, filter]));
-  const conditional = context.supportsFilterOptions
-    ? enabled.filter((breakpoint) => (
-        metadata.get(breakpoint.filterId)?.supportsCondition === true
-        && !!breakpoint.condition?.trim()
-      ))
+  const options = context.supportsFilterOptions
+    ? enabled.flatMap((breakpoint): ExceptionBreakpointFilterOption[] => {
+        const condition = metadata.get(breakpoint.filterId)?.supportsCondition === true
+          ? breakpoint.condition?.trim() || undefined
+          : undefined;
+        const mode = resolveBreakpointMode(
+          breakpoint.mode,
+          context.breakpointModes ?? [],
+          "exception",
+        );
+        return condition || mode ? [{ breakpoint, condition, mode }] : [];
+      })
     : [];
-  const conditionalIds = new Set(conditional.map((breakpoint) => breakpoint.filterId));
-  const plain = enabled.filter((breakpoint) => !conditionalIds.has(breakpoint.filterId));
+  const optionIds = new Set(options.map((entry) => entry.breakpoint.filterId));
+  const plain = enabled.filter((breakpoint) => !optionIds.has(breakpoint.filterId));
   const applicableRules = ruleList.filter((rule) => rule.adapterId === context.adapterId);
   const rules = context.supportsExceptionOptions && !context.muted
     ? applicableRules.filter((rule) => rule.enabled)
     : [];
   const sent: ExceptionBreakpointSyncTarget[] = [
     ...plain.map((breakpoint) => ({ kind: "filter" as const, breakpoint })),
-    ...conditional.map((breakpoint) => ({ kind: "filter" as const, breakpoint })),
+    ...options.map(({ breakpoint }) => ({ kind: "filter" as const, breakpoint })),
     ...rules.map((rule) => ({ kind: "rule" as const, rule })),
   ];
-  return { applicable, applicableRules, plain, conditional, rules, sent };
+  return { applicable, applicableRules, plain, options, rules, sent };
 }
 
 /** Build standard DAP `setExceptionBreakpoints` arguments with legacy fallback. */
 export function buildSetExceptionBreakpointsArgs(plan: ExceptionBreakpointSyncPlan) {
   const args: {
     filters: string[];
-    filterOptions?: { filterId: string; condition: string }[];
+    filterOptions?: Array<{ filterId: string; condition?: string; mode?: string }>;
     exceptionOptions?: Array<{
       path?: Array<{ names: string[]; negate?: boolean }>;
       breakMode: DebugExceptionBreakMode;
@@ -819,10 +930,11 @@ export function buildSetExceptionBreakpointsArgs(plan: ExceptionBreakpointSyncPl
   } = {
     filters: plan.plain.map((breakpoint) => breakpoint.filterId),
   };
-  if (plan.conditional.length > 0) {
-    args.filterOptions = plan.conditional.map((breakpoint) => ({
+  if (plan.options.length > 0) {
+    args.filterOptions = plan.options.map(({ breakpoint, condition, mode }) => ({
       filterId: breakpoint.filterId,
-      condition: breakpoint.condition!.trim(),
+      ...(condition ? { condition } : {}),
+      ...(mode ? { mode } : {}),
     }));
   }
   if (plan.rules.length > 0) {
@@ -884,7 +996,7 @@ export function exceptionBreakpointVerificationMap(
 ): Record<string, BreakpointRuntimeState> {
   const out: Record<string, BreakpointRuntimeState> = {};
   const filterBindings = bindings.filter((binding) => binding.kind === "filter");
-  [...plan.plain, ...plan.conditional].forEach((breakpoint, index) => {
+  [...plan.plain, ...plan.options.map((entry) => entry.breakpoint)].forEach((breakpoint, index) => {
     const binding = filterBindings[index];
     out[breakpoint.filterId] = binding
       ? bindingRuntimeStatus(binding)

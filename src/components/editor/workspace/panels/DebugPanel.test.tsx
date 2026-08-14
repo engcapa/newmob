@@ -33,6 +33,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     canRestart: false,
     toggleBreakpoint: vi.fn(),
     setBreakpointOptions: vi.fn(),
+    setBreakpointMode: vi.fn(),
     removeBreakpoint: vi.fn(),
     addFunctionBreakpoint: vi.fn(),
     setFunctionBreakpointOptions: vi.fn(),
@@ -314,7 +315,13 @@ describe("DebugPanel", () => {
             },
           ],
           activeSessionId: "s1",
-          capabilities: { supportsExceptionFilterOptions: true },
+          capabilities: {
+            supportsExceptionFilterOptions: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["exception"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["exception"] },
+            ],
+          },
           availableExceptionFilters: [{
             filter: "caught",
             label: "Caught Exceptions",
@@ -352,6 +359,10 @@ describe("DebugPanel", () => {
     expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", {
       condition: "exception instanceof IOException",
     });
+    fireEvent.change(screen.getByTestId("debug-exception-breakpoint-mode-0"), {
+      target: { value: "hardware" },
+    });
+    expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", { mode: "hardware" });
   });
 
   it("manages capability-gated exception class and package rules", () => {
@@ -532,6 +543,42 @@ describe("DebugPanel", () => {
     expect(removeBreakpoint).toHaveBeenCalledWith("/repo/A.java", 12);
   });
 
+  it("selects an adapter-scoped mode for a source breakpoint", () => {
+    const setBreakpointMode = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: { ...initialDebugState("s1"), status: "running" },
+          sessions: [{
+            id: "s1",
+            targetId: "app",
+            label: "App",
+            adapterId: "java",
+            status: "running",
+            stoppedReason: null,
+          }],
+          activeSessionId: "s1",
+          capabilities: {
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["source"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["source"] },
+            ],
+          },
+          breakpoints: { "/repo/A.java": [{ line: 12 }] },
+          setBreakpointMode,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        editingBreakpoint={{ path: "/repo/A.java", line: 12 }}
+      />,
+    );
+    expect(screen.getByTestId("debug-breakpoint-12")).toHaveTextContent("Software");
+    fireEvent.change(screen.getByTestId("debug-breakpoint-mode-12"), {
+      target: { value: "hardware" },
+    });
+    expect(setBreakpointMode).toHaveBeenCalledWith("/repo/A.java", 12, "hardware");
+  });
+
   it("adds, edits, disables and removes a function breakpoint", () => {
     const addFunctionBreakpoint = vi.fn();
     const setFunctionBreakpointOptions = vi.fn();
@@ -594,7 +641,13 @@ describe("DebugPanel", () => {
       <DebugPanel
         debug={makeSession({
           state: stoppedState(),
-          capabilities: { supportsDataBreakpoints: true },
+          capabilities: {
+            supportsDataBreakpoints: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["data"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["data"] },
+            ],
+          },
           addDataBreakpoint,
           fetchScopes: vi.fn().mockResolvedValue({
             scopes: [{ name: "Locals", variablesReference: 2 }],
@@ -608,12 +661,17 @@ describe("DebugPanel", () => {
       />,
     );
 
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-mode"), {
+      target: { value: "hardware" },
+    });
     const action = await screen.findByTestId("debug-variable-data-breakpoint");
     fireEvent.click(action);
     await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith({
       name: "count",
       variablesReference: 2,
       frameId: undefined,
+      mode: "hardware",
     }));
     expect(await screen.findByTestId("debug-data-breakpoint-notice")).toHaveTextContent(
       "Watching Service.count",
