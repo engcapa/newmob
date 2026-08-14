@@ -2,7 +2,7 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-13 · 版本：v4.12（严格持平基线；结构化 JUnit 测试结果闭环）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前又补齐 grouped multi-session Compound Debug、provider-backed semantic snapshot freshness、Inspection suppression/baseline/evidence 治理，以及 Surefire/Failsafe/Gradle JUnit XML 结果树、失败详情/定位/重跑，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-14 · 版本：v4.13（严格持平基线；多 provider 语义聚合与结构化 evidence）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前又补齐 grouped multi-session Compound Debug、provider-backed semantic snapshot freshness、多 root/language `workspace/symbol` 聚合、Safe Delete/semantic WorkspaceEdit 路径边界、Inspection proof-level/flow-step evidence，以及 Surefire/Failsafe/Gradle JUnit XML 结果树、失败详情/定位/重跑，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
 > 早期版本：v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -17,7 +17,7 @@
 | 工作区模型 | 多根目录（folder/git）+ loose files、布局恢复、最近工作区、tree/compact/flat 文件树 | `CodeWorkspaceTabInfo`、`codeWorkspaceStore`、`useWorkspaceTreeData` |
 | 编辑器 | CodeMirror 6：查找替换、多光标/矩形选择、折叠、注释、IDEA 常用编辑键位、大文件降级、二分屏、preview/pin tab | `CodeMirrorHost.tsx`、`EditorGroup.tsx` |
 | Markdown | edit/preview/split，Mermaid 渲染 + SVG/PNG 导出 | `MarkdownPreview.tsx` |
-| LSP 与分析 | 10 种语言预设 + 自定义命令；文档同步、诊断元数据、补全、签名、文档、导航/引用/层级、格式化、重命名、按 kind 请求 Code Action、inlay/semantic token、动态 capability、provider-backed inspection profile/related locations | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts`、`useWorkspaceLspSession.ts`、`AnalysisPanel.tsx` |
+| LSP 与分析 | 10 种语言预设 + 自定义命令；文档同步、诊断元数据、补全、签名、文档、导航/引用/层级、格式化、重命名、按 kind 请求 Code Action、inlay/semantic token、动态 capability、跨 root/language 的有界 workspace symbol 聚合、provider-backed inspection profile/related locations/structured evidence | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts`、`useWorkspaceLspSession.ts`、`AnalysisPanel.tsx` |
 | 搜索与导航 | Find/Replace in Files、Search Everywhere、Go to File/Class/Symbol、Recent Files、前进/后退、Outline/结构弹窗、Problems | `workspace_search.rs`、workspace panels/hooks |
 | 工程执行 | 集成 PTY、结构化 Build/Run/Debug 模型、Build 依赖拓扑、命名运行配置、参数/环境/dotenv/工作目录/Before launch、通用 DAP 与 Java 调试/测试基础、SDK/toolchain 探测 | `workspace.rs`、`dap.rs`、Run/Build/Test/Debug panels |
 | Git 与恢复 | gutter/diff、inline blame、完整 Git Manager、本地历史、TODO/书签 | `src/lib/git.ts`、workspace chrome/panels |
@@ -25,7 +25,7 @@
 
 **当前明确缺失（严格 IDEA parity）：**
 
-1. IDEA PSI/stub index、原生 inspection/data-flow/nullability 引擎，以及由索引保证语义的重构；当前已有 provider semantic snapshot 的 generation/revision/freshness 和过期写入拒绝，extract/inline/change signature/move 仍只调用 language server 提供的 Code Action，Safe Delete 也仍不是 IDEA PSI 级声明重构。
+1. IDEA PSI/stub index、原生 inspection/data-flow/nullability 引擎，以及由索引保证语义的重构；当前已有 provider semantic snapshot 的 generation/revision/freshness、跨 provider workspace symbol 覆盖诊断、semantic WorkspaceEdit root guard 和过期写入拒绝，extract/inline/change signature/move 仍只调用 language server 提供的 Code Action，Safe Delete 会在 unresolved/out-of-root 引用时硬阻断但仍不是 IDEA PSI 级声明重构。
 2. 完整 project/module/source-set/facet/language-level 模型及 Maven/Gradle 等价导入生命周期。
 3. LSP 客户端剩余协议面：更完整的配置模型与跨请求取消边界；diagnostic partial result/即时 refresh 已形成代码闭环，`workspace/didChangeWatchedFiles` 与 watcher 仍需三端原生验收。
 4. IDEA 级 dirty 冲突/合并与 crash/restart 恢复中心已形成基础代码闭环（含有界行级三方合并）；跨文件 WorkspaceEdit 已支持有界事务级 undo/redo，语义/token 级合并、目录/symlink/特殊文件历史、网络盘、UNC、大小写-only rename 等文件系统边界仍未完成严格验收。
@@ -82,8 +82,8 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 | P0 | WorkspaceEdit / Code Action | 有序 text/create/rename/delete、edit-before-command、command-only、延迟 `codeAction/resolve`、反向 `workspace/applyEdit`、用户文件操作 `will*/did*Files`、版本与 dirty buffer 防护、`changeAnnotations.needsConfirmation`、多文件/资源操作有序预览确认、事务级 undo/redo、基础冲突 UI | 事务仅覆盖可读普通文件；取消和冲突 UI 的语义合并仍缺 | 代码闭环，未严格完成 |
 | P0 | LSP 客户端协议 | initialize/动态 capability、文档同步与智能请求；反向 applyEdit/message/configuration/workDone progress；标准错误/取消；LSP 3.17 workspace pull diagnostics（full/unchanged/related/partial/refresh）；`workspace/didChangeWatchedFiles` 静态/动态注册与 kind/glob 过滤 | 配置仅覆盖当前 session 设置；已开始落盘的资源操作不可安全中断；watcher 的 macOS/Windows 原生行为尚未验收 | 代码闭环，未严格完成 |
 | P0 | 文件系统一致性 | 多根、loose file、hash 写入保护；资源 rename 支持跨根与跨文件系统回退；应用内变更通知；Tauri 原生递归 watcher、rename 归一化与前端刷新；dirty 冲突三选一、有界崩溃恢复快照与行级三方合并；普通文件 WorkspaceEdit 事务 undo/redo | 语义/token 级合并、目录/symlink/特殊文件历史、大小写-only rename、锁定文件/权限变化、网络盘/UNC，以及三端打包应用验收 | 代码闭环，未严格完成 |
-| P0 | 索引与重构 | LSP workspace symbol/rename；引用感知 Safe Delete；按 `CodeActionKind` 暴露 extract method/function、extract variable/constant、inline、change signature、move；provider semantic snapshot 维护 generation/revision/freshness，保存/watcher/资源操作/WorkspaceEdit/根变化/LSP 重启统一失效，Rename/Safe Delete/provider refactor 落盘前拒绝过期结果 | 无 IDEA PSI/stub index 与全项目引用增量索引；snapshot 是 provider 一致性协议而非自有索引，provider 是否提供动作及跨文件正确性仍取决于 language server，尚无 PSI 级语义保证 | 核心差距 |
-| P0 | Inspection / data-flow | provider diagnostic tags/related information/code description/data；按 provider source+code 持久化启停和展示 severity；文件/行 suppression；稳定 provider-message baseline 的创建、导入、导出、移除；Analysis 面板展示 capability、semantic token、related locations 与有限 nullability/taint/data-flow evidence 分类 | 这是 provider-backed 展示与治理层，不是 IDEA inspection engine；baseline 只改变展示/治理，不执行原生规则；无自有规则执行、PSI/stub 索引、跨过程 data-flow、nullability 推断、污点分析和路径证明；evidence 分类不构造客户端语义图 | 核心差距 |
+| P0 | 索引与重构 | 有界 LSP workspace symbol 多 provider 聚合（排序/去重/截断/失败诊断/覆盖计数）；LSP rename；引用感知 Safe Delete；按 `CodeActionKind` 暴露 extract method/function、extract variable/constant、inline、change signature、move；provider semantic snapshot 维护 generation/revision/freshness/coverage，保存/watcher/资源操作/WorkspaceEdit/根变化/LSP 重启统一失效，Rename/Safe Delete/provider refactor 落盘前拒绝过期或 workspace 外结果 | 无 IDEA PSI/stub index 与全项目引用增量索引；snapshot 是 provider 一致性协议而非自有索引，provider 是否提供动作及跨文件正确性仍取决于 language server，尚无 PSI 级语义保证 | 核心差距 |
+| P0 | Inspection / data-flow | provider diagnostic tags/related information/code description/data；按 provider source+code 持久化启停和展示 severity；文件/行 suppression；稳定 provider-message baseline 的创建、导入、导出、移除；Analysis 面板展示 capability、semantic token、related locations、structured/text-inferred proof level 与有界 flow steps | 这是 provider-backed 展示与治理层，不是 IDEA inspection engine；baseline 只改变展示/治理，不执行原生规则；无自有规则执行、PSI/stub 索引、跨过程 data-flow、nullability 推断、污点分析和路径证明；结构化 evidence 仅转发 provider metadata，不构造客户端语义图 | 核心差距 |
 | P0 | 工程模型与 Build | 多根、SDK 探测、Java module/任务/依赖树；Build/Rebuild 多项目目标去重、依赖拓扑、缺失/循环/工具错误预检、失败即停 | 无统一 project/module/source-set/facet/language-level 模型；Maven/Gradle 增量导入、冲突模型、active profile/source set 和离线状态不等价 | 核心差距 |
 | P1 | 导航与编辑器 UX | Search Everywhere、Recent Files、历史、分屏、tab、面包屑、Outline | action 搜索排序/上下文、preview/固定语义边界、导航落点恢复、拖拽停靠、keymap 编辑器、无障碍完整验收尚缺 | 未完成 |
 | P1 | Run/Test/Debug | 结构化 provider 配置；命名副本；program/VM arguments、cwd、env、dotenv、Before launch；按源文件保存 Run/Debug 共享选择；仓库共享配置文件/模板/平台覆盖；嵌套 compound Run/Debug；多 DAP 子会话与组级 Stop/Restart；通用 DAP、Java 调试和测试发现基础；有界 JUnit XML 结果协议、结果汇总/树、失败详情/定位/重跑 | 仍缺 coverage、完整 hot swap 和 Java/JS/Python/Go/Rust/C++ adapter 矩阵；XML 之外的 provider coverage 协议仍未统一 | 代码闭环，未严格完成 |
@@ -287,9 +287,13 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 #### 5.2.5 查找类 / 查找符号（Go to Class / Symbol）
 
 - 数据源 `workspace/symbol`；**Classes tab** 在客户端按 `SymbolKind ∈ {Class, Interface, Struct, Enum, TypeParameter…}` 过滤（各语言映射：Rust trait→Interface、Go struct→Struct 等由 server 决定，客户端不做语言特判）。
+- 每次查询聚合所有已就绪、声明 workspace-symbol capability 的 root/language provider；后端稳定排序、去重并限制返回量，同时返回 ready session/provider、跳过/失败 provider、截断与完整性诊断。新查询会令旧 generation 失效，并向仍在执行的 provider 发送标准 `$/cancelRequest`；旧响应不得发布结果或写入 resolve cache。
+- LSP 3.17 允许 `WorkspaceSymbol.location` 只有 URI。此类结果保持 unresolved，列表不伪造 `:1`，用户选择后才对声明 `resolveProvider` 的原 provider 调用 `workspaceSymbol/resolve`；resolve 失败、token 缺失或仍无 range 时不打开文件，成功后使用真实 `selectionRange`，`Ctrl+Enter` 保留分屏语义。
+- provider 原始 symbol/data payload 只保存在 Rust 后端，webview 仅接收 opaque resolve token。缓存与 workspace/provider session 生命周期绑定，TTL 300 秒、单项 64 KiB、单批 8 MiB、总计 32 MiB、最多 8 批；workspace 关闭、provider 退出、过期或淘汰后 token 必须拒绝解析。
 - 客户端二次排序：camelCase 缩写匹配（`CWT` → **C**ode**W**orkspace**T**ab）> 前缀 > 子串；同分按路径长度升序。
 - server 的 query 语义差异（有的做模糊、有的做前缀）通过客户端 re-rank 抹平。
 - 无可用 LSP 时 Classes/Symbols tab 隐藏（不展示空壳）。
+- Linux/macOS/Windows 真机验收仍为 TODO，重点覆盖 symlink/junction、网络盘、UNC/verbatim path、大小写规则与 provider 进程重启；现有测试只证明词法边界和协议生命周期，不替代三端发行包验证。
 
 #### 5.2.6 调用层级（Call Hierarchy）
 
@@ -321,7 +325,7 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 - 任一文件失败不回滚已成功文件，结果面板明确列出成功/失败清单（LSP 语义下无法保证原子性，如实呈现）。
 - 普通文件事务历史：首个 mutation 前捕获文本、存在性、编码/BOM 与打开 tab/group；成功后将整组操作压入一个 undo 单元，`Ctrl/Cmd+Z` 与 `Ctrl/Cmd+Shift+Z` 串行回放。目录、symlink、特殊文件或不可读资源不建立历史，并在状态栏说明原因。
 
-**Safe Delete（Alt+Delete）**：先调用 `prepareRename` 确认符号范围，再查询 declaration 与 references；引用面板先展示影响范围，确认后生成删除声明/引用的单一 WorkspaceEdit。缺少可靠范围、引用/重命名能力或目标是 library source 时拒绝猜测删除。
+**Safe Delete（Alt+Delete）**：先调用 `prepareRename` 确认符号范围，再查询 declaration 与 references；引用面板先展示影响范围，确认后生成删除声明/引用的单一 WorkspaceEdit。缺少可靠范围、引用/重命名能力、目标是 library source、引用没有本地 filesystem path 或引用/声明落在任一 workspace root 外时，结果标记 incomplete 并硬阻断删除，不静默降级到 loose-file 写入。
 
 **格式化（Ctrl+Alt+L）**：整文件/选区；"保存时格式化"为工作区级开关（默认关）。server 无 formatter（如 pyright）时置灰 + 提示外部格式化器方向（P2 规划"外部 formatter 命令"配置，如 ruff/black/prettier）。
 
@@ -764,8 +768,8 @@ src/stores/
 - [x] WorkspaceEdit §5.2.9 三态规则收口（open-clean 应用后保存、open-dirty 保持 dirty、未打开写盘 + hash 预检）— `workspaceEditApply` + `5d87203`
 - [x] WorkspaceEdit 事务 undo/redo：普通文件快照、编码/BOM 元数据、跨文件单步回放与 tab/group 恢复；失败时保留原历史。
 - [x] 非 UTF-8 编辑闭环：Rust `encoding_rs`/`chardetng` 检测与无损写入、前端状态栏 Reload/Convert 入口、浏览器 UTF-16 stub；二进制与 lossy legacy 保存明确拒绝。
-- [x] Safe Delete Symbol：Alt+Delete/右键/命令入口，引用面板预览与确认，声明/引用跨文件删除作为一个事务；无可靠 LSP 范围或 library source 时拒绝猜测。
-- [x] Build/Run/Debug 配置与分析代码闭环：Build 目标依赖拓扑、失败即停；命名 Run 配置副本、program/VM args、cwd、env、dotenv、Before launch；Run/Debug 共享 active selection；嵌套 Compound Run/Debug 和 grouped multi-session DAP；按 CodeActionKind 的 provider-backed extract/inline/change-signature/move 入口；provider semantic snapshot freshness 与落盘前过期拒绝；持久化 inspection profile、诊断 metadata、Analysis 面板与 Problems 展示变换（provider 原始诊断仍用于 quick fix）。
+- [x] Safe Delete Symbol：Alt+Delete/右键/命令入口，引用面板预览与确认，声明/引用跨文件删除作为一个事务；无可靠 LSP 范围、library source、unresolved reference 或 workspace 外路径时标记 incomplete 并拒绝猜测/写入。
+- [x] Build/Run/Debug 配置与分析代码闭环：Build 目标依赖拓扑、失败即停；命名 Run 配置副本、program/VM args、cwd、env、dotenv、Before launch；Run/Debug 共享 active selection；嵌套 Compound Run/Debug 和 grouped multi-session DAP；按 CodeActionKind 的 provider-backed extract/inline/change-signature/move 入口；provider semantic snapshot freshness/coverage 与落盘前过期或 workspace 外路径拒绝；持久化 inspection profile、诊断 metadata、Analysis 面板与 Problems 展示变换（provider 原始诊断仍用于 quick fix）。
 - [x] 合并门禁 8 例 Windows 失败已修复（clipboard URI ×4、pushd ×1、git 根 ×3）— `f6c1f36`
 - [ ] **⚠ 真机验证欠账（由用户执行）**：M0–M5 能力仍以单测/构建为主；`pnpm tauri dev` 冒烟结果回填本节
 - [ ] ⚠ M0 继续瘦身：树数据、LSP session、Git snapshot、导航与文件动作 controller 已抽离；命令注册、header/layout 大段继续下沉，目标装配壳 <400 行（当前约 4.4k 行）
@@ -785,7 +789,7 @@ src/stores/
    Git snapshot、导航与文件动作 controller 已抽离 — `cbc40ec`、`057006a`、`d97b2cb`。下一步组件化命令注册和 header/layout；当前壳体约 4.4k 行。
 
 4. **🔶 P0 协议与编辑器收口**
-   server 回推 `workspace/applyEdit`、有序资源操作、change annotation 确认、command-only、用户文件操作 `will*/did*Files`、server-request 分发、pull diagnostics、`workspace/didChangeWatchedFiles`/watcher、基础冲突/恢复中心、行级三方合并、字符集转换、事务 undo/redo 与 Safe Delete 代码链路已接入。下一步按 §2.7 完成三端原生验收、语义/token 合并和不可回滚资源边界；树/tab 拖拽与 `WorkspaceFs` 生产链路随后推进。
+   server 回推 `workspace/applyEdit`、有序资源操作、change annotation 确认、command-only、用户文件操作 `will*/did*Files`、server-request 分发、pull diagnostics、`workspace/didChangeWatchedFiles`/watcher、基础冲突/恢复中心、行级三方合并、字符集转换、事务 undo/redo、workspace symbol 多 provider 覆盖协议、semantic WorkspaceEdit root guard 与 Safe Delete incomplete 阻断已接入。下一步按 §2.7 完成三端原生验收、语义/token 合并和不可回滚资源边界；树/tab 拖拽与 `WorkspaceFs` 生产链路随后推进。
 
 5. **✅ 合入主干**
    M0–M5 已由 PR #361 合入 `main`；后续收口分支待独立合并，真机冒烟结果可在后续独立补录。
@@ -794,7 +798,7 @@ src/stores/
    突破原 §2.3 非目标，深化 Java 工程能力。**M6–M11 代码已交付**（jdtls 设置/大文件、全项目诊断基础设施、构建集成、Bundle、DAP、测试发现、Java Build/Run，以及执行配置与 provider-backed 分析闭环）；仓库共享 Run/Debug 配置已补齐 schema、迁移、模板、平台覆盖、compound Run/Debug、多 DAP 子会话和前端来源/诊断展示；JUnit XML 测试结果已形成读取、汇总、定位和重跑闭环。真机冒烟仍后置。coverage、非 JUnit provider 统一结果协议、自有 PSI/index、native data-flow 和完整多语言 adapter matrix 仍是后续差距。完整方案、命令清单与风险见 §11。
 
 7. **🔶 M11 执行配置与分析收口（本轮）**
-   Build/Run/Debug 现在统一通过结构化 execution model 传递 executable/argv/cwd/env/source/error；Build 先解析依赖拓扑并在首个失败处停止；Run 配置支持持久化命名副本、仓库共享配置/模板/平台覆盖、嵌套 compound Run/Debug、参数、VM/runtime options、工作目录、env、dotenv 和 Before launch；Compound Debug 支持多 DAP 子会话、子会话选择、失败策略和组级 Stop/Restart。重构入口按 provider 声明的 `CodeActionKind` 请求 extract/inline/change signature/move；provider semantic snapshot 记录 generation/revision/freshness，并在 Rename、Safe Delete 和 provider refactor 落盘前拒绝过期结果。inspection profile 只改变显示 severity/启停，Code Action 回调保留 provider 原始诊断。`Analysis` 面板展示 LSP capability、semantic token、snapshot freshness 和 related locations，不能冒充 PSI 或原生 data-flow。后续优先实现 coverage、自有 PSI/index、原生 inspection/data-flow 与完整多语言 provider/adapter 矩阵。
+   Build/Run/Debug 现在统一通过结构化 execution model 传递 executable/argv/cwd/env/source/error；Build 先解析依赖拓扑并在首个失败处停止；Run 配置支持持久化命名副本、仓库共享配置/模板/平台覆盖、嵌套 compound Run/Debug、参数、VM/runtime options、工作目录、env、dotenv 和 Before launch；Compound Debug 支持多 DAP 子会话、子会话选择、失败策略和组级 Stop/Restart。重构入口按 provider 声明的 `CodeActionKind` 请求 extract/inline/change signature/move；provider semantic snapshot 记录 generation/revision/freshness/query coverage，并在 Rename、Safe Delete 和 provider refactor 落盘前拒绝过期结果、unresolved reference 或 workspace 外路径。inspection profile 只改变显示 severity/启停，Code Action 回调保留 provider 原始诊断；`Analysis` 面板展示 LSP capability、semantic token、snapshot freshness、provider coverage、proof level、structured flow steps 和 related locations，不能冒充 PSI 或原生 data-flow。后续优先实现 coverage、自有 PSI/index、原生 inspection/data-flow 与完整多语言 provider/adapter 矩阵。
 
 ---
 

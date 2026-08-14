@@ -198,6 +198,9 @@
 - `[data-testid="analysis-data-flow"]` — display — F25.2.analysis-data-flow
 - `[data-testid="references-semantic-index"]` — display [optional] — F25.2.references-semantic-index
 - `[data-testid="search-everywhere-semantic-index"]` — display [optional] — F25.2.search-semantic-index
+- `[data-testid="search-everywhere-symbol-provider-status"]` — display [optional] — F25.2.search-symbol-provider-status
+- `[data-testid="analysis-evidence-proof-level"]` — display [optional] — F25.2.analysis-evidence-proof-level
+- `[data-testid="analysis-evidence-flow-steps"]` — display [optional] — F25.2.analysis-evidence-flow-steps
 
 ## database/hbase (F-DB-3)
 

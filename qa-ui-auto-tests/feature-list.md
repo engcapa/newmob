@@ -5043,8 +5043,11 @@ files:
   - src/components/editor/CodeWorkspaceTab.tsx
   - src/components/editor/workspace/SearchEverywhere.tsx
   - src/components/editor/workspace/WorkspacePopupsHost.tsx
+  - src/components/editor/workspace/codeWorkspaceModel.ts
   - src/components/editor/workspace/inspectionProfile.ts
   - src/components/editor/workspace/inspectionEvidence.ts
+  - src/components/editor/workspace/safeDelete.ts
+  - src/components/editor/workspace/semanticWorkspaceEdit.ts
   - src/components/editor/workspace/workspaceSemanticIndex.ts
   - src/components/editor/workspace/useWorkspaceSemanticIndex.ts
   - src/components/editor/workspace/workspaceEditApply.ts
@@ -5112,12 +5115,24 @@ controls:
     selector: '[data-testid="search-everywhere-semantic-index"]'
     kind: display
     optional: true       # requires workspace-symbol capability and a symbol query
+  - id: search-symbol-provider-status
+    selector: '[data-testid="search-everywhere-symbol-provider-status"]'
+    kind: display
+    optional: true       # requires a workspace-symbol query response
+  - id: analysis-evidence-proof-level
+    selector: '[data-testid="analysis-evidence-proof-level"]'
+    kind: display
+    optional: true       # requires a provider diagnostic with analysis evidence
+  - id: analysis-evidence-flow-steps
+    selector: '[data-testid="analysis-evidence-flow-steps"]'
+    kind: display
+    optional: true       # requires structured provider flow metadata
 -->
 
 - Analysis/Problems 面板呈现 provider capability、CodeActionKind、semantic token、诊断元数据、related locations 与可持久化 inspection 展示规则；支持文件/行 suppression、稳定 provider-message baseline 的创建/导入/导出/移除。
 - Provider semantic snapshot 以 workspace revision 判定结果新鲜度，generation 仅仲裁异步查询发布顺序；保存、编辑、watcher、资源操作、WorkspaceEdit、工程根变化、LSP/SDK 重启及 provider progress 会统一失效或阻断快照。
 - Rename、Safe Delete、Code Action/Refactor 在查询前等待活跃 editor buffer 的 LSP 同步，并在 resolve、菜单执行、确认对话框结束、WorkspaceEdit 最终 mutation 与 server-initiated `workspace/applyEdit` 前重复校验 revision。
-- References 与 Search Everywhere 绑定各自结果来源，后续无关查询不会把旧列表错误标成 ready；Analysis 仅分类和展示 provider 已返回的 nullability/taint/data-flow/related-location evidence，不执行客户端推断。当前仍不等同于 IntelliJ PSI/stub index；自有索引、原生 inspection、跨过程 data-flow/nullability/taint 引擎仍未完成。
+- References 与 Search Everywhere 绑定各自结果来源，后续无关查询不会把旧列表错误标成 ready；workspace symbol 显示 ready session/provider 覆盖、失败/跳过计数和有界状态；Rename/Refactor/Safe Delete 的 semantic WorkspaceEdit 拒绝 workspace 外路径，Safe Delete 对 unresolved reference 硬阻断。Analysis 仅分类和展示 provider 已返回的 nullability/taint/data-flow/related-location evidence，并区分 structured/text-inferred/related-location proof level 与有界 flow steps，不执行客户端推断。当前仍不等同于 IntelliJ PSI/stub index；自有索引、原生 inspection、跨过程 data-flow/nullability/taint 引擎仍未完成。
 
 ---
 
