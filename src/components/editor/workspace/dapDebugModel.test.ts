@@ -11,6 +11,8 @@ import {
   dataBreakpointKey,
   dataBreakpointVerificationMap,
   defaultDataBreakpointAccessType,
+  exceptionBreakpointRuleLabel,
+  exceptionBreakpointRuleVerificationMap,
   exceptionBreakpointVerificationMap,
   functionBreakpointVerificationMap,
   hoverExpressionAt,
@@ -396,37 +398,81 @@ describe("dapDebugModel", () => {
       { adapterId: "java", filterId: "uncaught", enabled: true },
       { adapterId: "node", filterId: "caught", enabled: true },
     ];
-    const plan = planExceptionBreakpointSync(settings, filters, {
+    const rules = [
+      {
+        id: "java-io",
+        adapterId: "java",
+        path: [
+          { names: ["Java Exceptions"] },
+          { names: ["java.io.IOException", "java.sql.SQLException"] },
+          { names: ["sun.*"], negate: true },
+        ],
+        breakMode: "unhandled" as const,
+        enabled: true,
+      },
+      {
+        id: "node-error",
+        adapterId: "node",
+        path: [{ names: ["Error"] }],
+        breakMode: "always" as const,
+        enabled: true,
+      },
+    ];
+    const plan = planExceptionBreakpointSync(settings, rules, filters, {
       adapterId: "java",
       supportsFilterOptions: true,
+      supportsExceptionOptions: true,
     });
     expect(buildSetExceptionBreakpointsArgs(plan)).toEqual({
       filters: ["uncaught"],
       filterOptions: [{ filterId: "caught", condition: "IOException" }],
+      exceptionOptions: [{
+        path: [
+          { names: ["Java Exceptions"] },
+          { names: ["java.io.IOException", "java.sql.SQLException"] },
+          { names: ["sun.*"], negate: true },
+        ],
+        breakMode: "unhandled",
+      }],
     });
-    expect(plan.sent.map((breakpoint) => breakpoint.filterId)).toEqual(["uncaught", "caught"]);
+    expect(plan.sent.map((target) => (
+      target.kind === "filter" ? target.breakpoint.filterId : target.rule.id
+    ))).toEqual(["uncaught", "caught", "java-io"]);
+    expect(exceptionBreakpointRuleLabel(rules[0])).toBe(
+      "Java Exceptions / java.io.IOException | java.sql.SQLException / not (sun.*)",
+    );
+    expect(exceptionBreakpointRuleLabel({ path: [] })).toBe("All exceptions");
 
     const bindings = parseSetExceptionBreakpointsResponse(plan, {
       breakpoints: [
         { id: 7, verified: true },
         { id: 8, verified: false, reason: "failed", message: "Invalid condition" },
+        { id: 9, verified: false, reason: "pending", message: "Class not loaded" },
       ],
     });
-    expect(bindings.map((binding) => binding.filterId)).toEqual(["uncaught", "caught"]);
+    expect(bindings.map((binding) => (
+      binding.kind === "filter" ? binding.filterId : binding.ruleId
+    ))).toEqual(["uncaught", "caught", "java-io"]);
     expect(exceptionBreakpointVerificationMap(plan, bindings)).toEqual({
       uncaught: { status: "verified", message: null },
       caught: { status: "failed", message: "Invalid condition" },
     });
+    expect(exceptionBreakpointRuleVerificationMap(plan, bindings)).toEqual({
+      "java-io": { status: "pending", message: "Class not loaded" },
+    });
 
-    const legacy = planExceptionBreakpointSync(settings, filters, {
+    const legacy = planExceptionBreakpointSync(settings, rules, filters, {
       adapterId: "java",
       supportsFilterOptions: false,
+      supportsExceptionOptions: false,
     });
     expect(buildSetExceptionBreakpointsArgs(legacy)).toEqual({ filters: ["caught", "uncaught"] });
-    const muted = planExceptionBreakpointSync(settings, filters, {
+    expect(legacy.applicableRules).toEqual([rules[0]]);
+    const muted = planExceptionBreakpointSync(settings, rules, filters, {
       adapterId: "java",
       muted: true,
       supportsFilterOptions: true,
+      supportsExceptionOptions: true,
     });
     expect(buildSetExceptionBreakpointsArgs(muted)).toEqual({ filters: [] });
   });

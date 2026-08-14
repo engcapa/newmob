@@ -83,6 +83,27 @@ export interface DebugExceptionBreakpoint {
   condition?: string;
 }
 
+export type DebugExceptionBreakMode = "never" | "always" | "unhandled" | "userUnhandled";
+
+/** One segment in the adapter-defined DAP exception tree. */
+export interface DebugExceptionPathSegment {
+  names: string[];
+  negate?: boolean;
+}
+
+/**
+ * A user-defined exception class/package rule sent through DAP
+ * `exceptionOptions`. Rules are persisted per workspace and adapter because
+ * exception-tree names and wildcard syntax are adapter-specific.
+ */
+export interface DebugExceptionBreakpointRule {
+  id: string;
+  adapterId: string;
+  path: DebugExceptionPathSegment[];
+  breakMode: DebugExceptionBreakMode;
+  enabled: boolean;
+}
+
 /** True unless the breakpoint was explicitly disabled. */
 export function isBreakpointEnabled(bp: DebugBreakpoint): boolean {
   return bp.enabled !== false;
@@ -685,6 +706,24 @@ export function exceptionBreakpointKey(
   return JSON.stringify([breakpoint.adapterId, breakpoint.filterId]);
 }
 
+/** Stable identity for a persisted adapter-specific exception path rule. */
+export function exceptionBreakpointRuleKey(
+  rule: Pick<DebugExceptionBreakpointRule, "adapterId" | "id">,
+): string {
+  return JSON.stringify([rule.adapterId, rule.id]);
+}
+
+/** Compact path label for the exception-breakpoints view. */
+export function exceptionBreakpointRuleLabel(
+  rule: Pick<DebugExceptionBreakpointRule, "path">,
+): string {
+  if (rule.path.length === 0) return "All exceptions";
+  return rule.path.map((segment) => {
+    const names = segment.names.join(" | ");
+    return segment.negate ? `not (${names})` : names;
+  }).join(" / ");
+}
+
 /**
  * Seed newly advertised filters from the adapter's `default` flag while
  * retaining every explicit user choice (including disabled filters).
@@ -709,19 +748,33 @@ export function mergeExceptionBreakpointDefaults(
 export interface ExceptionBreakpointSyncPlan {
   /** Settings matching filters advertised by this adapter, in advertised order. */
   applicable: DebugExceptionBreakpoint[];
+  /** Persisted class/package rules matching this adapter, in user order. */
+  applicableRules: DebugExceptionBreakpointRule[];
   /** Enabled filters sent through the backward-compatible `filters` array. */
   plain: DebugExceptionBreakpoint[];
   /** Enabled filters sent with a condition through `filterOptions`. */
   conditional: DebugExceptionBreakpoint[];
-  /** Positional response order: `filters` first, then `filterOptions`. */
-  sent: DebugExceptionBreakpoint[];
+  /** Enabled rules sent through capability-gated `exceptionOptions`. */
+  rules: DebugExceptionBreakpointRule[];
+  /** Positional response order: `filters`, `filterOptions`, then `exceptionOptions`. */
+  sent: ExceptionBreakpointSyncTarget[];
 }
+
+export type ExceptionBreakpointSyncTarget =
+  | { kind: "filter"; breakpoint: DebugExceptionBreakpoint }
+  | { kind: "rule"; rule: DebugExceptionBreakpointRule };
 
 /** Plan a replacing exception-breakpoint request for one adapter session. */
 export function planExceptionBreakpointSync(
   list: DebugExceptionBreakpoint[],
+  ruleList: DebugExceptionBreakpointRule[],
   filters: readonly DebugExceptionBreakpointFilter[],
-  context: { adapterId: string; muted?: boolean; supportsFilterOptions?: boolean },
+  context: {
+    adapterId: string;
+    muted?: boolean;
+    supportsFilterOptions?: boolean;
+    supportsExceptionOptions?: boolean;
+  },
 ): ExceptionBreakpointSyncPlan {
   const byKey = new Map(list.map((breakpoint) => [exceptionBreakpointKey(breakpoint), breakpoint]));
   const applicable = filters.map((filter) => {
@@ -742,7 +795,16 @@ export function planExceptionBreakpointSync(
     : [];
   const conditionalIds = new Set(conditional.map((breakpoint) => breakpoint.filterId));
   const plain = enabled.filter((breakpoint) => !conditionalIds.has(breakpoint.filterId));
-  return { applicable, plain, conditional, sent: [...plain, ...conditional] };
+  const applicableRules = ruleList.filter((rule) => rule.adapterId === context.adapterId);
+  const rules = context.supportsExceptionOptions && !context.muted
+    ? applicableRules.filter((rule) => rule.enabled)
+    : [];
+  const sent: ExceptionBreakpointSyncTarget[] = [
+    ...plain.map((breakpoint) => ({ kind: "filter" as const, breakpoint })),
+    ...conditional.map((breakpoint) => ({ kind: "filter" as const, breakpoint })),
+    ...rules.map((rule) => ({ kind: "rule" as const, rule })),
+  ];
+  return { applicable, applicableRules, plain, conditional, rules, sent };
 }
 
 /** Build standard DAP `setExceptionBreakpoints` arguments with legacy fallback. */
@@ -750,6 +812,10 @@ export function buildSetExceptionBreakpointsArgs(plan: ExceptionBreakpointSyncPl
   const args: {
     filters: string[];
     filterOptions?: { filterId: string; condition: string }[];
+    exceptionOptions?: Array<{
+      path?: Array<{ names: string[]; negate?: boolean }>;
+      breakMode: DebugExceptionBreakMode;
+    }>;
   } = {
     filters: plan.plain.map((breakpoint) => breakpoint.filterId),
   };
@@ -759,34 +825,55 @@ export function buildSetExceptionBreakpointsArgs(plan: ExceptionBreakpointSyncPl
       condition: breakpoint.condition!.trim(),
     }));
   }
+  if (plan.rules.length > 0) {
+    args.exceptionOptions = plan.rules.map((rule) => ({
+      ...(rule.path.length > 0
+        ? {
+            path: rule.path.map((segment) => ({
+              names: [...segment.names],
+              ...(segment.negate ? { negate: true } : {}),
+            })),
+          }
+        : {}),
+      breakMode: rule.breakMode,
+    }));
+  }
   return args;
 }
 
-/** Positional binding returned by `setExceptionBreakpoints`. */
-export interface ExceptionBreakpointBinding {
+interface ExceptionBreakpointBindingBase {
   id: number | null;
   verified: boolean;
-  filterId: string;
   message?: string | null;
   reason?: "pending" | "failed" | null;
 }
 
-/** Parse exception-filter bindings in `filters` then `filterOptions` order. */
+/** Positional binding returned by `setExceptionBreakpoints`. */
+export type ExceptionBreakpointBinding =
+  | (ExceptionBreakpointBindingBase & { kind: "filter"; filterId: string })
+  | (ExceptionBreakpointBindingBase & { kind: "rule"; ruleId: string });
+
+/** Parse bindings in `filters`, `filterOptions`, then `exceptionOptions` order. */
 export function parseSetExceptionBreakpointsResponse(
   plan: ExceptionBreakpointSyncPlan,
   body: unknown,
 ): ExceptionBreakpointBinding[] {
   const reported = asRecord(body).breakpoints;
   const list = Array.isArray(reported) ? reported : [];
-  return plan.sent.map((breakpoint, index) => {
+  return plan.sent.map((target, index) => {
     const rec = asRecord(list[index]);
-    return {
+    const reason: "pending" | "failed" | null = rec.reason === "pending" || rec.reason === "failed"
+      ? rec.reason
+      : null;
+    const binding: ExceptionBreakpointBindingBase = {
       id: typeof rec.id === "number" ? rec.id : null,
       verified: rec.verified === true,
-      filterId: breakpoint.filterId,
       message: typeof rec.message === "string" && rec.message ? rec.message : null,
-      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+      reason,
     };
+    return target.kind === "filter"
+      ? { ...binding, kind: "filter" as const, filterId: target.breakpoint.filterId }
+      : { ...binding, kind: "rule" as const, ruleId: target.rule.id };
   });
 }
 
@@ -796,9 +883,26 @@ export function exceptionBreakpointVerificationMap(
   bindings: ExceptionBreakpointBinding[],
 ): Record<string, BreakpointRuntimeState> {
   const out: Record<string, BreakpointRuntimeState> = {};
-  plan.sent.forEach((breakpoint, index) => {
-    const binding = bindings[index];
+  const filterBindings = bindings.filter((binding) => binding.kind === "filter");
+  [...plan.plain, ...plan.conditional].forEach((breakpoint, index) => {
+    const binding = filterBindings[index];
     out[breakpoint.filterId] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
+}
+
+/** Verification state per user-defined exception path rule. */
+export function exceptionBreakpointRuleVerificationMap(
+  plan: ExceptionBreakpointSyncPlan,
+  bindings: ExceptionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  const ruleBindings = bindings.filter((binding) => binding.kind === "rule");
+  plan.rules.forEach((rule, index) => {
+    const binding = ruleBindings[index];
+    out[rule.id] = binding
       ? bindingRuntimeStatus(binding)
       : { status: "pending", message: null };
   });

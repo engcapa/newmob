@@ -5067,6 +5067,66 @@ controls:
     selector: '[data-testid^="debug-exception-breakpoint-binding-"]'
     kind: display
     optional: true       # requires a live adapter with a pending or failed binding
+  - id: debug-exception-rules
+    selector: '[data-testid="debug-exception-rules"]'
+    kind: display
+    optional: true       # requires a live adapter advertising exception filters
+  - id: debug-exception-rule-input
+    selector: '[data-testid="debug-exception-rule-input"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionOptions
+  - id: debug-exception-rule-add
+    selector: '[data-testid="debug-exception-rule-add"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionOptions and a non-empty pattern
+  - id: debug-exception-rule-unsupported
+    selector: '[data-testid="debug-exception-rule-unsupported"]'
+    kind: display
+    optional: true       # requires exception filters without supportsExceptionOptions
+  - id: debug-exception-rule-row
+    selector: '[data-testid="debug-exception-rule-row"]'
+    kind: display
+    optional: true       # rendered for each saved adapter-scoped exception path rule
+  - id: debug-exception-rule-enabled
+    selector: '[data-testid^="debug-exception-rule-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-mode
+    selector: '[data-testid^="debug-exception-rule-mode-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-edit
+    selector: '[data-testid^="debug-exception-rule-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-remove
+    selector: '[data-testid^="debug-exception-rule-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-binding
+    selector: '[data-testid^="debug-exception-rule-binding-"]'
+    kind: display
+    optional: true       # requires a pending, failed, or unsupported live binding
+  - id: debug-exception-rule-path-names
+    selector: '[data-testid^="debug-exception-rule-path-names-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-exclude
+    selector: '[data-testid^="debug-exception-rule-path-exclude-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-remove
+    selector: '[data-testid^="debug-exception-rule-path-remove-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-input
+    selector: '[data-testid^="debug-exception-rule-path-input-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-add
+    selector: '[data-testid^="debug-exception-rule-path-add-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
   - id: tools-dialog
     selector: '[data-testid="workspace-build-run-tools-dialog"]'
     kind: display
@@ -5144,7 +5204,7 @@ controls:
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
 - Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
 - 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
-- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。标准 source/function/data/exception breakpoints 已覆盖 adapter scope、条件、Mute/Remove All、configurationDone 前同步和绑定状态，其中 exception filters 同时兼容 `filters` 与 capability-gated `filterOptions`。Maven Surefire/Failsafe 与 Gradle JUnit XML 已形成结构化结果、失败详情/定位/重跑闭环；coverage 和完整 adapter 矩阵仍未完成。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。标准 source/function/data/exception breakpoints 已覆盖 adapter scope、条件、Mute/Remove All、configurationDone 前同步和绑定状态；exception filters 同时兼容 `filters` 与 capability-gated `filterOptions`，支持 `exceptionOptions` 的 adapter 还可管理持久化异常树路径、排除段及 caught/uncaught break mode。Maven Surefire/Failsafe 与 Gradle JUnit XML 已形成结构化结果、失败详情/定位/重跑闭环；IDEA 专有断点属性、coverage 和完整 adapter 矩阵仍未完成。
 
 ### 25.2 Provider 语义快照与重构一致性 🟡
 

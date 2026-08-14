@@ -15,6 +15,8 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     dataBreakpointRuntime: {},
     exceptionBreakpoints: [],
     exceptionBreakpointRuntime: {},
+    exceptionBreakpointRules: [],
+    exceptionBreakpointRuleRuntime: {},
     capabilities: {},
     availableExceptionFilters: [],
     watchExpressions: [],
@@ -39,6 +41,9 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     setDataBreakpointOptions: vi.fn(),
     removeDataBreakpoint: vi.fn(),
     setExceptionBreakpointOptions: vi.fn(),
+    addExceptionBreakpointRule: vi.fn().mockReturnValue(null),
+    setExceptionBreakpointRuleOptions: vi.fn(),
+    removeExceptionBreakpointRule: vi.fn(),
     addWatchExpression: vi.fn(),
     removeWatchExpression: vi.fn(),
     step: vi.fn(),
@@ -347,6 +352,143 @@ describe("DebugPanel", () => {
     expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", {
       condition: "exception instanceof IOException",
     });
+  });
+
+  it("manages capability-gated exception class and package rules", () => {
+    const addExceptionBreakpointRule = vi.fn().mockReturnValue("rule-new");
+    const setExceptionBreakpointRuleOptions = vi.fn();
+    const removeExceptionBreakpointRule = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "app",
+            label: "App",
+            adapterId: "java",
+            status: "stopped",
+            stoppedReason: "exception",
+          }],
+          activeSessionId: "s1",
+          capabilities: { supportsExceptionOptions: true },
+          availableExceptionFilters: [{
+            filter: "all",
+            label: "All Exceptions",
+            default: false,
+            supportsCondition: false,
+          }],
+          exceptionBreakpointRules: [{
+            id: "rule-1",
+            adapterId: "java",
+            path: [
+              { names: ["Java Exceptions"] },
+              { names: ["java.io.IOException"] },
+            ],
+            breakMode: "unhandled",
+            enabled: true,
+          }],
+          exceptionBreakpointRuleRuntime: {
+            "rule-1": { status: "failed", message: "Unknown exception class" },
+          },
+          addExceptionBreakpointRule,
+          setExceptionBreakpointRuleOptions,
+          removeExceptionBreakpointRule,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("debug-exception-rules")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-exception-rule-row")).toHaveTextContent(
+      "Java Exceptions / java.io.IOException",
+    );
+    expect(screen.getByTestId("debug-exception-rule-binding-0")).toHaveTextContent("not bound");
+
+    fireEvent.change(screen.getByTestId("debug-exception-rule-input"), {
+      target: { value: "java.sql.SQLException, java.net.SocketException" },
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-add"));
+    expect(addExceptionBreakpointRule).toHaveBeenCalledWith([{
+      names: ["java.sql.SQLException", "java.net.SocketException"],
+    }]);
+
+    fireEvent.click(screen.getByTestId("debug-exception-rule-enabled-0"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", { enabled: false });
+    fireEvent.change(screen.getByTestId("debug-exception-rule-mode-0"), {
+      target: { value: "userUnhandled" },
+    });
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      breakMode: "userUnhandled",
+    });
+
+    fireEvent.click(screen.getByTestId("debug-exception-rule-edit-0"));
+    fireEvent.change(screen.getByTestId("debug-exception-rule-path-names-0-1"), {
+      target: { value: "java.io.IOException, java.io.EOFException" },
+    });
+    fireEvent.keyDown(screen.getByTestId("debug-exception-rule-path-names-0-1"), { key: "Enter" });
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [
+        { names: ["Java Exceptions"] },
+        { names: ["java.io.IOException", "java.io.EOFException"] },
+      ],
+    });
+
+    fireEvent.click(screen.getByTestId("debug-exception-rule-path-exclude-0-0"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [
+        { names: ["Java Exceptions"], negate: true },
+        { names: ["java.io.IOException"] },
+      ],
+    });
+    fireEvent.change(screen.getByTestId("debug-exception-rule-path-input-0"), {
+      target: { value: "com.example.*" },
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-path-add-0"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [
+        { names: ["Java Exceptions"] },
+        { names: ["java.io.IOException"] },
+        { names: ["com.example.*"] },
+      ],
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-path-remove-0-1"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [{ names: ["Java Exceptions"] }],
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-remove-0"));
+    expect(removeExceptionBreakpointRule).toHaveBeenCalledWith("rule-1");
+  });
+
+  it("explains when the active adapter cannot accept exception path rules", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "app",
+            label: "App",
+            adapterId: "java",
+            status: "stopped",
+            stoppedReason: "breakpoint",
+          }],
+          activeSessionId: "s1",
+          availableExceptionFilters: [{
+            filter: "all",
+            label: "All Exceptions",
+            default: false,
+            supportsCondition: false,
+          }],
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("debug-exception-rule-unsupported")).toHaveTextContent(
+      "does not support class or package exception rules",
+    );
   });
 
   it("lists every workspace breakpoint and reveals one on click", () => {

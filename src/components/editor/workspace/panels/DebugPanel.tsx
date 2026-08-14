@@ -21,9 +21,12 @@ import type { CodeDebugSession } from "../useCodeDebugSession";
 import {
   sortedBreakpoints,
   dataBreakpointKey,
+  exceptionBreakpointRuleLabel,
   type DebugBreakpoint,
   type DebugDataBreakpoint,
   type DebugExceptionBreakpoint,
+  type DebugExceptionBreakpointRule,
+  type DebugExceptionBreakMode,
   type DebugFunctionBreakpoint,
   type DebugStackFrame,
 } from "../dapDebugModel";
@@ -771,6 +774,259 @@ function ExceptionBreakpointsView({ debug }: { debug: CodeDebugSession }) {
                   )}
                 />
               </div>
+            )}
+          </div>
+        );
+      })}
+      <ExceptionBreakpointRulesView debug={debug} adapterId={activeSession?.adapterId ?? null} />
+    </div>
+  );
+}
+
+const EXCEPTION_BREAK_MODES: Array<{ value: DebugExceptionBreakMode; label: string }> = [
+  { value: "always", label: "Caught and uncaught" },
+  { value: "unhandled", label: "Uncaught" },
+  { value: "userUnhandled", label: "Unhandled in user code" },
+  { value: "never", label: "Never" },
+];
+
+function parseExceptionPathNames(value: string): string[] {
+  return Array.from(new Set(value.split(",").map((name) => name.trim()).filter(Boolean)));
+}
+
+function ExceptionBreakpointRuleEditor({
+  rule,
+  ruleIndex,
+  onChange,
+}: {
+  rule: DebugExceptionBreakpointRule;
+  ruleIndex: number;
+  onChange: (options: Partial<DebugExceptionBreakpointRule>) => void;
+}) {
+  const [newSegment, setNewSegment] = useState("");
+  const field = "min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none";
+  const setSegment = (segmentIndex: number, names: string[]) => {
+    const path = names.length > 0
+      ? rule.path.map((segment, index) => (index === segmentIndex ? { ...segment, names } : segment))
+      : rule.path.filter((_, index) => index !== segmentIndex);
+    onChange({ path });
+  };
+  const addSegment = () => {
+    const names = parseExceptionPathNames(newSegment);
+    if (names.length === 0) return;
+    onChange({ path: [...rule.path, { names }] });
+    setNewSegment("");
+  };
+  return (
+    <div className="space-y-1 bg-[var(--taomni-code-bg)] px-3 pb-1.5 pt-1">
+      {rule.path.map((segment, segmentIndex) => (
+        <div key={`${rule.id}:${segmentIndex}`} className="flex items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <CommitField
+              label={`Path ${segmentIndex + 1}`}
+              testId={`debug-exception-rule-path-names-${ruleIndex}-${segmentIndex}`}
+              className={field}
+              placeholder="Exception class or package patterns"
+              maxLength={4096}
+              initialValue={segment.names.join(", ")}
+              onCommit={(value) => setSegment(segmentIndex, parseExceptionPathNames(value))}
+            />
+          </div>
+          <label
+            className="inline-flex h-5 shrink-0 items-center gap-1 text-[10px] text-[var(--taomni-text-muted)]"
+            title="Exclude these names from this path segment"
+          >
+            <input
+              type="checkbox"
+              data-testid={`debug-exception-rule-path-exclude-${ruleIndex}-${segmentIndex}`}
+              checked={segment.negate === true}
+              onChange={(event) => onChange({
+                path: rule.path.map((entry, index) => (
+                  index === segmentIndex
+                    ? { ...entry, negate: event.target.checked || undefined }
+                    : entry
+                )),
+              })}
+            />
+            Exclude
+          </label>
+          <button
+            type="button"
+            data-testid={`debug-exception-rule-path-remove-${ruleIndex}-${segmentIndex}`}
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--taomni-text-muted)] hover:bg-rose-500/15 hover:text-rose-500"
+            title="Remove path segment"
+            aria-label="Remove path segment"
+            onClick={() => setSegment(segmentIndex, [])}
+          >
+            <Trash2 className="h-3 w-3" />
+          </button>
+        </div>
+      ))}
+      <div className="flex items-center gap-1">
+        <input
+          data-testid={`debug-exception-rule-path-input-${ruleIndex}`}
+          className={field}
+          aria-label="New exception path segment"
+          placeholder="Add path segment"
+          value={newSegment}
+          maxLength={4096}
+          onChange={(event) => setNewSegment(event.target.value)}
+          onKeyDown={(event) => { if (event.key === "Enter") addSegment(); }}
+        />
+        <button
+          type="button"
+          data-testid={`debug-exception-rule-path-add-${ruleIndex}`}
+          className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--taomni-text-muted)] hover:bg-emerald-500/15 hover:text-emerald-500 disabled:opacity-40"
+          title="Add path segment"
+          aria-label="Add path segment"
+          disabled={parseExceptionPathNames(newSegment).length === 0}
+          onClick={addSegment}
+        >
+          <Plus className="h-3 w-3" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ExceptionBreakpointRulesView({
+  debug,
+  adapterId,
+}: {
+  debug: CodeDebugSession;
+  adapterId: string | null;
+}) {
+  const [newRule, setNewRule] = useState("");
+  const [editingRuleId, setEditingRuleId] = useState<string | null>(null);
+  const supported = debug.capabilities.supportsExceptionOptions === true;
+  const rules = debug.exceptionBreakpointRules.filter((rule) => rule.adapterId === adapterId);
+  const addRule = () => {
+    const names = parseExceptionPathNames(newRule);
+    if (names.length === 0) return;
+    const id = debug.addExceptionBreakpointRule([{ names }]);
+    if (!id) return;
+    setNewRule("");
+    setEditingRuleId(id);
+  };
+  const field = "min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none";
+  return (
+    <div data-testid="debug-exception-rules" className="border-t border-[var(--taomni-code-border)]/60 pt-1">
+      {supported ? (
+        <div className="flex items-center gap-1 px-3 pb-1">
+          <input
+            data-testid="debug-exception-rule-input"
+            className={field}
+            aria-label="Exception class or package patterns"
+            placeholder="Exception class or package patterns"
+            value={newRule}
+            maxLength={4096}
+            onChange={(event) => setNewRule(event.target.value)}
+            onKeyDown={(event) => { if (event.key === "Enter") addRule(); }}
+          />
+          <button
+            type="button"
+            data-testid="debug-exception-rule-add"
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--taomni-text-muted)] hover:bg-emerald-500/15 hover:text-emerald-500 disabled:opacity-40"
+            title="Add exception path rule"
+            aria-label="Add exception path rule"
+            disabled={parseExceptionPathNames(newRule).length === 0}
+            onClick={addRule}
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        </div>
+      ) : (
+        <div
+          data-testid="debug-exception-rule-unsupported"
+          className="px-3 py-1 text-[10px] text-[var(--taomni-text-muted)]"
+        >
+          This adapter does not support class or package exception rules.
+        </div>
+      )}
+      {rules.map((rule, index) => {
+        const runtime = debug.exceptionBreakpointRuleRuntime[rule.id];
+        const bindingHint = rule.enabled
+          && !debug.breakpointsMuted
+          && runtime
+          && runtime.status !== "verified"
+          ? runtime
+          : null;
+        const editing = editingRuleId === rule.id;
+        return (
+          <div
+            key={rule.id}
+            data-testid="debug-exception-rule-row"
+            data-exception-rule={rule.id}
+            className="border-t border-[var(--taomni-code-border)]/40 first:border-t-0"
+          >
+            <div className="flex min-w-0 items-center gap-1 px-3 py-0.5 hover:bg-[var(--taomni-hover-bg)]">
+              <input
+                type="checkbox"
+                data-testid={`debug-exception-rule-enabled-${index}`}
+                aria-label={`Enable ${exceptionBreakpointRuleLabel(rule)}`}
+                checked={rule.enabled}
+                onChange={(event) => debug.setExceptionBreakpointRuleOptions(
+                  rule.id,
+                  { enabled: event.target.checked },
+                )}
+              />
+              <span className="min-w-0 flex-1 truncate font-mono" title={exceptionBreakpointRuleLabel(rule)}>
+                {exceptionBreakpointRuleLabel(rule)}
+                {bindingHint && (
+                  <span
+                    data-testid={`debug-exception-rule-binding-${index}`}
+                    className={`ml-2 font-sans ${
+                      bindingHint.status === "failed"
+                        ? "text-rose-500"
+                        : "text-[var(--taomni-text-muted)]"
+                    }`}
+                    title={bindingHint.message ?? undefined}
+                  >
+                    {bindingHint.status === "failed" ? "not bound" : "pending"}
+                  </span>
+                )}
+              </span>
+              <select
+                data-testid={`debug-exception-rule-mode-${index}`}
+                aria-label={`Break mode for ${exceptionBreakpointRuleLabel(rule)}`}
+                className="h-5 max-w-32 shrink-0 rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 text-[10px]"
+                value={rule.breakMode}
+                onChange={(event) => debug.setExceptionBreakpointRuleOptions(rule.id, {
+                  breakMode: event.target.value as DebugExceptionBreakMode,
+                })}
+              >
+                {EXCEPTION_BREAK_MODES.map((mode) => (
+                  <option key={mode.value} value={mode.value}>{mode.label}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                data-testid={`debug-exception-rule-edit-${index}`}
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--taomni-text-muted)] hover:bg-[var(--taomni-hover-bg)]"
+                title="Edit exception path"
+                aria-label="Edit exception path"
+                aria-expanded={editing}
+                onClick={() => setEditingRuleId(editing ? null : rule.id)}
+              >
+                {editing ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+              </button>
+              <button
+                type="button"
+                data-testid={`debug-exception-rule-remove-${index}`}
+                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--taomni-text-muted)] hover:bg-rose-500/15 hover:text-rose-500"
+                title="Remove exception rule"
+                aria-label="Remove exception rule"
+                onClick={() => debug.removeExceptionBreakpointRule(rule.id)}
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
+            {editing && (
+              <ExceptionBreakpointRuleEditor
+                rule={rule}
+                ruleIndex={index}
+                onChange={(options) => debug.setExceptionBreakpointRuleOptions(rule.id, options)}
+              />
             )}
           </div>
         );
