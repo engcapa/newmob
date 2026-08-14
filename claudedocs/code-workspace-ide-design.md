@@ -2,7 +2,7 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-14 · 版本：v4.13（严格持平基线；多 provider 语义聚合与结构化 evidence）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前又补齐 grouped multi-session Compound Debug、provider-backed semantic snapshot freshness、多 root/language `workspace/symbol` 聚合、Safe Delete/semantic WorkspaceEdit 路径边界、Inspection proof-level/flow-step evidence，以及 Surefire/Failsafe/Gradle JUnit XML 结果树、失败详情/定位/重跑，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-14 · 版本：v4.14（严格持平基线；DAP function/method breakpoint）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；当前又补齐 grouped multi-session Compound Debug、标准 DAP function/method breakpoint、provider-backed semantic snapshot freshness、多 root/language `workspace/symbol` 聚合、Safe Delete/semantic WorkspaceEdit 路径边界、Inspection proof-level/flow-step evidence，以及 Surefire/Failsafe/Gradle JUnit XML 结果树、失败详情/定位/重跑，但**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
 > 早期版本：v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -19,7 +19,7 @@
 | Markdown | edit/preview/split，Mermaid 渲染 + SVG/PNG 导出 | `MarkdownPreview.tsx` |
 | LSP 与分析 | 10 种语言预设 + 自定义命令；文档同步、诊断元数据、补全、签名、文档、导航/引用/层级、格式化、重命名、按 kind 请求 Code Action、inlay/semantic token、动态 capability、跨 root/language 的有界 workspace symbol 聚合、provider-backed inspection profile/related locations/structured evidence | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts`、`useWorkspaceLspSession.ts`、`AnalysisPanel.tsx` |
 | 搜索与导航 | Find/Replace in Files、Search Everywhere、Go to File/Class/Symbol、Recent Files、前进/后退、Outline/结构弹窗、Problems | `workspace_search.rs`、workspace panels/hooks |
-| 工程执行 | 集成 PTY、结构化 Build/Run/Debug 模型、Build 依赖拓扑、命名运行配置、参数/环境/dotenv/工作目录/Before launch、通用 DAP 与 Java 调试/测试基础、SDK/toolchain 探测 | `workspace.rs`、`dap.rs`、Run/Build/Test/Debug panels |
+| 工程执行 | 集成 PTY、结构化 Build/Run/Debug 模型、Build 依赖拓扑、命名运行配置、参数/环境/dotenv/工作目录/Before launch、通用 DAP、line/function breakpoint 与 Java 调试/测试基础、SDK/toolchain 探测 | `workspace.rs`、`dap.rs`、Run/Build/Test/Debug panels |
 | Git 与恢复 | gutter/diff、inline blame、完整 Git Manager、本地历史、TODO/书签 | `src/lib/git.ts`、workspace chrome/panels |
 | 外观与扩展入口 | code view profile、编辑区/树独立缩放、LSP 命令/Java 设置 | `codeViewProfile.ts`、Settings |
 
@@ -29,7 +29,7 @@
 2. 完整 project/module/source-set/facet/language-level 模型及 Maven/Gradle 等价导入生命周期。
 3. LSP 客户端剩余协议面：更完整的配置模型与跨请求取消边界；diagnostic partial result/即时 refresh 已形成代码闭环，`workspace/didChangeWatchedFiles` 与 watcher 仍需三端原生验收。
 4. IDEA 级 dirty 冲突/合并与 crash/restart 恢复中心已形成基础代码闭环（含有界行级三方合并）；跨文件 WorkspaceEdit 已支持有界事务级 undo/redo，语义/token 级合并、目录/symlink/特殊文件历史、网络盘、UNC、大小写-only rename 等文件系统边界仍未完成严格验收。
-5. Run/Debug 已共享命名配置、参数、环境、dotenv、工作目录与 Before launch，并支持仓库级 `.taomni/run-configurations.json`（v1 迁移、v2 schema、模板、平台覆盖、provider 引用、诊断、debug-only 选择和嵌套 compound Run/Debug）。Compound Debug 已支持顺序/并行、失败策略、多 DAP 子会话选择和组级 Stop/Restart；Inspection profile 已支持 provider rule 启停/severity、文件/行 suppression、稳定 provider-message baseline 的创建/导入/导出/移除，Analysis 面板对 provider 返回的 nullability/taint/data-flow/related-location evidence 做有限分类展示；Tests 面板已接入有界 JUnit XML 结果协议（Surefire/Failsafe/Gradle test-results）、汇总/状态树/失败详情/源码定位/失败重跑；coverage、原生 inspection/data-flow 和完整多语言调试适配矩阵仍缺。
+5. Run/Debug 已共享命名配置、参数、环境、dotenv、工作目录与 Before launch，并支持仓库级 `.taomni/run-configurations.json`（v1 迁移、v2 schema、模板、平台覆盖、provider 引用、诊断、debug-only 选择和嵌套 compound Run/Debug）。Compound Debug 已支持顺序/并行、失败策略、多 DAP 子会话选择和组级 Stop/Restart；标准 DAP function/method breakpoint 已支持持久化、启停、条件、命中次数、Mute/Remove All、adapter capability 门控、绑定状态和 compound 广播。Inspection profile 已支持 provider rule 启停/severity、文件/行 suppression、稳定 provider-message baseline 的创建/导入/导出/移除，Analysis 面板对 provider 返回的 nullability/taint/data-flow/related-location evidence 做有限分类展示；Tests 面板已接入有界 JUnit XML 结果协议（Surefire/Failsafe/Gradle test-results）、汇总/状态树/失败详情/源码定位/失败重跑；data breakpoint/watchpoint、coverage、原生 inspection/data-flow 和完整多语言调试适配矩阵仍缺。
 6. keymap 编辑器、设置 schema/迁移、无障碍与动作可发现性完整闭环。插件生态/第三方扩展点按用户范围明确为 non-goal，不计入持平门禁。
 7. Linux/macOS/Windows 原生工程和发行包验收证据。详细清单以 §2.5–§2.7 为准。
 
@@ -86,7 +86,7 @@ Code Workspace 是 taomni 内的完整代码编辑器和工程工作台：日常
 | P0 | Inspection / data-flow | provider diagnostic tags/related information/code description/data；按 provider source+code 持久化启停和展示 severity；文件/行 suppression；稳定 provider-message baseline 的创建、导入、导出、移除；Analysis 面板展示 capability、semantic token、related locations、structured/text-inferred proof level 与有界 flow steps | 这是 provider-backed 展示与治理层，不是 IDEA inspection engine；baseline 只改变展示/治理，不执行原生规则；无自有规则执行、PSI/stub 索引、跨过程 data-flow、nullability 推断、污点分析和路径证明；结构化 evidence 仅转发 provider metadata，不构造客户端语义图 | 核心差距 |
 | P0 | 工程模型与 Build | 多根、SDK 探测、Java module/任务/依赖树；Build/Rebuild 多项目目标去重、依赖拓扑、缺失/循环/工具错误预检、失败即停 | 无统一 project/module/source-set/facet/language-level 模型；Maven/Gradle 增量导入、冲突模型、active profile/source set 和离线状态不等价 | 核心差距 |
 | P1 | 导航与编辑器 UX | Search Everywhere、Recent Files、历史、分屏、tab、面包屑、Outline | action 搜索排序/上下文、preview/固定语义边界、导航落点恢复、拖拽停靠、keymap 编辑器、无障碍完整验收尚缺 | 未完成 |
-| P1 | Run/Test/Debug | 结构化 provider 配置；命名副本；program/VM arguments、cwd、env、dotenv、Before launch；按源文件保存 Run/Debug 共享选择；仓库共享配置文件/模板/平台覆盖；嵌套 compound Run/Debug；多 DAP 子会话与组级 Stop/Restart；通用 DAP、Java 调试和测试发现基础；有界 JUnit XML 结果协议、结果汇总/树、失败详情/定位/重跑 | 仍缺 coverage、完整 hot swap 和 Java/JS/Python/Go/Rust/C++ adapter 矩阵；XML 之外的 provider coverage 协议仍未统一 | 代码闭环，未严格完成 |
+| P1 | Run/Test/Debug | 结构化 provider 配置；命名副本；program/VM arguments、cwd、env、dotenv、Before launch；按源文件保存 Run/Debug 共享选择；仓库共享配置文件/模板/平台覆盖；嵌套 compound Run/Debug；多 DAP 子会话与组级 Stop/Restart；line breakpoint 与标准 DAP function/method breakpoint（持久化、条件、命中次数、capability/绑定状态）；通用 DAP、Java 调试和测试发现基础；有界 JUnit XML 结果协议、结果汇总/树、失败详情/定位/重跑 | 仍缺 data breakpoint/watchpoint、coverage、完整 hot swap 和 Java/JS/Python/Go/Rust/C++ adapter 矩阵；function name 的 adapter 特定语法、XML 之外的 provider 结果/coverage 协议及三端真实 adapter 行为仍未统一验证 | 代码闭环，未严格完成 |
 | P1 | 动作与设置 | LSP 自定义命令、部分语言设置及命令上下文 | 无完整 keymap 编辑、设置 schema/迁移、动作上下文说明和无障碍验收；插件扩展明确不在本次目标 | 核心差距 |
 | P1 | 可靠性与可观测 | 请求超时、标准错误、work-done progress/取消、部分结果摘要、部分本地历史；崩溃/重启恢复快照与恢复中心；跨文件事务 undo/redo 失败保留历史 | 协议 trace 脱敏、批量重构恢复、目录/symlink 事务、性能基准门禁和三端发行包验收未闭环 | 未完成 |
 
@@ -769,7 +769,7 @@ src/stores/
 - [x] WorkspaceEdit 事务 undo/redo：普通文件快照、编码/BOM 元数据、跨文件单步回放与 tab/group 恢复；失败时保留原历史。
 - [x] 非 UTF-8 编辑闭环：Rust `encoding_rs`/`chardetng` 检测与无损写入、前端状态栏 Reload/Convert 入口、浏览器 UTF-16 stub；二进制与 lossy legacy 保存明确拒绝。
 - [x] Safe Delete Symbol：Alt+Delete/右键/命令入口，引用面板预览与确认，声明/引用跨文件删除作为一个事务；无可靠 LSP 范围、library source、unresolved reference 或 workspace 外路径时标记 incomplete 并拒绝猜测/写入。
-- [x] Build/Run/Debug 配置与分析代码闭环：Build 目标依赖拓扑、失败即停；命名 Run 配置副本、program/VM args、cwd、env、dotenv、Before launch；Run/Debug 共享 active selection；嵌套 Compound Run/Debug 和 grouped multi-session DAP；按 CodeActionKind 的 provider-backed extract/inline/change-signature/move 入口；provider semantic snapshot freshness/coverage 与落盘前过期或 workspace 外路径拒绝；持久化 inspection profile、诊断 metadata、Analysis 面板与 Problems 展示变换（provider 原始诊断仍用于 quick fix）。
+- [x] Build/Run/Debug 配置与分析代码闭环：Build 目标依赖拓扑、失败即停；命名 Run 配置副本、program/VM args、cwd、env、dotenv、Before launch；Run/Debug 共享 active selection；嵌套 Compound Run/Debug 和 grouped multi-session DAP；标准 function/method breakpoint 跨子会话同步；按 CodeActionKind 的 provider-backed extract/inline/change-signature/move 入口；provider semantic snapshot freshness/coverage 与落盘前过期或 workspace 外路径拒绝；持久化 inspection profile、诊断 metadata、Analysis 面板与 Problems 展示变换（provider 原始诊断仍用于 quick fix）。
 - [x] 合并门禁 8 例 Windows 失败已修复（clipboard URI ×4、pushd ×1、git 根 ×3）— `f6c1f36`
 - [ ] **⚠ 真机验证欠账（由用户执行）**：M0–M5 能力仍以单测/构建为主；`pnpm tauri dev` 冒烟结果回填本节
 - [ ] ⚠ M0 继续瘦身：树数据、LSP session、Git snapshot、导航与文件动作 controller 已抽离；命令注册、header/layout 大段继续下沉，目标装配壳 <400 行（当前约 4.4k 行）
@@ -1022,6 +1022,7 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
 - **D3 断点 + 单步**：gutter 断点、run/pause/step in·over·out/continue、当前行高亮、调用栈面板——**经 D1 内核的 setBreakpoints/continue/stepIn… 通用请求，不碰适配器**。**规模 M。** — **✅ 已交付 `b141bad`**：`dap_send`（fire-and-forget，launch 握手需要）;`dapDebugModel`（纯：setBreakpoints/异常过滤 arg、threads/stackTrace 解析、step→command、event reducer，单测 6）;`useCodeDebugSession`（launch→initialized→setBreakpoints→configurationDone 编排、断点持久化、stopped 后 threads+stackTrace）;`debugEditorChrome` 断点 gutter + 当前行高亮;`DebugPanel` 控制条+调用栈。
 - **D4 变量 / 监视 / 求值**：variables·scopes 树、watch、debug console `evaluate`、悬停求值——同样走 D1 通用请求。**规模 M。** — **✅ 已交付 `b141bad`（随 D3 hook/panel）**：stopped 后 scopes→variables 懒展开树、watch 表达式（context=watch）、console（context=repl）。
 - **D5 进阶**：条件断点、logpoint、异常断点（DAP `setExceptionBreakpoints`，通用）；热重载为 Java 适配器可选扩展（jdtls `redefineClasses`，经 registry 的适配器能力位声明，非内核必备）。**规模 M。** — **✅ 已交付**：条件断点/logpoint（gutter 右键 → 条件/日志消息 prompt → `setBreakpointOptions` 走 `setBreakpoints` 的 condition/logMessage）;异常断点（面板按 `capabilities.exceptionBreakpointFilters` 勾选 → `setExceptionBreakpoints`）;热重载按钮（`redefineClasses`，best-effort）。
+- **D5.1 function/method breakpoint（`cbda8dd`）**：**✅ 代码闭环**。按 `supportsFunctionBreakpoints` 发送标准 `setFunctionBreakpoints`，支持 condition/hitCondition、workspace 有界持久化、启停、Mute/Remove All、adapter 返回的 verified/pending/failed 状态及无 source/line 的 breakpoint event；初始化时严格位于 `configurationDone` 前，运行中修改同步到所有 eligible compound child，并以 per-session generation 丢弃旧响应和终止后响应。**未完成边界**：DAP data breakpoint/watchpoint 尚未实现；不同 adapter 的函数名/方法签名语法与真实绑定结果必须在 Java/JS/Python/Go/Rust/C++ 及三端真机矩阵验证，不能仅凭协议单测标记严格完成。
 
 **前端**：底部 Debug 面板（调用栈/变量/监视/断点/console）+ 编辑器断点 gutter + 悬浮运行工具条，**均按 DAP 标准模型渲染，与语言无关**；适配器专属能力（如 Java 热重载）按 D1 下发的 capabilities/适配器能力位开关（沿用 §5.2.0 capability 驱动模式）。
 
