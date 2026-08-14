@@ -560,6 +560,7 @@ pub fn run() {
             lsp::lsp_prepare_rename,
             lsp::lsp_rename,
             lsp::lsp_workspace_symbols,
+            lsp::lsp_workspace_symbol_resolve,
             lsp::lsp_prepare_call_hierarchy,
             lsp::lsp_call_hierarchy_incoming,
             lsp::lsp_call_hierarchy_outgoing,

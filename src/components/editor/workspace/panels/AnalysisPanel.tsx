@@ -67,6 +67,13 @@ function relatedLabel(related: LspDiagnosticRelatedInformation): string {
   return `${path}:${related.location.range.start.line + 1}:${related.location.range.start.character + 1}`;
 }
 
+function flowStepLabel(step: { role: string; location: LspLocation | null }): string {
+  const role = step.role === "unknown" ? "step" : step.role;
+  if (!step.location) return role;
+  const path = step.location.path ?? step.location.uri;
+  return `${role} · ${path}:${step.location.range.start.line + 1}:${step.location.range.start.character + 1}`;
+}
+
 export function AnalysisPanel({
   files,
   status,
@@ -155,6 +162,14 @@ export function AnalysisPanel({
               <div className="text-[var(--taomni-code-muted)]">
                 Last query: {semanticIndex.lastQuery.kind} · generation {semanticIndex.lastQuery.generation}
                 {semanticIndex.lastQuery.resultCount !== null ? ` · ${semanticIndex.lastQuery.resultCount} results` : ""}
+                {semanticIndex.lastQuery.coverage && (
+                  <> · {semanticIndex.lastQuery.coverage.scope} coverage {semanticIndex.lastQuery.coverage.providerCount ?? "?"}/{semanticIndex.lastQuery.coverage.sessionCount ?? "?"} providers{semanticIndex.lastQuery.coverage.complete ? " · complete" : " · incomplete"}</>
+                )}
+              </div>
+            )}
+            {semanticIndex.lastQuery?.coverage && semanticIndex.lastQuery.coverage.diagnostics.length > 0 && (
+              <div className="text-amber-500" title={semanticIndex.lastQuery.coverage.diagnostics.join("\n")}>
+                Query diagnostics: {semanticIndex.lastQuery.coverage.diagnostics.length}
               </div>
             )}
             <div className="text-[var(--taomni-code-muted)]">
@@ -293,8 +308,33 @@ export function AnalysisPanel({
               <div className="mt-1 flex items-center gap-2 text-[10px] text-[var(--taomni-code-muted)]">
                 <span data-testid={`analysis-evidence-kind-${evidence.kind}`}>{evidence.label}</span>
                 <span>{evidence.confidence} provider evidence</span>
+                <span data-testid="analysis-evidence-proof-level">{evidence.proofLevel}</span>
                 <span>{evidence.source}</span>
               </div>
+              {evidence.flowSteps.length > 0 && (
+                <div data-testid="analysis-evidence-flow-steps" className="mt-1 space-y-0.5 border-l border-[var(--taomni-code-border)] pl-2">
+                  {evidence.flowSteps.map((step, stepIndex) => {
+                    const label = flowStepLabel(step);
+                    return step.location
+                      ? (
+                        <button
+                          key={`${label}:${stepIndex}`}
+                          type="button"
+                          className="flex w-full items-start gap-1 text-left text-[10px] text-[var(--taomni-code-muted)] hover:text-[var(--taomni-accent)]"
+                          onClick={() => onOpenLocation(step.location!)}
+                        >
+                          <span className="min-w-0 flex-1 break-words">{step.message}</span>
+                          <span className="shrink-0 font-mono">{label}</span>
+                        </button>
+                      )
+                      : (
+                        <div key={`${label}:${stepIndex}`} className="text-[10px] text-[var(--taomni-code-muted)]">
+                          {step.message} · {label}
+                        </div>
+                      );
+                  })}
+                </div>
+              )}
               {diagnostic.relatedInformation && diagnostic.relatedInformation.length > 0 && <div className="mt-1 space-y-0.5 border-l border-[var(--taomni-code-border)] pl-2">
                 {diagnostic.relatedInformation?.map((related, relatedIndex) => (
                   <button

@@ -3,11 +3,31 @@ import type {
   LspRange,
   LspWorkspaceEdit,
 } from "../../../lib/editor/lsp";
+import {
+  normalizeFsPath,
+  relativePathWithinRoot,
+} from "./codeWorkspaceModel";
 
 export interface SafeDeleteTarget {
   uri: string;
   path: string;
   range: LspRange;
+}
+
+export interface SafeDeleteBuildOptions {
+  /** Absolute workspace roots allowed to participate in a destructive edit. */
+  workspaceRoots?: readonly string[];
+}
+
+export interface SafeDeleteWorkspaceEditResult {
+  edit: LspWorkspaceEdit;
+  locations: SafeDeleteTarget[];
+  usageCount: number;
+  /** References that could not be represented as local workspace edits. */
+  unresolvedReferences: LspLocation[];
+  /** False means the edit must not be applied. */
+  complete: boolean;
+  diagnostics: string[];
 }
 
 function rangeKey(range: LspRange): string {
@@ -19,12 +39,16 @@ function locationKey(location: SafeDeleteTarget): string {
 }
 
 function normalizedLocation(location: LspLocation): SafeDeleteTarget | null {
-  if (!location.path) return null;
+  if (!location.path?.trim()) return null;
   return {
     uri: location.uri,
-    path: location.path.replace(/\\/g, "/"),
+    path: normalizeFsPath(location.path),
     range: location.range,
   };
+}
+
+function pathWithinRoot(path: string, root: string): boolean {
+  return relativePathWithinRoot(root, path) !== null;
 }
 
 /**
@@ -35,16 +59,33 @@ function normalizedLocation(location: LspLocation): SafeDeleteTarget | null {
 export function buildSafeDeleteWorkspaceEdit(
   declaration: SafeDeleteTarget,
   references: readonly LspLocation[],
-): { edit: LspWorkspaceEdit; locations: SafeDeleteTarget[]; usageCount: number } {
+  options: SafeDeleteBuildOptions = {},
+): SafeDeleteWorkspaceEditResult {
+  const workspaceRoots = (options.workspaceRoots ?? [])
+    .map(normalizeFsPath)
+    .filter(Boolean);
+  const diagnostics: string[] = [];
+  const unresolvedReferences: LspLocation[] = [];
   const normalizedDeclaration: SafeDeleteTarget = {
     ...declaration,
-    path: declaration.path.replace(/\\/g, "/"),
+    path: normalizeFsPath(declaration.path),
   };
+  const declarationInWorkspace = normalizedDeclaration.path.length > 0
+    && (workspaceRoots.length === 0 || workspaceRoots.some((root) => pathWithinRoot(normalizedDeclaration.path, root)));
+  if (!declarationInWorkspace) {
+    diagnostics.push("The symbol declaration is not a local file inside the workspace");
+  }
   const declarationKey = locationKey(normalizedDeclaration);
-  const byLocation = new Map<string, SafeDeleteTarget>([[declarationKey, normalizedDeclaration]]);
+  const byLocation = declarationInWorkspace
+    ? new Map<string, SafeDeleteTarget>([[declarationKey, normalizedDeclaration]])
+    : new Map<string, SafeDeleteTarget>();
   for (const reference of references) {
     const normalized = normalizedLocation(reference);
-    if (normalized) byLocation.set(locationKey(normalized), normalized);
+    if (!normalized || (workspaceRoots.length > 0 && !workspaceRoots.some((root) => pathWithinRoot(normalized.path, root)))) {
+      unresolvedReferences.push(reference);
+      continue;
+    }
+    byLocation.set(locationKey(normalized), normalized);
   }
   const locations = [...byLocation.values()];
   const byDocument = new Map<string, { uri: string; path: string; ranges: LspRange[] }>();
@@ -59,13 +100,21 @@ export function buildSafeDeleteWorkspaceEdit(
     version: null,
     edits: document.ranges.map((range) => ({ range, newText: "" })),
   }));
+  const complete = declarationInWorkspace && unresolvedReferences.length === 0;
   return {
     edit: {
-      documentEdits,
-      operations: documentEdits.map((document) => ({ kind: "text" as const, document })),
+      documentEdits: complete ? documentEdits : [],
+      operations: complete
+        ? documentEdits.map((document) => ({ kind: "text" as const, document }))
+        : [],
     },
     locations,
     usageCount: locations.filter((location) => locationKey(location) !== declarationKey).length,
+    unresolvedReferences,
+    complete,
+    diagnostics: unresolvedReferences.length > 0
+      ? [...diagnostics, `${unresolvedReferences.length} reference${unresolvedReferences.length === 1 ? "" : "s"} cannot be resolved to workspace files`]
+      : diagnostics,
   };
 }
 

@@ -77,6 +77,12 @@ export interface WorkspaceEditApplyHooks {
   confirmChangeAnnotations?: (annotations: LspChangeAnnotation[]) => Promise<boolean>;
   /** Final consistency barrier after dialogs and immediately before mutation. */
   preflightMutation?: () => Promise<void> | void;
+  /**
+   * Validate every operation path before confirmation or mutation. Semantic
+   * refactors use this to enforce workspace-root ownership and reject loose
+   * file fallbacks for provider-supplied edits.
+   */
+  validateOperationPaths?: (operations: readonly LspWorkspaceEditOperation[]) => string | null;
 }
 
 async function applyTextDocumentEdit(
@@ -200,6 +206,26 @@ export async function applyWorkspaceEdit(
       status: "failed",
       reason: annotationPreflight.error,
     }];
+  }
+  if (hooks.validateOperationPaths) {
+    try {
+      const validationError = hooks.validateOperationPaths(workspaceEditOperations(edit));
+      if (validationError) {
+        return [{
+          operationIndex: null,
+          path: "WorkspaceEdit",
+          status: "failed",
+          reason: validationError,
+        }];
+      }
+    } catch (error) {
+      return [{
+        operationIndex: null,
+        path: "WorkspaceEdit",
+        status: "failed",
+        reason: error instanceof Error ? error.message : String(error),
+      }];
+    }
   }
   const preview = buildWorkspaceEditPreview(edit);
   if (preview.requiresConfirmation && hooks.confirmWorkspaceEdit) {

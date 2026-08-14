@@ -16,6 +16,9 @@ import {
   makeLibraryFile,
   matchesTreeFilter,
   normalizeEditorText,
+  normalizeFsPath,
+  relativePathWithinRoot,
+  fsPathEquals,
   shouldHideEntry,
   type LibraryBufferInfo,
 } from "./codeWorkspaceModel";
@@ -30,6 +33,34 @@ const entry = (name: string, path: string): WorkspaceEntry => ({
 });
 
 describe("project tree model helpers", () => {
+  it("normalizes lexical dot segments without allowing a path to escape an absolute root", () => {
+    expect(normalizeFsPath("/repo/src/../outside.ts")).toBe("/repo/outside.ts");
+    expect(normalizeFsPath("/repo/./src//Main.ts/")).toBe("/repo/src/Main.ts");
+    expect(normalizeFsPath("src/../../outside.ts")).toBe("../outside.ts");
+    expect(relativePathWithinRoot("/repo", "/repo/src/../outside.ts")).toBe("outside.ts");
+    expect(relativePathWithinRoot("/repo", "/repo/../outside.ts")).toBeNull();
+  });
+
+  it("keeps Windows drive and UNC roots segment-safe and case-insensitive", () => {
+    expect(normalizeFsPath("C:\\repo\\src\\..\\Main.java\\")).toBe("C:/repo/Main.java");
+    expect(normalizeFsPath("\\\\server\\share\\repo\\src\\..\\Main.java")).toBe("//server/share/repo/Main.java");
+    expect(relativePathWithinRoot("C:\\Repo", "c:/repo/src/../Main.java")).toBe("Main.java");
+    expect(relativePathWithinRoot("C:\\Repo", "C:/repository/Main.java")).toBeNull();
+    expect(relativePathWithinRoot("\\\\server\\share\\repo", "\\\\SERVER\\SHARE\\repo\\src\\Main.java")).toBe("src/Main.java");
+    expect(fsPathEquals("C:\\Repo\\src\\..\\Main.java", "c:/repo/Main.java")).toBe(true);
+  });
+
+  it("does not reinterpret virtual document URIs as filesystem paths", () => {
+    expect(normalizeFsPath("jdt://contents/java.base/String.class")).toBe("jdt://contents/java.base/String.class");
+    expect(normalizeFsPath("file:///repo/src/../Main.java")).toBe("file:///repo/src/../Main.java");
+    expect(relativePathWithinRoot("/repo", "jdt://contents/String.class")).toBeNull();
+  });
+
+  it("keeps POSIX path comparisons case-sensitive even when a name contains a backslash", () => {
+    expect(fsPathEquals("/Repo/Name.ts", "/repo/name.ts")).toBe(false);
+    expect(fsPathEquals("/Repo\\Name.ts", "/repo\\name.ts")).toBe(false);
+  });
+
   it("compactEntryName folds single-child chain suffixes", () => {
     expect(compactEntryName(entry("src", "src"), undefined)).toBe("src");
     expect(compactEntryName(entry("src", "src"), { path: "src" })).toBe("src");

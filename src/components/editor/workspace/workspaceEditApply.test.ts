@@ -186,6 +186,30 @@ describe("applyWorkspaceEdit", () => {
     expect(summarizeWorkspaceEditOutcomes(outcomes)).toContain("semantic snapshot changed");
   });
 
+  it("rejects out-of-scope semantic operations before confirmation or mutation", async () => {
+    const confirmWorkspaceEdit = vi.fn(async () => true);
+    const applyToOpenBuffer = vi.fn();
+    const outcomes = await applyWorkspaceEdit(
+      edit("file:///outside/a.ts", "/outside/a.ts", "A"),
+      {
+        resolvePath: (file) => file.path,
+        getOpenBuffer: () => ({ text: "x", dirty: true, key: "outside" }),
+        applyToOpenBuffer,
+        saveOpenBuffer: async () => {},
+        readDisk: async () => ({ text: "x", hash: "h" }),
+        writeDisk: async () => {},
+        confirmWorkspaceEdit,
+        validateOperationPaths: () => "Semantic WorkspaceEdit path is outside the workspace: /outside/a.ts",
+      },
+    );
+    expect(confirmWorkspaceEdit).not.toHaveBeenCalled();
+    expect(applyToOpenBuffer).not.toHaveBeenCalled();
+    expect(outcomes[0]).toMatchObject({
+      status: "failed",
+      reason: expect.stringContaining("outside the workspace"),
+    });
+  });
+
   it("includes change annotations in a preview and only then applies resources", async () => {
     const confirmed: string[] = [];
     const applyToOpenBuffer = vi.fn();

@@ -14,12 +14,13 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, Notify, RwLock, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 
 const REQUEST_TIMEOUT_SECS: u64 = 8;
 /// Project-scope jdtls `executeCommand`s (java-debug's `resolveMainClass` /
@@ -50,6 +51,20 @@ const DOWNLOAD_SOURCES_POLL_INTERVAL_MS: u64 = 1200;
 /// Bound archive/virtual source reads so a corrupt server URI or compressed
 /// dependency cannot turn a navigation action into an unbounded allocation.
 const MAX_VIRTUAL_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
+/// Bound workspace/symbol fan-out and response materialization. A language
+/// server is allowed to return an arbitrarily large array; the editor must
+/// keep the query deterministic and responsive instead of trusting that size.
+const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
+const MAX_WORKSPACE_SYMBOL_PROVIDERS: usize = 64;
+const MAX_WORKSPACE_SYMBOL_DIAGNOSTICS: usize = 32;
+/// Keep opaque workspace-symbol resolve payloads short-lived and bounded. The
+/// token is only a routing handle; the raw provider payload never crosses the
+/// frontend boundary.
+const WORKSPACE_SYMBOL_RESOLUTION_TTL: Duration = Duration::from_secs(300);
+const MAX_WORKSPACE_SYMBOL_RAW_BYTES: usize = 64 * 1024;
+const MAX_WORKSPACE_SYMBOL_RESOLUTION_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const MAX_WORKSPACE_SYMBOL_RESOLUTION_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_WORKSPACE_SYMBOL_RESOLUTION_BATCHES: usize = 8;
 const SHUTDOWN_TIMEOUT_SECS: u64 = 3;
 const EXIT_TIMEOUT_SECS: u64 = 2;
 const COMMAND_AVAILABILITY_TTL: Duration = Duration::from_secs(30);
@@ -304,6 +319,17 @@ pub struct LspWorkspaceSymbol {
     pub path: Option<String>,
     pub range: LspRange,
     pub selection_range: LspRange,
+    /// False when the provider returned only a URI and requires
+    /// `workspaceSymbol/resolve` before a location is available.
+    #[serde(default)]
+    pub resolved: bool,
+    /// Short-lived opaque handle for a deferred provider resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolve_token: Option<String>,
+    #[serde(skip)]
+    raw: Option<Value>,
+    #[serde(skip)]
+    provider_session_key: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -311,6 +337,42 @@ pub struct LspWorkspaceSymbol {
 pub struct LspWorkspaceSymbolsResult {
     pub status: LspDocumentStatus,
     pub symbols: Vec<LspWorkspaceSymbol>,
+    /// Number of ready language-server sessions discovered for this workspace.
+    #[serde(default)]
+    pub session_count: u32,
+    /// Number of discovered sessions that advertised workspace/symbol and were
+    /// actually queried (bounded by the provider fan-out limit).
+    #[serde(default)]
+    pub provider_count: u32,
+    /// Ready sessions that were not queried because they did not advertise
+    /// workspace/symbol or fell outside the bounded provider fan-out.
+    #[serde(default)]
+    pub skipped_provider_count: u32,
+    /// Providers whose request or response could not be consumed.
+    #[serde(default)]
+    pub failed_provider_count: u32,
+    /// False when at least one provider failed, no provider was available, or
+    /// the bounded result limit was reached. Consumers must not present an
+    /// incomplete result as an authoritative project index.
+    #[serde(default)]
+    pub complete: bool,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+struct WorkspaceSymbolResolutionBatch {
+    workspace_id: String,
+    created_at: Instant,
+    bytes: usize,
+    entries: HashMap<String, WorkspaceSymbolResolutionEntry>,
+}
+
+#[derive(Clone)]
+struct WorkspaceSymbolResolutionEntry {
+    session: Weak<LspSession>,
+    raw: Value,
 }
 
 /// Normalized CallHierarchyItem / TypeHierarchyItem. `raw` is echoed back to
@@ -429,6 +491,8 @@ pub struct LspCapabilitySummary {
     pub references: bool,
     pub document_symbol: bool,
     pub workspace_symbol: bool,
+    /// The workspace-symbol provider accepts `workspaceSymbol/resolve`.
+    pub workspace_symbol_resolve: bool,
     pub rename: bool,
     pub formatting: bool,
     pub range_formatting: bool,
@@ -968,6 +1032,9 @@ pub struct LspManager {
     client_bridge: Arc<LspClientRequestBridge>,
     workspace_watchers: Arc<Mutex<HashMap<String, WorkspaceWatcherHandle>>>,
     local_watched_events: Arc<StdMutex<HashMap<(String, String, u8), Instant>>>,
+    workspace_symbol_resolutions: Arc<Mutex<HashMap<String, WorkspaceSymbolResolutionBatch>>>,
+    workspace_symbol_queries: Arc<Mutex<HashMap<String, (u64, CancellationToken)>>>,
+    next_workspace_symbol_query_id: AtomicU64,
 }
 
 enum LspSessionEntry {
@@ -1055,6 +1122,9 @@ impl LspManager {
             client_bridge: Arc::new(LspClientRequestBridge::new()),
             workspace_watchers: Arc::new(Mutex::new(HashMap::new())),
             local_watched_events: Arc::new(StdMutex::new(HashMap::new())),
+            workspace_symbol_resolutions: Arc::new(Mutex::new(HashMap::new())),
+            workspace_symbol_queries: Arc::new(Mutex::new(HashMap::new())),
+            next_workspace_symbol_query_id: AtomicU64::new(1),
         }
     }
 
@@ -1563,6 +1633,18 @@ impl LspManager {
 
     async fn stop_workspace(&self, workspace_id: &str) -> usize {
         self.stop_workspace_watcher(workspace_id).await;
+        if let Some((_, cancellation)) = self
+            .workspace_symbol_queries
+            .lock()
+            .await
+            .remove(workspace_id)
+        {
+            cancellation.cancel();
+        }
+        self.workspace_symbol_resolutions
+            .lock()
+            .await
+            .retain(|_, batch| batch.workspace_id != workspace_id);
         let (starts, ready) = {
             let mut sessions = self.sessions.lock().await;
             let matching: Vec<String> = sessions
@@ -1927,6 +2009,471 @@ impl LspManager {
         files.sort_by(|a, b| a.path.cmp(&b.path));
         files
     }
+
+    /// Query every ready language-server session in a workspace for
+    /// `workspace/symbol`. The old command path queried only the session that
+    /// owned the active document, which silently dropped symbols from other
+    /// roots and languages in a multi-root project.
+    async fn workspace_symbols(
+        &self,
+        workspace_id: &str,
+        query: &str,
+    ) -> Result<WorkspaceSymbolsAggregation, String> {
+        let query_id = self
+            .next_workspace_symbol_query_id
+            .fetch_add(1, Ordering::SeqCst);
+        let cancellation = {
+            let mut queries = self.workspace_symbol_queries.lock().await;
+            begin_workspace_symbol_query(&mut queries, workspace_id, query_id)
+        };
+        let sessions: Vec<Arc<LspSession>> = {
+            let guard = self.sessions.lock().await;
+            let mut sessions = guard
+                .values()
+                .filter_map(|entry| match entry {
+                    LspSessionEntry::Ready(session) if session.key.workspace_id == workspace_id => {
+                        Some(session.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            sessions.sort_by(|left, right| left.key.map_key().cmp(&right.key.map_key()));
+            sessions
+        };
+
+        let session_count = sessions.len() as u32;
+        let provider_limit_reached = sessions.len() > MAX_WORKSPACE_SYMBOL_PROVIDERS;
+
+        let capability_checks = sessions
+            .into_iter()
+            .take(MAX_WORKSPACE_SYMBOL_PROVIDERS)
+            .map(|session| async move {
+                let capabilities = session.capabilities.read().await;
+                let capabilities = capabilities.as_ref()?;
+                capabilities
+                    .workspace_symbol
+                    .then_some((session.clone(), capabilities.workspace_symbol_resolve))
+            });
+        let capable = futures::future::join_all(capability_checks)
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let provider_count = capable.len() as u32;
+        // `capable` is collected only from the bounded session prefix, so all
+        // other ready sessions (including sessions without the capability and
+        // sessions beyond the fan-out limit) are intentionally skipped.
+        let skipped_provider_count = session_count.saturating_sub(provider_count);
+        let responses = futures::future::join_all(
+            capable
+                .into_iter()
+                .take(MAX_WORKSPACE_SYMBOL_PROVIDERS)
+                .map(|(session, supports_resolve)| {
+                    let cancellation = cancellation.clone();
+                    async move {
+                        let label = session.preset.display_name.clone();
+                        let result = session
+                            .request_with_cancellation(
+                                "workspace/symbol",
+                                json!({ "query": query }),
+                                &cancellation,
+                            )
+                            .await;
+                        (label, session.key.map_key(), supports_resolve, result)
+                    }
+                }),
+        )
+        .await;
+        let mut aggregation = aggregate_workspace_symbol_responses(
+            responses,
+            session_count,
+            provider_count,
+            skipped_provider_count,
+            provider_limit_reached,
+        );
+        // Serialize the latest-query check with replacement so an old query
+        // cannot pass the check and then populate the resolve cache after a
+        // newer query starts.
+        let mut queries = self.workspace_symbol_queries.lock().await;
+        let is_latest = queries
+            .get(workspace_id)
+            .is_some_and(|(current_id, _)| *current_id == query_id);
+        if cancellation.is_cancelled() || !is_latest {
+            return Err("Workspace symbol query was superseded by a newer query".into());
+        }
+        self.cache_workspace_symbol_resolutions(workspace_id, &mut aggregation)
+            .await;
+        queries.remove(workspace_id);
+        Ok(aggregation)
+    }
+
+    async fn cache_workspace_symbol_resolutions(
+        &self,
+        workspace_id: &str,
+        aggregation: &mut WorkspaceSymbolsAggregation,
+    ) {
+        if !aggregation
+            .symbols
+            .iter()
+            .any(|symbol| symbol.raw.is_some())
+        {
+            return;
+        }
+
+        let sessions = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .iter()
+                .filter_map(|(key, entry)| match entry {
+                    LspSessionEntry::Ready(session) if session.key.workspace_id == workspace_id => {
+                        Some((key.clone(), Arc::downgrade(session)))
+                    }
+                    _ => None,
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let batch_id = uuid::Uuid::new_v4().simple().to_string();
+        let mut bytes = 0usize;
+        let mut entries = HashMap::new();
+        let mut skipped = 0usize;
+        for (index, symbol) in aggregation.symbols.iter_mut().enumerate() {
+            let Some(raw) = symbol.raw.take() else {
+                continue;
+            };
+            let Some(provider_session_key) = symbol.provider_session_key.take() else {
+                skipped += 1;
+                continue;
+            };
+            let raw_bytes = match serde_json::to_vec(&raw) {
+                Ok(value) => value.len(),
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let Some(session) = sessions.get(&provider_session_key) else {
+                skipped += 1;
+                continue;
+            };
+            if raw_bytes > MAX_WORKSPACE_SYMBOL_RAW_BYTES
+                || bytes.saturating_add(raw_bytes) > MAX_WORKSPACE_SYMBOL_RESOLUTION_BATCH_BYTES
+            {
+                skipped += 1;
+                continue;
+            }
+            let entry_id = index.to_string();
+            entries.insert(
+                entry_id.clone(),
+                WorkspaceSymbolResolutionEntry {
+                    session: session.clone(),
+                    raw,
+                },
+            );
+            bytes += raw_bytes;
+            symbol.resolve_token = Some(format!("{batch_id}:{entry_id}"));
+        }
+        if entries.is_empty() {
+            if skipped > 0 {
+                push_workspace_symbol_diagnostic(
+                    &mut aggregation.diagnostics,
+                    "Workspace symbol resolve payloads exceeded the bounded cache".into(),
+                );
+                aggregation.complete = false;
+                aggregation.truncated = true;
+            }
+            return;
+        }
+
+        let now = Instant::now();
+        let mut batches = self.workspace_symbol_resolutions.lock().await;
+        prune_workspace_symbol_resolution_batches(&mut batches, now);
+        batches.insert(
+            batch_id,
+            WorkspaceSymbolResolutionBatch {
+                workspace_id: workspace_id.to_string(),
+                created_at: now,
+                bytes,
+                entries,
+            },
+        );
+        prune_workspace_symbol_resolution_batches(&mut batches, now);
+        if skipped > 0 {
+            push_workspace_symbol_diagnostic(
+                &mut aggregation.diagnostics,
+                format!("{skipped} workspace symbol resolve payloads exceeded the bounded cache"),
+            );
+            aggregation.complete = false;
+            aggregation.truncated = true;
+        }
+    }
+
+    async fn resolve_workspace_symbol(
+        &self,
+        workspace_id: &str,
+        resolve_token: &str,
+    ) -> Result<LspWorkspaceSymbol, String> {
+        let (batch_id, entry_id) = parse_workspace_symbol_resolve_token(resolve_token)?;
+        let entry = {
+            let now = Instant::now();
+            let mut batches = self.workspace_symbol_resolutions.lock().await;
+            prune_workspace_symbol_resolution_batches(&mut batches, now);
+            let batch = batches
+                .get(batch_id)
+                .ok_or_else(|| "Workspace symbol resolve token expired".to_string())?;
+            if batch.workspace_id != workspace_id {
+                return Err("Workspace symbol resolve token belongs to another workspace".into());
+            }
+            batch
+                .entries
+                .get(entry_id)
+                .cloned()
+                .ok_or_else(|| "Workspace symbol resolve token is invalid".to_string())?
+        };
+        let session = entry
+            .session
+            .upgrade()
+            .ok_or_else(|| "Workspace symbol provider session is no longer active".to_string())?;
+        if session.key.workspace_id != workspace_id {
+            return Err("Workspace symbol provider session changed".into());
+        }
+        let resolved = session
+            .request("workspaceSymbol/resolve", entry.raw.clone())
+            .await?;
+        let merged = merge_workspace_symbol_values(&entry.raw, &resolved);
+        let symbol = parse_workspace_symbol(&merged)
+            .ok_or_else(|| "workspaceSymbol/resolve returned an invalid symbol".to_string())?;
+        if !symbol.resolved {
+            return Err("workspaceSymbol/resolve did not return a source range".into());
+        }
+        Ok(symbol)
+    }
+}
+
+struct WorkspaceSymbolsAggregation {
+    symbols: Vec<LspWorkspaceSymbol>,
+    session_count: u32,
+    provider_count: u32,
+    skipped_provider_count: u32,
+    failed_provider_count: u32,
+    complete: bool,
+    truncated: bool,
+    diagnostics: Vec<String>,
+}
+
+fn aggregate_workspace_symbol_responses(
+    responses: Vec<(String, String, bool, Result<Value, String>)>,
+    session_count: u32,
+    provider_count: u32,
+    skipped_provider_count: u32,
+    provider_limit_reached: bool,
+) -> WorkspaceSymbolsAggregation {
+    let mut diagnostics = Vec::new();
+    let mut failed_provider_count = 0u32;
+    let mut symbols = Vec::new();
+    let mut seen = HashSet::new();
+    let mut truncated = provider_limit_reached;
+
+    for (provider, provider_session_key, supports_resolve, response) in responses {
+        let value = match response {
+            Ok(value) => value,
+            Err(error) => {
+                failed_provider_count += 1;
+                push_workspace_symbol_diagnostic(&mut diagnostics, format!("{provider}: {error}"));
+                continue;
+            }
+        };
+        if value.is_null() {
+            continue;
+        }
+        let Some(items) = value.as_array() else {
+            failed_provider_count += 1;
+            push_workspace_symbol_diagnostic(
+                &mut diagnostics,
+                format!("{provider}: invalid workspace/symbol response"),
+            );
+            continue;
+        };
+        let mut provider_malformed = false;
+        let mut provider_unresolvable = false;
+        for item in items {
+            let Some(mut symbol) = parse_workspace_symbol(item) else {
+                provider_malformed = true;
+                continue;
+            };
+            let key = format_workspace_symbol_key(&symbol);
+            if !seen.insert(key) {
+                continue;
+            }
+            if symbols.len() >= MAX_WORKSPACE_SYMBOLS {
+                truncated = true;
+                continue;
+            }
+            if !symbol.resolved {
+                if supports_resolve {
+                    symbol.raw = Some(item.clone());
+                    symbol.provider_session_key = Some(provider_session_key.clone());
+                } else {
+                    provider_unresolvable = true;
+                }
+            }
+            symbols.push(symbol);
+        }
+        if provider_malformed || provider_unresolvable {
+            failed_provider_count += 1;
+        }
+        if provider_malformed {
+            push_workspace_symbol_diagnostic(
+                &mut diagnostics,
+                format!("{provider}: ignored malformed symbol"),
+            );
+        }
+        if provider_unresolvable {
+            push_workspace_symbol_diagnostic(
+                &mut diagnostics,
+                format!(
+                    "{provider}: returned URI-only symbols without advertising workspaceSymbol/resolve"
+                ),
+            );
+        }
+    }
+    if truncated && !provider_limit_reached {
+        push_workspace_symbol_diagnostic(
+            &mut diagnostics,
+            format!("Workspace symbol results limited to {MAX_WORKSPACE_SYMBOLS} entries"),
+        );
+    } else if provider_limit_reached {
+        push_workspace_symbol_diagnostic(
+            &mut diagnostics,
+            format!("Workspace symbol query limited to {MAX_WORKSPACE_SYMBOL_PROVIDERS} providers"),
+        );
+    }
+    if provider_count == 0 {
+        push_workspace_symbol_diagnostic(
+            &mut diagnostics,
+            "No active language server advertises workspace/symbol".into(),
+        );
+    }
+    symbols.sort_by(|left, right| {
+        left.path
+            .as_deref()
+            .unwrap_or(left.uri.as_str())
+            .cmp(right.path.as_deref().unwrap_or(right.uri.as_str()))
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| {
+                left.selection_range
+                    .start
+                    .line
+                    .cmp(&right.selection_range.start.line)
+            })
+            .then_with(|| {
+                left.selection_range
+                    .start
+                    .character
+                    .cmp(&right.selection_range.start.character)
+            })
+    });
+    let complete = session_count > 0
+        && provider_count > 0
+        && skipped_provider_count == 0
+        && failed_provider_count == 0
+        && diagnostics.is_empty()
+        && !truncated;
+    WorkspaceSymbolsAggregation {
+        symbols,
+        session_count,
+        provider_count,
+        skipped_provider_count,
+        failed_provider_count,
+        complete,
+        truncated,
+        diagnostics,
+    }
+}
+
+fn push_workspace_symbol_diagnostic(diagnostics: &mut Vec<String>, message: String) {
+    if diagnostics.len() < MAX_WORKSPACE_SYMBOL_DIAGNOSTICS {
+        diagnostics.push(message);
+    }
+}
+
+fn begin_workspace_symbol_query(
+    queries: &mut HashMap<String, (u64, CancellationToken)>,
+    workspace_id: &str,
+    query_id: u64,
+) -> CancellationToken {
+    let cancellation = CancellationToken::new();
+    if let Some((_, previous)) =
+        queries.insert(workspace_id.to_string(), (query_id, cancellation.clone()))
+    {
+        previous.cancel();
+    }
+    cancellation
+}
+
+fn parse_workspace_symbol_resolve_token(token: &str) -> Result<(&str, &str), String> {
+    let (batch_id, entry_id) = token
+        .split_once(':')
+        .ok_or_else(|| "Workspace symbol resolve token is invalid".to_string())?;
+    if batch_id.len() != 32
+        || !batch_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || entry_id.is_empty()
+        || !entry_id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("Workspace symbol resolve token is invalid".into());
+    }
+    Ok((batch_id, entry_id))
+}
+
+fn prune_workspace_symbol_resolution_batches(
+    batches: &mut HashMap<String, WorkspaceSymbolResolutionBatch>,
+    now: Instant,
+) {
+    batches.retain(|_, batch| {
+        now.saturating_duration_since(batch.created_at) <= WORKSPACE_SYMBOL_RESOLUTION_TTL
+    });
+    while batches.len() > MAX_WORKSPACE_SYMBOL_RESOLUTION_BATCHES
+        || batches.values().map(|batch| batch.bytes).sum::<usize>()
+            > MAX_WORKSPACE_SYMBOL_RESOLUTION_CACHE_BYTES
+    {
+        let Some(oldest) = batches
+            .iter()
+            .min_by_key(|(_, batch)| batch.created_at)
+            .map(|(id, _)| id.clone())
+        else {
+            break;
+        };
+        batches.remove(&oldest);
+    }
+}
+
+fn merge_workspace_symbol_values(original: &Value, resolved: &Value) -> Value {
+    let mut merged = merge_code_action_values(original, resolved);
+    let Some(original_location) = original.get("location").and_then(Value::as_object) else {
+        return merged;
+    };
+    let Some(resolved_location) = resolved.get("location").and_then(Value::as_object) else {
+        return merged;
+    };
+    let Some(merged_object) = merged.as_object_mut() else {
+        return merged;
+    };
+    let mut location = original_location.clone();
+    location.extend(resolved_location.clone());
+    merged_object.insert("location".into(), Value::Object(location));
+    merged
+}
+
+fn format_workspace_symbol_key(symbol: &LspWorkspaceSymbol) -> String {
+    format!(
+        "{}\u{0}{}\u{0}{}:{}:{}:{}:{}",
+        symbol.uri,
+        symbol.name,
+        symbol.container_name.as_deref().unwrap_or_default(),
+        symbol.selection_range.start.line,
+        symbol.selection_range.start.character,
+        symbol.selection_range.end.line,
+        symbol.selection_range.end.character,
+    )
 }
 
 async fn notify_watched_file_sessions(
@@ -2596,11 +3143,40 @@ impl LspSession {
             .await
     }
 
+    async fn request_with_cancellation(
+        &self,
+        method: &str,
+        params: Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, String> {
+        if cancellation.is_cancelled() {
+            return Err(format!("language server request cancelled: {method}"));
+        }
+        self.request_with_timeout_and_cancellation(
+            method,
+            params,
+            REQUEST_TIMEOUT_SECS,
+            Some(cancellation),
+        )
+        .await
+    }
+
     async fn request_with_timeout(
         &self,
         method: &str,
         params: Value,
         timeout_secs: u64,
+    ) -> Result<Value, String> {
+        self.request_with_timeout_and_cancellation(method, params, timeout_secs, None)
+            .await
+    }
+
+    async fn request_with_timeout_and_cancellation(
+        &self,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (sender, receiver) = oneshot::channel();
@@ -2622,7 +3198,23 @@ impl LspSession {
             self.pending.lock().await.remove(&id);
             return Err(error);
         }
-        match tokio::time::timeout(Duration::from_secs(timeout_secs), receiver).await {
+        let response = tokio::time::timeout(Duration::from_secs(timeout_secs), receiver);
+        tokio::pin!(response);
+        let outcome = if let Some(cancellation) = cancellation {
+            tokio::select! {
+                biased;
+                result = &mut response => result,
+                _ = cancellation.cancelled() => {
+                    if self.pending.lock().await.remove(&id).is_some() {
+                        let _ = self.notify("$/cancelRequest", json!({ "id": id })).await;
+                    }
+                    return Err(format!("language server request cancelled: {method}"));
+                }
+            }
+        } else {
+            response.await
+        };
+        match outcome {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(format!("language server closed request {method}")),
             Err(_) => {
@@ -3223,7 +3815,10 @@ fn workspace_client_capabilities() -> Value {
             "dynamicRegistration": true
         },
         "symbol": {
-            "dynamicRegistration": true
+            "dynamicRegistration": true,
+            "resolveSupport": {
+                "properties": ["location.range"]
+            }
         }
     })
 }
@@ -6480,38 +7075,10 @@ pub async fn lsp_workspace_symbols(
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
 ) -> Result<LspWorkspaceSymbolsResult, String> {
-    // Any open document under the workspace is enough to resolve the active
-    // language server session for workspace/symbol.
+    // Any open document under the workspace is enough to provide a status
+    // context. The actual query fans out across every ready provider session
+    // belonging to this workspace (including other roots/languages).
     let document = resolve_document(workspace_id, root_path, file_path, language_id, 0)?;
-    let session = match state
-        .lsp
-        .active_session(
-            &document,
-            server_command_id.as_deref(),
-            custom_server_command.as_ref(),
-        )
-        .await
-    {
-        Some(session) => session,
-        None => {
-            let status = state
-                .lsp
-                .document_status(
-                    &document,
-                    server_command_id.as_deref(),
-                    custom_server_command.as_ref(),
-                )
-                .await;
-            return Ok(LspWorkspaceSymbolsResult {
-                status,
-                symbols: Vec::new(),
-            });
-        }
-    };
-    let result = session
-        .request("workspace/symbol", json!({ "query": query }))
-        .await
-        .unwrap_or(Value::Null);
     let status = state
         .lsp
         .document_status(
@@ -6520,10 +7087,41 @@ pub async fn lsp_workspace_symbols(
             custom_server_command.as_ref(),
         )
         .await;
+    let aggregation = state
+        .lsp
+        .workspace_symbols(&document.workspace_id, &query)
+        .await?;
     Ok(LspWorkspaceSymbolsResult {
         status,
-        symbols: parse_workspace_symbols(&result),
+        symbols: aggregation.symbols,
+        session_count: aggregation.session_count,
+        provider_count: aggregation.provider_count,
+        skipped_provider_count: aggregation.skipped_provider_count,
+        failed_provider_count: aggregation.failed_provider_count,
+        complete: aggregation.complete,
+        truncated: aggregation.truncated,
+        diagnostics: aggregation.diagnostics,
     })
+}
+
+#[tauri::command]
+pub async fn lsp_workspace_symbol_resolve(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    resolve_token: String,
+) -> Result<LspWorkspaceSymbol, String> {
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return Err("workspaceId is required".into());
+    }
+    let resolve_token = resolve_token.trim();
+    if resolve_token.is_empty() {
+        return Err("resolveToken is required".into());
+    }
+    state
+        .lsp
+        .resolve_workspace_symbol(workspace_id, resolve_token)
+        .await
 }
 
 #[tauri::command]
@@ -8569,6 +9167,11 @@ fn capability_summary_from(capabilities: &Value) -> LspCapabilitySummary {
         references: has_provider(capabilities, "referencesProvider"),
         document_symbol: has_provider(capabilities, "documentSymbolProvider"),
         workspace_symbol: has_provider(capabilities, "workspaceSymbolProvider"),
+        workspace_symbol_resolve: capabilities
+            .get("workspaceSymbolProvider")
+            .and_then(|provider| provider.get("resolveProvider"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         rename: has_provider(capabilities, "renameProvider"),
         formatting: has_provider(capabilities, "documentFormattingProvider"),
         range_formatting: has_provider(capabilities, "documentRangeFormattingProvider"),
@@ -8761,7 +9364,14 @@ fn apply_dynamic_capability(
         "textDocument/implementation" => summary.implementation = true,
         "textDocument/references" => summary.references = true,
         "textDocument/documentSymbol" => summary.document_symbol = true,
-        "workspace/symbol" => summary.workspace_symbol = true,
+        "workspace/symbol" => {
+            summary.workspace_symbol = true;
+            summary.workspace_symbol_resolve |= registration
+                .register_options
+                .get("resolveProvider")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        }
         "textDocument/rename" => summary.rename = true,
         "textDocument/formatting" => summary.formatting = true,
         "textDocument/rangeFormatting" => summary.range_formatting = true,
@@ -9112,23 +9722,24 @@ fn parse_workspace_symbol(value: &Value) -> Option<LspWorkspaceSymbol> {
         .unwrap_or(0);
     // SymbolInformation: location.uri + location.range
     // WorkspaceSymbol (3.17): location may be { uri } only; range optional.
-    let (uri, range) = if let Some(location) = value.get("location") {
+    let (uri, range, resolved) = if let Some(location) = value.get("location") {
         let uri = location.get("uri").and_then(Value::as_str)?;
-        let range = location
+        let parsed_range = location
             .get("range")
             .and_then(parse_range)
-            .or_else(|| value.get("range").and_then(parse_range))
-            .unwrap_or(LspRange {
-                start: LspPosition {
-                    line: 0,
-                    character: 0,
-                },
-                end: LspPosition {
-                    line: 0,
-                    character: 0,
-                },
-            });
-        (uri.to_string(), range)
+            .or_else(|| value.get("range").and_then(parse_range));
+        let resolved = parsed_range.is_some();
+        let range = parsed_range.unwrap_or(LspRange {
+            start: LspPosition {
+                line: 0,
+                character: 0,
+            },
+            end: LspPosition {
+                line: 0,
+                character: 0,
+            },
+        });
+        (uri.to_string(), range, resolved)
     } else {
         return None;
     };
@@ -9149,6 +9760,10 @@ fn parse_workspace_symbol(value: &Value) -> Option<LspWorkspaceSymbol> {
         path,
         range,
         selection_range,
+        resolved,
+        resolve_token: None,
+        raw: None,
+        provider_session_key: None,
     })
 }
 
@@ -10437,6 +11052,10 @@ mod tests {
             json!({ "dynamicRegistration": true })
         );
         assert_eq!(capabilities["symbol"]["dynamicRegistration"], json!(true));
+        assert_eq!(
+            capabilities["symbol"]["resolveSupport"]["properties"],
+            json!(["location.range"])
+        );
     }
 
     #[test]
@@ -11796,6 +12415,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
             "completionProvider": { "triggerCharacters": [".", "::"], "resolveProvider": true },
             "signatureHelpProvider": { "triggerCharacters": ["(", ","] },
             "hoverProvider": true,
+            "workspaceSymbolProvider": { "resolveProvider": true },
             "renameProvider": { "prepareProvider": true },
             "selectionRangeProvider": true,
             "documentFormattingProvider": false,
@@ -11811,7 +12431,21 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert!(summary.selection_range);
         assert!(!summary.formatting);
         assert!(!summary.type_hierarchy);
-        assert!(!summary.workspace_symbol);
+        assert!(summary.workspace_symbol);
+        assert!(summary.workspace_symbol_resolve);
+    }
+
+    #[test]
+    fn dynamic_workspace_symbol_capability_tracks_resolve_provider() {
+        let registration = DynamicCapabilityRegistration {
+            id: "workspace-symbols".into(),
+            method: "workspace/symbol".into(),
+            register_options: json!({ "resolveProvider": true }),
+        };
+        let (summary, _, _, _) = capability_state_from(&json!({}), &[registration]);
+
+        assert!(summary.workspace_symbol);
+        assert!(summary.workspace_symbol_resolve);
     }
 
     #[test]
@@ -12231,6 +12865,271 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert_eq!(symbols[0].kind, 5);
         assert_eq!(symbols[0].container_name.as_deref(), Some("editor"));
         assert_eq!(symbols[0].range.start.line, 10);
+        assert!(symbols[0].resolved);
+        assert!(symbols[0].resolve_token.is_none());
+    }
+
+    #[test]
+    fn parses_uri_only_workspace_symbol_as_unresolved() {
+        let symbol = parse_workspace_symbol(&json!({
+            "name": "DeferredType",
+            "kind": 5,
+            "location": { "uri": "file:///repo/src/deferred.ts" },
+            "data": { "providerHandle": 42 }
+        }))
+        .expect("URI-only workspace symbol");
+
+        assert!(!symbol.resolved);
+        assert_eq!(symbol.range.start.line, 0);
+        assert_eq!(symbol.selection_range.start.character, 0);
+        assert!(symbol.resolve_token.is_none());
+    }
+
+    #[test]
+    fn aggregates_workspace_symbols_deterministically_and_deduplicates() {
+        let response = |name: &str, path: &str| {
+            json!([{
+                "name": name,
+                "kind": 5,
+                "location": {
+                    "uri": format!("file://{path}"),
+                    "range": {
+                        "start": { "line": 1, "character": 0 },
+                        "end": { "line": 1, "character": 3 }
+                    }
+                }
+            }])
+        };
+        let result = aggregate_workspace_symbol_responses(
+            vec![
+                (
+                    "TypeScript".into(),
+                    "typescript-session".into(),
+                    false,
+                    Ok(response("B", "/repo/b.ts")),
+                ),
+                (
+                    "Java".into(),
+                    "java-session".into(),
+                    false,
+                    Ok(response("A", "/repo/a.java")),
+                ),
+                (
+                    "duplicate".into(),
+                    "duplicate-session".into(),
+                    false,
+                    Ok(response("B", "/repo/b.ts")),
+                ),
+            ],
+            3,
+            3,
+            0,
+            false,
+        );
+        assert!(result.complete);
+        assert_eq!(result.symbols.len(), 2);
+        assert_eq!(result.symbols[0].name, "A");
+        assert_eq!(result.symbols[1].name, "B");
+        assert_eq!(result.failed_provider_count, 0);
+    }
+
+    #[test]
+    fn marks_failed_and_malformed_workspace_symbol_providers_incomplete() {
+        let result = aggregate_workspace_symbol_responses(
+            vec![
+                (
+                    "broken".into(),
+                    "broken-session".into(),
+                    false,
+                    Err("request timeout".into()),
+                ),
+                (
+                    "malformed".into(),
+                    "malformed-session".into(),
+                    false,
+                    Ok(json!([{ "name": "missing location" }])),
+                ),
+            ],
+            2,
+            2,
+            0,
+            false,
+        );
+        assert!(!result.complete);
+        assert_eq!(result.failed_provider_count, 2);
+        assert_eq!(result.symbols.len(), 0);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|item| item.contains("timeout"))
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|item| item.contains("malformed"))
+        );
+    }
+
+    #[test]
+    fn marks_missing_providers_and_provider_limit_as_bounded() {
+        let result = aggregate_workspace_symbol_responses(
+            vec![(
+                "TypeScript".into(),
+                "typescript-session".into(),
+                false,
+                Ok(Value::Array(Vec::new())),
+            )],
+            65,
+            1,
+            64,
+            true,
+        );
+        assert!(!result.complete);
+        assert!(result.truncated);
+        assert_eq!(result.skipped_provider_count, 64);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|item| item.contains("limited to"))
+        );
+    }
+
+    #[test]
+    fn reports_no_provider_without_claiming_complete_index() {
+        let result = aggregate_workspace_symbol_responses(Vec::new(), 0, 0, 0, false);
+        assert!(!result.complete);
+        assert!(!result.truncated);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|item| item.contains("No active language server"))
+        );
+    }
+
+    #[test]
+    fn preserves_deferred_symbol_payload_only_for_resolve_provider() {
+        let uri_only = json!([{
+            "name": "DeferredType",
+            "kind": 5,
+            "location": { "uri": "file:///repo/src/deferred.ts" },
+            "data": { "providerHandle": 42 }
+        }]);
+        let supported = aggregate_workspace_symbol_responses(
+            vec![(
+                "TypeScript".into(),
+                "typescript-session".into(),
+                true,
+                Ok(uri_only.clone()),
+            )],
+            1,
+            1,
+            0,
+            false,
+        );
+        assert!(supported.complete);
+        assert!(!supported.symbols[0].resolved);
+        assert_eq!(
+            supported.symbols[0].provider_session_key.as_deref(),
+            Some("typescript-session")
+        );
+        assert_eq!(supported.symbols[0].raw.as_ref(), Some(&uri_only[0]));
+
+        let unsupported = aggregate_workspace_symbol_responses(
+            vec![(
+                "Legacy".into(),
+                "legacy-session".into(),
+                false,
+                Ok(uri_only),
+            )],
+            1,
+            1,
+            0,
+            false,
+        );
+        assert!(!unsupported.complete);
+        assert_eq!(unsupported.failed_provider_count, 1);
+        assert!(unsupported.symbols[0].raw.is_none());
+        assert!(
+            unsupported
+                .diagnostics
+                .iter()
+                .any(|item| item.contains("without advertising"))
+        );
+    }
+
+    #[test]
+    fn validates_and_merges_workspace_symbol_resolve_payloads() {
+        assert_eq!(
+            parse_workspace_symbol_resolve_token("0123456789abcdef0123456789abcdef:17"),
+            Ok(("0123456789abcdef0123456789abcdef", "17"))
+        );
+        for invalid in [
+            "",
+            "short:1",
+            "0123456789abcdef0123456789abcdeg:1",
+            "0123456789abcdef0123456789abcdef:-1",
+        ] {
+            assert!(parse_workspace_symbol_resolve_token(invalid).is_err());
+        }
+
+        let original = json!({
+            "name": "DeferredType",
+            "kind": 5,
+            "location": { "uri": "file:///repo/src/deferred.ts" },
+            "data": { "providerHandle": 42 }
+        });
+        let response = json!({
+            "location": {
+                "range": {
+                    "start": { "line": 8, "character": 2 },
+                    "end": { "line": 8, "character": 14 }
+                }
+            }
+        });
+        let resolved = parse_workspace_symbol(&merge_workspace_symbol_values(&original, &response))
+            .expect("resolved symbol");
+        assert!(resolved.resolved);
+        assert_eq!(resolved.selection_range.start.line, 8);
+        assert_eq!(resolved.name, "DeferredType");
+    }
+
+    #[test]
+    fn newer_workspace_symbol_query_cancels_previous_generation() {
+        let mut queries = HashMap::new();
+        let first = begin_workspace_symbol_query(&mut queries, "workspace", 1);
+        assert!(!first.is_cancelled());
+
+        let second = begin_workspace_symbol_query(&mut queries, "workspace", 2);
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        assert_eq!(queries.get("workspace").map(|(id, _)| *id), Some(2));
+    }
+
+    #[tokio::test]
+    async fn stopping_workspace_cancels_symbol_query_and_clears_resolve_batches() {
+        let manager = LspManager::new();
+        let cancellation = {
+            let mut queries = manager.workspace_symbol_queries.lock().await;
+            begin_workspace_symbol_query(&mut queries, "workspace", 1)
+        };
+        manager.workspace_symbol_resolutions.lock().await.insert(
+            "0123456789abcdef0123456789abcdef".into(),
+            WorkspaceSymbolResolutionBatch {
+                workspace_id: "workspace".into(),
+                created_at: Instant::now(),
+                bytes: 0,
+                entries: HashMap::new(),
+            },
+        );
+
+        assert_eq!(manager.stop_workspace("workspace").await, 0);
+        assert!(cancellation.is_cancelled());
+        assert!(manager.workspace_symbol_queries.lock().await.is_empty());
+        assert!(manager.workspace_symbol_resolutions.lock().await.is_empty());
     }
 
     #[test]

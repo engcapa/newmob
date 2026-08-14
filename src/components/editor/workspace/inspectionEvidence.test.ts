@@ -26,8 +26,24 @@ describe("inspectionEvidence", () => {
   });
 
   it("recognizes taint and data-flow evidence from provider text", () => {
-    expect(classifyProviderAnalysisEvidence(diagnostic({ message: "Untrusted value reaches a sink" }))?.kind).toBe("taint");
-    expect(classifyProviderAnalysisEvidence(diagnostic({ message: "Data-flow path crosses a call" }))?.kind).toBe("data-flow");
+    expect(classifyProviderAnalysisEvidence(diagnostic({ message: "Untrusted value reaches a sink" }))).toMatchObject({ kind: "taint", proofLevel: "text-inferred" });
+    expect(classifyProviderAnalysisEvidence(diagnostic({ message: "Data-flow path crosses a call" }))).toMatchObject({ kind: "data-flow", proofLevel: "text-inferred" });
+  });
+
+  it("retains structured provider flow steps and locations", () => {
+    const evidence = classifyProviderAnalysisEvidence(diagnostic({
+      data: {
+        analysisKind: "data-flow",
+        flowPath: [
+          { role: "source", message: "Request input", location: { uri: "file:///repo/in.ts", path: "/repo/in.ts", range: { start: { line: 1, character: 0 }, end: { line: 1, character: 7 } } } },
+          { role: "sink", label: "SQL query" },
+        ],
+      },
+    }));
+    expect(evidence).toMatchObject({ kind: "data-flow", confidence: "explicit", proofLevel: "structured" });
+    expect(evidence?.flowSteps).toHaveLength(2);
+    expect(evidence?.flowSteps[0]).toMatchObject({ role: "source", location: { path: "/repo/in.ts" } });
+    expect(evidence?.flowSteps[1]).toMatchObject({ role: "sink", message: "SQL query" });
   });
 
   it("falls back to related-location evidence without inventing a flow category", () => {
@@ -37,6 +53,25 @@ describe("inspectionEvidence", () => {
         message: "Related source",
       }],
     }))).toMatchObject({ kind: "related-location", confidence: "explicit", relatedCount: 1 });
+  });
+
+  it("retains structured provider related locations", () => {
+    const evidence = classifyProviderAnalysisEvidence(diagnostic({
+      data: {
+        relatedLocations: [{
+          role: "related",
+          message: "Assigned here",
+          uri: "file:///repo/a.ts",
+          path: "/repo/a.ts",
+          range: { start: { line: 3, character: 1 }, end: { line: 3, character: 5 } },
+        }],
+      },
+    }));
+    expect(evidence).toMatchObject({
+      kind: "related-location",
+      proofLevel: "structured",
+      flowSteps: [{ role: "related", message: "Assigned here" }],
+    });
   });
 
   it("returns no evidence when the provider supplies no analysis signal", () => {

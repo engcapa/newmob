@@ -88,6 +88,7 @@ const lspMocks = vi.hoisted(() => ({
   lspCodeActions: vi.fn(),
   lspCodeActionResolve: vi.fn(),
   lspWorkspaceSymbols: vi.fn(),
+  lspWorkspaceSymbolResolve: vi.fn(),
   lspExecuteCommand: vi.fn(),
   lspResolveWorkspaceEdit: vi.fn(),
   lspResolveShowMessageRequest: vi.fn(),
@@ -420,7 +421,18 @@ describe("CodeWorkspaceTab", () => {
       action: raw,
     }));
     lspMocks.lspWorkspaceSymbols.mockReset();
-    lspMocks.lspWorkspaceSymbols.mockResolvedValue({ status: documentStatus(), symbols: [] });
+    lspMocks.lspWorkspaceSymbols.mockResolvedValue({
+      status: documentStatus(),
+      symbols: [],
+      sessionCount: 0,
+      providerCount: 0,
+      skippedProviderCount: 0,
+      failedProviderCount: 0,
+      complete: false,
+      truncated: false,
+      diagnostics: [],
+    });
+    lspMocks.lspWorkspaceSymbolResolve.mockReset();
     lspMocks.lspPrepareCallHierarchy.mockResolvedValue({ status: documentStatus(), items: [] });
     lspMocks.lspCallHierarchyIncoming.mockResolvedValue({ status: documentStatus(), entries: [] });
     lspMocks.lspCallHierarchyOutgoing.mockResolvedValue({ status: documentStatus(), entries: [] });
@@ -1330,6 +1342,157 @@ describe("CodeWorkspaceTab", () => {
     expect(screen.queryByTestId("code-workspace-recent-files")).not.toBeInTheDocument();
   });
 
+  it("resolves URI-only workspace symbols before opening their source range", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-symbol-resolve",
+      workspaceInstanceId: "instance-symbol-resolve",
+      name: "Symbol Resolve",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const capabilities = {
+      completion: false,
+      signatureHelp: false,
+      hover: false,
+      definition: false,
+      typeDefinition: false,
+      implementation: false,
+      references: false,
+      documentSymbol: false,
+      workspaceSymbol: true,
+      workspaceSymbolResolve: true,
+      rename: false,
+      formatting: false,
+      rangeFormatting: false,
+      codeAction: false,
+      documentHighlight: false,
+      callHierarchy: false,
+      typeHierarchy: false,
+      inlayHint: false,
+      selectionRange: false,
+      semanticTokens: false,
+      completionTriggerCharacters: [],
+      signatureTriggerCharacters: [],
+    };
+    const activeStatus = documentStatus({ available: true, active: true, capabilities });
+    const lifecycle: string[] = [];
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => {
+      if (path === "src/target.ts") lifecycle.push("read-target");
+      return file(path, path === "src/target.ts" ? "\n".repeat(8) + "class DeferredType {}" : "const main = true;");
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    lspMocks.lspWorkspaceSymbols.mockResolvedValue({
+      status: activeStatus,
+      symbols: [{
+        name: "DeferredType",
+        kind: 5,
+        containerName: "editor",
+        uri: "file:///repo/app/src/target.ts",
+        path: "/repo/app/src/target.ts",
+        range: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        selectionRange: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        resolved: false,
+        resolveToken: "0123456789abcdef0123456789abcdef:0",
+      }, {
+        name: "BrokenType",
+        kind: 5,
+        containerName: "editor",
+        uri: "file:///repo/app/src/broken.ts",
+        path: "/repo/app/src/broken.ts",
+        range: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        selectionRange: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        resolved: false,
+        resolveToken: null,
+      }],
+      sessionCount: 1,
+      providerCount: 1,
+      skippedProviderCount: 0,
+      failedProviderCount: 0,
+      complete: true,
+      truncated: false,
+      diagnostics: [],
+    });
+    lspMocks.lspWorkspaceSymbolResolve.mockImplementation(async () => {
+      lifecycle.push("resolve");
+      return {
+        name: "DeferredType",
+        kind: 5,
+        containerName: "editor",
+        uri: "file:///repo/app/src/target.ts",
+        path: "/repo/app/src/target.ts",
+        range: {
+          start: { line: 8, character: 0 },
+          end: { line: 8, character: 21 },
+        },
+        selectionRange: {
+          start: { line: 8, character: 6 },
+          end: { line: 8, character: 18 },
+        },
+        resolved: true,
+        resolveToken: null,
+      };
+    });
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => {
+      expect(registrationRef.current?.items.find((item) => item.id === "workspace.goToSymbol")?.enabled)
+        .toBe(true);
+    });
+    act(() => {
+      expect(registrationRef.current?.execute("workspace.goToSymbol")).toBe(true);
+    });
+    const input = await screen.findByLabelText("Go to symbol");
+    fireEvent.change(input, { target: { value: "Deferred" } });
+    expect(await screen.findByText("DeferredType")).toBeInTheDocument();
+    expect(screen.queryByText("editor · /repo/app/src/target.ts:1")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(lspMocks.lspWorkspaceSymbolResolve).toHaveBeenCalledWith(
+      "instance-symbol-resolve",
+      "0123456789abcdef0123456789abcdef:0",
+    ));
+    expect(await screen.findByTitle("app / src/target.ts")).toBeInTheDocument();
+    expect(lifecycle).toEqual(["resolve", "read-target"]);
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-symbol-resolve",
+    ).splitOrientation).toBe("vertical");
+
+    act(() => {
+      expect(registrationRef.current?.execute("workspace.goToSymbol")).toBe(true);
+    });
+    const brokenInput = await screen.findByLabelText("Go to symbol");
+    fireEvent.change(brokenInput, { target: { value: "Broken" } });
+    expect(await screen.findByText("BrokenType")).toBeInTheDocument();
+    fireEvent.keyDown(brokenInput, { key: "Enter" });
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain(
+      "did not provide a source location",
+    ));
+    expect(lspMocks.lspWorkspaceSymbolResolve).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTitle("app / src/broken.ts")).not.toBeInTheDocument();
+  });
+
   it("opens the file structure popup with Ctrl+F12 and jumps to a symbol", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
@@ -1561,7 +1724,10 @@ describe("CodeWorkspaceTab", () => {
       expect.any(Object),
       expect.objectContaining({ data: { fixId: "space" } }),
     ));
-    await waitFor(() => expect(screen.getByText(/unsaved|Applied/i)).toBeTruthy());
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-actions",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
   });
 
   it("rejects a provider refactor when the editor changes during preview confirmation", async () => {
@@ -2051,7 +2217,7 @@ describe("CodeWorkspaceTab", () => {
 
     expect(await screen.findByTestId("external-file-conflict-dialog")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Merge" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Merge result" }), {
+    fireEvent.change(await screen.findByRole("textbox", { name: "Merge result" }), {
       target: { value: "const value = 4;" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Apply Merge" }));

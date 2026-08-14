@@ -1623,6 +1623,22 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         locations: [],
       } as T;
     }
+    case "lsp_workspace_symbols": {
+      return {
+        status: stubLspDocumentStatus(args as InvokeArgs),
+        symbols: [],
+        sessionCount: 0,
+        providerCount: 0,
+        skippedProviderCount: 0,
+        failedProviderCount: 0,
+        complete: false,
+        truncated: false,
+        diagnostics: ["Workspace symbols are not available in browser preview"],
+      } as T;
+    }
+    case "lsp_workspace_symbol_resolve": {
+      throw new Error("Workspace symbol resolution is not available in browser preview");
+    }
     case "lsp_read_uri_contents": {
       const uri = String((args as InvokeArgs)?.uri ?? "");
       const title = uri.split("/").pop()?.split("?")[0] || "Library.java";

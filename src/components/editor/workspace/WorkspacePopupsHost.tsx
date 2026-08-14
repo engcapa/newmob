@@ -25,7 +25,7 @@ interface WorkspacePopupsHostProps {
   fetchWorkspaceSymbols: (query: string) => Promise<GoToSymbolQueryResult>;
   onCloseSearchEverywhere: () => void;
   onOpenFileItem: (item: GoToFileItem) => void;
-  onOpenSymbol: (symbol: GoToSymbolItem) => void;
+  onOpenSymbol: (symbol: GoToSymbolItem, options?: { split: boolean }) => void;
   onRunCommand: (commandId: string) => void;
   onSearchText: (query: string) => void;
 
@@ -103,7 +103,7 @@ export function WorkspacePopupsHost({
         fetchSymbols={fetchWorkspaceSymbols}
         onClose={onCloseSearchEverywhere}
         onOpenFile={onOpenFileItem}
-        onOpenSymbol={(symbol) => void onOpenSymbol(symbol)}
+        onOpenSymbol={(symbol, options) => void onOpenSymbol(symbol, options)}
         onRunCommand={onRunCommand}
         onSearchText={onSearchText}
       />

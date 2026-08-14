@@ -14,12 +14,27 @@ export type WorkspaceSemanticIndexInvalidationReason =
   | "language-server-restarted"
   | "provider-progress";
 
+export type WorkspaceSemanticIndexQueryScope = "document" | "workspace";
+
+export interface WorkspaceSemanticIndexQueryCoverage {
+  scope: WorkspaceSemanticIndexQueryScope;
+  sessionCount: number | null;
+  providerCount: number | null;
+  skippedProviderCount: number;
+  failedProviderCount: number;
+  complete: boolean;
+  truncated: boolean;
+  diagnostics: string[];
+}
+
 export interface WorkspaceSemanticIndexQuery {
   kind: "symbols" | "references" | "rename" | "safe-delete" | "code-action" | "refactor" | "analysis";
   generation: number;
   completedAt: number;
   resultCount: number | null;
   provider: WorkspaceSemanticIndexProvider;
+  /** Provider coverage/provenance for this query; absent for legacy callers. */
+  coverage?: WorkspaceSemanticIndexQueryCoverage;
 }
 
 export interface WorkspaceSemanticIndexSnapshot {

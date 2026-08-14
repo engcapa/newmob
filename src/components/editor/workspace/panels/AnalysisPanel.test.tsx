@@ -104,12 +104,56 @@ describe("AnalysisPanel", () => {
     expect(screen.getByText("Semantic tokens received: 4")).toBeInTheDocument();
     expect(screen.getAllByText("typescript:taint").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("analysis-evidence-kind-taint")).toHaveTextContent("Taint flow");
+    expect(screen.getByTestId("analysis-evidence-proof-level")).toHaveTextContent("text-inferred");
     fireEvent.click(screen.getByRole("checkbox", { name: "Enable inspection typescript:taint" }));
     expect(onUpdateRule).toHaveBeenCalledWith("typescript:taint", { enabled: false });
-    fireEvent.click(screen.getByText("Sink receives the value"));
+    fireEvent.click(screen.getAllByText("Sink receives the value")[0]!);
     expect(onOpenLocation).toHaveBeenCalled();
     fireEvent.click(screen.getByText("Value reaches a sink"));
     expect(onOpenDiagnostic).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0]);
+  });
+
+  it("renders structured flow evidence and navigates its provider locations", () => {
+    const structured = {
+      ...files[0].diagnostics[0],
+      code: "flow",
+      message: "Structured flow reported",
+      data: {
+        analysisKind: "data-flow",
+        flowSteps: [{
+          role: "source",
+          message: "Request parameter",
+          location: {
+            uri: "file:///repo/src/input.ts",
+            path: "/repo/src/input.ts",
+            range: { start: { line: 2, character: 1 }, end: { line: 2, character: 8 } },
+          },
+        }],
+      },
+      relatedInformation: undefined,
+    };
+    const onOpenLocation = vi.fn();
+    render(
+      <AnalysisPanel
+        files={[{ ...files[0], diagnostics: [structured] }]}
+        status={null}
+        semanticTokenCount={0}
+        semanticIndex={createWorkspaceSemanticIndexSnapshot()}
+        profile={defaultInspectionProfile()}
+        onUpdateRule={vi.fn()}
+        onCreateBaseline={vi.fn()}
+        onClearBaseline={vi.fn()}
+        onRemoveBaselineEntry={vi.fn()}
+        onRemoveSuppression={vi.fn()}
+        onExportBaseline={vi.fn()}
+        onImportBaseline={vi.fn()}
+        onOpenLocation={onOpenLocation}
+        onOpenDiagnostic={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("analysis-evidence-proof-level")).toHaveTextContent("structured");
+    fireEvent.click(screen.getByText("Request parameter"));
+    expect(onOpenLocation).toHaveBeenCalledWith(expect.objectContaining({ path: "/repo/src/input.ts" }));
   });
 
   it("shows an explicit provider boundary when no related locations exist", () => {

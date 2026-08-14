@@ -126,9 +126,18 @@ describe("SearchEverywhere", () => {
         uri: "file:///repo/src/CodeWorkspaceTab.tsx",
         line: 10,
         character: 0,
+        resolved: true,
+        resolveToken: null,
       }],
       semanticGeneration: 3,
       semanticRevision: 4,
+      sessionCount: 1,
+      providerCount: 1,
+      skippedProviderCount: 0,
+      failedProviderCount: 0,
+      complete: true,
+      truncated: false,
+      diagnostics: [],
     }));
     renderPopup({
       symbolsAvailable: true,
@@ -143,6 +152,7 @@ describe("SearchEverywhere", () => {
     fireEvent.change(screen.getByLabelText("Go to class"), { target: { value: "CWT" } });
     expect(await screen.findByText("CodeWorkspaceTab")).toBeInTheDocument();
     expect(screen.getByTestId("search-everywhere-semantic-index")).toHaveTextContent("Stale · result generation 3");
+    expect(screen.getByTestId("search-everywhere-symbol-provider-status")).toHaveTextContent("1/1 provider");
     fireEvent.keyDown(screen.getByLabelText("Go to class"), { key: "Enter" });
     expect(onOpenSymbol).toHaveBeenCalled();
 
@@ -150,5 +160,48 @@ describe("SearchEverywhere", () => {
     fireEvent.change(screen.getByLabelText("Find in files"), { target: { value: "needle" } });
     fireEvent.keyDown(screen.getByLabelText("Find in files"), { key: "Enter" });
     expect(onSearchText).toHaveBeenCalledWith("needle");
+  });
+
+  it("does not display a fabricated first line for unresolved workspace symbols", async () => {
+    const onOpenSymbol = vi.fn();
+    const fetchSymbols = vi.fn(async () => ({
+      symbols: [{
+        name: "DeferredType",
+        kind: 5,
+        containerName: "editor",
+        path: "src/deferred.ts",
+        uri: "file:///repo/src/deferred.ts",
+        line: 0,
+        character: 0,
+        resolved: false,
+        resolveToken: "0123456789abcdef0123456789abcdef:0",
+      }],
+      semanticGeneration: 1,
+      semanticRevision: 0,
+      sessionCount: 1,
+      providerCount: 1,
+      skippedProviderCount: 0,
+      failedProviderCount: 0,
+      complete: true,
+      truncated: false,
+      diagnostics: [],
+    }));
+    renderPopup({
+      symbolsAvailable: true,
+      fetchSymbols,
+      onOpenSymbol,
+      initialMode: "symbols",
+    });
+
+    fireEvent.change(screen.getByLabelText("Go to symbol"), { target: { value: "Deferred" } });
+    expect(await screen.findByText("DeferredType")).toBeInTheDocument();
+    expect(screen.getByText("editor · src/deferred.ts")).toBeInTheDocument();
+    expect(screen.queryByText("editor · src/deferred.ts:1")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(screen.getByLabelText("Go to symbol"), { key: "Enter" });
+    expect(onOpenSymbol).toHaveBeenCalledWith(expect.objectContaining({
+      resolved: false,
+      resolveToken: "0123456789abcdef0123456789abcdef:0",
+    }));
   });
 });

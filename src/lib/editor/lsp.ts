@@ -55,6 +55,8 @@ export interface LspCapabilitySummary {
   references: boolean;
   documentSymbol: boolean;
   workspaceSymbol: boolean;
+  /** The provider accepts LSP 3.17 workspaceSymbol/resolve requests. */
+  workspaceSymbolResolve?: boolean;
   rename: boolean;
   formatting: boolean;
   rangeFormatting: boolean;
@@ -867,11 +869,27 @@ export interface LspWorkspaceSymbol {
   path: string | null;
   range: LspRange;
   selectionRange: LspRange;
+  /** False when the provider returned only a URI and navigation must resolve it first. */
+  resolved: boolean;
+  /** Opaque, short-lived backend handle; raw provider payloads never enter the webview. */
+  resolveToken?: string | null;
 }
 
 export interface LspWorkspaceSymbolsResult {
   status: LspDocumentStatus;
   symbols: LspWorkspaceSymbol[];
+  /** Number of ready language-server sessions discovered for this workspace. */
+  sessionCount: number;
+  /** Number of provider sessions actually queried. */
+  providerCount: number;
+  /** Ready sessions skipped because they lack the capability or exceeded the fan-out bound. */
+  skippedProviderCount: number;
+  /** Providers whose request or response could not be consumed. */
+  failedProviderCount: number;
+  /** False when the provider fan-out failed, was unavailable, or truncated. */
+  complete: boolean;
+  truncated: boolean;
+  diagnostics: string[];
 }
 
 export interface LspHierarchyItem {
@@ -955,6 +973,16 @@ export function lspWorkspaceSymbols(
   return invoke<LspWorkspaceSymbolsResult>("lsp_workspace_symbols", {
     ...documentArgs(descriptor),
     query,
+  });
+}
+
+export function lspWorkspaceSymbolResolve(
+  workspaceId: string,
+  resolveToken: string,
+): Promise<LspWorkspaceSymbol> {
+  return invoke<LspWorkspaceSymbol>("lsp_workspace_symbol_resolve", {
+    workspaceId,
+    resolveToken,
   });
 }
 

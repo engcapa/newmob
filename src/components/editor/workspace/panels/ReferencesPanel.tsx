@@ -6,6 +6,7 @@ import {
   workspaceSemanticIndexStatusLabel,
   type WorkspaceSemanticIndexSnapshot,
 } from "../workspaceSemanticIndex";
+import { relativePathWithinRoot } from "../codeWorkspaceModel";
 
 export interface ReferencesResultState {
   loading: boolean;
@@ -21,17 +22,6 @@ interface ReferencesPanelProps {
   roots: CodeWorkspaceRootInfo[];
   semanticIndex: WorkspaceSemanticIndexSnapshot;
   onOpenLocation: (location: LspLocation) => void;
-}
-
-function normalizeFsPath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "");
-}
-
-function relativePathWithinRoot(rootPath: string, filePath: string): string | null {
-  const root = normalizeFsPath(rootPath);
-  const file = normalizeFsPath(filePath);
-  if (file === root) return "";
-  return file.startsWith(`${root}/`) ? file.slice(root.length + 1) : null;
 }
 
 function displayLocationPath(location: LspLocation, roots: CodeWorkspaceRootInfo[]): string {

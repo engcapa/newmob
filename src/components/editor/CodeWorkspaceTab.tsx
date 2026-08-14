@@ -114,6 +114,7 @@ import {
   lspSemanticTokens,
   lspSignatureHelp,
   lspTypeDefinition,
+  lspWorkspaceSymbolResolve,
   lspWorkspaceSymbols,
   type LspCodeAction,
   type JavaTestItem,
@@ -222,6 +223,7 @@ import {
   summarizeWorkspaceEditOutcomes,
   workspaceEditApplyResponse,
 } from "./workspace/workspaceEditApply";
+import { validateSemanticWorkspaceEditPaths } from "./workspace/semanticWorkspaceEdit";
 import {
   formatWorkspaceEditPreview,
   workspaceEditOperations,
@@ -530,6 +532,8 @@ import {
   makeLibraryFile,
   makeLoadingFile,
   makeLooseFile,
+  fsPathComparisonKey,
+  fsPathEquals,
   normalizeEditorText,
   normalizeFsPath,
   parentPath,
@@ -1331,7 +1335,7 @@ export function CodeWorkspaceTab({
   }, [roots]);
 
   const semanticRootsFingerprint = useMemo(
-    () => roots.map((root) => `${root.id}:${normalizeFsPath(root.path)}`).sort().join("\u0000"),
+    () => roots.map((root) => `${root.id}:${fsPathComparisonKey(root.path)}`).sort().join("\u0000"),
     [roots],
   );
   const previousSemanticRootsFingerprintRef = useRef(semanticRootsFingerprint);
@@ -2659,7 +2663,7 @@ export function CodeWorkspaceTab({
         if (entry.fileType !== "file") return null;
         const open = Object.values(openFilesRef.current).find((file) => {
           const path = absolutePathForOpenFile(file);
-          return path != null && normalizeFsPath(path) === normalizedPath;
+          return path != null && fsPathEquals(path, normalizedPath);
         });
         if (open) return {
           path: normalizedPath,
@@ -2682,7 +2686,7 @@ export function CodeWorkspaceTab({
     }
     const open = Object.values(openFilesRef.current).find((file) => {
       const path = absolutePathForOpenFile(file);
-      return path != null && normalizeFsPath(path) === normalizedPath;
+      return path != null && fsPathEquals(path, normalizedPath);
     });
     if (open) return {
       path: normalizedPath,
@@ -2713,8 +2717,9 @@ export function CodeWorkspaceTab({
     const add = (path: string | null) => {
       if (!path) return false;
       const normalized = normalizeFsPath(path);
-      if (!seen.has(normalized)) {
-        seen.add(normalized);
+      const comparisonKey = fsPathComparisonKey(normalized);
+      if (!seen.has(comparisonKey)) {
+        seen.add(comparisonKey);
         paths.push(normalized);
       }
       return true;
@@ -2737,11 +2742,11 @@ export function CodeWorkspaceTab({
   const captureWorkspaceEditTabSnapshot = useCallback((
     paths: readonly string[],
   ): WorkspaceEditTabSnapshot => {
-    const pathSet = new Set(paths.map(normalizeFsPath));
+    const pathSet = new Set(paths.map(fsPathComparisonKey));
     const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
     const files = Object.values(openFilesRef.current).flatMap((file) => {
       const absolutePath = absolutePathForOpenFile(file);
-      if (!absolutePath || !pathSet.has(normalizeFsPath(absolutePath))) return [];
+      if (!absolutePath || !pathSet.has(fsPathComparisonKey(absolutePath))) return [];
       const groups = (["primary", "secondary"] as const).flatMap((id) => {
         const group = ui.editorGroups[id];
         if (!group.openOrder.includes(file.key)) return [];
@@ -3386,7 +3391,7 @@ export function CodeWorkspaceTab({
     semanticIndex.invalidate("external-file-change", [normalizedPath]);
     const file = Object.values(openFilesRef.current).find((candidate) => {
       const absolute = absolutePathForOpenFile(candidate);
-      return absolute !== null && normalizeFsPath(absolute) === normalizedPath;
+      return absolute !== null && fsPathEquals(absolute, normalizedPath);
     });
     refreshTree();
     if (!file) {
@@ -4846,6 +4851,13 @@ export function CodeWorkspaceTab({
         symbols: [],
         semanticGeneration: null,
         semanticRevision: null,
+        sessionCount: 0,
+        providerCount: 0,
+        skippedProviderCount: 0,
+        failedProviderCount: 0,
+        complete: false,
+        truncated: false,
+        diagnostics: [],
       };
     };
     if (!file) return unavailable();
@@ -4866,16 +4878,35 @@ export function CodeWorkspaceTab({
         uri: symbol.uri,
         line: symbol.selectionRange.start.line,
         character: symbol.selectionRange.start.character,
+        resolved: symbol.resolved,
+        resolveToken: symbol.resolveToken ?? null,
       }));
       const completion = semanticIndex.finishQuery(buildToken, {
         kind: "symbols",
         resultCount: symbols.length,
+        coverage: {
+          scope: "workspace",
+          sessionCount: result.sessionCount,
+          providerCount: result.providerCount,
+          skippedProviderCount: result.skippedProviderCount,
+          failedProviderCount: result.failedProviderCount,
+          complete: result.complete,
+          truncated: result.truncated,
+          diagnostics: result.diagnostics,
+        },
       });
       return completion.accepted
         ? {
           symbols,
           semanticGeneration: buildToken.generation,
           semanticRevision: buildToken.revision,
+          sessionCount: result.sessionCount,
+          providerCount: result.providerCount,
+          skippedProviderCount: result.skippedProviderCount,
+          failedProviderCount: result.failedProviderCount,
+          complete: result.complete,
+          truncated: result.truncated,
+          diagnostics: result.diagnostics,
         }
         : unavailable();
     } catch (error) {
@@ -4898,21 +4929,45 @@ export function CodeWorkspaceTab({
     options?: { split: boolean },
   ) => {
     setSearchEverywhereOpen(false);
+    let location: LspLocation;
+    if (!symbol.resolved) {
+      if (!symbol.resolveToken) {
+        setStatusMessage(`Cannot open ${symbol.name}: the language server did not provide a source location`);
+        return;
+      }
+      try {
+        const resolved = await lspWorkspaceSymbolResolve(workspaceInstanceId, symbol.resolveToken);
+        if (!resolved.resolved) {
+          setStatusMessage(`Cannot open ${symbol.name}: workspace symbol resolution returned no source range`);
+          return;
+        }
+        location = {
+          uri: resolved.uri,
+          path: resolved.path,
+          range: resolved.selectionRange,
+        };
+      } catch (error) {
+        setStatusMessage(`Cannot open ${symbol.name}: ${errorMessage(error)}`);
+        return;
+      }
+    } else {
+      location = {
+        uri: symbol.uri,
+        path: symbol.path,
+        range: {
+          start: { line: symbol.line, character: symbol.character },
+          end: { line: symbol.line, character: symbol.character },
+        },
+      };
+    }
     let groupId: EditorGroupId | undefined;
     if (options?.split) {
       const current = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
       groupId = current.activeEditorGroupId === "primary" ? "secondary" : "primary";
       setStoreSplitOrientation(workspaceInstanceId, "vertical");
     }
-    await openLspLocation({
-      uri: symbol.uri,
-      path: symbol.path,
-      range: {
-        start: { line: symbol.line, character: symbol.character },
-        end: { line: symbol.line, character: symbol.character },
-      },
-    }, { groupId, preview: !options?.split });
-  }, [openLspLocation, setStoreSplitOrientation, workspaceInstanceId]);
+    await openLspLocation(location, { groupId, preview: !options?.split });
+  }, [openLspLocation, setStatusMessage, setStoreSplitOrientation, workspaceInstanceId]);
 
   const seSymbolsAvailable = !!(
     activeCapabilities?.workspaceSymbol
@@ -5255,6 +5310,8 @@ export function CodeWorkspaceTab({
     semanticRequireReady?: boolean;
     /** Internal history replay must not create another history entry. */
     recordHistory?: boolean;
+    /** Restrict provider edits to the opened workspace roots. */
+    semanticWorkspaceOnly?: boolean;
   };
 
   const applyLspWorkspaceEditNow = useCallback(async (
@@ -5277,7 +5334,7 @@ export function CodeWorkspaceTab({
         const normalized = normalizeFsPath(absolutePath);
         for (const file of Object.values(openFilesRef.current)) {
           const path = absolutePathForOpenFile(file);
-          if (path && normalizeFsPath(path) === normalized) {
+          if (path && fsPathEquals(path, normalized)) {
             return {
               text: file.text,
               dirty: file.dirty,
@@ -5322,7 +5379,7 @@ export function CodeWorkspaceTab({
         }
       },
       writeDisk: async (absolutePath, text, expectedHash, encoding = "UTF-8", bom = false) => {
-        const replayMetadata = replayWorkspaceEncodingRef.current?.get(normalizeFsPath(absolutePath));
+        const replayMetadata = replayWorkspaceEncodingRef.current?.get(fsPathComparisonKey(absolutePath));
         const effectiveEncoding = replayMetadata?.encoding ?? encoding;
         const effectiveBom = replayMetadata?.bom ?? bom;
         // Snapshot current disk contents before bulk WorkspaceEdit writes.
@@ -5416,6 +5473,12 @@ export function CodeWorkspaceTab({
             throw new Error("Semantic result became stale before changes were applied; run the action again");
           }
         },
+      validateOperationPaths: options.semanticWorkspaceOnly || (options.semanticGeneration != null && options.semanticRevision != null)
+        ? (operations) => validateSemanticWorkspaceEditPaths(
+          operations,
+          rootsRef.current.map((root) => root.path),
+        )
+        : undefined,
       createFile: (operation) => applyLspResourceOperation(operation),
       renameFile: (operation) => applyLspResourceOperation(operation),
       deleteFile: (operation) => applyLspResourceOperation(operation),
@@ -5508,7 +5571,7 @@ export function CodeWorkspaceTab({
       snapshots
         .filter((snapshot) => snapshot.exists)
         .map((snapshot) => [
-          normalizeFsPath(snapshot.path),
+          fsPathComparisonKey(snapshot.path),
           { encoding: snapshot.encoding ?? "UTF-8", bom: snapshot.bom ?? false },
         ]),
     );
@@ -6940,7 +7003,7 @@ export function CodeWorkspaceTab({
       if (session?.state?.status === "stopped") {
         const stoppedPath = session.currentLocation?.path;
         const filePath = absolutePathForOpenFile(file);
-        if (stoppedPath && filePath && normalizeFsPath(stoppedPath) === normalizeFsPath(filePath)) {
+        if (stoppedPath && filePath && fsPathEquals(stoppedPath, filePath)) {
           return null;
         }
       }
@@ -7124,6 +7187,7 @@ export function CodeWorkspaceTab({
         label: "Rename symbol",
         semanticGeneration: buildToken.generation,
         semanticRevision: buildToken.revision,
+        semanticWorkspaceOnly: true,
       });
     } catch (err) {
       semanticIndex.failBuild(buildToken, errorMessage(err));
@@ -7252,7 +7316,21 @@ export function CodeWorkspaceTab({
           path: currentPath,
           range: prepared.range,
         };
-      const deletion = buildSafeDeleteWorkspaceEdit(declaration, references.locations);
+      const deletion = buildSafeDeleteWorkspaceEdit(declaration, references.locations, {
+        workspaceRoots: rootsRef.current.map((root) => root.path),
+      });
+      if (!deletion.complete) {
+        const reason = deletion.diagnostics.join("; ") || "Safe Delete references are incomplete";
+        if (referencesRequestSequenceRef.current === referencesRequestId) {
+          setReferencesResult((current) => ({
+            ...current,
+            loading: false,
+            error: reason,
+          }));
+        }
+        setStatusMessage(`Safe Delete blocked: ${reason}`);
+        return;
+      }
       const line = live.text.split("\n")[prepared.range.start.line] ?? "";
       const symbol = prepared.range.start.line === prepared.range.end.line
         ? line.slice(prepared.range.start.character, prepared.range.end.character).trim()
@@ -7276,6 +7354,7 @@ export function CodeWorkspaceTab({
         label: "Safe delete symbol",
         semanticGeneration: buildToken.generation,
         semanticRevision: buildToken.revision,
+        semanticWorkspaceOnly: true,
       });
     } catch (error) {
       semanticIndex.failBuild(buildToken, errorMessage(error));
@@ -7739,7 +7818,6 @@ export function CodeWorkspaceTab({
     const activeRootId = activeFile.ref.kind === "root" ? activeFile.ref.rootId : null;
     const activeRoot = activeRootId ? roots.find((root) => root.id === activeRootId) : undefined;
     if (!activeRoot) return [];
-    const normalizedRoot = normalizeFsPath(activeRoot.path);
     const projectRoots = new Map(
       activeExecutionModel.projects.map((project) => [project.id, normalizeFsPath(project.root)]),
     );
@@ -7748,21 +7826,24 @@ export function CodeWorkspaceTab({
           ...activeExecutionModel.runConfigurations.filter((configuration) => (
             configuration.configurationSource === "shared"
             || !configuration.sourceFile
-            || normalizeFsPath(configuration.sourceFile) !== normalizeFsPath(javaFallbackConfiguration.sourceFile ?? "")
+            || !fsPathEquals(configuration.sourceFile, javaFallbackConfiguration.sourceFile ?? "")
           )),
           javaFallbackConfiguration,
         ]
       : activeExecutionModel.runConfigurations;
     const matches = configurations.filter((configuration) => {
       const sourceFile = configuration.sourceFile && normalizeFsPath(configuration.sourceFile);
-      if (sourceFile) return sourceFile === normalized && sourceFile.startsWith(`${normalizedRoot}/`);
+      if (sourceFile) {
+        return fsPathEquals(sourceFile, normalized)
+          && relativePathWithinRoot(activeRoot.path, sourceFile) !== null;
+      }
       const projectRoot = projectRoots.get(configuration.projectId);
       // A project-level configuration belongs to the active file only when its
       // project is rooted below the active workspace root. This keeps multiple
       // workspace roots and nested Maven/Gradle modules isolated.
       return !!projectRoot
-        && (projectRoot === normalizedRoot || projectRoot.startsWith(`${normalizedRoot}/`))
-        && (normalized === projectRoot || normalized.startsWith(`${projectRoot}/`));
+        && relativePathWithinRoot(activeRoot.path, projectRoot) !== null
+        && relativePathWithinRoot(projectRoot, normalized) !== null;
     });
     return materializeRunConfigurations(
       matches,
@@ -8028,8 +8109,8 @@ export function CodeWorkspaceTab({
       const executionModel = await workspaceExecutionModel(root.path, absolute ?? undefined, toolConfigRef.current);
       const normalizedActive = absolute ? normalizeFsPath(absolute) : null;
       const project = executionModel.projects
-        .filter((candidate) => !normalizedActive || normalizedActive === normalizeFsPath(candidate.root)
-          || normalizedActive.startsWith(`${normalizeFsPath(candidate.root)}/`))
+        .filter((candidate) => !normalizedActive
+          || relativePathWithinRoot(candidate.root, normalizedActive) !== null)
         .sort((left, right) => right.root.length - left.root.length)[0];
       const buildTarget = project
         ? executionModel.buildTargets.find((target) => target.projectId === project.id && target.kind === "build")
@@ -8348,7 +8429,7 @@ export function CodeWorkspaceTab({
   const activeDebugCurrentLine = useMemo<number | null>(() => {
     const loc = debug.currentLocation;
     if (!loc || !activeFileAbsPath) return null;
-    return normalizeFsPath(loc.path) === normalizeFsPath(activeFileAbsPath) ? loc.line : null;
+    return fsPathEquals(loc.path, activeFileAbsPath) ? loc.line : null;
   }, [activeFileAbsPath, debug.currentLocation]);
   /** The editor is showing the stopped frame: inline values + hover apply here. */
   const debugStoppedHere = debug.state?.status === "stopped" && activeDebugCurrentLine != null;
@@ -8667,8 +8748,7 @@ export function CodeWorkspaceTab({
         const resolveRoot = (candidate: ExecutionDebugConfiguration): CodeWorkspaceRootInfo => {
           const project = activeExecutionModel?.projects.find((item) => item.id === candidate.projectId);
           const projectRoot = project && roots.find((item) => (
-            normalizeFsPath(item.path) === normalizeFsPath(project.root)
-            || normalizeFsPath(project.root).startsWith(`${normalizeFsPath(item.path)}/`)
+            relativePathWithinRoot(item.path, project.root) !== null
           ));
           if (!projectRoot || projectRoot.id !== root.id) {
             throw new Error(`Compound Debug child belongs to another workspace root: ${candidate.label}`);
@@ -9848,7 +9928,7 @@ export function CodeWorkspaceTab({
         fetchWorkspaceSymbols={fetchWorkspaceSymbols}
         onCloseSearchEverywhere={() => setSearchEverywhereOpen(false)}
         onOpenFileItem={openGoToFileItem}
-        onOpenSymbol={(symbol) => void openWorkspaceSymbol(symbol)}
+        onOpenSymbol={(symbol, options) => void openWorkspaceSymbol(symbol, options)}
         onRunCommand={runSearchEverywhereCommand}
         onSearchText={(query) => {
           setSearchEverywhereOpen(false);

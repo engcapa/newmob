@@ -96,6 +96,16 @@ describe("workspaceSemanticIndex", () => {
     snapshot = recordWorkspaceSemanticIndexQuery(snapshot, {
       kind: "references",
       resultCount: 4,
+      coverage: {
+        scope: "document",
+        sessionCount: 1,
+        providerCount: 1,
+        skippedProviderCount: 0,
+        failedProviderCount: 0,
+        complete: true,
+        truncated: false,
+        diagnostics: [],
+      },
     }, 50);
 
     expect(snapshot).toMatchObject({
@@ -105,6 +115,7 @@ describe("workspaceSemanticIndex", () => {
       lastQuery: {
         kind: "references",
         resultCount: 4,
+        coverage: { scope: "document", complete: true },
         provider: "language-server",
         completedAt: 50,
       },
