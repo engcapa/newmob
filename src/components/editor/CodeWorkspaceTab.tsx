@@ -1833,6 +1833,9 @@ export function CodeWorkspaceTab({
     noteCaretPosition,
     reconcileFileReferences: reconcileNavigationFileReferences,
     openRecentFiles,
+    recentChangedOnly,
+    recordEditLocation,
+    navigateLastEditLocation,
     pickRecentFile,
   } = useWorkspaceNavigation({
     workspaceInstanceId,
@@ -2569,6 +2572,7 @@ export function CodeWorkspaceTab({
     // store publication that causes the surrounding workspace to re-render.
     openFilesRef.current = { ...openFilesRef.current, [key]: next };
     pendingEditorTextByFileRef.current.set(key, next);
+    recordEditLocation(file.ref, { line: 0, character: 0 });
     semanticIndex.invalidateSilently("document-edited", [file.path]);
     // Drive didChange from the live buffer only when a language server can
     // actually use it — plain text / missing LSP must not pay IPC cost.
@@ -6205,8 +6209,29 @@ export function CodeWorkspaceTab({
       keybinding: "Ctrl+E",
       keywords: ["previous", "history"],
       run: () => {
-        if (recentFilesOpen) setRecentAdvanceNonce((nonce) => nonce + 1);
+        if (recentFilesOpen && !recentChangedOnly) setRecentAdvanceNonce((nonce) => nonce + 1);
         else openRecentFiles();
+      },
+    },
+    {
+      id: "workspace.recentChangedFiles",
+      title: "Recently Changed Files",
+      category: "Navigation",
+      keybinding: "Ctrl+Shift+E",
+      keywords: ["modified", "changes", "history"],
+      run: () => {
+        if (recentFilesOpen && recentChangedOnly) setRecentAdvanceNonce((nonce) => nonce + 1);
+        else openRecentFiles({ changedOnly: true });
+      },
+    },
+    {
+      id: "workspace.lastEditLocation",
+      title: "Last Edit Location",
+      category: "Navigation",
+      keybinding: "Ctrl+Shift+Backspace",
+      keywords: ["edit", "history", "previous", "back"],
+      run: () => {
+        navigateLastEditLocation();
       },
     },
     {
@@ -9966,6 +9991,7 @@ export function CodeWorkspaceTab({
         recentFilesOpen={recentFilesOpen}
         recentEntries={recentEntries}
         recentAdvanceNonce={recentAdvanceNonce}
+        recentChangedOnly={recentChangedOnly}
         onCloseRecent={() => setRecentFilesOpen(false)}
         onPickRecent={pickRecentFile}
         structureOpen={structureOpen}

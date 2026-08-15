@@ -64,4 +64,10 @@ describe("RecentFilesPopup", () => {
     render(<RecentFilesPopup open entries={[]} onClose={vi.fn()} onPick={vi.fn()} />);
     expect(screen.getByText("No recent files yet")).toBeInTheDocument();
   });
+
+  it("renders custom placeholder and label in changed-only mode", () => {
+    render(<RecentFilesPopup open entries={[]} changedOnly onClose={vi.fn()} onPick={vi.fn()} />);
+    expect(screen.getByLabelText("Recently changed files")).toBeInTheDocument();
+    expect(screen.getByText("No recently changed files")).toBeInTheDocument();
+  });
 });

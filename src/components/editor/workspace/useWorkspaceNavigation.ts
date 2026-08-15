@@ -81,7 +81,10 @@ export interface WorkspaceNavigationController {
   reconcileFileReferences: (
     transform: (ref: CodeWorkspaceFileRef) => CodeWorkspaceFileRef | null,
   ) => void;
-  openRecentFiles: () => void;
+  openRecentFiles: (options?: { changedOnly?: boolean }) => void;
+  recentChangedOnly: boolean;
+  recordEditLocation: (ref: CodeWorkspaceFileRef, position: WorkspaceNavPosition) => void;
+  navigateLastEditLocation: () => void;
   pickRecentFile: (entry: RecentFileEntry) => void;
 }
 
@@ -111,6 +114,7 @@ export function useWorkspaceNavigation({
 }: UseWorkspaceNavigationOptions): WorkspaceNavigationController {
   const setSplitOrientation = useCodeWorkspaceStore((state) => state.setSplitOrientation);
   const [navCan, setNavCan] = useState({ back: false, forward: false });
+  const [recentChangedOnly, setRecentChangedOnly] = useState(false);
   const navHistoryRef = useRef<{
     stack: WorkspaceNavLocation[];
     index: number;
@@ -118,6 +122,8 @@ export function useWorkspaceNavigation({
     suppress: boolean;
   }>({ stack: [], index: -1, suppress: false });
   const recentFilesRef = useRef<CodeWorkspaceFileRef[]>([]);
+  const lastEditLocationRef = useRef<WorkspaceNavLocation | null>(null);
+  const changedFileKeysRef = useRef<Set<string>>(new Set());
   const caretByKeyRef = useRef<Record<string, WorkspaceNavPosition>>({});
   const previousActiveKeyRef = useRef<string | null>(null);
 
@@ -170,6 +176,27 @@ export function useWorkspaceNavigation({
       character: Math.max(0, position.character),
     };
   }, []);
+
+  const recordEditLocation = useCallback(
+    (ref: CodeWorkspaceFileRef, position: WorkspaceNavPosition) => {
+      const key = fileKey(ref);
+      changedFileKeysRef.current.add(key);
+      lastEditLocationRef.current = {
+        ref,
+        line: Math.max(0, position.line),
+        character: Math.max(0, position.character),
+      };
+    },
+    [],
+  );
+
+  const navigateLastEditLocation = useCallback(() => {
+    const edit = lastEditLocationRef.current;
+    if (!edit) return;
+    const key = fileKey(edit.ref);
+    revealLocation(key, { line: edit.line, character: edit.character });
+    void openFile(edit.ref);
+  }, [openFile, revealLocation]);
 
   const recordNavigationLocation = useCallback((
     ref: CodeWorkspaceFileRef,
@@ -263,6 +290,13 @@ export function useWorkspaceNavigation({
       back: nav.index > 0,
       forward: nav.index >= 0 && nav.index < nav.stack.length - 1,
     });
+
+    if (lastEditLocationRef.current) {
+      const rewrittenEdit = transform(lastEditLocationRef.current.ref);
+      lastEditLocationRef.current = rewrittenEdit
+        ? { ...lastEditLocationRef.current, ref: rewrittenEdit }
+        : null;
+    }
   }, [openFilesRef]);
 
   useEffect(() => {
@@ -338,15 +372,24 @@ export function useWorkspaceNavigation({
     void openFile(entry.ref);
   }, [openFile, revealLocation]);
 
-  const openRecentFiles = useCallback(() => {
-    const entries: RecentFileEntry[] = recentFilesRef.current.map((ref) => {
+  const openRecentFiles = useCallback((options?: { changedOnly?: boolean }) => {
+    const changedOnly = !!options?.changedOnly;
+    setRecentChangedOnly(changedOnly);
+    let refs = recentFilesRef.current;
+    if (changedOnly) {
+      refs = refs.filter((ref) => {
+        const key = fileKey(ref);
+        const open = openFilesRef.current?.[key];
+        return (open && open.dirty) || changedFileKeysRef.current.has(key);
+      });
+    }
+    const entries: RecentFileEntry[] = refs.map((ref) => {
       const key = fileKey(ref);
       const open = openFilesRef.current?.[key];
       const meta = fileMeta(ref, rootsRef.current ?? [], looseFilesRef.current ?? []);
       return {
         key,
         ref,
-        // Open buffers carry their own labels; library sources have no path to derive them from.
         title: open?.title || meta.title,
         subtitle: open?.subtitle || meta.subtitle,
         open: !!open,
@@ -387,6 +430,9 @@ export function useWorkspaceNavigation({
     noteCaretPosition,
     reconcileFileReferences,
     openRecentFiles,
+    recentChangedOnly,
+    recordEditLocation,
+    navigateLastEditLocation,
     pickRecentFile,
   };
 }

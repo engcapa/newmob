@@ -32,6 +32,7 @@ interface WorkspacePopupsHostProps {
   recentFilesOpen: boolean;
   recentEntries: RecentFileEntry[];
   recentAdvanceNonce: number;
+  recentChangedOnly?: boolean;
   onCloseRecent: () => void;
   onPickRecent: (entry: RecentFileEntry) => void;
 
@@ -72,6 +73,7 @@ export function WorkspacePopupsHost({
   recentFilesOpen,
   recentEntries,
   recentAdvanceNonce,
+  recentChangedOnly = false,
   onCloseRecent,
   onPickRecent,
   structureOpen,
@@ -111,6 +113,7 @@ export function WorkspacePopupsHost({
         open={recentFilesOpen}
         entries={recentEntries}
         advanceNonce={recentAdvanceNonce}
+        changedOnly={recentChangedOnly}
         onClose={onCloseRecent}
         onPick={onPickRecent}
       />

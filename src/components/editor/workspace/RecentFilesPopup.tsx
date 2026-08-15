@@ -17,13 +17,21 @@ interface RecentFilesPopupProps {
   entries: RecentFileEntry[];
   /** Bump while open to advance the selection (repeated Ctrl+E). */
   advanceNonce?: number;
+  changedOnly?: boolean;
   onClose: () => void;
   onPick: (entry: RecentFileEntry) => void;
 }
 
 const MAX_RESULTS = 50;
 
-export function RecentFilesPopup({ open, entries, advanceNonce, onClose, onPick }: RecentFilesPopupProps) {
+export function RecentFilesPopup({
+  open,
+  entries,
+  advanceNonce,
+  changedOnly = false,
+  onClose,
+  onPick,
+}: RecentFilesPopupProps) {
   const filterItems = useCallback(
     (query: string, all: RecentFileEntry[]) =>
       query.trim()
@@ -37,8 +45,8 @@ export function RecentFilesPopup({ open, entries, advanceNonce, onClose, onPick 
     <QuickPickOverlay
       open={open}
       testId="code-workspace-recent-files"
-      inputLabel="Recent files"
-      placeholder="Recent files (type to filter)"
+      inputLabel={changedOnly ? "Recently changed files" : "Recent files"}
+      placeholder={changedOnly ? "Recently changed files (type to filter)" : "Recent files (type to filter)"}
       items={entries}
       // Preselect the previous file so Ctrl+E, Enter flips back to it.
       initialIndex={entries.length > 1 ? 1 : 0}
@@ -60,15 +68,21 @@ export function RecentFilesPopup({ open, entries, advanceNonce, onClose, onPick 
           )}
         </>
       )}
-      emptyText={(query) => (query ? "No matching recent files" : "No recent files yet")}
+      emptyText={(query) =>
+        query
+          ? "No matching recent files"
+          : changedOnly
+            ? "No recently changed files"
+            : "No recent files yet"
+      }
       footer={
         <>
           <span>↑↓ select</span>
           <span>Enter open</span>
-          <span>Ctrl+E next</span>
+          <span>{changedOnly ? "Ctrl+Shift+E" : "Ctrl+E"} next</span>
           <span>Esc close</span>
           <span className="ml-auto">
-            {entries.length} recent file{entries.length === 1 ? "" : "s"}
+            {entries.length} {changedOnly ? "changed" : "recent"} file{entries.length === 1 ? "" : "s"}
           </span>
         </>
       }
