@@ -1348,6 +1348,7 @@ export function CodeWorkspaceTab({
     isDocumentSynced: isLspDocumentSynced,
     documentVersion: lspDocumentVersion,
     syncDocument: syncLspDocument,
+    waitForSyncQueue: waitForLspDocumentSyncQueue,
     saveDocument: saveLspDocument,
     closeDocument: closeLspDocument,
     updateStatus: updateLspStatusForFile,
@@ -2487,6 +2488,7 @@ export function CodeWorkspaceTab({
     };
     // Non-editor callers need the updated model immediately (formatting,
     // WorkspaceEdit, reload), so they intentionally bypass the input batch.
+    openFilesRef.current = { ...openFilesRef.current, [key]: next };
     setOpenFiles((current) => ({ ...current, [key]: next }));
   }, [setOpenFiles]);
 
@@ -2541,16 +2543,16 @@ export function CodeWorkspaceTab({
     };
     const ready = kick();
     if (ready) return ready;
-    // No active server: do not spin-wait 400ms on every completion keystroke.
+    // No active server: do not wait on every completion keystroke.
     if (!isLspFeatureReady(lspFilesRef.current[fileKey])) return null;
-    const deadline = performance.now() + LSP_FEATURE_SYNC_WAIT_MS;
-    while (performance.now() < deadline) {
-      await new Promise<void>((resolve) => {
-        window.setTimeout(resolve, 8);
-      });
-      const readyAgain = kick();
-      if (readyAgain) return readyAgain;
-    }
+    await Promise.race([
+      waitForLspDocumentSyncQueue(fileKey),
+      new Promise<void>((resolve) => {
+        window.setTimeout(resolve, LSP_FEATURE_SYNC_WAIT_MS);
+      }),
+    ]);
+    const finalReady = kick();
+    if (finalReady) return finalReady;
     // Best effort: if the server is active but still catching up, still return
     // the live buffer so the feature request can race (CM will re-query on the
     // next keystroke via isIncomplete / abort-on-doc-change).
@@ -2561,7 +2563,7 @@ export function CodeWorkspaceTab({
       && (!requireSynchronized || isLspDocumentSynced(fileKey, latest.text))
     ) return latest;
     return null;
-  }, [cancelLiveLspSync, isLspDocumentSynced, syncLspDocument]);
+  }, [cancelLiveLspSync, isLspDocumentSynced, syncLspDocument, waitForLspDocumentSyncQueue]);
 
   /**
    * Semantic mutations are stricter than completion/signature help: every
@@ -7363,7 +7365,14 @@ export function CodeWorkspaceTab({
         if (!openFilesRef.current[live.key]) return null;
         if (openFilesRef.current[live.key]?.text !== live.text) return null;
         if (lspDocumentEpochRef.current[live.key] !== epoch) return null;
-        updateLspStatusForFile(live, result.status);
+        const currentLsp = lspFilesRef.current[live.key];
+        if (
+          !currentLsp?.status
+          || currentLsp.status.active !== result.status.active
+          || currentLsp.status.error !== result.status.error
+        ) {
+          updateLspStatusForFile(live, result.status);
+        }
         return result;
       } catch {
         return null;

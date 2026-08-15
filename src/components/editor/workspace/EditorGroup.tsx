@@ -271,6 +271,15 @@ export function EditorGroup({
     return computeStickyLines(activeSymbols, lines, topLine);
   }, [stickyLinesEnabled, activeSymbols, activeFile, topLine]);
 
+  const completionTriggers = useMemo(
+    () => mergeCompletionTriggers(activeCapabilities?.completionTriggerCharacters),
+    [activeCapabilities?.completionTriggerCharacters],
+  );
+  const signatureTriggers = useMemo(
+    () => activeCapabilities?.signatureTriggerCharacters ?? [],
+    [activeCapabilities?.signatureTriggerCharacters],
+  );
+
   const tabScrollRef = useRef<HTMLDivElement>(null);
   const [tabScrollState, setTabScrollState] = useState<EditorTabScrollState>({
     overflow: false,
@@ -619,10 +628,8 @@ export function EditorGroup({
                         onLightbulb={onLightbulb}
                         onGitChangeClick={setGitDiffPeek}
                         onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
-                        completionTriggers={mergeCompletionTriggers(
-                          activeCapabilities?.completionTriggerCharacters,
-                        )}
-                        signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
+                        completionTriggers={completionTriggers}
+                        signatureTriggers={signatureTriggers}
                         softWrap={softWrap}
                         columnSelectionMode={columnSelectionMode}
                         codeStyle={activeCodeStyle}
@@ -677,10 +684,8 @@ export function EditorGroup({
                       onLightbulb={onLightbulb}
                       onGitChangeClick={setGitDiffPeek}
                       onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
-                      completionTriggers={mergeCompletionTriggers(
-                        activeCapabilities?.completionTriggerCharacters,
-                      )}
-                      signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
+                      completionTriggers={completionTriggers}
+                      signatureTriggers={signatureTriggers}
                       softWrap={softWrap}
                       columnSelectionMode={columnSelectionMode}
                       codeStyle={activeCodeStyle}

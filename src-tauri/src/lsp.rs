@@ -1259,6 +1259,7 @@ impl LspManager {
                             .into_iter()
                             .filter(|change| {
                                 workspace_watch_target_matches(&watch_targets, &change.path)
+                                    && !crate::workspace::should_skip_workspace_entry_path(&change.path)
                             })
                             .collect::<Vec<_>>();
                         if changes.is_empty() {

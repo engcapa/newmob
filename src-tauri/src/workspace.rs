@@ -3019,7 +3019,7 @@ fn collect_workspace_files(
     Ok(())
 }
 
-fn should_skip_workspace_entry_path(path: &str) -> bool {
+pub(crate) fn should_skip_workspace_entry_path(path: &str) -> bool {
     path.split(['/', '\\']).any(|segment| {
         matches!(
             segment,

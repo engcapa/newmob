@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useMemo, useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirmAppDialog, promptAppDialog } from "../../../lib/appDialogs";
 import { writeText } from "../../../lib/clipboard";
@@ -210,13 +210,29 @@ export function useWorkspaceFileActions({
     await addLooseFilePath(path);
   }, [addLooseFilePath]);
 
+  const refreshTreeTimerRef = useRef<number | null>(null);
+
   const refreshTree = useCallback(() => {
-    resetTreeData();
-    rootsRef.current?.forEach((root) => {
-      if (expandedRoots.has(root.id)) void loadDir(root.id, "");
-      if (treeViewMode === "flat") void loadFlatFiles(root.id, true);
-    });
+    // External file-change events can arrive in bursts (git checkout, a
+    // build writing many files). Each call resets the tree's generation, so
+    // firing on every event makes every in-flight loadDir lose the race and
+    // leaves the row stuck on "Loading". Coalesce bursts into one reload.
+    if (refreshTreeTimerRef.current !== null) {
+      window.clearTimeout(refreshTreeTimerRef.current);
+    }
+    refreshTreeTimerRef.current = window.setTimeout(() => {
+      refreshTreeTimerRef.current = null;
+      resetTreeData();
+      rootsRef.current?.forEach((root) => {
+        if (expandedRoots.has(root.id)) void loadDir(root.id, "");
+        if (treeViewMode === "flat") void loadFlatFiles(root.id, true);
+      });
+    }, 200);
   }, [expandedRoots, loadDir, loadFlatFiles, resetTreeData, rootsRef, treeViewMode]);
+
+  useEffect(() => () => {
+    if (refreshTreeTimerRef.current !== null) window.clearTimeout(refreshTreeTimerRef.current);
+  }, []);
 
   const toggleRoot = useCallback((rootId: string) => {
     setSelected({ kind: "root", rootId });

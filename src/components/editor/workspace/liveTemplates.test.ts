@@ -117,6 +117,28 @@ describe("createLiveTemplateCompletionSource", () => {
     if (!result || "then" in result) throw new Error("expected sync result");
     expect(result.options.some((o) => o.label === "clg")).toBe(true);
   });
+
+  it("suppresses live templates when typing inside string literals", () => {
+    const source = createLiveTemplateCompletionSource(() => "App.java");
+    const doc = 'String firstStr = "this is another ";';
+    const state = EditorState.create({ doc });
+    const pos = doc.indexOf("another") + 2;
+    const result = source(new CompletionContext(state, pos, false));
+    expect(result).toBeNull();
+  });
+
+  it("suppresses live templates for 1-char non-exact prefix during automatic typing", () => {
+    const source = createLiveTemplateCompletionSource(() => "App.java");
+    // "s" is a prefix of "sout", but typing "s" alone should not trigger completion popup
+    const state = EditorState.create({ doc: "s" });
+    const result = source(new CompletionContext(state, 1, false));
+    expect(result).toBeNull();
+
+    // But typing exact abbreviation "if" should trigger completion
+    const ifState = EditorState.create({ doc: "if" });
+    const ifResult = source(new CompletionContext(ifState, 2, false));
+    expect(ifResult).not.toBeNull();
+  });
 });
 
 describe("expandLiveTemplateAt", () => {

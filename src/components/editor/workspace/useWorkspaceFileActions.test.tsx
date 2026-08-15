@@ -300,6 +300,30 @@ describe("useWorkspaceFileActions", () => {
     expect(lspMocks.lspWorkspaceDidFileOperation).toHaveBeenCalledWith("workspace-1", operation);
   });
 
+  it("coalesces bursts of refreshTree calls into a single reload", () => {
+    vi.useFakeTimers();
+    try {
+      const props = options({ expandedRoots: new Set(["root-1"]) });
+      const { result } = renderHook(() => useWorkspaceFileActions(props));
+
+      act(() => {
+        result.current.refreshTree();
+        result.current.refreshTree();
+        result.current.refreshTree();
+      });
+      expect(props.resetTreeData).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+      expect(props.resetTreeData).toHaveBeenCalledTimes(1);
+      expect(props.loadDir).toHaveBeenCalledTimes(1);
+      expect(props.loadDir).toHaveBeenCalledWith("root-1", "");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("adds repository-relative ignore rules and refreshes Git state", async () => {
     gitMocks.gitIgnorePath.mockResolvedValue({
       rule: "/build/",

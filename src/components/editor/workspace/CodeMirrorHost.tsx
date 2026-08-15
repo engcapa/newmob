@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -336,7 +337,59 @@ function lspInteractionExtensions(
   ];
 }
 
-export function CodeMirrorHost({
+function sameCodeStyle(a?: EffectiveCodeStyle, b?: EffectiveCodeStyle): boolean {
+  if (a === b) return true;
+  return (a?.tabSize ?? 2) === (b?.tabSize ?? 2)
+    && (a?.insertSpaces ?? true) === (b?.insertSpaces ?? true)
+    && (a?.indentSize ?? 2) === (b?.indentSize ?? 2);
+}
+
+const EMPTY_LIST: readonly never[] = [];
+
+function sameOptionalArray<T>(
+  a?: readonly T[],
+  b?: readonly T[],
+  equal: (x: T, y: T) => boolean = (x, y) => x === y,
+): boolean {
+  if (a === b) return true;
+  const arrA = a ?? EMPTY_LIST;
+  const arrB = b ?? EMPTY_LIST;
+  if (arrA.length !== arrB.length) return false;
+  for (let i = 0; i < arrA.length; i++) {
+    if (!equal(arrA[i] as T, arrB[i] as T)) return false;
+  }
+  return true;
+}
+
+function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirrorHostProps): boolean {
+  if (prev.path !== next.path) return false;
+  if (prev.doc !== next.doc) return false;
+  if (prev.visible !== next.visible) return false;
+  if (prev.readOnly !== next.readOnly) return false;
+  if (prev.softWrap !== next.softWrap) return false;
+  if (prev.columnSelectionMode !== next.columnSelectionMode) return false;
+  if (prev.coverageEnabled !== next.coverageEnabled) return false;
+  if (prev.fileCoverage !== next.fileCoverage) return false;
+  if (prev.reveal !== next.reveal) return false;
+  if (prev.gitBlame !== next.gitBlame) return false;
+  if (prev.debugCurrentLine !== next.debugCurrentLine) return false;
+  if (!sameCodeStyle(prev.codeStyle, next.codeStyle)) return false;
+  if (!sameArrayOrBothEmpty(prev.diagnostics, next.diagnostics)) return false;
+  if (!sameOptionalArray(prev.highlights, next.highlights)) return false;
+  if (!sameOptionalArray(prev.inlayHints, next.inlayHints)) return false;
+  if (!sameOptionalArray(prev.semanticTokens, next.semanticTokens)) return false;
+  if (!sameOptionalArray(prev.gitChanges, next.gitChanges)) return false;
+  if (!sameOptionalArray(prev.debugBreakpoints, next.debugBreakpoints)) return false;
+  if (!sameOptionalArray(prev.completionTriggers, next.completionTriggers)) return false;
+  if (!sameOptionalArray(prev.signatureTriggers, next.signatureTriggers)) return false;
+  if (prev.debugStep !== next.debugStep) return false;
+  if (prev.debugRunToCursor !== next.debugRunToCursor) return false;
+  if (prev.debugStop !== next.debugStop) return false;
+  if (prev.debugEvaluate !== next.debugEvaluate) return false;
+  return true;
+}
+
+export const CodeMirrorHost = memo(function CodeMirrorHost({
   path,
   doc,
   visible,
@@ -400,6 +453,14 @@ export function CodeMirrorHost({
   const lastSelectionRef = useRef<{ from: number; to: number } | null>(null);
   const selectionEmitTimerRef = useRef<number | null>(null);
   const renderedDiagnosticsRef = useRef(diagnostics);
+  const renderedReadOnlyRef = useRef(readOnly);
+  const renderedSoftWrapRef = useRef(softWrap);
+  const renderedCodeStyleRef = useRef({
+    tabSize: codeStyle?.tabSize ?? 2,
+    insertSpaces: codeStyle?.insertSpaces ?? true,
+    indentSize: codeStyle?.indentSize || (codeStyle?.tabSize ?? 2),
+  });
+  const renderedCoverageRef = useRef({ fileCoverage, coverageEnabled });
   const renderedOverlayRef = useRef({ highlights, inlayHints });
   const renderedSemanticTokensRef = useRef(semanticTokens);
   const renderedGitRef = useRef({ changes: gitChanges, blame: gitBlame });
@@ -658,7 +719,7 @@ export function CodeMirrorHost({
           // Closer to IDEA: short settle while typing; trigger chars fire
           // immediately via the updateListener below.
           activateOnTyping: true,
-          activateOnTypingDelay: 50,
+          activateOnTypingDelay: 100,
           // Prefer the first server-ranked item (sortText / boost) when open.
           defaultKeymap: true,
           icons: true,
@@ -905,12 +966,16 @@ export function CodeMirrorHost({
   useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    if (renderedReadOnlyRef.current === readOnly) return;
+    renderedReadOnlyRef.current = readOnly;
     view.dispatch({ effects: readOnlyCompartment.current.reconfigure(readOnlyExtension(readOnly)) });
   }, [readOnly]);
 
   useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    if (renderedSoftWrapRef.current === softWrap) return;
+    renderedSoftWrapRef.current = softWrap;
     view.dispatch({
       effects: wrappingCompartment.current.reconfigure(softWrap ? EditorView.lineWrapping : []),
     });
@@ -953,6 +1018,11 @@ export function CodeMirrorHost({
     const tabSize = codeStyle?.tabSize ?? 2;
     const insertSpaces = codeStyle?.insertSpaces ?? true;
     const indentSize = codeStyle?.indentSize || tabSize;
+    const prev = renderedCodeStyleRef.current;
+    if (prev.tabSize === tabSize && prev.insertSpaces === insertSpaces && prev.indentSize === indentSize) {
+      return;
+    }
+    renderedCodeStyleRef.current = { tabSize, insertSpaces, indentSize };
     view.dispatch({
       effects: codeStyleCompartment.current.reconfigure([
         EditorState.tabSize.of(tabSize),
@@ -991,6 +1061,11 @@ export function CodeMirrorHost({
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const prev = renderedCoverageRef.current;
+    if (prev.fileCoverage === fileCoverage && prev.coverageEnabled === coverageEnabled) {
+      return;
+    }
+    renderedCoverageRef.current = { fileCoverage, coverageEnabled };
     view.dispatch({
       effects: coverageCompartment.current.reconfigure(
         createCoverageEditorChrome(fileCoverage ?? null, coverageEnabled),
@@ -1064,4 +1139,4 @@ export function CodeMirrorHost({
       className="h-full w-full"
     />
   );
-}
+}, areCodeMirrorHostPropsEqual);

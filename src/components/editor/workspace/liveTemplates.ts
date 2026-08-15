@@ -21,6 +21,7 @@ import {
   type LiveTemplateLanguage,
   type LiveTemplatePreferences,
 } from "../../../lib/liveTemplatePreferences";
+import { isInsideStringOrComment } from "./syntaxContext";
 
 export type { LiveTemplateLanguage };
 
@@ -1325,6 +1326,11 @@ export function createLiveTemplateCompletionSource(
   pathOf: () => string | null | undefined,
 ): CompletionSource {
   return (context: CompletionContext): CompletionResult | null => {
+    // Never trigger live templates inside string literals or comments.
+    if (isInsideStringOrComment(context.state, context.pos)) {
+      return null;
+    }
+
     const language = liveTemplateLanguageForPath(pathOf());
     // Require at least one character unless explicit (Ctrl+Space).
     const listed = listLiveTemplateCompletions(context.state.doc, context.pos, language);
@@ -1348,8 +1354,19 @@ export function createLiveTemplateCompletionSource(
       };
     }
 
-    if (!context.explicit && listed.matches.every((m) => m.typed.length < 1)) {
-      return null;
+    // For non-explicit automatic typing:
+    // Only offer templates if:
+    // 1) Postfix template (e.g. list.for), OR
+    // 2) Exact match (e.g. sout, psvm, if, fori), OR
+    // 3) Typed prefix is at least 2 characters long (e.g. "so" -> sout).
+    // Single-character prefix (like typing "s" or "i" or "t") MUST NOT hijack autocomplete popup!
+    if (!context.explicit) {
+      const isPostfix = listed.matches[0]?.template.postfix ?? false;
+      const hasExact = listed.matches.some((m) => m.exact);
+      const longestTyped = Math.max(...listed.matches.map((m) => m.typed.length));
+      if (!isPostfix && !hasExact && longestTyped < 2) {
+        return null;
+      }
     }
 
     return {

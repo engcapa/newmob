@@ -12,6 +12,7 @@ import {
   lspSetJavaSettings,
   lspSetJavaVmargs,
   lspStopWorkspace,
+  type LspCapabilitySummary,
   type LspDiagnostic,
   type LspDocumentDescriptor,
   type LspDocumentStatus,
@@ -75,6 +76,18 @@ export const LSP_DIAGNOSTICS_REFRESH_EVENT = "lsp://diagnostics-refresh";
  * comparison local and cheap (the capability summary is small) so feature
  * requests that do not change observable state are true no-ops.
  */
+function mergeDocumentCapabilities(
+  incoming: LspCapabilitySummary | null | undefined,
+  existing: LspCapabilitySummary | null | undefined,
+): LspCapabilitySummary | null {
+  if (!incoming) return existing ?? null;
+  if (!existing) return incoming;
+  const hasIncoming = Object.values(incoming).some((v) => v === true || (Array.isArray(v) && v.length > 0));
+  if (hasIncoming) return incoming;
+  const hasExisting = Object.values(existing).some((v) => v === true || (Array.isArray(v) && v.length > 0));
+  return hasExisting ? existing : incoming;
+}
+
 function sameDocumentStatus(left: LspDocumentStatus, right: LspDocumentStatus): boolean {
   return left === right || (
     left.path === right.path
@@ -139,6 +152,7 @@ export interface WorkspaceLspSessionController {
   isDocumentSynced: (key: string, text: string) => boolean;
   documentVersion: (key: string) => number | null;
   syncDocument: (file: OpenFileState, mode: "open" | "change") => Promise<void>;
+  waitForSyncQueue: (key: string) => Promise<void>;
   saveDocument: (file: OpenFileState, text: string) => Promise<void>;
   closeDocument: (file: OpenFileState) => void;
   forgetDocument: (key: string) => void;
@@ -322,7 +336,11 @@ export function useWorkspaceLspSession({
     documentActiveRef.current[file.key] = status.active;
     updateLspFiles((current) => {
       const existing = current[file.key] ?? emptyLspFileState();
-      if (existing.status && sameDocumentStatus(existing.status, status)
+      const effectiveCapabilities = mergeDocumentCapabilities(status.capabilities, existing.status?.capabilities);
+      const effectiveStatus: LspDocumentStatus = effectiveCapabilities !== status.capabilities
+        ? { ...status, capabilities: effectiveCapabilities }
+        : status;
+      if (existing.status && sameDocumentStatus(existing.status, effectiveStatus)
         && !existing.syncing && existing.error === null) {
         return current;
       }
@@ -330,7 +348,7 @@ export function useWorkspaceLspSession({
         ...current,
         [file.key]: {
           ...existing,
-          status,
+          status: effectiveStatus,
           syncing: false,
           error: null,
         },
@@ -545,9 +563,13 @@ export function useWorkspaceLspSession({
           // final syncedText when the queue drains.
           updateLspFiles((current) => {
             const existing = current[currentSync.file.key] ?? emptyLspFileState();
+            const effectiveCapabilities = mergeDocumentCapabilities(status.capabilities, existing.status?.capabilities);
+            const effectiveStatus: LspDocumentStatus = effectiveCapabilities !== status.capabilities
+              ? { ...status, capabilities: effectiveCapabilities }
+              : status;
             const nextSyncing = !active && hasPending;
             const statusUnchanged = !!existing.status
-              && sameDocumentStatus(existing.status, status);
+              && sameDocumentStatus(existing.status, effectiveStatus);
             // Typing burst: more keystrokes are already queued. syncedTextRef
             // tracks progress; skip the React/Zustand publish until drain.
             if (
@@ -571,7 +593,7 @@ export function useWorkspaceLspSession({
               ...current,
               [currentSync.file.key]: {
                 ...existing,
-                status,
+                status: effectiveStatus,
                 diagnostics: existing.diagnostics,
                 syncing: nextSyncing,
                 syncedText: currentSync.file.text,
@@ -704,6 +726,7 @@ export function useWorkspaceLspSession({
     isDocumentSynced,
     documentVersion,
     syncDocument,
+    waitForSyncQueue: waitForDocumentSyncQueue,
     saveDocument,
     closeDocument,
     forgetDocument,
