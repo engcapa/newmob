@@ -340,6 +340,13 @@ export function StatusBar() {
             <span className="taomni-mono">Ln {workspaceStatus.line}, Col {workspaceStatus.column}</span>
           </StatusSegment>
           <StatusSegment
+            testId="status-bar-workspace-indentation"
+            title="Indentation · click to cycle Spaces (2), Spaces (4), and Tab (4)"
+            onClick={workspaceActions?.cycleIndentation}
+          >
+            {workspaceStatus.indentation ?? "Spaces: 2"}
+          </StatusSegment>
+          <StatusSegment
             testId="status-bar-workspace-encoding"
             title={`${workspaceStatus.encoding} · open file encoding options`}
             onClick={workspaceActions?.chooseEncoding ?? workspaceActions?.toggleBom}

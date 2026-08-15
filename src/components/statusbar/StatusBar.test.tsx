@@ -80,6 +80,7 @@ describe("StatusBar code-workspace segments", () => {
         column: 4,
         encoding: "UTF-8",
         eol: "LF",
+        indentation: "Spaces: 2",
         languageId: "typescript",
         lspActive: true,
         lspLabel: "typescript-language-server",
@@ -90,12 +91,13 @@ describe("StatusBar code-workspace segments", () => {
         fontSize: 14,
         largeFile: false,
       },
-      actions: { openLanguagePanel, openGitManager },
+      actions: { openLanguagePanel, openGitManager, cycleIndentation: vi.fn() },
     });
 
     render(<StatusBar />);
 
     expect(screen.getByTestId("status-bar-workspace-cursor")).toHaveTextContent("Ln 12, Col 4");
+    expect(screen.getByTestId("status-bar-workspace-indentation")).toHaveTextContent("Spaces: 2");
     expect(screen.getByTestId("status-bar-workspace-encoding")).toHaveTextContent("UTF-8");
     expect(screen.getByTestId("status-bar-workspace-eol")).toHaveTextContent("LF");
     expect(screen.getByTestId("status-bar-workspace-language")).toHaveTextContent("typescript");

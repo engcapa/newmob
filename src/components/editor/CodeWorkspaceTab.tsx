@@ -159,6 +159,7 @@ import {
   type RightPaneTabId,
 } from "../../stores/codeWorkspaceStore";
 import {
+  detectIndentation,
   useCodeWorkspaceStatusStore,
   type WorkspaceEol,
 } from "../../stores/codeWorkspaceStatusStore";
@@ -4338,6 +4339,24 @@ export function CodeWorkspaceTab({
     setStatusMessage(`${file.subtitle}: ${file.encoding ?? "UTF-8"} ${nextBom ? "BOM enabled" : "BOM disabled"}; save to apply`);
   }, [activeKey, setOpenFiles, setStatusMessage]);
 
+  const [indentationOverrides, setIndentationOverrides] = useState<Record<string, string>>({});
+  const activeIndentation = (activeKey && indentationOverrides[activeKey])
+    ?? (activeFile ? detectIndentation(activeFile.text).label : "Spaces: 2");
+
+  const cycleActiveFileIndentation = useCallback(() => {
+    const key = activeKey;
+    const file = key ? openFilesRef.current[key] : null;
+    if (!key || !file || file.library) return;
+    const current = indentationOverrides[key] ?? detectIndentation(file.text).label;
+    const next = current === "Spaces: 2"
+      ? "Spaces: 4"
+      : current === "Spaces: 4"
+        ? "Tab: 4"
+        : "Spaces: 2";
+    setIndentationOverrides((curr) => ({ ...curr, [key]: next }));
+    setStatusMessage(`${file.subtitle}: indentation set to ${next}`);
+  }, [activeKey, indentationOverrides, setStatusMessage]);
+
   useEffect(() => {
     if (!visible) {
       clearWorkspaceStatus(tabId);
@@ -4354,6 +4373,7 @@ export function CodeWorkspaceTab({
         ? `${activeFile.encoding ?? "UTF-8"}${activeFile.bom ? " BOM" : ""}`
         : "UTF-8",
       eol: activeFile?.eol ?? "LF",
+      indentation: activeIndentation,
       languageId: status?.languageId ?? activeLanguageId,
       lspActive: !!status?.active,
       lspLabel: status?.displayName ?? (status?.active ? "LSP" : null),
@@ -4380,6 +4400,7 @@ export function CodeWorkspaceTab({
     activeFile?.eol,
     activeFileIsLarge,
     activeGitRoot,
+    activeIndentation,
     activeLanguageId,
     activeLspState,
     activeLspProgress,
@@ -4411,6 +4432,7 @@ export function CodeWorkspaceTab({
       cycleEol: activeFile && !activeFile.library ? cycleActiveFileEol : undefined,
       toggleBom: activeFile && !activeFile.library ? toggleActiveFileBom : undefined,
       chooseEncoding: activeFile && !activeFile.library ? openFileEncodingDialog : undefined,
+      cycleIndentation: activeFile && !activeFile.library ? cycleActiveFileIndentation : undefined,
       cancelLspProgress: activeLspProgress?.cancellable
         ? () => cancelLspProgress(activeLspProgress)
         : undefined,
@@ -4420,6 +4442,7 @@ export function CodeWorkspaceTab({
     onOpenGitManager,
     openGitManager,
     cycleActiveFileEol,
+    cycleActiveFileIndentation,
     openFileEncodingDialog,
     toggleActiveFileBom,
     activeFile,

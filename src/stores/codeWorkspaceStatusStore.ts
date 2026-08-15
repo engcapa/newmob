@@ -18,6 +18,7 @@ export interface CodeWorkspaceStatusSegments {
   column: number;
   encoding: string;
   eol: WorkspaceEol;
+  indentation?: string | null;
   languageId: string | null;
   lspActive: boolean;
   lspLabel: string | null;
@@ -42,6 +43,8 @@ export interface CodeWorkspaceStatusActions {
   toggleBom?: () => void;
   /** Open the charset/BOM chooser for the active editor. */
   chooseEncoding?: () => void;
+  /** Cycle the active editor's indentation display and preference. */
+  cycleIndentation?: () => void;
 }
 
 interface CodeWorkspaceStatusStoreState {
@@ -63,6 +66,7 @@ function segmentsEqual(
     && left.column === right.column
     && left.encoding === right.encoding
     && left.eol === right.eol
+    && left.indentation === right.indentation
     && left.languageId === right.languageId
     && left.lspActive === right.lspActive
     && left.lspLabel === right.lspLabel
@@ -83,6 +87,34 @@ export function detectWorkspaceEol(text: string): WorkspaceEol {
   if (text.includes("\r\n")) return "CRLF";
   if (text.includes("\r")) return "CR";
   return "LF";
+}
+
+export function detectIndentation(text: string): { type: "spaces" | "tabs"; size: number; label: string } {
+  let tabCount = 0;
+  let space2Count = 0;
+  let space4Count = 0;
+
+  for (const line of text.split("\n").slice(0, 300)) {
+    if (!line || /^\s*$/.test(line)) continue;
+    if (line.startsWith("\t")) {
+      tabCount += 1;
+    } else {
+      const match = line.match(/^ +/);
+      if (match) {
+        const len = match[0].length;
+        if (len % 4 === 0) space4Count += 1;
+        else if (len % 2 === 0) space2Count += 1;
+      }
+    }
+  }
+
+  if (tabCount > space2Count && tabCount > space4Count) {
+    return { type: "tabs", size: 4, label: "Tab: 4" };
+  }
+  if (space4Count > space2Count) {
+    return { type: "spaces", size: 4, label: "Spaces: 4" };
+  }
+  return { type: "spaces", size: 2, label: "Spaces: 2" };
 }
 
 export const useCodeWorkspaceStatusStore = create<CodeWorkspaceStatusStoreState>((set, get) => ({
