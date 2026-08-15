@@ -4054,4 +4054,51 @@ describe("CodeWorkspaceTab", () => {
     // 8. Ctrl+Shift+F9 Recompile Active File
     expect(registrationRef.current?.items.find((item) => item.id === "workspace.recompileActiveFile")?.enabled).toBe(true);
   });
+
+  it("ingests workspace test coverage report and renders coverage dock panel", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-coverage",
+      workspaceInstanceId: "instance-coverage",
+      name: "Coverage test",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+
+    const lcovContent = `
+SF:src/Program.cs
+DA:1,3
+DA:2,0
+LF:2
+LH:1
+end_of_record
+`;
+
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_instanceId: string, _rootId: string, rel: string) => {
+      if (rel === "coverage/lcov.info") {
+        return file("coverage/lcov.info", lcovContent);
+      }
+      return file("src/Program.cs", "class Program {\n  void Main() {}\n}\n");
+    });
+
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+
+    // Execute workspace.showCoverage command
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.showCoverage")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.showCoverage");
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("coverage-overall-badge")).toBeInTheDocument();
+      expect(screen.getByTestId("coverage-overall-badge")).toHaveTextContent("50%");
+    });
+  });
 });

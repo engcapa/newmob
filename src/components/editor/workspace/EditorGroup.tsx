@@ -38,8 +38,10 @@ import type {
 import {
   CodeMirrorHost,
   type EditorContextMenuRequest,
+  type EditorRevealTarget,
   type EditorSelectionRange,
 } from "./CodeMirrorHost";
+import type { FileCoverage } from "./coverageModel";
 import { mergeCompletionTriggers } from "./lspCompletion";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 import { useContextMenu } from "../../ContextMenu";
@@ -88,6 +90,10 @@ interface EditorGroupProps {
   activeSemanticTokens?: LspSemanticToken[];
   activeGitChanges: GitLineChange[];
   activeGitBlame: GitBlameLine | null;
+  /** Active file code coverage. */
+  activeCoverage?: FileCoverage | null;
+  /** Coverage overlay enabled. */
+  coverageEnabled?: boolean;
   /** Breakpoints on the active file (M9), for the breakpoint gutter. */
   activeDebugBreakpoints?: DebugBreakpointMarker[];
   /** 1-based current-execution line on the active file (or null). */
@@ -186,6 +192,8 @@ export function EditorGroup({
   activeSemanticTokens = [],
   activeGitChanges,
   activeGitBlame,
+  activeCoverage,
+  coverageEnabled = true,
   activeDebugBreakpoints,
   activeDebugCurrentLine,
   activeDebugInlineValues,
@@ -586,6 +594,8 @@ export function EditorGroup({
                         semanticTokens={activeSemanticTokens}
                         gitChanges={activeGitChanges}
                         gitBlame={activeGitBlame}
+                        fileCoverage={activeCoverage}
+                        coverageEnabled={coverageEnabled}
                         reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                         // Library sources (JDK / dependency classes) cannot be written back.
                         readOnly={readOnly || !!activeFile.library}
@@ -633,6 +643,8 @@ export function EditorGroup({
                       semanticTokens={activeSemanticTokens}
                       gitChanges={activeGitChanges}
                       gitBlame={activeGitBlame}
+                      fileCoverage={activeCoverage}
+                      coverageEnabled={coverageEnabled}
                       debugBreakpoints={activeDebugBreakpoints}
                       debugCurrentLine={activeDebugCurrentLine}
                       debugInlineValues={activeDebugInlineValues}

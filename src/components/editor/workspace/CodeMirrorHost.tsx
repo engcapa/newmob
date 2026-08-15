@@ -64,6 +64,8 @@ import {
 import { createLspHyperlinkExtension } from "./lspHyperlink";
 import { createGitEditorChrome, type GitLineChange } from "./gitEditorChrome";
 import { createDebugEditorChrome, type DebugBreakpointMarker } from "./debugEditorChrome";
+import { createCoverageEditorChrome } from "./coverageEditorChrome";
+import type { FileCoverage } from "./coverageModel";
 import type { DebugStepAction } from "./dapDebugModel";
 import type { GitBlameLine } from "../../../lib/git";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
@@ -98,6 +100,10 @@ interface CodeMirrorHostProps {
   semanticTokens?: LspSemanticToken[];
   gitChanges?: GitLineChange[];
   gitBlame?: GitBlameLine | null;
+  /** File test coverage data. */
+  fileCoverage?: FileCoverage | null;
+  /** Whether coverage gutter overlay is enabled. */
+  coverageEnabled?: boolean;
   /** Debug breakpoints on this file (M9) — rendered in the breakpoint gutter. */
   debugBreakpoints?: DebugBreakpointMarker[];
   /** 1-based line the debugger is currently stopped on for this file (or null). */
@@ -366,6 +372,8 @@ export function CodeMirrorHost({
   debugRunToCursor,
   debugStop,
   debugEvaluate,
+  fileCoverage,
+  coverageEnabled = true,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
@@ -374,6 +382,7 @@ export function CodeMirrorHost({
   const overlayCompartment = useRef(new Compartment());
   const semanticTokensCompartment = useRef(new Compartment());
   const gitCompartment = useRef(new Compartment());
+  const coverageCompartment = useRef(new Compartment());
   const debugCompartment = useRef(new Compartment());
   const signatureCompartment = useRef(new Compartment());
   const readOnlyCompartment = useRef(new Compartment());
@@ -709,6 +718,10 @@ export function CodeMirrorHost({
           gitBlame,
           (change) => onGitChangeClickRef.current?.(change),
         )),
+        coverageCompartment.current.of(createCoverageEditorChrome(
+          fileCoverage ?? null,
+          coverageEnabled,
+        )),
         debugCompartment.current.of(buildDebugChrome(
           debugBreakpoints,
           debugCurrentLine,
@@ -951,6 +964,16 @@ export function CodeMirrorHost({
       )),
     });
   }, [gitBlame, gitChanges]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: coverageCompartment.current.reconfigure(
+        createCoverageEditorChrome(fileCoverage ?? null, coverageEnabled),
+      ),
+    });
+  }, [fileCoverage, coverageEnabled]);
 
   useEffect(() => {
     const view = viewRef.current;

@@ -24,6 +24,7 @@ export type BottomDockTabId =
   | "run"
   | "build"
   | "tests"
+  | "coverage"
   | "debug";
 export type EditorGroupId = "primary" | "secondary";
 export type EditorSplitOrientation = "horizontal" | "vertical";

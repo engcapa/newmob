@@ -47,6 +47,7 @@ import {
   ZoomOut,
   WrapText,
   Columns3,
+  ShieldCheck,
 } from "lucide-react";
 import {
   workspaceListDir,
@@ -269,6 +270,12 @@ import {
   type HierarchyRootState,
 } from "./workspace/panels/HierarchyPanel";
 import { TodosBookmarksPanel } from "./workspace/panels/TodosBookmarksPanel";
+import { CoveragePanel } from "./workspace/panels/CoveragePanel";
+import {
+  findFileCoverage,
+  parseCoverageReport,
+  type WorkspaceCoverageReport,
+} from "./workspace/coverageModel";
 import {
   readWorkspaceBookmarks,
   toggleWorkspaceBookmark,
@@ -6291,6 +6298,42 @@ export function CodeWorkspaceTab({
     setStatusMessage("Imports organized");
   }, [activeFile, requestCodeActions, runCodeAction, setStatusMessage]);
 
+  const [coverageReport, setCoverageReport] = useState<WorkspaceCoverageReport | null>(null);
+  const [coverageOverlayEnabled, setCoverageOverlayEnabled] = useState(true);
+
+  const scanWorkspaceCoverage = useCallback(async () => {
+    for (const root of rootsRef.current) {
+      const candidates = [
+        "coverage/lcov.info",
+        "lcov.info",
+        "target/site/jacoco/jacoco.xml",
+        "target/site/jacoco-aggregate/jacoco.xml",
+        "build/reports/jacoco/test/jacocoTestReport.xml",
+        "coverage.xml",
+      ];
+      for (const rel of candidates) {
+        try {
+          const file = await workspaceReadFile(workspaceInstanceId, root.id, rel);
+          if (file && file.text) {
+            const report = parseCoverageReport(file.text);
+            setCoverageReport(report);
+            setStatusMessage(`Loaded test coverage (${rel}): ${report.totalPercentage}% covered`);
+            return;
+          }
+        } catch {
+          // Continue searching candidates
+        }
+      }
+    }
+    setStatusMessage("No coverage reports found (run tests with coverage enabled)");
+  }, [workspaceInstanceId, setStatusMessage]);
+
+  const activeFileCoverage = useMemo(() => {
+    if (!activeFile || !coverageReport) return null;
+    const abs = absolutePathForOpenFile(activeFile);
+    return abs ? findFileCoverage(coverageReport, abs) : null;
+  }, [activeFile, coverageReport, absolutePathForOpenFile]);
+
   const workspaceCommands = useMemo<WorkspaceCommand[]>(() => [
     {
       id: "workspace.goToFile",
@@ -7091,6 +7134,17 @@ export function CodeWorkspaceTab({
       keywords: ["keymap", "shortcuts", "hotkeys", "cheat sheet", "intellij"],
       run: () => setKeymapCheatSheetOpen(true),
     },
+    {
+      id: "workspace.showCoverage",
+      title: "Show Code Coverage",
+      category: "Analyze",
+      keywords: ["coverage", "jacoco", "lcov", "tests", "lines"],
+      run: () => {
+        setBottomDockTab("coverage");
+        setBottomDockOpen(true);
+        if (!coverageReport) void scanWorkspaceCoverage();
+      },
+    },
   ], [
     activeCapabilities,
     activeEditorGroupId,
@@ -7158,6 +7212,10 @@ export function CodeWorkspaceTab({
     undoWorkspaceEdit,
     redoWorkspaceEdit,
     workspaceEditHistoryState,
+    coverageReport,
+    scanWorkspaceCoverage,
+    setBottomDockOpen,
+    setBottomDockTab,
   ]);
 
   const executeWorkspaceCommand = useCallback((
@@ -8102,6 +8160,7 @@ export function CodeWorkspaceTab({
   const [testResultsByRoot, setTestResultsByRoot] = useState<Record<string, StructuredTestResults>>({});
   const testResultsWorkspaceRef = useRef(workspaceInstanceId);
   testResultsWorkspaceRef.current = workspaceInstanceId;
+
   const [activeExecutionModel, setActiveExecutionModel] = useState<WorkspaceExecutionModel | null>(null);
   const [javaFallbackConfiguration, setJavaFallbackConfiguration] = useState<ExecutionRunConfiguration | null>(null);
   const [runConfigurationRevision, setRunConfigurationRevision] = useState(0);
@@ -9481,6 +9540,8 @@ export function CodeWorkspaceTab({
         activeSemanticTokens={semanticTokensByGroup[groupId]}
         activeGitChanges={groupFile ? gitLineChangesByFile[groupFile.key] ?? [] : []}
         activeGitBlame={gitBlameByGroup[groupId]}
+        activeCoverage={groupFile && coverageReport ? findFileCoverage(coverageReport, absolutePathForOpenFile(groupFile) ?? groupFile.languagePath) : null}
+        coverageEnabled={coverageOverlayEnabled}
         activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
         activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
         activeDebugInlineValues={groupId === activeEditorGroupId ? activeDebugInlineValues : undefined}
@@ -10220,6 +10281,28 @@ export function CodeWorkspaceTab({
                 onOpenFailure={openStructuredTestFailure}
                 onDebug={debugJavaTest}
                 runDisabled={javaTestBuildTool === null}
+              />
+            ),
+          },
+          {
+            id: "coverage",
+            label: "Coverage",
+            icon: <ShieldCheck className="h-3.5 w-3.5" />,
+            badge: coverageReport ? `${coverageReport.totalPercentage}%` : undefined,
+            content: (
+              <CoveragePanel
+                report={coverageReport}
+                coverageEnabled={coverageOverlayEnabled}
+                onToggleCoverage={() => setCoverageOverlayEnabled((prev) => !prev)}
+                onOpenFile={(path, line) => {
+                  const ref = problemPathToRef(path);
+                  if (ref) {
+                    const targetLine = line && line > 0 ? line - 1 : 0;
+                    const range = { start: { line: targetLine, character: 0 }, end: { line: targetLine, character: 0 } };
+                    void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
+                  }
+                }}
+                onRefreshCoverage={() => void scanWorkspaceCoverage()}
               />
             ),
           },
