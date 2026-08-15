@@ -2,9 +2,9 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-15 · 版本：v4.26（IDEA editor parity implementation: P0-P2 shortcuts & actions delivery）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮交付了 P0（`Ctrl+Shift+U` 大小写切换、`F2`/`Shift+F2` 诊断跳转、`Ctrl+P` 参数提示、`Ctrl+Shift+I` 快速定义预览、`Ctrl+Alt+O` 优化导包）与 P1/P2（`Ctrl+Shift+F10` 上下文运行、`Alt+F1` 项目树定位自展、`Ctrl+Alt+Shift+T` 重构上下文弹窗与提取键位、`Ctrl+F8`/`Ctrl+Shift+F8` 断点与静音操作）。PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-15 · 版本：v4.27（IDEA editor parity implementation: Sticky Lines, Ctrl+Shift+F9 recompile & Run Profile overrides delivery）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮在 P0/P1/P2 基础上进一步交付了 Sticky Lines（编辑器吸顶作用域头）、`Ctrl+Shift+F9`（重新编译当前文件）、Maven Active Profile / Gradle 属性覆盖界面与临时运行配置持久化。PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
-> 早期版本：v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
+> 早期版本：v4.26（2026-08-15，IDEA editor parity implementation: P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
@@ -1180,12 +1180,26 @@ M11 配置与分析收口 : Build target DAG + Run/Debug configuration + provide
 4. **✅ `Ctrl+Shift+I` 快速定义预览 (Quick Definition Peek)**：绑定 `Mod-Shift-I` 直接唤起 `LocationPeek` 浮层预览定义代码，无需改变当前编辑焦点。
 5. **✅ `Ctrl+Alt+O` 优化导包 (Optimize Imports)**：向语言服务器发送 `source.organizeImports` 代码操作，自动清理未使用导入并排序。
 
-#### 🟡 P1 优先级（交互质感与上下文感知）— **部分已交付**
+#### 🟡 P1 优先级（交互质感与上下文感知）— **全部已交付**
 1. **✅ `Ctrl+Shift+F10` 上下文运行当前文件 (Run Context Configuration)**：注册 `workspace.runContextConfiguration`，根据当前活跃文件类型或 main 方法直接启动当前目标。
 2. **✅ `Alt+F1` 定位到项目树 (Select in Project View)**：注册 `workspace.revealActiveFileInTree`，将左侧文件树滚动并选中当前编辑器激活的文件节点，支持在项目树折叠状态下自动展开左侧面板。
-3. **⏳ Sticky Lines (编辑器头部吸顶上下文)**：CodeMirror 6 视图插件，滚动时将外层作用域声明行固定在编辑器顶部（目前由编辑器顶栏 IDEA Breadcrumbs 展示当前符号链）。
+3. **✅ Sticky Lines (编辑器头部吸顶上下文/作用域)**：实现 `computeStickyLines` 递归提取包/类/函数声明行并在编辑器顶端展示浮层（支持点击快速跳转与首选项开关），在 `EditorGroup` 与 `CodeWorkspaceTab` 完成无缝挂载并附完整单测。
+4. **✅ `Ctrl+Shift+F9` 重新编译当前文件 (Recompile Active File)**：注册 `workspace.recompileActiveFile`（`Mod-Shift-F9`），支持自动保存 dirty 缓冲并对当前工程执行单文件/增量重新编译。
 
-#### 🔵 P2 优先级（重构动作与高级调试）— **部分已交付**
+#### 🔵 P2 优先级（重构动作与高级调试）— **全部已交付**
 1. **✅ `Ctrl+Alt+Shift+T` 重构上下文弹窗 (Refactor This)**：注册 `workspace.refactorThis` 命令，唤起当前光标处的全部重构选项；补齐标准重构快捷键 `Ctrl+Alt+V`（抽取变量）、`Ctrl+Alt+M`（抽取方法）、`Ctrl+Alt+N`（内联）、`Ctrl+F6`（更改签名）、`F6`（移动）。
 2. **✅ 调试工具栏与命令静音所有断点 (Mute Breakpoints)**：注册 `workspace.toggleMuteBreakpoints` 命令，与 DebugPanel 工具栏联动切换静音状态；注册 `Ctrl+F8`（切换断点）、`Ctrl+Shift+F8`（查看/编辑断点）。
-3. **⏳ 多模块 Maven Active Profile / Gradle 属性覆盖界面**：在 Run/Build Configuration 面板中提供多模块 Profile 与自定义 Property 输入界面。
+3. **✅ 多模块 Maven Active Profile / Gradle 属性覆盖界面**：在 `RunConfigurationOverride` 与 `RunPanel` 界面中提供 Active Profiles（Maven `-P` / Spring profiles）与 JVM/Build Properties（`-Dkey=value`）输入与持久化，自动注入运行时参数，并支持临时配置标记与副本命名保存。
+
+---
+
+## 12. 后续进阶路线与三端真机验收计划
+
+1. **三端打包与真实环境验收**：
+   - Linux (Ubuntu Wayland / X11) 安装包冒烟、快捷键与 PTY 交互。
+   - macOS (Apple Silicon / Intel) `Cmd`/`Option` 键位、quarantine 权限与 LSP/DAP 进程生命周期。
+   - Windows 11 (NTFS + UNC 路径、CRLF 换行、WebView2 宿主)。
+2. **PSI / Stub Index 级深度语义分析与跨文件重构**：
+   - 逐步从基于 Language Server 的声明式 Code Action 升级到具备客户端增量 AST 缓存与符号引用的索引层。
+3. **真实多语言 Debug Adapter Matrix**：
+   - Java (`java-debug` bundle)、Node/TypeScript (`js-debug`)、Python (`debugpy`)、Go (`delve`)、Rust/C++ (`lldb-dap` / `cpptools`) 实机联调。
