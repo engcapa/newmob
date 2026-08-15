@@ -1,7 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Keyboard, Search, Sparkles, X } from "lucide-react";
 import type { WorkspaceCommand } from "./workspaceCommands";
-import { DEFAULT_WORKSPACE_ACTIONS } from "./workspaceActionRegistry";
+import {
+  workspaceActionRegistry,
+  DEFAULT_WORKSPACE_ACTIONS,
+} from "./workspaceActionRegistry";
 
 export interface KeymapCheatSheetDialogProps {
   open: boolean;
@@ -39,9 +42,29 @@ export function KeymapCheatSheetDialog({
 }: KeymapCheatSheetDialogProps) {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    return workspaceActionRegistry.subscribe(() => {
+      setTick((t) => t + 1);
+    });
+  }, []);
 
   const boundCommands = useMemo(() => {
-    return commands.filter((c) => !!c.keybinding || (c.keybindings && c.keybindings.length > 0));
+    const sourceCommands = commands.length > 0
+      ? [...commands]
+      : DEFAULT_WORKSPACE_ACTIONS.map((def) => ({
+          id: def.id,
+          title: def.title,
+          category: def.category,
+          keybinding: typeof def.keybinding === "string" ? def.keybinding : def.keybinding?.default,
+          keybindings: def.secondaryKeybindings,
+          provenance: def.provenance,
+          keywords: def.keywords,
+          run: () => {},
+        }));
+
+    return sourceCommands.filter((c) => !!c.keybinding || (c.keybindings && c.keybindings.length > 0));
   }, [commands]);
 
   const categories = useMemo(() => {
@@ -62,8 +85,9 @@ export function KeymapCheatSheetDialog({
       const matchTitle = c.title.toLowerCase().includes(q);
       const matchCategory = c.category.toLowerCase().includes(q);
       const matchId = c.id.toLowerCase().includes(q);
+      const matchKeywords = c.keywords?.some((k) => k.toLowerCase().includes(q));
       const allBindings = [c.keybinding, ...(c.keybindings ?? [])].filter(Boolean).join(" ").toLowerCase();
-      return matchTitle || matchCategory || matchId || allBindings.includes(q);
+      return matchTitle || matchCategory || matchId || Boolean(matchKeywords) || allBindings.includes(q);
     });
   }, [boundCommands, search, selectedCategory]);
 
@@ -149,8 +173,9 @@ export function KeymapCheatSheetDialog({
                 Boolean,
               ) as string[];
 
-              const meta = DEFAULT_WORKSPACE_ACTIONS.find((a) => a.id === command.id);
-              const provenance = meta?.provenance;
+              const regAction = workspaceActionRegistry.get(command.id);
+              const meta = DEFAULT_WORKSPACE_ACTIONS.find((a) => a.id === command.id || a.id === workspaceActionRegistry.resolveId(command.id));
+              const provenance = command.provenance ?? regAction?.provenance ?? meta?.provenance;
 
               return (
                 <div
@@ -169,10 +194,12 @@ export function KeymapCheatSheetDialog({
                             ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
                             : provenance === "provider"
                               ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
-                              : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                              : provenance === "index"
+                                ? "bg-purple-500/10 text-purple-400 border border-purple-500/20"
+                                : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
                         }`}
                       >
-                        {provenance === "local" ? "Local" : provenance === "provider" ? "LSP" : "Partial"}
+                        {provenance === "local" ? "Local" : provenance === "provider" ? "LSP" : provenance === "index" ? "Index" : "Partial"}
                       </span>
                     )}
                     <div className="min-w-0 truncate">
@@ -229,7 +256,7 @@ export function KeymapCheatSheetDialog({
         <div className="flex items-center justify-between border-t border-[var(--taomni-code-border)] bg-[var(--taomni-code-active-line-bg)]/20 px-4 py-2.5 text-[11px] text-[var(--taomni-code-muted)]">
           <div className="flex items-center gap-1.5">
             <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-            <span>Standard IntelliJ IDEA shortcut mappings with multi-platform parity</span>
+            <span>IntelliJ IDEA keymap & actions · Local / LSP provider-backed execution</span>
           </div>
           <button
             type="button"

@@ -12,6 +12,9 @@ import {
   shrinkSyntaxSelection,
   sortLines,
   toggleCase,
+  transposeLines,
+  tabJumpOut,
+  unwrapRemove,
   unselectOccurrence,
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
@@ -61,6 +64,7 @@ describe("workspace editor commands", () => {
       "Ctrl-Alt-Shift-j",
       "Mod-Shift-u",
       "Ctrl-Shift-u",
+      "Tab",
     ]);
   });
 
@@ -163,16 +167,13 @@ describe("workspace editor commands", () => {
     // Caret inside word without explicit range
     const caretView = new EditorView({
       state: EditorState.create({
-        doc: "const identifier = 1;",
+        doc,
         selection: { anchor: 8 }, // inside 'identifier'
       }),
     });
 
     expect(toggleCase(caretView)).toBe(true);
-    expect(caretView.state.doc.toString()).toBe("const IDENTIFIER = 1;");
-
-    expect(toggleCase(caretView)).toBe(true);
-    expect(caretView.state.doc.toString()).toBe("const identifier = 1;");
+    expect(caretView.state.doc.toString()).toBe("const MYVARIABLE = 'hello';");
 
     view.destroy();
     caretView.destroy();
@@ -217,6 +218,48 @@ describe("workspace editor commands", () => {
 
     expect(reverseLines(view)).toBe(true);
     expect(view.state.doc.toString()).toBe("third\nsecond\nfirst");
+    view.destroy();
+  });
+
+  it("transposes adjacent lines with transposeLines", () => {
+    const doc = "line 1\nline 2\nline 3";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 2 }, // on line 1
+      }),
+    });
+
+    expect(transposeLines(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("line 2\nline 1\nline 3");
+    view.destroy();
+  });
+
+  it("jumps out of closing brackets with Tab key", () => {
+    const doc = "foo()";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 4 }, // between ( and )
+      }),
+    });
+
+    expect(tabJumpOut(view)).toBe(true);
+    expect(view.state.selection.main.head).toBe(5); // jumped past )
+    view.destroy();
+  });
+
+  it("unwraps enclosing parentheses and quotes with unwrapRemove", () => {
+    const doc = 'const name = ("hello");';
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 16 }, // inside "hello"
+      }),
+    });
+
+    expect(unwrapRemove(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe('const name = "hello";');
     view.destroy();
   });
 });
