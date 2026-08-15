@@ -329,6 +329,7 @@ const MAX_DATA_BREAKPOINTS = 256;
 const MAX_DATA_BREAKPOINT_ID_LENGTH = 4096;
 const MAX_DATA_BREAKPOINT_DESCRIPTION_LENGTH = 1024;
 const MAX_DATA_BREAKPOINT_ADAPTER_ID_LENGTH = 128;
+const MAX_DATA_BREAKPOINT_BYTES = 0xffffffff;
 const MAX_EXCEPTION_BREAKPOINTS = 512;
 const MAX_EXCEPTION_BREAKPOINT_FILTER_ID_LENGTH = 1024;
 const MAX_EXCEPTION_BREAKPOINT_RULES = 256;
@@ -344,6 +345,15 @@ function normalizeBreakpointModeId(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const mode = value.trim();
   return mode && mode.length <= MAX_BREAKPOINT_MODE_ID_LENGTH ? mode : undefined;
+}
+
+function normalizeDataBreakpointBytes(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value)) return undefined;
+  return value > 0 && value <= MAX_DATA_BREAKPOINT_BYTES ? value : undefined;
+}
+
+function isDataBreakpointAddress(value: string): boolean {
+  return /^(?:0x[0-9a-f]+|[0-9]+)$/i.test(value);
 }
 
 function normalizeSourceBreakpointAdapterModes(value: unknown): Record<string, string> | undefined {
@@ -425,6 +435,8 @@ function normalizeDataBreakpoint(value: unknown): DebugDataBreakpoint | null {
   const accessType = raw.accessType === "read" || raw.accessType === "write" || raw.accessType === "readWrite"
     ? raw.accessType
     : undefined;
+  const bytes = normalizeDataBreakpointBytes(raw.bytes);
+  const asAddress = raw.asAddress === true ? true : undefined;
   const normalizeExpression = (expression: unknown): string | undefined => (
     typeof expression === "string"
       ? expression.trim().slice(0, MAX_FUNCTION_BREAKPOINT_EXPRESSION_LENGTH) || undefined
@@ -440,6 +452,8 @@ function normalizeDataBreakpoint(value: unknown): DebugDataBreakpoint | null {
       : defaultDataBreakpointAccessType(accessTypes),
     condition: normalizeExpression(raw.condition),
     hitCondition: normalizeExpression(raw.hitCondition),
+    bytes,
+    asAddress,
     mode: normalizeBreakpointModeId(raw.mode),
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : undefined,
     canPersist,
@@ -1945,6 +1959,21 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     if (dataBreakpointsRef.current.length >= MAX_DATA_BREAKPOINTS) {
       return { added: false, message: `Data breakpoint limit reached (${MAX_DATA_BREAKPOINTS})` };
     }
+    const supportsDataBreakpointBytes = record.capabilities.supportsDataBreakpointBytes === true;
+    const requestedBytes = normalizeDataBreakpointBytes(target.bytes);
+    const requestedAsAddress = target.asAddress === true;
+    if ((target.bytes !== undefined || requestedAsAddress) && !supportsDataBreakpointBytes) {
+      return { added: false, message: "The selected debug adapter does not support address/range data breakpoints" };
+    }
+    if (target.bytes !== undefined && requestedBytes === undefined) {
+      return { added: false, message: "Data breakpoint byte count must be an integer between 1 and 4294967295" };
+    }
+    if (requestedAsAddress && !isDataBreakpointAddress(name)) {
+      return { added: false, message: "Address data breakpoints require a decimal or 0x-prefixed hexadecimal address" };
+    }
+    if (requestedAsAddress && (typeof target.variablesReference === "number" || typeof target.frameId === "number")) {
+      return { added: false, message: "Address data breakpoints cannot be scoped to a variable or frame" };
+    }
     const dataModes = breakpointModesFor(parseBreakpointModes(record.capabilities), "data");
     const requestedMode = normalizeBreakpointModeId(target.mode);
     if (requestedMode && !dataModes.some((candidate) => candidate.mode === requestedMode)) {
@@ -1958,6 +1987,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         name,
         variablesReference: target.variablesReference,
         frameId: target.frameId,
+        bytes: requestedBytes,
+        asAddress: requestedAsAddress || undefined,
         mode,
       }));
     } catch (error) {
@@ -1981,6 +2012,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
       adapterId: record.adapterId,
       accessTypes: info.accessTypes,
       accessType: defaultDataBreakpointAccessType(info.accessTypes),
+      bytes: requestedBytes,
+      asAddress: requestedAsAddress || undefined,
       mode,
       canPersist: info.canPersist,
       sessionId: info.canPersist ? undefined : record.id,
@@ -2012,6 +2045,8 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
             ...options,
             dataId: breakpoint.dataId,
             adapterId: breakpoint.adapterId,
+            bytes: breakpoint.bytes,
+            asAddress: breakpoint.asAddress,
             mode: breakpoint.mode,
             canPersist: breakpoint.canPersist,
             sessionId: breakpoint.sessionId,

@@ -64,6 +64,10 @@ export interface DebugDataBreakpoint {
   accessType?: DebugDataBreakpointAccessType;
   condition?: string;
   hitCondition?: string;
+  /** Number of bytes covered by the data id when the adapter supports ranges. */
+  bytes?: number;
+  /** Whether the discovery name was interpreted as a decimal/hex address. */
+  asAddress?: boolean;
   /** Mode used when resolving this adapter-owned data id. */
   mode?: string;
   enabled?: boolean;
@@ -75,6 +79,10 @@ export interface DebugDataBreakpointTarget {
   name: string;
   variablesReference?: number;
   frameId?: number;
+  /** Optional range size, sent only with supportsDataBreakpointBytes. */
+  bytes?: number;
+  /** Interpret name as a decimal/hex memory address. */
+  asAddress?: boolean;
   /** Sent only in the capability-gated `dataBreakpointInfo` request. */
   mode?: string;
 }
@@ -416,10 +424,17 @@ export function resolveBreakpointMode(
 /** Build a standard DAP `dataBreakpointInfo` request from a variable/expression. */
 export function buildDataBreakpointInfoArgs(target: DebugDataBreakpointTarget) {
   const args: Record<string, unknown> = { name: target.name };
-  if (typeof target.variablesReference === "number" && target.variablesReference > 0) {
-    args.variablesReference = target.variablesReference;
-  } else if (typeof target.frameId === "number") {
-    args.frameId = target.frameId;
+  if (target.asAddress === true) {
+    args.asAddress = true;
+  } else {
+    if (typeof target.variablesReference === "number" && target.variablesReference > 0) {
+      args.variablesReference = target.variablesReference;
+    } else if (typeof target.frameId === "number") {
+      args.frameId = target.frameId;
+    }
+  }
+  if (Number.isInteger(target.bytes) && (target.bytes as number) > 0) {
+    args.bytes = target.bytes;
   }
   if (target.mode?.trim()) args.mode = target.mode.trim();
   return args;

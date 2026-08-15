@@ -168,6 +168,12 @@
 - `[data-testid="debug-function-breakpoint-unsupported"]` — display [optional] — F25.1.debug-function-breakpoint-unsupported
 - `[data-testid="debug-data-breakpoints"]` — display — F25.1.debug-data-breakpoints
 - `[data-testid="debug-data-breakpoint-mode"]` — interactive [optional] — F25.1.debug-data-breakpoint-mode
+- `[data-testid="debug-data-breakpoint-create"]` — display [optional] — F25.1.debug-data-breakpoint-create
+- `[data-testid="debug-data-breakpoint-target"]` — interactive [optional] — F25.1.debug-data-breakpoint-target
+- `[data-testid="debug-data-breakpoint-bytes"]` — interactive [optional] — F25.1.debug-data-breakpoint-bytes
+- `[data-testid="debug-data-breakpoint-as-address"]` — interactive [optional] — F25.1.debug-data-breakpoint-as-address
+- `[data-testid="debug-data-breakpoint-add"]` — interactive [optional] — F25.1.debug-data-breakpoint-add
+- `[data-testid="debug-data-breakpoint-create-notice"]` — display [optional] — F25.1.debug-data-breakpoint-create-notice
 - `[data-testid="debug-data-breakpoint-row"]` — display [optional] — F25.1.debug-data-breakpoint-row
 - `[data-testid^="debug-data-breakpoint-enabled-"]` — interactive [optional] — F25.1.debug-data-breakpoint-enabled
 - `[data-testid^="debug-data-breakpoint-access-"]` — interactive [optional] — F25.1.debug-data-breakpoint-access
@@ -179,6 +185,7 @@
 - `[data-testid^="debug-data-breakpoint-scope-"]` — display [optional] — F25.1.debug-data-breakpoint-scope
 - `[data-testid="debug-data-breakpoint-unsupported"]` — display [optional] — F25.1.debug-data-breakpoint-unsupported
 - `[data-testid="debug-variable-data-breakpoint"]` — interactive [optional] — F25.1.debug-variable-data-breakpoint
+- `[data-testid="editor-context-add-data-breakpoint"]` — interactive [optional] — F25.1.editor-context-add-data-breakpoint
 - `[data-testid="debug-data-breakpoint-notice"]` — display [optional] — F25.1.debug-data-breakpoint-notice
 - `[data-testid="debug-exception-breakpoints"]` — display [optional] — F25.1.debug-exception-breakpoints
 - `[data-testid="debug-exception-breakpoint-row"]` — display [optional] — F25.1.debug-exception-breakpoint-row

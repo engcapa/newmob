@@ -955,6 +955,78 @@ describe("useCodeDebugSession", () => {
     expect(dataBreakpointCalls().at(-1)?.breakpoints).toEqual([]);
   });
 
+  it("resolves and persists an address byte range only when the adapter advertises support", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string, args?: unknown) => {
+      if (command === "dataBreakpointInfo") {
+        expect(args).toEqual({
+          name: "0x1000",
+          asAddress: true,
+          bytes: 16,
+        });
+        return Promise.resolve({
+          dataId: "address:1000/16",
+          description: "0x1000 (16 bytes)",
+          accessTypes: ["write"],
+          canPersist: true,
+        });
+      }
+      if (command === "setDataBreakpoints") {
+        return Promise.resolve({ breakpoints: [{ id: 121, verified: true }] });
+      }
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, {
+      supportsDataBreakpoints: true,
+      supportsDataBreakpointBytes: true,
+    });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "stopped",
+      message: { body: { threadId: 1, reason: "breakpoint" } },
+    }));
+    await waitFor(() => expect(result.current.state?.status).toBe("stopped"));
+    let addResult: { added: boolean; message: string } | undefined;
+    await act(async () => {
+      addResult = await result.current.addDataBreakpoint({
+        name: "0x1000",
+        bytes: 16,
+        asAddress: true,
+      });
+    });
+    expect(addResult?.added).toBe(true);
+    expect(result.current.dataBreakpoints[0]).toMatchObject({
+      bytes: 16,
+      asAddress: true,
+      canPersist: true,
+    });
+    expect(JSON.parse(
+      window.localStorage.getItem("taomni.codeWorkspace.debugDataBreakpoints.v1.ws-1") ?? "[]",
+    )[0]).toMatchObject({ bytes: 16, asAddress: true });
+  });
+
+  it("rejects address/range discovery when supportsDataBreakpointBytes is absent", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug, { supportsDataBreakpoints: true });
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "stopped",
+      message: { body: { threadId: 1, reason: "breakpoint" } },
+    }));
+    await waitFor(() => expect(result.current.state?.status).toBe("stopped"));
+    let addResult: { added: boolean; message: string } | undefined;
+    await act(async () => {
+      addResult = await result.current.addDataBreakpoint({ name: "0x1000", asAddress: true });
+    });
+    expect(addResult).toEqual({
+      added: false,
+      message: "The selected debug adapter does not support address/range data breakpoints",
+    });
+    expect(dapSendRequest.mock.calls.some((call) => call[1] === "dataBreakpointInfo")).toBe(false);
+  });
+
   it("rejects a data breakpoint when execution resumes during discovery", async () => {
     let resolveInfo: ((body: unknown) => void) | null = null;
     dapSendRequest.mockImplementation((_id: string, command: string) => {

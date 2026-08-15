@@ -678,6 +678,48 @@ describe("DebugPanel", () => {
     );
   });
 
+  it("creates an address byte-range data breakpoint from the breakpoints view", async () => {
+    const addDataBreakpoint = vi.fn().mockResolvedValue({
+      added: true,
+      message: "Watching 0x1000 (16 bytes)",
+    });
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: {
+            supportsDataBreakpoints: true,
+            supportsDataBreakpointBytes: true,
+            breakpointModes: [{ mode: "hardware", label: "Hardware", appliesTo: ["data"] }],
+          },
+          addDataBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-target"), {
+      target: { value: "0x1000" },
+    });
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-bytes"), {
+      target: { value: "16" },
+    });
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-as-address"));
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-add"));
+    await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith({
+      name: "0x1000",
+      frameId: undefined,
+      bytes: 16,
+      asAddress: true,
+      mode: "hardware",
+    }));
+    expect(await screen.findByTestId("debug-data-breakpoint-create-notice")).toHaveTextContent(
+      "Watching 0x1000 (16 bytes)",
+    );
+  });
+
   it("edits, disables and removes a data watchpoint", () => {
     const setDataBreakpointOptions = vi.fn();
     const removeDataBreakpoint = vi.fn();

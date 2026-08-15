@@ -229,6 +229,32 @@ describe("dapDebugModel", () => {
     expect(parseDataBreakpointInfo({ dataId: null, description: "not watchable" }).dataId).toBeNull();
   });
 
+  it("builds capability-gated address and byte-range discovery arguments", () => {
+    expect(buildDataBreakpointInfoArgs({
+      name: "0x7fff0000",
+      frameId: 3,
+      bytes: 16,
+      asAddress: true,
+      mode: "hardware",
+    })).toEqual({
+      name: "0x7fff0000",
+      asAddress: true,
+      bytes: 16,
+      mode: "hardware",
+    });
+    expect(buildDataBreakpointInfoArgs({
+      name: "buffer",
+      variablesReference: 17,
+      frameId: 3,
+      bytes: 8,
+    })).toEqual({
+      name: "buffer",
+      variablesReference: 17,
+      bytes: 8,
+    });
+    expect(buildDataBreakpointInfoArgs({ name: "buffer", bytes: 0 })).toEqual({ name: "buffer" });
+  });
+
   it("builds replacing data-breakpoint requests and maps verification", () => {
     const stored = [
       {

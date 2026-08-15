@@ -4761,6 +4761,8 @@ files:
   - src/components/editor/workspace/panels/BottomDock.tsx
   - src/components/editor/workspace/WorkspaceBuildRunToolsDialog.tsx
   - src/components/editor/workspace/dapDebugModel.ts
+  - src/components/editor/workspace/dataBreakpointTarget.ts
+  - src/components/editor/workspace/editorContextMenu.ts
   - src/components/editor/workspace/panels/DebugPanel.tsx
   - src/components/editor/workspace/useCodeDebugSession.ts
   - src/lib/editor/workspace.ts
@@ -5007,6 +5009,30 @@ controls:
     selector: '[data-testid="debug-data-breakpoint-mode"]'
     kind: interactive
     optional: true       # rendered when the active adapter advertises data breakpoint modes
+  - id: debug-data-breakpoint-create
+    selector: '[data-testid="debug-data-breakpoint-create"]'
+    kind: display
+    optional: true       # rendered while stopped with supportsDataBreakpoints
+  - id: debug-data-breakpoint-target
+    selector: '[data-testid="debug-data-breakpoint-target"]'
+    kind: interactive
+    optional: true       # rendered for manual expression/address discovery
+  - id: debug-data-breakpoint-bytes
+    selector: '[data-testid="debug-data-breakpoint-bytes"]'
+    kind: interactive
+    optional: true       # requires supportsDataBreakpointBytes
+  - id: debug-data-breakpoint-as-address
+    selector: '[data-testid="debug-data-breakpoint-as-address"]'
+    kind: interactive
+    optional: true       # requires supportsDataBreakpointBytes
+  - id: debug-data-breakpoint-add
+    selector: '[data-testid="debug-data-breakpoint-add"]'
+    kind: interactive
+    optional: true       # rendered for manual expression/address discovery
+  - id: debug-data-breakpoint-create-notice
+    selector: '[data-testid="debug-data-breakpoint-create-notice"]'
+    kind: display
+    optional: true       # rendered after manual discovery succeeds or fails
   - id: debug-data-breakpoint-row
     selector: '[data-testid="debug-data-breakpoint-row"]'
     kind: display
@@ -5051,6 +5077,10 @@ controls:
     selector: '[data-testid="debug-variable-data-breakpoint"]'
     kind: interactive
     optional: true       # requires a supported adapter stopped on a variable or watch expression
+  - id: editor-context-add-data-breakpoint
+    selector: '[data-testid="editor-context-add-data-breakpoint"]'
+    kind: interactive
+    optional: true       # rendered on a recognized field declaration during a stopped supported session
   - id: debug-data-breakpoint-notice
     selector: '[data-testid="debug-data-breakpoint-notice"]'
     kind: display

@@ -555,6 +555,11 @@ function DataBreakpointsView({
   onNewModeChange: (mode: string) => void;
 }) {
   const [editingKey, setEditingKey] = useState<string | null>(null);
+  const [targetName, setTargetName] = useState("");
+  const [targetBytes, setTargetBytes] = useState("");
+  const [targetAsAddress, setTargetAsAddress] = useState(false);
+  const [addingTarget, setAddingTarget] = useState(false);
+  const [targetNotice, setTargetNotice] = useState<{ added: boolean; message: string } | null>(null);
   const entries = debug.dataBreakpoints.slice().sort((left, right) => (
     left.adapterId < right.adapterId ? -1
       : left.adapterId > right.adapterId ? 1
@@ -567,6 +572,9 @@ function DataBreakpointsView({
     ?? debug.sessions[0]
     ?? null;
   const supported = debug.capabilities.supportsDataBreakpoints === true;
+  const supportsBytes = debug.capabilities.supportsDataBreakpointBytes === true;
+  const stopped = debug.state?.status === "stopped";
+  const canAddTarget = supported && stopped && !addingTarget;
   const appliesToActiveSession = (breakpoint: DebugDataBreakpoint) => (
     breakpoint.sessionId
       ? breakpoint.sessionId === activeSession?.id
@@ -575,6 +583,33 @@ function DataBreakpointsView({
   const hasUnsupportedEntries = active && !supported && entries.some((breakpoint) => (
     appliesToActiveSession(breakpoint) && breakpoint.enabled !== false
   ));
+
+  const addTarget = async () => {
+    const name = targetName.trim();
+    if (!name || !canAddTarget) return;
+    const rawBytes = targetBytes.trim();
+    const bytes = rawBytes ? Number(rawBytes) : undefined;
+    if (rawBytes && (!Number.isInteger(bytes) || (bytes as number) <= 0)) {
+      setTargetNotice({ added: false, message: "Byte count must be a positive integer" });
+      return;
+    }
+    setAddingTarget(true);
+    setTargetNotice(null);
+    const result = await debug.addDataBreakpoint({
+      name,
+      frameId: targetAsAddress ? undefined : (debug.state?.selectedFrameId ?? debug.state?.frames[0]?.id ?? undefined),
+      bytes: supportsBytes ? bytes : undefined,
+      asAddress: supportsBytes && targetAsAddress ? true : undefined,
+      mode: newMode,
+    });
+    setAddingTarget(false);
+    setTargetNotice(result);
+    if (result.added) {
+      setTargetName("");
+      setTargetBytes("");
+      setTargetAsAddress(false);
+    }
+  };
 
   return (
     <div
@@ -600,6 +635,68 @@ function DataBreakpointsView({
         )}
         <span className="ml-auto text-[10px] tabular-nums text-[var(--taomni-text-muted)]">{entries.length}</span>
       </div>
+      {canAddTarget && (
+        <div className="space-y-1 px-3 pb-1" data-testid="debug-data-breakpoint-create">
+          <div className="flex items-center gap-1">
+            <input
+              data-testid="debug-data-breakpoint-target"
+              aria-label="Data breakpoint expression or address"
+              className="min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none"
+              placeholder={supportsBytes ? "Expression or address" : "Expression"}
+              maxLength={4096}
+              value={targetName}
+              onChange={(event) => setTargetName(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") void addTarget(); }}
+            />
+            <button
+              type="button"
+              data-testid="debug-data-breakpoint-add"
+              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-[var(--taomni-hover-bg)] disabled:opacity-30"
+              title="Add data breakpoint for the expression or address"
+              aria-label="Add data breakpoint"
+              disabled={!targetName.trim() || addingTarget}
+              onClick={() => void addTarget()}
+            >
+              <Plus className="h-3 w-3" />
+            </button>
+          </div>
+          {supportsBytes && (
+            <div className="flex items-center gap-2">
+              <label className="flex min-w-0 flex-1 items-center gap-1 text-[10px] text-[var(--taomni-text-muted)]">
+                <span className="shrink-0">Bytes</span>
+                <input
+                  data-testid="debug-data-breakpoint-bytes"
+                  aria-label="Data breakpoint byte count"
+                  className="min-w-0 flex-1 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1.5 py-0.5 font-mono text-[11px] outline-none"
+                  inputMode="numeric"
+                  placeholder="optional range size"
+                  value={targetBytes}
+                  onChange={(event) => setTargetBytes(event.target.value)}
+                />
+              </label>
+              <label className="flex shrink-0 items-center gap-1 text-[10px] text-[var(--taomni-text-muted)]" title="Interpret the target as a decimal or hexadecimal memory address">
+                <input
+                  type="checkbox"
+                  data-testid="debug-data-breakpoint-as-address"
+                  aria-label="Treat target as memory address"
+                  checked={targetAsAddress}
+                  onChange={(event) => setTargetAsAddress(event.target.checked)}
+                />
+                Address
+              </label>
+            </div>
+          )}
+          {targetNotice && (
+            <div
+              data-testid="debug-data-breakpoint-create-notice"
+              role="status"
+              className={targetNotice.added ? "text-emerald-500" : "text-rose-500"}
+            >
+              {targetNotice.message}
+            </div>
+          )}
+        </div>
+      )}
       {hasUnsupportedEntries && (
         <div data-testid="debug-data-breakpoint-unsupported" className="px-3 pb-1 text-[10px] text-amber-500">
           The active debug adapter does not support data breakpoints.
@@ -644,6 +741,8 @@ function DataBreakpointsView({
                 {breakpoint.description}
                 {breakpoint.condition && <span className="ml-2 text-amber-500">if {breakpoint.condition}</span>}
                 {breakpoint.hitCondition && <span className="ml-2 text-amber-500">hit {breakpoint.hitCondition}</span>}
+                {breakpoint.asAddress && <span className="ml-2 text-sky-600 dark:text-sky-400">address</span>}
+                {breakpoint.bytes && <span className="ml-2 text-sky-600 dark:text-sky-400">{breakpoint.bytes} bytes</span>}
                 {modeLabel && <span className="ml-2 text-emerald-600 dark:text-emerald-400">{modeLabel}</span>}
                 {bindingHint && (
                   <span

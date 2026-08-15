@@ -206,6 +206,7 @@ import {
   type EditorSelectionRange,
 } from "./workspace/CodeMirrorHost";
 import { buildEditorContextMenuItems } from "./workspace/editorContextMenu";
+import { fieldDeclarationAt } from "./workspace/dataBreakpointTarget";
 import { openSettingsSection } from "../../lib/settingsNavigation";
 import { isTauriRuntime } from "../../lib/runtime";
 import { useMountedRef } from "../../hooks/useMountedRef";
@@ -7517,12 +7518,34 @@ export function CodeWorkspaceTab({
         debug: (() => {
           const session = debugRef.current;
           if (!session?.state || session.state.status === "terminated") return null;
+          const field = fieldDeclarationAt(
+            breadcrumbSymbolsRef.current[activeEditorGroupIdRef.current] ?? [],
+            request.position,
+          );
           return {
             canRunToCursor: session.state.status === "stopped",
             runToCursor: () => {
               const absolute = absolutePathForOpenFile(file);
               if (absolute) session.runToCursor(normalizeFsPath(absolute), request.position.line + 1);
             },
+            ...(field ? {
+              dataBreakpoint: {
+                canAdd: session.state.status === "stopped"
+                  && session.capabilities.supportsDataBreakpoints === true,
+                add: () => {
+                  const frameId = session.state?.selectedFrameId
+                    ?? session.state?.frames[0]?.id
+                    ?? undefined;
+                  void session.addDataBreakpoint({ name: field.name, frameId }).then((result) => {
+                    setStatusMessage(result.message);
+                    if (result.added) {
+                      setBottomDockTab("debug");
+                      setBottomDockOpen(true);
+                    }
+                  });
+                },
+              },
+            } : {}),
           };
         })(),
         ai: {
@@ -7566,6 +7589,8 @@ export function CodeWorkspaceTab({
     );
   }, [
     absolutePathForOpenFile,
+    setBottomDockOpen,
+    setBottomDockTab,
     findReferences,
     formatActiveFile,
     goToDefinition,
@@ -7576,6 +7601,7 @@ export function CodeWorkspaceTab({
     openQuickDocumentation,
     renameSymbolAtCursor,
     safeDeleteSymbolAtCursor,
+    setStatusMessage,
     runEditorAiActionAtCursor,
     showCodeActionsMenu,
     t,
