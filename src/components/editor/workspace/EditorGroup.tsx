@@ -40,6 +40,7 @@ import {
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./CodeMirrorHost";
+import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
 import { mergeCompletionTriggers } from "./lspCompletion";
 import type { OpenFileViewModel } from "./editorGroupTypes";
@@ -93,6 +94,8 @@ interface EditorGroupProps {
   activeCoverage?: FileCoverage | null;
   /** Coverage overlay enabled. */
   coverageEnabled?: boolean;
+  /** Effective code style for the active buffer. */
+  activeCodeStyle?: EffectiveCodeStyle;
   /** Breakpoints on the active file (M9), for the breakpoint gutter. */
   activeDebugBreakpoints?: DebugBreakpointMarker[];
   /** 1-based current-execution line on the active file (or null). */
@@ -193,6 +196,7 @@ export function EditorGroup({
   activeGitBlame,
   activeCoverage,
   coverageEnabled = true,
+  activeCodeStyle,
   activeDebugBreakpoints,
   activeDebugCurrentLine,
   activeDebugInlineValues,
@@ -621,6 +625,7 @@ export function EditorGroup({
                         signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
                         softWrap={softWrap}
                         columnSelectionMode={columnSelectionMode}
+                        codeStyle={activeCodeStyle}
                       />
                     </div>
                     {renderMarkdownPreview(activeFile, onOpenMarkdownHref)}
@@ -678,6 +683,7 @@ export function EditorGroup({
                       signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
                       softWrap={softWrap}
                       columnSelectionMode={columnSelectionMode}
+                      codeStyle={activeCodeStyle}
                     />
                   </div>
                 )}

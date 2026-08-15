@@ -6,8 +6,11 @@ import {
   completeCurrentStatement,
   expandSyntaxSelection,
   expandSelectionFromLspRanges,
+  joinLines,
+  reverseLines,
   selectionHistoryField,
   shrinkSyntaxSelection,
+  sortLines,
   toggleCase,
   unselectOccurrence,
   workspaceEditorKeymap,
@@ -50,6 +53,8 @@ describe("workspace editor commands", () => {
       "Mod-Shift-w",
       "Mod-g",
       "Mod-Shift-Enter",
+      "Mod-Shift-j",
+      "Ctrl-Shift-j",
       "Alt-j",
       "Shift-Alt-j",
       "Mod-Alt-Shift-j",
@@ -171,5 +176,47 @@ describe("workspace editor commands", () => {
 
     view.destroy();
     caretView.destroy();
+  });
+
+  it("joins current line with next line collapsing whitespace with Ctrl+Shift+J", () => {
+    const doc = "const a = 1;\n  const b = 2;\nconst c = 3;";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 5 }, // on line 1
+      }),
+    });
+
+    expect(joinLines(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("const a = 1; const b = 2;\nconst c = 3;");
+    view.destroy();
+  });
+
+  it("sorts selected lines alphabetically with sortLines", () => {
+    const doc = "zebra\napple\nbanana";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 0, head: doc.length },
+      }),
+    });
+
+    expect(sortLines(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("apple\nbanana\nzebra");
+    view.destroy();
+  });
+
+  it("reverses selected lines with reverseLines", () => {
+    const doc = "first\nsecond\nthird";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 0, head: doc.length },
+      }),
+    });
+
+    expect(reverseLines(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("third\nsecond\nfirst");
+    view.destroy();
   });
 });

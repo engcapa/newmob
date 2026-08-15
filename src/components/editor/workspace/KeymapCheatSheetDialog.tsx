@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { Keyboard, Search, Sparkles, X } from "lucide-react";
 import type { WorkspaceCommand } from "./workspaceCommands";
+import { DEFAULT_WORKSPACE_ACTIONS } from "./workspaceActionRegistry";
 
 export interface KeymapCheatSheetDialogProps {
   open: boolean;
@@ -148,16 +149,32 @@ export function KeymapCheatSheetDialog({
                 Boolean,
               ) as string[];
 
+              const meta = DEFAULT_WORKSPACE_ACTIONS.find((a) => a.id === command.id);
+              const provenance = meta?.provenance;
+
               return (
                 <div
                   key={command.id}
                   data-testid={`keymap-item-${command.id}`}
                   className="group flex items-center justify-between py-2 px-2 rounded hover:bg-[var(--taomni-code-active-line-bg)]/50 transition-colors"
                 >
-                  <div className="flex items-center gap-2.5 min-w-0 pr-4">
+                  <div className="flex items-center gap-2 min-w-0 pr-4">
                     <span className="rounded bg-[var(--taomni-code-active-line-bg)] px-1.5 py-0.5 text-[10px] text-[var(--taomni-code-muted)] shrink-0 font-medium">
                       {command.category}
                     </span>
+                    {provenance && (
+                      <span
+                        className={`rounded px-1.5 py-0.5 text-[9px] font-medium shrink-0 ${
+                          provenance === "local"
+                            ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
+                            : provenance === "provider"
+                              ? "bg-sky-500/10 text-sky-400 border border-sky-500/20"
+                              : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
+                        }`}
+                      >
+                        {provenance === "local" ? "Local" : provenance === "provider" ? "LSP" : "Partial"}
+                      </span>
+                    )}
                     <div className="min-w-0 truncate">
                       <span className="font-medium text-[12px]">{command.title}</span>
                       <span className="ml-2 font-mono text-[10px] text-[var(--taomni-code-muted)] opacity-60">

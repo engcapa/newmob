@@ -2093,6 +2093,10 @@ describe("CodeWorkspaceTab", () => {
         workspaceId: "instance-format",
         filePath: "src/main.ts",
       }),
+      expect.objectContaining({
+        tabSize: 2,
+        insertSpaces: true,
+      }),
     );
   });
 

@@ -248,6 +248,97 @@ export const toggleCase: StateCommand = ({ state, dispatch }) => {
   return true;
 };
 
+/**
+ * Join current line with the next line (IDEA Ctrl+Shift+J), collapsing intervening whitespace.
+ */
+export const joinLines: StateCommand = ({ state, dispatch }) => {
+  if (state.readOnly) return false;
+  const main = state.selection.main;
+  const line = state.doc.lineAt(main.head);
+  if (line.number >= state.doc.lines) return false;
+
+  const nextLine = state.doc.line(line.number + 1);
+  const nextTrimmedStart = nextLine.from + (nextLine.text.match(/^\s*/)?.[0].length ?? 0);
+  const deleteFrom = line.to;
+  const deleteTo = nextTrimmedStart;
+
+  // If the line didn't end with whitespace and next line is not empty, insert single space separator
+  const needsSpace = line.length > 0 && !/\s$/.test(line.text) && nextLine.length > 0;
+  const insert = needsSpace ? " " : "";
+
+  dispatch(
+    state.update({
+      changes: { from: deleteFrom, to: deleteTo, insert },
+      selection: { anchor: deleteFrom + insert.length },
+      userEvent: "delete.joinLines",
+      scrollIntoView: true,
+    }),
+  );
+  return true;
+};
+
+/**
+ * Sort lines in selection alphabetically.
+ */
+export const sortLines: StateCommand = ({ state, dispatch }) => {
+  if (state.readOnly) return false;
+  const main = state.selection.main;
+  if (main.empty) return false;
+
+  const startLine = state.doc.lineAt(main.from);
+  const endLine = state.doc.lineAt(main.to);
+  if (startLine.number === endLine.number) return false;
+
+  const lines: string[] = [];
+  for (let i = startLine.number; i <= endLine.number; i++) {
+    lines.push(state.doc.line(i).text);
+  }
+
+  const sorted = [...lines].sort((a, b) => a.localeCompare(b));
+  const newText = sorted.join("\n");
+
+  dispatch(
+    state.update({
+      changes: { from: startLine.from, to: endLine.to, insert: newText },
+      selection: EditorSelection.range(startLine.from, startLine.from + newText.length),
+      userEvent: "edit.sortLines",
+      scrollIntoView: true,
+    }),
+  );
+  return true;
+};
+
+/**
+ * Reverse lines in selection.
+ */
+export const reverseLines: StateCommand = ({ state, dispatch }) => {
+  if (state.readOnly) return false;
+  const main = state.selection.main;
+  if (main.empty) return false;
+
+  const startLine = state.doc.lineAt(main.from);
+  const endLine = state.doc.lineAt(main.to);
+  if (startLine.number === endLine.number) return false;
+
+  const lines: string[] = [];
+  for (let i = startLine.number; i <= endLine.number; i++) {
+    lines.push(state.doc.line(i).text);
+  }
+
+  const reversed = [...lines].reverse();
+  const newText = reversed.join("\n");
+
+  dispatch(
+    state.update({
+      changes: { from: startLine.from, to: endLine.to, insert: newText },
+      selection: EditorSelection.range(startLine.from, startLine.from + newText.length),
+      userEvent: "edit.reverseLines",
+      scrollIntoView: true,
+    }),
+  );
+  return true;
+};
+
 export const workspaceEditorKeymap: readonly KeyBinding[] = [
   { key: "Mod-/", run: toggleComment },
   { key: "Mod-Shift-/", run: toggleBlockComment },
@@ -259,6 +350,8 @@ export const workspaceEditorKeymap: readonly KeyBinding[] = [
   { key: "Mod-Shift-w", run: shrinkSyntaxSelection },
   { key: "Mod-g", run: gotoLine },
   { key: "Mod-Shift-Enter", run: completeCurrentStatement },
+  { key: "Mod-Shift-j", run: joinLines },
+  { key: "Ctrl-Shift-j", run: joinLines },
   { key: "Alt-j", run: selectNextOccurrence },
   { key: "Shift-Alt-j", run: unselectOccurrence },
   { key: "Mod-Alt-Shift-j", run: selectSelectionMatches },

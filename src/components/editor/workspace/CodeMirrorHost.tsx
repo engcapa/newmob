@@ -37,10 +37,11 @@ import {
   expandLiveTemplateAt,
   liveTemplateLanguageForPath,
 } from "./liveTemplates";
-import { bracketMatching, foldGutter, indentOnInput } from "@codemirror/language";
+import { bracketMatching, foldGutter, indentOnInput, indentUnit } from "@codemirror/language";
 import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
 import { codeViewExtensions } from "../../../lib/codeViewTheme";
+import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type {
   LspCompletionItem,
   LspCompletionResult,
@@ -148,6 +149,8 @@ interface CodeMirrorHostProps {
   signatureTriggers?: string[];
   /** Wrap logical lines at the viewport edge (IDEA soft-wrap mode). */
   softWrap?: boolean;
+  /** Effective code style driving indentUnit, tabSize, and insertSpaces. */
+  codeStyle?: EffectiveCodeStyle;
   /** When enabled, a normal mouse drag creates a rectangular selection. */
   columnSelectionMode?: boolean;
 }
@@ -374,10 +377,12 @@ export function CodeMirrorHost({
   debugEvaluate,
   fileCoverage,
   coverageEnabled = true,
+  codeStyle,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const languageCompartment = useRef(new Compartment());
+  const codeStyleCompartment = useRef(new Compartment());
   const diagnosticsCompartment = useRef(new Compartment());
   const overlayCompartment = useRef(new Compartment());
   const semanticTokensCompartment = useRef(new Compartment());
@@ -698,6 +703,10 @@ export function CodeMirrorHost({
         }),
         search({ top: true, createPanel: createWorkspaceSearchPanel }),
         selectionHistoryField,
+        codeStyleCompartment.current.of([
+          EditorState.tabSize.of(codeStyle?.tabSize ?? 2),
+          indentUnit.of(codeStyle?.insertSpaces ? " ".repeat(codeStyle?.indentSize || codeStyle?.tabSize || 2) : "\t"),
+        ]),
         languageCompartment.current.of([]),
         diagnosticsCompartment.current.of(createDiagnosticChrome(
           diagnostics,
@@ -937,6 +946,20 @@ export function CodeMirrorHost({
       ),
     });
   }, [highlights, inlayHints]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const tabSize = codeStyle?.tabSize ?? 2;
+    const insertSpaces = codeStyle?.insertSpaces ?? true;
+    const indentSize = codeStyle?.indentSize || tabSize;
+    view.dispatch({
+      effects: codeStyleCompartment.current.reconfigure([
+        EditorState.tabSize.of(tabSize),
+        indentUnit.of(insertSpaces ? " ".repeat(indentSize) : "\t"),
+      ]),
+    });
+  }, [codeStyle?.tabSize, codeStyle?.indentSize, codeStyle?.insertSpaces]);
 
   useEffect(() => {
     const view = viewRef.current;

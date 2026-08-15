@@ -161,10 +161,14 @@ import {
   type RightPaneTabId,
 } from "../../stores/codeWorkspaceStore";
 import {
-  detectIndentation,
   useCodeWorkspaceStatusStore,
   type WorkspaceEol,
 } from "../../stores/codeWorkspaceStatusStore";
+import {
+  type EffectiveCodeStyle,
+  type ExplicitIndentationOverride,
+  resolveEffectiveCodeStyle,
+} from "./workspace/codeStyleModel";
 import { historySnapshot } from "../../lib/localHistory";
 import {
   fileRefFromFileKey,
@@ -1307,6 +1311,20 @@ export function CodeWorkspaceTab({
   );
   const toolConfigRef = useRef(toolConfig);
   toolConfigRef.current = toolConfig;
+
+  const [indentationOverrides, setIndentationOverrides] = useState<Record<string, ExplicitIndentationOverride | null>>({});
+  const indentationOverridesRef = useRef(indentationOverrides);
+  indentationOverridesRef.current = indentationOverrides;
+
+  const getEffectiveCodeStyleForFile = useCallback((file: { key: string; languagePath: string; text: string } | null): EffectiveCodeStyle | undefined => {
+    if (!file) return undefined;
+    const explicitOverride = indentationOverridesRef.current[file.key];
+    return resolveEffectiveCodeStyle({
+      filePath: file.languagePath,
+      text: file.text,
+      explicitOverride,
+    });
+  }, []);
 
   /** Run a workspace task in the integrated terminal (shared by Run + Build panels). */
   const runWorkspaceTask = useCallback(
@@ -3213,16 +3231,26 @@ export function CodeWorkspaceTab({
     if (capabilities && !useRange && !capabilities.formatting) return null;
     if (capabilities && useRange && !capabilities.rangeFormatting) return null;
 
+    const codeStyle = getEffectiveCodeStyleForFile(file) ?? resolveEffectiveCodeStyle({
+      filePath: file.languagePath,
+      text: file.text,
+    });
     const result = useRange && selection
       ? await lspRangeFormatting(descriptor, {
         start: selection.start,
         end: selection.end,
+      }, {
+        tabSize: codeStyle.tabSize,
+        insertSpaces: codeStyle.insertSpaces,
       })
-      : await lspFormatting(descriptor);
+      : await lspFormatting(descriptor, {
+        tabSize: codeStyle.tabSize,
+        insertSpaces: codeStyle.insertSpaces,
+      });
     updateLspStatusForFile(file, result.status);
     if (!result.edits.length) return file.text;
     return applyLspTextEditsToString(file.text, result.edits);
-  }, [lspDescriptorForFile, updateLspStatusForFile]);
+  }, [getEffectiveCodeStyleForFile, lspDescriptorForFile, updateLspStatusForFile]);
 
   const promptReloadProject = useCallback(
     async (key: string, subtitle: string) => {
@@ -4351,23 +4379,40 @@ export function CodeWorkspaceTab({
     setStatusMessage(`${file.subtitle}: ${file.encoding ?? "UTF-8"} ${nextBom ? "BOM enabled" : "BOM disabled"}; save to apply`);
   }, [activeKey, setOpenFiles, setStatusMessage]);
 
-  const [indentationOverrides, setIndentationOverrides] = useState<Record<string, string>>({});
-  const activeIndentation = (activeKey && indentationOverrides[activeKey])
-    ?? (activeFile ? detectIndentation(activeFile.text).label : "Spaces: 2");
+  const activeCodeStyle = useMemo(() => getEffectiveCodeStyleForFile(activeFile), [getEffectiveCodeStyleForFile, activeFile]);
+  const activeIndentation = activeCodeStyle?.label ?? "Spaces: 2";
 
   const cycleActiveFileIndentation = useCallback(() => {
     const key = activeKey;
     const file = key ? openFilesRef.current[key] : null;
     if (!key || !file || file.library) return;
-    const current = indentationOverrides[key] ?? detectIndentation(file.text).label;
-    const next = current === "Spaces: 2"
-      ? "Spaces: 4"
-      : current === "Spaces: 4"
-        ? "Tab: 4"
-        : "Spaces: 2";
-    setIndentationOverrides((curr) => ({ ...curr, [key]: next }));
-    setStatusMessage(`${file.subtitle}: indentation set to ${next}`);
-  }, [activeKey, indentationOverrides, setStatusMessage]);
+    const currentStyle = resolveEffectiveCodeStyle({
+      filePath: file.languagePath,
+      text: file.text,
+      explicitOverride: indentationOverridesRef.current[key],
+    });
+    let nextOverride: ExplicitIndentationOverride | null = null;
+    if (currentStyle.insertSpaces && currentStyle.indentSize === 2) {
+      nextOverride = { type: "spaces", size: 4 };
+    } else if (currentStyle.insertSpaces && currentStyle.indentSize === 4) {
+      nextOverride = { type: "spaces", size: 8 };
+    } else if (currentStyle.insertSpaces && currentStyle.indentSize === 8) {
+      nextOverride = { type: "tabs", size: 4 };
+    } else if (!currentStyle.insertSpaces && currentStyle.tabSize === 4) {
+      nextOverride = { type: "tabs", size: 2 };
+    } else if (!currentStyle.insertSpaces && currentStyle.tabSize === 2) {
+      nextOverride = null; // reset to auto/default
+    } else {
+      nextOverride = { type: "spaces", size: 2 };
+    }
+    setIndentationOverrides((curr) => ({ ...curr, [key]: nextOverride }));
+    const nextStyle = resolveEffectiveCodeStyle({
+      filePath: file.languagePath,
+      text: file.text,
+      explicitOverride: nextOverride,
+    });
+    setStatusMessage(`${file.subtitle}: code style set to ${nextStyle.label}`);
+  }, [activeKey, setStatusMessage]);
 
   useEffect(() => {
     if (!visible) {
@@ -9564,6 +9609,7 @@ export function CodeWorkspaceTab({
         activeGitBlame={gitBlameByGroup[groupId]}
         activeCoverage={groupFile && coverageReport ? findFileCoverage(coverageReport, absolutePathForOpenFile(groupFile) ?? groupFile.languagePath) : null}
         coverageEnabled={coverageOverlayEnabled}
+        activeCodeStyle={getEffectiveCodeStyleForFile(groupFile)}
         activeDebugBreakpoints={groupId === activeEditorGroupId ? activeDebugBreakpoints : undefined}
         activeDebugCurrentLine={groupId === activeEditorGroupId ? activeDebugCurrentLine : null}
         activeDebugInlineValues={groupId === activeEditorGroupId ? activeDebugInlineValues : undefined}
