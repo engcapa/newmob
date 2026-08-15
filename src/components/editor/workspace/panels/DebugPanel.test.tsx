@@ -11,6 +11,8 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     breakpointRuntime: {},
     functionBreakpoints: [],
     functionBreakpointRuntime: {},
+    instructionBreakpoints: [],
+    instructionBreakpointRuntime: {},
     dataBreakpoints: [],
     dataBreakpointRuntime: {},
     exceptionBreakpoints: [],
@@ -38,6 +40,9 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     addFunctionBreakpoint: vi.fn(),
     setFunctionBreakpointOptions: vi.fn(),
     removeFunctionBreakpoint: vi.fn(),
+    addInstructionBreakpoint: vi.fn().mockReturnValue(true),
+    setInstructionBreakpointOptions: vi.fn(),
+    removeInstructionBreakpoint: vi.fn(),
     addDataBreakpoint: vi.fn().mockResolvedValue({ added: true, message: "Watching value" }),
     setDataBreakpointOptions: vi.fn(),
     removeDataBreakpoint: vi.fn(),
@@ -630,6 +635,160 @@ describe("DebugPanel", () => {
     expect(screen.getByTestId("debug-function-breakpoint-unsupported")).toBeInTheDocument();
     expect(screen.getByTestId("debug-function-breakpoint-input")).toBeDisabled();
     expect(screen.getByTestId("debug-function-breakpoint-binding-0")).toHaveTextContent("not bound");
+  });
+
+  it("creates an instruction breakpoint with offset and adapter mode", () => {
+    const addInstructionBreakpoint = vi.fn().mockReturnValue(true);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "target",
+            label: "Native",
+            adapterId: "lldb",
+            status: "stopped",
+            stoppedReason: "breakpoint",
+          }],
+          activeSessionId: "s1",
+          capabilities: {
+            supportsInstructionBreakpoints: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["instruction"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["instruction"] },
+            ],
+          },
+          addInstructionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-reference"), {
+      target: { value: "main:entry" },
+    });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-offset"), {
+      target: { value: "-4" },
+    });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-mode"), {
+      target: { value: "hardware" },
+    });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-add"));
+    expect(addInstructionBreakpoint).toHaveBeenCalledWith({
+      instructionReference: "main:entry",
+      offset: -4,
+      mode: "hardware",
+    });
+  });
+
+  it("validates instruction offsets before mutating the session", () => {
+    const addInstructionBreakpoint = vi.fn().mockReturnValue(true);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: { supportsInstructionBreakpoints: true },
+          addInstructionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-reference"), {
+      target: { value: "0x1000" },
+    });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-offset"), {
+      target: { value: "2.5" },
+    });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-add"));
+    expect(addInstructionBreakpoint).not.toHaveBeenCalled();
+    expect(screen.getByTestId("debug-instruction-breakpoint-notice")).toHaveTextContent(
+      "signed decimal integer",
+    );
+  });
+
+  it("edits, disables, and removes an instruction breakpoint with binding status", () => {
+    const setInstructionBreakpointOptions = vi.fn();
+    const removeInstructionBreakpoint = vi.fn();
+    const instruction = {
+      adapterId: "lldb",
+      instructionReference: "0x1000",
+      offset: 4,
+      condition: "ready",
+      mode: "hardware",
+    };
+    const key = JSON.stringify(["lldb", "0x1000", 4]);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "target",
+            label: "Native",
+            adapterId: "lldb",
+            status: "stopped",
+            stoppedReason: "breakpoint",
+          }],
+          activeSessionId: "s1",
+          capabilities: {
+            supportsInstructionBreakpoints: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["instruction"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["instruction"] },
+            ],
+          },
+          instructionBreakpoints: [instruction],
+          instructionBreakpointRuntime: {
+            [key]: { status: "failed", message: "not executable" },
+          },
+          setInstructionBreakpointOptions,
+          removeInstructionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    expect(screen.getByTestId("debug-instruction-breakpoint-binding-0")).toHaveTextContent("not bound");
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-enabled-0"));
+    expect(setInstructionBreakpointOptions).toHaveBeenCalledWith(key, { enabled: false });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-edit-0"));
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-condition-0"), {
+      target: { value: "loaded" },
+    });
+    fireEvent.keyDown(screen.getByTestId("debug-instruction-breakpoint-condition-0"), { key: "Enter" });
+    expect(setInstructionBreakpointOptions).toHaveBeenCalledWith(key, { condition: "loaded" });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-row-mode-0"), {
+      target: { value: "software" },
+    });
+    expect(setInstructionBreakpointOptions).toHaveBeenCalledWith(key, { mode: "software" });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-remove-0"));
+    expect(removeInstructionBreakpoint).toHaveBeenCalledWith(key);
+  });
+
+  it("keeps saved instruction breakpoints visible when unsupported", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: { ...initialDebugState("s1"), status: "running" },
+          instructionBreakpoints: [{
+            adapterId: "java",
+            instructionReference: "0x1000",
+          }],
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    expect(screen.getByTestId("debug-instruction-breakpoint-unsupported")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-instruction-breakpoint-reference")).toBeDisabled();
+    expect(screen.getByTestId("debug-instruction-breakpoint-row")).toHaveTextContent("0x1000");
   });
 
   it("creates a data breakpoint from a stopped variable", async () => {

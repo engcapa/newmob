@@ -34,6 +34,21 @@ export interface DebugFunctionBreakpoint {
   enabled?: boolean;
 }
 
+/** A DAP instruction breakpoint scoped to the adapter that owns the reference. */
+export interface DebugInstructionBreakpoint {
+  adapterId: string;
+  /** Opaque instruction/memory reference supplied by the adapter or user. */
+  instructionReference: string;
+  /** Signed byte offset from `instructionReference`. */
+  offset?: number;
+  condition?: string;
+  hitCondition?: string;
+  /** Adapter-advertised instruction breakpoint mode. */
+  mode?: string;
+  /** Undefined means enabled, matching every other persisted breakpoint type. */
+  enabled?: boolean;
+}
+
 export type DebugDataBreakpointAccessType = "read" | "write" | "readWrite";
 
 export type DebugBreakpointModeApplicability =
@@ -361,6 +376,66 @@ export function buildSetFunctionBreakpointsArgs(plan: FunctionBreakpointSyncPlan
   };
 }
 
+/** Stable identity for one adapter-owned instruction location. */
+export function instructionBreakpointKey(
+  breakpoint: Pick<DebugInstructionBreakpoint, "adapterId" | "instructionReference" | "offset">,
+): string {
+  return JSON.stringify([
+    breakpoint.adapterId,
+    breakpoint.instructionReference,
+    breakpoint.offset ?? 0,
+  ]);
+}
+
+export interface InstructionBreakpointSyncPlan {
+  /** Full persisted set, sorted deterministically across adapters. */
+  sorted: DebugInstructionBreakpoint[];
+  /** Entries owned by the selected adapter, including disabled ones. */
+  applicable: DebugInstructionBreakpoint[];
+  /** Enabled and unmuted entries sent in request order. */
+  sent: DebugInstructionBreakpoint[];
+}
+
+/** Scope instruction references to their adapter and apply global muting. */
+export function planInstructionBreakpointSync(
+  list: DebugInstructionBreakpoint[],
+  context: { adapterId: string; muted?: boolean },
+): InstructionBreakpointSyncPlan {
+  const sorted = list.slice().sort((left, right) => (
+    compareText(left.adapterId, right.adapterId)
+    || compareText(left.instructionReference, right.instructionReference)
+    || (left.offset ?? 0) - (right.offset ?? 0)
+  ));
+  const applicable = sorted.filter((breakpoint) => breakpoint.adapterId === context.adapterId);
+  return {
+    sorted,
+    applicable,
+    sent: context.muted
+      ? []
+      : applicable.filter((breakpoint) => breakpoint.enabled !== false),
+  };
+}
+
+/** Build the replacing DAP `setInstructionBreakpoints` request. */
+export function buildSetInstructionBreakpointsArgs(
+  plan: InstructionBreakpointSyncPlan,
+  breakpointModes: readonly DebugBreakpointMode[] = [],
+) {
+  return {
+    breakpoints: plan.sent.map((breakpoint) => {
+      const entry: Record<string, unknown> = {
+        instructionReference: breakpoint.instructionReference,
+      };
+      if (breakpoint.offset !== undefined) entry.offset = breakpoint.offset;
+      if (breakpoint.condition?.trim()) entry.condition = breakpoint.condition.trim();
+      if (breakpoint.hitCondition?.trim()) entry.hitCondition = breakpoint.hitCondition.trim();
+      const mode = resolveBreakpointMode(breakpoint.mode, breakpointModes, "instruction");
+      if (mode) entry.mode = mode;
+      return entry;
+    }),
+  };
+}
+
 /** Parse, de-duplicate, and merge DAP breakpoint-mode capability metadata. */
 export function parseBreakpointModes(
   capabilities: Record<string, unknown>,
@@ -581,6 +656,15 @@ export interface FunctionBreakpointBinding {
   reason?: "pending" | "failed" | null;
 }
 
+/** Positional binding returned by `setInstructionBreakpoints`. */
+export interface InstructionBreakpointBinding {
+  id: number | null;
+  verified: boolean;
+  key: string;
+  message?: string | null;
+  reason?: "pending" | "failed" | null;
+}
+
 /** Positional binding returned by `setDataBreakpoints`. */
 export interface DataBreakpointBinding {
   id: number | null;
@@ -644,6 +728,25 @@ export function parseSetFunctionBreakpointsResponse(
   });
 }
 
+/** Parse `setInstructionBreakpoints`; response order matches the request. */
+export function parseSetInstructionBreakpointsResponse(
+  plan: InstructionBreakpointSyncPlan,
+  body: unknown,
+): InstructionBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((breakpoint, index) => {
+    const rec = asRecord(list[index]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      key: instructionBreakpointKey(breakpoint),
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+    };
+  });
+}
+
 /** Parse `setDataBreakpoints`; response order matches the replacing request. */
 export function parseSetDataBreakpointsResponse(
   plan: DataBreakpointSyncPlan,
@@ -684,6 +787,21 @@ export function functionBreakpointVerificationMap(
   plan.sent.forEach((breakpoint, index) => {
     const binding = bindings[index];
     out[breakpoint.name] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
+}
+
+/** Verification state per adapter-scoped instruction location. */
+export function instructionBreakpointVerificationMap(
+  plan: InstructionBreakpointSyncPlan,
+  bindings: InstructionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  plan.sent.forEach((breakpoint, index) => {
+    const binding = bindings[index];
+    out[instructionBreakpointKey(breakpoint)] = binding
       ? bindingRuntimeStatus(binding)
       : { status: "pending", message: null };
   });

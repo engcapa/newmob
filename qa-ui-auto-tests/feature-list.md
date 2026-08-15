@@ -5002,6 +5002,66 @@ controls:
     selector: '[data-testid="debug-function-breakpoint-unsupported"]'
     kind: display
     optional: true       # requires a live adapter without function-breakpoint support
+  - id: debug-instruction-breakpoints
+    selector: '[data-testid="debug-instruction-breakpoints"]'
+    kind: display
+    optional: true       # rendered in the native adapter breakpoint surface
+  - id: debug-instruction-breakpoint-reference
+    selector: '[data-testid="debug-instruction-breakpoint-reference"]'
+    kind: interactive
+    optional: true       # enabled only with supportsInstructionBreakpoints
+  - id: debug-instruction-breakpoint-offset
+    selector: '[data-testid="debug-instruction-breakpoint-offset"]'
+    kind: interactive
+    optional: true       # enabled only with supportsInstructionBreakpoints
+  - id: debug-instruction-breakpoint-mode
+    selector: '[data-testid="debug-instruction-breakpoint-mode"]'
+    kind: interactive
+    optional: true       # requires an adapter-advertised instruction mode
+  - id: debug-instruction-breakpoint-add
+    selector: '[data-testid="debug-instruction-breakpoint-add"]'
+    kind: interactive
+    optional: true       # enabled only with supportsInstructionBreakpoints
+  - id: debug-instruction-breakpoint-notice
+    selector: '[data-testid="debug-instruction-breakpoint-notice"]'
+    kind: display
+    optional: true       # rendered after invalid or duplicate input
+  - id: debug-instruction-breakpoint-unsupported
+    selector: '[data-testid="debug-instruction-breakpoint-unsupported"]'
+    kind: display
+    optional: true       # requires a live adapter without instruction support
+  - id: debug-instruction-breakpoint-row
+    selector: '[data-testid="debug-instruction-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered after an instruction breakpoint is saved
+  - id: debug-instruction-breakpoint-enabled
+    selector: '[data-testid^="debug-instruction-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each saved instruction breakpoint
+  - id: debug-instruction-breakpoint-edit
+    selector: '[data-testid^="debug-instruction-breakpoint-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each saved instruction breakpoint
+  - id: debug-instruction-breakpoint-condition
+    selector: '[data-testid^="debug-instruction-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # rendered while editing an instruction breakpoint
+  - id: debug-instruction-breakpoint-hit
+    selector: '[data-testid^="debug-instruction-breakpoint-hit-"]'
+    kind: interactive
+    optional: true       # rendered while editing an instruction breakpoint
+  - id: debug-instruction-breakpoint-row-mode
+    selector: '[data-testid^="debug-instruction-breakpoint-row-mode-"]'
+    kind: interactive
+    optional: true       # requires an adapter-advertised instruction mode
+  - id: debug-instruction-breakpoint-remove
+    selector: '[data-testid^="debug-instruction-breakpoint-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each saved instruction breakpoint
+  - id: debug-instruction-breakpoint-binding
+    selector: '[data-testid^="debug-instruction-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live pending or failed adapter binding
   - id: debug-data-breakpoints
     selector: '[data-testid="debug-data-breakpoints"]'
     kind: display

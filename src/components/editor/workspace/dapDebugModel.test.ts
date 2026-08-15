@@ -8,6 +8,7 @@ import {
   buildSetDataBreakpointsArgs,
   buildSetExceptionBreakpointsArgs,
   buildSetFunctionBreakpointsArgs,
+  buildSetInstructionBreakpointsArgs,
   currentLocation,
   dataBreakpointKey,
   dataBreakpointVerificationMap,
@@ -16,6 +17,8 @@ import {
   exceptionBreakpointRuleVerificationMap,
   exceptionBreakpointVerificationMap,
   functionBreakpointVerificationMap,
+  instructionBreakpointKey,
+  instructionBreakpointVerificationMap,
   hoverExpressionAt,
   initialDebugState,
   inlineValueLabel,
@@ -31,12 +34,14 @@ import {
   parseSetDataBreakpointsResponse,
   parseSetExceptionBreakpointsResponse,
   parseSetFunctionBreakpointsResponse,
+  parseSetInstructionBreakpointsResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
   planDataBreakpointSync,
   planExceptionBreakpointSync,
   planFunctionBreakpointSync,
+  planInstructionBreakpointSync,
   reconcileBreakpointLines,
   resolveBreakpointMode,
   reduceDebugEvent,
@@ -200,6 +205,73 @@ describe("dapDebugModel", () => {
     expect(functionBreakpointVerificationMap(plan, bindings)).toEqual({
       "Controller.handle": { status: "verified", message: null },
       "Service.run": { status: "failed", message: "method not found" },
+    });
+  });
+
+  it("plans adapter-scoped instruction breakpoints with signed offsets and modes", () => {
+    const stored = [
+      {
+        adapterId: "java",
+        instructionReference: "0x1000",
+        offset: -4,
+        condition: " ready ",
+        mode: "hardware",
+      },
+      {
+        adapterId: "java",
+        instructionReference: "0x1000",
+        offset: 8,
+        hitCondition: " 2 ",
+        enabled: false,
+      },
+      { adapterId: "node", instructionReference: "main:entry" },
+    ];
+    const plan = planInstructionBreakpointSync(stored, { adapterId: "java" });
+    expect(plan.applicable).toHaveLength(2);
+    expect(plan.sent).toHaveLength(1);
+    const modes = parseBreakpointModes({
+      breakpointModes: [{ mode: "hardware", label: "Hardware", appliesTo: ["instruction"] }],
+    });
+    expect(buildSetInstructionBreakpointsArgs(plan, modes)).toEqual({
+      breakpoints: [{
+        instructionReference: "0x1000",
+        offset: -4,
+        condition: "ready",
+        mode: "hardware",
+      }],
+    });
+    expect(buildSetInstructionBreakpointsArgs(
+      planInstructionBreakpointSync(stored, { adapterId: "node" }),
+      modes,
+    )).toEqual({ breakpoints: [{ instructionReference: "main:entry", mode: "hardware" }] });
+    expect(planInstructionBreakpointSync(stored, { adapterId: "java", muted: true }).sent).toEqual([]);
+  });
+
+  it("maps instruction breakpoint bindings and rejects stale mode metadata", () => {
+    const plan = planInstructionBreakpointSync([{
+      adapterId: "java",
+      instructionReference: "0x1000",
+      offset: 2,
+      mode: "not-advertised",
+    }], { adapterId: "java" });
+    const modes = parseBreakpointModes({
+      breakpointModes: [{ mode: "software", label: "Software", appliesTo: ["instruction"] }],
+    });
+    expect(buildSetInstructionBreakpointsArgs(plan, modes)).toEqual({
+      breakpoints: [{ instructionReference: "0x1000", offset: 2, mode: "software" }],
+    });
+    const bindings = parseSetInstructionBreakpointsResponse(plan, {
+      breakpoints: [{ id: 91, verified: false, reason: "failed", message: "not executable" }],
+    });
+    expect(bindings).toEqual([{
+      id: 91,
+      verified: false,
+      key: instructionBreakpointKey(plan.sent[0]),
+      message: "not executable",
+      reason: "failed",
+    }]);
+    expect(instructionBreakpointVerificationMap(plan, bindings)).toEqual({
+      [instructionBreakpointKey(plan.sent[0])]: { status: "failed", message: "not executable" },
     });
   });
 
