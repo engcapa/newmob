@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, type MutableRefObject } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  type MutableRefObject,
+} from "react";
 import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
 import {
   EditorView,
@@ -31,10 +38,11 @@ import {
   expandLiveTemplateAt,
   liveTemplateLanguageForPath,
 } from "./liveTemplates";
-import { bracketMatching, foldGutter, indentOnInput } from "@codemirror/language";
+import { bracketMatching, foldGutter, indentOnInput, indentUnit } from "@codemirror/language";
 import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
 import { codeViewExtensions } from "../../../lib/codeViewTheme";
+import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type {
   LspCompletionItem,
   LspCompletionResult,
@@ -58,6 +66,8 @@ import {
 import { createLspHyperlinkExtension } from "./lspHyperlink";
 import { createGitEditorChrome, type GitLineChange } from "./gitEditorChrome";
 import { createDebugEditorChrome, type DebugBreakpointMarker } from "./debugEditorChrome";
+import { createCoverageEditorChrome } from "./coverageEditorChrome";
+import type { FileCoverage } from "./coverageModel";
 import type { DebugStepAction } from "./dapDebugModel";
 import type { GitBlameLine } from "../../../lib/git";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
@@ -68,7 +78,7 @@ import {
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
 
-interface EditorRevealTarget {
+export interface EditorRevealTarget {
   line: number;
   character: number;
 }
@@ -92,6 +102,10 @@ interface CodeMirrorHostProps {
   semanticTokens?: LspSemanticToken[];
   gitChanges?: GitLineChange[];
   gitBlame?: GitBlameLine | null;
+  /** File test coverage data. */
+  fileCoverage?: FileCoverage | null;
+  /** Whether coverage gutter overlay is enabled. */
+  coverageEnabled?: boolean;
   /** Debug breakpoints on this file (M9) — rendered in the breakpoint gutter. */
   debugBreakpoints?: DebugBreakpointMarker[];
   /** 1-based line the debugger is currently stopped on for this file (or null). */
@@ -134,6 +148,12 @@ interface CodeMirrorHostProps {
   onContextMenu?: (info: EditorContextMenuRequest) => void;
   completionTriggers?: string[];
   signatureTriggers?: string[];
+  /** Wrap logical lines at the viewport edge (IDEA soft-wrap mode). */
+  softWrap?: boolean;
+  /** Effective code style driving indentUnit, tabSize, and insertSpaces. */
+  codeStyle?: EffectiveCodeStyle;
+  /** When enabled, a normal mouse drag creates a rectangular selection. */
+  columnSelectionMode?: boolean;
 }
 
 /** Payload for the editor context menu (coordinates + clipboard helpers). */
@@ -155,7 +175,12 @@ export interface EditorContextMenuRequest {
  * only document changes are rejected (IDEA's decompiled-source behaviour).
  */
 function readOnlyExtension(readOnly: boolean): Extension {
-  return readOnly ? EditorState.readOnly.of(true) : [];
+  return readOnly
+    ? [
+      EditorState.readOnly.of(true),
+      EditorView.contentAttributes.of({ "aria-readonly": "true" }),
+    ]
+    : [];
 }
 
 const WORKSPACE_EDITOR_STYLE = EditorView.theme({
@@ -312,7 +337,59 @@ function lspInteractionExtensions(
   ];
 }
 
-export function CodeMirrorHost({
+function sameCodeStyle(a?: EffectiveCodeStyle, b?: EffectiveCodeStyle): boolean {
+  if (a === b) return true;
+  return (a?.tabSize ?? 2) === (b?.tabSize ?? 2)
+    && (a?.insertSpaces ?? true) === (b?.insertSpaces ?? true)
+    && (a?.indentSize ?? 2) === (b?.indentSize ?? 2);
+}
+
+const EMPTY_LIST: readonly never[] = [];
+
+function sameOptionalArray<T>(
+  a?: readonly T[],
+  b?: readonly T[],
+  equal: (x: T, y: T) => boolean = (x, y) => x === y,
+): boolean {
+  if (a === b) return true;
+  const arrA = a ?? EMPTY_LIST;
+  const arrB = b ?? EMPTY_LIST;
+  if (arrA.length !== arrB.length) return false;
+  for (let i = 0; i < arrA.length; i++) {
+    if (!equal(arrA[i] as T, arrB[i] as T)) return false;
+  }
+  return true;
+}
+
+function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirrorHostProps): boolean {
+  if (prev.path !== next.path) return false;
+  if (prev.doc !== next.doc) return false;
+  if (prev.visible !== next.visible) return false;
+  if (prev.readOnly !== next.readOnly) return false;
+  if (prev.softWrap !== next.softWrap) return false;
+  if (prev.columnSelectionMode !== next.columnSelectionMode) return false;
+  if (prev.coverageEnabled !== next.coverageEnabled) return false;
+  if (prev.fileCoverage !== next.fileCoverage) return false;
+  if (prev.reveal !== next.reveal) return false;
+  if (prev.gitBlame !== next.gitBlame) return false;
+  if (prev.debugCurrentLine !== next.debugCurrentLine) return false;
+  if (!sameCodeStyle(prev.codeStyle, next.codeStyle)) return false;
+  if (!sameArrayOrBothEmpty(prev.diagnostics, next.diagnostics)) return false;
+  if (!sameOptionalArray(prev.highlights, next.highlights)) return false;
+  if (!sameOptionalArray(prev.inlayHints, next.inlayHints)) return false;
+  if (!sameOptionalArray(prev.semanticTokens, next.semanticTokens)) return false;
+  if (!sameOptionalArray(prev.gitChanges, next.gitChanges)) return false;
+  if (!sameOptionalArray(prev.debugBreakpoints, next.debugBreakpoints)) return false;
+  if (!sameOptionalArray(prev.completionTriggers, next.completionTriggers)) return false;
+  if (!sameOptionalArray(prev.signatureTriggers, next.signatureTriggers)) return false;
+  if (prev.debugStep !== next.debugStep) return false;
+  if (prev.debugRunToCursor !== next.debugRunToCursor) return false;
+  if (prev.debugStop !== next.debugStop) return false;
+  if (prev.debugEvaluate !== next.debugEvaluate) return false;
+  return true;
+}
+
+export const CodeMirrorHost = memo(function CodeMirrorHost({
   path,
   doc,
   visible,
@@ -342,6 +419,8 @@ export function CodeMirrorHost({
   onContextMenu,
   completionTriggers,
   signatureTriggers,
+  softWrap = false,
+  columnSelectionMode = false,
   debugBreakpoints,
   debugCurrentLine,
   debugInlineValues,
@@ -349,17 +428,23 @@ export function CodeMirrorHost({
   debugRunToCursor,
   debugStop,
   debugEvaluate,
+  fileCoverage,
+  coverageEnabled = true,
+  codeStyle,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
   const languageCompartment = useRef(new Compartment());
+  const codeStyleCompartment = useRef(new Compartment());
   const diagnosticsCompartment = useRef(new Compartment());
   const overlayCompartment = useRef(new Compartment());
   const semanticTokensCompartment = useRef(new Compartment());
   const gitCompartment = useRef(new Compartment());
+  const coverageCompartment = useRef(new Compartment());
   const debugCompartment = useRef(new Compartment());
   const signatureCompartment = useRef(new Compartment());
   const readOnlyCompartment = useRef(new Compartment());
+  const wrappingCompartment = useRef(new Compartment());
   const signatureShownRef = useRef(false);
   /** True while applying a prop-driven doc replace so it is not treated as a user edit. */
   const applyingExternalDocRef = useRef(false);
@@ -368,6 +453,14 @@ export function CodeMirrorHost({
   const lastSelectionRef = useRef<{ from: number; to: number } | null>(null);
   const selectionEmitTimerRef = useRef<number | null>(null);
   const renderedDiagnosticsRef = useRef(diagnostics);
+  const renderedReadOnlyRef = useRef(readOnly);
+  const renderedSoftWrapRef = useRef(softWrap);
+  const renderedCodeStyleRef = useRef({
+    tabSize: codeStyle?.tabSize ?? 2,
+    insertSpaces: codeStyle?.insertSpaces ?? true,
+    indentSize: codeStyle?.indentSize || (codeStyle?.tabSize ?? 2),
+  });
+  const renderedCoverageRef = useRef({ fileCoverage, coverageEnabled });
   const renderedOverlayRef = useRef({ highlights, inlayHints });
   const renderedSemanticTokensRef = useRef(semanticTokens);
   const renderedGitRef = useRef({ changes: gitChanges, blame: gitBlame });
@@ -401,6 +494,7 @@ export function CodeMirrorHost({
   const onContextMenuRef = useRef(onContextMenu);
   const completionTriggersRef = useRef(completionTriggers ?? []);
   const signatureTriggersRef = useRef(signatureTriggers ?? []);
+  const columnSelectionModeRef = useRef(columnSelectionMode);
   const pathRef = useRef(path);
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
@@ -464,6 +558,7 @@ export function CodeMirrorHost({
   }), []);
   completionTriggersRef.current = completionTriggers ?? [];
   signatureTriggersRef.current = signatureTriggers ?? [];
+  columnSelectionModeRef.current = columnSelectionMode;
   pathRef.current = path;
 
   const emitSelection = (view: EditorView) => {
@@ -609,7 +704,11 @@ export function CodeMirrorHost({
         drawSelection(),
         rectangularSelection({
           eventFilter: (event) =>
-            event.button === 0 && (event.altKey || (event.ctrlKey && event.shiftKey)),
+            event.button === 0 && (
+              columnSelectionModeRef.current
+              || event.altKey
+              || (event.ctrlKey && event.shiftKey)
+            ),
         }),
         crosshairCursor(),
         history(),
@@ -620,7 +719,7 @@ export function CodeMirrorHost({
           // Closer to IDEA: short settle while typing; trigger chars fire
           // immediately via the updateListener below.
           activateOnTyping: true,
-          activateOnTypingDelay: 50,
+          activateOnTypingDelay: 100,
           // Prefer the first server-ranked item (sortText / boost) when open.
           defaultKeymap: true,
           icons: true,
@@ -665,6 +764,10 @@ export function CodeMirrorHost({
         }),
         search({ top: true, createPanel: createWorkspaceSearchPanel }),
         selectionHistoryField,
+        codeStyleCompartment.current.of([
+          EditorState.tabSize.of(codeStyle?.tabSize ?? 2),
+          indentUnit.of(codeStyle?.insertSpaces ? " ".repeat(codeStyle?.indentSize || codeStyle?.tabSize || 2) : "\t"),
+        ]),
         languageCompartment.current.of([]),
         diagnosticsCompartment.current.of(createDiagnosticChrome(
           diagnostics,
@@ -685,6 +788,10 @@ export function CodeMirrorHost({
           gitBlame,
           (change) => onGitChangeClickRef.current?.(change),
         )),
+        coverageCompartment.current.of(createCoverageEditorChrome(
+          fileCoverage ?? null,
+          coverageEnabled,
+        )),
         debugCompartment.current.of(buildDebugChrome(
           debugBreakpoints,
           debugCurrentLine,
@@ -693,6 +800,7 @@ export function CodeMirrorHost({
         )),
         signatureCompartment.current.of([]),
         readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
+        wrappingCompartment.current.of(softWrap ? EditorView.lineWrapping : []),
         ...lspInteractionExtensions(onHoverRef, onDefinitionRef, onReferencesRef),
         ...codeViewExtensions(),
         WORKSPACE_EDITOR_STYLE,
@@ -719,6 +827,8 @@ export function CodeMirrorHost({
           { key: "Mod-s", run: saveHandler },
           { key: "Mod-r", run: openReplacePanel },
           { key: "Escape", run: () => hideSignature() },
+          { key: "Mod-p", run: (view) => requestSignatureHelp(view, null) },
+          { key: "Ctrl-p", run: (view) => requestSignatureHelp(view, null) },
           { key: "Mod-Shift-Space", run: (view) => requestSignatureHelp(view, null) },
           { key: "Mod-w", run: expandSemanticSelection },
           ...workspaceEditorKeymap,
@@ -853,11 +963,23 @@ export function CodeMirrorHost({
     };
   }, [path]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    if (renderedReadOnlyRef.current === readOnly) return;
+    renderedReadOnlyRef.current = readOnly;
     view.dispatch({ effects: readOnlyCompartment.current.reconfigure(readOnlyExtension(readOnly)) });
   }, [readOnly]);
+
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (renderedSoftWrapRef.current === softWrap) return;
+    renderedSoftWrapRef.current = softWrap;
+    view.dispatch({
+      effects: wrappingCompartment.current.reconfigure(softWrap ? EditorView.lineWrapping : []),
+    });
+  }, [softWrap]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -893,6 +1015,25 @@ export function CodeMirrorHost({
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const tabSize = codeStyle?.tabSize ?? 2;
+    const insertSpaces = codeStyle?.insertSpaces ?? true;
+    const indentSize = codeStyle?.indentSize || tabSize;
+    const prev = renderedCodeStyleRef.current;
+    if (prev.tabSize === tabSize && prev.insertSpaces === insertSpaces && prev.indentSize === indentSize) {
+      return;
+    }
+    renderedCodeStyleRef.current = { tabSize, insertSpaces, indentSize };
+    view.dispatch({
+      effects: codeStyleCompartment.current.reconfigure([
+        EditorState.tabSize.of(tabSize),
+        indentUnit.of(insertSpaces ? " ".repeat(indentSize) : "\t"),
+      ]),
+    });
+  }, [codeStyle?.tabSize, codeStyle?.indentSize, codeStyle?.insertSpaces]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
     if (sameArrayOrBothEmpty(renderedSemanticTokensRef.current, semanticTokens)) return;
     renderedSemanticTokensRef.current = semanticTokens;
     view.dispatch({
@@ -916,6 +1057,21 @@ export function CodeMirrorHost({
       )),
     });
   }, [gitBlame, gitChanges]);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const prev = renderedCoverageRef.current;
+    if (prev.fileCoverage === fileCoverage && prev.coverageEnabled === coverageEnabled) {
+      return;
+    }
+    renderedCoverageRef.current = { fileCoverage, coverageEnabled };
+    view.dispatch({
+      effects: coverageCompartment.current.reconfigure(
+        createCoverageEditorChrome(fileCoverage ?? null, coverageEnabled),
+      ),
+    });
+  }, [fileCoverage, coverageEnabled]);
 
   useEffect(() => {
     const view = viewRef.current;
@@ -975,5 +1131,12 @@ export function CodeMirrorHost({
     view.focus();
   }, [reveal]);
 
-  return <div ref={hostRef} className="h-full w-full" />;
-}
+  return (
+    <div
+      ref={hostRef}
+      data-soft-wrap={softWrap || undefined}
+      data-column-selection={columnSelectionMode || undefined}
+      className="h-full w-full"
+    />
+  );
+}, areCodeMirrorHostPropsEqual);

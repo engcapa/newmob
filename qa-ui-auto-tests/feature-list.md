@@ -4748,17 +4748,28 @@ controls:
 id: F25.1
 status: partial
 area: code-workspace/execution
-components: [CodeWorkspaceTab, RunPanel, BuildPanel, BottomDock, WorkspaceBuildRunToolsDialog]
+components: [CodeWorkspaceTab, RunPanel, BuildPanel, TestsPanel, DebugPanel, BottomDock, WorkspaceBuildRunToolsDialog]
 files:
   - src/components/sidebar/Sidebar.tsx
   - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/executionPlan.ts
+  - src/components/editor/workspace/runConfigurationPersistence.ts
   - src/components/editor/workspace/panels/RunPanel.tsx
   - src/components/editor/workspace/panels/BuildPanel.tsx
+  - src/components/editor/workspace/panels/TestsPanel.tsx
+  - src/components/editor/workspace/panels/testResultTree.ts
   - src/components/editor/workspace/panels/BottomDock.tsx
   - src/components/editor/workspace/WorkspaceBuildRunToolsDialog.tsx
+  - src/components/editor/workspace/dapDebugModel.ts
+  - src/components/editor/workspace/dataBreakpointTarget.ts
+  - src/components/editor/workspace/editorContextMenu.ts
   - src/components/editor/workspace/panels/DebugPanel.tsx
+  - src/components/editor/workspace/useCodeDebugSession.ts
+  - src/lib/editor/workspace.ts
   - src/lib/terminal/commandInput.ts
+  - src-tauri/src/lsp.rs
   - src-tauri/src/workspace_execution.rs
+  - src-tauri/src/test_results.rs
   - src-tauri/src/dap.rs
 controls:
   - id: sidebar-entry
@@ -4775,6 +4786,10 @@ controls:
     selector: '[data-testid="code-workspace-run-target"]'
     kind: interactive
     optional: true       # enabled only when the active file maps to a run configuration
+  - id: active-run-configuration
+    selector: '[data-testid="code-workspace-active-run-configuration"]'
+    kind: interactive
+    optional: true       # rendered when the active source file has multiple configurations
   - id: debug-current-target
     selector: '[data-testid="code-workspace-debug-target"]'
     kind: interactive
@@ -4784,6 +4799,9 @@ controls:
     kind: interactive
   - id: build-tab
     selector: '[data-testid="code-workspace-bottom-tab-build"]'
+    kind: interactive
+  - id: tests-tab
+    selector: '[data-testid="code-workspace-bottom-tab-tests"]'
     kind: interactive
   - id: debug-tab
     selector: '[data-testid="code-workspace-bottom-tab-debug"]'
@@ -4815,9 +4833,25 @@ controls:
     selector: '[data-testid^="run-panel-configuration-edit-run:"]'
     kind: interactive
     optional: true       # requires a language fixture with a detected run target
+  - id: run-configuration-copy
+    selector: '[data-testid^="run-panel-configuration-copy-run:"]'
+    kind: interactive
+    optional: true       # requires a language fixture with a detected run target
+  - id: run-configuration-source
+    selector: '[data-testid^="run-panel-configuration-source-"]'
+    kind: display
+    optional: true       # rendered for detected Run/Debug configurations
+  - id: execution-diagnostics
+    selector: '[data-testid="run-panel-execution-diagnostics"]'
+    kind: display
+    optional: true       # rendered when provider/shared configuration validation reports errors
   - id: run-configuration-editor
     selector: '[data-testid="run-configuration-editor"]'
     kind: display
+    optional: true
+  - id: run-configuration-name
+    selector: '[data-testid="run-configuration-name"]'
+    kind: interactive
     optional: true
   - id: run-configuration-cwd
     selector: '[data-testid="run-configuration-cwd"]'
@@ -4826,6 +4860,18 @@ controls:
   - id: run-configuration-args
     selector: '[data-testid="run-configuration-args"]'
     kind: interactive
+    optional: true
+  - id: run-configuration-vm-options
+    selector: '[data-testid="run-configuration-vm-options"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-env-file
+    selector: '[data-testid="run-configuration-env-file"]'
+    kind: interactive
+    optional: true
+  - id: run-configuration-before-launch
+    selector: '[data-testid="run-configuration-before-launch"]'
+    kind: display
     optional: true
   - id: run-configuration-env
     selector: '[data-testid="run-configuration-env"]'
@@ -4839,6 +4885,10 @@ controls:
     selector: '[data-testid="run-configuration-reset"]'
     kind: interactive
     optional: true
+  - id: run-configuration-delete
+    selector: '[data-testid="run-configuration-delete"]'
+    kind: interactive
+    optional: true       # rendered only while editing a named copy
   - id: build-panel
     selector: '[data-testid="code-workspace-build-panel"]'
     kind: display
@@ -4846,6 +4896,10 @@ controls:
     selector: '[data-testid="build-panel-error"]'
     kind: display
     optional: true       # rendered only when target discovery fails
+  - id: build-execution-error
+    selector: '[data-testid="build-panel-execution-error"]'
+    kind: display
+    optional: true       # rendered only when a target exits unsuccessfully
   - id: build-project
     selector: '[data-testid="build-panel-build-project"]'
     kind: interactive
@@ -4861,9 +4915,392 @@ controls:
     selector: '[data-testid^="build-panel-target-build:"]'
     kind: interactive
     optional: true       # requires a language fixture with a detected build target
+  - id: tests-panel
+    selector: '[data-testid="code-workspace-tests-panel"]'
+    kind: display
+  - id: tests-refresh
+    selector: '[data-testid="tests-refresh"]'
+    kind: interactive
+    optional: true       # enabled only for an active Java source file
+  - id: tests-load-results
+    selector: '[data-testid="tests-load-results"]'
+    kind: interactive
+    optional: true       # enabled only for an active Java workspace root
+  - id: tests-result-summary
+    selector: '[data-testid="tests-result-summary"]'
+    kind: display
+    optional: true       # rendered after a report is loaded or ingestion fails
+  - id: tests-result
+    selector: '[data-testid^="tests-result-"]'
+    kind: display
+    optional: true       # requires a Surefire/Failsafe/Gradle JUnit report
+  - id: tests-rerun
+    selector: '[data-testid^="tests-rerun-"]'
+    kind: interactive
+    optional: true       # requires a structured result and Maven/Gradle runner
+  - id: tests-failure-details
+    selector: '[data-testid^="tests-failure-details-"]'
+    kind: interactive
+    optional: true       # requires a failed result with provider details
   - id: debug-panel
     selector: '[data-testid="code-workspace-debug-panel"]'
     kind: display
+  - id: debug-active-configuration
+    selector: '[data-testid="debug-active-configuration"]'
+    kind: interactive
+    optional: true       # rendered when the active source has a Run/Debug configuration
+  - id: debug-configuration-diagnostic
+    selector: '[data-testid="debug-configuration-diagnostic"]'
+    kind: display
+    optional: true       # rendered when the selected configuration cannot be debugged
+  - id: debug-active-session
+    selector: '[data-testid="debug-active-session"]'
+    kind: interactive
+    optional: true       # rendered while a compound Debug launch has multiple child sessions
+  - id: debug-breakpoint-mode
+    selector: '[data-testid^="debug-breakpoint-mode-"]'
+    kind: interactive
+    optional: true       # rendered while editing a source breakpoint and the adapter advertises source modes
+  - id: debug-function-breakpoints
+    selector: '[data-testid="debug-function-breakpoints"]'
+    kind: display
+  - id: debug-function-breakpoint-input
+    selector: '[data-testid="debug-function-breakpoint-input"]'
+    kind: interactive
+  - id: debug-function-breakpoint-add
+    selector: '[data-testid="debug-function-breakpoint-add"]'
+    kind: interactive
+  - id: debug-function-breakpoint-row
+    selector: '[data-testid="debug-function-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered after a function/method breakpoint is saved
+  - id: debug-function-breakpoint-enabled
+    selector: '[data-testid^="debug-function-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each saved function/method breakpoint
+  - id: debug-function-breakpoint-edit
+    selector: '[data-testid^="debug-function-breakpoint-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each saved function/method breakpoint
+  - id: debug-function-breakpoint-condition
+    selector: '[data-testid^="debug-function-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # rendered while editing a function/method breakpoint
+  - id: debug-function-breakpoint-hit
+    selector: '[data-testid^="debug-function-breakpoint-hit-"]'
+    kind: interactive
+    optional: true       # rendered while editing a function/method breakpoint
+  - id: debug-function-breakpoint-remove
+    selector: '[data-testid^="debug-function-breakpoint-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each saved function/method breakpoint
+  - id: debug-function-breakpoint-binding
+    selector: '[data-testid^="debug-function-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live adapter with a pending or failed binding
+  - id: debug-function-breakpoint-unsupported
+    selector: '[data-testid="debug-function-breakpoint-unsupported"]'
+    kind: display
+    optional: true       # requires a live adapter without function-breakpoint support
+  - id: debug-instruction-breakpoints
+    selector: '[data-testid="debug-instruction-breakpoints"]'
+    kind: display
+    optional: true       # rendered in the native adapter breakpoint surface
+  - id: debug-instruction-breakpoint-reference
+    selector: '[data-testid="debug-instruction-breakpoint-reference"]'
+    kind: interactive
+    optional: true       # enabled only with supportsInstructionBreakpoints
+  - id: debug-instruction-breakpoint-offset
+    selector: '[data-testid="debug-instruction-breakpoint-offset"]'
+    kind: interactive
+    optional: true       # enabled only with supportsInstructionBreakpoints
+  - id: debug-instruction-breakpoint-mode
+    selector: '[data-testid="debug-instruction-breakpoint-mode"]'
+    kind: interactive
+    optional: true       # requires an adapter-advertised instruction mode
+  - id: debug-instruction-breakpoint-add
+    selector: '[data-testid="debug-instruction-breakpoint-add"]'
+    kind: interactive
+    optional: true       # enabled only with supportsInstructionBreakpoints
+  - id: debug-instruction-breakpoint-notice
+    selector: '[data-testid="debug-instruction-breakpoint-notice"]'
+    kind: display
+    optional: true       # rendered after invalid or duplicate input
+  - id: debug-instruction-breakpoint-unsupported
+    selector: '[data-testid="debug-instruction-breakpoint-unsupported"]'
+    kind: display
+    optional: true       # requires a live adapter without instruction support
+  - id: debug-instruction-breakpoint-row
+    selector: '[data-testid="debug-instruction-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered after an instruction breakpoint is saved
+  - id: debug-instruction-breakpoint-enabled
+    selector: '[data-testid^="debug-instruction-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each saved instruction breakpoint
+  - id: debug-instruction-breakpoint-edit
+    selector: '[data-testid^="debug-instruction-breakpoint-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each saved instruction breakpoint
+  - id: debug-instruction-breakpoint-condition
+    selector: '[data-testid^="debug-instruction-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # rendered while editing an instruction breakpoint
+  - id: debug-instruction-breakpoint-hit
+    selector: '[data-testid^="debug-instruction-breakpoint-hit-"]'
+    kind: interactive
+    optional: true       # rendered while editing an instruction breakpoint
+  - id: debug-instruction-breakpoint-row-mode
+    selector: '[data-testid^="debug-instruction-breakpoint-row-mode-"]'
+    kind: interactive
+    optional: true       # requires an adapter-advertised instruction mode
+  - id: debug-instruction-breakpoint-remove
+    selector: '[data-testid^="debug-instruction-breakpoint-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each saved instruction breakpoint
+  - id: debug-instruction-breakpoint-binding
+    selector: '[data-testid^="debug-instruction-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live pending or failed adapter binding
+  - id: debug-memory-disassembly
+    selector: '[data-testid="debug-memory-disassembly"]'
+    kind: display
+    optional: true       # rendered in the native debug memory surface
+  - id: debug-memory-unsupported
+    selector: '[data-testid="debug-memory-unsupported"]'
+    kind: display
+    optional: true       # requires a live adapter without memory/disassembly support
+  - id: debug-memory-reference
+    selector: '[data-testid="debug-memory-reference"]'
+    kind: interactive
+    optional: true       # requires a live adapter advertising a memory/disassembly request
+  - id: debug-memory-offset
+    selector: '[data-testid="debug-memory-offset"]'
+    kind: interactive
+    optional: true       # memory reads/writes support signed offsets
+  - id: debug-memory-count
+    selector: '[data-testid="debug-memory-count"]'
+    kind: interactive
+    optional: true       # requires supportsReadMemoryRequest
+  - id: debug-memory-read
+    selector: '[data-testid="debug-memory-read"]'
+    kind: interactive
+    optional: true       # requires supportsReadMemoryRequest
+  - id: debug-memory-result
+    selector: '[data-testid="debug-memory-result"]'
+    kind: display
+    optional: true       # rendered after a successful readMemory response
+  - id: debug-memory-write-data
+    selector: '[data-testid="debug-memory-write-data"]'
+    kind: interactive
+    optional: true       # requires supportsWriteMemoryRequest
+  - id: debug-memory-write
+    selector: '[data-testid="debug-memory-write"]'
+    kind: interactive
+    optional: true       # requires supportsWriteMemoryRequest
+  - id: debug-memory-write-status
+    selector: '[data-testid="debug-memory-write-status"]'
+    kind: display
+    optional: true       # rendered after a writeMemory response
+  - id: debug-disassemble-offset
+    selector: '[data-testid="debug-disassemble-offset"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassemble-instruction-offset
+    selector: '[data-testid="debug-disassemble-instruction-offset"]'
+    kind: interactive
+    optional: true       # supports adapter-defined instruction offsets
+  - id: debug-disassemble-count
+    selector: '[data-testid="debug-disassemble-count"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassemble-resolve-symbols
+    selector: '[data-testid="debug-disassemble-resolve-symbols"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassemble
+    selector: '[data-testid="debug-disassemble"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassembly-output
+    selector: '[data-testid="debug-disassembly-output"]'
+    kind: display
+    optional: true       # rendered after a successful disassemble response
+  - id: debug-disassembly-row
+    selector: '[data-testid="debug-disassembly-row"]'
+    kind: display
+    optional: true       # rendered for each returned instruction
+  - id: debug-memory-notice
+    selector: '[data-testid="debug-memory-notice"]'
+    kind: display
+    optional: true       # rendered after validation or adapter errors
+  - id: debug-data-breakpoints
+    selector: '[data-testid="debug-data-breakpoints"]'
+    kind: display
+  - id: debug-data-breakpoint-mode
+    selector: '[data-testid="debug-data-breakpoint-mode"]'
+    kind: interactive
+    optional: true       # rendered when the active adapter advertises data breakpoint modes
+  - id: debug-data-breakpoint-create
+    selector: '[data-testid="debug-data-breakpoint-create"]'
+    kind: display
+    optional: true       # rendered while stopped with supportsDataBreakpoints
+  - id: debug-data-breakpoint-target
+    selector: '[data-testid="debug-data-breakpoint-target"]'
+    kind: interactive
+    optional: true       # rendered for manual expression/address discovery
+  - id: debug-data-breakpoint-bytes
+    selector: '[data-testid="debug-data-breakpoint-bytes"]'
+    kind: interactive
+    optional: true       # requires supportsDataBreakpointBytes
+  - id: debug-data-breakpoint-as-address
+    selector: '[data-testid="debug-data-breakpoint-as-address"]'
+    kind: interactive
+    optional: true       # requires supportsDataBreakpointBytes
+  - id: debug-data-breakpoint-add
+    selector: '[data-testid="debug-data-breakpoint-add"]'
+    kind: interactive
+    optional: true       # rendered for manual expression/address discovery
+  - id: debug-data-breakpoint-create-notice
+    selector: '[data-testid="debug-data-breakpoint-create-notice"]'
+    kind: display
+    optional: true       # rendered after manual discovery succeeds or fails
+  - id: debug-data-breakpoint-row
+    selector: '[data-testid="debug-data-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered after an adapter has resolved a data breakpoint
+  - id: debug-data-breakpoint-enabled
+    selector: '[data-testid^="debug-data-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each resolved data breakpoint
+  - id: debug-data-breakpoint-access
+    selector: '[data-testid^="debug-data-breakpoint-access-"]'
+    kind: interactive
+    optional: true       # requires adapter-advertised access modes
+  - id: debug-data-breakpoint-edit
+    selector: '[data-testid^="debug-data-breakpoint-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each resolved data breakpoint
+  - id: debug-data-breakpoint-condition
+    selector: '[data-testid^="debug-data-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # rendered while editing a resolved data breakpoint
+  - id: debug-data-breakpoint-hit
+    selector: '[data-testid^="debug-data-breakpoint-hit-"]'
+    kind: interactive
+    optional: true       # rendered while editing a resolved data breakpoint
+  - id: debug-data-breakpoint-remove
+    selector: '[data-testid^="debug-data-breakpoint-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each resolved data breakpoint
+  - id: debug-data-breakpoint-binding
+    selector: '[data-testid^="debug-data-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live adapter with a pending or failed binding
+  - id: debug-data-breakpoint-scope
+    selector: '[data-testid^="debug-data-breakpoint-scope-"]'
+    kind: display
+    optional: true       # rendered for each adapter- or session-scoped data id
+  - id: debug-data-breakpoint-unsupported
+    selector: '[data-testid="debug-data-breakpoint-unsupported"]'
+    kind: display
+    optional: true       # requires saved data ids and an unsupported live adapter
+  - id: debug-variable-data-breakpoint
+    selector: '[data-testid="debug-variable-data-breakpoint"]'
+    kind: interactive
+    optional: true       # requires a supported adapter stopped on a variable or watch expression
+  - id: editor-context-add-data-breakpoint
+    selector: '[data-testid="editor-context-add-data-breakpoint"]'
+    kind: interactive
+    optional: true       # rendered on a recognized field declaration during a stopped supported session
+  - id: debug-data-breakpoint-notice
+    selector: '[data-testid="debug-data-breakpoint-notice"]'
+    kind: display
+    optional: true       # rendered after live adapter discovery succeeds or fails
+  - id: debug-exception-breakpoints
+    selector: '[data-testid="debug-exception-breakpoints"]'
+    kind: display
+    optional: true       # requires a live adapter advertising exception filters
+  - id: debug-exception-breakpoint-row
+    selector: '[data-testid="debug-exception-breakpoint-row"]'
+    kind: display
+    optional: true       # rendered for each adapter-advertised exception filter
+  - id: debug-exception-breakpoint-enabled
+    selector: '[data-testid^="debug-exception-breakpoint-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each adapter-advertised exception filter
+  - id: debug-exception-breakpoint-condition
+    selector: '[data-testid^="debug-exception-breakpoint-condition-"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionFilterOptions and a conditional filter
+  - id: debug-exception-breakpoint-mode
+    selector: '[data-testid^="debug-exception-breakpoint-mode-"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionFilterOptions and an exception breakpoint mode
+  - id: debug-exception-breakpoint-binding
+    selector: '[data-testid^="debug-exception-breakpoint-binding-"]'
+    kind: display
+    optional: true       # requires a live adapter with a pending or failed binding
+  - id: debug-exception-rules
+    selector: '[data-testid="debug-exception-rules"]'
+    kind: display
+    optional: true       # requires a live adapter advertising exception filters
+  - id: debug-exception-rule-input
+    selector: '[data-testid="debug-exception-rule-input"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionOptions
+  - id: debug-exception-rule-add
+    selector: '[data-testid="debug-exception-rule-add"]'
+    kind: interactive
+    optional: true       # requires supportsExceptionOptions and a non-empty pattern
+  - id: debug-exception-rule-unsupported
+    selector: '[data-testid="debug-exception-rule-unsupported"]'
+    kind: display
+    optional: true       # requires exception filters without supportsExceptionOptions
+  - id: debug-exception-rule-row
+    selector: '[data-testid="debug-exception-rule-row"]'
+    kind: display
+    optional: true       # rendered for each saved adapter-scoped exception path rule
+  - id: debug-exception-rule-enabled
+    selector: '[data-testid^="debug-exception-rule-enabled-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-mode
+    selector: '[data-testid^="debug-exception-rule-mode-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-edit
+    selector: '[data-testid^="debug-exception-rule-edit-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-remove
+    selector: '[data-testid^="debug-exception-rule-remove-"]'
+    kind: interactive
+    optional: true       # rendered for each saved exception path rule
+  - id: debug-exception-rule-binding
+    selector: '[data-testid^="debug-exception-rule-binding-"]'
+    kind: display
+    optional: true       # requires a pending, failed, or unsupported live binding
+  - id: debug-exception-rule-path-names
+    selector: '[data-testid^="debug-exception-rule-path-names-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-exclude
+    selector: '[data-testid^="debug-exception-rule-path-exclude-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-remove
+    selector: '[data-testid^="debug-exception-rule-path-remove-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-input
+    selector: '[data-testid^="debug-exception-rule-path-input-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
+  - id: debug-exception-rule-path-add
+    selector: '[data-testid^="debug-exception-rule-path-add-"]'
+    kind: interactive
+    optional: true       # rendered while editing an exception path rule
   - id: tools-dialog
     selector: '[data-testid="workspace-build-run-tools-dialog"]'
     kind: display
@@ -4936,12 +5373,137 @@ controls:
   - id: inherit-maven-argline
     selector: '[data-testid="workspace-maven-inherit-argline"]'
     kind: interactive
+  - id: step-filters-enabled
+    selector: '[data-testid="workspace-debug-step-filters-enabled"]'
+    kind: interactive
+  - id: step-filter-patterns
+    selector: '[data-testid="workspace-debug-step-filter-patterns"]'
+    kind: interactive
+    optional: true
+  - id: skip-synthetics
+    selector: '[data-testid="workspace-debug-skip-synthetics"]'
+    kind: interactive
+    optional: true
+  - id: skip-static-init
+    selector: '[data-testid="workspace-debug-skip-static-init"]'
+    kind: interactive
+    optional: true
+  - id: skip-constructors
+    selector: '[data-testid="workspace-debug-skip-constructors"]'
+    kind: interactive
+    optional: true
+  - id: split-sync-scroll
+    selector: '[data-testid="code-workspace-split-sync-scroll"]'
+    kind: interactive
+    optional: true
 -->
 
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
-- Run/Build 面板区分一等运行配置/构建目标与兼容任务；运行配置的 args、env、cwd 按 workspace 和 stable id 本地保存。
+- Run/Build 面板区分一等运行配置/构建目标与兼容任务；Build 按依赖拓扑串行执行并失败即停；命名 Run/Debug 配置的 program/VM args、env、dotenv、cwd、Before launch 与活动选择按 workspace 和源文件本地保存。
 - 顶部 Run/Debug 随当前文件能力启用，内置 argv 按实际终端 shell 安全渲染；DAP 支持 stdio 与托管 TCP adapter 生命周期。
-- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补。
+- 当前为部分完成：Rust/Go/Python/Node/Swift 已接入首批 Run/Debug，CMake/.NET/JVM provider 仍有 artifact、BSP/DAP 和跨平台 native smoke 待补；仓库 shared configuration、嵌套 compound Run/Debug、多 DAP 子会话选择、组级 Stop/Restart 与 `parallel`/`stopOnFailure` 已形成代码闭环。标准 source/function/data/exception breakpoints 已覆盖 adapter scope、条件、Mute/Remove All、configurationDone 前同步和绑定状态；exception filters 同时兼容 `filters` 与 capability-gated `filterOptions`，支持 `exceptionOptions` 的 adapter 还可管理持久化异常树路径、排除段及 caught/uncaught break mode。Maven Surefire/Failsafe 与 Gradle JUnit XML 已形成结构化结果、失败详情/定位/重跑闭环；IDEA 专有断点属性、coverage 和完整 adapter 矩阵仍未完成。
+
+### 25.2 Provider 语义快照与重构一致性 🟡
+
+<!-- feature
+id: F25.2
+status: partial
+area: code-workspace/semantic-analysis
+components: [CodeWorkspaceTab, SearchEverywhere, ReferencesPanel, ProblemsPanel, AnalysisPanel]
+files:
+  - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/SearchEverywhere.tsx
+  - src/components/editor/workspace/WorkspacePopupsHost.tsx
+  - src/components/editor/workspace/codeWorkspaceModel.ts
+  - src/components/editor/workspace/inspectionProfile.ts
+  - src/components/editor/workspace/inspectionEvidence.ts
+  - src/components/editor/workspace/safeDelete.ts
+  - src/components/editor/workspace/semanticWorkspaceEdit.ts
+  - src/components/editor/workspace/workspaceSemanticIndex.ts
+  - src/components/editor/workspace/useWorkspaceSemanticIndex.ts
+  - src/components/editor/workspace/workspaceEditApply.ts
+  - src/components/editor/workspace/useWorkspaceLspSession.ts
+  - src/components/editor/workspace/panels/ProblemsPanel.tsx
+  - src/components/editor/workspace/panels/AnalysisPanel.tsx
+  - src/components/editor/workspace/panels/ReferencesPanel.tsx
+  - src/lib/editor/lsp.ts
+controls:
+  - id: analysis-tab
+    selector: '[data-testid="code-workspace-bottom-tab-analysis"]'
+    kind: interactive
+  - id: analysis-panel
+    selector: '[data-testid="code-workspace-analysis-panel"]'
+    kind: display
+  - id: analysis-semantic-index
+    selector: '[data-testid="analysis-semantic-index"]'
+    kind: display
+  - id: analysis-lsp-status
+    selector: '[data-testid="analysis-lsp-status"]'
+    kind: display
+  - id: analysis-inspection-profile
+    selector: '[data-testid="analysis-inspection-profile"]'
+    kind: display
+  - id: analysis-inspection-baseline
+    selector: '[data-testid="analysis-inspection-baseline"]'
+    kind: display
+  - id: analysis-baseline-create
+    selector: '[data-testid="analysis-baseline-create"]'
+    kind: interactive
+  - id: analysis-baseline-import
+    selector: '[data-testid="analysis-baseline-import"]'
+    kind: interactive
+  - id: analysis-baseline-export
+    selector: '[data-testid="analysis-baseline-export"]'
+    kind: interactive
+    optional: true
+  - id: analysis-baseline-clear
+    selector: '[data-testid="analysis-baseline-clear"]'
+    kind: interactive
+    optional: true
+  - id: analysis-inspection-suppressions
+    selector: '[data-testid="analysis-inspection-suppressions"]'
+    kind: display
+  - id: problems-suppress-line
+    selector: '[data-testid="context-menu-item-suppress-for-line"]'
+    kind: interactive
+    optional: true       # requires a provider diagnostic in Problems
+  - id: problems-suppress-file
+    selector: '[data-testid="context-menu-item-suppress-for-file"]'
+    kind: interactive
+    optional: true       # requires a provider diagnostic in Problems
+  - id: problems-add-baseline
+    selector: '[data-testid="context-menu-item-add-to-inspection-baseline"]'
+    kind: interactive
+    optional: true       # requires a provider diagnostic in Problems
+  - id: analysis-data-flow
+    selector: '[data-testid="analysis-data-flow"]'
+    kind: display
+  - id: references-semantic-index
+    selector: '[data-testid="references-semantic-index"]'
+    kind: display
+    optional: true       # requires a provider-backed Find Usages request
+  - id: search-semantic-index
+    selector: '[data-testid="search-everywhere-semantic-index"]'
+    kind: display
+    optional: true       # requires workspace-symbol capability and a symbol query
+  - id: search-symbol-provider-status
+    selector: '[data-testid="search-everywhere-symbol-provider-status"]'
+    kind: display
+    optional: true       # requires a workspace-symbol query response
+  - id: analysis-evidence-proof-level
+    selector: '[data-testid="analysis-evidence-proof-level"]'
+    kind: display
+    optional: true       # requires a provider diagnostic with analysis evidence
+  - id: analysis-evidence-flow-steps
+    selector: '[data-testid="analysis-evidence-flow-steps"]'
+    kind: display
+    optional: true       # requires structured provider flow metadata
+-->
+
+- Analysis/Problems 面板呈现 provider capability、CodeActionKind、semantic token、诊断元数据、related locations 与可持久化 inspection 展示规则；支持文件/行 suppression、稳定 provider-message baseline 的创建/导入/导出/移除。
+- Provider semantic snapshot 以 workspace revision 判定结果新鲜度，generation 仅仲裁异步查询发布顺序；保存、编辑、watcher、资源操作、WorkspaceEdit、工程根变化、LSP/SDK 重启及 provider progress 会统一失效或阻断快照。
+- Rename、Safe Delete、Code Action/Refactor 在查询前等待活跃 editor buffer 的 LSP 同步，并在 resolve、菜单执行、确认对话框结束、WorkspaceEdit 最终 mutation 与 server-initiated `workspace/applyEdit` 前重复校验 revision。
+- References 与 Search Everywhere 绑定各自结果来源，后续无关查询不会把旧列表错误标成 ready；workspace symbol 显示 ready session/provider 覆盖、失败/跳过计数和有界状态；Rename/Refactor/Safe Delete 的 semantic WorkspaceEdit 拒绝 workspace 外路径，Safe Delete 对 unresolved reference 硬阻断。Analysis 仅分类和展示 provider 已返回的 nullability/taint/data-flow/related-location evidence，并区分 structured/text-inferred/related-location proof level 与有界 flow steps，不执行客户端推断。当前仍不等同于 IntelliJ PSI/stub index；自有索引、原生 inspection、跨过程 data-flow/nullability/taint 引擎仍未完成。
 
 ---
 

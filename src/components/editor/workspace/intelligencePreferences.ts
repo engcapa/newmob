@@ -3,6 +3,7 @@ export interface WorkspaceIntelligencePreferences {
   inlayHintLanguages: Record<string, boolean>;
   inlineBlameEnabled: boolean;
   formatOnSave: boolean;
+  stickyLinesEnabled: boolean;
 }
 
 export const DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES: WorkspaceIntelligencePreferences = {
@@ -10,6 +11,7 @@ export const DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES: WorkspaceIntelligencePr
   inlayHintLanguages: {},
   inlineBlameEnabled: false,
   formatOnSave: false,
+  stickyLinesEnabled: true,
 };
 
 function storageKey(workspaceInstanceId: string): string {
@@ -30,6 +32,7 @@ export function readWorkspaceIntelligencePreferences(
         : {},
       inlineBlameEnabled: parsed.inlineBlameEnabled === true,
       formatOnSave: parsed.formatOnSave === true,
+      stickyLinesEnabled: parsed.stickyLinesEnabled !== false,
     };
   } catch {
     return { ...DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES };

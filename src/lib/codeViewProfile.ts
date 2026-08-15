@@ -21,6 +21,8 @@ export interface CodeViewProfile {
   fontFamily: string;
   fontSize: number;
   fontLigatures: boolean;
+  /** Whether long logical lines wrap inside the editor viewport. */
+  softWrap?: boolean;
   theme: string;
 }
 
@@ -28,6 +30,7 @@ export const DEFAULT_CODE_VIEW_PROFILE: CodeViewProfile = {
   fontFamily: makeTerminalFontFamily("JetBrains Mono"),
   fontSize: 13,
   fontLigatures: true,
+  softWrap: false,
   theme: CODE_VIEW_THEME_APP,
 };
 
@@ -89,6 +92,8 @@ export function sameCodeViewProfile(a: CodeViewProfile, b: CodeViewProfile): boo
     a.fontFamily === b.fontFamily &&
     a.fontSize === b.fontSize &&
     a.fontLigatures === b.fontLigatures &&
+    (a.softWrap ?? DEFAULT_CODE_VIEW_PROFILE.softWrap)
+      === (b.softWrap ?? DEFAULT_CODE_VIEW_PROFILE.softWrap) &&
     a.theme === b.theme
   );
 }
@@ -99,6 +104,7 @@ export function normalizeCodeViewProfile(input: unknown): CodeViewProfile {
     fontFamily: readString(source.fontFamily, DEFAULT_CODE_VIEW_PROFILE.fontFamily),
     fontSize: clampInteger(source.fontSize, DEFAULT_CODE_VIEW_PROFILE.fontSize, 8, 32),
     fontLigatures: readBoolean(source.fontLigatures, DEFAULT_CODE_VIEW_PROFILE.fontLigatures),
+    softWrap: readBoolean(source.softWrap, DEFAULT_CODE_VIEW_PROFILE.softWrap ?? false),
     theme: readTheme(source.theme, DEFAULT_CODE_VIEW_PROFILE.theme),
   };
 }

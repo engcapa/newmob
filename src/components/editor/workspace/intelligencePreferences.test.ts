@@ -12,11 +12,13 @@ describe("workspace intelligence preferences", () => {
     const defaults = readWorkspaceIntelligencePreferences("ws");
     expect(inlayHintsEnabledForLanguage(defaults, "typescript")).toBe(false);
     expect(defaults.formatOnSave).toBe(false);
+    expect(defaults.stickyLinesEnabled).toBe(true);
     writeWorkspaceIntelligencePreferences("ws", {
       inlayHintsEnabled: true,
       inlayHintLanguages: { typescript: false, rust: true },
       inlineBlameEnabled: true,
       formatOnSave: true,
+      stickyLinesEnabled: false,
     });
     const restored = readWorkspaceIntelligencePreferences("ws");
     expect(inlayHintsEnabledForLanguage(restored, "typescript")).toBe(false);
@@ -24,5 +26,6 @@ describe("workspace intelligence preferences", () => {
     expect(inlayHintsEnabledForLanguage(restored, "go")).toBe(true);
     expect(restored.inlineBlameEnabled).toBe(true);
     expect(restored.formatOnSave).toBe(true);
+    expect(restored.stickyLinesEnabled).toBe(false);
   });
 });

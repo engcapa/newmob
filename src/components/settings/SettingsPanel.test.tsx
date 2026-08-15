@@ -121,6 +121,7 @@ describe("SettingsPanel", () => {
     await user.clear(fontSize);
     await user.type(fontSize, "15");
     await user.click(screen.getByLabelText("Enable code font ligatures"));
+    await user.click(screen.getByLabelText("Enable soft wrapping in the code editor"));
     await user.click(screen.getByTestId("code-theme-select"));
     await user.click(screen.getByTestId("code-theme-option-terminal-kanagawa-wave"));
 
@@ -129,6 +130,7 @@ describe("SettingsPanel", () => {
       expect(saved.fontFamily).toContain("JetBrains Mono");
       expect(saved.fontSize).toBe(15);
       expect(saved.fontLigatures).toBe(false);
+      expect(saved.softWrap).toBe(true);
       expect(saved.theme).toBe("terminal:kanagawa-wave");
     });
   }, 10_000);

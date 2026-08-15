@@ -202,4 +202,28 @@ describe("createLspCompletionSource", () => {
     const result = await source(contextAt("it", 2));
     expect(result?.options).toHaveLength(MAX_COMPLETION_OPTIONS);
   });
+
+  it("aborts early during fast typing without issuing fetch", async () => {
+    const fetch = vi.fn(async () => completionResult(["item"]));
+    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const context = contextAt("it", 2);
+    const promise = source(context);
+    // Simulate another keystroke arriving immediately (aborting previous context)
+    const raw = context as unknown as { abortListeners?: Array<() => void> };
+    Object.defineProperty(context, "aborted", { value: true, configurable: true });
+    raw.abortListeners?.forEach((l) => l());
+    const result = await promise;
+    expect(result).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("suppresses word-based LSP autocompletion inside string literals", async () => {
+    const fetch = vi.fn(async () => completionResult(["another"]));
+    const source = createLspCompletionSource({ fetch, triggerCharacters: () => ["."] });
+    const doc = 'String firstStr = "this is another";';
+    const pos = doc.indexOf("another") + 2;
+    const result = await source(contextAt(doc, pos));
+    expect(result).toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+  });
 });

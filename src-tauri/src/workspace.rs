@@ -1,4 +1,6 @@
 use crate::state::AppState;
+use chardetng::EncodingDetector;
+use encoding_rs::{Encoding, UTF_8, UTF_16BE, UTF_16LE};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -7,6 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 use tauri::State;
 
@@ -17,6 +20,7 @@ const HARD_RECURSIVE_MAX_DEPTH: usize = 100;
 const HARD_RECURSIVE_MAX_FILES: usize = 10_000;
 const GIT_ROOT_SCAN_MAX_DEPTH: usize = 4;
 const GIT_ROOT_SCAN_MAX_DIRS: usize = 2_000;
+static RESOURCE_BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +38,11 @@ pub struct WorkspaceEntry {
 pub struct WorkspaceFile {
     pub path: String,
     pub text: String,
+    /// Decoded editor encoding (for example UTF-8, GBK, or windows-1252).
+    /// `bom` records a Unicode byte-order marker independently so it can
+    /// round-trip without exposing it as an editor character.
+    pub encoding: String,
+    pub bom: bool,
     pub size: u64,
     pub mtime: u64,
     pub hash: String,
@@ -2010,6 +2019,56 @@ pub fn workspace_read_loose_file(
     loose_file_from_bytes(&target, bytes, meta)
 }
 
+/// Re-decode an existing file using an explicit user-selected encoding. The
+/// default read commands remain auto-detecting for backwards compatibility.
+#[tauri::command]
+pub fn workspace_read_file_with_encoding(
+    repo_root: String,
+    path: String,
+    max_bytes: Option<u64>,
+    encoding: String,
+) -> Result<WorkspaceFile, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    let target = resolve_existing_path(&root, &path)?;
+    let meta = fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?;
+    if !meta.is_file() {
+        return Err(format!("Not a file: {}", target.display()));
+    }
+    let limit = max_bytes.unwrap_or(DEFAULT_MAX_TEXT_BYTES);
+    if meta.len() > limit {
+        return Err(format!(
+            "File is {} bytes, exceeds text editor limit of {} bytes",
+            meta.len(),
+            limit
+        ));
+    }
+    let bytes = fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
+    file_from_bytes_with_encoding(&root, &target, bytes, meta, Some(&encoding))
+}
+
+#[tauri::command]
+pub fn workspace_read_loose_file_with_encoding(
+    path: String,
+    max_bytes: Option<u64>,
+    encoding: String,
+) -> Result<WorkspaceFile, String> {
+    let target = resolve_existing_loose_file_path(&path)?;
+    let meta = fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?;
+    if !meta.is_file() {
+        return Err(format!("Not a file: {}", target.display()));
+    }
+    let limit = max_bytes.unwrap_or(DEFAULT_MAX_TEXT_BYTES);
+    if meta.len() > limit {
+        return Err(format!(
+            "File is {} bytes, exceeds text editor limit of {} bytes",
+            meta.len(),
+            limit
+        ));
+    }
+    let bytes = fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?;
+    loose_file_from_bytes_with_encoding(&target, bytes, meta, Some(&encoding))
+}
+
 #[tauri::command]
 pub fn workspace_write_file(
     repo_root: String,
@@ -2134,6 +2193,45 @@ pub fn workspace_write_loose_file(
     workspace_read_loose_file(path, None)
 }
 
+/// Write text using the selected editor encoding while retaining the existing
+/// hash-precondition and atomic replacement guarantees.
+#[tauri::command]
+pub fn workspace_write_file_encoded(
+    repo_root: String,
+    path: String,
+    contents: String,
+    expected_hash: Option<String>,
+    encoding: String,
+    bom: Option<bool>,
+) -> Result<WorkspaceFile, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    let target = resolve_writable_path(&root, &path)?;
+    reject_protected_write(&root, &target)?;
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))?;
+    write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
+    workspace_read_file_with_encoding(repo_root, path, None, encoding)
+}
+
+#[tauri::command]
+pub fn workspace_write_loose_file_encoded(
+    path: String,
+    contents: String,
+    expected_hash: Option<String>,
+    encoding: String,
+    bom: Option<bool>,
+) -> Result<WorkspaceFile, String> {
+    let target = resolve_writable_loose_file_path(&path)?;
+    reject_protected_loose_write(&target)?;
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))?;
+    write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
+    loose_file_from_bytes_with_encoding(
+        &target,
+        fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?,
+        fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?,
+        Some(&encoding),
+    )
+}
+
 #[tauri::command]
 pub fn workspace_create_file(
     repo_root: String,
@@ -2218,6 +2316,367 @@ pub fn workspace_rename_path(
     workspace_entry(&root, &to)
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WorkspaceResourceOperation {
+    Create {
+        path: String,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        ignore_if_exists: bool,
+    },
+    Rename {
+        from_path: String,
+        to_path: String,
+        #[serde(default)]
+        to_repo_root: Option<String>,
+        #[serde(default)]
+        overwrite: bool,
+        #[serde(default)]
+        ignore_if_exists: bool,
+    },
+    Delete {
+        path: String,
+        #[serde(default)]
+        recursive: bool,
+        #[serde(default)]
+        ignore_if_not_exists: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceResourceOperationResult {
+    pub ignored: bool,
+}
+
+/// Apply an LSP CreateFile/RenameFile/DeleteFile inside a workspace root while
+/// keeping the same path traversal and protected-path guards as manual actions.
+#[tauri::command]
+pub fn workspace_apply_resource_operation(
+    repo_root: String,
+    operation: WorkspaceResourceOperation,
+) -> Result<WorkspaceResourceOperationResult, String> {
+    let root = canonical_repo_root(&repo_root)?;
+    match operation {
+        WorkspaceResourceOperation::Create {
+            path,
+            overwrite,
+            ignore_if_exists,
+        } => {
+            let target = resolve_writable_path(&root, &path)?;
+            reject_protected_write(&root, &target)?;
+            if resource_target_exists(&target)? {
+                if overwrite {
+                    let metadata = fs::symlink_metadata(&target)
+                        .map_err(|error| format!("stat {}: {error}", target.display()))?;
+                    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                        return Err(format!(
+                            "CreateFile cannot overwrite directory: {}",
+                            target.display()
+                        ));
+                    }
+                    create_empty_resource_replacing(&target)?;
+                } else if ignore_if_exists {
+                    return Ok(WorkspaceResourceOperationResult { ignored: true });
+                } else {
+                    return Err(format!("Path already exists: {}", target.display()));
+                }
+            } else {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&target)
+                    .map_err(|e| format!("create {}: {e}", target.display()))?;
+            }
+        }
+        WorkspaceResourceOperation::Rename {
+            from_path,
+            to_path,
+            to_repo_root,
+            overwrite,
+            ignore_if_exists,
+        } => {
+            let from = resolve_resource_path(&root, &from_path)?;
+            reject_workspace_root_target(&root, &from, "rename")?;
+            reject_protected_write(&root, &from)?;
+            let from_metadata = match fs::symlink_metadata(&from) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(format!("Path does not exist: {}", from.display()));
+                }
+                Err(error) => return Err(format!("stat {}: {error}", from.display())),
+            };
+            let destination_root = match to_repo_root.as_deref().map(str::trim) {
+                Some(path) if !path.is_empty() => canonical_repo_root(path)?,
+                _ => root.clone(),
+            };
+            let to = resolve_writable_path(&destination_root, &to_path)?;
+            reject_protected_write(&destination_root, &to)?;
+            if from == to {
+                return Ok(WorkspaceResourceOperationResult { ignored: true });
+            }
+            if from_metadata.is_dir()
+                && !from_metadata.file_type().is_symlink()
+                && to.starts_with(&from)
+            {
+                return Err(format!(
+                    "Cannot move directory {} inside itself",
+                    from.display()
+                ));
+            }
+            if resource_target_exists(&to)? {
+                if overwrite {
+                    move_resource_replacing(&from, &to)?;
+                } else if ignore_if_exists {
+                    return Ok(WorkspaceResourceOperationResult { ignored: true });
+                } else {
+                    return Err(format!("Path already exists: {}", to.display()));
+                }
+            } else {
+                move_resource_across_roots(&from, &to)?;
+            }
+        }
+        WorkspaceResourceOperation::Delete {
+            path,
+            recursive,
+            ignore_if_not_exists,
+        } => {
+            let target = resolve_writable_path(&root, &path)?;
+            reject_workspace_root_target(&root, &target, "delete")?;
+            reject_protected_write(&root, &target)?;
+            if !resource_target_exists(&target)? {
+                if ignore_if_not_exists {
+                    return Ok(WorkspaceResourceOperationResult { ignored: true });
+                }
+                return Err(format!("Path does not exist: {}", target.display()));
+            }
+            remove_resource_target(&target, recursive)?;
+        }
+    }
+    Ok(WorkspaceResourceOperationResult { ignored: false })
+}
+
+fn remove_resource_target(target: &Path, recursive: bool) -> Result<(), String> {
+    let meta =
+        fs::symlink_metadata(target).map_err(|e| format!("stat {}: {e}", target.display()))?;
+    if meta.is_dir() && !meta.file_type().is_symlink() {
+        if recursive {
+            fs::remove_dir_all(target).map_err(|e| format!("rmdir {}: {e}", target.display()))
+        } else {
+            fs::remove_dir(target).map_err(|e| format!("rmdir {}: {e}", target.display()))
+        }
+    } else {
+        fs::remove_file(target).map_err(|e| format!("remove {}: {e}", target.display()))
+    }
+}
+
+fn resource_target_exists(target: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(target) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("stat {}: {error}", target.display())),
+    }
+}
+
+fn resource_backup_path(target: &Path) -> Result<PathBuf, String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("Cannot create backup path for {}", target.display()))?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| format!("Cannot create backup path for {}", target.display()))?;
+    for _ in 0..1_000 {
+        let sequence = RESOURCE_BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut backup_name = OsString::from(".");
+        backup_name.push(file_name);
+        backup_name.push(format!(
+            ".taomni-workspace-edit-backup-{}-{sequence}",
+            std::process::id()
+        ));
+        let candidate = parent.join(backup_name);
+        if !resource_target_exists(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    Err(format!(
+        "Cannot allocate a backup path next to {}",
+        target.display()
+    ))
+}
+
+fn create_empty_resource_replacing(target: &Path) -> Result<(), String> {
+    let staged = resource_backup_path(target)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .map_err(|error| format!("create staged file {}: {error}", staged.display()))?;
+    if let Err(error) = move_resource_replacing(&staged, target) {
+        let cleanup_error = match resource_target_exists(&staged) {
+            Ok(true) => remove_resource_target(&staged, false).err(),
+            Ok(false) => None,
+            Err(error) => Some(error),
+        };
+        return Err(format!(
+            "create {}: {error}{}",
+            target.display(),
+            cleanup_error
+                .map(|cleanup| format!("; staged file cleanup failed: {cleanup}"))
+                .unwrap_or_default()
+        ));
+    }
+    Ok(())
+}
+
+fn move_resource_replacing(from: &Path, to: &Path) -> Result<(), String> {
+    match fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(direct_error) => {
+            let backup = resource_backup_path(to)?;
+            fs::rename(to, &backup).map_err(|backup_error| {
+                format!(
+                    "replace {} -> {}: {direct_error}; cannot preserve existing destination: {backup_error}",
+                    from.display(),
+                    to.display()
+                )
+            })?;
+
+            match move_resource_across_roots(from, to) {
+                Ok(()) => {
+                    if let Err(error) = remove_resource_target(&backup, true) {
+                        log::warn!(
+                            "workspace rename succeeded but destination backup cleanup failed at {}: {}",
+                            backup.display(),
+                            error
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(move_error) => {
+                    let partial_cleanup_error = match resource_target_exists(to) {
+                        Ok(true) => remove_resource_target(to, true).err(),
+                        Ok(false) => None,
+                        Err(error) => Some(error),
+                    };
+                    let restore_error = fs::rename(&backup, to).err();
+                    return Err(format!(
+                        "replace {} -> {} failed: {move_error}{}{}",
+                        from.display(),
+                        to.display(),
+                        partial_cleanup_error
+                            .map(|error| format!("; partial destination cleanup failed: {error}"))
+                            .unwrap_or_default(),
+                        restore_error
+                            .map(|error| format!("; destination restore failed: {error}"))
+                            .unwrap_or_default()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn move_resource_across_roots(from: &Path, to: &Path) -> Result<(), String> {
+    match fs::rename(from, to) {
+        Ok(()) => return Ok(()),
+        Err(rename_error) => {
+            if let Err(copy_error) = copy_resource_target(from, to) {
+                let cleanup_error = match resource_target_exists(to) {
+                    Ok(true) => remove_resource_target(to, true)
+                        .err()
+                        .map(|error| format!("partial destination cleanup failed: {error}")),
+                    Ok(false) => None,
+                    Err(error) => Some(format!("partial destination inspection failed: {error}")),
+                };
+                return Err(format!(
+                    "move {} -> {}: {rename_error}; copy fallback failed: {copy_error}{}",
+                    from.display(),
+                    to.display(),
+                    cleanup_error
+                        .map(|error| format!("; {error}"))
+                        .unwrap_or_default()
+                ));
+            }
+            if let Err(remove_error) = remove_resource_target(from, true) {
+                let cleanup_error = remove_resource_target(to, true).err();
+                return Err(format!(
+                    "move {} -> {}: source cleanup failed: {remove_error}{}",
+                    from.display(),
+                    to.display(),
+                    cleanup_error
+                        .map(|error| format!("; destination rollback failed: {error}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn copy_resource_target(from: &Path, to: &Path) -> Result<(), String> {
+    let metadata =
+        fs::symlink_metadata(from).map_err(|error| format!("stat {}: {error}", from.display()))?;
+    if metadata.file_type().is_symlink() {
+        return copy_resource_symlink(from, to, &metadata);
+    }
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::create_dir(to).map_err(|error| format!("mkdir {}: {error}", to.display()))?;
+        for entry in fs::read_dir(from)
+            .map_err(|error| format!("read directory {}: {error}", from.display()))?
+        {
+            let entry = entry.map_err(|error| format!("read {}: {error}", from.display()))?;
+            copy_resource_target(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        fs::set_permissions(to, metadata.permissions())
+            .map_err(|error| format!("set permissions {}: {error}", to.display()))?;
+        return Ok(());
+    }
+    fs::copy(from, to)
+        .map(|_| ())
+        .map_err(|error| format!("copy {} -> {}: {error}", from.display(), to.display()))
+}
+
+#[cfg(unix)]
+fn copy_resource_symlink(from: &Path, to: &Path, _metadata: &fs::Metadata) -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+
+    let target =
+        fs::read_link(from).map_err(|error| format!("read symlink {}: {error}", from.display()))?;
+    symlink(&target, to).map_err(|error| {
+        format!(
+            "copy symlink {} -> {}: {error}",
+            from.display(),
+            to.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn copy_resource_symlink(from: &Path, to: &Path, metadata: &fs::Metadata) -> Result<(), String> {
+    use std::os::windows::fs::{FileTypeExt, symlink_dir, symlink_file};
+
+    let target =
+        fs::read_link(from).map_err(|error| format!("read symlink {}: {error}", from.display()))?;
+    let result = if metadata.file_type().is_symlink_dir() {
+        symlink_dir(&target, to)
+    } else {
+        symlink_file(&target, to)
+    };
+    result.map_err(|error| {
+        format!(
+            "copy symlink {} -> {}: {error}",
+            from.display(),
+            to.display()
+        )
+    })
+}
+
 fn canonical_repo_root(repo_root: &str) -> Result<PathBuf, String> {
     let root = PathBuf::from(repo_root);
     let canonical = root
@@ -2242,12 +2701,12 @@ fn resolve_existing_path(root: &Path, relative: &str) -> Result<PathBuf, String>
     Ok(canonical)
 }
 
-fn resolve_writable_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+fn resolve_resource_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let requested = sanitize_relative_path(relative)?;
-    if requested.as_os_str().is_empty() {
-        return Err("Cannot write the workspace root".to_string());
-    }
     let target = root.join(&requested);
+    if requested.as_os_str().is_empty() {
+        return Ok(target);
+    }
     let parent = target
         .parent()
         .ok_or_else(|| format!("Cannot resolve parent for {}", target.display()))?;
@@ -2255,6 +2714,14 @@ fn resolve_writable_path(root: &Path, relative: &str) -> Result<PathBuf, String>
         .canonicalize()
         .map_err(|e| format!("resolve {}: {e}", parent.display()))?;
     ensure_inside(root, &parent_canonical)?;
+    Ok(target)
+}
+
+fn resolve_writable_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let target = resolve_resource_path(root, relative)?;
+    if target == root {
+        return Err("Cannot write the workspace root".to_string());
+    }
     Ok(target)
 }
 
@@ -2552,7 +3019,7 @@ fn collect_workspace_files(
     Ok(())
 }
 
-fn should_skip_workspace_entry_path(path: &str) -> bool {
+pub(crate) fn should_skip_workspace_entry_path(path: &str) -> bool {
     path.split(['/', '\\']).any(|segment| {
         matches!(
             segment,
@@ -2599,17 +3066,72 @@ fn workspace_entry(root: &Path, path: &Path) -> Result<WorkspaceEntry, String> {
     })
 }
 
+fn write_workspace_bytes(
+    target: &Path,
+    bytes: Vec<u8>,
+    expected_hash: Option<&str>,
+) -> Result<(), String> {
+    if let Some(expected) = expected_hash
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let current = fs::read(target).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "Cannot compare expected hash; file does not exist: {}",
+                    target.display()
+                )
+            } else {
+                format!("read {}: {error}", target.display())
+            }
+        })?;
+        let current_hash = sha256_hex(&current);
+        if !current_hash.eq_ignore_ascii_case(expected) {
+            return Err(format!(
+                "File changed on disk; expected hash {expected}, found {current_hash}"
+            ));
+        }
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("Cannot resolve parent for {}", target.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("mkdir {}: {error}", parent.display()))?;
+    let tmp = parent.join(format!(".taomni-write-{}", uuid::Uuid::new_v4().simple()));
+    {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(|error| format!("open {}: {error}", tmp.display()))?;
+        file.write_all(&bytes)
+            .map_err(|error| format!("write {}: {error}", tmp.display()))?;
+        file.sync_all()
+            .map_err(|error| format!("sync {}: {error}", tmp.display()))?;
+    }
+    if let Err(error) = replace_file(&tmp, target) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "rename {} -> {}: {error}",
+            tmp.display(),
+            target.display()
+        ));
+    }
+    Ok(())
+}
+
 fn file_from_bytes(
     root: &Path,
     target: &Path,
     bytes: Vec<u8>,
     meta: fs::Metadata,
 ) -> Result<WorkspaceFile, String> {
-    let text =
-        String::from_utf8(bytes.clone()).map_err(|e| format!("File is not valid UTF-8: {e}"))?;
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, None)?;
     Ok(WorkspaceFile {
         path: relative_path(root, target)?,
         text,
+        encoding,
+        bom,
         size: meta.len(),
         mtime: mtime_secs(&meta),
         hash: sha256_hex(&bytes),
@@ -2621,15 +3143,207 @@ fn loose_file_from_bytes(
     bytes: Vec<u8>,
     meta: fs::Metadata,
 ) -> Result<WorkspaceFile, String> {
-    let text =
-        String::from_utf8(bytes.clone()).map_err(|e| format!("File is not valid UTF-8: {e}"))?;
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, None)?;
     Ok(WorkspaceFile {
         path: path_for_display(target),
         text,
+        encoding,
+        bom,
         size: meta.len(),
         mtime: mtime_secs(&meta),
         hash: sha256_hex(&bytes),
     })
+}
+
+fn file_from_bytes_with_encoding(
+    root: &Path,
+    target: &Path,
+    bytes: Vec<u8>,
+    meta: fs::Metadata,
+    requested_encoding: Option<&str>,
+) -> Result<WorkspaceFile, String> {
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, requested_encoding)?;
+    Ok(WorkspaceFile {
+        path: relative_path(root, target)?,
+        text,
+        encoding,
+        bom,
+        size: meta.len(),
+        mtime: mtime_secs(&meta),
+        hash: sha256_hex(&bytes),
+    })
+}
+
+fn loose_file_from_bytes_with_encoding(
+    target: &Path,
+    bytes: Vec<u8>,
+    meta: fs::Metadata,
+    requested_encoding: Option<&str>,
+) -> Result<WorkspaceFile, String> {
+    let (text, encoding, bom) = decode_workspace_bytes(&bytes, requested_encoding)?;
+    Ok(WorkspaceFile {
+        path: path_for_display(target),
+        text,
+        encoding,
+        bom,
+        size: meta.len(),
+        mtime: mtime_secs(&meta),
+        hash: sha256_hex(&bytes),
+    })
+}
+
+fn decode_workspace_bytes(
+    bytes: &[u8],
+    requested_encoding: Option<&str>,
+) -> Result<(String, String, bool), String> {
+    const UTF8_BOM: &[u8] = b"\xEF\xBB\xBF";
+    const UTF16LE_BOM: &[u8] = b"\xFF\xFE";
+    const UTF16BE_BOM: &[u8] = b"\xFE\xFF";
+
+    let (encoding, payload, bom) = if let Some(label) = requested_encoding {
+        let encoding = encoding_for_label(label)?;
+        let (payload, bom) = if encoding == UTF_8 && bytes.starts_with(UTF8_BOM) {
+            (&bytes[UTF8_BOM.len()..], true)
+        } else if encoding == UTF_16LE && bytes.starts_with(UTF16LE_BOM) {
+            (&bytes[UTF16LE_BOM.len()..], true)
+        } else if encoding == UTF_16BE && bytes.starts_with(UTF16BE_BOM) {
+            (&bytes[UTF16BE_BOM.len()..], true)
+        } else {
+            (bytes, false)
+        };
+        (encoding, payload, bom)
+    } else if bytes.starts_with(UTF8_BOM) {
+        (UTF_8, &bytes[UTF8_BOM.len()..], true)
+    } else if bytes.starts_with(UTF16LE_BOM) {
+        (UTF_16LE, &bytes[UTF16LE_BOM.len()..], true)
+    } else if bytes.starts_with(UTF16BE_BOM) {
+        (UTF_16BE, &bytes[UTF16BE_BOM.len()..], true)
+    } else if let Some(encoding) = detect_utf16_without_bom(bytes) {
+        (encoding, bytes, false)
+    } else if std::str::from_utf8(bytes).is_ok() {
+        (UTF_8, bytes, false)
+    } else {
+        let mut detector = EncodingDetector::new();
+        detector.feed(bytes, true);
+        (detector.guess(None, true), bytes, false)
+    };
+
+    let text = encoding
+        .decode_without_bom_handling_and_without_replacement(payload)
+        .ok_or_else(|| {
+            format!(
+                "File cannot be decoded as {} without data loss",
+                encoding.name()
+            )
+        })?
+        .into_owned();
+    if encoding != UTF_16LE
+        && encoding != UTF_16BE
+        && (looks_binary_bytes(bytes)
+            || (requested_encoding.is_none()
+                && encoding != UTF_8
+                && looks_suspicious_legacy_bytes(bytes, &text)))
+    {
+        return Err("File appears to be binary; open it in a binary-capable viewer".into());
+    }
+    Ok((text, encoding.name().to_string(), bom))
+}
+
+fn encoding_for_label(label: &str) -> Result<&'static Encoding, String> {
+    let normalized = label.trim().replace('_', "-");
+    Encoding::for_label(normalized.as_bytes())
+        .ok_or_else(|| format!("Unsupported text encoding: {label}"))
+}
+
+fn detect_utf16_without_bom(bytes: &[u8]) -> Option<&'static Encoding> {
+    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+        return None;
+    }
+    let pairs = bytes.chunks_exact(2);
+    let mut even_zeroes = 0usize;
+    let mut odd_zeroes = 0usize;
+    for pair in pairs {
+        if pair[0] == 0 {
+            even_zeroes += 1;
+        }
+        if pair[1] == 0 {
+            odd_zeroes += 1;
+        }
+    }
+    let total = bytes.len() / 2;
+    if odd_zeroes * 3 >= total * 2 {
+        Some(UTF_16LE)
+    } else if even_zeroes * 3 >= total * 2 {
+        Some(UTF_16BE)
+    } else {
+        None
+    }
+}
+
+fn looks_binary_bytes(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let controls = bytes
+        .iter()
+        .filter(|&&byte| byte == 0 || (byte < 0x09) || (byte > 0x0D && byte < 0x20))
+        .count();
+    controls * 100 > bytes.len() * 2
+}
+
+/// Legacy single-byte encodings can decode every byte sequence, so a tiny
+/// arbitrary high-byte blob must not silently become editable text. Keep this
+/// conservative: real legacy documents normally contain either whitespace,
+/// ASCII punctuation, or enough bytes to establish a text sample.
+fn looks_suspicious_legacy_bytes(bytes: &[u8], text: &str) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    if bytes.len() <= 4 && bytes.iter().all(|byte| *byte >= 0x80) {
+        return true;
+    }
+    if bytes.len() < 16 {
+        let has_text_shape = bytes
+            .iter()
+            .any(|byte| matches!(*byte, b' '..=b'~' | b'\t' | b'\n' | b'\r'));
+        if !has_text_shape {
+            return true;
+        }
+    }
+    text.chars().all(|character| character.is_control())
+}
+
+fn encode_workspace_text(contents: &str, label: &str, bom: bool) -> Result<Vec<u8>, String> {
+    let encoding = encoding_for_label(label)?;
+    let mut bytes = if encoding == UTF_16LE || encoding == UTF_16BE {
+        let mut output = Vec::with_capacity(contents.len() * 2);
+        for unit in contents.encode_utf16() {
+            let encoded = if encoding == UTF_16LE {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            };
+            output.extend_from_slice(&encoded);
+        }
+        output
+    } else {
+        let (encoded, _, had_errors) = encoding.encode(contents);
+        if had_errors {
+            return Err(format!(
+                "Text contains characters not representable in {}",
+                encoding.name()
+            ));
+        }
+        encoded.into_owned()
+    };
+    if bom && encoding == UTF_8 {
+        bytes.splice(0..0, [0xEF, 0xBB, 0xBF]);
+    } else if bom && encoding == UTF_16LE {
+        bytes.splice(0..0, [0xFF, 0xFE]);
+    } else if bom && encoding == UTF_16BE {
+        bytes.splice(0..0, [0xFE, 0xFF]);
+    }
+    Ok(bytes)
 }
 
 fn path_for_display(path: &Path) -> String {
@@ -2733,6 +3447,146 @@ mod tests {
     }
 
     #[test]
+    fn reads_utf8_bom_without_exposing_marker_to_editor_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bom.txt");
+        fs::write(&path, b"\xEF\xBB\xBFhello\r\n").unwrap();
+
+        let file = workspace_read_loose_file(path.to_string_lossy().to_string(), None).unwrap();
+        assert_eq!(file.encoding, "UTF-8");
+        assert!(file.bom);
+        assert_eq!(file.text, "hello\r\n");
+        assert_eq!(file.size, 10);
+        assert_eq!(file.hash, sha256_hex(b"\xEF\xBB\xBFhello\r\n"));
+    }
+
+    #[test]
+    fn rejects_non_utf8_workspace_text_with_an_actionable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("binary.txt");
+        fs::write(&path, [0xff, 0xfe, 0xfd]).unwrap();
+
+        let error =
+            workspace_read_loose_file(path.to_string_lossy().to_string(), None).unwrap_err();
+        assert!(error.contains("binary") || error.contains("decoded"));
+    }
+
+    #[test]
+    fn reads_utf16_bom_and_round_trips_selected_encoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf16.txt");
+        let bytes = encode_workspace_text("hello\r\n世界", "UTF-16LE", true).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        let path_string = path.to_string_lossy().to_string();
+
+        let file = workspace_read_loose_file(path_string.clone(), None).unwrap();
+        assert_eq!(file.encoding, "UTF-16LE");
+        assert!(file.bom);
+        assert_eq!(file.text, "hello\r\n世界");
+
+        let saved = workspace_write_loose_file_encoded(
+            path_string,
+            "changed\n世界".into(),
+            Some(file.hash),
+            "UTF-16LE".into(),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(saved.encoding, "UTF-16LE");
+        assert!(saved.bom);
+        assert_eq!(saved.text, "changed\n世界");
+    }
+
+    #[test]
+    fn auto_detects_utf16_without_a_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("utf16-no-bom.txt");
+        let bytes = encode_workspace_text("hello", "UTF-16BE", false).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let file = workspace_read_loose_file(path.to_string_lossy().to_string(), None).unwrap();
+        assert_eq!(file.encoding, "UTF-16BE");
+        assert!(!file.bom);
+        assert_eq!(file.text, "hello");
+    }
+
+    #[test]
+    fn auto_detects_short_utf16_without_a_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short-utf16.txt");
+        fs::write(
+            &path,
+            encode_workspace_text("A", "UTF-16LE", false).unwrap(),
+        )
+        .unwrap();
+
+        let file = workspace_read_loose_file(path.to_string_lossy().to_string(), None).unwrap();
+        assert_eq!(file.encoding, "UTF-16LE");
+        assert_eq!(file.text, "A");
+    }
+
+    #[test]
+    fn round_trips_windows_1252() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("windows-1252.txt");
+        let path_string = path.to_string_lossy().to_string();
+        let saved = workspace_write_loose_file_encoded(
+            path_string.clone(),
+            "café – €".into(),
+            None,
+            "windows-1252".into(),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(saved.encoding, "windows-1252");
+        assert_eq!(saved.text, "café – €");
+        assert_eq!(
+            workspace_read_loose_file(path_string, None).unwrap().text,
+            "café – €"
+        );
+    }
+
+    #[test]
+    fn decodes_and_encodes_gbk_without_lossy_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gbk.txt");
+        // "中文" in GBK.
+        fs::write(&path, [0xd6, 0xd0, 0xce, 0xc4]).unwrap();
+        let path_string = path.to_string_lossy().to_string();
+        let file = workspace_read_loose_file_with_encoding(path_string.clone(), None, "GBK".into())
+            .unwrap();
+        assert_eq!(file.encoding, "GBK");
+        assert_eq!(file.text, "中文");
+
+        let saved = workspace_write_loose_file_encoded(
+            path_string,
+            "中文".into(),
+            Some(file.hash),
+            "GBK".into(),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(saved.text, "中文");
+        assert_eq!(fs::read(path).unwrap(), [0xd6, 0xd0, 0xce, 0xc4]);
+    }
+
+    #[test]
+    fn rejects_unrepresentable_legacy_encoding_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latin.txt");
+        fs::write(&path, b"plain").unwrap();
+        let error = workspace_write_loose_file_encoded(
+            path.to_string_lossy().to_string(),
+            "emoji 😀".into(),
+            None,
+            "windows-1252".into(),
+            Some(false),
+        )
+        .unwrap_err();
+        assert!(error.contains("not representable"));
+    }
+
+    #[test]
     fn rejects_dot_git_loose_writes() {
         let dir = tempfile::tempdir().unwrap();
         let git_dir = dir.path().join(".git");
@@ -2764,6 +3618,278 @@ mod tests {
 
         workspace_delete_path(root, "src/app.ts".into(), None).unwrap();
         assert!(!dir.path().join("src/app.ts").exists());
+    }
+
+    #[test]
+    fn applies_lsp_resource_operation_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        fs::create_dir(dir.path().join("src")).unwrap();
+
+        let created = workspace_apply_resource_operation(
+            root.clone(),
+            WorkspaceResourceOperation::Create {
+                path: "src/new.ts".into(),
+                overwrite: false,
+                ignore_if_exists: false,
+            },
+        )
+        .unwrap();
+        assert!(!created.ignored);
+        fs::write(dir.path().join("src/new.ts"), "new").unwrap();
+
+        let ignored = workspace_apply_resource_operation(
+            root.clone(),
+            WorkspaceResourceOperation::Create {
+                path: "src/new.ts".into(),
+                overwrite: false,
+                ignore_if_exists: true,
+            },
+        )
+        .unwrap();
+        assert!(ignored.ignored);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/new.ts")).unwrap(),
+            "new"
+        );
+
+        let overwritten = workspace_apply_resource_operation(
+            root.clone(),
+            WorkspaceResourceOperation::Create {
+                path: "src/new.ts".into(),
+                overwrite: true,
+                ignore_if_exists: true,
+            },
+        )
+        .unwrap();
+        assert!(!overwritten.ignored);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/new.ts")).unwrap(),
+            ""
+        );
+        fs::write(dir.path().join("src/new.ts"), "new").unwrap();
+
+        fs::write(dir.path().join("src/final.ts"), "old").unwrap();
+        workspace_apply_resource_operation(
+            root.clone(),
+            WorkspaceResourceOperation::Rename {
+                from_path: "src/new.ts".into(),
+                to_path: "src/final.ts".into(),
+                to_repo_root: None,
+                overwrite: true,
+                ignore_if_exists: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/final.ts")).unwrap(),
+            "new"
+        );
+
+        workspace_apply_resource_operation(
+            root.clone(),
+            WorkspaceResourceOperation::Delete {
+                path: "src/final.ts".into(),
+                recursive: false,
+                ignore_if_not_exists: false,
+            },
+        )
+        .unwrap();
+        let ignored_delete = workspace_apply_resource_operation(
+            root,
+            WorkspaceResourceOperation::Delete {
+                path: "src/final.ts".into(),
+                recursive: false,
+                ignore_if_not_exists: true,
+            },
+        )
+        .unwrap();
+        assert!(ignored_delete.ignored);
+    }
+
+    #[test]
+    fn create_file_overwrite_rejects_existing_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        fs::create_dir_all(dir.path().join("generated/nested")).unwrap();
+        fs::write(dir.path().join("generated/nested/keep.txt"), "keep").unwrap();
+
+        let error = workspace_apply_resource_operation(
+            root,
+            WorkspaceResourceOperation::Create {
+                path: "generated".into(),
+                overwrite: true,
+                ignore_if_exists: true,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("cannot overwrite directory"));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("generated/nested/keep.txt")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn deserializes_lsp_resource_operation_camel_case_fields() {
+        let operation: WorkspaceResourceOperation = serde_json::from_value(serde_json::json!({
+            "kind": "rename",
+            "fromPath": "src/old.ts",
+            "toPath": "src/new.ts",
+            "toRepoRoot": "/workspace-two",
+            "overwrite": true,
+            "ignoreIfExists": false
+        }))
+        .unwrap();
+        assert!(matches!(
+            operation,
+            WorkspaceResourceOperation::Rename {
+                from_path,
+                to_path,
+                to_repo_root: Some(to_repo_root),
+                overwrite: true,
+                ignore_if_exists: false,
+            } if from_path == "src/old.ts"
+                && to_path == "src/new.ts"
+                && to_repo_root == "/workspace-two"
+        ));
+    }
+
+    #[test]
+    fn applies_cross_root_lsp_rename_and_protects_same_path() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        fs::create_dir(source.path().join("src")).unwrap();
+        fs::create_dir(destination.path().join("lib")).unwrap();
+        fs::write(source.path().join("src/main.ts"), "content").unwrap();
+        let source_root = source.path().to_string_lossy().to_string();
+        let destination_root = destination.path().to_string_lossy().to_string();
+
+        workspace_apply_resource_operation(
+            source_root.clone(),
+            WorkspaceResourceOperation::Rename {
+                from_path: "src/main.ts".into(),
+                to_path: "lib/main.ts".into(),
+                to_repo_root: Some(destination_root),
+                overwrite: false,
+                ignore_if_exists: false,
+            },
+        )
+        .unwrap();
+        assert!(!source.path().join("src/main.ts").exists());
+        assert_eq!(
+            fs::read_to_string(destination.path().join("lib/main.ts")).unwrap(),
+            "content"
+        );
+
+        let ignored = workspace_apply_resource_operation(
+            source_root,
+            WorkspaceResourceOperation::Rename {
+                from_path: "src".into(),
+                to_path: "src".into(),
+                to_repo_root: None,
+                overwrite: true,
+                ignore_if_exists: false,
+            },
+        )
+        .unwrap();
+        assert!(ignored.ignored);
+        assert!(source.path().join("src").is_dir());
+    }
+
+    #[test]
+    fn failed_overwrite_move_restores_existing_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.ts");
+        let destination = dir.path().join("destination.ts");
+        fs::write(&destination, "original destination").unwrap();
+
+        let error = move_resource_replacing(&missing, &destination).unwrap_err();
+
+        assert!(error.contains("replace"));
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "original destination"
+        );
+        let entries = fs::read_dir(dir.path())
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn rejects_moving_directory_inside_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        fs::create_dir_all(dir.path().join("src/nested")).unwrap();
+        fs::write(dir.path().join("src/main.ts"), "content").unwrap();
+
+        let error = workspace_apply_resource_operation(
+            root,
+            WorkspaceResourceOperation::Rename {
+                from_path: "src".into(),
+                to_path: "src/nested/moved".into(),
+                to_repo_root: None,
+                overwrite: false,
+                ignore_if_exists: false,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("inside itself"));
+        assert!(dir.path().join("src/main.ts").is_file());
+        assert!(!dir.path().join("src/nested/moved").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_copy_and_rename_preserve_symbolic_links() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        fs::write(dir.path().join("target.ts"), "content").unwrap();
+        symlink("target.ts", dir.path().join("source-link.ts")).unwrap();
+
+        copy_resource_target(
+            &dir.path().join("source-link.ts"),
+            &dir.path().join("copied-link.ts"),
+        )
+        .unwrap();
+        assert!(
+            fs::symlink_metadata(dir.path().join("copied-link.ts"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_link(dir.path().join("copied-link.ts")).unwrap(),
+            PathBuf::from("target.ts")
+        );
+
+        workspace_apply_resource_operation(
+            root,
+            WorkspaceResourceOperation::Rename {
+                from_path: "source-link.ts".into(),
+                to_path: "renamed-link.ts".into(),
+                to_repo_root: None,
+                overwrite: false,
+                ignore_if_exists: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            fs::symlink_metadata(dir.path().join("renamed-link.ts"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::read_link(dir.path().join("renamed-link.ts")).unwrap(),
+            PathBuf::from("target.ts")
+        );
     }
 
     #[test]

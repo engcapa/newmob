@@ -113,7 +113,7 @@ export function diagnosticDecorations(view: EditorView, diagnostics: LspDiagnost
     const from = offsetFromLspPosition(view.state.doc, diagnostic.range.start);
     const rawTo = offsetFromLspPosition(view.state.doc, diagnostic.range.end);
     const to = Math.max(rawTo, Math.min(view.state.doc.length, from + 1));
-    if (from > view.state.doc.length || to < from) return [];
+    if (from >= view.state.doc.length || to <= from) return [];
     return Decoration.mark({
       class: diagnosticClass(diagnostic.severity),
       attributes: { title: diagnostic.message },

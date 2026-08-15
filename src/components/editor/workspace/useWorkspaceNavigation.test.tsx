@@ -205,4 +205,105 @@ describe("useWorkspaceNavigation", () => {
     expect(useCodeWorkspaceStore.getState().getInstance("workspace-1").splitOrientation).toBe("vertical");
     expect(setSearchEverywhereOpen).toHaveBeenCalledWith(false);
   });
+
+  it("remaps navigation history, carets, and recent files after a resource move", async () => {
+    const first: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/first.ts" };
+    const second: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/second.ts" };
+    const moved: CodeWorkspaceFileRef = { kind: "root", rootId: "root-2", path: "lib/first.ts" };
+    const openFilesRef = { current: {
+      "root:root-1:src/first.ts": openState(first),
+      "root:root-1:src/second.ts": openState(second),
+    } };
+    const openFile = vi.fn(async () => {});
+    const revealLocation = vi.fn();
+    const setRecentEntries = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ activeKey }) => useWorkspaceNavigation({
+        workspaceInstanceId: "workspace-1",
+        activeKey,
+        roots,
+        flatFiles: {},
+        visible: false,
+        rootsRef: { current: roots },
+        looseFilesRef: { current: [] },
+        openFilesRef,
+        loadFlatFiles: vi.fn(async () => {}),
+        openFile,
+        revealLocation,
+        setSearchEverywhereMode: vi.fn(),
+        setSearchEverywhereOpen: vi.fn(),
+        setRecentEntries,
+        setRecentFilesOpen: vi.fn(),
+      }),
+      { initialProps: { activeKey: "root:root-1:src/first.ts" as string | null } },
+    );
+    act(() => result.current.noteCaretPosition("root:root-1:src/first.ts", { line: 7, character: 3 }));
+    rerender({ activeKey: "root:root-1:src/second.ts" });
+    await waitFor(() => expect(result.current.navCan.back).toBe(true));
+
+    act(() => result.current.reconcileFileReferences((ref) => {
+      if (ref.kind !== "root") return ref;
+      if (ref.path === "src/first.ts") return moved;
+      return ref;
+    }));
+    act(() => result.current.navigateHistory(-1));
+    expect(openFile).toHaveBeenLastCalledWith(moved);
+    expect(revealLocation).toHaveBeenLastCalledWith("root:root-2:lib/first.ts", { line: 7, character: 3 });
+
+    act(() => result.current.openRecentFiles());
+    expect(setRecentEntries).toHaveBeenLastCalledWith([
+      expect.objectContaining({ key: "root:root-1:src/second.ts", ref: second }),
+      expect.objectContaining({ key: "root:root-2:lib/first.ts", ref: moved }),
+    ]);
+  });
+
+  it("navigates to last edit location and filters recently changed files", async () => {
+    const first: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/first.ts" };
+    const second: CodeWorkspaceFileRef = { kind: "root", rootId: "root-1", path: "src/second.ts" };
+    const openFilesRef = { current: {
+      "root:root-1:src/first.ts": openState(first),
+      "root:root-1:src/second.ts": openState(second),
+    } };
+    const openFile = vi.fn(async () => {});
+    const revealLocation = vi.fn();
+    const setRecentEntries = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ activeKey }) => useWorkspaceNavigation({
+        workspaceInstanceId: "workspace-1",
+        activeKey,
+        roots,
+        flatFiles: {},
+        visible: false,
+        rootsRef: { current: roots },
+        looseFilesRef: { current: [] },
+        openFilesRef,
+        loadFlatFiles: vi.fn(async () => {}),
+        openFile,
+        revealLocation,
+        setSearchEverywhereMode: vi.fn(),
+        setSearchEverywhereOpen: vi.fn(),
+        setRecentEntries,
+        setRecentFilesOpen: vi.fn(),
+      }),
+      { initialProps: { activeKey: "root:root-1:src/first.ts" as string | null } },
+    );
+
+    // Record an edit in first.ts at line 14, character 2
+    act(() => result.current.recordEditLocation(first, { line: 14, character: 2 }));
+
+    // Switch active file to second.ts
+    rerender({ activeKey: "root:root-1:src/second.ts" });
+
+    // Ctrl+Shift+Backspace jumps back to last edit location in first.ts
+    act(() => result.current.navigateLastEditLocation());
+    expect(revealLocation).toHaveBeenLastCalledWith("root:root-1:src/first.ts", { line: 14, character: 2 });
+    expect(openFile).toHaveBeenLastCalledWith(first);
+
+    // Ctrl+Shift+E shows only changed files (first.ts)
+    act(() => result.current.openRecentFiles({ changedOnly: true }));
+    expect(result.current.recentChangedOnly).toBe(true);
+    expect(setRecentEntries).toHaveBeenLastCalledWith([
+      expect.objectContaining({ key: "root:root-1:src/first.ts", ref: first }),
+    ]);
+  });
 });

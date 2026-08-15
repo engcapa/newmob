@@ -1,10 +1,12 @@
-# Code Workspace 轻量 IDE 化设计方案
+# Code Workspace IntelliJ IDEA Code Editor 对齐方案
 
-> 目标：在现有 Code Workspace 基础上做功能与交互完善，达到"日常代码开发够用"的 IntelliJ IDEA 级体验（非全量对标）。本文档为设计稿，不含实现代码。
+> 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先达到日常代码编辑工作流等价，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-07-26 · 版本：v3.3（在 M6–M9 基础上新增 **M10 Java Build/Run 可执行闭环**：主类发现、Maven/Gradle/单文件启动、多模块构建任务、项目 Build/Rebuild、顶部运行入口与 wrapper 跨平台修复；详见 §11.G。调试仍使用通用 DAP，普通 Run 不再依赖 java-debug bundle）· 状态：**实施中**（代码与聚焦自动化已交付，M6–M10 真机工程冒烟待回填）
+> 日期：2026-08-15 · 版本：v4.29（IDEA 2026.2 editor capability realignment & current-code audit）· 状态：**实施中**。本轮仅更新目标、能力基线和待办，不修改代码。代码审计基线为当前分支 `ca18b396`；M0–M11 既有实现继续保留，但 Build/Run/Debug/Test/Terminal 等改列为“IDE 伴随能力”，不再计入 Code Editor 对齐分数。
 >
-> 早期版本：v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
+> 当前结论：Code Workspace 已具备较完整的 CodeMirror/LSP 日常编辑骨架，但仍是 **provider-backed editor**，不是 IDEA 的 PSI/index/inspection/refactoring engine 等价物。尤其是缩进状态栏切换尚未驱动编辑器或 formatter，Keymap 面板只是速查表；两者不得登记为 IDEA 能力已交付。
+>
+> 早期版本：v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
@@ -14,28 +16,29 @@
 
 | 领域 | 已有能力 | 载体 |
 |------|----------|------|
-| 工作区模型 | 多根目录（folder/git）+ 松散文件（loose files）、最近工作区 | `CodeWorkspaceTabInfo`，tab 类型 `code-workspace` |
-| 文件树 | tree/compact/flat 三种视图、名称过滤、新建/重命名/删除、Git 状态徽标、树字号缩放 | `CodeWorkspaceTab.tsx`（当前约 3.7k 行单文件，文件树视图壳已抽离） |
-| 编辑器 | CodeMirror 6：行号、折叠、括号匹配、多光标、历史、词级补全、活动行高亮 | 同上 |
-| Markdown | edit/preview/split，Mermaid 渲染 + SVG/PNG 导出 | 同上 |
-| LSP | 10 种语言预设 + 自定义命令；didOpen/Change/Save/Close、publishDiagnostics、hover、definition、references；服务探测 | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts` |
-| Git | 快照/暂存/提交/日志/diff/分支/标签/stash/merge/rebase/cherry-pick/冲突/远端认证 —— 已相当完整 | `src/lib/git.ts`、`components/git/WorkspaceGitManager` |
-| 外观 | code view profile（主题/字号）与设置页共享，编辑区/树独立缩放 | `codeViewProfile.ts` |
+| 工作区模型 | 多根目录（folder/git）+ loose files、布局恢复、最近工作区、tree/compact/flat 文件树 | `CodeWorkspaceTabInfo`、`codeWorkspaceStore`、`useWorkspaceTreeData` |
+| 编辑内核 | CodeMirror 6：查找替换、多光标/矩形选择、折叠、注释、soft wrap、括号匹配/闭合、常用编辑键位、大文件降级、二分屏与同步滚动、preview/pin/溢出 tab | `CodeMirrorHost.tsx`、`workspaceEditorCommands.ts`、`EditorGroup.tsx` |
+| 编辑效率 | LSP 补全与 snippet、启发式 Complete Current Statement、同词多光标、大小写切换、内置/自定义 Live Templates 与 Postfix Templates；缩进检测和状态栏标签 | `lspCompletion.ts`、`workspaceEditorCommands.ts`、`liveTemplates.ts`、`LiveTemplatesSettings.tsx`、`codeWorkspaceStatusStore.ts` |
+| Markdown | edit/preview/split，Mermaid 渲染 + SVG/PNG 导出 | `MarkdownPreview.tsx` |
+| LSP 与分析 | 10 种语言预设 + 自定义命令；文档同步、诊断元数据、补全、签名、文档、导航/引用/层级、格式化、重命名、按 kind 请求 Code Action、inlay/semantic token、动态 capability、跨 root/language 的有界 workspace symbol 聚合、provider-backed inspection profile/related locations/structured evidence | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts`、`useWorkspaceLspSession.ts`、`AnalysisPanel.tsx` |
+| 搜索与导航 | Find/Replace in Files、Search Everywhere、Go to File/Class/Symbol、Recent/Recently Changed Files、Last Edit Location、前进/后退、Outline/结构弹窗、Problems | `workspace_search.rs`、`SearchEverywhere.tsx`、`useWorkspaceNavigation.ts`、workspace panels |
+| 质量与重构 | LSP diagnostics/Code Action、provider-backed inspection profile；Rename、受限 Safe Delete、provider refactor kinds、可勾选 WorkspaceEdit 预览、事务 undo/redo | `inspectionProfile.ts`、`safeDelete.ts`、`RefactoringPreviewDialog.tsx`、`workspaceEditHistory.ts` |
+| 编辑器呈现 | breadcrumbs、sticky lines、inlay hints、semantic tokens、Git gutter/inline blame/chunk rollback、coverage gutter、TODO/书签、本地历史 | workspace chrome/panels、`coverageEditorChrome.ts` |
+| IDE 伴随能力（不计入 Editor 对齐） | PTY、Build/Run/Test/Debug、DAP、工程拓扑、覆盖率报告、Git Manager、AI、远程工作区 | `workspace_execution.rs`、`dap.rs`、Run/Build/Test/Debug panels |
+| 设置入口 | code view profile、编辑区/树缩放、LSP/Java 设置、Live Template 管理、固定命令速查表 | `codeViewProfile.ts`、Settings、`KeymapCheatSheetDialog.tsx` |
 
-**明确缺失（vs 日常 IDE 开发）：**
+**当前明确缺失或被高估的 Editor 能力：**
 
-1. 编辑器内查找/替换（未引入 `@codemirror/search`）
-2. 语言智能只有"只读四件套"（诊断/悬停/定义/引用）——无补全、签名帮助、快速文档、重命名、格式化、Code Actions、类/符号查找、调用层级、类型层级、实现跳转、用法高亮、inlay hints
-3. 全局内容搜索（Find in Files）——只有文件名过滤
-4. 导航体系：Search Everywhere、Go to File/Class/Symbol、Recent Files、前进/后退
-5. Problems 汇总面板、Outline/结构视图
-6. 编辑区分屏、编辑器 tab 管理（固定/关闭其他/中键关闭）、面包屑
-7. 集成终端（终端目前是独立 tab，与工作区无联动）
-8. Git 编辑器内呈现：gutter 变更标记、inline blame
-9. Run/Tasks（脚本探测与运行）
-10. 本地历史（Local History）
-11. 树右键菜单、拖拽（文件操作目前依赖工具栏按钮）
-12. 仅支持本地文件系统（`workspace.rs` 全部走本地路径）
+1. 没有 IDEA 的 PSI/stub index、inspection/data-flow/nullability engine 和索引保证的重构；provider semantic snapshot 只是过期结果护栏。
+2. 没有 Smart Completion、type-matching completion、重复调用扩展候选、语言感知 Complete Current Statement、Surround With、Generate Code 和完整 intention catalog。
+3. 没有 Code Workspace 编辑器内的 Full Line/inline suggestion、模型生命周期或逐词/逐行接受；Terminal 的 FIM 建议不是 Code Editor Full Line Completion。
+4. 缩进“切换”当前只改变 React 状态与状态栏文案，未配置 CodeMirror `indentUnit`/tab behavior，也未把 `tabSize`/`insertSpaces` 传给 LSP formatter；不得标为已交付。
+5. 只有 LSP format/range format、format on save 和 organize imports；没有 IDEA code-style scheme、EditorConfig 解析/优先级、rearrange、cleanup、formatter marker/exclusion 和 scope formatting。
+6. Live/Postfix Templates 已有目录与自定义 UI，但 postfix 只按文本正则提取表达式，没有类型/上下文适用性、template variable function、surround template 和 import shortening 语义。
+7. 导航仍缺 Recent Locations（带上下文预览）、Switcher、related/super/sibling/method navigation、Structural Search/Replace；编辑 tab 仍限定两个 group，缺嵌套分屏、拖拽拆分/停靠、detach、tab policy/limit/sort。
+8. Keymap 目前是固定命令列表的速查/执行面板，不支持 action tree、按键反查、冲突检测、增删快捷键、scheme copy/reset/import/export；设置 schema/迁移和无障碍验收也未闭环。
+9. clipboard history、join/sort/reverse/transpose lines、unwrap/remove、custom folding region、virtual space、smart keys、字体/ligature/color scheme 等 IDEA 编辑器基础项尚无产品级闭环。
+10. Linux/macOS/Windows 的 IME、非美式键盘、系统快捷键、剪贴板、字体、路径、watcher、编码和打包应用证据仍缺。详细权威状态以 §2.5、§2.8、§2.9 和 §8.2 为准。
 
 ---
 
@@ -43,26 +46,155 @@
 
 ### 2.1 产品定位
 
-Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码、提交代码的主战场。重活（调试、重型重构、Profiling）仍交给外部 IDE，taomni 的差异化是**与终端/SSH/SFTP/AI 的一体化**。
+Code Workspace 是 taomni 内的代码编辑器与工程工作台，但本方案只把 **Code Editor** 作为主验收对象。参考产品固定为 IntelliJ IDEA 2026.2，参考语言固定为 Java；TypeScript/JavaScript、Python、Go、Rust、C/C++ 等语言通过 LSP/provider 提供能力，但只能按实际 capability 和对照用例分别记账，不能由“协议已接入”推导为全语言 IDEA 等价。官方明确标为 Ultimate 且默认随产品启用的 Full Line Code Completion 单独按 P2 参考发行版能力记账，不由此扩大到任意插件兼容。
+
+目标分两层：
+
+1. **发布目标：核心编辑工作流等价。** 用户能高效完成输入、补全、理解、导航、搜索、格式化、修复、重构和恢复，且动作可发现、可配置、可撤销。
+2. **北极星目标：Java 语义对齐。** 对声明/引用、inspection、data-flow 和项目级重构给出可证明的完整性、冲突和 freshness 语义；不要求复用 JetBrains 源码，但要求对照 fixture 的结果等价。
+
+Build/Run/Debug/Test/Coverage、Terminal、Git Manager、AI 和远程工作区继续发展为伴随能力；它们能增强编辑体验，但不能用于宣称 Code Editor 已对齐。
 
 ### 2.2 范围分级
 
 | 级别 | 内容 |
 |------|------|
-| **P0（核心补齐）** | 编辑器查找替换；语言智能核心（补全/签名/快速文档/重命名/格式化/Code Action/类与符号查找/实现与类型跳转/文档符号）；Find in Files；Search Everywhere + 导航体系；Problems 面板；Outline；树右键菜单 |
-| **P1（体验对齐）** | 编辑区分屏、编辑器 tab 管理、面包屑、集成终端底部面板、调用层级/类型层级、用法高亮、inlay hints、Git gutter/inline blame、Run/Tasks、工作区状态持久化增强 |
-| **P2（差异化/加分）** | 本地历史、TODO/书签面板、语义高亮、AI 深度集成（解释/修复/生成 + diff 应用）、远程工作区（SSH 根目录）探索 |
+| **P0（正确性与日常效率）** | 修正无效/夸大的 affordance；真实缩进与 smart keys；编辑命令；Basic/Smart/Type-matching Completion；Live/Postfix Template 语义；Surround/Generate；diagnostics/intention；EditorConfig/code style；Search/Navigation；可编辑 keymap |
+| **P1（Java 语义对齐）** | project/dependency context、声明/引用 index、inspection/data-flow、冲突感知 refactor、完整 usages preview、semantic navigation、dumb/smart state、性能与损坏恢复 |
+| **P2（高级编辑工作流）** | Structural Search/Replace、Recent Locations/Switcher、Full Line 本地内联补全、Code Vision、复杂 tab/nested split/detach、clipboard history、custom folding、scratch/injected language、完整 appearance/accessibility |
+| **X（伴随轨道，不计 Editor 分数）** | Build/Run/Debug/Test/Coverage、Terminal、完整 Git 客户端、AI、SSH/SFTP；仅其编辑器内入口/装饰按相关 Editor 用例验收 |
 
-### 2.3 非目标（明确不做）
+### 2.3 Code Editor 对齐边界
 
-> **v3.0 范围变更**：原列为非目标的「完整调试器（DAP）」与「构建系统模型」已纳入 §11 的 Java 深度支持计划（M6–M9）。调试改为通用 DAP 框架分阶段实现；构建集成只做依赖树/生命周期/模块视图，不做 IDEA 级 facet 建模。下表为更新后的非目标清单。
+**纳入主目标：**
 
-- **索引式重构**（move class、change signature 等超出 LSP 能力的重构）——只做 jdtls code action 提供的重构
-- **IDEA 级 project model / facet 体系**——构建集成止于依赖树/生命周期/模块视图（§11 F），不建完整 facet 模型
-- **插件系统 / 市场**
-- **Profiler / 内存分析器**
-- 不替代现有 Git Manager 的完整功能，只做编辑器内的轻量呈现与入口
-- **远程 jdtls**（在 SSH 主机上运行语言服务器）——仍在 §5.13 spike 之外
+- 文本输入/选择/剪贴板、多光标、statement-aware edit、查找替换、折叠、注释、smart keys、编码/EOL/BOM、tab/split、breadcrumbs、scrollbar/gutter 和状态栏。
+- Basic/Smart/Type-matching Completion、参数信息、快速文档、Live/Postfix Templates、Complete Statement、Surround With、Generate Code、auto-import 和 optimize imports。
+- IDEA Ultimate 默认 bundled plugin 提供的本地 Full Line Completion 作为 P2 参考扩展：单/多行内联建议、整段/逐词/逐行接受、语义过滤、auto-import、离线与隐私行为；只先要求 Java 对照，不要求兼容 JetBrains 插件 API。
+- diagnostics、intention/quick fix、inspection/profile/scope/suppression、Problems、data-flow/nullability；provider 结果必须标明来源和完整性。
+- declaration/type/implementation/usages、class/file/symbol/action 搜索、hierarchy、Recent/Last Edit/Recent Locations、结构视图、Structural Search/Replace。
+- format/range format、code-style scheme、EditorConfig、rearrange、cleanup、save actions 和 formatter exclusion。
+- Rename/Safe Delete/Move/Copy/Extract/Inline/Change Signature 等重构的 preview、exclude、conflict、undo 和 freshness。
+- keymap scheme、action context、settings schema/迁移、可发现性、键盘/读屏/焦点/对比度以及 Linux/macOS/Windows 一致性。
+
+**作为 Editor 的使能基础纳入，但只验收其编辑影响：** project/module/source-set、dependency/library source、language level、symbol/reference index 和增量失效。完整 build artifact、compiler cache 或运行配置不属于 Editor 主分数。
+
+**不纳入 Code Editor 主目标：** 第三方/任意 IDEA 插件兼容生态、AI Assistant、完整 Build/Run/Debug/Test/Coverage 产品、完整 Git 客户端、Terminal、Profiler、数据库客户端、远程桌面、邮件/聊天。它们独立记账，不得替代上面的编辑器缺口；上面单列的 Ultimate bundled Full Line 能力不代表放开此边界。
+
+### 2.4 能力等级与验收门禁
+
+实现状态统一使用四级，避免继续把 UI/协议入口写成“已交付”：
+
+| 等级 | 含义 |
+|------|------|
+| **L0 未实现** | 没有用户可用入口，或入口不产生承诺的效果 |
+| **L1 表面/协议基线** | UI、命令或协议已接入，但语义、配置、失败或完整性仍依赖外部 provider/固定假设 |
+| **L2 工作流可用** | 主路径、取消/失败、状态同步、撤销和聚焦自动化闭环；明确展示 provider/平台限制 |
+| **L3 对照等价** | 通过 IDEA 对照 fixture，语义完整性、冲突、性能、配置与 Linux/macOS/Windows 真机证据均满足 |
+
+能力从 L1/L2 升级必须同时通过：
+
+1. **行为门禁**：入口、快捷键、鼠标/键盘流程、结果、取消、失败和 undo 与对照用例一致；不能以静默 `null` 或无效开关作为成功。
+2. **语义门禁**：语义功能记录 provider/index、scope、revision、完整性和冲突；LSP/DAP 字段存在不等于 IDEA 行为等价。
+3. **状态门禁**：dirty buffer、磁盘、tab、index、tree、diagnostics 与外部变更在资源操作后收敛。
+4. **配置与可访问门禁**：设置可持久化/迁移/恢复默认，action 可发现，焦点、读屏名称、缩放、对比度和仅键盘操作可验收。
+5. **性能门禁**：定义小/中/大工程基准、输入延迟、索引/搜索时间、内存上限和 large-file 降级，不允许 UI 假死或旧结果回填。
+6. **三端与回归门禁**：Linux/macOS/Windows 原生包各有真实 fixture；聚焦 Vitest/Rust 测试与 `qa-ui-auto --diff` 通过，并保存脱敏日志/截图/版本信息。
+
+### 2.5 当前 Gap 清单（权威基线）
+
+状态按 §2.4 的 L0–L3 记录。下表只评价 Editor；X 轨道即使代码更多，也不提升 Editor 等级。
+
+| 优先级 | 能力域 | 当前代码基线 | IDEA 2026.2 关键 Gap | 等级 |
+|--------|--------|--------------|----------------------|------|
+| P0 | 文本编辑与 smart keys | 查找替换、多光标/矩形选择、注释、fold、soft wrap、括号闭合、复制/删/移动行、大小写切换、selection range、编码/EOL/BOM | 缺 clipboard history、join/sort/reverse/transpose、unwrap/remove、custom fold、virtual space、Tab 跳出括号等语言 smart keys；Complete Statement 只是行文本启发式 | **L2 部分工作流** |
+| P0 | 缩进、格式与 code style | 缩进嗅探/状态标签；LSP document/range formatting、format on save、organize imports；Java organize-import 设置 | 状态栏切换未驱动 CodeMirror 或 formatter；formatter 默认仍回落 `tabSize=2`/`insertSpaces=true`；无 EditorConfig、code-style scheme、rearrange/cleanup、scope format、formatter marker/exclusion、save-actions pipeline | **L1，存在错误承诺** |
+| P0 | Completion / Templates / Generate | LSP completion/resolve/snippet/additional edits、signature help；内置/自定义 Live Templates 与 Postfix Templates；Tab 展开 | 无 Smart/Type-matching Completion、重复调用扩展候选、completion exclusion/priority；postfix 不按类型/上下文过滤；无 template functions、Surround With、Generate constructors/getters/override/toString 等 | **L1–L2，provider/文本驱动** |
+| P2 | Full Line / Inline Completion | Code Workspace 编辑器内没有 inline suggestion/ghost text、模型管理或部分接受；Terminal FIM source 不计入本项 | IDEA Ultimate 的 bundled plugin 默认启用，本地模型给出单/多行建议，支持整段/逐词/逐行接受、格式/括号补全、基础语义检查、auto-import、smart filtering、模型下载/更新和硬件降级 | **L0** |
+| P0 | Diagnostics / Intention / Inspection | push/pull diagnostics、Problems、Alt+Enter Code Action/resolve/command；provider rule 显示启停/severity、file/line suppression、baseline、related evidence | 无 IDEA inspection registry/executor、scope/profile rule engine、自定义 severity 执行、cleanup、CFG/SSA/nullability/taint/interprocedural data-flow 和可证明 path；evidence 只是 provider metadata/文本分类 | **L1，核心差距** |
+| P0 | Navigation / Search | declaration/type/implementation/references、call/type hierarchy、Search Everywhere、Go to File/Class/Symbol、Recent/Changed Files、Last Edit、history、Outline/Structure、Problems 跳转 | Last Edit 仅内存单点；缺 Recent Locations 上下文预览、Switcher、related/super/sibling/method navigation、完整 library/dependency index、Structural Search/Replace 和 scope/template 分享 | **L2 部分工作流** |
+| P0 | Keymap / Actions / Settings | 固定 `WorkspaceCommand` registry、context gate、action search、快捷键速查与点击执行；部分 editor/LSP/template 设置 | 速查表不是 keymap editor；无 scheme 继承/copy/reset/import/export、按键反查、冲突检测、添加/删除 mouse/keyboard shortcut、统一 settings schema/migration；多处快捷键仍硬编码在 CodeMirror 与 workspace 两层 | **L1** |
+| P1 | Index / Refactor | LSP Rename、受限 Safe Delete、provider extract/inline/change-signature/move；semantic revision/root guard；可勾选 raw text edits 的 preview；普通文件事务 undo/redo | 无声明/引用/type graph、smart/dumb state、language-aware conflict detector 和后置验证；逐 edit 排除可能破坏 provider 重构不变量；缺 Copy、Extract Field/Parameter、Pull/Push、Encapsulate 等 Java catalog | **L1，核心差距** |
+| P2 | Tabs / Splits / Editor presentation | preview/pin/scroll/all-tabs，两个 editor group，横/纵 split、同步滚动，breadcrumbs/sticky lines/inlay/semantic/Git/coverage/debug gutter | 缺任意 nested splits、tab drag-to-split/dock、detach、equalize/stretch/splitter navigation、tab limit/order/policy；缺 scrollbar lens、Code Vision/继承提示、完整 font/ligature/color/appearance scheme | **L2 部分工作流** |
+| P0 | File state / Recovery | hash 写保护、watcher、dirty conflict、恢复快照、行级三方 merge、WorkspaceEdit 资源操作与普通文件事务 history | 缺语义/token merge、目录/symlink/特殊文件 undo、大小写-only rename、locked file/permission/network/UNC 完整行为和三端打包证据 | **L2** |
+| P0 | Accessibility / Performance / 三端 | large-file decoration 降级、部分 ARIA/testid、布局持久化；Linux 自动化与条件编译 | 无统一输入延迟/内存/索引基准；IME、读屏、focus order、200% zoom、非美式键盘、系统快捷键及 Linux/macOS/Windows 原生包矩阵未验收 | **L1–L2** |
+| X | Build/Run/Debug/Test/Coverage 等 | 已有结构化 execution/DAP/JUnit/LCOV/JaCoCo/Git/PTY/AI 能力 | 独立按伴随轨道验收；coverage 目前是报告扫描/展示，不是 IDEA Run with Coverage 配置模型 | **不计 Editor 等级** |
+
+### 2.6 Linux / macOS / Windows Gap
+
+| 平台 | 当前证据 | 平台特有 Gap | 严格验收清单 |
+|------|----------|--------------|----------------|
+| Linux | 当前环境有 TypeScript/Vitest/Rust 自动化和 `cfg(unix)` 路径 | 无打包 Tauri 记录；Wayland/X11 选区/剪贴板/拖拽、fcitx/ibus IME、非美式键盘、系统快捷键、字体 fallback、inotify 上限与跨 mount rename 未验收 | Ubuntu Wayland + X11；中日韩 IME；US/非 US 键盘；多光标/clipboard/tab/split；大小写敏感 FS；Java/TS 大工程 |
+| macOS | 无本轮本机执行证据；Tauri WebDriver 不支持 macOS | `Cmd`/`Option`/dead key、输入法 composition、系统菜单与快捷键、Retina/字体、APFS 大小写模式、quarantine/notarization、应用退出后的 LSP 子进程均未验收 | Apple Silicon 为主、Intel 至少一套；Cmd 系 keymap；IME；大小写-only rename；签名包；Java/TS 编辑主路径 |
+| Windows | 有条件编译与部分 Rust 单测，本轮未在 Windows 执行 | WebView2 composition/IME、AltGr/OEM key、CRLF/BOM、drive/UNC/长路径/盘符大小写、锁定文件/杀软竞争、junction/symlink 和高 DPI 未闭环 | Windows 11；中日韩 IME；US/非 US 键盘；NTFS + UNC；CRLF/UTF-8 BOM；200% 缩放；锁定文件失败恢复；Java/TS 编辑主路径 |
+
+三端共同保存同一套验收产物：应用/OS/WebView/字体/键盘/IME 版本、工程 fixture、操作步骤、LSP trace 摘要、性能采样、失败截图/脱敏日志和时间戳。浏览器 stub 与单平台单测不能替代这些证据；DAP/Build 证据只归 X 轨道。
+
+### 2.7 支持性协议实施记录（原 P0-A/P0-B，2026-08-11）
+
+本节保留既有 LSP/文件一致性成果，作为 Editor 的支撑证据；它不是 v4.29 优先级清单，也不能覆盖 §2.5 中的真实产品 Gap。
+
+- [x] 保留 LSP `documentChanges` 顺序并支持 TextDocumentEdit/CreateFile/RenameFile/DeleteFile。
+- [x] Code Action 按 edit 后 command 执行，支持 command-only；edit 部分失败时不执行 command。
+- [x] 服务器反向 `workspace/applyEdit` 具备前端桥、30 秒超时、workspace 校验、`failureReason`/`failedChange` 回传；provider command 串行执行，command 回推 edit 在最终 mutation 前重复校验 semantic revision。
+- [x] 动态 capability 注册/注销刷新前端 capability 摘要。
+- [x] 版本化编辑同时校验 LSP version 与“该文本已完成同步”，避免未发送输入被旧 edit 覆盖；语义查询前等待活跃 editor buffer 的 `didChange` 队列，`didSave` 严格排在同文件已排队 `didChange` 之后，保存期间的新编辑会补发最新 `didChange`。
+- [x] Provider semantic snapshot 仅以 workspace `revision` 判定 freshness，`generation` 只仲裁异步查询的可见发布顺序；同 revision 并发结果可继续使用，跨 revision 的查询、resolve、确认后 continuation 和最终 mutation 必须拒绝。这是一致性协议，不是 IntelliJ PSI/stub index。
+- [x] WorkspaceEdit 串行执行；资源操作期间双编辑器组只读；后端完成后基于最新 buffer 快照提交 tab/LSP/导航/树/书签状态。
+- [x] Create/Rename/Delete 遵循 option 优先级；rename overwrite 失败恢复旧目标；跨文件系统复制保留符号链接；拒绝 CreateFile 覆盖目录和目录移入自身。
+- [x] `changeAnnotations.needsConfirmation` 在任何修改前统一确认；拒绝不修改 buffer/磁盘，并按协议回传未应用原因。
+- [x] 用户主动创建/重命名/删除接入 `workspace/will*Files` + `workspace/did*Files`；按静态/动态 capability、scheme/glob/kind 和 session root 筛选，`will*` 返回的 edit 复用 `workspace/applyEdit` 前端桥并在落盘前完成。
+- [x] server-request/notification 分发：`window/showMessageRequest` 多 action 与超时/取消、`window/showMessage`、work-done progress/取消、workspace configuration/folders、已知 refresh、未知 method `-32601`、无效参数 `-32602`。
+- [x] LSP 3.17 `workspace/diagnostic` fallback：按静态/动态 provider 启用、跨 session 并发、resultId full/unchanged、relatedDocuments、partial result token、失败回退 push 缓存、响应原子应用。
+- [x] `workspace/diagnostic/refresh`：转发到前端并立即刷新打开文件和 Problems 聚合，不再只依赖轮询。
+- [x] 编辑器格式元数据：UTF-8 BOM 无损读写、状态栏显示/切换 BOM，LF/CRLF/CR 状态栏循环转换并进入现有 dirty/hash 保存链路。
+- [x] 字符集闭环：自动识别 UTF-8/UTF-16 与常见 legacy charset；状态栏编码入口支持显式 Reload 与 Convert on Save；非 UTF-8 写入拒绝不可表示字符并保留 BOM/hash。
+- [x] 应用内文件变更通知：创建/删除/重命名、保存和 WorkspaceEdit 写盘均转发 `workspace/didChangeWatchedFiles`，并抑制短窗口内的重复本地事件。
+- [x] `workspace/didChangeWatchedFiles`：动态 watcher 注册/注销、字符串 glob/`RelativePattern`、`kind` 位掩码、Create/Change/Delete 与 rename 拆分、参数校验和去重。
+- [x] WorkspaceEdit 预检/预览：统计受影响文件、文本编辑和资源操作，保留 `documentChanges` 顺序，展示资源路径与实际引用的 change annotations；多文件或资源操作在首个 mutation 前确认，拒绝时零修改。
+- [x] `codeAction/resolve`：initialize 声明延迟 `edit`/`command` 解析能力；保留原始 CodeAction/data，用户选中后 resolve 并合并结果；请求失败回退原动作且不破坏 edit-before-command。
+- [x] Tauri 原生 watcher 代码链路：多根目录与 loose file 递归监控、事件归一化、workspace 生命周期启停、前端外部变更刷新与干净 buffer 自动 reload。
+- [ ] macOS/Windows/Linux 打包应用中的原生 watcher 真机验收：锁定文件、权限错误、大小写-only rename、网络盘/UNC、跨文件系统和 watcher 上限。
+- [x] dirty buffer 外部变更基础恢复 UI：三选一（保留本地/载入磁盘/手工合并）、删除保护；新增有界本地恢复快照与恢复中心（Recover/Discard/Decide later）。
+- [x] 基础行级三方自动合并：非重叠改动自动组合，重叠改动生成可编辑冲突标记。
+- [x] 普通文件 WorkspaceEdit 事务级 undo/redo：多文件 text/create/rename/delete 回放、tab/group 恢复、失败保留历史；Safe Delete 通过 prepareRename + definition + references 生成单一可撤销事务。
+- [ ] IDEA 级语义/token 合并、目录/symlink/特殊文件 undo、恢复快照的三端打包应用验收。
+- [ ] Linux/macOS/Windows 原生工程矩阵与发行包冒烟。
+
+当前协议边界：`workspace/configuration` 对未知 section 返回 `null`，尚无 IDEA 等价的全局设置 schema；WorkspaceEdit 一旦开始磁盘资源操作，不会在操作中途响应取消，以避免主动制造部分落盘状态。事务 undo 只对可读普通文件建立历史，目录、symlink、特殊文件或不可读资源会明确报告不可撤销；原生 watcher、编码转换与恢复中心已有 Linux/浏览器自动化证据，但三端打包应用、网络盘/UNC、大小写-only rename、语义/token 合并仍不能宣称严格完成。
+
+### 2.8 IDEA 2026.2 官方能力再对齐（2026-08-15）
+
+本轮以 JetBrains 2026.2 Help 为准重新建模 Code Editor，而不是从现有实现反推目标。官方页面在 2026-07/08 更新；每个大里程碑开始前必须再次复核 URL 与产品版本。
+
+| 官方能力族 | IDEA 2026.2 真实能力 | 当前 Code Workspace 对比 | 目标修订 |
+|------------|----------------------|---------------------------|----------|
+| Editor basics / source editing | [Editor basics](https://www.jetbrains.com/help/idea/using-code-editor.html) 与 [Write and edit source code](https://www.jetbrains.com/help/idea/working-with-source-code.html) 覆盖 tabs/preview/pin/detach、任意 split、breadcrumbs、font/ligature、virtual space、smart keys、clipboard history、statement move/complete/unwrap、custom folding 等 | 已覆盖常用文本操作、两组 split、preview/pin、breadcrumbs/sticky lines；缺口见 §2.5，Complete Statement 仍为启发式 | P0 先补真实缩进/smart keys/高频 edit；复杂 tab/split/appearance 列 P2 |
+| Completion / templates / generation | [Code completion](https://www.jetbrains.com/help/idea/auto-completing-code.html) 包含 basic、smart type-matching、重复调用扩展范围与 completion 设置；另有 [Live Templates](https://www.jetbrains.com/help/idea/live-templates.html)、[Postfix Completion](https://www.jetbrains.com/help/idea/postfix-code-completion.html)、[Generate Code](https://www.jetbrains.com/help/idea/generating-code.html) 和 [Surround Code](https://www.jetbrains.com/help/idea/surrounding-blocks-of-code-with-language-constructs.html) | LSP basic completion/snippet 与本地 template catalog 可用；没有 smart/type-matching mode、语义 postfix、Surround/Generate | 这些从“加分项”升为 P0 日常效率，不再只追补快捷键 |
+| Full Line code completion（Ultimate bundled plugin） | [Full Line code completion](https://www.jetbrains.com/help/idea/full-line-code-completion.html) 在 Ultimate 中默认 bundled/enabled；模型完全在本机运行，提供单/多行 inline suggestion、整段/逐词/逐行接受、格式/括号/引号修正、基础语义检查、auto-import、smart filtering 与模型更新；Java/Kotlin 模型随 IDEA 提供，其他语言按插件/模型可用性变化 | Code Workspace 编辑器没有 inline suggestion/model runtime；现有 LSP popup completion 和 Terminal FIM 均不是该工作流 | 作为有 edition/plugin 限定的 P2 参考能力，Java 先行；不将其误归为 AI Assistant，也不要求通用 JetBrains plugin compatibility |
+| Intentions / inspections | [Intention actions](https://www.jetbrains.com/help/idea/intention-actions.html) 支持查看/禁用/分配 shortcut；[Code inspections](https://www.jetbrains.com/help/idea/code-inspection.html) 支持 project/scope、severity、自定义 profile、suppression 与 quick-fix | Alt+Enter 和 provider diagnostics 已接；profile 主要改变显示，不执行 IDEA inspection | Provider 能力保持 L1/L2；Java inspection/index/data-flow 为 P1 语义主线 |
+| Navigation / search | [Source code navigation](https://www.jetbrains.com/help/idea/navigating-through-the-source-code.html) 覆盖 declaration/type/implementation、last edit、super/sibling/method navigation；[Search Everywhere](https://www.jetbrains.com/help/idea/searching-everywhere.html) 覆盖 class/file/symbol/action/text；[Structural Search](https://www.jetbrains.com/help/idea/structural-search-and-replace.html) 按语法模板搜索替换 | 主流 LSP 导航、Search Everywhere、Recent/Changed/Last Edit 已有；缺 Recent Locations、Switcher、super/sibling/method 与 SSR | 补齐高频导航列 P0，SSR 与复杂位置历史列 P2；library/index 完整性归 P1 |
+| Formatting / imports / style | [Reformat code](https://www.jetbrains.com/help/idea/reformat-and-rearrange-code.html) 覆盖 fragment/file/module/directory、save/commit、exclude/marker、formatter settings；[Auto/Optimize Imports](https://www.jetbrains.com/help/idea/optimizing-imports.html) 与 [EditorConfig](https://www.jetbrains.com/help/idea/editorconfig.html) 提供持久化 style 与优先级 | LSP format、format on save、organize imports 有入口；状态栏 indentation 没有驱动实际行为，无 style model/EditorConfig/rearrange/cleanup | 真实 indentation + EditorConfig/style pipeline 升为首批 P0，不再把状态标签当完成 |
+| Refactoring | [Code refactoring](https://www.jetbrains.com/help/idea/refactoring-source-code.html) 包含 Safe Delete、Copy/Move、Extract method/constant/field/parameter/variable、Rename、Inline、Change Signature，以及 usages preview、exclude、conflict dialog 和统一 undo | provider actions、raw edit preview/exclude 与普通文件 undo 已有；无语义 conflict/完整性保证 | Java index + provider refactor contract 为 P1；preview UI 只能记 L1/L2 |
+| Keymap / action system | [Keymap](https://www.jetbrains.com/help/idea/settings-keymap.html) 可 search action、按键反查、copy/rename/reset/delete scheme、添加/删除 shortcut 并处理平台键盘差异 | 当前只有固定 action registry 和 cheatsheet | 可编辑 keymap、统一 dispatch、scheme/migration/conflict/a11y 升为 P0 |
+
+官方能力映射只定义“IDEA 有什么”；是否完成仍必须回到 §2.4 的对照 fixture，而不是以页面名称、组件名称或协议 capability 判断。
+
+### 2.9 当前代码证据审计（基线 `ca18b396`，2026-08-15）
+
+| 审计项 | 当前代码证据 | 结论与纠偏 | 下一验收点 |
+|--------|--------------|------------|------------|
+| 缩进与 formatter | `detectIndentation` 只生成 label；`indentationOverrides` 只进入 status segment。`CodeMirrorHost` 没有 indentation prop/compartment，`formatFileText` 调用 `lspFormatting`/`lspRangeFormatting` 时未传 options，Rust 默认 `tabSize=2`、`insertSpaces=true` | “缩进切换已交付”降为 **L1 表面实现**；当前点击不会改变 Tab/Enter/format 行为 | 建立单一 `EffectiveCodeStyle`，同时驱动 CodeMirror、LSP、状态栏、保存与持久化；加 2/4-space/tab fixture |
+| Keymap | `workspaceCommands`、`workspaceEditorKeymap` 和 CodeMirror keymaps 分散硬编码；`KeymapCheatSheetDialog` 只过滤/展示/执行已有 binding | “完整 Keymap 已交付”纠正为 **快捷键速查 L1** | 统一 action registry + when context；scheme copy/reset、录键/反查、冲突解析、持久化/迁移和 macOS 映射 |
+| Completion / templates | `lspCompletion.ts` 支持 resolve/snippet/additional edits；`liveTemplates.ts` 有大量内置项和自定义设置，但 postfix 用行级正则提取 `expr.abbr`；`completeCurrentStatement` 按当前行文本补 `;`/括号/brace | Basic completion 与 template 主路径可用；Smart/type-matching、语义 postfix、statement completion 不能登记为 IDEA 等价 | Java/TS 对照 fixture：可见性/类型过滤、重复调用、imports、overload、语法错误恢复、template context/type |
+| Full Line completion | Code Workspace editor 路径未发现 inline completion/ghost-text renderer、local model runtime、模型设置或部分接受 action；`terminal/aiSuggestionSource.ts` 仅服务终端建议 | 当前为 **L0**；不能用 popup completion、AI 选区动作或 Terminal FIM 抵扣 | Java 首个 fixture 覆盖 offline/local、单/多行、整段/逐词/逐行接受、popup 同步、imports、stale/cancel、硬件不支持、延迟/内存和源码不出机 |
+| Inspection / refactor | `inspectionProfile.ts` 变换 provider diagnostics；`inspectionEvidence.ts` 分类 metadata/text。`RefactoringPreviewDialog` 可逐 raw edit 排除，`filterWorkspaceEditByUsages` 不理解语义依赖；Rename/Safe Delete/provider actions 有 revision/root guard | UI/事务保护有效，但不是 inspection engine 或 conflict-aware refactor；任意排除 edit 可能产生不完整结果 | 先定义 provider completeness/conflict/exclusion contract；Java 声明/引用 index 垂直切片后验证 Rename/Safe Delete/Move/Change Signature |
+| Navigation / tabs | `useWorkspaceNavigation` 保存 nav stack、Recent/Changed Files 和单个 last-edit ref；`EditorGroup` 支持 preview/pin/scroll；store 只定义 primary/secondary 两组 | 高频主路径 L2；Recent Locations、多点 edit history、Switcher、nested split/detach/tab policy 未实现 | 加上下文位置历史 model；tab/group 改为可递归 layout tree，再做 drag/split/detach |
+| Editor chrome | breadcrumbs、sticky lines、inlay/semantic tokens、Git/coverage/debug gutter 均有代码与聚焦测试 | 这些是有效增量，但不补偿 completion/style/inspection/refactor/keymap Gap | 按单项保持 L2，补 Code Vision/scrollbar lens/appearance/a11y 后再对照 |
+| Coverage 与执行 | `coverageModel.ts` 扫描并解析 LCOV/JaCoCo，gutter/panel 展示；Build/Run/Debug/DAP 代码量较大 | 覆盖率展示已存在，旧文档“coverage 完全缺失”已过时；但它属于 X 轨道，且不是 Run with Coverage 配置/采集/合并模型 | 独立维护 X 轨道，不再挤占 Editor P0/P1 排序 |
+| 架构可演进性 | `CodeWorkspaceTab.tsx` 当前约 10.6k 行，命令、状态、LSP、文件、执行和大量 UI 装配仍集中 | 旧文档“约 4.4k 行”已失效；继续堆 action 会放大 context/keymap/state 竞态 | P0 功能前先抽 action/code-style/navigation controller；目标按职责拆分，不以任意行数作为唯一完成标准 |
+
+**规范优先级：** §2、§8.2 与 §12 是当前目标/状态/待办的权威来源。§3–§7、§9–§11 保留设计细节和历史交付记录；若出现“全部已交付”“coverage 缺失”“约 4.4k 行”等旧结论，以本节审计为准。
 
 ---
 
@@ -136,7 +268,7 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 2. **底部工具窗是新增结构**：现有 References 面板并入底部 dock；Terminal、Problems、Find in Files、Run、Call/Type Hierarchy 都以底部 tab 呈现。每个 tab 有徽标计数（如 Problems 的错误数）。
 3. **右侧工具窗**：Outline（文档符号树）为主；Documentation（固定的快速文档）与 AI 助手为可选 tab。
 4. **状态栏**：Code Workspace 激活时向全局状态栏注入分段信息（光标行列、语言与 LSP 状态点、当前文件所属 Git 分支）。点击各分段有对应动作（如点击语言段打开 LSP 服务器选择）。
-5. **现有 Git Manager 保持独立**，底部不设 Git tab（待决问题 §10.1），状态栏分支段作为入口。
+5. **现有 Git Manager 保持独立**，底部不设 Git tab；它按 X 轨道独立验收，状态栏分支段作为编辑器入口。
 
 ---
 
@@ -161,7 +293,7 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 
 ### 5.2 语言智能与代码洞察（P0/P1，本方案核心）
 
-对标 IDEA 日常使用频率最高的语言功能，全部经由 LSP 标准协议实现，**不自建索引**。
+对标 IDEA 日常使用频率最高的语言功能，采用 **provider-first、semantic-evidence-gated** 的路线：LSP 提供跨语言基线；Java P1 为 completion/inspection/navigation/refactor 建立可持久化声明/引用索引与必要的语义分析。没有标准 LSP 映射的 IDEA 能力必须明确使用本地 engine、provider extension 或标为 unavailable，不能用同名按钮伪装。
 
 #### 5.2.0 设计原则：capability 驱动的功能开关
 
@@ -169,11 +301,15 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 - **UI 按能力开关**：server 不支持的功能，菜单项置灰 + tooltip 说明（沿用现有 installHint 机制），绝不静默失败或伪造结果。
 - 每个请求带取消语义（编辑/切换文件即作废旧请求），防止过期结果回填。
 
-#### 5.2.1 功能 → LSP 协议映射总表
+#### 5.2.1 功能 → engine / 协议映射总表
 
-| IDEA 功能 | 快捷键 | LSP 方法 | UI 载体 | 优先级 |
-|-----------|--------|----------|---------|--------|
+| IDEA 功能 | 快捷键 | engine / 协议 | UI 载体 | 优先级 |
+|-----------|--------|---------------|---------|--------|
 | 基础补全 | Ctrl+Space / 输入触发 | `textDocument/completion` + `completionItem/resolve` | 编辑器补全浮层 | P0 |
+| Smart / Type-matching Completion | Ctrl+Shift+Space / 重复调用 | provider 候选 + type/context filter；Java index 兜底 | 同一补全浮层，显式显示 mode/scope | P0 |
+| Full Line / Inline Completion | Tab / Ctrl+Right / End 接受整段/词/行 | 本地模型 runtime + semantic/import/filter service（IDEA Ultimate bundled-plugin 参考） | editor ghost text，可与 popup 同步 | P2 |
+| Live / Postfix Templates | Tab / Ctrl+J | 本地 template engine + provider type/context/import service | 补全浮层 + template 变量导航 | P0 |
+| Complete Statement / Surround / Generate | Ctrl+Shift+Enter / Ctrl+Alt+T / Alt+Insert | language-aware local engine 或 provider extension/Code Action | editor action / popup / preview | P0 |
 | 参数信息 Parameter Info | Ctrl+P | `textDocument/signatureHelp` | 编辑器浮层 | P0 |
 | 快速文档 Quick Documentation | Ctrl+Q / 悬停 | `textDocument/hover`（已有，升级渲染） | 浮层，可固定到右栏 | P0 |
 | 跳转声明 | Ctrl+B / Ctrl+Click | `textDocument/definition`（已有） | 跳转 / 多结果 peek | 已有→增强 |
@@ -190,6 +326,8 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 | 重命名 | Shift+F6 | `textDocument/prepareRename` + `rename` | 内联输入 + 跨文件预览 | P0 |
 | 格式化 | Ctrl+Alt+L | `textDocument/formatting` / `rangeFormatting` | — | P0 |
 | 意图动作 / Quick Fix | Alt+Enter | `textDocument/codeAction` + `workspace/executeCommand` | 灯泡菜单 | P0 |
+| Inspection / Data-flow | 自动 / Analyze 菜单 | provider diagnostics + Java inspection/index engine | editor + Problems + Analysis | P1 |
+| Structural Search / Replace | —（由 keymap 配置） | parser/query engine + index；不能退化为 regex | 独立 search tool window | P2 |
 | Inlay Hints（参数名/类型） | 设置开关 | `textDocument/inlayHint`（按视口 range 请求） | 编辑器内嵌只读 widget | P1 |
 | 语义高亮 | 自动 | `textDocument/semanticTokens/full` + `delta` | 编辑器装饰 | P2 |
 | 智能选区 | Ctrl+W | `textDocument/selectionRange` → syntaxTree 回退 | — | P1 |
@@ -203,6 +341,7 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 - **Auto-import**：应用补全项的 `additionalTextEdits`（典型为文件头插入 import）——这是 IDEA 用户感知最强的补全体验之一，必须支持。
 - 触发策略：server 声明的 triggerCharacters + `Ctrl+Space` 手动；防抖 + 旧请求取消；`isIncomplete` 时续请求。
 - 签名帮助：输入 `(`、`,` 触发（server triggerCharacters），浮层展示当前重载 + 活动参数加粗；`Ctrl+P` 手动唤起；`↑↓` 切换重载。
+- **当前边界（v4.29）**：上述已实现条目只覆盖 basic popup completion。Smart/type-matching、第二/第三次调用的候选扩展、class/package exclusion/priority、type-aware postfix、language-aware statement completion、Surround/Generate 仍按 §8.2 待办执行；Full Line 是独立的 P2 inline/model 工作流，当前为 L0，不能由 LSP popup completion 推导完成。
 
 #### 5.2.3 快速文档（Quick Documentation）
 
@@ -220,9 +359,13 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 #### 5.2.5 查找类 / 查找符号（Go to Class / Symbol）
 
 - 数据源 `workspace/symbol`；**Classes tab** 在客户端按 `SymbolKind ∈ {Class, Interface, Struct, Enum, TypeParameter…}` 过滤（各语言映射：Rust trait→Interface、Go struct→Struct 等由 server 决定，客户端不做语言特判）。
+- 每次查询聚合所有已就绪、声明 workspace-symbol capability 的 root/language provider；后端稳定排序、去重并限制返回量，同时返回 ready session/provider、跳过/失败 provider、截断与完整性诊断。新查询会令旧 generation 失效，并向仍在执行的 provider 发送标准 `$/cancelRequest`；旧响应不得发布结果或写入 resolve cache。
+- LSP 3.17 允许 `WorkspaceSymbol.location` 只有 URI。此类结果保持 unresolved，列表不伪造 `:1`，用户选择后才对声明 `resolveProvider` 的原 provider 调用 `workspaceSymbol/resolve`；resolve 失败、token 缺失或仍无 range 时不打开文件，成功后使用真实 `selectionRange`，`Ctrl+Enter` 保留分屏语义。
+- provider 原始 symbol/data payload 只保存在 Rust 后端，webview 仅接收 opaque resolve token。缓存与 workspace/provider session 生命周期绑定，TTL 300 秒、单项 64 KiB、单批 8 MiB、总计 32 MiB、最多 8 批；workspace 关闭、provider 退出、过期或淘汰后 token 必须拒绝解析。
 - 客户端二次排序：camelCase 缩写匹配（`CWT` → **C**ode**W**orkspace**T**ab）> 前缀 > 子串；同分按路径长度升序。
 - server 的 query 语义差异（有的做模糊、有的做前缀）通过客户端 re-rank 抹平。
 - 无可用 LSP 时 Classes/Symbols tab 隐藏（不展示空壳）。
+- Linux/macOS/Windows 真机验收仍为 TODO，重点覆盖 symlink/junction、网络盘、UNC/verbatim path、大小写规则与 provider 进程重启；现有测试只证明词法边界和协议生命周期，不替代三端发行包验证。
 
 #### 5.2.6 调用层级（Call Hierarchy）
 
@@ -252,6 +395,9 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 - 已打开且 dirty 的 buffer → 应用到 buffer，保持 dirty，由用户保存；
 - 未打开的文件 → 后端直接改盘（带 hash 预检，文件被外部修改则该文件跳过并报告）；
 - 任一文件失败不回滚已成功文件，结果面板明确列出成功/失败清单（LSP 语义下无法保证原子性，如实呈现）。
+- 普通文件事务历史：首个 mutation 前捕获文本、存在性、编码/BOM 与打开 tab/group；成功后将整组操作压入一个 undo 单元，`Ctrl/Cmd+Z` 与 `Ctrl/Cmd+Shift+Z` 串行回放。目录、symlink、特殊文件或不可读资源不建立历史，并在状态栏说明原因。
+
+**Safe Delete（Alt+Delete）**：先调用 `prepareRename` 确认符号范围，再查询 declaration 与 references；引用面板先展示影响范围，确认后生成删除声明/引用的单一 WorkspaceEdit。缺少可靠范围、引用/重命名能力、目标是 library source、引用没有本地 filesystem path 或引用/声明落在任一 workspace root 外时，结果标记 incomplete 并硬阻断删除，不静默降级到 loose-file 写入。
 
 **格式化（Ctrl+Alt+L）**：整文件/选区；"保存时格式化"为工作区级开关（默认关）。server 无 formatter（如 pyright）时置灰 + 提示外部格式化器方向（P2 规划"外部 formatter 命令"配置，如 ruff/black/prettier）。
 
@@ -370,7 +516,7 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 
 - 编辑器顶部：`根名 > 目录 > … > 文件 [> 符号路径]`；目录段点击弹出同级列表快速切换；符号段来自 documentSymbol 的光标符号链，点击弹出 Outline 快捷列表。
 
-### 5.7 集成终端（P1）
+### 5.7 集成终端（X，IDE 伴随能力）
 
 - 底部 dock 的 Terminal tab，内嵌现有 `TerminalPanel`（本地 PTY），**cwd 默认为当前文件所在根目录**。
 - 支持多终端实例（左侧竖条列表或下拉切换），"+" 新建时可选根目录。
@@ -384,7 +530,7 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 - **Inline blame**（可开关，默认关）：当前行行尾灰字 `author, 3 months ago · commit summary`；按需 `git blame -L <line> --porcelain`，行级缓存，保存后失效。
 - 状态栏 Git 段：当前文件所属 repo 分支 + ahead/behind；点击打开 Git 管理器。
 
-### 5.9 Run / Tasks（P1）
+### 5.9 Run / Tasks（X，IDE 伴随能力）
 
 **探测（后端命令 `workspace_detect_tasks(root)`）**，按根目录识别：
 
@@ -410,7 +556,7 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 - 底部 Run tab：任务列表（按根分组）+ 运行历史；点击任务 → 集成终端新实例以 PTY 运行（保留颜色与交互），Run tab 显示状态（运行中 / 退出码）。
 - `Ctrl+F5` 重跑上一个任务；自定义任务（命令 + cwd，持久化到工作区状态）。
 - 普通 Java Run 复用工作区 PTY 与 SDK 环境（`JAVA_HOME`/`PATH` 由后端 workspace SDK resolution 注入），具有交互 stdin、彩色输出和真实退出码；它与 Debug 解耦，未安装 java-debug bundle 也可执行。
-- 当前边界：尚未提供 IDEA 完整 Run Configuration 对话框（VM options、program args、env 文件、Before launch 组合步骤）；自定义命令仍可覆盖特殊启动需求。
+- 当前代码闭环：Run 配置编辑器支持命名副本、program arguments、VM/runtime options、working directory、显式 env、dotenv 文件、Before launch 依赖选择和按源文件持久化；Run 与 Debug 共享同一配置选择。仓库共享配置位于 `.taomni/run-configurations.json`，schema 见 [`claudedocs/run-configurations.schema.json`](run-configurations.schema.json)，支持 v1 `runs` 迁移、v2 `configurations`、templates、Linux/macOS/Windows overrides、provider/project 可移植引用、原子诊断、debug-only 条目和嵌套 compound Run/Debug（顺序/并行/失败策略）。Compound Debug 为每个子配置维护独立 DAP 会话、断点/异常过滤器/栈/变量，并提供子会话选择和组级 Stop/Restart。Tests 面板已消费有界 JUnit XML 结果协议并支持汇总、失败详情、定位和重跑；coverage 已有 LCOV/JaCoCo 报告扫描、gutter 与面板展示，仍缺 Run with Coverage 的采集/配置/合并模型、非 JUnit provider 统一协议和完整 provider/adapter 矩阵；自定义命令继续作为特殊启动需求的兜底。
 
 ### 5.10 文件树交互完善（P0 部分 + P1 部分）
 
@@ -427,14 +573,14 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 - UI：tab 右键"查看本地历史"→ 版本时间线 + 与当前内容 diff（复用 `DiffPane`），支持恢复。
 - 价值：IDEA 用户迁移的安全网，且 diff 组件可复用，性价比高。
 
-### 5.12 AI 集成（P2，复用既有 ai/agent 能力）
+### 5.12 AI 集成（X，IDE 伴随能力；复用既有 ai/agent 能力）
 
 - 编辑器选区浮动工具条（复用 `SelectionToolbar` 模式）：解释 / 修复诊断 / 生成注释 / 按指令改写。
 - 改写类动作产出 diff 预览（复用 DiffPane），确认后应用到 buffer。
 - 右侧 AI tab：带当前文件/选区/诊断上下文的会话（复用 chat store）；打通 Claude Code bridge 工作区级会话（工作区根作为 cc cwd）。
 - 边界：只定义**入口与上下文注入协议**，不重造 AI 面板。
 
-### 5.13 远程工作区（P2 探索项）
+### 5.13 远程工作区（X，探索项）
 
 - 动机：taomni 本质是远程工作台，"打开 SSH 主机目录为 Code Workspace"是对标 VS Code Remote 的差异化能力。
 - 方向：`workspace.rs` 文件操作抽象为 `WorkspaceFs` trait（local / sftp 两实现）；LSP 远程运行（SSH exec + stdio 转发）复杂度高，首期远程根只提供**编辑/搜索/Git**，LSP 标注不可用。
@@ -450,7 +596,7 @@ Code Workspace 是 taomni 内的"轻量 IDE 面"：日常改代码、查代码�
 
 ```
 src/components/editor/
-  CodeWorkspaceTab.tsx          // 壳：布局 + 面板编排（目标 <400 行）
+  CodeWorkspaceTab.tsx          // 当前约 10.6k 行；按 action/style/navigation/X-track 职责拆分
   workspace/
     FileTreePane.tsx            // 树 + 右键菜单 + 拖拽
     EditorGroup.tsx             // 单个编辑组（tab 栏 + CM 实例 + 面包屑）
@@ -515,13 +661,15 @@ src/stores/
 | | `lsp_document_highlight` | 用法高亮 |
 | | `lsp_prepare_rename` / `lsp_rename` | 返回 WorkspaceEdit（按文件分组序列化） |
 | | `lsp_formatting` / `lsp_range_formatting` | TextEdit[] |
-| | `lsp_code_actions` / `lsp_execute_command` | applyEdit 回推 → Tauri event `lsp:apply-edit` + oneshot 应答（复用 cc_bridge HITL 模式） |
+| | `lsp_code_actions` / `lsp_code_action_resolve` / `lsp_execute_command` | 延迟 action 解析；applyEdit 回推 → Tauri event `lsp:apply-edit` + oneshot 应答（复用 cc_bridge HITL 模式） |
 | | `lsp_document_symbols` / `lsp_workspace_symbols` | Outline / Go to Class·Symbol |
 | | `lsp_call_hierarchy_prepare` / `_incoming` / `_outgoing` | 调用层级 |
 | | `lsp_type_hierarchy_prepare` / `_supertypes` / `_subtypes` | 类型层级 |
 | | `lsp_inlay_hints` | 视口 range 请求 |
 | | `lsp_selection_range` / `lsp_folding_range` | 智能选区 / 折叠（P1/P2） |
 | | `LspDocumentStatus.capabilities` 扩展 | server capabilities 摘要下发（§5.2.0） |
+| workspace.rs | `workspace_read_file_with_encoding` / `workspace_read_loose_file_with_encoding` | 按用户选择的字符集解码并返回 encoding/BOM 元数据 |
+| | `workspace_write_file_encoded` / `workspace_write_loose_file_encoded` | 按字符集无损编码写入，保留 hash 预检与原子替换 |
 | 新 workspace_search.rs | `workspace_search_start` / `_cancel` | ignore + grep-searcher，事件流式返回 |
 | | `workspace_replace_in_files` | 带 hash 预检的批量替换 |
 | workspace.rs 扩展 | `workspace_copy_path` / `workspace_move_path` | 树复制/移动 |
@@ -547,6 +695,8 @@ src/stores/
 
 ## 7. 快捷键方案（IDEA keymap 为基准）
 
+> 本表保留默认 binding 的设计/实现历史，用于说明预期肌肉记忆与已知冲突；它不是可编辑 Keymap 已完成的证据。当前 `KeymapCheatSheetDialog` 仍是固定速查/执行面板，权威目标和待办见 §2.5 与 §8.2 E0/E2。
+
 | 动作 | 快捷键 | 冲突处理 |
 |------|--------|----------|
 | Search Everywhere | 双击 Shift | 仅工作区 tab 激活时生效 |
@@ -565,7 +715,7 @@ src/stores/
 | 调用层级 | Ctrl+Alt+H | — |
 | 类型层级 | Ctrl+H | editorFocus 时截获 |
 | 快速文档 | Ctrl+Q / 悬停 | Linux 下若与系统冲突提供 F1 别名 |
-| 参数信息 | Ctrl+Shift+Space（实现决策：Ctrl+P 已作为 Go to File 的 VS Code 别名） | 触发字符（`(`、`,`）自动弹出 |
+| 参数信息 | Ctrl+P | IDEA 默认键；当前 CodeMirror/command registry 已绑定，scheme/context 统一仍归 E0/E2 |
 | 重命名 | Shift+F6 | 树聚焦=重命名文件；编辑器聚焦=重命名符号 |
 | 格式化 | Ctrl+Alt+L | — |
 | Quick Fix | Alt+Enter | — |
@@ -580,31 +730,34 @@ src/stores/
 | Problems 面板 | Alt+6（IDEA 习惯） | — |
 | 在树中定位文件 | Alt+F1 | — |
 
-设计约束：所有快捷键经 §6.2 的 when-context 路由；后续可加"keymap 方案"设置（IDEA/VS Code 两套预设），首期实现 IDEA 单套 + 少量 VS Code 别名（Ctrl+P → Go to File 的提示引导）。
+目标约束：所有快捷键最终经 §6.2 的统一 action/when-context 路由。当前 workspace 与 CodeMirror binding 仍分散硬编码；E0/E2 必须交付 IDEA platform defaults、可编辑 scheme、冲突检测、迁移/恢复默认，并让其他 preset 通过同一 schema 扩展。
 
 ---
 
 ## 8. 实施计划（里程碑）
 
+> M0–M11 是既有实施序列，完成计数只表示对应历史清单出现过代码入口，不是 v4.29 的能力等级或下一步优先级。下表已按当前边界标出混合项：编辑器部分仍按原 P0/P1/P2 追溯，Terminal/Build/Run/Test/Debug/AI/Remote 等统一标 X；权威等级与顺序见 §2.5 和 §8.2。
+
 | 里程碑 | 内容 | 规模 | 状态 |
 |--------|------|------|------|
-| **M0 前置重构** | 组件拆分 + codeWorkspaceStore + 命令系统骨架 + 底部 dock 容器（References 迁入） | M | 🔶 功能前提已交付；树数据、LSP session、Git snapshot、导航与文件动作已抽 hook，壳体约 4.4k 行，命令注册/header/layout 继续下沉 |
+| **M0 前置重构** | 组件拆分 + codeWorkspaceStore + 命令系统骨架 + 底部 dock 容器（References 迁入） | M | 🔶 功能前提已交付；树数据、LSP session、Git snapshot、导航与文件动作已抽 hook，但当前装配组件约 10.6k 行；按 §8.2 E0.2 继续按职责拆分 |
 | **M1 编辑器智能·上（P0）** | 查找替换、LSP 补全（含 auto-import）/签名/快速文档/格式化、诊断呈现升级、Problems 面板 | L | ✅ 9/9 |
 | **M2 导航与搜索（P0）** | Find in Files（后端搜索模块 + 面板）、Search Everywhere（含 Classes/Symbols）、Go to File/Class/Symbol、Recent Files、导航历史、Outline + 结构弹窗、类型/实现跳转 + peek、重命名、Code Actions、树右键/键盘 | L | ✅ 14/14（拖拽仍为 P1） |
-| **M3 布局与终端（P1）** | 分屏、tab 管理/预览 tab、面包屑、集成终端、Run/Tasks | L | ✅ 5/5 |
+| **M3 编辑器布局（历史 P1）+ Terminal/Run（X）** | 分屏、tab 管理/预览 tab、面包屑、集成终端、Run/Tasks | L | ✅ 历史清单代码入口已交付 |
 | **M4 语言智能·下 + Git（P1）** | 调用层级、类型层级、用法高亮、inlay hints、智能选区(LSP)、Git gutter、inline blame、状态栏分段、持久化增强 | L | ✅ 10/10（代码已交付；真机冒烟后置） |
-| **M5 差异化（P2）** | 本地历史、AI 集成入口、语义高亮、TODO/书签（可选）、远程工作区 spike | M–L | ✅ 5/5（代码已交付；真机冒烟后置） |
+| **M5 高级编辑（历史 P2）+ AI/Remote（X）** | 本地历史、AI 集成入口、语义高亮、TODO/书签（可选）、远程工作区 spike | M–L | ✅ 5/5 历史代码入口已交付；各项按当前轨道重新验收 |
 | **M6 Java 基础对齐（P0，§11 A+B）** | jdtls 初始化 `java.*` 设置全集（含 Lombok/autobuild/organizeImports/codeGeneration）；大文件性能（大文件降级守卫、增量 diff 提速） | M | ✅ 代码已交付（`c35d963` A + `4a06f91` B；真机冒烟后置；ChangeSet→LSP 全量重写按风险显式后置，见 §11.B） |
-| **M7 工程智能（P1，§11 C+F）** | 全项目诊断（先 spike，后端聚合命令 + Problems 面板切换）；构建集成增强（依赖树、生命周期/任务树、项目重载、模块视图） | L | 🔶 F 构建集成 + C 全项目诊断基础设施代码已交付（`ba037ac` 重载 + `a0d209c` 任务树 + `f9abab5` 依赖树 + 模块视图 + `083999f` 全项目诊断后端 + 前端 Problems 切换）；C 的诊断刷新由 event 改为轮询（Windows 链接约束，见 §11.C），命中语义待用户真机 spike |
-| **M8 测试与调试基建（P1，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test 加载与探测）；测试集成（探测 + run-only + 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | ✅ 代码已交付：Bundle 基建（`4929467`）+ D1 DAP 内核（`b432f0f`）+ D2 Java 适配器（`9edb7b7`）+ E 测试探测/terminal 运行（`daa20fd`）；真机冒烟后置（jdtls 已在 PATH，bundle jar 待配置） |
-| **M9 调试主线 + 收口（P1/P2，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载；debug-test；真机冒烟回填 | XL | ✅ 代码已交付：D3 断点/单步/调用栈/当前行 + D4 变量/监视/console（`b141bad`）+ D5 条件/logpoint/异常断点/热重载 + debug-test；结构化测试结果树（JUnit socket 协议）显式后置；真机冒烟由用户统一验证 |
-| **M10 Java Build/Run 闭环（P0，§11.G）** | 主类发现与普通运行、Maven/Gradle/单文件启动、多模块 task model、Build/Rebuild、wrapper 跨平台与测试运行修复 | M | ✅ 代码已交付：普通 Run 不依赖 java-debug；顶部 `Ctrl+F9` / `Shift+F10`、Run 主类列表、Build/Rebuild、多模块任务与聚焦 Rust/Vitest 覆盖；真实 Maven/Gradle/JDK 工程冒烟待回填 |
+| **M7 全项目诊断（历史 P1）+ Build integration（X）** | 全项目诊断（先 spike，后端聚合命令 + Problems 面板切换）；构建集成增强（依赖树、生命周期/任务树、项目重载、模块视图） | L | 🔶 F 构建集成 + C 全项目诊断基础设施代码已交付（`ba037ac` 重载 + `a0d209c` 任务树 + `f9abab5` 依赖树 + 模块视图 + `083999f` 全项目诊断后端 + 前端 Problems 切换）；C 的诊断刷新由 event 改为轮询（Windows 链接约束，见 §11.C），命中语义待用户真机 spike |
+| **M8 Test/Debug 基建（X，§11 Bundle+E+D1–D2）** | jdtls bundle 基建（java-debug/java-test 加载与探测）；测试集成（探测 + run-only + JUnit 结果树）；**通用 DAP 内核 + 适配器注册表（dap.rs，语言无关）+ Java 适配器（首个插入）** | L | ✅ 代码已交付：Bundle 基建（`4929467`）+ D1 DAP 内核（`b432f0f`）+ D2 Java 适配器（`9edb7b7`）+ E 测试探测/terminal 运行与 JUnit XML ingestion（`daa20fd`）；真机冒烟后置（jdtls 已在 PATH，bundle jar 待配置） |
+| **M9 Debug 主线 + 收口（X，§11 D3–D5+E）** | 断点/单步/调用栈、变量/监视/求值、条件断点/异常断点/热重载、data breakpoint/watchpoint；debug-test；真机冒烟回填 | XL | ✅ 代码已交付：D3 断点/单步/调用栈/当前行 + D4 变量/监视/console（`b141bad`）+ D5 条件/logpoint/异常断点/热重载 + D5.2 data breakpoint/watchpoint（`596759d`）+ D5.3 conditional exception filters（`1f2d93b`）+ D5.4 exception path rules（`4510aa2`）+ debug-test；结构化测试结果树已改为独立 JUnit XML ingestion（`test_results.rs` + TestsPanel 汇总/失败详情/定位/重跑）；真实 adapter 与三端真机冒烟由用户统一验证 |
+| **M10 Java Build/Run 闭环（X，§11.G）** | 主类发现与普通运行、Maven/Gradle/单文件启动、多模块 task model、Build/Rebuild、wrapper 跨平台与测试运行修复 | M | ✅ 代码已交付：普通 Run 不依赖 java-debug；顶部 `Ctrl+F9` / `Shift+F10`、Run 主类列表、Build/Rebuild、多模块任务与聚焦 Rust/Vitest 覆盖；真实 Maven/Gradle/JDK 工程冒烟待回填 |
+| **M11 Execution（X）+ Analysis（Editor 历史 P1）** | Build 依赖拓扑执行；稳定 module/source-set/language-level/compile-artifact 基线；Run/Debug 共享命名配置、参数/env/dotenv/Before launch；仓库共享配置/模板/平台覆盖；嵌套 compound Run/Debug 与多 DAP 子会话；provider-backed refactor/inspection/Analysis；semantic snapshot freshness；诊断元数据与 code-action kind 透传；结构化 JUnit 测试结果 | M | 🔶 基础代码闭环：coverage 报告展示已补；仍缺真实多模块 import、Run with Coverage、完整 adapter、自有 index/native data-flow 与三端真机。执行相关项按 X 轨道记账 |
 
-依赖关系：M0 是一切前提；M1/M2 内部可并行（后端 LSP 扩展与搜索模块独立）；M3 依赖 M0 的 dock 容器；M4 的层级面板依赖 M0 dock + M2 的 LSP 请求管道。**M6 两条线（A/B）互相独立可并行，且不依赖 M1–M5 之外的新前提；M7 的全项目诊断（C）依赖 M6-A 的 `autobuild`，构建增强（F）独立；M8 的测试/调试依赖 Bundle 基建，DAP 内核（D1）可与 M7 并行起步；M9 的 debug-test 依赖 M8 的 D1–D2；M10 普通 Run 只依赖 M3 PTY + workspace SDK，不依赖 DAP/bundle。** 每个里程碑独立可发布、可验收。M6–M10 的完整拆分见 §11。
+依赖关系：M0 是一切前提；M1/M2 内部可并行（后端 LSP 扩展与搜索模块独立）；M3 依赖 M0 的 dock 容器；M4 的层级面板依赖 M0 dock + M2 的 LSP 请求管道。**M6 两条线（A/B）互相独立可并行，且不依赖 M1–M5 之外的新前提；M7 的全项目诊断（C）依赖 M6-A 的 `autobuild`，构建增强（F）独立；M8 的测试/调试依赖 Bundle 基建，DAP 内核（D1）可与 M7 并行起步；M9 的 debug-test 依赖 M8 的 D1–D2；M10 普通 Run 只依赖 M3 PTY + workspace SDK，不依赖 DAP/bundle。** 每个里程碑独立可发布、可验收。M6–M11 的完整拆分见 §11。
 
 ### 8.1 进度明细（勾选清单）
 
-> 更新于 2026-07-12（v2.10）；自动化门禁于 2026-07-25 在 `fix/code-workspace-nav-history-and-library-goto` 复核恢复全绿（见下方横切事项）。M0–M5 已由 PR #361 合入 `main`；后续收口位于 `feat/code-workspace-followups`。功能按代码、提交与自动化门禁复核；真机冒烟由用户执行并待回填，M0 壳拆分技术债继续消化。完成度按本节拆分条目计数，已完成项附提交号。
+> 更新于 2026-08-15（v4.23）；IntelliJ IDEA 2026.2 真实能力、project/module/source-set/language-level/compile-artifact 基础拓扑、DAP `exceptionOptions`/`breakpointModes`、data breakpoint address/range discovery、LSP 字段声明入口、instruction breakpoint 客户端生命周期、memory read/write/disassembly 客户端闭环、六语言 adapter contract fixture、conditional exception filters、结构化 JUnit 测试结果、Compound Debug、function/method breakpoint、provider semantic snapshot、Inspection suppression/baseline/evidence 与自动化门禁已复核。M0–M5 已由 PR #361 合入 `main`；当前收口位于 `feat/code-workspace-idea-parity`。v4.23 只固定单 manifest 工程拓扑和待 provider 解析的 artifact 契约，DAP fixture 也只固定协议边界；Linux/macOS/Windows 真机冒烟、真实 build import/output 和 adapter initialize/DAP trace 由用户执行并待回填，不能据此把相关能力升级为 §2.4 的 L3。完成度按本节拆分条目计数，新增代码闭环项在横切事项记录。
 
 **M0 前置重构 — 🔶 清单项齐，壳体继续瘦身中**
 
@@ -639,7 +792,7 @@ src/stores/
 
 - [x] Find in Files 后端（ignore + grep-searcher 流式搜索、取消、截断）— `65ac601`
 - [x] Find in Files 面板（Ctrl+Shift+F、大小写/整词/正则、include/exclude glob）— `4766f43`
-- [x] Go to File（双 Shift / Ctrl+Shift+N / Ctrl+P，camelCase 模糊匹配）— `972ad00`；SE 六分组（All/Classes/Files/Symbols/Actions/Text）— `4040d6f`
+- [x] Go to File（当前主键 `Ctrl+Shift+N`，camelCase 模糊匹配；双 Shift 打开 Search Everywhere；早期 `Ctrl+P` alias 已改为 IDEA Parameter Info）— `972ad00` + `8143aa9`；SE 六分组（All/Classes/Files/Symbols/Actions/Text）— `4040d6f`
 - [x] 文件树右键菜单基础项（新建/重命名/删除/复制路径/Find in Directory）— `6be92f5`
 - [x] Recent Files（Ctrl+E，最近优先、连按推进、上一文件预选）— `f5ae894`
 - [x] 导航历史（Ctrl+Alt+←/→ + 头部按钮，100 条上限）— `f5ae894`
@@ -648,11 +801,11 @@ src/stores/
 - [x] Go to Class / Go to Symbol（`lsp_workspace_symbols` + SE Classes/Symbols）— `4040d6f`
 - [x] 类型声明/实现跳转 + 多结果 peek — `e373d0d`
 - [x] 重命名（prepareRename + rename + §5.2.9 WorkspaceEdit 应用规则）— `e7873ef`；open-clean 保存路径 — `5d87203`
-- [x] Code Actions / Alt+Enter（客户端 WorkspaceEdit 应用；server 回推 applyEdit oneshot 仍可增强）— `b049952` + `5d87203`
+- [x] Code Actions / Alt+Enter（客户端 WorkspaceEdit + command-only；server 回推 `workspace/applyEdit` 桥已接入）— `b049952` + `5d87203` + v4.1 P0-A
 - [x] 树键盘导航（↑↓←→/Enter/F2/Delete）；拖拽仍为 P1 — `1d8fa2f`
 - [x] 替换（Replace in Files via shared WorkspaceEdit applier）— `e7873ef` + `5d87203`
 
-**M3 布局与终端（P1）— ✅ 5/5**
+**M3 编辑器布局（历史 P1）+ Terminal/Run（X）— 历史代码入口已交付**
 
 - [x] 编辑区二分屏（共享 buffer/LSP session、水平/垂直、可调整尺寸、末 tab 自动收起；树/搜索 `Ctrl+Enter` 分栏）— `345379f` + `7b29391` + `f8f3665`
 - [x] 编辑器 tab 行为（单击预览/双击固定、pin、关闭其他/右侧/未修改/全部、中键与 `Ctrl+F4` 关闭、溢出下拉、路径/树/资源管理器/终端菜单）— `d445d79` + `f8f3665`
@@ -674,7 +827,7 @@ src/stores/
 - [x] 状态栏分段（光标/语言/LSP 状态/分支）— `8b30d88`
 - [x] 工作区状态持久化增强（打开 tab/分屏/dock 状态/搜索历史）— `3abe038`
 
-**M5 差异化（P2）— ✅ 5/5（代码已交付；真机冒烟后置）**
+**M5 高级编辑（历史 P2）+ AI/Remote（X）— ✅ 5/5 历史代码入口已交付**
 
 - [x] 本地历史（快照存储 + 时间线 diff + 恢复）— `2b78171`
 - [x] AI 集成入口（选区工具条 + diff 应用 + 右栏会话）— `0571bd9`（rewrite/fix preview + 全局 ChatDrawer `attachToComposer`）
@@ -685,36 +838,88 @@ src/stores/
 **横切事项**
 
 - [x] 交互原型交付（`claudedocs/prototype/code-workspace-prototype.html`）
-- [x] 签名帮助键位决策：Ctrl+Shift+Space（Ctrl+P 已作 Go to File 别名）— `f4d9c15`
+- [x] 签名帮助键位沿革：`f4d9c15` 初始使用 Ctrl+Shift+Space；当前代码以 IDEA 默认 `Ctrl+P` / `Mod-P` 为主并保留 `Mod-Shift-Space` alias，Go to File 当前主键为 `Ctrl+Shift+N` — `8143aa9`
 - [x] 代码与自动化复核（2026-07-12 v2.8）：全量 Vitest **159 文件 / 1267 项**通过（`--testTimeout=15000 --maxWorkers=4`）；`pnpm build` 通过；全量 `cargo test` 通过（lib **748 passed / 11 ignored**，其余 integration/doc tests 全绿）
 - [x] **自动化门禁恢复全绿（2026-07-25）**：全量 Vitest **164 文件 / 1304 项**通过；`pnpm build` 通过；全量 `cargo test` 全绿（lib **892 passed / 0 failed / 11 ignored**，其余 integration/doc tests 全绿）。原 v2.10 记录的 3 例 Windows `rdp::cliprdr::uri_list_*` 前导斜杠断言失败已修（测试辅助 `uri_path` 误对 Unix 风格路径剥前导斜杠，生产 `uri_list_to_paths` 保留斜杠属有意行为）；顺带修复 v2.10 后由 `11382ec` 引入的同类 Windows 失败 `chat::acp` grok 图片 `file://` URI 断言（`\\?\` 前缀不对称比较）。两处均只改测试、生产代码零改动 — `d2861f4`
 - [x] WorkspaceEdit §5.2.9 三态规则收口（open-clean 应用后保存、open-dirty 保持 dirty、未打开写盘 + hash 预检）— `workspaceEditApply` + `5d87203`
+- [x] WorkspaceEdit 事务 undo/redo：普通文件快照、编码/BOM 元数据、跨文件单步回放与 tab/group 恢复；失败时保留原历史。
+- [x] 非 UTF-8 编辑闭环：Rust `encoding_rs`/`chardetng` 检测与无损写入、前端状态栏 Reload/Convert 入口、浏览器 UTF-16 stub；二进制与 lossy legacy 保存明确拒绝。
+- [x] Safe Delete Symbol：Alt+Delete/右键/命令入口，引用面板预览与确认，声明/引用跨文件删除作为一个事务；无可靠 LSP 范围、library source、unresolved reference 或 workspace 外路径时标记 incomplete 并拒绝猜测/写入。
+- [x] Build/Run/Debug 配置与分析代码闭环：Build 目标依赖拓扑、失败即停；命名 Run 配置副本、program/VM args、cwd、env、dotenv、Before launch；Run/Debug 共享 active selection；嵌套 Compound Run/Debug 和 grouped multi-session DAP；标准 function/method、data breakpoint/watchpoint、adapter-advertised exception filters、capability-gated exception path rules 与 `breakpointModes` 跨同 adapter 子会话同步；data breakpoint discovery/`canPersist` scope + `dataBreakpointInfo.mode`，source mode 的 adapter-scoped 持久化，exception filter 的 `filterOptions.mode`，exception filter 默认值/条件持久化/`filterOptions` 兼容，`exceptionOptions` path/negate/四种 break mode，以及 configurationDone 前恢复、启停、Mute/Remove All、binding/unsupported 状态；按 CodeActionKind 的 provider-backed extract/inline/change-signature/move 入口；provider semantic snapshot freshness/coverage 与落盘前过期或 workspace 外路径拒绝；持久化 inspection profile、诊断 metadata、Analysis 面板与 Problems 展示变换（provider 原始诊断仍用于 quick fix）。
+- [x] **v4.15 D5.2 自动化门禁**：`dapDebugModel`、`useCodeDebugSession`、`DebugPanel` 聚焦回归通过；单 worker 全量 Vitest **260 文件 / 2210 tests**、`pnpm build`、TypeScript 编译通过；F25.1 controls/catalog 定向 audit 无 actionable gap，`TC-auto-F25-1` browser dry-run 通过。真实 adapter 与 Linux/macOS/Windows 真机留待用户执行。
+- [x] **v4.16 D5.3 自动化门禁**：conditional exception filters 的 model/session/panel 聚焦回归 **88 tests** 通过；单 worker 全量 Vitest **260 文件 / 2214 tests**、`pnpm build`（**4549 modules**）与 TypeScript 编译通过；F25.1 controls/catalog 定向 audit 无 actionable gap，`TC-auto-F25-1` browser dry-run 通过。全局 qa-ui-auto gate 仍有 F5.2 等既有 baseline 漂移，本阶段未重置无关基线；真实 adapter 与 Linux/macOS/Windows 真机留待用户执行。
+- [x] **v4.17 D5.4 自动化门禁**：`exceptionOptions` model/session/panel 聚焦回归 **92 tests** 通过；单 worker 全量 Vitest **260 文件 / 2218 tests**、`pnpm build`（**4549 modules**）与 TypeScript 编译通过；qa-ui-auto lint、F25.1 controls/catalog 定向 audit 无 actionable gap，`TC-auto-F25-1` browser dry-run 通过。未修改 Rust，故未重复 Cargo；全局 qa-ui-auto 仍有 137 个仓库既有 orphan selector 且本阶段未重置无关 baseline；真实 adapter 与 Linux/macOS/Windows 真机留待用户执行。
+- [x] **v4.18 D5.5 自动化门禁**：`breakpointModes` model/session/panel 聚焦回归 **98 tests** 通过；全量 Vitest **260 文件 / 2224 tests**、TypeScript 编译与 `pnpm build`（**4549 modules**）通过；qa-ui-auto lint、F25.1 controls/catalog 定向 audit 无 actionable gap，新增 source/data/exception mode 控件均 capability-gated 且 optional。`TC-auto-F25-1` browser dry-run 因本地 Vite 服务未启动而未执行（按 qa-ui-auto 约束待用户许可后运行）；真实 Java/JS/Python/Go/Rust/C++ adapter 矩阵与 Linux/macOS/Windows 真机仍留待用户执行。
+- [x] **v4.19 D5.6 自动化门禁**：data breakpoint `bytes`/`asAddress` 的 model/session 持久化与能力门控、DebugPanel expression/address/byte-range 创建入口、LSP field/property declaration context-menu 入口及回归覆盖已完成；聚焦 Vitest **5 files / 114 tests**，全量 Vitest **261 files / 2232 tests**，TypeScript 编译与 `pnpm build`（**4550 modules**）通过；qa-ui-auto lint **130 cases / 0 errors**、F25.1 audit 无 actionable gap、catalog check 通过。lint 仍报告仓库既有 **137 个 orphan selector**，未在本阶段修改 baseline；`TC-auto-F25-1` browser dry-run 因本地 Vite 服务未启动而未执行（按 qa-ui-auto 约束待用户许可后运行）；真实 Java/JS/Python/Go/Rust/C++ adapter 矩阵、地址/范围语义与 Linux/macOS/Windows 真机仍留待用户执行。
+- [x] **v4.20 D5.7 自动化门禁（本阶段）**：instruction breakpoint 的 model/session 持久化与 capability gate、`setInstructionBreakpoints` 全量替换、adapter-scoped opaque reference + signed offset identity、condition/hitCondition/mode、configurationDone 前恢复、Mute/Remove All、compound 隔离、binding event、终止/launch failure 清理和 stale-response guard 已完成；DebugPanel 创建/编辑/启停/删除/unsupported/binding 状态及窄 dock 换行布局已覆盖。聚焦 Vitest **3 files / 113 tests**、全量 Vitest **261 files / 2243 tests**、TypeScript 编译与 `pnpm build`（**4550 modules**）、qa-ui-auto lint **130 cases / 0 errors**、F25.1 audit 无 actionable gap 及 catalog check 已通过。lint 的 **137 个 orphan selector** 为仓库既有基线；browser dry-run 未启动服务，真实 adapter/CPU 指令语义与 Linux/macOS/Windows 真机继续留待用户执行。
+- [x] **v4.21 D5.8 自动化门禁（本阶段）**：`readMemory`/`writeMemory`/`disassemble` 的 model/session capability gate、bounded response parsing、hex/base64 conversion、session switch/termination stale-response guard 和 DebugPanel memory/disassembly tool surface 已完成；聚焦 Vitest **3 files / 120 tests**、全量 Vitest **261 files / 2250 tests**、TypeScript 编译与 `pnpm build`（**4550 modules**）、qa-ui-auto lint **130 cases / 0 errors**、F25.1 audit 无 actionable gap 及 catalog check 已通过。lint 的 **137 个 orphan selector** 为仓库既有基线；browser dry-run 未启动服务，真实 adapter 的地址/权限/partial-write/symbol/source mapping 语义与 Linux/macOS/Windows 真机继续留待用户执行。
+- [x] **v4.22 D5.9 adapter contract fixture 门禁（本阶段）**：新增 Java/JavaScript/Python/Go/Rust/C++ 六项 fixture，覆盖当前注册 adapter id（`java`、`node`、`python`、`delve`、`lldb`）及 Rust/C++ 的共享 lldb 变体；contract 评估器只读取 initialize capability，不按语言或 adapter id 猜测 memory/disassembly 支持。回归固定 opaque memory reference、signed byte offset、read range、显式 `allowPartial:false`、instruction offset/count、symbol/source mapping、sourceReference 和 breakpoint mode applicability；合成 baseline/advertised profile 均有测试。聚焦 Vitest **1 file / 5 tests** 与 TypeScript 编译已通过；synthetic profile 不是真实 adapter 证据，真实 initialize/DAP trace、地址宽度/权限/partial-write/模式语义和 Linux/macOS/Windows 真机仍留待用户执行。
+- [x] **v4.23 D5.10 project model baseline（`3dde3e76`）**：`workspace_execution` 为每个 provider manifest 生成稳定 `ProjectModel.moduleId` 与 `ModuleModel`，发现 production/test/generated source roots，提取 Cargo/Go/Python/Node/Maven/Gradle/sbt/.NET/CMake/SwiftPM 声明 language level；build target 关联 module 并声明 provider-specific `CompileArtifact`。artifact 不猜测 provider output path：工具可用但尚未执行真实 build 时为 `pending-provider-output`，配置工具缺失时为 `blocked` 并保留原始诊断；Maven `${java.version}` 属性引用有确定性覆盖。Rust `workspace_execution` **12 tests**、TypeScript 编译通过。明确边界：当前仅单 manifest→单 module，尚无 Maven/Gradle 多模块 import、active profile/source-set override、facet/依赖/SDK 图、真实 build output ingestion、background/incremental/single-file compile 或 Run/Debug module/artifact selection；三端真机继续由用户执行。
 - [x] 合并门禁 8 例 Windows 失败已修复（clipboard URI ×4、pushd ×1、git 根 ×3）— `f6c1f36`
 - [ ] **⚠ 真机验证欠账（由用户执行）**：M0–M5 能力仍以单测/构建为主；`pnpm tauri dev` 冒烟结果回填本节
-- [ ] ⚠ M0 继续瘦身：树数据、LSP session、Git snapshot、导航与文件动作 controller 已抽离；命令注册、header/layout 大段继续下沉，目标装配壳 <400 行（当前约 4.4k 行）
-- [ ] ⚠ 下列增强项可选收口：server 回推 `workspace/applyEdit` oneshot；树/tab 拖拽停靠（P1）；`WorkspaceFs` 生产只读链路
+- [ ] ⚠ 装配层继续按职责拆分：树数据、LSP session、Git snapshot、导航与文件动作 controller 已抽离；当前 `CodeWorkspaceTab.tsx` 约 10.6k 行，下一步按 §8.2 E0.2 抽 action、code-style、completion orchestration 与 X 轨道装配，不再以 <400 行作为单一完成条件。
+- [ ] ⚠ 历史未完成项（已由 §8.2 与 §12 按新轨道重排）：Maven/Gradle 多模块 import snapshot、active profile/source-set override、依赖/facet/SDK 图、真实 build output→artifact 回填、Run/Debug module/artifact selection、single-file/incremental/background compile；PSI/stub index、inspection/data-flow；watcher/编码/事务 undo 三端真机验收、语义/token 合并、目录/symlink undo；树/tab 拖拽停靠；`WorkspaceFs` 生产只读链路
 
-### 8.2 下一步待办（建议顺序）
+### 8.2 下一步待办（v4.29 权威顺序）
 
-> M0–M5 计划项均已交付并合入主干。后续收口已完成自动化门禁固化，Git snapshot、导航与文件动作 controller 抽离，以及保存时格式化和 Git ignore。**原 3 项 Windows `rdp::cliprdr` 门禁失败（及顺带发现的 `chat::acp` 同类失败）已于 2026-07-25 修复，全量 `cargo test` 恢复全绿 — `d2861f4`；真机冒烟仍由用户执行。**
+> 本轮只更新文档，以下项目均未因本次审计自动变为已实现。执行顺序以 Editor 正确性和用户频率为先；X 轨道不得插队后被计作 Editor 进度。
 
-1. **✅ 固化全量前端门禁参数** — `a9f7484`
-   `vitest.config.ts` 已统一设置 `testTimeout: 15_000` 与 `maxWorkers: 4`；无额外参数的 `pnpm test` 全绿。
+| 顺序 | 工作包 | 目标等级 | 完成定义 |
+|------|--------|----------|----------|
+| 1 | E0 真实行为与 action 基础 | L2 | 消除无效开关/错误完成声明；统一 action/context/keymap dispatch；功能状态能区分 unavailable/provider/partial/complete |
+| 2 | E1 Effective Code Style | L2 | 同一 style 同时驱动 Tab/Enter、CodeMirror indent、LSP formatting、状态栏、save actions 与持久化 |
+| 3 | E2 Keymap Editor | L2 | 可编辑 scheme、录键/反查、冲突解析、when context、平台映射、迁移/恢复默认 |
+| 4 | E3 日常编辑效率 | L2 | smart keys、高频 line/statement/clipboard/folding actions、Smart/Type-matching Completion、语义模板、Surround/Generate |
+| 5 | E4 Style / Quality / Navigation | L2 | EditorConfig/code-style/rearrange/cleanup；intention 来源/完整性；Recent Locations/Switcher/related navigation |
+| 6 | J1 Java semantic foundation | L2→L3 | imported Java context + declaration/reference/type index、增量失效、smart/dumb、损坏恢复与基准 |
+| 7 | J2 Inspection / Data-flow | L3（Java fixture） | registry/profile/scope executor + CFG/SSA/nullability/taint/flow evidence，与 IDEA 对照 |
+| 8 | J3 Refactoring | L3（Java fixture） | completeness/conflict/exclusion/preview/revision/rollback contract，核心 refactor 对照通过 |
+| 9 | A1–A4 Advanced editor | L2 | Structural Search/Replace、recursive split/tab layout、Code Vision、appearance、clipboard history、scratch/injection、Full Line local inline completion |
+| 10 | Q1 三端/性能/无障碍 | L3 gate | Linux/macOS/Windows、IME/键盘/读屏/缩放与小中大工程基准形成持续门禁 |
 
-2. **（用户执行）真机冒烟并记缺陷**
-   `pnpm tauri dev` 覆盖 M0–M5 快捷键、分屏、PTY、Git gutter/blame、本地历史、AI 入口、语义高亮和 TODO/书签；结果回填本节。
+#### 第一批：纠正错误承诺与建立可扩展底座（P0）
 
-3. **🔶 继续 M0 瘦身（目标装配壳 <400）**
-   Git snapshot、导航与文件动作 controller 已抽离 — `cbc40ec`、`057006a`、`d97b2cb`。下一步组件化命令注册和 header/layout；当前壳体约 4.4k 行。
+- [ ] **E0.1 统一 action registry。** 把 workspace、CodeMirror、tree、terminal 的 action id、title、default binding、when、enabled reason、handler 和 telemetry/evidence id 收敛到单一注册层；Search Everywhere、菜单、cheatsheet、keymap editor 共用同一来源。
+- [ ] **E0.2 拆分装配责任。** 从约 10.6k 行 `CodeWorkspaceTab.tsx` 抽出 action、effective-code-style、completion orchestration、navigation-history controller；以依赖方向和聚焦测试为完成标准，不再使用“装配壳 <400 行”这种单一指标。
+- [ ] **E0.3 能力真值 UI。** 对每个语义 action 显示来源（local/index/provider）、scope、freshness、complete/truncated/unsupported 和失败原因；L1 不使用“IDEA parity/完整/已交付”文案。
+- [ ] **E1.1 修复缩进切换。** 定义 `EffectiveCodeStyle { tabSize, indentSize, continuationIndent, insertSpaces, source }`；状态栏选项必须即时 reconfigure CodeMirror，并传给 document/range formatter，跨 tab/reopen/workspace 恢复。
+- [ ] **E1.2 加入 EditorConfig 与优先级。** 至少支持 `indent_style`、`indent_size`、`tab_width`、`end_of_line`、`charset`、`trim_trailing_whitespace`、`insert_final_newline`；优先级固定为 explicit file override > EditorConfig > language/workspace default > sniffed fallback，并显示来源。
+- [ ] **E1.3 建立 code-style 对照 fixture。** Java/TS/Python/Go 各覆盖 2 spaces、4 spaces、tabs、嵌套 EditorConfig、format selection/file、format/save、external file change；无 formatter 时不得伪成功。
 
-4. **（可选）体验补丁**
-   工作区级保存时格式化与 Git ignore 已交付 — `4ff2ed7`、`6b41676`。剩余：server 回推 `workspace/applyEdit` oneshot；树/tab 拖拽停靠；评估把 `WorkspaceFs` 接入一条生产只读链路。
+#### 第二批：Keymap 与日常编辑效率（P0）
 
-5. **✅ 合入主干**
-   M0–M5 已由 PR #361 合入 `main`；后续收口分支待独立合并，真机冒烟结果可在后续独立补录。
+- [ ] **E2.1 Keymap scheme。** 支持 IDEA default 与 platform-specific defaults、copy/rename/delete/reset、自定义 shortcut 增删、按键反查、冲突列表、禁用 action、import/export 和 schema migration。
+- [ ] **E2.2 Context 与平台键盘。** editor/tree/search/terminal/modal/completion/snippet 等 context 必须确定优先级；覆盖 macOS `Cmd/Option`、Windows AltGr/OEM、Linux non-US layout 与系统保留快捷键。
+- [ ] **E3.1 编辑命令补齐。** 实现并测试 join/sort/reverse/transpose lines、unwrap/remove、custom folding region、paste history、virtual space、Tab jump-out、智能 Enter/Backspace；对语言不安全的动作按 capability 置灰。
+- [ ] **E3.2 Completion modes。** Basic、Smart/Type-matching 和重复调用扩展候选分别有明确 mode；保留 provider ranking/resolve/import edits，增加 type/context filter、visibility、exclude/priority、cancel/stale/large-list 门禁。
+- [ ] **E3.3 Templates / Complete Statement。** template 支持 context/type constraint、变量函数、import/shorten、surround template；Complete Statement 改为 parser/provider-aware，不能只按行尾字符猜测。
+- [ ] **E3.4 Surround / Generate。** Java 首批覆盖 surround if/try/loop、constructor、getter/setter、equals/hashCode、toString、override/implement/delegate；provider 缺能力时显示 unavailable，不生成字符串拼接式伪结果。
 
-6. **🔶 Java 深度支持（M6–M9，§11 新增）**
-   突破原 §2.3 非目标，深化 Java 工程能力。**M6 代码已交付**（`c35d963` A：jdtls `java.*` 设置全集 + 热更新 + Lombok；`4a06f91` B：大文件降级守卫 + 增量 diff 提速；ChangeSet→LSP 全量重写按失步风险显式后置，见 §11.B）——真机冒烟随 M0–M5 一并后置。下一步 **M7** 工程智能：全项目诊断需**先 spike** jdtls `java.buildWorkspace` 是否对未打开含错文件推送 `publishDiagnostics`（§11.C 硬门槛），构建集成增强（§11.F）独立可并行；**M8/M9** 为测试与调试（DAP）——分 D1–D5 阶段推进，通用 DAP 框架而非 Java 特判。完整方案、命令清单与风险见 §11。
+#### 第三批：Style、质量与导航闭环（P0）
+
+- [ ] **E4.1 Code style pipeline。** 增加 scheme/language settings、rearrange、code cleanup、optimize imports、format/cleanup on save；支持 file/directory/module scope、formatter marker/exclusion、preview/cancel/partial failure。
+- [ ] **E4.2 Intention/inspection 可治理。** Alt+Enter 区分 error fix、intention、refactor、source action，支持 on-the-fly disable/assign shortcut；Problems/Analysis 展示 provider、scope、revision 和 evidence level，不把 display suppression 当规则执行。
+- [ ] **E4.3 Navigation history。** 实现带代码上下文的 Recent Locations、多个 edit locations、Switcher、super method、siblings、method up/down、related symbol；library/dependency 目标保留 source/ownership/read-only 语义。
+- [ ] **E4.4 搜索语义。** Search Everywhere 明确 All/Class/File/Symbol/Action/Text 的数据完整性、scope、indexing state 和 ranking；Find/Replace 支持 scope/filter/preview/partial result 与可恢复批量替换。
+
+#### 第四批：Java 可证明语义（P1）
+
+- [ ] **J1.1 Java imported context。** 将 source set、language level、SDK、dependency/library source 和 jdtls module 统一成 editor semantic context；不要求先完成 X 轨道 compiler/artifact，但 classpath/source ownership 必须确定。
+- [ ] **J1.2 Index。** 建立声明/引用/type relation index、版本 schema、增量 invalidation、smart/dumb state、cancel、损坏重建与 shared-cache 安全边界；记录 10k/100k/1M LOC 基准。
+- [ ] **J2 Inspection/Data-flow。** 实现最小 Java registry/profile/scope executor 与 CFG/SSA/nullability/taint/interprocedural summary；覆盖 dead code、probable null dereference、constant condition、possible values、producer/consumer、path proof 和 quick-fix linkage。
+- [ ] **J3 Refactor contract。** provider/index 统一返回 usages、completeness、conflicts、dependent edits、excludable groups、revision 和 rollback plan；Rename/Safe Delete/Move/Change Signature/Extract/Inline 用 IDEA fixture 验证结果、冲突、preview 与单步 undo。
+
+#### 第五批：高级能力与持续门禁（P2 / Cross-cutting）
+
+- [ ] **A1 Structural Search/Replace。** 以 parser/query AST 和 typed variables 实现 Java 首个垂直切片，支持 template 保存/分享、scope、preview、replace conflict 与 undo；regex 搜索不能计作 SSR。
+- [ ] **A2 Editor layout/presentation。** editor group 改为递归 layout tree，支持 nested split、drag-to-split/dock、detach/equalize/stretch/splitter navigation、tab limit/order/policy；再补 Code Vision、scrollbar lens、font/ligature/color scheme。
+- [ ] **A3 边缘编辑工作流。** clipboard history、scratch files、language injection、custom folding 与 read-only/library edit policy 分项设计和验收。
+- [ ] **A4 Full Line Completion（IDEA Ultimate bundled-plugin 参考）。** Java 首批建立本地模型下载/更新/禁用/硬件降级与隐私状态，支持单/多行 inline suggestion、整段/逐词/逐行接受、popup 同步、格式/括号/引号修正、基础 unresolved-reference 过滤、auto-import、smart filtering、cancel/stale 与 typing latency/memory budget；必须证明源码默认不出机。其他语言逐模型/provider 记账，AI Assistant 或 Terminal FIM 不计入本项。
+- [ ] **Q1 自动化。** 每个新增控件同步 `feature-list.md`/testid catalog/YAML case；核心算法加 Vitest/Rust 测试，Editor 主路径执行 `qa-ui-auto --diff`，失败与不支持状态均需用例。
+- [ ] **Q2 三端真机。** 按 §2.6 保存 Linux/macOS/Windows 的 keyboard/IME/clipboard/font/zoom/path/watcher/LSP/packaged-app 证据；只有三端完成后，相应能力才可升 L3。
+- [ ] **Q3 性能与隐私。** 固定 typing latency、completion p95、search/index time、memory 与 crash-recovery budget；trace 默认脱敏，不记录源码、补全文本、凭据或完整路径。
+
+X 轨道的 Build/Run/Debug/Test/Coverage、Terminal、Git、AI 继续按各自设计推进，但其待办统一放到 §12，避免再次挤占 Editor P0/P1 顺序。
 
 ---
 
@@ -722,48 +927,48 @@ src/stores/
 
 | 风险 | 说明 | 缓解 |
 |------|------|------|
-| M0 重构回归 | 4.4k 行组件拆迁易碎 | 行为不变原则 + 聚焦测试 + 回归清单；按 controller/面板分多个提交 |
+| 装配层重构回归 | `CodeWorkspaceTab.tsx` 已约 10.6k 行，action/style/LSP/file/execution 状态耦合 | 行为不变原则 + 聚焦测试 + 回归清单；先抽 action/code-style/navigation controller，再分离 X 轨道装配 |
 | LSP 服务器差异 | completion/rename/hierarchy 各 server capability 差异大 | §5.2.0 capability 驱动开关；不支持则置灰 + hint；§5.2.12 矩阵仅作方向参考 |
-| WorkspaceEdit 非原子 | 跨文件重命名部分失败 | 如实呈现结果清单（§5.2.9），不承诺原子性 |
+| WorkspaceEdit 非原子 | 跨文件重命名可能部分成功 | 有序执行在首次失败处停止并呈现结果；单个 overwrite 资源操作使用备份/恢复保护旧目标，但不虚构跨操作事务 |
 | 补全性能/竞态 | 高频输入下请求风暴、过期回填 | 防抖 + 请求代际取消；resolve 惰性化；isIncomplete 续查 |
 | 快捷键冲突 | IDEA 键位与应用/系统习惯冲突（Ctrl+W/N/P 等） | when-context 路由；冲突项文档化并留别名 |
 | 搜索性能 | 超大仓库 Find in Files | 流式分批 + 上限截断 + 可取消；ignore crate 跳过 .gitignore |
-| 分屏共享 buffer 复杂度 | 双 view 同步易出编辑竞态 | 限定二分屏；CM6 官方 split 模式；dirty/保存收敛到单 buffer 模型 |
+| 分屏共享 buffer 复杂度 | 双 view 已可用，递归 layout 后同步/焦点/关闭更易竞态 | 保持单 buffer ownership；先定义递归 layout state 与迁移，再逐步开放 nested split |
 | Inlay hints 抖动 | 编辑时 hint 频繁重排 | 视口 range + 滚动/编辑防抖；默认关，用户主动开启 |
 | 底部终端生命周期 | 工作区关闭时 PTY 泄漏 | 随 tab 卸载显式销毁；复用现有 TerminalPanel 清理路径 |
-| 范围蔓延 | "像 IDEA"没有边界 | §2.3 非目标清单为评审基线；新增诉求走 P2+ 排队 |
+| 范围蔓延 | “像 IDEA”没有边界，伴随能力容易挤占编辑器主线 | 以 §2.3 能力边界和 §8.2 排序评审；X 轨道独立记账 |
 
 ---
 
-## 10. 待决问题（评审时确认）
+## 10. 已定原则与待决实现选择
 
-1. 底部 dock 是否需要 Git tab（vs 只留状态栏入口 + 现有 Git Manager）？
-2. 右侧 Outline / Documentation / AI 是否首期合并为单栏多 tab（原型按合并形态演示）？
-3. 本地历史保留策略默认值（50 版/7 天）是否合适？
-4. 是否首期就提供 VS Code keymap 预设？
-5. `WorkspaceFs` trait spike 已完成，下一步是否接入一条生产只读链路？
-6. Inlay hints 默认开关（方案默认关，rust-analyzer 用户可能期待默认开）？
-7. **（v3.0 新增，✅ 已定）** §11 调试（DAP）：**从 D1 起就抽通用 DAP 框架**（语言无关内核 + 适配器注册表），Java（jdtls + java-debug）作为首个适配器插入，为后续语言（Node/Go/LLDB 等）留缝。架构切分见 §11.D。
-8. **（v3.0 新增）** jdtls bundle（java-debug/java-test/lombok）是否随发行内置下载，还是仅提供路径配置 + 手动下载入口？
+1. **参考基线已定**：IntelliJ IDEA 2026.2 Core Editor + Java；其他语言逐 provider/fixture 记账，不宣称整体现代 IDEA 等价。
+2. **范围已定**：Build/Run/Debug/Test/Coverage、Terminal、Git Manager、AI、远程工作区为 X 轨道；只把其 editor action/gutter/navigation 计入 Editor。
+3. **Code style 优先级已定**：explicit file override > EditorConfig > language/workspace default > sniffed fallback；状态栏必须展示最终值与来源。
+4. **Keymap 路线已定**：P0 先交付 IDEA platform defaults 与自定义 scheme；schema 为 VS Code/其他 preset 保留扩展，但 preset 内容不阻塞首批。
+5. **语义路线已定**：provider-first；Java 建最小声明/引用/type index 和 inspection/data-flow 垂直切片。待决的是 parser/index 技术选型与持久化格式，不是是否需要语义层。
+6. **模板/生成路线已定**：只有通过 type/context/provider 校验的变换才计作语义能力；固定文本模板可保留，但必须标为 local template。
+7. **布局路线已定**：现有双 group 保持兼容，P2 迁移为递归 layout tree；detach 是否使用 Tauri 独立窗口在 A2 spike 后决定。
+8. **默认显示已定**：inlay hints 继续默认关、semantic highlighting 默认按 provider 开、large-file 自动降级；每项必须可解释并可按语言配置。
+9. **Full Line 边界已定**：只对齐 IDEA Ultimate 默认 bundled plugin 的 Code Editor 工作流，Java 先行、本地离线和隐私为验收条件；不因此纳入 AI Assistant 或通用插件兼容。
+10. **仍待决**：Java parser/index 方案、Structural Search query model、Full Line 模型/runtime 选型、clipboard history 的隐私/保留策略、scratch/injection 的文件所有权，以及三端真机设备矩阵的具体机器清单。
 
 ---
 
-## 11. Java 深度支持完善计划（v3.0 新增，M6–M9）
+## 11. Java 深度支持历史计划（v3.0，M6–M11）
 
-> 目标：在 M0–M5 已达成的「日常编辑逼近 IDEA」基础上，深化 **Java 工程能力**——补齐 jdtls 初始化设置、消除大文件瓶颈，并**突破原 §2.3 非目标**纳入全项目诊断、构建集成、测试与调试（DAP）。本节按「先快赢、后重投入」排序，映射到里程碑 M6–M9。
->
-> 定位不变：Code Workspace 仍是「轻量 IDE 面」，与终端/SSH/SFTP/AI 一体化是差异化；本计划把「够用」提升到「Java 主力开发够用」，但不做 Profiler、不做 IDEA 级 facet 建模（见修订后 §2.3）。
+> 本节保留 M6–M11 的 Java 工程、测试与调试实施记录。v4.29 起，jdtls 编辑语义、Java index/inspection/refactor 归 Editor 的 J1–J3；Build/Run/Test/Debug/DAP 归 X 轨道。目标、状态和下一顺序以 §2 与 §8.2 为准。
 
-### 11.0 现状盘点（As-Is，Java 视角）
+### 11.0 现状盘点（As-Is，Java 视角，v4.23 复核）
 
 | 领域 | 现状 | 载体 |
 |------|------|------|
-| jdtls 初始化 | 仅下发 `java.configuration.runtimes` + `extendedClientCapabilities.classFileContentsSupport` | `lsp.rs` `lsp_initialization_options`（约 4549 行） |
-| 文档同步 | 已支持增量（`buildIncrementalContentChange` + `omitFullText`），但前端每键 `doc.toString()` 出全串、React 持全串、并用两份全串 diff 算增量 | `CodeMirrorHost.tsx:679`、`useWorkspaceLspSession.ts:455` |
-| 诊断 | 仅对**已打开文档**推送；Problems 面板只遍历 `openOrder` | `lsp.rs`（per-URI 存储）、`CodeWorkspaceTab.tsx:4669` |
+| jdtls 初始化 | `settings.java` 已覆盖 runtimes、autobuild、completion/format/import/codeGeneration、CodeLens、signature help、inlay hints、classpath severity；支持 didChangeConfiguration 热更新与可选 Lombok javaagent | `lsp.rs` `lsp_initialization_options`、`lsp_set_java_settings`；仍需真实 jdtls/bundle 验收 |
+| 文档同步 | 已支持 incremental sync、large-file guard（语义装饰降级）和全量兜底；ChangeSet→LSP 全量重写仍明确后置，前端仍有受控文本物化成本 | `CodeMirrorHost.tsx`、`useWorkspaceLspSession.ts`、`largeFile.ts`；需三端大文件/外部编辑真机验证 |
+| 诊断 | 已有 push diagnostics、LSP 3.17 workspace pull diagnostics、partial/related/refresh 基础和全项目聚合命令；Problems/Analysis 仍以 provider 结果为准，没有自有 inspection/data-flow | `lsp.rs` `lsp_workspace_diagnostics`、`CodeWorkspaceTab.tsx`、`AnalysisPanel.tsx` |
 | 库源码 | jdt:// 反编译 + 按需 Download Sources（已实现） | `lsp.rs` `lsp_download_sources`（约 3502 行） |
-| Run/Tasks（v3.2 基线问题） | 只探测 npm/Cargo/Make/Gradle/pom/go 的固定任务，经 PTY 运行；Java 仅有 Maven `package/test` 或 Gradle `build/test`，无主类发现、无当前文件运行，Windows wrapper 与测试 runner 还可能绕开项目 wrapper，因此界面有 Run/Build 但 Java 应用实际无法可靠启动 | `workspace.rs` `workspace_detect_tasks`、`RunPanel.tsx`、`javaTestRun.ts` |
-| 调试 / 测试 | 无（原 §2.3 非目标） | — |
+| Run/Tasks | `workspace_execution_model` 提供 provider targets、shared/local/provider named configuration、runtime/env/dotenv/Before launch/compound；`workspace_task_tree` 提供 wrapper 优先的 task tree；Java main/Maven/Gradle/单文件 Run、Java test discovery/run/debug 和 JUnit XML ingestion 已接入 PTY/DAP | `workspace_execution.rs`、`workspace.rs`、`RunPanel.tsx`、`BuildPanel.tsx`、`javaTestRun.ts`；execution model、task tree、jdtls module 查询尚未统一为 imported module/artifact graph；coverage 报告展示已有，typed Run with Coverage、采集/合并与真实 output 仍缺 |
+| 调试 / 测试 | 通用 DAP 内核、Java adapter、line/function/data/instruction/exception breakpoint、memory/disassembly、compound session、变量/栈/console、Java test debug、JUnit 结果树与 LCOV/JaCoCo coverage 展示已形成代码闭环 | 真实 Java/JS/Python/Go/Rust/C++ adapter trace、IDEA 专有 breakpoint properties、Run with Coverage 配置/采集、非 JUnit provider 协议、跨平台进程/路径/权限和真实工程结果仍缺；synthetic fixture 不是 adapter 证据 |
 
 ### 11.A jdtls 初始化设置补齐（M6，快赢，规模 S–M，风险低）
 
@@ -810,11 +1015,11 @@ src/stores/
 
 **Spike（前置，硬门槛）**：验证 jdtls `workspace/executeCommand: java.buildWorkspace`（或 `java.project.build` 全量）是否对**未打开的含错文件**主动 `publishDiagnostics`。
 - **命中**：走下方后端聚合方案。
-- **未命中**：退用 LSP 3.17 pull 诊断 `workspace/diagnostic`（需 server 声明 `diagnosticProvider.workspaceDiagnostics`）。
+- **未命中**：退用 LSP 3.17 pull 诊断 `workspace/diagnostic`（需 server 声明 `diagnosticProvider.workspaceDiagnostics`）；v4.2 已实现此 fallback，仍需真机确认具体 server 返回质量。
 
 **后端**：
 - `LspSession.diagnostics` 已按 URI 全量存储（不限打开文档，`lsp.rs:529`）。新增 `lsp_workspace_diagnostics(workspace_id)` 返回**全部已收到诊断**（含未打开文件）。
-- 新增 Tauri event（如 `lsp:diagnostics-updated`），在收到 `publishDiagnostics` 时通知前端刷新（现为轮询/按文档拉取）。
+- 收到 `publishDiagnostics` 继续写入 session 缓存；pull provider 通过 Problems 面板轮询触发，暂不依赖后台 stdout task 持有 `AppHandle`。
 - 触发点：项目导入完成、保存、手动「重新构建项目」按钮；防抖合并。
 
 **前端**：Problems 面板加 **「全项目 / 打开的文件」** 切换；未打开文件诊断点击即打开定位；徽标计数含全项目；「重新构建项目」入口（状态栏或面板工具条）。
@@ -822,10 +1027,11 @@ src/stores/
 **交付物**：spike 报告 → 后端全项目诊断命令 + event → Problems 面板切换 + 构建触发入口。
 
 **🔶 已交付基础设施（M7-C，`083999f` 后端 + C-2 前端提交）——spike 无关、优雅降级**：
-- **后端 `083999f`**：`lsp_workspace_diagnostics(workspace_id)` 聚合该 workspace 全部 ready session 已收到的诊断（含未打开文件,按 path 去重排序,跳过 `jdt://`/非 file URI）→ `WorkspaceDiagnosticFile{path,uri,diagnostics}`;`lsp_build_workspace(descriptor)` 走 `workspace/executeCommand: java.buildWorkspace(full=true)` 触发「重新构建项目」。诊断本就按 URI 全量存储,故此为纯读聚合——**对 spike 结果不敏感**:命中则「全项目」显示未打开文件诊断,未命中则等同「打开的文件」。
+- **后端 `083999f`**：`lsp_workspace_diagnostics(workspace_id)` 聚合该 workspace 全部 ready session 已收到的诊断（含未打开文件，按 path 去重排序，跳过 `jdt://`/非 file URI）→ `WorkspaceDiagnosticFile{path,uri,diagnostics}`；`lsp_build_workspace(descriptor)` 走 jdtls 自定义 `java/buildWorkspace(full=true)` request 触发「重新构建项目」。v4.2 之前此聚合依赖 server 主动 push，v4.2 起再叠加标准 pull fallback。
 - **⚠ 事件推送改为轮询(架构变更)**：原计划的 `lsp:diagnostics-updated` event push **已放弃**——在 LSP session 的 stdout 后台任务里持有 `AppHandle`/`Emitter` 会确定性触发 Windows 测试二进制启动失败(`STATUS_ENTRYPOINT_NOT_FOUND` 0xC0000139,与 emit 调用无关,移除 AppHandle 字段即恢复)。改为**前端轮询**:Problems 面板处于「全项目」且打开时每 ~1.5s 拉 `lsp_workspace_diagnostics` + 重建后重取。与既有按文件诊断同为 pull 式,无功能损失。
 - **前端 C-2**：Problems 面板「全项目 / 打开的文件」切换;「全项目」轮询聚合诊断;点未打开文件诊断即 `problemPathToRef`(复用 `relativePathWithinRoot`)映射回 `{kind:root,rootId,path}` → openFile + reveal;徽标随激活 scope 计数;「Rebuild」按钮(仅全项目)→ `lspBuildWorkspace`。文案沿用 ProblemsPanel 既有硬编码英文约定(不引 i18n)。
-- **⬜ 仍待你真机 spike**:验证 jdtls `java.buildWorkspace` 是否对**未打开含错文件**推送 `publishDiagnostics`。`pnpm tauri dev` → Maven/Gradle 工程含 A.java(有错,不打开)/B.java(打开) → 点「Rebuild」→ 看「全项目」是否列出 A.java 的错。**命中**:C 完整可用。**未命中**:补 LSP 3.17 pull 诊断 `workspace/diagnostic` 回退(需 server 声明 `diagnosticProvider.workspaceDiagnostics`)。测试:后端 `file_path_from_uri`;前端 ProblemsPanel scope 切换/rebuild/空态/加载态。`cargo test` 902、`pnpm test` 205 文件 / 1633 全绿。
+- **✅ v4.5 pull fallback 代码闭环**：`lsp_workspace_diagnostics` 对声明静态 `diagnosticProvider.workspaceDiagnostics` 或动态 `workspace/diagnostic` 的 session 发起 LSP 3.17 pull；携带 previous resultId 与 partial-result token，支持 full/unchanged、relatedDocuments、分片合并和 `workspace/diagnostic/refresh` 即时失效，跨 session 并发，慢请求去重，失败继续使用 `publishDiagnostics` 缓存，损坏响应不部分覆盖已有状态。
+- **⬜ 仍待三端真机 spike**：Maven/Gradle 工程含 A.java（有错且不打开）/B.java（打开）→ 点「Rebuild」→ 验证 push 或 pull 是否稳定列出 A.java，记录 jdtls provider capability、响应与耗时；并在支持 pull diagnostics 的 TypeScript/Rust/Python server 上各做一例真实工程验证。
 
 ### 11.Bundle jdtls 扩展加载基建（M8，D/E 共享硬前提，规模 M）
 
@@ -835,7 +1041,7 @@ jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩
 - 注入 `lsp_initialization_options` 的 `bundles`；Settings 暴露路径 + 「自动下载」入口 + 可用性探测（复用现有 jdtls 探测/版本校验模式）。
 - 复用 `cc_bridge` 的 oneshot HITL 管道模式处理 server 回推的 `workspace/executeCommand` 结果与 `applyEdit`。
 
-**✅ 已交付（`4929467`）**：新 `java_bundles.rs`——`resolve_bundle_jars`/`probe_bundles` 从配置目录按版本号（数值比较,非字典序）选最高版 `com.microsoft.java.{debug,test}.plugin-*.jar`,或接受显式 jar 路径;进程级 `CONFIGURED_JAVA_BUNDLES`。`lsp_initialization_options` 在配置存在时注入 `"bundles":[…]`（否则省略）。命令 `lsp_set_java_bundles`/`lsp_detect_java_bundles`;前端 `LSP_JAVA_BUNDLES_KEY` 持久化 + 启动推送 + Settings「调试与测试扩展」子区（路径输入 + detected/not-found 探测）+ en/zh。**修订**:Lombok **不是 bundle**——仍走 `-javaagent`(§11.A);bundles 只装 java-debug/java-test。**范围**:本期做路径配置 + 探测,自动下载留作发行打包决策(§10.8)。单测 5(版本选择/显式 jar/探测/空);jdtls 实际加载 jar 为真机项。
+**✅ 已交付（`4929467`）**：新 `java_bundles.rs`——`resolve_bundle_jars`/`probe_bundles` 从配置目录按版本号（数值比较,非字典序）选最高版 `com.microsoft.java.{debug,test}.plugin-*.jar`,或接受显式 jar 路径;进程级 `CONFIGURED_JAVA_BUNDLES`。`lsp_initialization_options` 在配置存在时注入 `"bundles":[…]`（否则省略）。命令 `lsp_set_java_bundles`/`lsp_detect_java_bundles`;前端 `LSP_JAVA_BUNDLES_KEY` 持久化 + 启动推送 + Settings「调试与测试扩展」子区（路径输入 + detected/not-found 探测）+ en/zh。**修订**:Lombok **不是 bundle**——仍走 `-javaagent`(§11.A);bundles 只装 java-debug/java-test。**范围**:本期做路径配置 + 探测,自动下载留作 §12 X 轨道发行打包决策。单测 5(版本选择/显式 jar/探测/空);jdtls 实际加载 jar 为真机项。
 
 ### 11.F 构建集成（M7，增强现有 Run/Tasks，规模 M–L，风险中）
 
@@ -846,14 +1052,14 @@ jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩
 - **项目重载**：pom.xml/build.gradle 变更 → `java/projectConfigurationUpdate`（Download Sources 路径已部分具备），补「检测到构建文件变化 → 提示重载」。
 - **模块/源集视图**：多模块工程 module 结构（jdtls `java.project.getAll`）。
 
-**不做**：IDEA 级 facet 建模、复杂运行配置参数体系（承接 §5.9 边界）。
+**本阶段未完成**：IDEA 级 facet/source-set/language-level 建模仍是工程模型 Gap；复杂运行配置参数、仓库共享配置和 compound Run/Debug 已由 M11 形成基础代码闭环，active profile UI 与 coverage 报告展示后来已补，仍缺 typed Run with Coverage/采集/合并、非 JUnit provider 统一结果协议与完整 adapter 矩阵。这些按 §12 的 X 轨道验收。
 
 **✅ 已交付（M7-F，`ba037ac` + `a0d209c` + `f9abab5` + 模块视图提交）**：
 - **项目重载（F-3，`ba037ac`）**：`lsp_reload_project` 走 active jdtls session 发 `java/projectConfigurationUpdate`（复用 download_sources 管道）；前端保存 pom.xml/build.gradle[.kts]/settings.gradle[.kts] 且 jdtls 活跃时弹「Reload Java project」确认。
 - **任务树（F-2，`a0d209c`）**：`workspace_task_tree` 按 source 分组，Maven 全生命周期（clean…install）、Gradle 常用任务（clean/build/assemble/check/test/jar），其余生态按来源归组——纯离线（不 spawn，`gradle tasks --all` 实时枚举留作后续）；前端 Build 底部 dock 面板渲染可点击树，复用 `runWorkspaceTask`（PTY），原 Run tab 不动。
 - **依赖树（F-1，`f9abab5`）**：`workspace_dependency_tree` spawn `mvn dependency:tree` / `gradle dependencies --configuration runtimeClasspath`，解析为 `DependencyNode` 森林并标版本冲突（Maven verbose `(omitted for conflict…)`、Gradle `req -> resolved` 仲裁）；解析器纯函数单测（spawn 为真机项）；前端 Build 面板 Dependencies 区按需加载、懒展开、冲突徽标。**安全**：树装配用索引路径栈，无裸指针（避免 Vec 扩容悬垂）。
 - **模块视图（F-4）**：`lsp_java_modules` 走 jdtls `workspace/executeCommand: java.project.getAll` → `JavaModule{name,path,uri}`（解析器去重+按名排序，单测）；前端 Build 面板 Modules 区仅对含 Maven/Gradle 任务的根显示、按需加载（合成 `.java` 路径选中该根的 jdtls session）。
-- **边界确认**：均未做 IDEA facet 建模 / 运行配置参数体系。真机门槛：spawn `mvn`/`gradle` 与 jdtls `getAll`/`projectConfigurationUpdate` 的端到端结果由用户真机冒烟回填；本期单测覆盖纯解析 + graceful 错误路径。
+- **边界确认**：尚未做 IDEA facet/source-set/language-level 建模；运行配置参数体系已由 M11 补齐基础模型。真机门槛：spawn `mvn`/`gradle` 与 jdtls `getAll`/`projectConfigurationUpdate` 的端到端结果由用户真机冒烟回填；本期单测覆盖纯解析 + graceful 错误路径。
 
 **v3.3 补强（与 §11.G 共用任务模型）**：
 
@@ -861,7 +1067,7 @@ jdtls 经 `initializationOptions.bundles[]`（jar 绝对路径数组）加载扩
 - Maven 生命周期补 `rebuild = clean compile`；Gradle补 `classes` 与 `rebuild = clean classes`。Build 面板顶部把“展示任务”提升为可直接执行的 Build project / Rebuild。
 - 本节仍负责构建模型、依赖与模块视图；“找到并启动 Java 应用”由 §11.G 闭环。
 
-### 11.G Java Build/Run 可执行闭环（M10，P0，规模 M）
+### 11.G Java Build/Run 可执行闭环（M10，历史 X，规模 M）
 
 #### 11.G.1 根因复盘
 
@@ -908,14 +1114,15 @@ Gradle init script 只写入系统临时目录 `taomni-code-workspace/java-run.i
 
 #### 11.G.3 当前边界与后续
 
-- 本轮目标是“开箱可 Build/Run”，不是完整 IDEA Run Configuration。program args、VM options、env map、active profiles、Before launch、配置命名/共享仍应作为 M11 独立模型实现，不能继续拼接到 `WorkspaceTask.command`。
+- M11 已引入独立于展示命令的结构化 `ExecutionRunConfiguration`/`ExecutionDebugConfiguration`：program args、VM/runtime options、env map、dotenv、working directory、Before launch、配置命名与按源文件 active selection 均形成代码闭环，Run/Debug 共享选择；不再从 `WorkspaceTask.command` 反解析生产 argv。测试命令退出后由 `workspace_test_results` 读取有界 JUnit XML（Maven Surefire/Failsafe、Gradle `build/test-results`），Tests 面板消费稳定的 case/summary/diagnostics schema。
+- 仍未达到 IDEA 完整 Run Configuration：compound Run/Debug 已支持嵌套、顺序/并行和失败策略，Debug 具备 grouped multi-session DAP；仍缺 active Maven/Gradle profiles/source set/module selection、coverage 和非 JUnit provider coverage；仓库级共享配置/模板、平台覆盖、配置迁移和校验 schema 已形成代码闭环，但仍需三端发行包验收。
 - Maven 首次运行 exec plugin、Gradle首次解析依赖仍可能访问网络；离线行为由构建工具自身配置决定。
 - Android Gradle、JPMS module-path、定制 Gradle `projectDir` 映射、非文件名顶层 main class 属高级 project model；发现失败时明确报错并保留自定义 task 兜底。
 - Debug 仍走 DAP + java-debug bundle，以保留断点/变量能力；Run 与 Debug 的依赖边界刻意不同。
 
 ### 11.D 调试（DAP，M8–M9，最大新项目，规模 XL，风险高，分 D1–D5）
 
-原 §2.3 明确排除，现纳入。**决策（§10.7）：从 D1 起就抽通用 DAP 框架**——语言无关内核 + 适配器注册表；Java 只是首个适配器，D3–D5 的断点/单步/变量/求值全部走**语言无关**的会话状态与前端面板，不写 Java 特判。后续 Node/Go/LLDB 等只需新增一个适配器定义。
+历史背景：调试曾被早期 §2.3 排除，后作为完整 IDE 的伴随能力实施；v4.29 起统一归 X 轨道。**既有 DAP 架构决策：从 D1 起抽通用 DAP 框架**——语言无关内核 + 适配器注册表；Java 只是首个适配器，D3–D5 的断点/单步/变量/求值全部走**语言无关**的会话状态与前端面板，不写 Java 特判。后续 Node/Go/LLDB 等只需新增一个适配器定义。
 
 **架构切分（内核 vs 适配器）**：
 
@@ -935,12 +1142,24 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
 - **D2 Java 适配器（首个 registry 插入）**：实现 Java `DebugAdapterDescriptor`——jdtls 命令 `java.resolveMainClass`/`java.resolveClasspath`/`java.resolveJavaExecutable` 组装 launch config；经 java-debug bundle 的 `vscode.java.startDebugSession` 拿到 adapter 端口/句柄交给 D1 内核。**语言相关代码集中于此一处。规模 M。** — **✅ 已交付 `9edb7b7`**（`java_debug_adapter.rs`）：resolve → `DapLaunchPlan{Tcp{port},launch,args}`;`dap_start_session` 返回 `DapStartResult{sessionId,capabilities,request,arguments}`（前端/D3 驱动 launch 时序）;`LspManager::execute_java_command` 共享 jdtls 访问;`DapManager::with_lsp` 注册 Java 适配器。单测 5（mainClass/classpath/port/launch-args/scope）。
 - **D3 断点 + 单步**：gutter 断点、run/pause/step in·over·out/continue、当前行高亮、调用栈面板——**经 D1 内核的 setBreakpoints/continue/stepIn… 通用请求，不碰适配器**。**规模 M。** — **✅ 已交付 `b141bad`**：`dap_send`（fire-and-forget，launch 握手需要）;`dapDebugModel`（纯：setBreakpoints/异常过滤 arg、threads/stackTrace 解析、step→command、event reducer，单测 6）;`useCodeDebugSession`（launch→initialized→setBreakpoints→configurationDone 编排、断点持久化、stopped 后 threads+stackTrace）;`debugEditorChrome` 断点 gutter + 当前行高亮;`DebugPanel` 控制条+调用栈。
 - **D4 变量 / 监视 / 求值**：variables·scopes 树、watch、debug console `evaluate`、悬停求值——同样走 D1 通用请求。**规模 M。** — **✅ 已交付 `b141bad`（随 D3 hook/panel）**：stopped 后 scopes→variables 懒展开树、watch 表达式（context=watch）、console（context=repl）。
-- **D5 进阶**：条件断点、logpoint、异常断点（DAP `setExceptionBreakpoints`，通用）；热重载为 Java 适配器可选扩展（jdtls `redefineClasses`，经 registry 的适配器能力位声明，非内核必备）。**规模 M。** — **✅ 已交付**：条件断点/logpoint（gutter 右键 → 条件/日志消息 prompt → `setBreakpointOptions` 走 `setBreakpoints` 的 condition/logMessage）;异常断点（面板按 `capabilities.exceptionBreakpointFilters` 勾选 → `setExceptionBreakpoints`）;热重载按钮（`redefineClasses`，best-effort）。
+- **D5 进阶**：条件断点、logpoint、异常断点（DAP `setExceptionBreakpoints`，通用）；热重载为 Java 适配器可选扩展（jdtls `redefineClasses`，经 registry 的适配器能力位声明，非内核必备）。**规模 M。** — **✅ 已交付**：条件断点/logpoint（gutter 右键 → 条件/日志消息 prompt → `setBreakpointOptions` 走 `setBreakpoints` 的 condition/logMessage）；异常断点初版（面板按 `capabilities.exceptionBreakpointFilters` 勾选 → `setExceptionBreakpoints`），其完整 filter metadata/condition/binding 生命周期由 D5.3 收口；热重载按钮（`redefineClasses`，best-effort）。
+- **D5.1 function/method breakpoint（`cbda8dd`）**：**✅ 代码闭环**。按 `supportsFunctionBreakpoints` 发送标准 `setFunctionBreakpoints`，支持 condition/hitCondition、workspace 有界持久化、启停、Mute/Remove All、adapter 返回的 verified/pending/failed 状态及无 source/line 的 breakpoint event；初始化时严格位于 `configurationDone` 前，运行中修改同步到所有 eligible compound child，并以 per-session generation 丢弃旧响应和终止后响应。**未完成边界**：不同 adapter 的函数名/方法签名语法与真实绑定结果必须在 Java/JS/Python/Go/Rust/C++ 及三端真机矩阵验证，不能仅凭协议单测标记严格完成。
+- **D5.2 data breakpoint/watchpoint（`596759d`）**：**✅ 代码闭环**。停驻的 Variables 或 Watch 行先调用标准 `dataBreakpointInfo`，只有 adapter 返回的 opaque `dataId` 才允许创建；`canPersist=true` 项按 `adapterId` 写入 workspace storage，`canPersist=false` 项只按 owner `sessionId` 存活。初始化恢复严格排在 `configurationDone` 前；标准 `setDataBreakpoints` 采用全量替换，支持 access type、condition、hitCondition、启停、Mute/Remove All、binding verified/pending/failed、compound adapter/session scope、终止清理和 stale-response generation guard。address/bytes 与源代码入口在 D5.6 单独收口，D5.2 的标准 watchpoint 生命周期不因此变成 IDEA 严格完成。
+- **D5.3 conditional exception filters（`1f2d93b`）**：**✅ 代码闭环**。完整解析 `exceptionBreakpointFilters` 的 label/description/default/supportsCondition/conditionDescription；用户显式启停与条件按 workspace + adapter + opaque filter id 有界持久化，新 filter 才采用 adapter default。初始化时在 `configurationDone` 前发送全量替换请求：无条件项及旧 adapter 走 `filters`，只有同时声明 filter condition 和 `supportsExceptionFilterOptions` 时才走 `filterOptions`；未广告 filter 的 adapter 不发送协议禁止的请求。运行中编辑只同步同 adapter 的 initialized compound children，并接入 Mute/Remove All、请求失败 console、verified/pending/failed 响应、breakpoint event id 路由、termination 清理和 per-session stale-response guard。**该阶段边界**：adapter filter 集合不是 IntelliJ IDEA 的任意异常类/包规则；标准 `exceptionOptions` 后由 D5.4 形成代码闭环，exception `breakpointModes` 的 `filterOptions.mode` 已由 D5.5 接入，但 IDEA 专有属性、Java/JS/Python/Go/Rust/C++ 的表达式/路径语法、真实绑定与三端行为仍待后续矩阵验收。
+- **D5.4 exception path rules（`4510aa2`）**：**✅ DAP 代码闭环**。新增标准 `ExceptionOptions`、`ExceptionPathSegment` 和 `never`/`always`/`unhandled`/`userUnhandled`；规则 id/path/names/negate/mode 按 workspace + adapter 有界持久化，损坏的非空 path 被拒绝而不会意外扩大成 whole-tree。只有 adapter 同时广告 exception filters 和 `supportsExceptionOptions` 才允许创建/发送；请求严格合并为 `filters → filterOptions → exceptionOptions` 的位置绑定顺序，在 `configurationDone` 前恢复，运行中只同步同 adapter 的 initialized compound children，并接入启停、Mute、Remove All、请求失败 console、verified/pending/failed、breakpoint event id、termination cleanup 和 generation guard。DebugPanel 支持类/包 pattern、四种 break mode、多 path segment、name alternatives、negate、编辑/删除和 unsupported/binding 状态。**未完成边界**：DAP 没有规定 adapter 的 exception tree、wildcard 或语言继承语义，因此此提交不能单独证明 IDEA“指定异常及其子类”；也不表达 IDEA catch-site/throw-site class filters、caller/instance filters、pass count reset、condition/evaluate-log/remove-once/suspend-policy/dependency 等属性。exception `filterOptions.mode` 已由 D5.5 统一接入；真实 adapter/三端矩阵仍待验收。
+- **D5.5 breakpoint modes（`f3363ad`）**：**✅ DAP 代码闭环**。解析并去重 adapter `breakpointModes` metadata，按 `source`/`exception`/`data`/`instruction` applicability 过滤并以 adapter 顺序提供默认值；source mode 按 adapter id 持久化并写入 `setBreakpoints`，exception mode 在 `supportsExceptionFilterOptions` 时写入 `filterOptions.mode`，data mode 只写入 `dataBreakpointInfo.mode` 并随 adapter-owned watchpoint 保存，instruction mode 由 D5.7 写入 `setInstructionBreakpoints`；compound session 仅向同 adapter 子会话广播，UI 控件均 capability-gated。**未完成边界**：DAP metadata/字段路由不等于硬件/软件断点真实行为；IDEA catch/throw/caller/instance 等属性、各语言 adapter 合约和三端真机仍待验收。
+- **D5.6 data address/range 与 source field declaration（`ac42f63`）**：**✅ 客户端代码闭环**。当 adapter 广告 `supportsDataBreakpointBytes` 时，DebugPanel 提供 stopped 状态下的表达式/十进制或 `0x` 地址、正整数 `bytes` 和 address 模式；`dataBreakpointInfo` 只在 capability gate 通过时携带 `bytes`/`asAddress`，地址模式拒绝 `frameId`/`variablesReference`，持久化 watchpoint 保留 discovery 元数据但 `setDataBreakpoints` 不误发 discovery-only 字段。编辑器右键入口基于当前 LSP `documentSymbol` 的 `Property`/`Field`/`Constant`/`EnumMember` 声明识别字段，并复用 selected frame 的 discovery。**未完成边界**：`supportsDataBreakpointBytes`/`asAddress` 属 adapter 扩展能力，不能证明真实 adapter 对地址宽度、字节范围、读/写触发、对齐、生命周期或硬件/软件绑定的解释；LSP symbol kind 也不是 PSI/字段语义，无法覆盖隐式字段、宏/生成代码、重载属性或 IDEA 的 field-read/field-write 属性。真实 data watchpoint、memory read/write、disassembly、语言 adapter contract fixture 与三端真机仍待实现/验收。
+- **D5.7 instruction breakpoint（`f5d027ea`）**：**✅ DAP 客户端代码闭环**。解析并持久化 adapter-owned opaque `instructionReference` 与有符号十进制安全整数 `offset`，以 adapter + reference + normalized offset 建立稳定 identity；只有 `supportsInstructionBreakpoints` 为真时才发送全量替换 `setInstructionBreakpoints`，condition/hitCondition 与仅适用于 `instruction` 的 adapter mode 一并传递。初始化恢复严格位于 `configurationDone` 前，运行中只同步同 adapter 的 initialized compound children，并接入启停、Mute/Remove All、verified/pending/failed binding、breakpoint event id 路由、终止/launch failure cleanup、per-session stale-response generation guard 和有界 workspace storage。DebugPanel 提供 reference/offset/mode 创建、编辑和 unsupported 状态，窄 dock 下 option controls 可换行。**未完成边界**：reference 是 adapter-owned opaque string，客户端不能证明它是合法 CPU 地址或 executable instruction；offset 的单位/地址宽度、ASLR/module reload、硬件/软件实现、condition/hit count 支持和错误语义均须真实 adapter contract 验证。memory read/write/disassembly 当时尚未实现，Java/JS/Python/Go/Rust/C++ adapter matrix 与三端真机仍待完成。
+- **D5.8 memory read/write 与 disassembly（当前阶段）**：**✅ DAP 客户端代码闭环**。只有 adapter 分别广告 `supportsReadMemoryRequest`、`supportsWriteMemoryRequest` 或 `supportsDisassembleRequest` 时才显示/发送对应请求；`readMemory`/`writeMemory`/`disassemble` 参数采用有界 memory reference、safe integer offsets 和 count，响应 parser 限制 base64/instruction 数量与字段长度。DebugPanel 提供 memory reference、signed byte offset、read count、hex bytes write（转 DAP base64、`allowPartial:false`）、instruction offset/count、resolve symbols 和 bounded disassembly rows；session termination/compound selection stale-response 会被丢弃，错误写入 Debug console。**未完成边界**：DAP 客户端不能证明 adapter 对地址宽度、权限、partial write、target memory consistency、endianness、符号解析、instruction bytes、source mapping 或 running/stopped 生命周期的解释；尚无 memory change event/编辑器地址联动、真实 Java/JS/Python/Go/Rust/C++ adapter contract fixture 与三端真机证据。
+- **D5.9 adapter contract fixture（`dfa09b48`）**：**✅ 协议边界代码闭环**。`dapAdapterContracts.ts` 为 Java/java-debug、JavaScript/vscode-js-debug（`node`）、Python/debugpy、Go/Delve、Rust/lldb、C++/lldb 建立六项 fixture；Rust/C++ 共享 `lldb` adapter id 但保留独立 source vector。评估器只读取 adapter initialize 的 `supportsReadMemoryRequest`/`supportsWriteMemoryRequest`/`supportsDisassembleRequest` 与 `breakpointModes`，不按语言、运行时或 adapter id 猜测支持；测试覆盖 opaque memory reference、signed byte offset、read range、显式 `allowPartial:false`、instruction offset/count、hex/base64、symbol/source mapping、sourceReference 和 mode applicability。**未完成边界**：advertised profile 是 synthetic test input，不是真实 adapter 版本证据；仍须用各 adapter 的 initialize/DAP trace 验证地址宽度、读写权限、partial write、target memory consistency、endianness、instruction bytes、符号解析、source mapping、mode 行为及 running/stopped 生命周期，并补 memory change event/编辑器地址联动和三端真机矩阵。
+- **D5.10 project/module/source-set/language-level/compile-artifact baseline（`3dde3e76`）**：**✅ 结构化契约代码闭环，非 IDEA 工程模型完成**。`ProjectModel` 具有稳定 `moduleId` 与声明语言级别；`ModuleModel` 连接 project、manifest 和 source sets；`SourceSetModel` 有 production/test/generated kind、根路径、generated 标记及语言级别；`BuildTarget` 绑定 module 并声明 `CompileArtifact`。Cargo、Go、Python、Node、Maven、Gradle、sbt、.NET、CMake、SwiftPM 均可记录 provider 声明的语言级别；Maven 一层属性引用（如 `${java.version}`）会解析到实际值。artifact 的 `path` 保持 `None`，工具可用但未从真实 provider output 回填时为 `pending-provider-output`，工具配置无法解析时为 `blocked` 并保留 command error；这避免把 `target/`、`build/` 或 `bin/` 约定路径伪装成 IDEA 的真实 compiler output。
 
-**前端**：底部 Debug 面板（调用栈/变量/监视/断点/console）+ 编辑器断点 gutter + 悬浮运行工具条，**均按 DAP 标准模型渲染，与语言无关**；适配器专属能力（如 Java 热重载）按 D1 下发的 capabilities/适配器能力位开关（沿用 §5.2.0 capability 驱动模式）。
+  **未完成边界**：当前发现器刻意维持单 manifest→单 module，不能代表 Maven/Gradle 多模块 import、父子继承、active profile、variant/source-set override、facet、依赖/SDK/order-entry 图、冲突和离线状态；没有 IDE compiler/cache、background/incremental/single-file compile、真实 build output ingestion、artifact/JAR 源码映射，也没有把 Run/Debug 配置绑定到 module/artifact selection。下一阶段应以 provider-owned import snapshot 和真实 build result ingestion 为入口，先补 Maven/Gradle 多模块，再补通用 artifact 绑定；三端真机 build/run/debug 仍是验收门禁。
+
+**前端**：底部 Debug 面板（调用栈/变量/监视/line/function/data/instruction breakpoint/memory/disassembly/exception filters/exception path rules/console）+ 编辑器断点 gutter + 悬浮运行工具条，**均按 DAP 标准模型渲染，与语言无关**；D5.6 增加 capability-gated 的 stopped 表达式/地址/范围创建入口和基于 LSP symbol metadata 的字段声明右键入口，D5.7 增加 instruction reference/offset/mode 入口，D5.8 增加 capability-gated memory reference/hex read-write/disassembly 工具区。入口可发现性不等于 PSI 字段语义、真实 watchpoint/CPU instruction/memory 绑定；exception path editor 完整保留标准 path segment/name alternatives/negate/break mode，但不能虚构 adapter 未承诺的 Java 类继承或 IDEA 专有 filter 语义。适配器专属能力（如 Java 热重载、data/instruction/memory breakpoint 支持与访问模式、exception filter condition/path）按 D1 下发的 capabilities/适配器能力位开关（沿用 §5.2.0 capability 驱动模式）。
 
 - **D6 IDEA 成熟度收口**（缺陷修复 + 补齐，规模 M）— **✅ 已交付**。
-  **缺陷（P0）**：① 会话中新增/改条件的断点**从不生效**——`toggleBreakpoint`/`setBreakpointOptions` 在 `setBreakpoints` 的 state updater 内同步调用 sync，读到的是**改动前**的 ref，推给适配器的是旧集合；改为「先算新集合 → 同步更新 ref → 显式传 list 给 sync」的单一变更入口（`mutateBreakpoints`），并加 per-path generation 防止旧响应覆盖新集合。② Windows 长 classpath 启动失败（`CreateProcess error=206`）——java-debug 默认不缩短命令行，现默认 `shortenCommandLine: "auto"`（可覆盖），对齐 IDEA 的 shorten command line。③ **stdio 适配器死锁**——`connect_transport` 管道化 stderr 却无人排空，管道写满后适配器永久阻塞；新增 `run_stderr_pump` 转成 `output` 事件（Java 走 TCP 不受影响，但这是多语言框架的通用缺陷）。④ **反向请求无人应答**——内核只转发不回复，发 `runInTerminal`/`startDebugging` 的适配器会一直等；`reverse_response` 统一回失败响应。⑤ `initialize` 无超时 → UI 永久卡「starting」；加 20s 上限。⑥ EOF 时后端会话从 map 移除，前端不在也不泄漏；Stop 优先走 `terminate`（capability 判定）再 `disconnect`。
+  **历史 X 轨道阻断缺陷**：① 会话中新增/改条件的断点**从不生效**——`toggleBreakpoint`/`setBreakpointOptions` 在 `setBreakpoints` 的 state updater 内同步调用 sync，读到的是**改动前**的 ref，推给适配器的是旧集合；改为「先算新集合 → 同步更新 ref → 显式传 list 给 sync」的单一变更入口（`mutateBreakpoints`），并加 per-path generation 防止旧响应覆盖新集合。② Windows 长 classpath 启动失败（`CreateProcess error=206`）——java-debug 默认不缩短命令行，现默认 `shortenCommandLine: "auto"`（可覆盖），对齐 IDEA 的 shorten command line。③ **stdio 适配器死锁**——`connect_transport` 管道化 stderr 却无人排空，管道写满后适配器永久阻塞；新增 `run_stderr_pump` 转成 `output` 事件（Java 走 TCP 不受影响，但这是多语言框架的通用缺陷）。④ **反向请求无人应答**——内核只转发不回复，发 `runInTerminal`/`startDebugging` 的适配器会一直等；`reverse_response` 统一回失败响应。⑤ `initialize` 无超时 → UI 永久卡「starting」；加 20s 上限。⑥ EOF 时后端会话从 map 移除，前端不在也不泄漏；Stop 优先走 `terminate`（capability 判定）再 `disconnect`。
   **IDEA 对齐（均为语言无关 DAP 层）**：断点视图（全工作区列表 + 单个启用/禁用 + Mute All + Remove All + 点击跳转 + 条件/命中次数/logpoint 内联编辑，取代原先三连 modal prompt）；编辑器悬停求值（停驻时接管 LSP hover）；行尾 inline values（仅渲染到当前执行行）；调试快捷键 F9/F8/F7/Shift+F8/Ctrl+F8/Ctrl+Shift+F8/Alt+F9/Ctrl+F2；`thread` 事件维护线程列表；Stop 后保留 console（含 Clear）；库/反编译栈帧经 DAP `source` 请求打开只读缓冲区。
   **Java 适配器**：远程 attach（IDEA Remote JVM Debug，`hostName`/`port`，跳过 mainClass/classpath 解析）；显式 mainClass 缺 projectName 时回填所属工程（多模块下避免解析错模块）；`sourcePaths`/`stopOnEntry`/`encoding`/`shortenCommandLine` 透传。
   测试：Rust 24（新增 reverse-response、attach 参数、shortenCommandLine/透传）；前端新增 `useCodeDebugSession.test.tsx`（9，含旧缺陷回归）+ `debugEditorChrome.test.ts`（7）+ 模型/面板补充。**真机冒烟仍由用户验证**（需 jdtls + java-debug bundle + Java 工程）。
@@ -948,11 +1167,11 @@ DebugAdapterRegistry（适配器注册表，类比 lsp_presets）
 ### 11.E 测试集成（M8–M9，依赖 Bundle 基建 + 部分 D，规模 L）
 
 - **探测**：java-test 命令 `java.test.findTestTypesAndMethods`（JUnit4/5、TestNG）。
-- **运行**：非调试 run 经 launch（不依赖 D）；调试 run 经 D 的 DAP（依赖 D2）。结果 pass/fail/skip/耗时。
+- **运行**：非调试 run 经 launch（不依赖 D）；调试 run 经 D 的 DAP（依赖 D2）。Maven Surefire/Failsafe 与 Gradle JUnit XML 结果提供 pass/fail/error/skip、耗时、失败详情、源码定位和重跑；LCOV/JaCoCo 报告已有展示，Run with Coverage 的采集/配置/合并与非 JUnit provider 结果仍待统一。
 - **前端**：测试树面板（按包/类/方法）、gutter run·debug 图标、结果状态、失败堆栈跳转、「重跑失败」。
 - **排期**：run-only 可先于 D 交付；debug-test 依赖 D2。
 
-**🔶 已交付（M8 E，探测 + terminal 运行）**：新 `java_test.rs`——`java_test_discover(workspace_id,root,file)` 走 jdtls `vscode.java.test.findTestTypesAndMethods`（file: URI 后端派生），容错解析（字段别名 fullName/jdtHandler/id、displayName/label/name、testLevel/level、children/tests）为 `JavaTestItem{name,fullName,kind,uri,range,children}` 树；复用 `LspManager::execute_java_command`。前端 `javaTestDiscover` 包装 + Tests 底部 dock 面板（按 class→method 树、run 图标、按活动 .java 文件自动探测）；**run-only 经集成终端**：`javaTestRunCommand`（Maven `-Dtest='Class#method'` / Gradle `--tests 'Class.method'`，构建工具由 `workspace_task_tree` 分组探测）复用 `runWorkspaceTask`（PTY）。单测：Rust 解析 4（class/method、结构推断 kind、空/畸形、location 别名）+ 前端 run 命令 5。**debug-test（M9 补齐）**：Tests 面板每项加 Debug 图标 → `java_test_resolve_launch`（java-test `vscode.java.test.junit.argument`，容错解析 mainClass/classpath/args）→ 以预解析 launch config 走 D2 DAP（Java 适配器识别已给的 `classPaths` 则跳过自身 classpath 解析）。单测:launch 解析别名。**仍显式后置**:结构化 pass/fail/skip/耗时结果树 + 失败堆栈跳转——那是独立的 JUnit 结果 socket 协议大块、纯真机依赖。真机门槛:探测/运行/调试需 jdtls + java-test/java-debug bundle 加载 + Java 工程。
+**🔶 已交付（M8 E + M9 收口）**：新 `java_test.rs`——`java_test_discover(workspace_id,root,file)` 走 jdtls `vscode.java.test.findTestTypesAndMethods`（file: URI 后端派生），容错解析（字段别名 fullName/jdtHandler/id、displayName/label/name、testLevel/level、children/tests）为 `JavaTestItem{name,fullName,kind,uri,range,children}` 树；复用 `LspManager::execute_java_command`。前端 `javaTestDiscover` 包装 + Tests 底部 dock 面板（按 class→method 树、run 图标、按活动 .java 文件自动探测）；**run-only 经集成终端**：`javaTestRunCommand`（Maven `-Dtest='Class#method'` / Gradle `--tests 'Class.method'`，构建工具由 `workspace_task_tree` 分组探测）复用 `runWorkspaceTask`（PTY）。`test_results.rs` 读取 Surefire/Failsafe/Gradle JUnit XML，限流文件/字段大小并输出稳定 case/summary/diagnostics；Tests 面板显示状态树、失败消息/堆栈、源码行定位与失败重跑。单测覆盖 parser、result tree 与 panel。**debug-test（M9 补齐）**：Tests 面板每项加 Debug 图标 → `java_test_resolve_launch`（java-test `vscode.java.test.junit.argument`，容错解析 mainClass/classpath/args）→ 以预解析 launch config 走 D2 DAP。真机门槛:探测/运行/调试/真实报告需 jdtls + java-test/java-debug bundle 加载 + Java 工程。
 
 ### 11.7 实施顺序与里程碑映射
 
@@ -962,6 +1181,7 @@ M7 工程智能        : C(全项目诊断, 先 spike) ‖ F(构建增强)     �
 M8 测试/调试基建    : Bundle 基建 → E(测试 run-only) ；D1→D2 起步(可与 M7 并行)
 M9 调试主线 + 收口  : D3→D4→D5 ；debug-test(E×D2) ；真机冒烟回填
 M10 Build/Run 闭环 : G(main 发现 + Maven/Gradle/单文件 Run + 多模块 Build) — 不依赖 DAP bundle
+M11 配置与分析收口 : Build target DAG + Run/Debug configuration + provider refactor/inspection/Analysis
 ```
 
 硬依赖：C ← M6-A 的 `autobuild`；D/E ← Bundle 基建；debug-test ← D2；G ← M3 的 PTY + workspace SDK environment。A、B、F、G 不依赖 DAP，可独立发布、验收。
@@ -979,15 +1199,17 @@ M10 Build/Run 闭环 : G(main 发现 + Maven/Gradle/单文件 Run + 多模块 Bu
 | workspace.rs / lsp.rs | `workspace_dependency_tree` / `workspace_task_tree` / `lsp_reload_project` | M7-F |
 | workspace.rs | `workspace_java_run_targets` / `workspace_java_run_target`；`WorkspaceTask.modulePath`；Maven/Gradle wrapper 与多模块 task command | M10-G |
 | 新 java_bundles.rs | bundle 路径解析 / 探测 / 下载 | M8-Bundle |
+| workspace.rs / frontend execution model | 结构化 Build/Run/Debug provider 结果、Build target 依赖计划、命名配置覆盖、dotenv 与 Before launch | M11 |
+| lsp.rs / Analysis frontend | diagnostic tags/related information/code description/data、`CodeActionKind` 过滤、capability/inspection/related-location 展示 | M11 |
 
 依赖新增：DAP 用自实现 stdio 客户端（不引第三方 crate）；java-debug / java-test / lombok 为运行期加载的 JVM bundle（jar），非 Rust 依赖。
 
-### 11.9 风险与权衡（M6–M10）
+### 11.9 风险与权衡（M6–M11）
 
 | 风险 | 缓解 |
 |------|------|
 | 全项目诊断依赖 jdtls 推送语义 | **C 先做 spike**，确认 `buildWorkspace` 是否推送未打开文件；备选 LSP pull 诊断 |
-| DAP 工程量失控 | 严格按 D1–D5 分里程碑，每阶段独立可用；**通用内核 + 适配器注册表（§10.7 已定）**——语言相关代码集中于 D2 一处，D3–D5 走标准 DAP，避免 Java 特判蔓延 |
+| DAP 工程量失控 | 严格按 D1–D5 分里程碑，每阶段独立可用；沿用本节的**通用内核 + 适配器注册表**历史决策——语言相关代码集中于 D2 一处，D3–D5 走标准 DAP，避免 Java 特判蔓延 |
 | Bundle 版本 / 下载 | 探测 + 版本校验 + 手动路径回退（同现有 jdtls 模式）；不强制自动下载 |
 | Lombok javaagent 路径 | Settings 显式配置 + 探测；缺失时降级提示而非静默报错 |
 | 大文件增量与 server 不同步 | ChangeSet 映射 + 全量兜底（已有 catch）+ 版本代际校验（已有 epoch guard） |
@@ -996,4 +1218,75 @@ M10 Build/Run 闭环 : G(main 发现 + Maven/Gradle/单文件 Run + 多模块 Bu
 | 静态 main 发现不是完整 Java AST | 先剥离注释/字面量并严格匹配合法 signature；jdtls/java-debug 可用时 Debug 仍走语义解析；后续 Run Configuration model 可增加 jdtls resolve 作为增强而非硬依赖 |
 | Gradle 工程高度可定制 | init script 不改工程且使用 sourceSets runtimeClasspath；标准多模块使用 qualified task；自定义 `projectDir`/Android 等明确降级到自定义 task，避免伪支持 |
 | Maven exec plugin 首次下载 | 固定 plugin 版本保证可重复；离线缓存缺失时在真实终端显示 Maven 原始错误，不吞错 |
-| 范围蔓延 | 修订后 §2.3 为新基线：不做 Profiler / IDEA facet 建模 / 远程 jdtls |
+| 范围蔓延 | §2.3 是当前范围基线：只把影响 Editor 语义的工程上下文/index/data-flow 放入 J1–J3；执行与调试按 X 轨道独立记账 |
+
+### 11.10 历史交付记录（原 P0–P3）
+
+以下只记录对应提交中已经出现的代码入口，不代表 §2.4 的 L3 对照等价，也不再作为下一步待办顺序。
+
+#### 原 P0：高频快捷键与动作 — **代码入口已交付**
+1. **✅ `Ctrl+Shift+U` 字母大小写切换 (Toggle Case)**：在 `workspaceEditorCommands.ts` 中实现选区或光标所在词的大写/小写/驼峰循环切换，并在 `workspaceEditorKeymap` 中绑定 `Mod-Shift-u` / `Ctrl-Shift-u`（单测覆盖）。
+2. **✅ `F2` / `Shift+F2` 诊断错误/警告快速跳转 (Next/Prev Highlighted Error)**：在编辑器内计算下一个/上一个诊断位置并移动光标展示错误气泡，支持环形回卷（wrap-around）；左侧树中保留树重命名逻辑。
+3. **✅ `Ctrl+P` 参数信息主动提示 (Parameter Info)**：注册 `workspace.parameterInfo` 命令并在 CodeMirror 中绑定 `Mod-p` / `Ctrl-p`，在编辑器光标处显式唤起 LSP 签名提示浮层（释放 Ctrl+P 快捷键）。
+4. **✅ `Ctrl+Shift+I` 快速定义预览 (Quick Definition Peek)**：绑定 `Mod-Shift-I` 直接唤起 `LocationPeek` 浮层预览定义代码，无需改变当前编辑焦点。
+5. **✅ `Ctrl+Alt+O` 优化导包 (Optimize Imports)**：向语言服务器发送 `source.organizeImports` 代码操作，自动清理未使用导入并排序。
+
+#### 原 P1：交互质感与上下文感知 — **代码入口已交付**
+1. **✅ `Ctrl+Shift+F10` 上下文运行当前文件 (Run Context Configuration)**：注册 `workspace.runContextConfiguration`，根据当前活跃文件类型或 main 方法直接启动当前目标。
+2. **✅ `Alt+F1` 定位到项目树 (Select in Project View)**：注册 `workspace.revealActiveFileInTree`，将左侧文件树滚动并选中当前编辑器激活的文件节点，支持在项目树折叠状态下自动展开左侧面板。
+3. **✅ Sticky Lines (编辑器头部吸顶上下文/作用域)**：实现 `computeStickyLines` 递归提取包/类/函数声明行并在编辑器顶端展示浮层（支持点击快速跳转与首选项开关），在 `EditorGroup` 与 `CodeWorkspaceTab` 完成无缝挂载并附完整单测。
+4. **✅ `Ctrl+Shift+F9` 重新编译当前文件 (Recompile Active File)**：注册 `workspace.recompileActiveFile`（`Mod-Shift-F9`），支持自动保存 dirty 缓冲并对当前工程执行单文件/增量重新编译。
+
+#### 原 P2：重构动作与高级调试 — **provider/代码入口已交付**
+1. **✅ `Ctrl+Alt+Shift+T` 重构上下文弹窗 (Refactor This)**：注册 `workspace.refactorThis` 命令，唤起当前光标处的全部重构选项；补齐标准重构快捷键 `Ctrl+Alt+V`（抽取变量）、`Ctrl+Alt+M`（抽取方法）、`Ctrl+Alt+N`（内联）、`Ctrl+F6`（更改签名）、`F6`（移动）。
+2. **✅ 调试工具栏与命令静音所有断点 (Mute Breakpoints)**：注册 `workspace.toggleMuteBreakpoints` 命令，与 DebugPanel 工具栏联动切换静音状态；注册 `Ctrl+F8`（切换断点）、`Ctrl+Shift+F8`（查看/编辑断点）。
+3. **✅ 多模块 Maven Active Profile / Gradle 属性覆盖界面**：在 `RunConfigurationOverride` 与 `RunPanel` 界面中提供 Active Profiles（Maven `-P` / Spring profiles）与 JVM/Build Properties（`-Dkey=value`）输入与持久化，自动注入运行时参数，并支持临时配置标记与副本命名保存。
+
+#### 原 P3：重构预审、覆盖率、键位速查与图谱 — **界面/协议入口已交付**
+1. **✅ 重构预审用法树与复选框过滤 UI**：实现 `RefactoringPreviewDialog` 弹窗，按文件分组呈现 raw WorkspaceEdit、行号和新文本，并可逐 edit 包含/排除。语义依赖、conflict 与安全排除仍属于 §8.2 J3。
+2. **✅ 缩进检测与状态栏标签 UI**：`detectIndentation` 可识别 2/4 spaces 与 tabs，状态栏可循环标签；当前没有改变 CodeMirror/LSP formatter 行为，实际切换属于 §8.2 E1.1。
+3. **✅ 快捷键速查与物理键帽 UI**：`KeymapCheatSheetDialog` 可分类、搜索和执行固定命令。可编辑 scheme、录键、反查、冲突与迁移仍属于 §8.2 E2。
+4. **✅ 测试覆盖率报告解析与编辑器覆盖条 (Test Coverage Ingestion, Gutter & Dock Panel)**：实现 `coverageModel`（支持 LCOV 与 JaCoCo XML 格式报告解析及多模块文件路径匹配）、`coverageEditorChrome`（CodeMirror 侧边栏绿/黄/红三色覆盖指示条）与 `CoveragePanel`（底部 Dock 统计面板、进度条、文件过滤与未覆盖行跳转），注册 `workspace.showCoverage` 命令并与工作区扫描联动。
+5. **✅ 多语言 DAP 适配器引导与配置模板 (DAP Debug Adapter Setup Guide & Templates)**：实现 `DapAdapterGuideDialog` 覆盖 Java (JDWP)、JavaScript/Node (`vscode-js-debug`)、Python (`debugpy`)、Go (`dlv`)、Rust (`lldb-dap`)、C++ 适配器的安装指南、运行环境规范与 `.taomni/run-configurations.json` 模板一键复制，注册 `workspace.openDapAdapterGuide` 命令。
+6. **✅ 工程模型多模块依赖拓扑与模块层级 (Multi-Module Dependency Topology in BuildPanel)**：在 `BuildPanel` 中呈现多模块工程的完整模块树、模块语言级别徽章与 `dependsOn` 依赖链，打通与底层 `workspaceExecutionModel` 的深度联动。
+7. **✅ Debug 变量树与调用栈右键快捷菜单 (Variable Tree & Call Stack Context Menus)**：在 `DebugPanel` 中支持对变量节点右键直接触发「添加数据断点」、「添加到监视」、「复制变量值/名称」、「设置变量值」；支持对调用栈帧右键执行「Jump to Source」、「Drop Frame / 栈帧重置 (`restartFrame`)」、「复制调用栈」等高频动作。
+8. **✅ 调试单步过滤配置 (Step Filters: 跳过 JDK/标准库/框架代码)**：在 `WorkspaceBuildRunToolsDialog` 中提供 Step Filters 开关与规则配置（可自定义类与包过滤模式、跳过 synthetic 方法、跳过 `<clinit>` 静态初始块、跳过构造函数），并在启动 DAP 调试时自动装配注入调试器启动载荷。
+9. **✅ 分屏编辑器同步滚动联动 (Synchronized Split Scrolling Toggle)**：在顶部工具栏与命令面板（`workspace.toggleSyncSplitScroll`）提供双向视口滚动镜像联动与防递归事件门禁，方便并排对比代码或跨文件审查。
+10. **✅ QA UI 自动化端到端用例编目沉淀 (`qa-ui-auto-tests/`)**：在 `feature-list.md` 中为 F25.1 补齐 step filters 与 split sync scroll 交互控件定义，同步刷新 `references/testid-catalog.md` 与 `TC-auto-F25-1` 自动化用例覆盖。
+
+---
+
+## 12. 后续进阶路线与三端真机验收计划
+
+本节只维护 X 轨道和最终真机门禁；Editor P0/P1/P2 待办见 §8.2。
+
+### 12.1 Build / Compile graph
+
+- [ ] 为 Maven/Gradle 多模块建立 provider-owned、可版本化 import snapshot：父子继承、active profile、variant/source set、依赖/SDK/order-entry、冲突、离线和导入诊断。
+- [ ] 让 `workspace_task_tree`、`workspace_execution_model`、jdtls module 查询和 `BuildPanel` 消费同一 graph；移除固定 common-task 清单对“已导入任务”的冒充。
+- [ ] 解析真实 compiler output、artifact/JAR、generated roots 和 source mapping；失败、取消、部分成功、stale result 不得覆盖新结果。
+- [ ] 绑定 module/artifact 到 Before launch、Run/Debug classpath，补 single-file、incremental、background compile 和 run-before-compile。
+
+### 12.2 Run / Test / Coverage
+
+- [ ] 增加 temporary/permanent、folder、typed provider schema、module/artifact/coverage selection、macro/secret/credential 与完整 validation。
+- [ ] 将 LCOV/JaCoCo 展示升级为 Run with Coverage 的采集、配置、合并、历史、source mapping 和多模块生命周期；明确 Cobertura、pytest、Go、LLVM 等 provider 的支持边界。
+- [ ] 定义统一 test provider protocol，覆盖动态/参数化测试树、history、failure rerun/debug、duration/output 和非 JUnit 结果。
+- [ ] 三端保存真实 build/run/test/coverage 证据；报告解析单测不能替代工具真实执行。
+
+### 12.3 Debug adapter matrix
+
+- [ ] 用 Java/JavaScript/Python/Go/Rust/C++ 真实 adapter initialize/DAP trace 替换 synthetic profile，记录地址宽度、权限、partial write、指令引用、异常继承/path、source mapping 和生命周期。
+- [ ] 对照 IDEA 验证 method enter/exit、field read/write、caught/uncaught、caller/instance filter、suspend policy、temporary/dependent breakpoint、pass-count/log/condition、smart step、force return、hot swap 和 coverage binding。
+- [ ] adapter 失败、能力缺失、旧响应、进程退出和 compound session 必须可见且可恢复；不得用 DAP capability fixture 宣称 adapter 语义完成。
+
+### 12.4 三端最终门禁
+
+- [ ] **Linux**：Ubuntu Wayland/X11，IME、US/非 US 键盘、剪贴板、字体 fallback、大小写敏感 FS、watcher、PTY、Java/TS 大工程和安装包升级/恢复。
+- [ ] **macOS**：Apple Silicon（Intel 至少一套），Cmd/Option/dead key、IME、Retina/字体、APFS 大小写模式、签名/quarantine、zsh PATH 和子进程清理。
+- [ ] **Windows**：Windows 11，WebView2/IME/AltGr/OEM、CRLF/BOM、NTFS + UNC/长路径、锁定文件、junction/symlink、高 DPI、PowerShell/cmd 和安装包升级。
+- [ ] 每个 fixture 保存应用/OS/WebView/工具链版本、操作步骤、脱敏 LSP/DAP trace、性能数据、截图/日志和时间戳；浏览器 stub、jsdom、Vitest、Rust protocol tests 只能作为单元证据。
+
+### 12.5 交付顺序约束
+
+X 轨道不阻塞 Editor E0–E4 的代码正确性工作，但在发布“IDE 全工作台”前必须完成 X 的真实工具与三端门禁。任何 X 轨道新 UI 若影响 editor action、gutter、navigation、state 或 accessibility，必须回到 §2.5 追加对应 Editor fixture。

@@ -2635,6 +2635,8 @@ export const zhCN: DeepPartial<typeof en> = {
     increaseTextSize: "增大代码字号",
     fontSizeAria: "代码字号",
     enableLigaturesAria: "启用代码字体连字",
+    softWrapLabel: "长行软换行",
+    enableSoftWrapAria: "启用代码编辑器软换行",
     themeLabel: "主题",
     themeAria: "代码主题",
     themeFollowApp: "匹配应用主题",

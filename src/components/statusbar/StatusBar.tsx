@@ -13,6 +13,8 @@ import {
   Shield,
   Sparkles,
   Cpu,
+  Loader2,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { useAppTheme } from "../../lib/appTheme";
@@ -299,6 +301,35 @@ export function StatusBar() {
         <CopyableText text={statusMessage} className="truncate max-w-[260px]" testId="status-bar-message" />
       )}
 
+      {showWorkspaceSegments && workspaceStatus?.lspProgress && (
+        <span
+          data-testid="status-bar-workspace-lsp-progress"
+          className="flex min-w-0 max-w-[300px] items-center gap-1 text-[var(--taomni-status-text)]"
+          title={`${workspaceStatus.lspProgress.label}${workspaceStatus.lspProgress.message
+            ? ` · ${workspaceStatus.lspProgress.message}`
+            : ""}${workspaceStatus.lspProgress.cancellable ? " · cancel" : ""}`}
+        >
+          <Loader2 className="w-3 h-3 shrink-0 animate-spin" />
+          <span className="truncate">{workspaceStatus.lspProgress.label}</span>
+          {workspaceStatus.lspProgress.percentage !== null && (
+            <span className="taomni-mono shrink-0 text-[10px]">
+              {workspaceStatus.lspProgress.percentage}%
+            </span>
+          )}
+          {workspaceStatus.lspProgress.cancellable && workspaceActions?.cancelLspProgress && (
+            <button
+              type="button"
+              aria-label="Cancel language server task"
+              title="Cancel language server task"
+              className="shrink-0 rounded p-0.5 hover:bg-[var(--taomni-hover)]"
+              onClick={workspaceActions.cancelLspProgress}
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </span>
+      )}
+
       {showWorkspaceSegments && workspaceStatus && (
         <>
           <span className="taomni-divider-v h-3" />
@@ -309,14 +340,23 @@ export function StatusBar() {
             <span className="taomni-mono">Ln {workspaceStatus.line}, Col {workspaceStatus.column}</span>
           </StatusSegment>
           <StatusSegment
+            testId="status-bar-workspace-indentation"
+            title="Indentation · click to cycle Spaces (2), Spaces (4), and Tab (4)"
+            onClick={workspaceActions?.cycleIndentation}
+          >
+            {workspaceStatus.indentation ?? "Spaces: 2"}
+          </StatusSegment>
+          <StatusSegment
             testId="status-bar-workspace-encoding"
-            title="File encoding (workspace currently reads/writes UTF-8)"
+            title={`${workspaceStatus.encoding} · open file encoding options`}
+            onClick={workspaceActions?.chooseEncoding ?? workspaceActions?.toggleBom}
           >
             {workspaceStatus.encoding}
           </StatusSegment>
           <StatusSegment
             testId="status-bar-workspace-eol"
-            title="Detected line endings"
+            title="Line endings · click to cycle LF, CRLF, and CR"
+            onClick={workspaceActions?.cycleEol}
           >
             {workspaceStatus.eol}
           </StatusSegment>

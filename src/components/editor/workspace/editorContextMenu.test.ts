@@ -9,6 +9,7 @@ const actions = {
   callHierarchy: vi.fn(),
   typeHierarchy: vi.fn(),
   rename: vi.fn(),
+  safeDelete: vi.fn(),
   quickDocumentation: vi.fn(),
   codeActions: vi.fn(),
   format: vi.fn(),
@@ -60,6 +61,7 @@ describe("buildEditorContextMenuItems", () => {
     expect(items.find((i) => i.testId === "editor-context-call-hierarchy")?.disabled).toBe(true);
     expect(items.find((i) => i.testId === "editor-context-type-hierarchy")?.disabled).toBe(false);
     expect(items.find((i) => i.testId === "editor-context-rename")?.disabled).toBe(true);
+    expect(items.find((i) => i.testId === "editor-context-safe-delete")?.disabled).toBe(true);
     expect(items.find((i) => i.testId === "editor-context-cut")?.disabled).toBe(false);
     expect(items.find((i) => i.testId === "editor-context-format")?.label).toBe("Format Selection");
   });
@@ -89,6 +91,36 @@ describe("buildEditorContextMenuItems", () => {
     expect(runToCursor).toHaveBeenCalledTimes(1);
     const running = buildEditorContextMenuItems({ ...base, debug: { canRunToCursor: false, runToCursor } });
     expect(running.find((i) => i.testId === "editor-context-run-to-cursor")?.disabled).toBe(true);
+  });
+
+  it("offers a field data-breakpoint action only when the host resolves one", () => {
+    const add = vi.fn();
+    const base = { capabilities: null, hasSelection: false, clientX: 0, clientY: 0, actions };
+    expect(buildEditorContextMenuItems({
+      ...base,
+      debug: { canRunToCursor: true, runToCursor: vi.fn() },
+    }).find((item) => item.testId === "editor-context-add-data-breakpoint")).toBeUndefined();
+    const items = buildEditorContextMenuItems({
+      ...base,
+      debug: {
+        canRunToCursor: true,
+        runToCursor: vi.fn(),
+        dataBreakpoint: { canAdd: true, add },
+      },
+    });
+    const item = items.find((entry) => entry.testId === "editor-context-add-data-breakpoint");
+    expect(item?.disabled).toBe(false);
+    item?.onClick?.();
+    expect(add).toHaveBeenCalledTimes(1);
+    const disabled = buildEditorContextMenuItems({
+      ...base,
+      debug: {
+        canRunToCursor: true,
+        runToCursor: vi.fn(),
+        dataBreakpoint: { canAdd: false, add },
+      },
+    }).find((entry) => entry.testId === "editor-context-add-data-breakpoint");
+    expect(disabled?.disabled).toBe(true);
   });
 
   it("adds the AI section only when a host supplies it", () => {

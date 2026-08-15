@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
   normalizeWorkspaceBuildRunTools,
   readWorkspaceBuildRunTools,
   workspaceToolConfig,
@@ -16,6 +17,7 @@ describe("workspace build/run tool persistence", () => {
     expect(readWorkspaceBuildRunTools("workspace-a")).toEqual({
       tools: {},
       mavenRun: { jvmArgs: [], inheritProjectJvmArgs: true },
+      stepFilters: DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
     });
   });
 
@@ -27,10 +29,12 @@ describe("workspace build/run tool persistence", () => {
     expect(readWorkspaceBuildRunTools("workspace-a")).toEqual({
       tools: { maven: { executable: "C:\\Tools\\mvn.cmd" } },
       mavenRun: { jvmArgs: [], inheritProjectJvmArgs: true },
+      stepFilters: DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
     });
     expect(readWorkspaceBuildRunTools("workspace-b")).toEqual({
       tools: {},
       mavenRun: { jvmArgs: [], inheritProjectJvmArgs: true },
+      stepFilters: DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
     });
   });
 
@@ -47,6 +51,7 @@ describe("workspace build/run tool persistence", () => {
         cargo: { executable: "/opt/rust/bin/cargo" },
       },
       mavenRun: { jvmArgs: [], inheritProjectJvmArgs: true },
+      stepFilters: DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
     });
   });
 
@@ -64,6 +69,7 @@ describe("workspace build/run tool persistence", () => {
         jvmArgs: ["--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"],
         inheritProjectJvmArgs: false,
       },
+      stepFilters: DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
     });
     expect(workspaceToolConfig(normalized)).toEqual({
       maven: "mvn-custom",
@@ -80,6 +86,7 @@ describe("workspace build/run tool persistence", () => {
     expect(readWorkspaceBuildRunTools("workspace-a")).toEqual({
       tools: {},
       mavenRun: { jvmArgs: [], inheritProjectJvmArgs: true },
+      stepFilters: DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
     });
     expect(workspaceToolExecutables({
       tools: {

@@ -1,23 +1,58 @@
 import { describe, expect, it } from "vitest";
 import {
   appendConsoleLine,
+  breakpointModesFor,
   breakpointVerificationMap,
+  buildDisassembleArgs,
+  buildDataBreakpointInfoArgs,
+  buildReadMemoryArgs,
   buildSetBreakpointsArgs,
+  buildSetDataBreakpointsArgs,
+  buildSetExceptionBreakpointsArgs,
+  buildSetFunctionBreakpointsArgs,
+  buildSetInstructionBreakpointsArgs,
+  buildWriteMemoryArgs,
   currentLocation,
+  dataBreakpointKey,
+  dataBreakpointVerificationMap,
+  decodeMemoryData,
+  defaultDataBreakpointAccessType,
+  exceptionBreakpointRuleLabel,
+  exceptionBreakpointRuleVerificationMap,
+  exceptionBreakpointVerificationMap,
+  encodeMemoryData,
+  functionBreakpointVerificationMap,
+  instructionBreakpointKey,
+  instructionBreakpointVerificationMap,
   hoverExpressionAt,
   initialDebugState,
   inlineValueLabel,
   markResumed,
+  mergeExceptionBreakpointDefaults,
   parseBreakpointEvent,
+  parseBreakpointModes,
+  parseDataBreakpointInfo,
+  parseDisassembleResponse,
   parseEvaluate,
+  parseExceptionBreakpointFilters,
   parseExceptionInfo,
   parseSetBreakpointsResponse,
+  parseSetDataBreakpointsResponse,
+  parseSetExceptionBreakpointsResponse,
+  parseSetFunctionBreakpointsResponse,
+  parseSetInstructionBreakpointsResponse,
+  parseReadMemoryResponse,
+  parseWriteMemoryResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
+  planDataBreakpointSync,
+  planExceptionBreakpointSync,
+  planFunctionBreakpointSync,
+  planInstructionBreakpointSync,
   reconcileBreakpointLines,
+  resolveBreakpointMode,
   reduceDebugEvent,
-  selectExceptionFilters,
   stepCommandFor,
   toAdapterSourcePath,
   type DebugStackFrame,
@@ -43,6 +78,80 @@ describe("dapDebugModel", () => {
     expect(stepCommandFor("pause")).toBe("pause");
   });
 
+  it("builds and parses bounded memory and disassembly requests", () => {
+    expect(buildReadMemoryArgs({ memoryReference: " 0x1000 ", offset: -4, count: 16 })).toEqual({
+      memoryReference: "0x1000",
+      offset: -4,
+      count: 16,
+    });
+    expect(parseReadMemoryResponse({
+      address: "0x1000",
+      unreadableBytes: 2,
+      data: "AAE=",
+    })).toEqual({ address: "0x1000", unreadableBytes: 2, data: "AAE=" });
+    expect(buildWriteMemoryArgs({
+      memoryReference: "0x1000",
+      offset: 2,
+      data: "AQI=",
+      allowPartial: false,
+    })).toEqual({ memoryReference: "0x1000", offset: 2, data: "AQI=", allowPartial: false });
+    expect(parseWriteMemoryResponse({ bytesWritten: 2 })).toEqual({ bytesWritten: 2 });
+    expect(buildDisassembleArgs({
+      memoryReference: "entry",
+      offset: 4,
+      instructionOffset: -1,
+      instructionCount: 2,
+      resolveSymbols: true,
+    })).toEqual({
+      memoryReference: "entry",
+      offset: 4,
+      instructionOffset: -1,
+      instructionCount: 2,
+      resolveSymbols: true,
+    });
+    expect(parseDisassembleResponse({
+      instructions: [{
+        address: "0x1000",
+        instructionBytes: "55",
+        instruction: "push rbp",
+        symbol: "main",
+        location: { path: "/repo/App.java", name: "App.java", sourceReference: null },
+        line: 9,
+        column: 2,
+      }, { address: "0x1001", instruction: "ret" }],
+    })).toEqual([
+      {
+        address: "0x1000",
+        instructionBytes: "55",
+        instruction: "push rbp",
+        symbol: "main",
+        location: { path: "/repo/App.java", name: "App.java", sourceReference: null },
+        line: 9,
+        column: 2,
+        endLine: null,
+        endColumn: null,
+      },
+      {
+        address: "0x1001",
+        instructionBytes: null,
+        instruction: "ret",
+        symbol: null,
+        location: null,
+        line: null,
+        column: null,
+        endLine: null,
+        endColumn: null,
+      },
+    ]);
+  });
+
+  it("converts memory bytes between hexadecimal and DAP base64", () => {
+    const encoded = encodeMemoryData("0x01 02 ff");
+    expect(encoded).toBe("AQL/");
+    expect(decodeMemoryData(encoded ?? "")).toBe("01 02 ff");
+    expect(encodeMemoryData("01 2")).toBeNull();
+  });
+
   it("builds setBreakpoints args sorted, with condition + hitCondition + logMessage", () => {
     const args = buildSetBreakpointsArgs("/repo/src/App.java", planBreakpointSync([
       { line: 20 },
@@ -59,6 +168,61 @@ describe("dapDebugModel", () => {
     ]);
   });
 
+  it("parses breakpoint modes by applicability and uses the first applicable mode as default", () => {
+    const modes = parseBreakpointModes({
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["source", "data"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["source"] },
+        { mode: "software", label: "duplicate", appliesTo: ["exception"] },
+        { mode: "invalid", label: "No applicability", appliesTo: [] },
+        { mode: "", label: "empty", appliesTo: ["source"] },
+      ],
+    });
+    expect(modes).toEqual([
+      {
+        mode: "software",
+        label: "Software",
+        description: undefined,
+        appliesTo: ["source", "data", "exception"],
+      },
+      {
+        mode: "hardware",
+        label: "Hardware",
+        description: undefined,
+        appliesTo: ["source"],
+      },
+    ]);
+    expect(breakpointModesFor(modes, "source").map((mode) => mode.mode)).toEqual([
+      "software",
+      "hardware",
+    ]);
+    expect(resolveBreakpointMode(undefined, modes, "source")).toBe("software");
+    expect(resolveBreakpointMode("hardware", modes, "source")).toBe("hardware");
+    // A stale mode from another adapter is rejected in favor of the default.
+    expect(resolveBreakpointMode("hardware", modes, "data")).toBe("software");
+  });
+
+  it("adds a source mode only when it is advertised for that adapter", () => {
+    const plan = planBreakpointSync([{
+      line: 8,
+      adapterModes: { java: "hardware", node: "not-advertised" },
+    }]);
+    const modes = parseBreakpointModes({
+      breakpointModes: [
+        { mode: "software", label: "Software", appliesTo: ["source"] },
+        { mode: "hardware", label: "Hardware", appliesTo: ["source"] },
+      ],
+    });
+    expect(buildSetBreakpointsArgs("/repo/App.java", plan, {
+      adapterId: "java",
+      breakpointModes: modes,
+    }).breakpoints).toEqual([{ line: 8, mode: "hardware" }]);
+    expect(buildSetBreakpointsArgs("/repo/App.java", plan, {
+      adapterId: "node",
+      breakpointModes: modes,
+    }).breakpoints).toEqual([{ line: 8, mode: "software" }]);
+  });
+
   it("omits disabled and muted breakpoints from the request but keeps them stored", () => {
     const stored = [{ line: 5 }, { line: 9, enabled: false }, { line: 12 }];
     const plan = planBreakpointSync(stored);
@@ -70,6 +234,259 @@ describe("dapDebugModel", () => {
     const muted = planBreakpointSync(stored, { muted: true });
     expect(muted.sent).toEqual([]);
     expect(muted.sorted).toHaveLength(3);
+  });
+
+  it("plans and builds standard function breakpoints with conditions", () => {
+    const stored = [
+      { name: "Service.run", condition: " ready " },
+      { name: "Controller.handle", hitCondition: " 3 " },
+      { name: "Worker.skip", enabled: false },
+    ];
+    const plan = planFunctionBreakpointSync(stored);
+    expect(plan.sorted.map((breakpoint) => breakpoint.name)).toEqual([
+      "Controller.handle",
+      "Service.run",
+      "Worker.skip",
+    ]);
+    expect(buildSetFunctionBreakpointsArgs(plan)).toEqual({
+      breakpoints: [
+        { name: "Controller.handle", hitCondition: "3" },
+        { name: "Service.run", condition: "ready" },
+      ],
+    });
+    expect(planFunctionBreakpointSync(stored, { muted: true }).sent).toEqual([]);
+  });
+
+  it("parses function-breakpoint verification by request order", () => {
+    const plan = planFunctionBreakpointSync([
+      { name: "Service.run" },
+      { name: "Controller.handle" },
+    ]);
+    const bindings = parseSetFunctionBreakpointsResponse(plan, {
+      breakpoints: [
+        { id: 7, verified: true },
+        { id: 8, verified: false, reason: "failed", message: "method not found" },
+      ],
+    });
+    expect(bindings).toEqual([
+      {
+        id: 7,
+        verified: true,
+        name: "Controller.handle",
+        message: null,
+        reason: null,
+      },
+      {
+        id: 8,
+        verified: false,
+        name: "Service.run",
+        message: "method not found",
+        reason: "failed",
+      },
+    ]);
+    expect(functionBreakpointVerificationMap(plan, bindings)).toEqual({
+      "Controller.handle": { status: "verified", message: null },
+      "Service.run": { status: "failed", message: "method not found" },
+    });
+  });
+
+  it("plans adapter-scoped instruction breakpoints with signed offsets and modes", () => {
+    const stored = [
+      {
+        adapterId: "java",
+        instructionReference: "0x1000",
+        offset: -4,
+        condition: " ready ",
+        mode: "hardware",
+      },
+      {
+        adapterId: "java",
+        instructionReference: "0x1000",
+        offset: 8,
+        hitCondition: " 2 ",
+        enabled: false,
+      },
+      { adapterId: "node", instructionReference: "main:entry" },
+    ];
+    const plan = planInstructionBreakpointSync(stored, { adapterId: "java" });
+    expect(plan.applicable).toHaveLength(2);
+    expect(plan.sent).toHaveLength(1);
+    const modes = parseBreakpointModes({
+      breakpointModes: [{ mode: "hardware", label: "Hardware", appliesTo: ["instruction"] }],
+    });
+    expect(buildSetInstructionBreakpointsArgs(plan, modes)).toEqual({
+      breakpoints: [{
+        instructionReference: "0x1000",
+        offset: -4,
+        condition: "ready",
+        mode: "hardware",
+      }],
+    });
+    expect(buildSetInstructionBreakpointsArgs(
+      planInstructionBreakpointSync(stored, { adapterId: "node" }),
+      modes,
+    )).toEqual({ breakpoints: [{ instructionReference: "main:entry", mode: "hardware" }] });
+    expect(planInstructionBreakpointSync(stored, { adapterId: "java", muted: true }).sent).toEqual([]);
+  });
+
+  it("maps instruction breakpoint bindings and rejects stale mode metadata", () => {
+    const plan = planInstructionBreakpointSync([{
+      adapterId: "java",
+      instructionReference: "0x1000",
+      offset: 2,
+      mode: "not-advertised",
+    }], { adapterId: "java" });
+    const modes = parseBreakpointModes({
+      breakpointModes: [{ mode: "software", label: "Software", appliesTo: ["instruction"] }],
+    });
+    expect(buildSetInstructionBreakpointsArgs(plan, modes)).toEqual({
+      breakpoints: [{ instructionReference: "0x1000", offset: 2, mode: "software" }],
+    });
+    const bindings = parseSetInstructionBreakpointsResponse(plan, {
+      breakpoints: [{ id: 91, verified: false, reason: "failed", message: "not executable" }],
+    });
+    expect(bindings).toEqual([{
+      id: 91,
+      verified: false,
+      key: instructionBreakpointKey(plan.sent[0]),
+      message: "not executable",
+      reason: "failed",
+    }]);
+    expect(instructionBreakpointVerificationMap(plan, bindings)).toEqual({
+      [instructionBreakpointKey(plan.sent[0])]: { status: "failed", message: "not executable" },
+    });
+  });
+
+  it("discovers and scopes standard DAP data breakpoints", () => {
+    expect(buildDataBreakpointInfoArgs({ name: "count", variablesReference: 17, frameId: 3, mode: "hardware" })).toEqual({
+      name: "count",
+      variablesReference: 17,
+      mode: "hardware",
+    });
+    expect(buildDataBreakpointInfoArgs({ name: "service.count", frameId: 3 })).toEqual({
+      name: "service.count",
+      frameId: 3,
+    });
+    const info = parseDataBreakpointInfo({
+      dataId: "field:Service.count",
+      description: "Service.count",
+      accessTypes: ["read", "write", "write", "invalid"],
+      canPersist: true,
+    });
+    expect(info).toEqual({
+      dataId: "field:Service.count",
+      description: "Service.count",
+      accessTypes: ["read", "write"],
+      canPersist: true,
+    });
+    expect(defaultDataBreakpointAccessType(info.accessTypes)).toBe("write");
+    expect(parseDataBreakpointInfo({ dataId: null, description: "not watchable" }).dataId).toBeNull();
+  });
+
+  it("builds capability-gated address and byte-range discovery arguments", () => {
+    expect(buildDataBreakpointInfoArgs({
+      name: "0x7fff0000",
+      frameId: 3,
+      bytes: 16,
+      asAddress: true,
+      mode: "hardware",
+    })).toEqual({
+      name: "0x7fff0000",
+      asAddress: true,
+      bytes: 16,
+      mode: "hardware",
+    });
+    expect(buildDataBreakpointInfoArgs({
+      name: "buffer",
+      variablesReference: 17,
+      frameId: 3,
+      bytes: 8,
+    })).toEqual({
+      name: "buffer",
+      variablesReference: 17,
+      bytes: 8,
+    });
+    expect(buildDataBreakpointInfoArgs({ name: "buffer", bytes: 0 })).toEqual({ name: "buffer" });
+  });
+
+  it("builds replacing data-breakpoint requests and maps verification", () => {
+    const stored = [
+      {
+        dataId: "field:count",
+        description: "Service.count",
+        adapterId: "java",
+        accessTypes: ["read", "write"] as const,
+        accessType: "write" as const,
+        condition: " ready ",
+        canPersist: true,
+      },
+      {
+        dataId: "address:temp",
+        description: "temporary",
+        adapterId: "java",
+        accessTypes: ["write"] as const,
+        hitCondition: " 2 ",
+        canPersist: false,
+        sessionId: "session-1",
+      },
+      {
+        dataId: "field:other",
+        description: "Other.value",
+        adapterId: "node",
+        accessTypes: [] as const,
+        canPersist: true,
+      },
+    ];
+    const plan = planDataBreakpointSync(stored.map((entry) => ({
+      ...entry,
+      accessTypes: [...entry.accessTypes],
+    })), {
+      adapterId: "java",
+      sessionId: "session-1",
+    });
+    expect(plan.applicable).toHaveLength(2);
+    expect(buildSetDataBreakpointsArgs(plan)).toEqual({
+      breakpoints: [
+        { dataId: "field:count", accessType: "write", condition: "ready" },
+        { dataId: "address:temp", hitCondition: "2" },
+      ],
+    });
+    const bindings = parseSetDataBreakpointsResponse(plan, {
+      breakpoints: [
+        { id: 71, verified: true },
+        { id: 72, verified: false, reason: "failed", message: "address expired" },
+      ],
+    });
+    expect(bindings.map((binding) => binding.key)).toEqual(plan.sent.map(dataBreakpointKey));
+    expect(dataBreakpointVerificationMap(plan, bindings)).toEqual({
+      [dataBreakpointKey(plan.sent[0])]: { status: "verified", message: null },
+      [dataBreakpointKey(plan.sent[1])]: { status: "failed", message: "address expired" },
+    });
+    expect(planDataBreakpointSync(plan.sorted, {
+      adapterId: "java",
+      sessionId: "session-1",
+      muted: true,
+    }).sent).toEqual([]);
+  });
+
+  it("places an advertised exception mode in filterOptions without inventing a condition", () => {
+    const filters = parseExceptionBreakpointFilters({
+      exceptionBreakpointFilters: [{ filter: "all", label: "All", default: true }],
+    });
+    const modes = parseBreakpointModes({
+      breakpointModes: [{ mode: "hardware", label: "Hardware", appliesTo: ["exception"] }],
+    });
+    const plan = planExceptionBreakpointSync([
+      { adapterId: "java", filterId: "all", enabled: true, mode: "hardware" },
+    ], [], filters, {
+      adapterId: "java",
+      supportsFilterOptions: true,
+      breakpointModes: modes,
+    });
+    expect(buildSetExceptionBreakpointsArgs(plan)).toEqual({
+      filters: [],
+      filterOptions: [{ filterId: "all", mode: "hardware" }],
+    });
   });
 
   it("inserts a run-to-cursor breakpoint in line order without storing it", () => {
@@ -180,15 +597,143 @@ describe("dapDebugModel", () => {
     expect(parseBreakpointEvent(null)).toBeNull();
   });
 
-  it("selects only exception filters the adapter advertises", () => {
+  it("parses exception filters and seeds adapter defaults without overriding choices", () => {
     const caps = {
       exceptionBreakpointFilters: [
-        { filter: "caught", label: "Caught Exceptions" },
+        {
+          filter: "caught",
+          label: "Caught Exceptions",
+          description: "Pause on handled exceptions",
+          default: true,
+          supportsCondition: true,
+          conditionDescription: "Exception class or expression",
+        },
         { filter: "uncaught", label: "Uncaught Exceptions" },
+        { filter: "caught", label: "duplicate" },
+        { label: "invalid" },
       ],
     };
-    expect(selectExceptionFilters(caps, ["uncaught", "unknown"])).toEqual(["uncaught"]);
-    expect(selectExceptionFilters({}, ["uncaught"])).toEqual([]);
+    const filters = parseExceptionBreakpointFilters(caps);
+    expect(filters).toEqual([
+      {
+        filter: "caught",
+        label: "Caught Exceptions",
+        description: "Pause on handled exceptions",
+        default: true,
+        supportsCondition: true,
+        conditionDescription: "Exception class or expression",
+      },
+      {
+        filter: "uncaught",
+        label: "Uncaught Exceptions",
+        description: undefined,
+        default: false,
+        supportsCondition: false,
+        conditionDescription: undefined,
+      },
+    ]);
+    const seeded = mergeExceptionBreakpointDefaults([
+      { adapterId: "java", filterId: "caught", enabled: false },
+      { adapterId: "node", filterId: "all", enabled: true },
+    ], "java", filters);
+    expect(seeded).toEqual([
+      { adapterId: "java", filterId: "caught", enabled: false },
+      { adapterId: "node", filterId: "all", enabled: true },
+      { adapterId: "java", filterId: "uncaught", enabled: false },
+    ]);
+    expect(mergeExceptionBreakpointDefaults(seeded, "java", filters)).toBe(seeded);
+    expect(parseExceptionBreakpointFilters({})).toEqual([]);
+  });
+
+  it("builds conditional exception filters with a legacy fallback and positional bindings", () => {
+    const filters = parseExceptionBreakpointFilters({
+      exceptionBreakpointFilters: [
+        { filter: "caught", label: "Caught", supportsCondition: true },
+        { filter: "uncaught", label: "Uncaught" },
+      ],
+    });
+    const settings = [
+      { adapterId: "java", filterId: "caught", enabled: true, condition: " IOException " },
+      { adapterId: "java", filterId: "uncaught", enabled: true },
+      { adapterId: "node", filterId: "caught", enabled: true },
+    ];
+    const rules = [
+      {
+        id: "java-io",
+        adapterId: "java",
+        path: [
+          { names: ["Java Exceptions"] },
+          { names: ["java.io.IOException", "java.sql.SQLException"] },
+          { names: ["sun.*"], negate: true },
+        ],
+        breakMode: "unhandled" as const,
+        enabled: true,
+      },
+      {
+        id: "node-error",
+        adapterId: "node",
+        path: [{ names: ["Error"] }],
+        breakMode: "always" as const,
+        enabled: true,
+      },
+    ];
+    const plan = planExceptionBreakpointSync(settings, rules, filters, {
+      adapterId: "java",
+      supportsFilterOptions: true,
+      supportsExceptionOptions: true,
+    });
+    expect(buildSetExceptionBreakpointsArgs(plan)).toEqual({
+      filters: ["uncaught"],
+      filterOptions: [{ filterId: "caught", condition: "IOException" }],
+      exceptionOptions: [{
+        path: [
+          { names: ["Java Exceptions"] },
+          { names: ["java.io.IOException", "java.sql.SQLException"] },
+          { names: ["sun.*"], negate: true },
+        ],
+        breakMode: "unhandled",
+      }],
+    });
+    expect(plan.sent.map((target) => (
+      target.kind === "filter" ? target.breakpoint.filterId : target.rule.id
+    ))).toEqual(["uncaught", "caught", "java-io"]);
+    expect(exceptionBreakpointRuleLabel(rules[0])).toBe(
+      "Java Exceptions / java.io.IOException | java.sql.SQLException / not (sun.*)",
+    );
+    expect(exceptionBreakpointRuleLabel({ path: [] })).toBe("All exceptions");
+
+    const bindings = parseSetExceptionBreakpointsResponse(plan, {
+      breakpoints: [
+        { id: 7, verified: true },
+        { id: 8, verified: false, reason: "failed", message: "Invalid condition" },
+        { id: 9, verified: false, reason: "pending", message: "Class not loaded" },
+      ],
+    });
+    expect(bindings.map((binding) => (
+      binding.kind === "filter" ? binding.filterId : binding.ruleId
+    ))).toEqual(["uncaught", "caught", "java-io"]);
+    expect(exceptionBreakpointVerificationMap(plan, bindings)).toEqual({
+      uncaught: { status: "verified", message: null },
+      caught: { status: "failed", message: "Invalid condition" },
+    });
+    expect(exceptionBreakpointRuleVerificationMap(plan, bindings)).toEqual({
+      "java-io": { status: "pending", message: "Class not loaded" },
+    });
+
+    const legacy = planExceptionBreakpointSync(settings, rules, filters, {
+      adapterId: "java",
+      supportsFilterOptions: false,
+      supportsExceptionOptions: false,
+    });
+    expect(buildSetExceptionBreakpointsArgs(legacy)).toEqual({ filters: ["caught", "uncaught"] });
+    expect(legacy.applicableRules).toEqual([rules[0]]);
+    const muted = planExceptionBreakpointSync(settings, rules, filters, {
+      adapterId: "java",
+      muted: true,
+      supportsFilterOptions: true,
+      supportsExceptionOptions: true,
+    });
+    expect(buildSetExceptionBreakpointsArgs(muted)).toEqual({ filters: [] });
   });
 
   it("parses threads and stack frames tolerantly", () => {

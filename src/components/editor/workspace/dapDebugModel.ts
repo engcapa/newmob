@@ -21,6 +21,133 @@ export interface DebugBreakpoint {
    * before this field existed stay armed).
    */
   enabled?: boolean;
+  /** Adapter-specific source-breakpoint mode ids (for example hardware/software). */
+  adapterModes?: Record<string, string>;
+}
+
+/** A DAP function/method breakpoint, independent of any source path. */
+export interface DebugFunctionBreakpoint {
+  name: string;
+  condition?: string;
+  hitCondition?: string;
+  /** Undefined means enabled, matching source-breakpoint persistence. */
+  enabled?: boolean;
+}
+
+/** A DAP instruction breakpoint scoped to the adapter that owns the reference. */
+export interface DebugInstructionBreakpoint {
+  adapterId: string;
+  /** Opaque instruction/memory reference supplied by the adapter or user. */
+  instructionReference: string;
+  /** Signed byte offset from `instructionReference`. */
+  offset?: number;
+  condition?: string;
+  hitCondition?: string;
+  /** Adapter-advertised instruction breakpoint mode. */
+  mode?: string;
+  /** Undefined means enabled, matching every other persisted breakpoint type. */
+  enabled?: boolean;
+}
+
+export type DebugDataBreakpointAccessType = "read" | "write" | "readWrite";
+
+export type DebugBreakpointModeApplicability =
+  | "source"
+  | "exception"
+  | "data"
+  | "instruction"
+  | (string & {});
+
+/** One breakpoint mode advertised by the adapter's initialize response. */
+export interface DebugBreakpointMode {
+  mode: string;
+  label: string;
+  description?: string;
+  appliesTo: DebugBreakpointModeApplicability[];
+}
+
+/**
+ * A DAP data breakpoint/watchpoint. Persistent data ids are scoped to one
+ * adapter; non-persistent ids are scoped to the suspended session that issued
+ * `dataBreakpointInfo` and are never written to workspace storage.
+ */
+export interface DebugDataBreakpoint {
+  dataId: string;
+  description: string;
+  adapterId: string;
+  accessTypes: DebugDataBreakpointAccessType[];
+  accessType?: DebugDataBreakpointAccessType;
+  condition?: string;
+  hitCondition?: string;
+  /** Number of bytes covered by the data id when the adapter supports ranges. */
+  bytes?: number;
+  /** Whether the discovery name was interpreted as a decimal/hex address. */
+  asAddress?: boolean;
+  /** Mode used when resolving this adapter-owned data id. */
+  mode?: string;
+  enabled?: boolean;
+  canPersist: boolean;
+  sessionId?: string;
+}
+
+export interface DebugDataBreakpointTarget {
+  name: string;
+  variablesReference?: number;
+  frameId?: number;
+  /** Optional range size, sent only with supportsDataBreakpointBytes. */
+  bytes?: number;
+  /** Interpret name as a decimal/hex memory address. */
+  asAddress?: boolean;
+  /** Sent only in the capability-gated `dataBreakpointInfo` request. */
+  mode?: string;
+}
+
+export interface DebugDataBreakpointInfo {
+  dataId: string | null;
+  description: string;
+  accessTypes: DebugDataBreakpointAccessType[];
+  canPersist: boolean;
+}
+
+/** One exception filter advertised by the adapter's initialize response. */
+export interface DebugExceptionBreakpointFilter {
+  filter: string;
+  label: string;
+  description?: string;
+  default: boolean;
+  supportsCondition: boolean;
+  conditionDescription?: string;
+}
+
+/** Workspace-persisted exception-breakpoint choice, scoped to one adapter. */
+export interface DebugExceptionBreakpoint {
+  adapterId: string;
+  filterId: string;
+  enabled: boolean;
+  condition?: string;
+  /** Adapter-advertised mode sent through `ExceptionFilterOptions`. */
+  mode?: string;
+}
+
+export type DebugExceptionBreakMode = "never" | "always" | "unhandled" | "userUnhandled";
+
+/** One segment in the adapter-defined DAP exception tree. */
+export interface DebugExceptionPathSegment {
+  names: string[];
+  negate?: boolean;
+}
+
+/**
+ * A user-defined exception class/package rule sent through DAP
+ * `exceptionOptions`. Rules are persisted per workspace and adapter because
+ * exception-tree names and wildcard syntax are adapter-specific.
+ */
+export interface DebugExceptionBreakpointRule {
+  id: string;
+  adapterId: string;
+  path: DebugExceptionPathSegment[];
+  breakMode: DebugExceptionBreakMode;
+  enabled: boolean;
 }
 
 /** True unless the breakpoint was explicitly disabled. */
@@ -73,6 +200,62 @@ export interface EvaluateResult {
   /** Non-zero when the value is structured and expandable via `variables`. */
   variablesReference: number;
   type: string | null;
+}
+
+/** DAP `readMemory` request. Memory references are opaque adapter strings. */
+export interface DebugMemoryReadRequest {
+  memoryReference: string;
+  offset?: number;
+  count: number;
+}
+
+/** Bounded result of a DAP `readMemory` response. `data` remains base64. */
+export interface DebugMemoryReadResult {
+  address: string | null;
+  unreadableBytes: number;
+  data: string;
+}
+
+/** DAP `writeMemory` request. `data` is base64 as required by the protocol. */
+export interface DebugMemoryWriteRequest {
+  memoryReference: string;
+  offset?: number;
+  data: string;
+  allowPartial?: boolean;
+}
+
+/** Result of a DAP `writeMemory` request. */
+export interface DebugMemoryWriteResult {
+  bytesWritten: number | null;
+}
+
+/** DAP `disassemble` request. All offsets are signed byte/instruction offsets. */
+export interface DebugDisassembleRequest {
+  memoryReference: string;
+  offset?: number;
+  instructionOffset?: number;
+  instructionCount: number;
+  resolveSymbols?: boolean;
+}
+
+/** Source location attached to a disassembled instruction, when available. */
+export interface DebugDisassemblyLocation {
+  path: string | null;
+  name: string | null;
+  sourceReference: number | null;
+}
+
+/** Bounded DAP `DisassembledInstruction` projection for the memory view. */
+export interface DebugDisassembledInstruction {
+  address: string;
+  instruction: string;
+  instructionBytes: string | null;
+  symbol: string | null;
+  location: DebugDisassemblyLocation | null;
+  line: number | null;
+  column: number | null;
+  endLine: number | null;
+  endColumn: number | null;
 }
 
 export interface DebugSessionState {
@@ -152,6 +335,152 @@ export function stepCommandFor(action: DebugStepAction): string {
     case "stepOut": return "stepOut";
   }
 }
+
+const MAX_MEMORY_REFERENCE_LENGTH = 4096;
+const MAX_MEMORY_READ_BYTES = 65536;
+const MAX_DISASSEMBLY_INSTRUCTIONS = 4096;
+const MAX_MEMORY_DATA_LENGTH = 131072;
+
+/** Build a standard DAP `readMemory` request. */
+export function buildReadMemoryArgs(request: DebugMemoryReadRequest) {
+  const args: {
+    memoryReference: string;
+    offset?: number;
+    count: number;
+  } = {
+    memoryReference: request.memoryReference.trim().slice(0, MAX_MEMORY_REFERENCE_LENGTH),
+    count: request.count,
+  };
+  if (request.offset !== undefined) args.offset = request.offset;
+  return args;
+}
+
+/** Parse a DAP `readMemory` response without trusting adapter field types. */
+export function parseReadMemoryResponse(body: unknown): DebugMemoryReadResult {
+  const rec = asRecord(body);
+  const unreadableBytes = typeof rec.unreadableBytes === "number"
+    && Number.isSafeInteger(rec.unreadableBytes)
+    && rec.unreadableBytes >= 0
+    ? Math.min(rec.unreadableBytes, MAX_MEMORY_READ_BYTES)
+    : 0;
+  return {
+    address: typeof rec.address === "string" && rec.address
+      ? rec.address.slice(0, MAX_MEMORY_REFERENCE_LENGTH)
+      : null,
+    unreadableBytes,
+    data: typeof rec.data === "string" ? rec.data.slice(0, MAX_MEMORY_DATA_LENGTH) : "",
+  };
+}
+
+/** Build a standard DAP `writeMemory` request. */
+export function buildWriteMemoryArgs(request: DebugMemoryWriteRequest) {
+  const args: {
+    memoryReference: string;
+    offset?: number;
+    data: string;
+    allowPartial?: boolean;
+  } = {
+    memoryReference: request.memoryReference.trim().slice(0, MAX_MEMORY_REFERENCE_LENGTH),
+    data: request.data.slice(0, MAX_MEMORY_DATA_LENGTH),
+  };
+  if (request.offset !== undefined) args.offset = request.offset;
+  if (request.allowPartial !== undefined) args.allowPartial = request.allowPartial;
+  return args;
+}
+
+/** Parse a DAP `writeMemory` response. */
+export function parseWriteMemoryResponse(body: unknown): DebugMemoryWriteResult {
+  const bytesWritten = asRecord(body).bytesWritten;
+  return {
+    bytesWritten: typeof bytesWritten === "number"
+      && Number.isSafeInteger(bytesWritten)
+      && bytesWritten >= 0
+      ? Math.min(bytesWritten, MAX_MEMORY_READ_BYTES)
+      : null,
+  };
+}
+
+/** Build a standard DAP `disassemble` request. */
+export function buildDisassembleArgs(request: DebugDisassembleRequest) {
+  const args: {
+    memoryReference: string;
+    offset?: number;
+    instructionOffset?: number;
+    instructionCount: number;
+    resolveSymbols?: boolean;
+  } = {
+    memoryReference: request.memoryReference.trim().slice(0, MAX_MEMORY_REFERENCE_LENGTH),
+    instructionCount: request.instructionCount,
+  };
+  if (request.offset !== undefined) args.offset = request.offset;
+  if (request.instructionOffset !== undefined) args.instructionOffset = request.instructionOffset;
+  if (request.resolveSymbols !== undefined) args.resolveSymbols = request.resolveSymbols;
+  return args;
+}
+
+/** Parse and bound a DAP `disassemble` response. */
+export function parseDisassembleResponse(body: unknown): DebugDisassembledInstruction[] {
+  const instructions = asRecord(body).instructions;
+  if (!Array.isArray(instructions)) return [];
+  return instructions.slice(0, MAX_DISASSEMBLY_INSTRUCTIONS).flatMap((value) => {
+    const rec = asRecord(value);
+    if (typeof rec.address !== "string" || !rec.address.trim()) return [];
+    const source = asRecord(rec.location);
+    const location = Object.keys(source).length > 0
+      ? {
+          path: typeof source.path === "string" && source.path ? source.path.slice(0, MAX_MEMORY_REFERENCE_LENGTH) : null,
+          name: typeof source.name === "string" && source.name ? source.name.slice(0, MAX_MEMORY_REFERENCE_LENGTH) : null,
+          sourceReference: typeof source.sourceReference === "number"
+            && Number.isSafeInteger(source.sourceReference)
+            && source.sourceReference > 0
+            ? source.sourceReference
+            : null,
+        }
+      : null;
+    return [{
+      address: rec.address.slice(0, MAX_MEMORY_REFERENCE_LENGTH),
+      instruction: typeof rec.instruction === "string" ? rec.instruction.slice(0, MAX_MEMORY_REFERENCE_LENGTH) : "",
+      instructionBytes: typeof rec.instructionBytes === "string" ? rec.instructionBytes.slice(0, MAX_MEMORY_REFERENCE_LENGTH) : null,
+      symbol: typeof rec.symbol === "string" && rec.symbol ? rec.symbol.slice(0, MAX_MEMORY_REFERENCE_LENGTH) : null,
+      location,
+      line: typeof rec.line === "number" && rec.line > 0 ? rec.line : null,
+      column: typeof rec.column === "number" && rec.column > 0 ? rec.column : null,
+      endLine: typeof rec.endLine === "number" && rec.endLine > 0 ? rec.endLine : null,
+      endColumn: typeof rec.endColumn === "number" && rec.endColumn > 0 ? rec.endColumn : null,
+    }];
+  });
+}
+
+/** Decode DAP base64 memory into a compact, readable hexadecimal string. */
+export function decodeMemoryData(data: string): string {
+  if (!data) return "";
+  try {
+    const binary = globalThis.atob(data);
+    return Array.from(binary, (character) => character.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
+  } catch {
+    return "";
+  }
+}
+
+/** Encode user-entered hexadecimal bytes into DAP base64. Returns null on invalid input. */
+export function encodeMemoryData(value: string): string | null {
+  const source = value.trim();
+  if (!source) return null;
+  const tokens = source.split(/[\s,]+/).filter(Boolean);
+  const compact = tokens.length === 1 ? tokens[0].replace(/^0x/i, "") : "";
+  const bytes = compact && /^(?:[0-9a-f]{2})+$/i.test(compact)
+    ? compact.match(/[0-9a-f]{2}/gi) ?? []
+    : tokens.map((token) => token.replace(/^0x/i, ""));
+  if (bytes.some((token) => !/^(?:[0-9a-f]{2})$/i.test(token))) return null;
+  if (bytes.length === 0 || bytes.length > MAX_MEMORY_READ_BYTES) return null;
+  const binary = bytes.map((token) => String.fromCharCode(Number.parseInt(token, 16))).join("");
+  try {
+    return globalThis.btoa(binary);
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Normalize a source path to the OS-native form the debug adapter expects.
  * On Windows, java-debug matches breakpoint source paths against JDT's records,
@@ -218,12 +547,275 @@ export function planBreakpointSync(
   return { sorted, sent, indexes };
 }
 
+export interface FunctionBreakpointSyncPlan {
+  /** Full persisted set, sorted deterministically by function name. */
+  sorted: DebugFunctionBreakpoint[];
+  /** Enabled entries sent to an adapter that supports function breakpoints. */
+  sent: DebugFunctionBreakpoint[];
+}
+
+/** Decide which function breakpoints are armed for one adapter session. */
+export function planFunctionBreakpointSync(
+  list: DebugFunctionBreakpoint[],
+  options: { muted?: boolean } = {},
+): FunctionBreakpointSyncPlan {
+  const sorted = list.slice().sort((left, right) => compareText(left.name, right.name));
+  return {
+    sorted,
+    sent: options.muted ? [] : sorted.filter((breakpoint) => breakpoint.enabled !== false),
+  };
+}
+
+/** Build standard DAP `setFunctionBreakpoints` request arguments. */
+export function buildSetFunctionBreakpointsArgs(plan: FunctionBreakpointSyncPlan) {
+  return {
+    breakpoints: plan.sent.map((breakpoint) => {
+      const entry: Record<string, unknown> = { name: breakpoint.name };
+      if (breakpoint.condition?.trim()) entry.condition = breakpoint.condition.trim();
+      if (breakpoint.hitCondition?.trim()) entry.hitCondition = breakpoint.hitCondition.trim();
+      return entry;
+    }),
+  };
+}
+
+/** Stable identity for one adapter-owned instruction location. */
+export function instructionBreakpointKey(
+  breakpoint: Pick<DebugInstructionBreakpoint, "adapterId" | "instructionReference" | "offset">,
+): string {
+  return JSON.stringify([
+    breakpoint.adapterId,
+    breakpoint.instructionReference,
+    breakpoint.offset ?? 0,
+  ]);
+}
+
+export interface InstructionBreakpointSyncPlan {
+  /** Full persisted set, sorted deterministically across adapters. */
+  sorted: DebugInstructionBreakpoint[];
+  /** Entries owned by the selected adapter, including disabled ones. */
+  applicable: DebugInstructionBreakpoint[];
+  /** Enabled and unmuted entries sent in request order. */
+  sent: DebugInstructionBreakpoint[];
+}
+
+/** Scope instruction references to their adapter and apply global muting. */
+export function planInstructionBreakpointSync(
+  list: DebugInstructionBreakpoint[],
+  context: { adapterId: string; muted?: boolean },
+): InstructionBreakpointSyncPlan {
+  const sorted = list.slice().sort((left, right) => (
+    compareText(left.adapterId, right.adapterId)
+    || compareText(left.instructionReference, right.instructionReference)
+    || (left.offset ?? 0) - (right.offset ?? 0)
+  ));
+  const applicable = sorted.filter((breakpoint) => breakpoint.adapterId === context.adapterId);
+  return {
+    sorted,
+    applicable,
+    sent: context.muted
+      ? []
+      : applicable.filter((breakpoint) => breakpoint.enabled !== false),
+  };
+}
+
+/** Build the replacing DAP `setInstructionBreakpoints` request. */
+export function buildSetInstructionBreakpointsArgs(
+  plan: InstructionBreakpointSyncPlan,
+  breakpointModes: readonly DebugBreakpointMode[] = [],
+) {
+  return {
+    breakpoints: plan.sent.map((breakpoint) => {
+      const entry: Record<string, unknown> = {
+        instructionReference: breakpoint.instructionReference,
+      };
+      if (breakpoint.offset !== undefined) entry.offset = breakpoint.offset;
+      if (breakpoint.condition?.trim()) entry.condition = breakpoint.condition.trim();
+      if (breakpoint.hitCondition?.trim()) entry.hitCondition = breakpoint.hitCondition.trim();
+      const mode = resolveBreakpointMode(breakpoint.mode, breakpointModes, "instruction");
+      if (mode) entry.mode = mode;
+      return entry;
+    }),
+  };
+}
+
+/** Parse, de-duplicate, and merge DAP breakpoint-mode capability metadata. */
+export function parseBreakpointModes(
+  capabilities: Record<string, unknown>,
+): DebugBreakpointMode[] {
+  const advertised = capabilities.breakpointModes;
+  if (!Array.isArray(advertised)) return [];
+  const out: DebugBreakpointMode[] = [];
+  const byId = new Map<string, DebugBreakpointMode>();
+  for (const value of advertised) {
+    const raw = asRecord(value);
+    const mode = typeof raw.mode === "string" ? raw.mode.trim() : "";
+    if (!mode || mode.length > 1024 || !Array.isArray(raw.appliesTo)) continue;
+    const appliesTo = Array.from(new Set(raw.appliesTo.flatMap((entry) => (
+      typeof entry === "string" && entry.trim() && entry.length <= 128
+        ? [entry.trim() as DebugBreakpointModeApplicability]
+        : []
+    ))));
+    if (appliesTo.length === 0) continue;
+    const existing = byId.get(mode);
+    if (existing) {
+      existing.appliesTo = Array.from(new Set([...existing.appliesTo, ...appliesTo]));
+      continue;
+    }
+    const label = typeof raw.label === "string" && raw.label.trim()
+      ? raw.label.trim().slice(0, 1024)
+      : mode;
+    const parsed: DebugBreakpointMode = {
+      mode,
+      label,
+      description: typeof raw.description === "string" && raw.description.trim()
+        ? raw.description.trim().slice(0, 4096)
+        : undefined,
+      appliesTo,
+    };
+    byId.set(mode, parsed);
+    out.push(parsed);
+  }
+  return out;
+}
+
+/** Modes in adapter order; the first is the protocol-recommended UI default. */
+export function breakpointModesFor(
+  modes: readonly DebugBreakpointMode[],
+  applicability: DebugBreakpointModeApplicability,
+): DebugBreakpointMode[] {
+  return modes.filter((mode) => mode.appliesTo.includes(applicability));
+}
+
+/** Keep a valid saved mode, otherwise use the first applicable advertised mode. */
+export function resolveBreakpointMode(
+  preferred: string | undefined,
+  modes: readonly DebugBreakpointMode[],
+  applicability: DebugBreakpointModeApplicability,
+): string | undefined {
+  const applicable = breakpointModesFor(modes, applicability);
+  return applicable.some((candidate) => candidate.mode === preferred)
+    ? preferred
+    : applicable[0]?.mode;
+}
+
+/** Build a standard DAP `dataBreakpointInfo` request from a variable/expression. */
+export function buildDataBreakpointInfoArgs(target: DebugDataBreakpointTarget) {
+  const args: Record<string, unknown> = { name: target.name };
+  if (target.asAddress === true) {
+    args.asAddress = true;
+  } else {
+    if (typeof target.variablesReference === "number" && target.variablesReference > 0) {
+      args.variablesReference = target.variablesReference;
+    } else if (typeof target.frameId === "number") {
+      args.frameId = target.frameId;
+    }
+  }
+  if (Number.isInteger(target.bytes) && (target.bytes as number) > 0) {
+    args.bytes = target.bytes;
+  }
+  if (target.mode?.trim()) args.mode = target.mode.trim();
+  return args;
+}
+
+/** Parse adapter-owned data id and access modes without inventing a fallback id. */
+export function parseDataBreakpointInfo(body: unknown): DebugDataBreakpointInfo {
+  const rec = asRecord(body);
+  const accessTypes: DebugDataBreakpointAccessType[] = [];
+  const seen = new Set<string>();
+  if (Array.isArray(rec.accessTypes)) {
+    for (const value of rec.accessTypes) {
+      if (
+        (value === "read" || value === "write" || value === "readWrite")
+        && !seen.has(value)
+      ) {
+        seen.add(value);
+        accessTypes.push(value);
+      }
+    }
+  }
+  return {
+    dataId: typeof rec.dataId === "string" && rec.dataId.length > 0 ? rec.dataId : null,
+    description: typeof rec.description === "string" ? rec.description : "",
+    accessTypes,
+    canPersist: rec.canPersist === true,
+  };
+}
+
+/** IDEA defaults a watchpoint to modification when the adapter offers it. */
+export function defaultDataBreakpointAccessType(
+  accessTypes: readonly DebugDataBreakpointAccessType[],
+): DebugDataBreakpointAccessType | undefined {
+  if (accessTypes.includes("write")) return "write";
+  return accessTypes[0];
+}
+
+/** Stable identity for UI/runtime maps; the opaque data id is never parsed. */
+export function dataBreakpointKey(breakpoint: DebugDataBreakpoint): string {
+  return JSON.stringify([
+    breakpoint.sessionId ? "session" : "adapter",
+    breakpoint.sessionId ?? breakpoint.adapterId,
+    breakpoint.dataId,
+  ]);
+}
+
+export interface DataBreakpointSyncPlan {
+  sorted: DebugDataBreakpoint[];
+  /** Breakpoints owned by this adapter/session, including disabled entries. */
+  applicable: DebugDataBreakpoint[];
+  /** Enabled and unmuted entries sent in request order. */
+  sent: DebugDataBreakpoint[];
+}
+
+/** Scope persistent data ids by adapter and transient ids by their owner session. */
+export function planDataBreakpointSync(
+  list: DebugDataBreakpoint[],
+  context: { adapterId: string; sessionId: string; muted?: boolean },
+): DataBreakpointSyncPlan {
+  const sorted = list.slice().sort((left, right) => (
+    compareText(left.adapterId, right.adapterId)
+    || compareText(left.description, right.description)
+    || compareText(left.dataId, right.dataId)
+  ));
+  const applicable = sorted.filter((breakpoint) => (
+    breakpoint.sessionId
+      ? breakpoint.sessionId === context.sessionId
+      : breakpoint.canPersist && breakpoint.adapterId === context.adapterId
+  ));
+  return {
+    sorted,
+    applicable,
+    sent: context.muted
+      ? []
+      : applicable.filter((breakpoint) => breakpoint.enabled !== false),
+  };
+}
+
+/** Build the replacing `setDataBreakpoints` payload required by DAP. */
+export function buildSetDataBreakpointsArgs(plan: DataBreakpointSyncPlan) {
+  return {
+    breakpoints: plan.sent.map((breakpoint) => {
+      const entry: Record<string, unknown> = { dataId: breakpoint.dataId };
+      if (breakpoint.accessType) entry.accessType = breakpoint.accessType;
+      if (breakpoint.condition?.trim()) entry.condition = breakpoint.condition.trim();
+      if (breakpoint.hitCondition?.trim()) entry.hitCondition = breakpoint.hitCondition.trim();
+      return entry;
+    }),
+  };
+}
+
 /**
  * Build DAP `setBreakpoints` arguments for one source file from a sync plan.
  * The response's `breakpoints` array corresponds 1:1, in order, to `plan.sent`
  * (see parseSetBreakpointsResponse).
  */
-export function buildSetBreakpointsArgs(path: string, plan: BreakpointSyncPlan) {
+export function buildSetBreakpointsArgs(
+  path: string,
+  plan: BreakpointSyncPlan,
+  options: {
+    adapterId?: string;
+    breakpointModes?: readonly DebugBreakpointMode[];
+  } = {},
+) {
   return {
     source: { path, name: path.split(/[\\/]/).pop() ?? path },
     breakpoints: plan.sent.map((bp) => {
@@ -231,6 +823,12 @@ export function buildSetBreakpointsArgs(path: string, plan: BreakpointSyncPlan) 
       if (bp.condition && bp.condition.trim()) entry.condition = bp.condition.trim();
       if (bp.hitCondition && bp.hitCondition.trim()) entry.hitCondition = bp.hitCondition.trim();
       if (bp.logMessage && bp.logMessage.trim()) entry.logMessage = bp.logMessage.trim();
+      const mode = resolveBreakpointMode(
+        options.adapterId ? bp.adapterModes?.[options.adapterId] : undefined,
+        options.breakpointModes ?? [],
+        "source",
+      );
+      if (mode) entry.mode = mode;
       return entry;
     }),
     // Ask the adapter to re-verify from source lines.
@@ -248,6 +846,33 @@ export interface BreakpointBinding {
   /** DAP `message`: why a breakpoint could not be verified (shown to the user). */
   message?: string | null;
   /** DAP `reason`: `"pending"` (may verify later) or `"failed"` (needs action). */
+  reason?: "pending" | "failed" | null;
+}
+
+/** Positional binding returned by `setFunctionBreakpoints`. */
+export interface FunctionBreakpointBinding {
+  id: number | null;
+  verified: boolean;
+  name: string;
+  message?: string | null;
+  reason?: "pending" | "failed" | null;
+}
+
+/** Positional binding returned by `setInstructionBreakpoints`. */
+export interface InstructionBreakpointBinding {
+  id: number | null;
+  verified: boolean;
+  key: string;
+  message?: string | null;
+  reason?: "pending" | "failed" | null;
+}
+
+/** Positional binding returned by `setDataBreakpoints`. */
+export interface DataBreakpointBinding {
+  id: number | null;
+  verified: boolean;
+  key: string;
+  message?: string | null;
   reason?: "pending" | "failed" | null;
 }
 
@@ -286,14 +911,118 @@ export function parseSetBreakpointsResponse(
   });
 }
 
+/** Parse the positional response to `setFunctionBreakpoints`. */
+export function parseSetFunctionBreakpointsResponse(
+  plan: FunctionBreakpointSyncPlan,
+  body: unknown,
+): FunctionBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((breakpoint, index) => {
+    const rec = asRecord(list[index]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      name: breakpoint.name,
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+    };
+  });
+}
+
+/** Parse `setInstructionBreakpoints`; response order matches the request. */
+export function parseSetInstructionBreakpointsResponse(
+  plan: InstructionBreakpointSyncPlan,
+  body: unknown,
+): InstructionBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((breakpoint, index) => {
+    const rec = asRecord(list[index]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      key: instructionBreakpointKey(breakpoint),
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+    };
+  });
+}
+
+/** Parse `setDataBreakpoints`; response order matches the replacing request. */
+export function parseSetDataBreakpointsResponse(
+  plan: DataBreakpointSyncPlan,
+  body: unknown,
+): DataBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((breakpoint, index) => {
+    const rec = asRecord(list[index]);
+    return {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      key: dataBreakpointKey(breakpoint),
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason: rec.reason === "pending" || rec.reason === "failed" ? rec.reason : null,
+    };
+  });
+}
+
 /** Map a raw binding's `verified`/`reason` to a display runtime status. */
-export function bindingRuntimeStatus(binding: BreakpointBinding): BreakpointRuntimeState {
+export function bindingRuntimeStatus(
+  binding: Pick<BreakpointBinding, "verified" | "message" | "reason">,
+): BreakpointRuntimeState {
   if (binding.verified) return { status: "verified", message: null };
   // Unverified: `failed` means the adapter gave up; anything else (incl. an
   // explicit `pending`, or no reason yet) is treated as pending so the gutter
   // shows "not bound yet" rather than a hard failure.
   const status = binding.reason === "failed" ? "failed" : "pending";
   return { status, message: binding.message ?? null };
+}
+
+/** Verification state per persisted function name for the active session. */
+export function functionBreakpointVerificationMap(
+  plan: FunctionBreakpointSyncPlan,
+  bindings: FunctionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  plan.sent.forEach((breakpoint, index) => {
+    const binding = bindings[index];
+    out[breakpoint.name] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
+}
+
+/** Verification state per adapter-scoped instruction location. */
+export function instructionBreakpointVerificationMap(
+  plan: InstructionBreakpointSyncPlan,
+  bindings: InstructionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  plan.sent.forEach((breakpoint, index) => {
+    const binding = bindings[index];
+    out[instructionBreakpointKey(breakpoint)] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
+}
+
+/** Verification state per data-breakpoint identity for the selected session. */
+export function dataBreakpointVerificationMap(
+  plan: DataBreakpointSyncPlan,
+  bindings: DataBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  plan.sent.forEach((breakpoint, index) => {
+    const binding = bindings[index];
+    out[dataBreakpointKey(breakpoint)] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
 }
 
 /**
@@ -369,23 +1098,270 @@ export function parseBreakpointEvent(
   };
 }
 
-/** Pick exception-breakpoint filters to enable from the adapter's advertised set. */
-export function selectExceptionFilters(
+/** Parse and de-duplicate the adapter's exception-filter capability metadata. */
+export function parseExceptionBreakpointFilters(
   capabilities: Record<string, unknown>,
-  enabledIds: string[],
-): string[] {
+): DebugExceptionBreakpointFilter[] {
   const filters = capabilities.exceptionBreakpointFilters;
   if (!Array.isArray(filters)) return [];
-  const available = new Set(
-    filters
-      .map((f) => (f && typeof f === "object" ? (f as Record<string, unknown>).filter : null))
-      .filter((id): id is string => typeof id === "string"),
-  );
-  return enabledIds.filter((id) => available.has(id));
+  const out: DebugExceptionBreakpointFilter[] = [];
+  const seen = new Set<string>();
+  for (const value of filters) {
+    const filter = asRecord(value);
+    const id = typeof filter.filter === "string" ? filter.filter : "";
+    if (!id.trim() || seen.has(id)) continue;
+    seen.add(id);
+    const label = typeof filter.label === "string" && filter.label.trim()
+      ? filter.label.trim()
+      : id;
+    out.push({
+      filter: id,
+      label,
+      description: typeof filter.description === "string" && filter.description.trim()
+        ? filter.description.trim()
+        : undefined,
+      default: filter.default === true,
+      supportsCondition: filter.supportsCondition === true,
+      conditionDescription: typeof filter.conditionDescription === "string"
+        && filter.conditionDescription.trim()
+        ? filter.conditionDescription.trim()
+        : undefined,
+    });
+  }
+  return out;
+}
+
+/** Stable identity for persisted adapter-specific exception settings. */
+export function exceptionBreakpointKey(
+  breakpoint: Pick<DebugExceptionBreakpoint, "adapterId" | "filterId">,
+): string {
+  return JSON.stringify([breakpoint.adapterId, breakpoint.filterId]);
+}
+
+/** Stable identity for a persisted adapter-specific exception path rule. */
+export function exceptionBreakpointRuleKey(
+  rule: Pick<DebugExceptionBreakpointRule, "adapterId" | "id">,
+): string {
+  return JSON.stringify([rule.adapterId, rule.id]);
+}
+
+/** Compact path label for the exception-breakpoints view. */
+export function exceptionBreakpointRuleLabel(
+  rule: Pick<DebugExceptionBreakpointRule, "path">,
+): string {
+  if (rule.path.length === 0) return "All exceptions";
+  return rule.path.map((segment) => {
+    const names = segment.names.join(" | ");
+    return segment.negate ? `not (${names})` : names;
+  }).join(" / ");
+}
+
+/**
+ * Seed newly advertised filters from the adapter's `default` flag while
+ * retaining every explicit user choice (including disabled filters).
+ */
+export function mergeExceptionBreakpointDefaults(
+  list: DebugExceptionBreakpoint[],
+  adapterId: string,
+  filters: readonly DebugExceptionBreakpointFilter[],
+): DebugExceptionBreakpoint[] {
+  const known = new Set(list.map(exceptionBreakpointKey));
+  const additions = filters.flatMap((filter) => {
+    const breakpoint: DebugExceptionBreakpoint = {
+      adapterId,
+      filterId: filter.filter,
+      enabled: filter.default,
+    };
+    return known.has(exceptionBreakpointKey(breakpoint)) ? [] : [breakpoint];
+  });
+  return additions.length > 0 ? [...list, ...additions] : list;
+}
+
+export interface ExceptionBreakpointSyncPlan {
+  /** Settings matching filters advertised by this adapter, in advertised order. */
+  applicable: DebugExceptionBreakpoint[];
+  /** Persisted class/package rules matching this adapter, in user order. */
+  applicableRules: DebugExceptionBreakpointRule[];
+  /** Enabled filters sent through the backward-compatible `filters` array. */
+  plain: DebugExceptionBreakpoint[];
+  /** Enabled filters sent with a condition and/or mode through `filterOptions`. */
+  options: ExceptionBreakpointFilterOption[];
+  /** Enabled rules sent through capability-gated `exceptionOptions`. */
+  rules: DebugExceptionBreakpointRule[];
+  /** Positional response order: `filters`, `filterOptions`, then `exceptionOptions`. */
+  sent: ExceptionBreakpointSyncTarget[];
+}
+
+export type ExceptionBreakpointSyncTarget =
+  | { kind: "filter"; breakpoint: DebugExceptionBreakpoint }
+  | { kind: "rule"; rule: DebugExceptionBreakpointRule };
+
+export interface ExceptionBreakpointFilterOption {
+  breakpoint: DebugExceptionBreakpoint;
+  condition?: string;
+  mode?: string;
+}
+
+/** Plan a replacing exception-breakpoint request for one adapter session. */
+export function planExceptionBreakpointSync(
+  list: DebugExceptionBreakpoint[],
+  ruleList: DebugExceptionBreakpointRule[],
+  filters: readonly DebugExceptionBreakpointFilter[],
+  context: {
+    adapterId: string;
+    muted?: boolean;
+    supportsFilterOptions?: boolean;
+    supportsExceptionOptions?: boolean;
+    breakpointModes?: readonly DebugBreakpointMode[];
+  },
+): ExceptionBreakpointSyncPlan {
+  const byKey = new Map(list.map((breakpoint) => [exceptionBreakpointKey(breakpoint), breakpoint]));
+  const applicable = filters.map((filter) => {
+    const fallback: DebugExceptionBreakpoint = {
+      adapterId: context.adapterId,
+      filterId: filter.filter,
+      enabled: filter.default,
+    };
+    return byKey.get(exceptionBreakpointKey(fallback)) ?? fallback;
+  });
+  const enabled = context.muted ? [] : applicable.filter((breakpoint) => breakpoint.enabled);
+  const metadata = new Map(filters.map((filter) => [filter.filter, filter]));
+  const options = context.supportsFilterOptions
+    ? enabled.flatMap((breakpoint): ExceptionBreakpointFilterOption[] => {
+        const condition = metadata.get(breakpoint.filterId)?.supportsCondition === true
+          ? breakpoint.condition?.trim() || undefined
+          : undefined;
+        const mode = resolveBreakpointMode(
+          breakpoint.mode,
+          context.breakpointModes ?? [],
+          "exception",
+        );
+        return condition || mode ? [{ breakpoint, condition, mode }] : [];
+      })
+    : [];
+  const optionIds = new Set(options.map((entry) => entry.breakpoint.filterId));
+  const plain = enabled.filter((breakpoint) => !optionIds.has(breakpoint.filterId));
+  const applicableRules = ruleList.filter((rule) => rule.adapterId === context.adapterId);
+  const rules = context.supportsExceptionOptions && !context.muted
+    ? applicableRules.filter((rule) => rule.enabled)
+    : [];
+  const sent: ExceptionBreakpointSyncTarget[] = [
+    ...plain.map((breakpoint) => ({ kind: "filter" as const, breakpoint })),
+    ...options.map(({ breakpoint }) => ({ kind: "filter" as const, breakpoint })),
+    ...rules.map((rule) => ({ kind: "rule" as const, rule })),
+  ];
+  return { applicable, applicableRules, plain, options, rules, sent };
+}
+
+/** Build standard DAP `setExceptionBreakpoints` arguments with legacy fallback. */
+export function buildSetExceptionBreakpointsArgs(plan: ExceptionBreakpointSyncPlan) {
+  const args: {
+    filters: string[];
+    filterOptions?: Array<{ filterId: string; condition?: string; mode?: string }>;
+    exceptionOptions?: Array<{
+      path?: Array<{ names: string[]; negate?: boolean }>;
+      breakMode: DebugExceptionBreakMode;
+    }>;
+  } = {
+    filters: plan.plain.map((breakpoint) => breakpoint.filterId),
+  };
+  if (plan.options.length > 0) {
+    args.filterOptions = plan.options.map(({ breakpoint, condition, mode }) => ({
+      filterId: breakpoint.filterId,
+      ...(condition ? { condition } : {}),
+      ...(mode ? { mode } : {}),
+    }));
+  }
+  if (plan.rules.length > 0) {
+    args.exceptionOptions = plan.rules.map((rule) => ({
+      ...(rule.path.length > 0
+        ? {
+            path: rule.path.map((segment) => ({
+              names: [...segment.names],
+              ...(segment.negate ? { negate: true } : {}),
+            })),
+          }
+        : {}),
+      breakMode: rule.breakMode,
+    }));
+  }
+  return args;
+}
+
+interface ExceptionBreakpointBindingBase {
+  id: number | null;
+  verified: boolean;
+  message?: string | null;
+  reason?: "pending" | "failed" | null;
+}
+
+/** Positional binding returned by `setExceptionBreakpoints`. */
+export type ExceptionBreakpointBinding =
+  | (ExceptionBreakpointBindingBase & { kind: "filter"; filterId: string })
+  | (ExceptionBreakpointBindingBase & { kind: "rule"; ruleId: string });
+
+/** Parse bindings in `filters`, `filterOptions`, then `exceptionOptions` order. */
+export function parseSetExceptionBreakpointsResponse(
+  plan: ExceptionBreakpointSyncPlan,
+  body: unknown,
+): ExceptionBreakpointBinding[] {
+  const reported = asRecord(body).breakpoints;
+  const list = Array.isArray(reported) ? reported : [];
+  return plan.sent.map((target, index) => {
+    const rec = asRecord(list[index]);
+    const reason: "pending" | "failed" | null = rec.reason === "pending" || rec.reason === "failed"
+      ? rec.reason
+      : null;
+    const binding: ExceptionBreakpointBindingBase = {
+      id: typeof rec.id === "number" ? rec.id : null,
+      verified: rec.verified === true,
+      message: typeof rec.message === "string" && rec.message ? rec.message : null,
+      reason,
+    };
+    return target.kind === "filter"
+      ? { ...binding, kind: "filter" as const, filterId: target.breakpoint.filterId }
+      : { ...binding, kind: "rule" as const, ruleId: target.rule.id };
+  });
+}
+
+/** Verification state per exception filter for the selected adapter session. */
+export function exceptionBreakpointVerificationMap(
+  plan: ExceptionBreakpointSyncPlan,
+  bindings: ExceptionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  const filterBindings = bindings.filter((binding) => binding.kind === "filter");
+  [...plan.plain, ...plan.options.map((entry) => entry.breakpoint)].forEach((breakpoint, index) => {
+    const binding = filterBindings[index];
+    out[breakpoint.filterId] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
+}
+
+/** Verification state per user-defined exception path rule. */
+export function exceptionBreakpointRuleVerificationMap(
+  plan: ExceptionBreakpointSyncPlan,
+  bindings: ExceptionBreakpointBinding[],
+): Record<string, BreakpointRuntimeState> {
+  const out: Record<string, BreakpointRuntimeState> = {};
+  const ruleBindings = bindings.filter((binding) => binding.kind === "rule");
+  plan.rules.forEach((rule, index) => {
+    const binding = ruleBindings[index];
+    out[rule.id] = binding
+      ? bindingRuntimeStatus(binding)
+      : { status: "pending", message: null };
+  });
+  return out;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 /** Parse a `threads` response body into our thread list. */

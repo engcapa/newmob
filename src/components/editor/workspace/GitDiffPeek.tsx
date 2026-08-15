@@ -1,11 +1,19 @@
-import { X } from "lucide-react";
+import { RotateCcw, X } from "lucide-react";
 import type { GitLineChange } from "./gitEditorChrome";
 
 function lineLabel(start: number, end: number): string {
   return start === end ? `${start + 1}` : `${start + 1}-${end + 1}`;
 }
 
-export function GitDiffPeek({ change, onClose }: { change: GitLineChange; onClose: () => void }) {
+export function GitDiffPeek({
+  change,
+  onClose,
+  onRollback,
+}: {
+  change: GitLineChange;
+  onClose: () => void;
+  onRollback?: (change: GitLineChange) => void;
+}) {
   return (
     <aside
       data-testid="code-workspace-git-diff-peek"
@@ -15,10 +23,26 @@ export function GitDiffPeek({ change, onClose }: { change: GitLineChange; onClos
         <span className="font-semibold capitalize text-[var(--taomni-code-text)]">{change.kind} lines</span>
         <span>HEAD {lineLabel(change.oldStartLine, change.oldEndLine)}</span>
         <span>→ Buffer {lineLabel(change.startLine, change.endLine)}</span>
+        {onRollback && (
+          <button
+            type="button"
+            data-testid="git-diff-peek-rollback-btn"
+            aria-label="Rollback this change"
+            title="Rollback this change to HEAD"
+            className="ml-auto inline-flex items-center gap-1 rounded bg-[var(--taomni-code-active-line-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--taomni-code-text)] hover:opacity-80"
+            onClick={() => {
+              onRollback(change);
+              onClose();
+            }}
+          >
+            <RotateCcw className="h-3 w-3" />
+            <span>Rollback</span>
+          </button>
+        )}
         <button
           type="button"
           aria-label="Close inline Git diff"
-          className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--taomni-code-active-line-bg)]"
+          className={`inline-flex h-6 w-6 items-center justify-center rounded hover:bg-[var(--taomni-code-active-line-bg)] ${onRollback ? "" : "ml-auto"}`}
           onClick={onClose}
         >
           <X className="h-3.5 w-3.5" />

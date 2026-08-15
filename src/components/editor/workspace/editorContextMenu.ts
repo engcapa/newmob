@@ -23,6 +23,7 @@ export interface EditorContextMenuActions {
   callHierarchy: () => void;
   typeHierarchy: () => void;
   rename: () => void;
+  safeDelete: () => void;
   quickDocumentation: () => void;
   codeActions: (clientX: number, clientY: number) => void;
   format: () => void;
@@ -59,7 +60,12 @@ export interface BuildEditorContextMenuInput {
   /** When true, LSP navigation items stay enabled even if capabilities are unknown. */
   lspAvailable?: boolean;
   /** Present while a debug session is active — adds Run to Cursor (IDEA Alt+F9). */
-  debug?: { canRunToCursor: boolean; runToCursor: () => void } | null;
+  debug?: {
+    canRunToCursor: boolean;
+    runToCursor: () => void;
+    /** Present only when the caret is on a recognized field declaration. */
+    dataBreakpoint?: { canAdd: boolean; add: () => void };
+  } | null;
   /** Present when AI is available — adds the Explain Syntax / Explain Code pair. */
   ai?: EditorContextMenuAiSection | null;
 }
@@ -92,6 +98,14 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
         disabled: !input.debug.canRunToCursor,
         onClick: input.debug.runToCursor,
       },
+      ...(input.debug.dataBreakpoint
+        ? [{
+          label: "Add Data Breakpoint",
+          testId: "editor-context-add-data-breakpoint",
+          disabled: !input.debug.dataBreakpoint.canAdd,
+          onClick: input.debug.dataBreakpoint.add,
+        }]
+        : []),
     ]
     : [];
 
@@ -178,6 +192,14 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
       testId: "editor-context-rename",
       disabled: !capEnabled(capabilities, "rename", lspAvailable),
       onClick: actions.rename,
+    },
+    {
+      label: "Safe Delete Symbol…",
+      shortcut: "Alt+Delete",
+      testId: "editor-context-safe-delete",
+      disabled: !capEnabled(capabilities, "references", lspAvailable)
+        || !capEnabled(capabilities, "rename", lspAvailable),
+      onClick: actions.safeDelete,
     },
     {
       label: "Quick Documentation",

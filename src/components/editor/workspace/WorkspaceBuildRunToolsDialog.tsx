@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { X } from "lucide-react";
-import type { WorkspaceBuildRunTools } from "./codeWorkspaceModel";
+import {
+  DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS,
+  type WorkspaceBuildRunTools,
+} from "./codeWorkspaceModel";
 
 interface WorkspaceBuildRunToolsDialogProps {
   config: WorkspaceBuildRunTools;
@@ -40,6 +43,21 @@ export function WorkspaceBuildRunToolsDialog({
   const [mavenJvmArgs, setMavenJvmArgs] = useState(() => config.mavenRun.jvmArgs.join("\n"));
   const [inheritProjectJvmArgs, setInheritProjectJvmArgs] = useState(
     () => config.mavenRun.inheritProjectJvmArgs,
+  );
+  const [stepFiltersEnabled, setStepFiltersEnabled] = useState(
+    () => config.stepFilters?.enabled ?? true,
+  );
+  const [stepFilterPatterns, setStepFilterPatterns] = useState(
+    () => (config.stepFilters?.patterns ?? DEFAULT_WORKSPACE_DEBUG_STEP_FILTERS.patterns).join("\n"),
+  );
+  const [skipSynthetics, setSkipSynthetics] = useState(
+    () => config.stepFilters?.skipSynthetics ?? true,
+  );
+  const [skipStaticInitializers, setSkipStaticInitializers] = useState(
+    () => config.stepFilters?.skipStaticInitializers ?? false,
+  );
+  const [skipConstructors, setSkipConstructors] = useState(
+    () => config.stepFilters?.skipConstructors ?? false,
   );
 
   return (
@@ -115,6 +133,64 @@ export function WorkspaceBuildRunToolsDialog({
             />
             <span>Inherit module-access options from Maven test configuration</span>
           </label>
+
+          <div className="border-t border-[var(--taomni-code-border)] pt-3 space-y-2">
+            <div className="font-medium">Debugger Step Filters (跳过标准库/框架代码)</div>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                data-testid="workspace-debug-step-filters-enabled"
+                checked={stepFiltersEnabled}
+                onChange={(e) => setStepFiltersEnabled(e.target.checked)}
+              />
+              <span>Enable Step Filters (Step Over matching classes/packages)</span>
+            </label>
+            {stepFiltersEnabled && (
+              <>
+                <label className="block text-[11px] text-[var(--taomni-code-muted)]" htmlFor="workspace-debug-step-filter-patterns">
+                  Class & package patterns to skip (one per line, e.g. <code>java.*</code>, <code>javax.*</code>, <code>sun.*</code>, <code>com.sun.*</code>)
+                </label>
+                <textarea
+                  id="workspace-debug-step-filter-patterns"
+                  data-testid="workspace-debug-step-filter-patterns"
+                  aria-label="Step filter class patterns"
+                  value={stepFilterPatterns}
+                  onChange={(e) => setStepFilterPatterns(e.target.value)}
+                  rows={4}
+                  className="block w-full resize-y rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-2 py-1 font-mono text-[11px]"
+                />
+                <div className="flex flex-wrap gap-4 pt-1">
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      data-testid="workspace-debug-skip-synthetics"
+                      checked={skipSynthetics}
+                      onChange={(e) => setSkipSynthetics(e.target.checked)}
+                    />
+                    <span>Skip synthetic methods</span>
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      data-testid="workspace-debug-skip-static-init"
+                      checked={skipStaticInitializers}
+                      onChange={(e) => setSkipStaticInitializers(e.target.checked)}
+                    />
+                    <span>Skip static initializers</span>
+                  </label>
+                  <label className="flex items-center gap-1.5">
+                    <input
+                      type="checkbox"
+                      data-testid="workspace-debug-skip-constructors"
+                      checked={skipConstructors}
+                      onChange={(e) => setSkipConstructors(e.target.checked)}
+                    />
+                    <span>Skip constructors</span>
+                  </label>
+                </div>
+              </>
+            )}
+          </div>
         </div>
         <div className="flex justify-end gap-2 border-t border-[var(--taomni-code-border)] p-3">
           <button
@@ -139,6 +215,13 @@ export function WorkspaceBuildRunToolsDialog({
                 mavenRun: {
                   jvmArgs: mavenJvmArgs.split(/\r?\n/).map((value) => value.trim()).filter(Boolean),
                   inheritProjectJvmArgs,
+                },
+                stepFilters: {
+                  enabled: stepFiltersEnabled,
+                  patterns: stepFilterPatterns.split(/\r?\n/).map((p) => p.trim()).filter(Boolean),
+                  skipSynthetics,
+                  skipStaticInitializers,
+                  skipConstructors,
                 },
               });
             }}

@@ -14,6 +14,10 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceReadFile: vi.fn(),
   workspaceRenamePath: vi.fn(),
 }));
+const lspMocks = vi.hoisted(() => ({
+  lspWorkspaceDidFileOperation: vi.fn(),
+  lspWorkspaceWillFileOperation: vi.fn(),
+}));
 const ipcMocks = vi.hoisted(() => ({
   selectFilePath: vi.fn(),
   selectFolderPath: vi.fn(),
@@ -23,6 +27,7 @@ const gitMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../lib/appDialogs", () => dialogMocks);
+vi.mock("../../../lib/editor/lsp", () => lspMocks);
 vi.mock("../../../lib/editor/workspace", () => workspaceMocks);
 vi.mock("../../../lib/ipc", () => ipcMocks);
 vi.mock("../../../lib/git", () => gitMocks);
@@ -38,6 +43,7 @@ const roots: CodeWorkspaceRootInfo[] = [{
 
 function options(overrides: Record<string, unknown> = {}) {
   return {
+    workspaceId: "workspace-1",
     roots,
     gitRoots: [{
       id: "git-1",
@@ -70,6 +76,7 @@ function options(overrides: Record<string, unknown> = {}) {
     resetTreeData: vi.fn(),
     removeTreeDataRoot: vi.fn(),
     openFile: vi.fn(async () => {}),
+    applyResourceOperation: vi.fn(async () => {}),
     notifyWorkspacePathGitChanged: vi.fn(),
     onStatus: vi.fn(),
     ...overrides,
@@ -85,6 +92,8 @@ describe("useWorkspaceFileActions", () => {
     workspaceMocks.workspaceDeletePath.mockReset();
     workspaceMocks.workspaceReadFile.mockReset();
     workspaceMocks.workspaceRenamePath.mockReset();
+    lspMocks.lspWorkspaceDidFileOperation.mockReset().mockResolvedValue(1);
+    lspMocks.lspWorkspaceWillFileOperation.mockReset().mockResolvedValue(1);
     ipcMocks.selectFilePath.mockReset();
     ipcMocks.selectFolderPath.mockReset();
     gitMocks.gitIgnorePath.mockReset();
@@ -106,6 +115,21 @@ describe("useWorkspaceFileActions", () => {
     await act(async () => result.current.createFile());
 
     expect(workspaceMocks.workspaceCreateFile).toHaveBeenCalledWith("/repo", "src/main.ts");
+    const operation = {
+      kind: "create",
+      files: [{ path: "/repo/src/main.ts", isDirectory: false }],
+    };
+    expect(lspMocks.lspWorkspaceWillFileOperation).toHaveBeenCalledWith("workspace-1", operation);
+    expect(lspMocks.lspWorkspaceDidFileOperation).toHaveBeenCalledWith("workspace-1", operation);
+    expect(lspMocks.lspWorkspaceWillFileOperation.mock.invocationCallOrder[0]).toBeLessThan(
+      workspaceMocks.workspaceCreateFile.mock.invocationCallOrder[0],
+    );
+    expect(workspaceMocks.workspaceCreateFile.mock.invocationCallOrder[0]).toBeLessThan(
+      lspMocks.lspWorkspaceDidFileOperation.mock.invocationCallOrder[0],
+    );
+    expect(lspMocks.lspWorkspaceDidFileOperation.mock.invocationCallOrder[0]).toBeLessThan(
+      props.loadDir.mock.invocationCallOrder[0],
+    );
     expect(props.loadDir).toHaveBeenCalledWith("root-1", "src");
     expect(props.openFile).toHaveBeenCalledWith({
       kind: "root",
@@ -115,16 +139,47 @@ describe("useWorkspaceFileActions", () => {
     expect(props.notifyWorkspacePathGitChanged).toHaveBeenCalledWith("root-1", "src/main.ts");
   });
 
+  it("does not mutate the filesystem when willCreateFiles fails", async () => {
+    dialogMocks.promptAppDialog.mockResolvedValue("blocked.ts");
+    lspMocks.lspWorkspaceWillFileOperation.mockRejectedValue(new Error("server rejected create"));
+    const props = options();
+    const { result } = renderHook(() => useWorkspaceFileActions(props));
+
+    await act(async () => result.current.createFile());
+
+    expect(workspaceMocks.workspaceCreateFile).not.toHaveBeenCalled();
+    expect(lspMocks.lspWorkspaceDidFileOperation).not.toHaveBeenCalled();
+    expect(props.onStatus).toHaveBeenCalledWith("server rejected create");
+  });
+
+  it("keeps UI state convergence after a didCreateFiles transport failure", async () => {
+    dialogMocks.promptAppDialog.mockResolvedValue("created.ts");
+    lspMocks.lspWorkspaceDidFileOperation.mockRejectedValue(new Error("did notify failed"));
+    workspaceMocks.workspaceCreateFile.mockResolvedValue({
+      path: "src/created.ts",
+      text: "",
+      size: 0,
+      mtime: 1,
+      hash: "hash",
+    });
+    const props = options();
+    const { result } = renderHook(() => useWorkspaceFileActions(props));
+
+    await act(async () => result.current.createFile());
+
+    expect(props.loadDir).toHaveBeenCalledWith("root-1", "src");
+    expect(props.openFile).toHaveBeenCalledWith({
+      kind: "root",
+      rootId: "root-1",
+      path: "src/created.ts",
+    });
+    expect(props.onStatus).toHaveBeenCalledWith(
+      "Created repo / src/created.ts; language server notification failed: did notify failed",
+    );
+  });
+
   it("renames and deletes workspace paths through one mutation boundary", async () => {
     dialogMocks.promptAppDialog.mockResolvedValue("renamed.ts");
-    workspaceMocks.workspaceRenamePath.mockResolvedValue({
-      name: "renamed.ts",
-      path: "src/renamed.ts",
-      fileType: "file",
-      size: 1,
-      mtime: 1,
-      isHidden: false,
-    });
     const props = options();
     const { result } = renderHook(() => useWorkspaceFileActions(props));
     const selection = {
@@ -133,20 +188,49 @@ describe("useWorkspaceFileActions", () => {
     };
 
     await act(async () => result.current.renameSelected(selection));
-    expect(workspaceMocks.workspaceRenamePath).toHaveBeenCalledWith(
-      "/repo",
-      "src/original.ts",
-      "src/renamed.ts",
-    );
-    expect(props.notifyWorkspacePathGitChanged).toHaveBeenCalledWith("root-1", "src/original.ts");
-    expect(props.notifyWorkspacePathGitChanged).toHaveBeenCalledWith("root-1", "src/renamed.ts");
-
+    expect(props.applyResourceOperation).toHaveBeenNthCalledWith(1, {
+      kind: "rename",
+      oldUri: "",
+      oldPath: "/repo/src/original.ts",
+      newUri: "",
+      newPath: "/repo/src/renamed.ts",
+      overwrite: false,
+      ignoreIfExists: false,
+      annotationId: null,
+    });
+    expect(lspMocks.lspWorkspaceWillFileOperation).toHaveBeenNthCalledWith(1, "workspace-1", {
+      kind: "rename",
+      files: [{
+        oldPath: "/repo/src/original.ts",
+        newPath: "/repo/src/renamed.ts",
+        isDirectory: false,
+      }],
+    });
+    expect(lspMocks.lspWorkspaceDidFileOperation).toHaveBeenNthCalledWith(1, "workspace-1", {
+      kind: "rename",
+      files: [{
+        oldPath: "/repo/src/original.ts",
+        newPath: "/repo/src/renamed.ts",
+        isDirectory: false,
+      }],
+    });
     await act(async () => result.current.deleteSelected(selection));
-    expect(workspaceMocks.workspaceDeletePath).toHaveBeenCalledWith(
-      "/repo",
-      "src/original.ts",
-      false,
-    );
+    expect(props.applyResourceOperation).toHaveBeenNthCalledWith(2, {
+      kind: "delete",
+      uri: "",
+      path: "/repo/src/original.ts",
+      recursive: false,
+      ignoreIfNotExists: false,
+      annotationId: null,
+    });
+    expect(lspMocks.lspWorkspaceWillFileOperation).toHaveBeenNthCalledWith(2, "workspace-1", {
+      kind: "delete",
+      files: [{ path: "/repo/src/original.ts", isDirectory: false }],
+    });
+    expect(lspMocks.lspWorkspaceDidFileOperation).toHaveBeenNthCalledWith(2, "workspace-1", {
+      kind: "delete",
+      files: [{ path: "/repo/src/original.ts", isDirectory: false }],
+    });
   });
 
   it("owns the internal tree clipboard and refreshes Git after paste", async () => {
@@ -176,7 +260,68 @@ describe("useWorkspaceFileActions", () => {
       "dest/source.ts",
       "source",
     );
+    expect(lspMocks.lspWorkspaceWillFileOperation).toHaveBeenCalledWith("workspace-1", {
+      kind: "create",
+      files: [{ path: "/repo/dest/source.ts", isDirectory: false }],
+    });
+    expect(lspMocks.lspWorkspaceDidFileOperation).toHaveBeenCalledWith("workspace-1", {
+      kind: "create",
+      files: [{ path: "/repo/dest/source.ts", isDirectory: false }],
+    });
     expect(props.notifyWorkspacePathGitChanged).toHaveBeenCalledWith("root-1", "dest/source.ts");
+  });
+
+  it("routes a cut directory through rename lifecycle with folder semantics", async () => {
+    const props = options();
+    const { result } = renderHook(() => useWorkspaceFileActions(props));
+
+    act(() => result.current.stageTreeClipboard("cut", "root-1", "src/module", true));
+    await act(async () => result.current.pasteTreeClipboard({ rootId: "root-1", path: "dest" }));
+
+    const operation = {
+      kind: "rename",
+      files: [{
+        oldPath: "/repo/src/module",
+        newPath: "/repo/dest/module",
+        isDirectory: true,
+      }],
+    };
+    expect(lspMocks.lspWorkspaceWillFileOperation).toHaveBeenCalledWith("workspace-1", operation);
+    expect(props.applyResourceOperation).toHaveBeenCalledWith({
+      kind: "rename",
+      oldUri: "",
+      oldPath: "/repo/src/module",
+      newUri: "",
+      newPath: "/repo/dest/module",
+      overwrite: false,
+      ignoreIfExists: false,
+      annotationId: null,
+    });
+    expect(lspMocks.lspWorkspaceDidFileOperation).toHaveBeenCalledWith("workspace-1", operation);
+  });
+
+  it("coalesces bursts of refreshTree calls into a single reload", () => {
+    vi.useFakeTimers();
+    try {
+      const props = options({ expandedRoots: new Set(["root-1"]) });
+      const { result } = renderHook(() => useWorkspaceFileActions(props));
+
+      act(() => {
+        result.current.refreshTree();
+        result.current.refreshTree();
+        result.current.refreshTree();
+      });
+      expect(props.resetTreeData).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(200);
+      });
+      expect(props.resetTreeData).toHaveBeenCalledTimes(1);
+      expect(props.loadDir).toHaveBeenCalledTimes(1);
+      expect(props.loadDir).toHaveBeenCalledWith("root-1", "");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("adds repository-relative ignore rules and refreshes Git state", async () => {

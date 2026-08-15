@@ -1,29 +1,27 @@
 import { File, Loader2 } from "lucide-react";
 import type { LspLocation } from "../../../../lib/editor/lsp";
 import type { CodeWorkspaceRootInfo } from "../../../../types";
+import {
+  workspaceSemanticIndexBuildIsCurrent,
+  workspaceSemanticIndexStatusLabel,
+  type WorkspaceSemanticIndexSnapshot,
+} from "../workspaceSemanticIndex";
+import { relativePathWithinRoot } from "../codeWorkspaceModel";
 
 export interface ReferencesResultState {
   loading: boolean;
   origin: string | null;
   locations: LspLocation[];
   error: string | null;
+  semanticGeneration?: number | null;
+  semanticRevision?: number | null;
 }
 
 interface ReferencesPanelProps {
   result: ReferencesResultState;
   roots: CodeWorkspaceRootInfo[];
+  semanticIndex: WorkspaceSemanticIndexSnapshot;
   onOpenLocation: (location: LspLocation) => void;
-}
-
-function normalizeFsPath(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "");
-}
-
-function relativePathWithinRoot(rootPath: string, filePath: string): string | null {
-  const root = normalizeFsPath(rootPath);
-  const file = normalizeFsPath(filePath);
-  if (file === root) return "";
-  return file.startsWith(`${root}/`) ? file.slice(root.length + 1) : null;
 }
 
 function displayLocationPath(location: LspLocation, roots: CodeWorkspaceRootInfo[]): string {
@@ -35,9 +33,27 @@ function displayLocationPath(location: LspLocation, roots: CodeWorkspaceRootInfo
   return path;
 }
 
-export function ReferencesPanel({ result, roots, onOpenLocation }: ReferencesPanelProps) {
+export function ReferencesPanel({ result, roots, semanticIndex, onOpenLocation }: ReferencesPanelProps) {
+  const resultToken = result.semanticGeneration == null || result.semanticRevision == null
+    ? null
+    : { generation: result.semanticGeneration, revision: result.semanticRevision };
+  const resultCurrent = resultToken
+    ? workspaceSemanticIndexBuildIsCurrent(semanticIndex, resultToken)
+    : false;
+  const semanticLabel = resultToken
+    ? resultCurrent
+      ? `Ready · generation ${resultToken.generation}`
+      : `Stale · result generation ${resultToken.generation}`
+    : workspaceSemanticIndexStatusLabel(semanticIndex);
   return (
     <div data-testid="code-workspace-references-panel" className="h-full min-h-0 overflow-auto py-1 text-[11px]">
+      <div
+        data-testid="references-semantic-index"
+        className={`border-b border-[var(--taomni-code-border)] px-3 py-1 text-[10px] ${resultCurrent ? "text-[var(--taomni-code-muted)]" : "text-amber-500"}`}
+        title="References are supplied by the active language server. This is not an IntelliJ PSI index guarantee."
+      >
+        Provider snapshot: {semanticLabel}
+      </div>
       {result.loading && (
         <div className="flex items-center gap-2 px-3 py-2 text-[var(--taomni-code-muted)]">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />

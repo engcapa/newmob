@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://taomni.dev/schemas/run-configurations.v2.json",
+  "title": "Taomni shared Run/Debug configurations",
+  "description": "Repository-shared Code Workspace Run/Debug configurations stored at .taomni/run-configurations.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": { "enum": [1, 2], "default": 2 },
+    "runs": {
+      "type": "array",
+      "description": "Legacy v1 spelling. Use configurations for v2.",
+      "items": { "$ref": "#/$defs/configuration" }
+    },
+    "configurations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/configuration" }
+    },
+    "templates": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/template" }
+    }
+  },
+  "anyOf": [
+    { "required": ["runs"] },
+    { "required": ["configurations"] }
+  ],
+  "$defs": {
+    "env": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "additionalProperties": { "type": "string" }
+    },
+    "stringList": {
+      "type": "array",
+      "items": { "type": "string", "not": { "pattern": "\\u0000" } }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "executable": { "type": "string" },
+        "args": { "$ref": "#/$defs/stringList" },
+        "cwd": { "type": "string" },
+        "env": { "$ref": "#/$defs/env" },
+        "display": { "type": "string" },
+        "runtimeOptions": { "$ref": "#/$defs/stringList" },
+        "envFile": { "type": "string" },
+        "argumentStrategy": { "enum": ["append", "maven-exec", "gradle-javaexec"] },
+        "environmentModes": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "enum": ["append", "replace"] }
+        }
+      }
+    },
+    "debug": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "adapterId": { "type": "string", "minLength": 1 },
+        "request": { "enum": ["launch", "attach"] },
+        "available": { "type": "boolean" },
+        "envFile": { "type": "string" },
+        "launchConfig": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "compound": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configurations"],
+      "properties": {
+        "configurations": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "parallel": { "type": "boolean", "default": false },
+        "stopOnFailure": { "type": "boolean", "default": true }
+      }
+    },
+    "platformPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sourceFile": { "type": "string" },
+        "beforeLaunch": { "$ref": "#/$defs/stringList" },
+        "kind": { "type": "string" },
+        "run": { "$ref": "#/$defs/run" },
+        "debug": { "$ref": "#/$defs/debug" },
+        "compound": { "$ref": "#/$defs/compound" }
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string" },
+        "label": { "type": "string" },
+        "base": { "type": "string" },
+        "baseConfigurationId": { "type": "string" },
+        "template": { "type": "string" },
+        "project": { "type": "string" },
+        "projectId": { "type": "string" },
+        "sourceFile": { "type": "string" },
+        "beforeLaunch": { "$ref": "#/$defs/stringList" },
+        "preLaunchTargets": { "$ref": "#/$defs/stringList" },
+        "kind": { "type": "string" },
+        "run": { "$ref": "#/$defs/run" },
+        "debug": { "$ref": "#/$defs/debug" },
+        "compound": { "$ref": "#/$defs/compound" },
+        "platforms": {
+          "type": "object",
+          "propertyNames": { "enum": ["linux", "macos", "windows"] },
+          "additionalProperties": { "$ref": "#/$defs/platformPatch" }
+        },
+        "executable": { "type": "string" },
+        "args": { "$ref": "#/$defs/stringList" },
+        "cwd": { "type": "string" },
+        "env": { "$ref": "#/$defs/env" },
+        "display": { "type": "string" },
+        "runtimeOptions": { "$ref": "#/$defs/stringList" },
+        "envFile": { "type": "string" },
+        "argumentStrategy": { "enum": ["append", "maven-exec", "gradle-javaexec"] },
+        "environmentModes": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+          "additionalProperties": { "enum": ["append", "replace"] }
+        },
+        "adapterId": { "type": "string" },
+        "request": { "enum": ["launch", "attach"] },
+        "launchConfig": { "type": "object", "additionalProperties": true },
+        "debugConfigurationId": { "type": "string" }
+      }
+    },
+    "template": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sourceFile": { "type": "string" },
+        "beforeLaunch": { "$ref": "#/$defs/stringList" },
+        "kind": { "type": "string" },
+        "run": { "$ref": "#/$defs/run" },
+        "debug": { "$ref": "#/$defs/debug" },
+        "compound": { "$ref": "#/$defs/compound" },
+        "platforms": {
+          "type": "object",
+          "propertyNames": { "enum": ["linux", "macos", "windows"] },
+          "additionalProperties": { "$ref": "#/$defs/platformPatch" }
+        }
+      }
+    }
+  }
+}

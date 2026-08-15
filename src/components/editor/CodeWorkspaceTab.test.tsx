@@ -4,14 +4,20 @@ import mermaid from "mermaid";
 import { StrictMode, useCallback, useRef, useState, type ComponentProps } from "react";
 import { useAppStore } from "../../stores/appStore";
 import { selectCodeWorkspaceUi, useCodeWorkspaceStore } from "../../stores/codeWorkspaceStore";
+import { useCodeWorkspaceStatusStore } from "../../stores/codeWorkspaceStatusStore";
 import { DEFAULT_CODE_VIEW_PROFILE, saveCodeViewProfile } from "../../lib/codeViewProfile";
 import type { CodeWorkspaceTabInfo } from "../../types";
 import type {
+  LspCapabilitySummary,
   LspDocumentStatus,
   LspServerStatus,
 } from "../../lib/editor/lsp";
-import type { WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
+import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab } from "./CodeWorkspaceTab";
+import { emit } from "@tauri-apps/api/event";
+import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
+import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
+import { confirmAppDialog } from "../../lib/appDialogs";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceListDir: vi.fn(),
@@ -23,15 +29,21 @@ const workspaceMocks = vi.hoisted(() => ({
   workspaceJavaRunTargets: vi.fn(),
   workspaceJavaRunTarget: vi.fn(),
   workspaceTaskTree: vi.fn(),
+  workspaceTestResults: vi.fn(),
   workspaceDependencyTree: vi.fn(),
   workspaceReadFile: vi.fn(),
   workspaceReadLooseFile: vi.fn(),
+  workspaceReadFileWithEncoding: vi.fn(),
+  workspaceReadLooseFileWithEncoding: vi.fn(),
   workspaceWriteFile: vi.fn(),
   workspaceWriteLooseFile: vi.fn(),
+  workspaceWriteFileEncoded: vi.fn(),
+  workspaceWriteLooseFileEncoded: vi.fn(),
   workspaceCreateFile: vi.fn(),
   workspaceCreateDir: vi.fn(),
   workspaceDeletePath: vi.fn(),
   workspaceRenamePath: vi.fn(),
+  workspaceApplyResourceOperation: vi.fn(),
 }));
 
 const lspMocks = vi.hoisted(() => ({
@@ -48,6 +60,8 @@ const lspMocks = vi.hoisted(() => ({
   lspGetDiagnostics: vi.fn(),
   lspHover: vi.fn(),
   lspDefinition: vi.fn(),
+  lspPrepareRename: vi.fn(),
+  lspRename: vi.fn(),
   lspReadUriContents: vi.fn(),
   lspDownloadSources: vi.fn(),
   lspReloadProject: vi.fn(),
@@ -73,7 +87,18 @@ const lspMocks = vi.hoisted(() => ({
   lspFormatting: vi.fn(),
   lspRangeFormatting: vi.fn(),
   lspCodeActions: vi.fn(),
+  lspCodeActionResolve: vi.fn(),
   lspWorkspaceSymbols: vi.fn(),
+  lspWorkspaceSymbolResolve: vi.fn(),
+  lspExecuteCommand: vi.fn(),
+  lspResolveWorkspaceEdit: vi.fn(),
+  lspResolveShowMessageRequest: vi.fn(),
+  lspCancelWorkDoneProgress: vi.fn(),
+  lspWorkspaceDidFileOperation: vi.fn(),
+  lspWorkspaceDidChangeWatchedFiles: vi.fn(),
+  lspStartWorkspaceWatcher: vi.fn(),
+  lspStopWorkspaceWatcher: vi.fn(),
+  lspWorkspaceWillFileOperation: vi.fn(),
 }));
 
 const ipcMocks = vi.hoisted(() => ({
@@ -105,6 +130,7 @@ vi.mock("../../lib/runtime", async (importOriginal) => ({
 }));
 
 const clipboardMocks = vi.hoisted(() => ({
+  readText: vi.fn(async () => ""),
   writeText: vi.fn(async () => {}),
 }));
 
@@ -115,6 +141,14 @@ const settingsNavigationMocks = vi.hoisted(() => ({
 vi.mock("../../lib/clipboard", () => clipboardMocks);
 
 vi.mock("../../lib/settingsNavigation", () => settingsNavigationMocks);
+
+// CodeWorkspaceTab is rendered in isolation (without the app-level dialog
+// provider). Auto-confirm preview-only WorkspaceEdits so those tests can
+// continue to assert the resource operation lifecycle itself.
+vi.mock("../../lib/appDialogs", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../lib/appDialogs")>()),
+  confirmAppDialog: vi.fn(async () => true),
+}));
 
 const gitMocks = vi.hoisted(() => ({
   gitSnapshot: vi.fn(),
@@ -129,6 +163,8 @@ const gitMocks = vi.hoisted(() => ({
 vi.mock("../../lib/editor/workspace", () => workspaceMocks);
 
 vi.mock("../../lib/editor/lsp", () => lspMocks);
+
+vi.mock("@tauri-apps/api/event", () => import("../../stubs/tauri-event"));
 
 vi.mock("../../lib/ipc", () => ipcMocks);
 
@@ -149,8 +185,24 @@ vi.mock("../git/diffLanguage", () => ({
 }));
 
 vi.mock("../terminal/TerminalPanel", () => ({
-  TerminalPanel: ({ tabId, initialCwd }: { tabId?: string; initialCwd?: string }) => (
-    <div data-testid="mock-workspace-terminal" data-tab-id={tabId} data-initial-cwd={initialCwd} />
+  TerminalPanel: ({
+    tabId,
+    initialCwd,
+    onTaskExit,
+  }: {
+    tabId?: string;
+    initialCwd?: string;
+    onTaskExit?: (exitCode: number) => void;
+  }) => (
+    <div data-testid="mock-workspace-terminal" data-tab-id={tabId} data-initial-cwd={initialCwd}>
+      <button
+        type="button"
+        data-testid="mock-workspace-terminal-task-exit"
+        onClick={() => onTaskExit?.(0)}
+      >
+        task-exit
+      </button>
+    </div>
   ),
 }));
 
@@ -219,6 +271,33 @@ function csharpStatus(overrides: Partial<LspServerStatus> = {}): LspServerStatus
   };
 }
 
+function defaultCapabilities(overrides: Partial<LspCapabilitySummary> = {}): LspCapabilitySummary {
+  return {
+    completion: false,
+    signatureHelp: false,
+    hover: false,
+    definition: false,
+    typeDefinition: false,
+    implementation: false,
+    references: false,
+    documentSymbol: false,
+    workspaceSymbol: false,
+    rename: false,
+    formatting: false,
+    rangeFormatting: false,
+    codeAction: false,
+    documentHighlight: false,
+    inlayHint: false,
+    selectionRange: false,
+    callHierarchy: false,
+    typeHierarchy: false,
+    semanticTokens: false,
+    completionTriggerCharacters: [],
+    signatureTriggerCharacters: [],
+    ...overrides,
+  };
+}
+
 function documentStatus(overrides: Partial<LspDocumentStatus> = {}): LspDocumentStatus {
   return {
     path: "/repo/app/src/Program.cs",
@@ -232,6 +311,7 @@ function documentStatus(overrides: Partial<LspDocumentStatus> = {}): LspDocument
     selectedCommand: "csharp-ls",
     installHint: "dotnet tool install -g csharp-ls",
     error: null,
+    capabilities: defaultCapabilities(overrides.capabilities ?? undefined),
     ...overrides,
   };
 }
@@ -251,6 +331,7 @@ function renderWorkspace(
 describe("CodeWorkspaceTab", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    vi.mocked(confirmAppDialog).mockReset().mockResolvedValue(true);
     useAppStore.setState({
       statusMessage: "Ready",
       codeWorkspaceByTab: {},
@@ -271,15 +352,29 @@ describe("CodeWorkspaceTab", () => {
     });
     workspaceMocks.workspaceJavaRunTarget.mockReset();
     workspaceMocks.workspaceTaskTree.mockReset().mockResolvedValue([]);
+    workspaceMocks.workspaceTestResults.mockReset().mockResolvedValue({
+      schema: "taomni.codeWorkspace.testResults",
+      version: 1,
+      source: "junit-xml",
+      generatedAt: 1,
+      results: [],
+      summary: { total: 0, passed: 0, failed: 0, skipped: 0, errors: 0, durationMs: 0 },
+      diagnostics: [],
+    } satisfies StructuredTestResults);
     workspaceMocks.workspaceDependencyTree.mockReset().mockResolvedValue([]);
     workspaceMocks.workspaceReadFile.mockReset();
     workspaceMocks.workspaceReadLooseFile.mockReset();
+    workspaceMocks.workspaceReadFileWithEncoding.mockReset();
+    workspaceMocks.workspaceReadLooseFileWithEncoding.mockReset();
     workspaceMocks.workspaceWriteFile.mockReset();
     workspaceMocks.workspaceWriteLooseFile.mockReset();
+    workspaceMocks.workspaceWriteFileEncoded.mockReset();
+    workspaceMocks.workspaceWriteLooseFileEncoded.mockReset();
     workspaceMocks.workspaceCreateFile.mockReset();
     workspaceMocks.workspaceCreateDir.mockReset();
     workspaceMocks.workspaceDeletePath.mockReset();
     workspaceMocks.workspaceRenamePath.mockReset();
+    workspaceMocks.workspaceApplyResourceOperation.mockReset();
     lspMocks.lspDetectServers.mockReset();
     lspMocks.lspSetJavaHome.mockReset().mockResolvedValue(undefined);
     lspMocks.lspSetJavaVmargs.mockReset().mockResolvedValue("-Xms1024m -Xmx1024m");
@@ -302,6 +397,8 @@ describe("CodeWorkspaceTab", () => {
     dapMocks.dapResolveJavaMainClasses.mockReset();
     lspMocks.lspHover.mockReset();
     lspMocks.lspDefinition.mockReset();
+    lspMocks.lspPrepareRename.mockReset();
+    lspMocks.lspRename.mockReset();
     lspMocks.lspReadUriContents.mockReset();
     lspMocks.lspDownloadSources.mockReset();
     lspMocks.lspReferences.mockReset();
@@ -316,6 +413,15 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspInlayHints.mockReset();
     lspMocks.lspSemanticTokens.mockReset();
     lspMocks.lspSelectionRanges.mockReset();
+    lspMocks.lspExecuteCommand.mockReset().mockResolvedValue(null);
+    lspMocks.lspResolveWorkspaceEdit.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspResolveShowMessageRequest.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspCancelWorkDoneProgress.mockReset().mockResolvedValue(false);
+    lspMocks.lspWorkspaceDidChangeWatchedFiles.mockReset().mockResolvedValue(0);
+    lspMocks.lspStartWorkspaceWatcher.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspStopWorkspaceWatcher.mockReset().mockResolvedValue(undefined);
+    lspMocks.lspWorkspaceDidFileOperation.mockReset().mockResolvedValue(1);
+    lspMocks.lspWorkspaceWillFileOperation.mockReset().mockResolvedValue(1);
     lspMocks.lspDocumentSymbols.mockResolvedValue({ status: documentStatus(), symbols: [] });
     lspMocks.lspDocumentHighlights.mockResolvedValue({ status: documentStatus(), highlights: [] });
     lspMocks.lspInlayHints.mockResolvedValue({ status: documentStatus(), hints: [] });
@@ -338,8 +444,24 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspRangeFormatting.mockResolvedValue({ status: documentStatus(), edits: [] });
     lspMocks.lspCodeActions.mockReset();
     lspMocks.lspCodeActions.mockResolvedValue({ status: documentStatus(), actions: [] });
+    lspMocks.lspCodeActionResolve.mockReset();
+    lspMocks.lspCodeActionResolve.mockImplementation(async (_descriptor: unknown, raw: unknown) => ({
+      status: documentStatus({ available: true, active: true }),
+      action: raw,
+    }));
     lspMocks.lspWorkspaceSymbols.mockReset();
-    lspMocks.lspWorkspaceSymbols.mockResolvedValue({ status: documentStatus(), symbols: [] });
+    lspMocks.lspWorkspaceSymbols.mockResolvedValue({
+      status: documentStatus(),
+      symbols: [],
+      sessionCount: 0,
+      providerCount: 0,
+      skippedProviderCount: 0,
+      failedProviderCount: 0,
+      complete: false,
+      truncated: false,
+      diagnostics: [],
+    });
+    lspMocks.lspWorkspaceSymbolResolve.mockReset();
     lspMocks.lspPrepareCallHierarchy.mockResolvedValue({ status: documentStatus(), items: [] });
     lspMocks.lspCallHierarchyIncoming.mockResolvedValue({ status: documentStatus(), entries: [] });
     lspMocks.lspCallHierarchyOutgoing.mockResolvedValue({ status: documentStatus(), entries: [] });
@@ -360,6 +482,17 @@ describe("CodeWorkspaceTab", () => {
     lspMocks.lspChangeDocument.mockResolvedValue(documentStatus({ active: true, available: true }));
     lspMocks.lspSaveDocument.mockResolvedValue(documentStatus({ active: true, available: true }));
     lspMocks.lspCloseDocument.mockResolvedValue(documentStatus());
+    lspMocks.lspPrepareRename.mockResolvedValue({
+      status: documentStatus(),
+      allowed: false,
+      range: null,
+      placeholder: null,
+      message: null,
+    });
+    lspMocks.lspRename.mockResolvedValue({
+      status: documentStatus(),
+      edit: { documentEdits: [], operations: [] },
+    });
     lspMocks.lspGetDiagnostics.mockResolvedValue({
       status: documentStatus(),
       diagnostics: [],
@@ -1238,6 +1371,157 @@ describe("CodeWorkspaceTab", () => {
     expect(screen.queryByTestId("code-workspace-recent-files")).not.toBeInTheDocument();
   });
 
+  it("resolves URI-only workspace symbols before opening their source range", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-symbol-resolve",
+      workspaceInstanceId: "instance-symbol-resolve",
+      name: "Symbol Resolve",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const capabilities = {
+      completion: false,
+      signatureHelp: false,
+      hover: false,
+      definition: false,
+      typeDefinition: false,
+      implementation: false,
+      references: false,
+      documentSymbol: false,
+      workspaceSymbol: true,
+      workspaceSymbolResolve: true,
+      rename: false,
+      formatting: false,
+      rangeFormatting: false,
+      codeAction: false,
+      documentHighlight: false,
+      callHierarchy: false,
+      typeHierarchy: false,
+      inlayHint: false,
+      selectionRange: false,
+      semanticTokens: false,
+      completionTriggerCharacters: [],
+      signatureTriggerCharacters: [],
+    };
+    const activeStatus = documentStatus({ available: true, active: true, capabilities });
+    const lifecycle: string[] = [];
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => {
+      if (path === "src/target.ts") lifecycle.push("read-target");
+      return file(path, path === "src/target.ts" ? "\n".repeat(8) + "class DeferredType {}" : "const main = true;");
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    lspMocks.lspWorkspaceSymbols.mockResolvedValue({
+      status: activeStatus,
+      symbols: [{
+        name: "DeferredType",
+        kind: 5,
+        containerName: "editor",
+        uri: "file:///repo/app/src/target.ts",
+        path: "/repo/app/src/target.ts",
+        range: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        selectionRange: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        resolved: false,
+        resolveToken: "0123456789abcdef0123456789abcdef:0",
+      }, {
+        name: "BrokenType",
+        kind: 5,
+        containerName: "editor",
+        uri: "file:///repo/app/src/broken.ts",
+        path: "/repo/app/src/broken.ts",
+        range: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        selectionRange: {
+          start: { line: 0, character: 0 },
+          end: { line: 0, character: 0 },
+        },
+        resolved: false,
+        resolveToken: null,
+      }],
+      sessionCount: 1,
+      providerCount: 1,
+      skippedProviderCount: 0,
+      failedProviderCount: 0,
+      complete: true,
+      truncated: false,
+      diagnostics: [],
+    });
+    lspMocks.lspWorkspaceSymbolResolve.mockImplementation(async () => {
+      lifecycle.push("resolve");
+      return {
+        name: "DeferredType",
+        kind: 5,
+        containerName: "editor",
+        uri: "file:///repo/app/src/target.ts",
+        path: "/repo/app/src/target.ts",
+        range: {
+          start: { line: 8, character: 0 },
+          end: { line: 8, character: 21 },
+        },
+        selectionRange: {
+          start: { line: 8, character: 6 },
+          end: { line: 8, character: 18 },
+        },
+        resolved: true,
+        resolveToken: null,
+      };
+    });
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => {
+      expect(registrationRef.current?.items.find((item) => item.id === "workspace.goToSymbol")?.enabled)
+        .toBe(true);
+    });
+    act(() => {
+      expect(registrationRef.current?.execute("workspace.goToSymbol")).toBe(true);
+    });
+    const input = await screen.findByLabelText("Go to symbol");
+    fireEvent.change(input, { target: { value: "Deferred" } });
+    expect(await screen.findByText("DeferredType")).toBeInTheDocument();
+    expect(screen.queryByText("editor · /repo/app/src/target.ts:1")).not.toBeInTheDocument();
+
+    fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(lspMocks.lspWorkspaceSymbolResolve).toHaveBeenCalledWith(
+      "instance-symbol-resolve",
+      "0123456789abcdef0123456789abcdef:0",
+    ));
+    expect(await screen.findByTitle("app / src/target.ts")).toBeInTheDocument();
+    expect(lifecycle).toEqual(["resolve", "read-target"]);
+    expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-symbol-resolve",
+    ).splitOrientation).toBe("vertical");
+
+    act(() => {
+      expect(registrationRef.current?.execute("workspace.goToSymbol")).toBe(true);
+    });
+    const brokenInput = await screen.findByLabelText("Go to symbol");
+    fireEvent.change(brokenInput, { target: { value: "Broken" } });
+    expect(await screen.findByText("BrokenType")).toBeInTheDocument();
+    fireEvent.keyDown(brokenInput, { key: "Enter" });
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain(
+      "did not provide a source location",
+    ));
+    expect(lspMocks.lspWorkspaceSymbolResolve).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTitle("app / src/broken.ts")).not.toBeInTheDocument();
+  });
+
   it("opens the file structure popup with Ctrl+F12 and jumps to a symbol", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
@@ -1423,6 +1707,22 @@ describe("CodeWorkspaceTab", () => {
         title: "Insert space",
         kind: "quickfix",
         isPreferred: true,
+        edit: null,
+        command: null,
+        commandArguments: null,
+        raw: {
+          title: "Insert space",
+          kind: "quickfix",
+          data: { fixId: "space" },
+        },
+      }],
+    });
+    lspMocks.lspCodeActionResolve.mockResolvedValue({
+      status: documentStatus({ available: true, active: true }),
+      action: {
+        title: "Insert space",
+        kind: "quickfix",
+        isPreferred: true,
         edit: {
           documentEdits: [{
             uri: "file:///repo/app/src/main.ts",
@@ -1438,8 +1738,8 @@ describe("CodeWorkspaceTab", () => {
         },
         command: null,
         commandArguments: null,
-        raw: {},
-      }],
+        raw: { title: "Insert space", data: { fixId: "space" } },
+      },
     });
 
     renderWorkspace(workspace);
@@ -1449,7 +1749,275 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(window, { key: "Enter", altKey: true });
     await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole("button", { name: "Insert space" }));
-    await waitFor(() => expect(screen.getByText(/unsaved|Applied/i)).toBeTruthy());
+    await waitFor(() => expect(lspMocks.lspCodeActionResolve).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ data: { fixId: "space" } }),
+    ));
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-actions",
+    ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
+  });
+
+  it("rejects a provider refactor when the editor changes during preview confirmation", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-stale-refactor",
+      workspaceInstanceId: "instance-stale-refactor",
+      name: "Stale refactor",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: {
+        completion: false,
+        signatureHelp: false,
+        hover: false,
+        definition: false,
+        typeDefinition: false,
+        implementation: false,
+        references: false,
+        documentSymbol: false,
+        workspaceSymbol: false,
+        rename: false,
+        formatting: false,
+        rangeFormatting: false,
+        codeAction: true,
+        documentHighlight: false,
+        callHierarchy: false,
+        typeHierarchy: false,
+        inlayHint: false,
+        selectionRange: false,
+        semanticTokens: false,
+        completionTriggerCharacters: [],
+        signatureTriggerCharacters: [],
+      },
+    });
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;"));
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: activeStatus,
+      actions: [{
+        title: "Extract generated helper",
+        kind: "refactor.extract",
+        isPreferred: true,
+        edit: {
+          documentEdits: [],
+          operations: [{
+            kind: "create",
+            uri: "file:///repo/app/src/generated.ts",
+            path: "/repo/app/src/generated.ts",
+            overwrite: false,
+            ignoreIfExists: false,
+            annotationId: null,
+          }],
+        },
+        command: null,
+        commandArguments: null,
+        raw: {},
+      }],
+    });
+    let resolvePreview!: (confirmed: boolean) => void;
+    vi.mocked(confirmAppDialog).mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      resolvePreview = resolve;
+    }));
+
+    const rendered = renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Extract generated helper" }));
+    await waitFor(() => expect(confirmAppDialog).toHaveBeenCalled());
+
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+    fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+    await act(async () => {
+      resolvePreview(true);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(useAppStore.getState().statusMessage).toContain(
+      "Semantic result became stale before changes were applied",
+    ));
+    expect(workspaceMocks.workspaceApplyResourceOperation).not.toHaveBeenCalled();
+  });
+
+  it("keeps provider diagnostics unchanged when inspection severity affects editor chrome", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-profile-actions",
+      workspaceInstanceId: "instance-profile-actions",
+      name: "Profile actions",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const providerDiagnostic = {
+      range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+      severity: 2,
+      code: "unused-value",
+      source: "typescript",
+      message: "Value is never read",
+      data: { providerToken: "original" },
+    };
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.inspectionProfile.v1.instance-profile-actions",
+      JSON.stringify({
+        version: 1,
+        rules: { "typescript:unused-value": { enabled: true, severity: 1 } },
+      }),
+    );
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "x"));
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: {
+        completion: false,
+        signatureHelp: false,
+        hover: false,
+        definition: false,
+        typeDefinition: false,
+        implementation: false,
+        references: false,
+        documentSymbol: false,
+        workspaceSymbol: false,
+        rename: false,
+        formatting: false,
+        rangeFormatting: false,
+        codeAction: true,
+        documentHighlight: false,
+        callHierarchy: false,
+        typeHierarchy: false,
+        inlayHint: false,
+        selectionRange: false,
+        semanticTokens: false,
+        completionTriggerCharacters: [],
+        signatureTriggerCharacters: [],
+      },
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status, diagnostics: [providerDiagnostic] });
+
+    const rendered = renderWorkspace(workspace);
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled(), { timeout: 3_000 });
+    await waitFor(() => expect(rendered.container.querySelector(".cm-lsp-diagnostic-error")).toBeTruthy());
+    const bulb = rendered.container.querySelector('[data-testid="code-workspace-lightbulb"]');
+    expect(bulb).toBeTruthy();
+    fireEvent.mouseDown(bulb!);
+
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalled());
+    expect(lspMocks.lspCodeActions.mock.calls.at(-1)?.[2]).toEqual([
+      expect.objectContaining({
+        severity: 2,
+        code: "unused-value",
+        data: { providerToken: "original" },
+      }),
+    ]);
+  });
+
+  it("makes the active editor read-only while a resource WorkspaceEdit is in flight", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-resource-action",
+      workspaceInstanceId: "instance-resource-action",
+      name: "Resource action",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;"));
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({
+      path: "/repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities: {
+        completion: false,
+        signatureHelp: false,
+        hover: false,
+        definition: false,
+        typeDefinition: false,
+        implementation: false,
+        references: false,
+        documentSymbol: false,
+        workspaceSymbol: false,
+        rename: false,
+        formatting: false,
+        rangeFormatting: false,
+        codeAction: true,
+        documentHighlight: false,
+        callHierarchy: false,
+        typeHierarchy: false,
+        inlayHint: false,
+        selectionRange: false,
+        semanticTokens: false,
+        completionTriggerCharacters: [],
+        signatureTriggerCharacters: [],
+      },
+    }));
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: documentStatus({ available: true, active: true }),
+      actions: [{
+        title: "Rename file",
+        kind: "refactor.rename",
+        isPreferred: true,
+        edit: {
+          documentEdits: [],
+          operations: [{
+            kind: "rename",
+            oldUri: "file:///repo/app/src/main.ts",
+            oldPath: "/repo/app/src/main.ts",
+            newUri: "file:///repo/app/src/renamed.ts",
+            newPath: "/repo/app/src/renamed.ts",
+            overwrite: false,
+            ignoreIfExists: false,
+            annotationId: null,
+          }],
+        },
+        command: null,
+        commandArguments: null,
+        raw: {},
+      }],
+    });
+    let finishResourceOperation!: (value: { ignored: boolean }) => void;
+    workspaceMocks.workspaceApplyResourceOperation.mockReturnValue(new Promise((resolve) => {
+      finishResourceOperation = resolve;
+    }));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    fireEvent.click(await screen.findByRole("button", { name: "Rename file" }));
+
+    await waitFor(() => expect(workspaceMocks.workspaceApplyResourceOperation).toHaveBeenCalled());
+    await waitFor(() => expect(
+      screen.getByTestId("code-workspace-editor").querySelector(".cm-content"),
+    ).toHaveAttribute("aria-readonly", "true"));
+
+    await act(async () => finishResourceOperation({ ignored: false }));
+    await waitFor(() => expect(
+      screen.getByTestId("code-workspace-editor").querySelector(".cm-content"),
+    ).not.toHaveAttribute("aria-readonly"));
+    expect(workspaceMocks.workspaceApplyResourceOperation).toHaveBeenCalledWith("/repo/app", {
+      kind: "rename",
+      fromPath: "src/main.ts",
+      toPath: "src/renamed.ts",
+      toRepoRoot: "/repo/app",
+      overwrite: false,
+      ignoreIfExists: false,
+    });
+    expect(Object.keys(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-resource-action").openFiles,
+    )).toContain("root:app:src/renamed.ts");
   });
 
   it("formats the active document through LSP when formatting is advertised", async () => {
@@ -1524,6 +2092,10 @@ describe("CodeWorkspaceTab", () => {
       expect.objectContaining({
         workspaceId: "instance-format",
         filePath: "src/main.ts",
+      }),
+      expect.objectContaining({
+        tabSize: 2,
+        insertSpaces: true,
       }),
     );
   });
@@ -1625,6 +2197,122 @@ describe("CodeWorkspaceTab", () => {
     ));
     expect(lspMocks.lspFormatting).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(screen.queryByText(/unsaved/)).not.toBeInTheDocument());
+    expect(lspMocks.lspWorkspaceDidChangeWatchedFiles).toHaveBeenCalledWith(
+      "instance-format-on-save",
+      [{ path: "/repo/app/src/main.ts", type: 2 }],
+    );
+  });
+
+  it("queues an external dirty-buffer conflict and applies a merge against the latest disk hash", async () => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-external-conflict",
+      workspaceInstanceId: "instance-external-conflict",
+      name: "External conflict",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    let disk = file("src/main.ts", "const value = 1;", { hash: "hash-base" });
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockImplementation(async () => disk);
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    const key = "root:app:src/main.ts";
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-external-conflict")
+        .openFiles[key]?.text,
+    ).toBe("const value = 1;"));
+
+    act(() => {
+      useCodeWorkspaceStore.getState().updateOpenFiles(
+        "instance-external-conflict",
+        (current) => ({
+          ...current,
+          [key]: {
+            ...current[key]!,
+            text: "const value = 2;",
+            dirty: true,
+          },
+        }),
+      );
+    });
+    disk = file("src/main.ts", "const value = 3;", { hash: "hash-external" });
+    await act(async () => {
+      await emit("lsp://external-file-change", {
+        workspaceId: "instance-external-conflict",
+        path: "/repo/app/src/main.ts",
+        type: 2,
+      });
+    });
+
+    expect(await screen.findByTestId("external-file-conflict-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Merge" }));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Merge result" }, { timeout: 5000 }), {
+      target: { value: "const value = 4;" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply Merge" }));
+
+    await waitFor(() => {
+      const merged = selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-external-conflict",
+      ).openFiles[key];
+      expect(merged?.text).toBe("const value = 4;");
+      expect(merged?.savedText).toBe("const value = 3;");
+      expect(merged?.hash).toBe("hash-external");
+      expect(merged?.dirty).toBe(true);
+    });
+    expect(screen.queryByTestId("external-file-conflict-dialog")).not.toBeInTheDocument();
+  });
+
+  it("restores a crash snapshot into the live editor without replacing the disk baseline", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-recovery",
+      workspaceInstanceId: "instance-recovery",
+      name: "Recovery",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;", { hash: "disk-hash" }));
+    window.localStorage.setItem(
+      `${WORKSPACE_RECOVERY_STORAGE_PREFIX}:instance-recovery`,
+      JSON.stringify([{
+        workspaceId: "instance-recovery",
+        key: "root:app:src/main.ts",
+        ref: { kind: "root", rootId: "app", path: "src/main.ts" },
+        path: "src/main.ts",
+        text: "const value = 2;",
+        savedText: "const value = 1;",
+        eol: "LF",
+        hash: "disk-hash",
+        mtime: 1,
+        size: 16,
+        capturedAt: Date.now(),
+      }]),
+    );
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(screen.getByTestId("workspace-recovery-dialog")).toBeInTheDocument());
+    expect(await screen.findByTestId("workspace-recovery-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Recover selected" }));
+    await waitFor(() => {
+      const recovered = selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-recovery",
+      ).openFiles["root:app:src/main.ts"];
+      expect(recovered?.text).toBe("const value = 2;");
+      expect(recovered?.savedText).toBe("const value = 1;");
+      expect(recovered?.hash).toBe("disk-hash");
+      expect(recovered?.dirty).toBe(true);
+    });
+    expect(screen.queryByTestId("workspace-recovery-dialog")).not.toBeInTheDocument();
   });
 
   it("opens call and type hierarchy from capability-gated shortcuts", async () => {
@@ -2314,6 +3002,180 @@ describe("CodeWorkspaceTab", () => {
     );
   });
 
+  it("ingests structured test results after the Java test terminal exits", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-test-results",
+      workspaceInstanceId: "instance-java-test-results",
+      name: "Java test results",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/test/java/com/acme/CalcTest.java" },
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/test/java/com/acme/CalcTest.java",
+      uri: "file:///repo/app/src/test/java/com/acme/CalcTest.java",
+      presetId: "java",
+      languageId: "java",
+      displayName: "Java",
+      available: true,
+      active: true,
+    });
+    const testItem = {
+      name: "fails",
+      fullName: "com.acme.CalcTest#fails",
+      kind: "method",
+      uri: null,
+      range: null,
+      children: [],
+    };
+    const report: StructuredTestResults = {
+      schema: "taomni.codeWorkspace.testResults",
+      version: 1,
+      source: "junit-xml",
+      generatedAt: 2,
+      results: [{
+        id: "target/surefire-reports/TEST.xml::com.acme.CalcTest#fails",
+        selector: testItem.fullName,
+        name: "fails",
+        className: "com.acme.CalcTest",
+        status: "failed",
+        durationMs: 30,
+        message: "expected 2",
+        details: "stack",
+        filePath: "src/test/java/com/acme/CalcTest.java",
+        line: 12,
+      }],
+      summary: { total: 1, passed: 0, failed: 1, skipped: 0, errors: 0, durationMs: 30 },
+      diagnostics: [],
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/test/java/com/acme/CalcTest.java",
+      "package com.acme; class CalcTest {}",
+    ));
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({ status: activeStatus, diagnostics: [] });
+    workspaceMocks.workspaceTaskTree.mockResolvedValue([{
+      source: "Maven",
+      tasks: [{
+        id: "Maven:test",
+        label: "test",
+        command: "mvn test",
+        cwd: "/repo/app",
+        source: "Maven",
+      }],
+    }]);
+    lspMocks.javaTestDiscover.mockResolvedValue([testItem]);
+    workspaceMocks.workspaceTestResults.mockResolvedValue(report);
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/test/java/com/acme/CalcTest.java");
+    fireEvent.click(screen.getByRole("tab", { name: /Tests/ }));
+    const runButton = await screen.findByTestId(`tests-run-${testItem.fullName}`);
+    fireEvent.click(runButton);
+    await screen.findByTestId("mock-workspace-terminal");
+    fireEvent.click(screen.getByTestId("mock-workspace-terminal-task-exit"));
+
+    await waitFor(() => expect(workspaceMocks.workspaceTestResults).toHaveBeenCalledWith(
+      "/repo/app",
+      expect.any(Number),
+    ));
+    expect(workspaceMocks.workspaceTestResults.mock.calls[0][1]).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("keeps a shared Java debug-only configuration ahead of compatibility discovery", async () => {
+    runtimeState.tauri = true;
+    const sourcePath = "/repo/app/src/main/java/com/acme/App.java";
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-shared-debug",
+      workspaceInstanceId: "instance-java-shared-debug",
+      name: "Java shared debug",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    workspaceMocks.workspaceJavaRunTarget.mockResolvedValue({
+      id: "java-main:src/main/java/com/acme/App.java",
+      label: "com.acme.App",
+      mainClass: "com.acme.App",
+      filePath: sourcePath,
+      command: "./mvnw compile exec:java",
+      cwd: "/repo/app",
+      buildSystem: "maven",
+      modulePath: ".",
+    });
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [{
+        id: "project:maven",
+        provider: "maven",
+        root: "/repo/app",
+        manifest: "/repo/app/pom.xml",
+        module: "app",
+        languages: ["java"],
+        toolchain: "maven",
+        diagnostics: [],
+      }],
+      buildTargets: [],
+      runConfigurations: [{
+        id: "shared-run:remote",
+        projectId: "project:maven",
+        label: "Remote JVM",
+        kind: "debug-only",
+        configurationSource: "shared",
+        sourceFile: sourcePath,
+        preLaunchTargets: [],
+        debugConfigurationId: "shared-debug:remote",
+        command: {
+          executable: "__taomni_debug_only__",
+          args: [],
+          cwd: "/repo/app",
+          env: {},
+          display: "Debug only",
+          source: "configured",
+          error: "This configuration is debug-only; choose Debug to launch it",
+        },
+      }],
+      debugConfigurations: [{
+        id: "shared-debug:remote",
+        projectId: "project:maven",
+        label: "Remote JVM",
+        adapterId: "java",
+        request: "attach",
+        available: true,
+        preLaunchTargets: [],
+        sourceFile: sourcePath,
+        configurationSource: "shared",
+        launchConfig: { request: "attach", arguments: { hostName: "127.0.0.1", port: 5005 } },
+      }],
+      tools: [],
+    });
+    dapMocks.dapStartSession.mockResolvedValue({
+      sessionId: "shared-java-session",
+      capabilities: {},
+      request: "attach",
+      arguments: { hostName: "127.0.0.1", port: 5005 },
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    await waitFor(() => expect(screen.getByTestId("code-workspace-active-run-configuration")).toHaveValue("shared-run:remote"));
+    expect(screen.getByTestId("code-workspace-run-target")).toBeDisabled();
+    expect(screen.getByTestId("code-workspace-debug-target")).toBeEnabled();
+
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+    await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalledWith(
+      "java",
+      expect.objectContaining({ request: "attach" }),
+    ));
+    expect(workspaceMocks.workspaceJavaRunTarget).toHaveBeenCalled();
+  });
+
   it("uses provider capabilities to run and debug an active non-Java target", async () => {
     runtimeState.tauri = true;
     const workspace: CodeWorkspaceTabInfo = {
@@ -2394,6 +3256,109 @@ describe("CodeWorkspaceTab", () => {
       "delve",
       expect.objectContaining({ adapterCommand: "dlv", adapterCwd: "/repo/app" }),
     ));
+  });
+
+  it("keeps project-level configurations scoped to the active workspace root", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/one",
+      workspaceId: "ws-multi-root-config",
+      workspaceInstanceId: "instance-multi-root-config",
+      name: "Multi-root configurations",
+      roots: [
+        { id: "one", name: "one", path: "/repo/one", kind: "git" },
+        { id: "two", name: "two", path: "/repo/two", kind: "git" },
+      ],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "one", path: "src/main.go" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main.go",
+      "package main\nfunc main() {}\n",
+    ));
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [
+        {
+          id: "project:one",
+          provider: "go",
+          root: "/repo/one",
+          manifest: "/repo/one/go.mod",
+          module: "one",
+          languages: ["go"],
+          toolchain: "go",
+          diagnostics: [],
+        },
+        {
+          id: "project:two",
+          provider: "go",
+          root: "/repo/two",
+          manifest: "/repo/two/go.mod",
+          module: "two",
+          languages: ["go"],
+          toolchain: "go",
+          diagnostics: [],
+        },
+      ],
+      buildTargets: [],
+      runConfigurations: [
+        {
+          id: "shared-run:one",
+          projectId: "project:one",
+          label: "One project launch",
+          kind: "project",
+          configurationSource: "shared",
+          preLaunchTargets: [],
+          command: {
+            executable: "go",
+            args: ["run", "."],
+            cwd: "/repo/one",
+            env: {},
+            display: "go run .",
+            source: "path",
+          },
+        },
+        {
+          id: "shared-run:two",
+          projectId: "project:two",
+          label: "Two project launch",
+          kind: "project",
+          configurationSource: "shared",
+          preLaunchTargets: [],
+          command: {
+            executable: "go",
+            args: ["run", "."],
+            cwd: "/repo/two",
+            env: {},
+            display: "go run .",
+            source: "path",
+          },
+        },
+        {
+          id: "shared-run:one-alt",
+          projectId: "project:one",
+          label: "One alternate launch",
+          kind: "project",
+          configurationSource: "shared",
+          preLaunchTargets: [],
+          command: {
+            executable: "go",
+            args: ["run", "./cmd/alternate"],
+            cwd: "/repo/one",
+            env: {},
+            display: "go run ./cmd/alternate",
+            source: "path",
+          },
+        },
+      ],
+      debugConfigurations: [],
+      tools: [],
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("one / src/main.go");
+    await waitFor(() => expect(screen.getByTestId("code-workspace-active-run-configuration")).toBeInTheDocument());
+    const selector = screen.getByTestId("code-workspace-active-run-configuration");
+    expect(selector).toHaveTextContent("One project launch");
+    expect(selector).not.toHaveTextContent("Two project launch");
   });
 
   it("starts a Java debug session from the toolbar under StrictMode", async () => {
@@ -2728,5 +3693,487 @@ describe("CodeWorkspaceTab", () => {
     });
     expect(screen.queryByTestId("code-workspace-project-collapsed-rail")).toBeNull();
     expect(screen.getByTestId("code-workspace-tree-collapse")).toBeInTheDocument();
+  });
+
+  it("opens the encoding chooser from workspace status and saves through the encoded writer", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-encoding-save",
+      workspaceInstanceId: "instance-encoding-save",
+      name: "Encoding Save",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.txt" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main.txt",
+      "你好",
+      { encoding: "UTF-8", bom: false },
+    ));
+    workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(file(
+      "src/main.txt",
+      "你好",
+      { encoding: "GBK", bom: false, hash: "hash-gbk" },
+    ));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.txt");
+    await waitFor(() => expect(useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding)
+      .toBeTypeOf("function"));
+
+    act(() => useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding?.());
+    expect(await screen.findByTestId("file-encoding-dialog")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Encoding"), { target: { value: "GBK" } });
+    fireEvent.click(screen.getByRole("button", { name: "Convert on Save" }));
+
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-encoding-save")
+        .openFiles["root:app:src/main.txt"]?.dirty,
+    ).toBe(true));
+    fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/main.txt",
+      "你好",
+      "hash-src/main.txt",
+      "GBK",
+      false,
+    ));
+    expect(workspaceMocks.workspaceWriteFile).not.toHaveBeenCalled();
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-encoding-save")
+        .openFiles["root:app:src/main.txt"]?.dirty,
+    ).toBe(false));
+  });
+
+  it("reloads the active file with an explicit encoding from the status action", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-encoding-reload",
+      workspaceInstanceId: "instance-encoding-reload",
+      name: "Encoding Reload",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/legacy.txt" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/legacy.txt",
+      "caf\u00E9",
+      { encoding: "windows-1252", bom: false },
+    ));
+    workspaceMocks.workspaceReadFileWithEncoding.mockResolvedValue(file(
+      "src/legacy.txt",
+      "caf\u00E9",
+      { encoding: "UTF-16LE", bom: true, hash: "hash-utf16" },
+    ));
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/legacy.txt");
+    await waitFor(() => expect(useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding)
+      .toBeTypeOf("function"));
+    act(() => useCodeWorkspaceStatusStore.getState().actions?.chooseEncoding?.());
+    await screen.findByTestId("file-encoding-dialog");
+
+    fireEvent.change(screen.getByLabelText("Encoding"), { target: { value: "UTF-16LE" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reload from Disk" }));
+
+    await waitFor(() => expect(workspaceMocks.workspaceReadFileWithEncoding).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/legacy.txt",
+      "UTF-16LE",
+    ));
+    await waitFor(() => {
+      const open = selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-encoding-reload",
+      ).openFiles["root:app:src/legacy.txt"];
+      expect(open?.encoding).toBe("UTF-16LE");
+      expect(open?.bom).toBe(true);
+      expect(open?.dirty).toBe(false);
+    });
+    expect(screen.queryByTestId("file-encoding-dialog")).toBeNull();
+  });
+
+  it("applies Safe Delete across files as one undoable workspace transaction", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-safe-delete",
+      workspaceInstanceId: "instance-safe-delete",
+      name: "Safe Delete",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    const disk = new Map([
+      ["src/main.ts", "const answer = 42;"],
+      ["src/use.ts", "use(answer);"],
+    ]);
+    workspaceMocks.workspaceListDir.mockImplementation(async (_root: string, path = "") => (
+      path === "src"
+        ? [entry("main.ts", "src/main.ts"), entry("use.ts", "src/use.ts")]
+        : []
+    ));
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => {
+      const text = disk.get(path);
+      if (text === undefined) throw new Error(`missing fixture ${path}`);
+      return file(path, text, { hash: `hash-${path}` });
+    });
+    workspaceMocks.workspaceWriteFile.mockImplementation(async (
+      _root: string,
+      path: string,
+      text: string,
+    ) => {
+      disk.set(path, text);
+      return file(path, text, { hash: `hash-${path}-${text}` });
+    });
+    const capabilities = {
+      completion: false,
+      signatureHelp: false,
+      hover: false,
+      definition: true,
+      typeDefinition: false,
+      implementation: false,
+      references: true,
+      documentSymbol: false,
+      workspaceSymbol: false,
+      rename: true,
+      formatting: false,
+      rangeFormatting: false,
+      codeAction: false,
+      documentHighlight: false,
+      callHierarchy: false,
+      typeHierarchy: false,
+      inlayHint: false,
+      selectionRange: false,
+      semanticTokens: false,
+      completionTriggerCharacters: [],
+      signatureTriggerCharacters: [],
+    };
+    const activeStatus = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+      capabilities,
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspSaveDocument.mockResolvedValue(activeStatus);
+    const declarationRange = {
+      start: { line: 0, character: 6 },
+      end: { line: 0, character: 12 },
+    };
+    lspMocks.lspPrepareRename.mockResolvedValue({
+      status: activeStatus,
+      allowed: true,
+      range: declarationRange,
+      placeholder: "answer",
+      message: null,
+    });
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: "file:///repo/app/src/main.ts",
+        path: "/repo/app/src/main.ts",
+        range: declarationRange,
+      }],
+    });
+    lspMocks.lspReferences.mockResolvedValue({
+      status: activeStatus,
+      locations: [
+        {
+          uri: "file:///repo/app/src/main.ts",
+          path: "/repo/app/src/main.ts",
+          range: declarationRange,
+        },
+        {
+          uri: "file:///repo/app/src/use.ts",
+          path: "/repo/app/src/use.ts",
+          range: {
+            start: { line: 0, character: 4 },
+            end: { line: 0, character: 10 },
+          },
+        },
+      ],
+    });
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    const rendered = renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/main.ts");
+    const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(content).not.toBeNull();
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+    fireEvent.keyDown(content!, { key: "Delete", code: "Delete", altKey: true });
+
+    await waitFor(() => expect(lspMocks.lspPrepareRename).toHaveBeenCalled());
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFile).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/main.ts",
+      "const  = 42;",
+      expect.any(String),
+    ));
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFile).toHaveBeenCalledWith(
+      "/repo/app",
+      "src/use.ts",
+      "use();",
+      "hash-src/use.ts",
+    ));
+    await waitFor(() => expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.enabled)
+      .toBe(true));
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.title)
+      .toBe("Undo Safe delete symbol");
+    expect(disk.get("src/main.ts")).toBe("const  = 42;");
+    expect(disk.get("src/use.ts")).toBe("use();");
+
+    await act(async () => {
+      registrationRef.current?.execute("workspace.undoWorkspaceEdit");
+    });
+    await waitFor(() => expect(disk.get("src/main.ts")).toBe("const answer = 42;"));
+    expect(disk.get("src/use.ts")).toBe("use(answer);");
+  });
+
+  it("navigates diagnostics with F2 / Shift+F2 and executes parameter info, quick definition, and optimize imports commands", async () => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-parity",
+      workspaceInstanceId: "instance-parity",
+      name: "Parity commands",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/Program.cs",
+      "using System;\nclass Program { static void Main() {} }\n",
+    ));
+    lspMocks.lspDetectServers.mockResolvedValue([csharpStatus({ available: true, active: true })]);
+    const activeStatus = documentStatus({
+      available: true,
+      active: true,
+      selectedCommand: "csharp-ls",
+      capabilities: defaultCapabilities({
+        codeAction: true,
+        definition: true,
+        typeDefinition: true,
+        implementation: true,
+        signatureHelp: true,
+      }),
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspSaveDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({
+      status: activeStatus,
+      diagnostics: [
+        {
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 12 } },
+          severity: 2,
+          message: "Unnecessary using directive",
+        },
+        {
+          range: { start: { line: 1, character: 6 }, end: { line: 1, character: 13 } },
+          severity: 1,
+          message: "Type error on Program",
+        },
+        {
+          range: { start: { line: 2, character: 0 }, end: { line: 2, character: 5 } },
+          severity: 1,
+          message: "Missing return statement",
+        },
+      ],
+    });
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: "file:///repo/app/src/Lib.cs",
+        path: "/repo/app/src/Lib.cs",
+        range: { start: { line: 10, character: 0 }, end: { line: 10, character: 10 } },
+      }],
+    });
+    lspMocks.lspSignatureHelp.mockResolvedValue({
+      status: activeStatus,
+      signatures: [{
+        label: "Main(): void",
+        parameters: [],
+      }],
+      activeSignature: 0,
+      activeParameter: 0,
+    });
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: activeStatus,
+      actions: [{
+        title: "Organize Imports",
+        kind: "source.organizeImports",
+        edit: {
+          changes: {
+            "file:///repo/app/src/Program.cs": [
+              { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 13 } }, newText: "" },
+            ],
+          },
+        },
+      }],
+    });
+
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled(), { timeout: 3_000 });
+
+    // 1. F2 Next error & Shift+F2 Prev error (wrapping)
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.nextError")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.nextError");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Error: Type error on Program");
+
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.prevError")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.prevError");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Warning: Unnecessary using directive");
+
+    // 2. Ctrl+P Parameter Info
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.parameterInfo")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.parameterInfo");
+    });
+    await waitFor(() => expect(lspMocks.lspSignatureHelp).toHaveBeenCalled());
+
+    // 3. Ctrl+Shift+I Quick Definition Peek
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.quickDefinition")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.quickDefinition");
+    });
+    await waitFor(() => expect(lspMocks.lspDefinition).toHaveBeenCalled());
+
+    // 4. Ctrl+Alt+O Optimize Imports
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.optimizeImports")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.optimizeImports");
+    });
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      ["source.organizeImports"],
+    ));
+    expect(useAppStore.getState().statusMessage).toBe("Imports organized");
+
+    // 5. Ctrl+Shift+F10 Run Context Configuration
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.runContextConfiguration")?.enabled).toBe(true);
+
+    // 6. Ctrl+Alt+Shift+T Refactor This
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.refactorThis")?.enabled).toBe(true);
+
+    // 7. Breakpoints: Ctrl+F8, Ctrl+Shift+F8, Mute
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.toggleBreakpoint")?.enabled).toBe(true);
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.viewBreakpoints")?.enabled).toBe(true);
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.toggleMuteBreakpoints")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.toggleMuteBreakpoints");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Breakpoints muted");
+
+    // 8. Ctrl+Shift+F9 Recompile Active File
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.recompileActiveFile")?.enabled).toBe(true);
+  });
+
+  it("ingests workspace test coverage report and renders coverage dock panel", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-coverage",
+      workspaceInstanceId: "instance-coverage",
+      name: "Coverage test",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+
+    const lcovContent = `
+SF:src/Program.cs
+DA:1,3
+DA:2,0
+LF:2
+LH:1
+end_of_record
+`;
+
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, rel: string) => {
+      if (rel === "coverage/lcov.info") {
+        return file("coverage/lcov.info", lcovContent);
+      }
+      return file("src/Program.cs", "class Program {\n  void Main() {}\n}\n");
+    });
+
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+
+    // Execute workspace.showCoverage command
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.showCoverage")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.showCoverage");
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("coverage-overall-badge")).toBeInTheDocument();
+      expect(screen.getByTestId("coverage-overall-badge")).toHaveTextContent("50%");
+    });
+  });
+
+  it("toggles synchronized split scrolling when editor is split", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-split",
+      workspaceInstanceId: "instance-split",
+      name: "Split test",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/Program.cs", "line1\nline2\nline3\nline4\nline5\n"));
+
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+
+    // Split editor right
+    const splitRightBtn = screen.getByTestId("code-workspace-split-right");
+    fireEvent.click(splitRightBtn);
+
+    // Sync scroll button should appear
+    const syncScrollBtn = await screen.findByTestId("code-workspace-split-sync-scroll");
+    expect(syncScrollBtn).toBeInTheDocument();
+    expect(syncScrollBtn).toHaveAttribute("aria-pressed", "false");
+
+    // Click to enable synchronized scrolling
+    fireEvent.click(syncScrollBtn);
+    expect(syncScrollBtn).toHaveAttribute("aria-pressed", "true");
+    expect(useAppStore.getState().statusMessage).toBe("Synchronized split scrolling enabled");
+
+    // Toggle via command
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.toggleSyncSplitScroll")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.toggleSyncSplitScroll");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Synchronized split scrolling disabled");
   });
 });

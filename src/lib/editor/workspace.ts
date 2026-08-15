@@ -14,6 +14,10 @@ export interface WorkspaceEntry {
 export interface WorkspaceFile {
   path: string;
   text: string;
+  /** Backend-decoded text encoding; older browser fixtures may omit it. */
+  encoding?: string;
+  /** Whether the on-disk UTF-8 bytes begin with EF BB BF. */
+  bom?: boolean;
   size: number;
   mtime: number;
   hash: string;
@@ -71,6 +75,42 @@ export interface WorkspaceTask {
   environment?: WorkspaceTaskEnvironment;
 }
 
+export type StructuredTestResultStatus = "passed" | "failed" | "skipped" | "error" | "unknown";
+
+export interface StructuredTestResult {
+  id: string;
+  /** Provider-native class/method selector used for a rerun. */
+  selector: string;
+  name: string;
+  className: string;
+  status: StructuredTestResultStatus;
+  durationMs: number | null;
+  message: string | null;
+  details: string | null;
+  /** Optional source path supplied by the test provider (not the report path). */
+  filePath: string | null;
+  line: number | null;
+}
+
+export interface StructuredTestSummary {
+  total: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  errors: number;
+  durationMs: number;
+}
+
+export interface StructuredTestResults {
+  schema: string;
+  version: number;
+  source: string;
+  generatedAt: number;
+  results: StructuredTestResult[];
+  summary: StructuredTestSummary;
+  diagnostics: string[];
+}
+
 /** A Java `static void main` entry point with a ready-to-run terminal command. */
 export interface JavaRunTarget {
   id: string;
@@ -81,7 +121,8 @@ export interface JavaRunTarget {
   cwd: string;
   buildSystem: "maven" | "gradle" | "source-file";
   modulePath: string;
-  execution: WorkspaceTaskExecution;
+  /** Structured executable/argv contract. Optional for older browser fixtures and persisted mocks. */
+  execution?: WorkspaceTaskExecution;
   environment?: WorkspaceTaskEnvironment;
 }
 
@@ -141,18 +182,62 @@ export interface ExecutionProjectModel {
   root: string;
   manifest: string;
   module: string;
+  /** Stable module identity. Optional only for persisted/browser fixtures from before v4.23. */
+  moduleId?: string;
   languages: string[];
+  languageLevel?: string;
   toolchain: string;
   diagnostics: string[];
+}
+
+export interface ExecutionModuleModel {
+  id: string;
+  projectId: string;
+  name: string;
+  root: string;
+  manifest: string;
+  languageLevel?: string;
+  sourceSetIds: string[];
+  parentModuleId?: string;
+  childModuleIds?: string[];
+  moduleDependencies?: string[];
+  diagnostics: string[];
+}
+
+export interface ExecutionSourceSetModel {
+  id: string;
+  projectId: string;
+  moduleId: string;
+  name: string;
+  kind: "production" | "test" | "generated" | string;
+  roots: string[];
+  generated: boolean;
+  languageLevel?: string;
+}
+
+export interface ExecutionCompileArtifact {
+  id: string;
+  projectId: string;
+  moduleId: string;
+  targetId: string;
+  kind: string;
+  path?: string;
+  resolution: "blocked" | "pending-provider-output" | "resolved" | string;
+  source: string;
+  diagnostic?: string;
 }
 
 export interface ExecutionBuildTarget {
   id: string;
   projectId: string;
+  /** Stable module identity. Optional only for persisted/browser fixtures from before v4.23. */
+  moduleId?: string;
   label: string;
   kind: "configure" | "restore" | "build" | "clean" | "check" | "test";
   command: ExecutionCommand;
   dependsOn: string[];
+  /** Declared compile artifacts produced by this target. */
+  artifactIds?: string[];
 }
 
 export interface ExecutionRunConfiguration {
@@ -164,6 +249,24 @@ export interface ExecutionRunConfiguration {
   sourceFile?: string;
   preLaunchTargets: string[];
   debugConfigurationId?: string;
+  /** User-configured VM/runtime options layered over the detected target. */
+  runtimeOptions?: string[];
+  /** Optional dotenv file loaded immediately before launch. */
+  envFile?: string;
+  /** Original detected configuration for a persisted named copy. */
+  baseConfigurationId?: string;
+  /** Provider-specific placement for user program arguments. */
+  argumentStrategy?: "append" | "maven-exec" | "gradle-javaexec";
+  /** Preserve append semantics for inherited task-scoped environment values. */
+  environmentModes?: Record<string, "append" | "replace">;
+  /** Provider-discovered, repository-shared, or local configuration origin. */
+  configurationSource?: "provider" | "shared" | "local";
+  /** Child configuration ids for an IntelliJ-style compound launch. */
+  compoundConfigurationIds?: string[];
+  /** Run child configurations concurrently when true. */
+  compoundParallel?: boolean;
+  /** Stop launching subsequent children after the first failure. */
+  compoundStopOnFailure?: boolean;
 }
 
 export interface ExecutionDebugConfiguration {
@@ -177,14 +280,28 @@ export interface ExecutionDebugConfiguration {
   preLaunchTargets: string[];
   sourceFile?: string;
   launchConfig: Record<string, unknown>;
+  /** Optional dotenv file inherited from the associated run configuration. */
+  envFile?: string;
+  /** Provider-discovered, repository-shared, or local configuration origin. */
+  configurationSource?: "provider" | "shared" | "local";
+  /** Child debug configuration ids for a compound debug chooser entry. */
+  compoundConfigurationIds?: string[];
+  compoundParallel?: boolean;
+  compoundStopOnFailure?: boolean;
 }
 
 export interface WorkspaceExecutionModel {
   projects: ExecutionProjectModel[];
+  /** Native execution-model topology; optional for older browser stubs. */
+  modules?: ExecutionModuleModel[];
+  sourceSets?: ExecutionSourceSetModel[];
   buildTargets: ExecutionBuildTarget[];
+  compileArtifacts?: ExecutionCompileArtifact[];
   runConfigurations: ExecutionRunConfiguration[];
   debugConfigurations: ExecutionDebugConfiguration[];
   tools: ExecutionToolProbe[];
+  /** Non-fatal provider or repository-shared configuration validation errors. */
+  diagnostics?: string[];
 }
 
 export function workspaceListDir(
@@ -285,6 +402,14 @@ export function workspaceTaskTree(
   return invoke<WorkspaceTaskGroup[]>("workspace_task_tree", { repoRoot, toolConfig: toolConfig ?? null });
 }
 
+/** Read bounded JUnit-style results produced below a workspace root. */
+export function workspaceTestResults(repoRoot: string, notBeforeMs?: number): Promise<StructuredTestResults> {
+  return invoke<StructuredTestResults>("workspace_test_results", {
+    repoRoot,
+    notBeforeMs: notBeforeMs ?? null,
+  });
+}
+
 /** A resolved dependency-tree node (Maven / Gradle) for the Build panel (M7 F-1). */
 export interface DependencyNode {
   group: string;
@@ -330,6 +455,34 @@ export function workspaceReadLooseFile(
   });
 }
 
+/** Read a workspace file using an explicit charset selected in the editor. */
+export function workspaceReadFileWithEncoding(
+  repoRoot: string,
+  path: string,
+  encoding: string,
+  maxBytes?: number,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_read_file_with_encoding", {
+    repoRoot,
+    path,
+    maxBytes: maxBytes ?? null,
+    encoding,
+  });
+}
+
+/** Read a loose file using an explicit charset selected in the editor. */
+export function workspaceReadLooseFileWithEncoding(
+  path: string,
+  encoding: string,
+  maxBytes?: number,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_read_loose_file_with_encoding", {
+    path,
+    maxBytes: maxBytes ?? null,
+    encoding,
+  });
+}
+
 export function workspaceWriteFile(
   repoRoot: string,
   path: string,
@@ -353,6 +506,42 @@ export function workspaceWriteLooseFile(
     path,
     contents,
     expectedHash: expectedHash ?? null,
+  });
+}
+
+/** Persist a workspace file using an explicit charset and BOM preference. */
+export function workspaceWriteFileEncoded(
+  repoRoot: string,
+  path: string,
+  contents: string,
+  expectedHash: string | null | undefined,
+  encoding: string,
+  bom = false,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_write_file_encoded", {
+    repoRoot,
+    path,
+    contents,
+    expectedHash: expectedHash ?? null,
+    encoding,
+    bom,
+  });
+}
+
+/** Persist a loose file using an explicit charset and BOM preference. */
+export function workspaceWriteLooseFileEncoded(
+  path: string,
+  contents: string,
+  expectedHash: string | null | undefined,
+  encoding: string,
+  bom = false,
+): Promise<WorkspaceFile> {
+  return invoke<WorkspaceFile>("workspace_write_loose_file_encoded", {
+    path,
+    contents,
+    expectedHash: expectedHash ?? null,
+    encoding,
+    bom,
   });
 }
 
@@ -392,5 +581,42 @@ export function workspaceRenamePath(
     repoRoot,
     fromPath,
     toPath,
+  });
+}
+
+export type WorkspaceResourceOperation =
+  | {
+    kind: "create";
+    path: string;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+  }
+  | {
+    kind: "rename";
+    fromPath: string;
+    toPath: string;
+    /** Destination workspace root; omitted for a rename within repoRoot. */
+    toRepoRoot?: string;
+    overwrite: boolean;
+    ignoreIfExists: boolean;
+  }
+  | {
+    kind: "delete";
+    path: string;
+    recursive: boolean;
+    ignoreIfNotExists: boolean;
+  };
+
+export interface WorkspaceResourceOperationResult {
+  ignored: boolean;
+}
+
+export function workspaceApplyResourceOperation(
+  repoRoot: string,
+  operation: WorkspaceResourceOperation,
+): Promise<WorkspaceResourceOperationResult> {
+  return invoke<WorkspaceResourceOperationResult>("workspace_apply_resource_operation", {
+    repoRoot,
+    operation,
   });
 }

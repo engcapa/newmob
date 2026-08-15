@@ -52,6 +52,30 @@ export function buildGitLineChanges(headText: string, bufferText: string): GitLi
   });
 }
 
+export function rollbackGitLineChange(docText: string, change: GitLineChange): string {
+  const lines = docText.split("\n");
+  const oldLines = change.oldText ? change.oldText.split("\n") : [];
+
+  if (change.kind === "added") {
+    const deleteCount = Math.max(1, change.endLine - change.startLine + 1);
+    lines.splice(change.startLine, deleteCount);
+    return lines.join("\n");
+  }
+
+  if (change.kind === "deleted") {
+    lines.splice(change.startLine, 0, ...oldLines);
+    return lines.join("\n");
+  }
+
+  if (change.kind === "modified") {
+    const deleteCount = Math.max(1, change.endLine - change.startLine + 1);
+    lines.splice(change.startLine, deleteCount, ...oldLines);
+    return lines.join("\n");
+  }
+
+  return docText;
+}
+
 function changeColor(kind: GitLineChangeKind): string {
   if (kind === "added") return "#22c55e";
   if (kind === "deleted") return "#ef4444";

@@ -4,6 +4,11 @@ import { QuickPickOverlay } from "./QuickPickOverlay";
 import { rankFuzzy } from "./fuzzyMatch";
 import { isClassSymbolKind, symbolKindLabel } from "./symbolKinds";
 import type { WorkspaceCommand } from "./workspaceCommands";
+import {
+  workspaceSemanticIndexBuildIsCurrent,
+  workspaceSemanticIndexStatusLabel,
+  type WorkspaceSemanticIndexSnapshot,
+} from "./workspaceSemanticIndex";
 
 export interface GoToFileItem {
   rootId: string;
@@ -19,6 +24,21 @@ export interface GoToSymbolItem {
   uri: string;
   line: number;
   character: number;
+  resolved: boolean;
+  resolveToken: string | null;
+}
+
+export interface GoToSymbolQueryResult {
+  symbols: GoToSymbolItem[];
+  semanticGeneration: number | null;
+  semanticRevision: number | null;
+  sessionCount: number;
+  providerCount: number;
+  skippedProviderCount: number;
+  failedProviderCount: number;
+  complete: boolean;
+  truncated: boolean;
+  diagnostics: string[];
 }
 
 export type SearchEverywhereMode = "all" | "classes" | "files" | "symbols" | "actions" | "text";
@@ -32,7 +52,8 @@ interface SearchEverywhereProps {
   commands?: WorkspaceCommand[];
   /** When true, Classes/Symbols tabs are shown and fetchSymbols is used. */
   symbolsAvailable?: boolean;
-  fetchSymbols?: (query: string) => Promise<GoToSymbolItem[]>;
+  semanticIndex?: WorkspaceSemanticIndexSnapshot;
+  fetchSymbols?: (query: string) => Promise<GoToSymbolQueryResult>;
   onClose: () => void;
   onOpenFile: (item: GoToFileItem, options?: { split: boolean }) => void;
   onOpenSymbol?: (item: GoToSymbolItem, options?: { split: boolean }) => void;
@@ -51,7 +72,7 @@ type SearchItem =
 function itemKey(item: SearchItem): string {
   if (item.kind === "file") return `file:${item.value.rootId}:${item.value.path}`;
   if (item.kind === "action") return `action:${item.value.id}`;
-  return `symbol:${item.value.uri}:${item.value.name}:${item.value.line}:${item.value.character}`;
+  return `symbol:${item.value.uri}:${item.value.name}:${item.value.resolved ? `${item.value.line}:${item.value.character}` : item.value.resolveToken ?? "unresolved"}`;
 }
 
 const MODE_TABS: { id: SearchEverywhereMode; label: string }[] = [
@@ -71,6 +92,7 @@ export function SearchEverywhere({
   truncated = false,
   commands = [],
   symbolsAvailable = false,
+  semanticIndex,
   fetchSymbols,
   onClose,
   onOpenFile,
@@ -81,6 +103,19 @@ export function SearchEverywhere({
   const [mode, setMode] = useState<SearchEverywhereMode>(initialMode);
   const [query, setQuery] = useState("");
   const [symbols, setSymbols] = useState<GoToSymbolItem[]>([]);
+  const [symbolSnapshot, setSymbolSnapshot] = useState<{
+    generation: number;
+    revision: number;
+  } | null>(null);
+  const [symbolQueryStatus, setSymbolQueryStatus] = useState<Pick<GoToSymbolQueryResult, "sessionCount" | "providerCount" | "skippedProviderCount" | "failedProviderCount" | "complete" | "truncated" | "diagnostics">>({
+    sessionCount: 0,
+    providerCount: 0,
+    skippedProviderCount: 0,
+    failedProviderCount: 0,
+    complete: false,
+    truncated: false,
+    diagnostics: [],
+  });
   const [symbolsLoading, setSymbolsLoading] = useState(false);
 
   useEffect(() => {
@@ -88,6 +123,8 @@ export function SearchEverywhere({
     setMode(initialMode);
     setQuery("");
     setSymbols([]);
+    setSymbolSnapshot(null);
+    setSymbolQueryStatus({ sessionCount: 0, providerCount: 0, skippedProviderCount: 0, failedProviderCount: 0, complete: false, truncated: false, diagnostics: [] });
   }, [initialMode, open]);
 
   const visibleTabs = useMemo(
@@ -105,12 +142,36 @@ export function SearchEverywhere({
     let cancelled = false;
     const handle = window.setTimeout(() => {
       setSymbolsLoading(true);
+      setSymbolSnapshot(null);
       void fetchSymbols(query.trim())
         .then((next) => {
-          if (!cancelled) setSymbols(next);
+          if (!cancelled) {
+            setSymbols(next.symbols);
+            setSymbolQueryStatus({
+              sessionCount: next.sessionCount,
+              providerCount: next.providerCount,
+              skippedProviderCount: next.skippedProviderCount,
+              failedProviderCount: next.failedProviderCount,
+              complete: next.complete,
+              truncated: next.truncated,
+              diagnostics: next.diagnostics,
+            });
+            setSymbolSnapshot(
+              next.semanticGeneration == null || next.semanticRevision == null
+                ? null
+                : {
+                  generation: next.semanticGeneration,
+                  revision: next.semanticRevision,
+                },
+            );
+          }
         })
         .catch(() => {
-          if (!cancelled) setSymbols([]);
+          if (!cancelled) {
+            setSymbols([]);
+            setSymbolSnapshot(null);
+            setSymbolQueryStatus({ sessionCount: 0, providerCount: 0, skippedProviderCount: 0, failedProviderCount: 0, complete: false, truncated: false, diagnostics: [] });
+          }
         })
         .finally(() => {
           if (!cancelled) setSymbolsLoading(false);
@@ -166,6 +227,16 @@ export function SearchEverywhere({
     : mode === "classes" || mode === "symbols" || mode === "all"
       ? symbolsLoading || (mode === "all" && loading)
       : false;
+  const symbolSnapshotCurrent = !!semanticIndex
+    && !!symbolSnapshot
+    && workspaceSemanticIndexBuildIsCurrent(semanticIndex, symbolSnapshot);
+  const symbolSnapshotLabel = symbolSnapshot
+    ? symbolSnapshotCurrent
+      ? `Ready · generation ${symbolSnapshot.generation}`
+      : `Stale · result generation ${symbolSnapshot.generation}`
+    : semanticIndex
+      ? workspaceSemanticIndexStatusLabel(semanticIndex)
+      : null;
 
   return (
     <QuickPickOverlay
@@ -217,7 +288,7 @@ export function SearchEverywhere({
               <span className="shrink-0 text-[var(--taomni-code-text)]">{item.value.name}</span>
               <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--taomni-code-muted)]">
                 {item.value.containerName ? `${item.value.containerName} · ` : ""}
-                {item.value.path}:{item.value.line + 1}
+                {item.value.path}{item.value.resolved ? `:${item.value.line + 1}` : ""}
               </span>
               <span className="shrink-0 text-[10px] text-[var(--taomni-code-muted)]">
                 {symbolKindLabel(item.value.kind)}
@@ -295,8 +366,25 @@ export function SearchEverywhere({
               <>{truncated ? "file index truncated · " : ""}{items.length} file{items.length === 1 ? "" : "s"}</>
             )}
             {mode === "actions" && <>{commands.length} action{commands.length === 1 ? "" : "s"}</>}
-            {(mode === "classes" || mode === "symbols") && (
-              <>{symbols.length} symbol{symbols.length === 1 ? "" : "s"}</>
+            {(mode === "all" || mode === "classes" || mode === "symbols") && (
+              <>
+                {symbolSnapshotLabel && (
+                  <span data-testid="search-everywhere-semantic-index">
+                    {symbolSnapshotLabel} · {" "}
+                  </span>
+                )}
+                <span
+                  data-testid="search-everywhere-symbol-provider-status"
+                  title={symbolQueryStatus.diagnostics.join("\n") || undefined}
+                  className={!symbolQueryStatus.complete ? "text-amber-500" : undefined}
+                >
+                  {symbolQueryStatus.providerCount}/{symbolQueryStatus.sessionCount} provider{symbolQueryStatus.sessionCount === 1 ? "" : "s"}
+                  {symbolQueryStatus.complete ? " · complete" : " · incomplete"}
+                  {symbolQueryStatus.truncated || symbolQueryStatus.skippedProviderCount > 0 || symbolQueryStatus.failedProviderCount > 0 || symbolQueryStatus.diagnostics.length > 0 ? " · bounded" : ""}
+                  {" · "}
+                </span>
+                {symbols.length} symbol{symbols.length === 1 ? "" : "s"}
+              </>
             )}
             {mode === "text" && <Type className="inline h-3 w-3" />}
           </span>

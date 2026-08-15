@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  detectIndentation,
   detectWorkspaceEol,
   useCodeWorkspaceStatusStore,
   type CodeWorkspaceStatusSegments,
@@ -34,6 +35,12 @@ describe("codeWorkspaceStatusStore", () => {
     expect(detectWorkspaceEol("a\nb")).toBe("LF");
     expect(detectWorkspaceEol("a\r\nb")).toBe("CRLF");
     expect(detectWorkspaceEol("a\rb")).toBe("CR");
+  });
+
+  it("detects indentation styles (2-spaces, 4-spaces, tabs)", () => {
+    expect(detectIndentation("function a() {\n  const x = 1;\n  return x;\n}").label).toBe("Spaces: 2");
+    expect(detectIndentation("function b() {\n    const x = 1;\n    return x;\n}").label).toBe("Spaces: 4");
+    expect(detectIndentation("function c() {\n\tconst x = 1;\n\treturn x;\n}").label).toBe("Tab: 4");
   });
 
   it("dedupes identical status updates", () => {

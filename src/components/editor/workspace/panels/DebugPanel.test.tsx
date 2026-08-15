@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DebugPanel } from "./DebugPanel";
 import type { CodeDebugSession } from "../useCodeDebugSession";
@@ -9,21 +9,47 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     state: null,
     breakpoints: {},
     breakpointRuntime: {},
+    functionBreakpoints: [],
+    functionBreakpointRuntime: {},
+    instructionBreakpoints: [],
+    instructionBreakpointRuntime: {},
+    dataBreakpoints: [],
+    dataBreakpointRuntime: {},
+    exceptionBreakpoints: [],
+    exceptionBreakpointRuntime: {},
+    exceptionBreakpointRules: [],
+    exceptionBreakpointRuleRuntime: {},
     capabilities: {},
     availableExceptionFilters: [],
-    enabledExceptionFilters: [],
     watchExpressions: [],
     breakpointsMuted: false,
     setBreakpointsMuted: vi.fn(),
     removeAllBreakpoints: vi.fn(),
     frameVariables: {},
+    sessions: [],
+    activeSessionId: null,
+    selectSession: vi.fn(),
     startDebug: vi.fn().mockResolvedValue(undefined),
+    startDebugGroup: vi.fn().mockResolvedValue(undefined),
     restart: vi.fn(),
     canRestart: false,
     toggleBreakpoint: vi.fn(),
     setBreakpointOptions: vi.fn(),
+    setBreakpointMode: vi.fn(),
     removeBreakpoint: vi.fn(),
-    setExceptionFilters: vi.fn(),
+    addFunctionBreakpoint: vi.fn(),
+    setFunctionBreakpointOptions: vi.fn(),
+    removeFunctionBreakpoint: vi.fn(),
+    addInstructionBreakpoint: vi.fn().mockReturnValue(true),
+    setInstructionBreakpointOptions: vi.fn(),
+    removeInstructionBreakpoint: vi.fn(),
+    addDataBreakpoint: vi.fn().mockResolvedValue({ added: true, message: "Watching value" }),
+    setDataBreakpointOptions: vi.fn(),
+    removeDataBreakpoint: vi.fn(),
+    setExceptionBreakpointOptions: vi.fn(),
+    addExceptionBreakpointRule: vi.fn().mockReturnValue(null),
+    setExceptionBreakpointRuleOptions: vi.fn(),
+    removeExceptionBreakpointRule: vi.fn(),
     addWatchExpression: vi.fn(),
     removeWatchExpression: vi.fn(),
     step: vi.fn(),
@@ -34,6 +60,9 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     hotReload: vi.fn(),
     evaluate: vi.fn().mockResolvedValue({ value: "", variablesReference: 0, type: null }),
     hoverEvaluate: vi.fn().mockResolvedValue(null),
+    readMemory: vi.fn().mockResolvedValue(null),
+    writeMemory: vi.fn().mockResolvedValue(null),
+    disassemble: vi.fn().mockResolvedValue([]),
     setVariable: vi.fn().mockResolvedValue(null),
     logConsole: vi.fn(),
     clearConsole: vi.fn(),
@@ -70,6 +99,66 @@ describe("DebugPanel", () => {
     expect(screen.getByText(/No debug session/)).toBeInTheDocument();
     fireEvent.click(screen.getByTestId("debug-start"));
     expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects the active Run/Debug configuration from the panel", () => {
+    const onActiveConfigurationChange = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession()}
+        onStart={vi.fn()}
+        onOpenFrame={vi.fn()}
+        configurations={[
+          { id: "run:default", label: "Default" },
+          { id: "run:local", label: "Local" },
+        ]}
+        activeConfigurationId="run:default"
+        onActiveConfigurationChange={onActiveConfigurationChange}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("debug-active-configuration"), {
+      target: { value: "run:local" },
+    });
+    expect(onActiveConfigurationChange).toHaveBeenCalledWith("run:local");
+  });
+
+  it("labels shared and local configuration provenance in the chooser", () => {
+    render(
+      <DebugPanel
+        debug={makeSession()}
+        onStart={vi.fn()}
+        onOpenFrame={vi.fn()}
+        configurations={[
+          { id: "shared-run:team", label: "Team", source: "shared" },
+          { id: "run:local", label: "Local", source: "local" },
+        ]}
+        activeConfigurationId="shared-run:team"
+      />,
+    );
+    expect(screen.getByRole("option", { name: "Team [Shared]" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Local [Local]" })).toBeInTheDocument();
+  });
+
+  it("surfaces an unavailable configuration diagnostic without hiding the choice", () => {
+    render(
+      <DebugPanel
+        debug={makeSession()}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        configurations={[{
+          id: "compound-debug",
+          label: "All services",
+          source: "shared",
+          available: false,
+          diagnostic: "Compound Debug requires grouped multi-session DAP support",
+        }]}
+        activeConfigurationId="compound-debug"
+      />,
+    );
+    expect(screen.getByRole("option", { name: /All services \[Shared\] \[Unavailable\]/ })).toBeInTheDocument();
+    expect(screen.getByTestId("debug-configuration-diagnostic")).toHaveTextContent(
+      "Compound Debug requires grouped multi-session DAP support",
+    );
   });
 
   it("explains the desktop requirement in the browser preview", () => {
@@ -195,22 +284,230 @@ describe("DebugPanel", () => {
     expect(restart).toHaveBeenCalledTimes(1);
   });
 
-  it("toggles an exception filter through the session", () => {
-    const setExceptionFilters = vi.fn();
+  it("switches between child sessions in a compound debug launch", () => {
+    const selectSession = vi.fn();
     render(
       <DebugPanel
         debug={makeSession({
           state: stoppedState(),
-          availableExceptionFilters: [{ filter: "uncaught", label: "Uncaught Exceptions" }],
-          enabledExceptionFilters: [],
-          setExceptionFilters,
+          sessions: [
+            { id: "s1", targetId: "api", label: "API", adapterId: "java", status: "stopped", stoppedReason: "breakpoint" },
+            { id: "s2", targetId: "web", label: "Web", adapterId: "node", status: "running", stoppedReason: null },
+          ],
+          activeSessionId: "s1",
+          selectSession,
         })}
         onStart={null}
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByTestId("debug-exception-uncaught"));
-    expect(setExceptionFilters).toHaveBeenCalledWith(["uncaught"]);
+    expect(screen.getByRole("option", { name: "API [stopped: breakpoint]" })).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("debug-active-session"), { target: { value: "s2" } });
+    expect(selectSession).toHaveBeenCalledWith("s2");
+  });
+
+  it("configures and reports a conditional exception filter through the session", () => {
+    const setExceptionBreakpointOptions = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [
+            {
+              id: "s1",
+              targetId: "app",
+              label: "App",
+              adapterId: "java",
+              status: "stopped",
+              stoppedReason: "breakpoint",
+            },
+          ],
+          activeSessionId: "s1",
+          capabilities: {
+            supportsExceptionFilterOptions: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["exception"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["exception"] },
+            ],
+          },
+          availableExceptionFilters: [{
+            filter: "caught",
+            label: "Caught Exceptions",
+            description: "Pause on handled exceptions",
+            default: false,
+            supportsCondition: true,
+            conditionDescription: "Exception class",
+          }],
+          exceptionBreakpoints: [{
+            adapterId: "java",
+            filterId: "caught",
+            enabled: true,
+          }],
+          exceptionBreakpointRuntime: {
+            caught: { status: "failed", message: "Invalid condition" },
+          },
+          setExceptionBreakpointOptions,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("debug-exception-breakpoints")).toBeInTheDocument();
+    expect(screen.getByText("Caught Exceptions").closest("label")).toHaveAttribute(
+      "title",
+      "Pause on handled exceptions",
+    );
+    expect(screen.getByTestId("debug-exception-breakpoint-binding-0")).toHaveTextContent("not bound");
+    fireEvent.click(screen.getByTestId("debug-exception-breakpoint-enabled-0"));
+    expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", { enabled: false });
+    fireEvent.change(screen.getByTestId("debug-exception-breakpoint-condition-0"), {
+      target: { value: "exception instanceof IOException" },
+    });
+    fireEvent.keyDown(screen.getByTestId("debug-exception-breakpoint-condition-0"), { key: "Enter" });
+    expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", {
+      condition: "exception instanceof IOException",
+    });
+    fireEvent.change(screen.getByTestId("debug-exception-breakpoint-mode-0"), {
+      target: { value: "hardware" },
+    });
+    expect(setExceptionBreakpointOptions).toHaveBeenCalledWith("caught", { mode: "hardware" });
+  });
+
+  it("manages capability-gated exception class and package rules", () => {
+    const addExceptionBreakpointRule = vi.fn().mockReturnValue("rule-new");
+    const setExceptionBreakpointRuleOptions = vi.fn();
+    const removeExceptionBreakpointRule = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "app",
+            label: "App",
+            adapterId: "java",
+            status: "stopped",
+            stoppedReason: "exception",
+          }],
+          activeSessionId: "s1",
+          capabilities: { supportsExceptionOptions: true },
+          availableExceptionFilters: [{
+            filter: "all",
+            label: "All Exceptions",
+            default: false,
+            supportsCondition: false,
+          }],
+          exceptionBreakpointRules: [{
+            id: "rule-1",
+            adapterId: "java",
+            path: [
+              { names: ["Java Exceptions"] },
+              { names: ["java.io.IOException"] },
+            ],
+            breakMode: "unhandled",
+            enabled: true,
+          }],
+          exceptionBreakpointRuleRuntime: {
+            "rule-1": { status: "failed", message: "Unknown exception class" },
+          },
+          addExceptionBreakpointRule,
+          setExceptionBreakpointRuleOptions,
+          removeExceptionBreakpointRule,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("debug-exception-rules")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-exception-rule-row")).toHaveTextContent(
+      "Java Exceptions / java.io.IOException",
+    );
+    expect(screen.getByTestId("debug-exception-rule-binding-0")).toHaveTextContent("not bound");
+
+    fireEvent.change(screen.getByTestId("debug-exception-rule-input"), {
+      target: { value: "java.sql.SQLException, java.net.SocketException" },
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-add"));
+    expect(addExceptionBreakpointRule).toHaveBeenCalledWith([{
+      names: ["java.sql.SQLException", "java.net.SocketException"],
+    }]);
+
+    fireEvent.click(screen.getByTestId("debug-exception-rule-enabled-0"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", { enabled: false });
+    fireEvent.change(screen.getByTestId("debug-exception-rule-mode-0"), {
+      target: { value: "userUnhandled" },
+    });
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      breakMode: "userUnhandled",
+    });
+
+    fireEvent.click(screen.getByTestId("debug-exception-rule-edit-0"));
+    fireEvent.change(screen.getByTestId("debug-exception-rule-path-names-0-1"), {
+      target: { value: "java.io.IOException, java.io.EOFException" },
+    });
+    fireEvent.keyDown(screen.getByTestId("debug-exception-rule-path-names-0-1"), { key: "Enter" });
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [
+        { names: ["Java Exceptions"] },
+        { names: ["java.io.IOException", "java.io.EOFException"] },
+      ],
+    });
+
+    fireEvent.click(screen.getByTestId("debug-exception-rule-path-exclude-0-0"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [
+        { names: ["Java Exceptions"], negate: true },
+        { names: ["java.io.IOException"] },
+      ],
+    });
+    fireEvent.change(screen.getByTestId("debug-exception-rule-path-input-0"), {
+      target: { value: "com.example.*" },
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-path-add-0"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [
+        { names: ["Java Exceptions"] },
+        { names: ["java.io.IOException"] },
+        { names: ["com.example.*"] },
+      ],
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-path-remove-0-1"));
+    expect(setExceptionBreakpointRuleOptions).toHaveBeenCalledWith("rule-1", {
+      path: [{ names: ["Java Exceptions"] }],
+    });
+    fireEvent.click(screen.getByTestId("debug-exception-rule-remove-0"));
+    expect(removeExceptionBreakpointRule).toHaveBeenCalledWith("rule-1");
+  });
+
+  it("explains when the active adapter cannot accept exception path rules", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "app",
+            label: "App",
+            adapterId: "java",
+            status: "stopped",
+            stoppedReason: "breakpoint",
+          }],
+          activeSessionId: "s1",
+          availableExceptionFilters: [{
+            filter: "all",
+            label: "All Exceptions",
+            default: false,
+            supportsCondition: false,
+          }],
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("debug-exception-rule-unsupported")).toHaveTextContent(
+      "does not support class or package exception rules",
+    );
   });
 
   it("lists every workspace breakpoint and reveals one on click", () => {
@@ -252,6 +549,390 @@ describe("DebugPanel", () => {
     expect(setBreakpointOptions).toHaveBeenCalledWith("/repo/A.java", 12, { enabled: false });
     fireEvent.click(screen.getByTestId("debug-breakpoint-remove-12"));
     expect(removeBreakpoint).toHaveBeenCalledWith("/repo/A.java", 12);
+  });
+
+  it("selects an adapter-scoped mode for a source breakpoint", () => {
+    const setBreakpointMode = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: { ...initialDebugState("s1"), status: "running" },
+          sessions: [{
+            id: "s1",
+            targetId: "app",
+            label: "App",
+            adapterId: "java",
+            status: "running",
+            stoppedReason: null,
+          }],
+          activeSessionId: "s1",
+          capabilities: {
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["source"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["source"] },
+            ],
+          },
+          breakpoints: { "/repo/A.java": [{ line: 12 }] },
+          setBreakpointMode,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        editingBreakpoint={{ path: "/repo/A.java", line: 12 }}
+      />,
+    );
+    expect(screen.getByTestId("debug-breakpoint-12")).toHaveTextContent("Software");
+    fireEvent.change(screen.getByTestId("debug-breakpoint-mode-12"), {
+      target: { value: "hardware" },
+    });
+    expect(setBreakpointMode).toHaveBeenCalledWith("/repo/A.java", 12, "hardware");
+  });
+
+  it("adds, edits, disables and removes a function breakpoint", () => {
+    const addFunctionBreakpoint = vi.fn();
+    const setFunctionBreakpointOptions = vi.fn();
+    const removeFunctionBreakpoint = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          functionBreakpoints: [{ name: "Service.run" }],
+          addFunctionBreakpoint,
+          setFunctionBreakpointOptions,
+          removeFunctionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    const input = screen.getByTestId("debug-function-breakpoint-input");
+    fireEvent.change(input, { target: { value: "Controller.handle" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(addFunctionBreakpoint).toHaveBeenCalledWith("Controller.handle");
+
+    fireEvent.click(screen.getByTestId("debug-function-breakpoint-enabled-0"));
+    expect(setFunctionBreakpointOptions).toHaveBeenCalledWith("Service.run", { enabled: false });
+    fireEvent.click(screen.getByTestId("debug-function-breakpoint-edit-0"));
+    const condition = screen.getByTestId("debug-function-breakpoint-condition-0");
+    fireEvent.change(condition, { target: { value: "ready" } });
+    fireEvent.keyDown(condition, { key: "Enter" });
+    expect(setFunctionBreakpointOptions).toHaveBeenCalledWith("Service.run", { condition: "ready" });
+    fireEvent.click(screen.getByTestId("debug-function-breakpoint-remove-0"));
+    expect(removeFunctionBreakpoint).toHaveBeenCalledWith("Service.run");
+  });
+
+  it("surfaces an adapter that cannot arm saved function breakpoints", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: { ...initialDebugState("s1"), status: "running" },
+          functionBreakpoints: [{ name: "Service.run" }],
+          functionBreakpointRuntime: {
+            "Service.run": { status: "failed", message: "unsupported" },
+          },
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    expect(screen.getByTestId("debug-function-breakpoint-unsupported")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-function-breakpoint-input")).toBeDisabled();
+    expect(screen.getByTestId("debug-function-breakpoint-binding-0")).toHaveTextContent("not bound");
+  });
+
+  it("creates an instruction breakpoint with offset and adapter mode", () => {
+    const addInstructionBreakpoint = vi.fn().mockReturnValue(true);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "target",
+            label: "Native",
+            adapterId: "lldb",
+            status: "stopped",
+            stoppedReason: "breakpoint",
+          }],
+          activeSessionId: "s1",
+          capabilities: {
+            supportsInstructionBreakpoints: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["instruction"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["instruction"] },
+            ],
+          },
+          addInstructionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-reference"), {
+      target: { value: "main:entry" },
+    });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-offset"), {
+      target: { value: "-4" },
+    });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-mode"), {
+      target: { value: "hardware" },
+    });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-add"));
+    expect(addInstructionBreakpoint).toHaveBeenCalledWith({
+      instructionReference: "main:entry",
+      offset: -4,
+      mode: "hardware",
+    });
+  });
+
+  it("validates instruction offsets before mutating the session", () => {
+    const addInstructionBreakpoint = vi.fn().mockReturnValue(true);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: { supportsInstructionBreakpoints: true },
+          addInstructionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-reference"), {
+      target: { value: "0x1000" },
+    });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-offset"), {
+      target: { value: "2.5" },
+    });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-add"));
+    expect(addInstructionBreakpoint).not.toHaveBeenCalled();
+    expect(screen.getByTestId("debug-instruction-breakpoint-notice")).toHaveTextContent(
+      "signed decimal integer",
+    );
+  });
+
+  it("edits, disables, and removes an instruction breakpoint with binding status", () => {
+    const setInstructionBreakpointOptions = vi.fn();
+    const removeInstructionBreakpoint = vi.fn();
+    const instruction = {
+      adapterId: "lldb",
+      instructionReference: "0x1000",
+      offset: 4,
+      condition: "ready",
+      mode: "hardware",
+    };
+    const key = JSON.stringify(["lldb", "0x1000", 4]);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          sessions: [{
+            id: "s1",
+            targetId: "target",
+            label: "Native",
+            adapterId: "lldb",
+            status: "stopped",
+            stoppedReason: "breakpoint",
+          }],
+          activeSessionId: "s1",
+          capabilities: {
+            supportsInstructionBreakpoints: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["instruction"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["instruction"] },
+            ],
+          },
+          instructionBreakpoints: [instruction],
+          instructionBreakpointRuntime: {
+            [key]: { status: "failed", message: "not executable" },
+          },
+          setInstructionBreakpointOptions,
+          removeInstructionBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    expect(screen.getByTestId("debug-instruction-breakpoint-binding-0")).toHaveTextContent("not bound");
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-enabled-0"));
+    expect(setInstructionBreakpointOptions).toHaveBeenCalledWith(key, { enabled: false });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-edit-0"));
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-condition-0"), {
+      target: { value: "loaded" },
+    });
+    fireEvent.keyDown(screen.getByTestId("debug-instruction-breakpoint-condition-0"), { key: "Enter" });
+    expect(setInstructionBreakpointOptions).toHaveBeenCalledWith(key, { condition: "loaded" });
+    fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-row-mode-0"), {
+      target: { value: "software" },
+    });
+    expect(setInstructionBreakpointOptions).toHaveBeenCalledWith(key, { mode: "software" });
+    fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-remove-0"));
+    expect(removeInstructionBreakpoint).toHaveBeenCalledWith(key);
+  });
+
+  it("keeps saved instruction breakpoints visible when unsupported", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: { ...initialDebugState("s1"), status: "running" },
+          instructionBreakpoints: [{
+            adapterId: "java",
+            instructionReference: "0x1000",
+          }],
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Breakpoints"));
+    expect(screen.getByTestId("debug-instruction-breakpoint-unsupported")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-instruction-breakpoint-reference")).toBeDisabled();
+    expect(screen.getByTestId("debug-instruction-breakpoint-row")).toHaveTextContent("0x1000");
+  });
+
+  it("creates a data breakpoint from a stopped variable", async () => {
+    const addDataBreakpoint = vi.fn().mockResolvedValue({
+      added: true,
+      message: "Watching Service.count",
+    });
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: {
+            supportsDataBreakpoints: true,
+            breakpointModes: [
+              { mode: "software", label: "Software", appliesTo: ["data"] },
+              { mode: "hardware", label: "Hardware", appliesTo: ["data"] },
+            ],
+          },
+          addDataBreakpoint,
+          fetchScopes: vi.fn().mockResolvedValue({
+            scopes: [{ name: "Locals", variablesReference: 2 }],
+          }),
+          fetchVariables: vi.fn().mockResolvedValue({
+            variables: [{ name: "count", value: "3", variablesReference: 0 }],
+          }),
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-mode"), {
+      target: { value: "hardware" },
+    });
+    const action = await screen.findByTestId("debug-variable-data-breakpoint");
+    fireEvent.click(action);
+    await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith({
+      name: "count",
+      variablesReference: 2,
+      frameId: undefined,
+      mode: "hardware",
+    }));
+    expect(await screen.findByTestId("debug-data-breakpoint-notice")).toHaveTextContent(
+      "Watching Service.count",
+    );
+  });
+
+  it("creates an address byte-range data breakpoint from the breakpoints view", async () => {
+    const addDataBreakpoint = vi.fn().mockResolvedValue({
+      added: true,
+      message: "Watching 0x1000 (16 bytes)",
+    });
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: {
+            supportsDataBreakpoints: true,
+            supportsDataBreakpointBytes: true,
+            breakpointModes: [{ mode: "hardware", label: "Hardware", appliesTo: ["data"] }],
+          },
+          addDataBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-target"), {
+      target: { value: "0x1000" },
+    });
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-bytes"), {
+      target: { value: "16" },
+    });
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-as-address"));
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-add"));
+    await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith({
+      name: "0x1000",
+      frameId: undefined,
+      bytes: 16,
+      asAddress: true,
+      mode: "hardware",
+    }));
+    expect(await screen.findByTestId("debug-data-breakpoint-create-notice")).toHaveTextContent(
+      "Watching 0x1000 (16 bytes)",
+    );
+  });
+
+  it("edits, disables and removes a data watchpoint", () => {
+    const setDataBreakpointOptions = vi.fn();
+    const removeDataBreakpoint = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          dataBreakpoints: [{
+            dataId: "field:Service.count",
+            description: "Service.count",
+            adapterId: "java",
+            accessTypes: ["read", "write"],
+            accessType: "write",
+            canPersist: true,
+          }],
+          setDataBreakpointOptions,
+          removeDataBreakpoint,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-enabled-0"));
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { enabled: false },
+    );
+    fireEvent.change(screen.getByTestId("debug-data-breakpoint-access-0"), {
+      target: { value: "read" },
+    });
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { accessType: "read" },
+    );
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-edit-0"));
+    const condition = screen.getByTestId("debug-data-breakpoint-condition-0");
+    fireEvent.change(condition, { target: { value: "ready" } });
+    fireEvent.keyDown(condition, { key: "Enter" });
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { condition: "ready" },
+    );
+    const hit = screen.getByTestId("debug-data-breakpoint-hit-0");
+    fireEvent.change(hit, { target: { value: "4" } });
+    fireEvent.keyDown(hit, { key: "Enter" });
+    expect(setDataBreakpointOptions).toHaveBeenCalledWith(
+      expect.any(String),
+      { hitCondition: "4" },
+    );
+    fireEvent.click(screen.getByTestId("debug-data-breakpoint-remove-0"));
+    expect(removeDataBreakpoint).toHaveBeenCalledWith(expect.any(String));
   });
 
   it("edits a breakpoint's condition inline instead of through modal prompts", () => {
@@ -320,5 +1001,142 @@ describe("DebugPanel", () => {
     );
     fireEvent.click(screen.getByTestId("debug-console-clear"));
     expect(clearConsole).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads, writes, and disassembles memory only when the adapter advertises support", async () => {
+    const readMemory = vi.fn().mockResolvedValue({
+      address: "0x1000",
+      unreadableBytes: 0,
+      data: "AAE=",
+    });
+    const writeMemory = vi.fn().mockResolvedValue({ bytesWritten: 2 });
+    const disassemble = vi.fn().mockResolvedValue([{
+      address: "0x1000",
+      instructionBytes: "55",
+      instruction: "push rbp",
+      symbol: null,
+      location: null,
+      line: null,
+      column: null,
+      endLine: null,
+      endColumn: null,
+    }]);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: {
+            supportsReadMemoryRequest: true,
+            supportsWriteMemoryRequest: true,
+            supportsDisassembleRequest: true,
+          },
+          readMemory,
+          writeMemory,
+          disassemble,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Memory / Disassembly"));
+    fireEvent.change(screen.getByTestId("debug-memory-reference"), { target: { value: "0x1000" } });
+    fireEvent.change(screen.getByTestId("debug-memory-offset"), { target: { value: "-4" } });
+    fireEvent.change(screen.getByTestId("debug-memory-count"), { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("debug-memory-read"));
+    await waitFor(() => expect(screen.getByTestId("debug-memory-result")).toHaveTextContent("01"));
+    expect(readMemory).toHaveBeenCalledWith({ memoryReference: "0x1000", offset: -4, count: 2 });
+
+    fireEvent.change(screen.getByTestId("debug-memory-write-data"), { target: { value: "01 02" } });
+    fireEvent.click(screen.getByTestId("debug-memory-write"));
+    await waitFor(() => expect(screen.getByTestId("debug-memory-write-status")).toHaveTextContent("Wrote 2 bytes"));
+    expect(writeMemory).toHaveBeenCalledWith({
+      memoryReference: "0x1000",
+      offset: -4,
+      data: "AQI=",
+      allowPartial: false,
+    });
+
+    fireEvent.change(screen.getByTestId("debug-disassemble-count"), { target: { value: "1" } });
+    fireEvent.click(screen.getByTestId("debug-disassemble"));
+    await waitFor(() => expect(screen.getByTestId("debug-disassembly-row")).toHaveTextContent("push rbp"));
+    expect(disassemble).toHaveBeenCalledWith({
+      memoryReference: "0x1000",
+      instructionCount: 1,
+      resolveSymbols: true,
+    });
+  });
+
+  it("shows memory tools as unsupported when no request capability is advertised", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({ state: stoppedState() })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Memory / Disassembly"));
+    expect(screen.getByTestId("debug-memory-unsupported")).toBeInTheDocument();
+    expect(screen.queryByTestId("debug-memory-read")).toBeNull();
+  });
+
+  it("opens context menu on variable node and allows adding data breakpoint and watch", async () => {
+    const addDataBreakpoint = vi.fn().mockResolvedValue({ added: true, message: "Watching user.name" });
+    const addWatchExpression = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: { supportsDataBreakpoints: true },
+          addDataBreakpoint,
+          addWatchExpression,
+          fetchScopes: vi.fn().mockResolvedValue({
+            scopes: [{ name: "Locals", variablesReference: 5 }],
+          }),
+          fetchVariables: vi.fn().mockResolvedValue({
+            variables: [{ name: "user", value: "Object", variablesReference: 0 }],
+          }),
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    const varNode = await screen.findByText("user");
+    fireEvent.contextMenu(varNode);
+
+    const watchMenu = await screen.findByTestId("debug-variable-menu-add-watch");
+    expect(watchMenu).toBeInTheDocument();
+    fireEvent.click(watchMenu);
+    expect(addWatchExpression).toHaveBeenCalledWith("user");
+
+    fireEvent.contextMenu(varNode);
+    const dataBpMenu = await screen.findByTestId("debug-variable-menu-data-breakpoint");
+    expect(dataBpMenu).toBeInTheDocument();
+    fireEvent.click(dataBpMenu);
+    await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith(expect.objectContaining({ name: "user" })));
+  });
+
+  it("opens context menu on call stack frame and triggers restartFrame", async () => {
+    const restartFrame = vi.fn();
+    const state = stoppedState();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state,
+          capabilities: { supportsRestartFrame: true },
+          restartFrame,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    const frameEl = screen.getByTestId(`debug-frame-${state.frames[0].id}`);
+    fireEvent.contextMenu(frameEl);
+
+    const restartMenu = await screen.findByTestId("debug-frame-menu-restart-frame");
+    expect(restartMenu).toBeInTheDocument();
+    fireEvent.click(restartMenu);
+    expect(restartFrame).toHaveBeenCalledWith(state.frames[0].id);
   });
 });

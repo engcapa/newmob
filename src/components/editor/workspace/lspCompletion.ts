@@ -15,6 +15,7 @@ import type {
   LspTextEdit,
 } from "../../../lib/editor/lsp";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
+import { isInsideStringOrComment } from "./syntaxContext";
 
 export interface LspCompletionHooks {
   fetch: (
@@ -281,10 +282,29 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       && word.from > 0
       && triggers.includes(context.state.sliceDoc(word.from - 1, word.from));
     if (!context.explicit && !word && !triggerOnly) return null;
+    // Suppress word-based LSP autocompletion inside string literals or comments
+    // unless user explicitly invoked completion (Ctrl+Space) or typed a trigger character.
+    if (!context.explicit && !triggerOnly && !afterTrigger && isInsideStringOrComment(context.state, context.pos)) {
+      return null;
+    }
 
     // LSP responses are tied to a document version. Do not spend renderer time
     // mapping a response that became stale while the user kept typing.
     context.addEventListener("abort", () => {}, { onDocChange: true });
+
+    // For plain non-trigger typing (e.g. typing identifiers in Java without `.` or `:`),
+    // settle briefly so rapid typing does not spam heavy LSP queries on every keystroke.
+    if (!context.explicit && !triggerOnly && !afterTrigger) {
+      await new Promise<void>((resolve) => {
+        const timer = window.setTimeout(resolve, 80);
+        context.addEventListener("abort", () => {
+          window.clearTimeout(timer);
+          resolve();
+        });
+      });
+      if (context.aborted) return null;
+    }
+
     const triggerCharacter = triggerOnly
       ? charBefore
       : afterTrigger
@@ -307,14 +327,20 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     if (result.items.length === 0) return null;
 
     const typed = word ? word.text : "";
-    const mapped = result.items.map((item): Completion => {
+    const rawItems = result.items;
+    const mapped: Completion[] = [];
+    const maxItemsToProcess = Math.min(rawItems.length, MAX_COMPLETION_OPTIONS * 3);
+    for (let i = 0; i < maxItemsToProcess; i += 1) {
+      const item = rawItems[i];
+      if (!item) continue;
       const filterText = item.filterText?.trim() ? item.filterText : null;
-      // Match against filterText when the server provides it (e.g. method
-      // signatures), but keep the human label visible in the list.
       const label = filterText ?? item.label;
-      const displayLabel = filterText && filterText !== item.label ? item.label : undefined;
       const boost = boostFromTypedPrefix(typed, label, item.sortText);
-      return {
+      if (typed && boost === undefined && mapped.length >= MAX_COMPLETION_OPTIONS) {
+        continue;
+      }
+      const displayLabel = filterText && filterText !== item.label ? item.label : undefined;
+      mapped.push({
         label,
         displayLabel,
         sortText: item.sortText ?? undefined,
@@ -326,8 +352,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
           : undefined,
         apply: (view, completion, from, to) =>
           applyLspCompletion(view, completion, item, from, to, hooks.resolve),
-      };
-    });
+      });
+      if (mapped.length >= MAX_COMPLETION_OPTIONS * 2) break;
+    }
+    if (context.aborted) return null;
 
     // Prefer textEdit start when every item shares the same replace range so
     // CM's client-side filtering aligns with the server's replace span.

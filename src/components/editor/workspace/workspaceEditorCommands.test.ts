@@ -3,12 +3,19 @@ import { EditorView } from "@codemirror/view";
 import { javascript } from "@codemirror/lang-javascript";
 import { describe, expect, it } from "vitest";
 import {
+  completeCurrentStatement,
   expandSyntaxSelection,
   expandSelectionFromLspRanges,
+  joinLines,
+  reverseLines,
   selectionHistoryField,
   shrinkSyntaxSelection,
+  sortLines,
+  toggleCase,
+  unselectOccurrence,
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
+import { selectNextOccurrence } from "@codemirror/search";
 
 describe("workspace editor commands", () => {
   it("expands and shrinks syntax selections through selection history", () => {
@@ -34,7 +41,7 @@ describe("workspace editor commands", () => {
     view.destroy();
   });
 
-  it("registers the designed comment and selection shortcuts", () => {
+  it("registers the designed comment, selection, and statement completion shortcuts", () => {
     expect(workspaceEditorKeymap.map((binding) => binding.key)).toEqual([
       "Mod-/",
       "Mod-Shift-/",
@@ -45,6 +52,15 @@ describe("workspace editor commands", () => {
       "Mod-w",
       "Mod-Shift-w",
       "Mod-g",
+      "Mod-Shift-Enter",
+      "Mod-Shift-j",
+      "Ctrl-Shift-j",
+      "Alt-j",
+      "Shift-Alt-j",
+      "Mod-Alt-Shift-j",
+      "Ctrl-Alt-Shift-j",
+      "Mod-Shift-u",
+      "Ctrl-Shift-u",
     ]);
   });
 
@@ -63,6 +79,144 @@ describe("workspace editor commands", () => {
     expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe("value");
     expect(shrinkSyntaxSelection(view)).toBe(true);
     expect(view.state.selection.main.empty).toBe(true);
+    view.destroy();
+  });
+
+  it("completes statement with semicolon and balances unclosed parentheses", () => {
+    const doc = "  const msg = calculate(a, b";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 15 },
+      }),
+    });
+    expect(completeCurrentStatement(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("  const msg = calculate(a, b);\n  ");
+    expect(view.state.selection.main.head).toBe(view.state.doc.length);
+    view.destroy();
+  });
+
+  it("completes control flow headers with block braces", () => {
+    const doc = "  if (isValid)";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6 },
+      }),
+    });
+    expect(completeCurrentStatement(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("  if (isValid) {\n    \n  }");
+    view.destroy();
+  });
+
+  it("adds and removes multi-caret occurrences with Alt-J and Shift-Alt-J semantics", () => {
+    const doc = "const alpha = 1;\nconst alpha = 2;\nconst alpha = 3;";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 8 }, // inside first 'alpha'
+        extensions: [javascript(), EditorState.allowMultipleSelections.of(true)],
+      }),
+    });
+
+    // 1st Alt-J: selects current word 'alpha'
+    expect(selectNextOccurrence(view)).toBe(true);
+    expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe("alpha");
+    expect(view.state.selection.ranges).toHaveLength(1);
+
+    // 2nd Alt-J: adds 2nd occurrence of 'alpha'
+    expect(selectNextOccurrence(view)).toBe(true);
+    expect(view.state.selection.ranges).toHaveLength(2);
+
+    // 3rd Alt-J: adds 3rd occurrence of 'alpha'
+    expect(selectNextOccurrence(view)).toBe(true);
+    expect(view.state.selection.ranges).toHaveLength(3);
+
+    // Shift-Alt-J: unselects last occurrence
+    expect(unselectOccurrence(view)).toBe(true);
+    expect(view.state.selection.ranges).toHaveLength(2);
+
+    expect(unselectOccurrence(view)).toBe(true);
+    expect(view.state.selection.ranges).toHaveLength(1);
+
+    expect(unselectOccurrence(view)).toBe(false);
+    view.destroy();
+  });
+
+  it("toggles case of selected text or word under caret with Ctrl+Shift+U", () => {
+    const doc = "const myVariable = 'hello';";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6, head: 16 }, // 'myVariable'
+      }),
+    });
+
+    // Lower/mixed -> UPPER
+    expect(toggleCase(view)).toBe(true);
+    expect(view.state.sliceDoc(6, 16)).toBe("MYVARIABLE");
+
+    // UPPER -> lower
+    expect(toggleCase(view)).toBe(true);
+    expect(view.state.sliceDoc(6, 16)).toBe("myvariable");
+
+    // Caret inside word without explicit range
+    const caretView = new EditorView({
+      state: EditorState.create({
+        doc: "const identifier = 1;",
+        selection: { anchor: 8 }, // inside 'identifier'
+      }),
+    });
+
+    expect(toggleCase(caretView)).toBe(true);
+    expect(caretView.state.doc.toString()).toBe("const IDENTIFIER = 1;");
+
+    expect(toggleCase(caretView)).toBe(true);
+    expect(caretView.state.doc.toString()).toBe("const identifier = 1;");
+
+    view.destroy();
+    caretView.destroy();
+  });
+
+  it("joins current line with next line collapsing whitespace with Ctrl+Shift+J", () => {
+    const doc = "const a = 1;\n  const b = 2;\nconst c = 3;";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 5 }, // on line 1
+      }),
+    });
+
+    expect(joinLines(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("const a = 1; const b = 2;\nconst c = 3;");
+    view.destroy();
+  });
+
+  it("sorts selected lines alphabetically with sortLines", () => {
+    const doc = "zebra\napple\nbanana";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 0, head: doc.length },
+      }),
+    });
+
+    expect(sortLines(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("apple\nbanana\nzebra");
+    view.destroy();
+  });
+
+  it("reverses selected lines with reverseLines", () => {
+    const doc = "first\nsecond\nthird";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 0, head: doc.length },
+      }),
+    });
+
+    expect(reverseLines(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("third\nsecond\nfirst");
     view.destroy();
   });
 });

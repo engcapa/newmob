@@ -77,7 +77,14 @@ export interface WorkspaceNavigationController {
   suppressNextHistoryRecord: () => void;
   /** Remember the live caret so tab switches keep accurate history positions. */
   noteCaretPosition: (key: string, position: WorkspaceNavPosition) => void;
-  openRecentFiles: () => void;
+  /** Remap or remove history/recent references after LSP resource operations. */
+  reconcileFileReferences: (
+    transform: (ref: CodeWorkspaceFileRef) => CodeWorkspaceFileRef | null,
+  ) => void;
+  openRecentFiles: (options?: { changedOnly?: boolean }) => void;
+  recentChangedOnly: boolean;
+  recordEditLocation: (ref: CodeWorkspaceFileRef, position: WorkspaceNavPosition) => void;
+  navigateLastEditLocation: () => void;
   pickRecentFile: (entry: RecentFileEntry) => void;
 }
 
@@ -107,6 +114,7 @@ export function useWorkspaceNavigation({
 }: UseWorkspaceNavigationOptions): WorkspaceNavigationController {
   const setSplitOrientation = useCodeWorkspaceStore((state) => state.setSplitOrientation);
   const [navCan, setNavCan] = useState({ back: false, forward: false });
+  const [recentChangedOnly, setRecentChangedOnly] = useState(false);
   const navHistoryRef = useRef<{
     stack: WorkspaceNavLocation[];
     index: number;
@@ -114,6 +122,8 @@ export function useWorkspaceNavigation({
     suppress: boolean;
   }>({ stack: [], index: -1, suppress: false });
   const recentFilesRef = useRef<CodeWorkspaceFileRef[]>([]);
+  const lastEditLocationRef = useRef<WorkspaceNavLocation | null>(null);
+  const changedFileKeysRef = useRef<Set<string>>(new Set());
   const caretByKeyRef = useRef<Record<string, WorkspaceNavPosition>>({});
   const previousActiveKeyRef = useRef<string | null>(null);
 
@@ -167,6 +177,27 @@ export function useWorkspaceNavigation({
     };
   }, []);
 
+  const recordEditLocation = useCallback(
+    (ref: CodeWorkspaceFileRef, position: WorkspaceNavPosition) => {
+      const key = fileKey(ref);
+      changedFileKeysRef.current.add(key);
+      lastEditLocationRef.current = {
+        ref,
+        line: Math.max(0, position.line),
+        character: Math.max(0, position.character),
+      };
+    },
+    [],
+  );
+
+  const navigateLastEditLocation = useCallback(() => {
+    const edit = lastEditLocationRef.current;
+    if (!edit) return;
+    const key = fileKey(edit.ref);
+    revealLocation(key, { line: edit.line, character: edit.character });
+    void openFile(edit.ref);
+  }, [openFile, revealLocation]);
+
   const recordNavigationLocation = useCallback((
     ref: CodeWorkspaceFileRef,
     position: WorkspaceNavPosition,
@@ -204,6 +235,69 @@ export function useWorkspaceNavigation({
   const suppressNextHistoryRecord = useCallback(() => {
     navHistoryRef.current.suppress = true;
   }, []);
+
+  const reconcileFileReferences = useCallback((
+    transform: (ref: CodeWorkspaceFileRef) => CodeWorkspaceFileRef | null,
+  ) => {
+    const nav = navHistoryRef.current;
+    const knownRefs = new Map<string, CodeWorkspaceFileRef>();
+    for (const entry of nav.stack) knownRefs.set(fileKey(entry.ref), entry.ref);
+    for (const ref of recentFilesRef.current) knownRefs.set(fileKey(ref), ref);
+    for (const file of Object.values(openFilesRef.current ?? {})) {
+      knownRefs.set(file.key, file.ref);
+    }
+
+    const nextStack: WorkspaceNavLocation[] = [];
+    let nextIndex = -1;
+    nav.stack.forEach((entry, index) => {
+      const ref = transform(entry.ref);
+      if (!ref) return;
+      nextStack.push({ ...entry, ref });
+      if (index <= nav.index) nextIndex = nextStack.length - 1;
+    });
+    nav.stack = nextStack;
+    nav.index = nextStack.length === 0 ? -1 : Math.max(0, Math.min(nextIndex, nextStack.length - 1));
+
+    const seenRecent = new Set<string>();
+    recentFilesRef.current = recentFilesRef.current.flatMap((ref) => {
+      const next = transform(ref);
+      if (!next) return [];
+      const key = fileKey(next);
+      if (seenRecent.has(key)) return [];
+      seenRecent.add(key);
+      return [next];
+    });
+
+    const nextCaret: Record<string, WorkspaceNavPosition> = {};
+    for (const [key, position] of Object.entries(caretByKeyRef.current)) {
+      const ref = knownRefs.get(key);
+      if (!ref) {
+        nextCaret[key] = position;
+        continue;
+      }
+      const next = transform(ref);
+      if (next) nextCaret[fileKey(next)] = position;
+    }
+    caretByKeyRef.current = nextCaret;
+    const previousRef = previousActiveKeyRef.current
+      ? knownRefs.get(previousActiveKeyRef.current)
+      : null;
+    if (previousRef) {
+      const next = transform(previousRef);
+      previousActiveKeyRef.current = next ? fileKey(next) : null;
+    }
+    setNavCan({
+      back: nav.index > 0,
+      forward: nav.index >= 0 && nav.index < nav.stack.length - 1,
+    });
+
+    if (lastEditLocationRef.current) {
+      const rewrittenEdit = transform(lastEditLocationRef.current.ref);
+      lastEditLocationRef.current = rewrittenEdit
+        ? { ...lastEditLocationRef.current, ref: rewrittenEdit }
+        : null;
+    }
+  }, [openFilesRef]);
 
   useEffect(() => {
     if (!activeKey) {
@@ -278,15 +372,24 @@ export function useWorkspaceNavigation({
     void openFile(entry.ref);
   }, [openFile, revealLocation]);
 
-  const openRecentFiles = useCallback(() => {
-    const entries: RecentFileEntry[] = recentFilesRef.current.map((ref) => {
+  const openRecentFiles = useCallback((options?: { changedOnly?: boolean }) => {
+    const changedOnly = !!options?.changedOnly;
+    setRecentChangedOnly(changedOnly);
+    let refs = recentFilesRef.current;
+    if (changedOnly) {
+      refs = refs.filter((ref) => {
+        const key = fileKey(ref);
+        const open = openFilesRef.current?.[key];
+        return (open && open.dirty) || changedFileKeysRef.current.has(key);
+      });
+    }
+    const entries: RecentFileEntry[] = refs.map((ref) => {
       const key = fileKey(ref);
       const open = openFilesRef.current?.[key];
       const meta = fileMeta(ref, rootsRef.current ?? [], looseFilesRef.current ?? []);
       return {
         key,
         ref,
-        // Open buffers carry their own labels; library sources have no path to derive them from.
         title: open?.title || meta.title,
         subtitle: open?.subtitle || meta.subtitle,
         open: !!open,
@@ -325,7 +428,11 @@ export function useWorkspaceNavigation({
     recordNavigationLocation,
     suppressNextHistoryRecord,
     noteCaretPosition,
+    reconcileFileReferences,
     openRecentFiles,
+    recentChangedOnly,
+    recordEditLocation,
+    navigateLastEditLocation,
     pickRecentFile,
   };
 }

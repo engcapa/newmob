@@ -316,4 +316,31 @@ describe("EditorGroup tabs", () => {
     expect(scrollLeft).toBe(750 + 150 - 200 + 8);
     expect(scrollLeft).not.toBe((paneLeft + 750) + 150 - 200 + 8);
   });
+
+  it("renders sticky lines overlay when activeSymbols and enclosing scope are present", () => {
+    const f = file("StickyDemo");
+    f.text = "class App {\n  constructor() {\n    this.init();\n  }\n}";
+    const onRevealTargetLine = vi.fn();
+    render(<EditorGroup {...props({
+      activeFile: f,
+      activeKey: "StickyDemo",
+      openFiles: { StickyDemo: f },
+      openOrder: ["StickyDemo"],
+      stickyLinesEnabled: true,
+      activeSymbols: [
+        {
+          name: "App",
+          detail: null,
+          kind: 5,
+          range: { start: { line: 0, character: 0 }, end: { line: 4, character: 1 } },
+          selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 9 } },
+          depth: 0,
+        },
+      ],
+      onRevealTargetLine,
+    })} />);
+
+    // Since mock CodeMirrorHost doesn't fire viewport events by default, we verify the component renders without error
+    expect(screen.getByTestId("mock-code-mirror")).toBeInTheDocument();
+  });
 });

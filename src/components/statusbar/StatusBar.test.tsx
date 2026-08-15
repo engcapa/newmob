@@ -80,6 +80,7 @@ describe("StatusBar code-workspace segments", () => {
         column: 4,
         encoding: "UTF-8",
         eol: "LF",
+        indentation: "Spaces: 2",
         languageId: "typescript",
         lspActive: true,
         lspLabel: "typescript-language-server",
@@ -90,12 +91,13 @@ describe("StatusBar code-workspace segments", () => {
         fontSize: 14,
         largeFile: false,
       },
-      actions: { openLanguagePanel, openGitManager },
+      actions: { openLanguagePanel, openGitManager, cycleIndentation: vi.fn() },
     });
 
     render(<StatusBar />);
 
     expect(screen.getByTestId("status-bar-workspace-cursor")).toHaveTextContent("Ln 12, Col 4");
+    expect(screen.getByTestId("status-bar-workspace-indentation")).toHaveTextContent("Spaces: 2");
     expect(screen.getByTestId("status-bar-workspace-encoding")).toHaveTextContent("UTF-8");
     expect(screen.getByTestId("status-bar-workspace-eol")).toHaveTextContent("LF");
     expect(screen.getByTestId("status-bar-workspace-language")).toHaveTextContent("typescript");
@@ -139,6 +141,38 @@ describe("StatusBar code-workspace segments", () => {
 
     render(<StatusBar />);
     expect(screen.getByTestId("status-bar-workspace-large-file")).toBeInTheDocument();
+  });
+
+  it("exposes encoding and line-ending actions when the editor provides them", () => {
+    const cycleEol = vi.fn();
+    const toggleBom = vi.fn();
+    const chooseEncoding = vi.fn();
+    useCodeWorkspaceStatusStore.setState({
+      status: {
+        tabId: "ws-tab",
+        line: 1,
+        column: 1,
+        encoding: "UTF-8",
+        eol: "LF",
+        languageId: null,
+        lspActive: false,
+        lspLabel: null,
+        lspError: false,
+        gitBranch: null,
+        gitAhead: 0,
+        gitBehind: 0,
+        fontSize: 14,
+        largeFile: false,
+      },
+      actions: { cycleEol, toggleBom, chooseEncoding },
+    });
+
+    render(<StatusBar />);
+    fireEvent.click(screen.getByTestId("status-bar-workspace-encoding"));
+    fireEvent.click(screen.getByTestId("status-bar-workspace-eol"));
+    expect(chooseEncoding).toHaveBeenCalledOnce();
+    expect(toggleBom).not.toHaveBeenCalled();
+    expect(cycleEol).toHaveBeenCalledOnce();
   });
 });
 

@@ -118,4 +118,72 @@ describe("ProblemsPanel", () => {
     );
     expect(screen.getByText("Loading project problems…")).toBeInTheDocument();
   });
+
+  it("uses profile values for display while preserving provider diagnostics for callbacks", () => {
+    const original = files[0].diagnostics[0];
+    const onOpenProblem = vi.fn();
+    const onQuickFix = vi.fn();
+    const onOpenRelatedInformation = vi.fn();
+    const providerDiagnostic = {
+      ...original,
+      relatedInformation: [{
+        location: {
+          uri: "file:///repo/src/other.ts",
+          path: "/repo/src/other.ts",
+          range: original.range,
+        },
+        message: "Related source",
+      }],
+    };
+    render(
+      <ProblemsPanel
+        files={[{
+          ...files[0],
+          diagnostics: [providerDiagnostic],
+        }]}
+        onOpenProblem={onOpenProblem}
+        onQuickFix={onQuickFix}
+        onOpenRelatedInformation={onOpenRelatedInformation}
+        diagnosticTransform={(diagnostic) => ({ ...diagnostic, severity: 2 })}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /Show warning diagnostics/ })).toHaveTextContent("1");
+    const problem = screen.getByRole("button", { name: /Broken expression/ });
+    fireEvent.click(problem);
+    expect(onOpenProblem).toHaveBeenCalledWith(files[0].key, providerDiagnostic);
+
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Quick Fix" }));
+    expect(onQuickFix).toHaveBeenCalledWith(files[0].key, providerDiagnostic);
+
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: /Show related locations/ }));
+    expect(onOpenRelatedInformation).toHaveBeenCalledWith(providerDiagnostic);
+  });
+
+  it("exposes file/line suppression and baseline actions with the original provider diagnostic", () => {
+    const onSuppress = vi.fn();
+    const onAddToBaseline = vi.fn();
+    render(
+      <ProblemsPanel
+        files={[{ ...files[0], path: "root:app:src/a.ts" }]}
+        onOpenProblem={vi.fn()}
+        onSuppress={onSuppress}
+        onAddToBaseline={onAddToBaseline}
+      />,
+    );
+    const problem = screen.getByRole("button", { name: /Broken expression/ });
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Suppress for line" }));
+    expect(onSuppress).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0], "line");
+
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Suppress for file" }));
+    expect(onSuppress).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0], "file");
+
+    fireEvent.contextMenu(problem, { clientX: 12, clientY: 18 });
+    fireEvent.click(screen.getByRole("button", { name: "Add to inspection baseline" }));
+    expect(onAddToBaseline).toHaveBeenCalledWith(files[0].key, files[0].diagnostics[0]);
+  });
 });
