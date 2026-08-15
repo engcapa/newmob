@@ -3902,4 +3902,138 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(disk.get("src/main.ts")).toBe("const answer = 42;"));
     expect(disk.get("src/use.ts")).toBe("use(answer);");
   });
+
+  it("navigates diagnostics with F2 / Shift+F2 and executes parameter info, quick definition, and optimize imports commands", async () => {
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-parity",
+      workspaceInstanceId: "instance-parity",
+      name: "Parity commands",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/Program.cs",
+      "using System;\nclass Program { static void Main() {} }\n",
+    ));
+    lspMocks.lspDetectServers.mockResolvedValue([csharpStatus({ available: true, active: true })]);
+    const activeStatus = documentStatus({
+      available: true,
+      active: true,
+      selectedCommand: "csharp-ls",
+      capabilities: {
+        codeAction: true,
+        definition: true,
+        typeDefinition: true,
+        implementation: true,
+        signatureHelp: true,
+      },
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspSaveDocument.mockResolvedValue(activeStatus);
+    lspMocks.lspGetDiagnostics.mockResolvedValue({
+      status: activeStatus,
+      diagnostics: [
+        {
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 12 } },
+          severity: 2,
+          message: "Unnecessary using directive",
+        },
+        {
+          range: { start: { line: 1, character: 6 }, end: { line: 1, character: 13 } },
+          severity: 1,
+          message: "Type error on Program",
+        },
+        {
+          range: { start: { line: 2, character: 0 }, end: { line: 2, character: 5 } },
+          severity: 1,
+          message: "Missing return statement",
+        },
+      ],
+    });
+    lspMocks.lspDefinition.mockResolvedValue({
+      status: activeStatus,
+      locations: [{
+        uri: "file:///repo/app/src/Lib.cs",
+        path: "/repo/app/src/Lib.cs",
+        range: { start: { line: 10, character: 0 }, end: { line: 10, character: 10 } },
+      }],
+    });
+    lspMocks.lspSignatureHelp.mockResolvedValue({
+      status: activeStatus,
+      signatures: [{
+        label: "Main(): void",
+        parameters: [],
+      }],
+      activeSignature: 0,
+      activeParameter: 0,
+    });
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: activeStatus,
+      actions: [{
+        title: "Organize Imports",
+        kind: "source.organizeImports",
+        edit: {
+          changes: {
+            "file:///repo/app/src/Program.cs": [
+              { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 13 } }, newText: "" },
+            ],
+          },
+        },
+      }],
+    });
+
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+    await waitFor(() => expect(lspMocks.lspGetDiagnostics).toHaveBeenCalled(), { timeout: 3_000 });
+
+    // 1. F2 Next error & Shift+F2 Prev error (wrapping)
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.nextError")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.nextError");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Error: Type error on Program");
+
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.prevError")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.prevError");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Error: Missing return statement");
+
+    // 2. Ctrl+P Parameter Info
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.parameterInfo")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.parameterInfo");
+    });
+    await waitFor(() => expect(lspMocks.lspSignatureHelp).toHaveBeenCalled());
+
+    // 3. Ctrl+Shift+I Quick Definition Peek
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.quickDefinition")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.quickDefinition");
+    });
+    await waitFor(() => expect(lspMocks.lspDefinition).toHaveBeenCalled());
+
+    // 4. Ctrl+Alt+O Optimize Imports
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.optimizeImports")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.optimizeImports");
+    });
+    await waitFor(() => expect(lspMocks.lspCodeActions).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      ["source.organizeImports"],
+    ));
+    expect(useAppStore.getState().statusMessage).toBe("Imports organized");
+  });
 });

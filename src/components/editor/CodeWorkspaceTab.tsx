@@ -1241,8 +1241,11 @@ export function CodeWorkspaceTab({
     throw new Error("Workspace resource history is not ready");
   });
   const replayWorkspaceEncodingRef = useRef<Map<string, { encoding: string; bom: boolean }> | null>(null);
+  const goToDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
+  const peekDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToTypeDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToImplementationRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
+  const getLspSignatureHelpRef = useRef<(file: OpenFileState, position: LspPosition, triggerCharacter?: string | null) => Promise<LspSignatureHelpResult | null>>(async () => null);
   const renameSymbolRef = useRef<() => Promise<void>>(async () => {});
   const safeDeleteSymbolRef = useRef<() => Promise<void>>(async () => {});
   // Hover enriches the AI prompt with type information. The LSP hover callback
@@ -6166,6 +6169,82 @@ export function CodeWorkspaceTab({
     setBookmarks(next);
   }, [bookmarks, workspaceInstanceId]);
 
+  const navigateDiagnostic = useCallback((direction: 1 | -1) => {
+    const file = activeFile;
+    if (!file) return;
+    const diags = (lspFilesRef.current[file.key]?.diagnostics ?? []).slice().sort((a, b) => {
+      if (a.range.start.line !== b.range.start.line) {
+        return a.range.start.line - b.range.start.line;
+      }
+      return a.range.start.character - b.range.start.character;
+    });
+    if (diags.length === 0) {
+      setStatusMessage("No errors or warnings in current file");
+      return;
+    }
+
+    const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
+    const currentLine = cursor.line + 1;
+    const currentColumn = cursor.character + 1;
+
+    let targetIndex = -1;
+    if (direction === 1) {
+      targetIndex = diags.findIndex(
+        (d) =>
+          d.range.start.line + 1 > currentLine ||
+          (d.range.start.line + 1 === currentLine && d.range.start.character + 1 > currentColumn),
+      );
+      if (targetIndex === -1) {
+        targetIndex = 0;
+      }
+    } else {
+      for (let i = diags.length - 1; i >= 0; i--) {
+        const d = diags[i];
+        if (
+          d.range.start.line + 1 < currentLine ||
+          (d.range.start.line + 1 === currentLine && d.range.start.character + 1 < currentColumn)
+        ) {
+          targetIndex = i;
+          break;
+        }
+      }
+      if (targetIndex === -1) {
+        targetIndex = diags.length - 1;
+      }
+    }
+
+    const target = diags[targetIndex];
+    if (target) {
+      void openFile(file.ref, {
+        location: {
+          line: target.range.start.line + 1,
+          column: target.range.start.character + 1,
+        },
+      });
+      setStatusMessage(`${target.severity === 1 ? "Error" : "Warning"}: ${target.message}`);
+    }
+  }, [activeEditorGroupId, activeFile, cursorPositions, openFile, setStatusMessage]);
+
+  const optimizeImports = useCallback(async () => {
+    const file = activeFile;
+    if (!file) return;
+    const wholeFileRange: LspRange = {
+      start: { line: 0, character: 0 },
+      end: { line: file.text.split("\n").length, character: 0 },
+    };
+    const { actions, semanticToken } = await requestCodeActions(
+      file,
+      wholeFileRange,
+      [],
+      ["source.organizeImports"],
+    );
+    if (!actions.length) {
+      setStatusMessage("No import optimization available from language server");
+      return;
+    }
+    await runCodeAction(actions[0], file, semanticToken);
+    setStatusMessage("Imports organized");
+  }, [activeFile, requestCodeActions, runCodeAction, setStatusMessage]);
 
   const workspaceCommands = useMemo<WorkspaceCommand[]>(() => [
     {
@@ -6173,7 +6252,6 @@ export function CodeWorkspaceTab({
       title: "Go to File",
       category: "Navigation",
       keybinding: "Ctrl+Shift+N",
-      keybindings: ["Ctrl+P"],
       keywords: ["search everywhere", "file", "open"],
       run: () => openSearchEverywhere("files"),
     },
@@ -6233,6 +6311,64 @@ export function CodeWorkspaceTab({
       run: () => {
         navigateLastEditLocation();
       },
+    },
+    {
+      id: "workspace.nextError",
+      title: "Next Highlighted Error / Warning",
+      category: "Navigation",
+      keybinding: "F2",
+      keywords: ["error", "warning", "diagnostic", "problem", "next"],
+      when: (context) => context.focus !== "tree" && !!activeFile,
+      run: () => navigateDiagnostic(1),
+    },
+    {
+      id: "workspace.prevError",
+      title: "Previous Highlighted Error / Warning",
+      category: "Navigation",
+      keybinding: "Shift+F2",
+      keywords: ["error", "warning", "diagnostic", "problem", "previous"],
+      when: (context) => context.focus !== "tree" && !!activeFile,
+      run: () => navigateDiagnostic(-1),
+    },
+    {
+      id: "workspace.quickDefinition",
+      title: "Quick Definition",
+      category: "Navigation",
+      keybinding: "Ctrl+Shift+I",
+      keybindings: ["Mod-Shift-I"],
+      keywords: ["peek definition", "implementation", "quick"],
+      when: () => !!activeFile,
+      run: () => {
+        const file = activeFile;
+        if (!file) return;
+        const pos = editorSelectionRef.current.end;
+        void peekDefinitionRef.current(file, { line: pos.line, character: pos.character });
+      },
+    },
+    {
+      id: "workspace.parameterInfo",
+      title: "Parameter Info",
+      category: "Code",
+      keybinding: "Ctrl+P",
+      keybindings: ["Mod-P"],
+      keywords: ["signature", "parameters", "arguments"],
+      when: () => !!activeFile,
+      run: () => {
+        const file = activeFile;
+        if (!file) return;
+        const pos = editorSelectionRef.current.end;
+        void getLspSignatureHelpRef.current(file, { line: pos.line, character: pos.character });
+      },
+    },
+    {
+      id: "workspace.optimizeImports",
+      title: "Optimize Imports",
+      category: "Code",
+      keybinding: "Ctrl+Alt+O",
+      keybindings: ["Mod-Alt-O"],
+      keywords: ["organize imports", "clean imports", "sort imports"],
+      when: () => !!activeFile,
+      run: () => void optimizeImports(),
     },
     {
       id: "workspace.navigateBack",
@@ -6880,6 +7016,8 @@ export function CodeWorkspaceTab({
     toggleProjectTree,
     toggleOutlinePane,
     toggleTodosPane,
+    navigateDiagnostic,
+    optimizeImports,
     undoWorkspaceEdit,
     redoWorkspaceEdit,
     workspaceEditHistoryState,
@@ -7089,6 +7227,27 @@ export function CodeWorkspaceTab({
     [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
 
+  const peekDefinition = useCallback(
+    async (file: OpenFileState, position: LspPosition) => {
+      const descriptor = lspDescriptorForFile(file);
+      if (!descriptor) return false;
+      try {
+        const result = await lspDefinition(descriptor, position);
+        updateLspStatusForFile(file, result.status);
+        if (!result.locations.length) {
+          setStatusMessage("No definition found");
+          return false;
+        }
+        setLocationPeek({ title: "Quick Definition", locations: result.locations });
+        return true;
+      } catch (err) {
+        setStatusMessage(errorMessage(err));
+        return false;
+      }
+    },
+    [lspDescriptorForFile, setLocationPeek, setStatusMessage, updateLspStatusForFile],
+  );
+
   const goToTypeDefinition = useCallback(
     async (file: OpenFileState, position: LspPosition) => {
       const descriptor = lspDescriptorForFile(file);
@@ -7132,8 +7291,11 @@ export function CodeWorkspaceTab({
     },
     [lspDescriptorForFile, navigateLocations, recordNavigationLocation, setStatusMessage, updateLspStatusForFile],
   );
+  goToDefinitionRef.current = goToDefinition;
+  peekDefinitionRef.current = peekDefinition;
   goToTypeDefinitionRef.current = goToTypeDefinition;
   goToImplementationRef.current = goToImplementation;
+  getLspSignatureHelpRef.current = getLspSignatureHelp;
 
   const renameSymbolAtCursor = useCallback(async () => {
     const file = activeFile;

@@ -744,6 +744,8 @@ export function CodeMirrorHost({
           { key: "Mod-s", run: saveHandler },
           { key: "Mod-r", run: openReplacePanel },
           { key: "Escape", run: () => hideSignature() },
+          { key: "Mod-p", run: (view) => requestSignatureHelp(view, null) },
+          { key: "Ctrl-p", run: (view) => requestSignatureHelp(view, null) },
           { key: "Mod-Shift-Space", run: (view) => requestSignatureHelp(view, null) },
           { key: "Mod-w", run: expandSemanticSelection },
           ...workspaceEditorKeymap,
