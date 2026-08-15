@@ -16,6 +16,12 @@ export interface RunConfigurationOverride {
   envFile?: string;
   /** Null means inherit the provider-discovered Before launch targets. */
   preLaunchTargets?: string[] | null;
+  /** IntelliJ-style temporary run configuration. */
+  isTemporary?: boolean;
+  /** Active build profiles (e.g. Maven -P or Spring profiles). */
+  activeProfiles?: string[];
+  /** Build / System properties (-Dkey=value). */
+  properties?: Record<string, string>;
 }
 
 export type RunConfigurationOverrides = Record<string, RunConfigurationOverride>;
@@ -188,6 +194,9 @@ function normalizeOverride(value: unknown): RunConfigurationOverride | null {
     env?: unknown;
     envFile?: unknown;
     preLaunchTargets?: unknown;
+    isTemporary?: unknown;
+    activeProfiles?: unknown;
+    properties?: unknown;
   };
   const args = Array.isArray(candidate.args)
     ? candidate.args.filter((item): item is string => typeof item === "string")
@@ -207,6 +216,16 @@ function normalizeOverride(value: unknown): RunConfigurationOverride | null {
     : Array.isArray(candidate.preLaunchTargets)
       ? candidate.preLaunchTargets.filter((item): item is string => typeof item === "string")
       : null;
+  const isTemporary = candidate.isTemporary === true;
+  const activeProfiles = Array.isArray(candidate.activeProfiles)
+    ? candidate.activeProfiles.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : undefined;
+  const properties: Record<string, string> = {};
+  if (candidate.properties && typeof candidate.properties === "object" && !Array.isArray(candidate.properties)) {
+    for (const [name, item] of Object.entries(candidate.properties)) {
+      if (typeof item === "string" && name.trim()) properties[name.trim()] = item;
+    }
+  }
   return {
     name: typeof candidate.name === "string" ? candidate.name.trim() : "",
     baseConfigurationId: typeof candidate.baseConfigurationId === "string"
@@ -218,6 +237,9 @@ function normalizeOverride(value: unknown): RunConfigurationOverride | null {
     env,
     envFile: typeof candidate.envFile === "string" ? candidate.envFile.trim() : undefined,
     preLaunchTargets,
+    isTemporary: isTemporary || undefined,
+    activeProfiles: activeProfiles && activeProfiles.length > 0 ? activeProfiles : undefined,
+    properties: Object.keys(properties).length > 0 ? properties : undefined,
   };
 }
 
@@ -320,25 +342,55 @@ function runtimeCommand(
   };
 }
 
+function extraProfileAndPropertyArgs(
+  configuration: ExecutionRunConfiguration,
+  override: RunConfigurationOverride | undefined,
+): string[] {
+  if (!override) return [];
+  const extra: string[] = [];
+  const executableName = configuration.command.executable.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const isMaven = /^(mvn|mvnw|mvn\.cmd|mvnw\.cmd|mvn\.bat|mvnw\.bat)$/.test(executableName) || configuration.argumentStrategy === "maven-exec";
+
+  if (override.activeProfiles && override.activeProfiles.length > 0) {
+    const profileList = override.activeProfiles.join(",");
+    if (isMaven) {
+      extra.push("-P", profileList);
+    } else {
+      extra.push(`-Dspring.profiles.active=${profileList}`);
+    }
+  }
+
+  if (override.properties) {
+    for (const [key, value] of Object.entries(override.properties)) {
+      if (key) extra.push(`-D${key}=${value}`);
+    }
+  }
+
+  return extra;
+}
+
 function configuredProgramArguments(
   configuration: ExecutionRunConfiguration,
-  args: readonly string[],
+  override: RunConfigurationOverride | undefined,
 ): string[] {
+  const extra = extraProfileAndPropertyArgs(configuration, override);
+  const userArgs = override?.args ?? [];
+
   if (configuration.argumentStrategy === "maven-exec") {
     const withoutExisting = configuration.command.args.filter((value) => !value.startsWith("-Dexec.args="));
-    return args.length === 0
-      ? withoutExisting
-      : [...withoutExisting, `-Dexec.args=${args.map(quoteArgument).join(" ")}`];
+    const execArgs = userArgs.length > 0 ? [`-Dexec.args=${userArgs.map(quoteArgument).join(" ")}`] : [];
+    return [...extra, ...withoutExisting, ...execArgs];
   }
   if (configuration.argumentStrategy === "gradle-javaexec") {
     const separator = configuration.command.args.indexOf("--args");
     const base = separator >= 0
       ? configuration.command.args.slice(0, separator)
       : [...configuration.command.args];
-    return args.length === 0 ? base : [...base, "--args", args.map(quoteArgument).join(" ")];
+    const execArgs = userArgs.length > 0 ? ["--args", userArgs.map(quoteArgument).join(" ")] : [];
+    return [...extra, ...base, ...execArgs];
   }
-  if (args.length === 0) return [...configuration.command.args];
-  return [...configuration.command.args, ...args];
+  if (userArgs.length === 0 && extra.length === 0) return [...configuration.command.args];
+  return [...extra, ...configuration.command.args, ...userArgs];
 }
 
 export function applyRunConfigurationOverride(
@@ -358,7 +410,7 @@ export function applyRunConfigurationOverride(
     }
     return { ...configuration, command: runtimeApplied, environmentModes };
   }
-  const args = configuredProgramArguments({ ...configuration, command: runtimeApplied }, override.args);
+  const args = configuredProgramArguments({ ...configuration, command: runtimeApplied }, override);
   const executable = runtimeApplied.executable;
   const executableName = executable.split(/[\\/]/).pop()?.toLowerCase() ?? "";
   const environmentModes = { ...configuration.environmentModes };
@@ -516,6 +568,8 @@ export function createNamedRunConfiguration(
     env: { ...(source?.env ?? {}) },
     envFile: source?.envFile ?? base.envFile ?? "",
     preLaunchTargets: [...(source?.preLaunchTargets ?? base.preLaunchTargets)],
+    activeProfiles: source?.activeProfiles ? [...source.activeProfiles] : undefined,
+    properties: source?.properties ? { ...source.properties } : undefined,
   }, scopeId);
   return id;
 }

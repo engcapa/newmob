@@ -373,4 +373,41 @@ describe("run configuration persistence", () => {
     expect(readActiveRunConfigurationSelection("workspace-a", "C:/repo/src/Main.java"))
       .toBeNull();
   });
+
+  it("applies active profiles and system properties overrides", () => {
+    const mavenRun: ExecutionRunConfiguration = {
+      id: "run:mvn",
+      projectId: "project:mvn",
+      label: "Run Maven",
+      kind: "exec",
+      command: {
+        executable: "mvn",
+        args: ["spring-boot:run"],
+        cwd: "/repo",
+        env: {},
+        display: "mvn spring-boot:run",
+        source: "path",
+      },
+      argumentStrategy: "maven-exec",
+      preLaunchTargets: [],
+    };
+
+    const override = {
+      args: [],
+      cwd: "/repo",
+      env: {},
+      isTemporary: true,
+      activeProfiles: ["dev", "local"],
+      properties: { "server.port": "8080" },
+    };
+
+    const applied = applyRunConfigurationOverride(mavenRun, override);
+    expect(applied.command.args).toEqual(["-P", "dev,local", "-Dserver.port=8080", "spring-boot:run"]);
+
+    writeRunConfigurationOverride("workspace-a", mavenRun.id, override);
+    const stored = readRunConfigurationOverrides("workspace-a")[mavenRun.id];
+    expect(stored.isTemporary).toBe(true);
+    expect(stored.activeProfiles).toEqual(["dev", "local"]);
+    expect(stored.properties).toEqual({ "server.port": "8080" });
+  });
 });

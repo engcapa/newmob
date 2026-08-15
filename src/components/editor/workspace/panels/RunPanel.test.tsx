@@ -238,6 +238,8 @@ describe("RunPanel", () => {
     fireEvent.click(await screen.findByLabelText("Edit run configuration Run app"));
     fireEvent.change(screen.getByTestId("run-configuration-name"), { target: { value: "Local app" } });
     fireEvent.change(screen.getByTestId("run-configuration-vm-options"), { target: { value: "-Xmx1g" } });
+    fireEvent.change(screen.getByTestId("run-configuration-profiles"), { target: { value: "dev, local" } });
+    fireEvent.change(screen.getByTestId("run-configuration-properties"), { target: { value: "server.port=8080" } });
     fireEvent.change(screen.getByTestId("run-configuration-args"), { target: { value: "--verbose" } });
     fireEvent.change(screen.getByTestId("run-configuration-env-file"), { target: { value: ".env" } });
     fireEvent.change(screen.getByTestId("run-configuration-env"), { target: { value: "MODE=explicit" } });
@@ -248,11 +250,15 @@ describe("RunPanel", () => {
     fireEvent.click(screen.getByLabelText("Copy run configuration Local app"));
     expect(await screen.findByDisplayValue("Local app copy")).toBeInTheDocument();
     expect(screen.getByTestId("run-configuration-vm-options")).toHaveValue("-Xmx1g");
+    expect(screen.getByTestId("run-configuration-profiles")).toHaveValue("dev, local");
+    expect(screen.getByTestId("run-configuration-properties")).toHaveValue("server.port=8080");
     expect(screen.getByTestId("run-configuration-env-file")).toHaveValue(".env");
 
     const named = readRunConfigurationOverrides("ws", "app");
     const copyId = Object.keys(named).find((id) => id.includes(":user:"));
     expect(copyId).toBeTruthy();
+    expect(named[copyId!].activeProfiles).toEqual(["dev", "local"]);
+    expect(named[copyId!].properties).toEqual({ "server.port": "8080" });
     writeActiveRunConfigurationSelection("ws", "/repo/app/src/main.rs", copyId!);
     fireEvent.click(screen.getByTestId("run-configuration-delete"));
     await waitFor(() => expect(screen.queryByDisplayValue("Local app copy")).not.toBeInTheDocument());

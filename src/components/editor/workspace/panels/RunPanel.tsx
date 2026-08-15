@@ -174,6 +174,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
     env: "",
     envFile: "",
     preLaunchTargets: "",
+    activeProfiles: "",
+    properties: "",
   });
   const [buildTargetsByRoot, setBuildTargetsByRoot] = useState<Record<string, ExecutionBuildTarget[]>>({});
   const [executionDiagnostics, setExecutionDiagnostics] = useState<Record<string, string[]>>({});
@@ -189,6 +191,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
       env: formatEnvironmentLines(override?.env ?? {}),
       envFile: override?.envFile ?? task.runConfiguration?.envFile ?? "",
       preLaunchTargets: (override?.preLaunchTargets ?? task.runConfiguration?.preLaunchTargets ?? []).join("\n"),
+      activeProfiles: (override?.activeProfiles ?? []).join(", "),
+      properties: Object.entries(override?.properties ?? {}).map(([k, v]) => `${k}=${v}`).join("\n"),
     });
   }, [workspaceInstanceId]);
 
@@ -549,6 +553,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                 env: formatEnvironmentLines(copy?.env ?? {}),
                 envFile: copy?.envFile ?? "",
                 preLaunchTargets: (copy?.preLaunchTargets ?? base.preLaunchTargets).join("\n"),
+                activeProfiles: (copy?.activeProfiles ?? []).join(", "),
+                properties: Object.entries(copy?.properties ?? {}).map(([k, v]) => `${k}=${v}`).join("\n"),
               });
               void refresh();
             }}
@@ -741,6 +747,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                           env: "",
                           envFile: defaults?.envFile ?? "",
                           preLaunchTargets: defaults?.preLaunchTargets.join("\n") ?? "",
+                          activeProfiles: "",
+                          properties: "",
                         });
                         void refresh();
                       }}
@@ -759,6 +767,19 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                         workspaceInstanceId,
                         configuration.rootId,
                       )[configuration.id];
+                      const profiles = configurationDraft.activeProfiles
+                        .split(/[,;\s]+/)
+                        .map((value) => value.trim())
+                        .filter(Boolean);
+                      const properties: Record<string, string> = {};
+                      for (const line of configurationDraft.properties.split(/\r?\n/)) {
+                        const idx = line.indexOf("=");
+                        if (idx > 0) {
+                          const k = line.slice(0, idx).trim();
+                          const v = line.slice(idx + 1).trim();
+                          if (k) properties[k] = v;
+                        }
+                      }
                       writeRunConfigurationOverride(workspaceInstanceId, configuration.id, {
                         name: configurationDraft.name,
                         baseConfigurationId: existing?.baseConfigurationId ?? "",
@@ -771,6 +792,8 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                           .split(/\r?\n/)
                           .map((value) => value.trim())
                           .filter(Boolean),
+                        activeProfiles: profiles.length > 0 ? profiles : undefined,
+                        properties: Object.keys(properties).length > 0 ? properties : undefined,
                       }, configuration.rootId);
                       void refresh();
                     }}
@@ -785,6 +808,16 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                     value={configurationDraft.name}
                     onChange={(event) => setConfigurationDraft((current) => ({ ...current, name: event.target.value }))}
                     className="h-6 w-full rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-0.5 block text-[10px] text-[var(--taomni-code-muted)]">Active profiles (Maven -P / Spring)</span>
+                  <input
+                    data-testid="run-configuration-profiles"
+                    value={configurationDraft.activeProfiles}
+                    placeholder="e.g. dev, test"
+                    onChange={(event) => setConfigurationDraft((current) => ({ ...current, activeProfiles: event.target.value }))}
+                    className="h-6 w-full rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5 font-mono"
                   />
                 </label>
                 <label className="block">
@@ -803,6 +836,17 @@ export const RunPanel = forwardRef<RunPanelHandle, RunPanelProps>(function RunPa
                     data-testid="run-configuration-vm-options"
                     value={configurationDraft.vmOptions}
                     onChange={(event) => setConfigurationDraft((current) => ({ ...current, vmOptions: event.target.value }))}
+                    rows={2}
+                    className="w-full resize-y rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5 py-1 font-mono"
+                  />
+                </label>
+                <label className="block">
+                  <span className="mb-0.5 block text-[10px] text-[var(--taomni-code-muted)]">Build / system properties (-Dkey=value)</span>
+                  <textarea
+                    data-testid="run-configuration-properties"
+                    value={configurationDraft.properties}
+                    placeholder="key=value"
+                    onChange={(event) => setConfigurationDraft((current) => ({ ...current, properties: event.target.value }))}
                     rows={2}
                     className="w-full resize-y rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1.5 py-1 font-mono"
                   />
