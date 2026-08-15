@@ -2,9 +2,9 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-15 · 版本：v4.23（project model baseline）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮在结构化执行模型中增加稳定 project→module identity、production/test/generated source set、manifest 声明语言级别和 build target→compile artifact 关系。artifact 输出路径在真实 provider 回填前保持空值，工具不可用时标为 `blocked`，不按约定目录猜测成功产物。当前只建立“一份 manifest 对应一个 module”的基础拓扑，尚无 Maven/Gradle 多模块导入、profile/source-set override、依赖图、真实 build output 回填或 Run/Debug module/artifact 绑定；PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-15 · 版本：v4.24（IDEA editor parity & multi-module execution graph）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮交付编辑器核心能力（`Ctrl+Shift+Enter` 完整语句补全、`Alt+J`/`Shift+Alt+J` 多光标发生项增删、Git Gutter 行内 chunk 回滚）、导航增强（`Ctrl+Shift+E` 最近修改文件弹窗、`Ctrl+Shift+Backspace` 最后编辑位置跳转）、以及后端 Maven/Gradle 多模块父子与项目依赖拓扑解析和已构建产物路径回填（`resolved` compile artifacts）。PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
-> 早期版本：v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
+> 早期版本：v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
