@@ -9003,6 +9003,14 @@ export function CodeWorkspaceTab({
         ? { ...launch, mainClass: main.mainClass, projectName: main.projectName }
         : launch;
       const configured = applyRunOverrideToJavaLaunch(config, override, environment, runtimeOptions);
+      if (buildRunTools.stepFilters?.enabled) {
+        configured.stepFilters = {
+          classNameFilters: buildRunTools.stepFilters.patterns,
+          skipSynthetics: buildRunTools.stepFilters.skipSynthetics,
+          skipStaticInitializers: buildRunTools.stepFilters.skipStaticInitializers,
+          skipConstructors: buildRunTools.stepFilters.skipConstructors,
+        };
+      }
       if (main) {
         // Resolving the classpath + asking java-debug for a port is another
         // multi-second server round trip: name the target so the panel is not
@@ -9011,7 +9019,7 @@ export function CodeWorkspaceTab({
       }
       void debug.startDebug(configured).catch((err) => setStatusMessage(errorMessage(err)));
     },
-    [activeRunConfiguration, activeRunConfigurationOverride, debug, setStatusMessage],
+    [activeRunConfiguration, activeRunConfigurationOverride, buildRunTools.stepFilters, debug, setStatusMessage],
   );
 
   /** Build a Java launch config for the active file and start debugging. */
