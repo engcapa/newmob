@@ -2,7 +2,13 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { describe, expect, it } from "vitest";
 import type { GitBlameLine } from "../../../lib/git";
-import { blameLabel, buildGitLineChanges, createGitEditorChrome, formatBlameAge } from "./gitEditorChrome";
+import {
+  blameLabel,
+  buildGitLineChanges,
+  createGitEditorChrome,
+  formatBlameAge,
+  rollbackGitLineChange,
+} from "./gitEditorChrome";
 
 describe("gitEditorChrome", () => {
   it("builds added, modified, and deleted line hunks against HEAD", () => {
@@ -53,5 +59,24 @@ describe("gitEditorChrome", () => {
       authorTime: 0,
       summary: "draft",
     })).toBe("Uncommitted change");
+  });
+
+  it("reverts added, deleted, and modified diff chunks with rollbackGitLineChange", () => {
+    const headDoc = "line1\noriginal line 2\noriginal line 3\nline4";
+    const modifiedDoc = "line1\nMODIFIED LINE 2\nline4";
+    const changes = buildGitLineChanges(headDoc, modifiedDoc);
+    expect(changes).toHaveLength(1);
+    expect(changes[0].kind).toBe("modified");
+
+    const restoredDoc = rollbackGitLineChange(modifiedDoc, changes[0]);
+    expect(restoredDoc).toBe(headDoc);
+
+    const addedDoc = "line1\nline2\nnew line 3\nline4";
+    const addedChange = buildGitLineChanges("line1\nline2\nline4", addedDoc)[0];
+    expect(rollbackGitLineChange(addedDoc, addedChange)).toBe("line1\nline2\nline4");
+
+    const deletedDoc = "line1\nline4";
+    const deletedChange = buildGitLineChanges("line1\nline2\nline3\nline4", deletedDoc)[0];
+    expect(rollbackGitLineChange(deletedDoc, deletedChange)).toBe("line1\nline2\nline3\nline4");
   });
 });

@@ -45,6 +45,7 @@ import { useContextMenu } from "../../ContextMenu";
 import type { EditorGroupId } from "../../../stores/codeWorkspaceStore";
 import type { GitBlameLine } from "../../../lib/git";
 import type { GitLineChange } from "./gitEditorChrome";
+import { rollbackGitLineChange } from "./gitEditorChrome";
 import type { DebugBreakpointMarker } from "./debugEditorChrome";
 import type { DebugStepAction } from "./dapDebugModel";
 import { GitDiffPeek } from "./GitDiffPeek";
@@ -528,7 +529,17 @@ export function EditorGroup({
                 </div>
               )}
               <div data-testid="code-workspace-editor" className="relative flex-1 min-h-0">
-                {gitDiffPeek && <GitDiffPeek change={gitDiffPeek} onClose={() => setGitDiffPeek(null)} />}
+                {gitDiffPeek && (
+                  <GitDiffPeek
+                    change={gitDiffPeek}
+                    onClose={() => setGitDiffPeek(null)}
+                    onRollback={(change) => {
+                      const newDoc = rollbackGitLineChange(activeFile.text, change);
+                      if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
+                      onChangeText(activeFile.key, newDoc);
+                    }}
+                  />
+                )}
                 {activeFile.loading ? (
                   <div className="h-full flex items-center justify-center text-[12px] text-[var(--taomni-code-muted)]">
                     <Loader2 className="w-4 h-4 animate-spin" />
