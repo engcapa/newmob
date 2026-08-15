@@ -204,4 +204,39 @@ describe("SearchEverywhere", () => {
       resolveToken: "0123456789abcdef0123456789abcdef:0",
     }));
   });
+
+  it("handles fetchSymbols with undefined diagnostics without crashing", async () => {
+    const fetchSymbols = vi.fn(async () => ({
+      symbols: [{
+        name: "TestSymbol",
+        kind: 5,
+        containerName: "editor",
+        path: "src/test.ts",
+        uri: "file:///repo/src/test.ts",
+        line: 0,
+        character: 0,
+        resolved: true,
+        resolveToken: null,
+      }],
+      semanticGeneration: 1,
+      semanticRevision: 0,
+      sessionCount: 1,
+      providerCount: 1,
+      skippedProviderCount: 0,
+      failedProviderCount: 0,
+      complete: true,
+      truncated: false,
+      diagnostics: undefined as unknown as string[],
+    }));
+
+    renderPopup({
+      symbolsAvailable: true,
+      fetchSymbols,
+      initialMode: "symbols",
+    });
+
+    fireEvent.change(screen.getByLabelText("Go to symbol"), { target: { value: "Test" } });
+    expect(await screen.findByText("TestSymbol")).toBeInTheDocument();
+    expect(screen.getByTestId("search-everywhere-symbol-provider-status")).toBeInTheDocument();
+  });
 });
