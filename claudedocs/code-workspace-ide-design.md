@@ -1195,6 +1195,14 @@ M11 配置与分析收口 : Build target DAG + Run/Debug configuration + provide
 2. **✅ 调试工具栏与命令静音所有断点 (Mute Breakpoints)**：注册 `workspace.toggleMuteBreakpoints` 命令，与 DebugPanel 工具栏联动切换静音状态；注册 `Ctrl+F8`（切换断点）、`Ctrl+Shift+F8`（查看/编辑断点）。
 3. **✅ 多模块 Maven Active Profile / Gradle 属性覆盖界面**：在 `RunConfigurationOverride` 与 `RunPanel` 界面中提供 Active Profiles（Maven `-P` / Spring profiles）与 JVM/Build Properties（`-Dkey=value`）输入与持久化，自动注入运行时参数，并支持临时配置标记与副本命名保存。
 
+#### 🟣 P3 进阶能力项（重构预审、覆盖率、键位速查与图谱）— **全部已交付**
+1. **✅ 重构预审用法树与复选框过滤 (Refactoring Usages Preview & Checkbox Filtering)**：实现 `RefactoringPreviewDialog` 弹窗，按文件分组呈现受影响的代码用法节点、行号、代码差异摘要；支持通过复选框按用法逐项包含/排除，并提供差异上下文搜索与一键确认重构。
+2. **✅ 缩进格式自动探测与状态栏一键切换 (Indent Auto-Detection & Status Bar Switcher)**：实现 `detectIndentation` 自动分析文件首部缩进特征（2空格/4空格/Tab），并在底部状态栏常驻缩进指示器，支持单键点击循环切换缩进格式。
+3. **✅ 完整快捷键速查表与物理键帽参考 (Keymap Cheat Sheet Dialog)**：实现 `KeymapCheatSheetDialog` 弹窗（注册 `workspace.openKeymapCheatsheet` / `Ctrl+Alt+/` / `Mod-k Mod-s`），分类收拢 Edit、Navigation、Refactor、Run、Debug、View、Help 全量快捷键，渲染物理键帽 (`<kbd>`) 并支持即时关键字模糊搜索与点击执行。
+4. **✅ 测试覆盖率报告解析与编辑器覆盖条 (Test Coverage Ingestion, Gutter & Dock Panel)**：实现 `coverageModel`（支持 LCOV 与 JaCoCo XML 格式报告解析及多模块文件路径匹配）、`coverageEditorChrome`（CodeMirror 侧边栏绿/黄/红三色覆盖指示条）与 `CoveragePanel`（底部 Dock 统计面板、进度条、文件过滤与未覆盖行跳转），注册 `workspace.showCoverage` 命令并与工作区扫描联动。
+5. **✅ 多语言 DAP 适配器引导与配置模板 (DAP Debug Adapter Setup Guide & Templates)**：实现 `DapAdapterGuideDialog` 覆盖 Java (JDWP)、JavaScript/Node (`vscode-js-debug`)、Python (`debugpy`)、Go (`dlv`)、Rust (`lldb-dap`)、C++ 适配器的安装指南、运行环境规范与 `.taomni/run-configurations.json` 模板一键复制，注册 `workspace.openDapAdapterGuide` 命令。
+6. **✅ 工程模型多模块依赖拓扑与模块层级 (Multi-Module Dependency Topology in BuildPanel)**：在 `BuildPanel` 中呈现多模块工程的完整模块树、模块语言级别徽章与 `dependsOn` 依赖链，打通与底层 `workspaceExecutionModel` 的深度联动。
+
 ---
 
 ## 12. 后续进阶路线与三端真机验收计划
@@ -1205,5 +1213,5 @@ M11 配置与分析收口 : Build target DAG + Run/Debug configuration + provide
    - Windows 11 (NTFS + UNC 路径、CRLF 换行、WebView2 宿主)。
 2. **PSI / Stub Index 级深度语义分析与跨文件重构**：
    - 逐步从基于 Language Server 的声明式 Code Action 升级到具备客户端增量 AST 缓存与符号引用的索引层。
-3. **真实多语言 Debug Adapter Matrix**：
+3. **真实多语言 Debug Adapter Matrix 实机联调**：
    - Java (`java-debug` bundle)、Node/TypeScript (`js-debug`)、Python (`debugpy`)、Go (`delve`)、Rust/C++ (`lldb-dap` / `cpptools`) 实机联调。
