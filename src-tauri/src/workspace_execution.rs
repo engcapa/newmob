@@ -73,6 +73,12 @@ pub struct ModuleModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language_level: Option<String>,
     pub source_set_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_module_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub child_module_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub module_dependencies: Vec<String>,
     pub diagnostics: Vec<String>,
 }
 
@@ -392,6 +398,7 @@ struct ModelBuilder {
 
 impl ModelBuilder {
     fn finish(mut self) -> WorkspaceExecutionModel {
+        self.resolve_module_hierarchy();
         self.projects.sort_by(|a, b| a.id.cmp(&b.id));
         self.modules.sort_by(|a, b| a.id.cmp(&b.id));
         self.source_sets.sort_by(|a, b| a.id.cmp(&b.id));
@@ -411,6 +418,88 @@ impl ModelBuilder {
             debug_configurations: self.debug_configurations,
             tools: self.tools.into_values().collect(),
             diagnostics: self.diagnostics,
+        }
+    }
+
+    fn resolve_module_hierarchy(&mut self) {
+        let mut parent_to_children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut child_to_parent: BTreeMap<String, String> = BTreeMap::new();
+        let mut module_deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+        // 1. Maven hierarchy from pom.xml <modules>
+        for module in &self.modules {
+            let manifest_path = Path::new(&module.manifest);
+            if manifest_path.file_name().and_then(|v| v.to_str()) == Some("pom.xml") {
+                if let Ok(content) = fs::read_to_string(manifest_path) {
+                    let submodules = parse_maven_modules(&content);
+                    let module_root = Path::new(&module.root);
+                    for sub in submodules {
+                        let sub_root = module_root.join(&sub);
+                        let sub_root_str = path_string(&sub_root);
+                        if let Some(child) = self.modules.iter().find(|m| m.root == sub_root_str) {
+                            parent_to_children
+                                .entry(module.id.clone())
+                                .or_default()
+                                .push(child.id.clone());
+                            child_to_parent.insert(child.id.clone(), module.id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Gradle hierarchy from settings.gradle / settings.gradle.kts
+        for module in &self.modules {
+            let module_root = Path::new(&module.root);
+            for settings_name in ["settings.gradle", "settings.gradle.kts"] {
+                let settings_path = module_root.join(settings_name);
+                if settings_path.is_file() {
+                    if let Ok(content) = fs::read_to_string(&settings_path) {
+                        let submodules = parse_gradle_settings_modules(&content);
+                        for sub in submodules {
+                            let sub_root = module_root.join(&sub);
+                            let sub_root_str = path_string(&sub_root);
+                            if let Some(child) =
+                                self.modules.iter().find(|m| m.root == sub_root_str)
+                            {
+                                parent_to_children
+                                    .entry(module.id.clone())
+                                    .or_default()
+                                    .push(child.id.clone());
+                                child_to_parent.insert(child.id.clone(), module.id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Module dependencies from build.gradle / build.gradle.kts
+        for module in &self.modules {
+            let manifest_path = Path::new(&module.manifest);
+            if let Ok(content) = fs::read_to_string(manifest_path) {
+                let deps = parse_gradle_project_dependencies(&content);
+                if !deps.is_empty() {
+                    module_deps.insert(module.id.clone(), deps);
+                }
+            }
+        }
+
+        // Apply to self.modules
+        for module in &mut self.modules {
+            if let Some(parent_id) = child_to_parent.get(&module.id) {
+                module.parent_module_id = Some(parent_id.clone());
+            }
+            if let Some(mut children) = parent_to_children.remove(&module.id) {
+                children.sort();
+                children.dedup();
+                module.child_module_ids = children;
+            }
+            if let Some(mut deps) = module_deps.remove(&module.id) {
+                deps.sort();
+                deps.dedup();
+                module.module_dependencies = deps;
+            }
         }
     }
 
@@ -488,6 +577,9 @@ impl ModelBuilder {
             manifest: project.manifest.clone(),
             language_level: project.language_level.clone(),
             source_set_ids,
+            parent_module_id: None,
+            child_module_ids: Vec::new(),
+            module_dependencies: Vec::new(),
             diagnostics: Vec::new(),
         });
         self.source_sets.extend(source_sets);
@@ -505,10 +597,19 @@ impl ModelBuilder {
         let id = stable_id("build", &[&project.id, kind, label]);
         let artifact_ids = if kind == "build" {
             let artifact_id = stable_id("artifact", &[&id, &project.module_id, label]);
-            let resolution = if command.error.is_some() {
-                "blocked"
+            let root = Path::new(&project.root);
+            let (path, resolution, diagnostic) = if command.error.is_some() {
+                (None, "blocked".to_string(), command.error.clone())
+            } else if let Some(resolved) =
+                resolve_existing_artifact_path(root, &project.provider, label)
+            {
+                (Some(path_string(&resolved)), "resolved".to_string(), None)
             } else {
-                "pending-provider-output"
+                (
+                    None,
+                    "pending-provider-output".to_string(),
+                    Some(compile_artifact_diagnostic(&project.provider).to_string()),
+                )
             };
             self.compile_artifacts.push(CompileArtifact {
                 id: artifact_id.clone(),
@@ -516,13 +617,10 @@ impl ModelBuilder {
                 module_id: project.module_id.clone(),
                 target_id: id.clone(),
                 kind: compile_artifact_kind(&project.provider, label).to_string(),
-                path: None,
-                resolution: resolution.to_string(),
+                path,
+                resolution,
                 source: "build-target".to_string(),
-                diagnostic: command
-                    .error
-                    .clone()
-                    .or_else(|| Some(compile_artifact_diagnostic(&project.provider).to_string())),
+                diagnostic,
             });
             vec![artifact_id]
         } else {
@@ -895,6 +993,148 @@ fn compile_artifact_diagnostic(provider: &str) -> &'static str {
         "swiftpm" => "Artifact path resolves from SwiftPM bin-path output after build.",
         _ => "Artifact path remains unresolved until the provider reports build output.",
     }
+}
+
+fn resolve_existing_artifact_path(root: &Path, provider: &str, label: &str) -> Option<PathBuf> {
+    let label_lower = label.to_ascii_lowercase();
+    match provider {
+        "maven" => {
+            if label_lower.contains("compile") || label_lower.contains("class") {
+                let classes = root.join("target/classes");
+                if classes.is_dir() {
+                    return Some(classes);
+                }
+            } else if label_lower.contains("package") || label_lower.contains("build") {
+                let target = root.join("target");
+                if let Ok(entries) = fs::read_dir(&target) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|ext| ext.to_str()) == Some("jar") {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "gradle" => {
+            if label_lower.contains("class") || label_lower.contains("compile") {
+                for candidate in [
+                    "build/classes/java/main",
+                    "build/classes/kotlin/main",
+                    "build/classes",
+                ] {
+                    let dir = root.join(candidate);
+                    if dir.is_dir() {
+                        return Some(dir);
+                    }
+                }
+            } else if label_lower.contains("build") || label_lower.contains("package") {
+                let libs = root.join("build/libs");
+                if let Ok(entries) = fs::read_dir(&libs) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|ext| ext.to_str()) == Some("jar") {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+            None
+        }
+        "cargo" => {
+            for candidate in ["target/debug", "target/release"] {
+                let dir = root.join(candidate);
+                if dir.is_dir() {
+                    return Some(dir);
+                }
+            }
+            None
+        }
+        "node" => {
+            for candidate in ["dist", "build", "lib", "out"] {
+                let dir = root.join(candidate);
+                if dir.is_dir() {
+                    return Some(dir);
+                }
+            }
+            None
+        }
+        "cmake" => {
+            let build = root.join("build");
+            if build.is_dir() { Some(build) } else { None }
+        }
+        "dotnet" => {
+            for candidate in ["bin/Debug", "bin/Release", "bin"] {
+                let dir = root.join(candidate);
+                if dir.is_dir() {
+                    return Some(dir);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn parse_maven_modules(pom_content: &str) -> Vec<String> {
+    static MODULE_REGEX: OnceLock<Regex> = OnceLock::new();
+    let regex = MODULE_REGEX.get_or_init(|| {
+        Regex::new(r"<module>\s*([^<\s]+)\s*</module>").expect("valid maven module regex")
+    });
+    regex
+        .captures_iter(pom_content)
+        .filter_map(|capture| capture.get(1).map(|m| m.as_str().trim().to_string()))
+        .filter(|m| !m.is_empty())
+        .collect()
+}
+
+fn parse_gradle_settings_modules(settings_content: &str) -> Vec<String> {
+    static INCLUDE_LINE_REGEX: OnceLock<Regex> = OnceLock::new();
+    let include_line_regex = INCLUDE_LINE_REGEX.get_or_init(|| {
+        Regex::new(r#"(?m)^\s*include\b([^\n\r]+)"#).expect("valid include line regex")
+    });
+    static QUOTED_REGEX: OnceLock<Regex> = OnceLock::new();
+    let quoted_regex = QUOTED_REGEX.get_or_init(|| {
+        Regex::new(r#"['"](?::)?([a-zA-Z0-9_\-:]+)['"]"#).expect("valid quoted regex")
+    });
+
+    let mut modules = Vec::new();
+    for capture in include_line_regex.captures_iter(settings_content) {
+        if let Some(rest) = capture.get(1) {
+            for item in quoted_regex.captures_iter(rest.as_str()) {
+                if let Some(name) = item.get(1) {
+                    let cleaned = name
+                        .as_str()
+                        .trim_start_matches(':')
+                        .replace(':', "/")
+                        .trim()
+                        .to_string();
+                    if !cleaned.is_empty() {
+                        modules.push(cleaned);
+                    }
+                }
+            }
+        }
+    }
+    modules
+}
+
+fn parse_gradle_project_dependencies(build_content: &str) -> Vec<String> {
+    static GRADLE_DEP_REGEX: OnceLock<Regex> = OnceLock::new();
+    let regex = GRADLE_DEP_REGEX.get_or_init(|| {
+        Regex::new(r#"project\s*\(\s*['":]([a-zA-Z0-9_\-:]+)['"]\s*\)"#)
+            .expect("valid gradle dep regex")
+    });
+    regex
+        .captures_iter(build_content)
+        .filter_map(|capture| {
+            capture
+                .get(1)
+                .map(|m| m.as_str().trim_start_matches(':').trim().to_string())
+        })
+        .filter(|m| !m.is_empty())
+        .collect()
 }
 
 fn configured_tool<'a>(config: Option<&'a WorkspaceToolConfig>, id: &str) -> Option<&'a str> {
@@ -4326,6 +4566,129 @@ mod tests {
                 .all(
                     |configuration| configuration.configuration_source.as_deref() != Some("shared")
                 )
+        );
+    }
+
+    #[test]
+    fn maven_multi_module_hierarchy_links_parent_and_children() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write(
+            &root.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>root</artifactId><version>1.0.0</version><packaging>pom</packaging><modules><module>core</module><module>web</module></modules></project>"#,
+        );
+        fs::create_dir_all(root.join("core/src/main/java")).unwrap();
+        write(
+            &root.join("core/pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><parent><groupId>com.example</groupId><artifactId>root</artifactId><version>1.0.0</version></parent><artifactId>core</artifactId></project>"#,
+        );
+        fs::create_dir_all(root.join("web/src/main/java")).unwrap();
+        write(
+            &root.join("web/pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><parent><groupId>com.example</groupId><artifactId>root</artifactId><version>1.0.0</version></parent><artifactId>web</artifactId></project>"#,
+        );
+
+        let model = detect_execution_model(root, None, None).unwrap();
+        let root_mod = model
+            .modules
+            .iter()
+            .find(|m| m.root == path_string(root))
+            .expect("root module");
+        let core_mod = model
+            .modules
+            .iter()
+            .find(|m| m.root == path_string(&root.join("core")))
+            .expect("core module");
+        let web_mod = model
+            .modules
+            .iter()
+            .find(|m| m.root == path_string(&root.join("web")))
+            .expect("web module");
+
+        assert_eq!(root_mod.child_module_ids.len(), 2);
+        assert!(root_mod.child_module_ids.contains(&core_mod.id));
+        assert!(root_mod.child_module_ids.contains(&web_mod.id));
+        assert_eq!(
+            core_mod.parent_module_id.as_deref(),
+            Some(root_mod.id.as_str())
+        );
+        assert_eq!(
+            web_mod.parent_module_id.as_deref(),
+            Some(root_mod.id.as_str())
+        );
+    }
+
+    #[test]
+    fn gradle_multi_project_hierarchy_and_dependencies() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write(
+            &root.join("settings.gradle"),
+            "rootProject.name = 'my-app'\ninclude 'core', 'web'\n",
+        );
+        write(
+            &root.join("build.gradle"),
+            "allprojects { repositories { mavenCentral() } }\n",
+        );
+        fs::create_dir_all(root.join("core/src/main/java")).unwrap();
+        write(&root.join("core/build.gradle"), "plugins { id 'java' }\n");
+        fs::create_dir_all(root.join("web/src/main/java")).unwrap();
+        write(
+            &root.join("web/build.gradle"),
+            "plugins { id 'java' }\ndependencies { implementation project(':core') }\n",
+        );
+
+        let model = detect_execution_model(root, None, None).unwrap();
+        let root_mod = model
+            .modules
+            .iter()
+            .find(|m| m.root == path_string(root))
+            .expect("root module");
+        let core_mod = model
+            .modules
+            .iter()
+            .find(|m| m.root == path_string(&root.join("core")))
+            .expect("core module");
+        let web_mod = model
+            .modules
+            .iter()
+            .find(|m| m.root == path_string(&root.join("web")))
+            .expect("web module");
+
+        assert!(root_mod.child_module_ids.contains(&core_mod.id));
+        assert!(root_mod.child_module_ids.contains(&web_mod.id));
+        assert_eq!(
+            core_mod.parent_module_id.as_deref(),
+            Some(root_mod.id.as_str())
+        );
+        assert_eq!(
+            web_mod.parent_module_id.as_deref(),
+            Some(root_mod.id.as_str())
+        );
+        assert_eq!(web_mod.module_dependencies, vec!["core".to_string()]);
+    }
+
+    #[test]
+    fn compile_artifact_path_resolves_when_output_dir_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        write(
+            &root.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>app</artifactId><version>1.0.0</version></project>"#,
+        );
+        let classes_dir = root.join("target/classes");
+        fs::create_dir_all(&classes_dir).unwrap();
+
+        let model = detect_execution_model(root, None, None).unwrap();
+        let artifact = model
+            .compile_artifacts
+            .iter()
+            .find(|a| a.kind == "jvm-classes")
+            .expect("classes artifact");
+        assert_eq!(artifact.resolution, "resolved");
+        assert_eq!(
+            artifact.path.as_deref(),
+            Some(path_string(&classes_dir).as_str())
         );
     }
 }

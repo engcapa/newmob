@@ -198,6 +198,9 @@ export interface ExecutionModuleModel {
   manifest: string;
   languageLevel?: string;
   sourceSetIds: string[];
+  parentModuleId?: string;
+  childModuleIds?: string[];
+  moduleDependencies?: string[];
   diagnostics: string[];
 }
 
