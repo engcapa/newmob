@@ -1024,6 +1024,93 @@ describe("useCodeDebugSession", () => {
     expect(instructionBreakpointCalls()).toEqual([]);
   });
 
+  it("routes capability-gated memory and disassembly requests through DAP", async () => {
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "readMemory") return Promise.resolve({ address: "0x1000", data: "AAE=", unreadableBytes: 1 });
+      if (command === "writeMemory") return Promise.resolve({ bytesWritten: 2 });
+      if (command === "disassemble") return Promise.resolve({
+        instructions: [{ address: "0x1000", instructionBytes: "55", instruction: "push rbp" }],
+      });
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    await startSession(result.current.startDebug, {
+      supportsReadMemoryRequest: true,
+      supportsWriteMemoryRequest: true,
+      supportsDisassembleRequest: true,
+    });
+
+    let readResult!: { address: string | null; unreadableBytes: number; data: string } | null;
+    let writeResult!: { bytesWritten: number | null } | null;
+    let disassembly!: { address: string; instruction: string }[];
+    await act(async () => {
+      readResult = await result.current.readMemory({ memoryReference: " 0x1000 ", offset: -4, count: 2 });
+      writeResult = await result.current.writeMemory({ memoryReference: "0x1000", offset: 1, data: "AQI=", allowPartial: false });
+      disassembly = await result.current.disassemble({ memoryReference: "0x1000", instructionCount: 1, resolveSymbols: true });
+    });
+    expect(readResult).toEqual({ address: "0x1000", unreadableBytes: 1, data: "AAE=" });
+    expect(writeResult).toEqual({ bytesWritten: 2 });
+    expect(disassembly).toEqual([{
+      address: "0x1000",
+      instructionBytes: "55",
+      instruction: "push rbp",
+      symbol: null,
+      location: null,
+      line: null,
+      column: null,
+      endLine: null,
+      endColumn: null,
+    }]);
+    expect(dapSendRequest).toHaveBeenCalledWith("sess-1", "readMemory", {
+      memoryReference: "0x1000",
+      offset: -4,
+      count: 2,
+    });
+    expect(dapSendRequest).toHaveBeenCalledWith("sess-1", "writeMemory", {
+      memoryReference: "0x1000",
+      offset: 1,
+      data: "AQI=",
+      allowPartial: false,
+    });
+    expect(dapSendRequest).toHaveBeenCalledWith("sess-1", "disassemble", {
+      memoryReference: "0x1000",
+      instructionCount: 1,
+      resolveSymbols: true,
+    });
+  });
+
+  it("does not call memory requests when the adapter does not advertise them", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    await startSession(result.current.startDebug);
+    const before = dapSendRequest.mock.calls.length;
+    await act(async () => {
+      expect(await result.current.readMemory({ memoryReference: "0x1000", count: 1 })).toBeNull();
+      expect(await result.current.writeMemory({ memoryReference: "0x1000", data: "AQ==" })).toBeNull();
+      expect(await result.current.disassemble({ memoryReference: "0x1000", instructionCount: 1 })).toEqual([]);
+    });
+    expect(dapSendRequest.mock.calls.length).toBe(before);
+  });
+
+  it("drops a memory response that arrives after the owning session terminates", async () => {
+    let resolveRead: ((body: unknown) => void) | null = null;
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "readMemory") return new Promise((resolve) => { resolveRead = resolve; });
+      return Promise.resolve({ breakpoints: [] });
+    });
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    await startSession(result.current.startDebug, { supportsReadMemoryRequest: true });
+    let pending!: Promise<unknown>;
+    act(() => {
+      pending = result.current.readMemory({ memoryReference: "0x1000", count: 1 });
+    });
+    await waitFor(() => expect(resolveRead).not.toBeNull());
+    await act(async () => result.current.terminate());
+    await act(async () => {
+      resolveRead?.({ address: "0x1000", data: "AA==" });
+      expect(await pending).toBeNull();
+    });
+  });
+
   it("isolates identical instruction references by adapter in a compound session", async () => {
     const handlers = new Map<string, (payload: {
       sessionId: string;

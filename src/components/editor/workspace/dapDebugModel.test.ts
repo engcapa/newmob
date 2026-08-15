@@ -3,19 +3,24 @@ import {
   appendConsoleLine,
   breakpointModesFor,
   breakpointVerificationMap,
+  buildDisassembleArgs,
   buildDataBreakpointInfoArgs,
+  buildReadMemoryArgs,
   buildSetBreakpointsArgs,
   buildSetDataBreakpointsArgs,
   buildSetExceptionBreakpointsArgs,
   buildSetFunctionBreakpointsArgs,
   buildSetInstructionBreakpointsArgs,
+  buildWriteMemoryArgs,
   currentLocation,
   dataBreakpointKey,
   dataBreakpointVerificationMap,
+  decodeMemoryData,
   defaultDataBreakpointAccessType,
   exceptionBreakpointRuleLabel,
   exceptionBreakpointRuleVerificationMap,
   exceptionBreakpointVerificationMap,
+  encodeMemoryData,
   functionBreakpointVerificationMap,
   instructionBreakpointKey,
   instructionBreakpointVerificationMap,
@@ -27,6 +32,7 @@ import {
   parseBreakpointEvent,
   parseBreakpointModes,
   parseDataBreakpointInfo,
+  parseDisassembleResponse,
   parseEvaluate,
   parseExceptionBreakpointFilters,
   parseExceptionInfo,
@@ -35,6 +41,8 @@ import {
   parseSetExceptionBreakpointsResponse,
   parseSetFunctionBreakpointsResponse,
   parseSetInstructionBreakpointsResponse,
+  parseReadMemoryResponse,
+  parseWriteMemoryResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
@@ -68,6 +76,80 @@ describe("dapDebugModel", () => {
     expect(stepCommandFor("stepIn")).toBe("stepIn");
     expect(stepCommandFor("stepOut")).toBe("stepOut");
     expect(stepCommandFor("pause")).toBe("pause");
+  });
+
+  it("builds and parses bounded memory and disassembly requests", () => {
+    expect(buildReadMemoryArgs({ memoryReference: " 0x1000 ", offset: -4, count: 16 })).toEqual({
+      memoryReference: "0x1000",
+      offset: -4,
+      count: 16,
+    });
+    expect(parseReadMemoryResponse({
+      address: "0x1000",
+      unreadableBytes: 2,
+      data: "AAE=",
+    })).toEqual({ address: "0x1000", unreadableBytes: 2, data: "AAE=" });
+    expect(buildWriteMemoryArgs({
+      memoryReference: "0x1000",
+      offset: 2,
+      data: "AQI=",
+      allowPartial: false,
+    })).toEqual({ memoryReference: "0x1000", offset: 2, data: "AQI=", allowPartial: false });
+    expect(parseWriteMemoryResponse({ bytesWritten: 2 })).toEqual({ bytesWritten: 2 });
+    expect(buildDisassembleArgs({
+      memoryReference: "entry",
+      offset: 4,
+      instructionOffset: -1,
+      instructionCount: 2,
+      resolveSymbols: true,
+    })).toEqual({
+      memoryReference: "entry",
+      offset: 4,
+      instructionOffset: -1,
+      instructionCount: 2,
+      resolveSymbols: true,
+    });
+    expect(parseDisassembleResponse({
+      instructions: [{
+        address: "0x1000",
+        instructionBytes: "55",
+        instruction: "push rbp",
+        symbol: "main",
+        location: { path: "/repo/App.java", name: "App.java", sourceReference: null },
+        line: 9,
+        column: 2,
+      }, { address: "0x1001", instruction: "ret" }],
+    })).toEqual([
+      {
+        address: "0x1000",
+        instructionBytes: "55",
+        instruction: "push rbp",
+        symbol: "main",
+        location: { path: "/repo/App.java", name: "App.java", sourceReference: null },
+        line: 9,
+        column: 2,
+        endLine: null,
+        endColumn: null,
+      },
+      {
+        address: "0x1001",
+        instructionBytes: null,
+        instruction: "ret",
+        symbol: null,
+        location: null,
+        line: null,
+        column: null,
+        endLine: null,
+        endColumn: null,
+      },
+    ]);
+  });
+
+  it("converts memory bytes between hexadecimal and DAP base64", () => {
+    const encoded = encodeMemoryData("0x01 02 ff");
+    expect(encoded).toBe("AQL/");
+    expect(decodeMemoryData(encoded ?? "")).toBe("01 02 ff");
+    expect(encodeMemoryData("01 2")).toBeNull();
   });
 
   it("builds setBreakpoints args sorted, with condition + hitCondition + logMessage", () => {

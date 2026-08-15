@@ -13,12 +13,15 @@ import {
   appendConsoleLine,
   breakpointModesFor,
   breakpointVerificationMap,
+  buildDisassembleArgs,
   buildDataBreakpointInfoArgs,
+  buildReadMemoryArgs,
   buildSetBreakpointsArgs,
   buildSetDataBreakpointsArgs,
   buildSetExceptionBreakpointsArgs,
   buildSetFunctionBreakpointsArgs,
   buildSetInstructionBreakpointsArgs,
+  buildWriteMemoryArgs,
   currentLocation,
   dataBreakpointKey,
   dataBreakpointVerificationMap,
@@ -36,6 +39,7 @@ import {
   parseBreakpointEvent,
   parseBreakpointModes,
   parseDataBreakpointInfo,
+  parseDisassembleResponse,
   parseEvaluate,
   parseExceptionBreakpointFilters,
   parseExceptionInfo,
@@ -44,6 +48,8 @@ import {
   parseSetExceptionBreakpointsResponse,
   parseSetFunctionBreakpointsResponse,
   parseSetInstructionBreakpointsResponse,
+  parseReadMemoryResponse,
+  parseWriteMemoryResponse,
   parseStackFrames,
   parseThreads,
   planBreakpointSync,
@@ -60,6 +66,8 @@ import {
   type DebugBreakpoint,
   type DebugDataBreakpoint,
   type DebugDataBreakpointTarget,
+  type DebugDisassembleRequest,
+  type DebugDisassembledInstruction,
   type DebugExceptionBreakpoint,
   type DebugExceptionBreakpointFilter,
   type DebugExceptionBreakpointRule,
@@ -67,6 +75,10 @@ import {
   type DebugExceptionPathSegment,
   type DebugFunctionBreakpoint,
   type DebugInstructionBreakpoint,
+  type DebugMemoryReadRequest,
+  type DebugMemoryReadResult,
+  type DebugMemoryWriteRequest,
+  type DebugMemoryWriteResult,
   type DebugSessionState,
   type DebugStackFrame,
   type DebugStepAction,
@@ -218,6 +230,12 @@ export interface CodeDebugSession {
    * the editor simply shows no tooltip.
    */
   hoverEvaluate: (expression: string) => Promise<EvaluateResult | null>;
+  /** Read adapter memory through the standard DAP request (capability-gated). */
+  readMemory: (request: DebugMemoryReadRequest) => Promise<DebugMemoryReadResult | null>;
+  /** Write adapter memory through the standard DAP request (capability-gated). */
+  writeMemory: (request: DebugMemoryWriteRequest) => Promise<DebugMemoryWriteResult | null>;
+  /** Disassemble an adapter memory range through the standard DAP request. */
+  disassemble: (request: DebugDisassembleRequest) => Promise<DebugDisassembledInstruction[]>;
   /** Change a variable's value (DAP `setVariable`; capability-gated). */
   setVariable: (variablesReference: number, name: string, value: string) => Promise<EvaluateResult | null>;
   /** Append a client-side line (REPL echo / result) to the session console. */
@@ -361,6 +379,9 @@ const MAX_INSTRUCTION_BREAKPOINTS = 256;
 const MAX_INSTRUCTION_REFERENCE_LENGTH = 4096;
 const MAX_INSTRUCTION_ADAPTER_ID_LENGTH = 128;
 const MAX_INSTRUCTION_OFFSET = Number.MAX_SAFE_INTEGER;
+const MAX_MEMORY_REFERENCE_LENGTH = 4096;
+const MAX_MEMORY_READ_BYTES = 65536;
+const MAX_DISASSEMBLE_INSTRUCTIONS = 4096;
 const MAX_EXCEPTION_BREAKPOINTS = 512;
 const MAX_EXCEPTION_BREAKPOINT_FILTER_ID_LENGTH = 1024;
 const MAX_EXCEPTION_BREAKPOINT_RULES = 256;
@@ -2699,6 +2720,85 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     }
   }, []);
 
+  const readMemory = useCallback(async (
+    request: DebugMemoryReadRequest,
+  ): Promise<DebugMemoryReadResult | null> => {
+    const id = sessionIdRef.current;
+    const memoryReference = request.memoryReference.trim().slice(0, MAX_MEMORY_REFERENCE_LENGTH);
+    if (
+      !id
+      || capabilitiesRef.current.supportsReadMemoryRequest !== true
+      || !memoryReference
+      || !Number.isSafeInteger(request.count)
+      || request.count <= 0
+      || request.count > MAX_MEMORY_READ_BYTES
+      || (request.offset !== undefined
+        && (!Number.isSafeInteger(request.offset) || Math.abs(request.offset) > Number.MAX_SAFE_INTEGER))
+    ) return null;
+    const body = await dapSendRequest(id, "readMemory", buildReadMemoryArgs({
+      ...request,
+      memoryReference,
+    })).catch((error) => {
+      logConsole("stderr", `readMemory failed: ${errorText(error)}\n`);
+      return null;
+    });
+    if (activeSessionIdRef.current !== id || !sessionsRef.current.get(id)?.live) return null;
+    return body == null ? null : parseReadMemoryResponse(body);
+  }, [logConsole]);
+
+  const writeMemory = useCallback(async (
+    request: DebugMemoryWriteRequest,
+  ): Promise<DebugMemoryWriteResult | null> => {
+    const id = sessionIdRef.current;
+    const memoryReference = request.memoryReference.trim().slice(0, MAX_MEMORY_REFERENCE_LENGTH);
+    if (
+      !id
+      || capabilitiesRef.current.supportsWriteMemoryRequest !== true
+      || !memoryReference
+      || !request.data
+      || request.data.length > 131072
+      || (request.offset !== undefined
+        && (!Number.isSafeInteger(request.offset) || Math.abs(request.offset) > Number.MAX_SAFE_INTEGER))
+    ) return null;
+    const body = await dapSendRequest(id, "writeMemory", buildWriteMemoryArgs({
+      ...request,
+      memoryReference,
+    })).catch((error) => {
+      logConsole("stderr", `writeMemory failed: ${errorText(error)}\n`);
+      return null;
+    });
+    if (activeSessionIdRef.current !== id || !sessionsRef.current.get(id)?.live) return null;
+    return body == null ? null : parseWriteMemoryResponse(body);
+  }, [logConsole]);
+
+  const disassemble = useCallback(async (
+    request: DebugDisassembleRequest,
+  ): Promise<DebugDisassembledInstruction[]> => {
+    const id = sessionIdRef.current;
+    const memoryReference = request.memoryReference.trim().slice(0, MAX_MEMORY_REFERENCE_LENGTH);
+    const validOffset = (value: number | undefined) => value === undefined
+      || (Number.isSafeInteger(value) && Math.abs(value) <= Number.MAX_SAFE_INTEGER);
+    if (
+      !id
+      || capabilitiesRef.current.supportsDisassembleRequest !== true
+      || !memoryReference
+      || !Number.isSafeInteger(request.instructionCount)
+      || request.instructionCount <= 0
+      || request.instructionCount > MAX_DISASSEMBLE_INSTRUCTIONS
+      || !validOffset(request.offset)
+      || !validOffset(request.instructionOffset)
+    ) return [];
+    const body = await dapSendRequest(id, "disassemble", buildDisassembleArgs({
+      ...request,
+      memoryReference,
+    })).catch((error) => {
+      logConsole("stderr", `disassemble failed: ${errorText(error)}\n`);
+      return null;
+    });
+    if (activeSessionIdRef.current !== id || !sessionsRef.current.get(id)?.live) return [];
+    return body == null ? [] : parseDisassembleResponse(body);
+  }, [logConsole]);
+
   const hoverEvaluate = useCallback(async (expression: string): Promise<EvaluateResult | null> => {
     const id = sessionIdRef.current;
     const current = stateRef.current;
@@ -2819,6 +2919,9 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     hotReload,
     evaluate,
     hoverEvaluate,
+    readMemory,
+    writeMemory,
+    disassemble,
     setVariable,
     logConsole,
     clearConsole,

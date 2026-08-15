@@ -5062,6 +5062,78 @@ controls:
     selector: '[data-testid^="debug-instruction-breakpoint-binding-"]'
     kind: display
     optional: true       # requires a live pending or failed adapter binding
+  - id: debug-memory-disassembly
+    selector: '[data-testid="debug-memory-disassembly"]'
+    kind: display
+    optional: true       # rendered in the native debug memory surface
+  - id: debug-memory-unsupported
+    selector: '[data-testid="debug-memory-unsupported"]'
+    kind: display
+    optional: true       # requires a live adapter without memory/disassembly support
+  - id: debug-memory-reference
+    selector: '[data-testid="debug-memory-reference"]'
+    kind: interactive
+    optional: true       # requires a live adapter advertising a memory/disassembly request
+  - id: debug-memory-offset
+    selector: '[data-testid="debug-memory-offset"]'
+    kind: interactive
+    optional: true       # memory reads/writes support signed offsets
+  - id: debug-memory-count
+    selector: '[data-testid="debug-memory-count"]'
+    kind: interactive
+    optional: true       # requires supportsReadMemoryRequest
+  - id: debug-memory-read
+    selector: '[data-testid="debug-memory-read"]'
+    kind: interactive
+    optional: true       # requires supportsReadMemoryRequest
+  - id: debug-memory-result
+    selector: '[data-testid="debug-memory-result"]'
+    kind: display
+    optional: true       # rendered after a successful readMemory response
+  - id: debug-memory-write-data
+    selector: '[data-testid="debug-memory-write-data"]'
+    kind: interactive
+    optional: true       # requires supportsWriteMemoryRequest
+  - id: debug-memory-write
+    selector: '[data-testid="debug-memory-write"]'
+    kind: interactive
+    optional: true       # requires supportsWriteMemoryRequest
+  - id: debug-memory-write-status
+    selector: '[data-testid="debug-memory-write-status"]'
+    kind: display
+    optional: true       # rendered after a writeMemory response
+  - id: debug-disassemble-offset
+    selector: '[data-testid="debug-disassemble-offset"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassemble-instruction-offset
+    selector: '[data-testid="debug-disassemble-instruction-offset"]'
+    kind: interactive
+    optional: true       # supports adapter-defined instruction offsets
+  - id: debug-disassemble-count
+    selector: '[data-testid="debug-disassemble-count"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassemble-resolve-symbols
+    selector: '[data-testid="debug-disassemble-resolve-symbols"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassemble
+    selector: '[data-testid="debug-disassemble"]'
+    kind: interactive
+    optional: true       # requires supportsDisassembleRequest
+  - id: debug-disassembly-output
+    selector: '[data-testid="debug-disassembly-output"]'
+    kind: display
+    optional: true       # rendered after a successful disassemble response
+  - id: debug-disassembly-row
+    selector: '[data-testid="debug-disassembly-row"]'
+    kind: display
+    optional: true       # rendered for each returned instruction
+  - id: debug-memory-notice
+    selector: '[data-testid="debug-memory-notice"]'
+    kind: display
+    optional: true       # rendered after validation or adapter errors
   - id: debug-data-breakpoints
     selector: '[data-testid="debug-data-breakpoints"]'
     kind: display

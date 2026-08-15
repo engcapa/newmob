@@ -60,6 +60,9 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     hotReload: vi.fn(),
     evaluate: vi.fn().mockResolvedValue({ value: "", variablesReference: 0, type: null }),
     hoverEvaluate: vi.fn().mockResolvedValue(null),
+    readMemory: vi.fn().mockResolvedValue(null),
+    writeMemory: vi.fn().mockResolvedValue(null),
+    disassemble: vi.fn().mockResolvedValue([]),
     setVariable: vi.fn().mockResolvedValue(null),
     logConsole: vi.fn(),
     clearConsole: vi.fn(),
@@ -998,5 +1001,81 @@ describe("DebugPanel", () => {
     );
     fireEvent.click(screen.getByTestId("debug-console-clear"));
     expect(clearConsole).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads, writes, and disassembles memory only when the adapter advertises support", async () => {
+    const readMemory = vi.fn().mockResolvedValue({
+      address: "0x1000",
+      unreadableBytes: 0,
+      data: "AAE=",
+    });
+    const writeMemory = vi.fn().mockResolvedValue({ bytesWritten: 2 });
+    const disassemble = vi.fn().mockResolvedValue([{
+      address: "0x1000",
+      instructionBytes: "55",
+      instruction: "push rbp",
+      symbol: null,
+      location: null,
+      line: null,
+      column: null,
+      endLine: null,
+      endColumn: null,
+    }]);
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: {
+            supportsReadMemoryRequest: true,
+            supportsWriteMemoryRequest: true,
+            supportsDisassembleRequest: true,
+          },
+          readMemory,
+          writeMemory,
+          disassemble,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Memory / Disassembly"));
+    fireEvent.change(screen.getByTestId("debug-memory-reference"), { target: { value: "0x1000" } });
+    fireEvent.change(screen.getByTestId("debug-memory-offset"), { target: { value: "-4" } });
+    fireEvent.change(screen.getByTestId("debug-memory-count"), { target: { value: "2" } });
+    fireEvent.click(screen.getByTestId("debug-memory-read"));
+    await waitFor(() => expect(screen.getByTestId("debug-memory-result")).toHaveTextContent("01"));
+    expect(readMemory).toHaveBeenCalledWith({ memoryReference: "0x1000", offset: -4, count: 2 });
+
+    fireEvent.change(screen.getByTestId("debug-memory-write-data"), { target: { value: "01 02" } });
+    fireEvent.click(screen.getByTestId("debug-memory-write"));
+    await waitFor(() => expect(screen.getByTestId("debug-memory-write-status")).toHaveTextContent("Wrote 2 bytes"));
+    expect(writeMemory).toHaveBeenCalledWith({
+      memoryReference: "0x1000",
+      offset: -4,
+      data: "AQI=",
+      allowPartial: false,
+    });
+
+    fireEvent.change(screen.getByTestId("debug-disassemble-count"), { target: { value: "1" } });
+    fireEvent.click(screen.getByTestId("debug-disassemble"));
+    await waitFor(() => expect(screen.getByTestId("debug-disassembly-row")).toHaveTextContent("push rbp"));
+    expect(disassemble).toHaveBeenCalledWith({
+      memoryReference: "0x1000",
+      instructionCount: 1,
+      resolveSymbols: true,
+    });
+  });
+
+  it("shows memory tools as unsupported when no request capability is advertised", () => {
+    render(
+      <DebugPanel
+        debug={makeSession({ state: stoppedState() })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("Memory / Disassembly"));
+    expect(screen.getByTestId("debug-memory-unsupported")).toBeInTheDocument();
+    expect(screen.queryByTestId("debug-memory-read")).toBeNull();
   });
 });
