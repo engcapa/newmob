@@ -4036,7 +4036,7 @@ describe("CodeWorkspaceTab", () => {
     await act(async () => {
       registrationRef.current?.execute("workspace.prevError");
     });
-    expect(useAppStore.getState().statusMessage).toBe("Error: Missing return statement");
+    expect(useAppStore.getState().statusMessage).toBe("Warning: Unnecessary using directive");
 
     // 2. Ctrl+P Parameter Info
     expect(registrationRef.current?.items.find((item) => item.id === "workspace.parameterInfo")?.enabled).toBe(true);
@@ -4104,7 +4104,7 @@ LH:1
 end_of_record
 `;
 
-    workspaceMocks.workspaceReadFile.mockImplementation(async (_instanceId: string, _rootId: string, rel: string) => {
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, rel: string) => {
       if (rel === "coverage/lcov.info") {
         return file("coverage/lcov.info", lcovContent);
       }
@@ -4129,5 +4129,47 @@ end_of_record
       expect(screen.getByTestId("coverage-overall-badge")).toBeInTheDocument();
       expect(screen.getByTestId("coverage-overall-badge")).toHaveTextContent("50%");
     });
+  });
+
+  it("toggles synchronized split scrolling when editor is split", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-split",
+      workspaceInstanceId: "instance-split",
+      name: "Split test",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Program.cs" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/Program.cs", "line1\nline2\nline3\nline4\nline5\n"));
+
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/Program.cs");
+
+    // Split editor right
+    const splitRightBtn = screen.getByTestId("code-workspace-split-right");
+    fireEvent.click(splitRightBtn);
+
+    // Sync scroll button should appear
+    const syncScrollBtn = await screen.findByTestId("code-workspace-split-sync-scroll");
+    expect(syncScrollBtn).toBeInTheDocument();
+    expect(syncScrollBtn).toHaveAttribute("aria-pressed", "false");
+
+    // Click to enable synchronized scrolling
+    fireEvent.click(syncScrollBtn);
+    expect(syncScrollBtn).toHaveAttribute("aria-pressed", "true");
+    expect(useAppStore.getState().statusMessage).toBe("Synchronized split scrolling enabled");
+
+    // Toggle via command
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.toggleSyncSplitScroll")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.toggleSyncSplitScroll");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Synchronized split scrolling disabled");
   });
 });

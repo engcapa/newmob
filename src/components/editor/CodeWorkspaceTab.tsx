@@ -48,6 +48,7 @@ import {
   WrapText,
   Columns3,
   ShieldCheck,
+  Link2,
 } from "lucide-react";
 import {
   workspaceListDir,
@@ -1145,6 +1146,8 @@ export function CodeWorkspaceTab({
     primary: null,
     secondary: null,
   });
+  const [syncSplitScroll, setSyncSplitScroll] = useState(false);
+  const syncScrollOriginGroupIdRef = useRef<EditorGroupId | null>(null);
   const [highlightsByGroup, setHighlightsByGroup] = useState<Record<EditorGroupId, LspDocumentHighlight[]>>({
     primary: [],
     secondary: [],
@@ -7000,6 +7003,19 @@ export function CodeWorkspaceTab({
       run: openGitManager,
     },
     {
+      id: "workspace.toggleSyncSplitScroll",
+      title: "View: Toggle Synchronized Split Scrolling",
+      category: "View",
+      when: () => !!splitOrientation,
+      run: () => {
+        setSyncSplitScroll((v) => {
+          const next = !v;
+          setStatusMessage(next ? "Synchronized split scrolling enabled" : "Synchronized split scrolling disabled");
+          return next;
+        });
+      },
+    },
+    {
       id: "workspace.tree.openLooseFile",
       title: "Open Loose File",
       category: "File",
@@ -9664,6 +9680,23 @@ export function CodeWorkspaceTab({
         }}
         onViewportChange={(range) => {
           setViewportRanges((current) => ({ ...current, [groupId]: range }));
+          if (syncSplitScroll && splitOrientation) {
+            const otherGroupId: EditorGroupId = groupId === "primary" ? "secondary" : "primary";
+            const otherActiveKey = editorGroups[otherGroupId]?.activeKey;
+            const otherFile = otherActiveKey ? openFiles[otherActiveKey] : null;
+            if (otherFile && syncScrollOriginGroupIdRef.current !== otherGroupId) {
+              syncScrollOriginGroupIdRef.current = groupId;
+              revealEditorLocation(otherFile.key, {
+                start: { line: range.start.line, character: 0 },
+                end: { line: range.start.line, character: 0 },
+              });
+              setTimeout(() => {
+                if (syncScrollOriginGroupIdRef.current === groupId) {
+                  syncScrollOriginGroupIdRef.current = null;
+                }
+              }, 50);
+            }
+          }
         }}
         onExpandSelection={getLspSelectionRanges}
         onLightbulb={(line) => void openCodeActionsForLine(line)}
@@ -9849,12 +9882,27 @@ export function CodeWorkspaceTab({
           onClick={() => splitEditor("horizontal")}
         />
         {splitOrientation && (
-          <IconButton
-            label="Close editor split"
-            testId="code-workspace-split-close"
-            icon={<X className="h-3.5 w-3.5" />}
-            onClick={closeSplit}
-          />
+          <>
+            <IconButton
+              label={syncSplitScroll ? "Disable synchronized split scrolling" : "Enable synchronized split scrolling"}
+              testId="code-workspace-split-sync-scroll"
+              icon={<Link2 className="h-3.5 w-3.5" />}
+              active={syncSplitScroll}
+              onClick={() => {
+                setSyncSplitScroll((v) => {
+                  const next = !v;
+                  setStatusMessage(next ? "Synchronized split scrolling enabled" : "Synchronized split scrolling disabled");
+                  return next;
+                });
+              }}
+            />
+            <IconButton
+              label="Close editor split"
+              testId="code-workspace-split-close"
+              icon={<X className="h-3.5 w-3.5" />}
+              onClick={closeSplit}
+            />
+          </>
         )}
         <IconButton
           label={`${activeInlayHintsEnabled ? "Disable" : "Enable"} inlay hints${activeLanguageId ? ` for ${activeLanguageId}` : ""}`}
