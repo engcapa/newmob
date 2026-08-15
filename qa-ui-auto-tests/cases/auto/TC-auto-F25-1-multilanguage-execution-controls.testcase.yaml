@@ -52,6 +52,13 @@ steps:
       selector: '[data-testid="workspace-maven-run-jvm-args"]'
       value: "--add-opens=java.base/java.lang=ALL-UNNAMED"
   - set_check: { selector: '[data-testid="workspace-maven-inherit-argline"]', checked: false }
+  - set_check: { selector: '[data-testid="workspace-debug-step-filters-enabled"]', checked: true }
+  - fill:
+      selector: '[data-testid="workspace-debug-step-filter-patterns"]'
+      value: "java.*\njavax.*\norg.test.*"
+  - set_check: { selector: '[data-testid="workspace-debug-skip-synthetics"]', checked: true }
+  - set_check: { selector: '[data-testid="workspace-debug-skip-static-init"]', checked: true }
+  - set_check: { selector: '[data-testid="workspace-debug-skip-constructors"]', checked: true }
   - click: '[data-testid="workspace-build-run-tools-save"]'
   - eval_readonly:
       expression: "JSON.stringify(localStorage).includes('cargo-custom') && JSON.stringify(localStorage).includes('netcoredbg-custom')"

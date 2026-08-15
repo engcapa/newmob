@@ -5373,6 +5373,29 @@ controls:
   - id: inherit-maven-argline
     selector: '[data-testid="workspace-maven-inherit-argline"]'
     kind: interactive
+  - id: step-filters-enabled
+    selector: '[data-testid="workspace-debug-step-filters-enabled"]'
+    kind: interactive
+  - id: step-filter-patterns
+    selector: '[data-testid="workspace-debug-step-filter-patterns"]'
+    kind: interactive
+    optional: true
+  - id: skip-synthetics
+    selector: '[data-testid="workspace-debug-skip-synthetics"]'
+    kind: interactive
+    optional: true
+  - id: skip-static-init
+    selector: '[data-testid="workspace-debug-skip-static-init"]'
+    kind: interactive
+    optional: true
+  - id: skip-constructors
+    selector: '[data-testid="workspace-debug-skip-constructors"]'
+    kind: interactive
+    optional: true
+  - id: split-sync-scroll
+    selector: '[data-testid="code-workspace-split-sync-scroll"]'
+    kind: interactive
+    optional: true
 -->
 
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。

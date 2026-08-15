@@ -265,6 +265,12 @@
 - `[data-testid="workspace-tool-netcoredbg"]` — interactive — F25.1.tool-netcoredbg
 - `[data-testid="workspace-maven-run-jvm-args"]` — interactive — F25.1.maven-jvm-args
 - `[data-testid="workspace-maven-inherit-argline"]` — interactive — F25.1.inherit-maven-argline
+- `[data-testid="workspace-debug-step-filters-enabled"]` — interactive — F25.1.step-filters-enabled
+- `[data-testid="workspace-debug-step-filter-patterns"]` — interactive [optional] — F25.1.step-filter-patterns
+- `[data-testid="workspace-debug-skip-synthetics"]` — interactive [optional] — F25.1.skip-synthetics
+- `[data-testid="workspace-debug-skip-static-init"]` — interactive [optional] — F25.1.skip-static-init
+- `[data-testid="workspace-debug-skip-constructors"]` — interactive [optional] — F25.1.skip-constructors
+- `[data-testid="code-workspace-split-sync-scroll"]` — interactive [optional] — F25.1.split-sync-scroll
 
 ## code-workspace/semantic-analysis (F25.2)
 
