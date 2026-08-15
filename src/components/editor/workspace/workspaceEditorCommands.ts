@@ -209,6 +209,44 @@ export const completeCurrentStatement: Command = (view) => {
   return true;
 };
 
+export const toggleCase: StateCommand = ({ state, dispatch }) => {
+  if (state.readOnly) return false;
+  const changes = [];
+  const ranges = [];
+
+  for (const range of state.selection.ranges) {
+    let from = range.from;
+    let to = range.to;
+
+    if (from === to) {
+      const word = state.wordAt(from);
+      if (!word) continue;
+      from = word.from;
+      to = word.to;
+    }
+
+    const text = state.sliceDoc(from, to);
+    if (!text) continue;
+    const isAllUpper = text === text.toUpperCase() && text !== text.toLowerCase();
+    const replacement = isAllUpper ? text.toLowerCase() : text.toUpperCase();
+
+    changes.push({ from, to, insert: replacement });
+    ranges.push(EditorSelection.range(from, from + replacement.length));
+  }
+
+  if (changes.length === 0) return false;
+
+  dispatch(
+    state.update({
+      changes,
+      selection: EditorSelection.create(ranges, state.selection.mainIndex),
+      userEvent: "input.toggleCase",
+      scrollIntoView: true,
+    }),
+  );
+  return true;
+};
+
 export const workspaceEditorKeymap: readonly KeyBinding[] = [
   { key: "Mod-/", run: toggleComment },
   { key: "Mod-Shift-/", run: toggleBlockComment },
@@ -224,4 +262,6 @@ export const workspaceEditorKeymap: readonly KeyBinding[] = [
   { key: "Shift-Alt-j", run: unselectOccurrence },
   { key: "Mod-Alt-Shift-j", run: selectSelectionMatches },
   { key: "Ctrl-Alt-Shift-j", run: selectSelectionMatches },
+  { key: "Mod-Shift-u", run: toggleCase },
+  { key: "Ctrl-Shift-u", run: toggleCase },
 ];

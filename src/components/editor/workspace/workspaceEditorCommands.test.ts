@@ -8,6 +8,7 @@ import {
   expandSelectionFromLspRanges,
   selectionHistoryField,
   shrinkSyntaxSelection,
+  toggleCase,
   unselectOccurrence,
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
@@ -53,6 +54,8 @@ describe("workspace editor commands", () => {
       "Shift-Alt-j",
       "Mod-Alt-Shift-j",
       "Ctrl-Alt-Shift-j",
+      "Mod-Shift-u",
+      "Ctrl-Shift-u",
     ]);
   });
 
@@ -133,5 +136,40 @@ describe("workspace editor commands", () => {
 
     expect(unselectOccurrence(view)).toBe(false);
     view.destroy();
+  });
+
+  it("toggles case of selected text or word under caret with Ctrl+Shift+U", () => {
+    const doc = "const myVariable = 'hello';";
+    const view = new EditorView({
+      state: EditorState.create({
+        doc,
+        selection: { anchor: 6, head: 16 }, // 'myVariable'
+      }),
+    });
+
+    // Lower/mixed -> UPPER
+    expect(toggleCase(view)).toBe(true);
+    expect(view.state.sliceDoc(6, 16)).toBe("MYVARIABLE");
+
+    // UPPER -> lower
+    expect(toggleCase(view)).toBe(true);
+    expect(view.state.sliceDoc(6, 16)).toBe("myvariable");
+
+    // Caret inside word without explicit range
+    const caretView = new EditorView({
+      state: EditorState.create({
+        doc: "const identifier = 1;",
+        selection: { anchor: 8 }, // inside 'identifier'
+      }),
+    });
+
+    expect(toggleCase(caretView)).toBe(true);
+    expect(caretView.state.doc.toString()).toBe("const IDENTIFIER = 1;");
+
+    expect(toggleCase(caretView)).toBe(true);
+    expect(caretView.state.doc.toString()).toBe("const identifier = 1;");
+
+    view.destroy();
+    caretView.destroy();
   });
 });
