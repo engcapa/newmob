@@ -2,9 +2,13 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-15 · 版本：v4.27（IDEA editor parity implementation: Sticky Lines, Ctrl+Shift+F9 recompile & Run Profile overrides delivery）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮在 P0/P1/P2 基础上进一步交付了 Sticky Lines（编辑器吸顶作用域头）、`Ctrl+Shift+F9`（重新编译当前文件）、Maven Active Profile / Gradle 属性覆盖界面与临时运行配置持久化。PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-15 · 版本：v4.28（IDEA editor parity implementation: Refactoring usages preview, Indentation auto-detection & Keymap reference delivery）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮在 P0/P1/P2 基础上进一步交付了：
+> 1. 重构引用预检面板（Refactoring Usages Preview Dialog with Checkbox Filtering，支持按文件/行勾选与过滤应用）；
+> 2. 文件缩进智能嗅探与状态栏切换（Indentation Auto-Detection: 2-space/4-space/tabs & `Spaces: 2` / `Spaces: 4` / `Tab: 4` 快捷切换）；
+> 3. Keymap 键盘快捷键速查面板（Keymap Shortcuts Cheatsheet: 分类导航、实时搜索、实体按键帽渲染与命令执行，快捷键 `Ctrl+Alt+/` / `Mod-k Mod-s`）。
+> PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
-> 早期版本：v4.26（2026-08-15，IDEA editor parity implementation: P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
+> 早期版本：v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
