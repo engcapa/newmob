@@ -234,6 +234,7 @@ import {
 } from "./workspace/workspaceEditPreview";
 import { RefactoringPreviewDialog } from "./workspace/RefactoringPreviewDialog";
 import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
+import { DapAdapterGuideDialog } from "./workspace/DapAdapterGuideDialog";
 import {
   buildWorkspacePathSnapshotEdit,
   WorkspaceEditHistory,
@@ -6300,6 +6301,8 @@ export function CodeWorkspaceTab({
 
   const [coverageReport, setCoverageReport] = useState<WorkspaceCoverageReport | null>(null);
   const [coverageOverlayEnabled, setCoverageOverlayEnabled] = useState(true);
+  const [dapGuideOpen, setDapGuideOpen] = useState(false);
+  const [keymapCheatSheetOpen, setKeymapCheatSheetOpen] = useState(false);
 
   const scanWorkspaceCoverage = useCallback(async () => {
     for (const root of rootsRef.current) {
@@ -7144,6 +7147,13 @@ export function CodeWorkspaceTab({
         setBottomDockOpen(true);
         if (!coverageReport) void scanWorkspaceCoverage();
       },
+    },
+    {
+      id: "workspace.openDapAdapterGuide",
+      title: "DAP Debug Adapter Setup Guide",
+      category: "Debug",
+      keywords: ["dap", "debugpy", "delve", "lldb", "gdb", "js-debug", "adapter", "guide", "setup"],
+      run: () => setDapGuideOpen(true),
     },
   ], [
     activeCapabilities,
@@ -8989,9 +8999,6 @@ export function CodeWorkspaceTab({
     resolve: (filtered: LspWorkspaceEdit | boolean) => void;
   } | null>(null);
 
-  /** Keyboard shortcuts reference dialog state. */
-  const [keymapCheatSheetOpen, setKeymapCheatSheetOpen] = useState(false);
-
   /** Start a Java debug session, optionally pinned to an explicit main class. */
   const launchJavaDebug = useCallback(
     (
@@ -10557,6 +10564,12 @@ export function CodeWorkspaceTab({
           onExecuteCommand={(cmdId) => {
             runWorkspaceCommand(workspaceCommands, cmdId, workspaceCommandContextRef.current);
           }}
+        />
+      )}
+      {dapGuideOpen && (
+        <DapAdapterGuideDialog
+          open={true}
+          onClose={() => setDapGuideOpen(false)}
         />
       )}
     </div>
