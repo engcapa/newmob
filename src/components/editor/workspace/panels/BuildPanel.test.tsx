@@ -286,12 +286,63 @@ describe("BuildPanel", () => {
       onExit?.(0);
     });
     render(<BuildPanel workspaceInstanceId="ws" roots={roots} active onRunTask={onRunTask} />);
-
     const rebuild = await screen.findByTestId("build-panel-rebuild-project");
     await waitFor(() => expect(rebuild).not.toBeDisabled());
     fireEvent.click(rebuild);
     await waitFor(() => expect(launched).toEqual([
       "cargo-clean", "cargo-build", "cmake-clean", "cmake-build",
     ]));
+  });
+
+  it("renders structured project modules with language level and dependencies", async () => {
+    workspaceMocks.workspaceTaskTree.mockResolvedValue([
+      { source: "Maven", tasks: [{ id: "mvn:compile", label: "compile", command: "mvn compile", cwd: "/repo/app" }] },
+    ]);
+    workspaceMocks.workspaceExecutionModel.mockResolvedValue({
+      projects: [],
+      buildTargets: [],
+      runConfigurations: [],
+      debugConfigurations: [],
+      tools: [],
+      modules: [
+        {
+          id: "module-core",
+          projectId: "proj-1",
+          name: "taomni-core",
+          root: "/repo/app/core",
+          manifest: "/repo/app/core/pom.xml",
+          languageLevel: "Java 21",
+          sourceSetIds: ["main", "test"],
+          moduleDependencies: [],
+          diagnostics: [],
+        },
+        {
+          id: "module-api",
+          projectId: "proj-1",
+          name: "taomni-api",
+          root: "/repo/app/api",
+          manifest: "/repo/app/api/pom.xml",
+          languageLevel: "Java 21",
+          sourceSetIds: ["main"],
+          moduleDependencies: ["taomni-core"],
+          diagnostics: [],
+        },
+      ],
+    });
+
+    render(
+      <BuildPanel
+        workspaceInstanceId="ws"
+        roots={roots}
+        active
+        onRunTask={vi.fn()}
+        onLoadModules={vi.fn().mockResolvedValue([])}
+      />,
+    );
+
+    expect(await screen.findByTestId("build-panel-model-module-module-core")).toBeInTheDocument();
+    expect(screen.getByTestId("build-panel-model-module-module-api")).toBeInTheDocument();
+    expect(screen.getAllByText("taomni-core")).toHaveLength(2);
+    expect(screen.getByText("taomni-api")).toBeInTheDocument();
   });
 });

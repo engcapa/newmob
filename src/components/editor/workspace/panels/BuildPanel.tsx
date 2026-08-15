@@ -5,6 +5,7 @@ import {
   workspaceExecutionModel,
   workspaceTaskTree,
   type DependencyNode,
+  type ExecutionModuleModel,
   type WorkspaceTaskGroup,
   type WorkspaceToolConfig,
 } from "../../../../lib/editor/workspace";
@@ -58,6 +59,7 @@ interface RootTaskTree {
   rootPath: string;
   groups: WorkspaceTaskGroup[];
   targets: WorkspaceTaskItem[];
+  modelModules: ExecutionModuleModel[];
 }
 
 interface BuildPanelProps {
@@ -145,6 +147,7 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
           rootName: root.name,
           rootPath: root.path,
           groups,
+          modelModules: executionModel.modules ?? [],
           targets: executionModel.buildTargets.map((target) => {
             const project = projectById.get(target.projectId);
             return {
@@ -534,11 +537,46 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
                   </button>
                 </div>
                 {!isCollapsed && (
-                  <div data-testid={`build-panel-modules-${tree.rootId}`}>
+                  <div data-testid={`build-panel-modules-${tree.rootId}`} className="space-y-1 py-1">
+                    {tree.modelModules && tree.modelModules.length > 0 && (
+                      <div className="space-y-1 px-2 pb-1">
+                        {tree.modelModules.map((mod) => (
+                          <div
+                            key={mod.id}
+                            data-testid={`build-panel-model-module-${mod.id}`}
+                            className="flex flex-col gap-0.5 rounded border border-[var(--taomni-code-border)]/40 bg-[var(--taomni-code-active-line-bg)]/20 px-2 py-1"
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-[var(--taomni-text)]">{mod.name}</span>
+                              {mod.languageLevel && (
+                                <span className="rounded bg-[var(--taomni-code-active-line-bg)] px-1 text-[9px] text-[var(--taomni-text-muted)] font-mono">
+                                  {mod.languageLevel}
+                                </span>
+                              )}
+                              <span className="ml-auto text-[9px] text-[var(--taomni-text-muted)] font-mono truncate max-w-[180px]">
+                                {mod.root}
+                              </span>
+                            </div>
+                            {mod.moduleDependencies && mod.moduleDependencies.length > 0 && (
+                              <div className="flex items-center gap-1 text-[9px] text-[var(--taomni-text-muted)]">
+                                <span>Depends on:</span>
+                                <div className="flex flex-wrap gap-1">
+                                  {mod.moduleDependencies.map((dep) => (
+                                    <span key={dep} className="rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] px-1 py-0.2 text-[9px] text-emerald-400 font-mono">
+                                      {dep}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                     {modulesError[tree.rootId] && (
                       <div className="px-2 py-1 text-red-500">{modulesError[tree.rootId]}</div>
                     )}
-                    {loaded && loaded.length === 0 && !modulesError[tree.rootId] && (
+                    {loaded && loaded.length === 0 && !modulesError[tree.rootId] && (!tree.modelModules || tree.modelModules.length === 0) && (
                       <div className="px-2 py-1 text-[var(--taomni-text-muted)]">No modules reported.</div>
                     )}
                     {loaded && loaded.map((module) => (
@@ -551,7 +589,7 @@ export function BuildPanel({ roots, active, onRunTask, onLoadModules, toolConfig
                         <span className="ml-auto truncate text-[10px] text-[var(--taomni-text-muted)]">{module.path}</span>
                       </div>
                     ))}
-                    {!loaded && !modulesLoading[tree.rootId] && !modulesError[tree.rootId] && (
+                    {!loaded && !modulesLoading[tree.rootId] && !modulesError[tree.rootId] && (!tree.modelModules || tree.modelModules.length === 0) && (
                       <div className="px-2 py-1 text-[10px] text-[var(--taomni-text-muted)]">
                         Load to list Java modules (requires an active language server).
                       </div>
