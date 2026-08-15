@@ -247,4 +247,50 @@ describe("AnalysisPanel", () => {
     expect(callbacks.onRemoveBaselineEntry).toHaveBeenCalled();
     expect(callbacks.onRemoveSuppression).toHaveBeenCalled();
   });
+
+  it("handles lastQuery coverage with undefined diagnostics without crashing", () => {
+    const semanticIndex = {
+      ...createWorkspaceSemanticIndexSnapshot(),
+      status: "ready" as const,
+      provider: "language-server" as const,
+      lastQuery: {
+        kind: "symbols" as const,
+        generation: 1,
+        completedAt: Date.now(),
+        resultCount: 5,
+        provider: "language-server" as const,
+        coverage: {
+          scope: "workspace" as const,
+          sessionCount: 1,
+          providerCount: 1,
+          skippedProviderCount: 0,
+          failedProviderCount: 0,
+          complete: true,
+          truncated: false,
+          diagnostics: undefined as unknown as string[],
+        },
+      },
+    };
+
+    render(
+      <AnalysisPanel
+        files={[]}
+        status={null}
+        semanticTokenCount={0}
+        semanticIndex={semanticIndex}
+        profile={defaultInspectionProfile()}
+        onUpdateRule={vi.fn()}
+        onCreateBaseline={vi.fn()}
+        onClearBaseline={vi.fn()}
+        onRemoveBaselineEntry={vi.fn()}
+        onRemoveSuppression={vi.fn()}
+        onExportBaseline={vi.fn()}
+        onImportBaseline={vi.fn()}
+        onOpenLocation={vi.fn()}
+        onOpenDiagnostic={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("analysis-semantic-index")).toHaveTextContent("Last query: symbols");
+  });
 });
