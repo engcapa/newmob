@@ -2,9 +2,9 @@
 
 > 目标：将 Code Workspace 的代码编辑器能力、交互语义和工程模型做到与 IntelliJ IDEA Code Editor 严格持平。这里的“持平”指同一类代码编辑工作流在三端（Linux、macOS、Windows）具备等价的可发现入口、可预测行为、协议能力和错误处理；不是只完成若干 UI 仿制项，也不把“能打开文件”视为完成。本文档同时作为实现与验收基线。
 >
-> 日期：2026-08-15 · 版本：v4.25（IDEA editor parity backlog & execution）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮在完成 `Ctrl+Shift+Enter` 语句补全、`Alt+J` 多光标发生项、Git Gutter chunk 回滚、`Ctrl+Shift+E` 最近修改、`Ctrl+Shift+Backspace` 最后编辑位置与 Maven/Gradle 多模块拓扑之后，制定并实施 §11.10 中的 P0–P2 待办清单（`Ctrl+Shift+U` 大小写切换、`F2`/`Shift+F2` 诊断跳转、`Ctrl+P` 参数提示、`Ctrl+Shift+I` 快速定义预览、`Ctrl+Alt+O` 优化导包等）。PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
+> 日期：2026-08-15 · 版本：v4.26（IDEA editor parity implementation: P0-P2 shortcuts & actions delivery）· 状态：**实施中**。已有 M0–M11 代码保留，所有“已交付”结论仍须通过三端真机工程验收；本轮交付了 P0（`Ctrl+Shift+U` 大小写切换、`F2`/`Shift+F2` 诊断跳转、`Ctrl+P` 参数提示、`Ctrl+Shift+I` 快速定义预览、`Ctrl+Alt+O` 优化导包）与 P1/P2（`Ctrl+Shift+F10` 上下文运行、`Alt+F1` 项目树定位自展、`Ctrl+Alt+Shift+T` 重构上下文弹窗与提取键位、`Ctrl+F8`/`Ctrl+Shift+F8` 断点与静音操作）。PSI/index、原生 inspection/data-flow、真实 adapter trace 与三端真实证据仍缺，因此**尚未达到 IntelliJ IDEA Code Editor 严格持平**。
 >
-> 早期版本：v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
+> 早期版本：v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
@@ -1171,21 +1171,21 @@ M11 配置与分析收口 : Build target DAG + Run/Debug configuration + provide
 
 ### 11.10 近期待办规划与实施路线（P0–P2）
 
-为彻底消除日常代码编辑与高频交互手感中的残余差异，制定以下三级实施路线：
+为彻底消除日常代码编辑与高频交互手感中的残余差异，制定并推进以下三级实施路线：
 
-#### 🔴 P0 优先级（高频快捷键与动作直接对齐）
-1. **`Ctrl+Shift+U` 字母大小写切换 (Toggle Case)**：在 `workspaceEditorCommands.ts` 中实现选区或光标所在词的大写/小写/驼峰循环切换，并在 `workspaceEditorKeymap` 中绑定 `Mod-Shift-u` / `Ctrl-Shift-u`。
-2. **`F2` / `Shift+F2` 诊断错误/警告快速跳转 (Next/Prev Highlighted Error)**：在编辑器内计算下一个/上一个诊断位置并移动光标展示错误气泡；左侧树中保留树重命名逻辑。
-3. **`Ctrl+P` 参数信息主动提示 (Parameter Info)**：注册 `workspace.parameterInfo` 命令并在编辑器光标处显式唤起 LSP 签名提示浮层。
-4. **`Ctrl+Shift+I` 快速定义预览 (Quick Definition Peek)**：绑定快捷键直接唤起 `LocationPeek` 浮层预览定义代码，无需改变当前编辑焦点。
-5. **`Ctrl+Alt+O` 优化导包 (Optimize Imports)**：向语言服务器发送 `source.organizeImports` 代码操作，自动清理未使用导入并排序。
+#### 🔴 P0 优先级（高频快捷键与动作直接对齐）— **全部已交付**
+1. **✅ `Ctrl+Shift+U` 字母大小写切换 (Toggle Case)**：在 `workspaceEditorCommands.ts` 中实现选区或光标所在词的大写/小写/驼峰循环切换，并在 `workspaceEditorKeymap` 中绑定 `Mod-Shift-u` / `Ctrl-Shift-u`（单测覆盖）。
+2. **✅ `F2` / `Shift+F2` 诊断错误/警告快速跳转 (Next/Prev Highlighted Error)**：在编辑器内计算下一个/上一个诊断位置并移动光标展示错误气泡，支持环形回卷（wrap-around）；左侧树中保留树重命名逻辑。
+3. **✅ `Ctrl+P` 参数信息主动提示 (Parameter Info)**：注册 `workspace.parameterInfo` 命令并在 CodeMirror 中绑定 `Mod-p` / `Ctrl-p`，在编辑器光标处显式唤起 LSP 签名提示浮层（释放 Ctrl+P 快捷键）。
+4. **✅ `Ctrl+Shift+I` 快速定义预览 (Quick Definition Peek)**：绑定 `Mod-Shift-I` 直接唤起 `LocationPeek` 浮层预览定义代码，无需改变当前编辑焦点。
+5. **✅ `Ctrl+Alt+O` 优化导包 (Optimize Imports)**：向语言服务器发送 `source.organizeImports` 代码操作，自动清理未使用导入并排序。
 
-#### 🟡 P1 优先级（交互质感与上下文感知）
-1. **`Ctrl+Shift+F10` 上下文运行当前文件 (Run Context Configuration)**：根据当前活跃文件类型或 main 方法自动构造临时运行指令并启动。
-2. **Sticky Lines (编辑器头部吸顶上下文)**：CodeMirror 6 视图插件，滚动时将外层作用域声明行固定在编辑器顶部。
-3. **`Alt+F1` 定位到项目树 (Select in Project View)**：将左侧文件树滚动并选中当前编辑器激活的文件节点。
+#### 🟡 P1 优先级（交互质感与上下文感知）— **部分已交付**
+1. **✅ `Ctrl+Shift+F10` 上下文运行当前文件 (Run Context Configuration)**：注册 `workspace.runContextConfiguration`，根据当前活跃文件类型或 main 方法直接启动当前目标。
+2. **✅ `Alt+F1` 定位到项目树 (Select in Project View)**：注册 `workspace.revealActiveFileInTree`，将左侧文件树滚动并选中当前编辑器激活的文件节点，支持在项目树折叠状态下自动展开左侧面板。
+3. **⏳ Sticky Lines (编辑器头部吸顶上下文)**：CodeMirror 6 视图插件，滚动时将外层作用域声明行固定在编辑器顶部（目前由编辑器顶栏 IDEA Breadcrumbs 展示当前符号链）。
 
-#### 🔵 P2 优先级（重构动作与高级调试）
-1. **`Ctrl+Alt+Shift+T` 重构上下文弹窗 (Refactor This)**。
-2. **调试工具栏静音所有断点 (Mute Breakpoints)**。
-3. **多模块 Maven Active Profile / Gradle 属性覆盖界面**。
+#### 🔵 P2 优先级（重构动作与高级调试）— **部分已交付**
+1. **✅ `Ctrl+Alt+Shift+T` 重构上下文弹窗 (Refactor This)**：注册 `workspace.refactorThis` 命令，唤起当前光标处的全部重构选项；补齐标准重构快捷键 `Ctrl+Alt+V`（抽取变量）、`Ctrl+Alt+M`（抽取方法）、`Ctrl+Alt+N`（内联）、`Ctrl+F6`（更改签名）、`F6`（移动）。
+2. **✅ 调试工具栏与命令静音所有断点 (Mute Breakpoints)**：注册 `workspace.toggleMuteBreakpoints` 命令，与 DebugPanel 工具栏联动切换静音状态；注册 `Ctrl+F8`（切换断点）、`Ctrl+Shift+F8`（查看/编辑断点）。
+3. **⏳ 多模块 Maven Active Profile / Gradle 属性覆盖界面**：在 Run/Build Configuration 面板中提供多模块 Profile 与自定义 Property 输入界面。
