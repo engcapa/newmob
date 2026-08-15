@@ -4035,5 +4035,20 @@ describe("CodeWorkspaceTab", () => {
       ["source.organizeImports"],
     ));
     expect(useAppStore.getState().statusMessage).toBe("Imports organized");
+
+    // 5. Ctrl+Shift+F10 Run Context Configuration
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.runContextConfiguration")?.enabled).toBe(true);
+
+    // 6. Ctrl+Alt+Shift+T Refactor This
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.refactorThis")?.enabled).toBe(true);
+
+    // 7. Breakpoints: Ctrl+F8, Ctrl+Shift+F8, Mute
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.toggleBreakpoint")?.enabled).toBe(true);
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.viewBreakpoints")?.enabled).toBe(true);
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.toggleMuteBreakpoints")?.enabled).toBe(true);
+    await act(async () => {
+      registrationRef.current?.execute("workspace.toggleMuteBreakpoints");
+    });
+    expect(useAppStore.getState().statusMessage).toBe("Breakpoints muted");
   });
 });

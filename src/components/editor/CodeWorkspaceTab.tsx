@@ -1267,6 +1267,9 @@ export function CodeWorkspaceTab({
   const runPanelRef = useRef<RunPanelHandle | null>(null);
   const runActiveJavaFileRef = useRef<() => void>(() => {});
   const buildActiveProjectRef = useRef<(rebuild?: boolean) => void>(() => {});
+  const toggleActiveBreakpointRef = useRef<(line: number) => void>(() => {});
+  const editActiveBreakpointRef = useRef<(line: number) => void>(() => {});
+  const debugRef = useRef<ReturnType<typeof useCodeDebugSession> | null>(null);
 
   useEffect(() => {
     workspaceEditHistory.clear();
@@ -2055,6 +2058,7 @@ export function CodeWorkspaceTab({
   const revealEditorTabInTree = useCallback((key: string) => {
     const file = openFilesRef.current[key];
     if (!file) return;
+    setLanguagePanelOpen(true);
     setSelected({ kind: "file", ref: file.ref });
     if (file.ref.kind !== "root") return;
     const rootId = file.ref.rootId;
@@ -2071,7 +2075,7 @@ export function CodeWorkspaceTab({
       return next;
     });
     treePaneRef.current?.focus();
-  }, [loadDir]);
+  }, [loadDir, setLanguagePanelOpen]);
 
   const revealEditorTabInExplorer = useCallback((key: string) => {
     const file = openFilesRef.current[key];
@@ -6502,17 +6506,30 @@ export function CodeWorkspaceTab({
       category: "Refactor",
       keybinding: "Alt+Delete",
       keywords: ["refactor", "delete", "safe delete", "usages"],
-      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
         && !activeFile.library
         && (!activeCapabilities || (!!activeCapabilities.references && !!activeCapabilities.rename)),
       run: () => void safeDeleteSymbolRef.current(),
     },
     {
+      id: "workspace.refactorThis",
+      title: "Refactor This…",
+      category: "Refactor",
+      keybinding: "Ctrl+Alt+Shift+T",
+      keybindings: ["Mod-Alt-Shift-T", "Mod-Alt-Shift-t", "Ctrl+T"],
+      keywords: ["refactor", "refactor this", "extract", "inline", "rename", "move"],
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
+        && !activeFile.library && !!activeCapabilities?.codeAction,
+      run: () => void openRefactorActions(["refactor"], "Refactor actions"),
+    },
+    {
       id: "workspace.extractMethod",
       title: "Extract Method",
       category: "Refactor",
+      keybinding: "Ctrl+Alt+M",
+      keybindings: ["Mod-Alt-M", "Mod-Alt-m"],
       keywords: ["refactor", "extract", "method", "function"],
-      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
         && !activeFile.library && !!activeCapabilities?.codeAction,
       run: () => void openRefactorActions(["refactor.extract", "refactor.extract.function", "refactor.extract.method"], "Extract Method/Function actions"),
     },
@@ -6520,8 +6537,10 @@ export function CodeWorkspaceTab({
       id: "workspace.extractVariable",
       title: "Extract Variable",
       category: "Refactor",
+      keybinding: "Ctrl+Alt+V",
+      keybindings: ["Mod-Alt-V", "Mod-Alt-v"],
       keywords: ["refactor", "extract", "variable", "local"],
-      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
         && !activeFile.library && !!activeCapabilities?.codeAction,
       run: () => void openRefactorActions(["refactor.extract.variable", "refactor.extract.constant"], "Extract Variable/Constant actions"),
     },
@@ -6529,8 +6548,10 @@ export function CodeWorkspaceTab({
       id: "workspace.inline",
       title: "Inline",
       category: "Refactor",
+      keybinding: "Ctrl+Alt+N",
+      keybindings: ["Mod-Alt-N", "Mod-Alt-n"],
       keywords: ["refactor", "inline", "variable", "method", "function"],
-      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
         && !activeFile.library && !!activeCapabilities?.codeAction,
       run: () => void openRefactorActions(["refactor.inline"], "Inline actions"),
     },
@@ -6538,8 +6559,10 @@ export function CodeWorkspaceTab({
       id: "workspace.changeSignature",
       title: "Change Signature",
       category: "Refactor",
+      keybinding: "Ctrl+F6",
+      keybindings: ["Mod-F6"],
       keywords: ["refactor", "signature", "parameters", "arguments"],
-      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
         && !activeFile.library && !!activeCapabilities?.codeAction,
       run: () => void openRefactorActions(["refactor.rewrite.changeSignature", "refactor.changeSignature"], "Change Signature actions"),
     },
@@ -6547,8 +6570,9 @@ export function CodeWorkspaceTab({
       id: "workspace.moveRefactor",
       title: "Move",
       category: "Refactor",
+      keybinding: "F6",
       keywords: ["refactor", "move", "symbol", "class"],
-      when: (context) => context.focus === "editor" && !!activeFile && !activeFile.loading
+      when: (context) => context.focus !== "tree" && !!activeFile && !activeFile.loading
         && !activeFile.library && !!activeCapabilities?.codeAction,
       run: () => void openRefactorActions(["refactor.move", "refactor.rewrite"], "Move actions"),
     },
@@ -6711,7 +6735,20 @@ export function CodeWorkspaceTab({
       title: "Run Current Target",
       category: "Run",
       keybinding: "Shift+F10",
+      keybindings: ["Ctrl+Shift+F10"],
       keywords: ["target", "main", "run", "application"],
+      when: () => !!activeFile
+        && activeFile.ref.kind === "root"
+        && !activeFile.library,
+      run: () => runActiveJavaFileRef.current(),
+    },
+    {
+      id: "workspace.runContextConfiguration",
+      title: "Run Context Configuration",
+      category: "Run",
+      keybinding: "Ctrl+Shift+F10",
+      keybindings: ["Mod-Shift-F10"],
+      keywords: ["run context", "run file", "main", "test", "target"],
       when: () => !!activeFile
         && activeFile.ref.kind === "root"
         && !activeFile.library,
@@ -6725,6 +6762,46 @@ export function CodeWorkspaceTab({
       keywords: ["build", "compile", "maven", "gradle"],
       when: () => roots.length > 0,
       run: () => buildActiveProjectRef.current(false),
+    },
+    {
+      id: "workspace.toggleBreakpoint",
+      title: "Toggle Line Breakpoint",
+      category: "Debug",
+      keybinding: "Ctrl+F8",
+      keybindings: ["Mod-F8"],
+      keywords: ["breakpoint", "toggle breakpoint", "debug"],
+      when: () => !!activeFile && !activeFile.library,
+      run: () => {
+        const cursor = cursorPositions[activeEditorGroupId];
+        const line = (cursor?.line ?? editorSelectionRef.current.start.line) + 1;
+        toggleActiveBreakpointRef.current(line);
+      },
+    },
+    {
+      id: "workspace.viewBreakpoints",
+      title: "View Breakpoints",
+      category: "Debug",
+      keybinding: "Ctrl+Shift+F8",
+      keybindings: ["Mod-Shift-F8"],
+      keywords: ["breakpoint", "manage breakpoints", "condition", "log", "debug"],
+      run: () => {
+        const cursor = cursorPositions[activeEditorGroupId];
+        const line = (cursor?.line ?? editorSelectionRef.current.start.line) + 1;
+        editActiveBreakpointRef.current(line);
+      },
+    },
+    {
+      id: "workspace.toggleMuteBreakpoints",
+      title: "Mute / Unmute Breakpoints",
+      category: "Debug",
+      keywords: ["debug", "breakpoint", "mute", "disable", "pause"],
+      run: () => {
+        const debugSession = debugRef.current;
+        if (!debugSession) return;
+        const next = !debugSession.breakpointsMuted;
+        debugSession.setBreakpointsMuted(next);
+        setStatusMessage(next ? "Breakpoints muted" : "Breakpoints unmuted");
+      },
     },
     {
       id: "workspace.showRunTasks",
@@ -8605,8 +8682,7 @@ export function CodeWorkspaceTab({
 
   // M9: debug session (breakpoints, stepping, variables, watch, console).
   const debug = useCodeDebugSession(workspaceInstanceId);
-  // Ref so callbacks declared above the hook (debug-test) can reach it.
-  const debugRef = useRef(debug);
+  // Ref so callbacks declared above the hook (debug-test, commands) can reach it.
   debugRef.current = debug;
   // Ref so debug-test (declared above prepareJavaLaunch) can reach the pre-launch
   // save+build gate without a forward reference.
@@ -8670,6 +8746,8 @@ export function CodeWorkspaceTab({
     setBottomDockTab("debug");
     setBottomDockOpen(true);
   }, [activeFileAbsPath, debug, setBottomDockOpen, setBottomDockTab]);
+  toggleActiveBreakpointRef.current = toggleActiveBreakpoint;
+  editActiveBreakpointRef.current = editActiveBreakpoint;
 
   /**
    * Make-before-launch (Phase 3): save every dirty Java / build file in the
