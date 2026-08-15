@@ -54,9 +54,56 @@ pub struct ProjectModel {
     pub root: String,
     pub manifest: String,
     pub module: String,
+    pub module_id: String,
     pub languages: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_level: Option<String>,
     pub toolchain: String,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ModuleModel {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub root: String,
+    pub manifest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_level: Option<String>,
+    pub source_set_ids: Vec<String>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceSetModel {
+    pub id: String,
+    pub project_id: String,
+    pub module_id: String,
+    pub name: String,
+    pub kind: String,
+    pub roots: Vec<String>,
+    pub generated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_level: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileArtifact {
+    pub id: String,
+    pub project_id: String,
+    pub module_id: String,
+    pub target_id: String,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub resolution: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -64,10 +111,12 @@ pub struct ProjectModel {
 pub struct BuildTarget {
     pub id: String,
     pub project_id: String,
+    pub module_id: String,
     pub label: String,
     pub kind: String,
     pub command: ExecutionCommand,
     pub depends_on: Vec<String>,
+    pub artifact_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -132,7 +181,10 @@ pub struct DebugConfiguration {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceExecutionModel {
     pub projects: Vec<ProjectModel>,
+    pub modules: Vec<ModuleModel>,
+    pub source_sets: Vec<SourceSetModel>,
     pub build_targets: Vec<BuildTarget>,
+    pub compile_artifacts: Vec<CompileArtifact>,
     pub run_configurations: Vec<RunConfiguration>,
     pub debug_configurations: Vec<DebugConfiguration>,
     pub tools: Vec<ToolProbe>,
@@ -328,7 +380,10 @@ struct ResolvedSharedDebug {
 #[derive(Default)]
 struct ModelBuilder {
     projects: Vec<ProjectModel>,
+    modules: Vec<ModuleModel>,
+    source_sets: Vec<SourceSetModel>,
     build_targets: Vec<BuildTarget>,
+    compile_artifacts: Vec<CompileArtifact>,
     run_configurations: Vec<RunConfiguration>,
     debug_configurations: Vec<DebugConfiguration>,
     tools: BTreeMap<String, ToolProbe>,
@@ -338,14 +393,20 @@ struct ModelBuilder {
 impl ModelBuilder {
     fn finish(mut self) -> WorkspaceExecutionModel {
         self.projects.sort_by(|a, b| a.id.cmp(&b.id));
+        self.modules.sort_by(|a, b| a.id.cmp(&b.id));
+        self.source_sets.sort_by(|a, b| a.id.cmp(&b.id));
         self.build_targets.sort_by(|a, b| a.id.cmp(&b.id));
+        self.compile_artifacts.sort_by(|a, b| a.id.cmp(&b.id));
         self.run_configurations.sort_by(|a, b| a.id.cmp(&b.id));
         self.debug_configurations.sort_by(|a, b| a.id.cmp(&b.id));
         self.diagnostics.sort();
         self.diagnostics.dedup();
         WorkspaceExecutionModel {
             projects: self.projects,
+            modules: self.modules,
+            source_sets: self.source_sets,
             build_targets: self.build_targets,
+            compile_artifacts: self.compile_artifacts,
             run_configurations: self.run_configurations,
             debug_configurations: self.debug_configurations,
             tools: self.tools.into_values().collect(),
@@ -389,8 +450,10 @@ impl ModelBuilder {
         toolchain: &str,
     ) -> ProjectModel {
         let root = manifest.parent().unwrap_or(manifest);
+        let id = stable_id("project", &[provider, &path_string(manifest)]);
+        let module_id = stable_id("module", &[&id, &path_string(root)]);
         let project = ProjectModel {
-            id: stable_id("project", &[provider, &path_string(manifest)]),
+            id,
             provider: provider.to_string(),
             root: path_string(root),
             manifest: path_string(manifest),
@@ -399,10 +462,35 @@ impl ModelBuilder {
                 .and_then(|value| value.to_str())
                 .unwrap_or("project")
                 .to_string(),
+            module_id,
             languages: languages.iter().map(|value| (*value).to_string()).collect(),
+            language_level: detect_language_level(provider, manifest),
             toolchain: toolchain.to_string(),
             diagnostics: Vec::new(),
         };
+        self.register_project(project)
+    }
+
+    fn register_project(&mut self, project: ProjectModel) -> ProjectModel {
+        if let Some(existing) = self.projects.iter().find(|entry| entry.id == project.id) {
+            return existing.clone();
+        }
+        let source_sets = discover_source_sets(&project);
+        let source_set_ids = source_sets
+            .iter()
+            .map(|source_set| source_set.id.clone())
+            .collect();
+        self.modules.push(ModuleModel {
+            id: project.module_id.clone(),
+            project_id: project.id.clone(),
+            name: project.module.clone(),
+            root: project.root.clone(),
+            manifest: project.manifest.clone(),
+            language_level: project.language_level.clone(),
+            source_set_ids,
+            diagnostics: Vec::new(),
+        });
+        self.source_sets.extend(source_sets);
         self.projects.push(project.clone());
         project
     }
@@ -415,13 +503,40 @@ impl ModelBuilder {
         command: ExecutionCommand,
     ) -> String {
         let id = stable_id("build", &[&project.id, kind, label]);
+        let artifact_ids = if kind == "build" {
+            let artifact_id = stable_id("artifact", &[&id, &project.module_id, label]);
+            let resolution = if command.error.is_some() {
+                "blocked"
+            } else {
+                "pending-provider-output"
+            };
+            self.compile_artifacts.push(CompileArtifact {
+                id: artifact_id.clone(),
+                project_id: project.id.clone(),
+                module_id: project.module_id.clone(),
+                target_id: id.clone(),
+                kind: compile_artifact_kind(&project.provider, label).to_string(),
+                path: None,
+                resolution: resolution.to_string(),
+                source: "build-target".to_string(),
+                diagnostic: command
+                    .error
+                    .clone()
+                    .or_else(|| Some(compile_artifact_diagnostic(&project.provider).to_string())),
+            });
+            vec![artifact_id]
+        } else {
+            Vec::new()
+        };
         self.build_targets.push(BuildTarget {
             id: id.clone(),
             project_id: project.id.clone(),
+            module_id: project.module_id.clone(),
             label: label.to_string(),
             kind: kind.to_string(),
             command,
             depends_on: Vec::new(),
+            artifact_ids,
         });
         id
     }
@@ -518,6 +633,26 @@ fn path_string(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+fn shared_project_model(workspace_root: &Path) -> ProjectModel {
+    let id = "shared:workspace".to_string();
+    ProjectModel {
+        module_id: stable_id("module", &[&id, &path_string(workspace_root)]),
+        id,
+        provider: "shared".to_string(),
+        root: path_string(workspace_root),
+        manifest: path_string(&workspace_root.join(SHARED_RUN_CONFIG_RELATIVE_PATH)),
+        module: workspace_root
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("workspace")
+            .to_string(),
+        languages: Vec::new(),
+        language_level: None,
+        toolchain: "shared".to_string(),
+        diagnostics: Vec::new(),
+    }
+}
+
 fn stable_id(prefix: &str, parts: &[&str]) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
@@ -526,6 +661,240 @@ fn stable_id(prefix: &str, parts: &[&str]) -> String {
     }
     let digest = hex::encode(hasher.finalize());
     format!("{prefix}:{}", &digest[..16])
+}
+
+fn first_capture(contents: &str, patterns: &[&str]) -> Option<String> {
+    patterns.iter().find_map(|pattern| {
+        Regex::new(pattern)
+            .ok()?
+            .captures(contents)?
+            .get(1)
+            .map(|value| value.as_str().trim().to_string())
+    })
+}
+
+fn maven_language_level(contents: &str) -> Option<String> {
+    let configured = first_capture(
+        contents,
+        &[
+            r"<maven\.compiler\.release>\s*([^<]+)\s*</maven\.compiler\.release>",
+            r"<maven\.compiler\.source>\s*([^<]+)\s*</maven\.compiler\.source>",
+        ],
+    );
+    let value = configured
+        .or_else(|| first_capture(contents, &[r"<java\.version>\s*([^<]+)\s*</java\.version>"]))?;
+    let Some(property) = value
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return Some(value);
+    };
+    if property.is_empty()
+        || !property
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+    {
+        return None;
+    }
+    let pattern = format!(
+        r"<{}>\s*([^<]+)\s*</{}>",
+        regex::escape(property),
+        regex::escape(property)
+    );
+    first_capture(contents, &[&pattern])
+}
+
+fn detect_language_level(provider: &str, manifest: &Path) -> Option<String> {
+    let contents = read_text(manifest).ok()?;
+    let (prefix, value) = match provider {
+        "cargo" => (
+            "rust",
+            first_capture(&contents, &[r#"(?m)^\s*edition\s*=\s*["']([^"']+)["']"#])?,
+        ),
+        "go" => (
+            "go",
+            first_capture(&contents, &[r"(?m)^\s*go\s+([0-9]+(?:\.[0-9]+)*)\s*$"])?,
+        ),
+        "python" => (
+            "python",
+            first_capture(
+                &contents,
+                &[r#"(?m)^\s*requires-python\s*=\s*["']([^"']+)["']"#],
+            )?,
+        ),
+        "node" => {
+            let value = serde_json::from_str::<Value>(&contents)
+                .ok()?
+                .pointer("/engines/node")?
+                .as_str()?
+                .trim()
+                .to_string();
+            ("node", value)
+        }
+        "maven" => ("java", maven_language_level(&contents)?),
+        "gradle" => (
+            "java",
+            first_capture(
+                &contents,
+                &[
+                    r"JavaLanguageVersion\.of\s*\(\s*([0-9]+)\s*\)",
+                    r"jvmToolchain\s*\(\s*([0-9]+)\s*\)",
+                    r#"sourceCompatibility\s*=\s*(?:JavaVersion\.VERSION_)?["']?([0-9_\.]+)"#,
+                ],
+            )?
+            .replace('_', "."),
+        ),
+        "sbt" => (
+            "scala",
+            first_capture(
+                &contents,
+                &[r#"(?m)^\s*(?:ThisBuild\s*/\s*)?scalaVersion\s*:?=\s*["']([^"']+)["']"#],
+            )?,
+        ),
+        "dotnet" => (
+            "dotnet",
+            first_capture(
+                &contents,
+                &[r"<TargetFramework>\s*([^<]+)\s*</TargetFramework>"],
+            )?,
+        ),
+        "cmake" => (
+            "cpp",
+            first_capture(
+                &contents,
+                &[r"CMAKE_CXX_STANDARD\s+([0-9]+)", r"cxx_std_([0-9]+)"],
+            )?,
+        ),
+        "swiftpm" => (
+            "swift",
+            first_capture(
+                &contents,
+                &[r"(?m)^\s*//\s*swift-tools-version:\s*([0-9]+(?:\.[0-9]+)*)"],
+            )?,
+        ),
+        _ => return None,
+    };
+    (!value.is_empty()).then(|| format!("{prefix}:{value}"))
+}
+
+fn source_set(
+    project: &ProjectModel,
+    name: &str,
+    kind: &str,
+    roots: Vec<PathBuf>,
+    generated: bool,
+) -> Option<SourceSetModel> {
+    let mut roots = roots
+        .into_iter()
+        .filter(|root| root.is_dir())
+        .map(|root| path_string(&root))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    if roots.is_empty() {
+        return None;
+    }
+    Some(SourceSetModel {
+        id: stable_id("source-set", &[&project.module_id, name, kind]),
+        project_id: project.id.clone(),
+        module_id: project.module_id.clone(),
+        name: name.to_string(),
+        kind: kind.to_string(),
+        roots,
+        generated,
+        language_level: project.language_level.clone(),
+    })
+}
+
+fn discover_source_sets(project: &ProjectModel) -> Vec<SourceSetModel> {
+    let root = Path::new(&project.root);
+    let mut main_roots = Vec::new();
+    let mut test_roots = Vec::new();
+    let mut generated_roots = Vec::new();
+    match project.provider.as_str() {
+        "maven" | "gradle" | "sbt" => {
+            for language in &project.languages {
+                main_roots.push(root.join("src/main").join(language));
+                test_roots.push(root.join("src/test").join(language));
+            }
+            main_roots.push(root.join("src/main/resources"));
+            test_roots.push(root.join("src/test/resources"));
+            generated_roots.extend([
+                root.join("target/generated-sources"),
+                root.join("build/generated/sources"),
+            ]);
+        }
+        "cargo" => {
+            main_roots.push(root.join("src"));
+            test_roots.push(root.join("tests"));
+            generated_roots.push(root.join("target/generated"));
+        }
+        "swiftpm" => {
+            main_roots.push(root.join("Sources"));
+            test_roots.push(root.join("Tests"));
+        }
+        "cmake" => {
+            main_roots.extend([root.join("src"), root.join("include")]);
+            test_roots.extend([root.join("tests"), root.join("test")]);
+            generated_roots.push(root.join("build/generated"));
+        }
+        "node" => {
+            main_roots.push(root.join("src"));
+            test_roots.extend([root.join("test"), root.join("tests")]);
+            generated_roots.push(root.join("generated"));
+        }
+        "python" => {
+            main_roots.push(root.join("src"));
+            test_roots.extend([root.join("test"), root.join("tests")]);
+        }
+        "go" | "dotnet" => {
+            main_roots.push(root.to_path_buf());
+            test_roots.extend([root.join("test"), root.join("tests")]);
+        }
+        _ => main_roots.push(root.to_path_buf()),
+    }
+    if !main_roots.iter().any(|candidate| candidate.is_dir()) {
+        main_roots.push(root.to_path_buf());
+    }
+    [
+        source_set(project, "main", "production", main_roots, false),
+        source_set(project, "test", "test", test_roots, false),
+        source_set(project, "generated", "generated", generated_roots, true),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+fn compile_artifact_kind(provider: &str, label: &str) -> &'static str {
+    let label = label.to_ascii_lowercase();
+    match provider {
+        "cargo" => "cargo-compiler-artifact",
+        "go" => "go-package",
+        "node" => "script-output",
+        "python" => "python-distribution",
+        "cmake" => "cmake-target",
+        "dotnet" => "dotnet-assembly",
+        "maven" | "gradle" | "sbt" if label.contains("compile") || label.contains("class") => {
+            "jvm-classes"
+        }
+        "maven" | "gradle" | "sbt" => "jvm-artifact",
+        "swiftpm" => "swift-product",
+        _ => "provider-output",
+    }
+}
+
+fn compile_artifact_diagnostic(provider: &str) -> &'static str {
+    match provider {
+        "cargo" => "Artifact path resolves from Cargo compiler-artifact JSON after build.",
+        "cmake" => "Artifact path requires CMake file-api target output.",
+        "dotnet" => "Artifact path requires MSBuild target framework output.",
+        "maven" | "gradle" | "sbt" => {
+            "Artifact path requires the imported build-tool module and task result."
+        }
+        "swiftpm" => "Artifact path resolves from SwiftPM bin-path output after build.",
+        _ => "Artifact path remains unresolved until the provider reports build output.",
+    }
 }
 
 fn configured_tool<'a>(config: Option<&'a WorkspaceToolConfig>, id: &str) -> Option<&'a str> {
@@ -1535,20 +1904,7 @@ fn resolve_shared_configuration(
             .find(|project| project.id == base.project_id)
             .ok_or_else(|| format!("provider base `{}` has no project", base.id))?
     } else if builder.projects.is_empty() && project_reference.is_none() {
-        standalone_project = ProjectModel {
-            id: "shared:workspace".to_string(),
-            provider: "shared".to_string(),
-            root: path_string(workspace_root),
-            manifest: path_string(&workspace_root.join(SHARED_RUN_CONFIG_RELATIVE_PATH)),
-            module: workspace_root
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("workspace")
-                .to_string(),
-            languages: Vec::new(),
-            toolchain: "shared".to_string(),
-            diagnostics: Vec::new(),
-        };
+        standalone_project = shared_project_model(workspace_root);
         &standalone_project
     } else {
         requested_project.unwrap_or(provider_project(builder, project_reference)?)
@@ -1730,20 +2086,7 @@ fn merge_shared_configurations(builder: &mut ModelBuilder, workspace_root: &Path
     }
 
     if builder.projects.is_empty() && !resolved.is_empty() {
-        builder.projects.push(ProjectModel {
-            id: "shared:workspace".to_string(),
-            provider: "shared".to_string(),
-            root: path_string(workspace_root),
-            manifest: path_string(&workspace_root.join(SHARED_RUN_CONFIG_RELATIVE_PATH)),
-            module: workspace_root
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("workspace")
-                .to_string(),
-            languages: Vec::new(),
-            toolchain: "shared".to_string(),
-            diagnostics: Vec::new(),
-        });
+        builder.register_project(shared_project_model(workspace_root));
     }
 
     let shared_debug_ids = resolved
@@ -3363,6 +3706,155 @@ mod tests {
                 .iter()
                 .all(|target| !target.command.executable.contains(' '))
         );
+    }
+
+    #[test]
+    fn models_modules_source_sets_language_levels_and_compile_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        write(
+            &directory.path().join("rust/Cargo.toml"),
+            "[package]\nname='native-app'\nversion='0.1.0'\nedition='2024'\n",
+        );
+        write(&directory.path().join("rust/src/main.rs"), "fn main() {}\n");
+        write(
+            &directory.path().join("rust/tests/smoke.rs"),
+            "#[test] fn smoke() {}\n",
+        );
+        write(
+            &directory.path().join("jvm/pom.xml"),
+            "<project><properties><maven.compiler.release>${java.version}</maven.compiler.release><java.version>21</java.version></properties></project>\n",
+        );
+        write(
+            &directory.path().join("jvm/src/main/java/App.java"),
+            "class App {}\n",
+        );
+        write(
+            &directory.path().join("jvm/src/test/java/AppTest.java"),
+            "class AppTest {}\n",
+        );
+        write(
+            &directory
+                .path()
+                .join("jvm/target/generated-sources/annotations/Generated.java"),
+            "class Generated {}\n",
+        );
+
+        let available_tool = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let available_config = WorkspaceToolConfig {
+            cargo: Some(available_tool.clone()),
+            maven: Some(available_tool),
+            ..Default::default()
+        };
+        let model =
+            detect_execution_model(directory.path(), None, Some(&available_config)).unwrap();
+        assert_eq!(model.modules.len(), model.projects.len());
+        for project in &model.projects {
+            let module = model
+                .modules
+                .iter()
+                .find(|module| module.id == project.module_id)
+                .expect("project module");
+            assert_eq!(module.project_id, project.id);
+            assert!(!module.source_set_ids.is_empty());
+            assert!(module.source_set_ids.iter().all(|id| {
+                model
+                    .source_sets
+                    .iter()
+                    .any(|source_set| source_set.id == *id && source_set.module_id == module.id)
+            }));
+        }
+
+        let rust = model
+            .projects
+            .iter()
+            .find(|project| project.provider == "cargo")
+            .expect("Cargo project");
+        assert_eq!(rust.language_level.as_deref(), Some("rust:2024"));
+        let rust_sets = model
+            .source_sets
+            .iter()
+            .filter(|source_set| source_set.module_id == rust.module_id)
+            .collect::<Vec<_>>();
+        assert!(
+            rust_sets
+                .iter()
+                .any(|source_set| source_set.kind == "production")
+        );
+        assert!(rust_sets.iter().any(|source_set| source_set.kind == "test"));
+
+        let jvm = model
+            .projects
+            .iter()
+            .find(|project| project.provider == "maven")
+            .expect("Maven project");
+        assert_eq!(jvm.language_level.as_deref(), Some("java:21"));
+        let jvm_sets = model
+            .source_sets
+            .iter()
+            .filter(|source_set| source_set.module_id == jvm.module_id)
+            .collect::<Vec<_>>();
+        assert!(
+            jvm_sets
+                .iter()
+                .any(|source_set| source_set.kind == "production")
+        );
+        assert!(jvm_sets.iter().any(|source_set| source_set.kind == "test"));
+        assert!(jvm_sets.iter().any(|source_set| source_set.generated));
+
+        for target in &model.build_targets {
+            assert!(
+                model
+                    .modules
+                    .iter()
+                    .any(|module| module.id == target.module_id)
+            );
+            if target.kind == "build" {
+                assert_eq!(target.artifact_ids.len(), 1);
+            } else {
+                assert!(target.artifact_ids.is_empty());
+            }
+        }
+        assert!(!model.compile_artifacts.is_empty());
+        for artifact in &model.compile_artifacts {
+            assert!(
+                artifact.path.is_none(),
+                "provider output must not be guessed"
+            );
+            assert_eq!(artifact.resolution, "pending-provider-output");
+            assert!(artifact.diagnostic.is_some());
+            assert!(model.build_targets.iter().any(|target| {
+                target.id == artifact.target_id
+                    && target.module_id == artifact.module_id
+                    && target.artifact_ids.contains(&artifact.id)
+            }));
+        }
+
+        let missing_tool = directory
+            .path()
+            .join("missing-build-tool")
+            .to_string_lossy()
+            .to_string();
+        let missing_config = WorkspaceToolConfig {
+            cargo: Some(missing_tool.clone()),
+            maven: Some(missing_tool),
+            ..Default::default()
+        };
+        let blocked_model =
+            detect_execution_model(directory.path(), None, Some(&missing_config)).unwrap();
+        assert!(!blocked_model.compile_artifacts.is_empty());
+        for artifact in &blocked_model.compile_artifacts {
+            assert_eq!(artifact.resolution, "blocked");
+            assert!(
+                artifact
+                    .diagnostic
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("Configured executable")
+            );
+        }
     }
 
     #[test]

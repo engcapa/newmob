@@ -182,18 +182,59 @@ export interface ExecutionProjectModel {
   root: string;
   manifest: string;
   module: string;
+  /** Stable module identity. Optional only for persisted/browser fixtures from before v4.23. */
+  moduleId?: string;
   languages: string[];
+  languageLevel?: string;
   toolchain: string;
   diagnostics: string[];
+}
+
+export interface ExecutionModuleModel {
+  id: string;
+  projectId: string;
+  name: string;
+  root: string;
+  manifest: string;
+  languageLevel?: string;
+  sourceSetIds: string[];
+  diagnostics: string[];
+}
+
+export interface ExecutionSourceSetModel {
+  id: string;
+  projectId: string;
+  moduleId: string;
+  name: string;
+  kind: "production" | "test" | "generated" | string;
+  roots: string[];
+  generated: boolean;
+  languageLevel?: string;
+}
+
+export interface ExecutionCompileArtifact {
+  id: string;
+  projectId: string;
+  moduleId: string;
+  targetId: string;
+  kind: string;
+  path?: string;
+  resolution: "blocked" | "pending-provider-output" | "resolved" | string;
+  source: string;
+  diagnostic?: string;
 }
 
 export interface ExecutionBuildTarget {
   id: string;
   projectId: string;
+  /** Stable module identity. Optional only for persisted/browser fixtures from before v4.23. */
+  moduleId?: string;
   label: string;
   kind: "configure" | "restore" | "build" | "clean" | "check" | "test";
   command: ExecutionCommand;
   dependsOn: string[];
+  /** Declared compile artifacts produced by this target. */
+  artifactIds?: string[];
 }
 
 export interface ExecutionRunConfiguration {
@@ -248,7 +289,11 @@ export interface ExecutionDebugConfiguration {
 
 export interface WorkspaceExecutionModel {
   projects: ExecutionProjectModel[];
+  /** Native execution-model topology; optional for older browser stubs. */
+  modules?: ExecutionModuleModel[];
+  sourceSets?: ExecutionSourceSetModel[];
   buildTargets: ExecutionBuildTarget[];
+  compileArtifacts?: ExecutionCompileArtifact[];
   runConfigurations: ExecutionRunConfiguration[];
   debugConfigurations: ExecutionDebugConfiguration[];
   tools: ExecutionToolProbe[];
