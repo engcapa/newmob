@@ -232,6 +232,7 @@ import {
   type WorkspaceEditPreview,
 } from "./workspace/workspaceEditPreview";
 import { RefactoringPreviewDialog } from "./workspace/RefactoringPreviewDialog";
+import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
 import {
   buildWorkspacePathSnapshotEdit,
   WorkspaceEditHistory,
@@ -7081,6 +7082,15 @@ export function CodeWorkspaceTab({
         }
       },
     },
+    {
+      id: "workspace.openKeymapCheatsheet",
+      title: "Keyboard Shortcuts (Keymap)",
+      category: "Help",
+      keybinding: "Ctrl+Alt+/",
+      keybindings: ["Mod-Alt-/", "Mod-k Mod-s"],
+      keywords: ["keymap", "shortcuts", "hotkeys", "cheat sheet", "intellij"],
+      run: () => setKeymapCheatSheetOpen(true),
+    },
   ], [
     activeCapabilities,
     activeEditorGroupId,
@@ -8920,6 +8930,9 @@ export function CodeWorkspaceTab({
     resolve: (filtered: LspWorkspaceEdit | boolean) => void;
   } | null>(null);
 
+  /** Keyboard shortcuts reference dialog state. */
+  const [keymapCheatSheetOpen, setKeymapCheatSheetOpen] = useState(false);
+
   /** Start a Java debug session, optionally pinned to an explicit main class. */
   const launchJavaDebug = useCallback(
     (
@@ -10450,6 +10463,16 @@ export function CodeWorkspaceTab({
           onCancel={() => {
             refactoringPreviewModal.resolve(false);
             setRefactoringPreviewModal(null);
+          }}
+        />
+      )}
+      {keymapCheatSheetOpen && (
+        <KeymapCheatSheetDialog
+          open={true}
+          commands={workspaceCommands}
+          onClose={() => setKeymapCheatSheetOpen(false)}
+          onExecuteCommand={(cmdId) => {
+            runWorkspaceCommand(workspaceCommands, cmdId, workspaceCommandContextRef.current);
           }}
         />
       )}
