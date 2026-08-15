@@ -13,9 +13,23 @@ export interface WorkspaceEditPreviewEntry {
   annotationLabel: string | null;
 }
 
+export interface WorkspaceEditPreviewUsage {
+  id: string;
+  operationIndex: number;
+  editIndex: number;
+  path: string;
+  range: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  };
+  newText: string;
+  annotationLabel: string | null;
+}
+
 export interface WorkspaceEditPreview {
   label: string | null;
   entries: WorkspaceEditPreviewEntry[];
+  usages: WorkspaceEditPreviewUsage[];
   operationCount: number;
   affectedFileCount: number;
   textEditCount: number;
@@ -36,6 +50,54 @@ export function workspaceEditOperations(edit: LspWorkspaceEdit): LspWorkspaceEdi
 }
 
 /**
+ * Filter an LSP WorkspaceEdit by excluding specific usage IDs (e.g. unchecked in preview dialog).
+ */
+export function filterWorkspaceEditByUsages(
+  edit: LspWorkspaceEdit,
+  excludedUsageIds: ReadonlySet<string>,
+): LspWorkspaceEdit {
+  if (excludedUsageIds.size === 0) return edit;
+
+  if (edit.operations && edit.operations.length > 0) {
+    const operations: LspWorkspaceEditOperation[] = [];
+    for (const [opIdx, op] of edit.operations.entries()) {
+      if (op.kind !== "text") {
+        operations.push(op);
+        continue;
+      }
+      const filteredEdits = op.document.edits.filter(
+        (_, editIdx) => !excludedUsageIds.has(`${opIdx}:${editIdx}`),
+      );
+      if (filteredEdits.length > 0) {
+        operations.push({
+          ...op,
+          document: {
+            ...op.document,
+            edits: filteredEdits,
+          },
+        });
+      }
+    }
+    return {
+      ...edit,
+      operations,
+    };
+  }
+
+  const documentEdits = edit.documentEdits
+    .map((doc, opIdx) => ({
+      ...doc,
+      edits: doc.edits.filter((_, editIdx) => !excludedUsageIds.has(`${opIdx}:${editIdx}`)),
+    }))
+    .filter((doc) => doc.edits.length > 0);
+
+  return {
+    ...edit,
+    documentEdits,
+  };
+}
+
+/**
  * Build a non-mutating summary of an LSP WorkspaceEdit.
  *
  * The operation order is intentionally retained. LSP documentChanges are
@@ -52,6 +114,7 @@ export function buildWorkspaceEditPreview(
   const referencedAnnotationIds = new Set<string>();
   const affectedPaths = new Set<string>();
   const entries: WorkspaceEditPreviewEntry[] = [];
+  const usages: WorkspaceEditPreviewUsage[] = [];
   let textEditCount = 0;
   let resourceOperationCount = 0;
 
@@ -70,6 +133,20 @@ export function buildWorkspaceEditPreview(
           .map((id) => annotationsById.get(id)?.label ?? id)
           .join(", ") || null,
       });
+      for (const [editIndex, item] of operation.document.edits.entries()) {
+        const annotationLabel = item.annotationId
+          ? annotationsById.get(item.annotationId)?.label ?? item.annotationId
+          : null;
+        usages.push({
+          id: `${operationIndex}:${editIndex}`,
+          operationIndex,
+          editIndex,
+          path,
+          range: item.range,
+          newText: item.newText,
+          annotationLabel,
+        });
+      }
       for (const id of operation.document.annotationIds ?? []) referencedAnnotationIds.add(id);
       continue;
     }
@@ -129,6 +206,7 @@ export function buildWorkspaceEditPreview(
   return {
     label: options.label?.trim() || null,
     entries,
+    usages,
     operationCount: entries.length,
     affectedFileCount,
     textEditCount,

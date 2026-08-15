@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { LspWorkspaceEdit } from "../../../lib/editor/lsp";
 import {
   buildWorkspaceEditPreview,
+  filterWorkspaceEditByUsages,
   formatWorkspaceEditPreview,
   workspaceEditOperations,
 } from "./workspaceEditPreview";
@@ -85,5 +86,47 @@ describe("workspaceEditPreview", () => {
     expect(message).toContain("...and 2 more operations.");
     expect(message).toContain("1. Edit /repo/0.ts");
     expect(message).not.toContain("3. Edit /repo/2.ts");
+  });
+
+  it("extracts individual usage items and filters workspace edits", () => {
+    const edit: LspWorkspaceEdit = {
+      documentEdits: [
+        {
+          uri: "file:///repo/a.ts",
+          path: "/repo/a.ts",
+          edits: [
+            { range: { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } }, newText: "newName" },
+            { range: { start: { line: 10, character: 0 }, end: { line: 10, character: 3 } }, newText: "newName" },
+          ],
+        },
+        {
+          uri: "file:///repo/b.ts",
+          path: "/repo/b.ts",
+          edits: [
+            { range: { start: { line: 5, character: 4 }, end: { line: 5, character: 7 } }, newText: "newName" },
+          ],
+        },
+      ],
+    };
+
+    const preview = buildWorkspaceEditPreview(edit);
+    expect(preview.usages).toHaveLength(3);
+    expect(preview.usages[0]).toMatchObject({
+      id: "0:0",
+      path: "/repo/a.ts",
+      range: { start: { line: 1, character: 2 }, end: { line: 1, character: 5 } },
+      newText: "newName",
+    });
+
+    // Exclude usage "0:1" (the second edit in a.ts)
+    const filtered = filterWorkspaceEditByUsages(edit, new Set(["0:1"]));
+    expect(filtered.documentEdits[0].edits).toHaveLength(1);
+    expect(filtered.documentEdits[0].edits[0].range.start.line).toBe(1);
+    expect(filtered.documentEdits[1].edits).toHaveLength(1);
+
+    // Exclude all edits in b.ts ("1:0")
+    const filteredOutB = filterWorkspaceEditByUsages(edit, new Set(["1:0"]));
+    expect(filteredOutB.documentEdits).toHaveLength(1);
+    expect(filteredOutB.documentEdits[0].path).toBe("/repo/a.ts");
   });
 });

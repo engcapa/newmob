@@ -72,7 +72,10 @@ export interface WorkspaceEditApplyHooks {
   /** Apply LSP DeleteFile semantics and synchronize workspace UI state. */
   deleteFile?: (operation: Extract<LspWorkspaceEditOperation, { kind: "delete" }>) => Promise<void>;
   /** Confirm a multi-file/resource edit before the first mutation. */
-  confirmWorkspaceEdit?: (preview: WorkspaceEditPreview) => Promise<boolean>;
+  confirmWorkspaceEdit?: (
+    preview: WorkspaceEditPreview,
+    edit: LspWorkspaceEdit,
+  ) => Promise<boolean | LspWorkspaceEdit>;
   /** Confirm server-declared change annotations before any mutation is applied. */
   confirmChangeAnnotations?: (annotations: LspChangeAnnotation[]) => Promise<boolean>;
   /** Final consistency barrier after dialogs and immediately before mutation. */
@@ -227,10 +230,11 @@ export async function applyWorkspaceEdit(
       }];
     }
   }
+  let activeEdit = edit;
   const preview = buildWorkspaceEditPreview(edit);
   if (preview.requiresConfirmation && hooks.confirmWorkspaceEdit) {
     try {
-      const confirmed = await hooks.confirmWorkspaceEdit(preview);
+      const confirmed = await hooks.confirmWorkspaceEdit(preview, edit);
       if (!confirmed) {
         return [{
           operationIndex: null,
@@ -238,6 +242,9 @@ export async function applyWorkspaceEdit(
           status: "skipped",
           reason: "WorkspaceEdit preview was declined",
         }];
+      }
+      if (typeof confirmed === "object" && confirmed !== null) {
+        activeEdit = confirmed;
       }
     } catch (error) {
       return [{
@@ -288,7 +295,7 @@ export async function applyWorkspaceEdit(
     }
   }
   const outcomes: WorkspaceEditApplyOutcome[] = [];
-  for (const [operationIndex, operation] of workspaceEditOperations(edit).entries()) {
+  for (const [operationIndex, operation] of workspaceEditOperations(activeEdit).entries()) {
     if (operation.kind === "text") {
       const outcome = await applyTextDocumentEdit(operation.document, operationIndex, hooks);
       outcomes.push(outcome);

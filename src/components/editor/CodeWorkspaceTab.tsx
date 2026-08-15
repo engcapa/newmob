@@ -230,6 +230,7 @@ import {
   workspaceEditOperations,
   type WorkspaceEditPreview,
 } from "./workspace/workspaceEditPreview";
+import { RefactoringPreviewDialog } from "./workspace/RefactoringPreviewDialog";
 import {
   buildWorkspacePathSnapshotEdit,
   WorkspaceEditHistory,
@@ -5462,14 +5463,29 @@ export function CodeWorkspaceTab({
         });
       },
       confirmWorkspaceEdit: options.preview
-        ? async (preview: WorkspaceEditPreview) => confirmAppDialog({
-          title: options.label?.trim() || "Review workspace changes",
-          message: formatWorkspaceEditPreview({
-            ...preview,
-            label: options.label?.trim() || preview.label,
-          }),
-          confirmLabel: "Apply changes",
-        })
+        ? (preview: WorkspaceEditPreview, edit: LspWorkspaceEdit) => {
+            if (preview.usages.length > 0) {
+              return new Promise<boolean | LspWorkspaceEdit>((resolve) => {
+                setRefactoringPreviewModal({
+                  title: options.label?.trim() || preview.label || "Review workspace changes",
+                  preview: {
+                    ...preview,
+                    label: options.label?.trim() || preview.label,
+                  },
+                  originalEdit: edit,
+                  resolve,
+                });
+              });
+            }
+            return confirmAppDialog({
+              title: options.label?.trim() || "Review workspace changes",
+              message: formatWorkspaceEditPreview({
+                ...preview,
+                label: options.label?.trim() || preview.label,
+              }),
+              confirmLabel: "Apply changes",
+            });
+          }
         : undefined,
       preflightMutation: options.semanticGeneration == null || options.semanticRevision == null
         ? undefined
@@ -8873,6 +8889,14 @@ export function CodeWorkspaceTab({
     runtimeOptions: string[];
   } | null>(null);
 
+  /** Interactive refactoring usages preview modal state. */
+  const [refactoringPreviewModal, setRefactoringPreviewModal] = useState<{
+    title: string;
+    preview: WorkspaceEditPreview;
+    originalEdit: LspWorkspaceEdit;
+    resolve: (filtered: LspWorkspaceEdit | boolean) => void;
+  } | null>(null);
+
   /** Start a Java debug session, optionally pinned to an explicit main class. */
   const launchJavaDebug = useCallback(
     (
@@ -10390,6 +10414,22 @@ export function CodeWorkspaceTab({
           );
         }}
       />
+      {refactoringPreviewModal && (
+        <RefactoringPreviewDialog
+          open={true}
+          title={refactoringPreviewModal.title}
+          preview={refactoringPreviewModal.preview}
+          originalEdit={refactoringPreviewModal.originalEdit}
+          onConfirm={(filteredEdit) => {
+            refactoringPreviewModal.resolve(filteredEdit);
+            setRefactoringPreviewModal(null);
+          }}
+          onCancel={() => {
+            refactoringPreviewModal.resolve(false);
+            setRefactoringPreviewModal(null);
+          }}
+        />
+      )}
     </div>
   );
 }

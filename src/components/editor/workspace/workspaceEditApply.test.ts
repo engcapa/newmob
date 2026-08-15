@@ -145,10 +145,13 @@ describe("applyWorkspaceEdit", () => {
       confirmWorkspaceEdit,
     });
 
-    expect(confirmWorkspaceEdit).toHaveBeenCalledWith(expect.objectContaining({
-      affectedFileCount: 2,
-      requiresConfirmation: true,
-    }));
+    expect(confirmWorkspaceEdit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        affectedFileCount: 2,
+        requiresConfirmation: true,
+      }),
+      expect.anything(),
+    );
     expect(applyToOpenBuffer).not.toHaveBeenCalled();
     expect(outcomes[0]).toMatchObject({ status: "skipped", reason: "WorkspaceEdit preview was declined" });
   });
@@ -583,5 +586,51 @@ describe("applyWorkspaceEdit", () => {
     });
     expect(outcomes).toHaveLength(2);
     expect(deleteFile).not.toHaveBeenCalled();
+  });
+
+  it("applies filtered WorkspaceEdit when confirmation hook filters out specific usages", async () => {
+    const applyToOpenBuffer = vi.fn();
+    const saveOpenBuffer = vi.fn(async () => {});
+    const editWithTwoFiles: LspWorkspaceEdit = {
+      documentEdits: [
+        {
+          uri: "file:///repo/a.ts",
+          path: "/repo/a.ts",
+          edits: [
+            { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "A" },
+          ],
+        },
+        {
+          uri: "file:///repo/b.ts",
+          path: "/repo/b.ts",
+          edits: [
+            { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } }, newText: "B" },
+          ],
+        },
+      ],
+    };
+
+    const outcomes = await applyWorkspaceEdit(
+      editWithTwoFiles,
+      {
+        resolvePath: (file) => file.path,
+        getOpenBuffer: (p) => ({ text: "x = 1", dirty: false, key: p }),
+        applyToOpenBuffer,
+        saveOpenBuffer,
+        readDisk: async () => null,
+        writeDisk: async () => {},
+        confirmWorkspaceEdit: async (_preview, original) => {
+          // Filter out b.ts
+          return {
+            ...original,
+            documentEdits: [original.documentEdits[0]],
+          };
+        },
+      },
+    );
+
+    expect(outcomes).toHaveLength(1);
+    expect(applyToOpenBuffer).toHaveBeenCalledTimes(1);
+    expect(applyToOpenBuffer).toHaveBeenCalledWith("/repo/a.ts", "A = 1");
   });
 });
