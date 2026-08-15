@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import React from "react";
 import { computeStickyLines, StickyLinesOverlay } from "./stickyLines";
 import type { LspDocumentSymbol } from "../../../lib/editor/lsp";
 
@@ -8,7 +7,9 @@ describe("computeStickyLines", () => {
   const sampleSymbols: LspDocumentSymbol[] = [
     {
       name: "MyClass",
+      detail: null,
       kind: 5,
+      depth: 0,
       range: {
         start: { line: 2, character: 0 },
         end: { line: 50, character: 1 },
@@ -17,46 +18,48 @@ describe("computeStickyLines", () => {
         start: { line: 2, character: 6 },
         end: { line: 2, character: 13 },
       },
-      children: [
-        {
-          name: "constructor",
-          kind: 9,
-          range: {
-            start: { line: 5, character: 2 },
-            end: { line: 15, character: 3 },
-          },
-          selectionRange: {
-            start: { line: 5, character: 2 },
-            end: { line: 5, character: 13 },
-          },
-        },
-        {
-          name: "calculateTotal",
-          kind: 6,
-          range: {
-            start: { line: 20, character: 2 },
-            end: { line: 40, character: 3 },
-          },
-          selectionRange: {
-            start: { line: 20, character: 2 },
-            end: { line: 20, character: 16 },
-          },
-          children: [
-            {
-              name: "innerHelper",
-              kind: 12,
-              range: {
-                start: { line: 25, character: 4 },
-                end: { line: 35, character: 5 },
-              },
-              selectionRange: {
-                start: { line: 25, character: 4 },
-                end: { line: 25, character: 15 },
-              },
-            },
-          ],
-        },
-      ],
+    },
+    {
+      name: "constructor",
+      detail: null,
+      kind: 9,
+      depth: 1,
+      range: {
+        start: { line: 5, character: 2 },
+        end: { line: 15, character: 3 },
+      },
+      selectionRange: {
+        start: { line: 5, character: 2 },
+        end: { line: 5, character: 13 },
+      },
+    },
+    {
+      name: "calculateTotal",
+      detail: null,
+      kind: 6,
+      depth: 1,
+      range: {
+        start: { line: 20, character: 2 },
+        end: { line: 40, character: 3 },
+      },
+      selectionRange: {
+        start: { line: 20, character: 2 },
+        end: { line: 20, character: 16 },
+      },
+    },
+    {
+      name: "innerHelper",
+      detail: null,
+      kind: 12,
+      depth: 2,
+      range: {
+        start: { line: 25, character: 4 },
+        end: { line: 35, character: 5 },
+      },
+      selectionRange: {
+        start: { line: 25, character: 4 },
+        end: { line: 25, character: 15 },
+      },
     },
   ];
 

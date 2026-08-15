@@ -65,8 +65,6 @@ describe("RefactoringPreviewDialog", () => {
     );
 
     // Uncheck second usage in UserService.ts (id "0:1")
-    const usageCheckboxes = screen.getAllByRole("checkbox");
-    // [0: file-1, 1: usage-0:0, 2: usage-0:1, 3: file-2, 4: usage-1:0]
     const usage2 = screen.getByTestId("refactoring-preview-usage-0:1");
     fireEvent.click(usage2);
 

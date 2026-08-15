@@ -6268,15 +6268,12 @@ export function CodeWorkspaceTab({
 
     const target = diags[targetIndex];
     if (target) {
-      void openFile(file.ref, {
-        location: {
-          line: target.range.start.line + 1,
-          column: target.range.start.character + 1,
-        },
+      void openFile(file.ref).then(() => {
+        revealEditorLocation(file.key, target.range);
       });
       setStatusMessage(`${target.severity === 1 ? "Error" : "Warning"}: ${target.message}`);
     }
-  }, [activeEditorGroupId, activeFile, cursorPositions, openFile, setStatusMessage]);
+  }, [activeEditorGroupId, activeFile, cursorPositions, openFile, revealEditorLocation, setStatusMessage]);
 
   const optimizeImports = useCallback(async () => {
     const file = activeFile;
@@ -6316,7 +6313,7 @@ export function CodeWorkspaceTab({
       ];
       for (const rel of candidates) {
         try {
-          const file = await workspaceReadFile(workspaceInstanceId, root.id, rel);
+          const file = await workspaceReadFile(root.path, rel);
           if (file && file.text) {
             const report = parseCoverageReport(file.text);
             setCoverageReport(report);
@@ -6329,13 +6326,7 @@ export function CodeWorkspaceTab({
       }
     }
     setStatusMessage("No coverage reports found (run tests with coverage enabled)");
-  }, [workspaceInstanceId, setStatusMessage]);
-
-  const activeFileCoverage = useMemo(() => {
-    if (!activeFile || !coverageReport) return null;
-    const abs = absolutePathForOpenFile(activeFile);
-    return abs ? findFileCoverage(coverageReport, abs) : null;
-  }, [activeFile, coverageReport, absolutePathForOpenFile]);
+  }, [setStatusMessage]);
 
   const workspaceCommands = useMemo<WorkspaceCommand[]>(() => [
     {
@@ -7341,7 +7332,7 @@ export function CodeWorkspaceTab({
     async (
       file: OpenFileState,
       position: LspPosition,
-      triggerCharacter: string | null,
+      triggerCharacter?: string | null,
     ): Promise<LspSignatureHelpResult | null> => {
       if (!shouldLiveSyncLsp(file.languagePath, lspFilesRef.current[file.key])) return null;
       const live = await ensureLspDocumentSynced(file.key);
@@ -7350,7 +7341,7 @@ export function CodeWorkspaceTab({
       const descriptor = lspDescriptorForFile(live);
       if (!descriptor) return null;
       try {
-        const result = await lspSignatureHelp(descriptor, position, triggerCharacter);
+        const result = await lspSignatureHelp(descriptor, position, triggerCharacter ?? null);
         if (!openFilesRef.current[live.key] || openFilesRef.current[live.key]?.text !== live.text) {
           return null;
         }
@@ -8799,7 +8790,7 @@ export function CodeWorkspaceTab({
         // Make-before-launch: save + build + block on compile errors.
         if (!(await prepareJavaLaunchRef.current(root.id, descriptor))) return;
         const launch = await javaTestResolveLaunch(descriptor, item);
-        await debugRef.current.startDebug({
+        await debugRef.current?.startDebug({
           workspaceId: descriptor.workspaceId,
           rootPath: root.path,
           filePath: absolute,
@@ -9354,7 +9345,7 @@ export function CodeWorkspaceTab({
     const descriptor = origin ? lspDescriptorForFile(origin) : null;
     if (!descriptor) return;
     void (async () => {
-      const text = await debugRef.current.fetchSource(sourceReference);
+      const text = await debugRef.current?.fetchSource(sourceReference);
       if (!text) {
         setStatusMessage("No source available for this frame");
         return;
@@ -10562,7 +10553,7 @@ export function CodeWorkspaceTab({
           commands={workspaceCommands}
           onClose={() => setKeymapCheatSheetOpen(false)}
           onExecuteCommand={(cmdId) => {
-            runWorkspaceCommand(workspaceCommands, cmdId, workspaceCommandContextRef.current);
+            executeWorkspaceCommand(cmdId);
           }}
         />
       )}

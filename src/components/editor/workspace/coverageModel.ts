@@ -138,7 +138,6 @@ export function parseJacocoXmlCoverage(content: string): WorkspaceCoverageReport
       const attrs = lineMatch[1];
       const nr = parseInt(attrs.match(/nr="(\d+)"/)?.[1] ?? "0", 10);
       const ci = parseInt(attrs.match(/ci="(\d+)"/)?.[1] ?? "0", 10); // covered instructions
-      const mi = parseInt(attrs.match(/mi="(\d+)"/)?.[1] ?? "0", 10); // missed instructions
       const cb = parseInt(attrs.match(/cb="(\d+)"/)?.[1] ?? "0", 10); // covered branches
       const mb = parseInt(attrs.match(/mb="(\d+)"/)?.[1] ?? "0", 10); // missed branches
 

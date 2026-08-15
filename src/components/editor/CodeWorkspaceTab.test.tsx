@@ -8,6 +8,7 @@ import { useCodeWorkspaceStatusStore } from "../../stores/codeWorkspaceStatusSto
 import { DEFAULT_CODE_VIEW_PROFILE, saveCodeViewProfile } from "../../lib/codeViewProfile";
 import type { CodeWorkspaceTabInfo } from "../../types";
 import type {
+  LspCapabilitySummary,
   LspDocumentStatus,
   LspServerStatus,
 } from "../../lib/editor/lsp";
@@ -270,6 +271,33 @@ function csharpStatus(overrides: Partial<LspServerStatus> = {}): LspServerStatus
   };
 }
 
+function defaultCapabilities(overrides: Partial<LspCapabilitySummary> = {}): LspCapabilitySummary {
+  return {
+    completion: false,
+    signatureHelp: false,
+    hover: false,
+    definition: false,
+    typeDefinition: false,
+    implementation: false,
+    references: false,
+    documentSymbol: false,
+    workspaceSymbol: false,
+    rename: false,
+    formatting: false,
+    rangeFormatting: false,
+    codeAction: false,
+    documentHighlight: false,
+    inlayHint: false,
+    selectionRange: false,
+    callHierarchy: false,
+    typeHierarchy: false,
+    semanticTokens: false,
+    completionTriggerCharacters: [],
+    signatureTriggerCharacters: [],
+    ...overrides,
+  };
+}
+
 function documentStatus(overrides: Partial<LspDocumentStatus> = {}): LspDocumentStatus {
   return {
     path: "/repo/app/src/Program.cs",
@@ -283,6 +311,7 @@ function documentStatus(overrides: Partial<LspDocumentStatus> = {}): LspDocument
     selectedCommand: "csharp-ls",
     installHint: "dotnet tool install -g csharp-ls",
     error: null,
+    capabilities: defaultCapabilities(overrides.capabilities ?? undefined),
     ...overrides,
   };
 }
@@ -2217,7 +2246,7 @@ describe("CodeWorkspaceTab", () => {
 
     expect(await screen.findByTestId("external-file-conflict-dialog")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Merge" }));
-    fireEvent.change(await screen.findByRole("textbox", { name: "Merge result" }), {
+    fireEvent.change(await screen.findByRole("textbox", { name: "Merge result" }, { timeout: 5000 }), {
       target: { value: "const value = 4;" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Apply Merge" }));
@@ -3923,13 +3952,13 @@ describe("CodeWorkspaceTab", () => {
       available: true,
       active: true,
       selectedCommand: "csharp-ls",
-      capabilities: {
+      capabilities: defaultCapabilities({
         codeAction: true,
         definition: true,
         typeDefinition: true,
         implementation: true,
         signatureHelp: true,
-      },
+      }),
     });
     lspMocks.lspOpenDocument.mockResolvedValue(activeStatus);
     lspMocks.lspChangeDocument.mockResolvedValue(activeStatus);

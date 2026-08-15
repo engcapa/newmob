@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 import {
   DAP_ADAPTER_CONTRACT_FIXTURES,
-  type DapAdapterContractFixture,
   type DapAdapterContractLanguage,
 } from "./dapAdapterContracts";
 

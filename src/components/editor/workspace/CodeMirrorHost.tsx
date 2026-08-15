@@ -76,7 +76,7 @@ import {
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
 
-interface EditorRevealTarget {
+export interface EditorRevealTarget {
   line: number;
   character: number;
 }

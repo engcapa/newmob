@@ -330,9 +330,11 @@ describe("EditorGroup tabs", () => {
       activeSymbols: [
         {
           name: "App",
+          detail: null,
           kind: 5,
           range: { start: { line: 0, character: 0 }, end: { line: 4, character: 1 } },
           selectionRange: { start: { line: 0, character: 6 }, end: { line: 0, character: 9 } },
+          depth: 0,
         },
       ],
       onRevealTargetLine,

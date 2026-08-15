@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Command, Keyboard, Search, Sparkles, X } from "lucide-react";
+import { Keyboard, Search, Sparkles, X } from "lucide-react";
 import type { WorkspaceCommand } from "./workspaceCommands";
 
 export interface KeymapCheatSheetDialogProps {

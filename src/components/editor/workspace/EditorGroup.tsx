@@ -38,7 +38,6 @@ import type {
 import {
   CodeMirrorHost,
   type EditorContextMenuRequest,
-  type EditorRevealTarget,
   type EditorSelectionRange,
 } from "./CodeMirrorHost";
 import type { FileCoverage } from "./coverageModel";

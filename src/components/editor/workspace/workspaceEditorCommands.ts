@@ -3,6 +3,7 @@ import {
   StateEffect,
   StateField,
   type EditorState,
+  type StateCommand,
 } from "@codemirror/state";
 import {
   copyLineDown,

@@ -29,33 +29,24 @@ export function computeStickyLines(
 
   const sticky: StickyLine[] = [];
 
-  function traverse(list: LspDocumentSymbol[], depth: number) {
-    if (sticky.length >= maxLines) return;
-    for (const sym of list) {
-      const startLine = sym.range.start.line;
-      const endLine = sym.range.end.line;
+  const enclosing = symbols
+    .filter((sym) => sym.range.start.line < topLine && sym.range.end.line >= topLine)
+    .sort((a, b) => a.depth - b.depth || a.range.start.line - b.range.start.line);
 
-      // Symbol starts strictly above the top visible line and continues at or below top line
-      if (startLine < topLine && endLine >= topLine) {
-        const rawLine = docLines[startLine] ?? sym.name;
-        const trimmed = rawLine.trim();
-        sticky.push({
-          line: startLine,
-          text: trimmed || sym.name,
-          name: sym.name,
-          kind: sym.kind,
-          depth,
-        });
-
-        if (sym.children && sym.children.length > 0 && sticky.length < maxLines) {
-          traverse(sym.children, depth + 1);
-        }
-        break; // Only take the enclosing symbol branch
-      }
-    }
+  for (const sym of enclosing) {
+    if (sticky.length >= maxLines) break;
+    const startLine = sym.range.start.line;
+    const rawLine = docLines[startLine] ?? sym.name;
+    const trimmed = rawLine.trim();
+    sticky.push({
+      line: startLine,
+      text: trimmed || sym.name,
+      name: sym.name,
+      kind: sym.kind,
+      depth: sym.depth,
+    });
   }
 
-  traverse(symbols, 0);
   return sticky;
 }
 

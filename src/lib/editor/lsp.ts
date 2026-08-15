@@ -190,6 +190,7 @@ export interface LspDocumentSymbolsResult {
 export interface LspTextEdit {
   range: LspRange;
   newText: string;
+  annotationId?: string;
 }
 
 export interface LspCompletionItem {
