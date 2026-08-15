@@ -1078,4 +1078,65 @@ describe("DebugPanel", () => {
     expect(screen.getByTestId("debug-memory-unsupported")).toBeInTheDocument();
     expect(screen.queryByTestId("debug-memory-read")).toBeNull();
   });
+
+  it("opens context menu on variable node and allows adding data breakpoint and watch", async () => {
+    const addDataBreakpoint = vi.fn().mockResolvedValue({ added: true, message: "Watching user.name" });
+    const addWatchExpression = vi.fn();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          capabilities: { supportsDataBreakpoints: true },
+          addDataBreakpoint,
+          addWatchExpression,
+          fetchScopes: vi.fn().mockResolvedValue({
+            scopes: [{ name: "Locals", variablesReference: 5 }],
+          }),
+          fetchVariables: vi.fn().mockResolvedValue({
+            variables: [{ name: "user", value: "Object", variablesReference: 0 }],
+          }),
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    const varNode = await screen.findByText("user");
+    fireEvent.contextMenu(varNode);
+
+    const watchMenu = await screen.findByTestId("debug-variable-menu-add-watch");
+    expect(watchMenu).toBeInTheDocument();
+    fireEvent.click(watchMenu);
+    expect(addWatchExpression).toHaveBeenCalledWith("user");
+
+    fireEvent.contextMenu(varNode);
+    const dataBpMenu = await screen.findByTestId("debug-variable-menu-data-breakpoint");
+    expect(dataBpMenu).toBeInTheDocument();
+    fireEvent.click(dataBpMenu);
+    await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith(expect.objectContaining({ name: "user" })));
+  });
+
+  it("opens context menu on call stack frame and triggers restartFrame", async () => {
+    const restartFrame = vi.fn();
+    const state = stoppedState();
+    render(
+      <DebugPanel
+        debug={makeSession({
+          state,
+          capabilities: { supportsRestartFrame: true },
+          restartFrame,
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    const frameEl = screen.getByTestId(`debug-frame-${state.frames[0].id}`);
+    fireEvent.contextMenu(frameEl);
+
+    const restartMenu = await screen.findByTestId("debug-frame-menu-restart-frame");
+    expect(restartMenu).toBeInTheDocument();
+    fireEvent.click(restartMenu);
+    expect(restartFrame).toHaveBeenCalledWith(state.frames[0].id);
+  });
 });

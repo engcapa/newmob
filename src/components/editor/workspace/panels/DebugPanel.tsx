@@ -39,6 +39,7 @@ import {
   type DebugInstructionBreakpoint,
   type DebugStackFrame,
 } from "../dapDebugModel";
+import { useContextMenu, type MenuItem } from "../../../ContextMenu";
 
 interface DebugPanelProps {
   debug: CodeDebugSession;
@@ -157,6 +158,7 @@ function VariableRow({
   onRemove,
   onAddDataBreakpoint,
   addingDataBreakpointKey,
+  onContextMenu,
 }: {
   node: VarNode;
   depth: number;
@@ -172,6 +174,7 @@ function VariableRow({
   /** Present while stopped when the adapter supports data breakpoints. */
   onAddDataBreakpoint?: (node: VarNode) => void;
   addingDataBreakpointKey?: string | null;
+  onContextMenu?: (e: React.MouseEvent, node: VarNode, onRemove?: () => void) => void;
 }) {
   const expandable = node.variablesReference > 0;
   const editing = edit?.node === node;
@@ -180,8 +183,9 @@ function VariableRow({
   return (
     <>
       <div
-        className="group flex items-start gap-1 py-0.5 pr-2 hover:bg-[var(--taomni-hover-bg)]"
+        className="group flex items-start gap-1 py-0.5 pr-2 hover:bg-[var(--taomni-hover-bg)] cursor-default select-none"
         style={{ paddingLeft: `${8 + depth * 12}px` }}
+        onContextMenu={(e) => onContextMenu?.(e, node, onRemove)}
       >
         {expandable ? (
           <button type="button" className="shrink-0" onClick={() => onExpand(node)}>
@@ -207,7 +211,7 @@ function VariableRow({
         ) : (
           <span
             className="truncate text-[var(--taomni-text-muted)]"
-            title={onStartEdit ? "Double-click to change the value" : undefined}
+            title={onStartEdit ? "Double-click to change the value (or right-click)" : undefined}
             onDoubleClick={onStartEdit ? () => onStartEdit(node) : undefined}
           >
             = {node.value}
@@ -254,6 +258,7 @@ function VariableRow({
           onEditCancel={onEditCancel}
           onAddDataBreakpoint={onAddDataBreakpoint}
           addingDataBreakpointKey={addingDataBreakpointKey}
+          onContextMenu={onContextMenu}
         />
       ))}
     </>
@@ -2105,6 +2110,91 @@ export function DebugPanel({
       debug.logConsole("result", `${result.value}\n`);
     });
   }, [debug, consoleInput]);
+
+  const variableMenu = useContextMenu();
+  const frameMenu = useContextMenu();
+
+  const handleVariableContextMenu = useCallback((e: React.MouseEvent, node: VarNode, onRemove?: () => void) => {
+    e.preventDefault();
+    const items: MenuItem[] = [];
+    const dataBreakpointEligible = node.parentRef > 0 || !!node.dataBreakpointExpression;
+    if (dataBreakpointEligible && canAddDataBreakpoint) {
+      items.push({
+        label: `Add Data Breakpoint for "${node.name}"`,
+        testId: "debug-variable-menu-data-breakpoint",
+        icon: <Crosshair className="w-3.5 h-3.5" />,
+        onClick: () => { void addDataBreakpointForNode(node); },
+      });
+    }
+    items.push({
+      label: `Add to Watches ("${node.name}")`,
+      testId: "debug-variable-menu-add-watch",
+      onClick: () => debug.addWatchExpression(node.name),
+    });
+    items.push({
+      label: "Copy Value",
+      testId: "debug-variable-menu-copy-value",
+      onClick: () => { void navigator.clipboard.writeText(node.value); },
+    });
+    items.push({
+      label: "Copy Variable Name",
+      testId: "debug-variable-menu-copy-name",
+      onClick: () => { void navigator.clipboard.writeText(node.name); },
+    });
+    if (canSetVariable && stopped) {
+      items.push({ separator: true, label: "" });
+      items.push({
+        label: "Set Value...",
+        testId: "debug-variable-menu-set-value",
+        onClick: () => startEdit(node),
+      });
+    }
+    if (onRemove) {
+      items.push({ separator: true, label: "" });
+      items.push({
+        label: "Remove Watch",
+        testId: "debug-variable-menu-remove-watch",
+        danger: true,
+        onClick: onRemove,
+      });
+    }
+    variableMenu.show(e, items);
+  }, [canAddDataBreakpoint, canSetVariable, stopped, addDataBreakpointForNode, debug, startEdit, variableMenu]);
+
+  const handleFrameContextMenu = useCallback((e: React.MouseEvent, frame: DebugStackFrame) => {
+    e.preventDefault();
+    const items: MenuItem[] = [];
+    if (frame.path || frame.sourceReference > 0) {
+      items.push({
+        label: "Jump to Source",
+        testId: "debug-frame-menu-jump-source",
+        onClick: () => onOpenFrame(frame),
+      });
+    }
+    if (canRestartFrame && stopped) {
+      items.push({
+        label: "Drop Frame / Restart from Here",
+        testId: "debug-frame-menu-restart-frame",
+        icon: <RotateCcw className="w-3.5 h-3.5" />,
+        onClick: () => debug.restartFrame(frame.id),
+      });
+    }
+    items.push({
+      label: "Copy Frame Name",
+      testId: "debug-frame-menu-copy-name",
+      onClick: () => { void navigator.clipboard.writeText(frame.name); },
+    });
+    items.push({
+      label: "Copy Call Stack",
+      testId: "debug-frame-menu-copy-stack",
+      onClick: () => {
+        const text = state?.frames.map((f) => `${f.name} (${(f.path?.split(/[\\/]/).pop()) ?? f.sourceName ?? "unknown"}:${f.line})`).join("\n") ?? frame.name;
+        void navigator.clipboard.writeText(text);
+      },
+    });
+    frameMenu.show(e, items);
+  }, [canRestartFrame, stopped, onOpenFrame, debug, state?.frames, frameMenu]);
+
   const controlBtn = "h-7 w-7 inline-flex items-center justify-center rounded-md transition-colors disabled:opacity-30 disabled:pointer-events-none";
   return (
     <div data-testid="code-workspace-debug-panel" className="h-full min-h-0 flex flex-col text-[11px]">
@@ -2391,6 +2481,7 @@ export function DebugPanel({
                         // opened via the adapter's `source` request.
                         if (frame.path || frame.sourceReference > 0) onOpenFrame(frame);
                       }}
+                      onContextMenu={(e) => handleFrameContextMenu(e, frame)}
                     >
                       <span
                         className={`truncate ${
@@ -2435,6 +2526,7 @@ export function DebugPanel({
                     onEditCancel={cancelEdit}
                     onAddDataBreakpoint={canAddDataBreakpoint ? addDataBreakpointForNode : undefined}
                     addingDataBreakpointKey={addingDataBreakpointKey}
+                    onContextMenu={handleVariableContextMenu}
                   />
                 ))}
               {dataBreakpointNotice && (
@@ -2469,6 +2561,7 @@ export function DebugPanel({
                   onRemove={() => debug.removeWatchExpression(i)}
                   onAddDataBreakpoint={canAddDataBreakpoint ? addDataBreakpointForNode : undefined}
                   addingDataBreakpointKey={addingDataBreakpointKey}
+                  onContextMenu={handleVariableContextMenu}
                 />
               ))}
             </Section>
@@ -2518,6 +2611,8 @@ export function DebugPanel({
           </>
         )}
       </div>
+      {variableMenu.render}
+      {frameMenu.render}
     </div>
   );
 }
