@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -49,6 +50,8 @@ import { rollbackGitLineChange } from "./gitEditorChrome";
 import type { DebugBreakpointMarker } from "./debugEditorChrome";
 import type { DebugStepAction } from "./dapDebugModel";
 import { GitDiffPeek } from "./GitDiffPeek";
+import { computeStickyLines, StickyLinesOverlay } from "./stickyLines";
+import type { LspDocumentSymbol } from "../../../lib/editor/lsp";
 import {
   computeEditorTabScrollState,
   editorTabScrollStep,
@@ -103,6 +106,9 @@ interface EditorGroupProps {
   activeLspSyncing: boolean;
   lspStatusPill: ReactNode;
   breadcrumbs: ReactNode;
+  activeSymbols?: LspDocumentSymbol[];
+  stickyLinesEnabled?: boolean;
+  onRevealTargetLine?: (line: number) => void;
   revealTarget: EditorRevealTarget | null;
   editorPaneRef: MutableRefObject<HTMLElement | null>;
   editorPaneStyle: CSSProperties;
@@ -193,6 +199,9 @@ export function EditorGroup({
   activeLspSyncing,
   lspStatusPill,
   breadcrumbs,
+  activeSymbols,
+  stickyLinesEnabled = true,
+  onRevealTargetLine,
   revealTarget,
   editorPaneRef,
   editorPaneStyle,
@@ -238,6 +247,19 @@ export function EditorGroup({
 }: EditorGroupProps) {
   const tabMenu = useContextMenu();
   const [gitDiffPeek, setGitDiffPeek] = useState<GitLineChange | null>(null);
+  const [topLine, setTopLine] = useState(0);
+
+  const handleViewportChange = useCallback((range: LspRange) => {
+    setTopLine(range.start.line);
+    onViewportChange?.(range);
+  }, [onViewportChange]);
+
+  const stickyLines = useMemo(() => {
+    if (stickyLinesEnabled === false || !activeSymbols || !activeFile) return [];
+    const lines = activeFile.text.split("\n");
+    return computeStickyLines(activeSymbols, lines, topLine);
+  }, [stickyLinesEnabled, activeSymbols, activeFile, topLine]);
+
   const tabScrollRef = useRef<HTMLDivElement>(null);
   const [tabScrollState, setTabScrollState] = useState<EditorTabScrollState>({
     overflow: false,
@@ -547,7 +569,11 @@ export function EditorGroup({
                 ) : isMarkdownPath(activeFile.languagePath) && activeMarkdownMode === "preview" ? (
                   renderMarkdownPreview(activeFile, onOpenMarkdownHref)
                 ) : isMarkdownPath(activeFile.languagePath) && activeMarkdownMode === "split" ? (
-                  <div className="h-full min-h-0 grid grid-cols-2">
+                  <div className="h-full min-h-0 grid grid-cols-2 relative">
+                    <StickyLinesOverlay
+                      stickyLines={stickyLines}
+                      onSelectLine={(line) => onRevealTargetLine?.(line + 1)}
+                    />
                     <div className="min-w-0 min-h-0 border-r border-[var(--taomni-code-border)]">
                       <CodeMirrorHost
                         key={`${activeFile.key}:edit`}
@@ -575,7 +601,7 @@ export function EditorGroup({
                         onCompleteResolve={(raw) => onCompleteResolve(activeFile, raw)}
                         onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
                         onSelectionChange={onSelectionChange}
-                        onViewportChange={onViewportChange}
+                        onViewportChange={handleViewportChange}
                         onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
                         onLightbulb={onLightbulb}
                         onGitChangeClick={setGitDiffPeek}
@@ -591,52 +617,58 @@ export function EditorGroup({
                     {renderMarkdownPreview(activeFile, onOpenMarkdownHref)}
                   </div>
                 ) : (
-                  <CodeMirrorHost
-                    key={activeFile.key}
-                    path={activeFile.languagePath}
-                    doc={activeFile.text}
-                    visible={visible}
-                    diagnostics={activeDiagnostics}
-                    highlights={activeHighlights}
-                    inlayHints={activeInlayHints}
-                    semanticTokens={activeSemanticTokens}
-                    gitChanges={activeGitChanges}
-                    gitBlame={activeGitBlame}
-                    debugBreakpoints={activeDebugBreakpoints}
-                    debugCurrentLine={activeDebugCurrentLine}
-                    debugInlineValues={activeDebugInlineValues}
-                    debugStep={debugStep}
-                    debugRunToCursor={debugRunToCursor}
-                    debugStop={debugStop}
-                    debugEvaluate={debugEvaluate}
-                    onToggleBreakpoint={onToggleBreakpoint}
-                    onEditBreakpoint={onEditBreakpoint}
-                    reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
-                    readOnly={readOnly || !!activeFile.library}
-                    onChange={(doc) => {
-                      if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
-                      onChangeText(activeFile.key, doc);
-                    }}
-                    onSave={() => onSave(activeFile.key)}
-                    onHover={(position) => onHover(activeFile, position)}
-                    onDefinition={(position) => onDefinition(activeFile, position)}
-                    onReferences={(position) => onReferences(activeFile, position)}
-                    onComplete={(position, trigger) => onComplete(activeFile, position, trigger)}
-                    onCompleteResolve={(raw) => onCompleteResolve(activeFile, raw)}
-                    onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
-                    onSelectionChange={onSelectionChange}
-                    onViewportChange={onViewportChange}
-                    onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
-                    onLightbulb={onLightbulb}
-                    onGitChangeClick={setGitDiffPeek}
-                    onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
-                    completionTriggers={mergeCompletionTriggers(
-                      activeCapabilities?.completionTriggerCharacters,
-                    )}
-                    signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
-                    softWrap={softWrap}
-                    columnSelectionMode={columnSelectionMode}
-                  />
+                  <div className="h-full min-h-0 relative">
+                    <StickyLinesOverlay
+                      stickyLines={stickyLines}
+                      onSelectLine={(line) => onRevealTargetLine?.(line + 1)}
+                    />
+                    <CodeMirrorHost
+                      key={activeFile.key}
+                      path={activeFile.languagePath}
+                      doc={activeFile.text}
+                      visible={visible}
+                      diagnostics={activeDiagnostics}
+                      highlights={activeHighlights}
+                      inlayHints={activeInlayHints}
+                      semanticTokens={activeSemanticTokens}
+                      gitChanges={activeGitChanges}
+                      gitBlame={activeGitBlame}
+                      debugBreakpoints={activeDebugBreakpoints}
+                      debugCurrentLine={activeDebugCurrentLine}
+                      debugInlineValues={activeDebugInlineValues}
+                      debugStep={debugStep}
+                      debugRunToCursor={debugRunToCursor}
+                      debugStop={debugStop}
+                      debugEvaluate={debugEvaluate}
+                      onToggleBreakpoint={onToggleBreakpoint}
+                      onEditBreakpoint={onEditBreakpoint}
+                      reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
+                      readOnly={readOnly || !!activeFile.library}
+                      onChange={(doc) => {
+                        if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
+                        onChangeText(activeFile.key, doc);
+                      }}
+                      onSave={() => onSave(activeFile.key)}
+                      onHover={(position) => onHover(activeFile, position)}
+                      onDefinition={(position) => onDefinition(activeFile, position)}
+                      onReferences={(position) => onReferences(activeFile, position)}
+                      onComplete={(position, trigger) => onComplete(activeFile, position, trigger)}
+                      onCompleteResolve={(raw) => onCompleteResolve(activeFile, raw)}
+                      onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
+                      onSelectionChange={onSelectionChange}
+                      onViewportChange={handleViewportChange}
+                      onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
+                      onLightbulb={onLightbulb}
+                      onGitChangeClick={setGitDiffPeek}
+                      onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
+                      completionTriggers={mergeCompletionTriggers(
+                        activeCapabilities?.completionTriggerCharacters,
+                      )}
+                      signatureTriggers={activeCapabilities?.signatureTriggerCharacters ?? []}
+                      softWrap={softWrap}
+                      columnSelectionMode={columnSelectionMode}
+                    />
+                  </div>
                 )}
               </div>
             </div>

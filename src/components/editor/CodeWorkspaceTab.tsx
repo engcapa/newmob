@@ -1267,6 +1267,7 @@ export function CodeWorkspaceTab({
   const runPanelRef = useRef<RunPanelHandle | null>(null);
   const runActiveJavaFileRef = useRef<() => void>(() => {});
   const buildActiveProjectRef = useRef<(rebuild?: boolean) => void>(() => {});
+  const recompileActiveFileRef = useRef<() => void>(() => {});
   const toggleActiveBreakpointRef = useRef<(line: number) => void>(() => {});
   const editActiveBreakpointRef = useRef<(line: number) => void>(() => {});
   const debugRef = useRef<ReturnType<typeof useCodeDebugSession> | null>(null);
@@ -6764,6 +6765,16 @@ export function CodeWorkspaceTab({
       run: () => buildActiveProjectRef.current(false),
     },
     {
+      id: "workspace.recompileActiveFile",
+      title: activeFile ? `Recompile '${activeFile.title}'` : "Recompile Active File",
+      category: "Build",
+      keybinding: "Ctrl+Shift+F9",
+      keybindings: ["Mod-Shift-F9"],
+      keywords: ["compile", "recompile", "single file", "build", "javac"],
+      when: () => !!activeFile && !activeFile.library,
+      run: () => recompileActiveFileRef.current(),
+    },
+    {
       id: "workspace.toggleBreakpoint",
       title: "Toggle Line Breakpoint",
       category: "Debug",
@@ -8490,8 +8501,20 @@ export function CodeWorkspaceTab({
     setBottomDockTab,
     setStatusMessage,
   ]);
+
+  /** IDEA-style Ctrl+Shift+F9: Recompile active file (save if dirty, then compile target). */
+  const recompileActiveFile = useCallback(async () => {
+    const file = openFilesRef.current[activeKey ?? ""];
+    if (!file || file.library) return;
+    if (file.dirty) {
+      await saveFile();
+    }
+    await buildActiveProject(false);
+  }, [activeKey, saveFile, buildActiveProject]);
+
   runActiveJavaFileRef.current = runActiveTarget;
   buildActiveProjectRef.current = buildActiveProject;
+  recompileActiveFileRef.current = recompileActiveFile;
   const [javaTestBuildTool, setJavaTestBuildTool] = useState<JavaTestBuildTool | null>(null);
   const [javaTestCommand, setJavaTestCommand] = useState<string | null>(null);
 
@@ -9443,6 +9466,9 @@ export function CodeWorkspaceTab({
             onSymbolClick={(symbol) => revealEditorLocation(groupFile.key, symbol.selectionRange)}
           />
         ) : null}
+        activeSymbols={breadcrumbSymbolsByGroup[groupId]}
+        stickyLinesEnabled={intelligencePreferences.stickyLinesEnabled !== false}
+        onRevealTargetLine={(line) => groupFile && setRevealTarget({ key: groupFile.key, line, character: 0, nonce: Date.now() })}
         revealTarget={revealTarget}
         editorPaneRef={groupId === activeEditorGroupId ? editorPaneRef : inactiveEditorPaneRef}
         editorPaneStyle={editorPaneStyle}

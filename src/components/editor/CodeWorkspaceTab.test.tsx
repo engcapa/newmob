@@ -4050,5 +4050,8 @@ describe("CodeWorkspaceTab", () => {
       registrationRef.current?.execute("workspace.toggleMuteBreakpoints");
     });
     expect(useAppStore.getState().statusMessage).toBe("Breakpoints muted");
+
+    // 8. Ctrl+Shift+F9 Recompile Active File
+    expect(registrationRef.current?.items.find((item) => item.id === "workspace.recompileActiveFile")?.enabled).toBe(true);
   });
 });
