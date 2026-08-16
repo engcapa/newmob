@@ -1,6 +1,15 @@
-export type WorkspaceCommandFocus = "workspace" | "editor" | "tree" | "terminal";
+import {
+  workspaceActionRegistry,
+  type ActionCategory,
+  type ActionProvenance,
+  type WorkspaceActionDefinition,
+  type WorkspaceActionContext,
+  type WorkspaceFocus,
+} from "./workspaceActionRegistry";
 
-export interface WorkspaceCommandContext {
+export type WorkspaceCommandFocus = WorkspaceFocus;
+
+export interface WorkspaceCommandContext extends WorkspaceActionContext {
   focus: WorkspaceCommandFocus;
   /** Optional caller-specific target (for example a tree selection or directory). */
   payload?: unknown;
@@ -13,6 +22,7 @@ export interface WorkspaceCommand {
   keybinding?: string;
   keybindings?: string[];
   keywords?: string[];
+  provenance?: ActionProvenance;
   when?: (context: WorkspaceCommandContext) => boolean;
   run: (context: WorkspaceCommandContext) => void | Promise<void>;
 }
@@ -23,6 +33,7 @@ export interface WorkspaceCommandMenuItem {
   category: string;
   keybinding?: string;
   enabled: boolean;
+  provenance?: ActionProvenance;
 }
 
 export interface WorkspaceCommandRegistration {
@@ -30,7 +41,7 @@ export interface WorkspaceCommandRegistration {
   execute: (commandId: string) => boolean;
 }
 
-interface KeyboardEventLike {
+export interface KeyboardEventLike {
   key: string;
   /** Physical key code (e.g. ArrowLeft); used when `key` is unreliable under Alt. */
   code?: string;
@@ -42,7 +53,7 @@ interface KeyboardEventLike {
   stopPropagation: () => void;
 }
 
-interface ParsedKeybinding {
+export interface ParsedKeybinding {
   key: string;
   ctrl: boolean;
   shift: boolean;
@@ -50,7 +61,7 @@ interface ParsedKeybinding {
   meta: boolean;
 }
 
-function normalizeKey(value: string): string {
+export function normalizeKey(value: string): string {
   const key = value.toLowerCase();
   if (key === "left") return "arrowleft";
   if (key === "right") return "arrowright";
@@ -81,7 +92,7 @@ export function eventLogicalKey(
   return normalizeKey(code);
 }
 
-function parseKeybinding(value: string): ParsedKeybinding | null {
+export function parseKeybinding(value: string): ParsedKeybinding | null {
   const parts = value.split("+").map((part) => part.trim()).filter(Boolean);
   if (parts.length === 0) return null;
   const modifiers = new Set(parts.slice(0, -1).map((part) => part.toLowerCase()));
@@ -141,7 +152,8 @@ export function runWorkspaceCommand(
   id: string,
   context: WorkspaceCommandContext,
 ): boolean {
-  const command = commands.find((candidate) => candidate.id === id);
+  const resolvedId = workspaceActionRegistry.resolveId(id);
+  const command = commands.find((candidate) => candidate.id === id || candidate.id === resolvedId);
   if (!command || !workspaceCommandEnabled(command, context)) return false;
   void command.run(context);
   return true;
@@ -151,11 +163,52 @@ export function workspaceCommandMenuItems(
   commands: readonly WorkspaceCommand[],
   context: WorkspaceCommandContext,
 ): WorkspaceCommandMenuItem[] {
-  return commands.map((command) => ({
-    id: command.id,
-    title: command.title,
-    category: command.category,
-    keybinding: command.keybinding,
-    enabled: workspaceCommandEnabled(command, context),
-  }));
+  return commands.map((command) => {
+    const regAction = workspaceActionRegistry.get(command.id);
+    return {
+      id: command.id,
+      title: command.title,
+      category: command.category,
+      keybinding: command.keybinding,
+      enabled: workspaceCommandEnabled(command, context),
+      provenance: command.provenance ?? regAction?.provenance ?? "local",
+    };
+  });
+}
+
+/**
+ * Adapter converting WorkspaceCommand to WorkspaceActionDefinition for registration.
+ */
+export function workspaceCommandToActionDefinition(
+  cmd: WorkspaceCommand,
+): WorkspaceActionDefinition {
+  const regMeta = workspaceActionRegistry.get(cmd.id);
+  return {
+    id: cmd.id,
+    title: cmd.title,
+    category: (cmd.category as ActionCategory) || regMeta?.category || "Edit",
+    keywords: cmd.keywords ?? regMeta?.keywords,
+    keybinding: cmd.keybinding ?? (typeof regMeta?.keybinding === "string" ? regMeta.keybinding : regMeta?.keybinding?.default),
+    secondaryKeybindings: cmd.keybindings ?? regMeta?.secondaryKeybindings,
+    provenance: cmd.provenance ?? regMeta?.provenance ?? "local",
+    when: cmd.when,
+    run: (ctx) => cmd.run(ctx as WorkspaceCommandContext),
+  };
+}
+
+/**
+ * Register an array of WorkspaceCommands in the singleton workspaceActionRegistry.
+ * Returns an unregister cleanup function.
+ */
+export function registerWorkspaceCommands(
+  commands: readonly WorkspaceCommand[],
+): () => void {
+  const unregisterFns = commands.map((cmd) => {
+    return workspaceActionRegistry.register(workspaceCommandToActionDefinition(cmd));
+  });
+  return () => {
+    for (const unreg of unregisterFns) {
+      unreg();
+    }
+  };
 }

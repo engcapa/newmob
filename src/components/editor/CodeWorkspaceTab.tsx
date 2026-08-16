@@ -4988,7 +4988,7 @@ export function CodeWorkspaceTab({
           failedProviderCount: result.failedProviderCount,
           complete: result.complete,
           truncated: result.truncated,
-          diagnostics: result.diagnostics,
+          diagnostics: result.diagnostics ?? [],
         },
       });
       return completion.accepted
@@ -5002,7 +5002,7 @@ export function CodeWorkspaceTab({
           failedProviderCount: result.failedProviderCount,
           complete: result.complete,
           truncated: result.truncated,
-          diagnostics: result.diagnostics,
+          diagnostics: result.diagnostics ?? [],
         }
         : unavailable();
     } catch (error) {

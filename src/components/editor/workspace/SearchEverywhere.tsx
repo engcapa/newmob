@@ -154,7 +154,7 @@ export function SearchEverywhere({
               failedProviderCount: next.failedProviderCount,
               complete: next.complete,
               truncated: next.truncated,
-              diagnostics: next.diagnostics,
+              diagnostics: next.diagnostics ?? [],
             });
             setSymbolSnapshot(
               next.semanticGeneration == null || next.semanticRevision == null
@@ -375,12 +375,12 @@ export function SearchEverywhere({
                 )}
                 <span
                   data-testid="search-everywhere-symbol-provider-status"
-                  title={symbolQueryStatus.diagnostics.join("\n") || undefined}
+                  title={symbolQueryStatus.diagnostics?.join("\n") || undefined}
                   className={!symbolQueryStatus.complete ? "text-amber-500" : undefined}
                 >
                   {symbolQueryStatus.providerCount}/{symbolQueryStatus.sessionCount} provider{symbolQueryStatus.sessionCount === 1 ? "" : "s"}
                   {symbolQueryStatus.complete ? " · complete" : " · incomplete"}
-                  {symbolQueryStatus.truncated || symbolQueryStatus.skippedProviderCount > 0 || symbolQueryStatus.failedProviderCount > 0 || symbolQueryStatus.diagnostics.length > 0 ? " · bounded" : ""}
+                  {symbolQueryStatus.truncated || symbolQueryStatus.skippedProviderCount > 0 || symbolQueryStatus.failedProviderCount > 0 || (symbolQueryStatus.diagnostics?.length ?? 0) > 0 ? " · bounded" : ""}
                   {" · "}
                 </span>
                 {symbols.length} symbol{symbols.length === 1 ? "" : "s"}

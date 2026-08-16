@@ -167,9 +167,9 @@ export function AnalysisPanel({
                 )}
               </div>
             )}
-            {semanticIndex.lastQuery?.coverage && semanticIndex.lastQuery.coverage.diagnostics.length > 0 && (
-              <div className="text-amber-500" title={semanticIndex.lastQuery.coverage.diagnostics.join("\n")}>
-                Query diagnostics: {semanticIndex.lastQuery.coverage.diagnostics.length}
+            {semanticIndex.lastQuery?.coverage && (semanticIndex.lastQuery.coverage.diagnostics?.length ?? 0) > 0 && (
+              <div className="text-amber-500" title={semanticIndex.lastQuery.coverage.diagnostics?.join("\n")}>
+                Query diagnostics: {semanticIndex.lastQuery.coverage.diagnostics?.length}
               </div>
             )}
             <div className="text-[var(--taomni-code-muted)]">
