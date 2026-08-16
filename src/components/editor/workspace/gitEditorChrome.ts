@@ -157,6 +157,40 @@ class InlineBlameWidget extends WidgetType {
   }
 }
 
+/** Module-level to keep the extension identity stable across reconfigures. */
+const GIT_EDITOR_THEME = EditorView.theme({
+  ".cm-git-change-gutter": { width: "5px" },
+  ".cm-git-change-gutter .cm-gutterElement": { padding: "0" },
+  ".cm-git-change-marker": {
+    display: "block",
+    width: "4px",
+    height: "100%",
+    minHeight: "1.2em",
+    border: "none",
+    padding: "0",
+    background: "var(--cm-git-change-color)",
+    cursor: "pointer",
+  },
+  ".cm-git-change-deleted": {
+    height: "0",
+    minHeight: "0",
+    borderTop: "4px solid transparent",
+    borderBottom: "4px solid transparent",
+    borderLeft: "5px solid var(--cm-git-change-color)",
+    background: "transparent",
+  },
+  ".cm-inline-git-blame": {
+    marginLeft: "2.5rem",
+    color: "var(--taomni-code-muted)",
+    opacity: "0.66",
+    fontSize: "0.9em",
+    fontStyle: "italic",
+    whiteSpace: "nowrap",
+    userSelect: "none",
+    pointerEvents: "none",
+  },
+});
+
 export function createGitEditorChrome(
   changes: GitLineChange[],
   blame: GitBlameLine | null,
@@ -185,40 +219,5 @@ export function createGitEditorChrome(
       Decoration.widget({ widget: new InlineBlameWidget(blame), side: 1 }).range(line.to),
     ]);
   });
-  return [
-    gitGutter,
-    blameDecoration,
-    EditorView.theme({
-      ".cm-git-change-gutter": { width: "5px" },
-      ".cm-git-change-gutter .cm-gutterElement": { padding: "0" },
-      ".cm-git-change-marker": {
-        display: "block",
-        width: "4px",
-        height: "100%",
-        minHeight: "1.2em",
-        border: "none",
-        padding: "0",
-        background: "var(--cm-git-change-color)",
-        cursor: "pointer",
-      },
-      ".cm-git-change-deleted": {
-        height: "0",
-        minHeight: "0",
-        borderTop: "4px solid transparent",
-        borderBottom: "4px solid transparent",
-        borderLeft: "5px solid var(--cm-git-change-color)",
-        background: "transparent",
-      },
-      ".cm-inline-git-blame": {
-        marginLeft: "2.5rem",
-        color: "var(--taomni-code-muted)",
-        opacity: "0.66",
-        fontSize: "0.9em",
-        fontStyle: "italic",
-        whiteSpace: "nowrap",
-        userSelect: "none",
-        pointerEvents: "none",
-      },
-    }),
-  ];
+  return [gitGutter, blameDecoration, GIT_EDITOR_THEME];
 }

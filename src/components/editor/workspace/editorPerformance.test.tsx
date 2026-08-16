@@ -4,7 +4,7 @@ import { EditorState } from "@codemirror/state";
 import { CompletionContext } from "@codemirror/autocomplete";
 import { createLspCompletionSource } from "./lspCompletion";
 import { CodeMirrorHost } from "./CodeMirrorHost";
-import type { LspCompletionResult, LspDocumentStatus } from "../../../lib/editor/lsp";
+import type { LspCompletionResult, LspDiagnostic, LspDocumentStatus } from "../../../lib/editor/lsp";
 
 function testDocStatus(active = true): LspDocumentStatus {
   return {
@@ -119,5 +119,64 @@ describe("Editor typing and completion performance verification", () => {
     rerender(<CodeMirrorHost {...props} />);
 
     expect(props.onChange).not.toHaveBeenCalled();
+  });
+
+  // The case above passes `diagnostics: []`, which satisfies the both-empty
+  // short-circuit trivially. A real Java buffer almost always has diagnostics,
+  // and a caller that rebuilt the array per render used to force a full
+  // diagnostics-compartment reconfigure on every keystroke: a fresh
+  // EditorView.theme (new StyleModule mount + editor-root class rewrite) plus
+  // three rebuilt gutters.
+  it("does not rebuild diagnostics chrome when re-rendered with an equal non-empty diagnostics array", () => {
+    const diagnostic: LspDiagnostic = {
+      range: { start: { line: 0, character: 13 }, end: { line: 0, character: 17 } },
+      severity: 1,
+      code: null,
+      source: "jdtls",
+      message: "cannot find symbol",
+    };
+    const onLightbulb = vi.fn();
+    const baseProps = {
+      path: "Main.java",
+      doc: "public class Main {}",
+      visible: true,
+      reveal: null,
+      readOnly: false,
+      softWrap: false,
+      onChange: vi.fn(),
+      onSave: vi.fn(),
+      onHover: vi.fn(async () => null),
+      onDefinition: vi.fn(async () => false),
+      onReferences: vi.fn(async () => {}),
+      onLightbulb,
+    };
+
+    const { container, rerender } = render(
+      <CodeMirrorHost {...baseProps} diagnostics={[diagnostic]} />,
+    );
+    const editorRoot = container.querySelector(".cm-editor") as HTMLElement;
+    const themeClasses = editorRoot.className;
+    const lightbulb = container.querySelector('[data-testid="code-workspace-lightbulb"]');
+    expect(lightbulb).toBeTruthy();
+
+    // Fresh array identity per render, identical contents.
+    rerender(<CodeMirrorHost {...baseProps} diagnostics={[diagnostic]} />);
+    rerender(<CodeMirrorHost {...baseProps} diagnostics={[diagnostic]} />);
+    rerender(<CodeMirrorHost {...baseProps} diagnostics={[diagnostic]} />);
+
+    // A reconfigure would mint a new theme class and swap the gutter DOM.
+    expect(editorRoot.className).toBe(themeClasses);
+    expect(container.querySelector('[data-testid="code-workspace-lightbulb"]')).toBe(lightbulb);
+
+    // Genuinely different diagnostics must still reconfigure without minting a
+    // new theme class: an EditorView.theme built per call would re-mount every
+    // stylesheet and rewrite the editor root class each time.
+    rerender(
+      <CodeMirrorHost
+        {...baseProps}
+        diagnostics={[{ ...diagnostic, message: "incompatible types" }]}
+      />,
+    );
+    expect(editorRoot.className).toBe(themeClasses);
   });
 });

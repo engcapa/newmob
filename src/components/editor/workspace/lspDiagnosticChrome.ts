@@ -64,13 +64,21 @@ class OverviewMarker extends GutterMarker {
 }
 
 class LightbulbMarker extends GutterMarker {
-  constructor(private readonly onClick: () => void) {
+  constructor(
+    private readonly line: number,
+    private readonly onLightbulb: (line: number) => void,
+  ) {
     super();
   }
 
-  // Always re-create so click handlers stay fresh with latest diagnostics.
-  eq(): boolean {
-    return false;
+  /**
+   * `markers` re-runs on every document change, so returning false here rebuilt
+   * the button DOM on each keystroke. The handler is a per-chrome-instance
+   * reference that callers keep fresh through a ref, so comparing it alongside
+   * the line is enough to reuse the existing element.
+   */
+  eq(other: LightbulbMarker): boolean {
+    return other.line === this.line && other.onLightbulb === this.onLightbulb;
   }
 
   toDOM(): HTMLElement {
@@ -84,7 +92,7 @@ class LightbulbMarker extends GutterMarker {
     el.addEventListener("mousedown", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      this.onClick();
+      this.onLightbulb(this.line);
     });
     return el;
   }
@@ -107,6 +115,46 @@ export function diagnosticClass(severity: number | null): string {
   if (severity === 2) return "cm-lsp-diagnostic-warning";
   return "cm-lsp-diagnostic-info";
 }
+
+/**
+ * Module-level so the extension identity stays stable across compartment
+ * reconfigures. Building it per call would mint a fresh `StyleModule` name on
+ * every keystroke, forcing CodeMirror to re-mount every stylesheet and rewrite
+ * the editor root class (full-subtree style recalc).
+ */
+const LSP_DIAGNOSTIC_THEME = EditorView.theme({
+  ".cm-lsp-diag-gutter": {
+    width: "1.1rem",
+  },
+  ".cm-lsp-diag-gutter-mark": {
+    fontSize: "9px",
+    lineHeight: "1",
+    display: "inline-flex",
+    width: "100%",
+    justifyContent: "center",
+  },
+  ".cm-lsp-lightbulb-gutter": {
+    width: "1.2rem",
+  },
+  ".cm-lsp-lightbulb": {
+    border: "none",
+    background: "transparent",
+    cursor: "pointer",
+    fontSize: "11px",
+    lineHeight: "1",
+    padding: 0,
+    width: "100%",
+  },
+  ".cm-lsp-overview-gutter": {
+    width: "4px",
+  },
+  ".cm-lsp-overview-mark": {
+    width: "3px",
+    height: "4px",
+    margin: "2px auto 0",
+    borderRadius: "1px",
+  },
+});
 
 export function diagnosticDecorations(view: EditorView, diagnostics: LspDiagnostic[]): DecorationSet {
   const ranges = diagnostics.flatMap((diagnostic) => {
@@ -166,11 +214,7 @@ export function createDiagnosticChrome(
       for (const lineNo of linesWithDiagnostics) {
         if (lineNo < 0 || lineNo >= view.state.doc.lines) continue;
         const line = view.state.doc.line(lineNo + 1);
-        builder.add(
-          line.from,
-          line.from,
-          new LightbulbMarker(() => onLightbulb(lineNo)),
-        );
+        builder.add(line.from, line.from, new LightbulbMarker(lineNo, onLightbulb));
       }
       return builder.finish();
     },
@@ -181,38 +225,6 @@ export function createDiagnosticChrome(
     severityGutter,
     lightbulbGutter,
     overviewGutter,
-    EditorView.theme({
-      ".cm-lsp-diag-gutter": {
-        width: "1.1rem",
-      },
-      ".cm-lsp-diag-gutter-mark": {
-        fontSize: "9px",
-        lineHeight: "1",
-        display: "inline-flex",
-        width: "100%",
-        justifyContent: "center",
-      },
-      ".cm-lsp-lightbulb-gutter": {
-        width: "1.2rem",
-      },
-      ".cm-lsp-lightbulb": {
-        border: "none",
-        background: "transparent",
-        cursor: "pointer",
-        fontSize: "11px",
-        lineHeight: "1",
-        padding: 0,
-        width: "100%",
-      },
-      ".cm-lsp-overview-gutter": {
-        width: "4px",
-      },
-      ".cm-lsp-overview-mark": {
-        width: "3px",
-        height: "4px",
-        margin: "2px auto 0",
-        borderRadius: "1px",
-      },
-    }),
+    LSP_DIAGNOSTIC_THEME,
   ];
 }

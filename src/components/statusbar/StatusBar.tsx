@@ -137,8 +137,16 @@ function StatusSegment({
 }
 
 export function StatusBar() {
-  const { tabs, activeTabId, xServerEnabled, xServerStatus, statusMessage } = useAppStore();
-  const { sessions, selectedSessionId } = useSessionStore();
+  // Per-field selectors: subscribing to the whole store re-rendered the status
+  // bar on every unrelated app-store mutation, and LSP progress writes
+  // `statusMessage` often enough for that to matter while typing.
+  const tabs = useAppStore((s) => s.tabs);
+  const activeTabId = useAppStore((s) => s.activeTabId);
+  const xServerEnabled = useAppStore((s) => s.xServerEnabled);
+  const xServerStatus = useAppStore((s) => s.xServerStatus);
+  const statusMessage = useAppStore((s) => s.statusMessage);
+  const sessions = useSessionStore((s) => s.sessions);
+  const selectedSessionId = useSessionStore((s) => s.selectedSessionId);
   const workspaceStatus = useCodeWorkspaceStatusStore((s) => s.status);
   const workspaceActions = useCodeWorkspaceStatusStore((s) => s.actions);
   const { mode, resolvedTheme } = useAppTheme();

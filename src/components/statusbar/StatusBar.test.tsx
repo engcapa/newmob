@@ -2,7 +2,6 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StatusBar } from "./StatusBar";
 import { useAppStore } from "../../stores/appStore";
-import { useSessionStore } from "../../stores/sessionStore";
 import { useCodeWorkspaceStatusStore } from "../../stores/codeWorkspaceStatusStore";
 
 vi.mock("../../lib/i18n", async (importOriginal) => {
@@ -34,8 +33,16 @@ vi.mock("../../lib/appTheme", () => ({
   useAppTheme: () => ({ mode: "dark", resolvedTheme: "dark" }),
 }));
 
+// StatusBar reads the session store through per-field selectors, so the mock has
+// to apply the selector the way zustand does.
+const sessionStoreState: { sessions: unknown[]; selectedSessionId: string | null } = {
+  sessions: [],
+  selectedSessionId: null,
+};
 vi.mock("../../stores/sessionStore", () => ({
-  useSessionStore: vi.fn(() => ({ sessions: [], selectedSessionId: null })),
+  useSessionStore: vi.fn((selector?: (state: unknown) => unknown) => (
+    selector ? selector(sessionStoreState) : sessionStoreState
+  )),
 }));
 
 vi.mock("../../stores/aiStore", () => ({
@@ -200,6 +207,8 @@ describe("StatusBar copyable/truncated text", () => {
       statusMessage: "",
     } as never);
     useCodeWorkspaceStatusStore.setState({ status: null, actions: null });
+    sessionStoreState.sessions = [];
+    sessionStoreState.selectedSessionId = null;
   });
 
   it("shows the full status message as tooltip and copies it on click", async () => {
@@ -223,10 +232,8 @@ describe("StatusBar copyable/truncated text", () => {
 
   it("copies the selected session name on click", async () => {
     const writeText = mockClipboard();
-    vi.mocked(useSessionStore).mockReturnValue({
-      sessions: [{ id: "s1", name: "my-very-long-session-name" } as never],
-      selectedSessionId: "s1",
-    });
+    sessionStoreState.sessions = [{ id: "s1", name: "my-very-long-session-name" }];
+    sessionStoreState.selectedSessionId = "s1";
 
     render(<StatusBar />);
 

@@ -14,8 +14,49 @@ export const LSP_SHOW_MESSAGE_CANCELLED_EVENT = "lsp://show-message-cancelled";
 export const LSP_SHOW_MESSAGE_EVENT = "lsp://show-message";
 export const LSP_WORK_DONE_PROGRESS_EVENT = "lsp://work-done-progress";
 
+/**
+ * jdtls reports its own "Publish Diagnostics" / "Validate documents" jobs on
+ * every validation cycle, so a single keystroke can produce several
+ * begin/report/end triples. Publishing each one straight into React state
+ * re-renders the whole workspace shell per event and makes the status bar
+ * flicker between task names. Fold them into one trailing update instead: work
+ * that starts and finishes inside the window never reaches the UI at all.
+ */
+const PROGRESS_FLUSH_INTERVAL_MS = 150;
+
 function progressKey(event: Pick<LspWorkDoneProgressEvent, "presetId" | "rootUri" | "token">): string {
   return `${event.presetId}\u0000${event.rootUri}\u0000${typeof event.token}:${String(event.token)}`;
+}
+
+function sameProgress(a: LspWorkDoneProgressEvent, b: LspWorkDoneProgressEvent): boolean {
+  return a.kind === b.kind
+    && a.title === b.title
+    && a.message === b.message
+    && a.percentage === b.percentage
+    && a.cancellable === b.cancellable
+    && progressKey(a) === progressKey(b);
+}
+
+function sameProgressList(
+  previous: readonly LspWorkDoneProgressEvent[],
+  next: readonly LspWorkDoneProgressEvent[],
+): boolean {
+  if (previous === next) return true;
+  if (previous.length !== next.length) return false;
+  return previous.every((entry, index) => sameProgress(entry, next[index]));
+}
+
+function reduceProgress(
+  current: readonly LspWorkDoneProgressEvent[],
+  progress: LspWorkDoneProgressEvent,
+): LspWorkDoneProgressEvent[] {
+  const key = progressKey(progress);
+  if (progress.kind === "end") {
+    return current.filter((entry) => progressKey(entry) !== key);
+  }
+  const previous = current.find((entry) => progressKey(entry) === key);
+  const next = { ...previous, ...progress, title: progress.title ?? previous?.title ?? null };
+  return [...current.filter((entry) => progressKey(entry) !== key), next].slice(-20);
 }
 
 function normalizeMessageRequest(value: unknown): LspShowMessageRequest | null {
@@ -102,16 +143,47 @@ export function useWorkspaceLspClientEvents({
   const onStatusRef = useRef(onStatus);
   visibleRef.current = visible;
   onStatusRef.current = onStatus;
+  // Pending (authoritative) progress list. React state trails it by at most one
+  // flush window so event bursts cost one render instead of one render each.
+  const pendingProgressesRef = useRef<LspWorkDoneProgressEvent[]>([]);
+  const publishedProgressesRef = useRef<LspWorkDoneProgressEvent[]>([]);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastStatusTextRef = useRef<string | null>(null);
+
+  const flushProgresses = useCallback(() => {
+    flushTimerRef.current = null;
+    if (!mountedRef.current) return;
+    const next = pendingProgressesRef.current;
+    if (sameProgressList(publishedProgressesRef.current, next)) return;
+    publishedProgressesRef.current = next;
+    setProgresses(next);
+  }, []);
+
+  const scheduleProgressFlush = useCallback(() => {
+    if (flushTimerRef.current !== null) return;
+    flushTimerRef.current = setTimeout(flushProgresses, PROGRESS_FLUSH_INTERVAL_MS);
+  }, [flushProgresses]);
 
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
     };
   }, []);
 
   useEffect(() => {
     cancelledMessageIdsRef.current.clear();
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    pendingProgressesRef.current = [];
+    publishedProgressesRef.current = [];
+    lastStatusTextRef.current = null;
     setMessageRequests([]);
     setProgresses([]);
   }, [workspaceId]);
@@ -144,27 +216,33 @@ export function useWorkspaceLspClientEvents({
           listen<LspShowMessageNotification>(LSP_SHOW_MESSAGE_EVENT, (event) => {
             const payload = event.payload;
             if (!payload || payload.workspaceId !== workspaceId || !visibleRef.current) return;
+            // Another writer took over the status line, so the progress dedupe
+            // key no longer describes what is on screen.
+            lastStatusTextRef.current = null;
             onStatusRef.current(notificationText(payload));
           }),
           listen<LspWorkDoneProgressEvent>(LSP_WORK_DONE_PROGRESS_EVENT, (event) => {
             const progress = normalizeProgress(event.payload);
             if (!progress || progress.workspaceId !== workspaceId) return;
             const key = progressKey(progress);
-            setProgresses((current) => {
-              if (progress.kind === "end") {
-                return current.filter((entry) => progressKey(entry) !== key);
+            // Only tasks that actually surfaced in the UI are worth announcing.
+            // Per-keystroke validations begin and end inside a single flush
+            // window, so they never reach `publishedProgressesRef` and no longer
+            // churn the shared status bar.
+            const wasPublished = publishedProgressesRef.current.some((entry) => progressKey(entry) === key);
+            pendingProgressesRef.current = reduceProgress(pendingProgressesRef.current, progress);
+            scheduleProgressFlush();
+            if (
+              visibleRef.current
+              && wasPublished
+              && progress.kind === "end"
+              && (progress.message || progress.title)
+            ) {
+              const text = `${progress.title ?? "Language server task"}${progress.message ? `: ${progress.message}` : " completed"}`;
+              if (text !== lastStatusTextRef.current) {
+                lastStatusTextRef.current = text;
+                onStatusRef.current(text);
               }
-              const previous = current.find((entry) => progressKey(entry) === key);
-              const next = { ...previous, ...progress, title: progress.title ?? previous?.title ?? null };
-              return [
-                ...current.filter((entry) => progressKey(entry) !== key),
-                next,
-              ].slice(-20);
-            });
-            if (visibleRef.current && progress.kind === "end" && (progress.message || progress.title)) {
-              onStatusRef.current(
-                `${progress.title ?? "Language server task"}${progress.message ? `: ${progress.message}` : " completed"}`,
-              );
             }
           }),
         ]);
@@ -183,7 +261,7 @@ export function useWorkspaceLspClientEvents({
       disposed = true;
       unlisten.forEach((remove) => remove());
     };
-  }, [workspaceId]);
+  }, [scheduleProgressFlush, workspaceId]);
 
   const resolveMessageRequest = useCallback((actionIndex: number | null) => {
     const request = messageRequests[0];
@@ -198,9 +276,13 @@ export function useWorkspaceLspClientEvents({
   }, [messageRequests, workspaceId]);
 
   const cancelProgress = useCallback((progress: LspWorkDoneProgressEvent) => {
-    setProgresses((current) => current.map((entry) => (
+    // User-initiated, so publish straight away rather than waiting for a flush.
+    const disable = (entries: readonly LspWorkDoneProgressEvent[]) => entries.map((entry) => (
       progressKey(entry) === progressKey(progress) ? { ...entry, cancellable: false } : entry
-    )));
+    ));
+    pendingProgressesRef.current = disable(pendingProgressesRef.current);
+    publishedProgressesRef.current = disable(publishedProgressesRef.current);
+    setProgresses(publishedProgressesRef.current);
     void lspCancelWorkDoneProgress(
       progress.workspaceId,
       progress.presetId,
