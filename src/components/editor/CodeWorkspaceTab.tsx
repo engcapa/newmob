@@ -10493,6 +10493,7 @@ export function CodeWorkspaceTab({
                     };
                   })}
                 activeConfigurationId={activeRunConfiguration?.id ?? null}
+                workspaceInstanceId={workspaceInstanceId}
                 onActiveConfigurationChange={(configurationId) => {
                   if (!activeFile) return;
                   const sourceFile = absolutePathForOpenFile(activeFile);
