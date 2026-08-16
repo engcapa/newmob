@@ -229,9 +229,20 @@ const EMPTY_INLAY_HINTS: LspInlayHint[] = [];
 const EMPTY_SEMANTIC_TOKENS: LspSemanticToken[] = [];
 const EMPTY_GIT_CHANGES: GitLineChange[] = [];
 
-/** New empty-array props are common while LSP requests are debounced. */
+/**
+ * New empty-array props are common while LSP requests are debounced, and a
+ * caller that rebuilds a derived array per render would otherwise force a full
+ * compartment reconfigure on every keystroke. Callers should keep identities
+ * stable; the element-wise pass is a cheap backstop for the ones that leak
+ * (these arrays hold tens of entries, not thousands).
+ */
 function sameArrayOrBothEmpty<T>(previous: readonly T[], next: readonly T[]): boolean {
-  return previous === next || (previous.length === 0 && next.length === 0);
+  if (previous === next) return true;
+  if (previous.length !== next.length) return false;
+  for (let index = 0; index < previous.length; index += 1) {
+    if (previous[index] !== next[index]) return false;
+  }
+  return true;
 }
 
 /**

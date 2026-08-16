@@ -504,6 +504,8 @@ const LSP_DOCUMENT_SYMBOLS_IDLE_DELAY_MS = 650;
 // keypress into the workspace-wide Zustand object redraws the file tree,
 // panels, and command chrome, so commit an editing burst as one update.
 const EDITOR_TEXT_COMMIT_IDLE_DELAY_MS = 220;
+// Shared empty result so "no diagnostics" is always the same array identity.
+const EMPTY_DISPLAY_DIAGNOSTICS: LspDiagnostic[] = [];
 
 import {
   type LibraryBufferInfo,
@@ -3819,6 +3821,31 @@ export function CodeWorkspaceTab({
       applyInspectionProfile(diagnostic, inspectionProfile, { path })
     ),
     [inspectionProfile],
+  );
+  // The session layer already content-dedupes `lspFiles[key].diagnostics`, so the
+  // source array identity is stable between real diagnostic changes. Mapping it
+  // through the inspection profile on every render would throw that stability
+  // away and defeat CodeMirrorHost's identity-based memo, forcing a full
+  // diagnostics-compartment reconfigure per render. Cache per source array so
+  // the mapped result keeps the same identity too.
+  const displayDiagnosticsCache = useMemo(
+    () => new WeakMap<readonly LspDiagnostic[], { path: string | undefined; result: LspDiagnostic[] }>(),
+    [inspectionProfile],
+  );
+  const displayDiagnosticsFor = useCallback(
+    (source: LspDiagnostic[] | null | undefined, path: string | undefined): LspDiagnostic[] => {
+      if (!source || source.length === 0) return EMPTY_DISPLAY_DIAGNOSTICS;
+      const cached = displayDiagnosticsCache.get(source);
+      if (cached && cached.path === path) return cached.result;
+      const mapped = source.flatMap((diagnostic) => {
+        const display = inspectionTransform(diagnostic, path);
+        return display ? [display] : [];
+      });
+      const result = mapped.length === 0 ? EMPTY_DISPLAY_DIAGNOSTICS : mapped;
+      displayDiagnosticsCache.set(source, { path, result });
+      return result;
+    },
+    [displayDiagnosticsCache, inspectionTransform],
   );
   const activeLspDocumentIsSynced = Boolean(
     activeFile
@@ -9511,10 +9538,10 @@ export function CodeWorkspaceTab({
     };
     const lspDiagnostics = openStates
       .map((file) => {
-        const diagnostics = (lspFiles[file.key]?.diagnostics ?? []).flatMap((diagnostic) => {
-          const display = inspectionTransform(diagnostic, inspectionPathForFileKey(file.key));
-          return display ? [display] : [];
-        });
+        const diagnostics = displayDiagnosticsFor(
+          lspFiles[file.key]?.diagnostics,
+          inspectionPathForFileKey(file.key),
+        );
         if (diagnostics.length === 0) return null;
         return {
           file: toContextFile(file),
@@ -9563,8 +9590,8 @@ export function CodeWorkspaceTab({
     deferredActiveFile,
     deferredOpenFiles,
     dirtyFiles,
+    displayDiagnosticsFor,
     inspectionPathForFileKey,
-    inspectionTransform,
     looseFiles,
     lspFiles,
     openOrder,
@@ -9583,10 +9610,7 @@ export function CodeWorkspaceTab({
     const groupFile = group.activeKey ? openFiles[group.activeKey] ?? null : null;
     const groupLspState = group.activeKey ? lspFiles[group.activeKey] ?? null : null;
     const groupPath = groupFile ? inspectionPathForFileKey(groupFile.key) : undefined;
-    const groupDiagnostics = (groupLspState?.diagnostics ?? []).flatMap((diagnostic) => {
-      const display = inspectionTransform(diagnostic, groupPath);
-      return display ? [display] : [];
-    });
+    const groupDiagnostics = displayDiagnosticsFor(groupLspState?.diagnostics, groupPath);
     const groupCapabilities = groupLspState?.status?.capabilities ?? null;
     const groupMarkdownMode = groupFile && isMarkdownPath(groupFile.languagePath)
       ? markdownModes[groupFile.key] ?? "edit"

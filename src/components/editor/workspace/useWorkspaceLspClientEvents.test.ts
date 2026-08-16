@@ -148,6 +148,51 @@ describe("useWorkspaceLspClientEvents", () => {
     unmount();
   });
 
+  it("swallows validation tasks that begin and end inside one flush window", async () => {
+    const onStatus = vi.fn();
+    let renders = 0;
+    const { result, unmount } = renderHook(() => {
+      renders += 1;
+      return useWorkspaceLspClientEvents({ workspaceId: "workspace-a", visible: true, onStatus });
+    });
+    const rendersBefore = renders;
+
+    const validationCycle = async (token: string, title: string) => {
+      for (const kind of ["begin", "report", "end"] as const) {
+        await emit(LSP_WORK_DONE_PROGRESS_EVENT, {
+          workspaceId: "workspace-a",
+          presetId: "java",
+          serverLabel: "Java",
+          rootUri: "file:///repo",
+          token,
+          kind,
+          title,
+          message: kind === "end" ? "done" : "working",
+          percentage: null,
+          cancellable: false,
+        });
+      }
+    };
+
+    // jdtls emits these per keystroke; each triple used to cost three renders
+    // plus a global status-bar write.
+    await act(async () => {
+      await validationCycle("pub-1", "Publish Diagnostics");
+      await validationCycle("val-1", "Validate documents");
+      await validationCycle("pub-2", "Publish Diagnostics");
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    expect(result.current.progresses).toHaveLength(0);
+    // Nothing ever became visible, so the shared status bar stays untouched and
+    // no state update was published.
+    expect(onStatus).not.toHaveBeenCalled();
+    expect(renders).toBe(rendersBefore);
+    unmount();
+  });
+
   it("surfaces one-way server messages only for the visible workspace", async () => {
     const onStatus = vi.fn();
     const { unmount } = renderHook(() => useWorkspaceLspClientEvents({

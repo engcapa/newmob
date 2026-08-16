@@ -24,6 +24,37 @@ class CoverageGutterMarker extends GutterMarker {
   }
 }
 
+/** Module-level to keep the extension identity stable across reconfigures. */
+const COVERAGE_THEME = EditorView.theme({
+  ".cm-coverage-gutter": {
+    width: "4px",
+    minWidth: "4px",
+    marginRight: "2px",
+  },
+  ".cm-coverage-gutter .cm-gutterElement": {
+    padding: "0",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  ".cm-coverage-marker": {
+    width: "3px",
+    height: "100%",
+    minHeight: "1.2em",
+    borderRadius: "1px",
+    transition: "background-color 0.15s ease",
+  },
+  ".cm-coverage-marker.cm-coverage-covered": {
+    backgroundColor: "#10b981", // Emerald 500
+  },
+  ".cm-coverage-marker.cm-coverage-partial": {
+    backgroundColor: "#f59e0b", // Amber 500
+  },
+  ".cm-coverage-marker.cm-coverage-uncovered": {
+    backgroundColor: "#ef4444", // Rose 500
+  },
+});
+
 export function createCoverageEditorChrome(
   coverage: FileCoverage | null,
   enabled = true,
@@ -44,35 +75,5 @@ export function createCoverageEditorChrome(
     },
   });
 
-  const coverageTheme = EditorView.theme({
-    ".cm-coverage-gutter": {
-      width: "4px",
-      minWidth: "4px",
-      marginRight: "2px",
-    },
-    ".cm-coverage-gutter .cm-gutterElement": {
-      padding: "0",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    ".cm-coverage-marker": {
-      width: "3px",
-      height: "100%",
-      minHeight: "1.2em",
-      borderRadius: "1px",
-      transition: "background-color 0.15s ease",
-    },
-    ".cm-coverage-marker.cm-coverage-covered": {
-      backgroundColor: "#10b981", // Emerald 500
-    },
-    ".cm-coverage-marker.cm-coverage-partial": {
-      backgroundColor: "#f59e0b", // Amber 500
-    },
-    ".cm-coverage-marker.cm-coverage-uncovered": {
-      backgroundColor: "#ef4444", // Rose 500
-    },
-  });
-
-  return [coverageGutter, coverageTheme];
+  return [coverageGutter, COVERAGE_THEME];
 }
