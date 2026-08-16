@@ -197,6 +197,37 @@ export function Empty({ text }: { text: string }) {
   return <div className="px-3 py-1 text-[var(--taomni-text-muted)]">{text}</div>;
 }
 
+/** react-resizable-panels v4 layout map: panel id -> flexGrow value. */
+export type DebugSplitLayout = Record<string, number>;
+
+/** Read a persisted split layout; returns undefined on any inconsistency. */
+export function readDebugSplitLayout(storageKey: string, panelIds: string[]): DebugSplitLayout | undefined {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return undefined;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const rec = parsed as Record<string, unknown>;
+    const layout: DebugSplitLayout = {};
+    for (const id of panelIds) {
+      const value = rec[id];
+      if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return undefined;
+      layout[id] = value;
+    }
+    return layout;
+  } catch {
+    return undefined;
+  }
+}
+
+export function writeDebugSplitLayout(storageKey: string, layout: DebugSplitLayout): void {
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify(layout));
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
 /** Text field that reports its value on Enter or blur, not per keystroke. */
 export function CommitField({
   label,

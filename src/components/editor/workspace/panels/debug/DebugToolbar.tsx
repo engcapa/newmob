@@ -5,7 +5,6 @@ import {
   CirclePlay,
   FlameKindling,
   Pause,
-  Plug,
   RotateCcw,
   Square,
 } from "lucide-react";
@@ -13,11 +12,8 @@ import type { CodeDebugSession } from "../../useCodeDebugSession";
 
 export interface DebugSessionControlsProps {
   debug: CodeDebugSession;
-  running: boolean;
   activeRunning: boolean;
   stopped: boolean;
-  onStart?: (() => void) | null;
-  onAttach?: (() => void) | null;
 }
 
 const verticalBtn =
@@ -26,57 +22,20 @@ const verticalBtn =
 const stepBtn =
   "h-6 px-1.5 inline-flex items-center gap-1 rounded text-[10px] font-medium transition-colors disabled:opacity-30 disabled:pointer-events-none hover:bg-[var(--taomni-hover-bg)]";
 
-/** 竖排：Resume/Pause/Stop/Restart/HotReload — 放在左栏最左侧 */
+/**
+ * 竖排：Resume/Pause/Stop/Restart/HotReload — 放在左栏最左侧。
+ *
+ * Start/Attach live in the top configuration bar (rendered whenever no
+ * session is live). Rendering them here too would duplicate their
+ * data-testids once a terminated session still has state, so the vertical
+ * strip only owns in-session controls and simply disables them when the
+ * session is not running.
+ */
 export function DebugSessionControls({
   debug,
-  running,
   activeRunning,
   stopped,
-  onStart,
-  onAttach,
 }: DebugSessionControlsProps) {
-  if (!running) {
-    return (
-      <div
-        data-testid="debug-session-controls"
-        className="w-8 shrink-0 flex flex-col items-center py-1.5 gap-1 border-r border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]/40"
-      >
-        <button
-          type="button"
-          data-testid="debug-start"
-          className={`${verticalBtn} hover:bg-emerald-500/15`}
-          onClick={() => onStart?.()}
-          disabled={!onStart}
-          title="Start debugging the active file"
-        >
-          <CirclePlay className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
-        </button>
-        {onAttach && (
-          <button
-            type="button"
-            data-testid="debug-attach"
-            className={`${verticalBtn} hover:bg-sky-500/15`}
-            onClick={() => onAttach()}
-            title="Attach to a remote JVM (host:port)"
-          >
-            <Plug className="h-4 w-4 text-sky-500 dark:text-sky-400" />
-          </button>
-        )}
-        {debug.canRestart && (
-          <button
-            type="button"
-            data-testid="debug-restart"
-            className={`${verticalBtn} hover:bg-emerald-500/15`}
-            onClick={() => debug.restart()}
-            title="Rerun the last debug session"
-          >
-            <RotateCcw className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
-          </button>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div
       data-testid="debug-session-controls"
@@ -88,7 +47,7 @@ export function DebugSessionControls({
         className={`${verticalBtn} hover:bg-emerald-500/15`}
         onClick={() => debug.step("continue")}
         disabled={!stopped}
-        title="Resume Program (F9)"
+        title="Resume Program"
       >
         <CirclePlay className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
       </button>
@@ -107,19 +66,25 @@ export function DebugSessionControls({
         data-testid="debug-stop"
         className={`${verticalBtn} hover:bg-rose-500/15`}
         onClick={() => debug.terminate()}
-        title="Stop (Ctrl+F2)"
+        disabled={!activeRunning}
+        title="Stop"
       >
         <Square className="h-4 w-4 text-rose-500 dark:text-rose-400" />
       </button>
-      <button
-        type="button"
-        data-testid="debug-restart"
-        className={`${verticalBtn} hover:bg-emerald-500/15`}
-        onClick={() => debug.restart()}
-        title="Restart the debug session (Ctrl+F5)"
-      >
-        <RotateCcw className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
-      </button>
+      {/* Restart only for a live session: once terminated, the top
+          configuration bar owns the restart/rerun action, and rendering a
+          second one here would duplicate its data-testid. */}
+      {activeRunning && (
+        <button
+          type="button"
+          data-testid="debug-restart"
+          className={`${verticalBtn} hover:bg-emerald-500/15`}
+          onClick={() => debug.restart()}
+          title="Restart the debug session"
+        >
+          <RotateCcw className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
+        </button>
+      )}
       <button
         type="button"
         data-testid="debug-hot-reload"
@@ -152,7 +117,7 @@ export function DebugStepControls({ debug, stopped }: DebugStepControlsProps) {
         className={stepBtn}
         onClick={() => debug.step("stepOver")}
         disabled={!stopped}
-        title="Step Over (F8)"
+        title="Step Over"
       >
         <ArrowRightToLine className="h-3.5 w-3.5 text-sky-500 dark:text-sky-400" />
         <span>Step Over</span>
@@ -163,7 +128,7 @@ export function DebugStepControls({ debug, stopped }: DebugStepControlsProps) {
         className={stepBtn}
         onClick={() => debug.step("stepIn")}
         disabled={!stopped}
-        title="Step Into (F7)"
+        title="Step Into"
       >
         <ArrowDownToLine className="h-3.5 w-3.5 text-indigo-500 dark:text-indigo-400" />
         <span>Into</span>
@@ -174,7 +139,7 @@ export function DebugStepControls({ debug, stopped }: DebugStepControlsProps) {
         className={stepBtn}
         onClick={() => debug.step("stepOut")}
         disabled={!stopped}
-        title="Step Out (Shift+F8)"
+        title="Step Out"
       >
         <ArrowUpFromLine className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" />
         <span>Out</span>

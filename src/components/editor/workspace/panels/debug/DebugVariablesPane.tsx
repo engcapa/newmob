@@ -1,11 +1,22 @@
 import type React from "react";
+import { useMemo } from "react";
 import {
   Group as PanelGroup,
   Panel,
   Separator as PanelResizeHandle,
 } from "react-resizable-panels";
 import { VariableRow } from "./VariableRow";
-import { Empty, type VarEditState, type VarNode } from "./debugPanelShared";
+import {
+  Empty,
+  readDebugSplitLayout,
+  writeDebugSplitLayout,
+  type VarEditState,
+  type VarNode,
+} from "./debugPanelShared";
+
+/** localStorage key + panel ids for the Variables/Watches vertical split. */
+const DEBUG_VERTICAL_LAYOUT_KEY = "taomni.codeWorkspace.debugSplitVertical.v1";
+const DEBUG_VERTICAL_PANEL_IDS = ["debug-variables-section", "debug-watches-section"];
 
 export interface DebugVariablesPaneProps {
   variables: VarNode[];
@@ -54,12 +65,22 @@ export function DebugVariablesPane({
   canAddDataBreakpoint,
   variableMenuRender,
 }: DebugVariablesPaneProps) {
+  const verticalLayout = useMemo(
+    () => readDebugSplitLayout(DEBUG_VERTICAL_LAYOUT_KEY, DEBUG_VERTICAL_PANEL_IDS),
+    [],
+  );
   return (
     <div
       data-testid="debug-variables-pane"
       className="h-full min-h-0 flex flex-col bg-[var(--taomni-code-bg)] text-[11px]"
     >
-      <PanelGroup orientation="vertical" id="debug-variables-split-v2" className="flex-1 min-h-0">
+      <PanelGroup
+        orientation="vertical"
+        id="debug-variables-split-v2"
+        className="flex-1 min-h-0"
+        defaultLayout={verticalLayout}
+        onLayoutChanged={(layout) => writeDebugSplitLayout(DEBUG_VERTICAL_LAYOUT_KEY, layout)}
+      >
         {/* Variables Section */}
         <Panel id="debug-variables-section" defaultSize="60%" minSize="20%" className="flex flex-col min-h-0 min-w-0">
           <div className="h-6 shrink-0 flex items-center justify-between border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]/40 px-2 font-medium text-[10px] text-[var(--taomni-text-muted)]">

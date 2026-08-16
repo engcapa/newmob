@@ -8,22 +8,16 @@ import { DebugSessionControls, DebugStepControls } from "./DebugToolbar";
 
 export interface DebugFramesPaneProps {
   debug: CodeDebugSession;
-  running: boolean;
   activeRunning: boolean;
   stopped: boolean;
   onOpenFrame: (frame: DebugStackFrame) => void;
-  onStart?: (() => void) | null;
-  onAttach?: (() => void) | null;
 }
 
 export function DebugFramesPane({
   debug,
-  running,
   activeRunning,
   stopped,
   onOpenFrame,
-  onStart,
-  onAttach,
 }: DebugFramesPaneProps) {
   const { state } = debug;
   const canRestartFrame = debug.capabilities.supportsRestartFrame === true;
@@ -131,11 +125,8 @@ export function DebugFramesPane({
     >
       <DebugSessionControls
         debug={debug}
-        running={running}
         activeRunning={activeRunning}
         stopped={stopped}
-        onStart={onStart}
-        onAttach={onAttach}
       />
 
       <div className="flex-1 min-w-0 flex flex-col h-full">
@@ -204,6 +195,7 @@ export function DebugFramesPane({
                     >
                       <button
                         type="button"
+                        aria-label={isExpanded ? `Collapse thread ${thread.name}` : `Expand thread ${thread.name}`}
                         className="shrink-0 p-0.5 text-[var(--taomni-text-muted)]"
                         onClick={(e) => {
                           e.stopPropagation();

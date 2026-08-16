@@ -107,7 +107,6 @@ describe("DebugFramesPane", () => {
     render(
       <DebugFramesPane
         debug={debug}
-        running={true}
         activeRunning={true}
         stopped={true}
         onOpenFrame={onOpenFrame}

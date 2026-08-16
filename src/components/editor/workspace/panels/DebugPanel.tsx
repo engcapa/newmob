@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Bug,
   CirclePlay,
@@ -14,6 +14,8 @@ import {
 import {
   configurationAvailabilityLabel,
   configurationSourceLabel,
+  readDebugSplitLayout,
+  writeDebugSplitLayout,
 } from "./debug/debugPanelShared";
 import { useDebugVariables } from "./debug/useDebugVariables";
 import { DebugSubTabBar } from "./debug/DebugSubTabBar";
@@ -27,6 +29,10 @@ import {
   Panel,
   Separator as PanelResizeHandle,
 } from "react-resizable-panels";
+
+/** localStorage key + panel ids for the Debugger tab's horizontal split. */
+const DEBUG_HORIZONTAL_LAYOUT_KEY = "taomni.codeWorkspace.debugSplitHorizontal.v1";
+const DEBUG_HORIZONTAL_PANEL_IDS = ["debug-frames", "debug-variables"];
 
 export interface DebugPanelProps {
   debug: CodeDebugSession;
@@ -120,6 +126,13 @@ export function DebugPanel({
   const frameId = stopped ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
   const variablesHook = useDebugVariables(debug, frameId, stopped);
 
+  // Persisted frames/variables split ratio (read once; defaultLayout only
+  // applies at mount).
+  const horizontalLayout = useMemo(
+    () => readDebugSplitLayout(DEBUG_HORIZONTAL_LAYOUT_KEY, DEBUG_HORIZONTAL_PANEL_IDS),
+    [],
+  );
+
   const activeConfiguration = configurations.find((configuration) => (
     configuration.id === (activeConfigurationId ?? configurations[0]?.id)
   )) ?? configurations[0] ?? null;
@@ -144,7 +157,9 @@ export function DebugPanel({
         onTabChange={handleTabChange}
         badges={{
           breakpoints: totalBreakpointsCount > 0 ? totalBreakpointsCount : undefined,
-          console: state?.output.length ? state.output.length : undefined,
+          console: state?.output.length
+            ? (state.output.length > 99 ? "99+" : state.output.length)
+            : undefined,
         }}
         statusText={state ? `${state.status}${state.stoppedReason ? ` · ${state.stoppedReason}` : ""}` : null}
       />
@@ -236,17 +251,20 @@ export function DebugPanel({
         ) : (
           /* Dual-column IDEA debugger layout */
           <div className="flex-1 min-h-0">
-            <PanelGroup orientation="horizontal" id="debug-layout-horizontal-v3" className="h-full min-h-0">
+            <PanelGroup
+              orientation="horizontal"
+              id="debug-layout-horizontal-v3"
+              className="h-full min-h-0"
+              defaultLayout={horizontalLayout}
+              onLayoutChanged={(layout) => writeDebugSplitLayout(DEBUG_HORIZONTAL_LAYOUT_KEY, layout)}
+            >
               {/* Left Column: Frames & Threads + Controls */}
               <Panel id="debug-frames" defaultSize="45%" minSize="15%" maxSize="85%" className="min-h-0 min-w-0">
                 <DebugFramesPane
                   debug={debug}
-                  running={running}
                   activeRunning={activeRunning}
                   stopped={stopped}
                   onOpenFrame={onOpenFrame}
-                  onStart={onStart}
-                  onAttach={onAttach}
                 />
               </Panel>
 
@@ -286,7 +304,7 @@ export function DebugPanel({
 
       {/* Console Sub-tab */}
       <div className={`flex-1 min-h-0 flex flex-col ${currentTab === "console" ? "" : "hidden"}`}>
-        <DebugConsolePane debug={debug} stopped={stopped} />
+        <DebugConsolePane debug={debug} stopped={stopped} visible={currentTab === "console"} />
       </div>
 
       {/* Breakpoints Sub-tab */}

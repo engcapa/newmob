@@ -6,18 +6,25 @@ import { consoleLineClass } from "./debugPanelShared";
 export interface DebugConsolePaneProps {
   debug: CodeDebugSession;
   stopped: boolean;
+  /**
+   * Whether this pane is the visible sub-tab. While hidden (display:none)
+   * scrollHeight is 0, so auto-scroll must re-run when the pane becomes
+   * visible again or the console appears stuck at the top.
+   */
+  visible?: boolean;
 }
 
-export function DebugConsolePane({ debug, stopped }: DebugConsolePaneProps) {
+export function DebugConsolePane({ debug, stopped, visible = true }: DebugConsolePaneProps) {
   const { state } = debug;
   const [consoleInput, setConsoleInput] = useState("");
   const consoleRef = useRef<HTMLDivElement | null>(null);
 
   const outputLength = state?.output.length ?? 0;
   useEffect(() => {
+    if (!visible) return;
     const el = consoleRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [outputLength]);
+  }, [outputLength, visible]);
 
   const submitConsole = useCallback(() => {
     const expr = consoleInput.trim();

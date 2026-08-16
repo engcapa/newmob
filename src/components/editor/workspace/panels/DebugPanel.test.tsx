@@ -282,6 +282,23 @@ describe("DebugPanel", () => {
     expect(restart).toHaveBeenCalledTimes(1);
   });
 
+  it("renders session controls exactly once after the session terminates", () => {
+    // A terminated session still has state, so both the top configuration bar
+    // and the frames pane are on screen; their controls must not duplicate
+    // data-testids.
+    const terminated: DebugSessionState = { ...initialDebugState("s1"), status: "terminated" };
+    render(
+      <DebugPanel
+        debug={makeSession({ state: terminated, canRestart: true })}
+        onStart={vi.fn()}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByTestId("debug-restart")).toHaveLength(1);
+    expect(screen.getAllByTestId("debug-start")).toHaveLength(1);
+    expect(screen.getAllByTestId("debug-session-controls")).toHaveLength(1);
+  });
+
   it("switches between child sessions in a compound debug launch", () => {
     const selectSession = vi.fn();
     render(
