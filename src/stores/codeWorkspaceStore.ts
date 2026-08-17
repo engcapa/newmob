@@ -26,6 +26,7 @@ export type BottomDockTabId =
   | "tests"
   | "coverage"
   | "debug";
+export type DebugSubTabId = "debugger" | "console" | "breakpoints" | "memory";
 export type EditorGroupId = "primary" | "secondary";
 export type EditorSplitOrientation = "horizontal" | "vertical";
 export type RightPaneTabId = "outline" | "documentation";
@@ -62,6 +63,7 @@ export interface CodeWorkspaceInstanceUi {
   languagePanelOpen: boolean;
   bottomDockOpen: boolean;
   bottomDockTab: BottomDockTabId;
+  debugSubTab: DebugSubTabId;
   rightPaneOpen: boolean;
   rightPaneTab: RightPaneTabId;
   searchEverywhereOpen: boolean;
@@ -104,6 +106,7 @@ export function createDefaultCodeWorkspaceUi(): CodeWorkspaceInstanceUi {
     languagePanelOpen: true,
     bottomDockOpen: true,
     bottomDockTab: "references",
+    debugSubTab: "debugger",
     rightPaneOpen: false,
     rightPaneTab: "outline",
     searchEverywhereOpen: false,

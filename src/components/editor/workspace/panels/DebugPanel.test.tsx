@@ -218,8 +218,6 @@ describe("DebugPanel", () => {
     render(
       <DebugPanel debug={makeSession({ state: stoppedState(), selectThread })} onStart={null} onOpenFrame={vi.fn()} />,
     );
-    // The threads section is collapsed by default — open it first.
-    fireEvent.click(screen.getByText(/Threads \(2\)/));
     fireEvent.click(screen.getByTestId("debug-thread-2"));
     expect(selectThread).toHaveBeenCalledWith(2);
   });
@@ -282,6 +280,23 @@ describe("DebugPanel", () => {
     );
     fireEvent.click(screen.getByTestId("debug-restart"));
     expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders session controls exactly once after the session terminates", () => {
+    // A terminated session still has state, so both the top configuration bar
+    // and the frames pane are on screen; their controls must not duplicate
+    // data-testids.
+    const terminated: DebugSessionState = { ...initialDebugState("s1"), status: "terminated" };
+    render(
+      <DebugPanel
+        debug={makeSession({ state: terminated, canRestart: true })}
+        onStart={vi.fn()}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+    expect(screen.getAllByTestId("debug-restart")).toHaveLength(1);
+    expect(screen.getAllByTestId("debug-start")).toHaveLength(1);
+    expect(screen.getAllByTestId("debug-session-controls")).toHaveLength(1);
   });
 
   it("switches between child sessions in a compound debug launch", () => {
@@ -634,7 +649,7 @@ describe("DebugPanel", () => {
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
     expect(screen.getByTestId("debug-function-breakpoint-unsupported")).toBeInTheDocument();
     expect(screen.getByTestId("debug-function-breakpoint-input")).toBeDisabled();
     expect(screen.getByTestId("debug-function-breakpoint-binding-0")).toHaveTextContent("not bound");
@@ -669,7 +684,7 @@ describe("DebugPanel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
     fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-reference"), {
       target: { value: "main:entry" },
     });
@@ -700,7 +715,7 @@ describe("DebugPanel", () => {
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
     fireEvent.change(screen.getByTestId("debug-instruction-breakpoint-reference"), {
       target: { value: "0x1000" },
     });
@@ -756,7 +771,7 @@ describe("DebugPanel", () => {
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
     expect(screen.getByTestId("debug-instruction-breakpoint-binding-0")).toHaveTextContent("not bound");
     fireEvent.click(screen.getByTestId("debug-instruction-breakpoint-enabled-0"));
     expect(setInstructionBreakpointOptions).toHaveBeenCalledWith(key, { enabled: false });
@@ -788,7 +803,7 @@ describe("DebugPanel", () => {
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
     expect(screen.getByTestId("debug-instruction-breakpoint-unsupported")).toBeInTheDocument();
     expect(screen.getByTestId("debug-instruction-breakpoint-reference")).toBeDisabled();
     expect(screen.getByTestId("debug-instruction-breakpoint-row")).toHaveTextContent("0x1000");
@@ -823,10 +838,11 @@ describe("DebugPanel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
     fireEvent.change(screen.getByTestId("debug-data-breakpoint-mode"), {
       target: { value: "hardware" },
     });
+    fireEvent.click(screen.getByTestId("debug-subtab-debugger"));
     const action = await screen.findByTestId("debug-variable-data-breakpoint");
     fireEvent.click(action);
     await waitFor(() => expect(addDataBreakpoint).toHaveBeenCalledWith({
@@ -861,7 +877,7 @@ describe("DebugPanel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("Breakpoints"));
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
     fireEvent.change(screen.getByTestId("debug-data-breakpoint-target"), {
       target: { value: "0x1000" },
     });
@@ -1038,7 +1054,7 @@ describe("DebugPanel", () => {
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByText("Memory / Disassembly"));
+    fireEvent.click(screen.getByTestId("debug-subtab-memory"));
     fireEvent.change(screen.getByTestId("debug-memory-reference"), { target: { value: "0x1000" } });
     fireEvent.change(screen.getByTestId("debug-memory-offset"), { target: { value: "-4" } });
     fireEvent.change(screen.getByTestId("debug-memory-count"), { target: { value: "2" } });
@@ -1074,7 +1090,7 @@ describe("DebugPanel", () => {
         onOpenFrame={vi.fn()}
       />,
     );
-    fireEvent.click(screen.getByText("Memory / Disassembly"));
+    fireEvent.click(screen.getByTestId("debug-subtab-memory"));
     expect(screen.getByTestId("debug-memory-unsupported")).toBeInTheDocument();
     expect(screen.queryByTestId("debug-memory-read")).toBeNull();
   });
@@ -1138,5 +1154,70 @@ describe("DebugPanel", () => {
     expect(restartMenu).toBeInTheDocument();
     fireEvent.click(restartMenu);
     expect(restartFrame).toHaveBeenCalledWith(state.frames[0].id);
+  });
+
+  it("switches sub-tabs and keeps views mounted", () => {
+    const onSubTabChange = vi.fn();
+    const state = stoppedState();
+    render(
+      <DebugPanel
+        debug={makeSession({ state })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        onSubTabChange={onSubTabChange}
+      />,
+    );
+
+    // Initial sub-tab is debugger
+    expect(screen.getByTestId("debug-frames-pane")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-variables-pane")).toBeInTheDocument();
+
+    // Switch to Console
+    fireEvent.click(screen.getByTestId("debug-subtab-console"));
+    expect(onSubTabChange).toHaveBeenCalledWith("console");
+    expect(screen.getByTestId("debug-console-pane")).toBeInTheDocument();
+
+    // Switch to Breakpoints
+    fireEvent.click(screen.getByTestId("debug-subtab-breakpoints"));
+    expect(onSubTabChange).toHaveBeenCalledWith("breakpoints");
+    expect(screen.getByTestId("debug-breakpoints-pane")).toBeInTheDocument();
+
+    // Switch to Memory
+    fireEvent.click(screen.getByTestId("debug-subtab-memory"));
+    expect(onSubTabChange).toHaveBeenCalledWith("memory");
+    expect(screen.getByTestId("debug-memory-pane")).toBeInTheDocument();
+  });
+
+  it("switches to breakpoints sub-tab when editingBreakpoint is provided", () => {
+    const { rerender } = render(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          breakpoints: {
+            "/repo/App.java": [{ line: 9, enabled: true }],
+          },
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        editingBreakpoint={null}
+      />,
+    );
+
+    rerender(
+      <DebugPanel
+        debug={makeSession({
+          state: stoppedState(),
+          breakpoints: {
+            "/repo/App.java": [{ line: 9, enabled: true }],
+          },
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        editingBreakpoint={{ path: "/repo/App.java", line: 9 }}
+      />,
+    );
+
+    // The breakpoints sub-tab should be active and the breakpoint condition input rendered
+    expect(screen.getByTestId("debug-breakpoint-condition-9")).toBeInTheDocument();
   });
 });
