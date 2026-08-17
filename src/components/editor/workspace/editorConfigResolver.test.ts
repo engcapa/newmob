@@ -104,12 +104,15 @@ indent_size = 2
     expect(subJava.provenance.indent_size?.configPath).toBe("/project/submodule/.editorconfig");
   });
 
-  it("prioritizes explicit user override over EditorConfig and language default", async () => {
+  it("prioritizes explicit user override over EditorConfig while preserving non-indentation properties", async () => {
     virtualFiles.set(
       "/project/.editorconfig",
       `root = true
 [*]
 indent_size = 4
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
 `
     );
 
@@ -123,6 +126,10 @@ indent_size = 4
     expect(result.tabSize).toBe(8);
     expect(result.source).toBe("explicit-override");
     expect(result.provenance.indent_style?.source).toBe("explicit");
+    expect(result.endOfLine).toBe("lf");
+    expect(result.charset).toBe("utf-8");
+    expect(result.trimTrailingWhitespace).toBe(true);
+    expect(result.provenance.end_of_line?.source).toBe("editorconfig");
   });
 
   it("falls back to sniffed indentation when EditorConfig is not set and file text differs", async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bug,
   CirclePlay,
@@ -123,6 +123,25 @@ export function DebugPanel({
     }
   }, [editingBreakpoint]);
 
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerWidth, setContainerWidth] = useState(800);
+  const [compactDebuggerTab, setCompactDebuggerTab] = useState<"frames" | "variables">("frames");
+
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined" || !containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) {
+          setContainerWidth(entry.contentRect.width);
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  const isCompact = containerWidth < 640;
+
   const frameId = stopped ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
   const variablesHook = useDebugVariables(debug, frameId, stopped);
 
@@ -149,8 +168,44 @@ export function DebugPanel({
 
   const controlBtn = "h-7 w-7 inline-flex items-center justify-center rounded-md transition-colors disabled:opacity-30 disabled:pointer-events-none";
 
+  const renderVariablesPane = () => (
+    <DebugVariablesPane
+      variables={variablesHook.displayedVariables}
+      watchNodes={variablesHook.displayedWatchNodes}
+      filterQuery={variablesHook.filterQuery}
+      onFilterQueryChange={variablesHook.setFilterQuery}
+      sortMode={variablesHook.sortMode}
+      onToggleSortMode={() =>
+        variablesHook.setSortMode((m) => (m === "natural" ? "alphabetical" : "natural"))
+      }
+      watchInput={variablesHook.watchInput}
+      onWatchInputChange={variablesHook.setWatchInput}
+      onAddWatch={variablesHook.addWatch}
+      onRemoveWatch={variablesHook.removeWatch}
+      edit={variablesHook.edit}
+      onEditChange={(value) => variablesHook.setEdit((current) => ({ ...current, value }))}
+      onEditSubmit={variablesHook.submitEdit}
+      onEditCancel={variablesHook.cancelEdit}
+      onStartEdit={variablesHook.startEdit}
+      onExpandVariable={variablesHook.expandVariable}
+      onExpandWatch={variablesHook.expandWatch}
+      onAddDataBreakpoint={variablesHook.canAddDataBreakpoint ? variablesHook.addDataBreakpointForNode : undefined}
+      addingDataBreakpointKey={variablesHook.addingDataBreakpointKey}
+      dataBreakpointNotice={variablesHook.dataBreakpointNotice}
+      onVariableContextMenu={variablesHook.handleVariableContextMenu}
+      stopped={stopped}
+      canSetVariable={variablesHook.canSetVariable}
+      canAddDataBreakpoint={variablesHook.canAddDataBreakpoint}
+      variableMenuRender={variablesHook.variableMenu.render}
+    />
+  );
+
   return (
-    <div data-testid="code-workspace-debug-panel" className="h-full min-h-0 flex flex-col text-[11px] bg-[var(--taomni-code-bg)]">
+    <div
+      ref={containerRef}
+      data-testid="code-workspace-debug-panel"
+      className="h-full min-h-0 flex flex-col text-[11px] bg-[var(--taomni-code-bg)]"
+    >
       {/* Sub-tab bar */}
       <DebugSubTabBar
         activeTab={currentTab}
@@ -162,6 +217,36 @@ export function DebugPanel({
             : undefined,
         }}
         statusText={state ? `${state.status}${state.stoppedReason ? ` · ${state.stoppedReason}` : ""}` : null}
+        trailing={
+          isCompact && currentTab === "debugger" && state ? (
+            <div className="flex items-center rounded border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] p-0.5 text-[10px]">
+              <button
+                type="button"
+                data-testid="debug-compact-tab-frames"
+                onClick={() => setCompactDebuggerTab("frames")}
+                className={`px-1.5 py-0.5 rounded transition-colors ${
+                  compactDebuggerTab === "frames"
+                    ? "bg-[var(--taomni-accent)]/20 text-[var(--taomni-accent)] font-semibold"
+                    : "text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)]"
+                }`}
+              >
+                Frames
+              </button>
+              <button
+                type="button"
+                data-testid="debug-compact-tab-variables"
+                onClick={() => setCompactDebuggerTab("variables")}
+                className={`px-1.5 py-0.5 rounded transition-colors ${
+                  compactDebuggerTab === "variables"
+                    ? "bg-[var(--taomni-accent)]/20 text-[var(--taomni-accent)] font-semibold"
+                    : "text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)]"
+                }`}
+              >
+                Variables
+              </button>
+            </div>
+          ) : undefined
+        }
       />
 
       {/* Debugger Sub-tab */}
@@ -248,8 +333,22 @@ export function DebugPanel({
                 : "Java debugging runs in the desktop app only. Start Taomni with the desktop runtime (pnpm tauri dev) to debug; the browser preview has no debug adapter."}
             </div>
           </div>
+        ) : isCompact ? (
+          /* Compact mode (< 640px): single pane with segmented switch */
+          <div className="flex-1 min-h-0 flex flex-col">
+            {compactDebuggerTab === "frames" ? (
+              <DebugFramesPane
+                debug={debug}
+                activeRunning={activeRunning}
+                stopped={stopped}
+                onOpenFrame={onOpenFrame}
+              />
+            ) : (
+              renderVariablesPane()
+            )}
+          </div>
         ) : (
-          /* Dual-column IDEA debugger layout */
+          /* Dual-column IDEA debugger layout (>= 640px) */
           <div className="flex-1 min-h-0">
             <PanelGroup
               orientation="horizontal"
@@ -273,29 +372,7 @@ export function DebugPanel({
 
               {/* Right Column: Variables & Watches */}
               <Panel id="debug-variables" defaultSize="55%" minSize="15%" className="min-h-0 min-w-0">
-                <DebugVariablesPane
-                  variables={variablesHook.variables}
-                  watchNodes={variablesHook.watchNodes}
-                  watchInput={variablesHook.watchInput}
-                  onWatchInputChange={variablesHook.setWatchInput}
-                  onAddWatch={variablesHook.addWatch}
-                  onRemoveWatch={variablesHook.removeWatch}
-                  edit={variablesHook.edit}
-                  onEditChange={(value) => variablesHook.setEdit((current) => ({ ...current, value }))}
-                  onEditSubmit={variablesHook.submitEdit}
-                  onEditCancel={variablesHook.cancelEdit}
-                  onStartEdit={variablesHook.startEdit}
-                  onExpandVariable={variablesHook.expandVariable}
-                  onExpandWatch={variablesHook.expandWatch}
-                  onAddDataBreakpoint={variablesHook.canAddDataBreakpoint ? variablesHook.addDataBreakpointForNode : undefined}
-                  addingDataBreakpointKey={variablesHook.addingDataBreakpointKey}
-                  dataBreakpointNotice={variablesHook.dataBreakpointNotice}
-                  onVariableContextMenu={variablesHook.handleVariableContextMenu}
-                  stopped={stopped}
-                  canSetVariable={variablesHook.canSetVariable}
-                  canAddDataBreakpoint={variablesHook.canAddDataBreakpoint}
-                  variableMenuRender={variablesHook.variableMenu.render}
-                />
+                {renderVariablesPane()}
               </Panel>
             </PanelGroup>
           </div>

@@ -1,14 +1,18 @@
+import { useState } from "react";
 import {
   ArrowDownToLine,
+  ArrowLeftToLine,
   ArrowRightToLine,
   ArrowUpFromLine,
   CirclePlay,
   FlameKindling,
+  LocateFixed,
   Pause,
   RotateCcw,
   Square,
 } from "lucide-react";
 import type { CodeDebugSession } from "../../useCodeDebugSession";
+import type { DebugStepAction } from "../../dapDebugModel";
 
 export interface DebugSessionControlsProps {
   debug: CodeDebugSession;
@@ -47,7 +51,7 @@ export function DebugSessionControls({
         className={`${verticalBtn} hover:bg-emerald-500/15`}
         onClick={() => debug.step("continue")}
         disabled={!stopped}
-        title="Resume Program"
+        title="Resume Program (F9)"
       >
         <CirclePlay className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
       </button>
@@ -102,22 +106,58 @@ export function DebugSessionControls({
 export interface DebugStepControlsProps {
   debug: CodeDebugSession;
   stopped: boolean;
+  onShowExecutionPoint?: () => void;
 }
 
-/** 横排：StepOver/StepInto/StepOut — 放在帧区上方或底部 */
-export function DebugStepControls({ debug, stopped }: DebugStepControlsProps) {
+/** 横排：ShowExecutionPoint/StepOver/StepInto/StepOut/StepBack — 放在帧区上方或底部 */
+export function DebugStepControls({
+  debug,
+  stopped,
+  onShowExecutionPoint,
+}: DebugStepControlsProps) {
+  const [isStepping, setIsStepping] = useState(false);
+  const supportsStepBack = debug.capabilities.supportsStepBack === true;
+
+  const handleStep = (action: DebugStepAction) => {
+    if (isStepping || !stopped) return;
+    try {
+      const res: unknown = debug.step(action);
+      if (res && typeof (res as Promise<unknown>).then === "function") {
+        setIsStepping(true);
+        void (res as Promise<unknown>).finally(() => setIsStepping(false));
+      }
+    } catch {
+      setIsStepping(false);
+    }
+  };
+
+  const isControlsDisabled = !stopped || isStepping;
+
   return (
     <div
       data-testid="debug-step-controls"
       className="flex items-center gap-1 px-2 py-1 border-t border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]/30 shrink-0"
     >
+      {onShowExecutionPoint && (
+        <button
+          type="button"
+          data-testid="debug-show-execution-point"
+          className={stepBtn}
+          onClick={onShowExecutionPoint}
+          disabled={!stopped}
+          title="Show Execution Point (Alt+F10)"
+        >
+          <LocateFixed className="h-3.5 w-3.5 text-[var(--taomni-text-muted)]" />
+          <span>Point</span>
+        </button>
+      )}
       <button
         type="button"
         data-testid="debug-step-over"
         className={stepBtn}
-        onClick={() => debug.step("stepOver")}
-        disabled={!stopped}
-        title="Step Over"
+        onClick={() => void handleStep("stepOver")}
+        disabled={isControlsDisabled}
+        title="Step Over (F8)"
       >
         <ArrowRightToLine className="h-3.5 w-3.5 text-sky-500 dark:text-sky-400" />
         <span>Step Over</span>
@@ -126,9 +166,9 @@ export function DebugStepControls({ debug, stopped }: DebugStepControlsProps) {
         type="button"
         data-testid="debug-step-in"
         className={stepBtn}
-        onClick={() => debug.step("stepIn")}
-        disabled={!stopped}
-        title="Step Into"
+        onClick={() => void handleStep("stepIn")}
+        disabled={isControlsDisabled}
+        title="Step Into (F7)"
       >
         <ArrowDownToLine className="h-3.5 w-3.5 text-indigo-500 dark:text-indigo-400" />
         <span>Into</span>
@@ -137,13 +177,26 @@ export function DebugStepControls({ debug, stopped }: DebugStepControlsProps) {
         type="button"
         data-testid="debug-step-out"
         className={stepBtn}
-        onClick={() => debug.step("stepOut")}
-        disabled={!stopped}
-        title="Step Out"
+        onClick={() => void handleStep("stepOut")}
+        disabled={isControlsDisabled}
+        title="Step Out (Shift+F8)"
       >
         <ArrowUpFromLine className="h-3.5 w-3.5 text-violet-500 dark:text-violet-400" />
         <span>Out</span>
       </button>
+      {supportsStepBack && (
+        <button
+          type="button"
+          data-testid="debug-step-back"
+          className={stepBtn}
+          onClick={() => void handleStep("stepBack")}
+          disabled={isControlsDisabled}
+          title="Step Back"
+        >
+          <ArrowLeftToLine className="h-3.5 w-3.5 text-amber-500 dark:text-amber-400" />
+          <span>Back</span>
+        </button>
+      )}
     </div>
   );
 }

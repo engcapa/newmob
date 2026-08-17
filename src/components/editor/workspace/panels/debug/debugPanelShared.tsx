@@ -17,6 +17,8 @@ export interface VarNode {
   dataBreakpointExpression: boolean;
   children: VarNode[] | null; // null = not yet loaded
   expanded: boolean;
+  /** True when variable value changed across debugger stop epochs (D2) */
+  hasChanged?: boolean;
 }
 
 export function variableDataBreakpointTargetKey(node: VarNode): string {

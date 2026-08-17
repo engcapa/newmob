@@ -1,8 +1,9 @@
 /**
- * Semantic Refactoring Plan & Conflict Resolution Engine (J3).
+ * Semantic Refactoring Plan & Conflict Resolution Model (J3) - Experimental Prototype.
  *
- * Constructs immutable refactoring plans with conflict verification, dependency grouping,
- * preview confirmation, and single-step transaction undo/rollback.
+ * Constructs prototype refactoring plans with conflict detection, dependency grouping,
+ * and rollback verification for UI preview testing.
+ * NOTE: This is an experimental client model, not a full compiler-backed refactoring engine.
  */
 
 import type { JavaSemanticIndex, JavaReferenceRecord } from "./javaSemanticIndex";

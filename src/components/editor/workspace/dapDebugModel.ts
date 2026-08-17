@@ -323,8 +323,8 @@ export function appendConsoleLine(
   return { ...state, output: [...state.output, { category, text }].slice(-MAX_CONSOLE_LINES) };
 }
 
-/** DAP `stepIn`/`stepOut`/`next`/`continue`/`pause` for a UI step action. */
-export type DebugStepAction = "continue" | "pause" | "stepOver" | "stepIn" | "stepOut";
+/** DAP `stepIn`/`stepOut`/`next`/`continue`/`pause`/`stepBack`/`reverseContinue` for a UI step action. */
+export type DebugStepAction = "continue" | "pause" | "stepOver" | "stepIn" | "stepOut" | "stepBack" | "reverseContinue";
 
 export function stepCommandFor(action: DebugStepAction): string {
   switch (action) {
@@ -333,6 +333,8 @@ export function stepCommandFor(action: DebugStepAction): string {
     case "stepOver": return "next";
     case "stepIn": return "stepIn";
     case "stepOut": return "stepOut";
+    case "stepBack": return "stepBack";
+    case "reverseContinue": return "reverseContinue";
   }
 }
 

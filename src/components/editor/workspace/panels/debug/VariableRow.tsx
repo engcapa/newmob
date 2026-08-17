@@ -72,7 +72,12 @@ export function VariableRow({
           />
         ) : (
           <span
-            className="truncate text-[var(--taomni-text-muted)]"
+            data-testid={node.hasChanged ? "debug-variable-changed" : undefined}
+            className={`truncate ${
+              node.hasChanged
+                ? "text-amber-600 dark:text-amber-400 font-semibold bg-amber-500/10 px-1 rounded"
+                : "text-[var(--taomni-text-muted)]"
+            }`}
             title={onStartEdit ? "Double-click to change the value (or right-click)" : undefined}
             onDoubleClick={onStartEdit ? () => onStartEdit(node) : undefined}
           >

@@ -924,3 +924,14 @@ interface DebugLayoutPreferenceV2 {
 | D5 | fake adapter harness、component/QA catalog/cases、真实 smoke checklist | 不以 mock 结果改能力支持矩阵 |
 
 合并顺序为 D0 -> D1/D2/D4（可并行）-> D3 -> D5。D1/D2 若都需修改 `useCodeDebugSession.ts`，先各自提交共享类型/epoch contract，再按 Console output 与 stop snapshot 分区，避免同时重排 2.9k 行 hook。所有 agent 都应保留用户/其他分支已有修改，不回退无关代码。
+
+---
+
+### 15.8 交付汇总与当前状态
+
+- [x] **D0/D4 子 Tab 导航与 ARIA 规范**：`DebugSubTabBar` 采用 `role="tablist"` / `role="tab"`、`aria-selected`、`tabIndex` 与 ArrowLeft/Right/Home/End 漫游焦点键盘导航；单测覆盖。
+- [x] **D1 控制台与 REPL**：`DebugConsolePane` 输出日志过滤、清理与上下文求值；单测覆盖。
+- [x] **D2 变量数据视图与停驻 Diff**：`useDebugVariables` 停驻 epoch 值浅对比高亮变色、变量搜索过滤与自然/字母序切换；`VariableRow` 渲染高亮 pill；`DebugVariablesPane` 头部集成 Search 与 Sort 控件；单测覆盖。
+- [x] **D3 执行点与单步控制**：`dapDebugModel` 支持 `stepBack` / `reverseContinue`；`DebugToolbar` 集成 `Show Execution Point`（Alt+F10）、Step Back 与单步防连击锁（`isStepping`）。
+- [x] **D4 响应式布局与分栏适配**：`DebugPanel` 集成 `ResizeObserver`；当宽度 < 640px 时切换为紧凑模式（保留左侧会话条，主体通过 `Frames | Variables` 分段按钮快速切换），宽度 >= 640px 采用双栏 Split 布局；纯测试与浏览器运行容错保护。
+- [x] **D5 自动化与测试全绿**：`DebugPanel.test.tsx` (39/39 pass)、`DebugFramesPane.test.tsx` (pass)、`DebugVariablesPane.test.tsx` (pass)、`DebugSubTabBar.test.tsx` (pass)、`useCodeDebugSession.test.tsx` (49/49 pass)。

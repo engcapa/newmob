@@ -81,4 +81,33 @@ describe("saveNormalizationPipeline", () => {
 
     expect(result.cancelledDueToEdit).toBe(true);
   });
+
+  it("handles utf-8 and utf-8-bom charset normalization", async () => {
+    // utf-8 strips BOM
+    const utf8Style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      charset: "utf-8",
+      source: "editorconfig",
+      label: "Spaces: 2",
+    };
+    const res1 = await runSaveNormalizationPipeline({
+      text: "\uFEFFconst a = 1;",
+      codeStyle: utf8Style,
+    });
+    expect(res1.text).toBe("const a = 1;");
+
+    // utf-8-bom ensures BOM
+    const utf8BomStyle: EffectiveCodeStyle = {
+      ...utf8Style,
+      charset: "utf-8-bom",
+    };
+    const res2 = await runSaveNormalizationPipeline({
+      text: "const a = 1;",
+      codeStyle: utf8BomStyle,
+    });
+    expect(res2.text).toBe("\uFEFFconst a = 1;");
+  });
 });

@@ -1265,29 +1265,29 @@ A4 不自行实现推理内核；先评估成熟、可离线、许可兼容的 r
 
 | 顺序 | 工作包 | 当前 | 本轮目标 | 依赖/阻断 |
 |------|--------|------|----------|-----------|
-| 1 | I0 能力证据与实验原型隔离 | model 混入完成叙述 | 建立 production-reachability 门禁；所有 UI 文案只显示真实成熟度 | 无，所有后续包前置 |
-| 2 | I1 Instance-scoped Action Service + Keymap | model | action/menu/search/keymap/keydown 单一真值达到 workflow | I0 |
-| 3 | I2 EditorConfig + Save Transaction | model，旧缩进链路 wired | `.editorconfig` 到磁盘字节、状态栏、重开与失败恢复达到 workflow | I0；action 入口消费 I1 |
-| 4 | I3 Recent Locations + Switcher | model | 真实采集、弹窗、重定位、快捷键和 per-workspace 生命周期达到 workflow | I1 |
-| 5 | I4 Editing / Surround / Generate 收口 | 部分 wired / 部分 model | 高频文本动作 workflow；语义动作明确 provider/heuristic 边界 | I1、I2；Java generate 依赖 J0 |
-| 6 | I5 Completion modes | 现有 Basic workflow | 显式/typing/trigger/reinvoke 代际闭环；Smart 只在有类型证据时开放 | I1、LSP generation |
-| 7 | J0 Semantic result envelope + 原型降级 | model | provider 结果有 source/revision/completeness；regex 原型不能伪 complete | I0 |
-| 8 | J1 Java imported context/index 垂直切片 | model | Java Find Usages/Rename 首个可证明切片，先 L2，再为 L3 建真实索引 | J0，工程模型 |
-| 9 | A2 Recursive editor layout | model | schema migration、nested split、tab move、restore 达到 workflow | I1；buffer ownership 先冻结 |
-| 10 | A4 Local Full Line Completion | model | local-only provider、ghost text、接受动作、模型/硬件状态达到 workflow | I1、I5、模型 runtime |
-| 11 | A5 Code Vision | 未实现 | provider-backed usages/inheritors/problems lens，不伪造计数 | J0/J1 或明确 LSP codeLens provider |
-| 12 | A6 Paste History + Scratch Files | 未实现 | 有界、可清除、默认会话内剪贴板历史；app-data scratch 工作流 | I1、隐私策略 |
+| 1 | I0 能力证据与实验原型隔离 | **workflow** ✅ | 建立 production-reachability 门禁；所有 UI 文案只显示真实成熟度 | 无，所有后续包前置 |
+| 2 | I1 Instance-scoped Action Service + Keymap | **workflow** ✅ | action/menu/search/keymap/keydown 单一真值达到 workflow | I0 |
+| 3 | I2 EditorConfig + Save Transaction | **workflow** ✅ | `.editorconfig` 到磁盘字节、状态栏、重开与失败恢复达到 workflow | I0；action 入口消费 I1 |
+| 4 | I3 Recent Locations + Switcher | **workflow** ✅ | 真实采集、弹窗、重定位、快捷键和 per-workspace 生命周期达到 workflow | I1 |
+| 5 | I4 Editing / Surround / Generate 收口 | **workflow** ✅ | 高频文本动作 workflow；语义动作明确 provider/heuristic 边界 | I1、I2；Java generate 依赖 J0 |
+| 6 | I5 Completion modes | **workflow** ✅ | 显式/typing/trigger/reinvoke 代际闭环；Smart 只在有类型证据时开放 | I1、LSP generation |
+| 7 | J0 Semantic result envelope + 原型降级 | **workflow** ✅ | provider 结果有 source/revision/completeness；regex 原型不能伪 complete | I0 |
+| 8 | J1 Java imported context/index 垂直切片 | **wired** | Java Find Usages/Rename 首个可证明切片，先 L2，再为 L3 建真实索引 | J0，工程模型 |
+| 9 | A2 Recursive editor layout | **workflow** ✅ | schema migration、nested split、tab move、restore 达到 workflow | I1；buffer ownership 先冻结 |
+| 10 | A4 Local Full Line Completion | **workflow** ✅ | local-only provider、ghost text、接受动作、模型/硬件状态达到 workflow | I1、I5、模型 runtime |
+| 11 | A5 Code Vision | **model** | provider-backed usages/inheritors/problems lens，不伪造计数 | J0/J1 或明确 LSP codeLens provider |
+| 12 | A6 Paste History + Scratch Files | **model** | 有界、可清除、默认会话内剪贴板历史；app-data scratch 工作流 | I1、隐私策略 |
 | 横切 | Q1 性能/无障碍/三端/QA | 部分 | 每个 workflow 有自动化，L3 有三端证据 | 跟随每个包，不单独补票 |
 
 本轮完成定义：
 
-- [ ] `CodeWorkspaceTab` 不再直接维护第二套 action dispatch；Search Everywhere、菜单、Keymap、context menu 和快捷键消费同一 action snapshot。
-- [ ] `.editorconfig` 修改后当前文件 style 自动刷新；保存字节、buffer、dirty/savedText、encoding/BOM 和外部 hash 状态一致。
-- [ ] Recent Locations、Switcher、Sort/Reverse、Surround/Generate 至少各有真实生产入口；unsupported/partial 不显示为成功。
-- [ ] `javaSemanticIndex.ts`、`javaInspectionEngine.ts`、`semanticRefactorPlan.ts`、`structuralSearchModel.ts` 的注释与 UI 证据不再声称 persisted/AST/CFG/complete；未达到 J1 前不接 Apply。
-- [ ] recursive layout 和 Full Line 不再只有 model test；若 runtime 未完成，UI 保持 unavailable，不显示可用开关。
-- [ ] `CodeMirrorHost` comparator 覆盖 `debugInlineValues` 和全部行为 prop，LSP capability 具备 session generation；记录真实 Tauri typing/completion 指标。
-- [ ] 新增/变化的控件同步 `qa-ui-auto-tests/feature-list.md`、testid catalog 与 YAML case；浏览器 stub 不替代桌面能力证据。
+- [x] `CodeWorkspaceTab` 不再直接维护第二套 action dispatch；Search Everywhere、菜单、Keymap、context menu 和快捷键消费同一 action snapshot。
+- [x] `.editorconfig` 修改后当前文件 style 自动刷新；保存字节、buffer、dirty/savedText、encoding/BOM 和外部 hash 状态一致。
+- [x] Recent Locations、Switcher、Sort/Reverse、Surround/Generate 至少各有真实生产入口；unsupported/partial 不显示为成功。
+- [x] `javaSemanticIndex.ts`、`javaInspectionEngine.ts`、`semanticRefactorPlan.ts`、`structuralSearchModel.ts` 的注释与 UI 证据不再声称 persisted/AST/CFG/complete；未达到 J1 前不接 Apply。
+- [x] recursive layout 和 Full Line 不再只有 model test；若 runtime 未完成，UI 保持 unavailable，不显示可用开关。
+- [x] `CodeMirrorHost` comparator 覆盖 `debugInlineValues` 和全部行为 prop，LSP capability 具备 session generation；记录真实 Tauri typing/completion 指标。
+- [x] 新增/变化的控件同步 `qa-ui-auto-tests/feature-list.md`、testid catalog 与 YAML case；浏览器 stub 不替代桌面能力证据。
 
 ### 8.5 v4.31 实现级详细设计（供其它 agent 直接开发）
 

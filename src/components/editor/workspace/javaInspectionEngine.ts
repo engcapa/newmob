@@ -1,11 +1,13 @@
 /**
- * Java Inspection Engine & Data-Flow Analyzer (J2).
+ * Java Inspection Engine & Data-Flow Analyzer (J2) - Experimental Prototype.
  *
- * Implements code inspections with control-flow & data-flow verification:
+ * Implements preliminary pattern-based code inspections for:
  *   1. Dead code / unreachable statements
  *   2. Constant conditions (e.g. `if (true)`, `if (false)`)
  *   3. Probable null dereferences
  *   4. Empty statement blocks
+ *
+ * NOTE: This is an experimental syntactic rule prototype, not a full CFG/SSA data-flow engine.
  */
 
 import type { JavaSemanticIndex } from "./javaSemanticIndex";

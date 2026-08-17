@@ -10,6 +10,8 @@ import { RecentFilesPopup, type RecentFileEntry } from "./RecentFilesPopup";
 import { StructurePopup } from "./StructurePopup";
 import { QuickDocPopup, type QuickDocContent } from "./QuickDocPopup";
 import { LocationPeek, type LocationPeekState } from "./LocationPeek";
+import { RecentLocationsDialog } from "./RecentLocationsDialog";
+import type { NavigationLocation } from "./navigationHistoryModel";
 import type { WorkspaceCommand } from "./workspaceCommands";
 import type { WorkspaceSemanticIndexSnapshot } from "./workspaceSemanticIndex";
 
@@ -35,6 +37,11 @@ interface WorkspacePopupsHostProps {
   recentChangedOnly?: boolean;
   onCloseRecent: () => void;
   onPickRecent: (entry: RecentFileEntry) => void;
+
+  recentLocationsOpen?: boolean;
+  recentLocationsChangedOnly?: boolean;
+  onCloseRecentLocations?: () => void;
+  onPickRecentLocation?: (location: NavigationLocation) => void;
 
   structureOpen: boolean;
   structureFileTitle: string | null;
@@ -76,6 +83,10 @@ export function WorkspacePopupsHost({
   recentChangedOnly = false,
   onCloseRecent,
   onPickRecent,
+  recentLocationsOpen = false,
+  recentLocationsChangedOnly = false,
+  onCloseRecentLocations,
+  onPickRecentLocation,
   structureOpen,
   structureFileTitle,
   structureSymbols,
@@ -117,6 +128,14 @@ export function WorkspacePopupsHost({
         onClose={onCloseRecent}
         onPick={onPickRecent}
       />
+      {recentLocationsOpen && onCloseRecentLocations && onPickRecentLocation && (
+        <RecentLocationsDialog
+          open={recentLocationsOpen}
+          initialChangedOnly={recentLocationsChangedOnly}
+          onClose={onCloseRecentLocations}
+          onSelectLocation={onPickRecentLocation}
+        />
+      )}
       <StructurePopup
         open={structureOpen}
         fileTitle={structureFileTitle}

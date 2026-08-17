@@ -1,8 +1,9 @@
 /**
- * Java Semantic Foundation & Index (J1).
+ * Java Semantic Foundation & Index (J1) - Experimental Prototype Model.
  *
- * Implements in-memory and persisted Java symbol/reference index, type relationship graph,
- * incremental file invalidation, corruption recovery, and smart/dumb indexing state.
+ * Provides prototype in-memory representation of Java symbol/reference records,
+ * type relationship graph, and indexing state for testing and UI integration.
+ * NOTE: This is an experimental client prototype, not a persisted full AST index.
  */
 
 export type JavaSymbolKind =

@@ -32,22 +32,51 @@ export function DebugSubTabBar({
   statusText,
   trailing,
 }: DebugSubTabBarProps) {
+  const handleKeyDown = (e: React.KeyboardEvent, index: number) => {
+    let nextIndex = -1;
+    if (e.key === "ArrowRight") {
+      nextIndex = (index + 1) % SUB_TABS.length;
+    } else if (e.key === "ArrowLeft") {
+      nextIndex = (index - 1 + SUB_TABS.length) % SUB_TABS.length;
+    } else if (e.key === "Home") {
+      nextIndex = 0;
+    } else if (e.key === "End") {
+      nextIndex = SUB_TABS.length - 1;
+    }
+
+    if (nextIndex >= 0) {
+      e.preventDefault();
+      const nextTab = SUB_TABS[nextIndex];
+      if (nextTab) {
+        onTabChange(nextTab.id);
+        const el = document.querySelector<HTMLButtonElement>(`[data-testid="${nextTab.testId}"]`);
+        el?.focus();
+      }
+    }
+  };
+
   return (
     <div
+      role="tablist"
+      aria-orientation="horizontal"
       data-testid="debug-sub-tab-bar"
       className="h-6 shrink-0 flex items-center border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] px-1.5 text-[10px] select-none"
     >
-      <div className="flex items-center gap-0.5">
-        {SUB_TABS.map((tab) => {
+      <div className="flex items-center gap-0.5" role="presentation">
+        {SUB_TABS.map((tab, index) => {
           const isActive = activeTab === tab.id;
           const Icon = tab.icon;
           const badge = badges?.[tab.id];
           return (
             <button
               key={tab.id}
+              role="tab"
+              aria-selected={isActive}
+              tabIndex={isActive ? 0 : -1}
               type="button"
               data-testid={tab.testId}
               onClick={() => onTabChange(tab.id)}
+              onKeyDown={(e) => handleKeyDown(e, index)}
               className={`h-5 px-2 rounded-t flex items-center gap-1.5 font-medium transition-colors ${
                 isActive
                   ? "bg-[var(--taomni-code-bg)] text-[var(--taomni-text)] shadow-2xs border-b-2 border-b-[var(--taomni-accent)]"

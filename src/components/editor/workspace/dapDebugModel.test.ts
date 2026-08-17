@@ -76,6 +76,8 @@ describe("dapDebugModel", () => {
     expect(stepCommandFor("stepIn")).toBe("stepIn");
     expect(stepCommandFor("stepOut")).toBe("stepOut");
     expect(stepCommandFor("pause")).toBe("pause");
+    expect(stepCommandFor("stepBack")).toBe("stepBack");
+    expect(stepCommandFor("reverseContinue")).toBe("reverseContinue");
   });
 
   it("builds and parses bounded memory and disassembly requests", () => {

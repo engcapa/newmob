@@ -1,8 +1,8 @@
 /**
- * Structural Search & Replace Engine (A1).
+ * Structural Search & Replace Model (A1) - Experimental Template Search Prototype.
  *
- * Implements pattern-based AST structural matching and templated replacement
- * with typed variables and constraints.
+ * Implements template-based search and replacement with variable placeholders.
+ * NOTE: This is an experimental text/pattern template prototype, not full AST structural search.
  */
 
 export interface StructuralVariable {

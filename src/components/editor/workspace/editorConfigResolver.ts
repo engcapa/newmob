@@ -178,30 +178,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
     const provenance: CodeStyleProvenance = {};
     const diagnostics: CodeStyleDiagnostic[] = [];
 
-    // 1. Explicit override on this file/tab has top priority
-    if (explicitOverride) {
-      const insertSpaces = explicitOverride.type === "spaces";
-      const tabSize = explicitOverride.size;
-      const indentSize = explicitOverride.size;
-      const label = formatCodeStyleLabel({ insertSpaces, indentSize, tabSize, source: "explicit-override" });
-
-      provenance.indent_style = { source: "explicit", rawValue: explicitOverride.type };
-      provenance.indent_size = { source: "explicit", rawValue: String(explicitOverride.size) };
-      provenance.tab_width = { source: "explicit", rawValue: String(explicitOverride.size) };
-
-      return {
-        tabSize,
-        indentSize,
-        continuationIndent: indentSize * 2,
-        insertSpaces,
-        source: "explicit-override",
-        label,
-        provenance,
-        diagnostics,
-      };
-    }
-
-    // 2. Resolve EditorConfig chain (parent directory hierarchy)
+    // 1. Resolve EditorConfig chain (parent directory hierarchy)
     const chain = await this.loadEditorConfigChain(filePath, rootPath);
     let mergedProperties: EditorConfigProperties = {};
     const propertySourcePaths: Partial<Record<keyof EditorConfigProperties, string>> = {};
@@ -230,7 +207,16 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
     let tabSize = langDefault.tabSize;
     let effectiveSource: CodeStyleSource = "language-default";
 
-    if (mergedProperties.indent_style !== undefined) {
+    if (explicitOverride) {
+      insertSpaces = explicitOverride.type === "spaces";
+      indentSize = explicitOverride.size;
+      tabSize = explicitOverride.size;
+      effectiveSource = "explicit-override";
+
+      provenance.indent_style = { source: "explicit", rawValue: explicitOverride.type };
+      provenance.indent_size = { source: "explicit", rawValue: String(explicitOverride.size) };
+      provenance.tab_width = { source: "explicit", rawValue: String(explicitOverride.size) };
+    } else if (mergedProperties.indent_style !== undefined) {
       insertSpaces = mergedProperties.indent_style === "space";
       provenance.indent_style = {
         source: "editorconfig",
@@ -242,7 +228,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
       provenance.indent_style = { source: "language", rawValue: insertSpaces ? "space" : "tab" };
     }
 
-    if (mergedProperties.indent_size !== undefined) {
+    if (!explicitOverride && mergedProperties.indent_size !== undefined) {
       if (mergedProperties.indent_size === "tab") {
         insertSpaces = false;
         indentSize = typeof mergedProperties.tab_width === "number" ? mergedProperties.tab_width : tabSize;
@@ -255,11 +241,11 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         rawValue: String(mergedProperties.indent_size),
       };
       effectiveSource = "editorconfig";
-    } else {
+    } else if (!explicitOverride) {
       provenance.indent_size = { source: "language", rawValue: String(indentSize) };
     }
 
-    if (mergedProperties.tab_width !== undefined) {
+    if (!explicitOverride && mergedProperties.tab_width !== undefined) {
       tabSize = mergedProperties.tab_width;
       provenance.tab_width = {
         source: "editorconfig",
@@ -267,7 +253,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         rawValue: String(mergedProperties.tab_width),
       };
       effectiveSource = "editorconfig";
-    } else {
+    } else if (!explicitOverride) {
       tabSize = insertSpaces ? indentSize : 4;
       provenance.tab_width = { source: "language", rawValue: String(tabSize) };
     }
@@ -278,7 +264,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.end_of_line,
         rawValue: mergedProperties.end_of_line,
       };
-      effectiveSource = "editorconfig";
+      if (!explicitOverride) effectiveSource = "editorconfig";
     }
 
     if (mergedProperties.charset) {
@@ -287,7 +273,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.charset,
         rawValue: mergedProperties.charset,
       };
-      effectiveSource = "editorconfig";
+      if (!explicitOverride) effectiveSource = "editorconfig";
     }
 
     if (mergedProperties.trim_trailing_whitespace !== undefined) {
@@ -296,7 +282,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.trim_trailing_whitespace,
         rawValue: String(mergedProperties.trim_trailing_whitespace),
       };
-      effectiveSource = "editorconfig";
+      if (!explicitOverride) effectiveSource = "editorconfig";
     }
 
     if (mergedProperties.insert_final_newline !== undefined) {
@@ -305,7 +291,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.insert_final_newline,
         rawValue: String(mergedProperties.insert_final_newline),
       };
-      effectiveSource = "editorconfig";
+      if (!explicitOverride) effectiveSource = "editorconfig";
     }
 
     // If EditorConfig did not configure indentation, fallback to sniffed text (if available)

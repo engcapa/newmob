@@ -85,4 +85,44 @@ describe("DebugVariablesPane", () => {
     fireEvent.click(screen.getByTitle("Remove watch"));
     expect(onRemoveWatch).toHaveBeenCalledWith(0);
   });
+
+  it("handles filter query and sort mode toggle", () => {
+    const onFilterQueryChange = vi.fn();
+    const onToggleSortMode = vi.fn();
+
+    render(
+      <DebugVariablesPane
+        variables={[]}
+        watchNodes={[]}
+        filterQuery="abc"
+        onFilterQueryChange={onFilterQueryChange}
+        sortMode="natural"
+        onToggleSortMode={onToggleSortMode}
+        watchInput=""
+        onWatchInputChange={vi.fn()}
+        onAddWatch={vi.fn()}
+        onRemoveWatch={vi.fn()}
+        edit={{ node: null, value: "" }}
+        onEditChange={vi.fn()}
+        onEditSubmit={vi.fn()}
+        onEditCancel={vi.fn()}
+        onStartEdit={vi.fn()}
+        onExpandVariable={vi.fn()}
+        onExpandWatch={vi.fn()}
+        onVariableContextMenu={vi.fn()}
+        stopped={true}
+        canSetVariable={true}
+        canAddDataBreakpoint={true}
+      />,
+    );
+
+    const searchInput = screen.getByTestId("debug-variables-search");
+    expect(searchInput).toHaveValue("abc");
+    fireEvent.change(searchInput, { target: { value: "test" } });
+    expect(onFilterQueryChange).toHaveBeenCalledWith("test");
+
+    const sortBtn = screen.getByTestId("debug-variables-sort");
+    fireEvent.click(sortBtn);
+    expect(onToggleSortMode).toHaveBeenCalled();
+  });
 });

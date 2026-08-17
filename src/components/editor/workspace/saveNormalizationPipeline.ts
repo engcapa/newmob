@@ -173,6 +173,29 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
+  // Stage 5: Charset / BOM verification & normalization
+  if (codeStyle.charset) {
+    const charset = codeStyle.charset.toLowerCase();
+    if (charset === "utf-8") {
+      // Ensure no BOM prefix for standard utf-8
+      if (currentText.startsWith("\uFEFF")) {
+        currentText = currentText.slice(1);
+      }
+    } else if (charset === "utf-8-bom") {
+      // Ensure BOM prefix for utf-8-bom if non-empty
+      if (currentText.length > 0 && !currentText.startsWith("\uFEFF")) {
+        currentText = `\uFEFF${currentText}`;
+      }
+    } else if (charset === "latin1") {
+      for (let i = 0; i < currentText.length; i++) {
+        if (currentText.charCodeAt(i) > 255) {
+          diagnostics.push(`Character '${currentText[i]}' at position ${i} exceeds Latin-1 range.`);
+          break;
+        }
+      }
+    }
+  }
+
   // Final race condition check
   if (getLatestBufferText) {
     const latestText = getLatestBufferText();

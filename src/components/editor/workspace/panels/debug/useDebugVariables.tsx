@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Crosshair } from "lucide-react";
 import type { CodeDebugSession } from "../../useCodeDebugSession";
 import {
@@ -24,6 +24,9 @@ export function useDebugVariables(
   const [watchNodes, setWatchNodes] = useState<VarNode[]>([]);
   const [watchTick, setWatchTick] = useState(0);
   const [watchInput, setWatchInput] = useState("");
+  const [filterQuery, setFilterQuery] = useState("");
+  const [sortMode, setSortMode] = useState<"natural" | "alphabetical">("natural");
+  const previousValuesRef = useRef<Map<string, string>>(new Map());
   const [edit, setEdit] = useState<VarEditState>({ node: null, value: "" });
   const [addingDataBreakpointKey, setAddingDataBreakpointKey] = useState<string | null>(null);
   const [preferredDataBreakpointMode, setPreferredDataBreakpointMode] = useState("");
@@ -85,8 +88,16 @@ export function useDebugVariables(
           })
         : [];
       const roots: VarNode[] = [];
+      const currentValues = new Map<string, string>();
       for (const scope of refs) {
-        const vars = parseVariables(await fetchVariables(scope.ref), scope.ref);
+        const rawVars = parseVariables(await fetchVariables(scope.ref), scope.ref);
+        const vars = rawVars.map((v) => {
+          const key = `${scope.ref}:${v.name}`;
+          currentValues.set(key, v.value);
+          const prev = previousValuesRef.current.get(key);
+          const hasChanged = prev !== undefined && prev !== v.value;
+          return { ...v, hasChanged };
+        });
         roots.push({
           name: scope.name,
           value: "",
@@ -98,6 +109,7 @@ export function useDebugVariables(
           expanded: true,
         });
       }
+      previousValuesRef.current = currentValues;
       if (!cancelled) setVariables(roots);
     })();
     return () => { cancelled = true; };
@@ -117,6 +129,10 @@ export function useDebugVariables(
     void (async () => {
       const next = await Promise.all(watchExpressions.map(async (expr) => {
         const result = await evaluate(expr, "watch");
+        const key = `watch:${expr}`;
+        const prev = previousValuesRef.current.get(key);
+        previousValuesRef.current.set(key, result.value);
+        const hasChanged = prev !== undefined && prev !== result.value;
         return {
           name: expr,
           value: result.value,
@@ -126,12 +142,48 @@ export function useDebugVariables(
           dataBreakpointExpression: true,
           children: null,
           expanded: false,
+          hasChanged,
         };
       }));
       if (!cancelled) setWatchNodes(next);
     })();
     return () => { cancelled = true; };
   }, [evaluate, stopped, selectedFrameId, watchExpressions, watchTick]);
+
+  const filterAndSort = useCallback((nodes: VarNode[]): VarNode[] => {
+    let result = nodes;
+    if (filterQuery.trim()) {
+      const q = filterQuery.trim().toLowerCase();
+      const filterRecursive = (list: VarNode[]): VarNode[] => {
+        return list.flatMap((n) => {
+          const matches = n.name.toLowerCase().includes(q) || n.value.toLowerCase().includes(q);
+          const filteredChildren = n.children ? filterRecursive(n.children) : null;
+          if (matches || (filteredChildren && filteredChildren.length > 0)) {
+            return [{
+              ...n,
+              expanded: true,
+              children: filteredChildren ?? n.children,
+            }];
+          }
+          return [];
+        });
+      };
+      result = filterRecursive(result);
+    }
+    if (sortMode === "alphabetical") {
+      const sortRecursive = (list: VarNode[]): VarNode[] => {
+        return [...list].sort((a, b) => a.name.localeCompare(b.name)).map((n) => ({
+          ...n,
+          children: n.children ? sortRecursive(n.children) : null,
+        }));
+      };
+      result = sortRecursive(result);
+    }
+    return result;
+  }, [filterQuery, sortMode]);
+
+  const displayedVariables = useMemo(() => filterAndSort(variables), [filterAndSort, variables]);
+  const displayedWatchNodes = useMemo(() => filterAndSort(watchNodes), [filterAndSort, watchNodes]);
 
   const makeExpandHandler = useCallback((
     setNodes: React.Dispatch<React.SetStateAction<VarNode[]>>,
@@ -237,6 +289,12 @@ export function useDebugVariables(
   return {
     variables,
     watchNodes,
+    displayedVariables,
+    displayedWatchNodes,
+    filterQuery,
+    setFilterQuery,
+    sortMode,
+    setSortMode,
     watchInput,
     setWatchInput,
     edit,

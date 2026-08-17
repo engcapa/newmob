@@ -328,6 +328,7 @@ import { OutlinePane } from "./workspace/OutlinePane";
 import { useDeferredGitLineChanges } from "./workspace/useDeferredGitLineChanges";
 import {
   dispatchWorkspaceCommandKeydown,
+  registerWorkspaceCommands,
   runWorkspaceCommand,
   workspaceCommandEnabled,
   workspaceCommandMenuItems,
@@ -336,6 +337,9 @@ import {
   type WorkspaceCommandFocus,
   type WorkspaceCommandRegistration,
 } from "./workspace/workspaceCommands";
+import {
+  navigationHistoryTracker,
+} from "./workspace/navigationHistoryModel";
 import type { WorkspaceSearchMatch } from "../../lib/editor/workspaceSearch";
 import type {
   CodeWorkspaceFileRef,
@@ -905,6 +909,8 @@ export function CodeWorkspaceTab({
   const setStructureLoading = useCallback((loading: boolean) => {
     patchWorkspaceUi(workspaceInstanceId, { structureLoading: loading });
   }, [patchWorkspaceUi, workspaceInstanceId]);
+  const [recentLocationsOpen, setRecentLocationsOpen] = useState(false);
+  const [recentLocationsChangedOnly, setRecentLocationsChangedOnly] = useState(false);
   const setStructureUnavailable = useCallback((reason: string | null) => {
     patchWorkspaceUi(workspaceInstanceId, { structureUnavailable: reason });
   }, [patchWorkspaceUi, workspaceInstanceId]);
@@ -6451,14 +6457,24 @@ export function CodeWorkspaceTab({
       },
     },
     {
+      id: "workspace.recentLocations",
+      title: "Recent Locations",
+      category: "Navigation",
+      keybinding: "Ctrl+Shift+E",
+      keywords: ["recent", "locations", "snippet", "preview", "history"],
+      run: () => {
+        setRecentLocationsChangedOnly(false);
+        setRecentLocationsOpen(true);
+      },
+    },
+    {
       id: "workspace.recentChangedFiles",
       title: "Recently Changed Files",
       category: "Navigation",
-      keybinding: "Ctrl+Shift+E",
       keywords: ["modified", "changes", "history"],
       run: () => {
-        if (recentFilesOpen && recentChangedOnly) setRecentAdvanceNonce((nonce) => nonce + 1);
-        else openRecentFiles({ changedOnly: true });
+        setRecentLocationsChangedOnly(true);
+        setRecentLocationsOpen(true);
       },
     },
     {
@@ -7366,6 +7382,34 @@ export function CodeWorkspaceTab({
     if (!onCommandsChange) return;
     return () => onCommandsChange(tabId, null);
   }, [onCommandsChange, tabId]);
+
+  // Register commands with the global/instance-aware WorkspaceActionRegistry (I1)
+  useEffect(() => {
+    return registerWorkspaceCommands(workspaceCommands);
+  }, [workspaceCommands]);
+
+  // Track recent navigation and edit positions with context preview (I3)
+  useEffect(() => {
+    if (!visible || !activeFile || activeFileLoading || activeFileText == null) return;
+    const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
+    const lines = activeFileText.split("\n");
+    const lineText = lines[cursor.line] ?? "";
+    const startLine = Math.max(0, cursor.line - 1);
+    const endLine = Math.min(lines.length, cursor.line + 2);
+    const contextSnippet = lines.slice(startLine, endLine).join("\n");
+
+    navigationHistoryTracker.recordLocation({
+      fileIdentity: activeFile.key,
+      filePath: activeFile.path ?? activeFile.title,
+      title: activeFile.title,
+      line: cursor.line,
+      character: cursor.character,
+      lineText,
+      contextSnippet,
+      isEditLocation: activeFile.dirty ?? false,
+      sourceOwnership: "workspace",
+    });
+  }, [activeEditorGroupId, activeFile, activeFileLoading, activeFileText, cursorPositions, visible]);
 
   const getLspCompletions = useCallback(
     async (
@@ -10537,6 +10581,40 @@ export function CodeWorkspaceTab({
         recentChangedOnly={recentChangedOnly}
         onCloseRecent={() => setRecentFilesOpen(false)}
         onPickRecent={pickRecentFile}
+        recentLocationsOpen={recentLocationsOpen}
+        recentLocationsChangedOnly={recentLocationsChangedOnly}
+        onCloseRecentLocations={() => setRecentLocationsOpen(false)}
+        onPickRecentLocation={(loc) => {
+          setRecentLocationsOpen(false);
+          const targetOpen = openFiles[loc.fileIdentity];
+          if (targetOpen) {
+            void openFile(targetOpen.ref).then(() => {
+              revealEditorLocation(targetOpen.key, {
+                start: { line: loc.line, character: loc.character },
+                end: { line: loc.line, character: loc.character },
+              });
+            });
+          } else {
+            const matchingRoot = roots.find((r) => loc.filePath.startsWith(r.path));
+            if (matchingRoot) {
+              const relPath = loc.filePath.slice(matchingRoot.path.length).replace(/^\/+/, "");
+              void openFile({ kind: "root", rootId: matchingRoot.id, path: relPath }).then(() => {
+                const key = `root:${matchingRoot.id}:${relPath}`;
+                revealEditorLocation(key, {
+                  start: { line: loc.line, character: loc.character },
+                  end: { line: loc.line, character: loc.character },
+                });
+              });
+            } else {
+              void openFile({ kind: "loose", id: loc.fileIdentity, path: loc.filePath }).then(() => {
+                revealEditorLocation(loc.fileIdentity, {
+                  start: { line: loc.line, character: loc.character },
+                  end: { line: loc.line, character: loc.character },
+                });
+              });
+            }
+          }
+        }}
         structureOpen={structureOpen}
         structureFileTitle={activeFile?.title ?? null}
         structureSymbols={structureSymbols}

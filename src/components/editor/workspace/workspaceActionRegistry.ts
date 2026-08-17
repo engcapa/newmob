@@ -249,6 +249,7 @@ class ActionRegistry {
     this.aliases.set("workspace.quickDefinitionPeek", "workspace.quickDefinition");
     this.aliases.set("workspace.rename", "workspace.renameSymbol");
     this.aliases.set("workspace.safeDelete", "workspace.safeDeleteSymbol");
+    this.aliases.set("workspace.recentChangedFiles", "workspace.recentLocations");
   }
 
   registerAlias(aliasId: string, targetId: string): void {
@@ -264,8 +265,10 @@ class ActionRegistry {
     this.actions.set(resolvedId, action);
     this.notify({ type: "registered", actionId: resolvedId });
     return () => {
-      this.actions.delete(resolvedId);
-      this.notify({ type: "unregistered", actionId: resolvedId });
+      if (this.actions.get(resolvedId) === action) {
+        this.actions.delete(resolvedId);
+        this.notify({ type: "unregistered", actionId: resolvedId });
+      }
     };
   }
 
@@ -424,6 +427,24 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keywords: ["reverse", "lines", "flip", "order"],
   },
   {
+    id: "workspace.transpose",
+    title: "Transpose Lines / Characters",
+    description: "Transpose characters at cursor or swap current line with next line",
+    category: "Edit",
+    keybinding: "Ctrl+T",
+    provenance: "local",
+    keywords: ["transpose", "swap", "lines", "characters"],
+  },
+  {
+    id: "workspace.unwrap",
+    title: "Unwrap / Remove Enclosing Construct",
+    description: "Unwrap enclosing parentheses, braces, brackets, or quotes around cursor",
+    category: "Edit",
+    keybinding: "Ctrl+Shift+Delete",
+    provenance: "local",
+    keywords: ["unwrap", "remove", "parentheses", "braces", "quotes"],
+  },
+  {
     id: "workspace.format",
     title: "Reformat Code",
     description: "Format active document or selection using effective code style and language formatter",
@@ -543,9 +564,18 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keywords: ["recent", "switcher", "history", "files"],
   },
   {
+    id: "workspace.recentLocations",
+    title: "Recent Locations",
+    description: "Navigate to recently visited and edited code positions with context preview",
+    category: "Navigate",
+    keybinding: "Ctrl+Shift+E",
+    provenance: "local",
+    keywords: ["recent", "locations", "context", "history", "edit"],
+  },
+  {
     id: "workspace.recentChangedFiles",
-    title: "Recently Changed Files",
-    description: "List recently modified files in the workspace",
+    title: "Recently Changed Files (Alias)",
+    description: "Alias for workspace.recentLocations",
     category: "Navigate",
     keybinding: "Ctrl+Shift+E",
     provenance: "local",
