@@ -70,6 +70,7 @@ export interface ResolveCodeStyleInput {
 }
 
 export interface EditorConfigResolver {
+  setFileProvider(fileProvider: EditorConfigFileProvider): void;
   resolveForFile(input: ResolveCodeStyleInput): Promise<ResolvedCodeStyle>;
   invalidate(path: string): void;
   clearWorkspace(workspaceId: string): void;

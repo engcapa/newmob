@@ -161,7 +161,7 @@ export const debugActionDescriptors: Record<DebugActionId, DebugActionDescriptor
       return undefined;
     },
     execute: async (ctx) => {
-      await ctx.debug.step("stepInto");
+      await ctx.debug.step("stepIn");
     },
   },
 

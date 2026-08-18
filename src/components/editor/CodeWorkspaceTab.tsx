@@ -154,6 +154,7 @@ import {
 import { DEFAULT_TERMINAL_PROFILE } from "../../lib/terminalProfile";
 import { useAppStore } from "../../stores/appStore";
 import {
+  createEditorGroup,
   selectCodeWorkspaceUi,
   useCodeWorkspaceStore,
   type BottomDockTabId,
@@ -162,6 +163,7 @@ import {
   type EditorSplitOrientation,
   type RightPaneTabId,
 } from "../../stores/codeWorkspaceStore";
+import type { OpenFileEol } from "./workspace/editorGroupTypes";
 import {
   useCodeWorkspaceStatusStore,
   type WorkspaceEol,
@@ -735,7 +737,6 @@ export function CodeWorkspaceTab({
   const setStoreSplitOrientation = useCodeWorkspaceStore((s) => s.setSplitOrientation);
   const splitLayoutLeaf = useCodeWorkspaceStore((s) => s.splitLayoutLeaf);
   const closeLayoutLeaf = useCodeWorkspaceStore((s) => s.closeLayoutLeaf);
-  const moveLayoutTab = useCodeWorkspaceStore((s) => s.moveLayoutTab);
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
   const seedTreeExpandIfEmpty = useCodeWorkspaceStore((s) => s.seedTreeExpandIfEmpty);
   // Ensure before first read so the selector always hits a real map entry.
@@ -3170,7 +3171,7 @@ export function CodeWorkspaceTab({
     key: string,
     textToSave: string,
     saveOptions?: {
-      eol?: "lf" | "crlf" | "cr";
+      eol?: OpenFileEol | "lf" | "crlf" | "cr";
       encoding?: string;
       bom?: boolean;
     },
@@ -3199,7 +3200,11 @@ export function CodeWorkspaceTab({
       }
       // BOM is a byte-level concern. Keep it out of the JavaScript buffer and
       // let the backend encode it together with the selected charset.
-      const targetEol = saveOptions?.eol ?? file.eol;
+      const rawEol = saveOptions?.eol;
+      const normalizedEolOption: OpenFileEol | undefined = rawEol
+        ? (rawEol.toUpperCase() as OpenFileEol)
+        : undefined;
+      const targetEol: OpenFileEol = normalizedEolOption ?? file.eol;
       const targetBom = saveOptions?.bom !== undefined ? saveOptions.bom : (file.bom ?? false);
       const encoding = saveOptions?.encoding ?? file.encoding ?? "UTF-8";
       const diskText = applyEditorEol(textToSave.replace(/^\uFEFF/, ""), targetEol);
@@ -3895,12 +3900,20 @@ export function CodeWorkspaceTab({
     if (!key) return;
     const file = openFilesRef.current[key];
     if (!file) return;
+    if (workspaceUi.layoutTreeV2) {
+      splitLayoutLeaf(workspaceInstanceId, sourceGroupId, orientation, key);
+      return;
+    }
     const targetGroupId: EditorGroupId = sourceGroupId === "primary" ? "secondary" : "primary";
     void openFile(file.ref, { groupId: targetGroupId });
     setStoreSplitOrientation(workspaceInstanceId, orientation);
-  }, [activeEditorGroupId, activeKey, openFile, setStoreSplitOrientation, workspaceInstanceId]);
+  }, [activeEditorGroupId, activeKey, openFile, setStoreSplitOrientation, splitLayoutLeaf, workspaceInstanceId, workspaceUi.layoutTreeV2]);
 
   const closeSplit = useCallback(() => {
+    if (workspaceUi.layoutTreeV2 && activeEditorGroupId !== "primary") {
+      closeLayoutLeaf(workspaceInstanceId, activeEditorGroupId);
+      return;
+    }
     const current = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
     const primary = current.editorGroups.primary;
     const secondary = current.editorGroups.secondary;
@@ -3926,7 +3939,7 @@ export function CodeWorkspaceTab({
     });
     setStoreSplitOrientation(workspaceInstanceId, null);
     activateEditorGroup("primary");
-  }, [activateEditorGroup, setStoreSplitOrientation, updateEditorGroup, workspaceInstanceId]);
+  }, [activateEditorGroup, activeEditorGroupId, closeLayoutLeaf, setStoreSplitOrientation, updateEditorGroup, workspaceInstanceId, workspaceUi.layoutTreeV2]);
 
   useEffect(() => {
     if (!splitOrientation) return;
@@ -8285,12 +8298,12 @@ export function CodeWorkspaceTab({
 
   const deferredActiveFile = activeKey ? deferredOpenFiles[activeKey] ?? activeFile : null;
   const dirtyCount = useMemo(
-    () => Object.values(deferredOpenFiles).filter((file) => file.dirty).length,
-    [deferredOpenFiles],
+    () => Object.values(openFiles).filter((file) => file.dirty).length,
+    [openFiles],
   );
   const dirtyFiles = useMemo(
-    () => openOrder.map((key) => deferredOpenFiles[key]).filter((file): file is OpenFileState => !!file?.dirty),
-    [deferredOpenFiles, openOrder],
+    () => openOrder.map((key) => openFiles[key]).filter((file): file is OpenFileState => !!file?.dirty),
+    [openFiles, openOrder],
   );
   const problemFiles = useMemo<ProblemFileGroup[]>(
     () => openOrder.flatMap((key) => {
@@ -9892,6 +9905,7 @@ export function CodeWorkspaceTab({
         editorPaneStyle={editorPaneStyle}
         onActivate={(key) => {
           flushPendingEditorText();
+          setLeafActiveTab(workspaceInstanceId, groupId, key);
           updateEditorGroup(groupId, (current) => ({ ...current, activeKey: key }));
           activateEditorGroup(groupId);
           if (key) {
@@ -9899,24 +9913,7 @@ export function CodeWorkspaceTab({
           }
         }}
         onActivateGroup={() => activateEditorGroup(groupId)}
-        onClose={(key) => void closeEditorTab(key, groupId)}
-        onReorder={(order) => updateEditorGroup(groupId, (current) => ({ ...current, openOrder: order }))}
-        onTogglePin={(key) => togglePinTab(key, groupId)}
-        onSplit={(orientation) => {
-          if (!group.activeKey) return;
-          const targetOrientation: EditorSplitOrientation = orientation === "horizontal" ? "horizontal" : "vertical";
-          splitLayoutLeaf(workspaceInstanceId, groupId, targetOrientation, group.activeKey);
-        }}
-        onMoveToOtherGroup={() => {
-          if (!group.activeKey) return;
-          const otherGroupId = groupId === "primary" ? "secondary" : "primary";
-          moveLayoutTab(workspaceInstanceId, groupId, otherGroupId, group.activeKey);
-        }}
-        onCloseOtherTabs={(key) => closeOtherTabs(key, groupId)}
-        onCloseTabsToRight={(key) => closeTabsToRight(key, groupId)}
-        onCloseAllTabs={() => closeAllTabsInGroup(groupId)}
-        onCloseSavedTabs={() => closeSavedTabsInGroup(groupId)}
-        onSetMarkdownMode={(key, mode) => setMarkdownMode(workspaceInstanceId, key, mode)}
+        onClose={(key) => void closeFile(key, groupId)}
         onPin={(key, pinned) => setTabPinned(groupId, key, pinned)}
         onPromotePreview={(key) => promotePreviewTab(groupId, key)}
         onCloseOthers={(key) => {

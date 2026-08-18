@@ -1,8 +1,8 @@
 # Debug 底部面板 IDEA 对齐重设计
 
-> 状态：**v1 布局已交付，v2 为 wired/partial，正确性收口待开发**。最新代码审计基线为当前分支 HEAD；单步中央锁、Show Execution Point 和运行期 Watch ID 已接线，但统一 Debug Action Service、per-session Console epoch、未读/follow-tail、per-thread frame cache、布局按 workspace 持久化、完整 i18n、真实 adapter 与三端证据仍未完成。
+> 状态：**v1 布局已交付，v2 为 wired/partial，正确性收口待开发**。最新代码审计基线为 `f88c5785`；action descriptor、Show Execution Point、Console seq/ring/follow-tail/REPL、部分 variables session guard 和 tab/tabpanel ARIA 已落地，但 descriptor 尚未成为统一执行入口，Console/Variables 仍缺真实 stop epoch 与定向发布，布局仍未按 workspace 持久化，hidden-pane request guard、完整 i18n、fake/真实 adapter 与三端证据仍未完成。
 > 日期：2026-08-18
-> 文档结构：§1–§12 保留原始布局方案；§13 是 v1 与最新提交的 as-built 对账；§14–§15 保留 v2 设计合同；§16 是本次审计后的下一轮权威待办。
+> 文档结构：§1–§12 保留原始布局方案；§13 是 v1 历史对账；§14–§16 保留 v2/v2.1 设计合同；§15.9 是 `f88c5785` 增量复核；§17 是当前下一轮权威待办。
 > 当前范围：v1 只重组 `DebugPanel.tsx` 及子组件；v2 允许按 §15 扩展 `dapDebugModel.ts`、`useCodeDebugSession.ts`、Action Service 和 QA catalog，但不修改 Rust DAP kernel，除非单独任务明确列出协议缺口。
 
 ---
@@ -723,7 +723,7 @@ useCodeDebugSession
 
 ## 13. v1 As-Built 对账（历史基线，2026-08-17）
 
-> 本节记录 v1 布局首次落地时的事实；`67215c85` 后的增量与等级以 §15.8、§16 为准。
+> 本节记录 v1 布局首次落地时的事实；`67215c85` 后的历史增量保留在 §15.8/§16，当前状态以 §15.9/§17 为准。
 
 ### 13.1 已进入生产路径
 
@@ -757,7 +757,7 @@ useCodeDebugSession
 
 ## 14. v2 当前权威待办（历史 D0-D5 分解）
 
-> D0-D5 的原始设计仍保留供追溯；最新可执行顺序和代码状态见 §15.8、§16（D6-D10）。
+> D0-D5 的原始设计仍保留供追溯；最新可执行顺序和代码状态见 §15.9、§17（D6-D10）。
 
 | 顺序 | 工作包 | 目标 | 依赖 |
 |------|--------|------|------|
@@ -943,9 +943,25 @@ interface DebugLayoutPreferenceV2 {
 
 **明确未交付。** Console seq/unread/follow-tail/ring buffer/REPL history 尚无；evaluate 未绑定 stopEpoch/frame/requestId，跨 session publish 与间接 terminate 不递增 generation；`refreshStoppedContext/selectThread` 仍只维护单线程 40 帧；`fetchScopes/fetchVariables` 失败仍折叠成空数组；value diff key 未完整包含 session/stop/frame；Watch 缺 reorder/enable/error；Hot Reload 未 capability gate；Debug layout 仍用 global preference，ARIA/i18n/隐藏 pane request guard、200% zoom、IME、非美式键盘、QA catalog、真实 adapter 与三端 evidence 均缺。
 
-## 16. v2.1 下一轮权威待办（面向其它 agent）
+### 15.9 `f88c5785` as-built 再审计（2026-08-18）
 
-本节以最新生产代码复核为起点。每个包必须同时提交：生产 host 接线、typed state/result、取消/失败/恢复语义、纯/组件测试、QA catalog/YAML 变更和适用的真实 adapter 证据。单测直接 mock `CodeDebugSession` 不能把能力升级为 `workflow`。
+本节只记录 §15.8 之后的增量事实。交付等级仍按 `model -> wired -> workflow -> verified`，新增文件或局部组件测试不自动提升等级。
+
+| 包 | 本提交实际新增 | 仍未闭环 | 结论 |
+|----|----------------|----------|------|
+| D6 Action Service | 新增 `debugActionService.ts` descriptor/action matrix；Hot Reload 有初步 gating；Show Execution Point 保持接线 | Toolbar 仍直接调用 `debug.step/terminate/restart`，Search/keymap/workspace registry 未统一消费 descriptor；`execute` 仍是 void Promise，无 `ActionResult/requestId/central lock`；runToCursor/callback/extension manifest gating 不完整 | **model + partial consumer** |
+| D7 Console | output entry 增加 seq 与 ring cap；pane 有 follow-tail、scroll-to-bottom、REPL history；clear/terminate/evaluate 有部分 generation 检查 | follow/history/seen 是 pane-local，切 session 会串；badge 仍可能是总长度；generation 不等于 per-stop epoch，且以 stoppedThreadId 代替 epoch；结果仍 append 到 resolve 时的当前 session，stale 空结果可能生成空行；2 MiB/ANSI/paint 门禁未证明 | **wired / correctness gap** |
+| D8 Variables/Watches | scopes/variables 请求增加 session guard；parent 向隐藏 pane 传 visible；Watch 删除继续按运行期 ID | 同一线程连续 stop 仍可接受旧响应；children expand 无 requestId/epoch/dedupe/error，collapse 后迟到结果可能复活；错误仍可能折叠为空；diff key、持久 stable watch ID、reorder/enable/per-item error 未完成 | **wired / correctness gap** |
+| D9 ARIA/Layout | tab id/`aria-controls`、tabpanel/`aria-labelledby` 和 visible props 有部分接线 | Arrow 导航仍用 document-global query，多个 Debug 实例会错焦点；global split preference 未迁移；separator/toolbar keyboard/i18n/200% zoom/hidden no-request 未验证 | **wired / partial** |
+| D10 Evidence | 新增单元/组件覆盖伴随提交 | 没有 fake DAP 全链、真实 Java/Node/Python/Delve/LLDB trace、QA catalog/YAML、性能或 Linux/macOS/Windows native evidence | **unit evidence only** |
+
+**关键纠偏。** `stoppedThreadId` 是线程标识，不是 stop epoch；同一 thread 可连续停止多次。Console、scopes、variables、watch、stack 和 action response 必须共享由 `stopped` event 单调递增的 `stopEpoch`，并使用 `(sessionId, stopEpoch, frameId, requestId[, clearGeneration])` 做发布条件。所有异步结果必须写回请求发出时捕获的 session reducer，禁止 Promise resolve 后重新读取 active session。
+
+**本轮验证结果。** 编辑器/布局相关回归为 5 files/42 tests 全绿，Debug 定向回归为 3 files/42 tests 全绿，`CodeWorkspaceTab.test.tsx` 56 tests 全绿；`pnpm build`（`tsc -b && vite build`）已修复并全绿通过。`git diff --check` 通过。后续包将继续补齐 fake DAP 全链、真实 adapter trace、QA YAML 及三端 native 证据。
+
+## 16. v2.1 下一轮权威待办（面向其它 agent，`f88c5785` 前历史快照）
+
+本节记录 `f88c5785` 之前的生产代码复核。当前增量事实见 §15.9，当前执行顺序见 §17。每个包必须同时提交：生产 host 接线、typed state/result、取消/失败/恢复语义、纯/组件测试、QA catalog/YAML 变更和适用的真实 adapter 证据。单测直接 mock `CodeDebugSession` 不能把能力升级为 `workflow`。
 
 | 优先级 | 工作包 | 已具备 | 本轮剩余 |
 |--------|--------|--------|----------|
@@ -1123,3 +1139,62 @@ Fake DAP 必须覆盖 `initialize -> launch -> initialized -> threads -> 两线�
 | D10 | fake/real adapter harness、QA catalog/cases、performance/native evidence | 修改 capability truth | sanitized traces、platform matrix、gate report |
 
 合并顺序：`D6 -> D7/D8/D9（共享类型先行，可并行） -> D10`。若 D7/D8 同时需要 `useCodeDebugSession.ts`，先提交只含 `DebugConsoleEntry`/`DebugStopSnapshot` 的类型与 reducer，再按代码区域合并；所有 agent 必须保留其它分支修改，不回退无关文件。
+
+## 17. v2.2 `f88c5785` 后续权威待办（面向其它 agent）
+
+§16 保留完整目标，本节只定义基于当前代码继续开发的下一批提交和完成门槛。所有工作包必须以生产 consumer 为准；descriptor、hook 字段、pane-local state 或 mocked `CodeDebugSession` 只能分别证明 model/component，不能代替真实 action path 和 DAP 生命周期。
+
+| 顺序 | 包 | 当前可复用基础 | 本轮必须交付 |
+|------|----|----------------|--------------|
+| P0 | D6 Action execution | descriptor factory、部分 Hot Reload/Show Point state | instance service、typed result/request lock、Toolbar/Search/keymap/workspace bridge |
+| P0 | D7 Session console | seq/ring、follow-tail、history、部分 generation guard | session-owned UI state、真实 stop epoch、captured append、unread/2 MiB/late-result correctness |
+| P0 | D8 Stop snapshot | session guard、visible prop、运行期 watch ID | monotonic stopEpoch、request state/dedupe、error-vs-empty、stable Watch model |
+| P1 | D9 Layout/ARIA | tab/tabpanel ids、responsive host 基础 | ref-scoped focus、workspace preference v2、hidden no-request、resizer/i18n/zoom |
+| Gate | D10 Evidence | unit/component tests | fake DAP、QA catalog/YAML、真实 adapter、性能与三端 native evidence |
+
+### 17.1 D6：让 Action Service 成为唯一执行入口
+
+**实现。** 将 `debugActionService.ts` 从纯 descriptor helper 改为每个 Debug/workspace 实例拥有的 service。descriptor 只暴露 `state` 和 `run(signal)`；`run` 创建 requestId、捕获 `(sessionId, activeChildId, stopEpoch)`，通过一个 central in-flight map 执行并返回统一结果：
+
+```ts
+type DebugActionResult =
+  | { kind: "applied"; requestId: string }
+  | { kind: "no-op" | "cancelled"; requestId?: string; reason: string }
+  | { kind: "failed"; requestId: string; message: string; retryable: boolean };
+```
+
+`DebugToolbar`、Frames/Breakpoint context actions、Search Everywhere、keymap/keydown 和 workspace ActionHost bridge 只能消费 service，删除直接 `debug.step()`/`terminate()`/`restart()` 分支。`showExecutionPoint` 在 callback 缺失时必须 `disabled`；runToCursor/stepBack/stepInTargets 必须有标准 capability 或明确 adapter extension，不用其它 step 动作冒充。Hot Reload 只在 adapter manifest 明确声明 `{ extension: "java.redefineClasses" }` 时注册，通用 `supportsHotReload` 字段不能让非 Java adapter 显示 Java 私有动作。
+
+**失败/测试。** continued/stopped/terminated、active child 切换、AbortSignal、request reject 都释放 lock；失败写到请求所属 session 的结构化 Console entry，按钮恢复可重试。测试 Java/Node/Python/LLDB action matrix、callback missing、0/1/N step targets、双击 busy、request failure、compound child switch，以及 toolbar/Search/keymap/keyboard state/result 完全一致。负责人限 `debugActionService.ts`、`DebugToolbar.tsx`、`DebugPanel.tsx` action adapter、workspace action bridge和 D6 tests，不改 Console ring 或 Variables cache。
+
+### 17.2 D7：Session-owned Console 与定向异步发布
+
+**实现。** 将 `followTail/history/historyIndex/lastSeenSeq/clearGeneration` 从 `DebugConsolePane` local state 移入 session-keyed reducer/store。每个 output/evaluate request 捕获 `ConsoleRequestToken { sessionId, stopEpoch, frameId, requestId, clearGeneration }`；result 只允许 dispatch 到 token.sessionId，且 reducer 在所有字段匹配时 append。active session 切换、continue/new stop、frame change、restart、所有 terminate 路径和 clear 按语义递增对应 epoch/generation；stale/cancelled 不返回空字符串，pane 只渲染 `applied` result。
+
+ring 同时限制 10,000 entries 和 2 MiB UTF-8 预算，截断时插入单一 marker；多行/ANSI normalization 在进入 ring 前完成。badge 按 active session 的 `seq > lastSeenSeq` 计算，只有 Console 可见且距底 <=24px 才推进 seen。follow-tail、Scroll to end、每 session 100 条 history、Up/Down/Esc draft 在 session 切换后恢复自己的状态，不默认写 localStorage。
+
+**测试/门禁。** 覆盖 A->B->A、同线程连续 stop、frame switch、clear 后 late result、indirect terminate、restart、hidden/visible、离底滚动、10k/2MiB、ANSI/多行、history draft 和持续输出 paint profile。负责人限 `dapDebugModel.ts` console reducer、`useCodeDebugSession.ts` output/evaluate 区、`DebugConsolePane.tsx` 和 D7 tests/QA case，不改 stack/variables semantics。
+
+### 17.3 D8：真实 stop epoch、Variables request state 与稳定 Watch
+
+**实现。** 在 DAP `stopped` event reducer 中为 session 单调递增 `stopEpoch`，不要从 threadId/frameId 推导。统一 token 为 `(sessionId, stopEpoch, threadId?, frameId?, variablesReference?, requestId)`；scopes、variables children、watch evaluate、setVariable、dataBreakpointInfo 和 stack page 在 publish 前逐项匹配。每个节点维护 `idle|loading|ready|partial|failed`、requestId/error；同 token dedupe，collapse 会撤销 interest，迟到 response 只能进 cache，不能重新展开 UI。失败保留 retry，不再转换成 `[]`。
+
+Watch 在 model 边界改为 `{id, expression, enabled, order, lastError}`，ID 持久化且所有 remove/edit/reorder/enable API 只接受 ID。value diff key 至少包含 session/stop/frame/stable variable path；无法证明跨 stop identity 时显示 local comparison，不跨 session/frame 高亮。hidden pane 的 `visible=false` 必须在 hook 前阻断 scopes/variables/watch effect，而不是只隐藏 DOM。
+
+**测试/门禁。** 覆盖同一 thread 连续 stop、collapse-before-response、frame/session switch、重复 variablesReference、error-vs-empty/retry、20 threads x 200 frames、Watch filter/sort 后删除、reload 后 stable ID、reorder/disable/per-item error 和 hidden pane zero-request。负责人限 stop snapshot/types、`useDebugVariables.tsx`、Frames/Variables/Watch components 和 D8 tests；与 D7 共享 epoch 类型但不改 Console UI state。
+
+### 17.4 D9：实例级焦点、Workspace layout 与隐藏 pane
+
+**实现。** `DebugSubTabBar` 持有本实例 button refs，Arrow/Home/End 只遍历该 ref collection，删除 `document.querySelector`。把 global split keys 迁移到 `{schemaVersion:2, workspaceId, windowId, horizontal, vertical, compactPane}` preference，合法 v1 比例只迁移一次，坏数据回默认并记录 diagnostic；提供 `debug.resetLayout` action。separator 暴露 label/orientation/value/min/max 和键盘调整，toolbar 使用 roving focus/visible focus ring；tab/tabpanel ids 在同页面多个 Debug 实例间唯一。
+
+所有 hidden subtab/pane 向 data hook 传 `visible=false` 并由 request spy 证明零 scopes/variables/evaluate。空态、tooltip、disabled reason、错误和按钮进入 i18n；验证 320/480/640/1024px、100%/200% zoom、长中英文、reduced motion、IME 和非美式键盘。负责人限 Debug layout/tab/ARIA/preference/i18n 与 D9 tests，不改 DAP request token。
+
+### 17.5 D10：Fake DAP、QA、真实 adapter 与 native 门禁
+
+fake DAP 覆盖 `initialize -> launch -> initialized -> two-thread stack pages -> scopes/variables -> evaluate -> continue + stale response -> stopped same thread -> terminate`，并提供 action supported/unsupported/failure profiles。同步 `qa-ui-auto-tests/feature-list.md`、`references/testid-catalog.md` 和 YAML，至少包含 action busy/unsupported、Console unread/follow/history、multi-thread/load-more、Watch reorder/error、layout Reset、two-instance tab focus 和 hidden no-request。
+
+真实 smoke 至少记录 Java、Node、Python、Delve、LLDB 的脱敏 capabilities、action request/event、source mapping、失败和 cleanup；adapter 不支持某动作时验收 UI 的准确 unavailable，而不是修改 capability fixture。性能门槛覆盖 10k/2 MiB Console、20x200 stack、持续 output 输入/滚动、hidden zero-request；Linux/macOS/Windows 原生包记录 F-key/system conflict、IME REPL、200% zoom、layout restore 和 compound session。mock、browser stub、jsdom 和协议单测不得替代真实 adapter/native 证据。
+
+### 17.6 Ownership 与合并顺序
+
+先由 D6/D7/D8 共同提交只含 `DebugRequestToken/stopEpoch/ActionResult` 的共享类型与 reducer fixture，再按 D6 action、D7 console、D8 stop data、D9 layout 分区开发；D10 随各包增量更新，不能最后补账。`useCodeDebugSession.ts` 的 owner 必须按 action/output/stop-snapshot 区域分提交，任何 agent 不重排其它区域。推荐合并顺序：`shared epoch contract -> D6 -> D7/D8/D9 -> D10 gate`。
