@@ -40,6 +40,7 @@ interface WorkspacePopupsHostProps {
 
   recentLocationsOpen?: boolean;
   recentLocationsChangedOnly?: boolean;
+  workspaceId?: string;
   onCloseRecentLocations?: () => void;
   onPickRecentLocation?: (location: NavigationLocation) => void;
 
@@ -85,6 +86,7 @@ export function WorkspacePopupsHost({
   onPickRecent,
   recentLocationsOpen = false,
   recentLocationsChangedOnly = false,
+  workspaceId,
   onCloseRecentLocations,
   onPickRecentLocation,
   structureOpen,
@@ -132,6 +134,7 @@ export function WorkspacePopupsHost({
         <RecentLocationsDialog
           open={recentLocationsOpen}
           initialChangedOnly={recentLocationsChangedOnly}
+          workspaceId={workspaceId}
           onClose={onCloseRecentLocations}
           onSelectLocation={onPickRecentLocation}
         />

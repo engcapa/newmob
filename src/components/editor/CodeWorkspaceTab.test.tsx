@@ -18,6 +18,9 @@ import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
 import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
 import { confirmAppDialog } from "../../lib/appDialogs";
+import { workspaceActionRegistry } from "./workspace/workspaceActionRegistry";
+import { navigationHistoryTracker } from "./workspace/navigationHistoryModel";
+import { globalEditorConfigResolver } from "./workspace/editorConfigResolver";
 
 const workspaceMocks = vi.hoisted(() => ({
   workspaceListDir: vi.fn(),
@@ -331,6 +334,9 @@ function renderWorkspace(
 describe("CodeWorkspaceTab", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    workspaceActionRegistry.clear();
+    navigationHistoryTracker.clear();
+    globalEditorConfigResolver.clearAll();
     vi.mocked(confirmAppDialog).mockReset().mockResolvedValue(true);
     useAppStore.setState({
       statusMessage: "Ready",
@@ -552,6 +558,9 @@ describe("CodeWorkspaceTab", () => {
 
   afterEach(() => {
     cleanup();
+    workspaceActionRegistry.clear();
+    navigationHistoryTracker.clear();
+    globalEditorConfigResolver.clearAll();
   });
 
   it("keeps command registration stable across unrelated parent rerenders", async () => {

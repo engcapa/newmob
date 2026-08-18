@@ -175,4 +175,38 @@ describe("workspaceActionRegistry", () => {
     expect(recentChangedFilesCalled).toBe(true);
     expect(recentLocationsCalled).toBe(false);
   });
+
+  it("emits registered event when unregister restores previous action definition", () => {
+    const events: Array<{ type: string; actionId?: string }> = [];
+    const unsub = workspaceActionRegistry.subscribe((e) => {
+      events.push(e);
+    });
+
+    const unregA = workspaceActionRegistry.register({
+      id: "test.action",
+      title: "Action A",
+      category: "Help",
+      provenance: "local",
+      run: () => {},
+    });
+
+    const unregB = workspaceActionRegistry.register({
+      id: "test.action",
+      title: "Action B",
+      category: "Help",
+      provenance: "local",
+      run: () => {},
+    });
+
+    events.length = 0;
+    // Unregister B: should restore A and emit both registered and state-changed
+    unregB();
+
+    expect(events.some((e) => e.type === "registered" && e.actionId === "test.action")).toBe(true);
+    expect(events.some((e) => e.type === "state-changed" && e.actionId === "test.action")).toBe(true);
+
+    unregA();
+    unsub();
+  });
 });
+

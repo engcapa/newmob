@@ -10,6 +10,7 @@ import type {
   TreeSelection,
   TreeViewMode,
 } from "../components/editor/workspace/codeWorkspaceModel";
+import type { LayoutNode } from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
 
 export type BottomDockTabId =
@@ -88,6 +89,8 @@ export interface CodeWorkspaceInstanceUi {
   editorGroups: Record<EditorGroupId, CodeWorkspaceEditorGroupState>;
   activeEditorGroupId: EditorGroupId;
   splitOrientation: EditorSplitOrientation | null;
+  /** Recursive layout tree v2 schema (A2) */
+  layoutTreeV2: LayoutNode | null;
   markdownModes: Record<string, "edit" | "preview" | "split">;
   /** Project tree chrome */
   treeFilter: string;
@@ -134,6 +137,7 @@ export function createDefaultCodeWorkspaceUi(): CodeWorkspaceInstanceUi {
     },
     activeEditorGroupId: "primary",
     splitOrientation: null,
+    layoutTreeV2: null,
     markdownModes: {},
     treeFilter: "",
     treeViewMode: readCodeWorkspaceTreeViewMode(),
@@ -233,6 +237,7 @@ interface CodeWorkspaceStoreState {
   ) => void;
   setActiveEditorGroup: (instanceId: string, groupId: EditorGroupId) => void;
   setSplitOrientation: (instanceId: string, orientation: EditorSplitOrientation | null) => void;
+  setLayoutTreeV2: (instanceId: string, layoutTree: LayoutNode | null) => void;
   setMarkdownMode: (instanceId: string, fileKey: string, mode: "edit" | "preview" | "split") => void;
   replaceFileState: (instanceId: string, replacement: CodeWorkspaceFileStateReplacement) => void;
   updateOpenFiles: (instanceId: string, updater: Updater<Record<string, OpenFileState>>) => void;
@@ -367,6 +372,10 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
 
   setSplitOrientation: (instanceId, orientation) => {
     get().patchInstance(instanceId, { splitOrientation: orientation });
+  },
+
+  setLayoutTreeV2: (instanceId, layoutTree) => {
+    get().patchInstance(instanceId, { layoutTreeV2: layoutTree });
   },
 
   setMarkdownMode: (instanceId, fileKey, mode) => {

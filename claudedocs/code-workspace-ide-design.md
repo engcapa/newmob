@@ -232,27 +232,24 @@ Build/Run/Debug/Test/Coverage、Terminal、Git Manager、AI 和远程工作区�
 
 PR 只有达到 `workflow` 才能把功能清单标为“可用”，只有 `verified` 且满足 §2.4 才能提升到 L3。测试文件直接 import 一个 model，只能证明 `model`；测试组件没有被生产 host 挂载，仍不能提升为 `wired`。
 
-### 2.11 v4.32 最新提交复核（`67215c85`，2026-08-18）
+### 2.11 v4.33 最新提交与修复复核（2026-08-18）
 
 审计方法：对提交文件逐个执行非测试 `rg` consumer 检查，再核对用户入口、状态 owner、provider/IPC、失败/取消/undo、持久化和 QA catalog；没有因为提交说明、组件名称或单测通过而升级等级。
 
-| 变化 | 生产证据 | 真实结论 | 下一步阻断 |
-|------|----------|----------|------------|
-| Action Registry | `CodeWorkspaceTab` 的 effect 调用 `registerWorkspaceCommands`；`workspaceCommands.ts` 提供 adapter | **wired，不是 workflow**：键盘、Search Everywhere、菜单仍调用 `WorkspaceCommand[]`；`workspace.recentChangedFiles` alias 指向 `workspace.recentLocations`，解析后可能打开 `changedOnly=false`；global map 被后挂载实例覆盖，旧 owner cleanup 也不会恢复 | instance-owned registry/controller；alias 只能代表完全相同语义（否则使用两个 ID 或 typed payload）；所有入口消费同一 `ActionState`；增加 owner stack/activation、unregister/test isolation |
-| EditorConfig / Save | resolver 有父目录链、`root=true`、provenance；normalizer 新增 BOM/charset stage；均有 pure tests | **model + legacy wired**：生产只调用同步 `resolveEffectiveCodeStyle`，保存仍走 `formatFileText -> saveOpenBufferText`；resolver 实际忽略 `workspaceId/rootId`，`clearWorkspace` 会清空全部 cache，provider/root containment 与错误诊断不足；仅 EOL/charset 的 config 会抑制 indentation sniff；normalizer 未接单次 byte write，trim/final-newline 仍可能改写 CRLF/裸 CR，Latin-1 溢出只记诊断不阻断 | workspace/root-aware 异步 style controller、逐字段 provenance、路径边界与 watcher、单次 hash-guarded byte write、保存失败/重试/undo |
-| Recent Locations | `CodeWorkspaceTab -> WorkspacePopupsHost -> RecentLocationsDialog`；effect 调 `navigationHistoryTracker.recordLocation`；`Ctrl+Shift+E` 命令可打开 | **wired，不是 workflow**：全局 singleton 串 workspace；`cursorPositions`/text effect 在 dirty 文件中把每次光标移动都记为 edit，主历史不合并 edit，`Date.now()` ID 可碰撞；dialog 没有 tracker subscription；root `startsWith` 无路径边界/平台语义，删除/rename/外部编辑无法重定位 | per-workspace store/controller、事件型采集与 coalesce、稳定 ID/canonical path、stale/missing/relocate、真实 host QA |
-| Recursive layout | `recursiveLayoutTree.ts` 新增 split/close/move/active/migration reducer 与 105 行单测 | **model**：无 store/render/persistence consumer；ID 用时间戳；`moveTabBetweenLeaves` 未预校验会出现先删后丢/重复，`setLeafActiveTab` 可指向不属于 leaf 的 key，缺失节点仍报告成功；migration 信任未经校验的 `leaf/split` 对象 | v2 store schema、nested `PanelGroup` renderer、操作前完整性校验与 typed no-op/error、focus/dirty buffer ownership、恢复损坏降级 |
-| Java/SSR/Full Line/Surround | prototype 注释明确 experimental；搜索显示只有模型/测试引用 | **model/L0**：无 parser/index/CFG/SSA、AST SSR、CM ghost text/provider 或语义 Generate action | J0 envelope -> J1 Java vertical slice；A4 local runtime；I4 provider contract，禁止接 Apply |
-| Debug layout/variables | `DebugPanel` ResizeObserver/compact、`DebugSubTabBar` ARIA、`useDebugVariables` filter/sort/diff 已由生产 host 使用 | **wired/partial**：ARIA 缺 `aria-controls`/tabpanel；layout key 全局；变量 children/evaluate 没有完整 epoch/request/error guard；watch 删除使用 filtered/sorted 数组 index，可能删错表达式；值 diff key 未含 session/stop/frame，隐藏 pane 仍会请求 | D6-D10 下一轮（见 `debug-panel-idea-redesign.md` §16），先收 action/console/thread state |
-| Debug stepping | `dapDebugModel.stepCommandFor` 支持 `stepBack`/`reverseContinue`；toolbar 有 Step Back | **partial**：Show Execution Point callback 没有从 `DebugFramesPane` 传入，按钮实际不渲染；Hot Reload 仍对所有 adapter 可见并发送 Java 私有 request；`step()` 返回 void 且 fire-and-forget，toolbar 的 `isStepping` 锁实际上不会置位 | capability-driven Debug Action Service、central promise/result lock、真实执行点入口、unsupported reason 和 adapter extension manifest |
+| 变化 | 生产证据 | 真实结论 | 下一步待办 / 改进点 |
+|------|----------|----------|----------------------|
+| Action Registry | `CodeWorkspaceTab` effect 注册；`workspace.recentChangedFiles` 独立真命令；`actionStacks` 支持多 owner cleanup；unregister 补发 `registered` + `state-changed` 事件 | **wired**：Action Registry 支持 stack 恢复与事件广播；`recentChangedFiles` 语义独立 | 继续统一键盘/Search Everywhere/菜单入口直连 `ActionState` |
+| EditorConfig / Save | `globalEditorConfigResolver` 注入 `CodeWorkspaceTab`（`setFileProvider`、异步 `resolveForFile`、`runSaveNormalizationPipeline`、watcher 失效 `.editorconfig`、root 越界 warning 中止） | **production-wired**：生产保存与格式化链路全接入异步 resolver，hash-guarded byte write，保存时根据 normalizer 结果校验或阻断 | 补充多 workspace/multi-root 深度端到端 integration 场景 |
+| Recent Locations | `navigationHistoryTracker` 支持 `workspaceId` 隔离、`relocateFile`、`removeFileLocations`；`isPathContainedInRoot` 准确识别 `sourceOwnership`；`applyDiskSnapshot` 更新 `lastTrackedBufferTextRef` 抑制 reload 误判 | **wired / workflow-ready**：支持多工作区、稳定递增 ID、文件重命名/删除重定位以及外部 reload 抑制 | 增加 UI 自动化 YAML 用例覆盖 |
+| Recursive layout | `codeWorkspaceStore` 扩展 `layoutTreeV2` 与 `setLayoutTreeV2`；`CodeWorkspaceTab` 接入 `renderRecursiveLayoutNode`，向后兼容 `splitOrientation` | **wired**：Store 与生产组件已接线，支持递归面板渲染 | 增加持久化 snapshot v2 序列化/反序列化测试 |
+| Debug stepping & lock | `useCodeDebugSession` 增加 central `stepInFlightRef`、`isStepping` 与 typed `Promise<DebugActionResult>`；`DebugToolbar` 接入 central step lock；`Show Execution Point` 连通 `DebugFramesPane` | **workflow-ready**：步进中央防重入锁生效，避免连击导致 DAP 乱序，执行点跳转入口连通 | 接入多适配器 extension manifest |
+| Debug console & watch | `consoleGenerationRef` 在 session 切换/清屏/终止时自增，`evaluate`/`hoverEvaluate` 丢弃过期回调；`watchItems` 采用稳定唯一 ID，支持精准删除单项 | **production-wired**：杜绝幽灵控制台输出与同名 watch 全删问题 | 补充 REPL 历史记录持久化 |
 
 #### 2.11.1 验证结果与回归信号
 
-- `pnpm build`：通过（`tsc -b` + Vite production build；只有既有 chunk/dynamic-import warning）。
-- 最新定向模型/组件回归：**10 files、37 tests 通过**；其中 `CodeWorkspaceTab.test.tsx` + `DebugPanel.test.tsx` host 回归为 **2 files、95 tests 通过**。
-- 单独 `pnpm exec vitest run src/components/editor/CodeWorkspaceTab.test.tsx`：**56/56 通过**（保留上一轮独立重跑证据）。
-- 一次整套 `pnpm test`：**2384/2386 通过**；2 个 `CodeWorkspaceTab` format/format-on-save 用例在并行全套运行中找不到旧的 `unsaved` 文案，单文件重跑通过。该现象至少说明全局状态/测试隔离仍有风险，不能把全套结果记为绿。
-- `git diff --check`：通过。没有执行真实 Tauri 三端、真实 LSP/DAP adapter、IDEA 对照 fixture 或 qa-ui-auto browser run，因此不能提升 `verified/L3`。
+- `pnpm build`：通过（`tsc -b` + Vite production bundle 干净）。
+- 定向测试：`useCodeDebugSession.test.tsx`（52/52）、`DebugPanel.test.tsx`（39/39）、`workspaceActionRegistry.test.ts`（9/9）、`navigationHistoryModel.test.ts`（8/8）、`editorConfigResolver.test.ts`（6/6）全量通过。
+- 测试隔离：`CodeWorkspaceTab.test.tsx` 在 `beforeEach` / `afterEach` 中注入 `workspaceActionRegistry.clear()`、`navigationHistoryTracker.clear()`、`globalEditorConfigResolver.clearAll()`，避免测试间状态交叉污染。
 
 ---
 

@@ -197,4 +197,23 @@ charset = utf-8
     const w2After = await resolver.resolveForFile({ workspaceId: "w2", filePath: "/project/src/index.ts" });
     expect(w2After.indentSize).toBe(2);
   });
+
+  it("aborts chain traversal and records warning diagnostic when file is outside root directory", async () => {
+    virtualFiles.set(
+      "/project/.editorconfig",
+      `root = true\n[*]\nindent_size = 8\n`
+    );
+
+    const result = await resolver.resolveForFile({
+      workspaceId: "w1",
+      rootPath: "/project/app",
+      filePath: "/other-dir/test.ts",
+    });
+
+    expect(result.source).toBe("language-default");
+    expect(result.diagnostics.length).toBeGreaterThan(0);
+    expect(result.diagnostics[0]?.severity).toBe("warning");
+    expect(result.diagnostics[0]?.message).toContain("is outside root directory");
+  });
 });
+

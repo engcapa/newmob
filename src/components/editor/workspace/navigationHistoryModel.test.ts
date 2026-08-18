@@ -1,6 +1,7 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
   NavigationHistoryTracker,
+  isPathContainedInRoot,
 } from "./navigationHistoryModel";
 
 describe("navigationHistoryModel", () => {
@@ -131,4 +132,67 @@ describe("navigationHistoryModel", () => {
 
     unsub();
   });
+
+  it("identifies paths contained inside root directory accurately", () => {
+    expect(isPathContainedInRoot("/project/src/Main.java", "/project")).toBe(true);
+    expect(isPathContainedInRoot("/project/src/Main.java", "/project/")).toBe(true);
+    expect(isPathContainedInRoot("/project-other/src/Main.java", "/project")).toBe(false);
+    expect(isPathContainedInRoot("/var/log/app.log", "/project")).toBe(false);
+  });
+
+  it("relocates and removes file locations on rename and delete", () => {
+    tracker.recordLocation({
+      workspaceId: "ws-1",
+      fileIdentity: "f1",
+      filePath: "/src/OldName.java",
+      title: "OldName.java",
+      line: 10,
+      character: 0,
+      lineText: "class OldName {}",
+      contextSnippet: "class OldName {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    tracker.relocateFile("/src/OldName.java", "/src/NewName.java", "ws-1");
+    expect(tracker.getRecentLocations()[0].filePath).toBe("/src/NewName.java");
+    expect(tracker.getRecentLocations()[0].title).toBe("NewName.java");
+
+    tracker.removeFileLocations("/src/NewName.java", "ws-1");
+    expect(tracker.getRecentLocations()).toHaveLength(0);
+  });
+
+  it("filters locations by workspaceId", () => {
+    tracker.recordLocation({
+      workspaceId: "ws-1",
+      fileIdentity: "f1",
+      filePath: "/src/A.java",
+      title: "A.java",
+      line: 1,
+      character: 0,
+      lineText: "class A {}",
+      contextSnippet: "class A {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    tracker.recordLocation({
+      workspaceId: "ws-2",
+      fileIdentity: "f2",
+      filePath: "/src/B.java",
+      title: "B.java",
+      line: 1,
+      character: 0,
+      lineText: "class B {}",
+      contextSnippet: "class B {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    expect(tracker.getRecentLocations(false, "ws-1")).toHaveLength(1);
+    expect(tracker.getRecentLocations(false, "ws-1")[0].title).toBe("A.java");
+    expect(tracker.getRecentLocations(false, "ws-2")).toHaveLength(1);
+    expect(tracker.getRecentLocations(false, "ws-2")[0].title).toBe("B.java");
+  });
 });
+

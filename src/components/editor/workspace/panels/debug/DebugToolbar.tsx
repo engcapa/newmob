@@ -117,9 +117,10 @@ export function DebugStepControls({
 }: DebugStepControlsProps) {
   const [isStepping, setIsStepping] = useState(false);
   const supportsStepBack = debug.capabilities.supportsStepBack === true;
+  const stepping = debug.isStepping || isStepping;
 
   const handleStep = async (action: DebugStepAction) => {
-    if (isStepping || !stopped) return;
+    if (stepping || !stopped) return;
     setIsStepping(true);
     try {
       await debug.step(action);
@@ -130,7 +131,7 @@ export function DebugStepControls({
     }
   };
 
-  const isControlsDisabled = !stopped || isStepping;
+  const isControlsDisabled = !stopped || stepping;
 
   return (
     <div

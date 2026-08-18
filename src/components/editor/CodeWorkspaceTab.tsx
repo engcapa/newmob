@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -6,6 +7,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
 import {
@@ -169,6 +171,12 @@ import {
   type ExplicitIndentationOverride,
   resolveEffectiveCodeStyle,
 } from "./workspace/codeStyleModel";
+import {
+  globalEditorConfigResolver,
+  type ResolvedCodeStyle,
+} from "./workspace/editorConfigResolver";
+import { isPathContainedInRoot } from "./workspace/navigationHistoryModel";
+import type { LayoutNode } from "./workspace/recursiveLayoutTree";
 import { runSaveNormalizationPipeline } from "./workspace/saveNormalizationPipeline";
 import { historySnapshot } from "../../lib/localHistory";
 import {
@@ -1326,8 +1334,37 @@ export function CodeWorkspaceTab({
   const indentationOverridesRef = useRef(indentationOverrides);
   indentationOverridesRef.current = indentationOverrides;
 
+  const resolvedCodeStylesRef = useRef<Record<string, ResolvedCodeStyle>>({});
+
+  useEffect(() => {
+    globalEditorConfigResolver.setFileProvider({
+      readFile: async (absolutePath: string) => {
+        const normalized = normalizeFsPath(absolutePath);
+        for (const root of rootsRef.current) {
+          const rel = relativePathWithinRoot(root.path, normalized);
+          if (rel !== null) {
+            try {
+              const res = await workspaceReadFile(root.path, rel);
+              return res.text;
+            } catch {
+              return null;
+            }
+          }
+        }
+        try {
+          const res = await workspaceReadLooseFile(normalized);
+          return res.text;
+        } catch {
+          return null;
+        }
+      },
+    });
+  }, []);
+
   const getEffectiveCodeStyleForFile = useCallback((file: { key: string; languagePath: string; text: string } | null): EffectiveCodeStyle | undefined => {
     if (!file) return undefined;
+    const asyncResolved = resolvedCodeStylesRef.current[file.key];
+    if (asyncResolved) return asyncResolved;
     const explicitOverride = indentationOverridesRef.current[file.key];
     return resolveEffectiveCodeStyle({
       filePath: file.languagePath,
@@ -3154,6 +3191,9 @@ export function CodeWorkspaceTab({
           );
       const savedPath = absolutePathForOpenFile(file);
       if (savedPath) {
+        if (savedPath.endsWith(".editorconfig")) {
+          globalEditorConfigResolver.invalidate(savedPath);
+        }
         await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
           path: savedPath,
           type: 2,
@@ -3243,10 +3283,19 @@ export function CodeWorkspaceTab({
     if (capabilities && !useRange && !capabilities.formatting) return null;
     if (capabilities && useRange && !capabilities.rangeFormatting) return null;
 
-    const codeStyle = getEffectiveCodeStyleForFile(file) ?? resolveEffectiveCodeStyle({
-      filePath: file.languagePath,
+    const root = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
+    const rootPath = root?.path;
+    const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
+    const codeStyle = await globalEditorConfigResolver.resolveForFile({
+      workspaceId: workspaceInstanceId,
+      rootId: file.ref.kind === "root" ? file.ref.rootId : undefined,
+      rootPath,
+      filePath: absPath,
+      explicitOverride: indentationOverridesRef.current[file.key],
       text: file.text,
     });
+    resolvedCodeStylesRef.current[file.key] = codeStyle;
+
     const result = useRange && selection
       ? await lspRangeFormatting(descriptor, {
         start: selection.start,
@@ -3262,7 +3311,7 @@ export function CodeWorkspaceTab({
     updateLspStatusForFile(file, result.status);
     if (!result.edits.length) return file.text;
     return applyLspTextEditsToString(file.text, result.edits);
-  }, [getEffectiveCodeStyleForFile, lspDescriptorForFile, updateLspStatusForFile]);
+  }, [absolutePathForOpenFile, findRoot, lspDescriptorForFile, updateLspStatusForFile, workspaceInstanceId]);
 
   const promptReloadProject = useCallback(
     async (key: string, subtitle: string) => {
@@ -3294,10 +3343,18 @@ export function CodeWorkspaceTab({
       let textToSave = file.text;
       let formatError: string | null = null;
 
-      const codeStyle = getEffectiveCodeStyleForFile(file) ?? resolveEffectiveCodeStyle({
-        filePath: file.languagePath,
+      const root = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
+      const rootPath = root?.path;
+      const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
+      const codeStyle = await globalEditorConfigResolver.resolveForFile({
+        workspaceId: workspaceInstanceId,
+        rootId: file.ref.kind === "root" ? file.ref.rootId : undefined,
+        rootPath,
+        filePath: absPath,
+        explicitOverride: indentationOverridesRef.current[file.key],
         text: file.text,
       });
+      resolvedCodeStylesRef.current[file.key] = codeStyle;
 
       try {
         const normResult = await runSaveNormalizationPipeline({
@@ -3443,6 +3500,7 @@ export function CodeWorkspaceTab({
 
   const applyDiskSnapshot = useCallback((file: OpenFileState, disk: ExternalDiskSnapshot) => {
     const latest = openFilesRef.current[file.key] ?? file;
+    lastTrackedBufferTextRef.current[file.key] = disk.text;
     const next: OpenFileState = {
       ...latest,
       text: disk.text,
@@ -3482,6 +3540,9 @@ export function CodeWorkspaceTab({
 
   const handleExternalFileChange = useCallback(async (change: LspExternalFileChange) => {
     const normalizedPath = normalizeFsPath(change.path);
+    if (normalizedPath.endsWith(".editorconfig")) {
+      globalEditorConfigResolver.invalidate(normalizedPath);
+    }
     semanticIndex.invalidate("external-file-change", [normalizedPath]);
     const file = Object.values(openFilesRef.current).find((candidate) => {
       const absolute = absolutePathForOpenFile(candidate);
@@ -7431,7 +7492,19 @@ export function CodeWorkspaceTab({
     const isEdit = prevText !== undefined && prevText !== activeFileText;
     lastTrackedBufferTextRef.current[activeFile.key] = activeFileText;
 
+    let sourceOwnership: "workspace" | "library" | "external" = "external";
+    if (activeFile.library) {
+      sourceOwnership = "library";
+    } else {
+      const activeFilePath = activeFile.path ?? activeFile.title;
+      const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
+      if (isInsideAnyRoot) {
+        sourceOwnership = "workspace";
+      }
+    }
+
     navigationHistoryTracker.recordLocation({
+      workspaceId: workspaceInstanceId,
       fileIdentity: activeFile.key,
       filePath: activeFile.path ?? activeFile.title,
       title: activeFile.title,
@@ -7440,9 +7513,9 @@ export function CodeWorkspaceTab({
       lineText,
       contextSnippet,
       isEditLocation: isEdit,
-      sourceOwnership: "workspace",
+      sourceOwnership,
     });
-  }, [activeEditorGroupId, activeFile, activeFileLoading, activeFileText, cursorPositions, visible]);
+  }, [activeEditorGroupId, activeFile, activeFileLoading, activeFileText, cursorPositions, visible, workspaceInstanceId]);
 
   const getLspCompletions = useCallback(
     async (
@@ -9868,6 +9941,42 @@ export function CodeWorkspaceTab({
     );
   };
 
+  const renderRecursiveLayoutNode = (
+    node: LayoutNode,
+    renderGroup: (groupId: EditorGroupId) => ReactNode,
+  ): ReactNode => {
+    if (node.type === "leaf") {
+      const groupId = (node.id === "secondary" ? "secondary" : "primary") as EditorGroupId;
+      return renderGroup(groupId);
+    }
+    return (
+      <PanelGroup
+        key={node.id}
+        orientation={node.orientation === "vertical" ? "horizontal" : "vertical"}
+        id={`recursive-split-${node.id}`}
+        className="h-full min-h-0"
+      >
+        {node.children.map((child, index) => {
+          const pct = node.ratios[index] ? `${Math.round(node.ratios[index] * 100)}%` : `${Math.round(100 / node.children.length)}%`;
+          return (
+            <Fragment key={child.id}>
+              {index > 0 && (
+                <PanelResizeHandle
+                  className={node.orientation === "vertical"
+                    ? "w-[3px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)]"
+                    : "h-[3px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)]"}
+                />
+              )}
+              <Panel id={`panel-${child.id}`} defaultSize={pct} minSize="10%" className="min-h-0 min-w-0">
+                {renderRecursiveLayoutNode(child, renderGroup)}
+              </Panel>
+            </Fragment>
+          );
+        })}
+      </PanelGroup>
+    );
+  };
+
   return (
     <div
       ref={rootRef}
@@ -10188,7 +10297,11 @@ export function CodeWorkspaceTab({
             minSize={languagePanelOpen ? "30%" : "40%"}
             className="min-w-0"
           >
-          {splitOrientation ? (
+          {workspaceUi.layoutTreeV2 ? (
+            <div data-testid="code-workspace-editor-split" className="h-full min-h-0">
+              {renderRecursiveLayoutNode(workspaceUi.layoutTreeV2, renderEditorGroup)}
+            </div>
+          ) : splitOrientation ? (
             <div data-testid="code-workspace-editor-split" className="h-full min-h-0">
               <PanelGroup
                 orientation={splitOrientation === "vertical" ? "horizontal" : "vertical"}
@@ -10616,6 +10729,7 @@ export function CodeWorkspaceTab({
         onPickRecent={pickRecentFile}
         recentLocationsOpen={recentLocationsOpen}
         recentLocationsChangedOnly={recentLocationsChangedOnly}
+        workspaceId={workspaceInstanceId}
         onCloseRecentLocations={() => setRecentLocationsOpen(false)}
         onPickRecentLocation={(loc) => {
           setRecentLocationsOpen(false);

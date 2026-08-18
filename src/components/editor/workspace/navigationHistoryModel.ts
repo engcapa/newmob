@@ -7,6 +7,7 @@
 
 export interface NavigationLocation {
   id: string;
+  workspaceId?: string;
   fileIdentity: string;
   filePath: string;
   title: string;
@@ -98,12 +99,14 @@ export class NavigationHistoryTracker {
     return newEntry;
   }
 
-  getRecentLocations(changedOnly: boolean = false): NavigationLocation[] {
-    return changedOnly ? this.editLocations : this.locations;
+  getRecentLocations(changedOnly: boolean = false, workspaceId?: string): NavigationLocation[] {
+    const list = changedOnly ? this.editLocations : this.locations;
+    if (!workspaceId) return list;
+    return list.filter((loc) => !loc.workspaceId || loc.workspaceId === workspaceId);
   }
 
-  searchLocations(query: string, changedOnly: boolean = false): NavigationLocation[] {
-    const list = this.getRecentLocations(changedOnly);
+  searchLocations(query: string, changedOnly: boolean = false, workspaceId?: string): NavigationLocation[] {
+    const list = this.getRecentLocations(changedOnly, workspaceId);
     const q = query.trim().toLowerCase();
     if (!q) return list;
 
@@ -117,6 +120,30 @@ export class NavigationHistoryTracker {
     });
   }
 
+  relocateFile(oldPath: string, newPath: string, workspaceId?: string): void {
+    let changed = false;
+    const newTitle = newPath.split("/").pop() ?? newPath;
+    for (const loc of [...this.locations, ...this.editLocations]) {
+      if ((!workspaceId || !loc.workspaceId || loc.workspaceId === workspaceId) && loc.filePath === oldPath) {
+        loc.filePath = newPath;
+        loc.fileIdentity = loc.fileIdentity.replace(oldPath, newPath);
+        loc.title = newTitle;
+        changed = true;
+      }
+    }
+    if (changed) this.notify();
+  }
+
+  removeFileLocations(filePath: string, workspaceId?: string): void {
+    this.locations = this.locations.filter(
+      (loc) => (workspaceId && loc.workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
+    );
+    this.editLocations = this.editLocations.filter(
+      (loc) => (workspaceId && loc.workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
+    );
+    this.notify();
+  }
+
   clear(): void {
     this.locations = [];
     this.editLocations = [];
@@ -125,3 +152,4 @@ export class NavigationHistoryTracker {
 }
 
 export const navigationHistoryTracker = new NavigationHistoryTracker();
+

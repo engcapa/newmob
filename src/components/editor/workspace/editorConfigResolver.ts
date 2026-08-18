@@ -146,8 +146,9 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
       diagnostics?.push({
         path: filePath,
         message: `File path "${filePath}" is outside root directory "${rootPath}".`,
-        severity: "info",
+        severity: "warning",
       });
+      return [];
     }
 
     // Collect directory segments

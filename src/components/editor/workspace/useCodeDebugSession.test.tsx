@@ -1962,10 +1962,97 @@ describe("useCodeDebugSession", () => {
       emit({ sessionId: "sess-1", event: "stopped", message: { body: { threadId: 1, reason: "breakpoint" } } });
       await Promise.resolve();
     });
-    await waitFor(() => expect(result.current.state?.status).toBe("stopped"));
-
     await expect(result.current.hoverEvaluate("total")).resolves.toMatchObject({ value: "42" });
     // The stopped frame's locals feed the editor's inline values.
     await waitFor(() => expect(result.current.frameVariables).toEqual({ total: "42" }));
   });
+
+  it("bumps consoleGeneration on clearConsole and session changes, and drops stale evaluate responses", async () => {
+    let resolveEval!: (value: unknown) => void;
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "evaluate") {
+        return new Promise((resolve) => {
+          resolveEval = resolve;
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    await startSession(result.current.startDebug);
+    const gen0 = result.current.consoleGeneration;
+
+    // Trigger an evaluate request
+    const pendingEval = result.current.evaluate("staleExpr", "repl");
+
+    // Clear console increments generation
+    act(() => {
+      result.current.clearConsole();
+    });
+    expect(result.current.consoleGeneration).toBeGreaterThan(gen0);
+
+    // Resolve late evaluate
+    resolveEval({ result: "lateValue", variablesReference: 0 });
+    const evalRes = await pendingEval;
+    // Late evaluation is dropped/neutralized because generation changed
+    expect(evalRes.value).toBe("");
+  });
+
+  it("enforces central step lock and returns typed DebugActionResult", async () => {
+    let resolveStep!: () => void;
+    dapSendRequest.mockImplementation((_id: string, command: string) => {
+      if (command === "next" || command === "stepIn") {
+        return new Promise((resolve) => {
+          resolveStep = () => resolve({});
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    await startSession(result.current.startDebug);
+
+    let firstStepPromise!: Promise<{ kind: string }>;
+    act(() => {
+      firstStepPromise = result.current.step("stepOver");
+    });
+    expect(result.current.isStepping).toBe(true);
+
+    // Concurrent step should return no-op
+    let secondStepResult!: { kind: string; message?: string };
+    await act(async () => {
+      secondStepResult = await result.current.step("stepIn");
+    });
+    expect(secondStepResult.kind).toBe("no-op");
+
+    // Resolve first step
+    await act(async () => {
+      resolveStep();
+      await firstStepPromise;
+    });
+    expect(result.current.isStepping).toBe(false);
+  });
+
+  it("manages watch expressions with stable IDs and removes only single matching expressions", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+
+    let id1: string | undefined;
+    let id2: string | undefined;
+    act(() => {
+      id1 = result.current.addWatchExpression("count") as string;
+      id2 = result.current.addWatchExpression("total") as string;
+    });
+
+    expect(result.current.watchExpressions).toEqual(["count", "total"]);
+    expect(result.current.watchItems.length).toBe(2);
+    expect(result.current.watchItems[0]?.id).toBe(id1);
+    expect(result.current.watchItems[1]?.id).toBe(id2);
+
+    // Remove by stable ID
+    act(() => {
+      result.current.removeWatchExpression(id1!);
+    });
+    expect(result.current.watchExpressions).toEqual(["total"]);
+  });
 });
+

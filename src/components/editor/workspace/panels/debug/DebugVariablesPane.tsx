@@ -199,11 +199,11 @@ export function DebugVariablesPane({
             ) : (
               watchNodes.map((node, i) => (
                 <VariableRow
-                  key={`${node.name}:${i}`}
+                  key={node.watchId ?? `${node.name}:${i}`}
                   node={node}
                   depth={0}
                   onExpand={onExpandWatch}
-                  onRemove={() => onRemoveWatch(node.name)}
+                  onRemove={() => onRemoveWatch(node.watchId ?? node.name)}
                   onAddDataBreakpoint={canAddDataBreakpoint ? onAddDataBreakpoint : undefined}
                   addingDataBreakpointKey={addingDataBreakpointKey}
                   onContextMenu={onVariableContextMenu}

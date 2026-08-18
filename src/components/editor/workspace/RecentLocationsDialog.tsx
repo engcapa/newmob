@@ -10,6 +10,7 @@ export interface RecentLocationsDialogProps {
   onClose: () => void;
   onSelectLocation: (location: NavigationLocation) => void;
   initialChangedOnly?: boolean;
+  workspaceId?: string;
 }
 
 export function RecentLocationsDialog({
@@ -17,6 +18,7 @@ export function RecentLocationsDialog({
   onClose,
   onSelectLocation,
   initialChangedOnly = false,
+  workspaceId,
 }: RecentLocationsDialogProps) {
   const [search, setSearch] = useState("");
   const [changedOnly, setChangedOnly] = useState(initialChangedOnly);
@@ -40,8 +42,8 @@ export function RecentLocationsDialog({
   const locations = useMemo(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     revision;
-    return navigationHistoryTracker.searchLocations(search, changedOnly);
-  }, [search, changedOnly, revision]);
+    return navigationHistoryTracker.searchLocations(search, changedOnly, workspaceId);
+  }, [search, changedOnly, revision, workspaceId]);
 
   useEffect(() => {
     setSelectedIndex(0);

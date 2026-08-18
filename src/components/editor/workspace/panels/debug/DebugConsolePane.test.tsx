@@ -22,6 +22,8 @@ function makeConsoleSession(overrides: Partial<CodeDebugSession> = {}): CodeDebu
     capabilities: {},
     availableExceptionFilters: [],
     watchExpressions: [],
+    watchItems: [],
+    isStepping: false,
     breakpointsMuted: false,
     setBreakpointsMuted: vi.fn(),
     removeAllBreakpoints: vi.fn(),

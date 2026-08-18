@@ -36,7 +36,9 @@ export function DebugConsolePane({ debug, stopped, visible = true }: DebugConsol
     void debug.evaluate(expr, "repl").then((result) => {
       if (debug.consoleGeneration !== curGen) return;
       if (curSessionId && debug.state?.sessionId !== curSessionId) return;
-      debug.logConsole("result", `${result.value}\n`);
+      if (result.value) {
+        debug.logConsole("result", `${result.value}\n`);
+      }
     });
   }, [debug, consoleInput]);
 

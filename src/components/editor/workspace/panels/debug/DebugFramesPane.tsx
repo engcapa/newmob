@@ -255,7 +255,16 @@ export function DebugFramesPane({
         </div>
 
         {/* Step controls footer */}
-        <DebugStepControls debug={debug} stopped={stopped} />
+        <DebugStepControls
+          debug={debug}
+          stopped={stopped}
+          onShowExecutionPoint={() => {
+            const frame = state?.frames.find((f) => f.id === state.selectedFrameId) ?? state?.frames[0];
+            if (frame && (frame.path || frame.sourceReference > 0)) {
+              onOpenFrame(frame);
+            }
+          }}
+        />
       </div>
 
       {frameMenu.render}

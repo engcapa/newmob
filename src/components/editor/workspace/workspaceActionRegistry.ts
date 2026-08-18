@@ -280,6 +280,7 @@ class ActionRegistry {
         if (currentStack.length > 0) {
           const restored = currentStack[currentStack.length - 1];
           this.actions.set(resolvedId, restored);
+          this.notify({ type: "registered", actionId: resolvedId });
           this.notify({ type: "state-changed", actionId: resolvedId });
         } else {
           this.actionStacks.delete(resolvedId);

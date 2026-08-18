@@ -116,25 +116,33 @@ export function useDebugVariables(
   }, [fetchScopes, fetchVariables, selectedFrameId]);
 
   // Re-evaluate watch expressions on each stop / frame change / edit.
-  const watchExpressions = debug.watchExpressions;
+  const watchItems = debug.watchItems ?? debug.watchExpressions.map((e, i) => ({ id: `watch-${i}`, expression: e }));
   useEffect(() => {
     let cancelled = false;
     if (!stopped || selectedFrameId == null) {
-      setWatchNodes(watchExpressions.map((expr) => ({
-        name: expr, value: "", type: null, variablesReference: 0, parentRef: 0, children: null, expanded: false,
+      setWatchNodes(watchItems.map((item) => ({
+        name: item.expression,
+        watchId: item.id,
+        value: "",
+        type: null,
+        variablesReference: 0,
+        parentRef: 0,
+        children: null,
+        expanded: false,
         dataBreakpointExpression: true,
       })));
       return;
     }
     void (async () => {
-      const next = await Promise.all(watchExpressions.map(async (expr) => {
-        const result = await evaluate(expr, "watch");
-        const key = `watch:${expr}`;
+      const next = await Promise.all(watchItems.map(async (item) => {
+        const result = await evaluate(item.expression, "watch");
+        const key = `watch:${item.id}`;
         const prev = previousValuesRef.current.get(key);
         previousValuesRef.current.set(key, result.value);
         const hasChanged = prev !== undefined && prev !== result.value;
         return {
-          name: expr,
+          name: item.expression,
+          watchId: item.id,
           value: result.value,
           type: result.type,
           variablesReference: result.variablesReference,
@@ -148,7 +156,7 @@ export function useDebugVariables(
       if (!cancelled) setWatchNodes(next);
     })();
     return () => { cancelled = true; };
-  }, [evaluate, stopped, selectedFrameId, watchExpressions, watchTick]);
+  }, [evaluate, stopped, selectedFrameId, watchItems, watchTick]);
 
   const filterAndSort = useCallback((nodes: VarNode[]): VarNode[] => {
     let result = nodes;

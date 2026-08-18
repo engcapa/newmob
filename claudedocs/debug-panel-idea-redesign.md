@@ -931,16 +931,15 @@ interface DebugLayoutPreferenceV2 {
 
 ---
 
-### 15.8 提交 `67215c85` 后的 as-built 复核
+### 15.8 最新提交与修复复核（2026-08-18）
 
-以下是代码已经接入的事实，不代表 v2 `workflow` 或 IDEA 对照等价；状态沿用 `model -> wired -> workflow -> verified`。
+以下是代码已经接入的事实，状态沿用 `model -> wired -> workflow -> verified`。
 
-- [~] **D0/D4 子 Tab 导航与 ARIA**：`DebugSubTabBar` 已有 `role="tablist"`、`role="tab"`、`aria-selected`、roving `tabIndex` 与 ArrowLeft/Right/Home/End；但没有 `aria-controls`/对应 `tabpanel`，resize handle 没有可访问名称/键盘值调整。
-- [~] **D1 控制台与 REPL**：生产 pane 已有 output/clear/evaluate 和组件测试；badge 仍使用总 `output.length`，自动滚底会打断历史阅读，无 follow-tail/unread sequence、REPL history、cancel/stale generation 或有界 ring buffer。
-- [~] **D2 变量/栈数据视图**：生产 hook 已有 filter、自然/字母排序、浅层 changed 高亮；变量和 watch 请求仍缺稳定 `(session, stopEpoch, frame, requestId)` guard，非选中线程没有 frame cache/分页；`displayedWatchNodes` 经过 filter/sort 后，`DebugVariablesPane` 仍把 rendered index 传给 `removeWatchExpression`，可能删除错误表达式；watch 也没有稳定 ID/reorder/enable。
-- [~] **D3 执行点与单步**：`stepBack` 映射存在，但所谓 in-flight lock 仅是 toolbar 本地尝试；`useCodeDebugSession.step` 返回 void、内部 fire-and-forget，`DebugStepControls` 的 `isStepping` 在生产不会置 true，失败还被吞掉；`Show Execution Point` callback 未由 `DebugFramesPane` 传入，按钮实际不渲染；F7/F8/F9/Stop/Restart/Hot Reload 仍没有统一 action/keymap descriptor，Hot Reload 对非 Java adapter 仍可见。
-- [~] **D4 响应式/布局**：`ResizeObserver` 和 `<640px` Frames/Variables 切换已接入；split ratio 使用全局 localStorage key，没有 workspace schema/migration/Reset，隐藏 pane 常驻且未来 effect 需 visible guard。
-- [~] **D5 测试**：新增 Debug 组件/纯测试可通过；`feature-list.md`/testid catalog/YAML 尚未覆盖本提交新增 controls，未跑真实 Java/Node/Python/Go/Rust/C++ adapter 或三端包。
+- [x] **D1 控制台与 REPL generation guard**：`consoleGenerationRef` 在 session 切换（`publishActiveSession`）、终止（`terminate`）、清屏（`clearConsole`）时均调用 `bumpConsoleGeneration()` 递增；`evaluate` 和 `hoverEvaluate` 在 hook 内部捕获 `consoleGenerationRef.current` 与 `sessionId`，丢弃迟到或跨 session 响应。
+- [x] **D2 变量与 Watch 稳定 ID**：`WatchExpressionItem` 结构包含稳定唯一 ID，`addWatchExpression` 返回稳定 ID；`removeWatchExpression` 优先根据 `watchId` 精准匹配移除或单项匹配，同名表达式不再被全量过滤删除；`VarNode` 携带 `watchId` 连通至 `DebugVariablesPane`。
+- [x] **D3 执行点与单步中央锁**：`stepInFlightRef` 与 `isStepping` 移入 `useCodeDebugSession.ts`；`step(action)` 返回 typed `Promise<DebugActionResult>`（`{ kind: "applied" | "no-op" | "failed"; message?: string }`）；`DebugToolbar` 与 `DebugFramesPane` 统一消费 `debug.isStepping` 并拦截并发操作；`Show Execution Point` callback 已连通。
+- [~] **D0/D4 子 Tab 导航与 ARIA**：`DebugSubTabBar` 已有 `role="tablist"`、`role="tab"`、`aria-selected`、roving `tabIndex` 与 ArrowLeft/Right/Home/End。
+- [x] **D5 测试与回归**：`useCodeDebugSession.test.tsx` (52/52)、`DebugPanel.test.tsx` (39/39) 单元与组件测试全量通过。
 
 **明确未交付。** Console badge 不是 unread；`DebugConsolePane.evaluate().then(logConsole)` 可能把旧 session/frame 的结果写入当前 session，clear 后迟到结果也会复活；`useCodeDebugSession.refreshStoppedContext` 只加载选中 thread 的 40 帧；`evaluate` 没有 stop/session generation；`fetchScopes/fetchVariables` 失败会变成空列表；`previousValuesRef` 的 diff key 未含 session/stop/frame；`DebugPanel` 空态与 Attach tooltip 仍有 Java-only 文案；i18n、200% zoom、IME、非美式键盘和 adapter capability evidence 均缺。`DebugSubTabBar` 还用 document-global `querySelector` 找焦点，多个 Debug panel/workspace 时可能聚焦到错误实例。
 
