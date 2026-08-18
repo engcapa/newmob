@@ -1,6 +1,6 @@
 # Debug 底部面板 IDEA 对齐重设计
 
-> 状态：**v1 布局已交付，v2 为 wired/partial，正确性收口待开发**。最新代码审计基线为 `67215c85`（前序基线 `61b361f4`）；真实 adapter、三端、Console 未读/follow-tail、per-thread frame cache、统一 stepping action、布局按 workspace 持久化和完整 i18n 仍未完成。
+> 状态：**v1 布局已交付，v2 为 wired/partial，正确性收口待开发**。最新代码审计基线为当前分支 HEAD；单步中央锁、Show Execution Point 和运行期 Watch ID 已接线，但统一 Debug Action Service、per-session Console epoch、未读/follow-tail、per-thread frame cache、布局按 workspace 持久化、完整 i18n、真实 adapter 与三端证据仍未完成。
 > 日期：2026-08-18
 > 文档结构：§1–§12 保留原始布局方案；§13 是 v1 与最新提交的 as-built 对账；§14–§15 保留 v2 设计合同；§16 是本次审计后的下一轮权威待办。
 > 当前范围：v1 只重组 `DebugPanel.tsx` 及子组件；v2 允许按 §15 扩展 `dapDebugModel.ts`、`useCodeDebugSession.ts`、Action Service 和 QA catalog，但不修改 Rust DAP kernel，除非单独任务明确列出协议缺口。
@@ -931,23 +931,39 @@ interface DebugLayoutPreferenceV2 {
 
 ---
 
-### 15.8 最新提交与修复复核（2026-08-18）
+### 15.8 最新提交再复核（2026-08-18）
 
 以下是代码已经接入的事实，状态沿用 `model -> wired -> workflow -> verified`。
 
-- [x] **D1 控制台与 REPL generation guard**：`consoleGenerationRef` 在 session 切换（`publishActiveSession`）、终止（`terminate`）、清屏（`clearConsole`）时均调用 `bumpConsoleGeneration()` 递增；`evaluate` 和 `hoverEvaluate` 在 hook 内部捕获 `consoleGenerationRef.current` 与 `sessionId`，丢弃迟到或跨 session 响应。
-- [x] **D2 变量与 Watch 稳定 ID**：`WatchExpressionItem` 结构包含稳定唯一 ID，`addWatchExpression` 返回稳定 ID；`removeWatchExpression` 优先根据 `watchId` 精准匹配移除或单项匹配，同名表达式不再被全量过滤删除；`VarNode` 携带 `watchId` 连通至 `DebugVariablesPane`。
-- [x] **D3 执行点与单步中央锁**：`stepInFlightRef` 与 `isStepping` 移入 `useCodeDebugSession.ts`；`step(action)` 返回 typed `Promise<DebugActionResult>`（`{ kind: "applied" | "no-op" | "failed"; message?: string }`）；`DebugToolbar` 与 `DebugFramesPane` 统一消费 `debug.isStepping` 并拦截并发操作；`Show Execution Point` callback 已连通。
+- [~] **D1 控制台与 REPL generation guard**：clear 与公开 `terminate()` 会 bump generation，`evaluate`/`hoverEvaluate` 已在 hook 内检查 generation + sessionId；但 `publishActiveSession`/`selectSession`、间接 terminate、continue/new stop/frame change 不会 bump，旧 A session 请求在 A→B→A 后仍可能被接受。stale evaluate 返回空结果而非 typed stale/cancelled，pane 的 Promise 链仍可能追加空 result。
+- [~] **D2 变量与 Watch 稳定 ID**：当前 mount 内 `WatchExpressionItem.id` 已贯通到 pane，filter/sort 后删除按 watchId 精准执行；但持久化仍只保存 expression、重载会重建随机 ID，且缺 reorder/enable/per-watch error。scopes/variables/watch response 仍无完整 `(session,stopEpoch,frame,requestId)` guard。
+- [~] **D3 执行点与单步中央锁**：`stepInFlightRef/isStepping` 已移入 hook，`step()` 返回 typed result，toolbar/keymap 最终共享中央锁，Show Execution Point 已连通；但还没有 capability-driven Debug Action Service，Hot Reload 仍对任意 adapter 可见并发送 Java `redefineClasses` 私有请求，其它 action 入口也未统一 descriptor。
 - [~] **D0/D4 子 Tab 导航与 ARIA**：`DebugSubTabBar` 已有 `role="tablist"`、`role="tab"`、`aria-selected`、roving `tabIndex` 与 ArrowLeft/Right/Home/End。
-- [x] **D5 测试与回归**：`useCodeDebugSession.test.tsx` (52/52)、`DebugPanel.test.tsx` (39/39) 单元与组件测试全量通过。
+- [~] **D5 测试与回归**：本轮 11 个相关测试文件、195 tests 通过；这是 unit/component 回归证据，不等于 fake DAP、真实 adapter、QA YAML、性能或三端门禁完成。
 
-**明确未交付。** Console badge 不是 unread；`DebugConsolePane.evaluate().then(logConsole)` 可能把旧 session/frame 的结果写入当前 session，clear 后迟到结果也会复活；`useCodeDebugSession.refreshStoppedContext` 只加载选中 thread 的 40 帧；`evaluate` 没有 stop/session generation；`fetchScopes/fetchVariables` 失败会变成空列表；`previousValuesRef` 的 diff key 未含 session/stop/frame；`DebugPanel` 空态与 Attach tooltip 仍有 Java-only 文案；i18n、200% zoom、IME、非美式键盘和 adapter capability evidence 均缺。`DebugSubTabBar` 还用 document-global `querySelector` 找焦点，多个 Debug panel/workspace 时可能聚焦到错误实例。
+**明确未交付。** Console seq/unread/follow-tail/ring buffer/REPL history 尚无；evaluate 未绑定 stopEpoch/frame/requestId，跨 session publish 与间接 terminate 不递增 generation；`refreshStoppedContext/selectThread` 仍只维护单线程 40 帧；`fetchScopes/fetchVariables` 失败仍折叠成空数组；value diff key 未完整包含 session/stop/frame；Watch 缺 reorder/enable/error；Hot Reload 未 capability gate；Debug layout 仍用 global preference，ARIA/i18n/隐藏 pane request guard、200% zoom、IME、非美式键盘、QA catalog、真实 adapter 与三端 evidence 均缺。
 
 ## 16. v2.1 下一轮权威待办（面向其它 agent）
 
-本节以 `67215c85` 的实际代码为起点。每个包必须同时提交：生产 host 接线、typed state/result、取消/失败/恢复语义、纯/组件测试、QA catalog/YAML 变更和适用的真实 adapter 证据。单测直接 mock `CodeDebugSession` 不能把能力升级为 `workflow`。
+本节以最新生产代码复核为起点。每个包必须同时提交：生产 host 接线、typed state/result、取消/失败/恢复语义、纯/组件测试、QA catalog/YAML 变更和适用的真实 adapter 证据。单测直接 mock `CodeDebugSession` 不能把能力升级为 `workflow`。
+
+| 优先级 | 工作包 | 已具备 | 本轮剩余 |
+|--------|--------|--------|----------|
+| P0 | D6 Action Service | hook-level step lock；Show Point wiring | capability descriptor；所有入口统一；Hot Reload extension gate |
+| P0 | D7 Console | clear/public terminate generation guard | per-session/stop/frame/request epoch；seq/unread/follow-tail/ring/history |
+| P0 | D8 Stack/Variables/Watches | mount 内 watchId 删除 | thread paging/cache；scope/variable epoch；structured watch reorder/enable/error |
+| P1 | D9 Layout/ARIA/i18n | basic responsive/tab keyboard | workspace preference/migration/Reset；tabpanel/resizer；hidden-pane guard |
+| Gate | D10 Adapter/QA/native | unit/component tests | fake DAP、真实 adapter、catalog/YAML、性能与三端 evidence |
 
 ### D6：Debug Action Service、能力真值与执行点
+
+**本次复核后的清单：**
+
+- [x] step Promise、中央防重入状态和 Show Execution Point 已接生产。
+- [ ] 建立唯一 `DebugActionDescriptor` service，并让 toolbar/Search/keymap/keyboard 全部消费相同 state/result。
+- [ ] Hot Reload 仅在 adapter manifest 明确声明 Java extension 时注册；Node/Python/LLDB 不渲染也不发请求。
+- [ ] stepBack/runToCursor/stepInTargets/restart/stop 的 supported/available/busy/failure 均由 capability + session epoch 派生。
+- [ ] 失败不得静默吞掉；Console 记录结构化错误，Abort/terminated/continued 释放 action lock。
 
 **目标。** 工具条、子 tab badge、Search/Keymap 和快捷键只消费一个 capability-driven action descriptor；Java 私有扩展不得以通用按钮出现。
 
@@ -970,7 +986,7 @@ interface DebugActionDescriptor {
 
 从 initialize capability、session status、active child 和 request lock 派生 descriptor；`hotReload` 只有 adapter manifest 明确声明 `java.redefineClasses` 时注册。`Show Execution Point` 是 `local-navigation`：将 `debug.currentLocation` 转成 `onOpenFrame`/sourceReference 定位；必须修复当前 `DebugFramesPane -> DebugStepControls` 未传 callback 的死入口。Run to Cursor/stepInTargets/force step/step back 逐项按 capability 或 extension gating，不以普通 `stepIn` 改标题。
 
-执行契约必须由 service 持有：`run()` 返回可等待的 `Promise<ActionResult>`，并在发 request 前生成 requestId、在 continued/stopped/terminated、AbortSignal 或 failure 时释放锁。不得再依赖 `DebugStepControls` 的返回值检测来设置 `isStepping`，因为当前 `useCodeDebugSession.step` 返回 void 且内部 fire-and-forget；toolbar 只能渲染 service 的 `busy`/`failure` 状态。旧 request 的结果不能覆盖新 active child 或新 stop epoch。
+执行契约必须由 service 持有：`run()` 返回可等待的 `Promise<ActionResult>`，并在发 request 前生成 requestId、在 continued/stopped/terminated、AbortSignal 或 failure 时释放锁。现有 hook-level `stepInFlightRef` 可作为迁移基础，但 toolbar 不能继续单独推导能力或绕过 service；旧 request 的结果不能覆盖新 active child 或新 stop epoch。
 
 **文件边界。** 新建 `panels/debug/debugActionService.ts`（或等价 adapter）；修改 `DebugPanel.tsx`、`DebugToolbar.tsx`、`DebugSubTabBar.tsx`、`DebugFramesPane.tsx`、`useCodeDebugSession.ts` capability adapter、`workspaceActionRegistry` bridge、`src/lib/i18n/locales/{en,zh-CN}.ts` 和 D6 tests。不得改 Console ring buffer 或 per-thread cache。
 
@@ -979,6 +995,14 @@ interface DebugActionDescriptor {
 **验收。** Java/Node/Python/LLDB synthetic descriptors；toolbar/Search/keymap/keyboard 状态完全一致；Show Point 真实打开源文件；hot reload 在非 Java adapter 不出现；stepInTargets 0/1/N、stepBack unsupported、request failure、compound active child、keymap remap 和 i18n 文案都有组件测试与 testid。
 
 ### D7：Console sequence、unread、follow-tail 与 REPL generation
+
+**本次复核后的清单：**
+
+- [x] clear 与公开 terminate 已 bump generation；evaluate/hover 已有基础 session/generation 检查。
+- [ ] generation 改为 per-session request epoch，并在 active-session publish、所有 terminate 路径、continue/new stop、frame change、restart 和 clear 时正确失效。
+- [ ] evaluate 返回 typed `applied/stale/cancelled/failed`，pane 只为 applied append；不得以空字符串代表 stale。
+- [ ] entry 使用单调 seq + sessionId；实现 10k/2MiB ring、truncation marker、unread badge 与 24px seen 规则。
+- [ ] follow-tail、Scroll to end、每 session 100 条 REPL history、Up/Down/Esc draft 与 busy-cancel policy 完整接线。
 
 **目标。** 把 `state.output` 的无身份数组升级为 session-scoped 有界日志模型，修正当前总行数 badge、强制滚底和旧 evaluate 回填。
 
@@ -1005,6 +1029,14 @@ evaluate 请求和结果绑定 `(sessionId, frameId, stopEpoch, requestId, clear
 **验收。** hidden/visible 切换、读历史日志、离开底部、clear 后迟到结果、terminate/restart、session switch、frame/stop 变化、10k output、ANSI/多行、evaluate success/error/stale/cancel、history draft、memory/paint profile；加入 `debug-console-unread`、`debug-console-follow-tail`、`debug-console-history` QA controls，并断言旧结果不会污染另一 session 或清空后的日志。
 
 ### D8：Per-thread stack cache、分页与稳定 Variables/Watches
+
+**本次复核后的清单：**
+
+- [x] Watch UI 删除已从 rendered index 改为当前 mount 内的 watchId。
+- [ ] Watch state 持久化稳定 ID/order/enabled，提供 reorder/enable/edit/error；删除 API 移除 number/expression fallback，只接受 ID。
+- [ ] stack 建立 per-thread cache、50/200 分页、partial/error/load-more，并以 session/stop/thread/requestId 发布。
+- [ ] scopes/variables/evaluate/setVariable/data breakpoint 全部绑定 session/stop/frame/requestId，失败不能伪装成空数组。
+- [ ] diff cache key 包含 session/stop/frame/stable path；collapse/frame/session 变化后的迟到响应不得复活节点。
 
 **目标。** 停止时至少同时查看两个线程的 stack snapshot，切线程不丢缓存；所有 scopes/variables/watch 请求具备 epoch guard 和可恢复 partial 状态。
 
@@ -1034,6 +1066,15 @@ Variables cache key 为 `session/stopEpoch/frameId/scope/variablesReference`，�
 
 ### D9：Workspace-scoped layout、ARIA、i18n 与窄宽稳定性
 
+**本次复核后的清单：**
+
+- [x] 已有基础 ResizeObserver、compact pane 和 tab 键盘导航。
+- [ ] global localStorage key 迁移为 workspace/window-scoped v2 preference，并提供坏数据回退与 Reset action。
+- [ ] tab/tabpanel 使用本实例 ref 关联 `aria-controls/aria-labelledby`；禁止 document-global focus 查询。
+- [ ] separator 补 label/orientation/value/min/max 与键盘调整；toolbar 补 roving focus/visible focus ring。
+- [ ] hidden pane 传 `visible=false` 并停止 scopes/variables/evaluate effect。
+- [ ] UI 文案全部 i18n；完成 320–1024px、200% zoom、长中英文和 reduced-motion 验证。
+
 **目标。** 将两个 global localStorage key 迁移为 workspace instance preference，并完成可访问 tab/panel/resizer/toolbar。
 
 ```ts
@@ -1054,6 +1095,14 @@ interface DebugLayoutPreferenceV2 {
 **验收。** 双 workspace/多窗口 layout 隔离、迁移坏数据、Reset、compact/full 切换、键盘 tab/tabpanel/resizer、两个 Debug panel 同时 Arrow 导航仍聚焦本实例、读屏名称、200% zoom、中文长文案、隐藏 pane 无 scopes/variables/evaluate 请求；浏览器和 Tauri smoke 各一条。
 
 ### D10：Fake DAP、真实 adapter、性能与三端门禁
+
+**本次复核后的清单：**
+
+- [x] 相关 unit/component 回归当前为 11 files、195 tests 全绿。
+- [ ] 建立 fake DAP 全事件链与 supported/unsupported profiles，覆盖 stale/partial/failure/cleanup。
+- [ ] Java、Node、Python、Delve、LLDB 记录脱敏 capability/action/source/cleanup smoke evidence。
+- [ ] 同步 feature-list、testid catalog、YAML：unread/follow-tail、step busy、multi-thread/load-more、layout Reset 与 unsupported reason。
+- [ ] 完成 10k Console、20x200 frames、hidden pane no-request 性能门槛及 Linux/macOS/Windows native checklist。
 
 **目标。** 把组件 mock 之外的 Debug 语义和平台证据固化，能力矩阵以真实 adapter 为准。
 
