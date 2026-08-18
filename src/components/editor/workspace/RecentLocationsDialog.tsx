@@ -176,6 +176,21 @@ export function RecentLocationsDialog({
                       )}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
+                      {loc.state === "relocated" && (
+                        <span className="rounded bg-blue-500/20 text-blue-300 px-1.5 py-0.2 text-[10px] font-medium border border-blue-500/30" title="File moved or renamed">
+                          Relocated
+                        </span>
+                      )}
+                      {loc.state === "stale" && (
+                        <span className="rounded bg-orange-500/20 text-orange-300 px-1.5 py-0.2 text-[10px] font-medium border border-orange-500/30" title={loc.staleReason ?? "Content modified externally"}>
+                          Stale
+                        </span>
+                      )}
+                      {loc.state === "missing" && (
+                        <span className="rounded bg-red-500/20 text-red-300 px-1.5 py-0.2 text-[10px] font-medium border border-red-500/30" title="File no longer exists on disk">
+                          Missing
+                        </span>
+                      )}
                       {loc.isEditLocation && (
                         <span className="rounded bg-amber-500/20 text-amber-300 px-1.5 py-0.2 text-[10px] font-medium border border-amber-500/30">
                           Edited

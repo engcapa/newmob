@@ -157,4 +157,26 @@ describe("saveNormalizationPipeline", () => {
     expect(result.diagnostics.length).toBeGreaterThan(0);
     expect(result.diagnostics[0]).toContain("cannot be represented in Latin-1");
   });
+
+  it("populates resolvedEol, resolvedCharset, and resolvedBom in result", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      endOfLine: "crlf",
+      charset: "utf-8-bom",
+      source: "editorconfig",
+      label: "Spaces: 2",
+    };
+
+    const result = await runSaveNormalizationPipeline({
+      text: "hello world",
+      codeStyle: style,
+    });
+
+    expect(result.resolvedEol).toBe("crlf");
+    expect(result.resolvedCharset).toBe("UTF-8");
+    expect(result.resolvedBom).toBe(true);
+  });
 });

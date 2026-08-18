@@ -173,6 +173,8 @@ import {
 } from "./workspace/codeStyleModel";
 import {
   globalEditorConfigResolver,
+  createEditorConfigResolver,
+  type EditorConfigResolver,
   type ResolvedCodeStyle,
 } from "./workspace/editorConfigResolver";
 import { isPathContainedInRoot } from "./workspace/navigationHistoryModel";
@@ -731,6 +733,10 @@ export function CodeWorkspaceTab({
   const updateStoreEditorGroup = useCodeWorkspaceStore((s) => s.updateEditorGroup);
   const setStoreActiveEditorGroup = useCodeWorkspaceStore((s) => s.setActiveEditorGroup);
   const setStoreSplitOrientation = useCodeWorkspaceStore((s) => s.setSplitOrientation);
+  const splitLayoutLeaf = useCodeWorkspaceStore((s) => s.splitLayoutLeaf);
+  const closeLayoutLeaf = useCodeWorkspaceStore((s) => s.closeLayoutLeaf);
+  const moveLayoutTab = useCodeWorkspaceStore((s) => s.moveLayoutTab);
+  const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
   const seedTreeExpandIfEmpty = useCodeWorkspaceStore((s) => s.seedTreeExpandIfEmpty);
   // Ensure before first read so the selector always hits a real map entry.
   ensureWorkspaceUi(workspaceInstanceId);
@@ -1335,9 +1341,10 @@ export function CodeWorkspaceTab({
   indentationOverridesRef.current = indentationOverrides;
 
   const resolvedCodeStylesRef = useRef<Record<string, ResolvedCodeStyle>>({});
+  const editorConfigResolverRef = useRef<EditorConfigResolver>(createEditorConfigResolver());
 
   useEffect(() => {
-    globalEditorConfigResolver.setFileProvider({
+    const provider = {
       readFile: async (absolutePath: string) => {
         const normalized = normalizeFsPath(absolutePath);
         for (const root of rootsRef.current) {
@@ -1358,8 +1365,14 @@ export function CodeWorkspaceTab({
           return null;
         }
       },
-    });
-  }, []);
+    };
+    editorConfigResolverRef.current.setFileProvider(provider);
+    globalEditorConfigResolver.setFileProvider(provider);
+
+    return () => {
+      editorConfigResolverRef.current.clearWorkspace(workspaceInstanceId);
+    };
+  }, [rootsRef, workspaceInstanceId]);
 
   const getEffectiveCodeStyleForFile = useCallback((file: { key: string; languagePath: string; text: string } | null): EffectiveCodeStyle | undefined => {
     if (!file) return undefined;
@@ -2537,7 +2550,32 @@ export function CodeWorkspaceTab({
     // WorkspaceEdit, reload), so they intentionally bypass the input batch.
     openFilesRef.current = { ...openFilesRef.current, [key]: next };
     setOpenFiles((current) => ({ ...current, [key]: next }));
-  }, [setOpenFiles]);
+
+    // Record real edit location on document text change
+    const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
+    const lines = text.split("\n");
+    const lineText = lines[cursor.line] ?? "";
+    const startLine = Math.max(0, cursor.line - 1);
+    const endLine = Math.min(lines.length, cursor.line + 2);
+    const contextSnippet = lines.slice(startLine, endLine).join("\n");
+    const activeFilePath = file.path ?? file.title;
+    const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
+    const sourceOwnership = file.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
+
+    navigationHistoryTracker.recordLocation({
+      workspaceId: workspaceInstanceId,
+      fileIdentity: file.key,
+      filePath: activeFilePath,
+      title: file.title,
+      line: cursor.line,
+      character: cursor.character,
+      lineText,
+      contextSnippet,
+      isEditLocation: true,
+      reason: "edit",
+      sourceOwnership,
+    });
+  }, [activeEditorGroupId, cursorPositions, rootsRef, setOpenFiles, workspaceInstanceId]);
 
   const scheduleLiveLspSync = useCallback((key: string) => {
     const existing = liveLspSyncTimersRef.current[key];
@@ -3128,7 +3166,15 @@ export function CodeWorkspaceTab({
     t,
   ]);
 
-  const saveOpenBufferText = useCallback(async (key: string, textToSave: string) => {
+  const saveOpenBufferText = useCallback(async (
+    key: string,
+    textToSave: string,
+    saveOptions?: {
+      eol?: "lf" | "crlf" | "cr";
+      encoding?: string;
+      bom?: boolean;
+    },
+  ) => {
     const file = openFilesRef.current[key];
     if (!file || file.loading) {
       throw new Error("Open buffer is not available to save");
@@ -3153,11 +3199,13 @@ export function CodeWorkspaceTab({
       }
       // BOM is a byte-level concern. Keep it out of the JavaScript buffer and
       // let the backend encode it together with the selected charset.
-      const diskText = applyEditorEol(textToSave.replace(/^\uFEFF/, ""), file.eol);
-      const encoding = file.encoding ?? "UTF-8";
+      const targetEol = saveOptions?.eol ?? file.eol;
+      const targetBom = saveOptions?.bom !== undefined ? saveOptions.bom : (file.bom ?? false);
+      const encoding = saveOptions?.encoding ?? file.encoding ?? "UTF-8";
+      const diskText = applyEditorEol(textToSave.replace(/^\uFEFF/, ""), targetEol);
       // Keep the established UTF-8 path compatible with browser/test shims;
       // non-UTF-8 files must use the byte-aware desktop command.
-      const encodedWriter = encoding.toLowerCase() !== "utf-8"
+      const encodedWriter = (encoding.toLowerCase() !== "utf-8" || targetBom)
         && typeof workspaceWriteFileEncoded === "function"
         && typeof workspaceWriteLooseFileEncoded === "function";
       const saved = file.ref.kind === "root"
@@ -3168,12 +3216,12 @@ export function CodeWorkspaceTab({
             diskText,
             file.hash,
             encoding,
-            file.bom ?? false,
+            targetBom,
           )
           : await workspaceWriteFile(
             findRoot(file.ref.rootId)?.path ?? "",
             file.ref.path,
-            `${file.bom ? "\uFEFF" : ""}${diskText}`,
+            `${targetBom ? "\uFEFF" : ""}${diskText}`,
             file.hash,
           )
         : encodedWriter
@@ -3182,16 +3230,17 @@ export function CodeWorkspaceTab({
             diskText,
             file.hash,
             encoding,
-            file.bom ?? false,
+            targetBom,
           )
           : await workspaceWriteLooseFile(
             file.ref.path,
-            `${file.bom ? "\uFEFF" : ""}${diskText}`,
+            `${targetBom ? "\uFEFF" : ""}${diskText}`,
             file.hash,
           );
       const savedPath = absolutePathForOpenFile(file);
       if (savedPath) {
         if (savedPath.endsWith(".editorconfig")) {
+          editorConfigResolverRef.current.invalidate(savedPath);
           globalEditorConfigResolver.invalidate(savedPath);
         }
         await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
@@ -3200,13 +3249,13 @@ export function CodeWorkspaceTab({
         }]).catch(() => 0);
       }
       const normalized = normalizeEditorText(saved.text);
-      const savedBom = saved.bom ?? saved.text.startsWith("\uFEFF");
+      const savedBom = saved.bom ?? (saveOptions?.bom !== undefined ? saveOptions.bom : saved.text.startsWith("\uFEFF"));
       const cleaned: OpenFileState = {
         ...file,
         text: normalized.text,
         savedText: normalized.text,
-        eol: normalized.eol,
-        encoding: saved.encoding ?? file.encoding ?? "UTF-8",
+        eol: targetEol ?? normalized.eol,
+        encoding: saved.encoding ?? encoding,
         bom: savedBom,
         hash: saved.hash,
         mtime: saved.mtime,
@@ -3231,13 +3280,6 @@ export function CodeWorkspaceTab({
             ? true
             : false,
           savedText: normalized.text,
-          eol: normalized.eol,
-          encoding: saved.encoding ?? file.encoding ?? "UTF-8",
-          bom: savedBom,
-          hash: saved.hash,
-          mtime: saved.mtime,
-          size: saved.size,
-          saving: false,
           error: null,
         },
       }));
@@ -3286,7 +3328,7 @@ export function CodeWorkspaceTab({
     const root = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
     const rootPath = root?.path;
     const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
-    const codeStyle = await globalEditorConfigResolver.resolveForFile({
+    const codeStyle = await editorConfigResolverRef.current.resolveForFile({
       workspaceId: workspaceInstanceId,
       rootId: file.ref.kind === "root" ? file.ref.rootId : undefined,
       rootPath,
@@ -3346,7 +3388,7 @@ export function CodeWorkspaceTab({
       const root = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
       const rootPath = root?.path;
       const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
-      const codeStyle = await globalEditorConfigResolver.resolveForFile({
+      const codeStyle = await editorConfigResolverRef.current.resolveForFile({
         workspaceId: workspaceInstanceId,
         rootId: file.ref.kind === "root" ? file.ref.rootId : undefined,
         rootPath,
@@ -3356,6 +3398,7 @@ export function CodeWorkspaceTab({
       });
       resolvedCodeStylesRef.current[file.key] = codeStyle;
 
+      let resolvedWriterOptions: { eol?: "lf" | "crlf" | "cr"; encoding?: string; bom?: boolean } | undefined;
       try {
         const normResult = await runSaveNormalizationPipeline({
           text: file.text,
@@ -3384,13 +3427,18 @@ export function CodeWorkspaceTab({
         }
 
         textToSave = normResult.text;
+        resolvedWriterOptions = {
+          eol: normResult.resolvedEol,
+          encoding: normResult.resolvedCharset,
+          bom: normResult.resolvedBom,
+        };
       } catch (normErr) {
         formatError = errorMessage(normErr);
         textToSave = openFilesRef.current[key]?.text ?? file.text;
       }
 
       try {
-        await saveOpenBufferText(key, textToSave);
+        await saveOpenBufferText(key, textToSave, resolvedWriterOptions);
         setStatusMessage(formatError
           ? `Saved ${file.subtitle}; format on save failed: ${formatError}`
           : `Saved ${file.subtitle}`);
@@ -3541,6 +3589,7 @@ export function CodeWorkspaceTab({
   const handleExternalFileChange = useCallback(async (change: LspExternalFileChange) => {
     const normalizedPath = normalizeFsPath(change.path);
     if (normalizedPath.endsWith(".editorconfig")) {
+      editorConfigResolverRef.current.invalidate(normalizedPath);
       globalEditorConfigResolver.invalidate(normalizedPath);
     }
     semanticIndex.invalidate("external-file-change", [normalizedPath]);
@@ -7488,10 +7537,6 @@ export function CodeWorkspaceTab({
     const endLine = Math.min(lines.length, cursor.line + 2);
     const contextSnippet = lines.slice(startLine, endLine).join("\n");
 
-    const prevText = lastTrackedBufferTextRef.current[activeFile.key];
-    const isEdit = prevText !== undefined && prevText !== activeFileText;
-    lastTrackedBufferTextRef.current[activeFile.key] = activeFileText;
-
     let sourceOwnership: "workspace" | "library" | "external" = "external";
     if (activeFile.library) {
       sourceOwnership = "library";
@@ -7512,7 +7557,8 @@ export function CodeWorkspaceTab({
       character: cursor.character,
       lineText,
       contextSnippet,
-      isEditLocation: isEdit,
+      isEditLocation: false,
+      reason: "navigate",
       sourceOwnership,
     });
   }, [activeEditorGroupId, activeFile, activeFileLoading, activeFileText, cursorPositions, visible, workspaceInstanceId]);
@@ -9756,7 +9802,7 @@ export function CodeWorkspaceTab({
   }, [setTabCodeWorkspaceContext, tabId]);
 
   const renderEditorGroup = (groupId: EditorGroupId) => {
-    const group = editorGroups[groupId];
+    const group = editorGroups[groupId] ?? createEditorGroup(groupId);
     const groupFile = group.activeKey ? openFiles[group.activeKey] ?? null : null;
     const groupLspState = group.activeKey ? lspFiles[group.activeKey] ?? null : null;
     const groupPath = groupFile ? inspectionPathForFileKey(groupFile.key) : undefined;
@@ -9848,9 +9894,29 @@ export function CodeWorkspaceTab({
           flushPendingEditorText();
           updateEditorGroup(groupId, (current) => ({ ...current, activeKey: key }));
           activateEditorGroup(groupId);
+          if (key) {
+            void ensureLspDocumentSynced(key);
+          }
         }}
         onActivateGroup={() => activateEditorGroup(groupId)}
-        onClose={(key) => void closeFile(key, groupId)}
+        onClose={(key) => void closeEditorTab(key, groupId)}
+        onReorder={(order) => updateEditorGroup(groupId, (current) => ({ ...current, openOrder: order }))}
+        onTogglePin={(key) => togglePinTab(key, groupId)}
+        onSplit={(orientation) => {
+          if (!group.activeKey) return;
+          const targetOrientation: EditorSplitOrientation = orientation === "horizontal" ? "horizontal" : "vertical";
+          splitLayoutLeaf(workspaceInstanceId, groupId, targetOrientation, group.activeKey);
+        }}
+        onMoveToOtherGroup={() => {
+          if (!group.activeKey) return;
+          const otherGroupId = groupId === "primary" ? "secondary" : "primary";
+          moveLayoutTab(workspaceInstanceId, groupId, otherGroupId, group.activeKey);
+        }}
+        onCloseOtherTabs={(key) => closeOtherTabs(key, groupId)}
+        onCloseTabsToRight={(key) => closeTabsToRight(key, groupId)}
+        onCloseAllTabs={() => closeAllTabsInGroup(groupId)}
+        onCloseSavedTabs={() => closeSavedTabsInGroup(groupId)}
+        onSetMarkdownMode={(key, mode) => setMarkdownMode(workspaceInstanceId, key, mode)}
         onPin={(key, pinned) => setTabPinned(groupId, key, pinned)}
         onPromotePreview={(key) => promotePreviewTab(groupId, key)}
         onCloseOthers={(key) => {
@@ -9946,8 +10012,7 @@ export function CodeWorkspaceTab({
     renderGroup: (groupId: EditorGroupId) => ReactNode,
   ): ReactNode => {
     if (node.type === "leaf") {
-      const groupId = (node.id === "secondary" ? "secondary" : "primary") as EditorGroupId;
-      return renderGroup(groupId);
+      return renderGroup(node.id);
     }
     return (
       <PanelGroup

@@ -70,8 +70,10 @@ export function DebugSubTabBar({
           return (
             <button
               key={tab.id}
+              id={`debug-subtab-${tab.id}`}
               role="tab"
               aria-selected={isActive}
+              aria-controls={`debug-panel-${tab.id}`}
               tabIndex={isActive ? 0 : -1}
               type="button"
               data-testid={tab.testId}

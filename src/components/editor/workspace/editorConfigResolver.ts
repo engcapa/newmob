@@ -138,7 +138,9 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
     rootPath?: string,
     workspaceId?: string,
     diagnostics?: CodeStyleDiagnostic[],
+    customProvider?: EditorConfigFileProvider,
   ): Promise<Array<{ configPath: string; parsed: ParsedEditorConfigFile }>> {
+    const provider = customProvider ?? this.fileProvider;
     const normalizedFile = filePath.replace(/\\/g, "/");
     const normalizedRoot = rootPath ? rootPath.replace(/\\/g, "/").replace(/\/+$/, "") : undefined;
 
@@ -165,13 +167,17 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
       let cached = this.configCache.get(cacheKey) ?? this.configCache.get(configPath);
       if (!cached) {
         try {
-          const content = await this.fileProvider.readFile(configPath);
+          const content = await provider.readFile(configPath);
           if (content !== null && content !== undefined) {
             cached = { parsed: parseEditorConfigFile(content) };
             this.configCache.set(cacheKey, cached);
           }
-        } catch {
-          // File read failed or missing
+        } catch (err) {
+          diagnostics?.push({
+            path: configPath,
+            message: `Failed to read .editorconfig: ${err instanceof Error ? err.message : String(err)}`,
+            severity: "warning",
+          });
         }
       }
 
@@ -194,13 +200,13 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
   }
 
   async resolveForFile(input: ResolveCodeStyleInput): Promise<ResolvedCodeStyle> {
-    const { workspaceId, filePath, rootPath, explicitOverride, text } = input;
+    const { workspaceId, filePath, rootPath, explicitOverride, text, fileProvider } = input;
     const langDefault = defaultLanguageCodeStyle(filePath);
     const provenance: CodeStyleProvenance = {};
     const diagnostics: CodeStyleDiagnostic[] = [];
 
     // 1. Resolve EditorConfig chain (parent directory hierarchy)
-    const chain = await this.loadEditorConfigChain(filePath, rootPath, workspaceId, diagnostics);
+    const chain = await this.loadEditorConfigChain(filePath, rootPath, workspaceId, diagnostics, fileProvider);
     let mergedProperties: EditorConfigProperties = {};
     const propertySourcePaths: Partial<Record<keyof EditorConfigProperties, string>> = {};
 
@@ -358,6 +364,10 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
       editorConfigProperties: hasEditorConfigProps ? mergedProperties : undefined,
     };
   }
+}
+
+export function createEditorConfigResolver(fileProvider?: EditorConfigFileProvider): EditorConfigResolver {
+  return new DefaultEditorConfigResolver(fileProvider);
 }
 
 export const globalEditorConfigResolver = new DefaultEditorConfigResolver();

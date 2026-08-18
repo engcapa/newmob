@@ -33,6 +33,9 @@ export interface SaveNormalizationResult {
   cancelledDueToEdit: boolean;
   encodingError?: boolean;
   diagnostics: string[];
+  resolvedEol?: "lf" | "crlf" | "cr";
+  resolvedCharset?: string;
+  resolvedBom?: boolean;
 }
 
 /**
@@ -186,20 +189,28 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
+  let resolvedCharset = codeStyle.charset;
+  let resolvedBom: boolean | undefined = undefined;
+
   // Stage 5: Charset / BOM verification & normalization
   if (codeStyle.charset) {
     const charset = codeStyle.charset.toLowerCase();
     if (charset === "utf-8") {
+      resolvedCharset = "UTF-8";
+      resolvedBom = false;
       // Ensure no BOM prefix for standard utf-8
       if (currentText.startsWith("\uFEFF")) {
         currentText = currentText.slice(1);
       }
     } else if (charset === "utf-8-bom") {
+      resolvedCharset = "UTF-8";
+      resolvedBom = true;
       // Ensure BOM prefix for utf-8-bom if non-empty
       if (currentText.length > 0 && !currentText.startsWith("\uFEFF")) {
         currentText = `\uFEFF${currentText}`;
       }
-    } else if (charset === "latin1") {
+    } else if (charset === "latin1" || charset === "iso-8859-1") {
+      resolvedCharset = "ISO-8859-1";
       for (let i = 0; i < currentText.length; i++) {
         const code = currentText.charCodeAt(i);
         if (code > 255) {
@@ -215,6 +226,25 @@ export async function runSaveNormalizationPipeline(
           };
         }
       }
+    } else if (charset === "us-ascii" || charset === "ascii") {
+      resolvedCharset = "US-ASCII";
+      for (let i = 0; i < currentText.length; i++) {
+        const code = currentText.charCodeAt(i);
+        if (code > 127) {
+          return {
+            text: initialText,
+            formatted: false,
+            whitespaceTrimmed: false,
+            newlineAdjusted: false,
+            eolNormalized: false,
+            cancelledDueToEdit: false,
+            encodingError: true,
+            diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds ASCII range (cannot be represented in US-ASCII).`],
+          };
+        }
+      }
+    } else if (charset === "utf-16le" || charset === "utf-16be" || charset === "utf-16") {
+      resolvedCharset = charset.toUpperCase();
     }
   }
 
@@ -243,5 +273,8 @@ export async function runSaveNormalizationPipeline(
     eolNormalized,
     cancelledDueToEdit: false,
     diagnostics,
+    resolvedEol: codeStyle.endOfLine,
+    resolvedCharset,
+    resolvedBom,
   };
 }

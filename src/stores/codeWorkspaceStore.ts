@@ -10,7 +10,14 @@ import type {
   TreeSelection,
   TreeViewMode,
 } from "../components/editor/workspace/codeWorkspaceModel";
-import type { LayoutNode } from "../components/editor/workspace/recursiveLayoutTree";
+import {
+  type LayoutNode,
+  splitLeafNode,
+  closeLeafNode,
+  moveTabBetweenLeaves,
+  setLeafActiveTab as setLeafActiveTabInTree,
+  getAllLeafNodes,
+} from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
 
 export type BottomDockTabId =
@@ -28,7 +35,7 @@ export type BottomDockTabId =
   | "coverage"
   | "debug";
 export type DebugSubTabId = "debugger" | "console" | "breakpoints" | "memory";
-export type EditorGroupId = "primary" | "secondary";
+export type EditorGroupId = "primary" | "secondary" | string;
 export type EditorSplitOrientation = "horizontal" | "vertical";
 export type RightPaneTabId = "outline" | "documentation";
 
@@ -49,7 +56,7 @@ export interface CodeWorkspaceFileStateReplacement {
   keyChanges: CodeWorkspaceFileKeyChanges;
 }
 
-function createEditorGroup(id: EditorGroupId): CodeWorkspaceEditorGroupState {
+export function createEditorGroup(id: EditorGroupId): CodeWorkspaceEditorGroupState {
   return { id, openOrder: [], activeKey: null, previewKey: null, pinnedKeys: [] };
 }
 
@@ -238,6 +245,20 @@ interface CodeWorkspaceStoreState {
   setActiveEditorGroup: (instanceId: string, groupId: EditorGroupId) => void;
   setSplitOrientation: (instanceId: string, orientation: EditorSplitOrientation | null) => void;
   setLayoutTreeV2: (instanceId: string, layoutTree: LayoutNode | null) => void;
+  splitLayoutLeaf: (
+    instanceId: string,
+    leafId: string,
+    orientation: "horizontal" | "vertical",
+    newFileKey?: string,
+  ) => void;
+  closeLayoutLeaf: (instanceId: string, leafId: string) => void;
+  moveLayoutTab: (
+    instanceId: string,
+    sourceLeafId: string,
+    targetLeafId: string,
+    fileKey: string,
+  ) => void;
+  setLeafActiveTab: (instanceId: string, leafId: string, fileKey: string | null) => void;
   setMarkdownMode: (instanceId: string, fileKey: string, mode: "edit" | "preview" | "split") => void;
   replaceFileState: (instanceId: string, replacement: CodeWorkspaceFileStateReplacement) => void;
   updateOpenFiles: (instanceId: string, updater: Updater<Record<string, OpenFileState>>) => void;
@@ -376,6 +397,133 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
 
   setLayoutTreeV2: (instanceId, layoutTree) => {
     get().patchInstance(instanceId, { layoutTreeV2: layoutTree });
+  },
+
+  splitLayoutLeaf: (instanceId, leafId, orientation, newFileKey) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      const currentTree: LayoutNode = current.layoutTreeV2 ?? {
+        type: "leaf",
+        id: leafId,
+        openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
+        activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
+      };
+      const newLeafId = `leaf-${Date.now()}`;
+      const newTree = splitLeafNode(currentTree, leafId, orientation, newLeafId, newFileKey);
+      const newEditorGroups = { ...current.editorGroups };
+      if (!newEditorGroups[newLeafId]) {
+        newEditorGroups[newLeafId] = {
+          id: newLeafId,
+          openOrder: newFileKey ? [newFileKey] : [],
+          activeKey: newFileKey ?? null,
+          previewKey: null,
+          pinnedKeys: [],
+        };
+      }
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: newTree,
+            editorGroups: newEditorGroups,
+            activeEditorGroupId: newLeafId,
+            splitOrientation: orientation,
+          },
+        },
+      };
+    });
+  },
+
+  closeLayoutLeaf: (instanceId, leafId) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      if (!current.layoutTreeV2) return state;
+      const newTree = closeLeafNode(current.layoutTreeV2, leafId);
+      const leaves = getAllLeafNodes(newTree);
+      const activeId = current.activeEditorGroupId === leafId ? (leaves[0]?.id ?? "primary") : current.activeEditorGroupId;
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: newTree,
+            activeEditorGroupId: activeId,
+          },
+        },
+      };
+    });
+  },
+
+  moveLayoutTab: (instanceId, sourceLeafId, targetLeafId, fileKey) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      if (!current.layoutTreeV2) return state;
+      const newTree = moveTabBetweenLeaves(current.layoutTreeV2, sourceLeafId, targetLeafId, fileKey);
+      const sourceGroup = current.editorGroups[sourceLeafId];
+      const targetGroup = current.editorGroups[targetLeafId] ?? createEditorGroup(targetLeafId);
+
+      const nextSourceOrder = sourceGroup ? sourceGroup.openOrder.filter((k) => k !== fileKey) : [];
+      const nextTargetOrder = targetGroup.openOrder.includes(fileKey) ? targetGroup.openOrder : [...targetGroup.openOrder, fileKey];
+
+      const newEditorGroups = {
+        ...current.editorGroups,
+        [sourceLeafId]: {
+          ...(sourceGroup ?? createEditorGroup(sourceLeafId)),
+          openOrder: nextSourceOrder,
+          activeKey: sourceGroup?.activeKey === fileKey ? (nextSourceOrder[0] ?? null) : (sourceGroup?.activeKey ?? null),
+        },
+        [targetLeafId]: {
+          ...targetGroup,
+          openOrder: nextTargetOrder,
+          activeKey: fileKey,
+        },
+      };
+
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: newTree,
+            editorGroups: newEditorGroups,
+            activeEditorGroupId: targetLeafId,
+          },
+        },
+      };
+    });
+  },
+
+  setLeafActiveTab: (instanceId, leafId, fileKey) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      const currentTree = current.layoutTreeV2;
+      const newTree = currentTree ? setLeafActiveTabInTree(currentTree, leafId, fileKey) : null;
+      const group = current.editorGroups[leafId] ?? createEditorGroup(leafId);
+      const newEditorGroups = {
+        ...current.editorGroups,
+        [leafId]: {
+          ...group,
+          activeKey: fileKey,
+        },
+      };
+      const isActive = current.activeEditorGroupId === leafId;
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: newTree ?? current.layoutTreeV2,
+            editorGroups: newEditorGroups,
+            activeKey: isActive ? fileKey : current.activeKey,
+          },
+        },
+      };
+    });
   },
 
   setMarkdownMode: (instanceId, fileKey, mode) => {

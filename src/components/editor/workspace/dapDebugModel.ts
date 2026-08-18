@@ -184,6 +184,8 @@ export interface DebugConsoleLine {
   /** DAP output category (`stdout`/`stderr`/`console`…) or client-side `repl`/`result`. */
   category: string;
   text: string;
+  seq?: number;
+  timestamp?: number;
 }
 
 /** Parsed `exceptionInfo` response (shown when stopped on an exception). */
@@ -310,17 +312,25 @@ export function markResumed(state: DebugSessionState): DebugSessionState {
   };
 }
 
-/** Cap retained console lines so a chatty debuggee cannot grow the store unbounded. */
-const MAX_CONSOLE_LINES = 2000;
+/** Cap retained console lines so a chatty debuggee cannot grow the store unbounded (10,000 lines). */
+const MAX_CONSOLE_LINES = 10000;
 
 /** Append a console line (no-op for empty text). */
 export function appendConsoleLine(
   state: DebugSessionState,
   category: string,
   text: string,
+  seq?: number,
+  timestamp?: number,
 ): DebugSessionState {
   if (!text) return state;
-  return { ...state, output: [...state.output, { category, text }].slice(-MAX_CONSOLE_LINES) };
+  const newLine: DebugConsoleLine = {
+    category,
+    text,
+    ...(seq !== undefined ? { seq } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+  };
+  return { ...state, output: [...state.output, newLine].slice(-MAX_CONSOLE_LINES) };
 }
 
 /** DAP `stepIn`/`stepOut`/`next`/`continue`/`pause`/`stepBack`/`reverseContinue` for a UI step action. */

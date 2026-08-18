@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { CodeDebugSession } from "../../useCodeDebugSession";
 import type { DebugStepAction } from "../../dapDebugModel";
+import { isHotReloadSupported } from "./debugActionService";
 
 export interface DebugSessionControlsProps {
   debug: CodeDebugSession;
@@ -89,16 +90,18 @@ export function DebugSessionControls({
           <RotateCcw className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
         </button>
       )}
-      <button
-        type="button"
-        data-testid="debug-hot-reload"
-        className={`${verticalBtn} hover:bg-orange-500/15`}
-        onClick={() => debug.hotReload()}
-        disabled={!activeRunning}
-        title="Hot reload changed classes"
-      >
-        <FlameKindling className="h-4 w-4 text-orange-500 dark:text-orange-400" />
-      </button>
+      {isHotReloadSupported(debug.capabilities) && (
+        <button
+          type="button"
+          data-testid="debug-hot-reload"
+          className={`${verticalBtn} hover:bg-orange-500/15`}
+          onClick={() => debug.hotReload()}
+          disabled={!activeRunning}
+          title="Hot reload changed classes"
+        >
+          <FlameKindling className="h-4 w-4 text-orange-500 dark:text-orange-400" />
+        </button>
+      )}
     </div>
   );
 }

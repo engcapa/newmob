@@ -215,5 +215,20 @@ charset = utf-8
     expect(result.diagnostics[0]?.severity).toBe("warning");
     expect(result.diagnostics[0]?.message).toContain("is outside root directory");
   });
+
+  it("supports custom fileProvider in resolveForFile input", async () => {
+    const customProvider: EditorConfigFileProvider = {
+      readFile: async () => `root = true\n[*]\nindent_size = 6\n`,
+    };
+
+    const result = await resolver.resolveForFile({
+      workspaceId: "w1",
+      filePath: "/project/src/index.ts",
+      fileProvider: customProvider,
+    });
+
+    expect(result.indentSize).toBe(6);
+    expect(result.source).toBe("editorconfig");
+  });
 });
 

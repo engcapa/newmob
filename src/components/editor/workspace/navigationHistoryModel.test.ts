@@ -194,5 +194,58 @@ describe("navigationHistoryModel", () => {
     expect(tracker.getRecentLocations(false, "ws-2")).toHaveLength(1);
     expect(tracker.getRecentLocations(false, "ws-2")[0].title).toBe("B.java");
   });
+
+  it("marks file locations as stale and missing with reason", () => {
+    tracker.recordLocation({
+      workspaceId: "ws-1",
+      fileIdentity: "f1",
+      filePath: "/src/A.java",
+      title: "A.java",
+      line: 1,
+      character: 0,
+      lineText: "class A {}",
+      contextSnippet: "class A {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    tracker.markFileStale("/src/A.java", "ws-1", "External conflict");
+    expect(tracker.getRecentLocations(false, "ws-1")[0].state).toBe("stale");
+    expect(tracker.getRecentLocations(false, "ws-1")[0].staleReason).toBe("External conflict");
+
+    tracker.markFileMissing("/src/A.java", "ws-1");
+    expect(tracker.getRecentLocations(false, "ws-1")[0].state).toBe("missing");
+  });
+
+  it("clears only locations belonging to a specific workspaceId with clearWorkspace", () => {
+    tracker.recordLocation({
+      workspaceId: "ws-1",
+      fileIdentity: "f1",
+      filePath: "/src/A.java",
+      title: "A.java",
+      line: 1,
+      character: 0,
+      lineText: "class A {}",
+      contextSnippet: "class A {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+    tracker.recordLocation({
+      workspaceId: "ws-2",
+      fileIdentity: "f2",
+      filePath: "/src/B.java",
+      title: "B.java",
+      line: 1,
+      character: 0,
+      lineText: "class B {}",
+      contextSnippet: "class B {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    tracker.clearWorkspace("ws-1");
+    expect(tracker.getRecentLocations(false, "ws-1")).toHaveLength(0);
+    expect(tracker.getRecentLocations(false, "ws-2")).toHaveLength(1);
+  });
 });
 

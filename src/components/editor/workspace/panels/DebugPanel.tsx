@@ -250,7 +250,12 @@ export function DebugPanel({
       />
 
       {/* Debugger Sub-tab */}
-      <div className={`flex-1 min-h-0 flex flex-col ${currentTab === "debugger" ? "" : "hidden"}`}>
+      <div
+        id="debug-panel-debugger"
+        role="tabpanel"
+        aria-labelledby="debug-subtab-debugger"
+        className={`flex-1 min-h-0 flex flex-col ${currentTab === "debugger" ? "" : "hidden"}`}
+      >
         {/* Configuration top bar when not running */}
         {!running && (
           <div className="h-8 shrink-0 flex items-center gap-1 border-b border-[var(--taomni-code-border)] px-2 bg-[var(--taomni-code-gutter-bg)]/30">
@@ -303,8 +308,8 @@ export function DebugPanel({
                   type="button"
                   data-testid="debug-attach"
                   className={`${controlBtn} hover:bg-sky-500/15`}
-                  onClick={() => onAttach()}
-                  title="Attach to a remote JVM (host:port)"
+                  onClick={onAttach}
+                  title="Attach to a remote JVM process"
                 >
                   <Plug className="h-4 w-4 text-sky-500 dark:text-sky-400" />
                 </button>
@@ -315,7 +320,7 @@ export function DebugPanel({
                   data-testid="debug-restart"
                   className={`${controlBtn} hover:bg-emerald-500/15`}
                   onClick={() => debug.restart()}
-                  title="Rerun the last debug session"
+                  title="Restart debug session"
                 >
                   <RotateCcw className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
                 </button>
@@ -380,12 +385,22 @@ export function DebugPanel({
       </div>
 
       {/* Console Sub-tab */}
-      <div className={`flex-1 min-h-0 flex flex-col ${currentTab === "console" ? "" : "hidden"}`}>
+      <div
+        id="debug-panel-console"
+        role="tabpanel"
+        aria-labelledby="debug-subtab-console"
+        className={`flex-1 min-h-0 flex flex-col ${currentTab === "console" ? "" : "hidden"}`}
+      >
         <DebugConsolePane debug={debug} stopped={stopped} visible={currentTab === "console"} />
       </div>
 
       {/* Breakpoints Sub-tab */}
-      <div className={`flex-1 min-h-0 flex flex-col ${currentTab === "breakpoints" ? "" : "hidden"}`}>
+      <div
+        id="debug-panel-breakpoints"
+        role="tabpanel"
+        aria-labelledby="debug-subtab-breakpoints"
+        className={`flex-1 min-h-0 flex flex-col ${currentTab === "breakpoints" ? "" : "hidden"}`}
+      >
         <DebugBreakpointsPane
           debug={debug}
           onOpenBreakpoint={onOpenBreakpoint}
@@ -397,7 +412,12 @@ export function DebugPanel({
       </div>
 
       {/* Memory Sub-tab */}
-      <div className={`flex-1 min-h-0 flex flex-col ${currentTab === "memory" ? "" : "hidden"}`}>
+      <div
+        id="debug-panel-memory"
+        role="tabpanel"
+        aria-labelledby="debug-subtab-memory"
+        className={`flex-1 min-h-0 flex flex-col ${currentTab === "memory" ? "" : "hidden"}`}
+      >
         <DebugMemoryPane debug={debug} />
       </div>
     </div>

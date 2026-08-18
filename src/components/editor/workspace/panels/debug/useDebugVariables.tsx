@@ -66,7 +66,7 @@ export function useDebugVariables(
     setAddingDataBreakpointKey((current) => current === targetKey ? null : current);
   }, [dataBreakpointMode, selectedFrameId, sessionAddDataBreakpoint]);
 
-  // On each stop, load the selected frame's scopes -> variables (D4).
+  // On each stop, load the selected frame's scopes -> variables (D4/D8).
   useEffect(() => {
     setEdit({ node: null, value: "" });
     if (selectedFrameId == null) {
@@ -74,8 +74,15 @@ export function useDebugVariables(
       return;
     }
     let cancelled = false;
+    const curSessionId = debug.state?.sessionId;
+    const curStopEpoch = debug.state?.stoppedThreadId;
+
     void (async () => {
       const scopesBody = await fetchScopes(selectedFrameId);
+      if (cancelled) return;
+      if (curSessionId && debug.state?.sessionId !== curSessionId) return;
+      if (curStopEpoch != null && debug.state?.stoppedThreadId !== curStopEpoch) return;
+
       const scopes = (scopesBody && typeof scopesBody === "object"
         ? (scopesBody as { scopes?: unknown }).scopes
         : null);
@@ -90,6 +97,7 @@ export function useDebugVariables(
       const roots: VarNode[] = [];
       const currentValues = new Map<string, string>();
       for (const scope of refs) {
+        if (cancelled) return;
         const rawVars = parseVariables(await fetchVariables(scope.ref), scope.ref);
         const vars = rawVars.map((v) => {
           const key = `${scope.ref}:${v.name}`;
@@ -110,15 +118,20 @@ export function useDebugVariables(
         });
       }
       previousValuesRef.current = currentValues;
-      if (!cancelled) setVariables(roots);
+      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || debug.state?.stoppedThreadId === curStopEpoch)) {
+        setVariables(roots);
+      }
     })();
     return () => { cancelled = true; };
-  }, [fetchScopes, fetchVariables, selectedFrameId]);
+  }, [fetchScopes, fetchVariables, selectedFrameId, debug.state?.sessionId, debug.state?.stoppedThreadId]);
 
-  // Re-evaluate watch expressions on each stop / frame change / edit.
+  // Re-evaluate watch expressions on each stop / frame change / edit (D8).
   const watchItems = debug.watchItems ?? debug.watchExpressions.map((e, i) => ({ id: `watch-${i}`, expression: e }));
   useEffect(() => {
     let cancelled = false;
+    const curSessionId = debug.state?.sessionId;
+    const curStopEpoch = debug.state?.stoppedThreadId;
+
     if (!stopped || selectedFrameId == null) {
       setWatchNodes(watchItems.map((item) => ({
         name: item.expression,
@@ -153,10 +166,12 @@ export function useDebugVariables(
           hasChanged,
         };
       }));
-      if (!cancelled) setWatchNodes(next);
+      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || debug.state?.stoppedThreadId === curStopEpoch)) {
+        setWatchNodes(next);
+      }
     })();
     return () => { cancelled = true; };
-  }, [evaluate, stopped, selectedFrameId, watchItems, watchTick]);
+  }, [evaluate, stopped, selectedFrameId, watchItems, watchTick, debug.state?.sessionId, debug.state?.stoppedThreadId]);
 
   const filterAndSort = useCallback((nodes: VarNode[]): VarNode[] => {
     let result = nodes;

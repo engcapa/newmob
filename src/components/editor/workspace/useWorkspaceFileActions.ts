@@ -40,6 +40,7 @@ import {
   type TreeSelection,
   type TreeViewMode,
 } from "./codeWorkspaceModel";
+import { navigationHistoryTracker } from "./navigationHistoryModel";
 
 type Updater<T> = T | ((current: T) => T);
 type UpdaterSetter<T> = (updater: Updater<T>) => void;
@@ -433,6 +434,9 @@ export function useWorkspaceFileActions({
         ignoreIfExists: false,
         annotationId: null,
       });
+      const oldAbs = absoluteWorkspacePath(root, rootTarget.path);
+      const newAbs = absoluteWorkspacePath(root, nextPath);
+      navigationHistoryTracker.relocateFile(oldAbs, newAbs, workspaceId);
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));
       await loadDir(root.id, parentPath(nextPath));
@@ -448,12 +452,13 @@ export function useWorkspaceFileActions({
     findRoot,
     loadDir,
     looseFilesRef,
-    onStatus,
     notifyWorkspaceFileOperationCompleted,
+    onStatus,
     prepareWorkspaceFileOperation,
     selected,
     setLooseFiles,
     setRoots,
+    workspaceId,
   ]);
 
   const deleteSelected = useCallback(async (target?: TreeSelection) => {
@@ -491,6 +496,7 @@ export function useWorkspaceFileActions({
       });
       if (!confirmed) return;
       const key = fileKey(ref);
+      navigationHistoryTracker.removeFileLocations(ref.path, workspaceId);
       setLooseFiles((current) => current.filter((item) => item.id !== ref.id));
       setOpenFiles((current) => {
         const next = { ...current };
@@ -525,10 +531,11 @@ export function useWorkspaceFileActions({
     if (!confirmed) return;
     try {
       const isDirectory = selection.kind === "dir";
+      const deletedAbs = absoluteWorkspacePath(root, rootTarget.path);
       const operation: LspWorkspaceFileOperation = {
         kind: "delete",
         files: [{
-          path: absoluteWorkspacePath(root, rootTarget.path),
+          path: deletedAbs,
           isDirectory,
         }],
       };
@@ -536,11 +543,12 @@ export function useWorkspaceFileActions({
       await applyResourceOperation({
         kind: "delete",
         uri: "",
-        path: absoluteWorkspacePath(root, rootTarget.path),
+        path: deletedAbs,
         recursive: isDirectory,
         ignoreIfNotExists: false,
         annotationId: null,
       });
+      navigationHistoryTracker.removeFileLocations(deletedAbs, workspaceId);
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));
       onStatus([
@@ -554,20 +562,21 @@ export function useWorkspaceFileActions({
     applyResourceOperation,
     findRoot,
     loadDir,
-    onStatus,
+    looseFilesRef,
     notifyWorkspaceFileOperationCompleted,
+    onStatus,
     openFilesRef,
     openOrderRef,
     prepareWorkspaceFileOperation,
     removeTreeDataRoot,
     selected,
     setActiveKey,
-    setExpandedDirs,
     setLooseFiles,
     setOpenFiles,
     setOpenOrder,
     setRoots,
     setSelected,
+    workspaceId,
   ]);
 
   const revealInExplorer = useCallback(async (rootId: string, path: string) => {

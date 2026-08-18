@@ -5,6 +5,9 @@
  * multi-point edit location history, and library / external file ownership.
  */
 
+export type NavigationReason = "navigate" | "edit" | "search" | "usage" | "refactor" | "tab-activate";
+export type NavigationLocationState = "current" | "relocated" | "stale" | "missing";
+
 export interface NavigationLocation {
   id: string;
   workspaceId?: string;
@@ -19,6 +22,9 @@ export interface NavigationLocation {
   isEditLocation: boolean;
   sourceOwnership: "workspace" | "library" | "external";
   symbolName?: string;
+  reason?: NavigationReason;
+  state?: NavigationLocationState;
+  staleReason?: string;
 }
 
 let locationSequenceCounter = 0;
@@ -60,6 +66,8 @@ export class NavigationHistoryTracker {
       ...location,
       id,
       timestamp: now,
+      state: location.state ?? "current",
+      reason: location.reason ?? (location.isEditLocation ? "edit" : "navigate"),
     };
 
     // Coalesce navigation entries if close to previous location in same file within 2 lines and within 2000ms
@@ -67,6 +75,7 @@ export class NavigationHistoryTracker {
     if (
       prev &&
       prev.fileIdentity === newEntry.fileIdentity &&
+      (!newEntry.workspaceId || prev.workspaceId === newEntry.workspaceId) &&
       Math.abs(prev.line - newEntry.line) <= 2 &&
       now - prev.timestamp < 2000
     ) {
@@ -83,6 +92,7 @@ export class NavigationHistoryTracker {
       if (
         prevEdit &&
         prevEdit.fileIdentity === newEntry.fileIdentity &&
+        (!newEntry.workspaceId || prevEdit.workspaceId === newEntry.workspaceId) &&
         Math.abs(prevEdit.line - newEntry.line) <= 2 &&
         now - prevEdit.timestamp < 2000
       ) {
@@ -102,7 +112,7 @@ export class NavigationHistoryTracker {
   getRecentLocations(changedOnly: boolean = false, workspaceId?: string): NavigationLocation[] {
     const list = changedOnly ? this.editLocations : this.locations;
     if (!workspaceId) return list;
-    return list.filter((loc) => !loc.workspaceId || loc.workspaceId === workspaceId);
+    return list.filter((loc) => loc.workspaceId === workspaceId);
   }
 
   searchLocations(query: string, changedOnly: boolean = false, workspaceId?: string): NavigationLocation[] {
@@ -124,10 +134,35 @@ export class NavigationHistoryTracker {
     let changed = false;
     const newTitle = newPath.split("/").pop() ?? newPath;
     for (const loc of [...this.locations, ...this.editLocations]) {
-      if ((!workspaceId || !loc.workspaceId || loc.workspaceId === workspaceId) && loc.filePath === oldPath) {
+      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === oldPath) {
         loc.filePath = newPath;
         loc.fileIdentity = loc.fileIdentity.replace(oldPath, newPath);
         loc.title = newTitle;
+        loc.state = "relocated";
+        changed = true;
+      }
+    }
+    if (changed) this.notify();
+  }
+
+  markFileStale(filePath: string, workspaceId?: string, staleReason?: string): void {
+    let changed = false;
+    for (const loc of [...this.locations, ...this.editLocations]) {
+      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === filePath) {
+        loc.state = "stale";
+        loc.staleReason = staleReason ?? "File content modified externally";
+        changed = true;
+      }
+    }
+    if (changed) this.notify();
+  }
+
+  markFileMissing(filePath: string, workspaceId?: string): void {
+    let changed = false;
+    for (const loc of [...this.locations, ...this.editLocations]) {
+      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === filePath) {
+        loc.state = "missing";
+        loc.staleReason = "File deleted from disk";
         changed = true;
       }
     }
@@ -136,11 +171,17 @@ export class NavigationHistoryTracker {
 
   removeFileLocations(filePath: string, workspaceId?: string): void {
     this.locations = this.locations.filter(
-      (loc) => (workspaceId && loc.workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
+      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
     );
     this.editLocations = this.editLocations.filter(
-      (loc) => (workspaceId && loc.workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
+      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
     );
+    this.notify();
+  }
+
+  clearWorkspace(workspaceId: string): void {
+    this.locations = this.locations.filter((loc) => loc.workspaceId !== workspaceId);
+    this.editLocations = this.editLocations.filter((loc) => loc.workspaceId !== workspaceId);
     this.notify();
   }
 
@@ -151,5 +192,10 @@ export class NavigationHistoryTracker {
   }
 }
 
+export function createNavigationHistoryTracker(): NavigationHistoryTracker {
+  return new NavigationHistoryTracker();
+}
+
 export const navigationHistoryTracker = new NavigationHistoryTracker();
+
 
