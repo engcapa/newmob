@@ -118,15 +118,14 @@ export function DebugStepControls({
   const [isStepping, setIsStepping] = useState(false);
   const supportsStepBack = debug.capabilities.supportsStepBack === true;
 
-  const handleStep = (action: DebugStepAction) => {
+  const handleStep = async (action: DebugStepAction) => {
     if (isStepping || !stopped) return;
+    setIsStepping(true);
     try {
-      const res: unknown = debug.step(action);
-      if (res && typeof (res as Promise<unknown>).then === "function") {
-        setIsStepping(true);
-        void (res as Promise<unknown>).finally(() => setIsStepping(false));
-      }
+      await debug.step(action);
     } catch {
+      // Step failed or interrupted
+    } finally {
       setIsStepping(false);
     }
   };

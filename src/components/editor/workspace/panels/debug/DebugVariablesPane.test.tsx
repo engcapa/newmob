@@ -83,7 +83,7 @@ describe("DebugVariablesPane", () => {
 
     // Remove watch
     fireEvent.click(screen.getByTitle("Remove watch"));
-    expect(onRemoveWatch).toHaveBeenCalledWith(0);
+    expect(onRemoveWatch).toHaveBeenCalledWith("count > 10");
   });
 
   it("handles filter query and sort mode toggle", () => {

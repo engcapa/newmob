@@ -235,6 +235,7 @@ export interface ActionRegistryEvent {
 
 class ActionRegistry {
   private actions = new Map<string, WorkspaceActionDefinition>();
+  private actionStacks = new Map<string, WorkspaceActionDefinition[]>();
   private aliases = new Map<string, string>();
   private listeners = new Set<(event: ActionRegistryEvent) => void>();
 
@@ -249,7 +250,6 @@ class ActionRegistry {
     this.aliases.set("workspace.quickDefinitionPeek", "workspace.quickDefinition");
     this.aliases.set("workspace.rename", "workspace.renameSymbol");
     this.aliases.set("workspace.safeDelete", "workspace.safeDeleteSymbol");
-    this.aliases.set("workspace.recentChangedFiles", "workspace.recentLocations");
   }
 
   registerAlias(aliasId: string, targetId: string): void {
@@ -262,10 +262,31 @@ class ActionRegistry {
 
   register(action: WorkspaceActionDefinition): () => void {
     const resolvedId = action.id;
+    let stack = this.actionStacks.get(resolvedId);
+    if (!stack) {
+      stack = [];
+      this.actionStacks.set(resolvedId, stack);
+    }
+    stack.push(action);
     this.actions.set(resolvedId, action);
     this.notify({ type: "registered", actionId: resolvedId });
     return () => {
-      if (this.actions.get(resolvedId) === action) {
+      const currentStack = this.actionStacks.get(resolvedId);
+      if (currentStack) {
+        const index = currentStack.indexOf(action);
+        if (index !== -1) {
+          currentStack.splice(index, 1);
+        }
+        if (currentStack.length > 0) {
+          const restored = currentStack[currentStack.length - 1];
+          this.actions.set(resolvedId, restored);
+          this.notify({ type: "state-changed", actionId: resolvedId });
+        } else {
+          this.actionStacks.delete(resolvedId);
+          this.actions.delete(resolvedId);
+          this.notify({ type: "unregistered", actionId: resolvedId });
+        }
+      } else if (this.actions.get(resolvedId) === action) {
         this.actions.delete(resolvedId);
         this.notify({ type: "unregistered", actionId: resolvedId });
       }
@@ -379,6 +400,7 @@ class ActionRegistry {
 
   clear(): void {
     this.actions.clear();
+    this.actionStacks.clear();
     this.setupDefaultAliases();
     this.notify({ type: "state-changed" });
   }
@@ -574,8 +596,8 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
   },
   {
     id: "workspace.recentChangedFiles",
-    title: "Recently Changed Files (Alias)",
-    description: "Alias for workspace.recentLocations",
+    title: "Recently Changed Files",
+    description: "Navigate to recently modified locations with context preview",
     category: "Navigate",
     keybinding: "Ctrl+Shift+E",
     provenance: "local",

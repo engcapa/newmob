@@ -66,6 +66,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     setVariable: vi.fn().mockResolvedValue(null),
     logConsole: vi.fn(),
     clearConsole: vi.fn(),
+    consoleGeneration: 0,
     reportStartupFailure: vi.fn(),
     reportStartupProgress: vi.fn(),
     fetchVariables: vi.fn().mockResolvedValue({ variables: [] }),

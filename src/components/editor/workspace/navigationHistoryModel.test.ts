@@ -77,4 +77,58 @@ describe("navigationHistoryModel", () => {
     expect(matches).toHaveLength(1);
     expect(matches[0].title).toBe("OrderService.java");
   });
+
+  it("generates unique monotonic IDs for multiple entries recorded in quick succession", () => {
+    const loc1 = tracker.recordLocation({
+      fileIdentity: "f1",
+      filePath: "/src/A.java",
+      title: "A.java",
+      line: 1,
+      character: 0,
+      lineText: "class A {}",
+      contextSnippet: "class A {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    const loc2 = tracker.recordLocation({
+      fileIdentity: "f2",
+      filePath: "/src/B.java",
+      title: "B.java",
+      line: 1,
+      character: 0,
+      lineText: "class B {}",
+      contextSnippet: "class B {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    expect(loc1.id).not.toBe(loc2.id);
+  });
+
+  it("notifies subscribers when locations are recorded or cleared", () => {
+    let notifiedCount = 0;
+    const unsub = tracker.subscribe(() => {
+      notifiedCount += 1;
+    });
+
+    tracker.recordLocation({
+      fileIdentity: "f1",
+      filePath: "/src/A.java",
+      title: "A.java",
+      line: 1,
+      character: 0,
+      lineText: "class A {}",
+      contextSnippet: "class A {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    expect(notifiedCount).toBe(1);
+
+    tracker.clear();
+    expect(notifiedCount).toBe(2);
+
+    unsub();
+  });
 });

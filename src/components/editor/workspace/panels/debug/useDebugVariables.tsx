@@ -233,8 +233,8 @@ export function useDebugVariables(
     debug.addWatchExpression(expr);
   }, [debug, watchInput]);
 
-  const removeWatch = useCallback((index: number) => {
-    debug.removeWatchExpression(index);
+  const removeWatch = useCallback((target: number | string) => {
+    debug.removeWatchExpression(target);
   }, [debug]);
 
   const variableMenu = useContextMenu();

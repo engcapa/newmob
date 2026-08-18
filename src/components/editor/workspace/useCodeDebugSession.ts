@@ -211,8 +211,8 @@ export interface CodeDebugSession {
   ) => void;
   removeExceptionBreakpointRule: (ruleId: string) => void;
   addWatchExpression: (expr: string) => void;
-  removeWatchExpression: (index: number) => void;
-  step: (action: DebugStepAction) => void;
+  removeWatchExpression: (target: number | string) => void;
+  step: (action: DebugStepAction) => Promise<void>;
   /** Continue to a line via a transient breakpoint (IDEA Run to Cursor). */
   runToCursor: (path: string, line: number) => void;
   /** Show another thread's stack while stopped. */
@@ -242,6 +242,8 @@ export interface CodeDebugSession {
   logConsole: (category: string, text: string) => void;
   /** Empty the console without touching the session. */
   clearConsole: () => void;
+  /** Generation counter incremented on clearConsole and session changes to prevent late callback resurrections. */
+  consoleGeneration: number;
   /**
    * Surface a launch/pre-launch failure in the Debug panel (not just the status
    * bar) so a debug attempt that dies before a session exists is visible rather
@@ -801,6 +803,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const [frameVariables, setFrameVariables] = useState<Record<string, string>>({});
   const [sessions, setSessions] = useState<DebugSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [consoleGeneration, setConsoleGeneration] = useState(0);
 
   const sessionsRef = useRef(new Map<string, DebugSessionRecord>());
   const abortedScopesRef = useRef(new Set<string>());
@@ -1005,6 +1008,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   }, [updateActiveState]);
 
   const clearConsole = useCallback(() => {
+    setConsoleGeneration((g) => g + 1);
     updateActiveState((prev) => (prev.output.length > 0 ? { ...prev, output: [] } : prev));
   }, [updateActiveState]);
 
@@ -2583,42 +2587,42 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     });
   }, [persistWatches]);
 
-  const removeWatchExpression = useCallback((index: number) => {
+  const removeWatchExpression = useCallback((target: number | string) => {
     setWatchExpressions((current) => {
-      const next = current.filter((_, i) => i !== index);
+      const next = typeof target === "number"
+        ? current.filter((_, i) => i !== target)
+        : current.filter((expr) => expr !== target);
       persistWatches(next);
       return next;
     });
   }, [persistWatches]);
 
-  const step = useCallback((action: DebugStepAction) => {
+  const step = useCallback(async (action: DebugStepAction): Promise<void> => {
     const id = sessionIdRef.current;
     const record = id ? sessionsRef.current.get(id) : undefined;
     if (!id || !record) return;
-    void (async () => {
-      if (action === "pause") {
-        // `pause` requires a threadId; while running we may not have one yet.
-        let tid = stateRef.current?.threads[0]?.id ?? null;
-        if (tid == null) {
-          tid = parseThreads(await dapSendRequest(id, "threads").catch(() => null))[0]?.id ?? null;
-        }
-        if (tid == null) return;
-        await dapSendRequest(id, "pause", { threadId: tid }).catch(() => {});
-        return; // The adapter answers with a `stopped` event.
+    if (action === "pause") {
+      // `pause` requires a threadId; while running we may not have one yet.
+      let tid = stateRef.current?.threads[0]?.id ?? null;
+      if (tid == null) {
+        tid = parseThreads(await dapSendRequest(id, "threads").catch(() => null))[0]?.id ?? null;
       }
-      const epoch = record.stopEpoch;
-      const tid = stateRef.current?.selectedThreadId ?? stateRef.current?.stoppedThreadId;
-      try {
-        await dapSendRequest(id, stepCommandFor(action), tid != null ? { threadId: tid } : {});
-        // Adapters need not emit `continued` after an explicit resume/step —
-        // flip to running optimistically unless a newer stop already landed.
-        if (mountedRef.current && record.stopEpoch === epoch) {
-          updateSessionState(id, (prev) => (prev.status === "stopped" ? markResumed(prev) : prev));
-        }
-      } catch {
-        // Request failed (e.g. already running): keep the current state.
+      if (tid == null) return;
+      await dapSendRequest(id, "pause", { threadId: tid }).catch(() => {});
+      return; // The adapter answers with a `stopped` event.
+    }
+    const epoch = record.stopEpoch;
+    const tid = stateRef.current?.selectedThreadId ?? stateRef.current?.stoppedThreadId;
+    try {
+      await dapSendRequest(id, stepCommandFor(action), tid != null ? { threadId: tid } : {});
+      // Adapters need not emit `continued` after an explicit resume/step —
+      // flip to running optimistically unless a newer stop already landed.
+      if (mountedRef.current && record.stopEpoch === epoch) {
+        updateSessionState(id, (prev) => (prev.status === "stopped" ? markResumed(prev) : prev));
       }
-    })();
+    } catch {
+      // Request failed (e.g. already running): keep the current state.
+    }
   }, [updateSessionState]);
 
   const runToCursor = useCallback((path: string, line: number) => {
@@ -2925,6 +2929,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setVariable,
     logConsole,
     clearConsole,
+    consoleGeneration,
     reportStartupFailure,
     reportStartupProgress,
     fetchVariables,

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DebugFramesPane } from "./DebugFramesPane";
 import type { CodeDebugSession } from "../../useCodeDebugSession";
@@ -52,7 +52,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     removeExceptionBreakpointRule: vi.fn(),
     addWatchExpression: vi.fn(),
     removeWatchExpression: vi.fn(),
-    step: vi.fn(),
+    step: vi.fn().mockResolvedValue(undefined),
     runToCursor: vi.fn(),
     selectThread: vi.fn(),
     selectFrame: vi.fn(),
@@ -66,6 +66,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     setVariable: vi.fn().mockResolvedValue(null),
     logConsole: vi.fn(),
     clearConsole: vi.fn(),
+    consoleGeneration: 0,
     reportStartupFailure: vi.fn(),
     reportStartupProgress: vi.fn(),
     fetchVariables: vi.fn().mockResolvedValue({ variables: [] }),
@@ -80,11 +81,11 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
 describe("DebugFramesPane", () => {
   afterEach(cleanup);
 
-  it("renders threads and frames tree and allows selection and step actions", () => {
+  it("renders threads and frames tree and allows selection and step actions", async () => {
     const selectThread = vi.fn();
     const selectFrame = vi.fn();
     const onOpenFrame = vi.fn();
-    const step = vi.fn();
+    const step = vi.fn().mockResolvedValue(undefined);
 
     const state = {
       ...initialDebugState("s1"),
@@ -128,15 +129,25 @@ describe("DebugFramesPane", () => {
     expect(selectThread).toHaveBeenCalledWith(2);
 
     // Step controls
-    fireEvent.click(screen.getByTestId("debug-step-over"));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("debug-step-over"));
+    });
     expect(step).toHaveBeenCalledWith("stepOver");
-    fireEvent.click(screen.getByTestId("debug-step-in"));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("debug-step-in"));
+    });
     expect(step).toHaveBeenCalledWith("stepIn");
-    fireEvent.click(screen.getByTestId("debug-step-out"));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("debug-step-out"));
+    });
     expect(step).toHaveBeenCalledWith("stepOut");
 
     // Session controls
-    fireEvent.click(screen.getByTestId("debug-continue"));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("debug-continue"));
+    });
     expect(step).toHaveBeenCalledWith("continue");
   });
 });

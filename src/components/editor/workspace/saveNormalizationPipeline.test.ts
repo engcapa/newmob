@@ -110,4 +110,51 @@ describe("saveNormalizationPipeline", () => {
     });
     expect(res2.text).toBe("\uFEFFconst a = 1;");
   });
+
+  it("preserves CRLF and bare CR during whitespace trimming when endOfLine is not configured", async () => {
+    const noEolStyle: EffectiveCodeStyle = {
+      tabSize: 4,
+      indentSize: 4,
+      continuationIndent: 8,
+      insertSpaces: true,
+      trimTrailingWhitespace: true,
+      source: "language-default",
+      label: "Spaces: 4",
+    };
+
+    const crlfInput = "const x = 1;  \r\nconst y = 2;  \r\n";
+    const crlfResult = await runSaveNormalizationPipeline({
+      text: crlfInput,
+      codeStyle: noEolStyle,
+    });
+    expect(crlfResult.text).toBe("const x = 1;\r\nconst y = 2;\r\n");
+
+    const bareCrInput = "const x = 1;  \rconst y = 2;  \r";
+    const bareCrResult = await runSaveNormalizationPipeline({
+      text: bareCrInput,
+      codeStyle: noEolStyle,
+    });
+    expect(bareCrResult.text).toBe("const x = 1;\rconst y = 2;\r");
+  });
+
+  it("blocks saving when characters cannot be represented in Latin-1", async () => {
+    const latin1Style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      charset: "latin1",
+      source: "editorconfig",
+      label: "Spaces: 2",
+    };
+
+    const result = await runSaveNormalizationPipeline({
+      text: "const message = '你好世界';", // Chinese characters exceed Latin-1 (code > 255)
+      codeStyle: latin1Style,
+    });
+
+    expect(result.encodingError).toBe(true);
+    expect(result.diagnostics.length).toBeGreaterThan(0);
+    expect(result.diagnostics[0]).toContain("cannot be represented in Latin-1");
+  });
 });

@@ -102,4 +102,60 @@ describe("recursiveLayoutTree", () => {
     expect(leaves[0].id).toBe("g1");
     expect(leaves[1].id).toBe("g2");
   });
+
+  it("atomically prevents tab loss when moving to a non-existent target leaf", () => {
+    const root: LayoutNode = {
+      type: "leaf",
+      id: "leaf-1",
+      openFileKeys: ["f1", "f2"],
+      activeKey: "f1",
+    };
+
+    // Target "leaf-non-existent" does not exist
+    const moved = moveTabBetweenLeaves(root, "leaf-1", "leaf-non-existent", "f2");
+    expect(moved).toBe(root);
+    const leaf = findLeafNode(moved, "leaf-1");
+    expect(leaf?.openFileKeys).toEqual(["f1", "f2"]); // Tab was preserved!
+  });
+
+  it("atomically prevents activating keys not belonging to the leaf", () => {
+    const root: LayoutNode = {
+      type: "leaf",
+      id: "leaf-1",
+      openFileKeys: ["f1", "f2"],
+      activeKey: "f1",
+    };
+
+    const updated = setLeafActiveTab(root, "leaf-1", "foreign-file.ts");
+    expect(updated).toBe(root);
+    expect((updated as { activeKey: string }).activeKey).toBe("f1");
+  });
+
+  it("refuses to close the last remaining leaf node in the tree", () => {
+    const root: LayoutNode = {
+      type: "leaf",
+      id: "leaf-1",
+      openFileKeys: ["f1"],
+      activeKey: "f1",
+    };
+
+    const closed = closeLeafNode(root, "leaf-1");
+    expect(closed).toBe(root);
+    expect(getAllLeafNodes(closed)).toHaveLength(1);
+  });
+
+  it("safely recovers corrupt tree structures during migration", () => {
+    const corruptTree = {
+      type: "split",
+      id: "split-corrupt",
+      orientation: "invalid-orientation",
+      children: [{ type: "leaf", id: "l1", openFileKeys: ["f1.ts"], activeKey: "non-existent.ts" }],
+      ratios: [1.0],
+    };
+
+    const recovered = migrateLayoutV1toV2(corruptTree);
+    expect(recovered.type).toBe("leaf");
+    expect(getAllLeafNodes(recovered)).toHaveLength(1);
+    expect(getAllLeafNodes(recovered)[0].openFileKeys).toContain("f1.ts");
+  });
 });

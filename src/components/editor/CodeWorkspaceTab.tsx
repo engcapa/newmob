@@ -169,6 +169,7 @@ import {
   type ExplicitIndentationOverride,
   resolveEffectiveCodeStyle,
 } from "./workspace/codeStyleModel";
+import { runSaveNormalizationPipeline } from "./workspace/saveNormalizationPipeline";
 import { historySnapshot } from "../../lib/localHistory";
 import {
   fileRefFromFileKey,
@@ -1297,6 +1298,7 @@ export function CodeWorkspaceTab({
   const toggleActiveBreakpointRef = useRef<(line: number) => void>(() => {});
   const editActiveBreakpointRef = useRef<(line: number) => void>(() => {});
   const debugRef = useRef<ReturnType<typeof useCodeDebugSession> | null>(null);
+  const lastTrackedBufferTextRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
     workspaceEditHistory.clear();
@@ -3291,19 +3293,45 @@ export function CodeWorkspaceTab({
       if (!file || file.loading || file.saving || !file.dirty) return;
       let textToSave = file.text;
       let formatError: string | null = null;
-      if (intelligencePreferences.formatOnSave) {
-        try {
-          const formatted = await formatFileText(file);
-          const current = openFilesRef.current[key];
-          // Do not overwrite keystrokes entered while the formatter was running.
-          textToSave = current?.text === file.text
-            ? formatted ?? file.text
-            : current?.text ?? file.text;
-        } catch (error) {
-          formatError = errorMessage(error);
-          textToSave = openFilesRef.current[key]?.text ?? file.text;
+
+      const codeStyle = getEffectiveCodeStyleForFile(file) ?? resolveEffectiveCodeStyle({
+        filePath: file.languagePath,
+        text: file.text,
+      });
+
+      try {
+        const normResult = await runSaveNormalizationPipeline({
+          text: file.text,
+          codeStyle,
+          formatOnSave: intelligencePreferences.formatOnSave,
+          formatFn: async (currentText) => {
+            try {
+              return await formatFileText({ ...file, text: currentText });
+            } catch (err) {
+              formatError = errorMessage(err);
+              return null;
+            }
+          },
+          getLatestBufferText: () => openFilesRef.current[key]?.text ?? file.text,
+        });
+
+        if (normResult.cancelledDueToEdit) {
+          setStatusMessage("Save cancelled due to concurrent buffer edits");
+          return;
         }
+
+        if (normResult.encodingError) {
+          const msg = normResult.diagnostics[0] ?? "Save blocked: character encoding error";
+          setStatusMessage(msg);
+          return;
+        }
+
+        textToSave = normResult.text;
+      } catch (normErr) {
+        formatError = errorMessage(normErr);
+        textToSave = openFilesRef.current[key]?.text ?? file.text;
       }
+
       try {
         await saveOpenBufferText(key, textToSave);
         setStatusMessage(formatError
@@ -3322,6 +3350,7 @@ export function CodeWorkspaceTab({
     [
       activeKey,
       formatFileText,
+      getEffectiveCodeStyleForFile,
       intelligencePreferences.formatOnSave,
       promptReloadProject,
       saveOpenBufferText,
@@ -7398,6 +7427,10 @@ export function CodeWorkspaceTab({
     const endLine = Math.min(lines.length, cursor.line + 2);
     const contextSnippet = lines.slice(startLine, endLine).join("\n");
 
+    const prevText = lastTrackedBufferTextRef.current[activeFile.key];
+    const isEdit = prevText !== undefined && prevText !== activeFileText;
+    lastTrackedBufferTextRef.current[activeFile.key] = activeFileText;
+
     navigationHistoryTracker.recordLocation({
       fileIdentity: activeFile.key,
       filePath: activeFile.path ?? activeFile.title,
@@ -7406,7 +7439,7 @@ export function CodeWorkspaceTab({
       character: cursor.character,
       lineText,
       contextSnippet,
-      isEditLocation: activeFile.dirty ?? false,
+      isEditLocation: isEdit,
       sourceOwnership: "workspace",
     });
   }, [activeEditorGroupId, activeFile, activeFileLoading, activeFileText, cursorPositions, visible]);

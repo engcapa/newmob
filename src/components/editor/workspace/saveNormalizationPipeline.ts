@@ -31,15 +31,20 @@ export interface SaveNormalizationResult {
   newlineAdjusted: boolean;
   eolNormalized: boolean;
   cancelledDueToEdit: boolean;
+  encodingError?: boolean;
   diagnostics: string[];
 }
 
 /**
  * Trim trailing whitespace from each line in a text buffer while preserving target EOL.
+ * If eol is not specified, preserves existing line breaks (LF, CRLF, bare CR) without modification.
  */
-export function trimTrailingWhitespace(text: string, eol: string = "\n"): string {
+export function trimTrailingWhitespace(text: string, eol?: string): string {
+  if (!eol) {
+    return text.replace(/[ \t]+(?=\r\n|\r|\n|$)/g, "");
+  }
   return text
-    .split(/\r?\n/)
+    .split(/\r\n|\r|\n/)
     .map((line) => line.replace(/[ \t]+$/, ""))
     .join(eol);
 }
@@ -49,15 +54,23 @@ export function trimTrailingWhitespace(text: string, eol: string = "\n"): string
  * If insertFinalNewline is true, ensures exactly one trailing newline.
  * If insertFinalNewline is false, removes any trailing newlines.
  */
-export function adjustFinalNewline(text: string, insertFinalNewline: boolean, eol: string = "\n"): string {
+export function adjustFinalNewline(text: string, insertFinalNewline: boolean, eol?: string): string {
   if (text.length === 0) return text;
 
   // Strip all trailing newlines first
-  const trimmed = text.replace(/(\r?\n)+$/, "");
-  if (insertFinalNewline) {
+  const trimmed = text.replace(/(\r\n|\r|\n)+$/, "");
+  if (!insertFinalNewline) {
+    return trimmed;
+  }
+  if (eol) {
     return trimmed + eol;
   }
-  return trimmed;
+  const detected = text.includes("\r\n")
+    ? "\r\n"
+    : text.includes("\r") && !text.includes("\n")
+      ? "\r"
+      : "\n";
+  return trimmed + detected;
 }
 
 /**
@@ -104,8 +117,8 @@ export async function runSaveNormalizationPipeline(
   let eolNormalized = false;
   const diagnostics: string[] = [];
 
-  const targetEol = codeStyle.endOfLine ?? "lf";
-  const eolChar = targetEol === "crlf" ? "\r\n" : targetEol === "cr" ? "\r" : "\n";
+  const explicitEol = codeStyle.endOfLine;
+  const eolChar = explicitEol === "crlf" ? "\r\n" : explicitEol === "cr" ? "\r" : explicitEol === "lf" ? "\n" : undefined;
 
   // Detect if initial text had mismatched EOL
   if (codeStyle.endOfLine) {
@@ -188,9 +201,18 @@ export async function runSaveNormalizationPipeline(
       }
     } else if (charset === "latin1") {
       for (let i = 0; i < currentText.length; i++) {
-        if (currentText.charCodeAt(i) > 255) {
-          diagnostics.push(`Character '${currentText[i]}' at position ${i} exceeds Latin-1 range.`);
-          break;
+        const code = currentText.charCodeAt(i);
+        if (code > 255) {
+          return {
+            text: initialText,
+            formatted: false,
+            whitespaceTrimmed: false,
+            newlineAdjusted: false,
+            eolNormalized: false,
+            cancelledDueToEdit: false,
+            encodingError: true,
+            diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds Latin-1 range (cannot be represented in Latin-1).`],
+          };
         }
       }
     }

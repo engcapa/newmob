@@ -20,27 +20,54 @@ export interface NavigationLocation {
   symbolName?: string;
 }
 
+let locationSequenceCounter = 0;
+
+export function isPathContainedInRoot(filePath: string, rootPath: string): boolean {
+  const normalizedFile = filePath.replace(/\\/g, "/");
+  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalizedFile === normalizedRoot || normalizedFile.startsWith(`${normalizedRoot}/`);
+}
+
 export class NavigationHistoryTracker {
   private locations: NavigationLocation[] = [];
   private editLocations: NavigationLocation[] = [];
   private maxEntries: number = 100;
+  private listeners = new Set<() => void>();
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
+  private notify(): void {
+    for (const listener of this.listeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.error("NavigationHistoryTracker listener error:", err);
+      }
+    }
+  }
 
   recordLocation(location: Omit<NavigationLocation, "id" | "timestamp">): NavigationLocation {
     const now = Date.now();
-    const id = `loc-${location.fileIdentity}-${location.line}-${now}`;
+    const seq = ++locationSequenceCounter;
+    const id = `loc-${location.fileIdentity}-${location.line}-${now}-${seq}`;
     const newEntry: NavigationLocation = {
       ...location,
       id,
       timestamp: now,
     };
 
-    // Coalesce if close to previous location in same file within 3 lines
+    // Coalesce navigation entries if close to previous location in same file within 2 lines and within 2000ms
     const prev = this.locations[0];
     if (
       prev &&
       prev.fileIdentity === newEntry.fileIdentity &&
       Math.abs(prev.line - newEntry.line) <= 2 &&
-      !newEntry.isEditLocation
+      now - prev.timestamp < 2000
     ) {
       this.locations[0] = newEntry;
     } else {
@@ -55,7 +82,8 @@ export class NavigationHistoryTracker {
       if (
         prevEdit &&
         prevEdit.fileIdentity === newEntry.fileIdentity &&
-        Math.abs(prevEdit.line - newEntry.line) <= 2
+        Math.abs(prevEdit.line - newEntry.line) <= 2 &&
+        now - prevEdit.timestamp < 2000
       ) {
         this.editLocations[0] = newEntry;
       } else {
@@ -66,6 +94,7 @@ export class NavigationHistoryTracker {
       }
     }
 
+    this.notify();
     return newEntry;
   }
 
@@ -91,6 +120,7 @@ export class NavigationHistoryTracker {
   clear(): void {
     this.locations = [];
     this.editLocations = [];
+    this.notify();
   }
 }
 

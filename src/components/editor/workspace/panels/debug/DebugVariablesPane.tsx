@@ -29,7 +29,7 @@ export interface DebugVariablesPaneProps {
   watchInput: string;
   onWatchInputChange: (value: string) => void;
   onAddWatch: () => void;
-  onRemoveWatch: (index: number) => void;
+  onRemoveWatch: (target: number | string) => void;
   edit: VarEditState;
   onEditChange: (value: string) => void;
   onEditSubmit: () => void;
@@ -203,7 +203,7 @@ export function DebugVariablesPane({
                   node={node}
                   depth={0}
                   onExpand={onExpandWatch}
-                  onRemove={() => onRemoveWatch(i)}
+                  onRemove={() => onRemoveWatch(node.name)}
                   onAddDataBreakpoint={canAddDataBreakpoint ? onAddDataBreakpoint : undefined}
                   addingDataBreakpointKey={addingDataBreakpointKey}
                   onContextMenu={onVariableContextMenu}

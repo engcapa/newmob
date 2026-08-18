@@ -21,10 +21,27 @@ export function RecentLocationsDialog({
   const [search, setSearch] = useState("");
   const [changedOnly, setChangedOnly] = useState(initialChangedOnly);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [revision, setRevision] = useState(0);
+
+  useEffect(() => {
+    return navigationHistoryTracker.subscribe(() => {
+      setRevision((r) => r + 1);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (open) {
+      setChangedOnly(initialChangedOnly);
+      setSearch("");
+      setSelectedIndex(0);
+    }
+  }, [open, initialChangedOnly]);
 
   const locations = useMemo(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    revision;
     return navigationHistoryTracker.searchLocations(search, changedOnly);
-  }, [search, changedOnly]);
+  }, [search, changedOnly, revision]);
 
   useEffect(() => {
     setSelectedIndex(0);
