@@ -2,9 +2,9 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先达到日常代码编辑工作流等价，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-19 · 版本：v4.38（`1b6f91cf` implementation re-audit & IDEA 2026.2 delta backlog）· 状态：**实施中**。本轮复核 `1b6f91cf` 的 SaveTransaction、recursive layout persistence、ActionHost 与 Debug tokens 的生产可达性，并对照 IntelliJ IDEA 2026.2 官方文档补入新增缺口；只更新文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
+> 日期：2026-08-19 · 版本：v4.39（`dab8a778` production-path code review & next parity tranche）· 状态：**实施中**。本轮复核其它 agent 对 §8.10/§20 的实现，逐项验证生产 consumer、异步写盘、tree/group ownership、实例生命周期与新增 dependency provider；只更新文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
 >
-> 当前结论：`1b6f91cf` 把 open-buffer save 接入了 `executeSaveTransaction`、补上了 v2 layout 持久化/恢复与任意 leaf renderer、把 Recent Locations 的 edit 采集从 caret effect 改为显式事件；但 controller 仍用文件元数据覆盖 resolved style、WorkspaceEdit 写盘绕过 transaction、资源替换不重映射 layout tree、ActionHost 仍是无生产 consumer 的死基础设施、LocationController 仍包裹 global tracker。Debug 侧 action service/console/variables 仍见 §15.12。本轮 `tsc -b` 干净、10 个定向测试文件 183/183 通过；没有任何一项可因此升级为 `workflow/verified`。当前执行合同见 §8.10，Debug 见 `debug-panel-idea-redesign.md` §20。
+> 当前结论：`dab8a778` 修正了 resolved style 优先级、roots controller 重建、后端 hash、layout key remap/ratio 校验、controller 内 tracker 隔离和部分 Debug UI；但 Save 仍用文本长度充当 revision，存在同长度编辑覆盖风险，WorkspaceEdit 仍绕过 transaction；close-leaf 只迁移 group 而未同步 tree；Workspace/Debug ActionService 与 dependency provider 都没有生产 consumer；Locations 文件生命周期仍修改另一个 global tracker。新增 Console source link 还存在 double decrement 与相对路径无法解析。`tsc -b` 与新增相关 5 files/45 tests 通过，但不能升级上述能力为 workflow/verified。当前执行合同见 §8.11，Debug 见 `debug-panel-idea-redesign.md` §21。
 >
 > 早期版本：v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -322,7 +322,22 @@ PR 只有达到 `workflow` 才能把功能清单标为“可用”，只有 `ver
 
 **本轮验证事实。** `pnpm exec tsc -b` 干净；定向回归 10 个测试文件、183/183 通过（CodeWorkspaceTab、workspaceStyleController、recursiveLayoutTree、navigationHistoryModel、useCodeDebugSession、DebugPanel、debug/*）。这些只证明无回归，不能证明双 workspace 运行期隔离、真实字节写盘或真实 DAP workflow；无 Tauri/QA YAML/三端证据。
 
-**IDEA 2026.2 对照增量（真实产品事实）。** 对照 JetBrains 官方 What's New 与 Help（2026-07/08）：2026.2 新增 Logpoints、runtime output → source 导航、dependency completion、Git 冲突解决流；平台编辑器新增 smooth caret animation 与新 selection 行为；Recent Locations 支持 Delete 删除条目（并同步从 Back/Forward 历史移除）、可按 breadcrumbs 搜索、Show edited only 切换。本仓库现状：logpoint 模型与 gutter diamond 已有（`dapDebugModel.ts:16-17`、`debugEditorChrome.ts:27`），其余均缺失或只有部分。新增缺口进入 §8.10 N8 与 Debug 文档 §20 D11。
+**IDEA 2026.2 对照增量（真实产品事实）。** 对照 JetBrains 官方 What's New 与 Help（2026-07/08）：2026.2 新增 Logpoints、runtime output → source 导航、dependency completion、Git 冲突解决流；平台编辑器新增 smooth caret animation 与新 selection 行为；Recent Locations 支持 Delete 删除条目（并同步从 Back/Forward 历史移除）、可按 breadcrumbs 搜索、Show edited only 切换。本仓库现状：logpoint 模型与 gutter diamond 已有（`dapDebugModel.ts:16-17`、`debugEditorChrome.ts:27`），其余均缺失或只有部分。当前新增缺口进入 §8.11 N8.1 与 Debug 文档 §21 D11.1/D11.2。
+
+### 2.16 v4.39 `dab8a778` production-path code review（2026-08-19）
+
+本节审查 `1b6f91cf..dab8a778` 的生产代码与测试，不采信提交标题中的 “complete”。判断仍使用 `model → wired → workflow → verified`：新类型、provider class、service factory 或组件单测，没有真实 consumer 时最高为 `model`。
+
+| 领域 | 本提交已确认 | Code review 发现的阻断事实 | 当前等级 / 下一包 |
+|------|--------------|----------------------------|-------------------|
+| N1.3 Save | resolved EditorConfig 不再被 file metadata 覆盖；roots fingerprint 变化会替换 controller；writer 返回后端 hash | `bufferVersion` 与最终 race check 都用 `text.length`（`CodeWorkspaceTab.tsx:3417,3448`）；等待 format/normalize 时发生同长度编辑，会通过 guard 并把旧 snapshot 写盘。open-clean WorkspaceEdit 与 closed-file writer 仍直接调用 `saveOpenBufferText/writeDisk`，绕过 transaction/style/cancellation | **wired / high correctness defect；N1.4** |
+| N6.3 Layout | ratio `<=0` 被拒；resource replacement 会 remap tree key；close leaf 会把 group 中 tab 迁入 surviving group | `atomicCloseLeaf` 只更新 `nextGroups[targetSiblingId].openOrder/activeKey`（`recursiveLayoutTree.ts:548-561`），返回的 `newTree` destination leaf 未同步 `openFileKeys/activeKey`；持久化后 tree/group owner 分叉，现有测试只断言 group 顺序 | **wired / invariant gap；N6.4** |
+| N0.3 Action | adapted action unregister cleanup 已补 | `CodeWorkspaceTab` 的 execute/keydown/Search/menu 仍直接走 `WorkspaceCommand[]`（`:7496-7557`），没有创建/消费 `useWorkspaceActionsController`；`registerCommands` 不 await `cmd.run`（`workspaceActionHost.ts:123-126`），async failure/cancel 会被误报 applied | **model only；N0.4** |
+| N2.3 Locations | controller 默认创建独立 tracker；breadcrumbs search、entry Delete、directory subtree relocate/remove API 已加入 | file rename/delete 仍直接 import global tracker（`useWorkspaceFileActions.ts:43,439-443,503,556-558`），不会更新 dialog 使用的 instance tracker；dialog Delete 只删 Recent Locations，不同步 Back/Forward history；Ctrl+Tab Switcher 仍缺 | **wired / split ownership；N2.4** |
+| N8 Dependency completion | Maven/Gradle context parser、provider interface/capability 与 181 行测试已加入 | 模块没有 production import；provider 永远报告 `available`，候选来自硬编码 popular list 而非 Maven Central/LSP；`complete()` 没有 AbortSignal、timeout、typed unavailable/error、request generation 或 host replacement-range consumer | **model only；N8.1** |
+| N7 Evidence | `pnpm exec tsc -b`、新增相关 5 files/45 tests 通过 | 无 Tauri byte fixture、nested reload host、双实例 Action/Locations UI、dependency real provider/QA；现有纯测没有触达上述失败路径 | **unit only；N7.5** |
+
+**Code review 结论。** 本提交没有完成 §8.10。优先级不是继续增加 API，而是先封闭 N1 同长度 stale write 和 N6 tree/group 数据不变量；随后把 N0/N2/N8 的新模型接进唯一生产 owner。Debug 的高优先级错误见 Debug 文档 §15.13。
 
 ---
 
@@ -1964,7 +1979,7 @@ canonical path policy 必须按平台处理大小写、drive/UNC、separator、s
 
 ### 8.9 v4.37 下一轮待办（`1b6f91cf` 前历史快照，当前合同见 §8.10）
 
-本节是 `3aacbecc` 之后、`1b6f91cf` 之前的执行清单，现保留为历史追溯；当前执行合同见 §8.10。每个 agent 必须在 PR 中标明本包达到的最高层级（`model`/`wired`/`workflow`/`verified`），并保留其它 agent 的修改。不能用新增类型或单测通过替代生产 consumer、真实写盘、真实布局恢复或 QA/native 证据。
+本节是 `3aacbecc` 之后、`1b6f91cf` 之前的执行清单，现保留为历史追溯；其后合同见 §8.10，当前执行合同见 §8.11。每个 agent 必须在 PR 中标明本包达到的最高层级（`model`/`wired`/`workflow`/`verified`），并保留其它 agent 的修改。不能用新增类型或单测通过替代生产 consumer、真实写盘、真实布局恢复或 QA/native 证据。
 
 | 顺序 | 工作包 | 目标 | 文件边界 | 完成门槛 |
 |------|--------|------|----------|----------|
@@ -2006,9 +2021,9 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 
 固定合并顺序：`N7.2 Gate -> N1.2 -> N6.2 -> N0.2 -> N2.2 -> Debug §19 -> N7.3 native/perf`。`CodeWorkspaceTab.tsx` 按 save/layout/action/navigation 区域分别提交，禁止 agent 重排其它 owner 区域；没有真实 host/native 证据的包最高标 `workflow-candidate`。
 
-### 8.10 v4.38 当前下一轮待办（面向其它 agent，`1b6f91cf` 复核后）
+### 8.10 v4.38 下一轮待办（`dab8a778` 前历史合同，当前见 §8.11）
 
-本节取代 §8.8/§8.9 作为当前执行合同（§8.7–§8.9 保留为历史追溯）。每个包必须同时交付：生产 consumer 接线、typed result、失败/取消/undo 语义、纯/组件/真实 host 测试与 QA catalog/YAML；只交 model、store 字段或组件 mock 不得升级等级。
+本节是 `1b6f91cf` 后、`dab8a778` 前的执行合同，现保留用于追溯；当前执行合同见 §8.11。
 
 | 顺序 | 子包 | 完成定义（验收要点） | 主要文件 owner |
 |------|------|----------------------|----------------|
@@ -2031,6 +2046,21 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 - [ ] ~~**Git 冲突解决流**（2026.2 改进）~~：**已确认不纳入本次范围**（用户决策 2026-08-19）；保留登记仅作 X 轨道未来对照。
 
 **合并顺序。** `N1.3 -> N6.3` 先行（数据正确性），`N0.3` 与 `N2.3` 可并行但分别只改 action/navigation 区域；`N8` 各条目在对应 owner 包冻结后独立成 PR；`N7.4` 随包执行。任何 PR 若 `tsc -b`、changed-file tests 或 `git diff --check` 红，不得进入下一包。
+
+### 8.11 v4.39 当前下一轮待办（面向其它 agent，`dab8a778` code review 后）
+
+本节取代 §8.10。每个包必须修复生产调用链并提供失败路径证据；禁止用“class/type/test 已存在”替代 host consumer、真实 writer/provider 或跨实例工作流。
+
+| 顺序 | 子包 | 完成定义（验收要点） | 主要 owner |
+|------|------|----------------------|------------|
+| P0 | N1.4 防止 stale save 覆盖 | buffer 使用单调递增 document revision 或 content identity，任何异步 format/normalize 后 revision 不同均返回 conflict、零落盘；open buffer 与所有 WorkspaceEdit open/closed writer 经同一 SaveTransaction；成功 hash 只认后端；同长度修改 race 测试 + CRLF/CR/BOM/Latin-1 Tauri save/reopen fixture | save 区、style controller、WorkspaceEdit writer、IPC fixture |
+| P0 | N6.4 Tree/group 原子 ownership | close leaf 迁移 tab 时同步 destination leaf 的 `openFileKeys/activeKey`；mutation 返回前执行 tree/groups 双向一致性校验；不一致 snapshot 拒绝持久化并 diagnostic。语义固定为**一个 canonical buffer 可被多个 leaf view 引用**：close/remap 必须保留所有其它 leaf 引用，不得为追求“单 owner”关闭合法 view；覆盖 nested split → 同 buffer 多 view + dirty tabs → close → reload、resource rename/delete | recursive tree、workspace store、layout persistence/host |
+| P0 | N0.4 ActionHost 唯一执行入口 | CodeWorkspaceTab keydown/Search/menu/context/keymap 全部调用 instance host；adapter await `cmd.run` 并把 thrown/rejected/cancelled/no-op 映射为 typed result；旧数组只负责 migration metadata。cleanup 只能删除自己安装的 command adapter，绝不能删除同 ID 后注册的独立 action；覆盖 same-ID register/replace/unregister 顺序、双 workspace owner restore、unmount、AbortSignal、async reject | action host/controller、workspace commands、CodeWorkspaceTab action 区 |
+| P1 | N2.4 单一 Location owner 与双历史删除 | `useWorkspaceFileActions` 注入当前 controller，禁止 production global tracker；rename/delete/cut-paste 对 file/directory subtree 更新同一 instance；Delete 同时删除 Recent Locations 与 Back/Forward entry；Ctrl+Tab modifier-release commit/Esc cancel；双 workspace 同路径与 Windows/UNC tests | location controller、file actions、Recent dialog、navigation history/Switcher |
+| P1 | N8.1 Maven/Gradle provider 真接线 | 候选真值固定为 **Maven Central Search API，经 Tauri/backend `DependencyIndexClient` 代理与有界缓存**；build-file LSP 只辅助 syntax context，不作为候选真值。capability 来自 backend/provider lifecycle，不得常量 available；`complete(context, signal)` 返回 typed available/unavailable/error/cancelled/timeout + replacement range/requestId；单次请求 deadline 3s，timeout 后至多一次显式 Retry、不得回退硬编码 popular list。CodeMirror host 覆盖 pom.xml 的 groupId/artifactId/version、Groovy/Kotlin DSL 坐标，五类 golden replacement case；离线/无 provider 不展示支持，error/timeout 给可重试提示 | dependency provider、backend IPC/index client、completion host、golden/QA fixtures |
+| Gate | N7.5 真实证据 | `tsc -b`、changed-file tests、`git diff --check` 为基础；N1 必须 Tauri bytes/race，N6 nested reload，N0/N2 双实例 UI，N8 real provider + no-provider QA；提交中逐项标明最高证据等级 | tests/QA/evidence only |
+
+**合并顺序。** `N1.4 -> N6.4` 先阻断数据损坏；`N0.4` 与 `N2.4` 在 owner 边界明确后并行；`N8.1` 独立于 P0，但不得在真实 provider 接入前宣传 Maven/Gradle 支持；`N7.5` 随包交付。Debug 先修错误导航，再处理 token/action/console/layout，见 Debug §21。
 
 ## 9. 风险与权衡
 

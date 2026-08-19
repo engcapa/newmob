@@ -1,8 +1,8 @@
 # Debug 底部面板 IDEA 对齐重设计
 
-> 状态：**v1 布局已交付，v2 为 wired/partial，正确性收口待开发**。最新代码审计基线为 `1b6f91cf`；该提交新增 `debugActionService.ts` descriptor 与部分 token 类型，但 Debug action、Console、Variables、layout 仍未完成真实 consumer 接线。session-scoped UI、workspace layout、hidden-pane request guard、完整 i18n、fake/真实 adapter 与三端证据仍未完成。
+> 状态：**v1 布局已交付，v2 为 model/wired partial，正确性收口待开发**。最新代码审计基线为 `dab8a778`；该提交新增 typed DebugActionService factory、source-link renderer、workspace-prefixed 部分 ID 与 hidden-pane guard，但 action/token/watch/console/layout 仍未完成真实 production ownership，source link 还有行号与多 root 解析错误。
 > 日期：2026-08-19
-> 文档结构：§1–§12 保留原始布局方案；§13 是 v1 历史对账；§14–§19 保留历史设计合同；§15.12 是 `1b6f91cf` 最新复核（含 IDEA 2026.2 对照）；§20 是当前下一轮权威待办。
+> 文档结构：§1–§12 保留原始布局方案；§13 是 v1 历史对账；§14–§20 保留历史设计合同；§15.13 是 `dab8a778` 最新 code review；§21 是当前下一轮权威待办。
 > 当前范围：v1 只重组 `DebugPanel.tsx` 及子组件；v2 允许按 §15 扩展 `dapDebugModel.ts`、`useCodeDebugSession.ts`、Action Service 和 QA catalog，但不修改 Rust DAP kernel，除非单独任务明确列出协议缺口。
 
 ---
@@ -1003,7 +1003,22 @@ interface DebugLayoutPreferenceV2 {
 
 **本轮验证事实。** `pnpm exec tsc -b` 干净；编辑器+Debug 定向回归 10 files、183/183 通过。仅为无回归证据，不构成 fake/真实 adapter、QA、性能或三端门禁。
 
-**IDEA 2026.2 对照增量。** 官方 2026.2  Debugger 相关新增：Logpoints（本仓库模型/gutter 已有，缺插值求值与输出证据）与 runtime output → source code 导航增强（本仓库 Console 无 file:line 超链接，grep 无 linkify/openLocation 实现）；async stack traces 是 Java agent 特性，通用 DAP 无标准 capability，声明为非目标。对应待办进入 §20 D11。
+**IDEA 2026.2 对照增量。** 官方 2026.2 Debugger 相关新增：Logpoints（本仓库模型/gutter 已有，缺插值求值与输出证据）与 runtime output → source code 导航增强（本仓库 Console 已有不正确的初版 linkify/openLocation）；async stack traces 是 Java agent 特性，通用 DAP 无标准 capability，声明为非目标。当前对应待办见 §21 D11.1/D11.2。
+
+### 15.13 `dab8a778` production-path code review（2026-08-19）
+
+本节审查 §20 的实际交付。结论为 **FAIL**：新增模型与组件行为有价值，但没有形成规定的唯一 action/request/console/layout owner；D11 source link 还会打开错误行。
+
+| 领域 | 本提交已确认 | Code review 发现的阻断事实 | 当前等级 / 下一包 |
+|------|--------------|----------------------------|-------------------|
+| D6.3 Action | `createDebugActionService` 返回 typed `Promise<ActionResult>` 并有 busy/cancel skeleton | 无 production consumer；Toolbar/Frames 仍直调 debug hook。service 在 descriptor resolve 后一律返回 applied（`debugActionService.ts:284-288`），但 `debug.step` 可能 resolve `{kind:"failed"}`，terminate/restart 仍 fire-and-forget；失败/取消被误报成功且不写目标 session Console | **model only / unsound result；D6.4** |
+| D8.3 Token/Watch | watch migration helper 与部分 hidden pane gating 已加入 | public scopes/variables API 仍只收 frame/reference并读 mutable active session；variables expansion 无取消且闭包可把 A 的迟到结果渲染进 B；stack 固定 40 条无 paging/cache；migration helper 无 consumer，持久化仍为 `string[]`、reload 重造 ID | **model + partial guard；D8.4** |
+| D7.3 Console | source line renderer 与现有 output ring 基础存在 | draft/history/follow/seen 仍是 pane-local；badge 是总 output 数而非 unread；`logConsole` 仍有独立 2k cap，不符合 10k + 2 MiB session reducer；clear/continue/terminate 的 request generation 未统一 | **wired partial；D7.4** |
+| D9.3 Layout/ARIA | subtab IDs 使用 workspace instance，Variables pane 按当前 tab 控制 visible | split storage key 与 PanelGroup ID 仍 global（`DebugPanel.tsx:34-35,360`），Variables split 同样 global；separator 无完整 ARIA/keyboard，testids 未实例化、可见文案未 i18n | **wired partial；D9.4** |
+| D11 Source navigation | Console 将 `path:line(:col)` 渲染为按钮并调用 `onOpenLocation` | renderer 先把 line/column 减一（`DebugConsolePane.tsx:36-44`），CodeWorkspace `openDebugFrame` 再减一，形成 double decrement；相对路径没有按 roots 解析，`App.java:42` 可 no-op；只有 pane callback test，没有 host navigation test | **wired but incorrect；D11.1** |
+| D10.3 Evidence | `tsc -b` 与新增相关 5 files/45 tests 通过 | 无 fake DAP、真实 adapter、性能/native；QA catalog/YAML 仍使用 `[data-testid="code-workspace-debug-panel"]`，生产已改为 `debug-panel`，现有自动化 selector 失效 | **missing / broken gate；D10.4** |
+
+**Code review 结论。** 先修 D11 错误导航和 D8 跨 session stale publish，再接 D6 唯一 action service；D7/D9 不能继续在 pane/global localStorage 上增量堆字段。所有 service/model 的完成声明必须附生产 consumer 搜索与真实 host/fake DAP 证据。
 
 ## 16. v2.1 下一轮权威待办（面向其它 agent，`f88c5785` 前历史快照）
 
@@ -1303,7 +1318,7 @@ fake DAP 首先验证同 thread re-stop 的 epoch：`stopped(thread=1,e1) -> var
 
 ## 19. v2.4 当前下一轮待办（面向其它 agent，`1b6f91cf` 前历史合同）
 
-> 本节已被 §20 取代，保留用于追溯 `3aacbecc` 之后的执行合同；`1b6f91cf` 后的当前合同见 §20。
+> 本节已被 §20 取代，保留用于追溯 `3aacbecc` 之后的执行合同；`1b6f91cf` 后的历史合同见 §20，当前合同见 §21。
 
 本节取代 §18 作为 `3aacbecc` 之后的当前 Debug 执行合同。每个包必须标明 `model`/`wired`/`workflow`/`verified`，保留其它 owner 的变更；mock DAP、jsdom 和组件字段不能升级为真实 workflow。
 
@@ -1351,9 +1366,9 @@ fake DAP 至少覆盖 `initialize -> launch -> initialized -> two-thread stack p
 
 ---
 
-## 20. v2.5 当前下一轮待办（面向其它 agent，`1b6f91cf` 复核后）
+## 20. v2.5 下一轮待办（`dab8a778` 前历史合同，当前见 §21）
 
-本节取代 §19 作为当前 Debug 执行合同（§19 保留为历史追溯）。每个包必须同时交付：生产 host 接线、typed state/result、取消/失败/恢复语义、纯/组件/真实 host 测试与 QA catalog/YAML；只交 descriptor 文件、类型声明或组件 mock 不得升级等级。
+本节是 `1b6f91cf` 后、`dab8a778` 前的执行合同，现保留用于追溯；当前执行合同见 §21。
 
 | 顺序 | 子包 | 完成定义（验收要点） | 主要文件 owner |
 |------|------|----------------------|----------------|
@@ -1371,3 +1386,21 @@ fake DAP 至少覆盖 `initialize -> launch -> initialized -> two-thread stack p
 - [ ] **Async stack traces**：声明为通用 DAP 非目标（无标准 capability）；仅当某 adapter 提供扩展时再立项，文档保留此决议防止重复评估。
 
 **合并顺序。** `D8.3 -> D6.3` 先行（正确性），`D7.3` 与 `D9.3` 在 D8.3 公开类型稳定后并行；`D11` 各条目独立成 PR 且不修改 capability truth；`D10.3` 随包执行。`useCodeDebugSession.ts` 仍按 stop/data、action、output/evaluate 区域分 owner；任何 PR 红门禁（`tsc -b`/changed-file tests/`git diff --check`）不得进入下一包。
+
+---
+
+## 21. v2.6 当前下一轮待办（面向其它 agent，`dab8a778` code review 后）
+
+本节取代 §20。按用户可见错误与跨 session 数据正确性排序；每包必须证明真实 consumer，不能只扩充 service/model tests。
+
+| 顺序 | 子包 | 完成定义（验收要点） | 主要 owner |
+|------|------|----------------------|------------|
+| P0 hotfix | D11.1 Source link 坐标与多 root | 统一坐标 contract：renderer/callback 全程传 1-based line **与 column**，仅 CodeMirror reveal 边界转换为 zero-based line/character 一次；绝对、file URI、Windows drive/UNC 先 canonical match，relative path 在所有 roots 中查找：唯一命中直接打开、多命中弹 disambiguation picker、零命中返回 typed no-op。CodeWorkspace host test 断言 `App.java:42` 与 `src/App.java:42:7` 的最终 line/character，并覆盖双 root ambiguity 与 Windows path | Console renderer、CodeWorkspace open-location adapter、path resolver |
+| P1 | D11.2 Logpoint 运行期证据 | `setBreakpoints.logMessage` 原样发给 adapter，客户端不得在 stop epoch 自行 evaluate；支持 adapter 的插值结果必须通过 `output` event 进入来源 session Console；不支持/未求值 adapter 显示其字面 output 或明确 capability limitation。fake adapter 覆盖 pass-through、origin session 与 unsupported profile，并提供至少一种真实 adapter 脱敏 trace | breakpoint/DAP adapter bridge、Console reducer、fake/real adapter evidence |
+| P0 | D8.4 Token API 与 Watch 真迁移 | scopes/variables/evaluate/stack/setVariable API 强制接收完整 request token；response 仅在 session/stop/frame/reference/requestId 全匹配时 reducer publish；switch/continue/terminate/collapse 取消 interest；stack paging + per-thread cache；旧 string[] 一次迁移成稳定 ID records 并按 ID edit/remove/reorder/enable | DAP model、debug hook stop/data 区、Variables/Watch |
+| P0 | D6.4 Instance ActionService 生产接线 | Toolbar/Frames/Panel/workspace keymap/Search 全部经同一 instance service；descriptor/adapter 返回 typed result 而非 resolved=success；AbortSignal 绑定 DAP request；failed/cancelled 写来源 session structured Console entry；Hot Reload 仅 adapter extension manifest 注册；双 session busy/cancel/failure workflow tests | action service、debug controls、workspace bridge |
+| P1 | D7.4 Session Console 单一 owner | entries/bytes/nextSeq/lastSeen/clearGeneration/follow/history/draft 全进 `consoleBySessionId`；删除 hook 2k 与 pane-local 双真值；10k + 2 MiB 双预算、一次 truncation marker、真实 unread badge；clear/frame/continue/new-stop/terminate 丢弃迟到 evaluate；A→B→A 恢复状态 | DAP console reducer、debug hook output/evaluate 区、Console/Panel |
+| P1 | D9.4 Workspace layout/ARIA/i18n | split keys、PanelGroup IDs、tab/panel/test IDs 均 namespace by workspace/window；schema v2 migration + Reset；separator 支持 orientation/value/min/max 与键盘；用户文案进 i18n；双 Debug instance focus/storage 与 200% zoom tests | DebugPanel/Variables layout、SubTabBar、locales |
+| Gate | D10.4 恢复并扩展证据链 | 先把 feature catalog/YAML selector 与生产 `debug-panel` 对齐；fake DAP 覆盖 stale/failure/cancel/cleanup 与 supported/unsupported profiles；真实 Java/Node/Python/Delve/LLDB trace；10k/2MiB、20x200 性能和三端 native checklist | QA catalog/YAML、fake harness、evidence |
+
+**合并顺序。** `D11.1 hotfix -> D8.4 -> D6.4`；D7.4/D9.4 在 D8 token contract 稳定后并行；D10.4 先修 selector，再随每包补 evidence。任何 PR 必须通过 `tsc -b`、changed-file tests、`git diff --check`，并列明仍缺的 real-adapter/native 证据。
