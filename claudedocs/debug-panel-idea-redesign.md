@@ -1366,7 +1366,7 @@ fake DAP 至少覆盖 `initialize -> launch -> initialized -> two-thread stack p
 
 **D11 IDEA 2026.2 delta 清单（对照官方 What's New 的新增缺口）：**
 
-- [ ] **Logpoint 插值证据链**：`logMessage` 中 `{expr}` 必须在 stop epoch 绑定 evaluate 并写入目标 session Console（category=console）；验证不支持插值的 adapter 的降级显示；补 QA case（模型与 gutter diamond 已存在，本项补运行期证据）。
+- [ ] **Logpoint 运行期证据链**：DAP logpoint 由 adapter 经 `setBreakpoints.logMessage` 求值，客户端**不在 stop epoch 上自行 evaluate**（logpoint 通常不暂停程序，无 stop epoch/frame 可用）。验收：`logMessage` 原样传递；支持的 adapter 将插值结果以 `output` 事件写入来源 session 的 Console；不支持或未求值的 adapter 按其返回的字面输出显示，或显式展示能力限制提示。以 fake adapter + 至少一种真实 adapter trace 验收（模型与 gutter diamond 已存在，本项只补运行期证据）。
 - [ ] **Console runtime output → source 导航**（2026.2 新增）：stdout/stderr/exception 文本中的 `path:line(:col)` 模式渲染为可点击链接，点击经统一导航入口打开位置；多 root/相对路径按 workspace 解析；长输出下链接化不得造成线性重渲染（与 D7.3 ring buffer 协同验收）。
 - [ ] **Async stack traces**：声明为通用 DAP 非目标（无标准 capability）；仅当某 adapter 提供扩展时再立项，文档保留此决议防止重复评估。
 
