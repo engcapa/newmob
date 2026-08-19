@@ -79,9 +79,46 @@ describe("applyWorkspaceEdit", () => {
         writeDisk,
       },
     );
-    expect(writeDisk).toHaveBeenCalledWith("/repo/b.ts", "Y", "h1");
+    expect(writeDisk).toHaveBeenCalledWith("/repo/b.ts", "Y", "h1", undefined, undefined, "lf");
     expect(saveOpenBuffer).not.toHaveBeenCalled();
     expect(outcomes[0]).toMatchObject({ status: "applied-disk" });
+  });
+
+  it("preserves CRLF and CR line endings when applying LSP edits to closed files", async () => {
+    const writeDisk = vi.fn(async () => {});
+    const outcomes = await applyWorkspaceEdit(
+      {
+        documentEdits: [{
+          uri: "file:///repo/crlf.ts",
+          path: "/repo/crlf.ts",
+          edits: [{
+            range: { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } },
+            newText: "inserted_line\n",
+          }],
+        }],
+      },
+      {
+        resolvePath: (file) => file.path,
+        getOpenBuffer: () => null,
+        applyToOpenBuffer: () => {},
+        saveOpenBuffer: async () => {},
+        readDisk: async () => ({
+          text: "line1\r\nline2\r\n",
+          hash: "h-crlf",
+          eol: "crlf",
+        }),
+        writeDisk,
+      },
+    );
+    expect(outcomes[0]).toMatchObject({ status: "applied-disk" });
+    expect(writeDisk).toHaveBeenCalledWith(
+      "/repo/crlf.ts",
+      "line1\r\ninserted_line\r\nline2\r\n",
+      "h-crlf",
+      undefined,
+      undefined,
+      "crlf",
+    );
   });
 
   it("records failures without rolling back prior successes", async () => {

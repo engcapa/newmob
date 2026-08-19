@@ -23,6 +23,7 @@ function makeConsoleSession(overrides: Partial<CodeDebugSession> = {}): CodeDebu
     availableExceptionFilters: [],
     watchExpressions: [],
     watchItems: [],
+    stopEpoch: 0,
     isStepping: false,
     breakpointsMuted: false,
     setBreakpointsMuted: vi.fn(),

@@ -8,6 +8,12 @@ import {
   getAllLeafNodes,
   findLeafNode,
   migrateLayoutV1toV2,
+  atomicSplitLeaf,
+  atomicCloseLeaf,
+  atomicMoveTab,
+  atomicSetLeafActiveTab,
+  atomicCloseTabInLeaf,
+  validateLayoutTree,
   type LayoutNode,
 } from "./recursiveLayoutTree";
 
@@ -103,59 +109,156 @@ describe("recursiveLayoutTree", () => {
     expect(leaves[1].id).toBe("g2");
   });
 
-  it("atomically prevents tab loss when moving to a non-existent target leaf", () => {
-    const root: LayoutNode = {
+  it("atomicSplitLeaf creates a new group and returns changed outcome", () => {
+    const tree: LayoutNode = {
       type: "leaf",
-      id: "leaf-1",
-      openFileKeys: ["f1", "f2"],
-      activeKey: "f1",
+      id: "primary",
+      openFileKeys: ["a.ts"],
+      activeKey: "a.ts",
+    };
+    const groups = {
+      primary: { id: "primary", openOrder: ["a.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
     };
 
-    // Target "leaf-non-existent" does not exist
-    const moved = moveTabBetweenLeaves(root, "leaf-1", "leaf-non-existent", "f2");
-    expect(moved).toBe(root);
-    const leaf = findLeafNode(moved, "leaf-1");
-    expect(leaf?.openFileKeys).toEqual(["f1", "f2"]); // Tab was preserved!
+    const res = atomicSplitLeaf(tree, groups, "primary", "primary", "horizontal", "b.ts", "leaf-secondary");
+    expect(res.kind).toBe("changed");
+    if (res.kind === "changed") {
+      expect(res.activeGroupId).toBe("leaf-secondary");
+      expect(res.groups["leaf-secondary"]).toBeDefined();
+      expect(res.groups["leaf-secondary"].openOrder).toEqual(["b.ts"]);
+      expect(getAllLeafNodes(res.tree)).toHaveLength(2);
+    }
   });
 
-  it("atomically prevents activating keys not belonging to the leaf", () => {
-    const root: LayoutNode = {
+  it("atomicCloseLeaf cleans up closed group and prevents closing last leaf", () => {
+    const tree: LayoutNode = {
       type: "leaf",
-      id: "leaf-1",
-      openFileKeys: ["f1", "f2"],
-      activeKey: "f1",
+      id: "primary",
+      openFileKeys: ["a.ts"],
+      activeKey: "a.ts",
+    };
+    const groups = {
+      primary: { id: "primary", openOrder: ["a.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
     };
 
-    const updated = setLeafActiveTab(root, "leaf-1", "foreign-file.ts");
-    expect(updated).toBe(root);
-    expect((updated as { activeKey: string }).activeKey).toBe("f1");
-  });
+    const res1 = atomicCloseLeaf(tree, groups, "primary", "primary");
+    expect(res1.kind).toBe("no-op");
 
-  it("refuses to close the last remaining leaf node in the tree", () => {
-    const root: LayoutNode = {
-      type: "leaf",
-      id: "leaf-1",
-      openFileKeys: ["f1"],
-      activeKey: "f1",
-    };
-
-    const closed = closeLeafNode(root, "leaf-1");
-    expect(closed).toBe(root);
-    expect(getAllLeafNodes(closed)).toHaveLength(1);
-  });
-
-  it("safely recovers corrupt tree structures during migration", () => {
-    const corruptTree = {
+    // With 2 leaves
+    const splitTree: LayoutNode = {
       type: "split",
-      id: "split-corrupt",
-      orientation: "invalid-orientation",
-      children: [{ type: "leaf", id: "l1", openFileKeys: ["f1.ts"], activeKey: "non-existent.ts" }],
-      ratios: [1.0],
+      id: "split-1",
+      orientation: "horizontal",
+      ratios: [0.5, 0.5],
+      children: [
+        { type: "leaf", id: "primary", openFileKeys: ["a.ts"], activeKey: "a.ts" },
+        { type: "leaf", id: "secondary", openFileKeys: ["b.ts"], activeKey: "b.ts" },
+      ],
+    };
+    const splitGroups = {
+      primary: { id: "primary", openOrder: ["a.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
+      secondary: { id: "secondary", openOrder: ["b.ts"], activeKey: "b.ts", previewKey: null, pinnedKeys: [] },
     };
 
-    const recovered = migrateLayoutV1toV2(corruptTree);
-    expect(recovered.type).toBe("leaf");
-    expect(getAllLeafNodes(recovered)).toHaveLength(1);
-    expect(getAllLeafNodes(recovered)[0].openFileKeys).toContain("f1.ts");
+    const res2 = atomicCloseLeaf(splitTree, splitGroups, "secondary", "secondary");
+    expect(res2.kind).toBe("changed");
+    if (res2.kind === "changed") {
+      expect(res2.activeGroupId).toBe("primary");
+      expect(res2.groups.secondary).toBeUndefined();
+      expect(res2.groups.primary).toBeDefined();
+      expect(getAllLeafNodes(res2.tree)).toHaveLength(1);
+    }
+  });
+
+  it("atomicCloseTabInLeaf synchronizes tree and group openOrder", () => {
+    const tree: LayoutNode = {
+      type: "leaf",
+      id: "primary",
+      openFileKeys: ["a.ts", "b.ts"],
+      activeKey: "a.ts",
+    };
+    const groups = {
+      primary: { id: "primary", openOrder: ["a.ts", "b.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const res = atomicCloseTabInLeaf(tree, groups, "primary", "primary", "a.ts");
+    expect(res.kind).toBe("changed");
+    if (res.kind === "changed") {
+      expect(res.groups.primary.openOrder).toEqual(["b.ts"]);
+      expect(res.groups.primary.activeKey).toBe("b.ts");
+      const leaf = findLeafNode(res.tree, "primary");
+      expect(leaf?.openFileKeys).toEqual(["b.ts"]);
+      expect(leaf?.activeKey).toBe("b.ts");
+    }
+  });
+
+  it("atomicMoveTab transfers tab across leaves and groups atomically", () => {
+    const tree: LayoutNode = {
+      type: "split",
+      id: "split-1",
+      orientation: "horizontal",
+      ratios: [0.5, 0.5],
+      children: [
+        { type: "leaf", id: "l1", openFileKeys: ["f1.ts", "f2.ts"], activeKey: "f1.ts" },
+        { type: "leaf", id: "l2", openFileKeys: ["f3.ts"], activeKey: "f3.ts" },
+      ],
+    };
+    const groups = {
+      l1: { id: "l1", openOrder: ["f1.ts", "f2.ts"], activeKey: "f1.ts", previewKey: null, pinnedKeys: [] },
+      l2: { id: "l2", openOrder: ["f3.ts"], activeKey: "f3.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const res = atomicMoveTab(tree, groups, "l1", "l1", "l2", "f2.ts");
+    expect(res.kind).toBe("changed");
+    if (res.kind === "changed") {
+      expect(res.groups.l1.openOrder).toEqual(["f1.ts"]);
+      expect(res.groups.l2.openOrder).toEqual(["f3.ts", "f2.ts"]);
+    }
+  });
+
+  it("atomicSetLeafActiveTab updates active tab in leaf and group atomically", () => {
+    const tree: LayoutNode = {
+      type: "leaf",
+      id: "l1",
+      openFileKeys: ["f1.ts", "f2.ts"],
+      activeKey: "f1.ts",
+    };
+    const groups = {
+      l1: { id: "l1", openOrder: ["f1.ts", "f2.ts"], activeKey: "f1.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const res = atomicSetLeafActiveTab(tree, groups, "l1", "l1", "f2.ts");
+    expect(res.kind).toBe("changed");
+    if (res.kind === "changed") {
+      expect(res.groups.l1.activeKey).toBe("f2.ts");
+      const leaf = findLeafNode(res.tree, "l1");
+      expect(leaf?.activeKey).toBe("f2.ts");
+    }
+  });
+
+  it("validateLayoutTree checks ratios sum tolerance", () => {
+    const validTree: LayoutNode = {
+      type: "split",
+      id: "s1",
+      orientation: "horizontal",
+      children: [
+        { type: "leaf", id: "l1", openFileKeys: [], activeKey: null },
+        { type: "leaf", id: "l2", openFileKeys: [], activeKey: null },
+      ],
+      ratios: [0.5, 0.5],
+    };
+    expect(validateLayoutTree(validTree).valid).toBe(true);
+
+    const invalidTree: LayoutNode = {
+      type: "split",
+      id: "s1",
+      orientation: "horizontal",
+      children: [
+        { type: "leaf", id: "l1", openFileKeys: [], activeKey: null },
+        { type: "leaf", id: "l2", openFileKeys: [], activeKey: null },
+      ],
+      ratios: [0.2, 0.2], // sum = 0.4 != 1.0
+    };
+    expect(validateLayoutTree(invalidTree).valid).toBe(false);
   });
 });

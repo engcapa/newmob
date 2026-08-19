@@ -170,6 +170,8 @@ export interface CodeDebugSession {
   watchExpressions: string[];
   /** Structured watch items with stable IDs. */
   watchItems: WatchExpressionItem[];
+  /** Monotonically increasing epoch bumped on every debug stop event. */
+  stopEpoch: number;
   /** Stepping action in-flight status. */
   isStepping: boolean;
   /** IDEA "Mute Breakpoints": keep them listed but stop arming them. */
@@ -2980,6 +2982,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setBreakpointsMuted,
     removeAllBreakpoints,
     frameVariables,
+    stopEpoch: state?.stopEpoch ?? stopEpochRef.current ?? 0,
     sessions,
     activeSessionId,
     selectSession,

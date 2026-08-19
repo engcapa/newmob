@@ -7,7 +7,14 @@ import type {
   RightPaneTabId,
 } from "../../../stores/codeWorkspaceStore";
 import { fileKey } from "./codeWorkspaceModel";
+import {
+  type LayoutNode,
+  validateLayoutTree,
+  migrateLayoutV1toV2,
+  getAllLeafNodes,
+} from "./recursiveLayoutTree";
 
+export const WORKSPACE_LAYOUT_STORAGE_PREFIX_V2 = "taomni.codeWorkspace.layout.v2.";
 export const WORKSPACE_LAYOUT_STORAGE_PREFIX = "taomni.codeWorkspace.layout.v1.";
 export const WORKSPACE_SEARCH_HISTORY_PREFIX = "taomni.codeWorkspace.searchHistory.v1.";
 export const MAX_SEARCH_HISTORY = 20;
@@ -20,7 +27,7 @@ export interface PersistedEditorGroup {
   pinnedKeys: string[];
 }
 
-export interface WorkspaceLayoutSnapshot {
+export interface WorkspaceLayoutSnapshotV1 {
   version: 1;
   bottomDockOpen: boolean;
   bottomDockTab: BottomDockTabId;
@@ -33,6 +40,23 @@ export interface WorkspaceLayoutSnapshot {
   expandedDirKeys: string[];
   editorGroups: Record<EditorGroupId, PersistedEditorGroup>;
 }
+
+export interface WorkspaceLayoutSnapshotV2 {
+  version: 2;
+  bottomDockOpen: boolean;
+  bottomDockTab: BottomDockTabId;
+  rightPaneOpen: boolean;
+  rightPaneTab: RightPaneTabId;
+  languagePanelOpen: boolean;
+  splitOrientation: EditorSplitOrientation | null;
+  activeEditorGroupId: string;
+  expandedRootIds: string[];
+  expandedDirKeys: string[];
+  layoutTreeV2: LayoutNode;
+  editorGroups: Record<string, PersistedEditorGroup>;
+}
+
+export type WorkspaceLayoutSnapshot = WorkspaceLayoutSnapshotV2;
 
 const BOTTOM_DOCK_TABS: BottomDockTabId[] = [
   "problems",
@@ -50,9 +74,12 @@ const BOTTOM_DOCK_TABS: BottomDockTabId[] = [
   "debug",
 ];
 const RIGHT_PANE_TABS: RightPaneTabId[] = ["outline", "documentation"];
-const GROUP_IDS: EditorGroupId[] = ["primary", "secondary"];
 
-function storageKey(workspaceInstanceId: string): string {
+function storageKeyV2(workspaceInstanceId: string): string {
+  return `${WORKSPACE_LAYOUT_STORAGE_PREFIX_V2}${workspaceInstanceId}`;
+}
+
+function storageKeyV1(workspaceInstanceId: string): string {
   return `${WORKSPACE_LAYOUT_STORAGE_PREFIX}${workspaceInstanceId}`;
 }
 
@@ -68,15 +95,19 @@ function asStringArray(value: unknown, limit = 200): string[] {
 }
 
 function normalizeGroup(value: unknown): PersistedEditorGroup {
-  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const source = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const openOrder = asStringArray(source.openOrder, MAX_RESTORED_OPEN_FILES);
-  const pinnedKeys = asStringArray(source.pinnedKeys, MAX_RESTORED_OPEN_FILES).filter((key) => openOrder.includes(key));
-  const activeKey = typeof source.activeKey === "string" && openOrder.includes(source.activeKey)
-    ? source.activeKey
-    : openOrder[0] ?? null;
-  const previewKey = typeof source.previewKey === "string" && openOrder.includes(source.previewKey)
-    ? source.previewKey
-    : null;
+  const pinnedKeys = asStringArray(source.pinnedKeys, MAX_RESTORED_OPEN_FILES).filter((key) =>
+    openOrder.includes(key),
+  );
+  const activeKey =
+    typeof source.activeKey === "string" && openOrder.includes(source.activeKey)
+      ? source.activeKey
+      : openOrder[0] ?? null;
+  const previewKey =
+    typeof source.previewKey === "string" && openOrder.includes(source.previewKey)
+      ? source.previewKey
+      : null;
   return {
     openOrder,
     activeKey,
@@ -94,9 +125,9 @@ export function createEmptyPersistedGroup(): PersistedEditorGroup {
   };
 }
 
-export function defaultWorkspaceLayoutSnapshot(): WorkspaceLayoutSnapshot {
+export function defaultWorkspaceLayoutSnapshot(): WorkspaceLayoutSnapshotV2 {
   return {
-    version: 1,
+    version: 2,
     bottomDockOpen: true,
     bottomDockTab: "references",
     rightPaneOpen: false,
@@ -106,6 +137,12 @@ export function defaultWorkspaceLayoutSnapshot(): WorkspaceLayoutSnapshot {
     activeEditorGroupId: "primary",
     expandedRootIds: [],
     expandedDirKeys: [],
+    layoutTreeV2: {
+      type: "leaf",
+      id: "primary",
+      openFileKeys: [],
+      activeKey: null,
+    },
     editorGroups: {
       primary: createEmptyPersistedGroup(),
       secondary: createEmptyPersistedGroup(),
@@ -113,25 +150,81 @@ export function defaultWorkspaceLayoutSnapshot(): WorkspaceLayoutSnapshot {
   };
 }
 
-export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayoutSnapshot {
+export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayoutSnapshotV2 {
   const fallback = defaultWorkspaceLayoutSnapshot();
   if (!value || typeof value !== "object") return fallback;
   const source = value as Record<string, unknown>;
   const bottomDockTab = BOTTOM_DOCK_TABS.includes(source.bottomDockTab as BottomDockTabId)
-    ? source.bottomDockTab as BottomDockTabId
+    ? (source.bottomDockTab as BottomDockTabId)
     : fallback.bottomDockTab;
   const rightPaneTab = RIGHT_PANE_TABS.includes(source.rightPaneTab as RightPaneTabId)
-    ? source.rightPaneTab as RightPaneTabId
+    ? (source.rightPaneTab as RightPaneTabId)
     : fallback.rightPaneTab;
-  const splitOrientation = source.splitOrientation === "horizontal" || source.splitOrientation === "vertical"
-    ? source.splitOrientation
-    : null;
-  const activeEditorGroupId = source.activeEditorGroupId === "secondary" ? "secondary" : "primary";
-  const groupsSource = source.editorGroups && typeof source.editorGroups === "object"
-    ? source.editorGroups as Record<string, unknown>
-    : {};
+  const splitOrientation =
+    source.splitOrientation === "horizontal" || source.splitOrientation === "vertical"
+      ? source.splitOrientation
+      : null;
+
+  const groupsSource =
+    source.editorGroups && typeof source.editorGroups === "object"
+      ? (source.editorGroups as Record<string, unknown>)
+      : {};
+
+  const normalizedGroups: Record<string, PersistedEditorGroup> = {};
+  for (const [k, v] of Object.entries(groupsSource)) {
+    if (v && typeof v === "object") {
+      normalizedGroups[k] = normalizeGroup(v);
+    }
+  }
+
+  if (!normalizedGroups.primary) {
+    normalizedGroups.primary = createEmptyPersistedGroup();
+  }
+  if (!normalizedGroups.secondary) {
+    normalizedGroups.secondary = createEmptyPersistedGroup();
+  }
+
+  // Resolve layout tree v2
+  let layoutTreeV2: LayoutNode;
+  if (source.layoutTreeV2 && typeof source.layoutTreeV2 === "object") {
+    const { valid } = validateLayoutTree(source.layoutTreeV2);
+    if (valid) {
+      layoutTreeV2 = source.layoutTreeV2 as LayoutNode;
+    } else {
+      layoutTreeV2 = migrateLayoutV1toV2(source.layoutTreeV2);
+    }
+  } else {
+    // Migrate v1 schema
+    layoutTreeV2 = migrateLayoutV1toV2({
+      orientation: splitOrientation ?? "horizontal",
+      groups: Object.entries(normalizedGroups).map(([id, g]) => ({
+        id,
+        openFileKeys: g.openOrder,
+        activeKey: g.activeKey,
+      })),
+    });
+  }
+
+  // Ensure all leaves in layout tree have entries in normalizedGroups
+  const leaves = getAllLeafNodes(layoutTreeV2);
+  for (const leaf of leaves) {
+    if (!normalizedGroups[leaf.id]) {
+      normalizedGroups[leaf.id] = {
+        openOrder: leaf.openFileKeys,
+        activeKey: leaf.activeKey,
+        previewKey: null,
+        pinnedKeys: [],
+      };
+    }
+  }
+
+  let activeEditorGroupId = typeof source.activeEditorGroupId === "string" ? source.activeEditorGroupId : "primary";
+  if (!normalizedGroups[activeEditorGroupId]) {
+    activeEditorGroupId = leaves[0]?.id ?? "primary";
+  }
+
   return {
-    version: 1,
+    version: 2,
     bottomDockOpen: source.bottomDockOpen !== false,
     bottomDockTab,
     rightPaneOpen: source.rightPaneOpen === true,
@@ -141,19 +234,23 @@ export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayou
     activeEditorGroupId,
     expandedRootIds: asStringArray(source.expandedRootIds, 64),
     expandedDirKeys: asStringArray(source.expandedDirKeys, 256),
-    editorGroups: {
-      primary: normalizeGroup(groupsSource.primary),
-      secondary: normalizeGroup(groupsSource.secondary),
-    },
+    layoutTreeV2,
+    editorGroups: normalizedGroups,
   };
 }
 
-export function readWorkspaceLayoutSnapshot(workspaceInstanceId: string): WorkspaceLayoutSnapshot | null {
+export function readWorkspaceLayoutSnapshot(workspaceInstanceId: string): WorkspaceLayoutSnapshotV2 | null {
   if (!workspaceInstanceId || typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(storageKey(workspaceInstanceId));
-    if (!raw) return null;
-    return normalizeWorkspaceLayoutSnapshot(JSON.parse(raw));
+    const rawV2 = window.localStorage.getItem(storageKeyV2(workspaceInstanceId));
+    if (rawV2) {
+      return normalizeWorkspaceLayoutSnapshot(JSON.parse(rawV2));
+    }
+    const rawV1 = window.localStorage.getItem(storageKeyV1(workspaceInstanceId));
+    if (rawV1) {
+      return normalizeWorkspaceLayoutSnapshot(JSON.parse(rawV1));
+    }
+    return null;
   } catch {
     return null;
   }
@@ -165,10 +262,8 @@ export function writeWorkspaceLayoutSnapshot(
 ): void {
   if (!workspaceInstanceId || typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(
-      storageKey(workspaceInstanceId),
-      JSON.stringify(normalizeWorkspaceLayoutSnapshot(snapshot)),
-    );
+    const normalized = normalizeWorkspaceLayoutSnapshot(snapshot);
+    window.localStorage.setItem(storageKeyV2(workspaceInstanceId), JSON.stringify(normalized));
   } catch {
     // localStorage may be unavailable in restricted webviews.
   }
@@ -231,11 +326,11 @@ export function fileRefFromFileKey(
   return null;
 }
 
-export function uniqueOrderedKeys(groups: Record<EditorGroupId, PersistedEditorGroup>): string[] {
+export function uniqueOrderedKeys(groups: Record<string, PersistedEditorGroup>): string[] {
   const seen = new Set<string>();
   const ordered: string[] = [];
-  for (const groupId of GROUP_IDS) {
-    for (const key of groups[groupId]?.openOrder ?? []) {
+  for (const group of Object.values(groups)) {
+    for (const key of group?.openOrder ?? []) {
       if (seen.has(key)) continue;
       seen.add(key);
       ordered.push(key);
@@ -252,19 +347,41 @@ export function snapshotFromWorkspaceUi(input: {
   rightPaneTab: RightPaneTabId;
   languagePanelOpen: boolean;
   splitOrientation: EditorSplitOrientation | null;
-  activeEditorGroupId: EditorGroupId;
+  activeEditorGroupId: string;
   expandedRootIds: string[];
   expandedDirKeys: string[];
-  editorGroups: Record<EditorGroupId, CodeWorkspaceEditorGroupState>;
-}): WorkspaceLayoutSnapshot {
+  editorGroups: Record<string, CodeWorkspaceEditorGroupState>;
+  layoutTreeV2?: LayoutNode | null;
+}): WorkspaceLayoutSnapshotV2 {
   const toPersisted = (group: CodeWorkspaceEditorGroupState): PersistedEditorGroup => ({
     openOrder: group.openOrder.slice(0, MAX_RESTORED_OPEN_FILES),
-    activeKey: group.activeKey && group.openOrder.includes(group.activeKey) ? group.activeKey : group.openOrder[0] ?? null,
-    previewKey: group.previewKey && group.openOrder.includes(group.previewKey) ? group.previewKey : null,
-    pinnedKeys: group.pinnedKeys.filter((key) => group.openOrder.includes(key)).slice(0, MAX_RESTORED_OPEN_FILES),
+    activeKey:
+      group.activeKey && group.openOrder.includes(group.activeKey)
+        ? group.activeKey
+        : group.openOrder[0] ?? null,
+    previewKey:
+      group.previewKey && group.openOrder.includes(group.previewKey) ? group.previewKey : null,
+    pinnedKeys: group.pinnedKeys
+      .filter((key) => group.openOrder.includes(key))
+      .slice(0, MAX_RESTORED_OPEN_FILES),
   });
+
+  const persistedGroups: Record<string, PersistedEditorGroup> = {};
+  for (const [k, v] of Object.entries(input.editorGroups)) {
+    if (v) {
+      persistedGroups[k] = toPersisted(v);
+    }
+  }
+
+  const layoutTree: LayoutNode = input.layoutTreeV2 ?? {
+    type: "leaf",
+    id: input.activeEditorGroupId || "primary",
+    openFileKeys: input.editorGroups[input.activeEditorGroupId]?.openOrder ?? [],
+    activeKey: input.editorGroups[input.activeEditorGroupId]?.activeKey ?? null,
+  };
+
   return normalizeWorkspaceLayoutSnapshot({
-    version: 1,
+    version: 2,
     bottomDockOpen: input.bottomDockOpen,
     bottomDockTab: input.bottomDockTab,
     rightPaneOpen: input.rightPaneOpen,
@@ -274,15 +391,13 @@ export function snapshotFromWorkspaceUi(input: {
     activeEditorGroupId: input.activeEditorGroupId,
     expandedRootIds: input.expandedRootIds,
     expandedDirKeys: input.expandedDirKeys,
-    editorGroups: {
-      primary: toPersisted(input.editorGroups.primary),
-      secondary: toPersisted(input.editorGroups.secondary),
-    },
+    layoutTreeV2: layoutTree,
+    editorGroups: persistedGroups,
   });
 }
 
-export function layoutSnapshotHasOpenFiles(snapshot: WorkspaceLayoutSnapshot): boolean {
-  return GROUP_IDS.some((id) => (snapshot.editorGroups[id]?.openOrder.length ?? 0) > 0);
+export function layoutSnapshotHasOpenFiles(snapshot: WorkspaceLayoutSnapshotV2): boolean {
+  return Object.values(snapshot.editorGroups).some((g) => (g?.openOrder.length ?? 0) > 0);
 }
 
 /** Re-export for callers that already import layout helpers. */

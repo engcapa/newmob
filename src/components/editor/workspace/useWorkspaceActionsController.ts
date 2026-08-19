@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  workspaceActionRegistry,
   compileWhenExpr,
   type WorkspaceActionContext,
   type ActionState,
@@ -9,17 +8,15 @@ import {
 } from "./workspaceActionRegistry";
 import {
   type WorkspaceCommand,
-  type WorkspaceCommandContext,
   type WorkspaceCommandMenuItem,
   type WorkspaceCommandRegistration,
   type KeyboardEventLike,
-  dispatchWorkspaceCommandKeydown,
-  runWorkspaceCommand,
-  workspaceCommandMenuItems,
-  registerWorkspaceCommands,
+  workspaceCommandMatchesKeybinding,
 } from "./workspaceCommands";
+import { WorkspaceActionHost } from "./workspaceActionHost";
 
 export interface UseWorkspaceActionsControllerOptions {
+  workspaceId?: string;
   commands: readonly WorkspaceCommand[];
   activeFocus: WorkspaceFocus;
   contextData?: Partial<WorkspaceActionContext>;
@@ -27,7 +24,9 @@ export interface UseWorkspaceActionsControllerOptions {
 }
 
 export interface WorkspaceActionsController {
+  host: WorkspaceActionHost;
   executeCommand: (commandId: string, payload?: unknown) => boolean;
+  executeAction: (commandId: string, payload?: unknown, signal?: AbortSignal) => Promise<ActionResult>;
   dispatchKeydown: (event: KeyboardEventLike) => WorkspaceCommand | null;
   getActionState: (commandId: string) => ActionState;
   menuItems: WorkspaceCommandMenuItem[];
@@ -37,9 +36,10 @@ export interface WorkspaceActionsController {
 
 /**
  * Controller hook managing workspace action registration, keydown dispatch,
- * state evaluation, and menu integration (E0.1 & E0.2).
+ * state evaluation, and menu integration (E0.1, E0.2, N0.1).
  */
 export function useWorkspaceActionsController({
+  workspaceId = "default-workspace",
   commands,
   activeFocus,
   contextData,
@@ -54,6 +54,8 @@ export function useWorkspaceActionsController({
   const contextDataRef = useRef(contextData);
   contextDataRef.current = contextData;
 
+  const [revision, setRevision] = useState(0);
+
   // Build current unified action context
   const getActionContext = useCallback((payload?: unknown): WorkspaceActionContext => {
     return {
@@ -63,63 +65,101 @@ export function useWorkspaceActionsController({
     };
   }, []);
 
-  // Register commands with the global action registry on mount / change
+  // Create stable workspace action host instance
+  const host = useMemo(() => {
+    return new WorkspaceActionHost({
+      workspaceId,
+      getContext: () => getActionContext(),
+      onExecuted: onCommandExecuted,
+    });
+  }, [workspaceId, getActionContext, onCommandExecuted]);
+
+  // Synchronize registered commands with the host
   useEffect(() => {
-    const unregister = registerWorkspaceCommands(commands);
+    const unregister = host.registerCommands(commands);
+    setRevision((r) => r + 1);
     return unregister;
-  }, [commands]);
+  }, [host, commands]);
 
-  const executeCommand = useCallback((commandId: string, payload?: unknown): boolean => {
-    const ctx = getActionContext(payload);
-    const success = runWorkspaceCommand(commandsRef.current, commandId, ctx as WorkspaceCommandContext);
-    if (success && onCommandExecuted) {
-      onCommandExecuted(commandId, { kind: "applied" });
-    }
-    return success;
-  }, [getActionContext, onCommandExecuted]);
+  const executeAction = useCallback(
+    async (commandId: string, payload?: unknown, signal?: AbortSignal): Promise<ActionResult> => {
+      return host.execute(commandId, payload, signal);
+    },
+    [host],
+  );
 
-  const dispatchKeydown = useCallback((event: KeyboardEventLike): WorkspaceCommand | null => {
-    const ctx = getActionContext();
-    const cmd = dispatchWorkspaceCommandKeydown(commandsRef.current, ctx as WorkspaceCommandContext, event);
-    if (cmd && onCommandExecuted) {
-      onCommandExecuted(cmd.id, { kind: "applied" });
-    }
-    return cmd;
-  }, [getActionContext, onCommandExecuted]);
+  const executeCommand = useCallback(
+    (commandId: string, payload?: unknown): boolean => {
+      const cmd = commandsRef.current.find((c) => c.id === commandId);
+      if (!cmd) return false;
+      const ctx = getActionContext(payload);
+      const res = cmd.run(ctx as any) as unknown;
+      const success = res !== false;
+      if (success && onCommandExecuted) {
+        onCommandExecuted(commandId, { kind: "applied" });
+      }
+      return Boolean(success);
+    },
+    [getActionContext, onCommandExecuted],
+  );
 
-  const getActionState = useCallback((commandId: string): ActionState => {
-    const ctx = getActionContext();
-    return workspaceActionRegistry.getState(commandId, ctx);
-  }, [getActionContext]);
+  const dispatchKeydown = useCallback(
+    (event: KeyboardEventLike): WorkspaceCommand | null => {
+      const ctx = getActionContext();
+      for (const cmd of commandsRef.current) {
+        if (!cmd.keybinding && !cmd.keybindings?.length) continue;
+        if (workspaceCommandMatchesKeybinding(cmd, event)) {
+          if (cmd.when && !compileWhenExpr(cmd.when)(ctx)) {
+            continue;
+          }
+          event.preventDefault?.();
+          event.stopPropagation?.();
+          const ok = cmd.run(ctx as any) as unknown;
+          if (ok !== false && onCommandExecuted) {
+            onCommandExecuted(cmd.id, { kind: "applied" });
+          }
+          return cmd;
+        }
+      }
+      return null;
+    },
+    [getActionContext, onCommandExecuted],
+  );
+
+  const getActionState = useCallback(
+    (commandId: string): ActionState => {
+      const ctx = getActionContext();
+      return host.getState(commandId, ctx);
+    },
+    [getActionContext, host],
+  );
 
   const menuItems = useMemo<WorkspaceCommandMenuItem[]>(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    revision;
     const ctx = getActionContext();
-    return workspaceCommandMenuItems(commands, ctx as WorkspaceCommandContext);
-  }, [commands, getActionContext]);
+    return host.getMenuItems(ctx);
+  }, [host, getActionContext, revision]);
 
   const searchableCommands = useMemo<WorkspaceCommandMenuItem[]>(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    revision;
     const ctx = getActionContext();
-    return commands.map((c) => {
-      const regAction = workspaceActionRegistry.get(c.id);
-      const whenCompiled = compileWhenExpr(c.when);
-      return {
-        id: c.id,
-        title: c.title,
-        category: c.category,
-        keybinding: c.keybinding,
-        enabled: whenCompiled(ctx),
-        provenance: c.provenance ?? regAction?.provenance ?? "local",
-      };
-    });
-  }, [commands, getActionContext]);
+    return host.search("", ctx);
+  }, [host, getActionContext, revision]);
 
-  const commandRegistration = useMemo<WorkspaceCommandRegistration>(() => ({
-    items: menuItems,
-    execute: (commandId) => executeCommand(commandId),
-  }), [menuItems, executeCommand]);
+  const commandRegistration = useMemo<WorkspaceCommandRegistration>(
+    () => ({
+      items: menuItems,
+      execute: (commandId) => executeCommand(commandId),
+    }),
+    [menuItems, executeCommand],
+  );
 
   return {
+    host,
     executeCommand,
+    executeAction,
     dispatchKeydown,
     getActionState,
     menuItems,

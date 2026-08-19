@@ -5,6 +5,7 @@ import type {
   LspWorkspaceEditOperation,
 } from "../../../lib/editor/lsp";
 import { applyLspTextEditsToString } from "./lspTextEdits";
+import { normalizeLineEndings } from "./saveNormalizationPipeline";
 import {
   buildWorkspaceEditPreview,
   workspaceEditOperations,
@@ -54,6 +55,7 @@ export interface WorkspaceEditApplyHooks {
   readDisk: (absolutePath: string) => Promise<{
     text: string;
     hash: string;
+    eol?: "lf" | "crlf" | "cr";
     encoding?: string;
     bom?: boolean;
   } | null>;
@@ -64,6 +66,7 @@ export interface WorkspaceEditApplyHooks {
     expectedHash: string | null,
     encoding?: string,
     bom?: boolean,
+    eol?: "lf" | "crlf" | "cr",
   ) => Promise<void>;
   /** Apply LSP CreateFile semantics and synchronize workspace UI state. */
   createFile?: (operation: Extract<LspWorkspaceEditOperation, { kind: "create" }>) => Promise<void>;
@@ -138,14 +141,12 @@ async function applyTextDocumentEdit(
     if (!disk) {
       return { operationIndex, path, status: "failed", reason: "file not found on disk" };
     }
-    const next = applyLspTextEditsToString(disk.text, file.edits);
-    if (disk.encoding !== undefined || disk.bom !== undefined) {
-      await hooks.writeDisk(path, next, disk.hash, disk.encoding, disk.bom);
-    } else {
-      // Preserve the compact legacy hook call for integrations that have not
-      // opted into charset metadata yet.
-      await hooks.writeDisk(path, next, disk.hash);
-    }
+    const diskEol: "lf" | "crlf" | "cr" =
+      disk.eol ??
+      (disk.text.includes("\r\n") ? "crlf" : disk.text.includes("\r") && !disk.text.includes("\n") ? "cr" : "lf");
+    const nextRaw = applyLspTextEditsToString(disk.text, file.edits);
+    const next = normalizeLineEndings(nextRaw, diskEol);
+    await hooks.writeDisk(path, next, disk.hash, disk.encoding, disk.bom, diskEol);
     return { operationIndex, path, status: "applied-disk" };
   } catch (error) {
     return {

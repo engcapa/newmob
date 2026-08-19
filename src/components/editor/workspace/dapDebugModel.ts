@@ -260,9 +260,33 @@ export interface DebugDisassembledInstruction {
   endColumn: number | null;
 }
 
+export interface DebugRequestToken {
+  sessionId: string;
+  stopEpoch: number;
+  threadId?: number;
+  frameId?: number;
+  variablesReference?: number;
+  requestId: string;
+}
+
+export type AsyncLoadState<T> =
+  | { status: "idle" }
+  | { status: "loading"; token: DebugRequestToken }
+  | { status: "ready" | "partial"; token: DebugRequestToken; value: T }
+  | { status: "failed"; token: DebugRequestToken; message: string; retryable: boolean };
+
+export interface DebugWatchItem {
+  id: string;
+  expression: string;
+  enabled: boolean;
+  order: number;
+  lastError?: string | null;
+}
+
 export interface DebugSessionState {
   sessionId: string;
   status: DebugStatus;
+  stopEpoch?: number;
   /** Thread the adapter last stopped on (for stackTrace / stepping). */
   stoppedThreadId: number | null;
   stoppedReason: string | null;
@@ -282,6 +306,7 @@ export function initialDebugState(sessionId: string): DebugSessionState {
   return {
     sessionId,
     status: "starting",
+    stopEpoch: 0,
     stoppedThreadId: null,
     stoppedReason: null,
     threads: [],
@@ -1461,6 +1486,7 @@ export function reduceDebugEvent(
       return {
         ...state,
         status: "stopped",
+        stopEpoch: (state.stopEpoch ?? 0) + 1,
         stoppedThreadId: threadId,
         selectedThreadId: threadId,
         stoppedReason: typeof body.reason === "string" ? body.reason : "stopped",

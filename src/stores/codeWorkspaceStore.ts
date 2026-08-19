@@ -12,11 +12,11 @@ import type {
 } from "../components/editor/workspace/codeWorkspaceModel";
 import {
   type LayoutNode,
-  splitLeafNode,
-  closeLeafNode,
-  moveTabBetweenLeaves,
-  setLeafActiveTab as setLeafActiveTabInTree,
-  getAllLeafNodes,
+  atomicSplitLeaf,
+  atomicCloseLeaf,
+  atomicMoveTab,
+  atomicSetLeafActiveTab,
+  atomicCloseTabInLeaf,
 } from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
 
@@ -259,6 +259,7 @@ interface CodeWorkspaceStoreState {
     fileKey: string,
   ) => void;
   setLeafActiveTab: (instanceId: string, leafId: string, fileKey: string | null) => void;
+  closeLayoutTabInLeaf: (instanceId: string, leafId: string, fileKey: string) => void;
   setMarkdownMode: (instanceId: string, fileKey: string, mode: "edit" | "preview" | "split") => void;
   replaceFileState: (instanceId: string, replacement: CodeWorkspaceFileStateReplacement) => void;
   updateOpenFiles: (instanceId: string, updater: Updater<Record<string, OpenFileState>>) => void;
@@ -409,26 +410,25 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
         activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
       };
-      const newLeafId = `leaf-${Date.now()}`;
-      const newTree = splitLeafNode(currentTree, leafId, orientation, newLeafId, newFileKey);
-      const newEditorGroups = { ...current.editorGroups };
-      if (!newEditorGroups[newLeafId]) {
-        newEditorGroups[newLeafId] = {
-          id: newLeafId,
-          openOrder: newFileKey ? [newFileKey] : [],
-          activeKey: newFileKey ?? null,
-          previewKey: null,
-          pinnedKeys: [],
-        };
+      const result = atomicSplitLeaf(
+        currentTree,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        leafId,
+        orientation,
+        newFileKey,
+      );
+      if (result.kind !== "changed") {
+        return state;
       }
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
-            layoutTreeV2: newTree,
-            editorGroups: newEditorGroups,
-            activeEditorGroupId: newLeafId,
+            layoutTreeV2: result.tree,
+            editorGroups: result.groups,
+            activeEditorGroupId: result.activeGroupId,
             splitOrientation: orientation,
           },
         },
@@ -441,16 +441,26 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       if (!current.layoutTreeV2) return state;
-      const newTree = closeLeafNode(current.layoutTreeV2, leafId);
-      const leaves = getAllLeafNodes(newTree);
-      const activeId = current.activeEditorGroupId === leafId ? (leaves[0]?.id ?? "primary") : current.activeEditorGroupId;
+      const result = atomicCloseLeaf(
+        current.layoutTreeV2,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        leafId,
+      );
+      if (result.kind !== "changed") {
+        return state;
+      }
+      const activeGroup = result.groups[result.activeGroupId];
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
-            layoutTreeV2: newTree,
-            activeEditorGroupId: activeId,
+            layoutTreeV2: result.tree,
+            editorGroups: result.groups,
+            activeEditorGroupId: result.activeGroupId,
+            openOrder: activeGroup?.openOrder ?? current.openOrder,
+            activeKey: activeGroup?.activeKey ?? null,
           },
         },
       };
@@ -462,35 +472,28 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       if (!current.layoutTreeV2) return state;
-      const newTree = moveTabBetweenLeaves(current.layoutTreeV2, sourceLeafId, targetLeafId, fileKey);
-      const sourceGroup = current.editorGroups[sourceLeafId];
-      const targetGroup = current.editorGroups[targetLeafId] ?? createEditorGroup(targetLeafId);
-
-      const nextSourceOrder = sourceGroup ? sourceGroup.openOrder.filter((k) => k !== fileKey) : [];
-      const nextTargetOrder = targetGroup.openOrder.includes(fileKey) ? targetGroup.openOrder : [...targetGroup.openOrder, fileKey];
-
-      const newEditorGroups = {
-        ...current.editorGroups,
-        [sourceLeafId]: {
-          ...(sourceGroup ?? createEditorGroup(sourceLeafId)),
-          openOrder: nextSourceOrder,
-          activeKey: sourceGroup?.activeKey === fileKey ? (nextSourceOrder[0] ?? null) : (sourceGroup?.activeKey ?? null),
-        },
-        [targetLeafId]: {
-          ...targetGroup,
-          openOrder: nextTargetOrder,
-          activeKey: fileKey,
-        },
-      };
-
+      const result = atomicMoveTab(
+        current.layoutTreeV2,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        sourceLeafId,
+        targetLeafId,
+        fileKey,
+      );
+      if (result.kind !== "changed") {
+        return state;
+      }
+      const activeGroup = result.groups[result.activeGroupId];
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
-            layoutTreeV2: newTree,
-            editorGroups: newEditorGroups,
-            activeEditorGroupId: targetLeafId,
+            layoutTreeV2: result.tree,
+            editorGroups: result.groups,
+            activeEditorGroupId: result.activeGroupId,
+            openOrder: activeGroup?.openOrder ?? current.openOrder,
+            activeKey: activeGroup?.activeKey ?? current.activeKey,
           },
         },
       };
@@ -501,25 +504,69 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      const currentTree = current.layoutTreeV2;
-      const newTree = currentTree ? setLeafActiveTabInTree(currentTree, leafId, fileKey) : null;
-      const group = current.editorGroups[leafId] ?? createEditorGroup(leafId);
-      const newEditorGroups = {
-        ...current.editorGroups,
-        [leafId]: {
-          ...group,
-          activeKey: fileKey,
-        },
+      const currentTree = current.layoutTreeV2 ?? {
+        type: "leaf",
+        id: leafId,
+        openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
+        activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
       };
-      const isActive = current.activeEditorGroupId === leafId;
+      const result = atomicSetLeafActiveTab(
+        currentTree,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        leafId,
+        fileKey,
+      );
+      if (result.kind !== "changed") {
+        return state;
+      }
+      const activeGroup = result.groups[result.activeGroupId];
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
-            layoutTreeV2: newTree ?? current.layoutTreeV2,
-            editorGroups: newEditorGroups,
-            activeKey: isActive ? fileKey : current.activeKey,
+            layoutTreeV2: result.tree,
+            editorGroups: result.groups,
+            activeEditorGroupId: result.activeGroupId,
+            openOrder: activeGroup?.openOrder ?? current.openOrder,
+            activeKey: activeGroup?.activeKey ?? current.activeKey,
+          },
+        },
+      };
+    });
+  },
+
+  closeLayoutTabInLeaf: (instanceId, leafId, fileKey) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      const currentTree = current.layoutTreeV2 ?? {
+        type: "leaf",
+        id: leafId,
+        openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
+        activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
+      };
+      const result = atomicCloseTabInLeaf(
+        currentTree,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        leafId,
+        fileKey,
+      );
+      if (result.kind !== "changed") {
+        return state;
+      }
+      const activeGroup = result.groups[result.activeGroupId];
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: result.tree,
+            editorGroups: result.groups,
+            openOrder: activeGroup?.openOrder ?? current.openOrder,
+            activeKey: activeGroup?.activeKey ?? current.activeKey,
           },
         },
       };

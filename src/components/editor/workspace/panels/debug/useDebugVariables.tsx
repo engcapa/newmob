@@ -75,13 +75,13 @@ export function useDebugVariables(
     }
     let cancelled = false;
     const curSessionId = debug.state?.sessionId;
-    const curStopEpoch = debug.state?.stoppedThreadId;
+    const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
 
     void (async () => {
       const scopesBody = await fetchScopes(selectedFrameId);
       if (cancelled) return;
       if (curSessionId && debug.state?.sessionId !== curSessionId) return;
-      if (curStopEpoch != null && debug.state?.stoppedThreadId !== curStopEpoch) return;
+      if ((debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) !== curStopEpoch) return;
 
       const scopes = (scopesBody && typeof scopesBody === "object"
         ? (scopesBody as { scopes?: unknown }).scopes
@@ -118,19 +118,19 @@ export function useDebugVariables(
         });
       }
       previousValuesRef.current = currentValues;
-      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || debug.state?.stoppedThreadId === curStopEpoch)) {
+      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || (debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) === curStopEpoch)) {
         setVariables(roots);
       }
     })();
     return () => { cancelled = true; };
-  }, [fetchScopes, fetchVariables, selectedFrameId, debug.state?.sessionId, debug.state?.stoppedThreadId]);
+  }, [fetchScopes, fetchVariables, selectedFrameId, debug.state?.sessionId, debug.state?.stopEpoch, debug.stopEpoch]);
 
   // Re-evaluate watch expressions on each stop / frame change / edit (D8).
   const watchItems = debug.watchItems ?? debug.watchExpressions.map((e, i) => ({ id: `watch-${i}`, expression: e }));
   useEffect(() => {
     let cancelled = false;
     const curSessionId = debug.state?.sessionId;
-    const curStopEpoch = debug.state?.stoppedThreadId;
+    const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
 
     if (!stopped || selectedFrameId == null) {
       setWatchNodes(watchItems.map((item) => ({
@@ -166,12 +166,12 @@ export function useDebugVariables(
           hasChanged,
         };
       }));
-      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || debug.state?.stoppedThreadId === curStopEpoch)) {
+      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || (debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) === curStopEpoch)) {
         setWatchNodes(next);
       }
     })();
     return () => { cancelled = true; };
-  }, [evaluate, stopped, selectedFrameId, watchItems, watchTick, debug.state?.sessionId, debug.state?.stoppedThreadId]);
+  }, [evaluate, stopped, selectedFrameId, watchItems, watchTick, debug.state?.sessionId, debug.state?.stopEpoch, debug.stopEpoch]);
 
   const filterAndSort = useCallback((nodes: VarNode[]): VarNode[] => {
     let result = nodes;

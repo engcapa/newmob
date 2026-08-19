@@ -1,16 +1,23 @@
 /**
- * Navigation History & Recent Locations Model (E4.3).
+ * Navigation History & Recent Locations Model (E4.3 / N2.1).
  *
  * Implements IntelliJ IDEA's Recent Locations (Ctrl+Shift+E) with code context preview,
- * multi-point edit location history, and library / external file ownership.
+ * multi-point edit location history, strict workspace identity, and canonical path policies.
  */
 
-export type NavigationReason = "navigate" | "edit" | "search" | "usage" | "refactor" | "tab-activate";
+export type NavigationReason =
+  | "navigate"
+  | "edit"
+  | "search"
+  | "usage"
+  | "refactor"
+  | "tab-activate";
+
 export type NavigationLocationState = "current" | "relocated" | "stale" | "missing";
 
 export interface NavigationLocation {
   id: string;
-  workspaceId?: string;
+  workspaceId: string;
   fileIdentity: string;
   filePath: string;
   title: string;
@@ -29,9 +36,22 @@ export interface NavigationLocation {
 
 let locationSequenceCounter = 0;
 
+/**
+ * Canonicalize file paths across platforms (forward slashes, drive letter normalization).
+ */
+export function canonicalizePath(filePath: string): string {
+  if (!filePath) return "";
+  let normalized = filePath.replace(/\\/g, "/");
+  // Normalize Windows drive letter: C:/ -> c:/
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    normalized = normalized.charAt(0).toLowerCase() + normalized.slice(1);
+  }
+  return normalized;
+}
+
 export function isPathContainedInRoot(filePath: string, rootPath: string): boolean {
-  const normalizedFile = filePath.replace(/\\/g, "/");
-  const normalizedRoot = rootPath.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalizedFile = canonicalizePath(filePath);
+  const normalizedRoot = canonicalizePath(rootPath).replace(/\/+$/, "");
   return normalizedFile === normalizedRoot || normalizedFile.startsWith(`${normalizedRoot}/`);
 }
 
@@ -64,6 +84,7 @@ export class NavigationHistoryTracker {
     const id = `loc-${location.fileIdentity}-${location.line}-${now}-${seq}`;
     const newEntry: NavigationLocation = {
       ...location,
+      filePath: canonicalizePath(location.filePath),
       id,
       timestamp: now,
       state: location.state ?? "current",
@@ -75,7 +96,7 @@ export class NavigationHistoryTracker {
     if (
       prev &&
       prev.fileIdentity === newEntry.fileIdentity &&
-      (!newEntry.workspaceId || prev.workspaceId === newEntry.workspaceId) &&
+      prev.workspaceId === newEntry.workspaceId &&
       Math.abs(prev.line - newEntry.line) <= 2 &&
       now - prev.timestamp < 2000
     ) {
@@ -92,7 +113,7 @@ export class NavigationHistoryTracker {
       if (
         prevEdit &&
         prevEdit.fileIdentity === newEntry.fileIdentity &&
-        (!newEntry.workspaceId || prevEdit.workspaceId === newEntry.workspaceId) &&
+        prevEdit.workspaceId === newEntry.workspaceId &&
         Math.abs(prevEdit.line - newEntry.line) <= 2 &&
         now - prevEdit.timestamp < 2000
       ) {
@@ -132,11 +153,14 @@ export class NavigationHistoryTracker {
 
   relocateFile(oldPath: string, newPath: string, workspaceId?: string): void {
     let changed = false;
-    const newTitle = newPath.split("/").pop() ?? newPath;
+    const normalizedOld = canonicalizePath(oldPath);
+    const normalizedNew = canonicalizePath(newPath);
+    const newTitle = normalizedNew.split("/").pop() ?? normalizedNew;
+
     for (const loc of [...this.locations, ...this.editLocations]) {
-      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === oldPath) {
-        loc.filePath = newPath;
-        loc.fileIdentity = loc.fileIdentity.replace(oldPath, newPath);
+      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === normalizedOld) {
+        loc.filePath = normalizedNew;
+        loc.fileIdentity = loc.fileIdentity.replace(normalizedOld, normalizedNew);
         loc.title = newTitle;
         loc.state = "relocated";
         changed = true;
@@ -147,8 +171,9 @@ export class NavigationHistoryTracker {
 
   markFileStale(filePath: string, workspaceId?: string, staleReason?: string): void {
     let changed = false;
+    const normalized = canonicalizePath(filePath);
     for (const loc of [...this.locations, ...this.editLocations]) {
-      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === filePath) {
+      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === normalized) {
         loc.state = "stale";
         loc.staleReason = staleReason ?? "File content modified externally";
         changed = true;
@@ -159,10 +184,10 @@ export class NavigationHistoryTracker {
 
   markFileMissing(filePath: string, workspaceId?: string): void {
     let changed = false;
+    const normalized = canonicalizePath(filePath);
     for (const loc of [...this.locations, ...this.editLocations]) {
-      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === filePath) {
+      if ((!workspaceId || loc.workspaceId === workspaceId) && loc.filePath === normalized) {
         loc.state = "missing";
-        loc.staleReason = "File deleted from disk";
         changed = true;
       }
     }
@@ -170,13 +195,17 @@ export class NavigationHistoryTracker {
   }
 
   removeFileLocations(filePath: string, workspaceId?: string): void {
+    const normalized = canonicalizePath(filePath);
+    const beforeCount = this.locations.length + this.editLocations.length;
     this.locations = this.locations.filter(
-      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
+      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== normalized,
     );
     this.editLocations = this.editLocations.filter(
-      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== filePath,
+      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || loc.filePath !== normalized,
     );
-    this.notify();
+    if (this.locations.length + this.editLocations.length !== beforeCount) {
+      this.notify();
+    }
   }
 
   clearWorkspace(workspaceId: string): void {
@@ -185,17 +214,107 @@ export class NavigationHistoryTracker {
     this.notify();
   }
 
-  clear(): void {
+  clearAll(): void {
     this.locations = [];
     this.editLocations = [];
     this.notify();
   }
+
+  clear(): void {
+    this.clearAll();
+  }
 }
 
-export function createNavigationHistoryTracker(): NavigationHistoryTracker {
-  return new NavigationHistoryTracker();
+export class WorkspaceLocationController {
+  private readonly workspaceId: string;
+  private readonly tracker: NavigationHistoryTracker;
+
+  constructor(workspaceId: string, tracker: NavigationHistoryTracker = navigationHistoryTracker) {
+    this.workspaceId = workspaceId;
+    this.tracker = tracker;
+  }
+
+  getWorkspaceId(): string {
+    return this.workspaceId;
+  }
+
+  recordUserEdit(options: {
+    fileKey: string;
+    filePath: string;
+    title: string;
+    line: number;
+    character: number;
+    lineText: string;
+    contextSnippet: string;
+    sourceOwnership: "workspace" | "library" | "external";
+    symbolName?: string;
+  }): NavigationLocation {
+    return this.tracker.recordLocation({
+      workspaceId: this.workspaceId,
+      fileIdentity: options.fileKey,
+      filePath: options.filePath,
+      title: options.title,
+      line: options.line,
+      character: options.character,
+      lineText: options.lineText,
+      contextSnippet: options.contextSnippet,
+      isEditLocation: true,
+      reason: "edit",
+      sourceOwnership: options.sourceOwnership,
+      symbolName: options.symbolName,
+    });
+  }
+
+  recordNavigation(options: {
+    fileKey: string;
+    filePath: string;
+    title: string;
+    line: number;
+    character: number;
+    lineText: string;
+    contextSnippet: string;
+    sourceOwnership: "workspace" | "library" | "external";
+    reason: NavigationReason;
+    symbolName?: string;
+  }): NavigationLocation {
+    return this.tracker.recordLocation({
+      workspaceId: this.workspaceId,
+      fileIdentity: options.fileKey,
+      filePath: options.filePath,
+      title: options.title,
+      line: options.line,
+      character: options.character,
+      lineText: options.lineText,
+      contextSnippet: options.contextSnippet,
+      isEditLocation: false,
+      reason: options.reason,
+      sourceOwnership: options.sourceOwnership,
+      symbolName: options.symbolName,
+    });
+  }
+
+  getLocations(changedOnly: boolean = false): NavigationLocation[] {
+    return this.tracker.getRecentLocations(changedOnly, this.workspaceId);
+  }
+
+  searchLocations(query: string, changedOnly: boolean = false): NavigationLocation[] {
+    return this.tracker.searchLocations(query, changedOnly, this.workspaceId);
+  }
+
+  subscribe(listener: () => void): () => void {
+    return this.tracker.subscribe(listener);
+  }
+
+  dispose(): void {
+    this.tracker.clearWorkspace(this.workspaceId);
+  }
+}
+
+export function createWorkspaceLocationController(
+  workspaceId: string,
+  tracker?: NavigationHistoryTracker,
+): WorkspaceLocationController {
+  return new WorkspaceLocationController(workspaceId, tracker);
 }
 
 export const navigationHistoryTracker = new NavigationHistoryTracker();
-
-

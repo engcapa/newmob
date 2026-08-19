@@ -1,6 +1,9 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import {
   NavigationHistoryTracker,
+  WorkspaceLocationController,
+  createWorkspaceLocationController,
+  canonicalizePath,
   isPathContainedInRoot,
 } from "./navigationHistoryModel";
 
@@ -13,6 +16,7 @@ describe("navigationHistoryModel", () => {
 
   it("records navigation locations and coalesces adjacent line visits", () => {
     tracker.recordLocation({
+      workspaceId: "ws-1",
       fileIdentity: "f1",
       filePath: "/src/Main.java",
       title: "Main.java",
@@ -28,6 +32,7 @@ describe("navigationHistoryModel", () => {
 
     // Moving within 2 lines in same file coalesces
     tracker.recordLocation({
+      workspaceId: "ws-1",
       fileIdentity: "f1",
       filePath: "/src/Main.java",
       title: "Main.java",
@@ -45,6 +50,7 @@ describe("navigationHistoryModel", () => {
 
   it("tracks edit locations separately", () => {
     tracker.recordLocation({
+      workspaceId: "ws-1",
       fileIdentity: "f1",
       filePath: "/src/Main.java",
       title: "Main.java",
@@ -62,6 +68,7 @@ describe("navigationHistoryModel", () => {
 
   it("searches locations by title, line text, and snippet", () => {
     tracker.recordLocation({
+      workspaceId: "ws-1",
       fileIdentity: "f1",
       filePath: "/src/OrderService.java",
       title: "OrderService.java",
@@ -81,6 +88,7 @@ describe("navigationHistoryModel", () => {
 
   it("generates unique monotonic IDs for multiple entries recorded in quick succession", () => {
     const loc1 = tracker.recordLocation({
+      workspaceId: "ws-1",
       fileIdentity: "f1",
       filePath: "/src/A.java",
       title: "A.java",
@@ -93,6 +101,7 @@ describe("navigationHistoryModel", () => {
     });
 
     const loc2 = tracker.recordLocation({
+      workspaceId: "ws-1",
       fileIdentity: "f2",
       filePath: "/src/B.java",
       title: "B.java",
@@ -114,6 +123,7 @@ describe("navigationHistoryModel", () => {
     });
 
     tracker.recordLocation({
+      workspaceId: "ws-1",
       fileIdentity: "f1",
       filePath: "/src/A.java",
       title: "A.java",
@@ -127,7 +137,7 @@ describe("navigationHistoryModel", () => {
 
     expect(notifiedCount).toBe(1);
 
-    tracker.clear();
+    tracker.clearAll();
     expect(notifiedCount).toBe(2);
 
     unsub();
@@ -140,7 +150,12 @@ describe("navigationHistoryModel", () => {
     expect(isPathContainedInRoot("/var/log/app.log", "/project")).toBe(false);
   });
 
-  it("relocates and removes file locations on rename and delete", () => {
+  it("canonicalizes paths on Windows and Unix uniformly", () => {
+    expect(canonicalizePath("C:\\Users\\dev\\Project\\App.java")).toBe("c:/Users/dev/Project/App.java");
+    expect(canonicalizePath("/home/dev/project/src/app.rs")).toBe("/home/dev/project/src/app.rs");
+  });
+
+  it("relocates and marks file locations on rename and delete", () => {
     tracker.recordLocation({
       workspaceId: "ws-1",
       fileIdentity: "f1",
@@ -158,41 +173,42 @@ describe("navigationHistoryModel", () => {
     expect(tracker.getRecentLocations()[0].filePath).toBe("/src/NewName.java");
     expect(tracker.getRecentLocations()[0].title).toBe("NewName.java");
 
-    tracker.removeFileLocations("/src/NewName.java", "ws-1");
-    expect(tracker.getRecentLocations()).toHaveLength(0);
+    tracker.markFileMissing("/src/NewName.java", "ws-1");
+    expect(tracker.getRecentLocations()[0].state).toBe("missing");
   });
 
-  it("filters locations by workspaceId", () => {
-    tracker.recordLocation({
-      workspaceId: "ws-1",
-      fileIdentity: "f1",
+  it("filters locations by workspaceId and supports WorkspaceLocationController", () => {
+    const ctrl1 = createWorkspaceLocationController("ws-1", tracker);
+    const ctrl2 = createWorkspaceLocationController("ws-2", tracker);
+
+    ctrl1.recordUserEdit({
+      fileKey: "f1",
       filePath: "/src/A.java",
       title: "A.java",
       line: 1,
       character: 0,
       lineText: "class A {}",
       contextSnippet: "class A {}",
-      isEditLocation: false,
       sourceOwnership: "workspace",
     });
 
-    tracker.recordLocation({
-      workspaceId: "ws-2",
-      fileIdentity: "f2",
+    ctrl2.recordNavigation({
+      fileKey: "f2",
       filePath: "/src/B.java",
       title: "B.java",
       line: 1,
       character: 0,
       lineText: "class B {}",
       contextSnippet: "class B {}",
-      isEditLocation: false,
       sourceOwnership: "workspace",
+      reason: "navigate",
     });
 
-    expect(tracker.getRecentLocations(false, "ws-1")).toHaveLength(1);
-    expect(tracker.getRecentLocations(false, "ws-1")[0].title).toBe("A.java");
-    expect(tracker.getRecentLocations(false, "ws-2")).toHaveLength(1);
-    expect(tracker.getRecentLocations(false, "ws-2")[0].title).toBe("B.java");
+    expect(ctrl1.getLocations(true)).toHaveLength(1);
+    expect(ctrl1.getLocations(true)[0].title).toBe("A.java");
+    expect(ctrl2.getLocations(true)).toHaveLength(0); // B.java was not an edit
+    expect(ctrl2.getLocations(false)).toHaveLength(1);
+    expect(ctrl2.getLocations(false)[0].title).toBe("B.java");
   });
 
   it("marks file locations as stale and missing with reason", () => {
@@ -247,5 +263,23 @@ describe("navigationHistoryModel", () => {
     expect(tracker.getRecentLocations(false, "ws-1")).toHaveLength(0);
     expect(tracker.getRecentLocations(false, "ws-2")).toHaveLength(1);
   });
-});
 
+  it("WorkspaceLocationController records locations scoped to its workspaceId", () => {
+    const ctrl = new WorkspaceLocationController("ws-custom", tracker);
+    ctrl.recordNavigation({
+      fileKey: "f-ctrl",
+      filePath: "/src/Ctrl.java",
+      title: "Ctrl.java",
+      line: 1,
+      character: 0,
+      lineText: "class Ctrl {}",
+      contextSnippet: "class Ctrl {}",
+      sourceOwnership: "workspace",
+      reason: "navigate",
+    });
+
+    const locs = ctrl.getLocations();
+    expect(locs).toHaveLength(1);
+    expect(locs[0].workspaceId).toBe("ws-custom");
+  });
+});

@@ -173,13 +173,12 @@ import {
   type ExplicitIndentationOverride,
   resolveEffectiveCodeStyle,
 } from "./workspace/codeStyleModel";
+import type { ResolvedCodeStyle } from "./workspace/editorConfigResolver";
 import {
-  globalEditorConfigResolver,
-  createEditorConfigResolver,
-  type EditorConfigResolver,
-  type ResolvedCodeStyle,
-} from "./workspace/editorConfigResolver";
-import { isPathContainedInRoot } from "./workspace/navigationHistoryModel";
+  createWorkspaceStyleController,
+  type WorkspaceStyleController,
+} from "./workspace/workspaceStyleController";
+import { isPathContainedInRoot, navigationHistoryTracker } from "./workspace/navigationHistoryModel";
 import type { LayoutNode } from "./workspace/recursiveLayoutTree";
 import { runSaveNormalizationPipeline } from "./workspace/saveNormalizationPipeline";
 import { historySnapshot } from "../../lib/localHistory";
@@ -350,9 +349,6 @@ import {
   type WorkspaceCommandFocus,
   type WorkspaceCommandRegistration,
 } from "./workspace/workspaceCommands";
-import {
-  navigationHistoryTracker,
-} from "./workspace/navigationHistoryModel";
 import type { WorkspaceSearchMatch } from "../../lib/editor/workspaceSearch";
 import type {
   CodeWorkspaceFileRef,
@@ -737,6 +733,7 @@ export function CodeWorkspaceTab({
   const setStoreSplitOrientation = useCodeWorkspaceStore((s) => s.setSplitOrientation);
   const splitLayoutLeaf = useCodeWorkspaceStore((s) => s.splitLayoutLeaf);
   const closeLayoutLeaf = useCodeWorkspaceStore((s) => s.closeLayoutLeaf);
+  const closeLayoutTabInLeaf = useCodeWorkspaceStore((s) => s.closeLayoutTabInLeaf);
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
   const seedTreeExpandIfEmpty = useCodeWorkspaceStore((s) => s.seedTreeExpandIfEmpty);
   // Ensure before first read so the selector always hits a real map entry.
@@ -767,26 +764,24 @@ export function CodeWorkspaceTab({
         activeEditorGroupId: snapshot.activeEditorGroupId,
         expandedRootIds: snapshot.expandedRootIds,
         expandedDirKeys: snapshot.expandedDirKeys,
-        editorGroups: {
-          primary: {
-            id: "primary",
-            openOrder: snapshot.editorGroups.primary.openOrder,
-            activeKey: snapshot.editorGroups.primary.activeKey,
-            previewKey: snapshot.editorGroups.primary.previewKey,
-            pinnedKeys: snapshot.editorGroups.primary.pinnedKeys,
-          },
-          secondary: {
-            id: "secondary",
-            openOrder: snapshot.editorGroups.secondary.openOrder,
-            activeKey: snapshot.editorGroups.secondary.activeKey,
-            previewKey: snapshot.editorGroups.secondary.previewKey,
-            pinnedKeys: snapshot.editorGroups.secondary.pinnedKeys,
-          },
-        },
+        layoutTreeV2: snapshot.layoutTreeV2,
+        editorGroups: Object.fromEntries(
+          Object.entries(snapshot.editorGroups).map(([id, g]) => [
+            id,
+            {
+              id,
+              openOrder: g.openOrder,
+              activeKey: g.activeKey,
+              previewKey: g.previewKey,
+              pinnedKeys: g.pinnedKeys,
+            },
+          ]),
+        ),
         openOrder: uniqueOrderedKeys(snapshot.editorGroups),
         activeKey: snapshot.editorGroups[snapshot.activeEditorGroupId]?.activeKey
-          ?? snapshot.editorGroups.primary.activeKey
-          ?? snapshot.editorGroups.secondary.activeKey,
+          ?? snapshot.editorGroups.primary?.activeKey
+          ?? snapshot.editorGroups.secondary?.activeKey
+          ?? null,
       });
       layoutRestoredOpenFilesRef.current = layoutSnapshotHasOpenFiles(snapshot);
       return;
@@ -1342,7 +1337,15 @@ export function CodeWorkspaceTab({
   indentationOverridesRef.current = indentationOverrides;
 
   const resolvedCodeStylesRef = useRef<Record<string, ResolvedCodeStyle>>({});
-  const editorConfigResolverRef = useRef<EditorConfigResolver>(createEditorConfigResolver());
+  const workspaceStyleControllerRef = useRef<WorkspaceStyleController>(
+    createWorkspaceStyleController({
+      workspaceId: workspaceInstanceId,
+      roots: rootsRef.current,
+      fileProvider: {
+        readFile: async () => null,
+      },
+    }),
+  );
 
   useEffect(() => {
     const provider = {
@@ -1367,11 +1370,14 @@ export function CodeWorkspaceTab({
         }
       },
     };
-    editorConfigResolverRef.current.setFileProvider(provider);
-    globalEditorConfigResolver.setFileProvider(provider);
+    workspaceStyleControllerRef.current = createWorkspaceStyleController({
+      workspaceId: workspaceInstanceId,
+      roots: rootsRef.current,
+      fileProvider: provider,
+    });
 
     return () => {
-      editorConfigResolverRef.current.clearWorkspace(workspaceInstanceId);
+      workspaceStyleControllerRef.current.clearCache();
     };
   }, [rootsRef, workspaceInstanceId]);
 
@@ -2551,32 +2557,7 @@ export function CodeWorkspaceTab({
     // WorkspaceEdit, reload), so they intentionally bypass the input batch.
     openFilesRef.current = { ...openFilesRef.current, [key]: next };
     setOpenFiles((current) => ({ ...current, [key]: next }));
-
-    // Record real edit location on document text change
-    const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
-    const lines = text.split("\n");
-    const lineText = lines[cursor.line] ?? "";
-    const startLine = Math.max(0, cursor.line - 1);
-    const endLine = Math.min(lines.length, cursor.line + 2);
-    const contextSnippet = lines.slice(startLine, endLine).join("\n");
-    const activeFilePath = file.path ?? file.title;
-    const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
-    const sourceOwnership = file.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
-
-    navigationHistoryTracker.recordLocation({
-      workspaceId: workspaceInstanceId,
-      fileIdentity: file.key,
-      filePath: activeFilePath,
-      title: file.title,
-      line: cursor.line,
-      character: cursor.character,
-      lineText,
-      contextSnippet,
-      isEditLocation: true,
-      reason: "edit",
-      sourceOwnership,
-    });
-  }, [activeEditorGroupId, cursorPositions, rootsRef, setOpenFiles, workspaceInstanceId]);
+  }, [setOpenFiles]);
 
   const scheduleLiveLspSync = useCallback((key: string) => {
     const existing = liveLspSyncTimersRef.current[key];
@@ -2700,7 +2681,30 @@ export function CodeWorkspaceTab({
     // store publication that causes the surrounding workspace to re-render.
     openFilesRef.current = { ...openFilesRef.current, [key]: next };
     pendingEditorTextByFileRef.current.set(key, next);
-    recordEditLocation(file.ref, { line: 0, character: 0 });
+    const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
+    const lines = text.split("\n");
+    const lineText = lines[cursor.line] ?? "";
+    const startLine = Math.max(0, cursor.line - 1);
+    const endLine = Math.min(lines.length, cursor.line + 2);
+    const contextSnippet = lines.slice(startLine, endLine).join("\n");
+    const activeFilePath = file.path ?? file.title;
+    const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
+    const sourceOwnership = file.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
+
+    navigationHistoryTracker.recordLocation({
+      workspaceId: workspaceInstanceId,
+      fileIdentity: file.key,
+      filePath: activeFilePath,
+      title: file.title,
+      line: cursor.line,
+      character: cursor.character,
+      lineText,
+      contextSnippet,
+      isEditLocation: true,
+      reason: "edit",
+      sourceOwnership,
+    });
+    recordEditLocation(file.ref, cursor);
     semanticIndex.invalidateSilently("document-edited", [file.path]);
     // Drive didChange from the live buffer only when a language server can
     // actually use it — plain text / missing LSP must not pay IPC cost.
@@ -3245,8 +3249,7 @@ export function CodeWorkspaceTab({
       const savedPath = absolutePathForOpenFile(file);
       if (savedPath) {
         if (savedPath.endsWith(".editorconfig")) {
-          editorConfigResolverRef.current.invalidate(savedPath);
-          globalEditorConfigResolver.invalidate(savedPath);
+          workspaceStyleControllerRef.current.invalidate(savedPath);
         }
         await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
           path: savedPath,
@@ -3330,13 +3333,8 @@ export function CodeWorkspaceTab({
     if (capabilities && !useRange && !capabilities.formatting) return null;
     if (capabilities && useRange && !capabilities.rangeFormatting) return null;
 
-    const root = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
-    const rootPath = root?.path;
     const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
-    const codeStyle = await editorConfigResolverRef.current.resolveForFile({
-      workspaceId: workspaceInstanceId,
-      rootId: file.ref.kind === "root" ? file.ref.rootId : undefined,
-      rootPath,
+    const codeStyle = await workspaceStyleControllerRef.current.resolveForFile({
       filePath: absPath,
       explicitOverride: indentationOverridesRef.current[file.key],
       text: file.text,
@@ -3390,13 +3388,8 @@ export function CodeWorkspaceTab({
       let textToSave = file.text;
       let formatError: string | null = null;
 
-      const root = file.ref.kind === "root" ? findRoot(file.ref.rootId) : null;
-      const rootPath = root?.path;
       const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
-      const codeStyle = await editorConfigResolverRef.current.resolveForFile({
-        workspaceId: workspaceInstanceId,
-        rootId: file.ref.kind === "root" ? file.ref.rootId : undefined,
-        rootPath,
+      const codeStyle = await workspaceStyleControllerRef.current.resolveForFile({
         filePath: absPath,
         explicitOverride: indentationOverridesRef.current[file.key],
         text: file.text,
@@ -3594,8 +3587,7 @@ export function CodeWorkspaceTab({
   const handleExternalFileChange = useCallback(async (change: LspExternalFileChange) => {
     const normalizedPath = normalizeFsPath(change.path);
     if (normalizedPath.endsWith(".editorconfig")) {
-      editorConfigResolverRef.current.invalidate(normalizedPath);
-      globalEditorConfigResolver.invalidate(normalizedPath);
+      workspaceStyleControllerRef.current.invalidate(normalizedPath);
     }
     semanticIndex.invalidate("external-file-change", [normalizedPath]);
     const file = Object.values(openFilesRef.current).find((candidate) => {
@@ -3745,15 +3737,19 @@ export function CodeWorkspaceTab({
       }
       const index = group.openOrder.indexOf(key);
       const nextOrder = group.openOrder.filter((entry) => entry !== key);
-      updateEditorGroup(groupId, (current) => ({
-        ...current,
-        openOrder: nextOrder,
-        activeKey: current.activeKey === key
-          ? nextOrder[Math.min(index, nextOrder.length - 1)] ?? null
-          : current.activeKey,
-        previewKey: current.previewKey === key ? null : current.previewKey,
-        pinnedKeys: current.pinnedKeys.filter((entry) => entry !== key),
-      }));
+      if (currentUi.layoutTreeV2) {
+        closeLayoutTabInLeaf(workspaceInstanceId, groupId, key);
+      } else {
+        updateEditorGroup(groupId, (current) => ({
+          ...current,
+          openOrder: nextOrder,
+          activeKey: current.activeKey === key
+            ? nextOrder[Math.min(index, nextOrder.length - 1)] ?? null
+            : current.activeKey,
+          previewKey: current.previewKey === key ? null : current.previewKey,
+          pinnedKeys: current.pinnedKeys.filter((entry) => entry !== key),
+        }));
+      }
       if (usedByOtherGroup) return;
       if (file) closeLspDocument(file);
       setOpenFiles((current) => {
@@ -5637,11 +5633,13 @@ export function CodeWorkspaceTab({
           if (rel === null) continue;
           try {
             const disk = await workspaceReadFile(root.path, rel);
+            const eol = disk.text.includes("\r\n") ? ("crlf" as const) : disk.text.includes("\r") && !disk.text.includes("\n") ? ("cr" as const) : ("lf" as const);
             return {
               text: disk.text,
               hash: disk.hash,
               encoding: disk.encoding ?? "UTF-8",
               bom: disk.bom ?? false,
+              eol,
             };
           } catch {
             return null;
@@ -5649,11 +5647,13 @@ export function CodeWorkspaceTab({
         }
         try {
           const disk = await workspaceReadLooseFile(absolutePath);
+          const eol = disk.text.includes("\r\n") ? ("crlf" as const) : disk.text.includes("\r") && !disk.text.includes("\n") ? ("cr" as const) : ("lf" as const);
           return {
             text: disk.text,
             hash: disk.hash,
             encoding: disk.encoding ?? "UTF-8",
             bom: disk.bom ?? false,
+            eol,
           };
         } catch {
           return null;
@@ -7522,7 +7522,7 @@ export function CodeWorkspaceTab({
 
   const commandRegistration = useMemo<WorkspaceCommandRegistration>(() => ({
     items: workspaceCommandMenuItems(workspaceCommands, { focus: "workspace" }),
-    execute: (commandId) => executeWorkspaceCommand(commandId),
+    execute: (commandId: string) => executeWorkspaceCommand(commandId),
   }), [executeWorkspaceCommand, workspaceCommands]);
 
   useEffect(() => {

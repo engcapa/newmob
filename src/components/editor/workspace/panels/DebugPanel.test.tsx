@@ -23,6 +23,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     availableExceptionFilters: [],
     watchExpressions: [],
     watchItems: [],
+    stopEpoch: 0,
     isStepping: false,
     breakpointsMuted: false,
     setBreakpointsMuted: vi.fn(),
