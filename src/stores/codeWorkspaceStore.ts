@@ -17,6 +17,7 @@ import {
   atomicMoveTab,
   atomicSetLeafActiveTab,
   atomicCloseTabInLeaf,
+  updateSplitNodeRatios,
 } from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
 
@@ -245,6 +246,7 @@ interface CodeWorkspaceStoreState {
   setActiveEditorGroup: (instanceId: string, groupId: EditorGroupId) => void;
   setSplitOrientation: (instanceId: string, orientation: EditorSplitOrientation | null) => void;
   setLayoutTreeV2: (instanceId: string, layoutTree: LayoutNode | null) => void;
+  setLayoutNodeRatios: (instanceId: string, splitId: string, ratios: number[]) => void;
   splitLayoutLeaf: (
     instanceId: string,
     leafId: string,
@@ -573,6 +575,24 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     });
   },
 
+  setLayoutNodeRatios: (instanceId, splitId, ratios) => {
+    get().ensureInstance(instanceId);
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      if (!current.layoutTreeV2) return state;
+      const nextTree = updateSplitNodeRatios(current.layoutTreeV2, splitId, ratios);
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: {
+            ...current,
+            layoutTreeV2: nextTree,
+          },
+        },
+      };
+    });
+  },
+
   setMarkdownMode: (instanceId, fileKey, mode) => {
     get().ensureInstance(instanceId);
     set((state) => {
@@ -594,19 +614,23 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       const validKeys = new Set(Object.keys(replacement.openFiles));
-      const editorGroups: CodeWorkspaceInstanceUi["editorGroups"] = {
-        primary: reconcileEditorGroupFiles(
-          current.editorGroups.primary,
-          replacement.keyChanges,
-          validKeys,
-        ),
-        secondary: reconcileEditorGroupFiles(
-          current.editorGroups.secondary,
-          replacement.keyChanges,
-          validKeys,
-        ),
-      };
-      const activeGroup = editorGroups[current.activeEditorGroupId];
+      const editorGroups: CodeWorkspaceInstanceUi["editorGroups"] = {};
+      for (const [gid, grp] of Object.entries(current.editorGroups)) {
+        if (grp) {
+          editorGroups[gid] = reconcileEditorGroupFiles(
+            grp,
+            replacement.keyChanges,
+            validKeys,
+          );
+        }
+      }
+      if (!editorGroups.primary) {
+        editorGroups.primary = createEditorGroup("primary");
+      }
+      if (!editorGroups.secondary) {
+        editorGroups.secondary = createEditorGroup("secondary");
+      }
+      const activeGroup = editorGroups[current.activeEditorGroupId] ?? editorGroups.primary;
       return {
         byInstanceId: {
           ...state.byInstanceId,

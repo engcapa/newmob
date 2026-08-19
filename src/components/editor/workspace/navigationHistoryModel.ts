@@ -11,7 +11,8 @@ export type NavigationReason =
   | "search"
   | "usage"
   | "refactor"
-  | "tab-activate";
+  | "tab-activate"
+  | "tab-switch";
 
 export type NavigationLocationState = "current" | "relocated" | "stale" | "missing";
 

@@ -406,6 +406,14 @@ export class WorkspaceStyleController {
       getLatestBufferVersion?: () => number;
     },
   ): Promise<SaveOutcome> {
+    if (transaction.workspaceId !== this.workspaceId) {
+      return {
+        kind: "failed",
+        reason: `Transaction workspaceId mismatch: expected "${this.workspaceId}", got "${transaction.workspaceId}".`,
+        retryable: false,
+      };
+    }
+
     const codeStyle = await this.resolveForFile({
       filePath: transaction.filePath,
       text: transaction.text,

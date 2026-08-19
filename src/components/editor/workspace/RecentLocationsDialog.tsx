@@ -3,6 +3,7 @@ import { Clock, Search, X, Code2, Edit3 } from "lucide-react";
 import {
   navigationHistoryTracker,
   type NavigationLocation,
+  type WorkspaceLocationController,
 } from "./navigationHistoryModel";
 
 export interface RecentLocationsDialogProps {
@@ -11,6 +12,7 @@ export interface RecentLocationsDialogProps {
   onSelectLocation: (location: NavigationLocation) => void;
   initialChangedOnly?: boolean;
   workspaceId?: string;
+  locationController?: WorkspaceLocationController;
 }
 
 export function RecentLocationsDialog({
@@ -19,6 +21,7 @@ export function RecentLocationsDialog({
   onSelectLocation,
   initialChangedOnly = false,
   workspaceId,
+  locationController,
 }: RecentLocationsDialogProps) {
   const [search, setSearch] = useState("");
   const [changedOnly, setChangedOnly] = useState(initialChangedOnly);
@@ -26,10 +29,11 @@ export function RecentLocationsDialog({
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
-    return navigationHistoryTracker.subscribe(() => {
+    const tracker = locationController ?? navigationHistoryTracker;
+    return tracker.subscribe(() => {
       setRevision((r) => r + 1);
     });
-  }, []);
+  }, [locationController]);
 
   useEffect(() => {
     if (open) {
@@ -42,8 +46,11 @@ export function RecentLocationsDialog({
   const locations = useMemo(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     revision;
+    if (locationController) {
+      return locationController.searchLocations(search, changedOnly);
+    }
     return navigationHistoryTracker.searchLocations(search, changedOnly, workspaceId);
-  }, [search, changedOnly, revision, workspaceId]);
+  }, [search, changedOnly, revision, workspaceId, locationController]);
 
   useEffect(() => {
     setSelectedIndex(0);

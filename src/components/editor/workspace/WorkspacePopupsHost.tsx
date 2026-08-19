@@ -11,7 +11,7 @@ import { StructurePopup } from "./StructurePopup";
 import { QuickDocPopup, type QuickDocContent } from "./QuickDocPopup";
 import { LocationPeek, type LocationPeekState } from "./LocationPeek";
 import { RecentLocationsDialog } from "./RecentLocationsDialog";
-import type { NavigationLocation } from "./navigationHistoryModel";
+import type { NavigationLocation, WorkspaceLocationController } from "./navigationHistoryModel";
 import type { WorkspaceCommand } from "./workspaceCommands";
 import type { WorkspaceSemanticIndexSnapshot } from "./workspaceSemanticIndex";
 
@@ -41,6 +41,7 @@ interface WorkspacePopupsHostProps {
   recentLocationsOpen?: boolean;
   recentLocationsChangedOnly?: boolean;
   workspaceId?: string;
+  locationController?: WorkspaceLocationController;
   onCloseRecentLocations?: () => void;
   onPickRecentLocation?: (location: NavigationLocation) => void;
 
@@ -87,6 +88,7 @@ export function WorkspacePopupsHost({
   recentLocationsOpen = false,
   recentLocationsChangedOnly = false,
   workspaceId,
+  locationController,
   onCloseRecentLocations,
   onPickRecentLocation,
   structureOpen,
@@ -135,6 +137,7 @@ export function WorkspacePopupsHost({
           open={recentLocationsOpen}
           initialChangedOnly={recentLocationsChangedOnly}
           workspaceId={workspaceId}
+          locationController={locationController}
           onClose={onCloseRecentLocations}
           onSelectLocation={onPickRecentLocation}
         />

@@ -58,10 +58,12 @@ export function useWorkspaceActionsController({
 
   // Build current unified action context
   const getActionContext = useCallback((payload?: unknown): WorkspaceActionContext => {
+    const custom = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
     return {
-      focus: activeFocusRef.current,
+      focus: (custom.focus as WorkspaceFocus) ?? activeFocusRef.current,
       payload,
       ...contextDataRef.current,
+      ...custom,
     };
   }, []);
 
@@ -90,40 +92,34 @@ export function useWorkspaceActionsController({
 
   const executeCommand = useCallback(
     (commandId: string, payload?: unknown): boolean => {
-      const cmd = commandsRef.current.find((c) => c.id === commandId);
-      if (!cmd) return false;
       const ctx = getActionContext(payload);
-      const res = cmd.run(ctx as any) as unknown;
-      const success = res !== false;
-      if (success && onCommandExecuted) {
-        onCommandExecuted(commandId, { kind: "applied" });
-      }
-      return Boolean(success);
+      const state = host.getState(commandId, ctx);
+      if (state.availability !== "available") return false;
+      void host.execute(commandId, payload);
+      return true;
     },
-    [getActionContext, onCommandExecuted],
+    [host, getActionContext],
   );
 
   const dispatchKeydown = useCallback(
-    (event: KeyboardEventLike): WorkspaceCommand | null => {
-      const ctx = getActionContext();
+    (event: KeyboardEventLike, customContext?: Partial<WorkspaceActionContext>): WorkspaceCommand | null => {
+      const ctx = getActionContext(customContext);
       for (const cmd of commandsRef.current) {
         if (!cmd.keybinding && !cmd.keybindings?.length) continue;
         if (workspaceCommandMatchesKeybinding(cmd, event)) {
-          if (cmd.when && !compileWhenExpr(cmd.when)(ctx)) {
-            continue;
+          if (cmd.when) {
+            const ok = typeof cmd.when === "function" ? cmd.when(ctx as any) : compileWhenExpr(cmd.when)(ctx);
+            if (!ok) continue;
           }
           event.preventDefault?.();
           event.stopPropagation?.();
-          const ok = cmd.run(ctx as any) as unknown;
-          if (ok !== false && onCommandExecuted) {
-            onCommandExecuted(cmd.id, { kind: "applied" });
-          }
+          void host.execute(cmd.id, ctx);
           return cmd;
         }
       }
       return null;
     },
-    [getActionContext, onCommandExecuted],
+    [getActionContext, host],
   );
 
   const getActionState = useCallback(

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { Bug, Terminal, CircleDot, Cpu } from "lucide-react";
 import type { DebugSubTabId } from "../../../../../stores/codeWorkspaceStore";
 
@@ -9,6 +9,7 @@ export interface DebugSubTabBarProps {
   badges?: Partial<Record<DebugSubTabId, number | string>>;
   statusText?: string | null;
   trailing?: ReactNode;
+  instanceId?: string;
 }
 
 interface SubTabDefinition {
@@ -31,7 +32,10 @@ export function DebugSubTabBar({
   badges,
   statusText,
   trailing,
+  instanceId,
 }: DebugSubTabBarProps) {
+  const tabButtonRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
   const handleKeyDown = (e: React.KeyboardEvent, index: number) => {
     let nextIndex = -1;
     if (e.key === "ArrowRight") {
@@ -49,8 +53,7 @@ export function DebugSubTabBar({
       const nextTab = SUB_TABS[nextIndex];
       if (nextTab) {
         onTabChange(nextTab.id);
-        const el = document.querySelector<HTMLButtonElement>(`[data-testid="${nextTab.testId}"]`);
-        el?.focus();
+        tabButtonRefs.current[nextIndex]?.focus();
       }
     }
   };
@@ -70,10 +73,13 @@ export function DebugSubTabBar({
           return (
             <button
               key={tab.id}
-              id={`debug-subtab-${tab.id}`}
+              ref={(el) => {
+                tabButtonRefs.current[index] = el;
+              }}
+              id={`${instanceId ? `${instanceId}-` : ""}debug-subtab-${tab.id}`}
               role="tab"
               aria-selected={isActive}
-              aria-controls={`debug-panel-${tab.id}`}
+              aria-controls={`${instanceId ? `${instanceId}-` : ""}debug-panel-${tab.id}`}
               tabIndex={isActive ? 0 : -1}
               type="button"
               data-testid={tab.testId}

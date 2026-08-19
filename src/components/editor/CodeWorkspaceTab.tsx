@@ -177,10 +177,14 @@ import type { ResolvedCodeStyle } from "./workspace/editorConfigResolver";
 import {
   createWorkspaceStyleController,
   type WorkspaceStyleController,
+  type SaveTransactionV2,
 } from "./workspace/workspaceStyleController";
-import { isPathContainedInRoot, navigationHistoryTracker } from "./workspace/navigationHistoryModel";
+import {
+  createWorkspaceLocationController,
+  type WorkspaceLocationController,
+  isPathContainedInRoot,
+} from "./workspace/navigationHistoryModel";
 import type { LayoutNode } from "./workspace/recursiveLayoutTree";
-import { runSaveNormalizationPipeline } from "./workspace/saveNormalizationPipeline";
 import { historySnapshot } from "../../lib/localHistory";
 import {
   fileRefFromFileKey,
@@ -189,6 +193,7 @@ import {
   snapshotFromWorkspaceUi,
   uniqueOrderedKeys,
   writeWorkspaceLayoutSnapshot,
+  type PersistedEditorGroup,
 } from "./workspace/workspaceLayoutPersistence";
 import { LocalHistoryDialog } from "./workspace/LocalHistoryDialog";
 import { EditorSelectionAiToolbar } from "./workspace/EditorSelectionAiToolbar";
@@ -735,6 +740,7 @@ export function CodeWorkspaceTab({
   const closeLayoutLeaf = useCodeWorkspaceStore((s) => s.closeLayoutLeaf);
   const closeLayoutTabInLeaf = useCodeWorkspaceStore((s) => s.closeLayoutTabInLeaf);
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
+  const setLayoutNodeRatios = useCodeWorkspaceStore((s) => s.setLayoutNodeRatios);
   const seedTreeExpandIfEmpty = useCodeWorkspaceStore((s) => s.seedTreeExpandIfEmpty);
   // Ensure before first read so the selector always hits a real map entry.
   ensureWorkspaceUi(workspaceInstanceId);
@@ -1381,6 +1387,17 @@ export function CodeWorkspaceTab({
     };
   }, [rootsRef, workspaceInstanceId]);
 
+  const workspaceLocationControllerRef = useRef<WorkspaceLocationController>(
+    createWorkspaceLocationController(workspaceInstanceId),
+  );
+
+  useEffect(() => {
+    workspaceLocationControllerRef.current = createWorkspaceLocationController(workspaceInstanceId);
+    return () => {
+      workspaceLocationControllerRef.current.dispose();
+    };
+  }, [workspaceInstanceId]);
+
   const getEffectiveCodeStyleForFile = useCallback((file: { key: string; languagePath: string; text: string } | null): EffectiveCodeStyle | undefined => {
     if (!file) return undefined;
     const asyncResolved = resolvedCodeStylesRef.current[file.key];
@@ -1999,8 +2016,9 @@ export function CodeWorkspaceTab({
         } else {
           if (initialOpenedKeyRef.current === `restored:${workspaceInstanceId}`) return;
           initialOpenedKeyRef.current = `restored:${workspaceInstanceId}`;
-          for (const groupId of ["primary", "secondary"] as const) {
-            const group = snapshot.editorGroups[groupId];
+          const groupEntries = Object.entries(snapshot.editorGroups) as Array<[EditorGroupId, PersistedEditorGroup]>;
+          for (const [groupId, group] of groupEntries) {
+            if (!group) continue;
             for (const key of group.openOrder) {
               const ref = fileRefFromFileKey(key, looseFiles);
               if (!ref) continue;
@@ -2052,6 +2070,7 @@ export function CodeWorkspaceTab({
         expandedRootIds,
         expandedDirKeys,
         editorGroups: persistableGroups,
+        layoutTreeV2: workspaceUi.layoutTreeV2,
       }));
     }, 250);
     return () => window.clearTimeout(timer);
@@ -2067,6 +2086,7 @@ export function CodeWorkspaceTab({
     rightPaneTab,
     splitOrientation,
     workspaceInstanceId,
+    workspaceUi.layoutTreeV2,
   ]);
 
   const applyFileActionResourceOperation = useCallback((
@@ -2691,17 +2711,14 @@ export function CodeWorkspaceTab({
     const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
     const sourceOwnership = file.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
 
-    navigationHistoryTracker.recordLocation({
-      workspaceId: workspaceInstanceId,
-      fileIdentity: file.key,
+    workspaceLocationControllerRef.current.recordUserEdit({
+      fileKey: file.key,
       filePath: activeFilePath,
       title: file.title,
       line: cursor.line,
       character: cursor.character,
       lineText,
       contextSnippet,
-      isEditLocation: true,
-      reason: "edit",
       sourceOwnership,
     });
     recordEditLocation(file.ref, cursor);
@@ -3385,22 +3402,36 @@ export function CodeWorkspaceTab({
       if (!key) return;
       const file = openFilesRef.current[key];
       if (!file || file.loading || file.saving || !file.dirty) return;
-      let textToSave = file.text;
-      let formatError: string | null = null;
 
       const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
-      const codeStyle = await workspaceStyleControllerRef.current.resolveForFile({
-        filePath: absPath,
-        explicitOverride: indentationOverridesRef.current[file.key],
-        text: file.text,
-      });
-      resolvedCodeStylesRef.current[file.key] = codeStyle;
+      let formatError: string | null = null;
 
-      let resolvedWriterOptions: { eol?: "lf" | "crlf" | "cr"; encoding?: string; bom?: boolean } | undefined;
-      try {
-        const normResult = await runSaveNormalizationPipeline({
-          text: file.text,
-          codeStyle,
+      const tx: SaveTransactionV2 = {
+        id: `tx-save-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        workspaceId: workspaceInstanceId,
+        fileKey: file.key,
+        filePath: absPath,
+        bufferVersion: file.text.length,
+        styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
+        expectedDiskHash: file.hash ?? null,
+        policy: {
+          eol: (file.eol?.toLowerCase() as "lf" | "crlf" | "cr") ?? "lf",
+          encoding: file.encoding ?? "UTF-8",
+          bom: file.bom ?? false,
+        },
+        text: file.text,
+      };
+
+      const outcome = await workspaceStyleControllerRef.current.executeSaveTransaction(
+        tx,
+        async (_filePath, text, _expectedHash, encoding, bom, eol) => {
+          await saveOpenBufferText(key, text, {
+            eol: (eol?.toUpperCase() as OpenFileEol) ?? file.eol,
+            encoding,
+            bom,
+          });
+        },
+        {
           formatOnSave: intelligencePreferences.formatOnSave,
           formatFn: async (currentText) => {
             try {
@@ -3410,54 +3441,33 @@ export function CodeWorkspaceTab({
               return null;
             }
           },
-          getLatestBufferText: () => openFilesRef.current[key]?.text ?? file.text,
-        });
+          getLatestBufferVersion: () => openFilesRef.current[key]?.text.length ?? file.text.length,
+        },
+      );
 
-        if (normResult.cancelledDueToEdit) {
-          setStatusMessage("Save cancelled due to concurrent buffer edits");
-          return;
-        }
-
-        if (normResult.encodingError) {
-          const msg = normResult.diagnostics[0] ?? "Save blocked: character encoding error";
-          setStatusMessage(msg);
-          return;
-        }
-
-        textToSave = normResult.text;
-        resolvedWriterOptions = {
-          eol: normResult.resolvedEol,
-          encoding: normResult.resolvedCharset,
-          bom: normResult.resolvedBom,
-        };
-      } catch (normErr) {
-        formatError = errorMessage(normErr);
-        textToSave = openFilesRef.current[key]?.text ?? file.text;
-      }
-
-      try {
-        await saveOpenBufferText(key, textToSave, resolvedWriterOptions);
+      if (outcome.kind === "saved") {
         setStatusMessage(formatError
           ? `Saved ${file.subtitle}; format on save failed: ${formatError}`
           : `Saved ${file.subtitle}`);
-        // A Maven/Gradle build file changed on disk: offer to re-import the
-        // project model so jdtls picks up dependency/classpath edits. Only when
-        // a jdtls session is actually up for this project (no prompt otherwise).
         if (isJavaBuildFile(file.languagePath) && lspFilesRef.current[key]?.status?.active) {
           void promptReloadProject(key, file.subtitle);
         }
-      } catch (err) {
-        setStatusMessage(errorMessage(err));
+      } else if (outcome.kind === "cancelled") {
+        setStatusMessage(`Save cancelled: ${outcome.reason}`);
+      } else if (outcome.kind === "conflict") {
+        setStatusMessage(`Save conflict: ${outcome.reason}`);
+      } else {
+        setStatusMessage(`Save failed: ${outcome.reason}`);
       }
     },
     [
       activeKey,
       formatFileText,
-      getEffectiveCodeStyleForFile,
       intelligencePreferences.formatOnSave,
       promptReloadProject,
       saveOpenBufferText,
       setStatusMessage,
+      workspaceInstanceId,
     ],
   );
 
@@ -7540,41 +7550,41 @@ export function CodeWorkspaceTab({
     return registerWorkspaceCommands(workspaceCommands);
   }, [workspaceCommands]);
 
-  // Track recent navigation and edit positions with context preview (I3)
+  // Track navigation location on tab activation / file switch (I3)
   useEffect(() => {
-    if (!visible || !activeFile || activeFileLoading || activeFileText == null) return;
+    if (!visible || !activeFile || activeFileLoading) return;
+    const file = openFilesRef.current[activeFile.key] ?? activeFile;
+    const text = file.text ?? "";
     const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
-    const lines = activeFileText.split("\n");
+    const lines = text.split("\n");
     const lineText = lines[cursor.line] ?? "";
     const startLine = Math.max(0, cursor.line - 1);
     const endLine = Math.min(lines.length, cursor.line + 2);
     const contextSnippet = lines.slice(startLine, endLine).join("\n");
 
     let sourceOwnership: "workspace" | "library" | "external" = "external";
-    if (activeFile.library) {
+    if (file.library) {
       sourceOwnership = "library";
     } else {
-      const activeFilePath = activeFile.path ?? activeFile.title;
+      const activeFilePath = file.path ?? file.title;
       const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
       if (isInsideAnyRoot) {
         sourceOwnership = "workspace";
       }
     }
 
-    navigationHistoryTracker.recordLocation({
-      workspaceId: workspaceInstanceId,
-      fileIdentity: activeFile.key,
-      filePath: activeFile.path ?? activeFile.title,
-      title: activeFile.title,
+    workspaceLocationControllerRef.current.recordNavigation({
+      fileKey: file.key,
+      filePath: file.path ?? file.title,
+      title: file.title,
       line: cursor.line,
       character: cursor.character,
       lineText,
       contextSnippet,
-      isEditLocation: false,
-      reason: "navigate",
+      reason: "tab-switch",
       sourceOwnership,
     });
-  }, [activeEditorGroupId, activeFile, activeFileLoading, activeFileText, cursorPositions, visible, workspaceInstanceId]);
+  }, [activeEditorGroupId, activeFile?.key, activeFileLoading, visible]);
 
   const getLspCompletions = useCallback(
     async (
@@ -10017,6 +10027,11 @@ export function CodeWorkspaceTab({
         orientation={node.orientation === "vertical" ? "horizontal" : "vertical"}
         id={`recursive-split-${node.id}`}
         className="h-full min-h-0"
+        onLayoutChanged={(sizes) => {
+          if (Array.isArray(sizes) && sizes.length === node.children.length) {
+            setLayoutNodeRatios(workspaceInstanceId, node.id, sizes);
+          }
+        }}
       >
         {node.children.map((child, index) => {
           const pct = node.ratios[index] ? `${Math.round(node.ratios[index] * 100)}%` : `${Math.round(100 / node.children.length)}%`;
@@ -10792,6 +10807,7 @@ export function CodeWorkspaceTab({
         recentLocationsOpen={recentLocationsOpen}
         recentLocationsChangedOnly={recentLocationsChangedOnly}
         workspaceId={workspaceInstanceId}
+        locationController={workspaceLocationControllerRef.current}
         onCloseRecentLocations={() => setRecentLocationsOpen(false)}
         onPickRecentLocation={(loc) => {
           setRecentLocationsOpen(false);

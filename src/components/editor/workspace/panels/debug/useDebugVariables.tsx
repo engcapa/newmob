@@ -213,7 +213,11 @@ export function useDebugVariables(
   ) => (node: VarNode) => {
     setNodes((current) => updateNode(current, node, (n) => ({ ...n, expanded: !n.expanded })));
     if (!node.expanded && node.children === null && node.variablesReference > 0) {
+      const curSessionId = debug.state?.sessionId;
+      const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
       void fetchVariables(node.variablesReference).then((body) => {
+        if (curSessionId && debug.state?.sessionId !== curSessionId) return;
+        if ((debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) !== curStopEpoch) return;
         const children = parseVariables(body, node.variablesReference);
         setNodes((current) => updateNode(current, node, (n) => ({ ...n, children, expanded: true })));
       });

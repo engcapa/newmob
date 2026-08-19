@@ -144,7 +144,8 @@ export class WorkspaceActionHost {
 
   getState(id: string, customContext?: WorkspaceActionContext): ActionState {
     const action = this.actions.get(id);
-    if (!action) {
+    const cmd = this.commands.get(id);
+    if (!action && !cmd) {
       return {
         availability: "unsupported",
         disabledReason: "unsupported",
@@ -159,7 +160,7 @@ export class WorkspaceActionHost {
       return {
         availability: "disabled",
         disabledReason: "busy",
-        source: action.provenance ?? "local",
+        source: action?.provenance ?? cmd?.provenance ?? "local",
         scope: "workspace",
         freshness: "current",
         completeness: "complete",
@@ -167,21 +168,24 @@ export class WorkspaceActionHost {
     }
 
     const ctx = customContext ?? this.getContext();
-    const whenMatches = action.when ? compileWhenExpr(action.when)(ctx) : true;
-    if (!whenMatches) {
-      return {
-        availability: "disabled",
-        disabledReason: "capability",
-        source: action.provenance ?? "local",
-        scope: "workspace",
-        freshness: "current",
-        completeness: "complete",
-      };
+    const whenCheck = action?.when ?? cmd?.when;
+    if (whenCheck) {
+      const ok = typeof whenCheck === "function" ? whenCheck(ctx as any) : compileWhenExpr(whenCheck)(ctx);
+      if (!ok) {
+        return {
+          availability: "disabled",
+          disabledReason: "capability",
+          source: action?.provenance ?? cmd?.provenance ?? "local",
+          scope: "workspace",
+          freshness: "current",
+          completeness: "complete",
+        };
+      }
     }
 
     return {
       availability: "available",
-      source: action.provenance ?? "local",
+      source: action?.provenance ?? cmd?.provenance ?? "local",
       scope: "workspace",
       freshness: "current",
       completeness: "complete",
@@ -210,8 +214,11 @@ export class WorkspaceActionHost {
 
     const ctx = { ...this.getContext(), payload };
     const whenCheck = action?.when ?? cmd?.when;
-    if (whenCheck && !compileWhenExpr(whenCheck)(ctx)) {
-      return { kind: "no-op", message: `Action "${id}" condition not met.` };
+    if (whenCheck) {
+      const ok = typeof whenCheck === "function" ? whenCheck(ctx as any) : compileWhenExpr(whenCheck)(ctx);
+      if (!ok) {
+        return { kind: "no-op", message: `Action "${id}" condition not met.` };
+      }
     }
 
     this.inFlightActions.add(id);

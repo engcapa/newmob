@@ -7,8 +7,8 @@ import {
 
 describe("WorkspaceStyleController (N1.1)", () => {
   it("isolates styles and caches between separate workspace instances", async () => {
-    const readFileA = vi.fn(async () => "root = true\n[*] indent_size = 2\n");
-    const readFileB = vi.fn(async () => "root = true\n[*] indent_size = 4\n");
+    const readFileA = vi.fn(async () => "root = true\n[*]\nindent_size = 2\n");
+    const readFileB = vi.fn(async () => "root = true\n[*]\nindent_size = 4\n");
 
     const ctrlA = createWorkspaceStyleController({
       workspaceId: "ws-a",

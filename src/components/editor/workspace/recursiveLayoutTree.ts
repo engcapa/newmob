@@ -146,6 +146,31 @@ export class LayoutTreeManager {
 }
 
 /**
+ * Update ratios of a split node and normalize them.
+ */
+export function updateSplitNodeRatios(
+  node: LayoutNode,
+  splitId: string,
+  rawRatios: number[],
+): LayoutNode {
+  if (node.type === "leaf") return node;
+  if (node.id === splitId) {
+    if (rawRatios.length !== node.children.length) return node;
+    const sum = rawRatios.reduce((a, b) => a + (Number.isFinite(b) && b > 0 ? b : 0), 0);
+    if (sum <= 0) return node;
+    const normalizedRatios = rawRatios.map((r) => r / sum);
+    return {
+      ...node,
+      ratios: normalizedRatios,
+    };
+  }
+  return {
+    ...node,
+    children: node.children.map((child) => updateSplitNodeRatios(child, splitId, rawRatios)),
+  };
+}
+
+/**
  * Extract all openFileKeys from any tree structure (even partially corrupt ones).
  */
 export function extractAllFileKeys(node: unknown): string[] {

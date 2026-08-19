@@ -2,9 +2,9 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先达到日常代码编辑工作流等价，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-19 · 版本：v4.36（`3f107de9` release-gate re-audit & correctness tranche）· 状态：**实施中**。本轮以 `3f107de9` 为审计基线，确认上一轮 TypeScript/build gate 已恢复，同时重新核对 EditorConfig owner、WorkspaceEdit 字节策略、Action 执行真值、Recent Locations 事件来源、递归布局 tree/group 原子性和 Debug async epoch；只更新文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
+> 日期：2026-08-19 · 版本：v4.37（`3aacbecc` implementation re-audit & next parity tranche）· 状态：**实施中**。本轮复核 `3aacbecc` 的 workspace style controller、atomic layout reducer、ActionHost、Recent Locations controller 和 Debug stop snapshot；只更新文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
 >
-> 当前结论：`3f107de9` 正确修复了 `EditorConfigResolver` 接口声明、EOL 类型归一化、递归 renderer 的 `EditorGroup` props、dirty 指示流和 Debug `stepIn` 映射，当前 `pnpm build` 与定向回归均通过；但该提交属于 release-gate repair，没有完成 §8.7 的任何主体工作包。global EditorConfig provider 仍会被后挂载 workspace 覆盖，closed-file WorkspaceEdit 缺少显式 EOL policy，LSP 新增换行可能与原 CRLF/CR 混用；Action 仍双 dispatch；Recent Locations 仍由通用文本更新与 caret effect 采集；`layoutTreeV2` 没有生产初始化/持久化，store no-op 后仍可能污染 groups，新增 `onClose` 也只改 group 不改 tree。Debug descriptor 仍不是唯一执行入口，公开 state 未携带内部已有的 `stopEpoch`，Console/Variables 继续用 `stoppedThreadId` 冒充 epoch。下一轮先完成 N1/N6 数据正确性，再收口 N0/N2，N3/N4/N5 不提前扩面。
+> 当前结论：`3aacbecc` 已移除生产路径中的 global EditorConfig provider、增加 workspace style controller、atomic layout reducer、ActionHost 和公开 stopEpoch 字段；但这些能力仍分别存在 dead transaction、roots 不随 workspace 更新、layout snapshot 写入遗漏 tree、ActionHost 未被 `CodeWorkspaceTab` 使用、Recent Locations 仍由 global tracker 持有，以及 Debug token/async state 尚未消费等断点。当前 `pnpm build` 通过，编辑器定向回归有 1 个 style 隔离测试失败（133/134），Debug 定向组件回归 46/46 通过；因此本提交不能标记 N0/N1/N2/N6 或 Debug D6/D7/D8/D9 为 workflow/verified。下一轮先修红色门禁和生产 ownership，再补真实 Tauri/adapter/三端证据。
 >
 > 早期版本：v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -39,7 +39,7 @@
 7. Recent Locations 已有生产入口，但仍缺 per-workspace 生命周期、事件型采集、重定位/stale 语义和 Switcher；related/super/sibling/method navigation 与 Structural Search/Replace 仍缺，同名 SSR 仍是正则。编辑 tab 仍限定两个 group，`LayoutTreeManager` 未进入 store/render/persistence。
 8. Keymap 仍是固定 `WorkspaceCommand[]` 速查/执行面板；`keymapModel.ts` 没有 store、设置 UI 或 dispatcher 消费，scheme/录键/冲突/import/export 对用户均不可用。
 9. clipboard history、custom folding region、virtual space、字体/ligature/color scheme 等尚无产品闭环；Join Lines 已进入 CodeMirror keymap，Sort/Reverse/Transpose/Unwrap 仅有导出函数或 catalog metadata，未形成统一 action/失败/undo 工作流。
-10. Linux/macOS/Windows 的 IME、非美式键盘、系统快捷键、剪贴板、字体、路径、watcher、编码和打包应用证据仍缺。详细权威状态以 §2.5、§2.8、§2.13、§8.5 和 §8.8 为准。
+10. Linux/macOS/Windows 的 IME、非美式键盘、系统快捷键、剪贴板、字体、路径、watcher、编码和打包应用证据仍缺。详细权威状态以 §2.5、§2.8、§2.13、§2.14、§8.5、§8.8 和 §8.9 为准。
 
 ---
 
@@ -291,6 +291,23 @@ PR 只有达到 `workflow` 才能把功能清单标为“可用”，只有 `ver
 - 这些结果证明当前提交可编译且已有用例未回归，不证明双 workspace provider、CRLF/CR closed-file WorkspaceEdit、动态 layout host、fake DAP、真实 adapter 或三端 native workflow。
 
 **结论。** §8.7 的 N0/N1/N2/N6 仍全部未完成。下一轮不得继续用“补接口/修 TS”代替生产 ownership；按 §8.8 先提交可独立验证的 transaction/reducer contract，再接 host。
+
+### 2.14 v4.37 `3aacbecc` 最新提交复核（2026-08-19）
+
+本节只记录 `3aacbecc` 的实际生产可达性，不覆盖 §2.13 的历史判断。提交说明中的“implemented”必须拆成 `model`、`wired`、`workflow`、`verified` 四层；纯 reducer、descriptor、hook 字段和组件 mock 不能单独升级等级。
+
+| 领域 | 本提交已确认 | 仍阻断对齐的事实 | 当前等级 / 下一包 |
+|------|--------------|------------------|------------------|
+| N1 Style/Save | `WorkspaceStyleController` 持有 workspaceId/roots/provider，cache key 带 workspace；普通 save/format 已通过 controller resolve；closed-file WorkspaceEdit 读取并推断 EOL 后对新文本做 normalize；全局 `setFileProvider`/invalidate 已从生产路径移除 | `SaveTransactionV2/executeSaveTransaction` 没有成为 `saveOpenBufferText` 的唯一写盘入口；其成功 hash 仍是客户端合成值；roots 变化只更新 `rootsRef`，controller effect 不随 roots fingerprint 重建/replace；style generation/buffer revision/hash 没有在真实 Tauri save 前后形成 typed transaction；新增隔离测试因非法单行 `.editorconfig` fixture 失败，133/134，不得把失败测试算作验证 | **model + partial wired；N1.2** |
+| N6 Layout | `atomicSplit/Close/Move/SetActive/CloseTab` 已返回 typed changed/no-op，Zustand reducer 仅在 changed 时替换 tree/groups；递归 renderer 与 v2 normalize/hydrate 入口存在；ID 生成已有进程内 monotonic counter | `CodeWorkspaceTab` 的持久化 effect 没有把 `layoutTreeV2` 传给 `snapshotFromWorkspaceUi`，写入 v2 仍会退化为 active leaf；恢复 open files 只遍历 primary/secondary，dynamic leaf 丢失；renderer 没有 `PanelGroup.onLayoutChanged` ratio 回写；normalize 未校验 tree/group tab/active 的一致性、非正 ratio 和空 leaf 的非法 activeKey；`replaceFileState` 仍重建固定 primary/secondary；close dynamic leaf 可能遗留 dirty/shared buffer 的无视图状态 | **model + unreachable/partial workflow；N6.2** |
+| N0 Action | `WorkspaceActionHost` 已具备 instance map、when/state、platform key matching、busy lock、AbortSignal、typed result，并有隔离单测 | `CodeWorkspaceTab` 没有调用 `useWorkspaceActionsController`/host；keydown、Search Everywhere、command registration、菜单仍走 `WorkspaceCommand[]` 和 global registry；hook 自身的 `executeCommand`/`dispatchKeydown` 也直接调用 `cmd.run`；host unmount/dispose、同 ID 替换/旧 owner cleanup、Debug bridge 未接生产；因此仍是双真值 | **model only；N0.2** |
+| N2 Locations | `NavigationLocation.workspaceId` 已必填；`WorkspaceLocationController` 提供 workspace-scoped API；user typing 的 `queueEditorTextUpdate` 与 programmatic `updateFileText` 已分开；rename/delete 有部分 workspace 过滤调用 | 生产仍直接导入 global `navigationHistoryTracker`，controller 未由 workspace 创建/销毁；tracker 查询与 lifecycle 参数仍可省略 workspaceId；active file/cursor effect 继续在 caret/文本变化时记录 navigation，formatter/restore/reload 的事件来源未统一；directory rename/delete、cut-paste、external stale/missing、case/UNC/symlink canonicalization 不完整；Ctrl+Tab Switcher 未实现 | **wired/partial；N2.2** |
+| D8 Stop snapshot | `DebugSessionState` 和 `CodeDebugSession` 现在暴露 stopEpoch；`reduceDebugEvent(stopped)` 递增 epoch；`useDebugVariables` 的首轮 scopes/watch guard 已改读 stopEpoch；`DebugRequestToken`/`AsyncLoadState`/structured watch 类型已声明 | `stopEpoch` 仍是 optional state 字段；token/load state 没有贯穿 `fetchScopes/fetchVariables/evaluate/stackTrace` 和 children interest；这些 API 失败仍返回空数组/空值，错误与 empty 未区分；Console 仍以 `stoppedThreadId` 检查 REPL 迟到结果；watch 仍只持久化 string[]，reload 后重新生成 ID，无 order/lastError/enable mutation；hidden Variables hook 未因 pane 不可见而阻断请求 | **model + partial consumer；D8.2** |
+| D6/D7/D9/D10 | Debug 组件回归 5 files/46 tests 通过；build 通过；tab/tabpanel ARIA 和 visible prop 的基础仍在 | Toolbar/Frames/Panel 仍直接调用 debug hook，不消费 descriptor；Console follow/history/lastSeen 是 pane-local，仅 10k 行无 2 MiB/unread/session store；DebugSubTabBar 仍用 `document.querySelector`，split 仍使用 global localStorage key；没有 fake DAP、真实 adapter trace、QA YAML、性能或三端 native 证据 | **component/unit only；D6.2/D7.2/D9.2/D10.2** |
+
+**本轮验证事实。** `pnpm build` 通过（仅保留既有 dynamic import/chunk-size warnings）；编辑器/布局/Action/Save 定向命令为 10 files、134 tests，其中 `workspaceStyleController.test.ts` 1 个失败；`codeWorkspaceStore.test.ts` 8/8、`dapDebugModel.test.ts` 与 `useCodeDebugSession.test.tsx` 合计 89/89 通过；Debug Panel/Console/Frames/SubTab/Variables 5 files、46/46 通过。`git diff --check` 与最终工作树检查在文档编辑后重新执行。上述结果不提供 Tauri byte-level save/reopen、nested layout reload、host command path、fake DAP、真实 adapter 或 Linux/macOS/Windows 证据。
+
+**提交复核结论。** `3aacbecc` 是正确性模型批次，不是 parity workflow 完成批次。开发顺序固定为：先修 style 隔离 fixture 和真实 save transaction，再修 v2 tree/group persistence 与 dynamic leaf lifecycle；随后让 ActionHost 成为 CodeWorkspace 唯一执行真值，最后接事件型 Locations 和 Debug D8/D6/D7/D9。N3/N4/N5 与新的 IDEA surface 在这些 owner/generation contract 冻结前继续冻结。
 
 ---
 
@@ -1929,6 +1946,50 @@ canonical path policy 必须按平台处理大小写、drive/UNC、separator、s
 #### N7.1：本批次门禁与合并顺序
 
 每个子包必须更新 `qa-ui-auto-tests/feature-list.md`、testid catalog 和至少一条 YAML；单测不替代真实 host。建议合并顺序：先并行提交 N1.1 的纯 controller/writer 与 N6.1 的纯 mutation/store；然后按 `N1 host wiring -> N6 host wiring -> N0 host -> N2 events -> N7 native` 串行修改 `CodeWorkspaceTab.tsx`。每次合并必须保持 `pnpm build` 和对应定向测试全绿。完成标准还包括 N1 字节 fixture、N6 reload/drag host、N0 双 workspace、N2 platform path fixture；没有这些证据不得勾选 §8.7 对应包。
+
+### 8.9 v4.37 下一轮待办（面向其它 agent，implementation-ready）
+
+本节是 `3aacbecc` 之后的唯一当前执行清单；§8.8 保留为上一批次合同。每个 agent 必须在 PR 中标明本包达到的最高层级（`model`/`wired`/`workflow`/`verified`），并保留其它 agent 的修改。不能用新增类型或单测通过替代生产 consumer、真实写盘、真实布局恢复或 QA/native 证据。
+
+| 顺序 | 工作包 | 目标 | 文件边界 | 完成门槛 |
+|------|--------|------|----------|----------|
+| Gate 0 | N7.2 红色门禁 | 先修失败测试并锁定真实基线 | `workspaceStyleController.test.ts`、fixtures、CI 命令 | 合法多行 EditorConfig fixture；编辑器定向 134/134、store 8/8、Debug 46/46、build、diff-check 全绿 |
+| P0 | N1.2 Save transaction | controller/style generation/buffer revision/hash 成为唯一写盘事实 | style controller、save pipeline、`CodeWorkspaceTab` save、WorkspaceEdit hooks、必要 IPC tests | open/closed save 共用 byte writer；race/conflict typed；Tauri temp fixture save→close→reopen 字节一致 |
+| P0 | N6.2 Recursive layout lifecycle | tree/groups/ratios/active leaf 原子持久化并支持任意 leaf | recursive tree/store/persistence/`CodeWorkspaceTab` layout host/EditorGroup tests | nested split、dynamic restore、ratio resize、close/drag、shared buffer、坏快照 migration 在 browser+Tauri smoke 通过 |
+| P1 | N0.2 ActionHost production wiring | keydown/Search/menu/context/keymap 只有一个执行入口 | action host/controller/commands/Search/menu/`CodeWorkspaceTab` bridge | 双 workspace 同 action ID、owner cleanup、when/context/Abort/busy、所有入口 state/result parity；不得再直接 `cmd.run` |
+| P1 | N2.2 Location lifecycle + Switcher | workspace-owned 事件采集、重命名/删除/stale 和 Ctrl+Tab 闭环 | navigation controller/model、file actions、Recent Locations、Switcher/action adapter | user/programmatic 分流、双 workspace 同路径、目录 rename/delete、external stale、Windows/UNC、modifier-release/Esc QA |
+| P1 | D8.2/D6.2/D7.2/D9.2 | Debug snapshot/token、action、console、layout 分别消费真实 state | 见 `debug-panel-idea-redesign.md` §19 | fake DAP stale/failed/hidden request、真实 adapter matrix、workspace layout/a11y smoke |
+| Gate | N7.3 Evidence | 把每个包的证据纳入发布门禁 | `qa-ui-auto-tests/feature-list.md`、testid catalog、YAML、native/perf reports | 没有 host/QA/native/perf 证据的包最高标 `workflow-candidate` |
+
+#### N1.2：把 StyleController 变成唯一 SaveTransaction
+
+保留 `WorkspaceStyleController` 的 immutable provider/cache，但把 roots fingerprint 变化接到 `replaceRoots(nextRoots, generation)`；controller 的 `workspaceId` 必须校验 transaction owner。普通保存、open-clean WorkspaceEdit 和 closed-file WorkspaceEdit 都调用同一个 `writeTextSnapshot` adapter。adapter 在 LF 逻辑文本上依次执行 formatter、trim/final-newline、显式 EditorConfig EOL、charset/BOM 校验，然后只做一次 hash-guarded byte write；BOM 不能进入逻辑 buffer。
+
+策略优先级固定为 `explicit save policy > EditorConfig > disk metadata > language/default`，写回后同步 `text/savedText/eol/encoding/bom/hash/mtime`。异步 formatter/resolve 完成后再次检查 file owner、buffer revision、style generation 和 expected hash；变化返回 typed `cancelled/conflict`，不得覆盖新编辑、伪造 hash 或静默 fallback UTF-8。测试必须覆盖 LF/CRLF/CR、UTF-8/BOM、UTF-16LE/BE、Latin-1，以及 Tauri save→close→reopen byte equality。Gate 0 先修合法多行 `.editorconfig` fixture；N1.2 不得修改 Action/Layout/Navigation。
+
+#### N6.2：树/组/比例的单一布局状态与任意 leaf restore
+
+持久化对象固定为 `{schemaVersion:2, tree, groupsByLeafId, activeGroupId, viewStateByLeafFile}`。`snapshotFromWorkspaceUi` 必须传入当前 tree；hydrate/migrate 一次性调用 `setLayoutTreeV2` 并按 tree preorder 恢复全部 dynamic leaf，而不是只遍历 primary/secondary。每次 reducer commit 校验 node ID、leaf/group 集合、leaf 与 group tab/active 一致性、finite positive ratios 与 sum=1；同一 fileKey 可在多个 leaf 共享 view，但 buffer/save/LSP owner 仍按 fileKey 唯一。
+
+`PanelGroup.onLayoutChanged` 必须按 split node id 回写 normalized ratios，resize 后 debounce persistence；坏快照回退单 leaf并记录 diagnostic。修复 `replaceFileState`、rename/remove key remap、cursor/viewport/highlight/inlay/blame 等仍写死 primary/secondary 的路径。关闭 leaf 按明确 sibling policy 合并/迁移 tabs 后再删除 group；其它 leaf 仍引用 dirty/shared buffer 时不得丢弃。drag split/move cancel 不得改变 state。加入 property/fuzz、no-op reference equality、v1→v2 migration、dynamic restore、ratio round-trip、shared dirty buffer 和双 workspace 隔离测试。
+
+#### N0.2：让 WorkspaceActionHost 成为 CodeWorkspace 唯一执行真值
+
+在 `CodeWorkspaceTab` 创建稳定 instance host，并在 workspace/window unmount 或 visibility owner 变化时 dispose。`executeWorkspaceCommand`、capture-phase keydown、Search Everywhere、顶部/右键菜单、keymap registration、`commandRegistration.execute` 全部改为 `host.getState/execute/search`；删除生产路径直接 `cmd.run` 与 global registry execution。旧 `WorkspaceCommand` 只能作为 metadata adapter，adapter replace 用 owner token 清理旧 closure。
+
+`execute` 捕获 owner token/context generation/payload，返回带 action id/request id 的 `applied|no-op|cancelled|failed`；Abort、hidden/unmount、provider reject 和 finally 都释放 busy。when/platform binding/chord/AltGr/focus 在 host 内判定。测试两个 workspace 同 action ID、A/B mount/unmount、旧 owner cleanup、keydown/Search/menu parity、busy double-click、Abort/when/focus；完成前不能把 global singleton 描述为 runtime truth。
+
+#### N2.2：LocationController 生命周期与 Ctrl+Tab Switcher
+
+生产 workspace 创建一个 `WorkspaceLocationController`，Recent Locations dialog 和 Switcher 只依赖该实例；global tracker 仅保留迁移 facade。事件源改为显式 user-edit/programmatic/navigation/tab-activate/external：只有 CodeMirror user transaction 写 edit location；formatter、WorkspaceEdit、reload、history restore 不产生 edit；成功 declaration/usage/refactor/reveal 和 tab activation 各写明确 reason，并移除 activeFileText/cursor 通用采集噪声。
+
+canonical identity 需处理 separator、drive/UNC、平台大小写，并用 stable file identity 做 rename；目录 rename/delete 对子树 relocate/remove，cut-paste 更新 history，external watcher 冲突标 stale、实际删除标 missing。Ctrl+Tab 使用 host action：modifier-release commit、Esc cancel、A→B→A 保留 selection，workspace/window 不串历史。测试 user/programmatic 分流、双 workspace 同路径、directory rename/delete/cut-paste、external stale/missing、Unix/Windows/UNC 和关闭/恢复。
+
+#### N7.2/N7.3：证据与合并规则
+
+Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-file tests 或 `git diff --check` 红，不得进入下一包。每个包同时更新 `qa-ui-auto-tests/feature-list.md`、`references/testid-catalog.md` 和至少一条 YAML control case；单测/mock 只能证明 model/component。N1 必须有 Tauri byte fixture，N6 必须有 nested restore/resize host，N0/N2 必须有双实例 UI workflow，Debug 必须有 fake DAP/真实 adapter。所有 trace 脱敏，不记录源码、变量值、表达式、完整路径或凭据。
+
+固定合并顺序：`N7.2 Gate -> N1.2 -> N6.2 -> N0.2 -> N2.2 -> Debug §19 -> N7.3 native/perf`。`CodeWorkspaceTab.tsx` 按 save/layout/action/navigation 区域分别提交，禁止 agent 重排其它 owner 区域；没有真实 host/native 证据的包最高标 `workflow-candidate`。
 
 ## 9. 风险与权衡
 
