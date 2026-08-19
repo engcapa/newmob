@@ -514,6 +514,68 @@ export function atomicSplitLeaf(
 }
 
 /**
+ * Walk a layout tree and update a specific leaf node in-place (pure/immutable).
+ */
+function updateLeafInTree(
+  node: LayoutNode,
+  leafId: string,
+  updater: (leaf: LeafGroupNode) => LeafGroupNode,
+): LayoutNode {
+  if (node.type === "leaf") {
+    return node.id === leafId ? updater(node) : node;
+  }
+  return {
+    ...node,
+    children: node.children.map((child) => updateLeafInTree(child, leafId, updater)),
+  };
+}
+
+/**
+ * Validate bidirectional consistency between layout tree leaves and editor groups.
+ * Every leaf must have a matching group with identical openFileKeys/activeKey,
+ * and every group must correspond to a leaf in the tree.
+ */
+export function validateTreeGroupConsistency(
+  tree: LayoutNode,
+  groups: Record<string, LayoutEditorGroupState>,
+): { consistent: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const leaves = getAllLeafNodes(tree);
+  const leafIds = new Set(leaves.map((l) => l.id));
+
+  for (const leaf of leaves) {
+    const group = groups[leaf.id];
+    if (!group) {
+      errors.push(`Leaf "${leaf.id}" has no matching group entry.`);
+      continue;
+    }
+    const treeKeys = new Set(leaf.openFileKeys);
+    const groupKeys = new Set(group.openOrder);
+    for (const k of leaf.openFileKeys) {
+      if (!groupKeys.has(k)) {
+        errors.push(`Leaf "${leaf.id}" tree has key "${k}" not in group openOrder.`);
+      }
+    }
+    for (const k of group.openOrder) {
+      if (!treeKeys.has(k)) {
+        errors.push(`Group "${leaf.id}" has key "${k}" not in tree openFileKeys.`);
+      }
+    }
+    if (leaf.activeKey !== group.activeKey) {
+      errors.push(`Leaf "${leaf.id}" activeKey mismatch: tree="${leaf.activeKey}" vs group="${group.activeKey}".`);
+    }
+  }
+
+  for (const gid of Object.keys(groups)) {
+    if (!leafIds.has(gid)) {
+      errors.push(`Group "${gid}" has no matching leaf in tree.`);
+    }
+  }
+
+  return { consistent: errors.length === 0, errors };
+}
+
+/**
  * Atomic Close Leaf Mutation.
  * Refuses to close the last remaining leaf or non-existent leaf.
  * Cleans up the closed group and selects a remaining leaf as active if needed.
@@ -561,6 +623,17 @@ export function atomicCloseLeaf(
     };
   }
 
+  // N6.4: Sync the destination leaf in the tree to match the updated group,
+  // preventing tree/group divergence on persist/restore.
+  const destGroup = nextGroups[targetSiblingId];
+  const syncedTree = destGroup
+    ? updateLeafInTree(newTree, targetSiblingId, (leaf) => ({
+        ...leaf,
+        openFileKeys: destGroup.openOrder,
+        activeKey: destGroup.activeKey,
+      }))
+    : newTree;
+
   const nextActiveId =
     activeGroupId === leafId
       ? targetSiblingId
@@ -568,7 +641,7 @@ export function atomicCloseLeaf(
 
   return {
     kind: "changed",
-    tree: newTree,
+    tree: syncedTree,
     groups: nextGroups,
     activeGroupId: nextActiveId,
   };

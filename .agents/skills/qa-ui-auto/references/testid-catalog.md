@@ -150,7 +150,7 @@
 - `[data-testid^="tests-result-"]` — display [optional] — F25.1.tests-result
 - `[data-testid^="tests-rerun-"]` — interactive [optional] — F25.1.tests-rerun
 - `[data-testid^="tests-failure-details-"]` — interactive [optional] — F25.1.tests-failure-details
-- `[data-testid="code-workspace-debug-panel"]` — display — F25.1.debug-panel
+- `[data-testid="debug-panel"]` — display — F25.1.debug-panel
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
 - `[data-testid="debug-active-session"]` — interactive [optional] — F25.1.debug-active-session

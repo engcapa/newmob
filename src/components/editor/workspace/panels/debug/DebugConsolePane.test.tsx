@@ -160,6 +160,36 @@ describe("DebugConsolePane", () => {
     const link = screen.getByRole("button", { name: "App.java:42" });
     expect(link).toBeInTheDocument();
     fireEvent.click(link);
-    expect(onOpenLocation).toHaveBeenCalledWith("App.java", 41, 0);
+    expect(onOpenLocation).toHaveBeenCalledWith("App.java", 42, undefined);
+  });
+
+  it("linkifies source locations with line and column (D11.1)", () => {
+    const onOpenLocation = vi.fn();
+    const debug = makeConsoleSession({
+      state: {
+        ...initialDebugState("s1"),
+        output: [
+          {
+            category: "stdout",
+            text: "Syntax error at src/App.java:42:7\n",
+            seq: 1,
+          },
+        ],
+      },
+    });
+
+    render(
+      <DebugConsolePane
+        debug={debug}
+        visible={true}
+        stopped={false}
+        onOpenLocation={onOpenLocation}
+      />,
+    );
+
+    const link = screen.getByRole("button", { name: "src/App.java:42:7" });
+    expect(link).toBeInTheDocument();
+    fireEvent.click(link);
+    expect(onOpenLocation).toHaveBeenCalledWith("src/App.java", 42, 7);
   });
 });

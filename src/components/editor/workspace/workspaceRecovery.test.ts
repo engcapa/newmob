@@ -42,6 +42,7 @@ function file(key: string, dirty: boolean, text = "local") {
     loading: false,
     saving: false,
     dirty,
+    documentRevision: 0,
     error: null,
   };
 }

@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   MavenDependencyCompletionProvider,
   GradleDependencyCompletionProvider,
+  InMemoryDependencyIndexClient,
   detectMavenContext,
   detectGradleContext,
+  type DependencyCompletionItem,
 } from "./dependencyCompletion";
 
-describe("DependencyCompletionProvider (N8)", () => {
+describe("DependencyCompletionProvider (N8.1)", () => {
   describe("detectMavenContext", () => {
     it("detects groupId, artifactId, and version contexts in pom.xml", () => {
       const pomContent = `<project>
@@ -78,7 +80,8 @@ describe("DependencyCompletionProvider (N8)", () => {
   });
 
   describe("MavenDependencyCompletionProvider", () => {
-    const provider = new MavenDependencyCompletionProvider();
+    const client = new InMemoryDependencyIndexClient();
+    const provider = new MavenDependencyCompletionProvider(client);
 
     it("supports pom.xml files only", () => {
       expect(provider.supports("/repo/pom.xml")).toBe(true);
@@ -89,14 +92,17 @@ describe("DependencyCompletionProvider (N8)", () => {
 
     it("completes groupId in pom.xml", async () => {
       const pom = `<project><dependencies><dependency><groupId>spring</groupId></dependency></dependencies></project>`;
-      const items = await provider.complete({
+      const res = await provider.complete({
         filePath: "/repo/pom.xml",
         fileContent: pom,
         position: { line: 0, character: 49 },
       });
 
-      expect(items.length).toBeGreaterThan(0);
-      expect(items.some((item) => item.groupId === "org.springframework.boot")).toBe(true);
+      expect(res.kind).toBe("available");
+      if (res.kind === "available") {
+        expect(res.items.length).toBeGreaterThan(0);
+        expect(res.items.some((item: DependencyCompletionItem) => item.groupId === "org.springframework.boot")).toBe(true);
+      }
     });
 
     it("completes artifactId under groupId in pom.xml", async () => {
@@ -109,14 +115,17 @@ describe("DependencyCompletionProvider (N8)", () => {
   </dependencies>
 </project>`;
 
-      const items = await provider.complete({
+      const res = await provider.complete({
         filePath: "/repo/pom.xml",
         fileContent: pom,
         position: { line: 4, character: 25 },
       });
 
-      expect(items.length).toBeGreaterThan(0);
-      expect(items.some((item) => item.artifactId === "spring-boot-starter-web")).toBe(true);
+      expect(res.kind).toBe("available");
+      if (res.kind === "available") {
+        expect(res.items.length).toBeGreaterThan(0);
+        expect(res.items.some((item: DependencyCompletionItem) => item.artifactId === "spring-boot-starter-web")).toBe(true);
+      }
     });
 
     it("completes versions for artifact in pom.xml", async () => {
@@ -130,19 +139,39 @@ describe("DependencyCompletionProvider (N8)", () => {
   </dependencies>
 </project>`;
 
-      const items = await provider.complete({
+      const res = await provider.complete({
         filePath: "/repo/pom.xml",
         fileContent: pom,
         position: { line: 5, character: 17 },
       });
 
-      expect(items.length).toBeGreaterThan(0);
-      expect(items.some((item) => item.version === "3.3.2")).toBe(true);
+      expect(res.kind).toBe("available");
+      if (res.kind === "available") {
+        expect(res.items.length).toBeGreaterThan(0);
+        expect(res.items.some((item: DependencyCompletionItem) => item.version === "3.3.2")).toBe(true);
+      }
+    });
+
+    it("returns cancelled when signal is already aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const res = await provider.complete(
+        {
+          filePath: "/repo/pom.xml",
+          fileContent: "<project></project>",
+          position: { line: 0, character: 0 },
+        },
+        controller.signal,
+      );
+
+      expect(res.kind).toBe("cancelled");
     });
   });
 
   describe("GradleDependencyCompletionProvider", () => {
-    const provider = new GradleDependencyCompletionProvider();
+    const client = new InMemoryDependencyIndexClient();
+    const provider = new GradleDependencyCompletionProvider(client);
 
     it("supports build.gradle and build.gradle.kts", () => {
       expect(provider.supports("/repo/build.gradle")).toBe(true);
@@ -154,28 +183,34 @@ describe("DependencyCompletionProvider (N8)", () => {
       const gradle = `dependencies {
     implementation 'jackson'
 }`;
-      const items = await provider.complete({
+      const res = await provider.complete({
         filePath: "/repo/build.gradle",
         fileContent: gradle,
         position: { line: 1, character: 26 },
       });
 
-      expect(items.length).toBeGreaterThan(0);
-      expect(items.some((item) => item.groupId === "com.fasterxml.jackson.core")).toBe(true);
+      expect(res.kind).toBe("available");
+      if (res.kind === "available") {
+        expect(res.items.length).toBeGreaterThan(0);
+        expect(res.items.some((item: DependencyCompletionItem) => item.groupId === "com.fasterxml.jackson.core")).toBe(true);
+      }
     });
 
     it("completes versions in build.gradle.kts", async () => {
       const kts = `dependencies {
     implementation("com.google.guava:guava:33")
 }`;
-      const items = await provider.complete({
+      const res = await provider.complete({
         filePath: "/repo/build.gradle.kts",
         fileContent: kts,
         position: { line: 1, character: 45 },
       });
 
-      expect(items.length).toBeGreaterThan(0);
-      expect(items.some((item) => item.version?.startsWith("33"))).toBe(true);
+      expect(res.kind).toBe("available");
+      if (res.kind === "available") {
+        expect(res.items.length).toBeGreaterThan(0);
+        expect(res.items.some((item: DependencyCompletionItem) => item.version?.startsWith("33"))).toBe(true);
+      }
     });
   });
 });

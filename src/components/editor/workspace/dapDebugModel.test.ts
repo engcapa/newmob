@@ -170,6 +170,15 @@ describe("dapDebugModel", () => {
     ]);
   });
 
+  it("builds setBreakpoints args combining condition, hitCondition and logMessage on single breakpoint (D11.2)", () => {
+    const args = buildSetBreakpointsArgs("/repo/src/App.java", planBreakpointSync([
+      { line: 42, condition: "x > 10", hitCondition: "3", logMessage: "x is {x}" },
+    ]));
+    expect(args.breakpoints).toEqual([
+      { line: 42, condition: "x > 10", hitCondition: "3", logMessage: "x is {x}" },
+    ]);
+  });
+
   it("parses breakpoint modes by applicability and uses the first applicable mode as default", () => {
     const modes = parseBreakpointModes({
       breakpointModes: [
@@ -891,5 +900,34 @@ describe("dapDebugModel", () => {
     expect(inlineValueLabel("i = i + 1;", variables)).toBe("i = 3");
     expect(inlineValueLabel("System.out.println();", variables)).toBeNull();
     expect(inlineValueLabel("sum = 1;", {})).toBeNull();
+  });
+
+  it("enforces 10,000 lines limit in appendConsoleLine (D7.4)", () => {
+    let state = initialDebugState("s1");
+    for (let i = 0; i < 10050; i++) {
+      state = appendConsoleLine(state, "stdout", `line ${i}\n`, i);
+    }
+    expect(state.output).toHaveLength(10000);
+    expect(state.output[0]?.text).toBe("line 50\n");
+    expect(state.output[9999]?.text).toBe("line 10049\n");
+  });
+
+  it("enforces 2 MiB memory budget eviction in appendConsoleLine (D7.4)", () => {
+    let state = initialDebugState("s1");
+    // Append 3 lines each of 1 MiB (1,000,000 chars)
+    const bigLine1 = "a".repeat(1000000);
+    const bigLine2 = "b".repeat(1000000);
+    const bigLine3 = "c".repeat(1000000);
+
+    state = appendConsoleLine(state, "stdout", bigLine1, 1);
+    state = appendConsoleLine(state, "stdout", bigLine2, 2);
+    // At this point total is 2 MiB -> holds both lines
+    expect(state.output).toHaveLength(2);
+
+    state = appendConsoleLine(state, "stdout", bigLine3, 3);
+    // Adding 3rd line exceeds 2 MiB -> line 1 must be evicted
+    expect(state.output).toHaveLength(2);
+    expect(state.output[0]?.text).toBe(bigLine2);
+    expect(state.output[1]?.text).toBe(bigLine3);
   });
 });

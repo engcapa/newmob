@@ -78,7 +78,13 @@ export function useDebugVariables(
     const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
 
     void (async () => {
-      const scopesBody = await fetchScopes(selectedFrameId);
+      const scopeToken = {
+        sessionId: curSessionId ?? "unknown",
+        stopEpoch: curStopEpoch,
+        frameId: selectedFrameId,
+        requestId: `scopes-${selectedFrameId}-${curStopEpoch}`,
+      };
+      const scopesBody = await fetchScopes(selectedFrameId, scopeToken);
       if (cancelled) return;
       if (curSessionId && debug.state?.sessionId !== curSessionId) return;
       if ((debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) !== curStopEpoch) return;
@@ -98,7 +104,14 @@ export function useDebugVariables(
       const currentValues = new Map<string, string>();
       for (const scope of refs) {
         if (cancelled) return;
-        const rawVars = parseVariables(await fetchVariables(scope.ref), scope.ref);
+        const varToken = {
+          sessionId: curSessionId ?? "unknown",
+          stopEpoch: curStopEpoch,
+          frameId: selectedFrameId,
+          variablesReference: scope.ref,
+          requestId: `vars-${scope.ref}-${curStopEpoch}`,
+        };
+        const rawVars = parseVariables(await fetchVariables(scope.ref, varToken), scope.ref);
         const vars = rawVars.map((v) => {
           const key = `${scope.ref}:${v.name}`;
           currentValues.set(key, v.value);
@@ -215,7 +228,14 @@ export function useDebugVariables(
     if (!node.expanded && node.children === null && node.variablesReference > 0) {
       const curSessionId = debug.state?.sessionId;
       const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
-      void fetchVariables(node.variablesReference).then((body) => {
+      const expandToken = {
+        sessionId: curSessionId ?? "unknown",
+        stopEpoch: curStopEpoch,
+        frameId: selectedFrameId ?? undefined,
+        variablesReference: node.variablesReference,
+        requestId: `vars-child-${node.variablesReference}-${curStopEpoch}`,
+      };
+      void fetchVariables(node.variablesReference, expandToken).then((body) => {
         if (curSessionId && debug.state?.sessionId !== curSessionId) return;
         if ((debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) !== curStopEpoch) return;
         const children = parseVariables(body, node.variablesReference);

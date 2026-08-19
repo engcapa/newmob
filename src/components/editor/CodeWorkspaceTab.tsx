@@ -343,15 +343,10 @@ import { MarkdownPreview } from "./workspace/MarkdownPreview";
 import { IconButton, LspStatusPill } from "./workspace/workspaceChrome";
 import { OutlinePane } from "./workspace/OutlinePane";
 import { useDeferredGitLineChanges } from "./workspace/useDeferredGitLineChanges";
+import { useWorkspaceActionsController } from "./workspace/useWorkspaceActionsController";
 import {
-  dispatchWorkspaceCommandKeydown,
-  registerWorkspaceCommands,
-  runWorkspaceCommand,
-  workspaceCommandEnabled,
-  workspaceCommandMenuItems,
   type WorkspaceCommand,
   type WorkspaceCommandContext,
-  type WorkspaceCommandFocus,
   type WorkspaceCommandRegistration,
 } from "./workspace/workspaceCommands";
 import type { WorkspaceSearchMatch } from "../../lib/editor/workspaceSearch";
@@ -1830,6 +1825,7 @@ export function CodeWorkspaceTab({
             loading: false,
             saving: false,
             dirty: false,
+            documentRevision: 0,
             error: null,
           };
           return next;
@@ -2121,6 +2117,7 @@ export function CodeWorkspaceTab({
     ignoreWorkspacePath,
   } = useWorkspaceFileActions({
     workspaceId: workspaceInstanceId,
+    locationController: workspaceLocationControllerRef.current,
     roots,
     gitRoots,
     selected,
@@ -2573,6 +2570,7 @@ export function CodeWorkspaceTab({
       ...file,
       text,
       dirty: text !== file.savedText,
+      documentRevision: (file.documentRevision ?? 0) + 1,
       error: null,
     };
     // Non-editor callers need the updated model immediately (formatting,
@@ -2697,6 +2695,7 @@ export function CodeWorkspaceTab({
       ...file,
       text,
       dirty: text !== file.savedText,
+      documentRevision: (file.documentRevision ?? 0) + 1,
       error: null,
     };
     // Keep every command/save/LSP call correct immediately, but delay the
@@ -3414,7 +3413,7 @@ export function CodeWorkspaceTab({
         workspaceId: workspaceInstanceId,
         fileKey: file.key,
         filePath: absPath,
-        bufferVersion: file.text.length,
+        bufferVersion: file.documentRevision ?? 0,
         styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
         expectedDiskHash: file.hash ?? null,
         policy: {
@@ -3445,7 +3444,7 @@ export function CodeWorkspaceTab({
               return null;
             }
           },
-          getLatestBufferVersion: () => openFilesRef.current[key]?.text.length ?? file.text.length,
+          getLatestBufferVersion: () => openFilesRef.current[key]?.documentRevision ?? file.documentRevision ?? 0,
         },
       );
 
@@ -7493,41 +7492,35 @@ export function CodeWorkspaceTab({
     setBottomDockTab,
   ]);
 
+  const actionsController = useWorkspaceActionsController({
+    workspaceId: workspaceInstanceId,
+    commands: workspaceCommands,
+    activeFocus: "workspace",
+    contextData: {
+      activeFileKey: activeKey ?? undefined,
+      activeFilePath: activeFile?.path,
+    },
+  });
+
   const executeWorkspaceCommand = useCallback((
     commandId: string,
     context: WorkspaceCommandContext = { focus: "workspace" },
-  ) => runWorkspaceCommand(workspaceCommands, commandId, context), [workspaceCommands]);
+  ) => {
+    return actionsController.executeCommand(commandId, context);
+  }, [actionsController]);
   workspaceCommandRunnerRef.current = executeWorkspaceCommand;
-
-  const commandFocusForTarget = useCallback((target: EventTarget | null): WorkspaceCommandFocus => {
-    const node = target instanceof Node ? target : null;
-    if (!node) return "workspace";
-    // Terminal dock (M3) marks itself with data-workspace-focus="terminal".
-    const el = node instanceof Element ? node : node.parentElement;
-    if (el?.closest('[data-workspace-focus="terminal"]')) return "terminal";
-    if (treePaneRef.current?.contains(node)) return "tree";
-    if (editorPaneRef.current?.contains(node)) return "editor";
-    return "workspace";
-  }, []);
 
   useEffect(() => {
     if (!visible) return;
     const handleWorkspaceCommand = (event: KeyboardEvent) => {
-      dispatchWorkspaceCommandKeydown(
-        workspaceCommands,
-        { focus: commandFocusForTarget(event.target) },
-        event,
-      );
+      actionsController.dispatchKeydown(event);
     };
     window.addEventListener("keydown", handleWorkspaceCommand, true);
     return () => window.removeEventListener("keydown", handleWorkspaceCommand, true);
-  }, [commandFocusForTarget, visible, workspaceCommands]);
+  }, [actionsController, visible]);
 
   const searchableWorkspaceCommands = useMemo(
-    () => workspaceCommands.filter((command) => (
-      command.id !== "workspace.goToFile"
-      && workspaceCommandEnabled(command, { focus: "workspace" })
-    )),
+    () => workspaceCommands.filter((command) => command.id !== "workspace.goToFile"),
     [workspaceCommands],
   );
 
@@ -7536,10 +7529,7 @@ export function CodeWorkspaceTab({
     executeWorkspaceCommand(commandId);
   }, [executeWorkspaceCommand]);
 
-  const commandRegistration = useMemo<WorkspaceCommandRegistration>(() => ({
-    items: workspaceCommandMenuItems(workspaceCommands, { focus: "workspace" }),
-    execute: (commandId: string) => executeWorkspaceCommand(commandId),
-  }), [executeWorkspaceCommand, workspaceCommands]);
+  const commandRegistration = actionsController.commandRegistration;
 
   useEffect(() => {
     if (!onCommandsChange) return;
@@ -7550,11 +7540,6 @@ export function CodeWorkspaceTab({
     if (!onCommandsChange) return;
     return () => onCommandsChange(tabId, null);
   }, [onCommandsChange, tabId]);
-
-  // Register commands with the global/instance-aware WorkspaceActionRegistry (I1)
-  useEffect(() => {
-    return registerWorkspaceCommands(workspaceCommands);
-  }, [workspaceCommands]);
 
   // Track navigation location on tab activation / file switch (I3)
   useEffect(() => {
@@ -8339,13 +8324,54 @@ export function CodeWorkspaceTab({
   const [projectProblemsLoading, setProjectProblemsLoading] = useState(false);
   const [rebuildingProject, setRebuildingProject] = useState(false);
 
-  const problemPathToRef = useCallback((absPath: string): CodeWorkspaceFileRef | null => {
+  const problemPathToRef = useCallback((rawPath: string): CodeWorkspaceFileRef | null => {
+    if (!rawPath) return null;
+    let cleanPath = rawPath.trim();
+    if (cleanPath.startsWith("file://")) {
+      cleanPath = decodeURIComponent(cleanPath.replace(/^file:\/\/\/?/, "/"));
+    }
+    cleanPath = cleanPath.replace(/\\/g, "/");
+
+    // 1. Direct absolute / canonical match against roots
     for (const root of rootsRef.current) {
-      const rel = relativePathWithinRoot(root.path, absPath);
+      const rel = relativePathWithinRoot(root.path, cleanPath);
       if (rel !== null && rel !== "") {
         return { kind: "root", rootId: root.id, path: rel };
       }
     }
+
+    // 2. Search currently open files by matching path, languagePath, or path suffix
+    const openFiles = Object.values(openFilesRef.current);
+    const matchingOpen = openFiles.find(
+      (f) =>
+        f.ref.path === cleanPath ||
+        f.path === cleanPath ||
+        f.languagePath === cleanPath ||
+        f.ref.path.endsWith(`/${cleanPath}`) ||
+        f.path.endsWith(`/${cleanPath}`),
+    );
+    if (matchingOpen) {
+      return matchingOpen.ref;
+    }
+
+    // 3. If relative path and not starting with '/' or Windows drive 'C:/'
+    const isAbsolute = cleanPath.startsWith("/") || /^[a-zA-Z]:\//.test(cleanPath);
+    if (!isAbsolute && rootsRef.current.length > 0) {
+      // If single root or active root matches, use it
+      const targetRoot = rootsRef.current[0];
+      if (targetRoot) {
+        return { kind: "root", rootId: targetRoot.id, path: cleanPath.replace(/^\/+/, "") };
+      }
+    }
+
+    // 4. Check loose files
+    const looseMatch = looseFilesRef.current.find(
+      (lf) => lf.path === cleanPath || lf.path.endsWith(`/${cleanPath}`),
+    );
+    if (looseMatch) {
+      return { kind: "loose", id: looseMatch.id, path: looseMatch.path };
+    }
+
     return null;
   }, []);
 
@@ -9657,9 +9683,12 @@ export function CodeWorkspaceTab({
   ]);
 
   const openDebugFrame = useCallback((
-    frame: Pick<DebugStackFrame, "path" | "line"> & Partial<Pick<DebugStackFrame, "sourceReference" | "sourceName" | "name">>,
+    frame: Pick<DebugStackFrame, "path" | "line"> & Partial<Pick<DebugStackFrame, "sourceReference" | "sourceName" | "name">> & { column?: number },
   ) => {
-    const range = { start: { line: frame.line - 1, character: 0 }, end: { line: frame.line - 1, character: 0 } };
+    // D11.1: line/column arrive 1-based; convert to 0-based exactly once here
+    const line0 = frame.line - 1;
+    const char0 = (frame.column ?? 1) - 1;
+    const range = { start: { line: line0, character: char0 }, end: { line: line0, character: char0 } };
     const ref = frame.path ? problemPathToRef(frame.path) : null;
     if (ref) {
       void openFile(ref).then(() => revealEditorLocation(fileKey(ref), range));
@@ -10722,8 +10751,8 @@ export function CodeWorkspaceTab({
                 onStart={activeFileDebuggable ? startDebugActiveTarget : null}
                 onAttach={activeFileJavaRoot && debugRuntimeAvailable ? attachRemoteDebug : null}
                 onOpenFrame={openDebugFrame}
-                onOpenBreakpoint={(path, line) => openDebugFrame({ path, line })}
-                onOpenLocation={(path, line) => openDebugFrame({ path, line })}
+                onOpenBreakpoint={(path, line, column) => openDebugFrame({ path, line, column })}
+                onOpenLocation={(path, line, column) => openDebugFrame({ path, line, column })}
                 editingBreakpoint={editingBreakpoint}
                 onEditingBreakpointChange={setEditingBreakpoint}
                 runtimeAvailable={debugRuntimeAvailable}

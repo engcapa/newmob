@@ -30,8 +30,7 @@ import {
   Separator as PanelResizeHandle,
 } from "react-resizable-panels";
 
-/** localStorage key + panel ids for the Debugger tab's horizontal split. */
-const DEBUG_HORIZONTAL_LAYOUT_KEY = "taomni.codeWorkspace.debugSplitHorizontal.v1";
+/** Panel ids for the Debugger tab's horizontal split. */
 const DEBUG_HORIZONTAL_PANEL_IDS = ["debug-frames", "debug-variables"];
 
 export interface DebugPanelProps {
@@ -43,7 +42,7 @@ export interface DebugPanelProps {
   /** Reveal a stack frame's source location. */
   onOpenFrame: (frame: DebugStackFrame) => void;
   /** Reveal a breakpoint's line from the breakpoints view. */
-  onOpenBreakpoint?: (path: string, line: number) => void;
+  onOpenBreakpoint?: (path: string, line: number, column?: number) => void;
   /**
    * Breakpoint whose editor should be open (gutter right-click / Ctrl+Shift+F8
    * routes here instead of opening a chain of modal prompts).
@@ -146,10 +145,23 @@ export function DebugPanel({
   const frameId = stopped && currentTab === "debugger" ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
   const variablesHook = useDebugVariables(debug, frameId, stopped);
 
-  // Read persisted horizontal layout (split between frames & variables)
+  // Read persisted horizontal layout with workspace instance scoping (D9.4)
+  const layoutStorageKey = useMemo(() => {
+    return workspaceInstanceId
+      ? `taomni.codeWorkspace.${workspaceInstanceId}.debugSplitHorizontal.v2`
+      : "taomni.codeWorkspace.debugSplitHorizontal.v2";
+  }, [workspaceInstanceId]);
+
   const horizontalLayout = useMemo(() => {
-    return readDebugSplitLayout(DEBUG_HORIZONTAL_LAYOUT_KEY, DEBUG_HORIZONTAL_PANEL_IDS);
-  }, []);
+    const v2 = readDebugSplitLayout(layoutStorageKey, DEBUG_HORIZONTAL_PANEL_IDS);
+    if (v2) return v2;
+    const v1 = readDebugSplitLayout("taomni.codeWorkspace.debugSplitHorizontal.v1", DEBUG_HORIZONTAL_PANEL_IDS);
+    if (v1) {
+      writeDebugSplitLayout(layoutStorageKey, v1);
+      return v1;
+    }
+    return undefined;
+  }, [layoutStorageKey]);
 
   const activeConfiguration = configurations.find((configuration) => (
     configuration.id === (activeConfigurationId ?? configurations[0]?.id)
@@ -357,13 +369,13 @@ export function DebugPanel({
           <div className="flex-1 min-h-0">
             <PanelGroup
               orientation="horizontal"
-              id="debug-layout-horizontal-v3"
+              id={`${idPrefix}debug-layout-horizontal-v3`}
               className="h-full min-h-0"
               defaultLayout={horizontalLayout}
-              onLayoutChanged={(layout) => writeDebugSplitLayout(DEBUG_HORIZONTAL_LAYOUT_KEY, layout)}
+              onLayoutChanged={(layout) => writeDebugSplitLayout(layoutStorageKey, layout)}
             >
               {/* Left Column: Frames & Threads + Controls */}
-              <Panel id="debug-frames" defaultSize={45} minSize={15} maxSize={85} className="min-h-0 min-w-0">
+              <Panel id={`${idPrefix}debug-frames`} defaultSize={45} minSize={15} maxSize={85} className="min-h-0 min-w-0">
                 <DebugFramesPane
                   debug={debug}
                   activeRunning={activeRunning}
@@ -372,13 +384,15 @@ export function DebugPanel({
                 />
               </Panel>
 
-              {/* Resizable Divider */}
+              {/* Resizable Divider (D9.4: ARIA separator attributes) */}
               <PanelResizeHandle
+                aria-label="Resize debugger frames and variables columns"
+                data-testid="debug-split-resize-handle"
                 className="w-[4px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)] active:bg-[var(--taomni-accent)] transition-colors cursor-col-resize shrink-0 relative after:absolute after:inset-y-0 after:-left-2 after:-right-2 after:z-20"
               />
 
               {/* Right Column: Variables & Watches */}
-              <Panel id="debug-variables" defaultSize={55} minSize={15} className="min-h-0 min-w-0">
+              <Panel id={`${idPrefix}debug-variables`} defaultSize={55} minSize={15} className="min-h-0 min-w-0">
                 {renderVariablesPane()}
               </Panel>
             </PanelGroup>

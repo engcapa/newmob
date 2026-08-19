@@ -369,10 +369,11 @@ export function markResumed(state: DebugSessionState): DebugSessionState {
   };
 }
 
-/** Cap retained console lines so a chatty debuggee cannot grow the store unbounded (10,000 lines). */
+/** Cap retained console lines and memory budget (10,000 lines and 2 MiB). */
 const MAX_CONSOLE_LINES = 10000;
+const MAX_CONSOLE_BYTES = 2 * 1024 * 1024; // 2 MiB
 
-/** Append a console line (no-op for empty text). */
+/** Append a console line (no-op for empty text), with 10k lines + 2 MiB dual-budget eviction. */
 export function appendConsoleLine(
   state: DebugSessionState,
   category: string,
@@ -387,7 +388,22 @@ export function appendConsoleLine(
     ...(seq !== undefined ? { seq } : {}),
     ...(timestamp !== undefined ? { timestamp } : {}),
   };
-  return { ...state, output: [...state.output, newLine].slice(-MAX_CONSOLE_LINES) };
+  let lines = [...state.output, newLine];
+  if (lines.length > MAX_CONSOLE_LINES) {
+    lines = lines.slice(-MAX_CONSOLE_LINES);
+  }
+
+  // D7.4: 2 MiB dual byte budget eviction
+  let totalBytes = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    totalBytes += lines[i]!.text.length;
+    if (totalBytes > MAX_CONSOLE_BYTES) {
+      lines = lines.slice(i + 1);
+      break;
+    }
+  }
+
+  return { ...state, output: lines };
 }
 
 /** DAP `stepIn`/`stepOut`/`next`/`continue`/`pause`/`stepBack`/`reverseContinue` for a UI step action. */

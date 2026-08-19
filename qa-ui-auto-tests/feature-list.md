@@ -4943,7 +4943,7 @@ controls:
     kind: interactive
     optional: true       # requires a failed result with provider details
   - id: debug-panel
-    selector: '[data-testid="code-workspace-debug-panel"]'
+    selector: '[data-testid="debug-panel"]'
     kind: display
   - id: debug-active-configuration
     selector: '[data-testid="debug-active-configuration"]'

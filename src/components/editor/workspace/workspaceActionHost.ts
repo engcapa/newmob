@@ -109,22 +109,37 @@ export class WorkspaceActionHost {
 
   registerCommands(commands: readonly WorkspaceCommand[]): () => void {
     if (this.disposed) return () => {};
+    const installedAdapters = new Map<string, WorkspaceActionDefinition>();
+
     for (const cmd of commands) {
       this.commands.set(cmd.id, cmd);
       // Also adapt into action definition if not already present
       if (!this.actions.has(cmd.id)) {
-        this.actions.set(cmd.id, {
+        const adapter: WorkspaceActionDefinition = {
           id: cmd.id,
           title: cmd.title,
           category: (cmd.category as any) ?? "Edit",
           keybinding: cmd.keybinding,
           when: cmd.when,
           provenance: cmd.provenance ?? "local",
-          run: async (ctx) => {
-            const res = cmd.run(ctx as WorkspaceCommandContext) as unknown;
-            return res !== false ? { kind: "applied" } : { kind: "no-op" };
+          run: async (ctx, signal) => {
+            if (signal?.aborted) {
+              return { kind: "cancelled", message: "Command cancelled via AbortSignal." };
+            }
+            try {
+              const res = await Promise.resolve(cmd.run(ctx as WorkspaceCommandContext));
+              if (signal?.aborted) {
+                return { kind: "cancelled", message: "Command cancelled after execution." };
+              }
+              return (res as unknown) !== false ? { kind: "applied" } : { kind: "no-op" };
+            } catch (err) {
+              const message = err instanceof Error ? err.message : String(err);
+              return { kind: "failed", message };
+            }
           },
-        });
+        };
+        installedAdapters.set(cmd.id, adapter);
+        this.actions.set(cmd.id, adapter);
       }
     }
     this.generation += 1;
@@ -132,6 +147,9 @@ export class WorkspaceActionHost {
       for (const cmd of commands) {
         if (this.commands.get(cmd.id) === cmd) {
           this.commands.delete(cmd.id);
+        }
+        const adapter = installedAdapters.get(cmd.id);
+        if (adapter && this.actions.get(cmd.id) === adapter) {
           this.actions.delete(cmd.id);
         }
       }
@@ -234,8 +252,8 @@ export class WorkspaceActionHost {
         const runRes = await action.run(ctx, signal);
         result = runRes ?? { kind: "applied" };
       } else if (cmd?.run) {
-        const res = cmd.run(ctx as WorkspaceCommandContext) as unknown;
-        result = res !== false ? { kind: "applied" } : { kind: "no-op" };
+        const res = await Promise.resolve(cmd.run(ctx as WorkspaceCommandContext));
+        result = (res as unknown) !== false ? { kind: "applied" } : { kind: "no-op" };
       } else {
         result = { kind: "applied" };
       }

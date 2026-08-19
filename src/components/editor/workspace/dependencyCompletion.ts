@@ -27,12 +27,29 @@ export interface DependencyCompletionContext {
 
 export type DependencyProviderCapability = "available" | "unavailable" | "error";
 
+export type DependencyCompletionResult =
+  | {
+      kind: "available";
+      items: DependencyCompletionItem[];
+      replacementRange?: { from: number; to: number };
+      requestId?: string;
+    }
+  | {
+      kind: "unavailable" | "error" | "cancelled" | "timeout";
+      reason: string;
+      retryable?: boolean;
+      requestId?: string;
+    };
+
 export interface DependencyCompletionProvider {
   readonly id: string;
   readonly name: string;
   supports(filePath: string): boolean;
   getCapabilityState(): DependencyProviderCapability;
-  complete(context: DependencyCompletionContext): Promise<DependencyCompletionItem[]>;
+  complete(
+    context: DependencyCompletionContext,
+    signal?: AbortSignal,
+  ): Promise<DependencyCompletionResult>;
 }
 
 export interface MavenDependencyIndexEntry {
@@ -209,11 +226,123 @@ export function detectGradleContext(
   return { kind: "none", prefix: "" };
 }
 
+export interface DependencyIndexClient {
+  search(
+    query: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<MavenDependencyIndexEntry[]>;
+  isAvailable(): Promise<boolean>;
+}
+
+export class MavenCentralDependencyIndexClient implements DependencyIndexClient {
+  private cache = new Map<string, { entries: MavenDependencyIndexEntry[]; timestamp: number }>();
+  private readonly maxCacheSize: number;
+  private readonly ttlMs: number;
+  private readonly baseUrl: string;
+
+  constructor(options?: { maxCacheSize?: number; ttlMs?: number; baseUrl?: string }) {
+    this.maxCacheSize = options?.maxCacheSize ?? 100;
+    this.ttlMs = options?.ttlMs ?? 5 * 60 * 1000;
+    this.baseUrl = options?.baseUrl ?? "https://search.maven.org/solrsearch/select";
+  }
+
+  async isAvailable(): Promise<boolean> {
+    return typeof fetch === "function";
+  }
+
+  async search(
+    query: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<MavenDependencyIndexEntry[]> {
+    const trimmed = query.trim();
+    if (!trimmed) return [];
+
+    const cached = this.cache.get(trimmed);
+    if (cached && Date.now() - cached.timestamp < this.ttlMs) {
+      return cached.entries;
+    }
+
+    const timeoutMs = options?.timeoutMs ?? 3000;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    const onAbort = () => controller.abort();
+    options?.signal?.addEventListener("abort", onAbort);
+
+    try {
+      const url = `${this.baseUrl}?q=${encodeURIComponent(trimmed)}&rows=20&wt=json`;
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`Maven Central returned HTTP ${response.status}`);
+      }
+      const data = await response.json();
+      const docs = data?.response?.docs ?? [];
+      const entries: MavenDependencyIndexEntry[] = docs.map((doc: Record<string, unknown>) => ({
+        groupId: String(doc.g ?? ""),
+        artifactId: String(doc.a ?? ""),
+        versions: Array.isArray(doc.tags)
+          ? (doc.tags as string[])
+          : doc.v
+            ? [String(doc.v)]
+            : [],
+        description: doc.text ? String(doc.text) : `${doc.g}:${doc.a}`,
+      }));
+
+      // Bounded LRU cache eviction
+      if (this.cache.size >= this.maxCacheSize) {
+        const oldestKey = this.cache.keys().next().value;
+        if (oldestKey) this.cache.delete(oldestKey);
+      }
+      this.cache.set(trimmed, { entries, timestamp: Date.now() });
+      return entries;
+    } finally {
+      clearTimeout(timeoutId);
+      options?.signal?.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+export class InMemoryDependencyIndexClient implements DependencyIndexClient {
+  constructor(private entries: MavenDependencyIndexEntry[] = POPULAR_JAVA_DEPENDENCIES) {}
+
+  async isAvailable(): Promise<boolean> {
+    return true;
+  }
+
+  async search(
+    query: string,
+    options?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<MavenDependencyIndexEntry[]> {
+    if (options?.signal?.aborted) {
+      throw new Error("Operation cancelled.");
+    }
+    const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+    if (words.length === 0) return this.entries;
+    return this.entries.filter((e) => {
+      const g = e.groupId.toLowerCase();
+      const a = e.artifactId.toLowerCase();
+      const d = (e.description || "").toLowerCase();
+      return words.every(
+        (w) =>
+          g.includes(w) ||
+          a.includes(w) ||
+          d.includes(w) ||
+          e.versions.some((v) => v.toLowerCase().includes(w)),
+      );
+    });
+  }
+}
+
 export class MavenDependencyCompletionProvider implements DependencyCompletionProvider {
   readonly id = "maven-dependency-completion";
   readonly name = "Maven POM Dependency Completion";
 
-  private index: MavenDependencyIndexEntry[] = POPULAR_JAVA_DEPENDENCIES;
+  private client: DependencyIndexClient;
+  private capabilityState: DependencyProviderCapability = "available";
+
+  constructor(client?: DependencyIndexClient) {
+    this.client = client ?? new MavenCentralDependencyIndexClient();
+  }
 
   supports(filePath: string): boolean {
     const normalized = filePath.replace(/\\/g, "/");
@@ -221,67 +350,99 @@ export class MavenDependencyCompletionProvider implements DependencyCompletionPr
   }
 
   getCapabilityState(): DependencyProviderCapability {
-    return "available";
+    return this.capabilityState;
   }
 
-  async complete(context: DependencyCompletionContext): Promise<DependencyCompletionItem[]> {
-    if (!this.supports(context.filePath)) return [];
+  async complete(
+    context: DependencyCompletionContext,
+    signal?: AbortSignal,
+  ): Promise<DependencyCompletionResult> {
+    if (!this.supports(context.filePath)) {
+      return { kind: "unavailable", reason: "File not supported for Maven dependency completion." };
+    }
+
+    if (signal?.aborted) {
+      return { kind: "cancelled", reason: "Completion cancelled." };
+    }
 
     const ctx = detectMavenContext(context.fileContent, context.position.line, context.position.character);
-    if (ctx.kind === "none") return [];
+    if (ctx.kind === "none") {
+      return { kind: "available", items: [] };
+    }
 
-    const items: DependencyCompletionItem[] = [];
+    const requestId = `req-mvn-${Date.now().toString(36)}`;
+    const searchQuery = ctx.currentArtifactId
+      ? `${ctx.currentGroupId ?? ""} ${ctx.currentArtifactId}`
+      : ctx.currentGroupId
+        ? ctx.currentGroupId
+        : ctx.prefix || "org";
 
-    if (ctx.kind === "groupId") {
-      const seen = new Set<string>();
-      for (const entry of this.index) {
-        if (!seen.has(entry.groupId) && entry.groupId.toLowerCase().includes(ctx.prefix.toLowerCase())) {
-          seen.add(entry.groupId);
-          items.push({
-            label: entry.groupId,
-            groupId: entry.groupId,
-            insertText: entry.groupId,
-            detail: entry.description,
-            kind: "groupId",
-          });
-        }
-      }
-    } else if (ctx.kind === "artifactId") {
-      for (const entry of this.index) {
-        if (ctx.currentGroupId && entry.groupId !== ctx.currentGroupId) continue;
-        if (entry.artifactId.toLowerCase().includes(ctx.prefix.toLowerCase())) {
-          items.push({
-            label: entry.artifactId,
-            groupId: entry.groupId,
-            artifactId: entry.artifactId,
-            insertText: entry.artifactId,
-            detail: `${entry.groupId}:${entry.artifactId}`,
-            documentation: entry.description,
-            kind: "artifactId",
-          });
-        }
-      }
-    } else if (ctx.kind === "version") {
-      for (const entry of this.index) {
-        if (ctx.currentGroupId && entry.groupId !== ctx.currentGroupId) continue;
-        if (ctx.currentArtifactId && entry.artifactId !== ctx.currentArtifactId) continue;
-        for (const ver of entry.versions) {
-          if (ver.toLowerCase().includes(ctx.prefix.toLowerCase())) {
+    try {
+      const entries = await this.client.search(searchQuery, { signal, timeoutMs: 3000 });
+      this.capabilityState = "available";
+      const items: DependencyCompletionItem[] = [];
+
+      if (ctx.kind === "groupId") {
+        const seen = new Set<string>();
+        for (const entry of entries) {
+          if (!seen.has(entry.groupId) && entry.groupId.toLowerCase().includes(ctx.prefix.toLowerCase())) {
+            seen.add(entry.groupId);
             items.push({
-              label: ver,
+              label: entry.groupId,
               groupId: entry.groupId,
-              artifactId: entry.artifactId,
-              version: ver,
-              insertText: ver,
-              detail: `${entry.groupId}:${entry.artifactId}:${ver}`,
-              kind: "version",
+              insertText: entry.groupId,
+              detail: entry.description,
+              kind: "groupId",
             });
           }
         }
+      } else if (ctx.kind === "artifactId") {
+        for (const entry of entries) {
+          if (ctx.currentGroupId && entry.groupId !== ctx.currentGroupId) continue;
+          if (entry.artifactId.toLowerCase().includes(ctx.prefix.toLowerCase())) {
+            items.push({
+              label: entry.artifactId,
+              groupId: entry.groupId,
+              artifactId: entry.artifactId,
+              insertText: entry.artifactId,
+              detail: `${entry.groupId}:${entry.artifactId}`,
+              documentation: entry.description,
+              kind: "artifactId",
+            });
+          }
+        }
+      } else if (ctx.kind === "version") {
+        for (const entry of entries) {
+          if (ctx.currentGroupId && entry.groupId !== ctx.currentGroupId) continue;
+          if (ctx.currentArtifactId && entry.artifactId !== ctx.currentArtifactId) continue;
+          for (const ver of entry.versions) {
+            if (ver.toLowerCase().includes(ctx.prefix.toLowerCase())) {
+              items.push({
+                label: ver,
+                groupId: entry.groupId,
+                artifactId: entry.artifactId,
+                version: ver,
+                insertText: ver,
+                detail: `${entry.groupId}:${entry.artifactId}:${ver}`,
+                kind: "version",
+              });
+            }
+          }
+        }
       }
-    }
 
-    return items;
+      return { kind: "available", items, requestId };
+    } catch (err) {
+      if (signal?.aborted) {
+        return { kind: "cancelled", reason: "Completion cancelled.", requestId };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("abort") || msg.includes("timed out")) {
+        return { kind: "timeout", reason: "Maven Central request timed out (3s limit).", retryable: true, requestId };
+      }
+      this.capabilityState = "error";
+      return { kind: "error", reason: `Dependency index error: ${msg}`, retryable: true, requestId };
+    }
   }
 }
 
@@ -289,7 +450,12 @@ export class GradleDependencyCompletionProvider implements DependencyCompletionP
   readonly id = "gradle-dependency-completion";
   readonly name = "Gradle Build Script Dependency Completion";
 
-  private index: MavenDependencyIndexEntry[] = POPULAR_JAVA_DEPENDENCIES;
+  private client: DependencyIndexClient;
+  private capabilityState: DependencyProviderCapability = "available";
+
+  constructor(client?: DependencyIndexClient) {
+    this.client = client ?? new MavenCentralDependencyIndexClient();
+  }
 
   supports(filePath: string): boolean {
     const normalized = filePath.replace(/\\/g, "/");
@@ -302,69 +468,101 @@ export class GradleDependencyCompletionProvider implements DependencyCompletionP
   }
 
   getCapabilityState(): DependencyProviderCapability {
-    return "available";
+    return this.capabilityState;
   }
 
-  async complete(context: DependencyCompletionContext): Promise<DependencyCompletionItem[]> {
-    if (!this.supports(context.filePath)) return [];
+  async complete(
+    context: DependencyCompletionContext,
+    signal?: AbortSignal,
+  ): Promise<DependencyCompletionResult> {
+    if (!this.supports(context.filePath)) {
+      return { kind: "unavailable", reason: "File not supported for Gradle dependency completion." };
+    }
+
+    if (signal?.aborted) {
+      return { kind: "cancelled", reason: "Completion cancelled." };
+    }
 
     const ctx = detectGradleContext(context.fileContent, context.position.line, context.position.character);
-    if (ctx.kind === "none") return [];
+    if (ctx.kind === "none") {
+      return { kind: "available", items: [] };
+    }
 
-    const items: DependencyCompletionItem[] = [];
+    const requestId = `req-grd-${Date.now().toString(36)}`;
+    const searchQuery = ctx.kind === "version"
+      ? `${ctx.groupId ?? ""} ${ctx.artifactId ?? ""}`.trim() || ctx.prefix || "org"
+      : ctx.groupId
+        ? `${ctx.groupId} ${ctx.prefix}`
+        : ctx.prefix || "org";
 
-    if (ctx.kind === "coordinate") {
-      for (const entry of this.index) {
-        const latestVer = entry.versions[0] ?? "";
-        const fullCoord = `${entry.groupId}:${entry.artifactId}:${latestVer}`;
-        if (
-          !ctx.groupId &&
-          (entry.groupId.toLowerCase().includes(ctx.prefix.toLowerCase()) ||
-            entry.artifactId.toLowerCase().includes(ctx.prefix.toLowerCase()))
-        ) {
-          items.push({
-            label: `${entry.groupId}:${entry.artifactId}`,
-            groupId: entry.groupId,
-            artifactId: entry.artifactId,
-            version: latestVer,
-            insertText: fullCoord,
-            detail: entry.description,
-            kind: "coordinate",
-          });
-        } else if (ctx.groupId && entry.groupId === ctx.groupId) {
-          if (entry.artifactId.toLowerCase().includes(ctx.prefix.toLowerCase())) {
+    try {
+      const entries = await this.client.search(searchQuery, { signal, timeoutMs: 3000 });
+      this.capabilityState = "available";
+      const items: DependencyCompletionItem[] = [];
+
+      if (ctx.kind === "coordinate") {
+        for (const entry of entries) {
+          const latestVer = entry.versions[0] ?? "";
+          const fullCoord = `${entry.groupId}:${entry.artifactId}:${latestVer}`;
+          if (
+            !ctx.groupId &&
+            (entry.groupId.toLowerCase().includes(ctx.prefix.toLowerCase()) ||
+              entry.artifactId.toLowerCase().includes(ctx.prefix.toLowerCase()))
+          ) {
             items.push({
-              label: `${entry.artifactId}:${latestVer}`,
+              label: `${entry.groupId}:${entry.artifactId}`,
               groupId: entry.groupId,
               artifactId: entry.artifactId,
               version: latestVer,
-              insertText: `${entry.artifactId}:${latestVer}`,
+              insertText: fullCoord,
               detail: entry.description,
               kind: "coordinate",
             });
+          } else if (ctx.groupId && entry.groupId === ctx.groupId) {
+            if (entry.artifactId.toLowerCase().includes(ctx.prefix.toLowerCase())) {
+              items.push({
+                label: `${entry.artifactId}:${latestVer}`,
+                groupId: entry.groupId,
+                artifactId: entry.artifactId,
+                version: latestVer,
+                insertText: `${entry.artifactId}:${latestVer}`,
+                detail: entry.description,
+                kind: "coordinate",
+              });
+            }
+          }
+        }
+      } else if (ctx.kind === "version") {
+        for (const entry of entries) {
+          if (ctx.groupId && entry.groupId !== ctx.groupId) continue;
+          if (ctx.artifactId && entry.artifactId !== ctx.artifactId) continue;
+          for (const ver of entry.versions) {
+            if (ver.toLowerCase().includes(ctx.prefix.toLowerCase())) {
+              items.push({
+                label: ver,
+                groupId: entry.groupId,
+                artifactId: entry.artifactId,
+                version: ver,
+                insertText: ver,
+                detail: `${entry.groupId}:${entry.artifactId}:${ver}`,
+                kind: "version",
+              });
+            }
           }
         }
       }
-    } else if (ctx.kind === "version") {
-      for (const entry of this.index) {
-        if (ctx.groupId && entry.groupId !== ctx.groupId) continue;
-        if (ctx.artifactId && entry.artifactId !== ctx.artifactId) continue;
-        for (const ver of entry.versions) {
-          if (ver.toLowerCase().includes(ctx.prefix.toLowerCase())) {
-            items.push({
-              label: ver,
-              groupId: entry.groupId,
-              artifactId: entry.artifactId,
-              version: ver,
-              insertText: ver,
-              detail: `${entry.groupId}:${entry.artifactId}:${ver}`,
-              kind: "version",
-            });
-          }
-        }
-      }
-    }
 
-    return items;
+      return { kind: "available", items, requestId };
+    } catch (err) {
+      if (signal?.aborted) {
+        return { kind: "cancelled", reason: "Completion cancelled.", requestId };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("abort") || msg.includes("timed out")) {
+        return { kind: "timeout", reason: "Maven Central request timed out (3s limit).", retryable: true, requestId };
+      }
+      this.capabilityState = "error";
+      return { kind: "error", reason: `Dependency index error: ${msg}`, retryable: true, requestId };
+    }
   }
 }

@@ -33,8 +33,8 @@ function renderConsoleLine(
     }
     const fullMatch = match[0];
     const path = match[1];
-    const line = parseInt(match[2], 10) - 1;
-    const col = match[3] ? parseInt(match[3], 10) - 1 : 0;
+    const line = parseInt(match[2], 10);  // 1-based, converted at CodeMirror boundary
+    const col = match[3] ? parseInt(match[3], 10) : undefined;  // 1-based or absent
 
     parts.push(
       <button
@@ -42,7 +42,7 @@ function renderConsoleLine(
         type="button"
         className="underline underline-offset-2 hover:text-[var(--taomni-accent)] text-sky-500 dark:text-sky-400 cursor-pointer inline font-mono"
         onClick={() => onOpenLocation(path, line, col)}
-        title={`Jump to ${path}:${line + 1}`}
+        title={`Jump to ${path}:${line}${col != null ? ":" + col : ""}`}
       >
         {fullMatch}
       </button>,

@@ -14,6 +14,7 @@ import {
   atomicSetLeafActiveTab,
   atomicCloseTabInLeaf,
   validateLayoutTree,
+  validateTreeGroupConsistency,
   remapLayoutTreeKeys,
   type LayoutNode,
 } from "./recursiveLayoutTree";
@@ -331,5 +332,73 @@ describe("recursiveLayoutTree", () => {
         expect(leaf1.activeKey).toBe(null);
       }
     }
+  });
+
+  it("atomicCloseLeaf syncs destination leaf openFileKeys/activeKey with group (N6.4)", () => {
+    const tree: LayoutNode = {
+      type: "split",
+      id: "split-root",
+      orientation: "horizontal",
+      ratios: [0.5, 0.5],
+      children: [
+        { type: "leaf", id: "left", openFileKeys: ["a.ts"], activeKey: "a.ts" },
+        { type: "leaf", id: "right", openFileKeys: ["b.ts"], activeKey: "b.ts" },
+      ],
+    };
+    const groups = {
+      left: { id: "left", openOrder: ["a.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
+      right: { id: "right", openOrder: ["b.ts"], activeKey: "b.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const result = atomicCloseLeaf(tree, groups, "right", "right");
+    expect(result.kind).toBe("changed");
+    if (result.kind !== "changed") return;
+
+    // The surviving leaf should have both files in tree AND group
+    const surviving = findLeafNode(result.tree, "left");
+    expect(surviving).not.toBeNull();
+    expect(surviving!.openFileKeys).toContain("a.ts");
+    expect(surviving!.openFileKeys).toContain("b.ts");
+
+    const survivingGroup = result.groups["left"];
+    expect(survivingGroup.openOrder).toContain("a.ts");
+    expect(survivingGroup.openOrder).toContain("b.ts");
+
+    // Tree and group must agree
+    expect(surviving!.openFileKeys).toEqual(survivingGroup.openOrder);
+    expect(surviving!.activeKey).toBe(survivingGroup.activeKey);
+  });
+
+  it("validateTreeGroupConsistency detects divergence (N6.4)", () => {
+    const tree: LayoutNode = {
+      type: "leaf",
+      id: "leaf-1",
+      openFileKeys: ["a.ts"],
+      activeKey: "a.ts",
+    };
+    const groups = {
+      "leaf-1": { id: "leaf-1", openOrder: ["a.ts", "b.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const result = validateTreeGroupConsistency(tree, groups);
+    expect(result.consistent).toBe(false);
+    expect(result.errors.length).toBeGreaterThan(0);
+    expect(result.errors.some((e: string) => e.includes("b.ts"))).toBe(true);
+  });
+
+  it("validateTreeGroupConsistency passes on consistent state (N6.4)", () => {
+    const tree: LayoutNode = {
+      type: "leaf",
+      id: "leaf-1",
+      openFileKeys: ["a.ts", "b.ts"],
+      activeKey: "a.ts",
+    };
+    const groups = {
+      "leaf-1": { id: "leaf-1", openOrder: ["a.ts", "b.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const result = validateTreeGroupConsistency(tree, groups);
+    expect(result.consistent).toBe(true);
+    expect(result.errors).toEqual([]);
   });
 });

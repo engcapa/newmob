@@ -44,6 +44,12 @@ export interface OpenFileViewModel {
   loading: boolean;
   saving: boolean;
   dirty: boolean;
+  /**
+   * N1.4: Monotonic revision counter, incremented on every buffer text change.
+   * Used for save-transaction race detection instead of text.length,
+   * which fails on same-length edits.
+   */
+  documentRevision: number;
   error: string | null;
   /** Set for language-server-provided library sources (read-only, no file on disk). */
   library?: OpenFileLibrarySource | null;

@@ -40,7 +40,7 @@ import {
   type TreeSelection,
   type TreeViewMode,
 } from "./codeWorkspaceModel";
-import { navigationHistoryTracker } from "./navigationHistoryModel";
+import { navigationHistoryTracker, type WorkspaceLocationController } from "./navigationHistoryModel";
 
 type Updater<T> = T | ((current: T) => T);
 type UpdaterSetter<T> = (updater: Updater<T>) => void;
@@ -48,6 +48,7 @@ type RootDirectory = { rootId: string; path: string };
 
 interface UseWorkspaceFileActionsOptions {
   workspaceId: string;
+  locationController?: WorkspaceLocationController;
   roots: CodeWorkspaceRootInfo[];
   gitRoots: WorkspaceGitRoot[];
   selected: TreeSelection | null;
@@ -108,6 +109,7 @@ export interface WorkspaceFileActionsController {
 
 export function useWorkspaceFileActions({
   workspaceId,
+  locationController,
   roots,
   gitRoots,
   selected,
@@ -437,9 +439,17 @@ export function useWorkspaceFileActions({
       const oldAbs = absoluteWorkspacePath(root, rootTarget.path);
       const newAbs = absoluteWorkspacePath(root, nextPath);
       if (isDirectory) {
-        navigationHistoryTracker.relocateDirectory(oldAbs, newAbs, workspaceId);
+        if (locationController) {
+          locationController.relocateDirectory(oldAbs, newAbs);
+        } else {
+          navigationHistoryTracker.relocateDirectory(oldAbs, newAbs, workspaceId);
+        }
       } else {
-        navigationHistoryTracker.relocateFile(oldAbs, newAbs, workspaceId);
+        if (locationController) {
+          locationController.relocateFile(oldAbs, newAbs);
+        } else {
+          navigationHistoryTracker.relocateFile(oldAbs, newAbs, workspaceId);
+        }
       }
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));
@@ -500,7 +510,11 @@ export function useWorkspaceFileActions({
       });
       if (!confirmed) return;
       const key = fileKey(ref);
-      navigationHistoryTracker.removeFileLocations(ref.path, workspaceId);
+      if (locationController) {
+        locationController.removeFileLocations(ref.path);
+      } else {
+        navigationHistoryTracker.removeFileLocations(ref.path, workspaceId);
+      }
       setLooseFiles((current) => current.filter((item) => item.id !== ref.id));
       setOpenFiles((current) => {
         const next = { ...current };
@@ -553,9 +567,17 @@ export function useWorkspaceFileActions({
         annotationId: null,
       });
       if (isDirectory) {
-        navigationHistoryTracker.removeDirectorySubtree(deletedAbs, workspaceId);
+        if (locationController) {
+          locationController.removeDirectorySubtree(deletedAbs);
+        } else {
+          navigationHistoryTracker.removeDirectorySubtree(deletedAbs, workspaceId);
+        }
       } else {
-        navigationHistoryTracker.removeFileLocations(deletedAbs, workspaceId);
+        if (locationController) {
+          locationController.removeFileLocations(deletedAbs);
+        } else {
+          navigationHistoryTracker.removeFileLocations(deletedAbs, workspaceId);
+        }
       }
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));

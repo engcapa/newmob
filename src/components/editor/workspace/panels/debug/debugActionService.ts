@@ -85,8 +85,8 @@ export const debugActionDescriptors: Record<DebugActionId, DebugActionDescriptor
     isSupported: () => true,
     isAvailable: (ctx) => ctx.activeRunning,
     disabledReason: (ctx) => (!ctx.activeRunning ? "No active debug session" : undefined),
-    execute: (ctx) => {
-      ctx.debug.terminate();
+    execute: async (ctx) => {
+      await ctx.debug.terminate();
     },
   },
 
@@ -282,9 +282,19 @@ export function createDebugActionService(getContext: () => DebugActionContext): 
       notify();
 
       try {
+        if (signal?.aborted) {
+          return { kind: "cancelled", requestId: reqId, reason: "Operation cancelled before execution." };
+        }
         await desc.execute(ctx, signal);
+        // D6.4: Check if signal was cancelled during execution
+        if (signal?.aborted) {
+          return { kind: "cancelled", requestId: reqId, reason: "Operation cancelled during execution." };
+        }
         return { kind: "applied", requestId: reqId };
       } catch (err) {
+        if (signal?.aborted) {
+          return { kind: "cancelled", requestId: reqId, reason: "Operation cancelled." };
+        }
         return { kind: "failed", requestId: reqId, error: err, reason: err instanceof Error ? err.message : String(err) };
       } finally {
         inFlight.delete(id);

@@ -30,6 +30,7 @@ function openState(ref: CodeWorkspaceFileRef): OpenFileState {
     loading: false,
     saving: false,
     dirty: false,
+    documentRevision: 0,
     error: null,
   };
 }

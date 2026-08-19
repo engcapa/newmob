@@ -79,6 +79,7 @@ import {
   type DebugMemoryReadResult,
   type DebugMemoryWriteRequest,
   type DebugMemoryWriteResult,
+  type DebugRequestToken,
   type DebugSessionState,
   type DebugStackFrame,
   type DebugStepAction,
@@ -276,10 +277,10 @@ export interface CodeDebugSession {
    * placeholder the whole time and the click looks ignored.
    */
   reportStartupProgress: (message: string) => void;
-  /** Fetch variables for a `variablesReference` (D4 lazy tree). */
-  fetchVariables: (variablesReference: number) => Promise<unknown>;
-  /** Fetch scopes for a stack frame (D4). */
-  fetchScopes: (frameId: number) => Promise<unknown>;
+  /** Fetch variables for a `variablesReference` (D4/D8.4 token-guarded). */
+  fetchVariables: (variablesReference: number, token?: DebugRequestToken) => Promise<unknown>;
+  /** Fetch scopes for a stack frame (D4/D8.4 token-guarded). */
+  fetchScopes: (frameId: number, token?: DebugRequestToken) => Promise<unknown>;
   /**
    * Fetch a library / decompiled frame's source text (DAP `source`), so a stack
    * frame outside the workspace still opens — IDEA's decompiled-source view.
@@ -2929,16 +2930,30 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     }
   }, [logConsole]);
 
-  const fetchVariables = useCallback(async (variablesReference: number): Promise<unknown> => {
-    const id = sessionIdRef.current;
+  const fetchVariables = useCallback(async (variablesReference: number, token?: DebugRequestToken): Promise<unknown> => {
+    const id = token?.sessionId ?? sessionIdRef.current;
     if (!id) return { variables: [] };
-    return dapSendRequest(id, "variables", { variablesReference }).catch(() => ({ variables: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { variables: [] };
+    }
+    const res = await dapSendRequest(id, "variables", { variablesReference }).catch(() => ({ variables: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { variables: [] };
+    }
+    return res;
   }, []);
 
-  const fetchScopes = useCallback(async (frameId: number): Promise<unknown> => {
-    const id = sessionIdRef.current;
+  const fetchScopes = useCallback(async (frameId: number, token?: DebugRequestToken): Promise<unknown> => {
+    const id = token?.sessionId ?? sessionIdRef.current;
     if (!id) return { scopes: [] };
-    return dapSendRequest(id, "scopes", { frameId }).catch(() => ({ scopes: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { scopes: [] };
+    }
+    const res = await dapSendRequest(id, "scopes", { frameId }).catch(() => ({ scopes: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { scopes: [] };
+    }
+    return res;
   }, []);
 
   const fetchSource = useCallback(async (sourceReference: number): Promise<string | null> => {

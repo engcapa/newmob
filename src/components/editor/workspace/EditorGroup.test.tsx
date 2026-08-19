@@ -27,6 +27,7 @@ function file(key: string): OpenFileViewModel {
     loading: false,
     saving: false,
     dirty: false,
+    documentRevision: 0,
     error: null,
   };
 }

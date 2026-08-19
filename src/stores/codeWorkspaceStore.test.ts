@@ -130,6 +130,7 @@ describe("codeWorkspaceStore", () => {
       loading: false,
       saving: false,
       dirty: false,
+      documentRevision: 0,
       error: null,
     };
     const keep = { ...source, key: "keep", path: "keep.ts", title: "keep.ts" };
@@ -180,6 +181,7 @@ describe("codeWorkspaceStore", () => {
         loading: false,
         saving: false,
         dirty: false,
+        documentRevision: 0,
         error: null,
       },
     });
