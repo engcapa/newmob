@@ -1548,9 +1548,14 @@ export function reduceDebugEvent(
         ...state,
         status: "terminated",
         stoppedThreadId: null,
+        stoppedReason: null,
         selectedThreadId: null,
         selectedFrameId: null,
+        // The debuggee is gone: its threads and frames no longer describe
+        // anything inspectable, so the panel must not keep showing a stack.
+        threads: [],
         frames: [],
+        exceptionInfo: null,
       };
       // IDEA-style closing line with the process exit code.
       return typeof body.exitCode === "number"
@@ -1562,9 +1567,12 @@ export function reduceDebugEvent(
         ...state,
         status: "terminated",
         stoppedThreadId: null,
+        stoppedReason: null,
         selectedThreadId: null,
         selectedFrameId: null,
+        threads: [],
         frames: [],
+        exceptionInfo: null,
       };
     case "output": {
       const text = typeof body.output === "string" ? body.output : "";

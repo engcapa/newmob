@@ -30,8 +30,13 @@ import {
   Separator as PanelResizeHandle,
 } from "react-resizable-panels";
 
-/** Panel ids for the Debugger tab's horizontal split. */
-const DEBUG_HORIZONTAL_PANEL_IDS = ["debug-frames", "debug-variables"];
+/**
+ * Panel id suffixes for the Debugger tab's horizontal split. The rendered ids
+ * carry the workspace-instance prefix, so a persisted layout has to be read
+ * back under the same prefixed keys — reading the bare suffixes silently
+ * discarded every saved layout.
+ */
+const DEBUG_HORIZONTAL_PANEL_SUFFIXES = ["debug-frames", "debug-variables"];
 
 export interface DebugPanelProps {
   debug: CodeDebugSession;
@@ -145,23 +150,23 @@ export function DebugPanel({
   const frameId = stopped && currentTab === "debugger" ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
   const variablesHook = useDebugVariables(debug, frameId, stopped);
 
-  // Read persisted horizontal layout with workspace instance scoping (D9.4)
+  // Read persisted horizontal layout with workspace instance scoping (D9.4).
+  // v3 deliberately starts clean: every v1/v2 layout was recorded while the
+  // panel constraints were pixel-based, so migrating one forward would restore
+  // the unusably narrow stack column this version fixes.
   const layoutStorageKey = useMemo(() => {
     return workspaceInstanceId
-      ? `taomni.codeWorkspace.${workspaceInstanceId}.debugSplitHorizontal.v2`
-      : "taomni.codeWorkspace.debugSplitHorizontal.v2";
+      ? `taomni.codeWorkspace.${workspaceInstanceId}.debugSplitHorizontal.v3`
+      : "taomni.codeWorkspace.debugSplitHorizontal.v3";
   }, [workspaceInstanceId]);
 
-  const horizontalLayout = useMemo(() => {
-    const v2 = readDebugSplitLayout(layoutStorageKey, DEBUG_HORIZONTAL_PANEL_IDS);
-    if (v2) return v2;
-    const v1 = readDebugSplitLayout("taomni.codeWorkspace.debugSplitHorizontal.v1", DEBUG_HORIZONTAL_PANEL_IDS);
-    if (v1) {
-      writeDebugSplitLayout(layoutStorageKey, v1);
-      return v1;
-    }
-    return undefined;
-  }, [layoutStorageKey]);
+  const horizontalLayout = useMemo(
+    () => readDebugSplitLayout(
+      layoutStorageKey,
+      DEBUG_HORIZONTAL_PANEL_SUFFIXES.map((suffix) => `${idPrefix}${suffix}`),
+    ),
+    [idPrefix, layoutStorageKey],
+  );
 
   const activeConfiguration = configurations.find((configuration) => (
     configuration.id === (activeConfigurationId ?? configurations[0]?.id)
@@ -208,6 +213,7 @@ export function DebugPanel({
       canSetVariable={variablesHook.canSetVariable}
       canAddDataBreakpoint={variablesHook.canAddDataBreakpoint}
       variableMenuRender={variablesHook.variableMenu.render}
+      instanceId={workspaceInstanceId}
     />
   );
 
@@ -374,8 +380,11 @@ export function DebugPanel({
               defaultLayout={horizontalLayout}
               onLayoutChanged={(layout) => writeDebugSplitLayout(layoutStorageKey, layout)}
             >
-              {/* Left Column: Frames & Threads + Controls */}
-              <Panel id={`${idPrefix}debug-frames`} defaultSize={45} minSize={15} maxSize={85} className="min-h-0 min-w-0">
+              {/* Left Column: Frames & Threads + Controls.
+                  Sizes must carry a unit: react-resizable-panels v4 reads a
+                  bare number as *pixels*, which pinned the stack column to a
+                  few dozen pixels and made the divider undraggable. */}
+              <Panel id={`${idPrefix}debug-frames`} defaultSize="45%" minSize="15%" maxSize="85%" className="min-h-0 min-w-0">
                 <DebugFramesPane
                   debug={debug}
                   activeRunning={activeRunning}
@@ -392,7 +401,7 @@ export function DebugPanel({
               />
 
               {/* Right Column: Variables & Watches */}
-              <Panel id={`${idPrefix}debug-variables`} defaultSize={55} minSize={15} className="min-h-0 min-w-0">
+              <Panel id={`${idPrefix}debug-variables`} defaultSize="55%" minSize="15%" className="min-h-0 min-w-0">
                 {renderVariablesPane()}
               </Panel>
             </PanelGroup>

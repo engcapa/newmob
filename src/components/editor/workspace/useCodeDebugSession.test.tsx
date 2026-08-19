@@ -821,6 +821,24 @@ describe("useCodeDebugSession", () => {
     expect(result.current.functionBreakpointRuntime).toEqual({});
   });
 
+  it("clears live threads when the session is stopped by the user", async () => {
+    const { result } = renderHook(() => useCodeDebugSession("ws-1"));
+    const emit = await startSession(result.current.startDebug);
+    act(() => emit({ sessionId: "sess-1", event: "initialized", message: {} }));
+    act(() => emit({
+      sessionId: "sess-1",
+      event: "thread",
+      message: { body: { reason: "started", threadId: 3 } },
+    }));
+    await waitFor(() => expect(result.current.state?.threads).toEqual([{ id: 3, name: "Thread 3" }]));
+
+    await act(async () => result.current.terminate());
+    await waitFor(() => expect(result.current.state?.status).toBe("terminated"));
+    // A terminated debuggee has no threads to expand into a call stack.
+    expect(result.current.state?.threads).toEqual([]);
+    expect(result.current.state?.frames).toEqual([]);
+  });
+
   it("keeps saved function breakpoints visible when the adapter is unsupported", async () => {
     const { result } = renderHook(() => useCodeDebugSession("ws-1"));
     act(() => result.current.addFunctionBreakpoint("Service.run"));

@@ -1817,8 +1817,12 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         ...record.state,
         status: "terminated",
         stoppedThreadId: null,
+        stoppedReason: null,
         selectedThreadId: null,
         selectedFrameId: null,
+        // Stop clears the inspectable view of the debuggee: no threads, no
+        // frames, no exception banner. Only the console history survives.
+        threads: [],
         frames: [],
         exceptionInfo: null,
       };

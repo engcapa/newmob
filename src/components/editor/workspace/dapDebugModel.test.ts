@@ -849,6 +849,36 @@ describe("dapDebugModel", () => {
     expect(state.output.at(-1)?.text).toContain("exit code 3");
   });
 
+  it.each(["terminated", "exited"] as const)(
+    "clears the whole inspectable stack on %s and keeps the console",
+    (event) => {
+      const stopped = {
+        ...initialDebugState("s1"),
+        status: "stopped" as const,
+        stoppedThreadId: 1,
+        stoppedReason: "breakpoint",
+        threads: [{ id: 1, name: "main" }, { id: 2, name: "worker" }],
+        frames: [{ id: 9, name: "f", path: "/a.java", line: 1, column: 1, sourceReference: 0, sourceName: null }],
+        selectedThreadId: 1,
+        selectedFrameId: 9,
+        exceptionInfo: { exceptionId: "E", description: "", details: null },
+        output: [{ category: "stdout", text: "hello\n" }],
+      };
+
+      const ended = reduceDebugEvent(stopped, event, { body: {} });
+      expect(ended.status).toBe("terminated");
+      expect(ended.threads).toEqual([]);
+      expect(ended.frames).toEqual([]);
+      expect(ended.stoppedThreadId).toBeNull();
+      expect(ended.stoppedReason).toBeNull();
+      expect(ended.selectedThreadId).toBeNull();
+      expect(ended.selectedFrameId).toBeNull();
+      expect(ended.exceptionInfo).toBeNull();
+      // Console history is the one thing Stop keeps (IDEA does the same).
+      expect(ended.output).toEqual([{ category: "stdout", text: "hello\n" }]);
+    },
+  );
+
   it("appends client console lines and skips telemetry output", () => {
     let state = initialDebugState("s1");
     state = appendConsoleLine(state, "repl", "> 1 + 1\n");
