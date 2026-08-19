@@ -16,6 +16,7 @@ import {
   atomicMoveTab,
   atomicSetLeafActiveTab,
   atomicSplitLeaf,
+  commitLayoutMutation,
   remapLayoutTreeKeys,
   updateSplitNodeRatios,
   type LayoutNode,
@@ -413,7 +414,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
         activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
       };
-      const result = atomicSplitLeaf(
+      const rawResult = atomicSplitLeaf(
         currentTree,
         current.editorGroups,
         current.activeEditorGroupId,
@@ -421,6 +422,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         orientation,
         newFileKey,
       );
+      const result = commitLayoutMutation(currentTree, current.editorGroups, current.activeEditorGroupId, rawResult);
       if (result.kind !== "changed") {
         return state;
       }
@@ -444,12 +446,13 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       if (!current.layoutTreeV2) return state;
-      const result = atomicCloseLeaf(
+      const rawResult = atomicCloseLeaf(
         current.layoutTreeV2,
         current.editorGroups,
         current.activeEditorGroupId,
         leafId,
       );
+      const result = commitLayoutMutation(current.layoutTreeV2, current.editorGroups, current.activeEditorGroupId, rawResult);
       if (result.kind !== "changed") {
         return state;
       }
@@ -475,7 +478,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       if (!current.layoutTreeV2) return state;
-      const result = atomicMoveTab(
+      const rawResult = atomicMoveTab(
         current.layoutTreeV2,
         current.editorGroups,
         current.activeEditorGroupId,
@@ -483,6 +486,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         targetLeafId,
         fileKey,
       );
+      const result = commitLayoutMutation(current.layoutTreeV2, current.editorGroups, current.activeEditorGroupId, rawResult);
       if (result.kind !== "changed") {
         return state;
       }
@@ -513,13 +517,14 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
         activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
       };
-      const result = atomicSetLeafActiveTab(
+      const rawResult = atomicSetLeafActiveTab(
         currentTree,
         current.editorGroups,
         current.activeEditorGroupId,
         leafId,
         fileKey,
       );
+      const result = commitLayoutMutation(currentTree, current.editorGroups, current.activeEditorGroupId, rawResult);
       if (result.kind !== "changed") {
         return state;
       }
@@ -550,13 +555,14 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
         activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
       };
-      const result = atomicCloseTabInLeaf(
+      const rawResult = atomicCloseTabInLeaf(
         currentTree,
         current.editorGroups,
         current.activeEditorGroupId,
         leafId,
         fileKey,
       );
+      const result = commitLayoutMutation(currentTree, current.editorGroups, current.activeEditorGroupId, rawResult);
       if (result.kind !== "changed") {
         return state;
       }
@@ -582,12 +588,24 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       if (!current.layoutTreeV2) return state;
       const nextTree = updateSplitNodeRatios(current.layoutTreeV2, splitId, ratios);
+      const validation = commitLayoutMutation(
+        current.layoutTreeV2,
+        current.editorGroups,
+        current.activeEditorGroupId,
+        {
+          kind: "changed",
+          tree: nextTree,
+          groups: current.editorGroups,
+          activeGroupId: current.activeEditorGroupId,
+        },
+      );
+      if (validation.kind !== "changed") return state;
       return {
         byInstanceId: {
           ...state.byInstanceId,
           [instanceId]: {
             ...current,
-            layoutTreeV2: nextTree,
+            layoutTreeV2: validation.tree,
           },
         },
       };

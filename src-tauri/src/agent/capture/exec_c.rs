@@ -23,7 +23,7 @@ use russh::{ChannelMsg, ChannelWriteHalf};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use super::exec_b::posix_quote;
-use super::reduce::{ReduceOp, ReduceResult, MAX_READ_BYTES};
+use super::reduce::{MAX_READ_BYTES, ReduceOp, ReduceResult};
 use super::{CaptureStatus, ShellFamily};
 use crate::terminal::ssh::SshHandler;
 
@@ -234,9 +234,12 @@ pub async fn reduce_remote(
                 (format!("{base} | jq {f}", f = posix_quote(filter)), None)
             } else {
                 // Pull bounded content, reduce locally with the embedded jq.
-                let (content, _) =
-                    exec_collect(handle, &format!("{base} | head -c {MAX_PULL_BYTES}"), MAX_PULL_BYTES)
-                        .await?;
+                let (content, _) = exec_collect(
+                    handle,
+                    &format!("{base} | head -c {MAX_PULL_BYTES}"),
+                    MAX_PULL_BYTES,
+                )
+                .await?;
                 let mut r = super::reduce::reduce_str(&content, op)?;
                 r.note = Some("jq via pulled window (remote jq absent)".into());
                 return Ok(r);
@@ -246,7 +249,11 @@ pub async fn reduce_remote(
 
     let (out, _code) = exec_collect(handle, &cmd, MAX_READ_BYTES).await?;
     let truncated = out.len() >= MAX_READ_BYTES;
-    Ok(ReduceResult { text: out, truncated, note })
+    Ok(ReduceResult {
+        text: out,
+        truncated,
+        note,
+    })
 }
 
 /// Best-effort `rm -f` of a remote capture temp file (called on thread purge).
@@ -298,4 +305,3 @@ mod tests {
         assert!(s.contains("'/tmp/x'"));
     }
 }
-

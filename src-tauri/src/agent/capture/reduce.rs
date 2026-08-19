@@ -21,12 +21,24 @@ pub const MAX_GREP_MATCHES: usize = 500;
 /// A reduction request over a capture's stored output.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReduceOp {
-    Head { n: usize },
-    Tail { n: usize },
+    Head {
+        n: usize,
+    },
+    Tail {
+        n: usize,
+    },
     /// 1-based inclusive line range.
-    Range { start: usize, end: usize },
-    Grep { pattern: String, context: usize },
-    Jq { filter: String },
+    Range {
+        start: usize,
+        end: usize,
+    },
+    Grep {
+        pattern: String,
+        context: usize,
+    },
+    Jq {
+        filter: String,
+    },
     Stats,
 }
 
@@ -40,7 +52,11 @@ pub struct ReduceResult {
 
 impl ReduceResult {
     fn plain(text: String, truncated: bool) -> Self {
-        Self { text, truncated, note: None }
+        Self {
+            text,
+            truncated,
+            note: None,
+        }
     }
 }
 
@@ -60,8 +76,7 @@ pub fn reduce_file(path: &Path, op: &ReduceOp) -> Result<ReduceResult, String> {
 /// where a bounded window of a remote file is fetched and reduced locally).
 /// Spills to a temp file so the streaming file ops are reused verbatim.
 pub fn reduce_str(content: &str, op: &ReduceOp) -> Result<ReduceResult, String> {
-    let p = std::env::temp_dir()
-        .join(format!("taomni-pull-{}.log", uuid::Uuid::new_v4().simple()));
+    let p = std::env::temp_dir().join(format!("taomni-pull-{}.log", uuid::Uuid::new_v4().simple()));
     std::fs::write(&p, content.as_bytes()).map_err(|e| format!("pull buffer: {e}"))?;
     let r = reduce_file(&p, op);
     let _ = std::fs::remove_file(&p);
@@ -70,9 +85,7 @@ pub fn reduce_str(content: &str, op: &ReduceOp) -> Result<ReduceResult, String> 
 
 fn open_lines(path: &Path) -> Result<impl Iterator<Item = String>, String> {
     let f = std::fs::File::open(path).map_err(|e| format!("capture file unavailable: {e}"))?;
-    Ok(BufReader::new(f)
-        .lines()
-        .map(|r| r.unwrap_or_default()))
+    Ok(BufReader::new(f).lines().map(|r| r.unwrap_or_default()))
 }
 
 /// Join lines into a byte/line-capped string, reporting truncation.
@@ -115,9 +128,7 @@ fn range(path: &Path, start: usize, end: usize) -> Result<ReduceResult, String> 
         return Err("range requires 1-based start ≤ end".into());
     }
     let want = (end - start + 1).min(MAX_READ_LINES);
-    let selected = open_lines(path)?
-        .skip(start - 1)
-        .take(want);
+    let selected = open_lines(path)?.skip(start - 1).take(want);
     Ok(join_capped(selected, want))
 }
 
@@ -172,7 +183,11 @@ fn grep(path: &Path, pattern: &str, context: usize) -> Result<ReduceResult, Stri
         }
     }
     let note = Some(format!("{matches} match(es)"));
-    Ok(ReduceResult { text: out, truncated, note })
+    Ok(ReduceResult {
+        text: out,
+        truncated,
+        note,
+    })
 }
 
 fn stats(path: &Path) -> Result<ReduceResult, String> {
@@ -192,17 +207,24 @@ fn stats(path: &Path) -> Result<ReduceResult, String> {
 /// The content is parsed as a single JSON value; outputs are newline-joined.
 fn jq(path: &Path, filter: &str) -> Result<ReduceResult, String> {
     use jaq_core::load::{Arena, File, Loader};
-    use jaq_core::{data, unwrap_valr, Compiler, Ctx, Vars};
-    use jaq_json::{read, Val};
+    use jaq_core::{Compiler, Ctx, Vars, data, unwrap_valr};
+    use jaq_json::{Val, read};
 
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("capture file unavailable: {e}"))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("capture file unavailable: {e}"))?;
     let input: Val = read::parse_single(content.as_bytes())
         .map_err(|e| format!("capture is not valid JSON for jq: {e}"))?;
 
-    let program = File { code: filter, path: () };
-    let defs = jaq_core::defs().chain(jaq_std::defs()).chain(jaq_json::defs());
-    let funs = jaq_core::funs().chain(jaq_std::funs()).chain(jaq_json::funs());
+    let program = File {
+        code: filter,
+        path: (),
+    };
+    let defs = jaq_core::defs()
+        .chain(jaq_std::defs())
+        .chain(jaq_json::defs());
+    let funs = jaq_core::funs()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs());
     let loader = Loader::new(defs);
     let arena = Arena::default();
     let modules = loader
@@ -237,8 +259,10 @@ mod tests {
     use std::io::Write;
 
     fn fixture(lines: &[&str]) -> std::path::PathBuf {
-        let p = std::env::temp_dir()
-            .join(format!("taomni-reduce-{}.log", uuid::Uuid::new_v4().simple()));
+        let p = std::env::temp_dir().join(format!(
+            "taomni-reduce-{}.log",
+            uuid::Uuid::new_v4().simple()
+        ));
         let mut f = std::fs::File::create(&p).unwrap();
         for l in lines {
             writeln!(f, "{l}").unwrap();
@@ -273,7 +297,14 @@ mod tests {
     #[test]
     fn grep_matches_with_line_numbers() {
         let p = fixture(&["info: ok", "ERROR: boom", "info: ok2", "ERROR: bang"]);
-        let r = reduce_file(&p, &ReduceOp::Grep { pattern: "ERROR".into(), context: 0 }).unwrap();
+        let r = reduce_file(
+            &p,
+            &ReduceOp::Grep {
+                pattern: "ERROR".into(),
+                context: 0,
+            },
+        )
+        .unwrap();
         assert!(r.text.contains("2:ERROR: boom"));
         assert!(r.text.contains("4:ERROR: bang"));
         assert!(!r.text.contains("info"));
@@ -284,7 +315,14 @@ mod tests {
     #[test]
     fn grep_context_includes_neighbors() {
         let p = fixture(&["a", "b", "MATCH", "d", "e"]);
-        let r = reduce_file(&p, &ReduceOp::Grep { pattern: "MATCH".into(), context: 1 }).unwrap();
+        let r = reduce_file(
+            &p,
+            &ReduceOp::Grep {
+                pattern: "MATCH".into(),
+                context: 1,
+            },
+        )
+        .unwrap();
         assert!(r.text.contains("2:b"));
         assert!(r.text.contains("3:MATCH"));
         assert!(r.text.contains("4:d"));
@@ -302,7 +340,13 @@ mod tests {
     #[test]
     fn jq_filters_json() {
         let p = fixture(&[r#"{"items":[{"n":1},{"n":2},{"n":3}]}"#]);
-        let r = reduce_file(&p, &ReduceOp::Jq { filter: ".items[].n".into() }).unwrap();
+        let r = reduce_file(
+            &p,
+            &ReduceOp::Jq {
+                filter: ".items[].n".into(),
+            },
+        )
+        .unwrap();
         assert_eq!(r.text, "1\n2\n3\n");
         let _ = std::fs::remove_file(p);
     }
@@ -317,7 +361,16 @@ mod tests {
     #[test]
     fn invalid_regex_errs() {
         let p = fixture(&["x"]);
-        assert!(reduce_file(&p, &ReduceOp::Grep { pattern: "(".into(), context: 0 }).is_err());
+        assert!(
+            reduce_file(
+                &p,
+                &ReduceOp::Grep {
+                    pattern: "(".into(),
+                    context: 0
+                }
+            )
+            .is_err()
+        );
         let _ = std::fs::remove_file(p);
     }
 }

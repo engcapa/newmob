@@ -6,7 +6,7 @@
 
 use uuid::Uuid;
 
-use super::{RpcPduHeader, PFC_FIRST_FRAG, PFC_LAST_FRAG, RPC_VERSION, RPC_VERSION_MINOR};
+use super::{PFC_FIRST_FRAG, PFC_LAST_FRAG, RPC_VERSION, RPC_VERSION_MINOR, RpcPduHeader};
 
 pub const RPC_PT_RTS: u8 = 0x14;
 

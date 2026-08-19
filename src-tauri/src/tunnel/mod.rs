@@ -25,7 +25,7 @@ use tokio::task::JoinHandle;
 
 use crate::module_lock::ModuleLock;
 use crate::state::AppState;
-use crate::terminal::ssh::{connect_ssh_authenticated, SshAuth, SshHandler};
+use crate::terminal::ssh::{SshAuth, SshHandler, connect_ssh_authenticated};
 
 /* ---------------------------- data model ---------------------------- */
 

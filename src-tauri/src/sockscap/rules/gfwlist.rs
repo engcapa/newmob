@@ -1,7 +1,7 @@
 //! Compile and match GFWList / AutoProxy rule sets.
 
-use super::autopxy::{host_matches_suffix, parse_autopxy_line, ParsedRule};
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use super::autopxy::{ParsedRule, host_matches_suffix, parse_autopxy_line};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -302,8 +302,7 @@ twitter
             "",
         ] {
             let probed = match_suffix_set(host, &set).is_some();
-            let pairwise = !host.is_empty()
-                && set.iter().any(|s| host_matches_suffix(host, s));
+            let pairwise = !host.is_empty() && set.iter().any(|s| host_matches_suffix(host, s));
             assert_eq!(probed, pairwise, "disagreement on {host:?}");
         }
     }

@@ -89,7 +89,9 @@ pub fn parse_region_info(value: &[u8]) -> Result<pb::RegionInfo, RegionError> {
         // Tolerate a leading version byte before the magic.
         &value[5..]
     } else {
-        return Err(RegionError::Parse("missing PBUF magic in regioninfo".into()));
+        return Err(RegionError::Parse(
+            "missing PBUF magic in regioninfo".into(),
+        ));
     };
     pb::RegionInfo::decode(body).map_err(|e| RegionError::Parse(e.to_string()))
 }
@@ -122,14 +124,13 @@ pub fn region_from_meta_cells(
         }
     }
 
-    let region = region_info
-        .ok_or_else(|| RegionError::NotFound("no info:regioninfo in row".into()))?;
+    let region =
+        region_info.ok_or_else(|| RegionError::NotFound("no info:regioninfo in row".into()))?;
     if region.offline.unwrap_or(false) {
         return Err(RegionError::Offline);
     }
-    let server = server.ok_or_else(|| {
-        RegionError::NotFound("no info:server (region in transition)".into())
-    })?;
+    let server = server
+        .ok_or_else(|| RegionError::NotFound("no info:server (region in transition)".into()))?;
 
     Ok(RegionLocation {
         region,

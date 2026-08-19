@@ -1,4 +1,4 @@
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Serialize;
 use std::collections::HashSet;
 #[cfg(target_os = "macos")]
@@ -308,10 +308,7 @@ fn expand_common_directory_path(raw: &str, home: Option<&Path>) -> Option<PathBu
     let candidate = PathBuf::from(path);
     // `/tmp/...` is absolute on Unix; on Windows Path::is_absolute is false for
     // that form, but history lines from remote shells still use it.
-    if candidate.is_absolute()
-        || looks_like_windows_absolute_path(path)
-        || path.starts_with('/')
-    {
+    if candidate.is_absolute() || looks_like_windows_absolute_path(path) || path.starts_with('/') {
         Some(candidate)
     } else {
         None

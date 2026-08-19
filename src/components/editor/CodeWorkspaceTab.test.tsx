@@ -2175,7 +2175,7 @@ describe("CodeWorkspaceTab", () => {
           newText: "// formatted\n",
         }],
       });
-    workspaceMocks.workspaceWriteFile.mockResolvedValue(file(
+    workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(file(
       "src/main.ts",
       "// formatted\nconst x =1",
       { hash: "hash-formatted" },
@@ -2198,11 +2198,13 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => expect(screen.getByText(/unsaved/)).toBeInTheDocument());
 
     fireEvent.keyDown(window, { key: "s", ctrlKey: true });
-    await waitFor(() => expect(workspaceMocks.workspaceWriteFile).toHaveBeenCalledWith(
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
       "/repo/app",
       "src/main.ts",
       "// formatted\nconst x =1",
       "hash-src/main.ts",
+      "UTF-8",
+      false,
     ));
     expect(lspMocks.lspFormatting).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(screen.queryByText(/unsaved/)).not.toBeInTheDocument());
@@ -3828,7 +3830,7 @@ describe("CodeWorkspaceTab", () => {
       if (text === undefined) throw new Error(`missing fixture ${path}`);
       return file(path, text, { hash: `hash-${path}` });
     });
-    workspaceMocks.workspaceWriteFile.mockImplementation(async (
+    workspaceMocks.workspaceWriteFileEncoded.mockImplementation(async (
       _root: string,
       path: string,
       text: string,
@@ -3919,17 +3921,21 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(content!, { key: "Delete", code: "Delete", altKey: true });
 
     await waitFor(() => expect(lspMocks.lspPrepareRename).toHaveBeenCalled());
-    await waitFor(() => expect(workspaceMocks.workspaceWriteFile).toHaveBeenCalledWith(
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
       "/repo/app",
       "src/main.ts",
       "const  = 42;",
       expect.any(String),
+      "UTF-8",
+      false,
     ));
-    await waitFor(() => expect(workspaceMocks.workspaceWriteFile).toHaveBeenCalledWith(
+    await waitFor(() => expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
       "/repo/app",
       "src/use.ts",
       "use();",
       "hash-src/use.ts",
+      "UTF-8",
+      false,
     ));
     await waitFor(() => expect(registrationRef.current?.items.find((item) => item.id === "workspace.undoWorkspaceEdit")?.enabled)
       .toBe(true));

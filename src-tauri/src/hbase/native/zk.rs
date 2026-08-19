@@ -118,11 +118,7 @@ pub fn parse_master(data: &[u8]) -> Result<ServerEndpoint, ZkError> {
 /// Connect to the ZooKeeper quorum, read a znode, and return its raw bytes.
 /// `quorum` is a comma-separated `host:port` list; `path` is the full znode
 /// path (root already prepended).
-pub async fn read_znode(
-    quorum: &str,
-    path: &str,
-    timeout: Duration,
-) -> Result<Vec<u8>, ZkError> {
+pub async fn read_znode(quorum: &str, path: &str, timeout: Duration) -> Result<Vec<u8>, ZkError> {
     // A fresh, short-lived session per lookup (no watches): matches gohbase.
     let mut connector = zookeeper_client::Client::connector();
     connector.session_timeout(timeout);

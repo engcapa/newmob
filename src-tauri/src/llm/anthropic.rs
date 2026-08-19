@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Anthropic Messages API provider (`POST {base_url}/messages`).
 ///
@@ -43,7 +43,11 @@ impl AnthropicProvider {
         proxy_url: Option<String>,
     ) -> Self {
         let mut builder = Client::builder().timeout(std::time::Duration::from_secs(60));
-        if let Some(proxy_url) = proxy_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(proxy_url) = proxy_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             if let Ok(proxy) = reqwest::Proxy::all(proxy_url) {
                 builder = builder.proxy(proxy);
             }

@@ -492,14 +492,27 @@ export class WorkspaceStyleController {
         targetEol,
       );
 
+      const returnedHash = (writeResult as { hash?: string } | undefined)?.hash;
+      if (!returnedHash) {
+        return {
+          kind: "failed",
+          reason: "writer returned no hash",
+          retryable: false,
+        };
+      }
+
       return {
         kind: "saved",
         transactionId: transaction.id,
-        hash: (writeResult as { hash?: string } | undefined)?.hash ?? `hash-${Date.now()}-${normResult.text.length}`,
+        hash: returnedHash,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const isConflict = msg.toLowerCase().includes("conflict") || msg.toLowerCase().includes("hash mismatch");
+      const isConflict =
+        msg.startsWith("hash-mismatch:") ||
+        msg.includes("hash-mismatch") ||
+        msg.includes("File changed on disk; expected hash") ||
+        msg.toLowerCase().includes("hash mismatch");
       if (isConflict) {
         return {
           kind: "conflict",

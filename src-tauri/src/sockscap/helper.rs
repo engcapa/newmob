@@ -6,16 +6,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, State};
 #[cfg(windows)]
 use tauri::Manager;
+use tauri::{AppHandle, State};
 
-use crate::sockscap::paths::{
-    resolve_helper_exe, resolve_windivert_dir, windivert_missing_hint,
-};
+use crate::sockscap::paths::{resolve_helper_exe, resolve_windivert_dir, windivert_missing_hint};
 use crate::state::AppState;
 
 static REQ_ID: AtomicU64 = AtomicU64::new(1);
@@ -92,11 +90,9 @@ impl Default for HelperRegistry {
     }
 }
 
-
-
 fn pick_free_port() -> Result<u16, String> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("pick free port: {e}"))?;
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("pick free port: {e}"))?;
     Ok(listener.local_addr().map_err(|e| e.to_string())?.port())
 }
 
@@ -302,10 +298,7 @@ pub async fn sockscap_helper_start(
             if ready_file.is_file() {
                 if let Ok(s) = std::fs::read_to_string(&ready_file) {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-                        elevated = v
-                            .get("elevated")
-                            .and_then(|x| x.as_bool())
-                            .unwrap_or(false);
+                        elevated = v.get("elevated").and_then(|x| x.as_bool()).unwrap_or(false);
                         pid = v.get("pid").and_then(|x| x.as_u64()).map(|n| n as u32);
                     }
                 }
@@ -439,7 +432,13 @@ fn elevate_and_spawn(helper: &Path, args: &[String]) -> Result<(), String> {
     );
 
     let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("failed to launch elevated helper: {e}"))?;
@@ -508,11 +507,7 @@ pub async fn sockscap_helper_probe_windivert(
         .as_ref()
         .ok_or_else(|| "helper not running — start it first (UAC)".to_string())?;
     let resp = send_cmd(sess, "windivert_probe", filter)?;
-    if resp
-        .get("ok")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if resp.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
         Ok(resp.get("result").cloned().unwrap_or(json!({})))
     } else {
         Err(resp
@@ -573,7 +568,10 @@ fn send_cmd(
 }
 
 /// Low-level helper RPC with a free-form JSON body (`cmd` required).
-pub fn send_json(sess: &HelperSession, body: serde_json::Value) -> Result<serde_json::Value, String> {
+pub fn send_json(
+    sess: &HelperSession,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
     send_json_timeout(sess, body, Duration::from_secs(15))
 }
 
@@ -594,9 +592,7 @@ pub fn send_json_timeout(
     )
     .map_err(|e| format!("connect helper: {e}"))?;
     stream.set_read_timeout(Some(read_timeout)).ok();
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .ok();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
     let line = format!("{}\n", body);
     stream
@@ -624,7 +620,10 @@ fn expect_ok(resp: serde_json::Value) -> Result<serde_json::Value, String> {
     }
 }
 
-pub fn capture_start(sess: &HelperSession, args: &CaptureStartArgs) -> Result<serde_json::Value, String> {
+pub fn capture_start(
+    sess: &HelperSession,
+    args: &CaptureStartArgs,
+) -> Result<serde_json::Value, String> {
     let endpoints: Vec<serde_json::Value> = args
         .bypass_endpoints
         .iter()
@@ -658,8 +657,14 @@ pub fn capture_stop(sess: &HelperSession) -> Result<(), String> {
 
 /// Hot-swap the relay port on the running capture session.
 /// Does not restart WinDivert — takes effect on the next intercepted packet.
-pub fn capture_update_relay(sess: &HelperSession, relay_port: u16) -> Result<serde_json::Value, String> {
-    expect_ok(send_json(sess, json!({ "cmd": "capture_update", "relayPort": relay_port }))?)
+pub fn capture_update_relay(
+    sess: &HelperSession,
+    relay_port: u16,
+) -> Result<serde_json::Value, String> {
+    expect_ok(send_json(
+        sess,
+        json!({ "cmd": "capture_update", "relayPort": relay_port }),
+    )?)
 }
 
 /// Replace the running session's bypass lists.
@@ -794,9 +799,7 @@ async fn client_loop(sess: HelperSession, mut rx: tokio::sync::mpsc::Receiver<Jo
 
     while let Some(job) = rx.recv().await {
         if conn.is_none() {
-            if last_connect_failure
-                .is_some_and(|at| at.elapsed() < CLIENT_RECONNECT_DEBOUNCE)
-            {
+            if last_connect_failure.is_some_and(|at| at.elapsed() < CLIENT_RECONNECT_DEBOUNCE) {
                 let _ = job
                     .reply
                     .send(Err("helper control connection unavailable".into()));
@@ -877,6 +880,9 @@ async fn client_call(
 }
 
 /// Ensure helper is running (elevate via UAC if needed). Returns current status.
-pub async fn ensure_helper(app: &AppHandle, state: &State<'_, AppState>) -> Result<HelperStatus, String> {
+pub async fn ensure_helper(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+) -> Result<HelperStatus, String> {
     sockscap_helper_start(app.clone(), state.clone()).await
 }

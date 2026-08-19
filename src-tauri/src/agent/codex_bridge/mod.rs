@@ -110,8 +110,8 @@ fn common_install_locations() -> Vec<PathBuf> {
 #[cfg(unix)]
 fn login_shell_path() -> Option<String> {
     use std::process::{Command as StdCommand, Stdio};
-    use std::sync::mpsc;
     use std::sync::OnceLock;
+    use std::sync::mpsc;
 
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
     CACHE
@@ -136,11 +136,7 @@ fn login_shell_path() -> Option<String> {
             let start = out.find(START)? + START.len();
             let end = out[start..].find(END)? + start;
             let path = out[start..end].trim().to_string();
-            if path.is_empty() {
-                None
-            } else {
-                Some(path)
-            }
+            if path.is_empty() { None } else { Some(path) }
         })
         .clone()
 }

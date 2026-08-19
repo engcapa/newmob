@@ -19,15 +19,15 @@
 //! never escape it. `maxConnections` caps concurrent control connections.
 
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::engine::{LogEmitter, ServerCtx, ServerStarted};
 use super::ServerConfig;
+use super::engine::{LogEmitter, ServerCtx, ServerStarted};
 
 const DEFAULT_PORT: u16 = 21;
 

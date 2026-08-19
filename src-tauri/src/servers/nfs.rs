@@ -9,8 +9,8 @@
 //!   - `exportDir` (string) the directory the user intends to export (used only
 //!                          to make the guidance concrete; default: home dir).
 
-use super::engine::{ServerCtx, ServerStarted};
 use super::ServerConfig;
+use super::engine::{ServerCtx, ServerStarted};
 
 pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted, String> {
     let _port = if config.port == 0 { 2049 } else { config.port };

@@ -26,12 +26,12 @@ pub mod transport;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU16};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, AtomicU16};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use mdns_sd::ServiceDaemon;
 use tauri::AppHandle;
 use tokio::net::TcpListener;
@@ -282,22 +282,18 @@ pub async fn start_service(app: AppHandle) -> Result<(), String> {
         return Ok(());
     }
 
-    let process_lock = match ModuleLock::try_acquire(
-        app_data_dir,
-        "lanchat",
-        "service",
-        "LanChat service",
-    ) {
-        Ok(lock) => lock,
-        Err(error) => {
-            lanchat.running.store(false, Ordering::SeqCst);
-            let _ = app.emit(
-                events::SERVICE,
-                serde_json::json!({ "running": false, "error": error.clone() }),
-            );
-            return Err(error);
-        }
-    };
+    let process_lock =
+        match ModuleLock::try_acquire(app_data_dir, "lanchat", "service", "LanChat service") {
+            Ok(lock) => lock,
+            Err(error) => {
+                lanchat.running.store(false, Ordering::SeqCst);
+                let _ = app.emit(
+                    events::SERVICE,
+                    serde_json::json!({ "running": false, "error": error.clone() }),
+                );
+                return Err(error);
+            }
+        };
 
     // Initialize the stable identity only while this process owns the service.
     // This avoids two fresh instances racing to generate different node keys.
@@ -354,8 +350,15 @@ pub async fn start_service(app: AppHandle) -> Result<(), String> {
                         continue;
                     }
                     if let (Some(addr), Some(p)) = (&peer.addr, peer.port) {
-                        log::info!("lanchat: reconnecting to historic peer {} ({}:{})", peer.name, addr, p);
-                        if let Err(e) = transport::ensure_connection(&app_r, &state_r, &peer.id).await {
+                        log::info!(
+                            "lanchat: reconnecting to historic peer {} ({}:{})",
+                            peer.name,
+                            addr,
+                            p
+                        );
+                        if let Err(e) =
+                            transport::ensure_connection(&app_r, &state_r, &peer.id).await
+                        {
                             log::debug!("lanchat: historic reconnect to {} failed: {}", peer.id, e);
                         }
                     }
@@ -365,8 +368,7 @@ pub async fn start_service(app: AppHandle) -> Result<(), String> {
             // Periodic retention cleanup: sweep on startup and every 6 hours.
             let state_c = lanchat.clone();
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
                 loop {
                     interval.tick().await; // fires immediately on the first iteration
                     match state_c.store.apply_retention() {

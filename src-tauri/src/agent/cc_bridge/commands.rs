@@ -1,7 +1,7 @@
 use crate::agent::cc_bridge::process::CcProcess;
-use crate::agent::cc_bridge::protocol::{extract_answer, extract_session_id, CcEvent};
-use crate::agent::cc_bridge::{detect, CcStatusResult};
-use crate::ai::config::{default_ai_config_path, AiConfig};
+use crate::agent::cc_bridge::protocol::{CcEvent, extract_answer, extract_session_id};
+use crate::agent::cc_bridge::{CcStatusResult, detect};
+use crate::ai::config::{AiConfig, default_ai_config_path};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -140,11 +140,10 @@ pub async fn cc_send_message(
     let process = match existing {
         Some(p) => p,
         None => {
-            let effective_proxy =
-                crate::agent::cc_bridge::config::resolve_effective_proxy_url(
-                    &state,
-                    &config.cc_bridge,
-                )?;
+            let effective_proxy = crate::agent::cc_bridge::config::resolve_effective_proxy_url(
+                &state,
+                &config.cc_bridge,
+            )?;
             // Provision the in-app rmcp MCP server + a per-thread scoped token.
             // This alternate path is shell-only (DB flavor selection lives in
             // the active `chat_stream` path), so it uses the Shell flavor.
@@ -451,11 +450,10 @@ pub async fn cc_stream_message(
     let process = match existing {
         Some(p) => p,
         None => {
-            let effective_proxy =
-                crate::agent::cc_bridge::config::resolve_effective_proxy_url(
-                    &state,
-                    &config.cc_bridge,
-                )?;
+            let effective_proxy = crate::agent::cc_bridge::config::resolve_effective_proxy_url(
+                &state,
+                &config.cc_bridge,
+            )?;
             // Shell-only alternate path (see the streaming variant above).
             let flavor = crate::agent::cc_bridge::mcp_http::Flavor::Shell;
             let (cc_server_url, cc_token) =

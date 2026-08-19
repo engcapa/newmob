@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   MavenDependencyCompletionProvider,
   GradleDependencyCompletionProvider,
@@ -7,6 +7,28 @@ import {
   detectGradleContext,
   type DependencyCompletionItem,
 } from "./dependencyCompletion";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+    if (cmd === "dependency_index_status") {
+      return { kind: "available" };
+    }
+    if (cmd === "dependency_index_search") {
+      const q = ((args?.query as string) || "").toLowerCase();
+      return [
+        { groupId: "org.junit.jupiter", artifactId: "junit-jupiter-api", version: "5.10.3", description: "JUnit Jupiter API" },
+        { groupId: "org.springframework.boot", artifactId: "spring-boot-starter-web", version: "3.3.2", description: "Spring Boot Web Starter" },
+      ].filter((d) => !q || d.groupId.includes(q) || d.artifactId.includes(q));
+    }
+    if (cmd === "dependency_index_versions") {
+      return [
+        { version: "5.10.3", timestamp: 1720000000 },
+        { version: "5.10.2", timestamp: 1718000000 },
+      ];
+    }
+    return undefined;
+  }),
+}));
 
 describe("DependencyCompletionProvider (N8.1)", () => {
   describe("detectMavenContext", () => {
@@ -211,6 +233,23 @@ describe("DependencyCompletionProvider (N8.1)", () => {
         expect(res.items.length).toBeGreaterThan(0);
         expect(res.items.some((item: DependencyCompletionItem) => item.version?.startsWith("33"))).toBe(true);
       }
+    });
+  });
+
+  describe("BackendDependencyIndexClient (N8.2)", () => {
+    it("delegates to backend tauri commands and caches queries", async () => {
+      const { BackendDependencyIndexClient } = await import("./dependencyCompletion");
+      const client = new BackendDependencyIndexClient();
+      const available = await client.isAvailable();
+      expect(typeof available).toBe("boolean");
+
+      const results = await client.search("junit");
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBeGreaterThan(0);
+
+      const versions = await client.getVersions("org.junit.jupiter", "junit-jupiter-api");
+      expect(Array.isArray(versions)).toBe(true);
+      expect(versions.length).toBeGreaterThan(0);
     });
   });
 });

@@ -63,8 +63,6 @@ import {
   workspaceTaskTree,
   workspaceTestResults,
   workspaceApplyResourceOperation,
-  workspaceWriteFile,
-  workspaceWriteLooseFile,
   workspaceWriteFileEncoded,
   workspaceWriteLooseFileEncoded,
   type WorkspaceFile,
@@ -349,6 +347,7 @@ import {
   type WorkspaceCommandContext,
   type WorkspaceCommandRegistration,
 } from "./workspace/workspaceCommands";
+import type { WorkspaceFocus } from "./workspace/workspaceActionRegistry";
 import type { WorkspaceSearchMatch } from "../../lib/editor/workspaceSearch";
 import type {
   CodeWorkspaceFileRef,
@@ -2563,21 +2562,77 @@ export function CodeWorkspaceTab({
     ],
   );
 
-  const updateFileText = useCallback((key: string, text: string) => {
-    const file = openFilesRef.current[key];
-    if (!file || file.text === text) return;
+  type MutationReason =
+    | "user-edit"
+    | "programmatic"
+    | "reload"
+    | "workspace-edit"
+    | "save-writeback"
+    | "history-replay";
+
+  interface BufferMutationPatch {
+    text?: string;
+    savedText?: string;
+    eol?: OpenFileEol;
+    encoding?: string;
+    bom?: boolean;
+    hash?: string;
+    mtime?: number;
+    size?: number;
+    loading?: boolean;
+    saving?: boolean;
+    dirty?: boolean;
+    error?: string | null;
+    documentRevision?: number;
+  }
+
+  const mutateOpenBuffer = useCallback((
+    key: string,
+    patch: BufferMutationPatch,
+    reason: MutationReason,
+  ): OpenFileState | null => {
+    const current = openFilesRef.current[key];
+    if (!current) return null;
+
+    const nextText = patch.text !== undefined ? patch.text : current.text;
+    const nextSavedText = patch.savedText !== undefined ? patch.savedText : current.savedText;
+    const isTextChanged = patch.text !== undefined && patch.text !== current.text;
+
+    let nextRevision = current.documentRevision ?? 0;
+    if (reason === "save-writeback") {
+      nextRevision = patch.documentRevision !== undefined
+        ? Math.max(current.documentRevision ?? 0, patch.documentRevision)
+        : (current.documentRevision ?? 0);
+    } else if (isTextChanged || reason === "reload" || reason === "workspace-edit" || reason === "history-replay") {
+      nextRevision = (current.documentRevision ?? 0) + 1;
+    }
+
+    const calculatedDirty = patch.dirty !== undefined
+      ? patch.dirty
+      : (nextText !== nextSavedText);
+
     const next: OpenFileState = {
-      ...file,
-      text,
-      dirty: text !== file.savedText,
-      documentRevision: (file.documentRevision ?? 0) + 1,
-      error: null,
+      ...current,
+      ...patch,
+      text: nextText,
+      savedText: nextSavedText,
+      dirty: calculatedDirty,
+      documentRevision: nextRevision,
     };
-    // Non-editor callers need the updated model immediately (formatting,
-    // WorkspaceEdit, reload), so they intentionally bypass the input batch.
+
     openFilesRef.current = { ...openFilesRef.current, [key]: next };
-    setOpenFiles((current) => ({ ...current, [key]: next }));
+    if (reason === "user-edit") {
+      pendingEditorTextByFileRef.current.set(key, next);
+    } else {
+      pendingEditorTextByFileRef.current.delete(key);
+      setOpenFiles((prev) => ({ ...prev, [key]: next }));
+    }
+    return next;
   }, [setOpenFiles]);
+
+  const updateFileText = useCallback((key: string, text: string) => {
+    mutateOpenBuffer(key, { text, error: null }, "programmatic");
+  }, [mutateOpenBuffer]);
 
   const scheduleLiveLspSync = useCallback((key: string) => {
     const existing = liveLspSyncTimersRef.current[key];
@@ -2691,39 +2746,30 @@ export function CodeWorkspaceTab({
       workspaceEditHistory.clear();
       setWorkspaceEditHistoryRevision((revision) => revision + 1);
     }
-    const next: OpenFileState = {
-      ...file,
-      text,
-      dirty: text !== file.savedText,
-      documentRevision: (file.documentRevision ?? 0) + 1,
-      error: null,
-    };
-    // Keep every command/save/LSP call correct immediately, but delay the
-    // store publication that causes the surrounding workspace to re-render.
-    openFilesRef.current = { ...openFilesRef.current, [key]: next };
-    pendingEditorTextByFileRef.current.set(key, next);
+    const next = mutateOpenBuffer(key, { text, error: null }, "user-edit");
+    if (!next) return;
     const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
     const lines = text.split("\n");
     const lineText = lines[cursor.line] ?? "";
     const startLine = Math.max(0, cursor.line - 1);
     const endLine = Math.min(lines.length, cursor.line + 2);
     const contextSnippet = lines.slice(startLine, endLine).join("\n");
-    const activeFilePath = file.path ?? file.title;
+    const activeFilePath = next.path ?? next.title;
     const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
-    const sourceOwnership = file.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
+    const sourceOwnership = next.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
 
     workspaceLocationControllerRef.current.recordUserEdit({
-      fileKey: file.key,
+      fileKey: next.key,
       filePath: activeFilePath,
-      title: file.title,
+      title: next.title,
       line: cursor.line,
       character: cursor.character,
       lineText,
       contextSnippet,
       sourceOwnership,
     });
-    recordEditLocation(file.ref, cursor);
-    semanticIndex.invalidateSilently("document-edited", [file.path]);
+    recordEditLocation(next.ref, cursor);
+    semanticIndex.invalidate("document-edited", [activeFilePath]);
     // Drive didChange from the live buffer only when a language server can
     // actually use it — plain text / missing LSP must not pay IPC cost.
     scheduleLiveLspSync(key);
@@ -3180,14 +3226,71 @@ export function CodeWorkspaceTab({
     const prompt = buildEditorAiPrompt(context, editorAiPreferences.answerLanguage);
     await sendPromptToTabChat(prompt);
     setStatusMessage(t("codeWorkspaceAi.resentRewrite"));
-  }, [
-    buildEditorAiContext,
-    defaultAiInstruction,
-    editorAiPreferences.answerLanguage,
-    sendPromptToTabChat,
-    setStatusMessage,
-    t,
-  ]);
+  }, [buildEditorAiContext, buildEditorAiPrompt, defaultAiInstruction, editorAiPreferences.answerLanguage, sendPromptToTabChat, setStatusMessage, t]);
+
+  const writeTextSnapshot = useCallback(async (request: {
+    fileKey?: string;
+    filePath: string;
+    logicalText: string;
+    expectedDiskHash: string | null;
+    policy: {
+      eol: OpenFileEol | "lf" | "crlf" | "cr";
+      encoding?: string;
+      bom?: boolean;
+    };
+    bufferVersion?: number;
+    styleGeneration?: number;
+  }): Promise<WorkspaceFile> => {
+    const targetEncoding = request.policy.encoding ?? "UTF-8";
+    const targetBom = request.policy.bom ?? false;
+    const rawEol = request.policy.eol ?? "LF";
+    const eol = (typeof rawEol === "string" ? rawEol.toLowerCase() : "lf") as "lf" | "crlf" | "cr";
+
+    const normalizedText = applyEditorEol(request.logicalText, eol.toUpperCase() as OpenFileEol);
+
+    let rootPath: string | null = null;
+    let relPath: string | null = null;
+
+    if (request.fileKey) {
+      const file = openFilesRef.current[request.fileKey];
+      if (file && file.ref.kind === "root") {
+        const root = rootsRef.current.find((r) => r.id === (file.ref as { rootId: string }).rootId);
+        if (root) {
+          rootPath = root.path;
+          relPath = file.ref.path;
+        }
+      }
+    }
+
+    if (!rootPath || !relPath) {
+      const matchingRoot = rootsRef.current.find(
+        (r) => request.filePath.startsWith(r.path + "/") || request.filePath === r.path,
+      );
+      if (matchingRoot) {
+        rootPath = matchingRoot.path;
+        relPath = request.filePath.slice(matchingRoot.path.length).replace(/^\/+/, "");
+      }
+    }
+
+    if (rootPath && relPath) {
+      return workspaceWriteFileEncoded(
+        rootPath,
+        relPath,
+        normalizedText,
+        request.expectedDiskHash,
+        targetEncoding,
+        targetBom,
+      );
+    }
+
+    return workspaceWriteLooseFileEncoded(
+      request.filePath,
+      normalizedText,
+      request.expectedDiskHash,
+      targetEncoding,
+      targetBom,
+    );
+  }, []);
 
   const saveOpenBufferText = useCallback(async (
     key: string,
@@ -3229,41 +3332,20 @@ export function CodeWorkspaceTab({
       const targetEol: OpenFileEol = normalizedEolOption ?? file.eol;
       const targetBom = saveOptions?.bom !== undefined ? saveOptions.bom : (file.bom ?? false);
       const encoding = saveOptions?.encoding ?? file.encoding ?? "UTF-8";
-      const diskText = applyEditorEol(textToSave.replace(/^\uFEFF/, ""), targetEol);
-      // Keep the established UTF-8 path compatible with browser/test shims;
-      // non-UTF-8 files must use the byte-aware desktop command.
-      const encodedWriter = (encoding.toLowerCase() !== "utf-8" || targetBom)
-        && typeof workspaceWriteFileEncoded === "function"
-        && typeof workspaceWriteLooseFileEncoded === "function";
-      const saved = file.ref.kind === "root"
-        ? encodedWriter
-          ? await workspaceWriteFileEncoded(
-            findRoot(file.ref.rootId)?.path ?? "",
-            file.ref.path,
-            diskText,
-            file.hash,
-            encoding,
-            targetBom,
-          )
-          : await workspaceWriteFile(
-            findRoot(file.ref.rootId)?.path ?? "",
-            file.ref.path,
-            `${targetBom ? "\uFEFF" : ""}${diskText}`,
-            file.hash,
-          )
-        : encodedWriter
-          ? await workspaceWriteLooseFileEncoded(
-            file.ref.path,
-            diskText,
-            file.hash,
-            encoding,
-            targetBom,
-          )
-          : await workspaceWriteLooseFile(
-            file.ref.path,
-            `${targetBom ? "\uFEFF" : ""}${diskText}`,
-            file.hash,
-          );
+      const absPath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
+
+      const saved = await writeTextSnapshot({
+        fileKey: key,
+        filePath: absPath,
+        logicalText: textToSave,
+        expectedDiskHash: file.hash ?? null,
+        policy: {
+          eol: targetEol,
+          encoding,
+          bom: targetBom,
+        },
+      });
+
       const savedPath = absolutePathForOpenFile(file);
       if (savedPath) {
         if (savedPath.endsWith(".editorconfig")) {
@@ -3276,39 +3358,31 @@ export function CodeWorkspaceTab({
       }
       const normalized = normalizeEditorText(saved.text);
       const savedBom = saved.bom ?? (saveOptions?.bom !== undefined ? saveOptions.bom : saved.text.startsWith("\uFEFF"));
-      const cleaned: OpenFileState = {
-        ...file,
-        text: normalized.text,
-        savedText: normalized.text,
-        eol: targetEol ?? normalized.eol,
-        encoding: saved.encoding ?? encoding,
-        bom: savedBom,
-        hash: saved.hash,
-        mtime: saved.mtime,
-        size: saved.size,
-        loading: false,
-        saving: false,
-        dirty: false,
-        error: null,
-      };
-      openFilesRef.current = { ...openFilesRef.current, [key]: cleaned };
-      setOpenFiles((current) => ({
-        ...current,
-        [key]: {
-          ...(current[key] ?? cleaned),
-          ...cleaned,
-          // If the user typed while we saved, keep their newer text dirty.
-          text: (current[key]?.text ?? normalized.text) !== textToSave && current[key]
-            ? current[key].text
-            : normalized.text,
-          dirty: (current[key]?.text ?? normalized.text) !== textToSave
-            && (current[key]?.text ?? normalized.text) !== normalized.text
-            ? true
-            : false,
+
+      const latestNow = openFilesRef.current[key] ?? file;
+      const isBufferStillSame = latestNow.text === textToSave;
+      const remainingDirty = !isBufferStillSame && latestNow.text !== normalized.text;
+
+      mutateOpenBuffer(
+        key,
+        {
           savedText: normalized.text,
+          text: isBufferStillSame ? normalized.text : latestNow.text,
+          eol: targetEol ?? normalized.eol,
+          encoding: saved.encoding ?? encoding,
+          bom: savedBom,
+          hash: saved.hash,
+          mtime: saved.mtime,
+          size: saved.size,
+          loading: false,
+          saving: false,
+          dirty: remainingDirty,
           error: null,
+          documentRevision: latestNow.documentRevision,
         },
-      }));
+        "save-writeback",
+      );
+
       if (file.ref.kind === "root") {
         notifyWorkspacePathGitChanged(file.ref.rootId, file.ref.path);
       }
@@ -3331,11 +3405,12 @@ export function CodeWorkspaceTab({
     }
   }, [
     absolutePathForOpenFile,
-    findRoot,
+    mutateOpenBuffer,
     notifyWorkspacePathGitChanged,
     saveLspDocument,
     semanticIndex.invalidate,
     workspaceInstanceId,
+    writeTextSnapshot,
   ]);
 
   const formatFileText = useCallback(async (
@@ -3505,10 +3580,9 @@ export function CodeWorkspaceTab({
           ? await workspaceReadFile(findRoot(file.ref.rootId)?.path ?? "", file.ref.path)
           : await workspaceReadLooseFile(file.ref.path);
         const normalized = normalizeEditorText(reloaded.text);
-        setOpenFiles((current) => ({
-          ...current,
-          [key]: {
-            ...file,
+        mutateOpenBuffer(
+          key,
+          {
             text: normalized.text,
             savedText: normalized.text,
             eol: normalized.eol,
@@ -3522,7 +3596,8 @@ export function CodeWorkspaceTab({
             dirty: false,
             error: null,
           },
-        }));
+          "reload",
+        );
         setStatusMessage(`Reloaded ${file.subtitle}`);
       } catch (err) {
         const message = errorMessage(err);
@@ -3538,7 +3613,7 @@ export function CodeWorkspaceTab({
         setStatusMessage(message);
       }
     },
-    [activeKey, findRoot, setStatusMessage],
+    [activeKey, findRoot, mutateOpenBuffer, setStatusMessage],
   );
 
   const readDiskSnapshot = useCallback(async (file: OpenFileState): Promise<ExternalDiskSnapshot> => {
@@ -3560,26 +3635,28 @@ export function CodeWorkspaceTab({
   const applyDiskSnapshot = useCallback((file: OpenFileState, disk: ExternalDiskSnapshot) => {
     const latest = openFilesRef.current[file.key] ?? file;
     lastTrackedBufferTextRef.current[file.key] = disk.text;
-    const next: OpenFileState = {
-      ...latest,
-      text: disk.text,
-      savedText: disk.text,
-      eol: disk.eol,
-      encoding: disk.encoding,
-      bom: disk.bom,
-      hash: disk.hash,
-      mtime: disk.mtime,
-      size: disk.size,
-      loading: false,
-      saving: false,
-      dirty: false,
-      error: null,
-    };
-    setOpenFiles((current) => ({ ...current, [file.key]: next }));
-    if (latest.text !== next.text && lspFilesRef.current[file.key]?.status?.active) {
+    const next = mutateOpenBuffer(
+      file.key,
+      {
+        text: disk.text,
+        savedText: disk.text,
+        eol: disk.eol,
+        encoding: disk.encoding,
+        bom: disk.bom,
+        hash: disk.hash,
+        mtime: disk.mtime,
+        size: disk.size,
+        loading: false,
+        saving: false,
+        dirty: false,
+        error: null,
+      },
+      "reload",
+    );
+    if (next && latest.text !== next.text && lspFilesRef.current[file.key]?.status?.active) {
       void syncLspDocument(next, "change");
     }
-  }, [setOpenFiles, syncLspDocument]);
+  }, [mutateOpenBuffer, syncLspDocument]);
 
   const enqueueExternalFileConflict = useCallback((
     file: OpenFileState,
@@ -4479,25 +4556,28 @@ export function CodeWorkspaceTab({
         ? await workspaceReadFileWithEncoding(findRoot(file.ref.rootId)?.path ?? "", file.ref.path, encoding)
         : await workspaceReadLooseFileWithEncoding(file.ref.path, encoding);
       const normalized = normalizeEditorText(reloaded.text);
-      const next: OpenFileState = {
-        ...file,
-        text: normalized.text,
-        savedText: normalized.text,
-        eol: normalized.eol,
-        encoding: reloaded.encoding ?? encoding,
-        bom: reloaded.bom ?? false,
-        hash: reloaded.hash,
-        mtime: reloaded.mtime,
-        size: reloaded.size,
-        loading: false,
-        saving: false,
-        dirty: false,
-        error: null,
-      };
-      openFilesRef.current = { ...openFilesRef.current, [key]: next };
-      setOpenFiles((current) => ({ ...current, [key]: next }));
+      const next = mutateOpenBuffer(
+        key,
+        {
+          text: normalized.text,
+          savedText: normalized.text,
+          eol: normalized.eol,
+          encoding: reloaded.encoding ?? encoding,
+          bom: reloaded.bom ?? false,
+          hash: reloaded.hash,
+          mtime: reloaded.mtime,
+          size: reloaded.size,
+          loading: false,
+          saving: false,
+          dirty: false,
+          error: null,
+        },
+        "reload",
+      );
       setFileEncodingDialogOpen(false);
-      setStatusMessage(`Reloaded ${file.subtitle} as ${next.encoding}${next.bom ? " BOM" : ""}`);
+      if (next) {
+        setStatusMessage(`Reloaded ${file.subtitle} as ${next.encoding}${next.bom ? " BOM" : ""}`);
+      }
     } catch (error) {
       const message = errorMessage(error);
       setOpenFiles((current) => ({
@@ -4507,7 +4587,7 @@ export function CodeWorkspaceTab({
       setStatusMessage(message);
       throw error instanceof Error ? error : new Error(message);
     }
-  }, [activeKey, findRoot, setStatusMessage]);
+  }, [activeKey, findRoot, mutateOpenBuffer, setStatusMessage]);
 
   const convertActiveFileEncoding = useCallback((encoding: string, bom: boolean) => {
     const key = activeKey;
@@ -5704,25 +5784,17 @@ export function CodeWorkspaceTab({
         } catch {
           // Best-effort history; never block the edit write.
         }
-        for (const root of rootsRef.current) {
-          const rel = relativePathWithinRoot(root.path, absolutePath);
-          if (rel === null) continue;
-          if (effectiveEncoding.toLowerCase() !== "utf-8" && typeof workspaceWriteFileEncoded === "function") {
-            await workspaceWriteFileEncoded(root.path, rel, text, expectedHash, effectiveEncoding, effectiveBom);
-          } else {
-            await workspaceWriteFile(root.path, rel, `${effectiveBom ? "\uFEFF" : ""}${text}`, expectedHash);
-          }
-          await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
-            path: absolutePath,
-            type: 2,
-          }]).catch(() => 0);
-          return;
-        }
-        if (effectiveEncoding.toLowerCase() !== "utf-8" && typeof workspaceWriteLooseFileEncoded === "function") {
-          await workspaceWriteLooseFileEncoded(absolutePath, text, expectedHash, effectiveEncoding, effectiveBom);
-        } else {
-          await workspaceWriteLooseFile(absolutePath, `${effectiveBom ? "\uFEFF" : ""}${text}`, expectedHash);
-        }
+        await writeTextSnapshot({
+          filePath: absolutePath,
+          logicalText: text,
+          expectedDiskHash: expectedHash ?? null,
+          policy: {
+            eol: "lf",
+            encoding: effectiveEncoding,
+            bom: effectiveBom,
+          },
+        });
+
         await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
           path: absolutePath,
           type: 2,
@@ -7492,10 +7564,22 @@ export function CodeWorkspaceTab({
     setBottomDockTab,
   ]);
 
+  const commandFocusForTarget = useCallback((target: EventTarget | null): WorkspaceFocus => {
+    const node = target instanceof Node ? target : null;
+    if (!node) return "workspace";
+    // Terminal dock marks itself with data-workspace-focus="terminal".
+    const el = node instanceof Element ? node : node.parentElement;
+    if (el?.closest?.('[data-workspace-focus="terminal"]')) return "terminal";
+    if (treePaneRef.current?.contains(node)) return "tree";
+    if (editorPaneRef.current?.contains(node)) return "editor";
+    return "workspace";
+  }, []);
+
   const actionsController = useWorkspaceActionsController({
     workspaceId: workspaceInstanceId,
     commands: workspaceCommands,
-    activeFocus: "workspace",
+    resolveFocus: commandFocusForTarget,
+    getDefaultFocus: () => "workspace",
     contextData: {
       activeFileKey: activeKey ?? undefined,
       activeFilePath: activeFile?.path,
@@ -7513,7 +7597,7 @@ export function CodeWorkspaceTab({
   useEffect(() => {
     if (!visible) return;
     const handleWorkspaceCommand = (event: KeyboardEvent) => {
-      actionsController.dispatchKeydown(event);
+      void actionsController.dispatchKeydown(event, { eventTarget: event.target });
     };
     window.addEventListener("keydown", handleWorkspaceCommand, true);
     return () => window.removeEventListener("keydown", handleWorkspaceCommand, true);

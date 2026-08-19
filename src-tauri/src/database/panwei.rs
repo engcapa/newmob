@@ -16,20 +16,20 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio_opengauss::{
+    Client as OgClient, Config as OgConfig, Error as OgError, NoTls, Row as OgRow,
+    SimpleQueryMessage,
     config::SslMode,
     tls::{
         ChannelBinding as OgChannelBinding, MakeTlsConnect, TlsConnect, TlsStream as OgTlsStream,
     },
     types::ToSql,
-    Client as OgClient, Config as OgConfig, Error as OgError, NoTls, Row as OgRow,
-    SimpleQueryMessage,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    emit_query_result_stream, group_foreign_keys, ColumnDescription, ColumnInfo, DbConfig,
-    DbHandle, DbObject, ForeignKeyInfo, IndexInfo, QueryResult, QueryStreamChannel, SchemaInfo,
-    TableInfo,
+    ColumnDescription, ColumnInfo, DbConfig, DbHandle, DbObject, ForeignKeyInfo, IndexInfo,
+    QueryResult, QueryStreamChannel, SchemaInfo, TableInfo, emit_query_result_stream,
+    group_foreign_keys,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;

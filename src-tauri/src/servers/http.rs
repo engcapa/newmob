@@ -16,8 +16,8 @@ use tokio::io::AsyncBufReadExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-use super::engine::{LogEmitter, ServerCtx, ServerStarted};
 use super::ServerConfig;
+use super::engine::{LogEmitter, ServerCtx, ServerStarted};
 
 const DEFAULT_PORT: u16 = 8080;
 

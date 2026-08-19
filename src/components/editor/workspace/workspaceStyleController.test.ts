@@ -95,6 +95,7 @@ describe("WorkspaceStyleController (N1.1)", () => {
     const writeDisk = vi.fn(async (_path, text, _hash, _enc, _bom, eol) => {
       writtenText = text;
       writtenEol = eol ?? "";
+      return { hash: "hash-saved-1" };
     });
 
     const tx: SaveTransactionV2 = {
@@ -117,6 +118,9 @@ describe("WorkspaceStyleController (N1.1)", () => {
     expect(writeDisk).toHaveBeenCalled();
     expect(writtenText).toBe("line1\r\nline2\r\n");
     expect(writtenEol).toBe("crlf");
+    if (outcome.kind === "saved") {
+      expect(outcome.hash).toBe("hash-saved-1");
+    }
   });
 
   it("fails typed on unencodable characters for Latin-1 policy", async () => {
@@ -127,7 +131,7 @@ describe("WorkspaceStyleController (N1.1)", () => {
       fileProvider,
     });
 
-    const writeDisk = vi.fn(async () => {});
+    const writeDisk = vi.fn(async () => ({ hash: "dummy" }));
 
     const tx: SaveTransactionV2 = {
       id: "tx-3",
@@ -147,5 +151,49 @@ describe("WorkspaceStyleController (N1.1)", () => {
       expect(outcome.retryable).toBe(false);
     }
     expect(writeDisk).not.toHaveBeenCalled();
+  });
+
+  it("handles structured hash mismatch and missing hash from writer (N1.5)", async () => {
+    const ctrl = new WorkspaceStyleController({
+      workspaceId: "ws-1",
+      roots: [{ path: "/project" }],
+      fileProvider: { readFile: async () => null },
+    });
+
+    // 1. Structured hash mismatch
+    const writeDiskConflict = vi.fn(async () => {
+      throw new Error("hash-mismatch: File changed on disk; expected hash aaa, found bbb");
+    });
+    const tx: SaveTransactionV2 = {
+      id: "tx-4",
+      workspaceId: "ws-1",
+      fileKey: "key-4",
+      filePath: "/project/app.ts",
+      bufferVersion: 1,
+      styleGeneration: 0,
+      expectedDiskHash: "aaa",
+      policy: { eol: "lf", encoding: "UTF-8", bom: false },
+      text: "test content\n",
+    };
+
+    const outcome1 = await ctrl.executeSaveTransaction(tx, writeDiskConflict, {
+      getLatestBufferVersion: () => 1,
+    });
+    expect(outcome1.kind).toBe("conflict");
+    if (outcome1.kind === "conflict") {
+      expect(outcome1.retryable).toBe(true);
+      expect(outcome1.reason).toContain("Disk hash conflict");
+    }
+
+    // 2. Missing hash from writer (no synthetic fallback)
+    const writeDiskNoHash = vi.fn(async () => ({ hash: undefined }));
+    const outcome2 = await ctrl.executeSaveTransaction(tx, writeDiskNoHash as any, {
+      getLatestBufferVersion: () => 1,
+    });
+    expect(outcome2.kind).toBe("failed");
+    if (outcome2.kind === "failed") {
+      expect(outcome2.reason).toBe("writer returned no hash");
+      expect(outcome2.retryable).toBe(false);
+    }
   });
 });

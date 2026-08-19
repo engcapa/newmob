@@ -36,10 +36,16 @@ struct Progress<F: FnMut(u64, u64)> {
 
 impl<F: FnMut(u64, u64)> Progress<F> {
     fn new(cb: F) -> Self {
-        Self { cb, last: Instant::now(), last_bytes: 0 }
+        Self {
+            cb,
+            last: Instant::now(),
+            last_bytes: 0,
+        }
     }
     fn maybe(&mut self, lines: u64, bytes: u64) {
-        if self.last.elapsed() >= Duration::from_millis(500) || bytes.saturating_sub(self.last_bytes) >= 256 * 1024 {
+        if self.last.elapsed() >= Duration::from_millis(500)
+            || bytes.saturating_sub(self.last_bytes) >= 256 * 1024
+        {
             (self.cb)(lines, bytes);
             self.last = Instant::now();
             self.last_bytes = bytes;
@@ -193,7 +199,10 @@ fn local_shell_command(command: &str) -> tokio::process::Command {
         // resolve it. `-NoProfile` keeps the captured output free of profile
         // banners.
         let mut c = tokio::process::Command::new("pwsh");
-        c.arg("-NoProfile").arg("-NonInteractive").arg("-Command").arg(command);
+        c.arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(command);
         c
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
@@ -225,7 +234,8 @@ mod tests {
         if cfg!(windows) {
             return; // POSIX shell assumed in this test
         }
-        let dir = std::env::temp_dir().join(format!("taomni-execb-{}", uuid::Uuid::new_v4().simple()));
+        let dir =
+            std::env::temp_dir().join(format!("taomni-execb-{}", uuid::Uuid::new_v4().simple()));
         let w = CaptureWriter::create(&dir, "x").unwrap();
         let cancel = Arc::new(Notify::new());
         let out = run_local("printf 'a\\nb\\nc\\n'", None, &w, cancel, |_, _| {})

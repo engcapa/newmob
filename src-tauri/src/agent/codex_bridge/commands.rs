@@ -1,7 +1,7 @@
 use crate::agent::codex_bridge::process::{CodexAppServer, CodexThreadOptions, CodexTurnOptions};
 use crate::agent::codex_bridge::protocol::CodexEvent;
-use crate::agent::codex_bridge::{detect, CodexStatusResult};
-use crate::ai::config::{default_ai_config_path, AiConfig};
+use crate::agent::codex_bridge::{CodexStatusResult, detect};
+use crate::ai::config::{AiConfig, default_ai_config_path};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

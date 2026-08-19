@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 use std::path::Path;
 
 pub const VAULT_SCHEMA_VERSION: i64 = 1;

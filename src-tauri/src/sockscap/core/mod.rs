@@ -66,8 +66,7 @@ impl XrayCore {
         config_hash: String,
         preferred_port: Option<u16>,
     ) -> Result<Self, String> {
-        std::fs::create_dir_all(work_dir)
-            .map_err(|e| format!("create xray work dir: {e}"))?;
+        std::fs::create_dir_all(work_dir).map_err(|e| format!("create xray work dir: {e}"))?;
 
         // A respawn (health-check restart) reuses the dead core's port so the
         // relay's cached xray_port stays valid; first spawn picks a free one.
@@ -88,8 +87,8 @@ impl XrayCore {
         // errors to stderr, so route BOTH to the log (a null stdout is how a bad
         // cipher/uuid used to vanish silently).
         let log_file = work_dir.join(format!("xray-{local_port}.log"));
-        let log_out = std::fs::File::create(&log_file)
-            .map_err(|e| format!("create xray log: {e}"))?;
+        let log_out =
+            std::fs::File::create(&log_file).map_err(|e| format!("create xray log: {e}"))?;
         let log_err = log_out
             .try_clone()
             .map_err(|e| format!("clone xray log handle: {e}"))?;
@@ -157,7 +156,9 @@ impl XrayCore {
             // Fail fast if the process already exited (bad config, missing lib).
             match self.child.try_wait() {
                 Ok(Some(status)) => {
-                    return Err(format!("xray exited early ({status}); check config/protocol params"));
+                    return Err(format!(
+                        "xray exited early ({status}); check config/protocol params"
+                    ));
                 }
                 Ok(None) => {}
                 Err(e) => return Err(format!("xray wait: {e}")),
@@ -470,8 +471,8 @@ impl XrayManager {
 /// Small TOCTOU window (port could be taken before xray binds), acceptable and
 /// matches the elevated helper's `pick_free_port`.
 fn pick_free_loopback_port() -> Result<u16, String> {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| format!("pick free port: {e}"))?;
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("pick free port: {e}"))?;
     Ok(listener.local_addr().map_err(|e| e.to_string())?.port())
 }
 

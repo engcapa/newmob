@@ -1,8 +1,8 @@
+use crate::agent::tools::ToolRegistry;
 use crate::agent::tools::history::SearchHistoryTool;
 use crate::agent::tools::sessions::{ListSessionsTool, OpenSessionEditorTool, SwitchTabTool};
 use crate::agent::tools::sftp_runbook::{SaveAsRunbookTool, SftpUploadTool};
 use crate::agent::tools::terminal::{ExplainErrorTool, ReadTerminalTailTool, RunInTerminalTool};
-use crate::agent::tools::ToolRegistry;
 use crate::agent::{Agent, AgentStepResult, PendingAction};
 use crate::llm::{ChatMessage, ChatRequest, TaskKind};
 use crate::state::AppState;

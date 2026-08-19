@@ -131,7 +131,8 @@ fn build_serial_launch(device: &str, options_json: Option<&str>) -> ClientTermin
 }
 
 fn serial_baud(options_json: Option<&str>) -> Option<u32> {
-    let options = serde_json::from_str::<ClientTerminalOptions>(options_json.unwrap_or("{}")).ok()?;
+    let options =
+        serde_json::from_str::<ClientTerminalOptions>(options_json.unwrap_or("{}")).ok()?;
     match options.serial_baud? {
         serde_json::Value::Number(value) => value.as_u64().and_then(|n| u32::try_from(n).ok()),
         serde_json::Value::String(value) => value.trim().parse::<u32>().ok(),
@@ -205,7 +206,10 @@ mod tests {
         #[cfg(windows)]
         {
             assert_eq!(launch.program, "plink.exe");
-            assert_eq!(launch.args, ["-serial", "/dev/ttyUSB0", "-sercfg", "57600,8,n,1,N"]);
+            assert_eq!(
+                launch.args,
+                ["-serial", "/dev/ttyUSB0", "-sercfg", "57600,8,n,1,N"]
+            );
         }
 
         #[cfg(not(windows))]

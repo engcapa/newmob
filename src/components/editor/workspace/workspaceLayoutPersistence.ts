@@ -10,6 +10,7 @@ import { fileKey } from "./codeWorkspaceModel";
 import {
   type LayoutNode,
   validateLayoutTree,
+  validateTreeGroupConsistency,
   migrateLayoutV1toV2,
   getAllLeafNodes,
 } from "./recursiveLayoutTree";
@@ -54,6 +55,7 @@ export interface WorkspaceLayoutSnapshotV2 {
   expandedDirKeys: string[];
   layoutTreeV2: LayoutNode;
   editorGroups: Record<string, PersistedEditorGroup>;
+  layoutRecovered?: boolean;
 }
 
 export type WorkspaceLayoutSnapshot = WorkspaceLayoutSnapshotV2;
@@ -170,34 +172,34 @@ export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayou
       ? (source.editorGroups as Record<string, unknown>)
       : {};
 
-  const normalizedGroups: Record<string, PersistedEditorGroup> = {};
+  const rawGroups: Record<string, PersistedEditorGroup> = {};
   for (const [k, v] of Object.entries(groupsSource)) {
     if (v && typeof v === "object") {
-      normalizedGroups[k] = normalizeGroup(v);
+      rawGroups[k] = normalizeGroup(v);
     }
-  }
-
-  if (!normalizedGroups.primary) {
-    normalizedGroups.primary = createEmptyPersistedGroup();
-  }
-  if (!normalizedGroups.secondary) {
-    normalizedGroups.secondary = createEmptyPersistedGroup();
   }
 
   // Resolve layout tree v2
   let layoutTreeV2: LayoutNode;
+  let layoutRecovered = false;
+
   if (source.layoutTreeV2 && typeof source.layoutTreeV2 === "object") {
-    const { valid } = validateLayoutTree(source.layoutTreeV2);
+    const { valid } = validateLayoutTree(source.layoutTreeV2 as LayoutNode);
     if (valid) {
       layoutTreeV2 = source.layoutTreeV2 as LayoutNode;
     } else {
       layoutTreeV2 = migrateLayoutV1toV2(source.layoutTreeV2);
+      layoutRecovered = true;
     }
   } else {
-    // Migrate v1 schema
+    // Only synthesize primary/secondary when v2 tree is absent
+    const groupsForMigration = Object.keys(rawGroups).length > 0 ? rawGroups : {
+      primary: createEmptyPersistedGroup(),
+      secondary: createEmptyPersistedGroup(),
+    };
     layoutTreeV2 = migrateLayoutV1toV2({
       orientation: splitOrientation ?? "horizontal",
-      groups: Object.entries(normalizedGroups).map(([id, g]) => ({
+      groups: Object.entries(groupsForMigration).map(([id, g]) => ({
         id,
         openFileKeys: g.openOrder,
         activeKey: g.activeKey,
@@ -205,17 +207,36 @@ export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayou
     });
   }
 
-  // Ensure all leaves in layout tree have entries in normalizedGroups
+  // Ensure bidirectional consistency:
+  // 1. Drop groups that do not have a corresponding leaf in the tree (orphan groups)
+  // 2. Align openOrder/activeKey with tree leaf as truth
   const leaves = getAllLeafNodes(layoutTreeV2);
+  const normalizedGroups: Record<string, PersistedEditorGroup> = {};
+
   for (const leaf of leaves) {
-    if (!normalizedGroups[leaf.id]) {
-      normalizedGroups[leaf.id] = {
-        openOrder: leaf.openFileKeys,
-        activeKey: leaf.activeKey,
-        previewKey: null,
-        pinnedKeys: [],
-      };
-    }
+    const existing = rawGroups[leaf.id];
+    const baseOpen = leaf.openFileKeys.length > 0 ? leaf.openFileKeys : existing?.openOrder ?? [];
+    const openOrder = asStringArray(baseOpen, MAX_RESTORED_OPEN_FILES);
+    const pinnedKeys = existing ? existing.pinnedKeys.filter((k) => openOrder.includes(k)) : [];
+    const previewKey = existing && existing.previewKey && openOrder.includes(existing.previewKey)
+      ? existing.previewKey
+      : null;
+    const activeKey = (existing?.activeKey && openOrder.includes(existing.activeKey))
+      ? existing.activeKey
+      : (leaf.activeKey && openOrder.includes(leaf.activeKey))
+      ? leaf.activeKey
+      : (openOrder[0] ?? null);
+
+    // Sync back to leaf
+    leaf.openFileKeys = [...openOrder];
+    leaf.activeKey = activeKey;
+
+    normalizedGroups[leaf.id] = {
+      openOrder,
+      activeKey,
+      previewKey,
+      pinnedKeys,
+    };
   }
 
   let activeEditorGroupId = typeof source.activeEditorGroupId === "string" ? source.activeEditorGroupId : "primary";
@@ -236,6 +257,7 @@ export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayou
     expandedDirKeys: asStringArray(source.expandedDirKeys, 256),
     layoutTreeV2,
     editorGroups: normalizedGroups,
+    layoutRecovered,
   };
 }
 
@@ -263,6 +285,16 @@ export function writeWorkspaceLayoutSnapshot(
   if (!workspaceInstanceId || typeof window === "undefined") return;
   try {
     const normalized = normalizeWorkspaceLayoutSnapshot(snapshot);
+    const treeValid = validateLayoutTree(normalized.layoutTreeV2);
+    if (!treeValid.valid) {
+      console.error("[LayoutPersistence] Refusing to persist invalid layout tree:", treeValid.errors);
+      return;
+    }
+    const consistency = validateTreeGroupConsistency(normalized.layoutTreeV2, normalized.editorGroups as any);
+    if (!consistency.consistent) {
+      console.error("[LayoutPersistence] Refusing to persist inconsistent tree/groups:", consistency.errors);
+      return;
+    }
     window.localStorage.setItem(storageKeyV2(workspaceInstanceId), JSON.stringify(normalized));
   } catch {
     // localStorage may be unavailable in restricted webviews.

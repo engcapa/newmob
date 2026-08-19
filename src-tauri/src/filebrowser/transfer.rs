@@ -1,7 +1,7 @@
 use crate::state::AppState;
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::State;
 use tokio::sync::Notify;
 

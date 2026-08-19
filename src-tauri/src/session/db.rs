@@ -1,5 +1,5 @@
 use super::models::{AuthMethod, SessionConfig, SessionGroup, SessionType};
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 
 pub fn init_db(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(

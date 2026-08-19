@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  compileWhenExpr,
   type WorkspaceActionContext,
   type ActionState,
   type ActionResult,
@@ -11,14 +10,15 @@ import {
   type WorkspaceCommandMenuItem,
   type WorkspaceCommandRegistration,
   type KeyboardEventLike,
-  workspaceCommandMatchesKeybinding,
 } from "./workspaceCommands";
-import { WorkspaceActionHost } from "./workspaceActionHost";
+import { type ActionInvocation, WorkspaceActionHost } from "./workspaceActionHost";
 
 export interface UseWorkspaceActionsControllerOptions {
   workspaceId?: string;
   commands: readonly WorkspaceCommand[];
-  activeFocus: WorkspaceFocus;
+  activeFocus?: WorkspaceFocus;
+  resolveFocus?: (target: EventTarget | null) => WorkspaceFocus;
+  getDefaultFocus?: () => WorkspaceFocus;
   contextData?: Partial<WorkspaceActionContext>;
   onCommandExecuted?: (commandId: string, result?: ActionResult) => void;
 }
@@ -27,8 +27,11 @@ export interface WorkspaceActionsController {
   host: WorkspaceActionHost;
   executeCommand: (commandId: string, payload?: unknown) => boolean;
   executeAction: (commandId: string, payload?: unknown, signal?: AbortSignal) => Promise<ActionResult>;
-  dispatchKeydown: (event: KeyboardEventLike) => WorkspaceCommand | null;
-  getActionState: (commandId: string) => ActionState;
+  dispatchKeydown: (
+    event: KeyboardEventLike,
+    options?: { eventTarget?: EventTarget | null } | ActionInvocation,
+  ) => Promise<{ id: string; result: ActionResult } | null>;
+  getActionState: (commandId: string, payload?: unknown) => ActionState;
   menuItems: WorkspaceCommandMenuItem[];
   searchableCommands: WorkspaceCommandMenuItem[];
   commandRegistration: WorkspaceCommandRegistration;
@@ -36,12 +39,14 @@ export interface WorkspaceActionsController {
 
 /**
  * Controller hook managing workspace action registration, keydown dispatch,
- * state evaluation, and menu integration (E0.1, E0.2, N0.1).
+ * state evaluation, and menu integration (E0.1, E0.2, N0.1, Gate R0).
  */
 export function useWorkspaceActionsController({
   workspaceId = "default-workspace",
   commands,
-  activeFocus,
+  activeFocus = "workspace",
+  resolveFocus,
+  getDefaultFocus,
   contextData,
   onCommandExecuted,
 }: UseWorkspaceActionsControllerOptions): WorkspaceActionsController {
@@ -51,30 +56,38 @@ export function useWorkspaceActionsController({
   const activeFocusRef = useRef(activeFocus);
   activeFocusRef.current = activeFocus;
 
+  const resolveFocusRef = useRef(resolveFocus);
+  resolveFocusRef.current = resolveFocus;
+
+  const getDefaultFocusRef = useRef(getDefaultFocus);
+  getDefaultFocusRef.current = getDefaultFocus;
+
   const contextDataRef = useRef(contextData);
   contextDataRef.current = contextData;
 
+  const onCommandExecutedRef = useRef(onCommandExecuted);
+  onCommandExecutedRef.current = onCommandExecuted;
+
   const [revision, setRevision] = useState(0);
 
-  // Build current unified action context
-  const getActionContext = useCallback((payload?: unknown): WorkspaceActionContext => {
-    const custom = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
-    return {
-      focus: (custom.focus as WorkspaceFocus) ?? activeFocusRef.current,
-      payload,
-      ...contextDataRef.current,
-      ...custom,
-    };
-  }, []);
-
-  // Create stable workspace action host instance
+  // Create stable workspace action host instance with lifecycle disposal
   const host = useMemo(() => {
     return new WorkspaceActionHost({
       workspaceId,
-      getContext: () => getActionContext(),
-      onExecuted: onCommandExecuted,
+      getDefaultContext: () => ({ ...contextDataRef.current }),
+      resolveFocus: (target) =>
+        resolveFocusRef.current ? resolveFocusRef.current(target) : (activeFocusRef.current ?? "workspace"),
+      getDefaultFocus: () =>
+        getDefaultFocusRef.current ? getDefaultFocusRef.current() : (activeFocusRef.current ?? "workspace"),
+      onExecuted: (id, res) => onCommandExecutedRef.current?.(id, res),
     });
-  }, [workspaceId, getActionContext, onCommandExecuted]);
+  }, [workspaceId]);
+
+  useEffect(() => {
+    return () => {
+      host.dispose();
+    };
+  }, [host]);
 
   // Synchronize registered commands with the host
   useEffect(() => {
@@ -92,57 +105,42 @@ export function useWorkspaceActionsController({
 
   const executeCommand = useCallback(
     (commandId: string, payload?: unknown): boolean => {
-      const ctx = getActionContext(payload);
-      const state = host.getState(commandId, ctx);
+      const state = host.getState(commandId, payload);
       if (state.availability !== "available") return false;
       void host.execute(commandId, payload);
       return true;
     },
-    [host, getActionContext],
+    [host],
   );
 
   const dispatchKeydown = useCallback(
-    (event: KeyboardEventLike, customContext?: Partial<WorkspaceActionContext>): WorkspaceCommand | null => {
-      const ctx = getActionContext(customContext);
-      for (const cmd of commandsRef.current) {
-        if (!cmd.keybinding && !cmd.keybindings?.length) continue;
-        if (workspaceCommandMatchesKeybinding(cmd, event)) {
-          if (cmd.when) {
-            const ok = typeof cmd.when === "function" ? cmd.when(ctx as any) : compileWhenExpr(cmd.when)(ctx);
-            if (!ok) continue;
-          }
-          event.preventDefault?.();
-          event.stopPropagation?.();
-          void host.execute(cmd.id, ctx);
-          return cmd;
-        }
-      }
-      return null;
+    async (
+      event: KeyboardEventLike,
+      options?: { eventTarget?: EventTarget | null } | ActionInvocation,
+    ): Promise<{ id: string; result: ActionResult } | null> => {
+      return host.dispatchKeydown(event, options);
     },
-    [getActionContext, host],
+    [host],
   );
 
   const getActionState = useCallback(
-    (commandId: string): ActionState => {
-      const ctx = getActionContext();
-      return host.getState(commandId, ctx);
+    (commandId: string, payload?: unknown): ActionState => {
+      return host.getState(commandId, payload);
     },
-    [getActionContext, host],
+    [host],
   );
 
   const menuItems = useMemo<WorkspaceCommandMenuItem[]>(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     revision;
-    const ctx = getActionContext();
-    return host.getMenuItems(ctx);
-  }, [host, getActionContext, revision]);
+    return host.getMenuItems();
+  }, [host, revision]);
 
   const searchableCommands = useMemo<WorkspaceCommandMenuItem[]>(() => {
     // eslint-disable-next-line @typescript-eslint/no-unused-expressions
     revision;
-    const ctx = getActionContext();
-    return host.search("", ctx);
-  }, [host, getActionContext, revision]);
+    return host.search("");
+  }, [host, revision]);
 
   const commandRegistration = useMemo<WorkspaceCommandRegistration>(
     () => ({

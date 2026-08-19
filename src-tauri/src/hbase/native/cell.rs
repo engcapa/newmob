@@ -283,8 +283,8 @@ mod tests {
     fn known_byte_layout() {
         // Verify exact wire bytes for a tiny cell so we catch layout drift.
         let c = Cell {
-            row: Bytes::from_static(b"r"),     // row_len=1
-            family: Bytes::from_static(b"f"),  // family_len=1
+            row: Bytes::from_static(b"r"),       // row_len=1
+            family: Bytes::from_static(b"f"),    // family_len=1
             qualifier: Bytes::from_static(b"q"), // qualifier_len=1
             timestamp: 0x0102030405060708,
             cell_type: cell_type::PUT,
@@ -294,14 +294,14 @@ mod tests {
         // key_len = 2 + 1 + 1 + 1 + 1 + 8 + 1 = 15
         // kv_len  = 4 + 4 + 15 + 1 = 24
         let expected: Vec<u8> = [
-            &[0, 0, 0, 24][..],        // kv_len
-            &[0, 0, 0, 15][..],        // key_len
-            &[0, 0, 0, 1][..],         // value_len
-            &[0, 1][..],               // row_len = 1
+            &[0, 0, 0, 24][..], // kv_len
+            &[0, 0, 0, 15][..], // key_len
+            &[0, 0, 0, 1][..],  // value_len
+            &[0, 1][..],        // row_len = 1
             b"r",
-            &[1][..],                  // family_len = 1
+            &[1][..], // family_len = 1
             b"f",
-            b"q",                      // qualifier (len derived)
+            b"q",                          // qualifier (len derived)
             &[1, 2, 3, 4, 5, 6, 7, 8][..], // timestamp BE
             &[cell_type::PUT][..],
             b"v",

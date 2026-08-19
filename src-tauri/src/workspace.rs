@@ -2098,7 +2098,7 @@ pub fn workspace_write_file(
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
             return Err(format!(
-                "File changed on disk; expected hash {expected}, found {current_hash}"
+                "hash-mismatch: File changed on disk; expected hash {expected}, found {current_hash}"
             ));
         }
     }
@@ -2159,7 +2159,7 @@ pub fn workspace_write_loose_file(
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
             return Err(format!(
-                "File changed on disk; expected hash {expected}, found {current_hash}"
+                "hash-mismatch: File changed on disk; expected hash {expected}, found {current_hash}"
             ));
         }
     }
@@ -3088,7 +3088,7 @@ fn write_workspace_bytes(
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
             return Err(format!(
-                "File changed on disk; expected hash {expected}, found {current_hash}"
+                "hash-mismatch: File changed on disk; expected hash {expected}, found {current_hash}"
             ));
         }
     }

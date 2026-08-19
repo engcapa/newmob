@@ -451,13 +451,17 @@ mod tests {
         assert_eq!(response.secrets[0].session_id, "a");
         assert_eq!(response.secrets[0].value, "one");
         assert_eq!(response.failures.len(), 2);
-        assert!(response
-            .failures
-            .iter()
-            .any(|f| f.session_id == "b" && f.needs_passphrase));
-        assert!(response
-            .failures
-            .iter()
-            .any(|f| f.session_id == "c" && !f.needs_passphrase));
+        assert!(
+            response
+                .failures
+                .iter()
+                .any(|f| f.session_id == "b" && f.needs_passphrase)
+        );
+        assert!(
+            response
+                .failures
+                .iter()
+                .any(|f| f.session_id == "c" && !f.needs_passphrase)
+        );
     }
 }

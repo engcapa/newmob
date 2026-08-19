@@ -19,8 +19,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::engine::{ServerCtx, ServerStarted};
 use super::ServerConfig;
+use super::engine::{ServerCtx, ServerStarted};
 use crate::terminal::pty::create_pty;
 
 const DEFAULT_PORT: u16 = 23;

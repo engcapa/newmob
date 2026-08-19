@@ -7,11 +7,13 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
-use crate::lanchat::protocol::PresenceStatus;
-use crate::lanchat::store::{decode_avatar_base64, Conversation, Group, LanMessage, Profile, RetentionSettings};
 use crate::lanchat::messaging;
 use crate::lanchat::protocol::PeerRecord;
+use crate::lanchat::protocol::PresenceStatus;
 use crate::lanchat::store::direct_conv_id;
+use crate::lanchat::store::{
+    Conversation, Group, LanMessage, Profile, RetentionSettings, decode_avatar_base64,
+};
 use crate::lanchat::swarm;
 use crate::lanchat::transfer;
 use crate::state::AppState;
@@ -50,7 +52,12 @@ pub async fn lanchat_status(state: State<'_, AppState>) -> Result<LanChatStatus,
 #[tauri::command]
 pub async fn lanchat_list_peers(state: State<'_, AppState>) -> Result<Vec<PeerRecord>, String> {
     let mut by_id = std::collections::HashMap::new();
-    for peer in state.lanchat.store.list_peers().map_err(|e| e.to_string())? {
+    for peer in state
+        .lanchat
+        .store
+        .list_peers()
+        .map_err(|e| e.to_string())?
+    {
         by_id.insert(peer.id.clone(), peer);
     }
     for peer in state.lanchat.peers.read().await.values().cloned() {
@@ -136,7 +143,14 @@ pub async fn lanchat_send_text(
     if args.text.trim().is_empty() {
         return Err("message text is empty".into());
     }
-    messaging::send_text(&app, &state.lanchat, &args.peer_id, args.text, args.mentions).await
+    messaging::send_text(
+        &app,
+        &state.lanchat,
+        &args.peer_id,
+        args.text,
+        args.mentions,
+    )
+    .await
 }
 
 /// Re-send a failed/pending direct message (e.g. after the peer reconnects).
@@ -155,7 +169,11 @@ pub async fn lanchat_resend_message(
 pub async fn lanchat_list_conversations(
     state: State<'_, AppState>,
 ) -> Result<Vec<Conversation>, String> {
-    state.lanchat.store.list_conversations().map_err(|e| e.to_string())
+    state
+        .lanchat
+        .store
+        .list_conversations()
+        .map_err(|e| e.to_string())
 }
 
 /// List recent messages for a conversation (oldest-first, last `limit`).
@@ -175,11 +193,12 @@ pub async fn lanchat_list_messages(
 
 /// Clear a conversation's unread counter (opened/read).
 #[tauri::command]
-pub async fn lanchat_mark_read(
-    state: State<'_, AppState>,
-    conv_id: String,
-) -> Result<(), String> {
-    state.lanchat.store.reset_unread(&conv_id).map_err(|e| e.to_string())
+pub async fn lanchat_mark_read(state: State<'_, AppState>, conv_id: String) -> Result<(), String> {
+    state
+        .lanchat
+        .store
+        .reset_unread(&conv_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Arguments for [`lanchat_create_group`].
@@ -226,7 +245,14 @@ pub async fn lanchat_send_group_text(
     if args.text.trim().is_empty() {
         return Err("message text is empty".into());
     }
-    messaging::send_group_text(&app, &state.lanchat, &args.group_id, args.text, args.mentions).await
+    messaging::send_group_text(
+        &app,
+        &state.lanchat,
+        &args.group_id,
+        args.text,
+        args.mentions,
+    )
+    .await
 }
 
 /// List all known groups (with their members).
@@ -281,7 +307,13 @@ pub async fn lanchat_send_group_file(
     path: String,
 ) -> Result<String, String> {
     ensure_ready(&state).await?;
-    swarm::send_to_group(&app, &state.lanchat, &group_id, std::path::PathBuf::from(path)).await
+    swarm::send_to_group(
+        &app,
+        &state.lanchat,
+        &group_id,
+        std::path::PathBuf::from(path),
+    )
+    .await
 }
 
 /// Accept an inbound file offer. Pass an empty `save_path` to use the default
@@ -294,7 +326,13 @@ pub async fn lanchat_accept_file(
     save_path: String,
 ) -> Result<String, String> {
     ensure_ready(&state).await?;
-    swarm::accept_offer(&app, &state.lanchat, &transfer_id, std::path::PathBuf::from(save_path)).await
+    swarm::accept_offer(
+        &app,
+        &state.lanchat,
+        &transfer_id,
+        std::path::PathBuf::from(save_path),
+    )
+    .await
 }
 
 /// Open a received file (or its folder) with the OS default handler.
@@ -316,7 +354,12 @@ pub async fn lanchat_send_signal(
 ) -> Result<(), String> {
     ensure_ready(&state).await?;
     let my_id = state.lanchat.node_id().await;
-    let env = crate::lanchat::protocol::Envelope::new(&frame_type, &my_id, Some(peer_id.clone()), payload);
+    let env = crate::lanchat::protocol::Envelope::new(
+        &frame_type,
+        &my_id,
+        Some(peer_id.clone()),
+        payload,
+    );
     crate::lanchat::transport::send_to_peer(&app, &state.lanchat, &peer_id, env).await
 }
 
@@ -331,12 +374,21 @@ pub async fn lanchat_signal_group(
 ) -> Result<(), String> {
     ensure_ready(&state).await?;
     let my_id = state.lanchat.node_id().await;
-    let members = state.lanchat.store.list_group_members(&group_id).map_err(|e| e.to_string())?;
+    let members = state
+        .lanchat
+        .store
+        .list_group_members(&group_id)
+        .map_err(|e| e.to_string())?;
     for member in members {
         if member == my_id {
             continue;
         }
-        let env = crate::lanchat::protocol::Envelope::new(&frame_type, &my_id, Some(member.clone()), payload.clone());
+        let env = crate::lanchat::protocol::Envelope::new(
+            &frame_type,
+            &my_id,
+            Some(member.clone()),
+            payload.clone(),
+        );
         let _ = crate::lanchat::transport::send_to_peer(&app, &state.lanchat, &member, env).await;
     }
     Ok(())
@@ -365,7 +417,8 @@ pub async fn nmedia_start(state: State<'_, AppState>, call_id: String) -> Result
     if let Some(existing) = lan.media_sessions.read().await.get(&call_id) {
         return Ok(existing.ws_port());
     }
-    let session = crate::lanchat::media::NativeMediaSession::start(lan.clone(), call_id.clone()).await?;
+    let session =
+        crate::lanchat::media::NativeMediaSession::start(lan.clone(), call_id.clone()).await?;
     let port = session.ws_port();
     lan.media_sessions.write().await.insert(call_id, session);
     Ok(port)
@@ -400,7 +453,13 @@ pub async fn nmedia_add_peer(
     call_id: String,
     peer_id: String,
 ) -> Result<(), String> {
-    let session = state.lanchat.media_sessions.read().await.get(&call_id).cloned();
+    let session = state
+        .lanchat
+        .media_sessions
+        .read()
+        .await
+        .get(&call_id)
+        .cloned();
     match session {
         Some(s) => {
             s.add_peer(&peer_id).await;
@@ -417,7 +476,14 @@ pub async fn nmedia_remove_peer(
     call_id: String,
     peer_id: String,
 ) -> Result<(), String> {
-    if let Some(s) = state.lanchat.media_sessions.read().await.get(&call_id).cloned() {
+    if let Some(s) = state
+        .lanchat
+        .media_sessions
+        .read()
+        .await
+        .get(&call_id)
+        .cloned()
+    {
         s.remove_peer(&peer_id).await;
     }
     Ok(())
@@ -434,7 +500,14 @@ pub async fn nmedia_peer_state(
     cam: bool,
     screen: bool,
 ) -> Result<(), String> {
-    if let Some(s) = state.lanchat.media_sessions.read().await.get(&call_id).cloned() {
+    if let Some(s) = state
+        .lanchat
+        .media_sessions
+        .read()
+        .await
+        .get(&call_id)
+        .cloned()
+    {
         s.peer_state(&peer_id, mic, cam, screen);
     }
     Ok(())
@@ -448,7 +521,14 @@ pub async fn nmedia_toggle_mic(
     call_id: String,
     on: bool,
 ) -> Result<(), String> {
-    if let Some(s) = state.lanchat.media_sessions.read().await.get(&call_id).cloned() {
+    if let Some(s) = state
+        .lanchat
+        .media_sessions
+        .read()
+        .await
+        .get(&call_id)
+        .cloned()
+    {
         s.set_mic(on);
     }
     Ok(())
@@ -462,7 +542,13 @@ pub async fn nmedia_toggle_screen(
     call_id: String,
     on: bool,
 ) -> Result<(), String> {
-    let session = state.lanchat.media_sessions.read().await.get(&call_id).cloned();
+    let session = state
+        .lanchat
+        .media_sessions
+        .read()
+        .await
+        .get(&call_id)
+        .cloned();
     match session {
         Some(s) => s.set_screen(app, state.lanchat.clone(), on).await,
         None => Err(format!("no native media session for {call_id}")),
@@ -476,7 +562,13 @@ pub async fn nmedia_toggle_cam(
     call_id: String,
     on: bool,
 ) -> Result<(), String> {
-    let session = state.lanchat.media_sessions.read().await.get(&call_id).cloned();
+    let session = state
+        .lanchat
+        .media_sessions
+        .read()
+        .await
+        .get(&call_id)
+        .cloned();
     match session {
         Some(s) => s.set_cam(state.lanchat.clone(), on).await,
         None => Err(format!("no native media session for {call_id}")),
@@ -491,7 +583,15 @@ pub async fn lanchat_send_dir(
 ) -> Result<String, String> {
     ensure_ready(&state).await?;
     let conv = direct_conv_id(&peer_id);
-    swarm::send_dir(&app, &state.lanchat, vec![peer_id], std::path::PathBuf::from(path), conv, None).await
+    swarm::send_dir(
+        &app,
+        &state.lanchat,
+        vec![peer_id],
+        std::path::PathBuf::from(path),
+        conv,
+        None,
+    )
+    .await
 }
 
 /// Pause / resume / cancel a transfer (`action`: "pause" | "resume" | "cancel").
@@ -518,7 +618,16 @@ pub async fn lanchat_send_screenshot(
         .await
         .map_err(|e| e.to_string())??;
     let conv = direct_conv_id(&peer_id);
-    swarm::send(&app, &state.lanchat, vec![peer_id.clone()], vec![peer_id], path, conv, None).await
+    swarm::send(
+        &app,
+        &state.lanchat,
+        vec![peer_id.clone()],
+        vec![peer_id],
+        path,
+        conv,
+        None,
+    )
+    .await
 }
 
 /// Send a pre-encoded PNG (base64) to a peer as a file. Used as the webview
@@ -532,13 +641,22 @@ pub async fn lanchat_send_image_bytes(
     data: String,
 ) -> Result<String, String> {
     ensure_ready(&state).await?;
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
     let bytes = BASE64
         .decode(data.as_bytes())
         .map_err(|e| format!("decode image: {e}"))?;
     let path = transfer::save_png_bytes(&bytes)?;
     let conv = direct_conv_id(&peer_id);
-    swarm::send(&app, &state.lanchat, vec![peer_id.clone()], vec![peer_id], path, conv, None).await
+    swarm::send(
+        &app,
+        &state.lanchat,
+        vec![peer_id.clone()],
+        vec![peer_id],
+        path,
+        conv,
+        None,
+    )
+    .await
 }
 #[tauri::command]
 pub async fn lanchat_send_clipboard_image(
@@ -548,7 +666,10 @@ pub async fn lanchat_send_clipboard_image(
 ) -> Result<String, String> {
     ensure_ready(&state).await?;
     let path = {
-        let mut guard = state.clipboard.lock().map_err(|_| "clipboard lock".to_string())?;
+        let mut guard = state
+            .clipboard
+            .lock()
+            .map_err(|_| "clipboard lock".to_string())?;
         if guard.is_none() {
             *guard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
         }
@@ -557,7 +678,16 @@ pub async fn lanchat_send_clipboard_image(
         transfer::save_rgba_png(img.width as u32, img.height as u32, &img.bytes)?
     };
     let conv = direct_conv_id(&peer_id);
-    swarm::send(&app, &state.lanchat, vec![peer_id.clone()], vec![peer_id], path, conv, None).await
+    swarm::send(
+        &app,
+        &state.lanchat,
+        vec![peer_id.clone()],
+        vec![peer_id],
+        path,
+        conv,
+        None,
+    )
+    .await
 }
 
 /* ----------------------------- retention & security (phase 4) ----------------------------- */
@@ -567,7 +697,11 @@ pub async fn lanchat_send_clipboard_image(
 pub async fn lanchat_get_retention(
     state: State<'_, AppState>,
 ) -> Result<RetentionSettings, String> {
-    state.lanchat.store.get_retention().map_err(|e| e.to_string())
+    state
+        .lanchat
+        .store
+        .get_retention()
+        .map_err(|e| e.to_string())
 }
 
 /// Update the message-retention policy and apply it immediately.
@@ -617,7 +751,10 @@ pub async fn lanchat_get_service_state(
 /// The service's long-running loops are spawned internally; lock or bind
 /// failures are returned to the caller and also published via the service event.
 #[tauri::command]
-pub async fn lanchat_start_service(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn lanchat_start_service(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     if state
         .lanchat
         .running
@@ -648,7 +785,11 @@ pub async fn lanchat_delete_message(
     state: State<'_, AppState>,
     msg_id: String,
 ) -> Result<(), String> {
-    state.lanchat.store.delete_message(&msg_id).map_err(|e| e.to_string())
+    state
+        .lanchat
+        .store
+        .delete_message(&msg_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Clear all messages in a conversation.
@@ -657,13 +798,21 @@ pub async fn lanchat_clear_conversation(
     state: State<'_, AppState>,
     conv_id: String,
 ) -> Result<(), String> {
-    state.lanchat.store.clear_conversation(&conv_id).map_err(|e| e.to_string())
+    state
+        .lanchat
+        .store
+        .clear_conversation(&conv_id)
+        .map_err(|e| e.to_string())
 }
 
 /// Delete all local chat history and reclaim disk space.
 #[tauri::command]
 pub async fn lanchat_clear_all_history(state: State<'_, AppState>) -> Result<(), String> {
-    state.lanchat.store.clear_all_history().map_err(|e| e.to_string())?;
+    state
+        .lanchat
+        .store
+        .clear_all_history()
+        .map_err(|e| e.to_string())?;
     let _ = state.lanchat.store.vacuum();
     Ok(())
 }
@@ -701,5 +850,9 @@ pub async fn lanchat_retrust_peer(
     state: State<'_, AppState>,
     node_id: String,
 ) -> Result<(), String> {
-    state.lanchat.store.clear_pin(&node_id).map_err(|e| e.to_string())
+    state
+        .lanchat
+        .store
+        .clear_pin(&node_id)
+        .map_err(|e| e.to_string())
 }

@@ -16,6 +16,8 @@ import {
   validateLayoutTree,
   validateTreeGroupConsistency,
   remapLayoutTreeKeys,
+  findAdjacentSiblingLeaf,
+  commitLayoutMutation,
   type LayoutNode,
 } from "./recursiveLayoutTree";
 
@@ -400,5 +402,77 @@ describe("recursiveLayoutTree", () => {
     const result = validateTreeGroupConsistency(tree, groups);
     expect(result.consistent).toBe(true);
     expect(result.errors).toEqual([]);
+  });
+
+  it("findAdjacentSiblingLeaf finds sibling along parent split (N6.5)", () => {
+    const tree: LayoutNode = {
+      type: "split",
+      id: "s1",
+      orientation: "horizontal",
+      ratios: [0.33, 0.33, 0.34],
+      children: [
+        { type: "leaf", id: "leaf-0", openFileKeys: [], activeKey: null },
+        { type: "leaf", id: "leaf-1", openFileKeys: [], activeKey: null },
+        { type: "leaf", id: "leaf-2", openFileKeys: [], activeKey: null },
+      ],
+    };
+
+    // leaf-0 -> prefers index+1 = leaf-1
+    const sib0 = findAdjacentSiblingLeaf(tree, "leaf-0");
+    expect(sib0?.id).toBe("leaf-1");
+
+    // leaf-1 -> prefers index+1 = leaf-2
+    const sib1 = findAdjacentSiblingLeaf(tree, "leaf-1");
+    expect(sib1?.id).toBe("leaf-2");
+
+    // leaf-2 -> index+1 is out of bounds, so index-1 = leaf-1
+    const sib2 = findAdjacentSiblingLeaf(tree, "leaf-2");
+    expect(sib2?.id).toBe("leaf-1");
+  });
+
+  it("atomicCloseLeaf returns migration metadata with destinationLeafId and migratedKeys (N6.5)", () => {
+    const tree: LayoutNode = {
+      type: "split",
+      id: "s1",
+      orientation: "horizontal",
+      ratios: [0.5, 0.5],
+      children: [
+        { type: "leaf", id: "l1", openFileKeys: ["f1.ts"], activeKey: "f1.ts" },
+        { type: "leaf", id: "l2", openFileKeys: ["f2.ts", "f3.ts"], activeKey: "f2.ts" },
+      ],
+    };
+    const groups = {
+      l1: { id: "l1", openOrder: ["f1.ts"], activeKey: "f1.ts", previewKey: null, pinnedKeys: [] },
+      l2: { id: "l2", openOrder: ["f2.ts", "f3.ts"], activeKey: "f2.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const res = atomicCloseLeaf(tree, groups, "l2", "l2");
+    expect(res.kind).toBe("changed");
+    if (res.kind === "changed") {
+      expect(res.migration).toBeDefined();
+      expect(res.migration?.destinationLeafId).toBe("l1");
+      expect(res.migration?.migratedKeys).toEqual(["f2.ts", "f3.ts"]);
+      expect(res.groups.l1.openOrder).toEqual(["f1.ts", "f2.ts", "f3.ts"]);
+    }
+  });
+
+  it("commitLayoutMutation rejects inconsistent mutations", () => {
+    const validTree: LayoutNode = {
+      type: "leaf",
+      id: "l1",
+      openFileKeys: ["a.ts"],
+      activeKey: "a.ts",
+    };
+    const validGroups = {
+      l1: { id: "l1", openOrder: ["a.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
+    };
+    const badMutation = {
+      kind: "changed" as const,
+      tree: { type: "split" as const, id: "bad", orientation: "horizontal" as const, ratios: [0.5], children: [validTree] },
+      groups: validGroups,
+      activeGroupId: "l1",
+    };
+    const committed = commitLayoutMutation(validTree, validGroups, "l1", badMutation);
+    expect(committed.kind).toBe("failed");
   });
 });

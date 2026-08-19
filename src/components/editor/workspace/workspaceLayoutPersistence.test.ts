@@ -122,4 +122,53 @@ describe("workspaceLayoutPersistence", () => {
     pushWorkspaceSearchHistory("ws", "first");
     expect(readWorkspaceSearchHistory("ws")).toEqual(["first", "second"]);
   });
+
+  it("cleans up orphan groups not present in layout tree (N6.5)", () => {
+    const rawSnapshot = {
+      version: 2,
+      layoutTreeV2: {
+        type: "leaf",
+        id: "leaf-main",
+        openFileKeys: ["root:app:a.ts"],
+        activeKey: "root:app:a.ts",
+      },
+      editorGroups: {
+        "leaf-main": {
+          openOrder: ["root:app:a.ts"],
+          activeKey: "root:app:a.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+        "leaf-orphan-1": {
+          openOrder: ["root:app:b.ts"],
+          activeKey: "root:app:b.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+      },
+    };
+
+    const normalized = normalizeWorkspaceLayoutSnapshot(rawSnapshot);
+    expect(normalized.editorGroups["leaf-main"]).toBeDefined();
+    expect(normalized.editorGroups["leaf-orphan-1"]).toBeUndefined();
+  });
+
+  it("recovers corrupted layout tree gracefully to single leaf (N6.5)", () => {
+    const corrupted = {
+      version: 2,
+      layoutTreeV2: {
+        type: "split",
+        id: "bad-split",
+        orientation: "horizontal",
+        children: [], // Invalid: split with no children
+        ratios: [],
+      },
+      editorGroups: {},
+    };
+
+    const normalized = normalizeWorkspaceLayoutSnapshot(corrupted);
+    expect(normalized.layoutRecovered).toBe(true);
+    expect(normalized.layoutTreeV2.type).toBe("leaf");
+    expect(normalized.editorGroups[normalized.layoutTreeV2.id]).toBeDefined();
+  });
 });

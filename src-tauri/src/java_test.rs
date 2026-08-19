@@ -174,7 +174,12 @@ pub struct JavaTestLaunch {
 fn string_list(value: Option<&Value>) -> Vec<String> {
     value
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -185,10 +190,17 @@ fn string_list(value: Option<&Value>) -> Vec<String> {
 /// directly or nested under `body`.
 fn parse_test_launch(value: &Value) -> Option<JavaTestLaunch> {
     let obj = value.get("body").unwrap_or(value);
-    let main_class = obj.get("mainClass").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    let main_class = obj
+        .get("mainClass")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?;
     Some(JavaTestLaunch {
         main_class: main_class.to_string(),
-        project_name: obj.get("projectName").and_then(Value::as_str).unwrap_or("").to_string(),
+        project_name: obj
+            .get("projectName")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         class_paths: string_list(obj.get("classpath").or_else(|| obj.get("classPaths"))),
         module_paths: string_list(obj.get("modulepath").or_else(|| obj.get("modulePaths"))),
         args: string_list(obj.get("programArguments").or_else(|| obj.get("args"))),
@@ -241,7 +253,10 @@ mod tests {
             "vmArguments": ["-ea"]
         });
         let launch = parse_test_launch(&value).expect("resolves");
-        assert_eq!(launch.main_class, "org.junit.platform.console.ConsoleLauncher");
+        assert_eq!(
+            launch.main_class,
+            "org.junit.platform.console.ConsoleLauncher"
+        );
         assert_eq!(launch.project_name, "demo");
         assert_eq!(launch.class_paths, vec!["/cp/a.jar", "/cp/b.jar"]);
         assert_eq!(launch.args, vec!["-c", "com.example.CalcTest"]);
@@ -249,7 +264,9 @@ mod tests {
         // Nested under body, and missing mainClass → None.
         assert!(parse_test_launch(&json!({ "body": { "projectName": "x" } })).is_none());
         assert_eq!(
-            parse_test_launch(&json!({ "body": { "mainClass": "M" } })).unwrap().main_class,
+            parse_test_launch(&json!({ "body": { "mainClass": "M" } }))
+                .unwrap()
+                .main_class,
             "M",
         );
     }
@@ -272,7 +289,10 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, "class");
         assert_eq!(items[0].name, "CalcTest");
-        assert_eq!(items[0].uri.as_deref(), Some("file:///repo/src/test/CalcTest.java"));
+        assert_eq!(
+            items[0].uri.as_deref(),
+            Some("file:///repo/src/test/CalcTest.java")
+        );
         assert_eq!(items[0].children.len(), 2);
         assert_eq!(items[0].children[0].kind, "method");
         assert_eq!(items[0].children[0].full_name, "com.example.CalcTest#adds");
@@ -314,4 +334,3 @@ mod tests {
         assert_eq!(items[0].range.as_ref().unwrap()["start"]["line"], 3);
     }
 }
-

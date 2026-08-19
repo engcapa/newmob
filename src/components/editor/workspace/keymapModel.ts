@@ -156,6 +156,24 @@ export function detectKeybindingConflicts(
   return conflicts;
 }
 
+export function resolveBinding(
+  scheme: KeymapScheme,
+  actionId: string,
+  _platform: "macos" | "windows" | "linux" = "windows",
+): string | null {
+  if (scheme.disabledActions.includes(actionId)) return null;
+  const list = scheme.bindings[actionId];
+  if (!list || list.length === 0) return null;
+  return list[0] ?? null;
+}
+
+export function findConflicts(
+  scheme: KeymapScheme,
+  actionCatalog: WorkspaceActionMetadata[] = DEFAULT_WORKSPACE_ACTIONS,
+): KeybindingConflict[] {
+  return detectKeybindingConflicts(scheme, actionCatalog);
+}
+
 /**
  * Export keymap scheme to JSON string.
  */

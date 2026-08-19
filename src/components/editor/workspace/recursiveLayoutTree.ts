@@ -36,6 +36,10 @@ export type LayoutMutationResult =
       tree: LayoutNode;
       groups: Record<string, LayoutEditorGroupState>;
       activeGroupId: string;
+      migration?: {
+        destinationLeafId: string;
+        migratedKeys: string[];
+      };
     }
   | { kind: "no-op" | "failed"; reason: string };
 
@@ -576,9 +580,92 @@ export function validateTreeGroupConsistency(
 }
 
 /**
- * Atomic Close Leaf Mutation.
+ * Find the adjacent sibling leaf for a target leaf along the parent split (N6.5).
+ * Priority: same-level index + 1, else index - 1.
+ * If sibling is a split, returns the preorder first leaf in that split.
+ */
+export function findAdjacentSiblingLeaf(
+  tree: LayoutNode,
+  targetLeafId: string,
+): LeafGroupNode | null {
+  function search(node: LayoutNode): { sibling: LeafGroupNode | null; found: boolean } {
+    if (node.type === "leaf") {
+      return { sibling: null, found: node.id === targetLeafId };
+    }
+
+    for (let i = 0; i < node.children.length; i++) {
+      const child = node.children[i];
+      if (child.type === "leaf" && child.id === targetLeafId) {
+        const siblingIdx = i + 1 < node.children.length ? i + 1 : i - 1 >= 0 ? i - 1 : -1;
+        if (siblingIdx >= 0) {
+          const siblingChild = node.children[siblingIdx];
+          const leaf = siblingChild.type === "leaf" ? siblingChild : getAllLeafNodes(siblingChild)[0] ?? null;
+          return { sibling: leaf, found: true };
+        }
+        return { sibling: null, found: true };
+      }
+
+      if (child.type === "split") {
+        const res = search(child);
+        if (res.found) {
+          if (res.sibling) return res;
+          const siblingIdx = i + 1 < node.children.length ? i + 1 : i - 1 >= 0 ? i - 1 : -1;
+          if (siblingIdx >= 0) {
+            const siblingChild = node.children[siblingIdx];
+            const leaf = siblingChild.type === "leaf" ? siblingChild : getAllLeafNodes(siblingChild)[0] ?? null;
+            return { sibling: leaf, found: true };
+          }
+          return { sibling: null, found: true };
+        }
+      }
+    }
+    return { sibling: null, found: false };
+  }
+
+  const { sibling } = search(tree);
+  if (sibling) return sibling;
+
+  const allLeaves = getAllLeafNodes(tree).filter((l) => l.id !== targetLeafId);
+  return allLeaves[0] ?? null;
+}
+
+/**
+ * Validate and commit a layout mutation (N6.5).
+ * Validates tree structure and bidirectional tree-group consistency.
+ * If validation fails, logs diagnostic and returns failed result.
+ */
+export function commitLayoutMutation(
+  _currentTree: LayoutNode,
+  _currentGroups: Record<string, LayoutEditorGroupState>,
+  _currentActiveGroupId: string,
+  result: LayoutMutationResult,
+): LayoutMutationResult {
+  if (result.kind !== "changed") {
+    return result;
+  }
+
+  const treeValidation = validateLayoutTree(result.tree);
+  if (!treeValidation.valid) {
+    const errorMsg = `Layout tree validation failed: ${treeValidation.errors.join(", ")}`;
+    console.error(`[LayoutDiagnostics] ${errorMsg}`);
+    return { kind: "failed", reason: errorMsg };
+  }
+
+  const consistency = validateTreeGroupConsistency(result.tree, result.groups);
+  if (!consistency.consistent) {
+    const errorMsg = `Tree/group consistency validation failed: ${consistency.errors.join("; ")}`;
+    console.error(`[LayoutDiagnostics] ${errorMsg}`);
+    return { kind: "failed", reason: errorMsg };
+  }
+
+  return result;
+}
+
+/**
+ * Atomic Close Leaf Mutation (N6.5).
  * Refuses to close the last remaining leaf or non-existent leaf.
- * Cleans up the closed group and selects a remaining leaf as active if needed.
+ * Migrates tabs to adjacent sibling leaf along the parent split.
+ * Never drops tabs silently and keeps tree/group bidirectionally consistent.
  */
 export function atomicCloseLeaf(
   tree: LayoutNode,
@@ -596,24 +683,41 @@ export function atomicCloseLeaf(
     return { kind: "no-op", reason: `Target leaf "${leafId}" not found in layout tree.` };
   }
 
+  const siblingLeaf = findAdjacentSiblingLeaf(tree, leafId);
+  const targetSiblingId = siblingLeaf?.id ?? getAllLeafNodes(tree).find((l) => l.id !== leafId)?.id;
+  if (!targetSiblingId) {
+    return { kind: "no-op", reason: "Cannot determine destination leaf for migration." };
+  }
+
   const newTree = closeLeafNode(tree, leafId);
   if (newTree === tree) {
     return { kind: "no-op", reason: "Tree close leaf resulted in identical tree." };
   }
 
-  const remainingLeaves = getAllLeafNodes(newTree);
-  const targetSiblingId = remainingLeaves[0]?.id ?? Object.keys(groups).find((id) => id !== leafId) ?? "primary";
   const closedGroup = groups[leafId];
   const nextGroups = { ...groups };
   delete nextGroups[leafId];
 
-  // Seamlessly migrate closed leaf's tabs to the surviving sibling group
+  // If destination group does not exist in groups dictionary, create it from tree leaf
+  if (!nextGroups[targetSiblingId]) {
+    const destLeafNode = findLeafNode(newTree, targetSiblingId);
+    nextGroups[targetSiblingId] = {
+      id: targetSiblingId,
+      openOrder: destLeafNode ? [...destLeafNode.openFileKeys] : [],
+      activeKey: destLeafNode?.activeKey ?? null,
+      previewKey: null,
+      pinnedKeys: [],
+    };
+  }
+
+  const migratedKeys: string[] = [];
   if (closedGroup && closedGroup.openOrder.length > 0 && nextGroups[targetSiblingId]) {
     const targetGroup = nextGroups[targetSiblingId];
     const combinedOrder = [...targetGroup.openOrder];
     for (const key of closedGroup.openOrder) {
       if (!combinedOrder.includes(key)) {
         combinedOrder.push(key);
+        migratedKeys.push(key);
       }
     }
     nextGroups[targetSiblingId] = {
@@ -623,8 +727,6 @@ export function atomicCloseLeaf(
     };
   }
 
-  // N6.4: Sync the destination leaf in the tree to match the updated group,
-  // preventing tree/group divergence on persist/restore.
   const destGroup = nextGroups[targetSiblingId];
   const syncedTree = destGroup
     ? updateLeafInTree(newTree, targetSiblingId, (leaf) => ({
@@ -634,16 +736,17 @@ export function atomicCloseLeaf(
       }))
     : newTree;
 
-  const nextActiveId =
-    activeGroupId === leafId
-      ? targetSiblingId
-      : activeGroupId;
+  const nextActiveId = activeGroupId === leafId ? targetSiblingId : activeGroupId;
 
   return {
     kind: "changed",
     tree: syncedTree,
     groups: nextGroups,
     activeGroupId: nextActiveId,
+    migration: {
+      destinationLeafId: targetSiblingId,
+      migratedKeys,
+    },
   };
 }
 

@@ -386,6 +386,58 @@ export class WorkspaceLocationController {
   }
 }
 
+export interface LocationIdentity {
+  fileKey: string | null;
+  canonicalPath: string;
+  line: number;
+  character: number;
+}
+
+export function canonicalizeWorkspacePath(filePath: string, _platform: string = "linux"): string {
+  return canonicalizePath(filePath);
+}
+
+export class NavigationHistoryFacade {
+  constructor(
+    private readonly locationController: WorkspaceLocationController,
+    private readonly tracker?: NavigationHistoryTracker,
+  ) {}
+
+  remove(identity: LocationIdentity): void {
+    const canonical = canonicalizeWorkspacePath(identity.canonicalPath);
+    const locs = this.locationController.getLocations();
+    for (const loc of locs) {
+      if (
+        (loc.fileIdentity === identity.fileKey || canonicalizeWorkspacePath(loc.filePath) === canonical) &&
+        loc.line === identity.line
+      ) {
+        this.locationController.removeLocation(loc.id);
+      }
+    }
+    if (this.tracker) {
+      const all = this.tracker.getRecentLocations();
+      for (const loc of all) {
+        if (
+          (loc.fileIdentity === identity.fileKey || canonicalizeWorkspacePath(loc.filePath) === canonical) &&
+          loc.line === identity.line
+        ) {
+          this.tracker.removeLocation(loc.id);
+        }
+      }
+    }
+  }
+
+  relocate(fromPath: string, toPath: string): void {
+    this.locationController.relocateFile(fromPath, toPath);
+    this.tracker?.relocateFile(fromPath, toPath);
+  }
+
+  removeSubtree(dirPath: string): void {
+    this.locationController.removeDirectorySubtree(dirPath);
+    this.tracker?.removeDirectorySubtree(dirPath);
+  }
+}
+
 export function createWorkspaceLocationController(
   workspaceId: string,
   tracker?: NavigationHistoryTracker,
@@ -393,4 +445,6 @@ export function createWorkspaceLocationController(
   return new WorkspaceLocationController(workspaceId, tracker);
 }
 
+/** @deprecated Use WorkspaceLocationController with workspaceId scope instead */
 export const navigationHistoryTracker = new NavigationHistoryTracker();
+

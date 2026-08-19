@@ -226,28 +226,34 @@ export function detectGradleContext(
   return { kind: "none", prefix: "" };
 }
 
+import { invoke } from "@tauri-apps/api/core";
+
 export interface DependencyIndexClient {
   search(
     query: string,
     options?: { signal?: AbortSignal; timeoutMs?: number },
   ): Promise<MavenDependencyIndexEntry[]>;
+  getVersions?(groupId: string, artifactId: string): Promise<string[]>;
   isAvailable(): Promise<boolean>;
 }
 
-export class MavenCentralDependencyIndexClient implements DependencyIndexClient {
+export class BackendDependencyIndexClient implements DependencyIndexClient {
   private cache = new Map<string, { entries: MavenDependencyIndexEntry[]; timestamp: number }>();
   private readonly maxCacheSize: number;
   private readonly ttlMs: number;
-  private readonly baseUrl: string;
 
-  constructor(options?: { maxCacheSize?: number; ttlMs?: number; baseUrl?: string }) {
+  constructor(options?: { maxCacheSize?: number; ttlMs?: number }) {
     this.maxCacheSize = options?.maxCacheSize ?? 100;
     this.ttlMs = options?.ttlMs ?? 5 * 60 * 1000;
-    this.baseUrl = options?.baseUrl ?? "https://search.maven.org/solrsearch/select";
   }
 
   async isAvailable(): Promise<boolean> {
-    return typeof fetch === "function";
+    try {
+      const status = await invoke<{ kind: string; reason?: string }>("dependency_index_status").catch(() => ({ kind: "unavailable" }));
+      return status.kind === "available";
+    } catch {
+      return false;
+    }
   }
 
   async search(
@@ -262,42 +268,43 @@ export class MavenCentralDependencyIndexClient implements DependencyIndexClient 
       return cached.entries;
     }
 
-    const timeoutMs = options?.timeoutMs ?? 3000;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    if (options?.signal?.aborted) {
+      throw new Error("Operation cancelled.");
+    }
 
-    const onAbort = () => controller.abort();
-    options?.signal?.addEventListener("abort", onAbort);
+    const rawCoords = await invoke<Array<{ groupId: string; artifactId: string; version?: string; description?: string }>>(
+      "dependency_index_search",
+      { query: trimmed, limit: 20 },
+    );
 
+    const entries: MavenDependencyIndexEntry[] = [];
+    for (const c of rawCoords) {
+      const versions = c.version ? [c.version] : [];
+      entries.push({
+        groupId: c.groupId,
+        artifactId: c.artifactId,
+        versions,
+        description: c.description,
+      });
+    }
+
+    if (this.cache.size >= this.maxCacheSize) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey) this.cache.delete(oldestKey);
+    }
+    this.cache.set(trimmed, { entries, timestamp: Date.now() });
+    return entries;
+  }
+
+  async getVersions(groupId: string, artifactId: string): Promise<string[]> {
     try {
-      const url = `${this.baseUrl}?q=${encodeURIComponent(trimmed)}&rows=20&wt=json`;
-      const response = await fetch(url, { signal: controller.signal });
-      if (!response.ok) {
-        throw new Error(`Maven Central returned HTTP ${response.status}`);
-      }
-      const data = await response.json();
-      const docs = data?.response?.docs ?? [];
-      const entries: MavenDependencyIndexEntry[] = docs.map((doc: Record<string, unknown>) => ({
-        groupId: String(doc.g ?? ""),
-        artifactId: String(doc.a ?? ""),
-        versions: Array.isArray(doc.tags)
-          ? (doc.tags as string[])
-          : doc.v
-            ? [String(doc.v)]
-            : [],
-        description: doc.text ? String(doc.text) : `${doc.g}:${doc.a}`,
-      }));
-
-      // Bounded LRU cache eviction
-      if (this.cache.size >= this.maxCacheSize) {
-        const oldestKey = this.cache.keys().next().value;
-        if (oldestKey) this.cache.delete(oldestKey);
-      }
-      this.cache.set(trimmed, { entries, timestamp: Date.now() });
-      return entries;
-    } finally {
-      clearTimeout(timeoutId);
-      options?.signal?.removeEventListener("abort", onAbort);
+      const res = await invoke<Array<{ version: string; timestamp?: number }>>(
+        "dependency_index_versions",
+        { groupId, artifactId, limit: 30 },
+      );
+      return res.map((item) => item.version);
+    } catch {
+      return [];
     }
   }
 }
@@ -331,6 +338,11 @@ export class InMemoryDependencyIndexClient implements DependencyIndexClient {
       );
     });
   }
+
+  async getVersions(groupId: string, artifactId: string): Promise<string[]> {
+    const entry = this.entries.find((e) => e.groupId === groupId && e.artifactId === artifactId);
+    return entry?.versions ?? [];
+  }
 }
 
 export class MavenDependencyCompletionProvider implements DependencyCompletionProvider {
@@ -341,7 +353,7 @@ export class MavenDependencyCompletionProvider implements DependencyCompletionPr
   private capabilityState: DependencyProviderCapability = "available";
 
   constructor(client?: DependencyIndexClient) {
-    this.client = client ?? new MavenCentralDependencyIndexClient();
+    this.client = client ?? new BackendDependencyIndexClient();
   }
 
   supports(filePath: string): boolean {
@@ -454,7 +466,7 @@ export class GradleDependencyCompletionProvider implements DependencyCompletionP
   private capabilityState: DependencyProviderCapability = "available";
 
   constructor(client?: DependencyIndexClient) {
-    this.client = client ?? new MavenCentralDependencyIndexClient();
+    this.client = client ?? new BackendDependencyIndexClient();
   }
 
   supports(filePath: string): boolean {

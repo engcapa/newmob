@@ -7,15 +7,15 @@ use crate::filebrowser::local;
 use crate::filebrowser::transfer::{self, ProgressPayload, TransferHandle};
 use crate::terminal::network::NetworkSettings;
 use crate::terminal::ssh::{
-    connect_ssh_authenticated_with_prompter, KbdInteractivePrompter, SshAuth, SshHandler,
+    KbdInteractivePrompter, SshAuth, SshHandler, connect_ssh_authenticated_with_prompter,
 };
 use russh::client;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{FileAttributes, FileType as SftpFileType, OpenFlags};
 use serde::Serialize;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -230,7 +230,11 @@ impl ActiveSftp {
         let (sftp, handle) = connect_sftp(params, None).await?;
         *self.sftp.lock().await = sftp;
         *self._handle.lock().await = handle;
-        tracing::info!("SFTP session reconnected to {}:{}", params.host, params.port);
+        tracing::info!(
+            "SFTP session reconnected to {}:{}",
+            params.host,
+            params.port
+        );
         Ok(())
     }
 
@@ -1026,7 +1030,9 @@ mod tests {
     fn genuine_file_errors_are_not_retried() {
         assert!(!is_disconnect_error("stat /x: No such file or directory"));
         assert!(!is_disconnect_error("mkdir /x: Permission denied"));
-        assert!(!is_disconnect_error("File is 999 bytes, exceeds preview limit"));
+        assert!(!is_disconnect_error(
+            "File is 999 bytes, exceeds preview limit"
+        ));
     }
 
     #[test]

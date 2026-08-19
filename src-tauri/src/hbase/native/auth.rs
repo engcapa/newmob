@@ -67,9 +67,13 @@ pub mod kerberos {
         W: AsyncWriteExt + Unpin,
     {
         // Initial token.
-        let (mut pending, token) =
-            ClientCtx::new(InitiateFlags::empty(), client_principal, service_principal, None)
-                .map_err(|e| format!("GSSAPI init failed: {e}"))?;
+        let (mut pending, token) = ClientCtx::new(
+            InitiateFlags::empty(),
+            client_principal,
+            service_principal,
+            None,
+        )
+        .map_err(|e| format!("GSSAPI init failed: {e}"))?;
         write_token(write, &token).await?;
 
         // First server reply: status + (challenge | switch-to-simple).
@@ -82,7 +86,10 @@ pub mod kerberos {
 
         // Negotiation loop.
         loop {
-            match pending.step(&challenge).map_err(|e| format!("GSSAPI step failed: {e}"))? {
+            match pending
+                .step(&challenge)
+                .map_err(|e| format!("GSSAPI step failed: {e}"))?
+            {
                 Step::Finished((ctx, last)) => {
                     // The GSSAPI security context is established, but HBase's
                     // SaslServer follows the SASL/GSSAPI mechanism (RFC 4752),
@@ -187,9 +194,7 @@ pub mod kerberos {
     /// Hadoop `WritableUtils.readString`: a vint length prefix + UTF-8 bytes.
     /// We approximate with a 4-byte length (sufficient for error text framing
     /// in practice; on parse trouble we just return what we read).
-    async fn read_writable_string<R: AsyncReadExt + Unpin>(
-        read: &mut R,
-    ) -> Result<String, String> {
+    async fn read_writable_string<R: AsyncReadExt + Unpin>(read: &mut R) -> Result<String, String> {
         let len = read.read_i32().await.map_err(ioerr)?;
         if !(0..=1_000_000).contains(&len) {
             return Ok(String::new());

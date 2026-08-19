@@ -1,5 +1,5 @@
 /**
- * Workspace-Scoped Action Host (N0.1).
+ * Workspace-Scoped Action Host (N0.1, Gate R0).
  *
  * Provides a dedicated, isolated action registry and execution host for each workspace/window instance.
  * Eliminates dual execution paths between WorkspaceCommand and WorkspaceActionRegistry by unifying
@@ -13,6 +13,7 @@ import {
   type ActionState,
   type ActionResult,
   type ActionPlatformKeybindings,
+  type WorkspaceFocus,
 } from "./workspaceActionRegistry";
 import {
   type WorkspaceCommand,
@@ -24,9 +25,19 @@ import {
   workspaceCommandMatchesKeybinding,
 } from "./workspaceCommands";
 
+export interface ActionInvocation {
+  context?: Partial<WorkspaceActionContext>;
+  payload?: unknown;
+  eventTarget?: EventTarget | null;
+  signal?: AbortSignal;
+}
+
 export interface WorkspaceActionHostOptions {
   workspaceId: string;
-  getContext: () => WorkspaceActionContext;
+  getContext?: () => WorkspaceActionContext;
+  getDefaultContext?: () => Partial<WorkspaceActionContext>;
+  resolveFocus?: (target: EventTarget | null) => WorkspaceFocus;
+  getDefaultFocus?: () => WorkspaceFocus;
   onExecuted?: (actionId: string, result: ActionResult) => void;
 }
 
@@ -45,7 +56,10 @@ function matchesKeybinding(pattern: string, event: KeyboardEventLike): boolean {
 
 export class WorkspaceActionHost {
   private readonly workspaceId: string;
-  private readonly getContext: () => WorkspaceActionContext;
+  private readonly getContext?: () => WorkspaceActionContext;
+  private readonly getDefaultContext?: () => Partial<WorkspaceActionContext>;
+  private readonly resolveFocus?: (target: EventTarget | null) => WorkspaceFocus;
+  private readonly getDefaultFocus?: () => WorkspaceFocus;
   private readonly onExecuted?: (actionId: string, result: ActionResult) => void;
 
   private actions = new Map<string, WorkspaceActionDefinition>();
@@ -57,6 +71,9 @@ export class WorkspaceActionHost {
   constructor(options: WorkspaceActionHostOptions) {
     this.workspaceId = options.workspaceId;
     this.getContext = options.getContext;
+    this.getDefaultContext = options.getDefaultContext;
+    this.resolveFocus = options.resolveFocus;
+    this.getDefaultFocus = options.getDefaultFocus;
     this.onExecuted = options.onExecuted;
   }
 
@@ -161,7 +178,64 @@ export class WorkspaceActionHost {
     return this.actions.get(id);
   }
 
-  getState(id: string, customContext?: WorkspaceActionContext): ActionState {
+  /**
+   * Single unified context constructor (Gate R0).
+   * Priority: explicit invocation.context > eventTarget resolution > host default focus / context.
+   */
+  buildContext(invocation?: ActionInvocation | Partial<WorkspaceActionContext> | unknown): WorkspaceActionContext {
+    const base: Partial<WorkspaceActionContext> = this.getDefaultContext
+      ? this.getDefaultContext()
+      : this.getContext
+      ? this.getContext()
+      : {};
+
+    if (invocation === undefined || invocation === null) {
+      const defaultFocus = (this.getDefaultFocus ? this.getDefaultFocus() : undefined)
+        ?? (base.focus as WorkspaceFocus | undefined)
+        ?? "workspace";
+      return {
+        focus: defaultFocus,
+        ...base,
+      };
+    }
+
+    let explicitCtx: Partial<WorkspaceActionContext> | undefined;
+    let payload: unknown = undefined;
+    let target: EventTarget | null = null;
+
+    if (typeof invocation === "object" && invocation !== null) {
+      const inv = invocation as Record<string, unknown>;
+      if ("context" in inv || "eventTarget" in inv || "signal" in inv) {
+        explicitCtx = inv.context as Partial<WorkspaceActionContext> | undefined;
+        payload = inv.payload;
+        target = (inv.eventTarget as EventTarget | null) ?? null;
+      } else if ("focus" in inv || "payload" in inv) {
+        // WorkspaceCommandContext object passed directly
+        explicitCtx = inv as Partial<WorkspaceActionContext>;
+        payload = inv.payload !== undefined ? inv.payload : undefined;
+      } else {
+        // Raw payload
+        payload = invocation;
+      }
+    } else {
+      payload = invocation;
+    }
+
+    const resolvedFocus: WorkspaceFocus = explicitCtx?.focus
+      ?? (target && this.resolveFocus ? this.resolveFocus(target) : undefined)
+      ?? (this.getDefaultFocus ? this.getDefaultFocus() : undefined)
+      ?? (base.focus as WorkspaceFocus | undefined)
+      ?? "workspace";
+
+    return {
+      ...base,
+      ...explicitCtx,
+      focus: resolvedFocus,
+      payload: payload !== undefined ? payload : base.payload,
+    };
+  }
+
+  getState(id: string, invocationOrContext?: ActionInvocation | WorkspaceActionContext | unknown): ActionState {
     const action = this.actions.get(id);
     const cmd = this.commands.get(id);
     if (!action && !cmd) {
@@ -186,7 +260,7 @@ export class WorkspaceActionHost {
       };
     }
 
-    const ctx = customContext ?? this.getContext();
+    const ctx = this.buildContext(invocationOrContext);
     const whenCheck = action?.when ?? cmd?.when;
     if (whenCheck) {
       const ok = typeof whenCheck === "function" ? whenCheck(ctx as any) : compileWhenExpr(whenCheck)(ctx);
@@ -211,12 +285,20 @@ export class WorkspaceActionHost {
     };
   }
 
-  async execute(id: string, payload?: unknown, signal?: AbortSignal): Promise<ActionResult> {
+  async execute(
+    id: string,
+    invocationOrPayload?: ActionInvocation | unknown,
+    signal?: AbortSignal,
+  ): Promise<ActionResult> {
     if (this.disposed) {
       return { kind: "failed", message: "Action host is disposed." };
     }
 
-    if (signal?.aborted) {
+    const sig = (invocationOrPayload && typeof invocationOrPayload === "object" && "signal" in invocationOrPayload)
+      ? (invocationOrPayload as ActionInvocation).signal ?? signal
+      : signal;
+
+    if (sig?.aborted) {
       return { kind: "cancelled", message: "Action cancelled via AbortSignal." };
     }
 
@@ -231,7 +313,7 @@ export class WorkspaceActionHost {
       return { kind: "no-op", message: `Action "${id}" is already executing.` };
     }
 
-    const ctx = { ...this.getContext(), payload };
+    const ctx = this.buildContext(invocationOrPayload);
     const whenCheck = action?.when ?? cmd?.when;
     if (whenCheck) {
       const ok = typeof whenCheck === "function" ? whenCheck(ctx as any) : compileWhenExpr(whenCheck)(ctx);
@@ -243,13 +325,13 @@ export class WorkspaceActionHost {
     this.inFlightActions.add(id);
 
     try {
-      if (signal?.aborted) {
+      if (sig?.aborted) {
         return { kind: "cancelled", message: "Action cancelled before run." };
       }
 
       let result: ActionResult;
       if (action?.run) {
-        const runRes = await action.run(ctx, signal);
+        const runRes = await action.run(ctx, sig);
         result = runRes ?? { kind: "applied" };
       } else if (cmd?.run) {
         const res = await Promise.resolve(cmd.run(ctx as WorkspaceCommandContext));
@@ -272,12 +354,13 @@ export class WorkspaceActionHost {
 
   async dispatchKeydown(
     event: KeyboardEventLike,
+    options?: { eventTarget?: EventTarget | null } | ActionInvocation,
   ): Promise<{ id: string; result: ActionResult } | null> {
     if (this.disposed) return null;
 
-    const ctx = this.getContext();
+    const ctx = this.buildContext(options ?? { eventTarget: (event as any).target });
 
-    // Check actions with keybindings
+    // 1. Check explicit actions with keybindings first
     for (const action of this.actions.values()) {
       if (!action.keybinding) continue;
       const patterns = typeof action.keybinding === "string"
@@ -295,21 +378,22 @@ export class WorkspaceActionHost {
         }
         event.preventDefault?.();
         event.stopPropagation?.();
-        const result = await this.execute(action.id);
+        const result = await this.execute(action.id, { context: ctx, payload: ctx.payload });
         return { id: action.id, result };
       }
     }
 
-    // Check registered commands with keybinding string
+    // 2. Check registered commands with keybinding string
     for (const cmd of this.commands.values()) {
       if (!cmd.keybinding && !cmd.keybindings?.length) continue;
       if (workspaceCommandMatchesKeybinding(cmd, event)) {
-        if (cmd.when && !compileWhenExpr(cmd.when)(ctx)) {
-          continue;
+        if (cmd.when) {
+          const ok = typeof cmd.when === "function" ? cmd.when(ctx as any) : compileWhenExpr(cmd.when)(ctx);
+          if (!ok) continue;
         }
         event.preventDefault?.();
         event.stopPropagation?.();
-        const result = await this.execute(cmd.id);
+        const result = await this.execute(cmd.id, { context: ctx, payload: ctx.payload });
         return { id: cmd.id, result };
       }
     }
@@ -317,8 +401,8 @@ export class WorkspaceActionHost {
     return null;
   }
 
-  search(query: string, customContext?: WorkspaceActionContext): WorkspaceCommandMenuItem[] {
-    const ctx = customContext ?? this.getContext();
+  search(query: string, customContext?: ActionInvocation | WorkspaceActionContext | unknown): WorkspaceCommandMenuItem[] {
+    const ctx = this.buildContext(customContext);
     const q = query.trim().toLowerCase();
     const items: WorkspaceCommandMenuItem[] = [];
 
@@ -346,7 +430,7 @@ export class WorkspaceActionHost {
     return items;
   }
 
-  getMenuItems(customContext?: WorkspaceActionContext): WorkspaceCommandMenuItem[] {
+  getMenuItems(customContext?: ActionInvocation | WorkspaceActionContext | unknown): WorkspaceCommandMenuItem[] {
     return this.search("", customContext);
   }
 }

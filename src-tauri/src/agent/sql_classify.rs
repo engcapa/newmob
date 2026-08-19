@@ -19,15 +19,16 @@ pub enum SqlClass {
 
 /// Leading keywords that begin a read-only statement (subject to the extra
 /// guards below — e.g. `SELECT … INTO` and data-modifying CTEs are excluded).
-const READ_LEADERS: &[&str] = &["select", "show", "desc", "describe", "explain", "with", "values", "table", "pragma"];
+const READ_LEADERS: &[&str] = &[
+    "select", "show", "desc", "describe", "explain", "with", "values", "table", "pragma",
+];
 
 /// Word-boundary keywords that mean a statement mutates data/schema/session.
 /// Used to disqualify `WITH …` / `EXPLAIN …` bodies that wrap a write.
 const MUTATING_WORDS: &[&str] = &[
-    "insert", "update", "delete", "merge", "replace", "upsert", "create", "alter",
-    "drop", "truncate", "grant", "revoke", "call", "exec", "execute", "copy", "load",
-    "import", "attach", "rename", "vacuum", "optimize", "reindex", "cluster", "lock",
-    "comment", "refresh", "set",
+    "insert", "update", "delete", "merge", "replace", "upsert", "create", "alter", "drop",
+    "truncate", "grant", "revoke", "call", "exec", "execute", "copy", "load", "import", "attach",
+    "rename", "vacuum", "optimize", "reindex", "cluster", "lock", "comment", "refresh", "set",
 ];
 
 /// Classify a single SQL statement string. Conservative: unknown ⇒ `Mutating`.
@@ -78,9 +79,7 @@ pub fn classify(sql: &str) -> SqlClass {
         // bare EXPLAIN of a write still describes a write — only allow EXPLAIN
         // when it neither analyzes nor wraps a mutating verb.
         "explain" => {
-            if has_word(&lower, "analyze")
-                || MUTATING_WORDS.iter().any(|w| has_word(&lower, w))
-            {
+            if has_word(&lower, "analyze") || MUTATING_WORDS.iter().any(|w| has_word(&lower, w)) {
                 SqlClass::Mutating
             } else {
                 SqlClass::ReadOnly
@@ -150,10 +149,18 @@ mod tests {
     use super::*;
 
     fn ro(sql: &str) {
-        assert_eq!(classify(sql), SqlClass::ReadOnly, "expected ReadOnly: {sql}");
+        assert_eq!(
+            classify(sql),
+            SqlClass::ReadOnly,
+            "expected ReadOnly: {sql}"
+        );
     }
     fn mut_(sql: &str) {
-        assert_eq!(classify(sql), SqlClass::Mutating, "expected Mutating: {sql}");
+        assert_eq!(
+            classify(sql),
+            SqlClass::Mutating,
+            "expected Mutating: {sql}"
+        );
     }
 
     #[test]

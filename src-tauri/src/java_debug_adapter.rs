@@ -155,10 +155,11 @@ fn select_main_class(candidates: Vec<MainClassCandidate>, target_file: &str) -> 
         return MainClassSelection::None;
     }
     let target = canonical_comparable(target_file);
-    if let Some(exact) = candidates
-        .iter()
-        .find(|c| c.file_path.as_deref().is_some_and(|p| canonical_comparable(p) == target))
-    {
+    if let Some(exact) = candidates.iter().find(|c| {
+        c.file_path
+            .as_deref()
+            .is_some_and(|p| canonical_comparable(p) == target)
+    }) {
         return MainClassSelection::Resolved(exact.clone());
     }
     if candidates.len() == 1 {
@@ -276,7 +277,10 @@ fn build_launch_arguments(
 fn build_attach_arguments(cfg: &Value) -> Result<Value, String> {
     let port = cfg
         .get("port")
-        .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
         .filter(|p| *p > 0 && *p <= u16::MAX as u64)
         .ok_or("Java attach needs a debug `port` (the JVM's jdwp address)")?;
     let host = cfg
@@ -293,7 +297,13 @@ fn build_attach_arguments(cfg: &Value) -> Result<Value, String> {
         "hostName": host,
         "port": port,
     });
-    for key in ["projectName", "sourcePaths", "timeout", "stepFilters", "processId"] {
+    for key in [
+        "projectName",
+        "sourcePaths",
+        "timeout",
+        "stepFilters",
+        "processId",
+    ] {
         if let Some(value) = cfg.get(key) {
             args[key] = value.clone();
         }
@@ -338,7 +348,10 @@ impl DebugAdapter for JavaDebugAdapter {
             let port = parse_debug_port(&port_value)
                 .ok_or("java-debug did not return a debug session port")?;
             return Ok(DapLaunchPlan {
-                transport: DapTransport::Tcp { host: "127.0.0.1".into(), port },
+                transport: DapTransport::Tcp {
+                    host: "127.0.0.1".into(),
+                    port,
+                },
                 request: "attach".into(),
                 arguments,
             });
@@ -362,7 +375,9 @@ impl DebugAdapter for JavaDebugAdapter {
             // than sending an empty projectName (which resolves the wrong module in
             // multi-module builds).
             (Some(main_class), None) => {
-                let resolved = run("vscode.java.resolveMainClass", vec![]).await.unwrap_or(Value::Null);
+                let resolved = run("vscode.java.resolveMainClass", vec![])
+                    .await
+                    .unwrap_or(Value::Null);
                 let project = parse_main_classes(&resolved)
                     .into_iter()
                     .find(|c| c.main_class == main_class)
@@ -398,13 +413,23 @@ impl DebugAdapter for JavaDebugAdapter {
         let preset_classpaths = launch_config
             .get("classPaths")
             .and_then(Value::as_array)
-            .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
             .filter(|paths| !paths.is_empty());
         let (modulepaths, classpaths) = if let Some(classpaths) = preset_classpaths {
             let modulepaths = launch_config
                 .get("modulePaths")
                 .and_then(Value::as_array)
-                .map(|items| items.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             (modulepaths, classpaths)
         } else {
@@ -466,7 +491,9 @@ pub enum JavaMainClassResolution {
     /// A single main class is implied (active file, or the only one): launch it.
     Resolved { main: JavaMainClassOption },
     /// Several mains and none matches the active file: show the picker.
-    Choose { candidates: Vec<JavaMainClassOption> },
+    Choose {
+        candidates: Vec<JavaMainClassOption>,
+    },
     /// No runnable main in the project.
     None,
 }
@@ -502,15 +529,17 @@ pub async fn java_debug_resolve_main_classes(
             scope.identity.clone(),
         )
         .await?;
-    Ok(match select_main_class(parse_main_classes(&resolved), &scope.file_path) {
-        MainClassSelection::Resolved(candidate) => JavaMainClassResolution::Resolved {
-            main: candidate.into(),
+    Ok(
+        match select_main_class(parse_main_classes(&resolved), &scope.file_path) {
+            MainClassSelection::Resolved(candidate) => JavaMainClassResolution::Resolved {
+                main: candidate.into(),
+            },
+            MainClassSelection::Ambiguous(candidates) => JavaMainClassResolution::Choose {
+                candidates: candidates.into_iter().map(Into::into).collect(),
+            },
+            MainClassSelection::None => JavaMainClassResolution::None,
         },
-        MainClassSelection::Ambiguous(candidates) => JavaMainClassResolution::Choose {
-            candidates: candidates.into_iter().map(Into::into).collect(),
-        },
-        MainClassSelection::None => JavaMainClassResolution::None,
-    })
+    )
 }
 
 #[cfg(test)]
@@ -548,7 +577,9 @@ mod tests {
         ];
         // Slash direction + drive-letter case differences must not break matching.
         match select_main_class(candidates.clone(), "d:/repo/src/App.java") {
-            MainClassSelection::Resolved(picked) => assert_eq!(picked.main_class, "com.example.App"),
+            MainClassSelection::Resolved(picked) => {
+                assert_eq!(picked.main_class, "com.example.App")
+            }
             other => panic!("expected active-file match, got {other:?}"),
         }
         // No active-file match with several mains → ambiguous (never arbitrary).
@@ -563,10 +594,15 @@ mod tests {
             file_path: Some("/repo/src/Only.java".into()),
         }];
         match select_main_class(one, "/elsewhere/Main.java") {
-            MainClassSelection::Resolved(picked) => assert_eq!(picked.main_class, "com.example.Only"),
+            MainClassSelection::Resolved(picked) => {
+                assert_eq!(picked.main_class, "com.example.Only")
+            }
             other => panic!("expected sole-candidate resolve, got {other:?}"),
         }
-        assert_eq!(select_main_class(vec![], "/x.java"), MainClassSelection::None);
+        assert_eq!(
+            select_main_class(vec![], "/x.java"),
+            MainClassSelection::None
+        );
     }
 
     #[test]
@@ -694,7 +730,10 @@ mod tests {
             "serverCommandId": "jdtls-custom",
         }))
         .unwrap();
-        assert_eq!(scope.identity.preferred_command_id.as_deref(), Some("jdtls-custom"));
+        assert_eq!(
+            scope.identity.preferred_command_id.as_deref(),
+            Some("jdtls-custom")
+        );
 
         // A custom command object is parsed through so a bespoke jdtls launch
         // resolves the same session key the editor uses.
@@ -703,7 +742,10 @@ mod tests {
             "customServerCommand": { "command": "/opt/jdtls/bin/jdtls", "args": ["--stdio"] },
         }))
         .unwrap();
-        let custom = scope.identity.custom_command.expect("custom command parsed");
+        let custom = scope
+            .identity
+            .custom_command
+            .expect("custom command parsed");
         assert_eq!(custom.command, "/opt/jdtls/bin/jdtls");
         assert_eq!(custom.args, vec!["--stdio"]);
 

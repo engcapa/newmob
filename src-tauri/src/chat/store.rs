@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection, Result as SqlResult};
+use rusqlite::{Connection, Result as SqlResult, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

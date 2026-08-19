@@ -247,7 +247,7 @@ pub fn process_image_name(pid: u32) -> Option<String> {
     use winapi::shared::minwindef::{DWORD, FALSE};
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
     use winapi::um::tlhelp32::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
 
@@ -333,7 +333,7 @@ pub fn pids_by_image_name(image: &str) -> Vec<u32> {
     use winapi::shared::minwindef::{DWORD, FALSE};
     use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
     use winapi::um::tlhelp32::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
     };
 

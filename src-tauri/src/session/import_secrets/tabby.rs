@@ -24,13 +24,13 @@
 // We do not enable Tabby's "encrypt config" mode — only the secrets — so
 // `config` is ignored.
 
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 use serde_yml::Value as YamlValue;
 use zeroize::Zeroizing;
 
-use super::crypto::{aes_256_cbc_decrypt_pkcs7, pbkdf2_sha512, SecretCryptoError};
+use super::crypto::{SecretCryptoError, aes_256_cbc_decrypt_pkcs7, pbkdf2_sha512};
 
 const TABBY_PBKDF2_ITERATIONS: u32 = 100_000;
 const TABBY_KEY_LEN: usize = 32;

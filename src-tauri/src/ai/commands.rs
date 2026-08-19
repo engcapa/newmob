@@ -1,6 +1,6 @@
-use crate::ai::config::{default_ai_config_path, AiConfig, LlmProviderConfig};
+use crate::ai::config::{AiConfig, LlmProviderConfig, default_ai_config_path};
 use crate::ai::shell_prompt::SHELL_COMMAND_SYSTEM_PROMPT;
-use crate::ai::shell_safety::{check_blacklist, RiskLevel};
+use crate::ai::shell_safety::{RiskLevel, check_blacklist};
 use crate::ai::tools_shell::GeneratedCommand;
 use crate::llm::anthropic::AnthropicProvider;
 use crate::llm::openai_compat::OpenAiCompatProvider;

@@ -34,7 +34,7 @@ describe("useWorkspaceActionsController", () => {
     expect(runMock).toHaveBeenCalled();
   });
 
-  it("dispatches matching keyboard shortcuts", () => {
+  it("dispatches matching keyboard shortcuts", async () => {
     const runMock = vi.fn();
     const commands: WorkspaceCommand[] = [
       {
@@ -63,8 +63,8 @@ describe("useWorkspaceActionsController", () => {
       stopPropagation: vi.fn(),
     };
 
-    act(() => {
-      const dispatched = result.current.dispatchKeydown(event);
+    await act(async () => {
+      const dispatched = await result.current.dispatchKeydown(event);
       expect(dispatched?.id).toBe("workspace.save");
     });
 

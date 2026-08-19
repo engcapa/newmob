@@ -6,6 +6,7 @@ mod chat;
 mod config;
 mod dap;
 mod database;
+mod dependency_index;
 mod filebrowser;
 mod git;
 mod hbase;
@@ -14,8 +15,9 @@ mod java_bundles;
 mod java_debug_adapter;
 mod java_test;
 mod lanchat;
-mod lsp;
 pub mod llm;
+mod local_history;
+mod lsp;
 mod mail;
 mod migrate;
 pub mod models;
@@ -25,12 +27,12 @@ mod notes;
 mod objectstorage;
 pub mod perf;
 mod proxy;
-pub mod sockscap;
 mod rdp;
+mod sdk;
 mod serial;
 mod servers;
 mod session;
-mod sdk;
+pub mod sockscap;
 mod state;
 mod tab;
 pub mod terminal;
@@ -45,7 +47,6 @@ mod workspace;
 mod workspace_execution;
 mod workspace_fs;
 mod workspace_search;
-mod local_history;
 mod wsl;
 
 use state::AppState;
@@ -506,6 +507,9 @@ pub fn run() {
             local_history::history_list,
             local_history::history_read,
             local_history::history_prune,
+            dependency_index::dependency_index_status,
+            dependency_index::dependency_index_search,
+            dependency_index::dependency_index_versions,
             workspace_search::workspace_search_start,
             workspace_search::workspace_search_cancel,
             lsp::lsp_list_presets,

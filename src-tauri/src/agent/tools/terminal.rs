@@ -61,8 +61,7 @@ impl Tool for ReadTerminalTailTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "read_terminal_tail",
-            description:
-                "读取当前活跃终端最近 N 行输出。仅用户在 'AI 解释报错' 流程中显式触发时可用。",
+            description: "读取当前活跃终端最近 N 行输出。仅用户在 'AI 解释报错' 流程中显式触发时可用。",
             params: "session_id: string, lines?: u32 (default 50), user_invoked: bool",
         }
     }

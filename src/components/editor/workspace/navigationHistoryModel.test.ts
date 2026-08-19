@@ -5,6 +5,7 @@ import {
   createWorkspaceLocationController,
   canonicalizePath,
   isPathContainedInRoot,
+  NavigationHistoryFacade,
 } from "./navigationHistoryModel";
 
 describe("navigationHistoryModel", () => {
@@ -343,5 +344,32 @@ describe("navigationHistoryModel", () => {
     const matches = tracker.searchLocations("components/editor");
     expect(matches).toHaveLength(1);
     expect(matches[0].title).toBe("RecentLocationsDialog.tsx");
+  });
+
+  it("synchronizes location deletion and relocation across facade (N2.5)", () => {
+    const wsController = createWorkspaceLocationController("ws-facade", tracker);
+    const facade = new NavigationHistoryFacade(wsController, tracker);
+
+    wsController.recordUserEdit({
+      fileKey: "key-1",
+      filePath: "/src/App.tsx",
+      title: "App.tsx",
+      line: 25,
+      character: 4,
+      lineText: "const a = 1;",
+      contextSnippet: "const a = 1;",
+      sourceOwnership: "workspace",
+    });
+
+    expect(wsController.getLocations()).toHaveLength(1);
+
+    facade.remove({
+      fileKey: "key-1",
+      canonicalPath: "/src/App.tsx",
+      line: 25,
+      character: 4,
+    });
+
+    expect(wsController.getLocations()).toHaveLength(0);
   });
 });

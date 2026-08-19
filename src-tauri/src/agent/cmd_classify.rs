@@ -28,15 +28,79 @@ pub enum CommandClass {
 /// `uniq` are handled by `special_case` instead (read-only only without their
 /// write flags).
 const READ_ONLY_CMDS: &[&str] = &[
-    "ls", "cat", "head", "tail", "wc", "stat", "file", "du", "df", "free",
-    "uptime", "uname", "hostname", "whoami", "id", "groups", "pwd", "echo",
-    "printf", "date", "cal", "printenv", "which", "type", "tree", "basename",
-    "dirname", "realpath", "readlink", "tr", "column", "tac", "nl", "od",
-    "hexdump", "xxd", "strings", "grep", "egrep", "fgrep", "rg", "ag", "ack",
-    "ps", "pstree", "lsof", "ss", "netstat", "ping", "dig", "nslookup", "host",
-    "getent", "lscpu", "lsblk", "lsusb", "lspci", "lsmod", "sensors", "vmstat",
-    "iostat", "mpstat", "last", "w", "who", "cmp", "diff", "md5sum", "sha1sum",
-    "sha256sum", "cksum", "jq", "cut",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "stat",
+    "file",
+    "du",
+    "df",
+    "free",
+    "uptime",
+    "uname",
+    "hostname",
+    "whoami",
+    "id",
+    "groups",
+    "pwd",
+    "echo",
+    "printf",
+    "date",
+    "cal",
+    "printenv",
+    "which",
+    "type",
+    "tree",
+    "basename",
+    "dirname",
+    "realpath",
+    "readlink",
+    "tr",
+    "column",
+    "tac",
+    "nl",
+    "od",
+    "hexdump",
+    "xxd",
+    "strings",
+    "grep",
+    "egrep",
+    "fgrep",
+    "rg",
+    "ag",
+    "ack",
+    "ps",
+    "pstree",
+    "lsof",
+    "ss",
+    "netstat",
+    "ping",
+    "dig",
+    "nslookup",
+    "host",
+    "getent",
+    "lscpu",
+    "lsblk",
+    "lsusb",
+    "lspci",
+    "lsmod",
+    "sensors",
+    "vmstat",
+    "iostat",
+    "mpstat",
+    "last",
+    "w",
+    "who",
+    "cmp",
+    "diff",
+    "md5sum",
+    "sha1sum",
+    "sha256sum",
+    "cksum",
+    "jq",
+    "cut",
 ];
 
 /// `(command, read-only subcommands)` for tools whose first argument decides
@@ -45,31 +109,60 @@ const SUBCOMMAND_READ: &[(&str, &[&str])] = &[
     (
         "git",
         &[
-            "status", "log", "diff", "show", "blame", "rev-parse", "rev-list",
-            "ls-files", "ls-remote", "shortlog", "describe", "reflog", "grep",
-            "cat-file", "for-each-ref", "merge-base", "symbolic-ref", "name-rev",
-            "whatchanged", "version",
+            "status",
+            "log",
+            "diff",
+            "show",
+            "blame",
+            "rev-parse",
+            "rev-list",
+            "ls-files",
+            "ls-remote",
+            "shortlog",
+            "describe",
+            "reflog",
+            "grep",
+            "cat-file",
+            "for-each-ref",
+            "merge-base",
+            "symbolic-ref",
+            "name-rev",
+            "whatchanged",
+            "version",
         ],
     ),
     (
         "docker",
         &[
-            "ps", "images", "logs", "inspect", "port", "top", "stats",
-            "version", "info", "history", "events",
+            "ps", "images", "logs", "inspect", "port", "top", "stats", "version", "info",
+            "history", "events",
         ],
     ),
     (
         "kubectl",
         &[
-            "get", "describe", "logs", "top", "explain", "api-resources",
-            "api-versions", "version",
+            "get",
+            "describe",
+            "logs",
+            "top",
+            "explain",
+            "api-resources",
+            "api-versions",
+            "version",
         ],
     ),
     (
         "systemctl",
         &[
-            "status", "list-units", "list-unit-files", "is-active",
-            "is-enabled", "is-failed", "show", "cat", "get-default",
+            "status",
+            "list-units",
+            "list-unit-files",
+            "is-active",
+            "is-enabled",
+            "is-failed",
+            "show",
+            "cat",
+            "get-default",
             "list-dependencies",
         ],
     ),
@@ -80,8 +173,16 @@ const SUBCOMMAND_READ: &[(&str, &[&str])] = &[
 /// read-only verdict is downgraded to `Mutating` when any operand looks like
 /// one of these (exact basename, or `.env*` / `*.pem` / `*.key`).
 const SECRET_NAME_EXACT: &[&str] = &[
-    "shadow", "credentials", ".pgpass", ".npmrc", ".htpasswd", "id_rsa",
-    "id_dsa", "id_ecdsa", "id_ed25519", ".netrc",
+    "shadow",
+    "credentials",
+    ".pgpass",
+    ".npmrc",
+    ".htpasswd",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    ".netrc",
 ];
 
 /// Classify a full command line. Returns `ReadOnly` only when every
@@ -223,10 +324,9 @@ fn segment_class(seg: &[Tok]) -> SegResult {
             Tok::Op(op) => {
                 // A bare number right before a redirect is an fd specifier
                 // (`2>`, `1>`), not a command operand — drop it.
-                if words
-                    .last()
-                    .map_or(false, |w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()))
-                {
+                if words.last().map_or(false, |w| {
+                    !w.is_empty() && w.chars().all(|c| c.is_ascii_digit())
+                }) {
                     words.pop();
                 }
                 let target = match seg.get(i + 1) {
@@ -319,30 +419,53 @@ fn classify_command(cmd: &str, args: &[&str]) -> CommandClass {
                 a.starts_with("--in-place")
                     || (a.starts_with('-') && !a.starts_with("--") && a.contains('i'))
             });
-            return if writes { CommandClass::Mutating } else { CommandClass::ReadOnly };
+            return if writes {
+                CommandClass::Mutating
+            } else {
+                CommandClass::ReadOnly
+            };
         }
         // `find` mutates only with these actions.
         "find" => {
             let writes = args.iter().any(|a| {
                 matches!(
                     *a,
-                    "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fprint"
-                        | "-fprint0" | "-fprintf" | "-fls"
+                    "-delete"
+                        | "-exec"
+                        | "-execdir"
+                        | "-ok"
+                        | "-okdir"
+                        | "-fprint"
+                        | "-fprint0"
+                        | "-fprintf"
+                        | "-fls"
                 )
             });
-            return if writes { CommandClass::Mutating } else { CommandClass::ReadOnly };
+            return if writes {
+                CommandClass::Mutating
+            } else {
+                CommandClass::ReadOnly
+            };
         }
         // `sort -o FILE` / `--output` writes a file.
         "sort" => {
             let writes = args
                 .iter()
                 .any(|a| *a == "-o" || a.starts_with("-o") || a.starts_with("--output"));
-            return if writes { CommandClass::Mutating } else { CommandClass::ReadOnly };
+            return if writes {
+                CommandClass::Mutating
+            } else {
+                CommandClass::ReadOnly
+            };
         }
         // `uniq [input [output]]` — a 2nd file operand is an output file.
         "uniq" => {
             let operands = args.iter().filter(|a| !a.starts_with('-')).count();
-            return if operands >= 2 { CommandClass::Mutating } else { CommandClass::ReadOnly };
+            return if operands >= 2 {
+                CommandClass::Mutating
+            } else {
+                CommandClass::ReadOnly
+            };
         }
         _ => {}
     }

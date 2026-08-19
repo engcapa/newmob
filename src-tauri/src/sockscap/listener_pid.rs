@@ -279,7 +279,8 @@ mod win {
                 let rows = table.table.as_ptr();
                 for i in 0..table.dw_num_entries as usize {
                     let row = &*rows.add(i);
-                    if row.dw_state == MIB_TCP_STATE_LISTEN && v6_addr_is_local(&row.uc_local_addr) {
+                    if row.dw_state == MIB_TCP_STATE_LISTEN && v6_addr_is_local(&row.uc_local_addr)
+                    {
                         super::push_unique(
                             &mut out,
                             port_from_dword(row.dw_local_port),
@@ -368,7 +369,7 @@ fn parse_lsof_fields(content: &str) -> Vec<(u16, u32)> {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::{parse_proc_net_tcp, push_unique, LoopbackListener};
+    use super::{LoopbackListener, parse_proc_net_tcp, push_unique};
     use std::collections::HashMap;
 
     /// LISTEN sockets on loopback/wildcard with their owning pid, resolved by
@@ -434,7 +435,7 @@ mod linux {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use super::{parse_lsof_fields, push_unique, LoopbackListener};
+    use super::{LoopbackListener, parse_lsof_fields, push_unique};
 
     /// LISTEN sockets with owning pid via `lsof`. macOS has no `/proc`; `lsof` is
     /// part of the base system. We restrict to TCP LISTEN and field output.

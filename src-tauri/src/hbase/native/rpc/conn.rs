@@ -8,21 +8,21 @@
 //! `oneshot` per call.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use bytes::BytesMut;
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::super::auth::AuthMethod;
 use super::super::proto::pb;
 use super::codec::{
-    self, connection_preamble, encode_connection_header, encode_request, make_connection_header,
-    try_decode_response, CodecError, ResponseFrame,
+    self, CodecError, ResponseFrame, connection_preamble, encode_connection_header, encode_request,
+    make_connection_header, try_decode_response,
 };
 
 /// An error from an RPC call.
@@ -111,8 +111,14 @@ impl RpcConnection {
         effective_user: &str,
         connect_timeout: Duration,
     ) -> Result<Self, RpcError> {
-        Self::connect_with_auth(addr, service, effective_user, &AuthMethod::Simple, connect_timeout)
-            .await
+        Self::connect_with_auth(
+            addr,
+            service,
+            effective_user,
+            &AuthMethod::Simple,
+            connect_timeout,
+        )
+        .await
     }
 
     /// Establish a connection to `addr` (`host:port`), perform the preamble +
@@ -155,9 +161,18 @@ impl RpcConnection {
         // the actual hostname of the server being connected to.
         match auth {
             AuthMethod::Simple => {}
-            AuthMethod::Kerberos { service_principal, client_principal } => {
+            AuthMethod::Kerberos {
+                service_principal,
+                client_principal,
+            } => {
                 let resolved_spn = resolve_host_placeholder(service_principal, addr);
-                run_sasl(&mut read_half, &mut write_half, &resolved_spn, client_principal.as_deref()).await?;
+                run_sasl(
+                    &mut read_half,
+                    &mut write_half,
+                    &resolved_spn,
+                    client_principal.as_deref(),
+                )
+                .await?;
             }
         }
 
@@ -208,20 +223,16 @@ impl RpcConnection {
                         timeout: None,
                         attribute: Vec::new(),
                     };
-                    let frame = encode_request(
-                        &req_header,
-                        param.as_deref(),
-                        cell_block.as_deref(),
-                    );
+                    let frame =
+                        encode_request(&req_header, param.as_deref(), cell_block.as_deref());
 
                     in_flight.lock().await.insert(call_id, reply);
 
                     if let Err(e) = write_half.write_all(&frame).await {
                         // Send failed: fail this call and stop the writer.
                         if let Some(reply) = in_flight.lock().await.remove(&call_id) {
-                            let _ = reply.send(Err(RpcError::Transport(format!(
-                                "write to {addr_w}: {e}"
-                            ))));
+                            let _ = reply
+                                .send(Err(RpcError::Transport(format!("write to {addr_w}: {e}"))));
                         }
                         break;
                     }
@@ -305,10 +316,7 @@ impl RpcConnection {
             cell_block,
             reply: reply_tx,
         };
-        self.tx
-            .send(out)
-            .await
-            .map_err(|_| RpcError::Closed)?;
+        self.tx.send(out).await.map_err(|_| RpcError::Closed)?;
         reply_rx.await.map_err(|_| RpcError::Closed)?
     }
 
@@ -323,8 +331,7 @@ impl RpcConnection {
         let resp = self
             .call(method, Some(req.encode_to_vec()), cell_block)
             .await?;
-        let decoded = T::decode(resp.param.clone())
-            .map_err(|e| RpcError::Decode(e.to_string()))?;
+        let decoded = T::decode(resp.param.clone()).map_err(|e| RpcError::Decode(e.to_string()))?;
         Ok((decoded, resp.cell_block))
     }
 }
@@ -373,9 +380,14 @@ async fn run_sasl(
     service_principal: &str,
     client_principal: Option<&str>,
 ) -> Result<(), RpcError> {
-    let ok = super::super::auth::kerberos::sasl_connect(read, write, service_principal, client_principal)
-        .await
-        .map_err(RpcError::Transport)?;
+    let ok = super::super::auth::kerberos::sasl_connect(
+        read,
+        write,
+        service_principal,
+        client_principal,
+    )
+    .await
+    .map_err(RpcError::Transport)?;
     if !ok {
         return Err(RpcError::Transport(
             "server requested fallback to simple auth, but Kerberos was configured".into(),
@@ -408,10 +420,7 @@ fn resolve_host_placeholder(spn: &str, addr: &str) -> String {
         return spn.to_string();
     }
     // addr is "host:port"; extract just the host part.
-    let host = addr
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(addr);
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
     spn.replace("_HOST", host)
 }
 
@@ -422,7 +431,10 @@ mod tests {
     #[test]
     fn resolve_host_replaces_placeholder() {
         assert_eq!(
-            resolve_host_placeholder("hbase/_HOST@EMR.367593.COM", "emr-header-1.cluster-367593:16000"),
+            resolve_host_placeholder(
+                "hbase/_HOST@EMR.367593.COM",
+                "emr-header-1.cluster-367593:16000"
+            ),
             "hbase/emr-header-1.cluster-367593@EMR.367593.COM"
         );
     }

@@ -12,9 +12,9 @@
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use rusqlite::{params, Connection, OptionalExtension};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -271,7 +271,12 @@ impl LanChatStore {
         conn.execute(
             "INSERT INTO profile (id, name, avatar, avatar_hash, signature, status, updated_at)
              VALUES (?1, ?2, NULL, NULL, '', ?3, ?4)",
-            params![id, default_display_name(), PresenceStatus::Online.as_txt(), now],
+            params![
+                id,
+                default_display_name(),
+                PresenceStatus::Online.as_txt(),
+                now
+            ],
         )?;
         Ok(id)
     }
@@ -281,11 +286,9 @@ impl LanChatStore {
     /// whether to reuse the stored identity or generate a fresh one.
     pub fn get_profile_id_and_cert(&self) -> rusqlite::Result<Option<(String, Option<Vec<u8>>)>> {
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT id, cert_der FROM profile LIMIT 1",
-            [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
-        )
+        conn.query_row("SELECT id, cert_der FROM profile LIMIT 1", [], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?))
+        })
         .optional()
     }
 
@@ -378,7 +381,10 @@ impl LanChatStore {
     /// "re-trust" command after a peer legitimately reinstalled.
     pub fn clear_pin(&self, node_id: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM pinned_keys WHERE node_id = ?1", params![node_id])?;
+        conn.execute(
+            "DELETE FROM pinned_keys WHERE node_id = ?1",
+            params![node_id],
+        )?;
         Ok(())
     }
 
@@ -858,8 +864,7 @@ impl LanChatStore {
         let conn = self.conn.lock().unwrap();
         let mut deleted = 0usize;
         if s.retention_days > 0 {
-            let cutoff =
-                chrono::Utc::now().timestamp_millis() - s.retention_days * 86_400_000;
+            let cutoff = chrono::Utc::now().timestamp_millis() - s.retention_days * 86_400_000;
             deleted += conn.execute(
                 "DELETE FROM messages WHERE created_at < ?1",
                 params![cutoff],
@@ -1030,7 +1035,12 @@ mod tests {
         store.ensure_identity().unwrap();
 
         let p1 = store
-            .update_profile("赵敏", Some(b"img-one".to_vec()), "设计即沟通", PresenceStatus::Busy)
+            .update_profile(
+                "赵敏",
+                Some(b"img-one".to_vec()),
+                "设计即沟通",
+                PresenceStatus::Busy,
+            )
             .unwrap();
         assert_eq!(p1.name, "赵敏");
         assert_eq!(p1.signature, "设计即沟通");
@@ -1040,7 +1050,12 @@ mod tests {
 
         // Different avatar content -> different fingerprint.
         let p2 = store
-            .update_profile("赵敏", Some(b"img-two".to_vec()), "设计即沟通", PresenceStatus::Busy)
+            .update_profile(
+                "赵敏",
+                Some(b"img-two".to_vec()),
+                "设计即沟通",
+                PresenceStatus::Busy,
+            )
             .unwrap();
         assert_ne!(h1, p2.avatar_hash.unwrap(), "fingerprint tracks content");
 
@@ -1049,7 +1064,10 @@ mod tests {
             .update_profile("林开发", None, "摸鱼中", PresenceStatus::Away)
             .unwrap();
         assert_eq!(p3.name, "林开发");
-        assert!(p3.avatar_base64.is_some(), "avatar retained when None passed");
+        assert!(
+            p3.avatar_base64.is_some(),
+            "avatar retained when None passed"
+        );
     }
 
     #[test]
@@ -1076,10 +1094,20 @@ mod tests {
     fn insert_message_is_idempotent_on_id() {
         let store = LanChatStore::open_in_memory().unwrap();
         let conv = direct_conv_id("peer-x");
-        store.ensure_conversation(&conv, "direct", "peer-x").unwrap();
-        assert!(store.insert_message(&msg("m1", &conv, "peer-x", 100, "delivered")).unwrap());
+        store
+            .ensure_conversation(&conv, "direct", "peer-x")
+            .unwrap();
+        assert!(
+            store
+                .insert_message(&msg("m1", &conv, "peer-x", 100, "delivered"))
+                .unwrap()
+        );
         // duplicate delivery -> not inserted again
-        assert!(!store.insert_message(&msg("m1", &conv, "peer-x", 100, "delivered")).unwrap());
+        assert!(
+            !store
+                .insert_message(&msg("m1", &conv, "peer-x", 100, "delivered"))
+                .unwrap()
+        );
         assert_eq!(store.list_messages(&conv, 50).unwrap().len(), 1);
     }
 
@@ -1087,7 +1115,9 @@ mod tests {
     fn messages_listed_oldest_first_within_limit() {
         let store = LanChatStore::open_in_memory().unwrap();
         let conv = direct_conv_id("peer-y");
-        store.ensure_conversation(&conv, "direct", "peer-y").unwrap();
+        store
+            .ensure_conversation(&conv, "direct", "peer-y")
+            .unwrap();
         for (i, ts) in [(1, 300), (2, 100), (3, 200)] {
             store
                 .insert_message(&msg(&format!("m{i}"), &conv, "me", ts, "sent"))
@@ -1104,7 +1134,9 @@ mod tests {
     fn conversation_unread_increments_and_resets() {
         let store = LanChatStore::open_in_memory().unwrap();
         let conv = direct_conv_id("peer-z");
-        store.ensure_conversation(&conv, "direct", "peer-z").unwrap();
+        store
+            .ensure_conversation(&conv, "direct", "peer-z")
+            .unwrap();
         store.touch_conversation(&conv, 500, 1).unwrap();
         store.touch_conversation(&conv, 600, 1).unwrap();
         let c = store.get_conversation(&conv).unwrap().unwrap();
@@ -1118,8 +1150,12 @@ mod tests {
     fn message_state_transitions() {
         let store = LanChatStore::open_in_memory().unwrap();
         let conv = direct_conv_id("peer-s");
-        store.ensure_conversation(&conv, "direct", "peer-s").unwrap();
-        store.insert_message(&msg("ms", &conv, "me", 1, "sending")).unwrap();
+        store
+            .ensure_conversation(&conv, "direct", "peer-s")
+            .unwrap();
+        store
+            .insert_message(&msg("ms", &conv, "me", 1, "sending"))
+            .unwrap();
         store.set_message_state("ms", "delivered").unwrap();
         assert_eq!(store.get_message("ms").unwrap().unwrap().state, "delivered");
     }
@@ -1129,14 +1165,22 @@ mod tests {
         let store = LanChatStore::open_in_memory().unwrap();
         store.set_message_key(&[7u8; 32]);
         let conv = direct_conv_id("peer-e");
-        store.ensure_conversation(&conv, "direct", "peer-e").unwrap();
+        store
+            .ensure_conversation(&conv, "direct", "peer-e")
+            .unwrap();
         let mut m = msg("me1", &conv, "me", 10, "sent");
         m.body = "secret text".into();
         store.insert_message(&m).unwrap();
 
         // Round-trips through the decrypting read path.
-        assert_eq!(store.get_message("me1").unwrap().unwrap().body, "secret text");
-        assert_eq!(store.list_messages(&conv, 10).unwrap()[0].body, "secret text");
+        assert_eq!(
+            store.get_message("me1").unwrap().unwrap().body,
+            "secret text"
+        );
+        assert_eq!(
+            store.list_messages(&conv, 10).unwrap()[0].body,
+            "secret text"
+        );
 
         // At rest the plaintext column is empty and the ciphertext is present.
         let conn = store.conn.lock().unwrap();
@@ -1156,7 +1200,9 @@ mod tests {
     fn migrate_message_encryption_encrypts_legacy_rows() {
         let store = LanChatStore::open_in_memory().unwrap();
         let conv = direct_conv_id("peer-m");
-        store.ensure_conversation(&conv, "direct", "peer-m").unwrap();
+        store
+            .ensure_conversation(&conv, "direct", "peer-m")
+            .unwrap();
         // Insert without a key -> stored plaintext (enc_ver 0).
         let mut m = msg("ml1", &conv, "me", 5, "delivered");
         m.body = "legacy plaintext".into();
@@ -1164,12 +1210,17 @@ mod tests {
 
         store.set_message_key(&[3u8; 32]);
         assert_eq!(store.migrate_message_encryption().unwrap(), 1);
-        assert_eq!(store.get_message("ml1").unwrap().unwrap().body, "legacy plaintext");
+        assert_eq!(
+            store.get_message("ml1").unwrap().unwrap().body,
+            "legacy plaintext"
+        );
         let conn = store.conn.lock().unwrap();
         let (plain, ev): (String, i64) = conn
-            .query_row("SELECT body, enc_ver FROM messages WHERE id='ml1'", [], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+            .query_row(
+                "SELECT body, enc_ver FROM messages WHERE id='ml1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(plain, "");
         assert_eq!(ev, 1);
@@ -1190,10 +1241,14 @@ mod tests {
     fn retention_trims_by_age_and_count() {
         let store = LanChatStore::open_in_memory().unwrap();
         let conv = direct_conv_id("peer-r");
-        store.ensure_conversation(&conv, "direct", "peer-r").unwrap();
+        store
+            .ensure_conversation(&conv, "direct", "peer-r")
+            .unwrap();
         let now = chrono::Utc::now().timestamp_millis();
         let old = now - 100 * 86_400_000; // 100 days ago
-        store.insert_message(&msg("old1", &conv, "me", old, "delivered")).unwrap();
+        store
+            .insert_message(&msg("old1", &conv, "me", old, "delivered"))
+            .unwrap();
         for i in 0..5 {
             store
                 .insert_message(&msg(&format!("r{i}"), &conv, "me", now - i, "delivered"))
@@ -1210,7 +1265,10 @@ mod tests {
         assert!(deleted >= 1, "old + overflow rows deleted");
         let remaining = store.list_messages(&conv, 100).unwrap();
         assert!(remaining.len() <= 3, "trimmed to max_per_conv");
-        assert!(!remaining.iter().any(|m| m.id == "old1"), "aged-out row gone");
+        assert!(
+            !remaining.iter().any(|m| m.id == "old1"),
+            "aged-out row gone"
+        );
     }
 
     #[test]
@@ -1220,8 +1278,12 @@ mod tests {
         let c2 = direct_conv_id("b");
         store.ensure_conversation(&c1, "direct", "a").unwrap();
         store.ensure_conversation(&c2, "direct", "b").unwrap();
-        store.insert_message(&msg("x1", &c1, "me", 1, "sent")).unwrap();
-        store.insert_message(&msg("y1", &c2, "me", 1, "sent")).unwrap();
+        store
+            .insert_message(&msg("x1", &c1, "me", 1, "sent"))
+            .unwrap();
+        store
+            .insert_message(&msg("y1", &c2, "me", 1, "sent"))
+            .unwrap();
         store.clear_conversation(&c1).unwrap();
         assert_eq!(store.list_messages(&c1, 10).unwrap().len(), 0);
         assert_eq!(store.list_messages(&c2, 10).unwrap().len(), 1);

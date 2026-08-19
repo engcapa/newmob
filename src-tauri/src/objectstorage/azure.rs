@@ -55,7 +55,9 @@ pub fn azure_base_url(
     let raw = match endpoint.filter(|e| !e.is_empty()) {
         Some(e) => e.to_string(),
         None => {
-            let suffix = endpoint_suffix.filter(|s| !s.is_empty()).unwrap_or("core.windows.net");
+            let suffix = endpoint_suffix
+                .filter(|s| !s.is_empty())
+                .unwrap_or("core.windows.net");
             format!("https://{account}.blob.{suffix}")
         }
     };
@@ -82,13 +84,21 @@ pub fn parse_connection_string(cs: &str) -> Result<(String, Url, AzureAuth), Str
             "sharedaccesssignature" => sas = Some(v.trim().trim_start_matches('?').to_string()),
             "blobendpoint" => blob_endpoint = Some(v.trim().to_string()),
             "endpointsuffix" => suffix = Some(v.trim().to_string()),
-            "defaultendpointsprotocol" => protocol = if v.trim().eq_ignore_ascii_case("http") { "http" } else { "https" },
+            "defaultendpointsprotocol" => {
+                protocol = if v.trim().eq_ignore_ascii_case("http") {
+                    "http"
+                } else {
+                    "https"
+                }
+            }
             _ => {}
         }
     }
     let account = account.ok_or("connection string missing AccountName")?;
     let base = match blob_endpoint {
-        Some(e) => Url::parse(e.trim_end_matches('/')).map_err(|e| format!("invalid BlobEndpoint: {e}"))?,
+        Some(e) => {
+            Url::parse(e.trim_end_matches('/')).map_err(|e| format!("invalid BlobEndpoint: {e}"))?
+        }
         None => {
             let suffix = suffix.unwrap_or_else(|| "core.windows.net".into());
             Url::parse(&format!("{protocol}://{account}.blob.{suffix}"))
@@ -160,7 +170,12 @@ pub async fn acquire_bearer_token(pasted: Option<&str>) -> Result<String, String
 
 impl AzureClient {
     pub fn new(http: Client, account: String, base: Url, auth: AzureAuth) -> Self {
-        Self { http, account, base, auth }
+        Self {
+            http,
+            account,
+            base,
+            auth,
+        }
     }
 
     fn base_str(&self) -> &str {
@@ -221,10 +236,7 @@ impl AzureClient {
         // VERB, Content-Encoding, Content-Language, Content-Length, Content-MD5,
         // Content-Type, Date, If-Modified-Since, If-Match, If-None-Match,
         // If-Unmodified-Since, Range — Date is empty because x-ms-date is used.
-        let head = [
-            verb, "", "", &cl, "", content_type, "", "", "", "", "", "",
-        ]
-        .join("\n");
+        let head = [verb, "", "", &cl, "", content_type, "", "", "", "", "", ""].join("\n");
         let string_to_sign = format!("{head}\n{canon_headers}{canon_resource}");
 
         let mut mac = HmacSha256::new_from_slice(key).expect("hmac accepts any key length");
@@ -339,7 +351,9 @@ impl AzureClient {
     /// List containers (the bucket-level analog).
     pub async fn list_buckets(&self) -> Result<Vec<BucketEntry>, String> {
         let url = self.build("", &[("comp", "list")]);
-        let resp = self.send(reqwest::Method::GET, url, None, &[], None).await?;
+        let resp = self
+            .send(reqwest::Method::GET, url, None, &[], None)
+            .await?;
         let body = resp.text().await.map_err(net_err)?;
         let parsed: EnumerationResults =
             quick_xml::de::from_str(&body).map_err(|e| format!("parse containers: {e}"))?;
@@ -381,7 +395,9 @@ impl AzureClient {
             query.push(("marker", m));
         }
         let url = self.build(container, &query);
-        let resp = self.send(reqwest::Method::GET, url, None, &[], None).await?;
+        let resp = self
+            .send(reqwest::Method::GET, url, None, &[], None)
+            .await?;
         let body = resp.text().await.map_err(net_err)?;
         let parsed: EnumerationResults =
             quick_xml::de::from_str(&body).map_err(|e| format!("parse blobs: {e}"))?;
@@ -418,19 +434,26 @@ impl AzureClient {
             });
         }
         let next = parsed.next_marker.filter(|m| !m.is_empty());
-        Ok(ObjectListPage { entries, next_token: next })
+        Ok(ObjectListPage {
+            entries,
+            next_token: next,
+        })
     }
 
     pub async fn get_object_bytes(&self, container: &str, key: &str) -> Result<Vec<u8>, String> {
         let url = self.build(&format!("{container}/{key}"), &[]);
-        let resp = self.send(reqwest::Method::GET, url, None, &[], None).await?;
+        let resp = self
+            .send(reqwest::Method::GET, url, None, &[], None)
+            .await?;
         Ok(resp.bytes().await.map_err(net_err)?.to_vec())
     }
 
     /// HEAD a blob and build its metadata from the response headers.
     pub async fn head_object(&self, container: &str, key: &str) -> Result<ObjectMetadata, String> {
         let url = self.build(&format!("{container}/{key}"), &[]);
-        let resp = self.send(reqwest::Method::HEAD, url, None, &[], None).await?;
+        let resp = self
+            .send(reqwest::Method::HEAD, url, None, &[], None)
+            .await?;
         let h = resp.headers();
         let get = |name: &str| {
             h.get(name)
@@ -447,7 +470,9 @@ impl AzureClient {
         }
         Ok(ObjectMetadata {
             key: key.to_string(),
-            size: get("content-length").and_then(|s| s.parse().ok()).unwrap_or(0),
+            size: get("content-length")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0),
             content_type: get("content-type"),
             etag: get("etag").map(|e| e.trim_matches('"').to_string()),
             last_modified: get("last-modified").as_deref().and_then(parse_http_date),
@@ -479,7 +504,8 @@ impl AzureClient {
 
     pub async fn delete_object(&self, container: &str, key: &str) -> Result<(), String> {
         let url = self.build(&format!("{container}/{key}"), &[]);
-        self.send(reqwest::Method::DELETE, url, None, &[], None).await?;
+        self.send(reqwest::Method::DELETE, url, None, &[], None)
+            .await?;
         Ok(())
     }
 
@@ -574,7 +600,9 @@ impl AzureClient {
                 query.push(("marker", m));
             }
             let url = self.build(container, &query);
-            let resp = self.send(reqwest::Method::GET, url, None, &[], None).await?;
+            let resp = self
+                .send(reqwest::Method::GET, url, None, &[], None)
+                .await?;
             let body = resp.text().await.map_err(net_err)?;
             let parsed: EnumerationResults =
                 quick_xml::de::from_str(&body).map_err(|e| format!("parse blobs: {e}"))?;
@@ -596,13 +624,15 @@ impl AzureClient {
 
     pub async fn create_bucket(&self, container: &str) -> Result<(), String> {
         let url = self.build(container, &[("restype", "container")]);
-        self.send(reqwest::Method::PUT, url, None, &[], None).await?;
+        self.send(reqwest::Method::PUT, url, None, &[], None)
+            .await?;
         Ok(())
     }
 
     pub async fn delete_bucket(&self, container: &str) -> Result<(), String> {
         let url = self.build(container, &[("restype", "container")]);
-        self.send(reqwest::Method::DELETE, url, None, &[], None).await?;
+        self.send(reqwest::Method::DELETE, url, None, &[], None)
+            .await?;
         Ok(())
     }
 
@@ -648,8 +678,8 @@ impl AzureClient {
                     "",
                 ];
                 let string_to_sign = fields.join("\n");
-                let mut mac = HmacSha256::new_from_slice(account_key)
-                    .expect("hmac accepts any key length");
+                let mut mac =
+                    HmacSha256::new_from_slice(account_key).expect("hmac accepts any key length");
                 mac.update(string_to_sign.as_bytes());
                 let sig =
                     base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
@@ -683,7 +713,9 @@ impl AzureClient {
         app: &AppHandle<R>,
     ) -> Result<(), String> {
         let url = self.build(&format!("{container}/{key}"), &[]);
-        let resp = self.send(reqwest::Method::GET, url, None, &[], None).await?;
+        let resp = self
+            .send(reqwest::Method::GET, url, None, &[], None)
+            .await?;
         let total = resp.content_length().unwrap_or(0);
         super::transfer::stream_to_file(resp, total, dest, transfer_id, handle, app).await
     }
@@ -702,7 +734,9 @@ impl AzureClient {
         handle: &Arc<TransferHandle>,
         app: &AppHandle<R>,
     ) -> Result<(), String> {
-        use super::transfer::{emit_paused, emit_progress, read_full, MULTIPART_THRESHOLD, PART_SIZE};
+        use super::transfer::{
+            MULTIPART_THRESHOLD, PART_SIZE, emit_paused, emit_progress, read_full,
+        };
         let total = tokio::fs::metadata(local)
             .await
             .map_err(|e| format!("stat {}: {e}", local.display()))?
@@ -758,16 +792,21 @@ impl AzureClient {
                 &format!("{container}/{key}"),
                 &[("comp", "block"), ("blockid", id.as_str())],
             );
-            self.send(reqwest::Method::PUT, url, Some(buf[..n].to_vec()), &[], None)
-                .await?;
+            self.send(
+                reqwest::Method::PUT,
+                url,
+                Some(buf[..n].to_vec()),
+                &[],
+                None,
+            )
+            .await?;
             block_ids.push(id);
             uploaded += n as u64;
             emit_progress(app, transfer_id, uploaded, total, started);
             index += 1;
         }
 
-        let mut xml =
-            String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<BlockList>\n");
+        let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<BlockList>\n");
         for id in &block_ids {
             xml.push_str("  <Latest>");
             xml.push_str(id);
@@ -904,55 +943,106 @@ mod it {
         let client = AzureClient::new(reqwest::Client::new(), account, base, auth);
 
         let container = format!("taomniit{}", uuid::Uuid::new_v4().simple());
-        client.create_bucket(&container).await.expect("create container");
+        client
+            .create_bucket(&container)
+            .await
+            .expect("create container");
 
         let buckets = client.list_buckets().await.expect("list containers");
-        assert!(buckets.iter().any(|b| b.name == container), "new container listed");
+        assert!(
+            buckets.iter().any(|b| b.name == container),
+            "new container listed"
+        );
 
         client
             .put_object_bytes(&container, "dir/hello.txt", b"hi there".to_vec())
             .await
             .expect("put blob");
-        client.create_folder(&container, "emptydir").await.expect("create folder");
+        client
+            .create_folder(&container, "emptydir")
+            .await
+            .expect("create folder");
 
-        let root = client.list_objects(&container, "", None, 1000).await.expect("list root");
+        let root = client
+            .list_objects(&container, "", None, 1000)
+            .await
+            .expect("list root");
         assert!(
             root.entries.iter().any(|e| e.is_dir && e.name == "dir"),
             "dir/ surfaces as a folder"
         );
 
-        let inside = client.list_objects(&container, "dir/", None, 1000).await.expect("list dir/");
-        let file = inside.entries.iter().find(|e| !e.is_dir).expect("file under dir/");
+        let inside = client
+            .list_objects(&container, "dir/", None, 1000)
+            .await
+            .expect("list dir/");
+        let file = inside
+            .entries
+            .iter()
+            .find(|e| !e.is_dir)
+            .expect("file under dir/");
         assert_eq!(file.name, "hello.txt");
         assert_eq!(file.size, 8);
 
-        let bytes = client.get_object_bytes(&container, "dir/hello.txt").await.expect("get");
+        let bytes = client
+            .get_object_bytes(&container, "dir/hello.txt")
+            .await
+            .expect("get");
         assert_eq!(bytes, b"hi there");
 
         // --- P3 management ops ---
-        let meta = client.head_object(&container, "dir/hello.txt").await.expect("head");
+        let meta = client
+            .head_object(&container, "dir/hello.txt")
+            .await
+            .expect("head");
         assert_eq!(meta.size, 8);
 
         client
             .copy_object(&container, "dir/hello.txt", &container, "dir2/copy.txt")
             .await
             .expect("copy blob");
-        let copied = client.get_object_bytes(&container, "dir2/copy.txt").await.expect("get copy");
+        let copied = client
+            .get_object_bytes(&container, "dir2/copy.txt")
+            .await
+            .expect("get copy");
         assert_eq!(copied, b"hi there");
 
         // Service SAS should be fetchable with no auth header.
-        let url = client.presign_get(&container, "dir/hello.txt", 300).expect("presign");
-        let presigned = reqwest::get(&url).await.expect("fetch sas").bytes().await.expect("bytes");
+        let url = client
+            .presign_get(&container, "dir/hello.txt", 300)
+            .expect("presign");
+        let presigned = reqwest::get(&url)
+            .await
+            .expect("fetch sas")
+            .bytes()
+            .await
+            .expect("bytes");
         assert_eq!(&presigned[..], b"hi there");
 
-        client.delete_prefix(&container, "dir/").await.expect("delete_prefix");
-        let after = client.list_objects(&container, "", None, 1000).await.expect("relist");
-        assert!(!after.entries.iter().any(|e| e.name == "dir"), "dir/ gone after delete_prefix");
+        client
+            .delete_prefix(&container, "dir/")
+            .await
+            .expect("delete_prefix");
+        let after = client
+            .list_objects(&container, "", None, 1000)
+            .await
+            .expect("relist");
+        assert!(
+            !after.entries.iter().any(|e| e.name == "dir"),
+            "dir/ gone after delete_prefix"
+        );
 
-        client.delete_object(&container, "dir2/copy.txt").await.expect("del copy");
-        client.delete_object(&container, "emptydir/").await.expect("del marker");
-        client.delete_bucket(&container).await.expect("del container");
+        client
+            .delete_object(&container, "dir2/copy.txt")
+            .await
+            .expect("del copy");
+        client
+            .delete_object(&container, "emptydir/")
+            .await
+            .expect("del marker");
+        client
+            .delete_bucket(&container)
+            .await
+            .expect("del container");
     }
 }
-
-
