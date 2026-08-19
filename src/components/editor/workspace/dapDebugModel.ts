@@ -283,6 +283,38 @@ export interface DebugWatchItem {
   lastError?: string | null;
 }
 
+export function migrateWatchItems(raw: unknown): DebugWatchItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item, index) => {
+    if (typeof item === "string") {
+      return {
+        id: `watch-${index}-${Date.now().toString(36)}`,
+        expression: item,
+        enabled: true,
+        order: index,
+        lastError: null,
+      };
+    }
+    if (item && typeof item === "object") {
+      const rec = item as Record<string, unknown>;
+      return {
+        id: typeof rec.id === "string" && rec.id ? rec.id : `watch-${index}-${Date.now().toString(36)}`,
+        expression: typeof rec.expression === "string" ? rec.expression : "",
+        enabled: typeof rec.enabled === "boolean" ? rec.enabled : true,
+        order: typeof rec.order === "number" ? rec.order : index,
+        lastError: typeof rec.lastError === "string" ? rec.lastError : null,
+      };
+    }
+    return {
+      id: `watch-${index}-${Date.now().toString(36)}`,
+      expression: String(item),
+      enabled: true,
+      order: index,
+      lastError: null,
+    };
+  }).filter((item) => item.expression.trim().length > 0);
+}
+
 export interface DebugSessionState {
   sessionId: string;
   status: DebugStatus;

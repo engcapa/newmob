@@ -68,6 +68,16 @@ export function RecentLocationsDialog({
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSelectedIndex((idx) => (idx - 1 + locations.length) % Math.max(1, locations.length));
+    } else if (e.key === "Delete" || (e.key === "Backspace" && (e.metaKey || e.ctrlKey))) {
+      e.preventDefault();
+      const loc = locations[selectedIndex];
+      if (loc) {
+        if (locationController) {
+          locationController.removeLocation(loc.id);
+        } else {
+          navigationHistoryTracker.removeLocation(loc.id);
+        }
+      }
     } else if (e.key === "Enter") {
       e.preventDefault();
       const loc = locations[selectedIndex];

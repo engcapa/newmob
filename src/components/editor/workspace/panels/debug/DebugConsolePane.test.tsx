@@ -132,4 +132,34 @@ describe("DebugConsolePane", () => {
     // logConsole should NOT have been called with late result
     expect(logConsole).not.toHaveBeenCalledWith("result", "late_result\n");
   });
+
+  it("linkifies source locations in console output and navigates on click (D11)", () => {
+    const onOpenLocation = vi.fn();
+    const debug = makeConsoleSession({
+      state: {
+        ...initialDebugState("s1"),
+        output: [
+          {
+            category: "stdout",
+            text: "Exception at com.example.App.main(App.java:42)\n",
+            seq: 1,
+          },
+        ],
+      },
+    });
+
+    render(
+      <DebugConsolePane
+        debug={debug}
+        visible={true}
+        stopped={false}
+        onOpenLocation={onOpenLocation}
+      />,
+    );
+
+    const link = screen.getByRole("button", { name: "App.java:42" });
+    expect(link).toBeInTheDocument();
+    fireEvent.click(link);
+    expect(onOpenLocation).toHaveBeenCalledWith("App.java", 41, 0);
+  });
 });

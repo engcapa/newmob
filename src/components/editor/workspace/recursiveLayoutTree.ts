@@ -263,6 +263,13 @@ export function validateLayoutTree(root: unknown): { valid: boolean; errors: str
         errors.push(`${path}: ratios length must match children length`);
         return false;
       }
+      for (let i = 0; i < rec.ratios.length; i++) {
+        const r = (rec.ratios as number[])[i];
+        if (typeof r !== "number" || !Number.isFinite(r) || r <= 0) {
+          errors.push(`${path}: ratio[${i}] must be a positive finite number, got ${r}`);
+          return false;
+        }
+      }
       const sum = (rec.ratios as number[]).reduce((a, b) => a + (typeof b === "number" && Number.isFinite(b) ? b : 0), 0);
       if (Math.abs(sum - 1.0) > 0.05) {
         errors.push(`${path}: ratios must sum close to 1.0 (actual: ${sum})`);
@@ -533,12 +540,30 @@ export function atomicCloseLeaf(
   }
 
   const remainingLeaves = getAllLeafNodes(newTree);
+  const targetSiblingId = remainingLeaves[0]?.id ?? Object.keys(groups).find((id) => id !== leafId) ?? "primary";
+  const closedGroup = groups[leafId];
   const nextGroups = { ...groups };
   delete nextGroups[leafId];
 
+  // Seamlessly migrate closed leaf's tabs to the surviving sibling group
+  if (closedGroup && closedGroup.openOrder.length > 0 && nextGroups[targetSiblingId]) {
+    const targetGroup = nextGroups[targetSiblingId];
+    const combinedOrder = [...targetGroup.openOrder];
+    for (const key of closedGroup.openOrder) {
+      if (!combinedOrder.includes(key)) {
+        combinedOrder.push(key);
+      }
+    }
+    nextGroups[targetSiblingId] = {
+      ...targetGroup,
+      openOrder: combinedOrder,
+      activeKey: targetGroup.activeKey ?? closedGroup.activeKey ?? combinedOrder[0] ?? null,
+    };
+  }
+
   const nextActiveId =
     activeGroupId === leafId
-      ? remainingLeaves[0]?.id ?? Object.keys(nextGroups)[0] ?? "primary"
+      ? targetSiblingId
       : activeGroupId;
 
   return {
@@ -785,5 +810,42 @@ export function migrateLayoutV1toV2(legacyLayout: unknown): LayoutNode {
     id: "leaf-primary",
     openFileKeys,
     activeKey,
+  };
+}
+
+/**
+ * Reconcile and remap file keys inside a LayoutNode tree when files are renamed or removed.
+ */
+export function remapLayoutTreeKeys(
+  node: LayoutNode,
+  keyChanges: Record<string, string | null>,
+  validKeys: Set<string>,
+  editorGroups: Record<string, LayoutEditorGroupState | undefined>,
+): LayoutNode {
+  if (node.type === "leaf") {
+    const group = editorGroups[node.id];
+    let nextKey = node.activeKey;
+    if (nextKey && keyChanges[nextKey] !== undefined) {
+      nextKey = keyChanges[nextKey];
+    }
+    if (nextKey && !validKeys.has(nextKey)) {
+      nextKey = group?.activeKey ?? null;
+    }
+    const nextOpenFileKeys = node.openFileKeys
+      .map((k) => (keyChanges[k] !== undefined ? keyChanges[k] : k))
+      .filter((k): k is string => typeof k === "string" && validKeys.has(k));
+
+    return {
+      ...node,
+      openFileKeys: nextOpenFileKeys,
+      activeKey: nextKey,
+    };
+  }
+
+  return {
+    ...node,
+    children: node.children.map((child) =>
+      remapLayoutTreeKeys(child, keyChanges, validKeys, editorGroups),
+    ),
   };
 }

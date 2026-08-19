@@ -132,6 +132,7 @@ export class WorkspaceActionHost {
       for (const cmd of commands) {
         if (this.commands.get(cmd.id) === cmd) {
           this.commands.delete(cmd.id);
+          this.actions.delete(cmd.id);
         }
       }
       this.generation += 1;

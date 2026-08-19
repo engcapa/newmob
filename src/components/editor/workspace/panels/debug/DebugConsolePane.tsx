@@ -12,11 +12,52 @@ export interface DebugConsolePaneProps {
    * visible again or the console appears stuck at the top.
    */
   visible?: boolean;
+  onOpenLocation?: (filePath: string, line: number, column?: number) => void;
 }
 
 const MAX_REPL_HISTORY = 100;
 
-export function DebugConsolePane({ debug, stopped, visible = true }: DebugConsolePaneProps) {
+function renderConsoleLine(
+  text: string,
+  onOpenLocation?: (filePath: string, line: number, column?: number) => void,
+) {
+  if (!onOpenLocation) return text;
+  const regex = /([a-zA-Z0-9_\-./\\]+\.[a-zA-Z0-9]+):(\d+)(?::(\d+))?/g;
+  const parts: (string | React.ReactNode)[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(text.slice(lastIndex, match.index));
+    }
+    const fullMatch = match[0];
+    const path = match[1];
+    const line = parseInt(match[2], 10) - 1;
+    const col = match[3] ? parseInt(match[3], 10) - 1 : 0;
+
+    parts.push(
+      <button
+        key={`${match.index}-${fullMatch}`}
+        type="button"
+        className="underline underline-offset-2 hover:text-[var(--taomni-accent)] text-sky-500 dark:text-sky-400 cursor-pointer inline font-mono"
+        onClick={() => onOpenLocation(path, line, col)}
+        title={`Jump to ${path}:${line + 1}`}
+      >
+        {fullMatch}
+      </button>,
+    );
+    lastIndex = match.index + fullMatch.length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : text;
+}
+
+export function DebugConsolePane({ debug, stopped, visible = true, onOpenLocation }: DebugConsolePaneProps) {
   const { state } = debug;
   const [consoleInput, setConsoleInput] = useState("");
   const [followTail, setFollowTail] = useState(true);
@@ -76,13 +117,13 @@ export function DebugConsolePane({ debug, stopped, visible = true }: DebugConsol
 
     const curGen = debug.consoleGeneration;
     const curSessionId = debug.state?.sessionId;
-    const curStopEpoch = debug.state?.stoppedThreadId;
+    const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
     debug.logConsole("repl", `> ${expr}\n`);
 
     void debug.evaluate(expr, "repl").then((result) => {
       if (debug.consoleGeneration !== curGen) return;
       if (curSessionId && debug.state?.sessionId !== curSessionId) return;
-      if (curStopEpoch != null && debug.state?.stoppedThreadId !== curStopEpoch) return;
+      if (curStopEpoch != null && (debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) !== curStopEpoch) return;
       if (result.value) {
         debug.logConsole("result", `${result.value}\n`);
       }
@@ -194,7 +235,7 @@ export function DebugConsolePane({ debug, stopped, visible = true }: DebugConsol
         ) : (
           state.output.map((line, i) => (
             <div key={line.seq ?? i} className={`whitespace-pre-wrap ${consoleLineClass(line.category)}`}>
-              {line.text}
+              {renderConsoleLine(line.text, onOpenLocation)}
             </div>
           ))
         )}

@@ -436,7 +436,11 @@ export function useWorkspaceFileActions({
       });
       const oldAbs = absoluteWorkspacePath(root, rootTarget.path);
       const newAbs = absoluteWorkspacePath(root, nextPath);
-      navigationHistoryTracker.relocateFile(oldAbs, newAbs, workspaceId);
+      if (isDirectory) {
+        navigationHistoryTracker.relocateDirectory(oldAbs, newAbs, workspaceId);
+      } else {
+        navigationHistoryTracker.relocateFile(oldAbs, newAbs, workspaceId);
+      }
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));
       await loadDir(root.id, parentPath(nextPath));
@@ -548,7 +552,11 @@ export function useWorkspaceFileActions({
         ignoreIfNotExists: false,
         annotationId: null,
       });
-      navigationHistoryTracker.removeFileLocations(deletedAbs, workspaceId);
+      if (isDirectory) {
+        navigationHistoryTracker.removeDirectorySubtree(deletedAbs, workspaceId);
+      } else {
+        navigationHistoryTracker.removeFileLocations(deletedAbs, workspaceId);
+      }
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));
       onStatus([

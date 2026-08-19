@@ -399,7 +399,7 @@ export class WorkspaceStyleController {
       encoding?: string,
       bom?: boolean,
       eol?: OpenFileEol | "lf" | "crlf" | "cr",
-    ) => Promise<void>,
+    ) => Promise<{ hash?: string } | void>,
     options?: {
       formatOnSave?: boolean;
       formatFn?: (text: string) => Promise<string | null>;
@@ -419,15 +419,21 @@ export class WorkspaceStyleController {
       text: transaction.text,
     });
 
-    // Run normalization pipeline
+    // Run normalization pipeline with resolved style values as priority
+    const resolvedEol = codeStyle.endOfLine
+      ? (codeStyle.endOfLine.toLowerCase() as "lf" | "crlf" | "cr")
+      : transaction.policy.eol
+        ? (transaction.policy.eol.toLowerCase() as "lf" | "crlf" | "cr")
+        : undefined;
+
+    const resolvedCharset = codeStyle.charset ?? transaction.policy.encoding ?? "UTF-8";
+
     const normResult: SaveNormalizationResult = await runSaveNormalizationPipeline({
       text: transaction.text,
       codeStyle: {
         ...codeStyle,
-        endOfLine: transaction.policy.eol
-          ? (transaction.policy.eol.toLowerCase() as "lf" | "crlf" | "cr")
-          : codeStyle.endOfLine,
-        charset: transaction.policy.encoding ?? codeStyle.charset,
+        endOfLine: resolvedEol,
+        charset: resolvedCharset,
       },
       formatOnSave: options?.formatOnSave,
       formatFn: options?.formatFn,
@@ -473,11 +479,11 @@ export class WorkspaceStyleController {
     }
 
     try {
-      const targetEol = transaction.policy.eol ?? normResult.resolvedEol ?? "lf";
-      const targetEncoding = transaction.policy.encoding ?? normResult.resolvedCharset ?? "UTF-8";
-      const targetBom = transaction.policy.bom ?? normResult.resolvedBom ?? false;
+      const targetEol = normResult.resolvedEol ?? resolvedEol ?? "lf";
+      const targetEncoding = normResult.resolvedCharset ?? resolvedCharset ?? "UTF-8";
+      const targetBom = normResult.resolvedBom ?? transaction.policy.bom ?? false;
 
-      await writeTextDisk(
+      const writeResult = await writeTextDisk(
         transaction.filePath,
         normResult.text,
         transaction.expectedDiskHash,
@@ -489,7 +495,7 @@ export class WorkspaceStyleController {
       return {
         kind: "saved",
         transactionId: transaction.id,
-        hash: `hash-${Date.now()}-${normResult.text.length}`,
+        hash: (writeResult as { hash?: string } | undefined)?.hash ?? `hash-${Date.now()}-${normResult.text.length}`,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -1353,6 +1353,8 @@ export function CodeWorkspaceTab({
     }),
   );
 
+  const rootsFingerprint = roots.map((r) => `${r.id}:${r.path}`).join("|");
+
   useEffect(() => {
     const provider = {
       readFile: async (absolutePath: string) => {
@@ -1385,7 +1387,7 @@ export function CodeWorkspaceTab({
     return () => {
       workspaceStyleControllerRef.current.clearCache();
     };
-  }, [rootsRef, workspaceInstanceId]);
+  }, [rootsFingerprint, workspaceInstanceId]);
 
   const workspaceLocationControllerRef = useRef<WorkspaceLocationController>(
     createWorkspaceLocationController(workspaceInstanceId),
@@ -3313,6 +3315,7 @@ export function CodeWorkspaceTab({
       }
       semanticIndex.invalidate("document-saved", [savedPath ?? file.path]);
       await saveLspDocument({ ...file, text: textToSave }, textToSave);
+      return saved;
     } catch (err) {
       const message = errorMessage(err);
       setOpenFiles((current) => ({
@@ -3425,11 +3428,12 @@ export function CodeWorkspaceTab({
       const outcome = await workspaceStyleControllerRef.current.executeSaveTransaction(
         tx,
         async (_filePath, text, _expectedHash, encoding, bom, eol) => {
-          await saveOpenBufferText(key, text, {
+          const savedFile = await saveOpenBufferText(key, text, {
             eol: (eol?.toUpperCase() as OpenFileEol) ?? file.eol,
             encoding,
             bom,
           });
+          return { hash: savedFile?.hash };
         },
         {
           formatOnSave: intelligencePreferences.formatOnSave,
@@ -5635,7 +5639,9 @@ export function CodeWorkspaceTab({
       },
       applyToOpenBuffer: (key, nextText) => updateFileText(key, nextText),
       // §5.2.9 open-clean: apply then save so the buffer is not left dirty.
-      saveOpenBuffer: (key, nextText) => saveOpenBufferText(key, nextText),
+      saveOpenBuffer: async (key, nextText) => {
+        await saveOpenBufferText(key, nextText);
+      },
       readDisk: async (absolutePath) => {
         // Prefer workspace APIs via root-relative path when possible.
         for (const root of rootsRef.current) {
@@ -10717,6 +10723,7 @@ export function CodeWorkspaceTab({
                 onAttach={activeFileJavaRoot && debugRuntimeAvailable ? attachRemoteDebug : null}
                 onOpenFrame={openDebugFrame}
                 onOpenBreakpoint={(path, line) => openDebugFrame({ path, line })}
+                onOpenLocation={(path, line) => openDebugFrame({ path, line })}
                 editingBreakpoint={editingBreakpoint}
                 onEditingBreakpointChange={setEditingBreakpoint}
                 runtimeAvailable={debugRuntimeAvailable}

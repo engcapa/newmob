@@ -282,4 +282,66 @@ describe("navigationHistoryModel", () => {
     expect(locs).toHaveLength(1);
     expect(locs[0].workspaceId).toBe("ws-custom");
   });
+
+  it("supports removing individual locations by ID (N2.3)", () => {
+    const loc = tracker.recordLocation({
+      workspaceId: "ws-1",
+      fileIdentity: "f1",
+      filePath: "/src/A.java",
+      title: "A.java",
+      line: 1,
+      character: 0,
+      lineText: "class A {}",
+      contextSnippet: "class A {}",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    expect(tracker.getRecentLocations()).toHaveLength(1);
+    tracker.removeLocation(loc.id);
+    expect(tracker.getRecentLocations()).toHaveLength(0);
+  });
+
+  it("relocates and removes directory subtrees (N2.3)", () => {
+    tracker.recordLocation({
+      workspaceId: "ws-1",
+      fileIdentity: "/project/src/components/A.tsx",
+      filePath: "/project/src/components/A.tsx",
+      title: "A.tsx",
+      line: 10,
+      character: 0,
+      lineText: "export const A = () => {};",
+      contextSnippet: "export const A = () => {};",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    // Relocate directory
+    tracker.relocateDirectory("/project/src/components", "/project/src/ui", "ws-1");
+    const loc = tracker.getRecentLocations()[0];
+    expect(loc.filePath).toBe("/project/src/ui/A.tsx");
+
+    // Remove directory subtree
+    tracker.removeDirectorySubtree("/project/src/ui", "ws-1");
+    expect(tracker.getRecentLocations()).toHaveLength(0);
+  });
+
+  it("supports breadcrumbs search query matching across path segments (N8)", () => {
+    tracker.recordLocation({
+      workspaceId: "ws-1",
+      fileIdentity: "f1",
+      filePath: "/project/src/components/editor/RecentLocationsDialog.tsx",
+      title: "RecentLocationsDialog.tsx",
+      line: 42,
+      character: 5,
+      lineText: "const loc = locations[selectedIndex];",
+      contextSnippet: "const loc = locations[selectedIndex];",
+      isEditLocation: false,
+      sourceOwnership: "workspace",
+    });
+
+    const matches = tracker.searchLocations("components/editor");
+    expect(matches).toHaveLength(1);
+    expect(matches[0].title).toBe("RecentLocationsDialog.tsx");
+  });
 });

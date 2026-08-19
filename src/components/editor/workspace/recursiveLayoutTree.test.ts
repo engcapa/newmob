@@ -14,6 +14,7 @@ import {
   atomicSetLeafActiveTab,
   atomicCloseTabInLeaf,
   validateLayoutTree,
+  remapLayoutTreeKeys,
   type LayoutNode,
 } from "./recursiveLayoutTree";
 
@@ -260,5 +261,75 @@ describe("recursiveLayoutTree", () => {
       ratios: [0.2, 0.2], // sum = 0.4 != 1.0
     };
     expect(validateLayoutTree(invalidTree).valid).toBe(false);
+
+    // Reject non-positive ratios (<= 0)
+    const negativeRatioTree: LayoutNode = {
+      type: "split",
+      id: "s1",
+      orientation: "horizontal",
+      children: [
+        { type: "leaf", id: "l1", openFileKeys: [], activeKey: null },
+        { type: "leaf", id: "l2", openFileKeys: [], activeKey: null },
+      ],
+      ratios: [-0.5, 1.5],
+    };
+    expect(validateLayoutTree(negativeRatioTree).valid).toBe(false);
+  });
+
+  it("atomicCloseLeaf migrates open tabs to sibling leaf to preserve view (N6.3)", () => {
+    const splitTree: LayoutNode = {
+      type: "split",
+      id: "split-1",
+      orientation: "horizontal",
+      ratios: [0.5, 0.5],
+      children: [
+        { type: "leaf", id: "primary", openFileKeys: ["a.ts"], activeKey: "a.ts" },
+        { type: "leaf", id: "secondary", openFileKeys: ["b.ts", "c.ts"], activeKey: "b.ts" },
+      ],
+    };
+    const splitGroups = {
+      primary: { id: "primary", openOrder: ["a.ts"], activeKey: "a.ts", previewKey: null, pinnedKeys: [] },
+      secondary: { id: "secondary", openOrder: ["b.ts", "c.ts"], activeKey: "b.ts", previewKey: null, pinnedKeys: [] },
+    };
+
+    const res = atomicCloseLeaf(splitTree, splitGroups, "secondary", "secondary");
+    expect(res.kind).toBe("changed");
+    if (res.kind === "changed") {
+      expect(res.groups.primary.openOrder).toEqual(["a.ts", "b.ts", "c.ts"]);
+    }
+  });
+
+  it("remapLayoutTreeKeys correctly remaps file keys and activeKey across tree leaves (N6.3)", () => {
+    const tree: LayoutNode = {
+      type: "split",
+      id: "split-root",
+      orientation: "horizontal",
+      ratios: [0.5, 0.5],
+      children: [
+        { type: "leaf", id: "primary", openFileKeys: ["oldA.ts", "keep.ts"], activeKey: "oldA.ts" },
+        { type: "leaf", id: "secondary", openFileKeys: ["deleted.ts"], activeKey: "deleted.ts" },
+      ],
+    };
+
+    const keyChanges = { "oldA.ts": "newA.ts" };
+    const validKeys = new Set(["newA.ts", "keep.ts"]);
+    const groups = {
+      primary: { id: "primary", openOrder: ["newA.ts", "keep.ts"], activeKey: "newA.ts", previewKey: null, pinnedKeys: [] },
+      secondary: { id: "secondary", openOrder: [], activeKey: null, previewKey: null, pinnedKeys: [] },
+    };
+
+    const remapped = remapLayoutTreeKeys(tree, keyChanges, validKeys, groups);
+    if (remapped.type === "split") {
+      const leaf0 = remapped.children[0];
+      const leaf1 = remapped.children[1];
+      if (leaf0.type === "leaf") {
+        expect(leaf0.openFileKeys).toEqual(["newA.ts", "keep.ts"]);
+        expect(leaf0.activeKey).toBe("newA.ts");
+      }
+      if (leaf1.type === "leaf") {
+        expect(leaf1.openFileKeys).toEqual([]);
+        expect(leaf1.activeKey).toBe(null);
+      }
+    }
   });
 });

@@ -142,12 +142,25 @@ export class NavigationHistoryTracker {
     const q = query.trim().toLowerCase();
     if (!q) return list;
 
+    const segments = q.split(/[\/\\]+/).filter(Boolean);
+
     return list.filter((loc) => {
-      if (loc.title.toLowerCase().includes(q)) return true;
-      if (loc.filePath.toLowerCase().includes(q)) return true;
-      if (loc.lineText.toLowerCase().includes(q)) return true;
-      if (loc.symbolName?.toLowerCase().includes(q)) return true;
-      if (loc.contextSnippet.toLowerCase().includes(q)) return true;
+      const lowerPath = loc.filePath.toLowerCase();
+      const lowerTitle = loc.title.toLowerCase();
+      const lowerLine = loc.lineText.toLowerCase();
+      const lowerSnippet = loc.contextSnippet.toLowerCase();
+      const lowerSymbol = loc.symbolName?.toLowerCase() ?? "";
+
+      if (lowerTitle.includes(q)) return true;
+      if (lowerPath.includes(q)) return true;
+      if (lowerLine.includes(q)) return true;
+      if (lowerSymbol.includes(q)) return true;
+      if (lowerSnippet.includes(q)) return true;
+
+      if (segments.length > 1 && segments.every((seg) => lowerPath.includes(seg))) {
+        return true;
+      }
+
       return false;
     });
   }
@@ -163,6 +176,25 @@ export class NavigationHistoryTracker {
         loc.filePath = normalizedNew;
         loc.fileIdentity = loc.fileIdentity.replace(normalizedOld, normalizedNew);
         loc.title = newTitle;
+        loc.state = "relocated";
+        changed = true;
+      }
+    }
+    if (changed) this.notify();
+  }
+
+  relocateDirectory(oldDirPath: string, newDirPath: string, workspaceId?: string): void {
+    let changed = false;
+    const normOld = canonicalizePath(oldDirPath).replace(/\/+$/, "") + "/";
+    const normNew = canonicalizePath(newDirPath).replace(/\/+$/, "") + "/";
+
+    for (const loc of [...this.locations, ...this.editLocations]) {
+      if ((!workspaceId || loc.workspaceId === workspaceId) && (loc.filePath + "/").startsWith(normOld)) {
+        const sub = loc.filePath.slice(normOld.length - 1);
+        const nextPath = normNew.slice(0, -1) + sub;
+        loc.filePath = nextPath;
+        loc.fileIdentity = loc.fileIdentity.replace(normOld.slice(0, -1), normNew.slice(0, -1));
+        loc.title = nextPath.split("/").pop() ?? loc.title;
         loc.state = "relocated";
         changed = true;
       }
@@ -209,6 +241,29 @@ export class NavigationHistoryTracker {
     }
   }
 
+  removeDirectorySubtree(dirPath: string, workspaceId?: string): void {
+    const normDir = canonicalizePath(dirPath).replace(/\/+$/, "") + "/";
+    const beforeCount = this.locations.length + this.editLocations.length;
+    this.locations = this.locations.filter(
+      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || !(loc.filePath + "/").startsWith(normDir),
+    );
+    this.editLocations = this.editLocations.filter(
+      (loc) => (workspaceId && loc.workspaceId !== workspaceId) || !(loc.filePath + "/").startsWith(normDir),
+    );
+    if (this.locations.length + this.editLocations.length !== beforeCount) {
+      this.notify();
+    }
+  }
+
+  removeLocation(locationId: string): void {
+    const beforeCount = this.locations.length + this.editLocations.length;
+    this.locations = this.locations.filter((loc) => loc.id !== locationId);
+    this.editLocations = this.editLocations.filter((loc) => loc.id !== locationId);
+    if (this.locations.length + this.editLocations.length !== beforeCount) {
+      this.notify();
+    }
+  }
+
   clearWorkspace(workspaceId: string): void {
     this.locations = this.locations.filter((loc) => loc.workspaceId !== workspaceId);
     this.editLocations = this.editLocations.filter((loc) => loc.workspaceId !== workspaceId);
@@ -230,9 +285,9 @@ export class WorkspaceLocationController {
   private readonly workspaceId: string;
   private readonly tracker: NavigationHistoryTracker;
 
-  constructor(workspaceId: string, tracker: NavigationHistoryTracker = navigationHistoryTracker) {
+  constructor(workspaceId: string, tracker?: NavigationHistoryTracker) {
     this.workspaceId = workspaceId;
-    this.tracker = tracker;
+    this.tracker = tracker ?? new NavigationHistoryTracker();
   }
 
   getWorkspaceId(): string {
@@ -292,6 +347,26 @@ export class WorkspaceLocationController {
       sourceOwnership: options.sourceOwnership,
       symbolName: options.symbolName,
     });
+  }
+
+  removeLocation(locationId: string): void {
+    this.tracker.removeLocation(locationId);
+  }
+
+  relocateFile(oldPath: string, newPath: string): void {
+    this.tracker.relocateFile(oldPath, newPath, this.workspaceId);
+  }
+
+  relocateDirectory(oldDirPath: string, newDirPath: string): void {
+    this.tracker.relocateDirectory(oldDirPath, newDirPath, this.workspaceId);
+  }
+
+  removeFileLocations(filePath: string): void {
+    this.tracker.removeFileLocations(filePath, this.workspaceId);
+  }
+
+  removeDirectorySubtree(dirPath: string): void {
+    this.tracker.removeDirectorySubtree(dirPath, this.workspaceId);
   }
 
   getLocations(changedOnly: boolean = false): NavigationLocation[] {

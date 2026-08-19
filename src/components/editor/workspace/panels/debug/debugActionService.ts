@@ -237,3 +237,82 @@ export const debugActionDescriptors: Record<DebugActionId, DebugActionDescriptor
 export function getDebugAction(id: DebugActionId): DebugActionDescriptor {
   return debugActionDescriptors[id];
 }
+
+export interface ActionResult {
+  kind: "applied" | "no-op" | "failed" | "cancelled";
+  requestId?: string;
+  reason?: string;
+  error?: unknown;
+}
+
+export interface DebugActionService {
+  execute(id: DebugActionId, customContext?: Partial<DebugActionContext>, signal?: AbortSignal): Promise<ActionResult>;
+  getState(id: DebugActionId, customContext?: Partial<DebugActionContext>): { supported: boolean; available: boolean; disabledReason?: string };
+  isBusy(id?: DebugActionId): boolean;
+  subscribe(listener: () => void): () => void;
+}
+
+export function createDebugActionService(getContext: () => DebugActionContext): DebugActionService {
+  const inFlight = new Set<string>();
+  const listeners = new Set<() => void>();
+
+  const notify = () => {
+    for (const l of listeners) l();
+  };
+
+  return {
+    async execute(id, customContext, signal) {
+      if (signal?.aborted) {
+        return { kind: "cancelled", reason: "Operation cancelled." };
+      }
+      const ctx: DebugActionContext = { ...getContext(), ...customContext };
+      const desc = debugActionDescriptors[id];
+      if (!desc) {
+        return { kind: "failed", reason: `Unknown debug action "${id}".` };
+      }
+      if (!desc.isSupported(ctx) || !desc.isAvailable(ctx)) {
+        return { kind: "no-op", reason: desc.disabledReason(ctx) };
+      }
+      if (inFlight.has(id)) {
+        return { kind: "no-op", reason: `Action "${id}" is already in progress.` };
+      }
+
+      const reqId = `dbg-${id}-${Date.now().toString(36)}`;
+      inFlight.add(id);
+      notify();
+
+      try {
+        await desc.execute(ctx, signal);
+        return { kind: "applied", requestId: reqId };
+      } catch (err) {
+        return { kind: "failed", requestId: reqId, error: err, reason: err instanceof Error ? err.message : String(err) };
+      } finally {
+        inFlight.delete(id);
+        notify();
+      }
+    },
+
+    getState(id, customContext) {
+      const ctx: DebugActionContext = { ...getContext(), ...customContext };
+      const desc = debugActionDescriptors[id];
+      if (!desc) {
+        return { supported: false, available: false, disabledReason: `Unknown debug action "${id}".` };
+      }
+      return {
+        supported: desc.isSupported(ctx),
+        available: desc.isAvailable(ctx) && !inFlight.has(id),
+        disabledReason: inFlight.has(id) ? "Operation in progress" : desc.disabledReason(ctx),
+      };
+    },
+
+    isBusy(id) {
+      return id ? inFlight.has(id) : inFlight.size > 0;
+    },
+
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+

@@ -73,6 +73,7 @@ export interface DebugPanelProps {
   /** Controlled sub tab override */
   activeSubTab?: DebugSubTabId;
   onSubTabChange?: (tab: DebugSubTabId) => void;
+  onOpenLocation?: (filePath: string, line: number, column?: number) => void;
 }
 
 export function DebugPanel({
@@ -90,11 +91,9 @@ export function DebugPanel({
   workspaceInstanceId,
   activeSubTab,
   onSubTabChange,
+  onOpenLocation,
 }: DebugPanelProps) {
   const { state } = debug;
-  const running = debug.sessions.length > 0
-    ? debug.sessions.some((session) => session.status !== "terminated")
-    : !!state && state.status !== "terminated";
   const activeRunning = !!state && state.status !== "terminated";
   const stopped = state?.status === "stopped";
 
@@ -108,13 +107,15 @@ export function DebugPanel({
   const currentTab = activeSubTab ?? (workspaceInstanceId ? (storeSubTab ?? "debugger") : localSubTab);
 
   const handleTabChange = (tab: DebugSubTabId) => {
-    onSubTabChange?.(tab);
     if (workspaceInstanceId) {
       patchInstance(workspaceInstanceId, { debugSubTab: tab });
     } else {
       setLocalSubTab(tab);
     }
+    onSubTabChange?.(tab);
   };
+
+  const idPrefix = workspaceInstanceId ? `${workspaceInstanceId}-` : "";
 
   // If a breakpoint editor is requested to open, switch to the Breakpoints tab
   useEffect(() => {
@@ -125,7 +126,6 @@ export function DebugPanel({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(800);
-  const [compactDebuggerTab, setCompactDebuggerTab] = useState<"frames" | "variables">("frames");
 
   useEffect(() => {
     if (typeof ResizeObserver === "undefined" || !containerRef.current) return;
@@ -141,16 +141,15 @@ export function DebugPanel({
   }, []);
 
   const isCompact = containerWidth < 640;
+  const [compactDebuggerTab, setCompactDebuggerTab] = useState<"frames" | "variables">("frames");
 
-  const frameId = stopped ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
+  const frameId = stopped && currentTab === "debugger" ? state?.selectedFrameId ?? state?.frames[0]?.id ?? null : null;
   const variablesHook = useDebugVariables(debug, frameId, stopped);
 
-  // Persisted frames/variables split ratio (read once; defaultLayout only
-  // applies at mount).
-  const horizontalLayout = useMemo(
-    () => readDebugSplitLayout(DEBUG_HORIZONTAL_LAYOUT_KEY, DEBUG_HORIZONTAL_PANEL_IDS),
-    [],
-  );
+  // Read persisted horizontal layout (split between frames & variables)
+  const horizontalLayout = useMemo(() => {
+    return readDebugSplitLayout(DEBUG_HORIZONTAL_LAYOUT_KEY, DEBUG_HORIZONTAL_PANEL_IDS);
+  }, []);
 
   const activeConfiguration = configurations.find((configuration) => (
     configuration.id === (activeConfigurationId ?? configurations[0]?.id)
@@ -203,11 +202,12 @@ export function DebugPanel({
   return (
     <div
       ref={containerRef}
-      data-testid="code-workspace-debug-panel"
+      data-testid="debug-panel"
       className="h-full min-h-0 flex flex-col text-[11px] bg-[var(--taomni-code-bg)]"
     >
-      {/* Sub-tab bar */}
+      {/* Primary Sub Tab Bar (Debugger, Console, Breakpoints, Memory) */}
       <DebugSubTabBar
+        instanceId={workspaceInstanceId}
         activeTab={currentTab}
         onTabChange={handleTabChange}
         badges={{
@@ -251,13 +251,13 @@ export function DebugPanel({
 
       {/* Debugger Sub-tab */}
       <div
-        id="debug-panel-debugger"
+        id={`${idPrefix}debug-panel-debugger`}
         role="tabpanel"
-        aria-labelledby="debug-subtab-debugger"
+        aria-labelledby={`${idPrefix}debug-subtab-debugger`}
         className={`flex-1 min-h-0 flex flex-col ${currentTab === "debugger" ? "" : "hidden"}`}
       >
         {/* Configuration top bar when not running */}
-        {!running && (
+        {!activeRunning && (
           <div className="h-8 shrink-0 flex items-center gap-1 border-b border-[var(--taomni-code-border)] px-2 bg-[var(--taomni-code-gutter-bg)]/30">
             <Bug className="h-4 w-4 text-[var(--taomni-text-muted)]" />
             <span className="font-medium">Debug</span>
@@ -274,7 +274,7 @@ export function DebugPanel({
                   <option
                     key={configuration.id}
                     value={configuration.id}
-                    data-configuration-available={configuration.available === false ? "false" : "true"}
+                    disabled={configuration.available === false}
                   >
                     {configuration.label} [{configurationSourceLabel(configuration.source)}]
                     {configurationAvailabilityLabel(configuration.available)}
@@ -363,7 +363,7 @@ export function DebugPanel({
               onLayoutChanged={(layout) => writeDebugSplitLayout(DEBUG_HORIZONTAL_LAYOUT_KEY, layout)}
             >
               {/* Left Column: Frames & Threads + Controls */}
-              <Panel id="debug-frames" defaultSize="45%" minSize="15%" maxSize="85%" className="min-h-0 min-w-0">
+              <Panel id="debug-frames" defaultSize={45} minSize={15} maxSize={85} className="min-h-0 min-w-0">
                 <DebugFramesPane
                   debug={debug}
                   activeRunning={activeRunning}
@@ -373,10 +373,12 @@ export function DebugPanel({
               </Panel>
 
               {/* Resizable Divider */}
-              <PanelResizeHandle className="w-[4px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)] active:bg-[var(--taomni-accent)] transition-colors cursor-col-resize shrink-0 relative after:absolute after:inset-y-0 after:-left-2 after:-right-2 after:z-20" />
+              <PanelResizeHandle
+                className="w-[4px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)] active:bg-[var(--taomni-accent)] transition-colors cursor-col-resize shrink-0 relative after:absolute after:inset-y-0 after:-left-2 after:-right-2 after:z-20"
+              />
 
               {/* Right Column: Variables & Watches */}
-              <Panel id="debug-variables" defaultSize="55%" minSize="15%" className="min-h-0 min-w-0">
+              <Panel id="debug-variables" defaultSize={55} minSize={15} className="min-h-0 min-w-0">
                 {renderVariablesPane()}
               </Panel>
             </PanelGroup>
@@ -386,19 +388,24 @@ export function DebugPanel({
 
       {/* Console Sub-tab */}
       <div
-        id="debug-panel-console"
+        id={`${idPrefix}debug-panel-console`}
         role="tabpanel"
-        aria-labelledby="debug-subtab-console"
+        aria-labelledby={`${idPrefix}debug-subtab-console`}
         className={`flex-1 min-h-0 flex flex-col ${currentTab === "console" ? "" : "hidden"}`}
       >
-        <DebugConsolePane debug={debug} stopped={stopped} visible={currentTab === "console"} />
+        <DebugConsolePane
+          debug={debug}
+          stopped={stopped}
+          visible={currentTab === "console"}
+          onOpenLocation={onOpenLocation}
+        />
       </div>
 
       {/* Breakpoints Sub-tab */}
       <div
-        id="debug-panel-breakpoints"
+        id={`${idPrefix}debug-panel-breakpoints`}
         role="tabpanel"
-        aria-labelledby="debug-subtab-breakpoints"
+        aria-labelledby={`${idPrefix}debug-subtab-breakpoints`}
         className={`flex-1 min-h-0 flex flex-col ${currentTab === "breakpoints" ? "" : "hidden"}`}
       >
         <DebugBreakpointsPane
@@ -413,9 +420,9 @@ export function DebugPanel({
 
       {/* Memory Sub-tab */}
       <div
-        id="debug-panel-memory"
+        id={`${idPrefix}debug-panel-memory`}
         role="tabpanel"
-        aria-labelledby="debug-subtab-memory"
+        aria-labelledby={`${idPrefix}debug-subtab-memory`}
         className={`flex-1 min-h-0 flex flex-col ${currentTab === "memory" ? "" : "hidden"}`}
       >
         <DebugMemoryPane debug={debug} />

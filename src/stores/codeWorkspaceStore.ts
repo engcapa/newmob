@@ -11,13 +11,14 @@ import type {
   TreeViewMode,
 } from "../components/editor/workspace/codeWorkspaceModel";
 import {
-  type LayoutNode,
-  atomicSplitLeaf,
   atomicCloseLeaf,
+  atomicCloseTabInLeaf,
   atomicMoveTab,
   atomicSetLeafActiveTab,
-  atomicCloseTabInLeaf,
+  atomicSplitLeaf,
+  remapLayoutTreeKeys,
   updateSplitNodeRatios,
+  type LayoutNode,
 } from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
 
@@ -631,6 +632,9 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         editorGroups.secondary = createEditorGroup("secondary");
       }
       const activeGroup = editorGroups[current.activeEditorGroupId] ?? editorGroups.primary;
+      const layoutTreeV2 = current.layoutTreeV2
+        ? remapLayoutTreeKeys(current.layoutTreeV2, replacement.keyChanges, validKeys, editorGroups)
+        : current.layoutTreeV2;
       return {
         byInstanceId: {
           ...state.byInstanceId,
@@ -639,6 +643,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
             openFiles: replacement.openFiles,
             lspFiles: replacement.lspFiles,
             editorGroups,
+            layoutTreeV2,
             openOrder: activeGroup.openOrder,
             activeKey: activeGroup.activeKey,
             markdownModes: remapMarkdownModes(current.markdownModes, replacement.keyChanges, validKeys),
