@@ -1,8 +1,8 @@
 # Debug 底部面板 IDEA 对齐重设计
 
-> 状态：**v1 布局已交付，v2 为 wired/partial，正确性收口待开发**。最新代码审计基线为 `3aacbecc`；该提交已公开 stopEpoch 并增加 ActionHost/atomic layout/style 等共享模型，但 Debug action、Console、Variables、layout 仍未完成真实 consumer 接线。session-scoped UI、workspace layout、hidden-pane request guard、完整 i18n、fake/真实 adapter 与三端证据仍未完成。
+> 状态：**v1 布局已交付，v2 为 wired/partial，正确性收口待开发**。最新代码审计基线为 `1b6f91cf`；该提交新增 `debugActionService.ts` descriptor 与部分 token 类型，但 Debug action、Console、Variables、layout 仍未完成真实 consumer 接线。session-scoped UI、workspace layout、hidden-pane request guard、完整 i18n、fake/真实 adapter 与三端证据仍未完成。
 > 日期：2026-08-19
-> 文档结构：§1–§12 保留原始布局方案；§13 是 v1 历史对账；§14–§18 保留历史设计合同；§15.11 是 `3aacbecc` 最新复核；§19 是当前下一轮权威待办。
+> 文档结构：§1–§12 保留原始布局方案；§13 是 v1 历史对账；§14–§19 保留历史设计合同；§15.12 是 `1b6f91cf` 最新复核（含 IDEA 2026.2 对照）；§20 是当前下一轮权威待办。
 > 当前范围：v1 只重组 `DebugPanel.tsx` 及子组件；v2 允许按 §15 扩展 `dapDebugModel.ts`、`useCodeDebugSession.ts`、Action Service 和 QA catalog，但不修改 Rust DAP kernel，除非单独任务明确列出协议缺口。
 
 ---
@@ -989,6 +989,22 @@ interface DebugLayoutPreferenceV2 {
 
 **复核结论。** `3aacbecc` 完成了 D8 的公开字段和结构化类型，但没有完成 D8 workflow；D6/D7/D9 仍必须按生产 consumer 重做接线。下一步先让 D8 token 成为 scopes/variables/evaluate/stack 的唯一发布条件，再由 D6 action service、D7 session console、D9 workspace layout 消费，D10 随包记录协议和平台证据。
 
+### 15.12 `1b6f91cf` 最新提交复核（2026-08-19，含 IDEA 2026.2 对照）
+
+本节只评价 `1b6f91cf` 的生产可达性；descriptor 文件、类型声明与组件 mock 只能证明 `model/component`。
+
+| 领域 | 已确认实现 | 仍未闭环（含证据） | 当前等级 / 下一包 |
+|------|------------|--------------------|-------------------|
+| D6.2 Action Service | `debugActionService.ts:1-238` descriptor 文件存在 | `execute` 返回 `void`（`:36`），非 instance service、无 typed result/requestId/取消；`DebugToolbar.tsx:53,63,73,87,98,129` 与 `DebugFramesPane.tsx:43,111` 仍直调 hook；Hot Reload 接受泛化 capability 字段而非 adapter extension manifest（`debugActionService.ts:41-44`）；无 Search/keymap bridge consumer | **model；D6.3** |
+| D7.2 Console | session record 持有 output；模型 10k 行截断（`dapDebugModel.ts:340-359`） | history/draft/follow-tail/seen 是 pane-local（`DebugConsolePane.tsx:20-28`），A→B→A 不恢复；REPL 用 `stoppedThreadId` 当 epoch（`:77-88`）；`logConsole` 写 active session 且仅 2k cap（`useCodeDebugSession.ts:1036-1042`）；generation 只在 clear bump（`:1044-1047`），active publish/间接 terminate 不 bump（`:890-912,1755-1787,1802-1856`）；无 2 MiB budget 与 reducer-owned unread | **component only；D7.3** |
+| D8.2 Token/Watch | token/load/watch 类型存在（`dapDebugModel.ts:263-284`）；stopped 递增 epoch；variables 有有限 epoch 检查 | fetch API 只收 frame/reference（`useCodeDebugSession.ts:280-282`）；stackTrace 不分页且仅 epoch 检查（`:1614-1650,2736-2751`）；watch 持久化 `string[]`、reload 重造 ID（`:717,818-826,1017-1023,2613-2654`），无 order/enable/error；hidden Debugger 仍无条件创建 variables hook（`DebugPanel.tsx:145-146`） | **model + partial consumer；D8.3** |
+| D9.2 Layout/ARIA | ref-scoped tab 导航已修（`DebugSubTabBar.tsx:37-58`） | `CodeWorkspaceTab.tsx:10714-10722` 未传 `workspaceInstanceId`；panel ID 无实例前缀（`DebugPanel.tsx:253-257,387-392`）；split key 仍全局（`DebugPanel.tsx:34,150-153`、`DebugVariablesPane.tsx:18-20,77-91`）；separator 无 ARIA/键盘值；文案为字面量未入 i18n（如 `DebugPanel.tsx:233-245,263`） | **partial；D9.3** |
+| D10.2 Evidence | — | 无 fake DAP 生命周期、QA YAML/catalog、真实 Java/Node/Python/Delve/LLDB trace、性能或 native 证据 | **missing；D10.3** |
+
+**本轮验证事实。** `pnpm exec tsc -b` 干净；编辑器+Debug 定向回归 10 files、183/183 通过。仅为无回归证据，不构成 fake/真实 adapter、QA、性能或三端门禁。
+
+**IDEA 2026.2 对照增量。** 官方 2026.2  Debugger 相关新增：Logpoints（本仓库模型/gutter 已有，缺插值求值与输出证据）与 runtime output → source code 导航增强（本仓库 Console 无 file:line 超链接，grep 无 linkify/openLocation 实现）；async stack traces 是 Java agent 特性，通用 DAP 无标准 capability，声明为非目标。对应待办进入 §20 D11。
+
 ## 16. v2.1 下一轮权威待办（面向其它 agent，`f88c5785` 前历史快照）
 
 本节记录 `f88c5785` 之前的生产代码复核。当前增量事实见 §15.11，当前执行顺序见 §19。每个包必须同时提交：生产 host 接线、typed state/result、取消/失败/恢复语义、纯/组件测试、QA catalog/YAML 变更和适用的真实 adapter 证据。单测直接 mock `CodeDebugSession` 不能把能力升级为 `workflow`。
@@ -1285,7 +1301,9 @@ fake DAP 首先验证同 thread re-stop 的 epoch：`stopped(thread=1,e1) -> var
 
 固定顺序为 `D8.1 shared token/state -> D6.1 action -> D7.1 console -> D9.1 layout -> D10.1 gate`；D9.1 可在 shared types 合并后并行。`useCodeDebugSession.ts` 分成 stop/data、action adapter、output/evaluate 三个 owner 区域；共享提交后各 agent不得重排其它区域。每个包必须保持 `pnpm build`、相应定向测试和 `git diff --check` 全绿，并在 PR 中标明尚缺的真实 adapter/native evidence。
 
-## 19. v2.4 当前下一轮待办（面向其它 agent）
+## 19. v2.4 当前下一轮待办（面向其它 agent，`1b6f91cf` 前历史合同）
+
+> 本节已被 §20 取代，保留用于追溯 `3aacbecc` 之后的执行合同；`1b6f91cf` 后的当前合同见 §20。
 
 本节取代 §18 作为 `3aacbecc` 之后的当前 Debug 执行合同。每个包必须标明 `model`/`wired`/`workflow`/`verified`，保留其它 owner 的变更；mock DAP、jsdom 和组件字段不能升级为真实 workflow。
 
@@ -1330,3 +1348,26 @@ fake DAP 至少覆盖 `initialize -> launch -> initialized -> two-thread stack p
 ### 19.6 Ownership 与合并顺序
 
 共享顺序固定为 `D8.2 token consumer -> D6.2 action -> D7.2 console -> D9.2 layout -> D10.2 evidence`；D9.2 可在 D8.2 的公开类型稳定后并行。`useCodeDebugSession.ts` 按 stop/data、action、output/evaluate 区域分 owner；任何 agent 不重排其它区域。每个 PR 保持 build、changed-file tests、`git diff --check` 全绿，并明确剩余真实 adapter/native/performance evidence。
+
+---
+
+## 20. v2.5 当前下一轮待办（面向其它 agent，`1b6f91cf` 复核后）
+
+本节取代 §19 作为当前 Debug 执行合同（§19 保留为历史追溯）。每个包必须同时交付：生产 host 接线、typed state/result、取消/失败/恢复语义、纯/组件/真实 host 测试与 QA catalog/YAML；只交 descriptor 文件、类型声明或组件 mock 不得升级等级。
+
+| 顺序 | 子包 | 完成定义（验收要点） | 主要文件 owner |
+|------|------|----------------------|----------------|
+| P0 | D8.3 Token 贯穿与 Watch 结构化 | 所有 scopes/variables/evaluate/stack/setVariable 请求携带 `{sessionId,stopEpoch,frameId,variablesReference?,requestId}` 并定向发布；失败保留 error/retry 不折叠为空；Watch 持久化 `{id,expression,enabled,order,lastError}`、reload 不重造 ID、remove/edit/reorder 只按 ID；stack 分页 + per-thread cache；hidden pane 零请求 | `dapDebugModel.ts`、`useCodeDebugSession.ts` stop/data 区、`useDebugVariables.tsx` |
+| P0 | D6.3 Instance ActionService | descriptor service 返回 typed `Promise<ActionResult>`（含 requestId/busy/cancelled）；Toolbar/Frames/Panel/keymap/Search 全部经 service 执行；Hot Reload 仅在 adapter extension manifest 声明 `java.redefineClasses` 时注册；失败写结构化 Console entry | `debugActionService.ts`、DebugToolbar/Frames/Panel、workspace bridge |
+| P1 | D7.3 Session-owned Console | `consoleBySessionId` 持有 entries/bytes/nextSeq/lastSeen/clearGeneration/followTail/history/draft；10k entries + 2 MiB 双上限；unread badge = `seq > lastSeenSeq`；evaluate 全字段匹配才 append，stale/cancelled 返回 typed outcome；A→B→A 恢复 follow/history/draft | `dapDebugModel.ts` console 区、`useCodeDebugSession.ts` output 区、`DebugConsolePane.tsx` |
+| P1 | D9.3 Workspace Layout 与 ARIA | `CodeWorkspaceTab` 传 `workspaceInstanceId`；panel/tab/test IDs 加实例前缀；split preference 迁移 `{schemaVersion:2,workspaceId,...}` + Reset；separator 补 orientation/label/value/min/max + 键盘调整；全部文案入 i18n；hidden pane 经 request spy 证明零 DAP | `DebugPanel.tsx`、`DebugSubTabBar.tsx`、layout preference、i18n locales |
+| P2 | D11 IDEA 2026.2 delta（新增） | 见下方清单 | `DebugConsolePane.tsx`、gutter/breakpoint UI、QA |
+| Gate | D10.3 Evidence | fake DAP 全事件链 + supported/unsupported profiles；真实 Java/Node/Python/Delve/LLDB 脱敏 trace；catalog/YAML；10k/2MiB Console、20x200 stack 性能；Linux/macOS/Windows native checklist | fake harness、QA、evidence only |
+
+**D11 IDEA 2026.2 delta 清单（对照官方 What's New 的新增缺口）：**
+
+- [ ] **Logpoint 插值证据链**：`logMessage` 中 `{expr}` 必须在 stop epoch 绑定 evaluate 并写入目标 session Console（category=console）；验证不支持插值的 adapter 的降级显示；补 QA case（模型与 gutter diamond 已存在，本项补运行期证据）。
+- [ ] **Console runtime output → source 导航**（2026.2 新增）：stdout/stderr/exception 文本中的 `path:line(:col)` 模式渲染为可点击链接，点击经统一导航入口打开位置；多 root/相对路径按 workspace 解析；长输出下链接化不得造成线性重渲染（与 D7.3 ring buffer 协同验收）。
+- [ ] **Async stack traces**：声明为通用 DAP 非目标（无标准 capability）；仅当某 adapter 提供扩展时再立项，文档保留此决议防止重复评估。
+
+**合并顺序。** `D8.3 -> D6.3` 先行（正确性），`D7.3` 与 `D9.3` 在 D8.3 公开类型稳定后并行；`D11` 各条目独立成 PR 且不修改 capability truth；`D10.3` 随包执行。`useCodeDebugSession.ts` 仍按 stop/data、action、output/evaluate 区域分 owner；任何 PR 红门禁（`tsc -b`/changed-file tests/`git diff --check`）不得进入下一包。

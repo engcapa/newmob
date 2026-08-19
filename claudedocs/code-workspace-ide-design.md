@@ -2,9 +2,9 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先达到日常代码编辑工作流等价，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-19 · 版本：v4.37（`3aacbecc` implementation re-audit & next parity tranche）· 状态：**实施中**。本轮复核 `3aacbecc` 的 workspace style controller、atomic layout reducer、ActionHost、Recent Locations controller 和 Debug stop snapshot；只更新文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
+> 日期：2026-08-19 · 版本：v4.38（`1b6f91cf` implementation re-audit & IDEA 2026.2 delta backlog）· 状态：**实施中**。本轮复核 `1b6f91cf` 的 SaveTransaction、recursive layout persistence、ActionHost 与 Debug tokens 的生产可达性，并对照 IntelliJ IDEA 2026.2 官方文档补入新增缺口；只更新文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
 >
-> 当前结论：`3aacbecc` 已移除生产路径中的 global EditorConfig provider、增加 workspace style controller、atomic layout reducer、ActionHost 和公开 stopEpoch 字段；但这些能力仍分别存在 dead transaction、roots 不随 workspace 更新、layout snapshot 写入遗漏 tree、ActionHost 未被 `CodeWorkspaceTab` 使用、Recent Locations 仍由 global tracker 持有，以及 Debug token/async state 尚未消费等断点。当前 `pnpm build` 通过，编辑器定向回归有 1 个 style 隔离测试失败（133/134），Debug 定向组件回归 46/46 通过；因此本提交不能标记 N0/N1/N2/N6 或 Debug D6/D7/D8/D9 为 workflow/verified。下一轮先修红色门禁和生产 ownership，再补真实 Tauri/adapter/三端证据。
+> 当前结论：`1b6f91cf` 把 open-buffer save 接入了 `executeSaveTransaction`、补上了 v2 layout 持久化/恢复与任意 leaf renderer、把 Recent Locations 的 edit 采集从 caret effect 改为显式事件；但 controller 仍用文件元数据覆盖 resolved style、WorkspaceEdit 写盘绕过 transaction、资源替换不重映射 layout tree、ActionHost 仍是无生产 consumer 的死基础设施、LocationController 仍包裹 global tracker。Debug 侧 action service/console/variables 仍见 §15.12。本轮 `tsc -b` 干净、10 个定向测试文件 183/183 通过；没有任何一项可因此升级为 `workflow/verified`。当前执行合同见 §8.10，Debug 见 `debug-panel-idea-redesign.md` §20。
 >
 > 早期版本：v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
@@ -308,6 +308,21 @@ PR 只有达到 `workflow` 才能把功能清单标为“可用”，只有 `ver
 **本轮验证事实。** `pnpm build` 通过（仅保留既有 dynamic import/chunk-size warnings）；编辑器/布局/Action/Save 定向命令为 10 files、134 tests，其中 `workspaceStyleController.test.ts` 1 个失败；`codeWorkspaceStore.test.ts` 8/8、`dapDebugModel.test.ts` 与 `useCodeDebugSession.test.tsx` 合计 89/89 通过；Debug Panel/Console/Frames/SubTab/Variables 5 files、46/46 通过。`git diff --check` 与最终工作树检查在文档编辑后重新执行。上述结果不提供 Tauri byte-level save/reopen、nested layout reload、host command path、fake DAP、真实 adapter 或 Linux/macOS/Windows 证据。
 
 **提交复核结论。** `3aacbecc` 是正确性模型批次，不是 parity workflow 完成批次。开发顺序固定为：先修 style 隔离 fixture 和真实 save transaction，再修 v2 tree/group persistence 与 dynamic leaf lifecycle；随后让 ActionHost 成为 CodeWorkspace 唯一执行真值，最后接事件型 Locations 和 Debug D8/D6/D7/D9。N3/N4/N5 与新的 IDEA surface 在这些 owner/generation contract 冻结前继续冻结。
+
+### 2.15 v4.38 `1b6f91cf` 最新提交复核（2026-08-19）
+
+本节是 `1b6f91cf` 的生产可达性审计，逐个核对非测试 consumer、状态 owner、写盘字节策略与异步生命周期；提交说明中的 “complete production wiring” 逐条降级为实际等级。
+
+| 领域 | 本提交已确认 | 仍阻断对齐的事实（含证据） | 当前等级 / 下一包 |
+|------|--------------|---------------------------|-------------------|
+| N1.2 Save/Style | open-buffer save 已调用 `WorkspaceStyleController.executeSaveTransaction`（`CodeWorkspaceTab.tsx:3409-3446`）；最终 writer 应用 EOL/encoding/BOM（`:3222-3264`） | transaction policy 总是携带文件元数据，controller 用其覆盖 resolved EditorConfig 的 EOL/charset（`workspaceStyleController.ts:423-431,475-487`），写出的不是解析结果；controller 重建 effect 依赖稳定 ref 而非 roots fingerprint（`CodeWorkspaceTab.tsx:1356-1388`），roots 变化不生效；WorkspaceEdit 写盘绕过 transaction 直调 writer（`:5636-5638,5702-5720`）；成功 hash 是客户端合成值（`workspaceStyleController.ts:489-493`） | **wired / correctness gap；N1.3** |
+| N6.2 Layout | v2 snapshot 持久化/恢复已携带 tree 并枚举全部 group（`CodeWorkspaceTab.tsx:2019-2029,2062-2074`）；renderer 使用任意 leaf group ID（`:9827-9853,10017-10053`）；resize 回写 ratio | 资源替换只 reconciles groups、不重映射 `layoutTreeV2` 的 key，rename/delete 后 dynamic leaf 变 stale（`codeWorkspaceStore.ts:612-650`）；close leaf 直接删 group、不迁移其中 tab，shared/dirty buffer 失去视图（`recursiveLayoutTree.ts:514-548`）；校验接受零/负 ratio（`:266-269`） | **wired / partial；N6.3** |
+| N0.2 Action | `WorkspaceActionHost` 与 controller 具备 instance/state/busy/AbortSignal 能力 | `CodeWorkspaceTab` 不消费 `useWorkspaceActionsController`/host：keydown、Search Everywhere、菜单注册与执行仍直接用 `WorkspaceCommand[]`（`CodeWorkspaceTab.tsx:7490-7551`），helper 直调 `command.run`（`workspaceCommands.ts:134-159`）。ActionHost 目前是死基础设施 | **model only；N0.3** |
+| N2.2 Locations | user edit 已显式记录（`CodeWorkspaceTab.tsx:2683-2724`）；activation effect 不再依赖 cursor/text（`:7553-7587`）；dialog 走 controller 查询 | controller 只是包裹 global singleton（`navigationHistoryModel.ts:229-234,321`）；rename/delete lifecycle 仍 import 并调用 global（`useWorkspaceFileActions.ts:43,439,499,551`）；relocate/remove 是精确路径匹配，不处理目录子树（`:155-170,198-210`）；dialog 不支持条目删除 | **wired / partial；N2.3** |
+
+**本轮验证事实。** `pnpm exec tsc -b` 干净；定向回归 10 个测试文件、183/183 通过（CodeWorkspaceTab、workspaceStyleController、recursiveLayoutTree、navigationHistoryModel、useCodeDebugSession、DebugPanel、debug/*）。这些只证明无回归，不能证明双 workspace 运行期隔离、真实字节写盘或真实 DAP workflow；无 Tauri/QA YAML/三端证据。
+
+**IDEA 2026.2 对照增量（真实产品事实）。** 对照 JetBrains 官方 What's New 与 Help（2026-07/08）：2026.2 新增 Logpoints、runtime output → source 导航、dependency completion、Git 冲突解决流；平台编辑器新增 smooth caret animation 与新 selection 行为；Recent Locations 支持 Delete 删除条目（并同步从 Back/Forward 历史移除）、可按 breadcrumbs 搜索、Show edited only 切换。本仓库现状：logpoint 模型与 gutter diamond 已有（`dapDebugModel.ts:16-17`、`debugEditorChrome.ts:27`），其余均缺失或只有部分。新增缺口进入 §8.9 N8 与 Debug 文档 §20 D11。
 
 ---
 
@@ -1884,7 +1899,7 @@ N7 不修改产品 capability truth，只维护证据链。每个包在 PR 中�
 
 ---
 
-### 8.8 v4.36 当前执行批次（implementation-ready）
+### 8.8 v4.36 执行批次（`1b6f91cf` 前历史快照，当前合同见 §8.10）
 
 本批次的目标不是再增加模型，而是把 §8.7 拆成能独立合并、能证明 production ownership 的小提交。优先级按数据损坏风险排序：N1.1 Save、N6.1 Layout、N0.1 Action、N2.1 Navigation；N7 随包交付。完成本批次前，N3/N4/N5 和新的 IDEA surface 继续冻结。
 
@@ -1947,9 +1962,9 @@ canonical path policy 必须按平台处理大小写、drive/UNC、separator、s
 
 每个子包必须更新 `qa-ui-auto-tests/feature-list.md`、testid catalog 和至少一条 YAML；单测不替代真实 host。建议合并顺序：先并行提交 N1.1 的纯 controller/writer 与 N6.1 的纯 mutation/store；然后按 `N1 host wiring -> N6 host wiring -> N0 host -> N2 events -> N7 native` 串行修改 `CodeWorkspaceTab.tsx`。每次合并必须保持 `pnpm build` 和对应定向测试全绿。完成标准还包括 N1 字节 fixture、N6 reload/drag host、N0 双 workspace、N2 platform path fixture；没有这些证据不得勾选 §8.7 对应包。
 
-### 8.9 v4.37 下一轮待办（面向其它 agent，implementation-ready）
+### 8.9 v4.37 下一轮待办（`1b6f91cf` 前历史快照，当前合同见 §8.10）
 
-本节是 `3aacbecc` 之后的唯一当前执行清单；§8.8 保留为上一批次合同。每个 agent 必须在 PR 中标明本包达到的最高层级（`model`/`wired`/`workflow`/`verified`），并保留其它 agent 的修改。不能用新增类型或单测通过替代生产 consumer、真实写盘、真实布局恢复或 QA/native 证据。
+本节是 `3aacbecc` 之后、`1b6f91cf` 之前的执行清单，现保留为历史追溯；当前执行合同见 §8.10。每个 agent 必须在 PR 中标明本包达到的最高层级（`model`/`wired`/`workflow`/`verified`），并保留其它 agent 的修改。不能用新增类型或单测通过替代生产 consumer、真实写盘、真实布局恢复或 QA/native 证据。
 
 | 顺序 | 工作包 | 目标 | 文件边界 | 完成门槛 |
 |------|--------|------|----------|----------|
@@ -1990,6 +2005,29 @@ canonical identity 需处理 separator、drive/UNC、平台大小写，并用 st
 Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-file tests 或 `git diff --check` 红，不得进入下一包。每个包同时更新 `qa-ui-auto-tests/feature-list.md`、`references/testid-catalog.md` 和至少一条 YAML control case；单测/mock 只能证明 model/component。N1 必须有 Tauri byte fixture，N6 必须有 nested restore/resize host，N0/N2 必须有双实例 UI workflow，Debug 必须有 fake DAP/真实 adapter。所有 trace 脱敏，不记录源码、变量值、表达式、完整路径或凭据。
 
 固定合并顺序：`N7.2 Gate -> N1.2 -> N6.2 -> N0.2 -> N2.2 -> Debug §19 -> N7.3 native/perf`。`CodeWorkspaceTab.tsx` 按 save/layout/action/navigation 区域分别提交，禁止 agent 重排其它 owner 区域；没有真实 host/native 证据的包最高标 `workflow-candidate`。
+
+### 8.10 v4.38 当前下一轮待办（面向其它 agent，`1b6f91cf` 复核后）
+
+本节取代 §8.8/§8.9 作为当前执行合同（§8.7–§8.9 保留为历史追溯）。每个包必须同时交付：生产 consumer 接线、typed result、失败/取消/undo 语义、纯/组件/真实 host 测试与 QA catalog/YAML；只交 model、store 字段或组件 mock 不得升级等级。
+
+| 顺序 | 子包 | 完成定义（验收要点） | 主要文件 owner |
+|------|------|----------------------|----------------|
+| P0 | N1.3 SaveTransaction 唯一写盘 | resolved style 不被文件元数据覆盖；open/WorkspaceEdit save 共用同一 transaction；成功 hash 来自后端；roots fingerprint 变化重建 controller；CRLF/裸 CR/BOM/Latin-1 save/reopen 字节相等（Tauri fixture） | `workspaceStyleController.ts`、`saveNormalizationPipeline.ts`、`CodeWorkspaceTab.tsx` save 区、writer IPC |
+| P0 | N6.3 Layout 资源生命周期 | `replaceFileState`/rename/delete 重映射 tree+groups；close leaf 先迁移 tab 或返回 typed error 不丢 buffer；ratio 校验拒绝非正值；nested restore/resize/dirty-owner host tests | `recursiveLayoutTree.ts`、`codeWorkspaceStore.ts`、`CodeWorkspaceTab.tsx` layout 区 |
+| P1 | N0.3 ActionHost 唯一执行真值 | `CodeWorkspaceTab` 的 keydown/Search Everywhere/菜单/context/keymap 全部经 instance host 执行；`WorkspaceCommand[]` 降级为纯迁移 adapter；同 ID 双 owner 恢复、Debug action bridge 接入；host dispose 不误删他实例注册 | `workspaceActionHost.ts`、`workspaceCommands.ts`、`useWorkspaceActionsController.ts`、`CodeWorkspaceTab.tsx` action 区 |
+| P1 | N2.3 Locations 实例化与条目管理 | tracker 由 workspace 创建/销毁（不再 global singleton 包裹）；rename/delete 走 instance controller；目录子树 relocate/remove；dialog 支持 Delete 删除条目并同步 Back/Forward 历史（IDEA 语义）；Ctrl+Tab Switcher MRU | `navigationHistoryModel.ts`、`useWorkspaceFileActions.ts`、`RecentLocationsDialog.tsx`、`CodeWorkspaceTab.tsx` navigation 区 |
+| P2 | N8 IDEA 2026.2 delta（新增） | 见下方清单；每项独立验收，不阻塞 P0/P1 | 各对应模块 |
+| Gate | N7.4 证据门禁 | 每包 build + changed-file tests + host + QA YAML；N1.3 需 Tauri byte fixture；N6.3 需 nested restore host；N0.3/N2.3 需双实例 UI workflow | tests/QA only |
+
+**N8 IDEA 2026.2 delta 清单（对照官方 What's New / Help 的新增缺口）：**
+
+- [ ] **Recent Locations 条目删除**：popup 内 `Delete`/`Backspace` 删除选中条目，且删除后同时从 Back/Forward 导航历史移除（IDEA 官方语义）；搜索需支持 breadcrumbs 路径匹配（当前仅 symbolName/path/text/snippet）。
+- [ ] **Dependency completion**：Maven/Gradle 构建文件中的依赖坐标补全（2026.2 新增）；没有 provider 证据时不得声称支持，先调研 jdtls/构建文件 LSP 能力再立项。
+- [ ] **Smooth caret animation 与新 selection 行为**（2026 平台编辑器改进）：作为可选 polish 记录，需 `prefers-reduced-motion` 下自动禁用；不进入本轮 P0/P1。
+- [ ] **Logpoints / runtime output→source**：模型已具备 `logMessage` 与 gutter diamond；插值求值证据、Console 源码超链接属 Debug 范围，验收见 `debug-panel-idea-redesign.md` §20 D11。
+- [ ] **Git 冲突解决流**（2026.2 改进）：属 Git Manager X 轨道，仅登记为 X 轨道对照项，不在本编辑器批次实现。
+
+**合并顺序。** `N1.3 -> N6.3` 先行（数据正确性），`N0.3` 与 `N2.3` 可并行但分别只改 action/navigation 区域；`N8` 各条目在对应 owner 包冻结后独立成 PR；`N7.4` 随包执行。任何 PR 若 `tsc -b`、changed-file tests 或 `git diff --check` 红，不得进入下一包。
 
 ## 9. 风险与权衡
 
