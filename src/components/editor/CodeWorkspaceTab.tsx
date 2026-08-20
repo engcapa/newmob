@@ -1277,7 +1277,7 @@ export function CodeWorkspaceTab({
   ) => Promise<void>>(async () => {
     throw new Error("Workspace resource history is not ready");
   });
-  const replayWorkspaceEncodingRef = useRef<Map<string, { encoding: string; bom: boolean }> | null>(null);
+  const replayWorkspaceEncodingRef = useRef<Map<string, { encoding: string; bom: boolean; eol?: "lf" | "crlf" | "cr" }> | null>(null);
   const goToDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const peekDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
   const goToTypeDefinitionRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<boolean>>(async () => false);
@@ -2872,14 +2872,17 @@ export function CodeWorkspaceTab({
           text: open.text,
           encoding: open.encoding ?? "UTF-8",
           bom: open.bom ?? false,
+          eol: open.eol ? (open.eol.toLowerCase() as "lf" | "crlf" | "cr") : undefined,
         };
         const file = await workspaceReadFile(root.path, relative);
+        const eol = file.text.includes("\r\n") ? ("crlf" as const) : file.text.includes("\r") && !file.text.includes("\n") ? ("cr" as const) : ("lf" as const);
         return {
           path: normalizedPath,
           exists: true,
           text: file.text,
           encoding: file.encoding ?? "UTF-8",
           bom: file.bom ?? false,
+          eol,
         };
       } catch {
         return null;
@@ -2895,15 +2898,18 @@ export function CodeWorkspaceTab({
       text: open.text,
       encoding: open.encoding ?? "UTF-8",
       bom: open.bom ?? false,
+      eol: open.eol ? (open.eol.toLowerCase() as "lf" | "crlf" | "cr") : undefined,
     };
     try {
       const file = await workspaceReadLooseFile(normalizedPath);
+      const eol = file.text.includes("\r\n") ? ("crlf" as const) : file.text.includes("\r") && !file.text.includes("\n") ? ("cr" as const) : ("lf" as const);
       return {
         path: normalizedPath,
         exists: true,
         text: file.text,
         encoding: file.encoding ?? "UTF-8",
         bom: file.bom ?? false,
+        eol,
       };
     } catch {
       return { path: normalizedPath, exists: false, text: null };
@@ -3308,21 +3314,20 @@ export function CodeWorkspaceTab({
     if (file.library) {
       throw new Error(`${file.title} is a read-only library source`);
     }
-    setOpenFiles((current) => ({
-      ...current,
-      [key]: { ...current[key], text: textToSave, saving: true, error: null },
-    }));
-    openFilesRef.current = {
-      ...openFilesRef.current,
-      [key]: { ...file, text: textToSave, saving: true, error: null },
-    };
+
+    // Snapshot the previous on-disk contents before overwrite when available.
+    const historyPath = absolutePathForOpenFile(file);
+    if (historyPath && file.savedText.length <= 2 * 1024 * 1024) {
+      const historyText = `${file.bom ? "\uFEFF" : ""}${applyEditorEol(file.savedText, file.eol)}`;
+      await historySnapshot(historyPath, historyText, "save").catch(() => null);
+    }
+
+    mutateOpenBuffer(
+      key,
+      { text: textToSave, saving: true, error: null },
+      "programmatic",
+    );
     try {
-      // Snapshot the previous on-disk contents before overwrite when available.
-      const historyPath = absolutePathForOpenFile(file);
-      if (historyPath && file.savedText.length <= 2 * 1024 * 1024) {
-        const historyText = `${file.bom ? "\uFEFF" : ""}${applyEditorEol(file.savedText, file.eol)}`;
-        await historySnapshot(historyPath, historyText, "save").catch(() => null);
-      }
       // BOM is a byte-level concern. Keep it out of the JavaScript buffer and
       // let the backend encode it together with the selected charset.
       const rawEol = saveOptions?.eol;
@@ -3391,16 +3396,16 @@ export function CodeWorkspaceTab({
       return saved;
     } catch (err) {
       const message = errorMessage(err);
-      setOpenFiles((current) => ({
-        ...current,
-        [key]: {
-          ...current[key],
+      mutateOpenBuffer(
+        key,
+        {
           text: textToSave,
           dirty: true,
           saving: false,
           error: message,
         },
-      }));
+        "programmatic",
+      );
       throw err instanceof Error ? err : new Error(message);
     }
   }, [
@@ -3491,6 +3496,7 @@ export function CodeWorkspaceTab({
         bufferVersion: file.documentRevision ?? 0,
         styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
         expectedDiskHash: file.hash ?? null,
+        explicitOverride: indentationOverridesRef.current[file.key] ?? null,
         policy: {
           eol: (file.eol?.toLowerCase() as "lf" | "crlf" | "cr") ?? "lf",
           encoding: file.encoding ?? "UTF-8",
@@ -5754,10 +5760,18 @@ export function CodeWorkspaceTab({
           return null;
         }
       },
-      writeDisk: async (absolutePath, text, expectedHash, encoding = "UTF-8", bom = false) => {
+      writeDisk: async (
+        absolutePath,
+        text,
+        expectedHash,
+        encoding = "UTF-8",
+        bom = false,
+        eol?: "lf" | "crlf" | "cr",
+      ) => {
         const replayMetadata = replayWorkspaceEncodingRef.current?.get(fsPathComparisonKey(absolutePath));
         const effectiveEncoding = replayMetadata?.encoding ?? encoding;
         const effectiveBom = replayMetadata?.bom ?? bom;
+        const effectiveEol = replayMetadata?.eol ?? eol ?? "lf";
         // Snapshot current disk contents before bulk WorkspaceEdit writes.
         try {
           let oldText: string | null = null;
@@ -5789,7 +5803,7 @@ export function CodeWorkspaceTab({
           logicalText: text,
           expectedDiskHash: expectedHash ?? null,
           policy: {
-            eol: "lf",
+            eol: effectiveEol,
             encoding: effectiveEncoding,
             bom: effectiveBom,
           },
@@ -5955,7 +5969,11 @@ export function CodeWorkspaceTab({
         .filter((snapshot) => snapshot.exists)
         .map((snapshot) => [
           fsPathComparisonKey(snapshot.path),
-          { encoding: snapshot.encoding ?? "UTF-8", bom: snapshot.bom ?? false },
+          {
+            encoding: snapshot.encoding ?? "UTF-8",
+            bom: snapshot.bom ?? false,
+            eol: snapshot.eol,
+          },
         ]),
     );
     try {

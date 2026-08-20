@@ -2097,9 +2097,7 @@ pub fn workspace_write_file(
         })?;
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
-            return Err(format!(
-                "hash-mismatch: File changed on disk; expected hash {expected}, found {current_hash}"
-            ));
+            return Err(hash_mismatch_error(expected, &current_hash));
         }
     }
 
@@ -2158,9 +2156,7 @@ pub fn workspace_write_loose_file(
         })?;
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
-            return Err(format!(
-                "hash-mismatch: File changed on disk; expected hash {expected}, found {current_hash}"
-            ));
+            return Err(hash_mismatch_error(expected, &current_hash));
         }
     }
 
@@ -3087,9 +3083,7 @@ fn write_workspace_bytes(
         })?;
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
-            return Err(format!(
-                "hash-mismatch: File changed on disk; expected hash {expected}, found {current_hash}"
-            ));
+            return Err(hash_mismatch_error(expected, &current_hash));
         }
     }
     let parent = target
@@ -3379,9 +3373,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+pub fn hash_mismatch_error(expected: &str, found: &str) -> String {
+    format!("hash-mismatch: File changed on disk; expected hash {expected}, found {found}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_mismatch_error_format() {
+        let err = hash_mismatch_error("expected_123", "found_456");
+        assert!(err.starts_with("hash-mismatch: "));
+        assert!(err.contains("expected hash expected_123"));
+        assert!(err.contains("found found_456"));
+    }
 
     #[test]
     fn rejects_parent_dir_escape() {

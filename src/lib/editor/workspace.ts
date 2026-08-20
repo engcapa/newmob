@@ -483,34 +483,74 @@ export function workspaceReadLooseFileWithEncoding(
   });
 }
 
-export function workspaceWriteFile(
+export class WorkspaceHashMismatchError extends Error {
+  readonly kind = "hash-mismatch" as const;
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(message: string, expected = "", actual = "") {
+    super(message);
+    this.name = "WorkspaceHashMismatchError";
+    this.expected = expected;
+    this.actual = actual;
+    Object.setPrototypeOf(this, WorkspaceHashMismatchError.prototype);
+  }
+}
+
+export function isWorkspaceHashMismatchError(err: unknown): err is WorkspaceHashMismatchError {
+  return (
+    err instanceof WorkspaceHashMismatchError ||
+    (typeof err === "object" && err !== null && (err as { kind?: string }).kind === "hash-mismatch") ||
+    (err instanceof Error && err.message.startsWith("hash-mismatch:"))
+  );
+}
+
+export function parseWorkspaceWriteError(err: unknown): Error {
+  if (isWorkspaceHashMismatchError(err)) return err;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.startsWith("hash-mismatch:")) {
+    const match = msg.match(/expected hash\s+([^\s,]+),\s*found\s+([^\s,]+)/i);
+    return new WorkspaceHashMismatchError(msg, match?.[1] ?? "", match?.[2] ?? "");
+  }
+  return err instanceof Error ? err : new Error(msg);
+}
+
+export async function workspaceWriteFile(
   repoRoot: string,
   path: string,
   contents: string,
   expectedHash?: string | null,
 ): Promise<WorkspaceFile> {
-  return invoke<WorkspaceFile>("workspace_write_file", {
-    repoRoot,
-    path,
-    contents,
-    expectedHash: expectedHash ?? null,
-  });
+  try {
+    return await invoke<WorkspaceFile>("workspace_write_file", {
+      repoRoot,
+      path,
+      contents,
+      expectedHash: expectedHash ?? null,
+    });
+  } catch (err) {
+    throw parseWorkspaceWriteError(err);
+  }
 }
 
-export function workspaceWriteLooseFile(
+export async function workspaceWriteLooseFile(
   path: string,
   contents: string,
   expectedHash?: string | null,
 ): Promise<WorkspaceFile> {
-  return invoke<WorkspaceFile>("workspace_write_loose_file", {
-    path,
-    contents,
-    expectedHash: expectedHash ?? null,
-  });
+  try {
+    return await invoke<WorkspaceFile>("workspace_write_loose_file", {
+      path,
+      contents,
+      expectedHash: expectedHash ?? null,
+    });
+  } catch (err) {
+    throw parseWorkspaceWriteError(err);
+  }
 }
 
 /** Persist a workspace file using an explicit charset and BOM preference. */
-export function workspaceWriteFileEncoded(
+export async function workspaceWriteFileEncoded(
   repoRoot: string,
   path: string,
   contents: string,
@@ -518,31 +558,39 @@ export function workspaceWriteFileEncoded(
   encoding: string,
   bom = false,
 ): Promise<WorkspaceFile> {
-  return invoke<WorkspaceFile>("workspace_write_file_encoded", {
-    repoRoot,
-    path,
-    contents,
-    expectedHash: expectedHash ?? null,
-    encoding,
-    bom,
-  });
+  try {
+    return await invoke<WorkspaceFile>("workspace_write_file_encoded", {
+      repoRoot,
+      path,
+      contents,
+      expectedHash: expectedHash ?? null,
+      encoding,
+      bom,
+    });
+  } catch (err) {
+    throw parseWorkspaceWriteError(err);
+  }
 }
 
 /** Persist a loose file using an explicit charset and BOM preference. */
-export function workspaceWriteLooseFileEncoded(
+export async function workspaceWriteLooseFileEncoded(
   path: string,
   contents: string,
   expectedHash: string | null | undefined,
   encoding: string,
   bom = false,
 ): Promise<WorkspaceFile> {
-  return invoke<WorkspaceFile>("workspace_write_loose_file_encoded", {
-    path,
-    contents,
-    expectedHash: expectedHash ?? null,
-    encoding,
-    bom,
-  });
+  try {
+    return await invoke<WorkspaceFile>("workspace_write_loose_file_encoded", {
+      path,
+      contents,
+      expectedHash: expectedHash ?? null,
+      encoding,
+      bom,
+    });
+  } catch (err) {
+    throw parseWorkspaceWriteError(err);
+  }
 }
 
 export function workspaceCreateFile(

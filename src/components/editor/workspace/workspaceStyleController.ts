@@ -30,6 +30,7 @@ import {
   runSaveNormalizationPipeline,
   type SaveNormalizationResult,
 } from "./saveNormalizationPipeline";
+import { isWorkspaceHashMismatchError } from "../../../lib/editor/workspace";
 
 export interface WorkspaceStyleRoot {
   id?: string;
@@ -64,6 +65,7 @@ export interface SaveTransactionV2 {
   bufferVersion: number;
   styleGeneration: number;
   expectedDiskHash: string | null;
+  explicitOverride?: ExplicitIndentationOverride | null;
   policy: {
     eol?: OpenFileEol | "lf" | "crlf" | "cr";
     encoding: string;
@@ -417,6 +419,7 @@ export class WorkspaceStyleController {
     const codeStyle = await this.resolveForFile({
       filePath: transaction.filePath,
       text: transaction.text,
+      explicitOverride: transaction.explicitOverride,
     });
 
     // Run normalization pipeline with resolved style values as priority
@@ -509,10 +512,8 @@ export class WorkspaceStyleController {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isConflict =
-        msg.startsWith("hash-mismatch:") ||
-        msg.includes("hash-mismatch") ||
-        msg.includes("File changed on disk; expected hash") ||
-        msg.toLowerCase().includes("hash mismatch");
+        isWorkspaceHashMismatchError(err) ||
+        (typeof err === "object" && err !== null && (err as { kind?: string }).kind === "hash-mismatch");
       if (isConflict) {
         return {
           kind: "conflict",
