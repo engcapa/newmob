@@ -83,11 +83,7 @@ export function useWorkspaceActionsController({
     });
   }, [workspaceId]);
 
-  useEffect(() => {
-    return () => {
-      host.dispose();
-    };
-  }, [host]);
+
 
   // Synchronize registered commands with the host
   useEffect(() => {

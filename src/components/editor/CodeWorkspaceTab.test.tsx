@@ -4191,4 +4191,70 @@ end_of_record
     });
     expect(useAppStore.getState().statusMessage).toBe("Synchronized split scrolling disabled");
   });
+
+  it("opens Search Everywhere with Ctrl+N and Ctrl+Shift+N when viewing a Java file", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-shortcuts-test",
+      workspaceInstanceId: "instance-shortcuts-test",
+      name: "Shortcuts test",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(
+      file("src/App.java", "public class App { public static void main(String[] args) {} }"),
+    );
+    workspaceMocks.workspaceListDir.mockResolvedValue([
+      { name: "App.java", path: "src/App.java", fileType: "file", size: 50, mtime: 1 },
+    ]);
+    workspaceMocks.workspaceListFilesRecursive.mockResolvedValue([
+      { name: "App.java", path: "src/App.java", fileType: "file", size: 50, mtime: 1 },
+    ]);
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/App.java");
+
+    // 1. Press Ctrl+Shift+N to open Search Everywhere (Files mode)
+    await act(async () => {
+      fireEvent.keyDown(window, {
+        key: "N",
+        code: "KeyN",
+        ctrlKey: true,
+        shiftKey: true,
+      });
+    });
+
+    const overlay1 = await screen.findByTestId("code-workspace-search-everywhere");
+    expect(overlay1).toBeInTheDocument();
+
+    // Close with Escape on the searchbox input
+    await act(async () => {
+      fireEvent.keyDown(within(overlay1).getByRole("searchbox"), { key: "Escape" });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("code-workspace-search-everywhere")).not.toBeInTheDocument();
+    });
+
+    // 2. Press Ctrl+N to open Search Everywhere (Classes mode or fallback)
+    await act(async () => {
+      fireEvent.keyDown(window, {
+        key: "n",
+        code: "KeyN",
+        ctrlKey: true,
+        shiftKey: false,
+      });
+    });
+
+    const overlay2 = await screen.findByTestId("code-workspace-search-everywhere");
+    expect(overlay2).toBeInTheDocument();
+
+    // Close with Escape
+    await act(async () => {
+      fireEvent.keyDown(within(overlay2).getByRole("searchbox"), { key: "Escape" });
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("code-workspace-search-everywhere")).not.toBeInTheDocument();
+    });
+  });
 });

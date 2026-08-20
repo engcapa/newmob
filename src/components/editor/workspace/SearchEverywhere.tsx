@@ -127,13 +127,10 @@ export function SearchEverywhere({
     setSymbolQueryStatus({ sessionCount: 0, providerCount: 0, skippedProviderCount: 0, failedProviderCount: 0, complete: false, truncated: false, diagnostics: [] });
   }, [initialMode, open]);
 
-  const visibleTabs = useMemo(
-    () => MODE_TABS.filter((tab) => {
-      if ((tab.id === "classes" || tab.id === "symbols") && !symbolsAvailable) return false;
-      return true;
-    }),
-    [symbolsAvailable],
-  );
+  // Always show all tabs. When symbols are unavailable, the Classes and
+  // Symbols tabs degrade gracefully with an informative empty message
+  // instead of disappearing, matching IntelliJ IDEA behavior.
+  const visibleTabs = MODE_TABS;
 
   // Async workspace symbols for Classes / Symbols / All.
   useEffect(() => {
@@ -319,7 +316,7 @@ export function SearchEverywhere({
         }
         if (mode === "classes" || mode === "symbols") {
           if (symbolsLoading) return "Querying language server…";
-          if (!symbolsAvailable) return "No language server with workspace symbols";
+          if (!symbolsAvailable) return "Language server initializing or unavailable — use Files tab to search by filename";
           return q.trim() ? "No matching symbols" : "Type to search workspace symbols";
         }
         if (mode === "all") {

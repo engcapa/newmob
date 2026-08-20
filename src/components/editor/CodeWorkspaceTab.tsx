@@ -6665,8 +6665,7 @@ export function CodeWorkspaceTab({
       category: "Navigation",
       keybinding: "Ctrl+N",
       keywords: ["type", "interface", "struct"],
-      when: () => seSymbolsAvailable,
-      run: () => openSearchEverywhere("classes"),
+      run: () => openSearchEverywhere(seSymbolsAvailable ? "classes" : "files"),
     },
     {
       id: "workspace.goToSymbol",
@@ -6674,8 +6673,7 @@ export function CodeWorkspaceTab({
       category: "Navigation",
       keybinding: "Ctrl+Alt+Shift+N",
       keywords: ["workspace symbol"],
-      when: () => seSymbolsAvailable,
-      run: () => openSearchEverywhere("symbols"),
+      run: () => openSearchEverywhere(seSymbolsAvailable ? "symbols" : "files"),
     },
     {
       id: "workspace.searchEverywhere",

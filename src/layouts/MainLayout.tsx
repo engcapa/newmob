@@ -3203,6 +3203,15 @@ export function MainLayout() {
       const state = useAppStore.getState();
       const current = state.tabs.find((tab) => tab.id === state.activeTabId);
       if (current?.type === "welcome") {
+        // If a code-workspace tab exists, switch to it and let its Go to File
+        // handler execute Ctrl+Shift+N instead of creating a new session.
+        const workspaceTab = state.tabs.find((tab) => tab.type === "code-workspace");
+        if (workspaceTab) {
+          event.preventDefault();
+          event.stopPropagation();
+          setActiveTab(workspaceTab.id);
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         handleCommand("new-session");
