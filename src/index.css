@@ -1132,18 +1132,33 @@ select.taomni-input:not(.appearance-none):not([multiple]) {
  * --taomni-divider, …) which can clash with the active code theme (e.g. light
  * pre backgrounds inside a dark code tooltip). Force code-theme tokens here.
  */
-.cm-lsp-hover,
-.cm-tooltip .cm-lsp-hover,
+.cm-tooltip {
+  z-index: 50 !important;
+}
+
 .cm-tooltip.cm-tooltip-hover {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+  overflow: visible !important;
+}
+
+.cm-lsp-hover-container {
+  width: 440px;
+  height: 280px;
+  min-width: 260px;
+  min-height: 100px;
+  max-width: min(560px, 85vw);
+  max-height: min(380px, 45vh);
+  resize: both;
+}
+
+.cm-lsp-hover,
+.cm-tooltip .cm-lsp-hover {
   background: var(--taomni-code-tooltip-bg) !important;
   color: var(--taomni-code-text) !important;
   border-color: var(--taomni-code-border) !important;
-  resize: both;
-  overflow: auto;
-  min-width: 260px;
-  min-height: 80px;
-  max-width: 85vw;
-  max-height: 70vh;
 }
 .cm-lsp-hover.taomni-chat-md,
 .cm-tooltip .taomni-chat-md {

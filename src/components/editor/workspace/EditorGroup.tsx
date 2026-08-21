@@ -43,6 +43,7 @@ import {
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
 import { mergeCompletionTriggers } from "./lspCompletion";
+import type { QuickDocContent } from "./QuickDocPopup";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 import { useContextMenu } from "../../ContextMenu";
 import type { EditorGroupId } from "../../../stores/codeWorkspaceStore";
@@ -146,6 +147,7 @@ interface EditorGroupProps {
   onChangeText: (key: string, text: string) => void;
   onSave: (key: string) => void;
   onHover: (file: OpenFileViewModel, position: LspPosition) => Promise<string | null>;
+  onPinHoverDoc?: (content: QuickDocContent) => void;
   onDefinition: (file: OpenFileViewModel, position: LspPosition) => Promise<boolean>;
   onReferences: (file: OpenFileViewModel, position: LspPosition) => Promise<void>;
   onComplete: (
@@ -240,6 +242,7 @@ export function EditorGroup({
   onChangeText,
   onSave,
   onHover,
+  onPinHoverDoc,
   onDefinition,
   onReferences,
   onComplete,
@@ -617,6 +620,7 @@ export function EditorGroup({
                         }}
                         onSave={() => onSave(activeFile.key)}
                         onHover={(position) => onHover(activeFile, position)}
+                        onPinHoverDoc={onPinHoverDoc}
                         onDefinition={(position) => onDefinition(activeFile, position)}
                         onReferences={(position) => onReferences(activeFile, position)}
                         onComplete={(position, trigger) => onComplete(activeFile, position, trigger)}
@@ -673,6 +677,7 @@ export function EditorGroup({
                       }}
                       onSave={() => onSave(activeFile.key)}
                       onHover={(position) => onHover(activeFile, position)}
+                      onPinHoverDoc={onPinHoverDoc}
                       onDefinition={(position) => onDefinition(activeFile, position)}
                       onReferences={(position) => onReferences(activeFile, position)}
                       onComplete={(position, trigger) => onComplete(activeFile, position, trigger)}

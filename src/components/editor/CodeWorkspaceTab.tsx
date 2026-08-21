@@ -10114,6 +10114,7 @@ export function CodeWorkspaceTab({
         onChangeText={queueEditorTextUpdate}
         onSave={(key) => void saveFile(key)}
         onHover={getLspHover}
+        onPinHoverDoc={pinQuickDocumentation}
         onDefinition={goToDefinition}
         onReferences={findReferences}
         onComplete={getLspCompletions}

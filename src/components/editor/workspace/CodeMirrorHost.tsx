@@ -6,7 +6,7 @@ import {
   useRef,
   type MutableRefObject,
 } from "react";
-import { Compartment, EditorState, Prec, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, Prec, type Extension, type Text } from "@codemirror/state";
 import {
   EditorView,
   crosshairCursor,
@@ -18,8 +18,10 @@ import {
   lineNumbers,
   rectangularSelection,
   showTooltip,
+  tooltips,
   type Tooltip,
 } from "@codemirror/view";
+import type { QuickDocContent } from "./QuickDocPopup";
 import {
   defaultKeymap,
   history,
@@ -124,6 +126,7 @@ interface CodeMirrorHostProps {
   onChange: (doc: string) => void;
   onSave: () => void;
   onHover: (position: LspPosition) => Promise<string | null>;
+  onPinHoverDoc?: (content: QuickDocContent) => void;
   onDefinition: (position: LspPosition) => Promise<boolean>;
   onReferences: (position: LspPosition) => Promise<void>;
   onComplete?: (
@@ -206,22 +209,32 @@ const LSP_EDITOR_STYLE = EditorView.theme({
     textDecoration: "underline dotted #38bdf8 1px",
     textUnderlineOffset: "2px",
   },
-  ".cm-lsp-hover": {
+  ".cm-tooltip": {
+    zIndex: "50 !important",
+  },
+  ".cm-tooltip.cm-tooltip-hover": {
+    background: "transparent !important",
+    border: "none !important",
+    boxShadow: "none !important",
+    padding: "0 !important",
+    overflow: "visible !important",
+  },
+  ".cm-lsp-hover-container": {
+    width: "440px",
+    height: "280px",
     minWidth: "260px",
-    minHeight: "80px",
-    maxWidth: "85vw",
-    maxHeight: "70vh",
+    minHeight: "100px",
+    maxWidth: "min(560px, 85vw)",
+    maxHeight: "min(380px, 45vh)",
+    resize: "both",
+  },
+  ".cm-lsp-hover": {
     overflow: "auto",
-    padding: "8px 10px",
-    border: "1px solid var(--taomni-code-border)",
-    // Prefer a surface slightly lifted from the editor bg so body text and
-    // nested markdown code blocks remain legible across light/dark code themes.
+    padding: "8px 12px",
     background: "var(--taomni-code-tooltip-bg)",
     color: "var(--taomni-code-text)",
-    boxShadow: "0 12px 28px rgba(0, 0, 0, 0.28)",
     fontSize: "12px",
     lineHeight: "1.5",
-    resize: "both",
     outline: "none",
   },
   // Nested markdown (via .taomni-chat-md) is themed in index.css so it tracks
@@ -264,6 +277,129 @@ function sameInlineValues(
   const keys = Object.keys(a);
   if (keys.length !== Object.keys(b).length) return false;
   return keys.every((key) => a[key] === b[key]);
+}
+
+function extractIdentifierAtPos(doc: Text, pos: number): string {
+  if (pos < 0 || pos > doc.length) return "Documentation";
+  const line = doc.lineAt(pos);
+  const col = pos - line.from;
+  const left = line.text.slice(0, col);
+  const right = line.text.slice(col);
+  const start = left.search(/[A-Za-z0-9_$]+$/);
+  const endMatch = right.match(/^[A-Za-z0-9_$]*/);
+  const from = start >= 0 ? start : col;
+  const to = col + (endMatch?.[0].length ?? 0);
+  const word = line.text.slice(from, to).trim();
+  return word || "Documentation";
+}
+
+function setupHoverResize(container: HTMLElement, handle: HTMLElement) {
+  handle.onmousedown = (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startRect = container.getBoundingClientRect();
+    const startWidth = startRect.width > 0 ? startRect.width : 440;
+    const startHeight = startRect.height > 0 ? startRect.height : 280;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      const deltaX = moveEvent.clientX - startX;
+      const deltaY = moveEvent.clientY - startY;
+      const maxWidth = typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth * 0.85 : 1200;
+      const maxHeight = typeof window !== "undefined" && window.innerHeight > 0 ? window.innerHeight * 0.75 : 800;
+      const newWidth = Math.max(260, Math.min(maxWidth, startWidth + deltaX));
+      const newHeight = Math.max(100, Math.min(maxHeight, startHeight + deltaY));
+      container.style.width = `${Math.round(newWidth)}px`;
+      container.style.height = `${Math.round(newHeight)}px`;
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  };
+}
+
+function createHoverDocDom({
+  title,
+  contents,
+  onPin,
+  onClose,
+}: {
+  title: string;
+  contents: string;
+  onPin?: (content: QuickDocContent) => void;
+  onClose?: () => void;
+}): HTMLElement {
+  const container = document.createElement("div");
+  container.className = "cm-lsp-hover-container flex flex-col overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-tooltip-bg)] shadow-xl outline-none select-text";
+  container.tabIndex = 0;
+  container.setAttribute("role", "dialog");
+  container.setAttribute("aria-label", "Hover documentation");
+  container.setAttribute("data-testid", "code-workspace-hover-doc");
+
+  // Header bar matching QuickDocPopup
+  const header = document.createElement("div");
+  header.className = "flex h-8 shrink-0 items-center gap-1 border-b border-[var(--taomni-code-border)] px-2 select-none bg-[var(--taomni-code-tooltip-bg)]";
+
+  const titleSpan = document.createElement("span");
+  titleSpan.className = "min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--taomni-code-text)]";
+  titleSpan.textContent = title;
+  header.appendChild(titleSpan);
+
+  if (onPin) {
+    const pinBtn = document.createElement("button");
+    pinBtn.type = "button";
+    pinBtn.title = "Pin to Documentation pane";
+    pinBtn.setAttribute("aria-label", "Pin to Documentation pane");
+    pinBtn.setAttribute("data-testid", "code-workspace-hover-doc-pin");
+    pinBtn.className = "inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] hover:text-[var(--taomni-code-text)]";
+    pinBtn.innerHTML = `<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>`;
+    pinBtn.onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      onPin({ title, body: contents });
+      onClose?.();
+    };
+    header.appendChild(pinBtn);
+  }
+
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.title = "Close";
+  closeBtn.setAttribute("aria-label", "Close quick documentation");
+  closeBtn.className = "inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] hover:text-[var(--taomni-code-text)]";
+  closeBtn.innerHTML = `<svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
+  closeBtn.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClose?.();
+  };
+  header.appendChild(closeBtn);
+
+  container.appendChild(header);
+
+  // Markdown body
+  const body = document.createElement("div");
+  body.className = "cm-lsp-hover taomni-chat-md min-h-0 flex-1 overflow-auto px-3 py-2 text-[12px] leading-relaxed text-[var(--taomni-code-text)]";
+  body.innerHTML = renderFormatted(contents, "md") ?? "";
+  container.appendChild(body);
+
+  // Resize grip handle
+  const grip = document.createElement("div");
+  grip.setAttribute("data-testid", "code-workspace-hover-doc-resize-handle");
+  grip.setAttribute("aria-label", "Resize hover documentation");
+  grip.className = "absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100 select-none";
+  grip.innerHTML = `<svg viewBox="0 0 6 6" class="h-2.5 w-2.5 fill-current text-[var(--taomni-code-muted)]"><path d="M5 1L1 5M5 3L3 5M5 5L5 5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>`;
+
+  setupHoverResize(container, grip);
+  container.appendChild(grip);
+
+  return container;
 }
 
 function signatureTooltipDom(result: LspSignatureHelpResult): HTMLElement {
@@ -310,6 +446,7 @@ function lspInteractionExtensions(
   hoverRef: MutableRefObject<(position: LspPosition) => Promise<string | null>>,
   definitionRef: MutableRefObject<(position: LspPosition) => Promise<boolean>>,
   referencesRef: MutableRefObject<(position: LspPosition) => Promise<void>>,
+  onPinHoverDocRef?: MutableRefObject<((content: QuickDocContent) => void) | undefined>,
 ): Extension[] {
   const definitionAtSelection = (view: EditorView) => {
     const position = lspPositionFromOffset(view.state.doc, view.state.selection.main.head);
@@ -322,18 +459,42 @@ function lspInteractionExtensions(
     return true;
   };
   return [
+    tooltips({
+      position: "fixed",
+      parent: typeof document !== "undefined" ? document.body : undefined,
+      tooltipSpace: (view) => {
+        if (typeof window === "undefined") {
+          return { top: 0, left: 0, bottom: 800, right: 1000 };
+        }
+        const rect = view.dom.getBoundingClientRect();
+        return {
+          top: Math.max(0, rect.top),
+          left: Math.max(0, rect.left),
+          bottom: rect.bottom > 0 ? rect.bottom : window.innerHeight,
+          right: rect.right > 0 ? rect.right : window.innerWidth,
+        };
+      },
+    }),
     hoverTooltip((view, pos): Promise<Tooltip | null> => {
       const position = lspPositionFromOffset(view.state.doc, pos);
       return hoverRef.current(position).then((contents) => {
         if (!contents) return null;
+        const title = extractIdentifierAtPos(view.state.doc, pos);
         return {
           pos,
           above: true,
           create() {
-            const dom = document.createElement("div");
-            dom.className = "cm-lsp-hover taomni-chat-md";
-            dom.tabIndex = 0;
-            dom.innerHTML = renderFormatted(contents, "md") ?? "";
+            const dom = createHoverDocDom({
+              title,
+              contents,
+              onPin: onPinHoverDocRef?.current,
+              onClose: () => {
+                const tooltipEl = dom.closest(".cm-tooltip") as HTMLElement | null;
+                if (tooltipEl) {
+                  tooltipEl.style.display = "none";
+                }
+              },
+            });
             return { dom };
           },
         };
@@ -402,6 +563,7 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
   if (prev.debugRunToCursor !== next.debugRunToCursor) return false;
   if (prev.debugStop !== next.debugStop) return false;
   if (prev.debugEvaluate !== next.debugEvaluate) return false;
+  if (prev.onPinHoverDoc !== next.onPinHoverDoc) return false;
   return true;
 }
 
@@ -420,6 +582,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onChange,
   onSave,
   onHover,
+  onPinHoverDoc,
   onDefinition,
   onReferences,
   onComplete,
@@ -488,6 +651,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   });
   const onToggleBreakpointRef = useRef(onToggleBreakpoint);
   const onEditBreakpointRef = useRef(onEditBreakpoint);
+  const onPinHoverDocRef = useRef(onPinHoverDoc);
+  onPinHoverDocRef.current = onPinHoverDoc;
   // Debug actions go through refs so a new session (or a step landing) does not
   // force the whole editor extension set to be rebuilt.
   const debugStepRef = useRef(debugStep);
@@ -817,7 +982,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         signatureCompartment.current.of([]),
         readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
         wrappingCompartment.current.of(softWrap ? EditorView.lineWrapping : []),
-        ...lspInteractionExtensions(onHoverRef, onDefinitionRef, onReferencesRef),
+        ...lspInteractionExtensions(onHoverRef, onDefinitionRef, onReferencesRef, onPinHoverDocRef),
         ...codeViewExtensions(),
         WORKSPACE_EDITOR_STYLE,
         LSP_EDITOR_STYLE,
