@@ -207,8 +207,10 @@ const LSP_EDITOR_STYLE = EditorView.theme({
     textUnderlineOffset: "2px",
   },
   ".cm-lsp-hover": {
-    maxWidth: "520px",
-    maxHeight: "320px",
+    minWidth: "260px",
+    minHeight: "80px",
+    maxWidth: "85vw",
+    maxHeight: "70vh",
     overflow: "auto",
     padding: "8px 10px",
     border: "1px solid var(--taomni-code-border)",
@@ -219,6 +221,8 @@ const LSP_EDITOR_STYLE = EditorView.theme({
     boxShadow: "0 12px 28px rgba(0, 0, 0, 0.28)",
     fontSize: "12px",
     lineHeight: "1.5",
+    resize: "both",
+    outline: "none",
   },
   // Nested markdown (via .taomni-chat-md) is themed in index.css so it tracks
   // --taomni-code-* even when the tooltip is portaled outside the editor host.
@@ -328,6 +332,7 @@ function lspInteractionExtensions(
           create() {
             const dom = document.createElement("div");
             dom.className = "cm-lsp-hover taomni-chat-md";
+            dom.tabIndex = 0;
             dom.innerHTML = renderFormatted(contents, "md") ?? "";
             return { dom };
           },

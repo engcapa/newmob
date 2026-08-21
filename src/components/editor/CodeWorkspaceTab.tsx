@@ -266,6 +266,7 @@ import {
   safeDeleteFileCount,
 } from "./workspace/safeDelete";
 import { executeCodeAction } from "./workspace/codeActionExecution";
+import { createJavaImportCodeActions } from "./workspace/javaQuickFix";
 import {
   transformWorkspaceResourceExpandedDirKeys,
   transformWorkspaceResourceFileKey,
@@ -6254,7 +6255,20 @@ export function CodeWorkspaceTab({
     sectionLabel = "code actions",
   ) => {
     const requested = await requestCodeActions(file, range, diagnostics, only);
-    const actions = requested.actions;
+    const actions = [...requested.actions];
+
+    // If this is a Java file, supplement with local Java quick fix / auto-import actions if unimported JDK types exist
+    const isJavaFile = (file.path || file.title || file.languagePath || "").toLowerCase().endsWith(".java");
+    if (isJavaFile && (only.length === 0 || only.some((k) => k === "quickfix" || k.startsWith("quickfix.")))) {
+      const filePath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
+      const javaActions = createJavaImportCodeActions(filePath, file.text, range.start);
+      for (const ja of javaActions) {
+        if (!actions.some((a) => a.title === ja.title)) {
+          actions.push(ja);
+        }
+      }
+    }
+
     if (requested.semanticToken && !workspaceSemanticIndexBuildIsCurrent(
       semanticIndex.current(),
       requested.semanticToken,
@@ -6318,9 +6332,9 @@ export function CodeWorkspaceTab({
       start: selection.start,
       end: selection.empty ? selection.start : selection.end,
     };
+    const line = range.start.line;
     const diagnostics = (lspFilesRef.current[file.key]?.diagnostics ?? []).filter((item) => (
-      item.range.start.line === range.start.line
-      || item.range.end.line === range.start.line
+      item.range.start.line <= line && item.range.end.line >= line
     ));
     const rect = editorPaneRef.current?.getBoundingClientRect();
     await showCodeActionsMenu(
@@ -6336,7 +6350,7 @@ export function CodeWorkspaceTab({
     const file = activeFile;
     if (!file || file.loading) return;
     const diagnostics = (lspFilesRef.current[file.key]?.diagnostics ?? []).filter(
-      (item) => item.range.start.line === line || item.range.end.line === line,
+      (item) => item.range.start.line <= line && item.range.end.line >= line,
     );
     const range: LspRange = diagnostics[0]?.range ?? {
       start: { line, character: 0 },

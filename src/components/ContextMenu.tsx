@@ -53,14 +53,9 @@ export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
         onClose();
       }
     };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
     document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
     return () => {
       document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
     };
   }, [onClose]);
 
@@ -74,31 +69,132 @@ export function ContextMenu({ items, x, y, onClose }: ContextMenuProps) {
   return <MenuSurface ref={ref} items={items} onClose={onClose} style={style} />;
 }
 
-const MenuSurface = forwardRef<HTMLDivElement, {
+export const MenuSurface = forwardRef<HTMLDivElement, {
   items: MenuItem[];
   onClose: () => void;
   style?: CSSProperties;
-}>(({ items, onClose, style }, ref) => {
+  isSubmenu?: boolean;
+  onBack?: () => void;
+}>(({ items, onClose, style, isSubmenu, onBack }, forwardedRef) => {
+  const innerRef = useRef<HTMLDivElement | null>(null);
+
+  const selectableIndices = useMemo(() => {
+    return items
+      .map((item, idx) => (!item.separator && !item.disabled ? idx : -1))
+      .filter((idx) => idx !== -1);
+  }, [items]);
+
+  const [activeIndex, setActiveIndex] = useState<number>(() => selectableIndices[0] ?? -1);
+  const [openSubmenuIndex, setOpenSubmenuIndex] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (selectableIndices.length > 0 && !selectableIndices.includes(activeIndex)) {
+      setActiveIndex(selectableIndices[0] ?? -1);
+    }
+  }, [items, selectableIndices, activeIndex]);
+
+  const setRef = useCallback((node: HTMLDivElement | null) => {
+    innerRef.current = node;
+    if (typeof forwardedRef === "function") forwardedRef(node);
+    else if (forwardedRef) forwardedRef.current = node;
+  }, [forwardedRef]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // If a submenu is currently open, let the child submenu handle the key event
+      if (openSubmenuIndex !== null) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (selectableIndices.length === 0) return;
+        const currentPos = selectableIndices.indexOf(activeIndex);
+        const nextPos = currentPos === -1 || currentPos === selectableIndices.length - 1 ? 0 : currentPos + 1;
+        setActiveIndex(selectableIndices[nextPos]!);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (selectableIndices.length === 0) return;
+        const currentPos = selectableIndices.indexOf(activeIndex);
+        const prevPos = currentPos <= 0 ? selectableIndices.length - 1 : currentPos - 1;
+        setActiveIndex(selectableIndices[prevPos]!);
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (selectableIndices.length > 0) setActiveIndex(selectableIndices[0]!);
+      } else if (e.key === "End") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (selectableIndices.length > 0) setActiveIndex(selectableIndices[selectableIndices.length - 1]!);
+      } else if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (activeIndex !== -1 && items[activeIndex]) {
+          const item = items[activeIndex]!;
+          if (item.children?.length || item.customPanel) {
+            setOpenSubmenuIndex(activeIndex);
+          } else if (item.onClick) {
+            item.onClick();
+            onClose();
+          }
+        }
+      } else if (e.key === "ArrowRight") {
+        if (activeIndex !== -1 && items[activeIndex]) {
+          const item = items[activeIndex]!;
+          if (item.children?.length || item.customPanel) {
+            e.preventDefault();
+            e.stopPropagation();
+            setOpenSubmenuIndex(activeIndex);
+          }
+        }
+      } else if (e.key === "ArrowLeft") {
+        if (isSubmenu && onBack) {
+          e.preventDefault();
+          e.stopPropagation();
+          onBack();
+        }
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (isSubmenu && onBack) {
+          onBack();
+        } else {
+          onClose();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [activeIndex, isSubmenu, items, onBack, onClose, openSubmenuIndex, selectableIndices]);
+
   return (
     <div
-      ref={ref}
+      ref={setRef}
       data-testid="context-menu"
       data-taomni-context-menu=""
-      className="min-w-[220px] py-1 rounded shadow-lg border text-[12px]"
+      className="min-w-[220px] py-1 rounded shadow-lg border text-[12px] outline-none"
       style={{
         background: "var(--taomni-panel-bg)",
         borderColor: "var(--taomni-divider)",
         color: "var(--taomni-text)",
         ...style,
-        // The surface owns its own vertical overflow so long menus and long
-        // submenus stay within the viewport and scroll. Side flyouts are
-        // portaled out (below), so this scroll container never clips them.
         maxHeight: "calc(100vh - 12px)",
         overflowY: "auto",
       }}
     >
       {items.map((item, i) => (
-        <MenuRow key={i} item={item} onClose={onClose} />
+        <MenuRow
+          key={i}
+          item={item}
+          active={activeIndex === i}
+          isSubmenuOpen={openSubmenuIndex === i}
+          onHover={() => setActiveIndex(i)}
+          onOpenSubmenu={() => setOpenSubmenuIndex(i)}
+          onCloseSubmenu={() => setOpenSubmenuIndex(null)}
+          onClose={onClose}
+        />
       ))}
     </div>
   );
@@ -164,10 +260,28 @@ function PortalFlyout({
   );
 }
 
-function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
-  const [open, setOpen] = useState(false);
+function MenuRow({
+  item,
+  active,
+  isSubmenuOpen,
+  onHover,
+  onOpenSubmenu,
+  onCloseSubmenu,
+  onClose,
+}: {
+  item: MenuItem;
+  active: boolean;
+  isSubmenuOpen: boolean;
+  onHover: () => void;
+  onOpenSubmenu: () => void;
+  onCloseSubmenu: () => void;
+  onClose: () => void;
+}) {
+  const [openByHover, setOpenByHover] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const closeTimer = useRef<number | null>(null);
+
+  const open = isSubmenuOpen || openByHover;
 
   useEffect(
     () => () => {
@@ -175,6 +289,12 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
     },
     [],
   );
+
+  useEffect(() => {
+    if (active && triggerRef.current) {
+      triggerRef.current.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [active]);
 
   if (item.separator) {
     return <div className="h-px mx-2 my-1" style={{ background: "var(--taomni-divider)" }} />;
@@ -199,38 +319,59 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
         closeTimer.current = null;
       }
     };
-    // The flyout is portaled, so moving the cursor from the trigger to the
-    // submenu crosses a DOM gap. A short close delay bridges that gap: either
-    // side re-entering cancels the pending close.
     const scheduleClose = () => {
       cancelClose();
-      closeTimer.current = window.setTimeout(() => setOpen(false), 120);
+      closeTimer.current = window.setTimeout(() => {
+        setOpenByHover(false);
+        onCloseSubmenu();
+      }, 120);
     };
     const openNow = () => {
       cancelClose();
-      setOpen(true);
+      setOpenByHover(true);
+      onHover();
+      onOpenSubmenu();
     };
 
     return (
       <div
         className="relative group/menu-row"
-        onMouseEnter={item.openOnClick ? cancelClose : openNow}
+        onMouseEnter={item.openOnClick ? () => { cancelClose(); onHover(); } : openNow}
         onMouseLeave={scheduleClose}
       >
         <button
           ref={triggerRef}
           data-testid={item.testId ?? `context-menu-item-${slugForTestId(item.label)}`}
-          className="w-full px-3 py-1 text-left flex items-center gap-2 hover:bg-[var(--taomni-hover)] disabled:opacity-40"
+          data-active={active ? "true" : undefined}
+          className="w-full px-3 py-1 text-left flex items-center gap-2 hover:bg-[var(--taomni-hover)] data-[active=true]:bg-[var(--taomni-hover)] disabled:opacity-40 outline-none"
           style={item.danger ? { color: "#b22222" } : undefined}
           disabled={item.disabled}
-          onClick={item.openOnClick ? () => setOpen((v) => !v) : undefined}
+          onClick={item.openOnClick ? () => {
+            if (open) {
+              setOpenByHover(false);
+              onCloseSubmenu();
+            } else {
+              setOpenByHover(true);
+              onOpenSubmenu();
+            }
+          } : undefined}
           type="button"
         >
           {content}
         </button>
         {!item.disabled && open && (
           <PortalFlyout triggerRef={triggerRef} onMouseEnter={cancelClose} onMouseLeave={scheduleClose}>
-            {item.customPanel ? item.customPanel : <MenuSurface items={item.children ?? []} onClose={onClose} />}
+            {item.customPanel ? item.customPanel : (
+              <MenuSurface
+                isSubmenu
+                items={item.children ?? []}
+                onClose={onClose}
+                onBack={() => {
+                  setOpenByHover(false);
+                  onCloseSubmenu();
+                }}
+              />
+            )}
           </PortalFlyout>
         )}
       </div>
@@ -239,9 +380,12 @@ function MenuRow({ item, onClose }: { item: MenuItem; onClose: () => void }) {
 
   return (
     <button
+      ref={triggerRef}
       data-testid={item.testId ?? `context-menu-item-${slugForTestId(item.label)}`}
-      className="w-full px-3 py-1 text-left flex items-center gap-2 hover:bg-[var(--taomni-hover)] disabled:opacity-40"
+      data-active={active ? "true" : undefined}
+      className="w-full px-3 py-1 text-left flex items-center gap-2 hover:bg-[var(--taomni-hover)] data-[active=true]:bg-[var(--taomni-hover)] disabled:opacity-40 outline-none"
       style={item.danger ? { color: "#b22222" } : undefined}
+      onMouseEnter={onHover}
       onClick={() => {
         item.onClick?.();
         onClose();

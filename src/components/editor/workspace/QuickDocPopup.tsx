@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pin, X } from "lucide-react";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
 
@@ -16,8 +16,23 @@ interface QuickDocPopupProps {
   onPin: (content: QuickDocContent) => void;
 }
 
+const MIN_WIDTH = 280;
+const MIN_HEIGHT = 140;
+const DEFAULT_WIDTH = 460;
+const DEFAULT_HEIGHT = 320;
+
 export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const [size, setSize] = useState<{ width: number; height: number }>({
+    width: DEFAULT_WIDTH,
+    height: DEFAULT_HEIGHT,
+  });
+  const isResizingRef = useRef(false);
+
+  useEffect(() => {
+    if (!open) return;
+    rootRef.current?.focus();
+  }, [open, content]);
 
   useEffect(() => {
     if (!open) return;
@@ -35,6 +50,7 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
   useEffect(() => {
     if (!open) return;
     const onPointer = (event: MouseEvent) => {
+      if (isResizingRef.current) return;
       const root = rootRef.current;
       if (!root) return;
       if (event.target instanceof Node && !root.contains(event.target)) {
@@ -45,6 +61,39 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
     return () => window.removeEventListener("mousedown", onPointer, true);
   }, [onClose, open]);
 
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    isResizingRef.current = true;
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startRect = rootRef.current?.getBoundingClientRect();
+    const startWidth = startRect?.width && startRect.width > 0 ? startRect.width : size.width;
+    const startHeight = startRect?.height && startRect.height > 0 ? startRect.height : size.height;
+
+    const onMouseMove = (moveEvent: MouseEvent) => {
+      if (!isResizingRef.current) return;
+      const deltaX = moveEvent.clientX - startX;
+      const deltaY = moveEvent.clientY - startY;
+      const maxWidth = typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth * 0.95 : 1600;
+      const maxHeight = typeof window !== "undefined" && window.innerHeight > 0 ? window.innerHeight * 0.85 : 1200;
+
+      const newWidth = Math.max(MIN_WIDTH, Math.min(maxWidth, startWidth + deltaX));
+      const newHeight = Math.max(MIN_HEIGHT, Math.min(maxHeight, startHeight + deltaY));
+
+      setSize({ width: Math.round(newWidth), height: Math.round(newHeight) });
+    };
+
+    const onMouseUp = () => {
+      isResizingRef.current = false;
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }, [size.height, size.width]);
+
   if (!open || !content) return null;
 
   const html = renderFormatted(content.body, "md") ?? content.body;
@@ -54,10 +103,20 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
       ref={rootRef}
       role="dialog"
       aria-label="Quick documentation"
+      tabIndex={0}
       data-testid="code-workspace-quick-doc"
-      className="absolute right-6 top-16 z-40 flex max-h-[min(420px,60vh)] w-[min(420px,90vw)] flex-col overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-tooltip-bg)] shadow-xl"
+      className="absolute right-6 top-16 z-40 flex flex-col overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-tooltip-bg)] shadow-xl outline-none"
+      style={{
+        width: `${size.width}px`,
+        height: `${size.height}px`,
+        maxWidth: "95vw",
+        maxHeight: "85vh",
+        minWidth: `${MIN_WIDTH}px`,
+        minHeight: `${MIN_HEIGHT}px`,
+        resize: "both",
+      }}
     >
-      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--taomni-code-border)] px-2">
+      <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--taomni-code-border)] px-2 select-none">
         <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--taomni-code-text)]">
           {content.title}
         </span>
@@ -85,6 +144,16 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
         className="taomni-chat-md min-h-0 flex-1 overflow-auto px-3 py-2 text-[12px] leading-relaxed text-[var(--taomni-code-text)]"
         dangerouslySetInnerHTML={{ __html: html }}
       />
+      <div
+        data-testid="code-workspace-quick-doc-resize-handle"
+        aria-label="Resize documentation dialog"
+        className="absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100"
+        onMouseDown={handleResizeMouseDown}
+      >
+        <svg viewBox="0 0 6 6" className="h-2.5 w-2.5 fill-current text-[var(--taomni-code-muted)]">
+          <path d="M5 1L1 5M5 3L3 5M5 5L5 5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />
+        </svg>
+      </div>
     </div>
   );
 }

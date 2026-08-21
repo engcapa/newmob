@@ -1138,6 +1138,12 @@ select.taomni-input:not(.appearance-none):not([multiple]) {
   background: var(--taomni-code-tooltip-bg) !important;
   color: var(--taomni-code-text) !important;
   border-color: var(--taomni-code-border) !important;
+  resize: both;
+  overflow: auto;
+  min-width: 260px;
+  min-height: 80px;
+  max-width: 85vw;
+  max-height: 70vh;
 }
 .cm-lsp-hover.taomni-chat-md,
 .cm-tooltip .taomni-chat-md {

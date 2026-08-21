@@ -2820,6 +2820,21 @@ impl LspSession {
                     "documentHighlight": { "dynamicRegistration": true },
                     "codeAction": {
                         "dynamicRegistration": true,
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "",
+                                    "quickfix",
+                                    "refactor",
+                                    "refactor.extract",
+                                    "refactor.inline",
+                                    "refactor.rewrite",
+                                    "source",
+                                    "source.organizeImports",
+                                    "source.fixAll"
+                                ]
+                            }
+                        },
                         "isPreferredSupport": true,
                         "dataSupport": true,
                         "resolveSupport": {
@@ -4281,7 +4296,13 @@ impl JavaLanguageSettings {
                 "enabled": true,
                 "guessMethodArguments": self.guess_method_arguments,
                 "importOrder": self.completion_import_order,
-                "favoriteStaticMembers": self.favorite_static_members
+                "favoriteStaticMembers": self.favorite_static_members,
+                "autoImport": {
+                    "enabled": true
+                },
+                "postfix": {
+                    "enabled": true
+                }
             },
             "format": {
                 "enabled": true,
@@ -9674,7 +9695,7 @@ fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
         .and_then(Value::as_str)
         .filter(|title| !title.is_empty())?
         .to_string();
-    let command = value.get("command").and_then(|command| {
+    let command_name = value.get("command").and_then(|command| {
         if let Some(name) = command.as_str() {
             Some(name.to_string())
         } else {
@@ -9689,7 +9710,36 @@ fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
         .and_then(|command| command.get("arguments"))
         .cloned()
         .or_else(|| value.get("arguments").cloned());
-    let edit = value.get("edit").map(parse_workspace_edit);
+    let mut edit = value.get("edit").map(parse_workspace_edit);
+
+    // If edit is missing, but the command is an apply-workspace-edit wrapper (such as
+    // JDTLS `_java.apply.workspaceEdit` or `java.apply.workspaceEdit` or VSCode `editor.action.applyWorkspaceEdit`),
+    // extract the workspace edit from command_arguments[0].
+    let is_apply_workspace_edit_command = command_name.as_deref().is_some_and(|name| {
+        name == "_java.apply.workspaceEdit"
+            || name == "java.apply.workspaceEdit"
+            || name == "editor.action.applyWorkspaceEdit"
+            || name == "applyWorkspaceEdit"
+    });
+
+    if edit.is_none() && is_apply_workspace_edit_command {
+        if let Some(first_arg) = command_arguments
+            .as_ref()
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+        {
+            if first_arg.get("changes").is_some() || first_arg.get("documentChanges").is_some() {
+                edit = Some(parse_workspace_edit(first_arg));
+            }
+        }
+    }
+
+    let command = if is_apply_workspace_edit_command && edit.is_some() {
+        None
+    } else {
+        command_name
+    };
+
     Some(LspCodeAction {
         title,
         kind: value

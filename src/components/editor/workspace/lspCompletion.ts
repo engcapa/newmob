@@ -16,6 +16,11 @@ import type {
 } from "../../../lib/editor/lsp";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import { isInsideStringOrComment } from "./syntaxContext";
+import {
+  getJavaJdkCompletionCandidates,
+  generateJavaImportWorkspaceEdit,
+  isJavaTypeImported,
+} from "./javaQuickFix";
 
 export interface LspCompletionHooks {
   fetch: (
@@ -320,8 +325,44 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       result = null;
     }
     if (context.aborted) return null;
-    // No language service: fall back to buffer-word completion.
+    // No language service: check if typed prefix matches JDK types, else fall back to buffer-word completion.
     if (!result || (!result.status.active && result.items.length === 0)) {
+      const docText = context.state.doc.toString();
+      const typed = word ? word.text : "";
+      const jdkCandidates = getJavaJdkCompletionCandidates(typed, docText);
+      if (jdkCandidates.length > 0) {
+        const options: Completion[] = jdkCandidates.map((c) => ({
+          label: c.label,
+          detail: c.detail,
+          type: c.type,
+          boost: c.boost,
+          apply: (view, completion, from, to) => {
+            const currentDoc = view.state.doc.toString();
+            const fqcn = completion.detail!;
+            const simpleName = completion.label;
+
+            view.dispatch({
+              changes: { from, to, insert: simpleName },
+              selection: { anchor: from + simpleName.length },
+            });
+
+            if (!isJavaTypeImported(currentDoc, fqcn, simpleName)) {
+              const importEdit = generateJavaImportWorkspaceEdit("dummy.java", view.state.doc.toString(), fqcn);
+              const textEdit = importEdit.documentEdits[0]?.edits[0];
+              if (textEdit) {
+                const importPos = offsetFromLspPosition(view.state.doc, textEdit.range.start);
+                view.dispatch({
+                  changes: { from: importPos, to: importPos, insert: textEdit.newText },
+                });
+              }
+            }
+          },
+        }));
+        return {
+          from: word ? word.from : context.pos,
+          options,
+        };
+      }
       return completeAnyWord(context);
     }
     if (result.items.length === 0) return null;

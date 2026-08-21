@@ -1768,6 +1768,73 @@ describe("CodeWorkspaceTab", () => {
     ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
   });
 
+  it("shows Java JDK import quick fixes on Alt+Enter and inserts the import statement", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-import",
+      workspaceInstanceId: "instance-java-import",
+      name: "Java Import",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/Service.java" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/Service.java",
+      "class Service { List items; }",
+    ));
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({
+      path: "/repo/app/src/Service.java",
+      available: true,
+      active: true,
+      capabilities: {
+        completion: true,
+        signatureHelp: false,
+        hover: false,
+        definition: false,
+        typeDefinition: false,
+        implementation: false,
+        references: false,
+        documentSymbol: false,
+        workspaceSymbol: false,
+        rename: false,
+        formatting: false,
+        rangeFormatting: false,
+        codeAction: true,
+        documentHighlight: false,
+        callHierarchy: false,
+        typeHierarchy: false,
+        inlayHint: false,
+        selectionRange: false,
+        semanticTokens: false,
+        completionTriggerCharacters: [],
+        signatureTriggerCharacters: [],
+      },
+    }));
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: documentStatus({ available: true, active: true }),
+      actions: [],
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/Service.java");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+
+    // Trigger Alt+Enter
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    const importOption = await screen.findByRole("button", { name: "Import 'List' (java.util.List)" });
+    expect(importOption).toBeInTheDocument();
+    expect(importOption).toHaveAttribute("data-active", "true");
+
+    // Press Enter to apply the active quick fix via keyboard
+    fireEvent.keyDown(window, { key: "Enter" });
+
+    await waitFor(() => expect(selectCodeWorkspaceUi(
+      useCodeWorkspaceStore.getState(),
+      "instance-java-import",
+    ).openFiles["root:app:src/Service.java"]?.text).toContain("import java.util.List;"));
+  });
+
   it("rejects a provider refactor when the editor changes during preview confirmation", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
