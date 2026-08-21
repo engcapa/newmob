@@ -266,7 +266,6 @@ import {
   safeDeleteFileCount,
 } from "./workspace/safeDelete";
 import { executeCodeAction } from "./workspace/codeActionExecution";
-import { createJavaImportCodeActions } from "./workspace/javaQuickFix";
 import {
   transformWorkspaceResourceExpandedDirKeys,
   transformWorkspaceResourceFileKey,
@@ -519,6 +518,44 @@ const LSP_DOCUMENT_SYMBOLS_IDLE_DELAY_MS = 650;
 const EDITOR_TEXT_COMMIT_IDLE_DELAY_MS = 220;
 // Shared empty result so "no diagnostics" is always the same array identity.
 const EMPTY_DISPLAY_DIAGNOSTICS: LspDiagnostic[] = [];
+
+function extractContextSnippet(text: string, targetLine: number): { lineText: string; contextSnippet: string } {
+  const desiredStart = Math.max(0, targetLine - 1);
+  const desiredEnd = targetLine + 2;
+  let currentLine = 0;
+  let lineStart = 0;
+  let targetLineStart = 0;
+  let targetLineEnd = text.length;
+  let startLineOffset = 0;
+  let endLineOffset = text.length;
+
+  let pos = 0;
+  while (pos <= text.length) {
+    const nextNewline = text.indexOf("\n", pos);
+    const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+    if (currentLine === desiredStart) startLineOffset = lineStart;
+    if (currentLine === targetLine) {
+      targetLineStart = lineStart;
+      targetLineEnd = lineEnd;
+    }
+    if (currentLine === desiredEnd) {
+      endLineOffset = lineEnd;
+      break;
+    }
+    if (nextNewline === -1) {
+      if (currentLine < desiredEnd) endLineOffset = text.length;
+      break;
+    }
+    currentLine++;
+    lineStart = nextNewline + 1;
+    pos = lineStart;
+  }
+
+  return {
+    lineText: text.slice(targetLineStart, targetLineEnd),
+    contextSnippet: text.slice(startLineOffset, endLineOffset),
+  };
+}
 
 import {
   type LibraryBufferInfo,
@@ -2569,6 +2606,7 @@ export function CodeWorkspaceTab({
     | "reload"
     | "workspace-edit"
     | "save-writeback"
+    | "save-metadata"
     | "history-replay";
 
   interface BufferMutationPatch {
@@ -2595,15 +2633,17 @@ export function CodeWorkspaceTab({
     const current = openFilesRef.current[key];
     if (!current) return null;
 
-    const nextText = patch.text !== undefined ? patch.text : current.text;
+    const nextText = reason === "save-metadata" ? current.text : (patch.text !== undefined ? patch.text : current.text);
     const nextSavedText = patch.savedText !== undefined ? patch.savedText : current.savedText;
-    const isTextChanged = patch.text !== undefined && patch.text !== current.text;
+    const isTextChanged = reason !== "save-metadata" && patch.text !== undefined && patch.text !== current.text;
 
     let nextRevision = current.documentRevision ?? 0;
     if (reason === "save-writeback") {
       nextRevision = patch.documentRevision !== undefined
         ? Math.max(current.documentRevision ?? 0, patch.documentRevision)
         : (current.documentRevision ?? 0);
+    } else if (reason === "save-metadata") {
+      nextRevision = current.documentRevision ?? 0;
     } else if (isTextChanged || reason === "reload" || reason === "workspace-edit" || reason === "history-replay") {
       nextRevision = (current.documentRevision ?? 0) + 1;
     }
@@ -2750,11 +2790,7 @@ export function CodeWorkspaceTab({
     const next = mutateOpenBuffer(key, { text, error: null }, "user-edit");
     if (!next) return;
     const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
-    const lines = text.split("\n");
-    const lineText = lines[cursor.line] ?? "";
-    const startLine = Math.max(0, cursor.line - 1);
-    const endLine = Math.min(lines.length, cursor.line + 2);
-    const contextSnippet = lines.slice(startLine, endLine).join("\n");
+    const { lineText, contextSnippet } = extractContextSnippet(text, cursor.line);
     const activeFilePath = next.path ?? next.title;
     const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
     const sourceOwnership = next.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
@@ -2770,7 +2806,7 @@ export function CodeWorkspaceTab({
       sourceOwnership,
     });
     recordEditLocation(next.ref, cursor);
-    semanticIndex.invalidate("document-edited", [activeFilePath]);
+    semanticIndex.invalidateSilently("document-edited", [activeFilePath]);
     // Drive didChange from the live buffer only when a language server can
     // actually use it — plain text / missing LSP must not pay IPC cost.
     scheduleLiveLspSync(key);
@@ -3301,13 +3337,13 @@ export function CodeWorkspaceTab({
 
   const saveOpenBufferText = useCallback(async (
     key: string,
-    textToSave: string,
+    textToSave?: string,
     saveOptions?: {
       eol?: OpenFileEol | "lf" | "crlf" | "cr";
       encoding?: string;
       bom?: boolean;
     },
-  ) => {
+  ): Promise<WorkspaceFile | null> => {
     const file = openFilesRef.current[key];
     if (!file || file.loading) {
       throw new Error("Open buffer is not available to save");
@@ -3316,41 +3352,66 @@ export function CodeWorkspaceTab({
       throw new Error(`${file.title} is a read-only library source`);
     }
 
-    // Snapshot the previous on-disk contents before overwrite when available.
+    // 1. Prepare phase: capture immutable snapshot
+    const snapshotText = textToSave !== undefined ? textToSave : file.text;
+    const snapshotRevision = file.documentRevision ?? 0;
+    const expectedDiskHash = file.hash ?? null;
+    const styleGeneration = workspaceStyleControllerRef.current.getGeneration();
+    const absPath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
+    const rawEol = saveOptions?.eol;
+    const normalizedEolOption: OpenFileEol | undefined = rawEol
+      ? (rawEol.toUpperCase() as OpenFileEol)
+      : undefined;
+    const targetEol: OpenFileEol = normalizedEolOption ?? file.eol;
+    const targetBom = saveOptions?.bom !== undefined ? saveOptions.bom : (file.bom ?? false);
+    const encoding = saveOptions?.encoding ?? file.encoding ?? "UTF-8";
+
+    // Set metadata without changing text or bumping revision
+    mutateOpenBuffer(
+      key,
+      { saving: true, error: null },
+      "save-metadata",
+    );
+
+    // Snapshot the previous on-disk contents before overwrite when available
     const historyPath = absolutePathForOpenFile(file);
     if (historyPath && file.savedText.length <= 2 * 1024 * 1024) {
       const historyText = `${file.bom ? "\uFEFF" : ""}${applyEditorEol(file.savedText, file.eol)}`;
       await historySnapshot(historyPath, historyText, "save").catch(() => null);
     }
 
-    mutateOpenBuffer(
-      key,
-      { text: textToSave, saving: true, error: null },
-      "programmatic",
-    );
-    try {
-      // BOM is a byte-level concern. Keep it out of the JavaScript buffer and
-      // let the backend encode it together with the selected charset.
-      const rawEol = saveOptions?.eol;
-      const normalizedEolOption: OpenFileEol | undefined = rawEol
-        ? (rawEol.toUpperCase() as OpenFileEol)
-        : undefined;
-      const targetEol: OpenFileEol = normalizedEolOption ?? file.eol;
-      const targetBom = saveOptions?.bom !== undefined ? saveOptions.bom : (file.bom ?? false);
-      const encoding = saveOptions?.encoding ?? file.encoding ?? "UTF-8";
-      const absPath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
+    // 2. Pre-write commit boundary (SYNCHRONOUS, NO AWAIT)
+    const currentBeforeWrite = openFilesRef.current[key];
+    if (!currentBeforeWrite || (absolutePathForOpenFile(currentBeforeWrite) ?? currentBeforeWrite.path) !== absPath) {
+      mutateOpenBuffer(key, { saving: false }, "save-metadata");
+      return null;
+    }
+    if ((currentBeforeWrite.documentRevision ?? 0) !== snapshotRevision) {
+      // Buffer modified during prepare!
+      mutateOpenBuffer(key, { saving: false }, "save-metadata");
+      return null;
+    }
+    if (workspaceStyleControllerRef.current.getGeneration() !== styleGeneration) {
+      mutateOpenBuffer(key, { saving: false }, "save-metadata");
+      return null;
+    }
 
-      const saved = await writeTextSnapshot({
-        fileKey: key,
-        filePath: absPath,
-        logicalText: textToSave,
-        expectedDiskHash: file.hash ?? null,
-        policy: {
-          eol: targetEol,
-          encoding,
-          bom: targetBom,
-        },
-      });
+    // In the SAME synchronous turn, invoke byte writer
+    const writerPromise = writeTextSnapshot({
+      fileKey: key,
+      filePath: absPath,
+      logicalText: snapshotText,
+      expectedDiskHash,
+      policy: {
+        eol: targetEol,
+        encoding,
+        bom: targetBom,
+      },
+    });
+
+    // 3. Writeback phase (Merge, never overwrite text)
+    try {
+      const saved = await writerPromise;
 
       const savedPath = absolutePathForOpenFile(file);
       if (savedPath) {
@@ -3366,14 +3427,13 @@ export function CodeWorkspaceTab({
       const savedBom = saved.bom ?? (saveOptions?.bom !== undefined ? saveOptions.bom : saved.text.startsWith("\uFEFF"));
 
       const latestNow = openFilesRef.current[key] ?? file;
-      const isBufferStillSame = latestNow.text === textToSave;
-      const remainingDirty = !isBufferStillSame && latestNow.text !== normalized.text;
+      const isBufferStillSame = (latestNow.documentRevision ?? 0) === snapshotRevision;
 
       mutateOpenBuffer(
         key,
         {
           savedText: normalized.text,
-          text: isBufferStillSame ? normalized.text : latestNow.text,
+          text: latestNow.text,
           eol: targetEol ?? normalized.eol,
           encoding: saved.encoding ?? encoding,
           bom: savedBom,
@@ -3382,7 +3442,7 @@ export function CodeWorkspaceTab({
           size: saved.size,
           loading: false,
           saving: false,
-          dirty: remainingDirty,
+          dirty: !isBufferStillSame,
           error: null,
           documentRevision: latestNow.documentRevision,
         },
@@ -3393,19 +3453,18 @@ export function CodeWorkspaceTab({
         notifyWorkspacePathGitChanged(file.ref.rootId, file.ref.path);
       }
       semanticIndex.invalidate("document-saved", [savedPath ?? file.path]);
-      await saveLspDocument({ ...file, text: textToSave }, textToSave);
+      await saveLspDocument({ ...file, text: snapshotText }, snapshotText);
       return saved;
     } catch (err) {
       const message = errorMessage(err);
       mutateOpenBuffer(
         key,
         {
-          text: textToSave,
           dirty: true,
           saving: false,
           error: message,
         },
-        "programmatic",
+        "save-metadata",
       );
       throw err instanceof Error ? err : new Error(message);
     }
@@ -3489,13 +3548,16 @@ export function CodeWorkspaceTab({
       const absPath = absolutePathForOpenFile(file) ?? file.languagePath;
       let formatError: string | null = null;
 
+      const snapshotRevision = file.documentRevision ?? 0;
+      const styleGeneration = workspaceStyleControllerRef.current.getGeneration();
+
       const tx: SaveTransactionV2 = {
         id: `tx-save-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         workspaceId: workspaceInstanceId,
         fileKey: file.key,
         filePath: absPath,
-        bufferVersion: file.documentRevision ?? 0,
-        styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
+        bufferVersion: snapshotRevision,
+        styleGeneration,
         expectedDiskHash: file.hash ?? null,
         explicitOverride: indentationOverridesRef.current[file.key] ?? null,
         policy: {
@@ -3514,7 +3576,10 @@ export function CodeWorkspaceTab({
             encoding,
             bom,
           });
-          return { hash: savedFile?.hash };
+          if (!savedFile) {
+            return { cancelled: true, reason: "Buffer modified during save preparation" };
+          }
+          return { hash: savedFile.hash };
         },
         {
           formatOnSave: intelligencePreferences.formatOnSave,
@@ -3531,9 +3596,15 @@ export function CodeWorkspaceTab({
       );
 
       if (outcome.kind === "saved") {
-        setStatusMessage(formatError
-          ? `Saved ${file.subtitle}; format on save failed: ${formatError}`
-          : `Saved ${file.subtitle}`);
+        const latestNow = openFilesRef.current[key];
+        const wasStale = (latestNow?.documentRevision ?? 0) > snapshotRevision;
+        if (wasStale) {
+          setStatusMessage(`Saved previous snapshot of ${file.subtitle}; current changes remain unsaved`);
+        } else {
+          setStatusMessage(formatError
+            ? `Saved ${file.subtitle}; format on save failed: ${formatError}`
+            : `Saved ${file.subtitle}`);
+        }
         if (isJavaBuildFile(file.languagePath) && lspFilesRef.current[key]?.status?.active) {
           void promptReloadProject(key, file.subtitle);
         }
@@ -6257,18 +6328,6 @@ export function CodeWorkspaceTab({
     const requested = await requestCodeActions(file, range, diagnostics, only);
     const actions = [...requested.actions];
 
-    // If this is a Java file, supplement with local Java quick fix / auto-import actions if unimported JDK types exist
-    const isJavaFile = (file.path || file.title || file.languagePath || "").toLowerCase().endsWith(".java");
-    if (isJavaFile && (only.length === 0 || only.some((k) => k === "quickfix" || k.startsWith("quickfix.")))) {
-      const filePath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
-      const javaActions = createJavaImportCodeActions(filePath, file.text, range.start);
-      for (const ja of javaActions) {
-        if (!actions.some((a) => a.title === ja.title)) {
-          actions.push(ja);
-        }
-      }
-    }
-
     if (requested.semanticToken && !workspaceSemanticIndexBuildIsCurrent(
       semanticIndex.current(),
       requested.semanticToken,
@@ -7706,6 +7765,7 @@ export function CodeWorkspaceTab({
       const live = await ensureLspDocumentSynced(file.key);
       if (!live) return null;
       if (!isLspFeatureReady(lspFilesRef.current[live.key])) return null;
+      if (openFilesRef.current[live.key]?.text !== live.text) return null;
       const descriptor = lspDescriptorForFile(live);
       if (!descriptor) return null;
       const epoch = lspDocumentEpochRef.current[live.key] ?? 0;

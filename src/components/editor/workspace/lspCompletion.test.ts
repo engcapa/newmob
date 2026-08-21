@@ -226,4 +226,124 @@ describe("createLspCompletionSource", () => {
     expect(result).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it("never returns hardcoded Java JDK completions when language service is inactive", async () => {
+    const fetch = vi.fn(async () => completionResult([], false));
+    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+
+    const result = await source(contextAt("Lis", 3));
+    // Should fall back to completeAnyWord, without synthetic JDK imports like java.util.List
+    const labels = result?.options.map((opt) => opt.label) ?? [];
+    expect(labels).not.toContain("ArrayList");
+    expect(labels).not.toContain("HashMap");
+  });
+
+  it("applies primary textEdit and additionalTextEdits in a single atomic dispatch", async () => {
+    const { EditorView } = await import("@codemirror/view");
+    const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+      status: status(true),
+      isIncomplete: false,
+      items: [{
+        label: "List",
+        kind: 7,
+        detail: "java.util.List",
+        documentation: null,
+        insertText: "List",
+        insertTextFormat: 1,
+        filterText: "List",
+        sortText: "0001",
+        textEdit: {
+          range: { start: { line: 1, character: 0 }, end: { line: 1, character: 3 } },
+          newText: "List",
+        },
+        additionalTextEdits: [{
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+          newText: "import java.util.List;\n",
+        }],
+        raw: {},
+      }],
+    }));
+
+    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const initialText = "\nLis";
+    const state = EditorState.create({ doc: initialText });
+    const view = new EditorView({ state });
+
+    const result = await source(new CompletionContext(state, 4, true));
+    expect(result?.options).toHaveLength(1);
+
+    const option = result!.options[0];
+    const dispatchSpy = vi.spyOn(view, "dispatch");
+
+    if (typeof option.apply === "function") {
+      option.apply(view, option, 1, 4);
+    }
+
+    // Assert single atomic dispatch
+    expect(dispatchSpy).toHaveBeenCalledTimes(1);
+    expect(view.state.doc.toString()).toBe("import java.util.List;\n\nList");
+  });
+
+  it("guards against stale async resolve when document changes before resolve completes", async () => {
+    const { EditorView } = await import("@codemirror/view");
+    let resolvePromise: (item: any) => void = () => {};
+    const deferredResolve = new Promise<any>((r) => { resolvePromise = r; });
+
+    const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+      status: status(true),
+      isIncomplete: false,
+      items: [{
+        label: "AutoImportedClass",
+        kind: 7,
+        detail: null,
+        documentation: null,
+        insertText: "AutoImportedClass",
+        insertTextFormat: 1,
+        filterText: "AutoImportedClass",
+        sortText: "0001",
+        textEdit: null,
+        additionalTextEdits: [],
+        raw: {},
+      }],
+    }));
+
+    const resolve = vi.fn(() => deferredResolve);
+    let docRevision = 1;
+    const source = createLspCompletionSource({
+      fetch,
+      resolve,
+      triggerCharacters: () => [],
+      getDocumentRevision: () => docRevision,
+    });
+
+    const initialText = "const a = Aut";
+    const state = EditorState.create({ doc: initialText });
+    const view = new EditorView({ state });
+
+    const result = await source(new CompletionContext(state, 13, true));
+    const option = result!.options[0];
+
+    // User accepts completion
+    if (typeof option.apply === "function") {
+      option.apply(view, option, 10, 13);
+    }
+    expect(view.state.doc.toString()).toBe("const a = AutoImportedClass");
+
+    // Before resolve arrives, user types further, bumping documentRevision
+    docRevision = 2;
+    view.dispatch({ changes: { from: 27, to: 27, insert: ";" } });
+
+    // Now resolve arrives with additionalTextEdits
+    resolvePromise({
+      additionalTextEdits: [{
+        range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+        newText: "import { AutoImportedClass } from './module';\n",
+      }],
+    });
+    await deferredResolve;
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Stale additionalTextEdits should NOT be applied to mutated revision
+    expect(view.state.doc.toString()).toBe("const a = AutoImportedClass;");
+  });
 });

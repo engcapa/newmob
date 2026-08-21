@@ -226,7 +226,6 @@ const LSP_EDITOR_STYLE = EditorView.theme({
     minHeight: "100px",
     maxWidth: "min(560px, 85vw)",
     maxHeight: "min(380px, 45vh)",
-    resize: "both",
   },
   ".cm-lsp-hover": {
     overflow: "auto",
@@ -293,7 +292,9 @@ function extractIdentifierAtPos(doc: Text, pos: number): string {
   return word || "Documentation";
 }
 
-function setupHoverResize(container: HTMLElement, handle: HTMLElement) {
+type ResizeCorner = "se" | "sw" | "ne" | "nw";
+
+function setupHoverResize(container: HTMLElement, handle: HTMLElement, corner: ResizeCorner = "se") {
   handle.onmousedown = (e: MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -308,8 +309,26 @@ function setupHoverResize(container: HTMLElement, handle: HTMLElement) {
       const deltaY = moveEvent.clientY - startY;
       const maxWidth = typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth * 0.85 : 1200;
       const maxHeight = typeof window !== "undefined" && window.innerHeight > 0 ? window.innerHeight * 0.75 : 800;
-      const newWidth = Math.max(260, Math.min(maxWidth, startWidth + deltaX));
-      const newHeight = Math.max(100, Math.min(maxHeight, startHeight + deltaY));
+
+      let newWidth = startWidth;
+      let newHeight = startHeight;
+
+      if (corner === "se") {
+        newWidth = startWidth + deltaX;
+        newHeight = startHeight + deltaY;
+      } else if (corner === "sw") {
+        newWidth = startWidth - deltaX;
+        newHeight = startHeight + deltaY;
+      } else if (corner === "ne") {
+        newWidth = startWidth + deltaX;
+        newHeight = startHeight - deltaY;
+      } else if (corner === "nw") {
+        newWidth = startWidth - deltaX;
+        newHeight = startHeight - deltaY;
+      }
+
+      newWidth = Math.max(260, Math.min(maxWidth, newWidth));
+      newHeight = Math.max(100, Math.min(maxHeight, newHeight));
       container.style.width = `${Math.round(newWidth)}px`;
       container.style.height = `${Math.round(newHeight)}px`;
     };
@@ -336,7 +355,7 @@ function createHoverDocDom({
   onClose?: () => void;
 }): HTMLElement {
   const container = document.createElement("div");
-  container.className = "cm-lsp-hover-container flex flex-col overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-tooltip-bg)] shadow-xl outline-none select-text";
+  container.className = "cm-lsp-hover-container relative flex flex-col overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-tooltip-bg)] shadow-xl outline-none select-text";
   container.tabIndex = 0;
   container.setAttribute("role", "dialog");
   container.setAttribute("aria-label", "Hover documentation");
@@ -389,15 +408,29 @@ function createHoverDocDom({
   body.innerHTML = renderFormatted(contents, "md") ?? "";
   container.appendChild(body);
 
-  // Resize grip handle
-  const grip = document.createElement("div");
-  grip.setAttribute("data-testid", "code-workspace-hover-doc-resize-handle");
-  grip.setAttribute("aria-label", "Resize hover documentation");
-  grip.className = "absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100 select-none";
-  grip.innerHTML = `<svg viewBox="0 0 6 6" class="h-2.5 w-2.5 fill-current text-[var(--taomni-code-muted)]"><path d="M5 1L1 5M5 3L3 5M5 5L5 5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>`;
+  // 4-corner resize handles
+  const gripNW = document.createElement("div");
+  gripNW.className = "absolute top-0 left-0 h-4 w-4 cursor-nw-resize z-10 select-none";
+  setupHoverResize(container, gripNW, "nw");
+  container.appendChild(gripNW);
 
-  setupHoverResize(container, grip);
-  container.appendChild(grip);
+  const gripNE = document.createElement("div");
+  gripNE.className = "absolute top-0 right-0 h-4 w-4 cursor-ne-resize z-10 select-none";
+  setupHoverResize(container, gripNE, "ne");
+  container.appendChild(gripNE);
+
+  const gripSW = document.createElement("div");
+  gripSW.className = "absolute bottom-0 left-0 h-4 w-4 cursor-sw-resize z-10 select-none";
+  setupHoverResize(container, gripSW, "sw");
+  container.appendChild(gripSW);
+
+  const gripSE = document.createElement("div");
+  gripSE.setAttribute("data-testid", "code-workspace-hover-doc-resize-handle");
+  gripSE.setAttribute("aria-label", "Resize hover documentation");
+  gripSE.className = "absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100 select-none z-10";
+  gripSE.innerHTML = `<svg viewBox="0 0 6 6" class="h-2.5 w-2.5 fill-current text-[var(--taomni-code-muted)]"><path d="M5 1L1 5M5 3L3 5M5 5L5 5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>`;
+  setupHoverResize(container, gripSE, "se");
+  container.appendChild(gripSE);
 
   return container;
 }
@@ -1290,7 +1323,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     applyingExternalDocRef.current = true;
     try {
       lastDocumentTextRef.current = doc;
-      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: doc } });
+      const currentSelection = view.state.selection;
+      const clampedAnchor = Math.min(currentSelection.main.anchor, doc.length);
+      const clampedHead = Math.min(currentSelection.main.head, doc.length);
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: doc },
+        selection: { anchor: clampedAnchor, head: clampedHead },
+        scrollIntoView: false,
+      });
     } finally {
       applyingExternalDocRef.current = false;
     }

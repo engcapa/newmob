@@ -1,3 +1,8 @@
+/**
+ * NON-PRODUCTION / TEST FIXTURE ONLY (§8.14.2 J0 Containment).
+ * Do not import or execute in production completion or code-action paths.
+ */
+
 import type { LspCodeAction, LspPosition, LspWorkspaceEdit } from "../../../lib/editor/lsp";
 
 export const JDK_KNOWN_TYPES: Record<string, string[]> = {

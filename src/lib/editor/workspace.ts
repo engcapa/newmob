@@ -483,13 +483,41 @@ export function workspaceReadLooseFileWithEncoding(
   });
 }
 
-export class WorkspaceHashMismatchError extends Error {
-  readonly kind = "hash-mismatch" as const;
+export type WorkspaceWriteErrorKind = "hash-mismatch" | "encoding" | "permission" | "io";
+
+export interface WorkspaceWriteErrorData {
+  kind: WorkspaceWriteErrorKind;
+  message: string;
+  expectedHash?: string;
+  actualHash?: string;
+}
+
+export class WorkspaceWriteError extends Error implements WorkspaceWriteErrorData {
+  readonly kind: WorkspaceWriteErrorKind;
+  readonly expectedHash?: string;
+  readonly actualHash?: string;
+
+  constructor(
+    kind: WorkspaceWriteErrorKind,
+    message: string,
+    expectedHash?: string,
+    actualHash?: string,
+  ) {
+    super(message);
+    this.name = "WorkspaceWriteError";
+    this.kind = kind;
+    this.expectedHash = expectedHash;
+    this.actualHash = actualHash;
+    Object.setPrototypeOf(this, WorkspaceWriteError.prototype);
+  }
+}
+
+export class WorkspaceHashMismatchError extends WorkspaceWriteError {
   readonly expected: string;
   readonly actual: string;
 
   constructor(message: string, expected = "", actual = "") {
-    super(message);
+    super("hash-mismatch", message, expected, actual);
     this.name = "WorkspaceHashMismatchError";
     this.expected = expected;
     this.actual = actual;
@@ -497,22 +525,46 @@ export class WorkspaceHashMismatchError extends Error {
   }
 }
 
-export function isWorkspaceHashMismatchError(err: unknown): err is WorkspaceHashMismatchError {
-  return (
-    err instanceof WorkspaceHashMismatchError ||
-    (typeof err === "object" && err !== null && (err as { kind?: string }).kind === "hash-mismatch") ||
-    (err instanceof Error && err.message.startsWith("hash-mismatch:"))
-  );
+export function isWorkspaceHashMismatchError(err: unknown): boolean {
+  if (err instanceof WorkspaceHashMismatchError) return true;
+  if (err instanceof WorkspaceWriteError && err.kind === "hash-mismatch") return true;
+  if (typeof err === "object" && err !== null && (err as { kind?: string }).kind === "hash-mismatch") return true;
+  if (err instanceof Error && err.message.startsWith("hash-mismatch:")) return true;
+  return false;
 }
 
-export function parseWorkspaceWriteError(err: unknown): Error {
-  if (isWorkspaceHashMismatchError(err)) return err;
-  const msg = err instanceof Error ? err.message : String(err);
+export function parseWorkspaceWriteError(err: unknown): WorkspaceWriteError {
+  if (err instanceof WorkspaceWriteError) return err;
+  const msg = err instanceof Error ? err.message : (typeof err === "object" && err !== null && "message" in err ? String((err as { message: unknown }).message) : String(err));
+  const match = msg.match(/expected hash\s+([^\s,;]+)[,\s]+found\s+([^\s,;]+)/i);
+  
+  if (isWorkspaceHashMismatchError(err)) {
+    if (err instanceof WorkspaceHashMismatchError) return err;
+    const exp = (err as { expectedHash?: string; expected?: string })?.expectedHash ?? (err as { expected?: string })?.expected ?? match?.[1];
+    const act = (err as { actualHash?: string; actual?: string })?.actualHash ?? (err as { actual?: string })?.actual ?? match?.[2];
+    return new WorkspaceHashMismatchError(msg, exp ?? "", act ?? "");
+  }
+  if (typeof err === "object" && err !== null) {
+    const raw = err as Record<string, unknown>;
+    const kind = typeof raw.kind === "string" ? raw.kind : undefined;
+    const message = typeof raw.message === "string" ? raw.message : msg;
+    if (kind === "hash-mismatch" || kind === "encoding" || kind === "permission" || kind === "io") {
+      if (kind === "hash-mismatch") {
+        return new WorkspaceHashMismatchError(message, String(raw.expectedHash ?? match?.[1] ?? ""), String(raw.actualHash ?? match?.[2] ?? ""));
+      }
+      return new WorkspaceWriteError(kind, message);
+    }
+  }
   if (msg.startsWith("hash-mismatch:")) {
-    const match = msg.match(/expected hash\s+([^\s,]+),\s*found\s+([^\s,]+)/i);
     return new WorkspaceHashMismatchError(msg, match?.[1] ?? "", match?.[2] ?? "");
   }
-  return err instanceof Error ? err : new Error(msg);
+  if (msg.includes("not representable") || msg.includes("encoding")) {
+    return new WorkspaceWriteError("encoding", msg);
+  }
+  if (msg.includes("permission denied") || msg.includes("PermissionDenied")) {
+    return new WorkspaceWriteError("permission", msg);
+  }
+  return new WorkspaceWriteError("io", msg);
 }
 
 export async function workspaceWriteFile(

@@ -16,19 +16,27 @@ import type {
 } from "../../../lib/editor/lsp";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import { isInsideStringOrComment } from "./syntaxContext";
-import {
-  getJavaJdkCompletionCandidates,
-  generateJavaImportWorkspaceEdit,
-  isJavaTypeImported,
-} from "./javaQuickFix";
+
+export interface CompletionRequestToken {
+  workspaceId?: string;
+  fileKey?: string;
+  uri?: string;
+  languageId?: string;
+  documentRevision?: number;
+  lspSessionGeneration?: number;
+  requestId?: string;
+}
 
 export interface LspCompletionHooks {
+  token?: CompletionRequestToken;
   fetch: (
     position: LspPosition,
     triggerCharacter: string | null,
+    token?: CompletionRequestToken,
   ) => Promise<LspCompletionResult | null>;
-  resolve?: (raw: unknown) => Promise<LspCompletionItem | null>;
+  resolve?: (raw: unknown, token?: CompletionRequestToken) => Promise<LspCompletionItem | null>;
   triggerCharacters: () => string[];
+  getDocumentRevision?: () => number;
 }
 
 /** LSP CompletionItemKind → CodeMirror completion `type` (built-in icons). */
@@ -202,6 +210,8 @@ function applyLspCompletion(
   from: number,
   to: number,
   resolve?: LspCompletionHooks["resolve"],
+  token?: CompletionRequestToken,
+  getDocumentRevision?: () => number,
 ): void {
   // Prefer the server's textEdit range when present (e.g. replacing a member
   // access span wider/narrower than the typed prefix word).
@@ -212,26 +222,42 @@ function applyLspCompletion(
     replaceTo = offsetFromLspPosition(view.state.doc, item.textEdit.range.end);
   }
   const insert = item.textEdit?.newText ?? item.insertText ?? item.label;
+  const additionalEdits = item.additionalTextEdits ?? [];
+
   if (item.insertTextFormat === 2) {
     snippet(lspSnippetToCmSnippet(insert))(view, completion, replaceFrom, replaceTo);
+    if (additionalEdits.length) {
+      applyTextEdits(view, additionalEdits);
+    }
   } else {
+    // Single atomic transaction dispatch combining primary replacement and all additional edits
+    const primaryChange = { from: replaceFrom, to: replaceTo, insert };
+    const additionalChanges = additionalEdits.map((edit) => ({
+      from: offsetFromLspPosition(view.state.doc, edit.range.start),
+      to: offsetFromLspPosition(view.state.doc, edit.range.end),
+      insert: edit.newText,
+    }));
     view.dispatch({
-      changes: { from: replaceFrom, to: replaceTo, insert },
+      changes: [primaryChange, ...additionalChanges],
       selection: { anchor: replaceFrom + insert.length },
     });
   }
-  if (item.additionalTextEdits.length) {
-    applyTextEdits(view, item.additionalTextEdits);
-    return;
-  }
-  // Servers like typescript-language-server only compute auto-import edits
-  // at resolve time; fetch them after the main insertion.
-  if (resolve) {
-    void resolve(item.raw)
+
+  // If resolve is needed for additionalTextEdits (e.g. typescript auto-imports computed lazily)
+  if (!additionalEdits.length && resolve) {
+    const docAtAccept = view.state.doc.toString();
+    const revAtAccept = getDocumentRevision?.();
+    void (token ? resolve(item.raw, token) : resolve(item.raw))
       .then((resolved) => {
-        if (resolved?.additionalTextEdits.length) {
-          applyTextEdits(view, resolved.additionalTextEdits);
+        if (!resolved?.additionalTextEdits?.length) return;
+        // Verify document has not changed since accept
+        if (getDocumentRevision && revAtAccept !== undefined && getDocumentRevision() !== revAtAccept) {
+          return;
         }
+        if (view.state.doc.toString() !== docAtAccept && !getDocumentRevision) {
+          return;
+        }
+        applyTextEdits(view, resolved.additionalTextEdits);
       })
       .catch(() => {});
   }
@@ -301,7 +327,7 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     // settle briefly so rapid typing does not spam heavy LSP queries on every keystroke.
     if (!context.explicit && !triggerOnly && !afterTrigger) {
       await new Promise<void>((resolve) => {
-        const timer = window.setTimeout(resolve, 80);
+        const timer = window.setTimeout(resolve, 120);
         context.addEventListener("abort", () => {
           window.clearTimeout(timer);
           resolve();
@@ -317,52 +343,22 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         : null;
     let result: LspCompletionResult | null = null;
     try {
-      result = await hooks.fetch(
-        lspPositionFromOffset(context.state.doc, context.pos),
-        triggerCharacter,
-      );
+      result = hooks.token
+        ? await hooks.fetch(
+            lspPositionFromOffset(context.state.doc, context.pos),
+            triggerCharacter,
+            hooks.token,
+          )
+        : await hooks.fetch(
+            lspPositionFromOffset(context.state.doc, context.pos),
+            triggerCharacter,
+          );
     } catch {
       result = null;
     }
     if (context.aborted) return null;
-    // No language service: check if typed prefix matches JDK types, else fall back to buffer-word completion.
+    // No language service / inactive LSP: fall back to buffer-word completion.
     if (!result || (!result.status.active && result.items.length === 0)) {
-      const docText = context.state.doc.toString();
-      const typed = word ? word.text : "";
-      const jdkCandidates = getJavaJdkCompletionCandidates(typed, docText);
-      if (jdkCandidates.length > 0) {
-        const options: Completion[] = jdkCandidates.map((c) => ({
-          label: c.label,
-          detail: c.detail,
-          type: c.type,
-          boost: c.boost,
-          apply: (view, completion, from, to) => {
-            const currentDoc = view.state.doc.toString();
-            const fqcn = completion.detail!;
-            const simpleName = completion.label;
-
-            view.dispatch({
-              changes: { from, to, insert: simpleName },
-              selection: { anchor: from + simpleName.length },
-            });
-
-            if (!isJavaTypeImported(currentDoc, fqcn, simpleName)) {
-              const importEdit = generateJavaImportWorkspaceEdit("dummy.java", view.state.doc.toString(), fqcn);
-              const textEdit = importEdit.documentEdits[0]?.edits[0];
-              if (textEdit) {
-                const importPos = offsetFromLspPosition(view.state.doc, textEdit.range.start);
-                view.dispatch({
-                  changes: { from: importPos, to: importPos, insert: textEdit.newText },
-                });
-              }
-            }
-          },
-        }));
-        return {
-          from: word ? word.from : context.pos,
-          options,
-        };
-      }
       return completeAnyWord(context);
     }
     if (result.items.length === 0) return null;
@@ -392,7 +388,16 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
           ? () => completionInfo(item, hooks.resolve)
           : undefined,
         apply: (view, completion, from, to) =>
-          applyLspCompletion(view, completion, item, from, to, hooks.resolve),
+          applyLspCompletion(
+            view,
+            completion,
+            item,
+            from,
+            to,
+            hooks.resolve,
+            hooks.token,
+            hooks.getDocumentRevision,
+          ),
       });
       if (mapped.length >= MAX_COMPLETION_OPTIONS * 2) break;
     }

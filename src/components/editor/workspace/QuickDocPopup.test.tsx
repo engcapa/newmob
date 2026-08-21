@@ -28,7 +28,7 @@ describe("QuickDocPopup", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("is focusable and provides an interactive resize handle", () => {
+  it("is focusable and provides interactive 4-corner resize handles", () => {
     render(
       <QuickDocPopup
         open
@@ -41,11 +41,11 @@ describe("QuickDocPopup", () => {
     const dialog = screen.getByTestId("code-workspace-quick-doc");
     expect(dialog).toHaveAttribute("tabIndex", "0");
 
-    const resizeHandle = screen.getByTestId("code-workspace-quick-doc-resize-handle");
-    expect(resizeHandle).toBeInTheDocument();
+    const resizeHandleSE = screen.getByTestId("code-workspace-quick-doc-resize-handle");
+    expect(resizeHandleSE).toBeInTheDocument();
 
-    // Start resize drag
-    fireEvent.mouseDown(resizeHandle, { clientX: 100, clientY: 100 });
+    // Start resize drag from SE (bottom-right)
+    fireEvent.mouseDown(resizeHandleSE, { clientX: 100, clientY: 100 });
     fireEvent.mouseMove(window, { clientX: 200, clientY: 250 });
     fireEvent.mouseUp(window);
 

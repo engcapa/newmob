@@ -173,6 +173,15 @@ vi.mock("../../lib/ipc", () => ipcMocks);
 
 vi.mock("../../lib/git", () => gitMocks);
 
+const localHistoryMocks = vi.hoisted(() => ({
+  historySnapshot: vi.fn(async () => null),
+  historyList: vi.fn(async () => []),
+  historyRevert: vi.fn(async () => null),
+  historyPurge: vi.fn(async () => null),
+}));
+
+vi.mock("../../lib/localHistory", () => localHistoryMocks);
+
 const chatMocks = vi.hoisted(() => ({
   attachToComposer: vi.fn(async () => undefined),
   explainSelection: vi.fn(async () => undefined),
@@ -343,6 +352,7 @@ describe("CodeWorkspaceTab", () => {
       codeWorkspaceByTab: {},
     });
     useCodeWorkspaceStore.setState({ byInstanceId: {} });
+    localHistoryMocks.historySnapshot.mockReset().mockResolvedValue(null);
     workspaceMocks.workspaceListDir.mockReset();
     workspaceMocks.workspaceCompactChain.mockReset();
     workspaceMocks.workspaceListFilesRecursive.mockReset();
@@ -1768,7 +1778,7 @@ describe("CodeWorkspaceTab", () => {
     ).openFiles["root:app:src/main.ts"]?.text).toBe("x =1"));
   });
 
-  it("shows Java JDK import quick fixes on Alt+Enter and inserts the import statement", async () => {
+  it("applies provider Java import quick fixes on Alt+Enter and inserts the import statement", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
       workspaceId: "ws-java-import",
@@ -1813,7 +1823,24 @@ describe("CodeWorkspaceTab", () => {
     }));
     lspMocks.lspCodeActions.mockResolvedValue({
       status: documentStatus({ available: true, active: true }),
-      actions: [],
+      actions: [{
+        title: "Import 'List' (java.util.List)",
+        kind: "quickfix",
+        isPreferred: true,
+        edit: {
+          documentEdits: [{
+            uri: "file:///repo/app/src/Service.java",
+            path: "/repo/app/src/Service.java",
+            edits: [{
+              range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+              newText: "import java.util.List;\n",
+            }],
+          }],
+        },
+        command: null,
+        commandArguments: null,
+        raw: { title: "Import 'List' (java.util.List)" },
+      }],
     });
 
     renderWorkspace(workspace);
@@ -1824,15 +1851,54 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.keyDown(window, { key: "Enter", altKey: true });
     const importOption = await screen.findByRole("button", { name: "Import 'List' (java.util.List)" });
     expect(importOption).toBeInTheDocument();
-    expect(importOption).toHaveAttribute("data-active", "true");
 
-    // Press Enter to apply the active quick fix via keyboard
-    fireEvent.keyDown(window, { key: "Enter" });
+    fireEvent.click(importOption);
 
     await waitFor(() => expect(selectCodeWorkspaceUi(
       useCodeWorkspaceStore.getState(),
       "instance-java-import",
     ).openFiles["root:app:src/Service.java"]?.text).toContain("import java.util.List;"));
+  });
+
+  it("never generates or suggests Java import quick fixes in TypeScript files", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-ts-no-java-import",
+      workspaceInstanceId: "instance-ts-no-java-import",
+      name: "TS No Java Import",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/app.ts" },
+    };
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/app.ts",
+      "const items: List = [];",
+    ));
+    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({
+      path: "/repo/app/src/app.ts",
+      available: true,
+      active: true,
+      capabilities: defaultCapabilities({
+        completion: true,
+        codeAction: true,
+      }),
+    }));
+    lspMocks.lspCodeActions.mockResolvedValue({
+      status: documentStatus({ available: true, active: true }),
+      actions: [],
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/app.ts");
+    await waitFor(() => expect(screen.queryByText("LSP idle")).not.toBeInTheDocument());
+
+    // Trigger Alt+Enter on TypeScript file where LSP has no actions
+    fireEvent.keyDown(window, { key: "Enter", altKey: true });
+    
+    // Assert no Java import quick fix is suggested
+    expect(screen.queryByRole("button", { name: /import 'List' \(java\.util\.List\)/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /java\.util/i })).not.toBeInTheDocument();
   });
 
   it("rejects a provider refactor when the editor changes during preview confirmation", async () => {
@@ -4322,6 +4388,159 @@ end_of_record
     });
     await waitFor(() => {
       expect(screen.queryByTestId("code-workspace-search-everywhere")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("P0-S / N1.7 Atomic Save Commit Host Race Tests", () => {
+    it("cancels save with 0 disk writes when user edits buffer during historySnapshot await", async () => {
+      let resolveHistory: () => void = () => {};
+      const historyDeferred = new Promise<null>((r) => {
+        resolveHistory = () => r(null);
+      });
+      localHistoryMocks.historySnapshot.mockReturnValue(historyDeferred);
+
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-save-race-history",
+        workspaceInstanceId: "instance-save-race-history",
+        name: "Save Race History",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "original_v1\n"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+
+      // Make buffer dirty first by typing Ctrl+D (duplicate line)
+      fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-save-race-history",
+        ).openFiles["root:app:src/main.ts"];
+        expect(fileState?.dirty).toBe(true);
+        expect(fileState?.text).toBe("original_v1\noriginal_v1\n");
+      });
+
+      // Trigger Save (Ctrl+S) -> enters prepare phase and awaits historySnapshot
+      fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+
+      await waitFor(() => {
+        expect(localHistoryMocks.historySnapshot).toHaveBeenCalled();
+      });
+
+      // While historySnapshot is awaiting, user edits buffer again (Ctrl+D)
+      fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-save-race-history",
+        ).openFiles["root:app:src/main.ts"];
+        expect(fileState?.text).toBe("original_v1\noriginal_v1\noriginal_v1\n");
+      });
+
+      // Now resolve historySnapshot
+      await act(async () => {
+        resolveHistory();
+      });
+
+      // Assert pre-write commit boundary cancelled save: zero disk writes
+      expect(workspaceMocks.workspaceWriteFileEncoded).not.toHaveBeenCalled();
+      expect(workspaceMocks.workspaceWriteLooseFileEncoded).not.toHaveBeenCalled();
+      expect(workspaceMocks.workspaceWriteFile).not.toHaveBeenCalled();
+
+      // Editor and store retain latest user edits, dirty remains true
+      const finalFileState = selectCodeWorkspaceUi(
+        useCodeWorkspaceStore.getState(),
+        "instance-save-race-history",
+      ).openFiles["root:app:src/main.ts"];
+      expect(finalFileState?.text).toBe("original_v1\noriginal_v1\noriginal_v1\n");
+      expect(finalFileState?.dirty).toBe(true);
+      expect(finalFileState?.saving).toBe(false);
+    });
+
+    it("preserves concurrent edits and marks dirty when disk write was in-flight", async () => {
+      let resolveWrite: (res: any) => void = () => {};
+      const writeDeferred = new Promise<any>((r) => {
+        resolveWrite = r;
+      });
+      workspaceMocks.workspaceWriteFileEncoded.mockReturnValue(writeDeferred);
+
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-save-race-inflight",
+        workspaceInstanceId: "instance-save-race-inflight",
+        name: "Save Race InFlight",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "initial_text\n"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+
+      // Make buffer dirty (Ctrl+D)
+      fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-save-race-inflight",
+        ).openFiles["root:app:src/main.ts"];
+        expect(fileState?.dirty).toBe(true);
+        expect(fileState?.text).toBe("initial_text\ninitial_text\n");
+      });
+
+      // Trigger Save (Ctrl+S) -> historySnapshot resolves immediately, disk writer is called and deferred
+      fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+
+      await waitFor(() => {
+        expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalledWith(
+          "/repo/app",
+          "src/main.ts",
+          "initial_text\ninitial_text\n",
+          "hash-src/main.ts",
+          "UTF-8",
+          false,
+        );
+      });
+
+      // While write is in-flight, user edits buffer further (Ctrl+D)
+      fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-save-race-inflight",
+        ).openFiles["root:app:src/main.ts"];
+        expect(fileState?.text).toBe("initial_text\ninitial_text\ninitial_text\n");
+      });
+
+      // Now resolve the disk writer with snapshot result
+      await act(async () => {
+        resolveWrite(file("src/main.ts", "initial_text\ninitial_text\n", { hash: "hash-saved-snapshot" }));
+      });
+
+      // Assert writeback merged cleanly: savedText is updated, but buffer text keeps revision 11 edits and dirty is true
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-save-race-inflight",
+        ).openFiles["root:app:src/main.ts"];
+        expect(fileState?.text).toBe("initial_text\ninitial_text\ninitial_text\n");
+        expect(fileState?.savedText).toBe("initial_text\ninitial_text\n");
+        expect(fileState?.dirty).toBe(true);
+        expect(fileState?.saving).toBe(false);
+      });
+
+      expect(useAppStore.getState().statusMessage).toContain("current changes remain unsaved");
     });
   });
 });

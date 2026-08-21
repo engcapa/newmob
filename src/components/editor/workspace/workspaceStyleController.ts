@@ -495,7 +495,15 @@ export class WorkspaceStyleController {
         targetEol,
       );
 
-      const returnedHash = (writeResult as { hash?: string } | undefined)?.hash;
+      const resultObj = writeResult as { hash?: string; cancelled?: boolean; reason?: string } | undefined;
+      if (resultObj?.cancelled) {
+        return {
+          kind: "cancelled",
+          reason: resultObj.reason ?? "Buffer was modified before write.",
+          retryable: true,
+        };
+      }
+      const returnedHash = resultObj?.hash;
       if (!returnedHash) {
         return {
           kind: "failed",

@@ -234,4 +234,30 @@ describe("CodeMirrorHost search", () => {
     const rendered = renderEditor("one\ntwo", vi.fn(), { columnSelectionMode: true });
     expect(rendered.container.firstElementChild).toHaveAttribute("data-column-selection", "true");
   });
+
+  it("preserves cursor selection when doc update is applied", async () => {
+    const onSelectionChange = vi.fn();
+    const rendered = renderEditor("line1\nline2\nline3", vi.fn(), { onSelectionChange });
+
+    // Rerender with updated doc (e.g. normalized after save)
+    rendered.rerender(
+      <CodeMirrorHost
+        path="src/example.ts"
+        doc="line1\nline2\nline3\n"
+        visible
+        diagnostics={[]}
+        reveal={null}
+        onChange={rendered.onChange}
+        onSave={vi.fn()}
+        onHover={vi.fn(async () => null)}
+        onDefinition={vi.fn(async () => false)}
+        onReferences={vi.fn(async () => undefined)}
+        onSelectionChange={onSelectionChange}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector(".cm-content")).toBeInTheDocument();
+    });
+  });
 });

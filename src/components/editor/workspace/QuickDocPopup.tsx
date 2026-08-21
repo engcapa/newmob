@@ -61,7 +61,7 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
     return () => window.removeEventListener("mousedown", onPointer, true);
   }, [onClose, open]);
 
-  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+  const handleResizeMouseDown = useCallback((corner: "se" | "sw" | "ne" | "nw" = "se") => (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     isResizingRef.current = true;
@@ -78,8 +78,25 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
       const maxWidth = typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth * 0.95 : 1600;
       const maxHeight = typeof window !== "undefined" && window.innerHeight > 0 ? window.innerHeight * 0.85 : 1200;
 
-      const newWidth = Math.max(MIN_WIDTH, Math.min(maxWidth, startWidth + deltaX));
-      const newHeight = Math.max(MIN_HEIGHT, Math.min(maxHeight, startHeight + deltaY));
+      let newWidth = startWidth;
+      let newHeight = startHeight;
+
+      if (corner === "se") {
+        newWidth = startWidth + deltaX;
+        newHeight = startHeight + deltaY;
+      } else if (corner === "sw") {
+        newWidth = startWidth - deltaX;
+        newHeight = startHeight + deltaY;
+      } else if (corner === "ne") {
+        newWidth = startWidth + deltaX;
+        newHeight = startHeight - deltaY;
+      } else if (corner === "nw") {
+        newWidth = startWidth - deltaX;
+        newHeight = startHeight - deltaY;
+      }
+
+      newWidth = Math.max(MIN_WIDTH, Math.min(maxWidth, newWidth));
+      newHeight = Math.max(MIN_HEIGHT, Math.min(maxHeight, newHeight));
 
       setSize({ width: Math.round(newWidth), height: Math.round(newHeight) });
     };
@@ -113,7 +130,6 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
         maxHeight: "85vh",
         minWidth: `${MIN_WIDTH}px`,
         minHeight: `${MIN_HEIGHT}px`,
-        resize: "both",
       }}
     >
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--taomni-code-border)] px-2 select-none">
@@ -144,11 +160,24 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
         className="taomni-chat-md min-h-0 flex-1 overflow-auto px-3 py-2 text-[12px] leading-relaxed text-[var(--taomni-code-text)]"
         dangerouslySetInnerHTML={{ __html: html }}
       />
+      {/* 4-corner resize handles */}
+      <div
+        className="absolute top-0 left-0 h-4 w-4 cursor-nw-resize z-10 select-none"
+        onMouseDown={handleResizeMouseDown("nw")}
+      />
+      <div
+        className="absolute top-0 right-0 h-4 w-4 cursor-ne-resize z-10 select-none"
+        onMouseDown={handleResizeMouseDown("ne")}
+      />
+      <div
+        className="absolute bottom-0 left-0 h-4 w-4 cursor-sw-resize z-10 select-none"
+        onMouseDown={handleResizeMouseDown("sw")}
+      />
       <div
         data-testid="code-workspace-quick-doc-resize-handle"
         aria-label="Resize documentation dialog"
-        className="absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100"
-        onMouseDown={handleResizeMouseDown}
+        className="absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100 z-10 select-none"
+        onMouseDown={handleResizeMouseDown("se")}
       >
         <svg viewBox="0 0 6 6" className="h-2.5 w-2.5 fill-current text-[var(--taomni-code-muted)]">
           <path d="M5 1L1 5M5 3L3 5M5 5L5 5" stroke="currentColor" strokeWidth="1" strokeLinecap="round" />

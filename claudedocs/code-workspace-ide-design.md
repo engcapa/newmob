@@ -1,12 +1,12 @@
 # Code Workspace IntelliJ IDEA Code Editor 对齐方案
 
-> 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先达到日常代码编辑工作流等价，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
+> 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-20 · 版本：v4.41（`c5ce1fd6` + `5ce13c9a` as-built 复核、IDEA 编辑器能力第二批对照与下一轮合同）· 状态：**实施中（Gate R0 回归已解除，转入残留缺陷收口）**。本轮沿生产调用链复核 §8.12 六个子包（Gate R0 / N1.5 / N6.5 / N0.5 / N2.5 / N8.2）的实际落地，重跑仓库自带 host 级测试，并以 IntelliJ IDEA 长期稳定的 Code Editor 能力做第二批对照，登记此前未覆盖的缺口；只更新文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
+> 日期：2026-08-21 · 版本：v4.43（`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核、IDEA 编辑器能力第三批对照与 P0 纠偏合同）· 状态：**实施中（仍有 P0 正确性阻断）**。本轮以 `HEAD 20027dfe` 为代码基线，复核 N1.6、Java import/code-action、Context Menu 与 Quick Documentation 增量，并重新读取 IntelliJ IDEA 2026.2 官方 Editor/Auto Import/Code Reference/Editor Tabs/Multiple Carets 设置与工作流；随后对按 §8.14 实现的未提交工作树进行生产调用链、Rust 写盘、completion stale-response 和 QA 审计；只更新本文档，不修改功能代码。Build/Run/Debug/Test/Terminal 继续按 IDE 伴随能力独立记账。
 >
-> 当前结论：`c5ce1fd6` + `5ce13c9a` 解除了 §8.12 的 P0 回归——`commandFocusForTarget` 已恢复并注入 controller，`buildContext` 成为单一 context 构造，payload 契约统一到 `ctx.payload`，controller 内的第二套 keydown 匹配已删除；`CodeWorkspaceTab.test.tsx` 3 个红测转绿（本轮复跑 9 files / 137 tests 全绿，`tsc -b` exit 0）。N1.5 的 `mutateOpenBuffer`/`writeTextSnapshot`/无 hash 即 `failed`、N6.5 的 `commitLayoutMutation`/sibling 迁移/快照修复、N8.2 的后端 `dependency_index` 三命令（`core=gav`，不再用 solr `tags`）均已落到生产路径。**但六个子包全部仍低于合同定义**，且新增两处 P0 级事实：① 关闭文件的 WorkspaceEdit 写盘丢弃 applier 传入的 `diskEol` 并硬编码 `policy.eol:"lf"`（`CodeWorkspaceTab.tsx:5757-5796`），CRLF 文件被静默改写为 LF；② StrictMode 崩溃被“删除 `host.dispose()`”修掉（`5ce13c9a`），ActionHost 现在**永不释放**，Gate R0 第 6 条生命周期与双实例验收无法成立。其余：typed result 无接收方（`onCommandExecuted` 未传）、Search Everywhere/cheatsheet 仍读原始 `WorkspaceCommand[]` 并以 `focus:"workspace"` 执行 editor-only 命令、`keymapModel`/`NavigationHistoryFacade`/`LocationIdentity`/`dependencyCompletion` 等 8 个模块仍零生产引用、Back/Forward 与 Recent Locations 双历史未打通、Ctrl+Tab Switcher 仍缺、默认布局 `layoutTreeV2:null` 使递归渲染与 primary/secondary 双路径并存。当前执行合同见 §8.13（§8.12 转历史），as-built 明细见 §2.19，IDEA 第二批缺口见 §2.20，Debug 见 `debug-panel-idea-redesign.md` §21。
+> 当前结论：N1.6 已把 closed-file WorkspaceEdit 的 EOL、replay metadata、显式缩进 override 与 hash-mismatch 包装接入生产路径，但**没有完成原子保存合同**：`saveOpenBufferText` 在 `historySnapshot` 后已有 revision guard，writer-in-flight writeback 也会保留新 buffer，当前 host 用例未复现旧 snapshot 覆盖当前输入；然而 `WorkspaceStyleController` 的最终 guard 与 host writer 之间不是同一个 typed `PreparedSave` 提交边界，旧 snapshot 写盘完成后仍会调用 `saveLspDocument(..., snapshotText)`，导致 provider 先收到旧 `didSave` 再收到当前 `didChange`。IPC 仍返回字符串错误，新增 377 行测试只用简化 callback 验证 controller/model，没有挂载完整生产 host，也没有做 Tauri 多编码字节 fixture。`9203d3e4` 对 JDTLS apply-workspace-edit wrapper 的解析是有效增量，但其本地“JDK auto-import”是硬编码表（还混入 SLF4J/Spring/Lombok），completion source 没有语言身份，LSP 不可用时可在非 Java 文件插入 Java import，且主插入/import 分两次 transaction；必须先隔离，不能计为 IDEA auto-import。QuickDoc/hover 已有可缩放、固定到 Documentation pane 和底部遮挡修复，但缺 hover 设置、外部文档、Type Info、Context Info、历史/链接路由及完整可访问性证据。Gate R1、N6.6、N2.6、N0.6、N8.3 与 8 个孤儿模型结论均未被最新提交改变。当前唯一执行合同改为 §8.15；本轮明细见 §2.21、§2.23，IDEA 第三批对照见 §2.22。
 >
-> 早期版本：v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
+> 早期版本：v4.42（2026-08-21，`d641ad12` + `9203d3e4` + `20027dfe` as-built 复核）· v4.41（2026-08-20，`c5ce1fd6` + `5ce13c9a` as-built 复核）· v4.40（2026-08-19，`a4584916` + `b4e7325f` as-built 复核与 Gate R0 回归登记）· v4.39（2026-08-19，`dab8a778` production-path code review）· v4.30（2026-08-15，Action/Style/Keymap/Semantic/Advanced 详细设计及首批模型代码）· v4.29（2026-08-15，IDEA 2026.2 editor 能力重对齐与 `ca18b396` 审计）· v4.28（2026-08-15，Refactoring usages preview、indentation detection 与 keymap cheatsheet）· v4.27（2026-08-15，Sticky Lines, Ctrl+Shift+F9 & Run Profile overrides）· v4.26（2026-08-15，P0-P2 shortcuts & actions delivery）· v4.25（2026-08-15，IDEA editor parity backlog & execution）· v4.24（2026-08-15，IDEA editor parity & multi-module execution graph）· v4.23（2026-08-15，project model baseline）· v4.22（2026-08-15，DAP adapter contract fixtures）· v4.17（2026-08-15，DAP `exceptionOptions`）· v4.16（2026-08-14，DAP conditional exception filters）· v3.2（2026-07-26，M6–M9 代码交付）· v3.1（2026-07-25，M6 代码交付）· v3.0（2026-07-25，新增 §11 M6–M9 计划并修订 §2.3 非目标）。
 >
 > 早期版本沿革：v2.10（2026-07-12，M0–M5 主线交付与后续收口）。
 
@@ -18,7 +18,7 @@
 |------|----------|------|
 | 工作区模型 | 多根目录（folder/git）+ loose files、布局恢复、最近工作区、tree/compact/flat 文件树 | `CodeWorkspaceTabInfo`、`codeWorkspaceStore`、`useWorkspaceTreeData` |
 | 编辑内核 | CodeMirror 6：查找替换、多光标/矩形选择、折叠、注释、soft wrap、括号匹配/闭合、常用编辑键位、大文件降级、二分屏与同步滚动、preview/pin/溢出 tab | `CodeMirrorHost.tsx`、`workspaceEditorCommands.ts`、`EditorGroup.tsx` |
-| 编辑效率 | LSP 补全与 snippet、语法上下文抑制/输入防抖/候选上限、启发式 Complete Current Statement、同词多光标、大小写切换、已接入的多选区 Join Lines 与 Tab jump-out、内置/自定义 Live Templates 与 Postfix Templates；EffectiveCodeStyle 与状态栏标签 | `lspCompletion.ts`、`syntaxContext.ts`、`workspaceEditorCommands.ts`、`liveTemplates.ts`、`LiveTemplatesSettings.tsx`、`codeStyleModel.ts`、`codeWorkspaceStatusStore.ts` |
+| 编辑效率 | LSP 补全与 snippet、语法上下文抑制/输入防抖/候选上限、启发式 Complete Current Statement、同词多光标、大小写切换、已接入的多选区 Join Lines 与 Tab jump-out、内置/自定义 Live Templates 与 Postfix Templates；EffectiveCodeStyle 与状态栏标签；参数信息、可缩放/可固定 QuickDoc 与 hover 文档 | `lspCompletion.ts`、`syntaxContext.ts`、`workspaceEditorCommands.ts`、`liveTemplates.ts`、`QuickDocPopup.tsx`、`CodeMirrorHost.tsx`、`workspaceStyleController.ts` |
 | Markdown | edit/preview/split，Mermaid 渲染 + SVG/PNG 导出 | `MarkdownPreview.tsx` |
 | LSP 与分析 | 10 种语言预设 + 自定义命令；文档同步、诊断元数据、补全、签名、文档、导航/引用/层级、格式化、重命名、按 kind 请求 Code Action、inlay/semantic token、动态 capability、跨 root/language 的有界 workspace symbol 聚合、provider-backed inspection profile/related locations/structured evidence | `src-tauri/src/lsp.rs`、`src/lib/editor/lsp.ts`、`useWorkspaceLspSession.ts`、`AnalysisPanel.tsx` |
 | 搜索与导航 | Find/Replace in Files、Search Everywhere、Go to File/Class/Symbol、Recent/Recently Changed Files、Recent Locations（当前为 wired/partial）、Last Edit Location、前进/后退、Outline/结构弹窗、Problems | `workspace_search.rs`、`SearchEverywhere.tsx`、`RecentLocationsDialog.tsx`、`useWorkspaceNavigation.ts`、workspace panels |
@@ -26,20 +26,20 @@
 | 编辑器呈现 | breadcrumbs、sticky lines、inlay hints、semantic tokens、Git gutter/inline blame/chunk rollback、coverage gutter、TODO/书签、本地历史 | workspace chrome/panels、`coverageEditorChrome.ts` |
 | IDE 伴随能力（不计入 Editor 对齐） | PTY、Build/Run/Test/Debug、DAP、工程拓扑、覆盖率报告、Git Manager、AI、远程工作区 | `workspace_execution.rs`、`dap.rs`、Run/Build/Test/Debug panels |
 | 设置入口 | code view profile、编辑区/树缩放、LSP/Java 设置、Live Template 管理、静态 action catalog 驱动的固定命令速查表 | `codeViewProfile.ts`、Settings、`workspaceActionRegistry.ts`、`KeymapCheatSheetDialog.tsx` |
-| 零生产引用的实验模型（不计任何能力） | Keymap scheme、Maven/Gradle 依赖补全、Full Line session、Java 正则 inspection/refactor plan、inspection evidence、文本模板式 SSR、Surround/Generate | 8 个模块共 ~1.7k 行 + ~0.5k 行只测试死代码：`keymapModel.ts`、`dependencyCompletion.ts`、`fullLineCompletionModel.ts`、`javaInspectionEngine.ts`、`semanticRefactorPlan.ts`、`inspectionEvidence.ts`、`structuralSearchModel.ts`、`surroundGenerateModel.ts`；治理决策见 §8.13 N12。EditorConfig/save pipeline 与 recursive layout 已进入生产路径（残留缺陷见 §2.19） |
+| 零生产引用的实验模型（不计任何能力） | Keymap scheme、Maven/Gradle 依赖补全、Full Line session、Java 正则 inspection/refactor plan、inspection evidence、文本模板式 SSR、Surround/Generate | 8 个模块共 ~1.7k 行 + ~0.5k 行只测试死代码：`keymapModel.ts`、`dependencyCompletion.ts`、`fullLineCompletionModel.ts`、`javaInspectionEngine.ts`、`semanticRefactorPlan.ts`、`inspectionEvidence.ts`、`structuralSearchModel.ts`、`surroundGenerateModel.ts`；治理决策见 §8.14 N12 继承规则。EditorConfig/save pipeline 与 recursive layout 已进入生产路径（残留缺陷见 §2.21） |
 
 **当前明确缺失或被高估的 Editor 能力：**
 
 1. 没有 IDEA 的 PSI/stub index、inspection/data-flow/nullability engine 和索引保证的重构；`javaSemanticIndex.ts`/`javaInspectionEngine.ts` 的正则原型没有生产入口、真实解析、符号解析或 CFG/SSA，不能填补此项。
 2. 没有 Smart Completion、type-matching completion、重复调用扩展候选、语言感知 Complete Current Statement 和完整 intention catalog；`surroundGenerateModel.ts` 只是未装配的固定文本生成器。
 3. 没有 Code Workspace 编辑器内的 Full Line/inline suggestion、推理 runtime、CodeMirror ghost text 或逐词/逐行 action；`FullLineSession` 只管理测试数据，Terminal 的 shell FIM 仍是另一条链路。
-4. 缩进切换能通过 `EffectiveCodeStyle` 重配置 CodeMirror `EditorState.tabSize`/`indentUnit`，且格式化请求带 `tabSize`/`insertSpaces`；但 override 仍是组件内状态，新 resolver/save pipeline 没有生产消费者，保存仍只执行原 formatter 链路。
+4. 缩进切换能通过 `EffectiveCodeStyle` 重配置 CodeMirror `EditorState.tabSize`/`indentUnit`，resolver/save pipeline 已进入生产链，且 formatter 请求带 `tabSize`/`insertSpaces`；但 override 仍是组件内状态，最终 guard 到 host writer 仍跨越 `historySnapshot` await，且旧 snapshot 的 LSP save 顺序错误；当前 inner guard/writeback 已保护 buffer 文本，但尚无统一 PreparedSave/typed stale-save 合同，详见 §2.21、§2.23/N1.7。
 5. 现有能力仍只有 LSP format/range format、format on save 和 organize imports；没有 IDEA code-style scheme、生产级 EditorConfig 父目录链/优先级、rearrange、cleanup、formatter marker/exclusion 和 scope formatting。
 6. Live/Postfix Templates 已有目录与自定义 UI，但 postfix 只按文本正则提取表达式，没有类型/上下文适用性、template variable function、surround template 和 import shortening 语义。
 7. Recent Locations 已有 per-workspace controller 与事件型采集，但 Back/Forward 与 Recent Locations 仍是两套历史（Delete 只删一侧），`LocationIdentity`/`NavigationHistoryFacade` 零生产引用，canonical path 不折叠大小写/不解 symlink，Ctrl+Tab Switcher 仍缺；related/super/sibling/method navigation 与 Structural Search/Replace 仍缺，同名 SSR 仍是正则。递归布局已进入 store/render/persistence，但默认 `layoutTreeV2:null` 使 primary/secondary 旧路径继续并存。
 8. Keymap 仍是固定 `WorkspaceCommand[]` 速查/执行面板；`keymapModel.ts`（含 `resolveBinding`/`findConflicts`）没有 store、设置 UI 或 dispatcher 消费，绑定真值仍是 `WorkspaceCommand.keybinding` 与 `workspaceEditorKeymap` 两处硬编码，scheme/录键/冲突/import/export 对用户均不可用。
 9. clipboard history、custom folding region、virtual space、字体/ligature/color scheme 等尚无产品闭环；Join Lines 已进入 CodeMirror keymap，Sort/Reverse/Transpose/Unwrap 仅有导出函数或 catalog metadata，未形成统一 action/失败/undo 工作流。
-10. Linux/macOS/Windows 的 IME、非美式键盘、系统快捷键、剪贴板、字体、路径、watcher、编码和打包应用证据仍缺。详细权威状态以 §2.5、§2.8、§2.13、§2.14、§8.5、§8.8 和 §8.9 为准。
+10. Linux/macOS/Windows 的 IME、非美式键盘、系统快捷键、剪贴板、字体、路径、watcher、编码和打包应用证据仍缺。当前权威状态以 §2.5、§2.21、§2.22 与 §8.14 为准；更早审计只作历史证据。
 
 ---
 
@@ -49,10 +49,14 @@
 
 Code Workspace 是 taomni 内的代码编辑器与工程工作台，但本方案只把 **Code Editor** 作为主验收对象。参考产品固定为 IntelliJ IDEA 2026.2，参考语言固定为 Java；TypeScript/JavaScript、Python、Go、Rust、C/C++ 等语言通过 LSP/provider 提供能力，但只能按实际 capability 和对照用例分别记账，不能由“协议已接入”推导为全语言 IDEA 等价。官方明确标为 Ultimate 且默认随产品启用的 Full Line Code Completion 单独按 P2 参考发行版能力记账，不由此扩大到任意插件兼容。
 
-目标分两层：
+目标改为四层，避免“功能数量很多”掩盖数据安全或把 provider/硬编码 fallback 误称为 IDEA 等价：
 
-1. **发布目标：核心编辑工作流等价。** 用户能高效完成输入、补全、理解、导航、搜索、格式化、修复、重构和恢复，且动作可发现、可配置、可撤销。
-2. **北极星目标：Java 语义对齐。** 对声明/引用、inspection、data-flow 和项目级重构给出可证明的完整性、冲突和 freshness 语义；不要求复用 JetBrains 源码，但要求对照 fixture 的结果等价。
+1. **G0 发布阻断：编辑完整性。** 保存、WorkspaceEdit、undo/redo、外部变更、Action lifecycle、语言隔离和多 workspace ownership 不得丢数据、覆写新输入、跨语言注入文本或静默 no-op。G0 未全绿时，任何 P1/P2 新功能只能开发在独立分支，不得合入发布主线。
+2. **G1 发布目标：IDEA Daily Editor Profile。** 用户能完成输入/选择/多光标、Basic Completion、参数与快速文档、导航/搜索、diagnostics/quick fix、格式化/import、tab/split、恢复与可编辑 keymap；每项至少达到 L2，并明确 provider、edition、platform 与 unavailable 语义。这里称“日常工作流对齐”，不称整个 IntelliJ IDEA 等价。
+3. **G2 北极星目标：Java Semantic Profile。** 对 declaration/reference、type-matching completion、inspection/data-flow、import、usages 与项目级 refactor 给出可证明的 scope、revision、completeness、conflict 和 dumb/smart state；固定 Java/JDK/Maven/Gradle fixture 与 IDEA 2026.2 实机结果逐项对照到 L3。
+4. **G3 扩展目标：IDEA Advanced Editor Profile。** Full Line、SSR、scratch/injection、Code Vision、复杂布局、clipboard history、appearance 与其它 P2 能力逐项记账，不作为 G1 发布阻断，也不能反向补偿 G0/G2 缺口。
+
+**对外宣称规则：** 只有 G0 全绿且 G1 清单全部 L2 后才能称“IDEA-like daily editor workflow”；只有某个 Java fixture 矩阵达到 L3 才能对该能力称“IDEA-equivalent”。官方帮助页只证明 IDEA 提供该能力，不证明本产品已完成；Community/Ultimate、bundled plugin、操作系统和 language provider 差异必须随能力展示。
 
 Build/Run/Debug/Test/Coverage、Terminal、Git Manager、AI 和远程工作区继续发展为伴随能力；它们能增强编辑体验，但不能用于宣称 Code Editor 已对齐。
 
@@ -60,7 +64,7 @@ Build/Run/Debug/Test/Coverage、Terminal、Git Manager、AI 和远程工作区�
 
 | 级别 | 内容 |
 |------|------|
-| **P0（正确性与日常效率）** | 修正无效/夸大的 affordance；真实缩进与 smart keys；编辑命令；Basic/Smart/Type-matching Completion；Live/Postfix Template 语义；Surround/Generate；diagnostics/intention；EditorConfig/code style；Search/Navigation；可编辑 keymap |
+| **P0（G0 正确性 + G1 日常效率）** | 原子保存/WorkspaceEdit/undo、语言与 workspace 隔离、Action lifecycle；真实缩进与 smart keys；编辑命令；Basic Completion；参数/QuickDoc；diagnostics/intention；EditorConfig/code style；Search/Navigation；可编辑 keymap。Smart/Type-matching、Surround/Generate 只有在 provider 语义可证明时进入 G1，否则归 G2 |
 | **P1（Java 语义对齐）** | project/dependency context、声明/引用 index、inspection/data-flow、冲突感知 refactor、完整 usages preview、semantic navigation、dumb/smart state、性能与损坏恢复 |
 | **P2（高级编辑工作流）** | Structural Search/Replace、Recent Locations/Switcher、Full Line 本地内联补全、Code Vision、复杂 tab/nested split/detach、clipboard history、custom folding、scratch/injected language、完整 appearance/accessibility |
 | **X（伴随轨道，不计 Editor 分数）** | Build/Run/Debug/Test/Coverage、Terminal、完整 Git 客户端、AI、SSH/SFTP；仅其编辑器内入口/装饰按相关 Editor 用例验收 |
@@ -100,7 +104,7 @@ Build/Run/Debug/Test/Coverage、Terminal、Git Manager、AI 和远程工作区�
 3. **状态门禁**：dirty buffer、磁盘、tab、index、tree、diagnostics 与外部变更在资源操作后收敛。
 4. **配置与可访问门禁**：设置可持久化/迁移/恢复默认，action 可发现，焦点、读屏名称、缩放、对比度和仅键盘操作可验收。
 5. **性能门禁**：定义小/中/大工程基准、输入延迟、索引/搜索时间、内存上限和 large-file 降级，不允许 UI 假死或旧结果回填。
-6. **三端与回归门禁**：Linux/macOS/Windows 原生包各有真实 fixture；聚焦 Vitest/Rust 测试与 `qa-ui-auto --diff` 通过，并保存脱敏日志/截图/版本信息。
+6. **三端与回归门禁**：Linux/macOS/Windows 原生包各有真实 fixture；聚焦 Vitest/Rust 测试与 `PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.audit --diff <base>` 通过，并保存脱敏日志/截图/版本信息。
 
 ### 2.5 当前 Gap 清单（权威基线）
 
@@ -109,8 +113,9 @@ Build/Run/Debug/Test/Coverage、Terminal、Git Manager、AI 和远程工作区�
 | 优先级 | 能力域 | 当前代码基线 | IDEA 2026.2 关键 Gap | 等级 |
 |--------|--------|--------------|----------------------|------|
 | P0 | 文本编辑与 smart keys | 查找替换、多光标/矩形选择、注释、fold、soft wrap、括号闭合、复制/删/移动行、大小写切换、selection range、编码/EOL/BOM；Join Lines 和 naive Tab jump-out 已挂入 CodeMirror；Sort/Reverse/Transpose/Unwrap 只有未消费导出或 catalog metadata | Join 的重叠 range/末行边界仍未定；Sort/Reverse 无用户入口；Transpose 只处理主光标；Unwrap/Tab jump-out 不看 syntax/language；缺 clipboard history、custom fold、virtual space，Complete Statement 仍硬编码文本与两空格 | **L2 既有编辑 / L1 新命令原型** |
-| P0 | 缩进、格式与 code style | `EffectiveCodeStyle` 驱动 CodeMirror `tabSize`/`indentUnit`，formatter 带 `tabSize`/`insertSpaces`；`c5ce1fd6` 后三条写盘路径共用 `writeTextSnapshot`，`mutateOpenBuffer` 维持单调 `documentRevision`，无 hash 即 `failed`（不再合成），后端 `hash-mismatch:` 前缀可判别 | **P0：关闭文件 WorkspaceEdit 丢弃 `diskEol` 并硬编码 `lf`（CRLF 文件被改写）**；`saveOpenBufferText` 仍直接覆写 `openFilesRef`（绕过 mutate helper）；save 端 `resolveForFile` 不传 `explicitOverride`（状态栏缩进 override 保存时失效）；最终 guard 与写盘之间仍有 `historySnapshot` await；override 不持久化；无 watcher/scheme/rearrange/cleanup/scope/marker | **L2 缩进基线 / 写盘链 wired / P0 EOL 缺陷（N1.6）** |
-| P0 | Completion / Templates / Generate | LSP completion/resolve/snippet/additional edits、signature help、80ms typing debounce、trigger 即时、200 项 cap、Live/Postfix Templates；新增 Surround/Generate 固定文本模型未装配 | 无 Smart/Type-matching/reinvoke、truncation UI、visibility/type filter；postfix 不按类型/上下文；Generate 不读取真实 class/method/import/conflict，`equals/hashCode` 等固定拼接不具备语义正确性 | **L2 completion 性能基线 / L0–L1 生成原型** |
+| P0 | 缩进、格式与 code style | `d641ad12` 已贯通 closed-file EOL/replay metadata、显式缩进 override、`mutateOpenBuffer` 与 hash-mismatch 前端类型包装；三条编辑器写盘路径最终调用 `writeTextSnapshot`；history-await 后的 inner revision guard 和 writer-in-flight merge 已有 host 证据 | **P0：最终 revision guard 到 host writer 之间仍跨越 `historySnapshot` await，save controller 没有统一 `PreparedSave`/typed writer 结果；旧 snapshot 写盘完成后仍以旧文本调用 LSP save，provider 顺序错误。当前用例暂未证明 buffer 被覆盖，但真实 Tauri byte path、typed IPC error、stale LSP 和关闭/unmount 仍缺。override 不持久化；无 scheme/rearrange/cleanup/scope/marker** | **L2 缩进基线 / save wired / G0 红（N1.7）** |
+| P0 | Completion / Templates / Generate / Import | LSP completion/resolve/snippet/additional edits、signature help、80ms typing debounce、trigger 即时、200 项 cap、Live/Postfix Templates；JDTLS apply-workspace-edit wrapper 已能提取并进入 WorkspaceEdit applier | `javaQuickFix.ts` 用硬编码表模拟 import，混入非 JDK 类型；completion hook 无 language/file identity，LSP 不可用时会向非 Java 文档提供并插入 Java import；主插入与 `additionalTextEdits`/resolve import 分多次 transaction，异步 resolve 无 document generation guard，不能保证原子 undo 或 stale 安全。仍无 Smart/Type-matching/reinvoke、truncation UI、visibility/type filter；postfix/Generate 无语义 | **L2 provider basic completion / 本地 import fallback 不合格（G0 红，J0）** |
+| P0/P1 | Reference information / QuickDoc | 参数信息、Ctrl+Q QuickDoc、LSP hover、Quick Definition 已有；`9203d3e4`/`20027dfe` 增加可缩放 popup、hover header/关闭/固定到 Documentation pane，并把 tooltip 挂到 `body` 避开底栏遮挡 | 无 hover 开关/延迟、完整签名设置、doc 历史与 source/link 路由、External Documentation、Type Info、Context Info；hover resize 在 unmount 中途没有 listener cleanup，`20027dfe` 无新增组件/QA 测试；不能把渲染外观升级记为语义完成 | **QuickDoc L2 局部 / Reference suite L0–L1（N16）** |
 | P2 | Full Line / Inline Completion | 只有未装配的 `FullLineSession` 接受状态；无 CodeMirror decoration/action/provider。Terminal shell FIM 独立，且本地 `fim_engine_real` 仍返回 `None` | 需要严格 local-only 的 editor provider、模型 manifest/decode、prefix+suffix 上下文、ghost text、整段/逐词/逐行接受、popup 协作、取消/代际、auto-import、隐私和硬件降级 | **L0 用户能力** |
 | P0 | Diagnostics / Intention / Inspection | push/pull diagnostics、Problems、Alt+Enter Code Action/resolve/command；另有未装配的 `JavaInspectionEngine` 正则规则 | 正则规则没有 parser/CFG/SSA/profile/scope/revision/path evidence，且会产生明显误报；不得冒充 IDEA inspection/data-flow。仍缺 registry executor、自定义 severity、cleanup、nullability/taint/interprocedural flow | **L1 provider 能力 / L0 本地语义 engine** |
 | P0 | Navigation / Search | declaration/type/implementation/references、call/type hierarchy、Search Everywhere（Classes/Symbols 在无 symbol provider 时降级为 Files 并显示空态）、Go to File/Class/Symbol、Recent/Changed Files、Last Edit、history、Outline/Structure、Problems；Recent Locations 有 per-workspace controller、事件型采集、Delete 与 breadcrumbs 搜索 | Back/Forward 与 Recent Locations 仍两套历史，Delete 只删一侧；`LocationIdentity`/`NavigationHistoryFacade` 零生产引用；`canonicalizeWorkspacePath` 忽略 platform（不折叠大小写、不解 symlink、盘符小写化）；Ctrl+Tab Switcher 缺失；Find Usages 只有 96 行平铺列表（无分组/过滤/预览/pin/exclude）；无 navigation bar、Show Usages 弹窗、occurrence 导航；SSR 仍是 regex | **L2 既有导航 / L1 Recent Locations / L0 semantic SSR** |
@@ -425,6 +430,57 @@ PR 只有达到 `workflow` 才能把功能清单标为“可用”，只有 `ver
 | 22 | Intention 组织与抑制 | Alt+Enter 列表按 quick-fix/intention 分组、子菜单可 “Fix all in file”、按语句/方法/类/文件 suppress，并写入注释或 profile | 只有平铺 code action 列表；无 fix-all、无 suppression 入口、无分组 | **N15.2** |
 
 **边界声明。** 12–22 全部属于 Editor 主线（§2.3 纳入范围）；其中 21/22 依赖 provider 语义，只按 Java 对照 fixture 记账，不得以“LSP 有对应字段”宣称完成。不新增 X 轨道内容，不放开插件生态与 AI Assistant 边界。
+
+---
+
+### 2.21 v4.42 `d641ad12` + `9203d3e4` + `20027dfe` as-built 复核（2026-08-21）
+
+本节以 `HEAD 20027dfe` 为准，取代 §2.19 对当前状态的描述；§2.19 继续作为 `5ce13c9a` 历史快照。审计仍按用户入口 → production owner → provider/IPC → 状态回填 → undo/失败 → host/QA 证据逐段检查，不能用 commit subject 或纯 model 测试升级等级。
+
+| 领域 | 本轮真实增量 | 仍阻断目标的生产事实 | 当前等级 / 下一包 |
+|------|--------------|----------------------|-------------------|
+| N1.6 EOL / style / conflict | closed-file `writeDisk` 已接第 6 个 `eol` 参数并写入 replay metadata；save transaction 带 `explicitOverride`；错误在 `src/lib/editor/workspace.ts` 边界包装为 `WorkspaceHashMismatchError`；`saveOpenBufferText` 的 state/ref 更新改走 `mutateOpenBuffer`；history-await 后的 inner guard 和 writer-in-flight merge 已有 host 用例 | **G0 数据安全仍为红。** `WorkspaceStyleController.executeSaveTransaction` 在 `:463-489` 做最终 version/style guard 后调用 writer，writer 实际进入 `CodeWorkspaceTab.tsx:3302-3353` 并再次 await `historySnapshot`；这违反统一 PreparedSave 的“最终 guard 到 writer 零 await”合同，虽然当前 inner guard 可取消 history 窗口内的编辑，writeback 也保留 writer-in-flight 的新 buffer。旧 snapshot 完成后仍以旧文本调用 `saveLspDocument`，LSP 顺序错误；错误仍从 Rust 字符串前缀解析，不是跨 IPC 的结构化 enum | **wired / partial；N1.7 P0-S** |
+| N1.6 测试与 QA | `writeDiskByteCorrectness.test.ts` 新增 377 行、覆盖 3 EOL × 3 抽象路径、同长度 revision、override 与错误包装；新增 TC-064 YAML | 9 项测试只断言 mock callback 收到的 JS text/eol，不读取 Tauri 临时目录原始 bytes，也不覆盖 UTF-8 BOM/UTF-16LE/UTF-16BE/Latin-1；没有在 `CodeWorkspaceTab` 挂载下把输入注入 `historySnapshot` await 窗口。TC-064 仍只打开 workspace 并截图，未操作保存/style/冲突，不能作为 N1.6 control evidence | **unit/model evidence；N7.8** |
+| JDTLS code action bridge | client capability 增加 `codeActionLiteralSupport`；Rust parser 与前端 executor可识别 `_java.apply.workspaceEdit` 等 wrapper 并交给既有 WorkspaceEdit applier；Alt+Enter 菜单已有 host 用例 | wrapper command 名白名单在 Rust/TS 各一份，缺 unknown wrapper/嵌套参数/版本化 edit 的 contract fixture；Rust 改动无对应 parser 单测。该增量可记 provider bridge `wired`，不能推导为 Java import 语义完整 | **L1–L2 provider bridge；J0** |
+| 本地 Java import fallback | `javaQuickFix.ts` 被 `CodeWorkspaceTab` 与 `lspCompletion` 生产引用，Java Alt+Enter 可生成本地 import action，LSP inactive 时 completion 可插入类型与 import | `JDK_KNOWN_TYPES` 是 135 行固定字典，含 `org.slf4j`、Spring、Lombok；不读取 JDK language level、module/classpath、source set、已有同名 symbol 或 diagnostics。更严重的是 `LspCompletionHooks` 无 language/file identity，任意语言在 provider 不可用时都能命中并插入 Java import；主文本与 import 分两次 dispatch，provider resolve 的 `additionalTextEdits` 也异步无 revision guard。该能力违反 G0 语言隔离与原子 undo，必须先下线生产 fallback | **用户可达但不合格；P0-J0** |
+| Context Menu 键盘 | Arrow Up/Down、Home/End、Enter/Space、左右子菜单与 Escape 已接，分隔/disabled item 会跳过，组件测试覆盖主路径 | 每个 menu surface 通过 `window` capture listener 抢键；缺 `role=menu/menuitem`、roving focus、typeahead、submenu focus restore、同屏多菜单隔离和读屏证据。可记键盘可用基线，不能记完整 accessibility | **L2 局部；并入 Gate R1/N7.8** |
+| QuickDoc / hover | QuickDoc popup 可聚焦、缩放、关闭、固定到 Documentation pane；hover 复用同一视觉结构，可固定；CodeMirror tooltip portal 改到 `body` 并限制 editor viewport，减少底部面板遮挡 | hover resize 的 `mousemove/mouseup` listener 只在 mouseup 清理，拖动中 unmount 会泄漏；hover close 仅把最近 `.cm-tooltip` 设为 `display:none`；无 hover on/off/delay、popup/tool-window policy、history/source/external link、Type Info/Context Info；`20027dfe` 没有新增测试或 QA case | **QuickDoc presentation L2 局部；N16** |
+| 未触及的主线包 | 最新三提交没有修改 ActionHost/keymap、layout、navigation history/switcher、dependency completion 或 8 个 orphan models 的 owner | Gate R1、N6.6、N2.6、N0.6、N8.3、N12 的 §2.19 结论原样有效；`layoutTreeV2:null`、host 不 dispose、双历史、三份 keybinding 与 dependency completion 零 host import 均仍存在 | **不升级** |
+
+#### 2.21.1 本轮验证与证据边界
+
+- `pnpm exec tsc -b`：exit 0。
+- 聚焦 Vitest：`writeDiskByteCorrectness`、`javaQuickFix`、`codeActionExecution`、`lspCompletion`、`QuickDocPopup`、`ContextMenu`、`CodeWorkspaceTab` 共 **7 files / 119 tests 全绿**。
+- Rust：`cargo test --lib workspace::tests::hash_mismatch_error_format` 为 **1 passed**；同时输出仓库既有大量 warning，本轮不把 warning 数计作本功能失败。
+- `qa-ui-auto audit --diff 5ce13c9a`：131 cases / 0 lint errors、catalog up to date；但有 137 orphan selectors，diff impact 标出 F25.1/F25.2 新旧 controls 未对账，并判定 `TC-auto-F25-1` 含 stale selectors。未启动 Vite，未执行 browser/native case；skill 本身也不验证视觉回归、viewport、a11y 或性能。
+- 因此绿色测试只能证明现有用例通过；N1.7 的 host race、非 Java import、completion stale resolve、hover unmount cleanup 与三端行为都没有被现有用例覆盖。
+
+### 2.22 IntelliJ IDEA 2026.2 编辑器能力第三批对照（官方页面复核）
+
+本轮重新读取的官方页面资源均指向 `/help/img/idea/2026.2/`。以下不是根据本仓库 UI 反推的需求，而是 IDEA 真实行为中此前漏记或设计过窄的部分；已有包采用“扩充验收”而不是再造平行 owner。
+
+| # | 官方能力与来源 | IDEA 真实行为 | 当前差距与目标修订 |
+|---|----------------|---------------|-------------------|
+| 23 | [Code reference information](https://www.jetbrains.com/help/idea/viewing-reference-information.html) | Parameter Info 支持自动弹出延迟/完整签名；Quick Documentation 支持 hover 开关、popup/tool window、toolbar/source；Shift+F1 External Documentation；Ctrl+Shift+P Type Info；Alt+Q Context Info | 现有 signature/QuickDoc 只覆盖显示主路径。新增 **N16 Reference Information Service**，统一 revision/provider/result，不能用任意 hover 字符串冒充 Type Info 或外部文档 URL |
+| 24 | [Auto Import](https://www.jetbrains.com/help/idea/auto-import.html) | unresolved reference 基于项目 symbol/classpath 给出候选；唯一候选可 on-the-fly；歧义候选由用户选择；paste import 与 optimize-on-the-fly 均可配置 | §8.13 N13.5 设计方向正确，但 `9203d3e4` 的固定字典与跨语言 fallback 相反。拆为 **P0-J0 containment** + 后续 provider-backed N13.5；无 provider 时必须 unavailable，而不是本地猜测 |
+| 25 | [Editor Tabs settings](https://www.jetbrains.com/help/idea/editor-tabs.html) 与 [Editor basics](https://www.jetbrains.com/help/idea/using-code-editor.html) | preview/pin、pinned 单独行、tab limit、alphabetical order、opening/closing policy、reopen closed、MRU switcher、Open in Right Split 与 split stretch/equalize/navigation | 当前只有 preview/pin/overflow 和 partial recursive tree。扩充 **N11.2**：补 reopen/close policies/pinned row/alphabetical；split stretch/equalize/navigation 放在 N6.6 后，不再只设计 tab limit 与 drag-to-split |
+| 26 | [Multiple carets](https://www.jetbrains.com/help/idea/multiple-carets.html) | clone caret above/below、next/all occurrence、矩形/column mode、overlap merge、Esc 收敛、按多行/多 caret 分发 paste、virtual-space 行尾规则 | 当前多光标/矩形/同词选择可用，但 clone/paste distribution/virtual-space 与边界 contract 缺失。扩充 **N9.3 + N14.4**，要求单一 transaction、selection mapping 和多平台 clipboard fixture |
+| 27 | [Editor General settings](https://www.jetbrains.com/help/idea/settings-editor-general.html) 与 [Editor basics](https://www.jetbrains.com/help/idea/using-code-editor.html) | 单 editor/全部 editor 字号缩放、字体/ligature/color scheme/high contrast、soft-wrap 文件模式与缩进/标记、virtual space、breadcrumbs 位置/语言开关 | 现有缩放主要是 workspace view scale，code profile 不构成 IDEA appearance 闭环。新增 **N17 Appearance Profile**；与 code-style scheme、Terminal font、Markdown theme 分账，避免一份设置错误控制所有 surface |
+
+**目标边界修订。** G1 只要求 N16 的 Parameter Info + QuickDoc 主路径、基础 tab/multi-caret/appearance 可配置达到 L2；External Documentation、Type Info/Context Info 的 Java 语义完整性、全量 tab policy 和 appearance matrix 可随 G2/G3 交付。这样既比“只有相似 popup”更接近 IDEA，也避免把所有偏好设置都提升为发布阻断。
+
+---
+
+### 2.23 v4.43 P0-S (N1.7) 与 P0-J (J0) as-built 复核（2026-08-21，原完成声明已撤销）
+
+> **纠偏声明。** 工作树中的实现代理确实加入了保存竞态、原始字节和补全隔离测试，但本轮代码审计发现这些测试与生产合同仍有缺口。因此本节的“Complete”不能作为能力完成证据；以下状态由本节末的 **§8.15 v4.43 纠偏合同** 覆盖。只有真实 production host、结构化 IPC 错误和完整请求身份均接通后，才允许提升等级。
+
+本节记录两个最高优先级 P0 工作包的交付与验证事实：
+
+| 领域 | 交付内容与修复事实 | 验证证据 | 状态 |
+|------|--------------------|----------|------|
+| **P0-S / N1.7 Atomic Save Commit** | 1. `save-metadata` 不改文本/版本；保存链已具备 prepare、同步 pre-write guard、合并 writeback 的雏形。<br>2. `historySnapshot` 与 writer-in-flight host 用例可证明部分竞态不会覆盖当前 buffer。<br>3. Rust 文件新增了 `WorkspaceWriteError` 类型，但它尚未被任何写命令返回。 | - 15 组测试是直接调用 Rust helper 的 lib fixture，不是 open-buffer/closed-WorkspaceEdit/replay 的真实 Tauri host 字节链；编码矩阵使用 `windows-1252`，没有 `ISO-8859-1` fixture。<br>- `WorkspaceStyleController` 仍只接受 `{ hash?: string }` 并用未声明的 `cancelled` 字段做运行时 cast；`saveOpenBufferText` 写完旧 snapshot 后仍会用旧文本调用 `saveLspDocument`，再由 LSP hook 补发当前文本。<br>- `WorkspaceWriteError` 在 `src-tauri/src/workspace.rs` 中产生 dead-code warning，命令签名仍是 `Result<WorkspaceFile, String>`；前端因此仍依赖消息文本启发式。 | **wired / partial；G0 仍红；P0-S2** |
+| **P0-J / J0 Provider-Safe Completion & Action** | 1. 生产路径已移除固定 Java completion/import fallback；`javaQuickFix.ts` 仅加了注释但仍位于可被生产源码导入的目录。<br>2. 非 provider completion 会回退 `completeAnyWord`；普通 item 的 primary edit 与 `additionalTextEdits` 尝试合并。<br>3. resolve helper 增加了可选 revision 检查。 | - `LspCompletionHooks.token` 的每个字段都是可选，`CodeMirrorHost`/`EditorGroup`/`CodeWorkspaceTab` 生产接线没有传 token 或 `getDocumentRevision`；`completionInfo` 仍无身份校验。<br>- snippet 分支仍先 `snippet(...)` 再 `applyTextEdits(...)`，是两次 dispatch；普通分支没有检查 edit overlap，也没有把位于 primary edit 之前的 additional edit 映射到正确 selection。<br>- resolve 仍在 primary symbol 已提交后异步插入 import，不是“resolve 后一次提交”或明确的 intention 降级。测试只覆盖直接构造 source 的 plain item，未证明 production host 和一次 undo。 | **containment partial / L1–L2；G0 仍红；P0-J1** |
 
 ---
 
@@ -1159,7 +1215,7 @@ src/stores/
 - [ ] **A2 Editor layout/presentation。** editor group 改为递归 layout tree，支持 nested split、drag-to-split/dock、detach/equalize/stretch/splitter navigation、tab limit/order/policy；再补 Code Vision、scrollbar lens、font/ligature/color scheme。
 - [ ] **A3 边缘编辑工作流。** clipboard history、scratch files、language injection、custom folding 与 read-only/library edit policy 分项设计和验收。
 - [ ] **A4 Full Line Completion（IDEA Ultimate bundled-plugin 参考）。** Java 首批建立本地模型下载/更新/禁用/硬件降级与隐私状态，支持单/多行 inline suggestion、整段/逐词/逐行接受、popup 同步、格式/括号/引号修正、基础 unresolved-reference 过滤、auto-import、smart filtering、cancel/stale 与 typing latency/memory budget；必须证明源码默认不出机。其他语言逐模型/provider 记账，AI Assistant 或 Terminal FIM 不计入本项。
-- [ ] **Q1 自动化。** 每个新增控件同步 `feature-list.md`/testid catalog/YAML case；核心算法加 Vitest/Rust 测试，Editor 主路径执行 `qa-ui-auto --diff`，失败与不支持状态均需用例。
+- [ ] **Q1 自动化。** 每个新增控件同步 `feature-list.md`/testid catalog/YAML case；核心算法加 Vitest/Rust 测试，Editor 主路径执行 `PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.audit --diff <base>`，失败与不支持状态均需用例。
 - [ ] **Q2 三端真机。** 按 §2.6 保存 Linux/macOS/Windows 的 keyboard/IME/clipboard/font/zoom/path/watcher/LSP/packaged-app 证据；只有三端完成后，相应能力才可升 L3。
 - [ ] **Q3 性能与隐私。** 固定 typing latency、completion p95、search/index time、memory 与 crash-recovery budget；trace 默认脱敏，不记录源码、补全文本、凭据或完整路径。
 
@@ -2269,9 +2325,9 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 
 **合并顺序（固定）。** `Gate R0 → N1.5 → N6.5 → (N0.5 ∥ N2.5) → N8.2 → N9.x → N10.x → N11.x`。`CodeWorkspaceTab.tsx` 仍按 save / layout / action / navigation 四个区域分别提交，agent 不得重排其它 owner 区域；N9–N11 的每个子项独立成 PR，且在对应 owner 包（R0/N1.5/N6.5）冻结后才允许开工。Debug 侧顺序不变，见 `debug-panel-idea-redesign.md` §21：先修错误导航，再 token/action/console/layout。
 
-### 8.13 v4.41 当前下一轮待办（面向其它 agent，`5ce13c9a` 复核后）
+### 8.13 v4.41 历史下一轮待办（`5ce13c9a` 复核后，当前合同见 §8.14）
 
-本节取代 §8.12，是**当前唯一执行合同**。两条硬阻断（P0-A / P0-B）必须先合并，之后才允许开工任何 P1/P2 包。
+本节曾取代 §8.12；`d641ad12` 的实际结果与后续两次编辑器提交已由 §2.21 重新审计，当前执行顺序和完成定义统一以后文 §8.14 为准。本节保留未完成包的原始需求输入，不能再用其“P0-A 已提交”推导 N1.6 已完成。
 
 **通用交付协议（每个 PR 必须满足，违反即退回）**
 
@@ -2406,6 +2462,350 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 
 ---
 
+### 8.14 v4.42 当前唯一执行合同（面向其它 coding agent，`HEAD 20027dfe`）
+
+§8.13 及更早计划全部转为历史输入；从本节开始按 G0/G1/G2/G3 记账。**当前不得把 N1.6、Java auto-import 或完整 QuickDoc 标为完成。** 每个 agent 只领取一个工作包，先复现本文列出的失败，再沿生产 host 修复；不得只给 model 新增测试。
+
+#### 8.14.0 当前目标与待办状态
+
+| 目标 | 当前判断 | 解除条件 |
+|------|----------|----------|
+| **G0 编辑完整性** | **红 / partial** | 保存竞态的两个窗口已覆盖，但 typed IPC error、stale LSP save writeback、production completion identity、inactive non-empty stale completion 和 snippet atomicity 尚未闭合；必须完成 P0-S2 + P0-J1，并通过真实 host/QA 后才可转绿 |
+| **G1 Daily Editor Profile** | **partial** | G0 全绿；N6.6/N2.6/N0.6 完成；Basic Completion、Parameter Info、QuickDoc、Search/Navigation、format/import、tab/split/keymap 的列名用例全部 L2 |
+| **G2 Java Semantic Profile** | **未达到** | J1–J3 与 N13.3/N13.5/N15/N16 Java fixture 给出 provider/index、revision、completeness、conflict 与 IDEA 实机对照证据 |
+| **G3 Advanced Editor Profile** | **零散 partial** | N9–N17、SSR、Full Line、scratch/injection、appearance 等逐项达到自己的 L2/L3；不设“一次性全完成”假门禁 |
+
+**现行工作包完成记账（不使用百分比，避免不同规模任务产生假精度）：**
+
+| 工作包 | 当前交付标签 | 已完成 / 未完成判断 |
+|--------|--------------|---------------------|
+| N1.6 → N1.7 | `wired / partial` | 保存三阶段雏形与两个 host race fixture 已存在；真实 Tauri byte path、typed IPC error、stale LSP writeback、closed/replay host 证据仍缺 |
+| J0 / import | `containment partial / L1–L2` | 固定字典不再被当前生产入口调用，非 provider 回退已接；但 fixture 尚在 production tree、请求身份未接线、snippet/resolve/import 不能保证一次事务 |
+| Gate R1 | `wired / partial` | focus/payload/keydown 回归已修；dispose、typed result、SE/cheatsheet、单次 when、冲突裁决未完成 |
+| N6.6 | `wired / partial` | recursive reducer/persistence 可达；单一 tree、per-leaf owner、纯 normalize、view refcount 未完成 |
+| N2.6 / N0.6 | `model only` | facade/keymap model 存在；双历史/Switcher/keymap runtime truth 均未完成 |
+| N8.3 | backend `workflow` / frontend `model` | Maven Central 后端命令可达；completion host、proxy/status/generation/QA 未完成 |
+| N12 | `0/8 已结案` | 8 个零生产引用模块均尚未完成接线、降级或删除结案 |
+| N9 | `0/4 complete` | stock find、scope、clipboard、completion settings 均未达到包合同 |
+| N10 | `0/3 complete` | QuickDoc 外观增量不等于 rendered comments；highlight widget/banner 均未完成 |
+| N11 | `0/4 complete` | file templates、完整 tab policy、助记书签、通用 compare 均未完成 |
+| N13 | `0/5 complete` | 固定字典 import 不计 N13.5；save all/navigation bar/usages/occurrence/import settings 未完成 |
+| N14 / N15 | `0/6 complete` | scratch/injection/shared document/statement edit/Code Vision/fix-all 均未完成 |
+| N16 / N17 | `0 complete`（局部 UI 基线） | QuickDoc/hover presentation 可复用；统一 controller、reference suite 与 appearance profile 未完成 |
+
+| 固定顺序 | 工作包 | 本轮完成定义 | 状态 | 主要 owner |
+|----------|--------|--------------|------|------------|
+| **0** | **P0-S / N1.7 Atomic Save Commit** | 真实 `CodeWorkspaceTab` 保存链在所有 await 窗口不覆盖新输入；prepare/commit/writeback 分相；Tauri 原始字节、typed IPC error、closed/replay 与 LSP stale-save 全绿 | **部分完成，P0-S2 待领** | `CodeWorkspaceTab.tsx` save 区、`workspaceStyleController.ts`、`src/lib/editor/workspace.ts`、`src-tauri/src/workspace.rs` |
+| **1** | **P0-J / J0 Provider-safe Completion & Import** | 固定字典移出生产树；completion/code action 有强制 language/file/revision/provider identity；primary/import 一次事务或明确 intention 降级；非 Java 零 Java import | **containment partial，P0-J1 待领** | `lspCompletion.ts`、`javaQuickFix.ts` fixture、`codeActionExecution.ts`、`CodeMirrorHost.tsx`、`EditorGroup.tsx`、`CodeWorkspaceTab.tsx`、`lsp.rs` parser |
+| **2** | **P0-B / Gate R1** | §8.13 Gate R1 六条全部完成；补 Context Menu focus/a11y 与双实例；typed result 可见 | 待领 (Next) | `workspaceActionHost.ts`、`useWorkspaceActionsController.ts`、`ContextMenu.tsx`、Search/cheatsheet hosts |
+| **3** | **N6.6** | 单一 recursive tree、per-leaf 状态、纯持久化、多 view refcount、可见 diagnostic | 排队中 | §8.13 N6.6 owners |
+| **4** | **N2.6 / N0.6** | 双历史 + Switcher；keymap scheme 成为唯一 binding 真值 | 排队中 | §8.13 对应 owners，可并行但均依赖 Gate R1 |
+| **5** | **N8.3 / N12** | dependency completion 真接线；8 个 orphan model 接线/降级/删除结案 | 排队中 | §8.13 对应 owners |
+| **6** | **N16** | Parameter Info/QuickDoc 统一 reference service 达 L2；Java Type/Context/External Documentation 按 provider 单项记账 | 排队中 | 见 §8.14.4 |
+| **7** | **N9–N15 / N17** | 按独立小包交付；N11.2、N9.3/N14.4 用本节扩展合同；appearance 独立 owner | 排队中 | 见 §8.13 + §8.14.5–§8.14.7 |
+
+#### 8.14.1 P0-S / N1.7：Atomic Save Commit（先修数据安全）
+
+**必须先写的回归用例。** 在挂载的 `CodeWorkspaceTab` 中用 deferred promise 卡住 `historySnapshot`：buffer revision=10、用户触发保存、在 promise resolve 前输入同长度新文本使 revision=11；释放 promise。当前工作树的 inner guard 应取消写盘，editor/store 文本保持 revision=11、disk writer 为 0 次且 buffer 仍 dirty；不能把历史上曾经出现的“旧 snapshot 覆盖 UI 文本”当作当前复现结果。另加 writer 已调用后的用例：允许磁盘保存旧 snapshot 并返回 `saved-stale-snapshot`，但 writeback 必须保留新 buffer，且不得向 LSP 发送旧 `didSave`。
+
+**数据合同：**
+
+```ts
+type PreparedSave = {
+  transactionId: string;
+  workspaceId: string;
+  fileKey: string;
+  filePath: string;
+  snapshotText: string;
+  snapshotRevision: number;
+  expectedDiskHash: string | null;
+  styleGeneration: number;
+  policy: { eol: "lf" | "crlf" | "cr"; encoding: string; bom: boolean };
+  historyPrepared: boolean;
+};
+
+type SaveCommitResult =
+  | { kind: "saved-current"; file: WorkspaceFile }
+  | { kind: "saved-stale-snapshot"; file: WorkspaceFile; currentRevision: number }
+  | { kind: "cancelled"; phase: "prepare" | "pre-write"; reason: string }
+  | { kind: "conflict"; error: WorkspaceWriteError }
+  | { kind: "failed"; error: WorkspaceWriteError };
+```
+
+1. **Prepare phase（允许 await，禁止改 buffer text）。** 捕获 `snapshotText/snapshotRevision/hash/styleGeneration`；解析 EditorConfig、format/normalize、生成 local-history snapshot、等待 LSP 必要同步。期间只能把 `saving` 作为 metadata 写入，新增 `mutateOpenBuffer(...,"save-metadata")`，该 reason 不改 text、不 bump revision；不得调用接收任意 `textToSave` 并写回 buffer 的 helper。
+2. **Pre-write commit boundary（不得 await）。** prepare 完成后同步读取 `openFilesRef.current[fileKey].documentRevision`、controller generation、workspace/file identity；任一变化立即返回 `cancelled`。校验通过后在同一 call stack 立即调用唯一 byte writer并拿到 promise，再 `await` 该 promise。`historySnapshot`、format、LSP、dialog、state update 均不得出现在校验与 writer invocation 之间。
+3. **Writeback phase（合并，不覆盖）。** writer 返回后重新读取 current buffer。若 revision 仍等于 snapshot：更新 `savedText/hash/mtime/encoding/eol/bom`、清 dirty；若已前进：只更新 disk metadata 与 `savedText=snapshotText`，保留 current `text/documentRevision` 和 `dirty=true`，返回 `saved-stale-snapshot` 并提示“旧快照已保存，当前改动仍未保存”。失败时也只更新 `saving/error`，禁止写 `text: snapshotText`。
+4. **统一路径。** open-buffer save、open-clean WorkspaceEdit、closed-file WorkspaceEdit 与 replay 都消费同一个 `PreparedWritePolicy` 和 byte writer；WorkspaceEdit 可有自己的 prepare，但不得回调旧 `saveOpenBufferText(key,text)`。用静态 guard 限定 `workspaceWriteFileEncoded/workspaceWriteLooseFileEncoded` 在 Code Workspace production 中只能被 byte writer 模块 import（Git Manager 属 X/独立 owner，不纳入本 guard）。
+5. **结构化错误。** Rust 定义可序列化 `WorkspaceWriteError { kind: hash_mismatch | encoding | permission | io, message, expectedHash?, actualHash? }`；IPC adapter 只在兼容旧 backend 时解析 `hash-mismatch:`，业务 controller 只看 `kind`。测试要证明 message 任意变化不影响 conflict 分类。
+6. **真实字节 fixture。** Rust tempdir 对 `LF/CRLF/CR × UTF-8/UTF-8+BOM/UTF-16LE/UTF-16BE/Latin-1` 写入并读取 raw bytes；至少覆盖 open save、closed WorkspaceEdit 与 replay 各一次，另外用 table test 覆盖 15 个 policy 组合。不可表示字符必须零落盘并保留原文件 hash。
+
+**完成门禁：** host race 至少覆盖 `format await`、`history await`、`writer in-flight` 三个注入点；同长度输入、close tab/workspace、external hash change 各一条；Rust raw-byte tests；TC-064 必须改为真实操作 style/save 并断言状态，不能只截图 shell。达到这些条件才可把 N1.6/N1.7 合并记为 `workflow`。
+
+#### 8.14.2 P0-J / J0：Provider-safe Completion、Code Action 与 Import
+
+1. **立即 containment。** 从生产 completion 和 Alt+Enter 移除 `JDK_KNOWN_TYPES` 自动 edit；`javaQuickFix.ts` 可删除，或移到 `__fixtures__` 并标 `NON-PRODUCTION`。在 containment PR 合并前，最低限度也必须给 `LspCompletionHooks` 增加不可伪造的 `{ languageId, filePath, workspaceId, documentRevision }`，非 `java` 直接禁用该 source；但“只加 `.java` 判断”仍不能完成本包。
+2. **provider 单一来源。** Java import 候选只来自 jdtls completion `additionalTextEdits`、code action/resolve 或后续 Java semantic provider。provider inactive/unavailable 时返回 typed unavailable 并回退 `completeAnyWord`，不得猜 classpath。JDTLS wrapper normalize 只保留一个 owner：建议 Rust `parse_code_action` 输出 canonical `edit + command=null`；TS executor 的兼容 unwrap 仅处理旧 backend，并有 protocol-version gate。
+3. **请求身份。** `CompletionRequestToken = { workspaceId, fileKey, uri, languageId, documentRevision, lspSessionGeneration, requestId }`；fetch、resolve、accept 都验证同一 token。doc/session 变化即丢弃旧结果，popup 不得显示上一文件候选；日志只记录 provider/status/latency/count，不记录源码或 label。
+4. **原子 acceptance。** 把 primary `textEdit` 与同文档 `additionalTextEdits` 在原 document state 上转换并检查不重叠，一次 transaction dispatch，Ctrl+Z 一次恢复选择前文本。需要 resolve 才有 import 时，先 resolve 再 commit；超时可插入主 symbol，但必须把 import 降级为显式 intention，禁止稍后在未知 revision 异步插 edit。snippet + additional edits 必须有专门 fixture，不允许通过“两次 dispatch 恰好被 history 合并”作为保证。
+5. **Code Action 完整性。** wrapper fixture 覆盖 `changes`、`documentChanges`、versioned textDocument edit、resource operations、unknown command、malformed/nested args；所有 edit 进入 `applyWorkspaceEdit` 的 revision/hash/preview/undo 合同。固定字典生成的 raw WorkspaceEdit 不再与 provider actions 混排。
+6. **后续 N13.5 设置。** containment 完成后再实现 `addUnambiguousOnTheFly/showPopupForAmbiguous/onPaste`。候选唯一性由 provider/project model判定；ambiguous chooser展示 FQCN/module/source；paste 与 optimize-on-the-fly 复用同一 transaction。无 provider 时设置显示 unavailable，不能静默启用。
+
+**验收矩阵：** Java provider active/inactive、TS/Python/Rust provider inactive、同名 `java.util.List/java.awt.List`、项目自定义 `List`、不同 JDK language level、resolve 超时、输入后 stale resolve、snippet+import、一次 undo、双 workspace 同路径，共至少 12 条；必须有一条 host 测试证明 TypeScript 输入 `Lis` 不出现/不插入 Java import。
+
+#### 8.14.3 Gate R1、N6.6、N2.6、N0.6、N8.3 与 N12 的继承规则
+
+- **Gate R1** 继续执行 §8.13 的六条设计，不因 Context Menu 键盘增量而缩减。Context Menu 追加：根层 `role=menu`、item `role=menuitem/menuitemcheckbox`、roving focus、字符 typeahead、submenu ArrowLeft 后焦点回父项、关闭后焦点回触发器；监听绑定到 active menu owner，不允许多个 `window` capture handler 同时处理一次按键。
+- **N6.6/N2.6/N0.6/N8.3/N12** 的接口、故障模型与验收矩阵沿用 §8.13；最新三提交没有完成其中任何一项。agent 开工前必须先用 `rg` 复核行号，但不得改变不变量或用新 model 替代接线。
+- P0-S、P0-J、Gate R1 可由不同 agent 在独立分支并行开发，但合并顺序固定为 P0-S → P0-J → Gate R1；它们都触及 `CodeWorkspaceTab.tsx` 时分别限于 save、completion/action、action host 区域，禁止跨区格式化。
+
+#### 8.14.4 N16：Reference Information Service（IDEA Code Reference 对齐）
+
+**owner 与接口。** 新建实例级 `referenceInfoController.ts`（不得 global singleton），由 `CodeWorkspaceTab` 每 workspace 创建并注入 `CodeMirrorHost/WorkspacePopupsHost/DocumentationPane`：
+
+```ts
+type ReferenceInfoKind = "parameter" | "documentation" | "type" | "context" | "external-documentation";
+type ReferenceInfoRequest = {
+  kind: ReferenceInfoKind;
+  workspaceId: string;
+  fileKey: string;
+  uri: string;
+  languageId: string;
+  position: LspPosition;
+  documentRevision: number;
+  providerGeneration: number;
+};
+type ReferenceInfoResult =
+  | { kind: "available"; source: "lsp" | "java-provider" | "document-symbol"; completeness: "complete" | "partial"; payload: ReferencePayload }
+  | { kind: "unavailable"; reason: "provider" | "capability" | "no-symbol" }
+  | { kind: "stale" | "cancelled"; requestId: string }
+  | { kind: "failed"; message: string; retryable: boolean };
+```
+
+1. **生命周期。** 每种 kind 保留最新 request generation；caret/file/workspace/provider generation 改变即 abort/丢弃。controller dispose 必须取消 timer/request 并清 popup history；两个 workspace 的 popup、history、settings 与 pinned pane 内容互不串。
+2. **Parameter Info（G1）。** 保留现有 signatureHelp provider，增加 `parameterInfo = { autoPopup: boolean; delayMs: number; showFullSignatures: boolean }` workspace 设置；Ctrl+P 始终显式请求。重载切换、active parameter 高亮、无 capability/unavailable、stale response 和 Escape/focus restore 必测。
+3. **Quick Documentation（G1）。** `quickDoc = { showOnHover: boolean; hoverDelayMs: number; defaultTarget: "popup" | "tool-window" }`；Ctrl+Q、hover 与 completion 文档共用 controller/cache/sanitizer。popup 支持 Back/Forward、Open Source、Pin、字体缩放；Pin 后 Documentation pane 跟随 caret与锁定模式二选一。内部 symbol link 走 navigation service，HTTP(S) 外链走系统浏览器策略，未知 scheme 拒绝。
+4. **Type Info（G2 Java 首批）。** 注册 `workspace.typeInfo`（IDEA 默认 Ctrl+Shift+P，但需由 N0.6 解决与 Terminal/平台冲突）。只消费明确的 provider type result；普通 hover markdown 不得用正则抽取成类型。结果显示 expression range、rendered type、nullability/constant 信息的来源与 partial 标记；无 provider 隐藏 action或显示 unavailable。
+5. **Context Info（G1 local + G2 semantic）。** Alt+Q 先用已缓存的 `documentSymbol` ranges 查找 viewport 上方最近的 enclosing class/method header；没有可靠 range 时 unavailable，不扫描源文本猜声明。Java provider 后续可补 generic/containing type。浮层不移动 caret，重复 Alt+Q 向外层切换，Esc 恢复 editor focus。
+6. **External Documentation（G2）。** Shift+F1 只在 provider 返回结构化 URL 时可用；展示目标 host，按应用外链策略打开。不得从 markdown 任意 `<a>` 推导“官方 external doc”。离线/无 URL/危险 scheme 有 typed 结果。
+7. **UI 与 a11y。** React popup 与 hover DOM 共用一个 `ReferencePopupSurface` 或等价生命周期 helper；禁止两套 resize listener。Pointer cancel、window blur、unmount 都清 mouse listeners；role/name、toolbar keyboard、Tab trap/非模态策略、200% zoom 与底栏/左右边界碰撞须验证。
+
+**验收：** Parameter/QuickDoc 各至少 1 条 host + 1 条 QA；hover disabled、delay cancellation、pin/follow/lock、Back/Forward、source/internal/external link、type unavailable、Alt+Q nested symbol、stale response、双 workspace、drag-resize unmount listener cleanup、窄 viewport/200% zoom。N16 只在 Parameter + QuickDoc 主路径全部 L2 后进入 G1；Type/External 可按 Java fixture单列 L1/L2。
+
+#### 8.14.5 N11.2 扩充：IDEA Tab Opening/Closing Policy 与 Split 操作
+
+在 §8.13 N11.2 基础上固定 `EditorTabPolicy`：
+
+```ts
+type EditorTabPolicy = {
+  limit: number;
+  sort: "manual" | "alphabetical";
+  openAt: "end" | "after-active";
+  activateAfterClose: "mru" | "left" | "right";
+  showPinnedInSeparateRow: boolean;
+  reusePreviewTab: boolean;
+};
+```
+
+- 超限只自动关闭 unpinned + clean + 非 active preview 候选；dirty/pinned/library diff 等不可淘汰，无法降到 limit 时保留并给一次性 banner。关闭栈保留至少 20 项，`Reopen Closed Tab` 恢复 file identity、leaf、preview/pin、selection/viewport；missing/renamed 文件走 N2.6 identity 状态。
+- alphabetical 只影响视觉顺序，不重写 MRU；拖拽时自动切回 manual 或拒绝并解释，行为必须固定。pinned separate row 在窄 leaf 溢出时仍可键盘访问。
+- `Shift+Enter Open in Right Split`、Next/Previous Splitter、Stretch Left/Right/Top/Bottom、Equalize Proportions 全部经 ActionHost/KeymapScheme；mutation 只走 N6.6 reducer，一次 undo/restore snapshot，不直接改 DOM ratio。
+- host 验收覆盖 limit eviction、全 dirty 不淘汰、preview reuse/pin、reopen missing/renamed、alphabetical+MRU、右分屏、equalize/stretch、nested reload；QA 至少覆盖 opening/closing policy 与 Right Split 两条。
+
+#### 8.14.6 N9.3 + N14.4 扩充：Multi-caret / Clipboard Transaction Contract
+
+1. 所有 multi-caret command 接收规范化、按位置排序且已合并 overlap 的 `EditorSelection.ranges`，输出一个 CodeMirror transaction；primary caret identity 必须保留。clone above/below 在短行 clamp column，启用 virtual space 时才允许补空格。
+2. `Select Next/All Occurrences` 的 case/whole-word 与 Find bar 共用 matcher；F3/Shift+F3 的“跳过 occurrence”历史在 selection 改变后清空。Esc 第一次清 occurrence session、第二次收敛到 primary caret，不能关闭上层 workspace。
+3. clipboard payload 内部格式为 `{ plainText, segments?: string[], sourceEol, rectangular }`，系统 clipboard 仍只写标准文本；caret 数=segment 数时逐段，否则整段粘贴每个 caret。矩形复制的虚拟空格显式转 spaces；plain paste 去富文本但保留原始 EOL，再由当前 document policy 归一。
+4. Paste History 默认 20 条纯内存，按内容 hash 去重，workspace 关闭清空；password/secret field、超大文本、binary/NUL 不入历史。弹层经 ActionHost 打开，选择一次产生单 transaction/单 undo。
+5. fixture：overlap ranges、空行/短行、CRLF、多 unicode grapheme、IME composition 中禁止 command、矩形 virtual space、N caret/N segment、1 segment/N caret、一次 undo、Linux primary selection 与 Windows/macOS clipboard adapter 分账。
+
+#### 8.14.7 N17：Editor Appearance Profile
+
+**范围分账。** 本包只控制 Code Workspace editor surface；Terminal、Markdown preview、应用 UI theme 与 code-style formatting 各有独立设置，禁止复用一个 font/theme flag 造成跨 surface 隐式变化。
+
+```ts
+type EditorAppearanceProfile = {
+  fontFamily: string;
+  fontSizePx: number;
+  lineHeight: number;
+  ligatures: boolean;
+  colorSchemeId: string;
+  highContrast: boolean;
+  zoomScope: "active-editor" | "all-editors";
+  softWrap: { patterns: string[]; useOriginalIndent: boolean; additionalIndent: number; showMarkers: boolean };
+  virtualSpace: { afterLineEnd: boolean; atFileBottom: boolean };
+  breadcrumbs: { visible: boolean; placement: "top" | "bottom"; languages: string[] };
+};
+```
+
+1. profile 持久化到 workspace settings，schema version + migration + reset；font 候选复用 OS 字体枚举但保存 fallback chain。找不到字体/颜色方案损坏时回退默认并显示 diagnostic，不静默写坏设置。
+2. CodeMirror 用 compartments 更新 font/theme/wrap/virtual-space extension，不销毁 EditorState，不清 history/selection/fold/scroll；active-editor zoom 是 view state，all-editors zoom 写 profile。字号范围、步进与 200% UI zoom下最长字体名布局必须稳定。
+3. color scheme 至少定义 editor background/foreground/selection/caret/gutter/diagnostic/diff/semantic token；high contrast 是独立可验证 scheme，不是简单提高饱和度。ligature 开关只设字体 feature，不影响 token 文本与测量。
+4. soft-wrap pattern 解析、breadcrumbs language/position 与 virtual-space 都必须真实改变 behavior；无 language parser 时 breadcrumbs 降级到文件路径。设置预览有 Apply/Cancel/Reset，Cancel 不污染已打开 editor。
+5. 验收：reload/migration/reset、missing font、active/all zoom、history 保留、soft-wrap glob、virtual-space caret、breadcrumbs position/language、high contrast、Linux/macOS/Windows 字体 fallback 和 200% zoom；至少一条 host + 一条设置 QA。qa-ui-auto 不验证视觉对比度/overflow，因此另存人工或 Playwright bounding-box/contrast 证据。
+
+#### 8.14.8 N7.8：证据门禁、QA 修复与 agent 交付卡
+
+**每包证据：**
+
+1. `pnpm exec tsc -b`、改动相关 Vitest 文件/通过数、`git diff --check`；Rust 包执行 `cargo test --lib <focused filter>` 或相关 integration test，并只对改动 `.rs` 跑 `rustfmt --edition 2024`。
+2. 至少一个挂载真实 production host 的用例；model 单测、raw source grep 和 mock writer 参数测试只能作为补充。异步功能必须使用 deferred promise 在每个 await boundary 注入 stale/cancel/unmount。
+3. 用户可见变化执行 `PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.audit --diff <base>`；先修 lint/stale selector，再更新 feature controls/catalog/YAML/baseline。当前已知 `TC-auto-F25-1` stale selectors 与 F25.1/F25.2 controls 必须在下一个相关 UI PR 收口，不能继续只加 shell screenshot。
+4. browser/native case 运行前按 skill 先 probe；不得自动启动服务。本 skill 不覆盖视觉、viewport、a11y、性能，相关包必须另给截图/bounding box、axe/读屏或 profiler/latency 证据。
+5. 三端 evidence 仍按 §2.6；任一平台未跑必须写“未验证”，不得用 browser stub 替代。
+
+**交给 coding agent 的任务卡必须包含：** `包 ID / 允许修改的 owner 文件 / 明确非目标 / 当前失败复现 / 数据与接口合同 / 状态机或时序 / 失败和取消语义 / undo 与持久化 / host + unit + Rust + QA 用例 / 运行命令 / 最高可声明等级`。agent 最终回报必须给生产调用链与未完成项，禁止使用“fully aligned/complete parity”概括部分完成。
+
+**固定合并顺序：** `P0-S(N1.7) → P0-J(J0) → Gate R1 → N6.6 → (N2.6 ∥ N0.6) → N8.3 → N12 → N16(G1 slice) → N9/N10/N11/N13/N14/N15/N17`。N11.2 依赖 N6.6 + N0.6；N14.3 依赖 N6.6；N13.5 完整设置依赖 J0；N16 actions 依赖 Gate R1，快捷键持久化依赖 N0.6。后段每个编号仍拆独立 PR，不允许把整个 N16/N17 塞进一次提交。
+
+---
+
+### 8.15 v4.43 纠偏合同（当前工作树复核，2026-08-21）
+
+本节覆盖工作树中按 §8.14 实现的未提交改动，并取代 §2.23 中的“完成”措辞。它是下一轮 coding agent 的唯一追加合同；§8.14 的未完成包仍有效，但不得跳过本节的 P0 修复。
+
+#### 8.15.0 审计结论与目标重置
+
+**已确认的生产事实：**
+
+| 严重度 | 证据 | 影响 | 处理包 |
+|---|---|---|---|
+| P0 | `src-tauri/src/workspace.rs:53-77` 定义了 `WorkspaceWriteError`，但 encoded commands `:2223-2257` 仍返回 `Result<WorkspaceFile, String>`；`hash_mismatch_error` 在 `:3404` 仍生成字符串 | IPC 没有稳定的 `kind`，前端只能按错误文本猜冲突/编码/权限；类型本身产生 dead-code warning | **P0-S2** |
+| P0 | `CodeWorkspaceTab.tsx:3422` 在旧 snapshot 写盘完成后仍调用 `saveLspDocument(..., snapshotText)`；`useWorkspaceLspSession.ts:636-671` 会先发旧 `didSave`，再补发当前 `didChange` | provider 可能短暂观察到“已保存”的旧 revision，语义诊断/保存状态与磁盘提交不一致 | **P0-S2** |
+| P0 | `CodeMirrorHost.tsx:919-925` 创建 completion source 时没有 token/revision；`CodeMirrorHost` props、`EditorGroup` 和 `CodeWorkspaceTab` 只传 position/trigger/raw；`CompletionRequestToken` 字段全部可选 | 跨文件/跨 session 的旧 completion、resolve 文档仍可进入当前 popup；可选 token 不是身份合同 | **P0-J1** |
+| P0 | `lspCompletion.ts:360-363` 只有在 `status.active === false` 且 `items.length === 0` 时才回退；若 provider 在请求返回后失活但携带旧/非空 items，仍会映射并接受这些候选 | session stop/restart、file switch 或 capability 变化时，旧 provider 候选可继续展示或写入当前文档；“inactive 必须 unavailable”合同未成立 | **P0-J1 stale containment** |
+| P0 | `lspCompletion.ts:227-231` 的 snippet 分支先调用 `snippet(...)` 再调用 `applyTextEdits(...)`；resolve 分支在 primary symbol 已插入后才异步插入 additional edits | snippet + import 不是一次 CodeMirror transaction；Ctrl+Z、selection、stale import 语义不稳定 | **P0-J1** |
+| P1 | `javaQuickFix.ts` 只添加了 NON-PRODUCTION 注释，文件仍在 `src/components/editor/workspace/`；测试可继续直接 import，缺少生产导入 guard | “隔离”依赖人工约定，后续 agent 可误接回固定字典 | **P0-J1 containment** |
+| P1 | `qa-ui-auto audit --diff 20027dfe`：131 cases、0 lint error、catalog up to date，但 137 orphan selectors；F25.1/F25.2 controls 与 diff 不同步，`TC-auto-F25-1` 有 28 个 stale selector | UI 证据不能作为当前实现的发布门禁；新增/删除控件没有可追溯 YAML | **N7.9** |
+| P1 | 聚焦 4 个 Vitest 文件组合运行曾出现 1 个外部冲突 merge 用例失败；本轮同一组合连续两次为 **103 passed / 4 files passed** | 目前是重跑通过但仍缺连续三次的稳定性证据，不能把一次或两次通过宣称为整套回归稳定 | **N7.9** |
+| P1 | `git diff --check` 报 `CodeWorkspaceTab.test.tsx:1898`、`src/lib/editor/workspace.ts:540` 新增尾随空格 | 交付门禁本身失败 | **N7.9** |
+
+**目标重置：** G0 继续保持红/partial；N1.7 只能写 `wired / partial`，J0 只能写 `containment partial`。只有 P0-S2 与 P0-J1 的 production host、IPC、undo/失败证据完成后，才能回到 G0 green。绿色 unit/model 测试不改变这个判断。
+
+#### 8.15.1 P0-S2：Typed Workspace Write Error 与 stale-save 收口
+
+**owner 与非目标。** 允许修改 `src-tauri/src/workspace.rs`、`src/lib/editor/workspace.ts`、`workspaceStyleController.ts`、`CodeWorkspaceTab.tsx` save 区和 `useWorkspaceLspSession.ts`。Git Manager 的独立写盘 owner、UI 视觉重构、N6.6 layout 不在本包。
+
+**当前失败复现。**
+
+1. 调用 encoded Tauri command 触发 hash mismatch，观察到的 IPC reject 仍是 `"hash-mismatch: ..."` 字符串；`WorkspaceWriteError` 没有实例化。
+2. writer promise 延迟期间编辑 buffer，writer 返回旧 snapshot；当前实现的 writeback 会保留新 buffer 并标记 dirty，但随后仍调用 `saveLspDocument(..., snapshotText)`，监听 LSP trace 可见先发送旧 `didSave`，再发送新 `didChange`。验收必须把“磁盘允许保存旧 snapshot”与“provider 不得收到旧 didSave”分开断言。
+3. close tab/workspace 后 writer 返回，验证任何 `setOpenFiles`、LSP save 或 status update 都不能重新创建已关闭 buffer。
+
+**跨层数据合同：**
+
+```ts
+type WorkspaceWriteErrorKind = "hash-mismatch" | "encoding" | "permission" | "io";
+type WorkspaceWriteError = {
+  kind: WorkspaceWriteErrorKind;
+  message: string;
+  expectedHash?: string;
+  actualHash?: string;
+};
+
+type PreparedSave = {
+  transactionId: string;
+  workspaceId: string;
+  fileKey: string;
+  filePath: string;
+  snapshotText: string;
+  snapshotRevision: number;
+  expectedDiskHash: string | null;
+  styleGeneration: number;
+  policy: { eol: "lf" | "crlf" | "cr"; encoding: string; bom: boolean };
+};
+
+type SaveCommitResult =
+  | { kind: "saved-current"; file: WorkspaceFile }
+  | { kind: "saved-stale-snapshot"; file: WorkspaceFile; currentRevision: number }
+  | { kind: "cancelled"; phase: "prepare" | "pre-write"; reason: string }
+  | { kind: "conflict"; error: WorkspaceWriteError }
+  | { kind: "failed"; error: WorkspaceWriteError };
+```
+
+**Rust/IPC implementation.**
+
+1. Make `WorkspaceWriteError` the serialized error type of both encoded commands. `WorkspaceWriteErrorKind` must serialize exactly as `hash-mismatch`, `encoding`, `permission`, `io`; map `NotFound`, `PermissionDenied`, encode failure, temp-file open/write/sync/rename and hash precondition separately. Do not put paths, source text or credentials in `message`.
+2. Keep a compatibility adapter for old string responses only at `src/lib/editor/workspace.ts`. The adapter may recognize the legacy `hash-mismatch:` prefix, but all new backend responses must be normalized by `kind`, independent of message wording. Add a parser test with three different messages for the same `kind`.
+3. Encode first, compare hash before creating the temp file, write/sync/replace atomically, and on encode failure prove the target bytes and hash are unchanged. Add exact `ISO-8859-1` and `windows-1252` fixtures with non-ASCII characters; do not label windows-1252 as Latin-1.
+
+**Save controller state machine.**
+
+```text
+idle -> preparing -> pre-write-check -> writer-in-flight -> writeback -> idle
+                         |                    |
+                         +-- cancelled       +-- conflict/failed
+```
+
+1. `prepare` may await EditorConfig, format, history and LSP queue. It may set `saving` metadata only. A `PreparedSave` owns the exact text/revision/hash/policy; no helper may accept an unbound `textToSave`.
+2. `pre-write-check` reads the live buffer, workspace/file identity and style generation synchronously. Any mismatch returns `cancelled` with zero writer calls. The check and writer invocation must have no `await`, dialog or React state update between them.
+3. `writeback` reads the live buffer again. Same revision returns `saved-current`, updates `savedText/hash/mtime/encoding/eol/bom`, clears dirty and sends `didSave(snapshotText)`. Advanced revision returns `saved-stale-snapshot`, updates disk metadata and `savedText` only, retains current text/revision/dirty, and **does not send `didSave(snapshotText)`**. It may queue a current `didChange` if the provider is behind; the next explicit save owns `didSave`.
+4. If the file was closed or the workspace unmounted, discard writeback and LSP work by transaction identity. Never recreate an open-file entry from an old closure.
+5. `WorkspaceStyleController.executeSaveTransaction` must accept/return the typed write result; remove the runtime cast of `{ cancelled: true }`. Open-clean WorkspaceEdit, closed-file WorkspaceEdit and replay must use the same prepared byte-writer policy, while each operation retains its own hash/revision guard.
+
+**Required evidence.** Add mounted host tests for format-await, history-await, writer-in-flight, same-length edit, external hash conflict, close-tab/unmount, stale LSP save ordering and one successful current save. Add Rust focused tests for all error kinds, raw bytes for `LF/CRLF/CR × UTF-8/UTF-8+BOM/UTF-16LE/UTF-16BE/ISO-8859-1/windows-1252`, closed WorkspaceEdit and replay. Highest claim before all evidence: **N1.7 L2 partial**.
+
+#### 8.15.2 P0-J1：Completion identity、provider containment 与一次事务 acceptance
+
+**owner 与非目标。** 允许修改 `CodeMirrorHost.tsx`、`EditorGroup.tsx`、`CodeWorkspaceTab.tsx` completion wiring、`lspCompletion.ts`、`useWorkspaceLspSession.ts`、`codeActionExecution.ts` 和 fixture/test 文件。不要在本包实现新的 Java classpath/index、N13.5 on-the-fly import 设置或重写 CodeMirror history。
+
+**强制请求身份：**
+
+```ts
+type CompletionRequestToken = {
+  workspaceId: string;
+  fileKey: string;
+  filePath: string;
+  uri: string;
+  languageId: string;
+  documentRevision: number;
+  lspSessionGeneration: number;
+  requestId: string;
+};
+```
+
+1. 生产 `onComplete`、`onCompleteResolve`、completion source 和 `completionInfo` 均必须携带同一个 token；production 类型字段不可选。测试 fixture 如需省略 token，必须使用独立 `createFixtureCompletionSource`，不得让 production overload 接受 `undefined`。
+2. `CodeWorkspaceTab` 在请求开始捕获 live file identity、document revision、LSP session generation 和 monotonic request id；`fetch` 前后、resolve 前后、accept 前后都验证 token。file switch、close、document revision/session generation 改变时 abort/丢弃结果，popup 不得显示上一文件候选或文档。
+3. provider inactive/unavailable 无论 `items` 是否非空都返回 typed unavailable 并安全回退 `completeAnyWord`；禁止以 language extension 判断 Java provider。`status` 必须在候选映射前校验，并与请求 token 的 `lspSessionGeneration`、`documentRevision` 同代；“请求开始时 active、响应回来时 inactive”必须丢弃整个结果，不能只过滤空数组。日志只记录 provider/status/latency/count。
+
+**stale inactive 处理时序：** `request-start(active, token A) -> provider response(items, token A) -> session status inactive/token B -> validate -> unavailable/word fallback`。`items` 非空不是可用性证明；只有状态、身份和文档代际全部匹配，候选才可以进入 popup。该顺序必须有一个 session-stop deferred host fixture 和一个 source-level unit fixture，分别证明生产接线与纯映射逻辑不会接受旧候选。
+
+**Acceptance 算法：**
+
+1. 以 accept 时的同一 `EditorState` 把 primary `textEdit`、同文档 `additionalTextEdits` 转成 changes；检查 URI、范围合法性和 edits 不重叠。重叠/跨文档返回 `invalid-additional-edits`，不部分写入。
+2. plain item 和 snippet item 都必须产生一个 `view.dispatch`。snippet 需要先转换成单个 `ChangeSet` 与选择映射，不能调用会自行 dispatch 的 helper 后再补 dispatch。primary 前方插入 import 时，selection 使用 transaction mapping，不能使用未映射的 `replaceFrom + insert.length`。
+3. additional edits 已在 response 中时立即一次提交；只有 resolve 才能得到 import 时，先 await resolve 并再次验证 token。超时/resolve 失败只能提交 primary 并生成显式 `additional-edit-unavailable` intention，禁止未知 revision 下异步插入 import。
+4. 接受一次 completion 后 Ctrl+Z 必须一次撤销 primary、snippet placeholder 和 import；document revision 只推进一次。一次事务失败不得留下半个 import。
+
+**containment。** 将 `javaQuickFix.ts` 移到明确的 `__fixtures__`/test-only 路径，或者删除生产文件；增加静态测试，扫描 production `.ts/.tsx` import graph，发现 `JDK_KNOWN_TYPES`、`createJavaImportCodeActions` 或 fixture 路径即失败。保留的 fixture 必须覆盖 `java.util.List` / `java.awt.List` ambiguity，但不能进入 runtime bundle。
+
+**验收矩阵。** 至少包括 Java provider active/inactive、TypeScript/Python/Rust inactive、双 workspace 同路径、file switch、close/unmount、same-length edit、session restart、additional edit overlap、snippet+import、resolve timeout/stale、one undo、provider supplied code action import。必须有一条挂载 `CodeWorkspaceTab` 的 TypeScript 负向测试和一条真实 provider host 测试。最高 claim：containment 完成前 **J0 L1**；身份接线和一次事务全绿后 **J0 L2**。
+
+#### 8.15.3 P0-J2：CodeAction wrapper canonicalization 与 WorkspaceEdit 完整性
+
+当前 Rust `parse_code_action` 和 TS `executeCodeAction` 各自维护 `_java.apply.workspaceEdit`、`java.apply.workspaceEdit`、`editor.action.applyWorkspaceEdit`、`applyWorkspaceEdit` 白名单，已有 wrapper bridge 但没有 parser fixture。下一包固定一个 canonical owner：
+
+1. Rust parser 输出 `{ title, kind, isPreferred, edit, command: null, raw }`；wrapper 的第一个参数必须是合法 WorkspaceEdit，否则返回 typed `malformed-action`，不得静默丢掉 command 或部分 edit。TS 只在带协议版本的旧 backend response 上 unwrap，不能再复制 command 白名单。
+2. fixture 覆盖 `changes`、`documentChanges`、versioned `textDocument`、create/rename/delete、change annotations、unknown command、missing/nested/non-array args、resolved action 合并。未知但非 wrapper command 保留为 command-only action；不安全/不完整参数必须显示 unavailable/failed，不执行任意对象。
+3. 所有 canonical edit 必须进入 `applyWorkspaceEdit` 的 path validation、hash/revision guard、preview/confirmation、undo history 和 first-failure boundary。加一条 host 测试证明 wrapper action 的一次 undo 与普通 provider edit 相同。
+
+#### 8.15.4 N7.9：QA、测试隔离与交付卫生
+
+**当前基线（2026-08-21）：** `qa-ui-auto audit --diff 20027dfe` 报 131 cases、78 features、984 controls、0 lint errors、catalog up to date、137 orphan selectors；F25.1/F25.2 的 added/removed controls 尚未回写，`TC-auto-F25-1` 仍触碰已删除的 bottom tabs、tool ids 和 debug controls。该状态不能标为 QA green。
+
+1. 先运行 `fix controls F25.1`、`fix controls F25.2`，决定每个 added control 的 owner；更新 `feature-list.md`、`references/testid-catalog.md` 和对应 YAML。对已删除 control，修改 `TC-auto-F25-1` 为当前右 pane/build/debug/toolchain workflow，禁止用空 assert 替代真实操作。重新运行 `audit --diff 20027dfe`，stale selector 必须为 0；orphan selector 要么归属 feature，要么从 case 删除并记录原因。
+2. 固定测试隔离：每个 `CodeWorkspaceTab` host 用例必须使用唯一 `workspaceInstanceId`、reset mocks/store/localStorage、在 `afterEach` 等待 deferred promise 和 unmount。此前一次组合运行出现外部冲突 merge 用例“组合失败、单独通过”，本轮同一四文件组合重跑为 **103 passed / 4 files passed**；在至少连续三次组合运行、无随机重试的结果稳定前，只能记为“当前通过、稳定性未证明”，不能把一次通过当作绿门禁。
+3. 清理新增尾随空格，使 `git diff --check` exit 0。Rust 只对改动 `.rs` 执行 `rustfmt --edition 2024 <file>`，禁止项目级 `cargo fmt`。
+4. 每包证据必须同时给：`pnpm exec tsc -b`、相关 Vitest（组合运行）、Rust focused test、`git diff --check`、`qa-ui-auto audit --diff`。browser/native YAML 运行前按 skill probe；未启动服务或未跑三端必须明确写“未验证”。
+
+#### 8.15.5 既有 Gate 与后续顺序
+
+P0-S2、P0-J1、P0-J2、N7.9 完成前，Gate R1 不得升级为完整；N6.6、N2.6、N0.6、N8.3、N12 仍沿用 §8.14 的未完成状态。新的固定顺序为：
+
+`P0-S2 → P0-J1 containment → P0-J1 identity/atomic acceptance → P0-J2 → N7.9 → Gate R1 → N6.6 → (N2.6 ∥ N0.6) → N8.3 → N12 → N16(G1 slice) → N9/N10/N11/N13/N14/N15/N17`。
+
+每张 agent 任务卡必须写明：`包 ID / owner 文件 / 非目标 / 失败复现 / 数据合同 / 状态机与时序 / 取消和错误 / undo 与持久化 / host+unit+Rust+QA 用例 / 运行命令 / 最高可声明等级`。agent 回报必须列出 production call chain、实际证据、未完成项和残余风险，禁止使用 “fully aligned”“complete parity” 概括局部实现。
+
 ## 9. 风险与权衡
 
 | 风险 | 说明 | 缓解 |
@@ -2420,13 +2820,14 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 | Inlay hints 抖动 | 编辑时 hint 频繁重排 | 视口 range + 滚动/编辑防抖；默认关，用户主动开启 |
 | 底部终端生命周期 | 工作区关闭时 PTY 泄漏 | 随 tab 卸载显式销毁；复用现有 TerminalPanel 清理路径 |
 | Action registry 双真值 | 静态 catalog、旧 `WorkspaceCommand[]`、CodeMirror keymap 和菜单可能出现 ID/when/handler 分叉 | 先做全量 ID 对账和 migration adapter；registry 订阅快照成为唯一入口；未知/重复 ID 在开发期硬失败 |
-| Action context 分叉（已发生，已修） | `a4584916` 中 `getState` 与 `execute` 各自构造 context、focus 退化为常量，导致 focus/payload 命令静默 no-op（§2.17 N0.4）；`c5ce1fd6` 已恢复 focus 解析与单一 `buildContext` | 单一 `buildContext`、focus 由事件目标/焦点推导、参数契约固定为 `ctx.payload` 并在开发期告警；每个 action 入口都要有“同一命令四条路径结果一致”的测试（§8.13 Gate R1 仍未完成 SE/cheatsheet 一致性） |
+| Action context 分叉（已发生，已修） | `a4584916` 中 `getState` 与 `execute` 各自构造 context、focus 退化为常量，导致 focus/payload 命令静默 no-op（§2.17 N0.4）；`c5ce1fd6` 已恢复 focus 解析与单一 `buildContext` | 单一 `buildContext`、focus 由事件目标/焦点推导、参数契约固定为 `ctx.payload` 并在开发期告警；每个 action 入口都要有“同一命令四条路径结果一致”的测试（§8.14 Gate R1 仍未完成 SE/cheatsheet 一致性） |
 | 用“删除机制”换绿灯（已发生） | `5ce13c9a` 为绕过 StrictMode 双挂载直接删除 `host.dispose()`，ActionHost 从此永不释放，双实例隔离与生命周期验收失效 | 生命周期对象不放在 `useMemo`：惰性 `useState` 创建 + 真实 unmount 释放 + disposed 后自愈重建；PR 禁止以删除正确性机制的方式让测试转绿（§8.13 通用协议第 6 条） |
-| 写盘策略参数在装配层被丢弃（已发生） | closed-file WorkspaceEdit 未接 applier 传入的 `diskEol` 并硬编码 `lf`，CRLF 文件被静默整篇改写（§2.19 N1.5） | 写盘策略沿 `readDisk → applier → writeTextSnapshot` 全链传递并有 9 条字节相等用例；`writeTextSnapshot` 之外禁止任何写盘调用（grep 守卫） |
-| 孤儿能力模型堆积 | 8 个模块 1.7k 行零生产引用，另有 0.5k 行测试只验证死代码，导致“有模型即宣称能力”反复发生 | §8.13 N12 逐模块作接线/降级/删除决策；保留者文件头标注 NON-PRODUCTION 并排除覆盖率；禁止新增无生产 owner 的模型+单测组合 |
+| 写盘策略参数在装配层被丢弃（已修参数，事务语义仍红） | closed-file EOL 已由 `d641ad12` 贯通；当前 save 的 inner guard/writeback 已保护 buffer，但最终 guard 到 host writer 仍 await history，且旧 snapshot 仍会进入 LSP `didSave`（§2.23） | 按 §8.15 P0-S2 拆 prepare/commit/writeback；history 在最终 guard 前完成，guard 后立即调用 typed writer，writeback 只合并 metadata；stale snapshot 不得触发旧 `didSave`；用 host deferred-race + LSP trace + Rust raw bytes 证明 |
+| 跨语言硬编码语义 fallback（当前已发生） | `javaQuickFix.ts` 固定类型表被无 language identity 的 completion source 使用，provider unavailable 时非 Java 文件也可能插入 Java import | P0-J 先移除生产 fallback；所有 completion/import 携带 language/revision/provider generation，provider unavailable 只回退普通 word completion；非 Java host 负例为合并门禁 |
+| 孤儿能力模型堆积 | 8 个模块 1.7k 行零生产引用，另有 0.5k 行测试只验证死代码，导致“有模型即宣称能力”反复发生 | §8.14 N12 继承规则逐模块作接线/降级/删除决策；保留者文件头标注 NON-PRODUCTION 并排除覆盖率；禁止新增无生产 owner 的模型+单测组合 |
 | 提交混入与项目级格式化 | `c5ce1fd6` 一次提交 144 文件（123 个 `.rs`，含 LanChat/agent/hbase 无关改动与全仓 import 重排），违反 `CLAUDE.md` 且掩盖真实缺陷 | 一包一提交；Rust 只格式化本包改动文件；review 前用 `git show --stat` 自检无关文件为 0 |
 | EditorConfig 误解析 | 父目录链、glob 相对路径、`root=true`、外部变更和非法值处理错误会 silently 改变格式 | resolver 与 parser 分层；缓存带 mtime/hash；逐字段 provenance/diagnostic；fixture 覆盖嵌套与 root stop |
-| 保存规范化破坏文本 | formatter、EOL、charset、trim/final-newline 顺序错误，或异步期间覆盖新编辑 | 以最新 dirty snapshot 重跑；normalize 失败零落盘；编码不可表示/外部 hash 冲突明确阻断并保留恢复入口 |
+| 保存规范化破坏文本 | formatter、history、EOL、charset、trim/final-newline 的 await/顺序错误，或 writeback 覆盖新编辑 | §8.14 N1.7 的 PreparedSave + 同步 pre-write boundary + merge-only writeback；normalize/编码失败零落盘；外部 hash 冲突明确阻断并保留恢复入口 |
 | Capability stale merge | 空 capability 摘要保护可能把旧 session 的能力带到新 provider | 用 session generation + provenance；新 session 先 reset 为 unknown，只有同代空增量才允许保留 |
 | CM memo comparator stale callback | 忽略 callback identity 后新增 prop 未同步 ref/comparator，旧闭包继续执行 | prop matrix 契约测试；行为 prop 必须有 ref、比较和 unmount/rapid-switch 回归 |
 | Completion 过度截断/误判上下文 | 200 项 cap、Lezer 节点名差异、lexical fallback 可能隐藏合法候选或在字符串中误触发 | 返回 truncation/source/reason；显式/trigger/typing 分流；跨语言 syntax fixture 和真实 p95 门禁 |
@@ -2442,19 +2843,23 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 4. **Keymap 路线已定**：P0 先交付 IDEA platform defaults 与自定义 scheme；schema 为 VS Code/其他 preset 保留扩展，但 preset 内容不阻塞首批。
 5. **语义路线已定**：provider-first；Java 建最小声明/引用/type index 和 inspection/data-flow 垂直切片。待决的是 parser/index 技术选型与持久化格式，不是是否需要语义层。
 6. **模板/生成路线已定**：只有通过 type/context/provider 校验的变换才计作语义能力；固定文本模板可保留，但必须标为 local template。
-7. **布局路线已定**：现有双 group 保持兼容，P2 迁移为递归 layout tree；detach 是否使用 Tauri 独立窗口在 A2 spike 后决定。
+7. **布局路线已定**：N6.6 后 production 只保留递归 layout tree，`primary/secondary` 旧渲染分支不再长期兼容；schema migration 负责读取旧快照。detach 是否使用 Tauri 独立窗口在 A2 spike 后决定。
 8. **默认显示已定**：inlay hints 继续默认关、semantic highlighting 默认按 provider 开、large-file 自动降级；每项必须可解释并可按语言配置。
 9. **Full Line 边界已定**：只对齐 IDEA Ultimate 默认 bundled plugin 的 Code Editor 工作流，Java 先行、本地离线和隐私为验收条件；不因此纳入 AI Assistant 或通用插件兼容。
 10. **运行时真值已定**：`workspaceActionRegistry` 是目标唯一 action truth；当前静态 catalog/旧 `WorkspaceCommand` 仅视为迁移输入，不能作为完成证据。`when` 必须是可验证的结构化表达式，action state 必须携带来源、freshness 和 completeness。
 11. **EditorConfig 解析边界已定**：parser 无文件系统副作用，resolver 负责父目录链、root stop、缓存/失效和 provenance；仅有 EOL/charset 等非缩进属性也必须生效；保存 normalize 与 formatter 是两个可观察阶段。
 12. **Completion 性能语义已定**：80ms debounce、trigger immediate、200 项 cap 是性能护栏而非 IDEA Smart Completion；request reason、session/document generation、truncation/source 必须显式可观测，不能用提高 cap 或静默 fallback 宣称语义完成。
-13. **仍待决**：Java parser/index 方案、Structural Search query model、Full Line 模型/runtime 选型、clipboard history 的隐私/保留策略、scratch/injection 的文件所有权，以及三端真机设备矩阵的具体机器清单。
+13. **保存提交边界已定**：prepare 可 await 但不能改 buffer text；最终 revision/style/identity guard 后必须在同一 call stack 调唯一 byte writer；writeback 只按 current revision 合并，绝不覆盖更新文本。
+14. **Import 来源已定**：自动 import 只能来自带 project/classpath 语义的 provider/index；硬编码类型表只能作 fixture，provider unavailable 不猜测候选。
+15. **Reference 信息 owner 已定**：Parameter/QuickDoc/Type/Context/External Documentation 共用 workspace-scoped controller、request generation 与 popup surface；普通 hover markdown 不能冒充结构化 type/URL。
+16. **Appearance 分账已定**：Code Workspace editor profile 与 Terminal、Markdown、应用 UI theme、code-style formatter 独立；运行期通过 CodeMirror compartments 更新，不重建 document state。
+17. **仍待决**：Java parser/index 方案、Structural Search query model、Full Line 模型/runtime 选型、clipboard history 的最终隐私/保留策略、scratch/injection 的文件所有权，以及三端真机设备矩阵的具体机器清单。
 
 ---
 
 ## 11. Java 深度支持历史计划（v3.0，M6–M11）
 
-> 本节保留 M6–M11 的 Java 工程、测试与调试实施记录。v4.30 起，jdtls 编辑语义、Java index/inspection/refactor 归 Editor 的 J1–J3；Build/Run/Test/Debug/DAP 归 X 轨道。目标、状态和下一顺序以 §2、§2.13 与 §8.8 为准。
+> 本节保留 M6–M11 的 Java 工程、测试与调试实施记录。v4.30 起，jdtls 编辑语义、Java index/inspection/refactor 归 Editor 的 J1–J3；Build/Run/Test/Debug/DAP 归 X 轨道。当前目标、状态和下一顺序以 §2.21、§2.22 与 §8.14 为准。
 
 ### 11.0 现状盘点（As-Is，Java 视角，v4.23 复核）
 
@@ -2749,13 +3154,13 @@ M11 配置与分析收口 : Build target DAG + Run/Debug configuration + provide
 7. **✅ Debug 变量树与调用栈右键快捷菜单 (Variable Tree & Call Stack Context Menus)**：在 `DebugPanel` 中支持对变量节点右键直接触发「添加数据断点」、「添加到监视」、「复制变量值/名称」、「设置变量值」；支持对调用栈帧右键执行「Jump to Source」、「Drop Frame / 栈帧重置 (`restartFrame`)」、「复制调用栈」等高频动作。
 8. **✅ 调试单步过滤配置 (Step Filters: 跳过 JDK/标准库/框架代码)**：在 `WorkspaceBuildRunToolsDialog` 中提供 Step Filters 开关与规则配置（可自定义类与包过滤模式、跳过 synthetic 方法、跳过 `<clinit>` 静态初始块、跳过构造函数），并在启动 DAP 调试时自动装配注入调试器启动载荷。
 9. **✅ 分屏编辑器同步滚动联动 (Synchronized Split Scrolling Toggle)**：在顶部工具栏与命令面板（`workspace.toggleSyncSplitScroll`）提供双向视口滚动镜像联动与防递归事件门禁，方便并排对比代码或跨文件审查。
-10. **✅ QA UI 自动化端到端用例编目沉淀 (`qa-ui-auto-tests/`)**：在 `feature-list.md` 中为 F25.1 补齐 step filters 与 split sync scroll 交互控件定义，同步刷新 `references/testid-catalog.md` 与 `TC-auto-F25-1` 自动化用例覆盖。
+10. **✅ QA UI 自动化端到端用例编目沉淀 (`qa-ui-auto-tests/`)（历史交付）**：曾在 `feature-list.md` 中为 F25.1 补齐 step filters 与 split sync scroll 交互控件定义并生成 `TC-auto-F25-1`；当前 `5ce13c9a..HEAD` audit 已判该 case 含 stale selectors，修复要求见 §2.21.1/§8.14.8，不能继续作为当前门禁全绿证据。
 
 ---
 
 ## 12. 后续进阶路线与三端真机验收计划
 
-本节只维护 X 轨道和最终真机门禁；Editor P0/P1/P2 当前待办见 §8.4，详细实现合同见 §8.5。
+本节只维护 X 轨道和最终真机门禁；Editor G0/G1/G2/G3 当前待办与详细实现合同统一见 §8.14。
 
 ### 12.1 Build / Compile graph
 

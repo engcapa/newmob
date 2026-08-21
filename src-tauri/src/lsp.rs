@@ -4296,13 +4296,7 @@ impl JavaLanguageSettings {
                 "enabled": true,
                 "guessMethodArguments": self.guess_method_arguments,
                 "importOrder": self.completion_import_order,
-                "favoriteStaticMembers": self.favorite_static_members,
-                "autoImport": {
-                    "enabled": true
-                },
-                "postfix": {
-                    "enabled": true
-                }
+                "favoriteStaticMembers": self.favorite_static_members
             },
             "format": {
                 "enabled": true,
