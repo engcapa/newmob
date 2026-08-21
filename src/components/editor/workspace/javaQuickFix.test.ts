@@ -4,6 +4,7 @@ import {
   isJavaTypeImported,
   generateJavaImportWorkspaceEdit,
   createJavaImportCodeActions,
+  getJavaJdkCompletionCandidates,
 } from "./javaQuickFix";
 
 describe("javaQuickFix", () => {
@@ -111,6 +112,20 @@ describe("javaQuickFix", () => {
       const code = "package com.example;\n\nimport java.util.List;\n\npublic class App {\n  List items;\n}";
       const actions = createJavaImportCodeActions("/repo/App.java", code, { line: 5, character: 5 });
       expect(actions).toHaveLength(0);
+    });
+  });
+
+  describe("getJavaJdkCompletionCandidates", () => {
+    it("returns matching JDK candidates with boosted sort", () => {
+      const code = "package com.example;\n\npublic class App {\n  void run() {\n    Array\n  }\n}";
+      const candidates = getJavaJdkCompletionCandidates("Array", code);
+      expect(candidates.length).toBeGreaterThan(0);
+      expect(candidates[0]!.label).toBe("ArrayList");
+      expect(candidates[0]!.detail).toBe("java.util.ArrayList");
+    });
+
+    it("handles empty prefix gracefully", () => {
+      expect(getJavaJdkCompletionCandidates("", "class A {}")).toHaveLength(0);
     });
   });
 });

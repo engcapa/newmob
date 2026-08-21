@@ -139,6 +139,134 @@ export const JDK_KNOWN_TYPES: Record<string, string[]> = {
   Nullable: ["org.springframework.lang.Nullable"],
 };
 
+interface JavaHeaderInfo {
+  packageName: string | null;
+  exactImports: Set<string>;
+  wildcardPackages: Set<string>;
+  declaredTypes: Set<string>;
+  packageLineIndex: number;
+  lastImportLineIndex: number;
+}
+
+// Bounded LRU cache for parsed document headers (capped at 50 entries)
+const headerCache = new Map<string, JavaHeaderInfo>();
+const MAX_HEADER_CACHE_SIZE = 50;
+
+/**
+ * Parses package, imports, and declared types with a single pass over the document.
+ * Results are cached by docText identity/value for zero-cost repeated lookups during typing.
+ */
+export function parseJavaDocumentHeader(docText: string): JavaHeaderInfo {
+  const cached = headerCache.get(docText);
+  if (cached) return cached;
+
+  let packageName: string | null = null;
+  const exactImports = new Set<string>();
+  const wildcardPackages = new Set<string>();
+  const declaredTypes = new Set<string>();
+  let packageLineIndex = -1;
+  let lastImportLineIndex = -1;
+  let lineIndex = 0;
+
+  // Single pass over lines using string character indices (no split array allocation)
+  let lineStart = 0;
+  for (let i = 0; i <= docText.length; i++) {
+    if (i === docText.length || docText.charCodeAt(i) === 10) {
+      let end = i;
+      if (end > lineStart && docText.charCodeAt(end - 1) === 13) {
+        end--;
+      }
+      const rawLine = docText.slice(lineStart, end).trim();
+
+      if (rawLine.startsWith("package ") && rawLine.endsWith(";")) {
+        packageName = rawLine.slice(8, -1).trim();
+        packageLineIndex = lineIndex;
+      } else if (rawLine.startsWith("import ")) {
+        lastImportLineIndex = lineIndex;
+        let stmt = rawLine.slice(7).trim();
+        if (stmt.startsWith("static ")) {
+          stmt = stmt.slice(7).trim();
+        }
+        if (stmt.endsWith(";")) {
+          stmt = stmt.slice(0, -1).trim();
+        }
+        if (stmt.endsWith(".*")) {
+          wildcardPackages.add(stmt.slice(0, -2));
+        } else {
+          exactImports.add(stmt);
+          const dot = stmt.lastIndexOf(".");
+          if (dot >= 0) {
+            exactImports.add(stmt.slice(dot + 1));
+          }
+        }
+      } else if (
+        rawLine.startsWith("public class ") ||
+        rawLine.startsWith("class ") ||
+        rawLine.startsWith("public interface ") ||
+        rawLine.startsWith("interface ") ||
+        rawLine.startsWith("public enum ") ||
+        rawLine.startsWith("enum ") ||
+        rawLine.startsWith("public record ") ||
+        rawLine.startsWith("record ")
+      ) {
+        const words = rawLine.split(/\s+/);
+        for (let w = 0; w < words.length; w++) {
+          if (["class", "interface", "enum", "record"].includes(words[w]!) && words[w + 1]) {
+            const declName = words[w + 1]!.replace(/[^a-zA-Z0-9_$].*$/, "");
+            if (declName) declaredTypes.add(declName);
+          }
+        }
+      }
+
+      lineIndex++;
+      lineStart = i + 1;
+    }
+  }
+
+  const info: JavaHeaderInfo = {
+    packageName,
+    exactImports,
+    wildcardPackages,
+    declaredTypes,
+    packageLineIndex,
+    lastImportLineIndex,
+  };
+
+  if (headerCache.size >= MAX_HEADER_CACHE_SIZE) {
+    const firstKey = headerCache.keys().next().value;
+    if (firstKey !== undefined) headerCache.delete(firstKey);
+  }
+  headerCache.set(docText, info);
+
+  return info;
+}
+
+function getLineAt(text: string, targetLine: number): string | null {
+  let lineStart = 0;
+  let currentLine = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) {
+      if (currentLine === targetLine) {
+        let end = i;
+        if (end > lineStart && text.charCodeAt(end - 1) === 13) {
+          end--;
+        }
+        return text.slice(lineStart, end);
+      }
+      currentLine++;
+      lineStart = i + 1;
+    }
+  }
+  if (currentLine === targetLine) {
+    let end = text.length;
+    if (end > lineStart && text.charCodeAt(end - 1) === 13) {
+      end--;
+    }
+    return text.slice(lineStart, end);
+  }
+  return null;
+}
+
 /**
  * Extracts a Java identifier at or near the given cursor position in the document text.
  */
@@ -146,8 +274,7 @@ export function extractJavaIdentifierAtPosition(
   docText: string,
   position: LspPosition,
 ): string | null {
-  const lines = docText.split(/\r?\n/);
-  const line = lines[position.line];
+  const line = getLineAt(docText, position.line);
   if (line == null) return null;
 
   const char = position.character;
@@ -186,45 +313,21 @@ export function extractJavaIdentifierAtPosition(
 
 /**
  * Checks whether a given fully qualified class or simple class name is already imported
- * or declared in the current Java document.
+ * or declared in the current Java document in O(1) via the cached header index.
  */
 export function isJavaTypeImported(docText: string, fqcn: string, simpleName: string): boolean {
-  const lines = docText.split(/\r?\n/);
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (
-      line === `import ${fqcn};` ||
-      line === `import static ${fqcn};` ||
-      line === `import static ${fqcn}.*;` ||
-      (line.startsWith("import ") && line.endsWith(`.${simpleName};`))
-    ) {
-      return true;
-    }
-    // Check wildcard imports like java.util.*
-    const pkg = fqcn.substring(0, fqcn.lastIndexOf("."));
-    if (line === `import ${pkg}.*;`) {
-      return true;
-    }
-    // Check package declaration (same package)
-    if (line.startsWith("package ") && line.endsWith(";")) {
-      const currentPkg = line.slice(8, -1).trim();
-      if (currentPkg === pkg) {
-        return true;
-      }
-    }
-    // Check if class/interface/enum with same name is declared in this file
-    if (
-      line.startsWith(`public class ${simpleName}`) ||
-      line.startsWith(`class ${simpleName}`) ||
-      line.startsWith(`public interface ${simpleName}`) ||
-      line.startsWith(`interface ${simpleName}`) ||
-      line.startsWith(`public enum ${simpleName}`) ||
-      line.startsWith(`enum ${simpleName}`) ||
-      line.startsWith(`public record ${simpleName}`) ||
-      line.startsWith(`record ${simpleName}`)
-    ) {
-      return true;
-    }
+  const info = parseJavaDocumentHeader(docText);
+  if (info.exactImports.has(fqcn) || info.exactImports.has(simpleName)) {
+    return true;
+  }
+  const dot = fqcn.lastIndexOf(".");
+  if (dot >= 0) {
+    const pkg = fqcn.slice(0, dot);
+    if (info.wildcardPackages.has(pkg)) return true;
+    if (info.packageName === pkg) return true;
+  }
+  if (info.declaredTypes.has(simpleName)) {
+    return true;
   }
   return false;
 }
@@ -238,32 +341,20 @@ export function generateJavaImportWorkspaceEdit(
   fqcn: string,
 ): LspWorkspaceEdit {
   const eol = docText.includes("\r\n") ? "\r\n" : "\n";
-  const lines = docText.split(/\r?\n/);
+  const info = parseJavaDocumentHeader(docText);
 
   let insertLine = 0;
   let insertPrefix = "";
   let insertSuffix = eol;
 
-  let packageLineIndex = -1;
-  let lastImportLineIndex = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = (lines[i] ?? "").trim();
-    if (trimmed.startsWith("package ") && trimmed.endsWith(";")) {
-      packageLineIndex = i;
-    } else if (trimmed.startsWith("import ") && trimmed.endsWith(";")) {
-      lastImportLineIndex = i;
-    }
-  }
-
-  if (lastImportLineIndex !== -1) {
+  if (info.lastImportLineIndex !== -1) {
     // Insert after the last import statement
-    insertLine = lastImportLineIndex + 1;
+    insertLine = info.lastImportLineIndex + 1;
     insertPrefix = "";
     insertSuffix = eol;
-  } else if (packageLineIndex !== -1) {
+  } else if (info.packageLineIndex !== -1) {
     // Insert after the package statement with a leading blank line
-    insertLine = packageLineIndex + 1;
+    insertLine = info.packageLineIndex + 1;
     insertPrefix = eol;
     insertSuffix = eol;
   } else {
@@ -348,6 +439,17 @@ export interface JavaJdkCompletionItem {
   boost: number;
 }
 
+// Pre-computed lowercase lookup entries for JDK_KNOWN_TYPES
+const PRECOMPUTED_JDK_ENTRIES: Array<{
+  simpleName: string;
+  lowerName: string;
+  fqcns: string[];
+}> = Object.entries(JDK_KNOWN_TYPES).map(([simpleName, fqcns]) => ({
+  simpleName,
+  lowerName: simpleName.toLowerCase(),
+  fqcns,
+}));
+
 /**
  * Returns candidate JDK completions for a typed prefix in a Java document.
  */
@@ -357,16 +459,26 @@ export function getJavaJdkCompletionCandidates(
 ): JavaJdkCompletionItem[] {
   if (!typedPrefix || typedPrefix.length === 0) return [];
   const lowerPrefix = typedPrefix.toLowerCase();
+  const info = parseJavaDocumentHeader(docText);
   const results: JavaJdkCompletionItem[] = [];
 
-  for (const [simpleName, fqcns] of Object.entries(JDK_KNOWN_TYPES)) {
-    if (simpleName.toLowerCase().startsWith(lowerPrefix)) {
-      for (const fqcn of fqcns) {
-        const isImported = isJavaTypeImported(docText, fqcn, simpleName);
-        const matchBoost = simpleName === typedPrefix ? 40 : simpleName.startsWith(typedPrefix) ? 20 : 0;
+  for (let i = 0; i < PRECOMPUTED_JDK_ENTRIES.length; i++) {
+    const entry = PRECOMPUTED_JDK_ENTRIES[i]!;
+    if (entry.lowerName.startsWith(lowerPrefix)) {
+      for (let j = 0; j < entry.fqcns.length; j++) {
+        const fqcn = entry.fqcns[j]!;
+        const isImported =
+          info.exactImports.has(fqcn) ||
+          info.exactImports.has(entry.simpleName) ||
+          (fqcn.lastIndexOf(".") >= 0 && info.wildcardPackages.has(fqcn.slice(0, fqcn.lastIndexOf(".")))) ||
+          (fqcn.lastIndexOf(".") >= 0 && info.packageName === fqcn.slice(0, fqcn.lastIndexOf("."))) ||
+          info.declaredTypes.has(entry.simpleName);
+
+        const matchBoost =
+          entry.simpleName === typedPrefix ? 40 : entry.simpleName.startsWith(typedPrefix) ? 20 : 0;
         const importBoost = isImported ? 10 : 0;
         results.push({
-          label: simpleName,
+          label: entry.simpleName,
           detail: fqcn,
           type: "class",
           boost: matchBoost + importBoost,
