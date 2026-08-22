@@ -54,6 +54,74 @@ export function generateLayoutId(prefix: "leaf" | "split", workspaceId?: string)
   return `${prefix}-${wsPart}${Date.now()}-${layoutMonotonicCounter}`;
 }
 
+/**
+ * Single canonical single-leaf tree factory (§8.16.4): fresh mounts, legacy
+ * synthesis and persistence defaults all materialize through this helper so
+ * leaf ids and shape stay consistent across every creation path.
+ */
+export function createSingleLeafLayout(
+  leafId: string,
+  openFileKeys: readonly string[],
+  activeKey: string | null,
+): LeafGroupNode {
+  return {
+    type: "leaf",
+    id: leafId,
+    openFileKeys: [...openFileKeys],
+    activeKey,
+  };
+}
+
+/**
+ * Bidirectionally sync a leaf's tab list from its legacy group (§8.16.4):
+ * every `updateEditorGroup` write mirrors openOrder/activeKey into the
+ * recursive tree so preview replacement, close-others and WorkspaceEdit
+ * restore cannot desynchronize leaf and group truth.
+ * Returns the same tree reference when the leaf is missing or unchanged.
+ */
+export function setLeafTabs(
+  root: LayoutNode,
+  leafId: string,
+  openFileKeys: readonly string[],
+  activeKey: string | null,
+): LayoutNode {
+  const leaf = findLeafNode(root, leafId);
+  if (!leaf) return root;
+  const sameKeys = leaf.openFileKeys.length === openFileKeys.length
+    && leaf.openFileKeys.every((key, index) => key === openFileKeys[index]);
+  if (sameKeys && leaf.activeKey === activeKey) return root;
+  return updateLeafInTree(root, leafId, (target) => ({
+    ...target,
+    openFileKeys: [...openFileKeys],
+    activeKey,
+  }));
+}
+
+export function cloneLayoutTree(node: LayoutNode): LayoutNode {
+  if (node.type === "leaf") {
+    return { ...node, openFileKeys: [...node.openFileKeys] };
+  }
+  return {
+    ...node,
+    ratios: [...node.ratios],
+    children: node.children.map(cloneLayoutTree),
+  };
+}
+
+/** Convert react-resizable-panels v4's keyed percentage map to normalized ratios. */
+export function panelLayoutToRatios(
+  layout: Readonly<Record<string, number>>,
+  childIds: readonly string[],
+): number[] | null {
+  const values = childIds.map((id) => layout[`panel-${id}`]);
+  if (values.length < 2 || values.some((value) => !Number.isFinite(value) || value <= 0)) {
+    return null;
+  }
+  const sum = values.reduce((total, value) => total + value, 0);
+  if (!Number.isFinite(sum) || sum <= 0) return null;
+  return values.map((value) => value / sum);
+}
+
 export class LayoutTreeManager {
   private root: LayoutNode;
 
@@ -160,19 +228,22 @@ export function updateSplitNodeRatios(
   if (node.type === "leaf") return node;
   if (node.id === splitId) {
     if (rawRatios.length !== node.children.length) return node;
-    const sum = rawRatios.reduce((a, b) => a + (Number.isFinite(b) && b > 0 ? b : 0), 0);
-    if (sum <= 0) return node;
-    const normalizedRatios = rawRatios.map((r) => r / sum);
-    return {
-      ...node,
-      ratios: normalizedRatios,
-    };
+    if (rawRatios.some((ratio) => !Number.isFinite(ratio) || ratio <= 0)) return node;
+    const sum = rawRatios.reduce((total, ratio) => total + ratio, 0);
+    if (!Number.isFinite(sum) || sum <= 0) return node;
+    const normalizedRatios = rawRatios.map((ratio) => ratio / sum);
+    if (normalizedRatios.every((ratio, index) => ratio === node.ratios[index])) return node;
+    return { ...node, ratios: normalizedRatios };
   }
-  return {
-    ...node,
-    children: node.children.map((child) => updateSplitNodeRatios(child, splitId, rawRatios)),
-  };
+  let changed = false;
+  const children = node.children.map((child) => {
+    const next = updateSplitNodeRatios(child, splitId, rawRatios);
+    changed ||= next !== child;
+    return next;
+  });
+  return changed ? { ...node, children } : node;
 }
+
 
 /**
  * Extract all openFileKeys from any tree structure (even partially corrupt ones).
@@ -571,7 +642,10 @@ export function validateTreeGroupConsistency(
   }
 
   for (const gid of Object.keys(groups)) {
-    if (!leafIds.has(gid)) {
+    // An empty legacy group slot carries no layout truth and stays dormant
+    // (e.g. the unused "secondary" group after fresh-mount materialization);
+    // only non-empty groups require a matching leaf (§8.16.4).
+    if (!leafIds.has(gid) && groups[gid].openOrder.length > 0) {
       errors.push(`Group "${gid}" has no matching leaf in tree.`);
     }
   }

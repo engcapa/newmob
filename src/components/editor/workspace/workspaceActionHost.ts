@@ -1,35 +1,70 @@
-/**
- * Workspace-Scoped Action Host (N0.1, Gate R0).
- *
- * Provides a dedicated, isolated action registry and execution host for each workspace/window instance.
- * Eliminates dual execution paths between WorkspaceCommand and WorkspaceActionRegistry by unifying
- * keymap dispatch, Search Everywhere, menus, and direct invocations under a single async execution lifecycle.
- */
-
 import {
   compileWhenExpr,
-  type WorkspaceActionDefinition,
-  type WorkspaceActionContext,
-  type ActionState,
+  type ActionDisabledReason,
   type ActionResult,
-  type ActionPlatformKeybindings,
+  type ActionState,
+  type WorkspaceActionContext,
+  type WorkspaceActionDefinition,
   type WorkspaceFocus,
 } from "./workspaceActionRegistry";
 import {
+  type KeyboardEventLike,
   type WorkspaceCommand,
   type WorkspaceCommandContext,
   type WorkspaceCommandMenuItem,
-  type KeyboardEventLike,
-  parseKeybinding,
   eventLogicalKey,
-  workspaceCommandMatchesKeybinding,
+  parseKeybinding,
 } from "./workspaceCommands";
 
+export type ActionInvocationKind =
+  | "direct"
+  | "keyboard"
+  | "search"
+  | "menu"
+  | "native-menu"
+  | "toolbar"
+  | "context-menu"
+  | "cheat-sheet"
+  | "snapshot";
+
 export interface ActionInvocation {
+  kind?: ActionInvocationKind;
   context?: Partial<WorkspaceActionContext>;
   payload?: unknown;
   eventTarget?: EventTarget | null;
   signal?: AbortSignal;
+}
+
+export interface PreparedActionEvaluation {
+  readonly workspaceId: string;
+  readonly hostGeneration: number;
+  readonly actionId: string;
+  readonly invocationKind: ActionInvocationKind;
+  readonly context: Readonly<WorkspaceActionContext>;
+  readonly state: ActionState;
+  /** Runtime owner identity. Prepared evaluations cannot cross host instances. */
+  readonly ownerToken: symbol;
+  /** Runtime action identity. A late disposer or replacement invalidates the evaluation. */
+  readonly action: WorkspaceActionDefinition | null;
+}
+
+export interface ActionBindingConflictDiagnostic {
+  kind: "binding-conflict";
+  keybinding: string;
+  actionIds: string[];
+  winnerId: string;
+}
+
+export interface ActionSnapshotItem {
+  id: string;
+  title: string;
+  category: string;
+  keybinding?: string;
+  keybindings?: string[];
+  keywords?: string[];
+  state: ActionState;
+  evaluation: PreparedActionEvaluation;
+  bindingConflicts?: ActionBindingConflictDiagnostic[];
 }
 
 export interface WorkspaceActionHostOptions {
@@ -45,17 +80,80 @@ function matchesKeybinding(pattern: string, event: KeyboardEventLike): boolean {
   const binding = parseKeybinding(pattern);
   if (!binding) return false;
   const eventKey = eventLogicalKey(event);
-  return (
-    binding.key === eventKey &&
-    binding.ctrl === !!event.ctrlKey &&
-    binding.shift === !!event.shiftKey &&
-    binding.alt === !!event.altKey &&
-    binding.meta === !!event.metaKey
-  );
+  return binding.key === eventKey
+    && binding.ctrl === !!event.ctrlKey
+    && binding.shift === !!event.shiftKey
+    && binding.alt === !!event.altKey
+    && binding.meta === !!event.metaKey;
+}
+
+function actionKeybindings(action: WorkspaceActionDefinition): string[] {
+  const primary = typeof action.keybinding === "string"
+    ? [action.keybinding]
+    : action.keybinding
+      ? [
+          action.keybinding.default,
+          action.keybinding.macos,
+          action.keybinding.windows,
+          action.keybinding.linux,
+        ]
+      : [];
+  return Array.from(new Set([
+    ...primary,
+    ...(action.secondaryKeybindings ?? []),
+  ].filter((binding): binding is string => Boolean(binding))));
+}
+
+function bindingIdentity(pattern: string): string | null {
+  const binding = parseKeybinding(pattern);
+  if (!binding) return null;
+  return [
+    binding.ctrl ? "ctrl" : "",
+    binding.shift ? "shift" : "",
+    binding.alt ? "alt" : "",
+    binding.meta ? "meta" : "",
+    binding.key,
+  ].filter(Boolean).join("+");
+}
+
+function defaultDisabledReason(context: WorkspaceActionContext): ActionDisabledReason {
+  if (context.readOnly) return "readOnly";
+  if (!context.hasActiveFile && context.focus === "editor") return "noEditor";
+  if (!context.hasSelection && context.focus === "editor") return "noSelection";
+  return "capability";
+}
+
+function unsupportedState(): ActionState {
+  return {
+    availability: "unsupported",
+    disabledReason: "unsupported",
+    source: "unsupported",
+    scope: "workspace",
+    freshness: "unknown",
+    completeness: "unavailable",
+  };
+}
+
+function freezeContext(context: WorkspaceActionContext): Readonly<WorkspaceActionContext> {
+  const activeCapabilities = context.activeCapabilities
+    ? Object.freeze({ ...context.activeCapabilities })
+    : context.activeCapabilities;
+  return Object.freeze({ ...context, activeCapabilities });
+}
+
+function focusByPriority(
+  context: Partial<WorkspaceActionContext>,
+  candidate: WorkspaceFocus,
+): WorkspaceFocus {
+  if (context.modalOpen || candidate === "modal") return "modal";
+  if (context.completionActive || candidate === "completion") return "completion";
+  if (context.snippetActive || candidate === "snippet") return "snippet";
+  return candidate;
 }
 
 export class WorkspaceActionHost {
   private readonly workspaceId: string;
+  private readonly ownerToken = Symbol("workspace-action-host-owner");
   private readonly getContext?: () => WorkspaceActionContext;
   private readonly getDefaultContext?: () => Partial<WorkspaceActionContext>;
   private readonly resolveFocus?: (target: EventTarget | null) => WorkspaceFocus;
@@ -65,8 +163,8 @@ export class WorkspaceActionHost {
   private actions = new Map<string, WorkspaceActionDefinition>();
   private commands = new Map<string, WorkspaceCommand>();
   private inFlightActions = new Set<string>();
-  private generation: number = 0;
-  private disposed: boolean = false;
+  private generation = 0;
+  private disposed = false;
 
   constructor(options: WorkspaceActionHostOptions) {
     this.workspaceId = options.workspaceId;
@@ -90,7 +188,9 @@ export class WorkspaceActionHost {
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.generation += 1;
     this.inFlightActions.clear();
     this.actions.clear();
     this.commands.clear();
@@ -101,26 +201,24 @@ export class WorkspaceActionHost {
     this.actions.set(action.id, action);
     this.generation += 1;
     return () => {
-      if (this.actions.get(action.id) === action) {
-        this.actions.delete(action.id);
-        this.generation += 1;
-      }
+      if (this.actions.get(action.id) !== action) return;
+      this.actions.delete(action.id);
+      this.generation += 1;
     };
   }
 
   registerActions(actions: readonly WorkspaceActionDefinition[]): () => void {
     if (this.disposed) return () => {};
-    for (const a of actions) {
-      this.actions.set(a.id, a);
-    }
+    for (const action of actions) this.actions.set(action.id, action);
     this.generation += 1;
     return () => {
-      for (const a of actions) {
-        if (this.actions.get(a.id) === a) {
-          this.actions.delete(a.id);
-        }
+      let changed = false;
+      for (const action of actions) {
+        if (this.actions.get(action.id) !== action) continue;
+        this.actions.delete(action.id);
+        changed = true;
       }
-      this.generation += 1;
+      if (changed) this.generation += 1;
     };
   }
 
@@ -128,49 +226,66 @@ export class WorkspaceActionHost {
     if (this.disposed) return () => {};
     const installedAdapters = new Map<string, WorkspaceActionDefinition>();
 
-    for (const cmd of commands) {
-      this.commands.set(cmd.id, cmd);
-      // Also adapt into action definition if not already present
-      if (!this.actions.has(cmd.id)) {
-        const adapter: WorkspaceActionDefinition = {
-          id: cmd.id,
-          title: cmd.title,
-          category: (cmd.category as any) ?? "Edit",
-          keybinding: cmd.keybinding,
-          when: cmd.when,
-          provenance: cmd.provenance ?? "local",
-          run: async (ctx, signal) => {
+    for (const command of commands) {
+      this.commands.set(command.id, command);
+      if (this.actions.has(command.id)) continue;
+      const adapter: WorkspaceActionDefinition = {
+        id: command.id,
+        title: command.title,
+        category: command.category as WorkspaceActionDefinition["category"],
+        keybinding: command.keybinding,
+        secondaryKeybindings: command.keybindings,
+        keywords: command.keywords,
+        when: command.when,
+        provenance: command.provenance ?? "local",
+        run: async (context, signal) => {
+          if (signal?.aborted) {
+            return {
+              kind: "cancelled",
+              reason: "aborted",
+              message: "Command cancelled via AbortSignal.",
+            };
+          }
+          try {
+            const result = await Promise.resolve(command.run(context as WorkspaceCommandContext));
             if (signal?.aborted) {
-              return { kind: "cancelled", message: "Command cancelled via AbortSignal." };
+              return {
+                kind: "cancelled",
+                reason: "aborted",
+                message: "Command cancelled after execution.",
+              };
             }
-            try {
-              const res = await Promise.resolve(cmd.run(ctx as WorkspaceCommandContext));
-              if (signal?.aborted) {
-                return { kind: "cancelled", message: "Command cancelled after execution." };
-              }
-              return (res as unknown) !== false ? { kind: "applied" } : { kind: "no-op" };
-            } catch (err) {
-              const message = err instanceof Error ? err.message : String(err);
-              return { kind: "failed", message };
-            }
-          },
-        };
-        installedAdapters.set(cmd.id, adapter);
-        this.actions.set(cmd.id, adapter);
-      }
+            return (result as unknown) !== false
+              ? { kind: "applied" }
+              : { kind: "no-op", reason: "condition-not-met" };
+          } catch (error) {
+            return {
+              kind: "failed",
+              reason: "exception",
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        },
+      };
+      installedAdapters.set(command.id, adapter);
+      this.actions.set(command.id, adapter);
     }
     this.generation += 1;
+
     return () => {
-      for (const cmd of commands) {
-        if (this.commands.get(cmd.id) === cmd) {
-          this.commands.delete(cmd.id);
+      let changed = false;
+      for (const command of commands) {
+        if (this.commands.get(command.id) === command) {
+          this.commands.delete(command.id);
+          changed = true;
         }
-        const adapter = installedAdapters.get(cmd.id);
-        if (adapter && this.actions.get(cmd.id) === adapter) {
-          this.actions.delete(cmd.id);
+        const adapter = installedAdapters.get(command.id);
+        if (adapter && this.actions.get(command.id) === adapter) {
+          this.actions.delete(command.id);
+          changed = true;
         }
       }
-      this.generation += 1;
+      if (changed) this.generation += 1;
     };
   }
 
@@ -178,111 +293,215 @@ export class WorkspaceActionHost {
     return this.actions.get(id);
   }
 
-  /**
-   * Single unified context constructor (Gate R0).
-   * Priority: explicit invocation.context > eventTarget resolution > host default focus / context.
-   */
-  buildContext(invocation?: ActionInvocation | Partial<WorkspaceActionContext> | unknown): WorkspaceActionContext {
+  buildContext(
+    invocation?: ActionInvocation | Partial<WorkspaceActionContext> | unknown,
+  ): WorkspaceActionContext {
     const base: Partial<WorkspaceActionContext> = this.getDefaultContext
       ? this.getDefaultContext()
       : this.getContext
-      ? this.getContext()
-      : {};
+        ? this.getContext()
+        : {};
 
-    if (invocation === undefined || invocation === null) {
-      const defaultFocus = (this.getDefaultFocus ? this.getDefaultFocus() : undefined)
-        ?? (base.focus as WorkspaceFocus | undefined)
-        ?? "workspace";
-      return {
-        focus: defaultFocus,
-        ...base,
-      };
-    }
-
-    let explicitCtx: Partial<WorkspaceActionContext> | undefined;
-    let payload: unknown = undefined;
+    let explicitContext: Partial<WorkspaceActionContext> | undefined;
+    let payload: unknown;
     let target: EventTarget | null = null;
 
-    if (typeof invocation === "object" && invocation !== null) {
-      const inv = invocation as Record<string, unknown>;
-      if ("context" in inv || "eventTarget" in inv || "signal" in inv) {
-        explicitCtx = inv.context as Partial<WorkspaceActionContext> | undefined;
-        payload = inv.payload;
-        target = (inv.eventTarget as EventTarget | null) ?? null;
-      } else if ("focus" in inv || "payload" in inv) {
-        // WorkspaceCommandContext object passed directly
-        explicitCtx = inv as Partial<WorkspaceActionContext>;
-        payload = inv.payload !== undefined ? inv.payload : undefined;
+    if (invocation !== undefined && invocation !== null) {
+      if (typeof invocation === "object") {
+        const candidate = invocation as Record<string, unknown>;
+        if (
+          "context" in candidate
+          || "eventTarget" in candidate
+          || "signal" in candidate
+          || "kind" in candidate
+        ) {
+          explicitContext = candidate.context as Partial<WorkspaceActionContext> | undefined;
+          payload = candidate.payload;
+          target = (candidate.eventTarget as EventTarget | null) ?? null;
+        } else if ("focus" in candidate || "payload" in candidate) {
+          explicitContext = candidate as Partial<WorkspaceActionContext>;
+          payload = candidate.payload;
+        } else {
+          payload = invocation;
+        }
       } else {
-        // Raw payload
         payload = invocation;
       }
-    } else {
-      payload = invocation;
     }
 
-    const resolvedFocus: WorkspaceFocus = explicitCtx?.focus
+    const merged = { ...base, ...explicitContext };
+    const candidateFocus = explicitContext?.focus
       ?? (target && this.resolveFocus ? this.resolveFocus(target) : undefined)
       ?? (this.getDefaultFocus ? this.getDefaultFocus() : undefined)
-      ?? (base.focus as WorkspaceFocus | undefined)
+      ?? base.focus
       ?? "workspace";
 
     return {
-      ...base,
-      ...explicitCtx,
-      focus: resolvedFocus,
+      ...merged,
+      focus: focusByPriority(merged, candidateFocus),
       payload: payload !== undefined ? payload : base.payload,
     };
   }
 
-  getState(id: string, invocationOrContext?: ActionInvocation | WorkspaceActionContext | unknown): ActionState {
-    const action = this.actions.get(id);
-    const cmd = this.commands.get(id);
-    if (!action && !cmd) {
+  private evaluateAction(
+    action: WorkspaceActionDefinition | undefined,
+    context: Readonly<WorkspaceActionContext>,
+  ): ActionState {
+    if (!action) return unsupportedState();
+    if (this.inFlightActions.has(action.id)) {
       return {
-        availability: "unsupported",
-        disabledReason: "unsupported",
-        source: "unsupported",
-        scope: "workspace",
-        freshness: "unknown",
-        completeness: "unavailable",
-      };
-    }
-
-    if (this.inFlightActions.has(id)) {
-      return {
-        availability: "disabled",
+        availability: "busy",
         disabledReason: "busy",
-        source: action?.provenance ?? cmd?.provenance ?? "local",
+        source: action.provenance,
         scope: "workspace",
         freshness: "current",
         completeness: "complete",
       };
     }
+    if (action.provenance === "unsupported") return unsupportedState();
 
-    const ctx = this.buildContext(invocationOrContext);
-    const whenCheck = action?.when ?? cmd?.when;
-    if (whenCheck) {
-      const ok = typeof whenCheck === "function" ? whenCheck(ctx as any) : compileWhenExpr(whenCheck)(ctx);
-      if (!ok) {
-        return {
-          availability: "disabled",
-          disabledReason: "capability",
-          source: action?.provenance ?? cmd?.provenance ?? "local",
-          scope: "workspace",
-          freshness: "current",
-          completeness: "complete",
-        };
-      }
+    try {
+      if (action.getState) return action.getState(context as WorkspaceActionContext);
+      const whenEnabled = compileWhenExpr(action.when)(context as WorkspaceActionContext);
+      const explicitlyEnabled = action.isEnabled
+        ? action.isEnabled(context as WorkspaceActionContext)
+        : true;
+      const enabled = whenEnabled && explicitlyEnabled;
+      return {
+        availability: enabled ? "available" : "disabled",
+        disabledReason: enabled
+          ? undefined
+          : defaultDisabledReason(context as WorkspaceActionContext),
+        source: action.provenance,
+        scope: "workspace",
+        freshness: "current",
+        completeness: "complete",
+      };
+    } catch {
+      return {
+        availability: "disabled",
+        disabledReason: "invalidCondition",
+        source: action.provenance,
+        scope: "workspace",
+        freshness: "current",
+        completeness: "failed",
+      };
+    }
+  }
+
+  private prepareWithContext(
+    id: string,
+    context: Readonly<WorkspaceActionContext>,
+    kind: ActionInvocationKind,
+  ): PreparedActionEvaluation {
+    const action = this.actions.get(id) ?? null;
+    return Object.freeze({
+      workspaceId: this.workspaceId,
+      hostGeneration: this.generation,
+      actionId: id,
+      invocationKind: kind,
+      context,
+      state: this.evaluateAction(action ?? undefined, context),
+      ownerToken: this.ownerToken,
+      action,
+    });
+  }
+
+  prepare(
+    id: string,
+    invocation?: ActionInvocation | Partial<WorkspaceActionContext> | unknown,
+    kind?: ActionInvocationKind,
+  ): PreparedActionEvaluation {
+    const invocationKind = kind
+      ?? (invocation && typeof invocation === "object" && "kind" in invocation
+        ? (invocation as ActionInvocation).kind
+        : undefined)
+      ?? "direct";
+    return this.prepareWithContext(id, freezeContext(this.buildContext(invocation)), invocationKind);
+  }
+
+  getState(
+    id: string,
+    invocationOrContext?: ActionInvocation | WorkspaceActionContext | unknown,
+  ): ActionState {
+    return this.prepare(id, invocationOrContext).state;
+  }
+
+  async executePrepared(
+    prepared: PreparedActionEvaluation,
+    signal?: AbortSignal,
+  ): Promise<ActionResult> {
+    if (this.disposed) {
+      return {
+        kind: "failed",
+        reason: "disposed",
+        message: "Action host is disposed.",
+      };
+    }
+    if (
+      prepared.ownerToken !== this.ownerToken
+      || prepared.workspaceId !== this.workspaceId
+      || prepared.hostGeneration !== this.generation
+      || !prepared.action
+      || this.actions.get(prepared.actionId) !== prepared.action
+    ) {
+      return {
+        kind: "failed",
+        reason: "stale-owner",
+        message: `Action "${prepared.actionId}" evaluation is stale.`,
+        retryable: true,
+      };
+    }
+    if (signal?.aborted) {
+      return {
+        kind: "cancelled",
+        reason: "aborted",
+        message: "Action cancelled via AbortSignal.",
+      };
+    }
+    if (prepared.state.availability !== "available") {
+      return {
+        kind: "no-op",
+        reason: prepared.state.availability === "busy" ? "busy" : "condition-not-met",
+        message: `Action "${prepared.actionId}" is ${prepared.state.availability} (${prepared.state.disabledReason ?? "context blocked"}).`,
+      };
+    }
+    if (this.inFlightActions.has(prepared.actionId)) {
+      return {
+        kind: "no-op",
+        reason: "busy",
+        message: `Action "${prepared.actionId}" is already executing.`,
+      };
     }
 
-    return {
-      availability: "available",
-      source: action?.provenance ?? cmd?.provenance ?? "local",
-      scope: "workspace",
-      freshness: "current",
-      completeness: "complete",
-    };
+    this.inFlightActions.add(prepared.actionId);
+    try {
+      if (signal?.aborted) {
+        return {
+          kind: "cancelled",
+          reason: "aborted",
+          message: "Action cancelled before run.",
+        };
+      }
+      const response = await prepared.action.run(
+        prepared.context as WorkspaceActionContext,
+        signal,
+      );
+      const result = response ?? { kind: "applied" as const };
+      this.onExecuted?.(prepared.actionId, result);
+      return result;
+    } catch (error) {
+      const result: ActionResult = {
+        kind: "failed",
+        reason: "exception",
+        message: error instanceof Error ? error.message : String(error),
+        retryable: true,
+      };
+      this.onExecuted?.(prepared.actionId, result);
+      return result;
+    } finally {
+      this.inFlightActions.delete(prepared.actionId);
+    }
   }
 
   async execute(
@@ -290,66 +509,15 @@ export class WorkspaceActionHost {
     invocationOrPayload?: ActionInvocation | unknown,
     signal?: AbortSignal,
   ): Promise<ActionResult> {
-    if (this.disposed) {
-      return { kind: "failed", message: "Action host is disposed." };
-    }
-
-    const sig = (invocationOrPayload && typeof invocationOrPayload === "object" && "signal" in invocationOrPayload)
-      ? (invocationOrPayload as ActionInvocation).signal ?? signal
-      : signal;
-
-    if (sig?.aborted) {
-      return { kind: "cancelled", message: "Action cancelled via AbortSignal." };
-    }
-
-    const action = this.actions.get(id);
-    const cmd = this.commands.get(id);
-
-    if (!action && !cmd) {
-      return { kind: "failed", message: `Action "${id}" not found.` };
-    }
-
-    if (this.inFlightActions.has(id)) {
-      return { kind: "no-op", message: `Action "${id}" is already executing.` };
-    }
-
-    const ctx = this.buildContext(invocationOrPayload);
-    const whenCheck = action?.when ?? cmd?.when;
-    if (whenCheck) {
-      const ok = typeof whenCheck === "function" ? whenCheck(ctx as any) : compileWhenExpr(whenCheck)(ctx);
-      if (!ok) {
-        return { kind: "no-op", message: `Action "${id}" condition not met.` };
-      }
-    }
-
-    this.inFlightActions.add(id);
-
-    try {
-      if (sig?.aborted) {
-        return { kind: "cancelled", message: "Action cancelled before run." };
-      }
-
-      let result: ActionResult;
-      if (action?.run) {
-        const runRes = await action.run(ctx, sig);
-        result = runRes ?? { kind: "applied" };
-      } else if (cmd?.run) {
-        const res = await Promise.resolve(cmd.run(ctx as WorkspaceCommandContext));
-        result = (res as unknown) !== false ? { kind: "applied" } : { kind: "no-op" };
-      } else {
-        result = { kind: "applied" };
-      }
-
-      this.onExecuted?.(id, result);
-      return result;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const res: ActionResult = { kind: "failed", message };
-      this.onExecuted?.(id, res);
-      return res;
-    } finally {
-      this.inFlightActions.delete(id);
-    }
+    const invocationSignal = invocationOrPayload
+      && typeof invocationOrPayload === "object"
+      && "signal" in invocationOrPayload
+      ? (invocationOrPayload as ActionInvocation).signal
+      : undefined;
+    return this.executePrepared(
+      this.prepare(id, invocationOrPayload),
+      invocationSignal ?? signal,
+    );
   }
 
   async dispatchKeydown(
@@ -357,81 +525,124 @@ export class WorkspaceActionHost {
     options?: { eventTarget?: EventTarget | null } | ActionInvocation,
   ): Promise<{ id: string; result: ActionResult } | null> {
     if (this.disposed) return null;
+    const context = freezeContext(this.buildContext(
+      options ?? { kind: "keyboard", eventTarget: (event as KeyboardEventLike & { target?: EventTarget }).target },
+    ));
 
-    const ctx = this.buildContext(options ?? { eventTarget: (event as any).target });
-
-    // 1. Check explicit actions with keybindings first
     for (const action of this.actions.values()) {
-      if (!action.keybinding) continue;
-      const patterns = typeof action.keybinding === "string"
-        ? [action.keybinding]
-        : [
-            action.keybinding.default,
-            action.keybinding.macos,
-            action.keybinding.windows,
-            action.keybinding.linux,
-          ].filter((p): p is string => Boolean(p));
-      const matched = patterns.some((pattern) => matchesKeybinding(pattern, event));
-      if (matched) {
-        if (action.when && !compileWhenExpr(action.when)(ctx)) {
-          continue;
-        }
-        event.preventDefault?.();
-        event.stopPropagation?.();
-        const result = await this.execute(action.id, { context: ctx, payload: ctx.payload });
-        return { id: action.id, result };
-      }
+      if (!actionKeybindings(action).some((pattern) => matchesKeybinding(pattern, event))) continue;
+      const prepared = this.prepareWithContext(action.id, context, "keyboard");
+      if (prepared.state.availability !== "available") continue;
+      event.preventDefault();
+      event.stopPropagation();
+      const invocationSignal = options && "signal" in options ? options.signal : undefined;
+      return {
+        id: action.id,
+        result: await this.executePrepared(prepared, invocationSignal),
+      };
     }
-
-    // 2. Check registered commands with keybinding string
-    for (const cmd of this.commands.values()) {
-      if (!cmd.keybinding && !cmd.keybindings?.length) continue;
-      if (workspaceCommandMatchesKeybinding(cmd, event)) {
-        if (cmd.when) {
-          const ok = typeof cmd.when === "function" ? cmd.when(ctx as any) : compileWhenExpr(cmd.when)(ctx);
-          if (!ok) continue;
-        }
-        event.preventDefault?.();
-        event.stopPropagation?.();
-        const result = await this.execute(cmd.id, { context: ctx, payload: ctx.payload });
-        return { id: cmd.id, result };
-      }
-    }
-
     return null;
   }
 
-  search(query: string, customContext?: ActionInvocation | WorkspaceActionContext | unknown): WorkspaceCommandMenuItem[] {
-    const ctx = this.buildContext(customContext);
-    const q = query.trim().toLowerCase();
-    const items: WorkspaceCommandMenuItem[] = [];
-
-    for (const action of this.actions.values()) {
-      const state = this.getState(action.id, ctx);
-      const title = action.title.toLowerCase();
-      const id = action.id.toLowerCase();
-      const category = (action.category ?? "Edit").toLowerCase();
-
-      if (!q || title.includes(q) || id.includes(q) || category.includes(q)) {
-        const kb = typeof action.keybinding === "string"
-          ? action.keybinding
-          : (action.keybinding as ActionPlatformKeybindings | undefined)?.default;
-        items.push({
-          id: action.id,
-          title: action.title,
-          category: action.category ?? "Edit",
-          keybinding: kb,
-          enabled: state.availability === "available",
-          provenance: state.source,
-        });
+  getBindingDiagnostics(
+    customContext?: ActionInvocation | WorkspaceActionContext | unknown,
+  ): ActionBindingConflictDiagnostic[] {
+    const snapshot = this.getSnapshot(customContext);
+    const byBinding = new Map<string, { display: string; actionIds: string[] }>();
+    for (const item of snapshot) {
+      if (item.state.availability !== "available") continue;
+      for (const binding of item.keybindings ?? []) {
+        const identity = bindingIdentity(binding);
+        if (!identity) continue;
+        const current = byBinding.get(identity) ?? { display: binding, actionIds: [] };
+        if (!current.actionIds.includes(item.id)) current.actionIds.push(item.id);
+        byBinding.set(identity, current);
       }
     }
-
-    return items;
+    return Array.from(byBinding.values())
+      .filter((entry) => entry.actionIds.length > 1)
+      .map((entry) => ({
+        kind: "binding-conflict",
+        keybinding: entry.display,
+        actionIds: entry.actionIds,
+        winnerId: entry.actionIds[0],
+      }));
   }
 
-  getMenuItems(customContext?: ActionInvocation | WorkspaceActionContext | unknown): WorkspaceCommandMenuItem[] {
+  search(
+    query: string,
+    customContext?: ActionInvocation | WorkspaceActionContext | unknown,
+  ): WorkspaceCommandMenuItem[] {
+    const q = query.trim().toLowerCase();
+    return this.getSnapshot(customContext)
+      .filter((item) => !q
+        || item.title.toLowerCase().includes(q)
+        || item.id.toLowerCase().includes(q)
+        || item.category.toLowerCase().includes(q)
+        || item.keywords?.some((keyword) => keyword.toLowerCase().includes(q)))
+      .map((item) => ({
+        id: item.id,
+        title: item.title,
+        category: item.category,
+        keybinding: item.keybinding,
+        enabled: item.state.availability === "available",
+        provenance: item.state.source,
+      }));
+  }
+
+  getMenuItems(
+    customContext?: ActionInvocation | WorkspaceActionContext | unknown,
+  ): WorkspaceCommandMenuItem[] {
     return this.search("", customContext);
+  }
+
+  getSnapshot(
+    customContext?: ActionInvocation | WorkspaceActionContext | unknown,
+  ): ActionSnapshotItem[] {
+    const context = freezeContext(this.buildContext(customContext));
+    const items = Array.from(this.actions.values()).map((action): ActionSnapshotItem => {
+      const keybindings = actionKeybindings(action);
+      const evaluation = this.prepareWithContext(action.id, context, "snapshot");
+      return {
+        id: action.id,
+        title: action.title,
+        category: action.category ?? "Edit",
+        keybinding: keybindings[0],
+        keybindings,
+        keywords: action.keywords,
+        state: evaluation.state,
+        evaluation,
+      };
+    });
+
+    const byAction = new Map<string, ActionBindingConflictDiagnostic[]>();
+    const byBinding = new Map<string, { display: string; actionIds: string[] }>();
+    for (const item of items) {
+      if (item.state.availability !== "available") continue;
+      for (const binding of item.keybindings ?? []) {
+        const identity = bindingIdentity(binding);
+        if (!identity) continue;
+        const current = byBinding.get(identity) ?? { display: binding, actionIds: [] };
+        if (!current.actionIds.includes(item.id)) current.actionIds.push(item.id);
+        byBinding.set(identity, current);
+      }
+    }
+    for (const entry of byBinding.values()) {
+      if (entry.actionIds.length < 2) continue;
+      const diagnostic: ActionBindingConflictDiagnostic = {
+        kind: "binding-conflict",
+        keybinding: entry.display,
+        actionIds: entry.actionIds,
+        winnerId: entry.actionIds[0],
+      };
+      for (const id of entry.actionIds) {
+        byAction.set(id, [...(byAction.get(id) ?? []), diagnostic]);
+      }
+    }
+    return items.map((item) => ({
+      ...item,
+      bindingConflicts: byAction.get(item.id),
+    }));
   }
 }
 

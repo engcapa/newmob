@@ -1,5 +1,5 @@
 # qa-ui-auto configuration
-# Copy this file to project root as `qa-ui-auto.config.yaml` and fill in.
+# Copy this file to `qa-ui-auto-tests/qa-ui-auto.config.yaml` and fill in.
 # Secrets MUST come from environment variables: ${env.VAR_NAME}.
 # Both ${cfg.x.y} and the legacy ${cfg:x.y} forms are accepted by the runner.
 

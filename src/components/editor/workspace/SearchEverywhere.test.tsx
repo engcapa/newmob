@@ -114,6 +114,35 @@ describe("SearchEverywhere", () => {
     expect(onRunCommand).toHaveBeenCalledWith("workspace.findInFiles");
   });
 
+  it("treats an explicitly supplied empty snapshot as authoritative", () => {
+    renderPopup({ actionSnapshots: [], initialMode: "actions" });
+    expect(screen.getByText("No available workspace actions")).toBeInTheDocument();
+    expect(screen.queryByText("Find in Files")).not.toBeInTheDocument();
+  });
+
+  it("does not expose disabled snapshot actions as selectable results", () => {
+    renderPopup({
+      actionSnapshots: [{
+        id: "workspace.findInFiles",
+        title: "Find in Files",
+        category: "Search",
+        keybinding: "Ctrl+Shift+F",
+        state: {
+          availability: "disabled",
+          disabledReason: "providerOffline",
+          source: "provider",
+          scope: "workspace",
+          freshness: "current",
+          completeness: "unavailable",
+        },
+        evaluation: {} as never,
+      }],
+      initialMode: "actions",
+    });
+    expect(screen.getByText("No available workspace actions")).toBeInTheDocument();
+    expect(screen.queryByText("Find in Files")).not.toBeInTheDocument();
+  });
+
   it("shows Classes/Symbols when available and routes Text into Find in Files", async () => {
     const onSearchText = vi.fn();
     const onOpenSymbol = vi.fn();

@@ -30,7 +30,29 @@ import {
   runSaveNormalizationPipeline,
   type SaveNormalizationResult,
 } from "./saveNormalizationPipeline";
-import { isWorkspaceHashMismatchError } from "../../../lib/editor/workspace";
+import {
+  isWorkspaceHashMismatchError,
+  parseWorkspaceWriteError,
+} from "../../../lib/editor/workspace";
+
+/** Extract a typed payload from an IPC write error for outcome consumers. */
+function typedWriteErrorPayload(err: unknown): {
+  error?: { kind: string; message: string; expectedHash?: string; actualHash?: string };
+} {
+  try {
+    const parsed = parseWorkspaceWriteError(err);
+    return {
+      error: {
+        kind: parsed.kind,
+        message: parsed.message,
+        ...(parsed.expectedHash !== undefined ? { expectedHash: parsed.expectedHash } : {}),
+        ...(parsed.actualHash !== undefined ? { actualHash: parsed.actualHash } : {}),
+      },
+    };
+  } catch {
+    return {};
+  }
+}
 
 export interface WorkspaceStyleRoot {
   id?: string;
@@ -76,7 +98,14 @@ export interface SaveTransactionV2 {
 
 export type SaveOutcome =
   | { kind: "saved"; transactionId: string; hash: string }
-  | { kind: "cancelled" | "conflict" | "failed"; reason: string; retryable: boolean };
+  | { kind: "cancelled"; reason: string; retryable: boolean }
+  | {
+      kind: "conflict" | "failed";
+      reason: string;
+      retryable: boolean;
+      /** Typed write-error payload when the failure came from the IPC writer. */
+      error?: { kind: string; message: string; expectedHash?: string; actualHash?: string };
+    };
 
 /** Typed result every save writer must return to `executeSaveTransaction`. */
 export type SaveWriterResult =
@@ -531,12 +560,14 @@ export class WorkspaceStyleController {
           kind: "conflict",
           reason: `Disk hash conflict: ${msg}`,
           retryable: true,
+          ...typedWriteErrorPayload(err),
         };
       }
       return {
         kind: "failed",
         reason: `Disk write failed: ${msg}`,
         retryable: true,
+        ...typedWriteErrorPayload(err),
       };
     }
   }

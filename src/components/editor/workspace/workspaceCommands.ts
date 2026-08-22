@@ -1,11 +1,12 @@
-import {
-  workspaceActionRegistry,
-  type ActionCategory,
-  type ActionProvenance,
-  type WorkspaceActionDefinition,
-  type WorkspaceActionContext,
-  type WorkspaceFocus,
+import type {
+  ActionCategory,
+  ActionProvenance,
+  ActionResult,
+  WorkspaceActionContext,
+  WorkspaceActionDefinition,
+  WorkspaceFocus,
 } from "./workspaceActionRegistry";
+import type { ActionSnapshotItem } from "./workspaceActionHost";
 
 export type WorkspaceCommandFocus = WorkspaceFocus;
 
@@ -24,7 +25,7 @@ export interface WorkspaceCommand {
   keywords?: string[];
   provenance?: ActionProvenance;
   when?: (context: WorkspaceCommandContext) => boolean;
-  run: (context: WorkspaceCommandContext) => void | Promise<void>;
+  run: (context: WorkspaceCommandContext) => void | boolean | Promise<void | boolean>;
 }
 
 export interface WorkspaceCommandMenuItem {
@@ -37,8 +38,14 @@ export interface WorkspaceCommandMenuItem {
 }
 
 export interface WorkspaceCommandRegistration {
+  /** Snapshot-derived menu projection for compatibility surfaces. */
   items: WorkspaceCommandMenuItem[];
-  execute: (commandId: string) => boolean;
+  /** The complete immutable instance-scoped action truth. */
+  snapshot: readonly ActionSnapshotItem[];
+  /** Typed execution through the owning WorkspaceActionHost. */
+  executeAction: (commandId: string, payload?: unknown, signal?: AbortSignal) => Promise<ActionResult>;
+  /** Deprecated synchronous adapter for legacy callers; result is intentionally not the truth. */
+  execute: (commandId: string, payload?: unknown) => boolean;
 }
 
 export interface KeyboardEventLike {
@@ -79,16 +86,20 @@ export function eventLogicalKey(
   event: Pick<KeyboardEventLike, "key"> & { code?: string },
 ): string {
   const rawKey = (event.key ?? "").trim();
+  const code = event.code ?? "";
+  // Numpad operators report printable symbols in `key`, which cannot identify
+  // the documented IDE binding. Preserve their physical key identity.
+  if (code.startsWith("Numpad") && code.length > 6) {
+    return normalizeKey(code);
+  }
   if (rawKey && rawKey !== "Unidentified" && rawKey !== "Process") {
     const normalized = normalizeKey(rawKey);
     // Single printable keys and named keys (ArrowLeft, F12, …).
     if (normalized.length > 0) return normalized;
   }
-  const code = event.code ?? "";
   if (!code) return normalizeKey(rawKey);
   if (code.startsWith("Key") && code.length === 4) return code.slice(3).toLowerCase();
   if (code.startsWith("Digit") && code.length === 6) return code.slice(5).toLowerCase();
-  if (code.startsWith("Numpad") && code.length > 6) return normalizeKey(code.slice(6));
   return normalizeKey(code);
 }
 
@@ -131,84 +142,26 @@ export function workspaceCommandMatchesKeybinding(
   });
 }
 
-export function dispatchWorkspaceCommandKeydown(
-  commands: readonly WorkspaceCommand[],
-  context: WorkspaceCommandContext,
-  event: KeyboardEventLike,
-): WorkspaceCommand | null {
-  const command = commands.find((candidate) => (
-    workspaceCommandEnabled(candidate, context)
-    && workspaceCommandMatchesKeybinding(candidate, event)
-  ));
-  if (!command) return null;
-  event.preventDefault();
-  event.stopPropagation();
-  void command.run(context);
-  return command;
-}
-
-export function runWorkspaceCommand(
-  commands: readonly WorkspaceCommand[],
-  id: string,
-  context: WorkspaceCommandContext,
-): boolean {
-  const resolvedId = workspaceActionRegistry.resolveId(id);
-  const command = commands.find((candidate) => candidate.id === id || candidate.id === resolvedId);
-  if (!command || !workspaceCommandEnabled(command, context)) return false;
-  void command.run(context);
-  return true;
-}
-
-export function workspaceCommandMenuItems(
-  commands: readonly WorkspaceCommand[],
-  context: WorkspaceCommandContext,
-): WorkspaceCommandMenuItem[] {
-  return commands.map((command) => {
-    const regAction = workspaceActionRegistry.get(command.id);
-    return {
-      id: command.id,
-      title: command.title,
-      category: command.category,
-      keybinding: command.keybinding,
-      enabled: workspaceCommandEnabled(command, context),
-      provenance: command.provenance ?? regAction?.provenance ?? "local",
-    };
-  });
-}
-
 /**
  * Adapter converting WorkspaceCommand to WorkspaceActionDefinition for registration.
  */
 export function workspaceCommandToActionDefinition(
   cmd: WorkspaceCommand,
 ): WorkspaceActionDefinition {
-  const regMeta = workspaceActionRegistry.get(cmd.id);
   return {
     id: cmd.id,
     title: cmd.title,
-    category: (cmd.category as ActionCategory) || regMeta?.category || "Edit",
-    keywords: cmd.keywords ?? regMeta?.keywords,
-    keybinding: cmd.keybinding ?? (typeof regMeta?.keybinding === "string" ? regMeta.keybinding : regMeta?.keybinding?.default),
-    secondaryKeybindings: cmd.keybindings ?? regMeta?.secondaryKeybindings,
-    provenance: cmd.provenance ?? regMeta?.provenance ?? "local",
+    category: (cmd.category as ActionCategory) || "Edit",
+    keywords: cmd.keywords,
+    keybinding: cmd.keybinding,
+    secondaryKeybindings: cmd.keybindings,
+    provenance: cmd.provenance ?? "local",
     when: cmd.when,
-    run: (ctx) => cmd.run(ctx as WorkspaceCommandContext),
-  };
-}
-
-/**
- * Register an array of WorkspaceCommands in the singleton workspaceActionRegistry.
- * Returns an unregister cleanup function.
- */
-export function registerWorkspaceCommands(
-  commands: readonly WorkspaceCommand[],
-): () => void {
-  const unregisterFns = commands.map((cmd) => {
-    return workspaceActionRegistry.register(workspaceCommandToActionDefinition(cmd));
-  });
-  return () => {
-    for (const unreg of unregisterFns) {
-      unreg();
-    }
+    run: async (ctx) => {
+      const result = await cmd.run(ctx as WorkspaceCommandContext);
+      return result === false
+        ? { kind: "no-op", reason: "condition-not-met" }
+        : { kind: "applied" };
+    },
   };
 }

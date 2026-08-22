@@ -151,6 +151,8 @@ export interface WorkspaceLspSessionController {
   /** True when the language server has the given buffer and no didChange is in flight. */
   isDocumentSynced: (key: string, text: string) => boolean;
   documentVersion: (key: string) => number | null;
+  /** Current provider session generation (bumped on every restart). */
+  sessionGeneration: () => number;
   syncDocument: (file: OpenFileState, mode: "open" | "change") => Promise<void>;
   waitForSyncQueue: (key: string) => Promise<void>;
   saveDocument: (file: OpenFileState, text: string) => Promise<void>;
@@ -176,6 +178,7 @@ export function useWorkspaceLspSession({
   const [javaHome, setJavaHome] = useState(() => readLspJavaHome());
   const rootsRef = useRef(roots);
   const versionRef = useRef<Record<string, number>>({});
+  const sessionGenerationRef = useRef(0);
   const syncedTextRef = useRef<Record<string, string>>({});
   const incrementalSyncRef = useRef<Record<string, boolean>>({});
   /** Last known server-active flag per file (avoids store peeks before didChange). */
@@ -227,6 +230,9 @@ export function useWorkspaceLspSession({
   const restartWorkspaceServers = useCallback(() => {
     if (!mountedRef.current) return;
     onRestart?.();
+    // Session generation: every restart invalidates completion/resolve
+    // requests minted against the previous provider session (§8.16.2).
+    sessionGenerationRef.current += 1;
     syncedTextRef.current = {};
     incrementalSyncRef.current = {};
     documentActiveRef.current = {};
@@ -714,6 +720,8 @@ export function useWorkspaceLspSession({
     forgetDocument(file.key);
   }, [descriptorForFile, forgetDocument]);
 
+  const sessionGeneration = useCallback(() => sessionGenerationRef.current, []);
+
   return {
     serverStatuses,
     commandPrefs,
@@ -725,6 +733,8 @@ export function useWorkspaceLspSession({
     descriptorForPath,
     isDocumentSynced,
     documentVersion,
+    /** Current provider session generation (bumped on every restart). */
+    sessionGeneration,
     syncDocument,
     waitForSyncQueue: waitForDocumentSyncQueue,
     saveDocument,

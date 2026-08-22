@@ -6,6 +6,10 @@ import { useAppStore } from "../../stores/appStore";
 import { selectCodeWorkspaceUi, useCodeWorkspaceStore } from "../../stores/codeWorkspaceStore";
 import { useCodeWorkspaceStatusStore } from "../../stores/codeWorkspaceStatusStore";
 import { DEFAULT_CODE_VIEW_PROFILE, saveCodeViewProfile } from "../../lib/codeViewProfile";
+import {
+  editorAppearanceProfileStorageKey,
+  writeEditorAppearanceProfile,
+} from "./workspace/editorAppearanceProfile";
 import type { CodeWorkspaceTabInfo } from "../../types";
 import type {
   LspCapabilitySummary,
@@ -137,6 +141,7 @@ vi.mock("../../lib/runtime", async (importOriginal) => ({
 
 const clipboardMocks = vi.hoisted(() => ({
   readText: vi.fn(async () => ""),
+  readTextResult: vi.fn(async () => ({ ok: true, text: "" })),
   writeText: vi.fn(async () => {}),
 }));
 
@@ -623,7 +628,12 @@ describe("CodeWorkspaceTab", () => {
     await waitFor(() => {
       expect(onCommandsChange).toHaveBeenCalledWith(
         "tab-code",
-        expect.objectContaining({ items: expect.any(Array), execute: expect.any(Function) }),
+        expect.objectContaining({
+          items: expect.any(Array),
+          snapshot: expect.any(Array),
+          executeAction: expect.any(Function),
+          execute: expect.any(Function),
+        }),
       );
     });
 
@@ -641,6 +651,92 @@ describe("CodeWorkspaceTab", () => {
     rendered.unmount();
     expect(onCommandsChange).toHaveBeenCalledTimes(1);
     expect(onCommandsChange).toHaveBeenCalledWith("tab-code", null);
+  });
+
+  it("persists editor intelligence settings per workspace and reloads defaults after rebinding", async () => {
+    const first: CodeWorkspaceTabInfo = {
+      repoRoot: "",
+      workspaceId: "ws-intelligence-settings-a",
+      workspaceInstanceId: "instance-intelligence-settings-a",
+      name: "Intelligence Settings A",
+      roots: [],
+      looseFiles: [],
+    };
+    const second: CodeWorkspaceTabInfo = {
+      ...first,
+      workspaceId: "ws-intelligence-settings-b",
+      workspaceInstanceId: "instance-intelligence-settings-b",
+      name: "Intelligence Settings B",
+    };
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
+    const rendered = renderWorkspace(first, { onCommandsChange });
+    await screen.findByText("Code · Intelligence Settings A");
+    await waitFor(() => expect(
+      registrationRef.current?.items.some((item) => item.id === "workspace.intelligenceSettings"),
+    ).toBe(true));
+
+    act(() => {
+      expect(registrationRef.current?.execute("workspace.intelligenceSettings")).toBe(true);
+    });
+    await screen.findByTestId("workspace-intelligence-settings-dialog");
+    fireEvent.click(screen.getByTestId("workspace-quick-doc-hover-enabled"));
+    fireEvent.change(screen.getByTestId("workspace-quick-doc-hover-delay"), {
+      target: { value: "825" },
+    });
+    fireEvent.change(screen.getByTestId("workspace-quick-doc-default-target"), {
+      target: { value: "tool-window" },
+    });
+    fireEvent.click(screen.getByTestId("workspace-parameter-info-auto-popup"));
+    fireEvent.change(screen.getByTestId("workspace-parameter-info-delay"), {
+      target: { value: "275" },
+    });
+    fireEvent.click(screen.getByTestId("workspace-intelligence-settings-apply"));
+
+    expect(JSON.parse(
+      window.localStorage.getItem(
+        "taomni.codeWorkspace.intelligence.v1.instance-intelligence-settings-a",
+      ) ?? "null",
+    )).toEqual(expect.objectContaining({
+      quickDoc: {
+        showOnHover: false,
+        hoverDelayMs: 825,
+        defaultTarget: "tool-window",
+      },
+      parameterInfo: {
+        autoPopup: false,
+        delayMs: 275,
+        showFullSignatures: false,
+      },
+    }));
+    expect(window.localStorage.getItem(
+      "taomni.codeWorkspace.intelligence.v1.instance-intelligence-settings-b",
+    )).toBeNull();
+
+    rendered.rerender(
+      <CodeWorkspaceTab
+        tabId="tab-code"
+        workspace={second}
+        visible
+        onCommandsChange={onCommandsChange}
+      />,
+    );
+    await screen.findByText("Code · Intelligence Settings B");
+    await waitFor(() => expect(
+      registrationRef.current?.items.some((item) => item.id === "workspace.intelligenceSettings"),
+    ).toBe(true));
+    act(() => {
+      expect(registrationRef.current?.execute("workspace.intelligenceSettings")).toBe(true);
+    });
+
+    await screen.findByTestId("workspace-intelligence-settings-dialog");
+    expect(screen.getByTestId("workspace-quick-doc-hover-enabled")).toBeChecked();
+    expect(screen.getByTestId("workspace-quick-doc-hover-delay")).toHaveValue(300);
+    expect(screen.getByTestId("workspace-quick-doc-default-target")).toHaveValue("popup");
+    expect(screen.getByTestId("workspace-parameter-info-auto-popup")).toBeChecked();
+    expect(screen.getByTestId("workspace-parameter-info-delay")).toHaveValue(0);
   });
 
   it("settles when the parent stores command registrations in state", async () => {
@@ -841,25 +937,27 @@ describe("CodeWorkspaceTab", () => {
     expect(screen.getByTestId("code-workspace-tree-pane").style.getPropertyValue("--taomni-code-tree-font-size")).toBe("13px");
     expect(window.localStorage.getItem("taomni.codeViewProfile.v1")).toBeNull();
 
+    const appearanceKey = editorAppearanceProfileStorageKey("ws-appearance");
     fireEvent.click(screen.getByTestId("code-workspace-zoom-in"));
-    let saved = JSON.parse(window.localStorage.getItem("taomni.codeViewProfile.v1") ?? "{}");
-    expect(saved.fontSize).toBe(14);
-    expect(document.documentElement.style.getPropertyValue("--taomni-code-font-size")).toBe("14px");
+    let saved = JSON.parse(window.localStorage.getItem(appearanceKey) ?? "{}");
+    expect(saved.profile.fontSizePx).toBe(14);
+    expect(document.documentElement.style.getPropertyValue("--taomni-code-font-size")).toBe("");
+    expect(window.localStorage.getItem("taomni.codeViewProfile.v1")).toBeNull();
     expect(window.localStorage.getItem("taomni.codeWorkspace.treeFontSize.v1")).toBe("13");
 
     fireEvent.wheel(screen.getByTestId("code-workspace-tree-pane"), { ctrlKey: true, deltaY: -100 });
     expect(window.localStorage.getItem("taomni.codeWorkspace.treeFontSize.v1")).toBe("14");
-    saved = JSON.parse(window.localStorage.getItem("taomni.codeViewProfile.v1") ?? "{}");
-    expect(saved.fontSize).toBe(14);
+    saved = JSON.parse(window.localStorage.getItem(appearanceKey) ?? "{}");
+    expect(saved.profile.fontSizePx).toBe(14);
 
     fireEvent.wheel(screen.getByTestId("code-workspace-editor-pane"), { ctrlKey: true, deltaY: -100 });
-    saved = JSON.parse(window.localStorage.getItem("taomni.codeViewProfile.v1") ?? "{}");
-    expect(saved.fontSize).toBe(15);
+    saved = JSON.parse(window.localStorage.getItem(appearanceKey) ?? "{}");
+    expect(saved.profile.fontSizePx).toBe(15);
     expect(window.localStorage.getItem("taomni.codeWorkspace.treeFontSize.v1")).toBe("14");
 
     fireEvent.click(screen.getByTestId("code-workspace-zoom-out"));
-    saved = JSON.parse(window.localStorage.getItem("taomni.codeViewProfile.v1") ?? "{}");
-    expect(saved.fontSize).toBe(14);
+    saved = JSON.parse(window.localStorage.getItem(appearanceKey) ?? "{}");
+    expect(saved.profile.fontSizePx).toBe(14);
 
     fireEvent.click(screen.getByTestId("code-workspace-tree-zoom-out"));
     expect(window.localStorage.getItem("taomni.codeWorkspace.treeFontSize.v1")).toBe("13");
@@ -1263,7 +1361,7 @@ describe("CodeWorkspaceTab", () => {
     });
   });
 
-  it("has no theme picker and follows the shared Code View Appearance profile", async () => {
+  it("keeps workspace editor appearance isolated from the global code-view profile", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
       workspaceId: "ws-theme-follow",
@@ -1273,20 +1371,51 @@ describe("CodeWorkspaceTab", () => {
       initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
     };
     workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "export const answer = 42;"));
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      if (next) registrationRef.current = next;
+    });
 
-    renderWorkspace(workspace);
+    renderWorkspace(workspace, { onCommandsChange });
 
     expect(await screen.findByText("Code · Theme")).toBeInTheDocument();
     // The workspace no longer owns a theme selector; theme is set in Settings.
     expect(screen.queryByTestId("code-workspace-theme-select")).toBeNull();
 
-    // A Settings edit (persisted via saveCodeViewProfile) is picked up live and
-    // applied to the shared code-view CSS variables the workspace renders with.
+    // Global Code View changes no longer mutate the Code Workspace editor.
     act(() => {
       saveCodeViewProfile({ ...DEFAULT_CODE_VIEW_PROFILE, theme: "kanagawa-wave" });
     });
+    expect(document.documentElement.style.getPropertyValue("--taomni-code-bg")).toBe("");
+
+    writeEditorAppearanceProfile("ws-theme-follow", {
+      fontFamily: DEFAULT_CODE_VIEW_PROFILE.fontFamily,
+      fontSizePx: 13,
+      lineHeight: 1.5,
+      ligatures: true,
+      colorSchemeId: "dracula",
+      highContrast: false,
+      zoomScope: "all-editors",
+      softWrap: { patterns: [], useOriginalIndent: true, additionalIndent: 0, showMarkers: false },
+      virtualSpace: { afterLineEnd: false, atFileBottom: false },
+      breadcrumbs: { visible: true, placement: "top", languages: ["*"] },
+    });
+    await waitFor(() => expect(
+      registrationRef.current?.items.some((item) => item.id === "workspace.editorAppearanceSettings"),
+    ).toBe(true));
+    act(() => {
+      expect(registrationRef.current?.execute("workspace.editorAppearanceSettings")).toBe(true);
+    });
+    expect(await screen.findByTestId("workspace-editor-appearance-settings-dialog")).toBeInTheDocument();
+    fireEvent.change(screen.getByTestId("workspace-editor-appearance-color-scheme-id"), {
+      target: { value: "dracula" },
+    });
+    fireEvent.click(screen.getByTestId("workspace-editor-appearance-apply"));
     await waitFor(() => {
-      expect(document.documentElement.style.getPropertyValue("--taomni-code-bg")).toBe("#1f1f28");
+      expect(document.querySelector(".cm-content")).toHaveAttribute(
+        "data-editor-color-scheme",
+        "dracula",
+      );
     });
   });
 
@@ -1678,7 +1807,8 @@ describe("CodeWorkspaceTab", () => {
     fireEvent.click(within(outline).getByText("render"));
   });
 
-  it("opens quick documentation with Ctrl+Q and pins it to the right pane", async () => {
+  it("opens quick documentation with Ctrl+Q, navigates to its exact source, and pins it", async () => {
+    const { EditorView } = await import("@codemirror/view");
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
       workspaceId: "ws-qdoc",
@@ -1690,29 +1820,89 @@ describe("CodeWorkspaceTab", () => {
     };
     workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
     workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "openFile(path)"));
-    lspMocks.lspOpenDocument.mockResolvedValue(documentStatus({
+    const status = documentStatus({
       path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
       available: true,
       active: true,
-    }));
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
     lspMocks.lspHover.mockResolvedValue({
-      status: documentStatus({ available: true, active: true }),
+      status,
       contents: "**Opens** a workspace file.",
+      range: {
+        start: { line: 0, character: 9 },
+        end: { line: 0, character: 13 },
+      },
     });
 
-    renderWorkspace(workspace);
+    const rendered = renderWorkspace(workspace);
     await screen.findByTitle("app / src/main.ts");
     await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalled());
+    const editorContent = rendered.container.querySelector<HTMLElement>(".cm-content");
+    expect(editorContent).not.toBeNull();
+    const view = EditorView.findFromDOM(editorContent!);
+    expect(view).not.toBeNull();
 
     fireEvent.keyDown(window, { key: "q", ctrlKey: true });
     const popup = await screen.findByTestId("code-workspace-quick-doc");
     expect(popup).toHaveTextContent("Opens");
     expect(lspMocks.lspHover).toHaveBeenCalled();
 
+    fireEvent.click(within(popup).getByRole("button", { name: "Source" }));
+    await waitFor(() => expect(view!.state.selection.main.head).toBe(9));
+
+    fireEvent.keyDown(window, { key: "q", ctrlKey: true });
+    await screen.findByTestId("code-workspace-quick-doc");
     fireEvent.click(screen.getByTestId("code-workspace-quick-doc-pin"));
     expect(screen.queryByTestId("code-workspace-quick-doc")).not.toBeInTheDocument();
     expect(screen.getByTestId("code-workspace-right-pane")).toBeInTheDocument();
     expect(screen.getByTestId("code-workspace-documentation-pane")).toHaveTextContent("Opens");
+  });
+
+  it("routes explicit QuickDoc to the unlocked Documentation pane when configured", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-qdoc-tool-window",
+      workspaceInstanceId: "instance-qdoc-tool-window",
+      name: "QuickDoc tool window",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    window.localStorage.setItem(
+      "taomni.codeWorkspace.intelligence.v1.instance-qdoc-tool-window",
+      JSON.stringify({ quickDoc: { defaultTarget: "tool-window" } }),
+    );
+    workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "openFile(path)"));
+    const status = documentStatus({
+      path: "/repo/app/src/main.ts",
+      uri: "file:///repo/app/src/main.ts",
+      available: true,
+      active: true,
+    });
+    lspMocks.lspOpenDocument.mockResolvedValue(status);
+    lspMocks.lspHover.mockResolvedValue({
+      status,
+      contents: "**Opens** a workspace file.",
+      range: {
+        start: { line: 0, character: 0 },
+        end: { line: 0, character: 8 },
+      },
+    });
+
+    renderWorkspace(workspace);
+    await screen.findByTitle("app / src/main.ts");
+    await waitFor(() => expect(lspMocks.lspOpenDocument).toHaveBeenCalled());
+    fireEvent.keyDown(window, { key: "q", ctrlKey: true });
+
+    const pane = await screen.findByTestId("code-workspace-documentation-pane");
+    expect(pane).toHaveTextContent("Opens");
+    expect(screen.getByRole("tab", { name: "Documentation", selected: true })).toBeInTheDocument();
+    expect(screen.queryByTestId("code-workspace-quick-doc")).not.toBeInTheDocument();
+    expect(within(pane).queryByLabelText("Pinned")).not.toBeInTheDocument();
+    expect(within(pane).queryByRole("button", { name: "Unpin documentation" })).not.toBeInTheDocument();
   });
 
   it("requests code actions on Alt+Enter and applies workspace edits", async () => {
@@ -3704,8 +3894,17 @@ describe("CodeWorkspaceTab", () => {
     ).toBe("vertical"));
     expect(await screen.findByTestId("code-workspace-editor-split")).toBeInTheDocument();
     expect(screen.getAllByTestId("code-workspace-editor-pane")).toHaveLength(2);
+    // §8.16.4 N6.6: a split materializes two recursive leaves sharing one buffer.
     const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-split");
-    expect(ui.editorGroups.primary.activeKey).toBe(ui.editorGroups.secondary.activeKey);
+    const tree = ui.layoutTreeV2;
+    expect(tree?.type).toBe("split");
+    if (tree?.type === "split") {
+      const leafActiveKeys = tree.children
+        .filter((child) => child.type === "leaf")
+        .map((child) => child.activeKey);
+      expect(leafActiveKeys).toHaveLength(2);
+      expect(leafActiveKeys[0]).toBe(leafActiveKeys[1]);
+    }
     expect(Object.keys(ui.openFiles)).toHaveLength(1);
 
     fireEvent.click(screen.getByTestId("code-workspace-split-close"));
@@ -3756,8 +3955,14 @@ describe("CodeWorkspaceTab", () => {
     });
 
     expect(await screen.findByTestId("code-workspace-editor-split")).toBeInTheDocument();
+    // §8.16.4 N6.6: Ctrl+Enter opens the tree file in a new recursive leaf.
     const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-tree-split");
-    expect(ui.editorGroups.secondary.activeKey).toBe("root:app:README.md");
+    const tree = ui.layoutTreeV2;
+    expect(tree?.type).toBe("split");
+    const leafKeys = tree?.type === "split"
+      ? tree.children.flatMap((child) => (child.type === "leaf" ? [child.activeKey] : []))
+      : [];
+    expect(leafKeys).toContain("root:app:README.md");
   });
 
   it("scans open-file TODOs and toggles persistent bookmarks with F11", async () => {
@@ -3851,6 +4056,91 @@ describe("CodeWorkspaceTab", () => {
     expect(screen.getByTestId("code-workspace-project-expand")).toBeInTheDocument();
     expect(workspaceMocks.workspaceReadFile).toHaveBeenCalledWith("/repo/app", "src/main.ts");
     expect(workspaceMocks.workspaceReadFile).toHaveBeenCalledWith("/repo/app", "src/util.ts");
+  });
+
+  it("routes editor actions through ActionHost to the active recursive leaf", async () => {
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-editor-actions",
+      workspaceInstanceId: "instance-editor-actions",
+      name: "Editor Actions",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+    };
+    workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) => (
+      path === "src/util.ts"
+        ? file("src/util.ts", "alpha\nbeta")
+        : file("src/main.ts", "first\nsecond")
+    ));
+    window.localStorage.setItem("taomni.codeWorkspace.layout.v1.instance-editor-actions", JSON.stringify({
+      version: 1,
+      splitOrientation: "vertical",
+      activeEditorGroupId: "primary",
+      editorGroups: {
+        primary: {
+          openOrder: ["root:app:src/main.ts"],
+          activeKey: "root:app:src/main.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+        secondary: {
+          openOrder: ["root:app:src/util.ts"],
+          activeKey: "root:app:src/util.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+      },
+    }));
+    const registrationRef: { current: WorkspaceCommandRegistration | null } = { current: null };
+    const onCommandsChange = vi.fn((_tabId: string, next: WorkspaceCommandRegistration | null) => {
+      registrationRef.current = next;
+    });
+
+    renderWorkspace(workspace, { onCommandsChange });
+    await screen.findByTitle("app / src/main.ts");
+    await screen.findByTitle("app / src/util.ts");
+    const { EditorView } = await import("@codemirror/view");
+    const panes = screen.getAllByTestId("code-workspace-editor-pane");
+    const primaryPane = panes.find((pane) => pane.getAttribute("data-editor-group-id") === "primary");
+    const secondaryPane = panes.find((pane) => pane.getAttribute("data-editor-group-id") === "secondary");
+    const primaryEditor = primaryPane?.querySelector<HTMLElement>(".cm-editor");
+    const secondaryEditor = secondaryPane?.querySelector<HTMLElement>(".cm-editor");
+    expect(primaryEditor).not.toBeNull();
+    expect(secondaryEditor).not.toBeNull();
+    const primaryView = EditorView.findFromDOM(primaryEditor!);
+    const secondaryView = EditorView.findFromDOM(secondaryEditor!);
+    expect(primaryView).not.toBeNull();
+    expect(secondaryView).not.toBeNull();
+
+    fireEvent.mouseDown(primaryPane!);
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-editor-actions")
+        .activeEditorGroupId,
+    ).toBe("primary"));
+    await waitFor(() => expect(
+      registrationRef.current?.items.find((item) => item.id === "workspace.editor.cloneCaretBelow")?.enabled,
+    ).toBe(true));
+    await act(async () => {
+      expect((await registrationRef.current?.executeAction(
+        "workspace.editor.cloneCaretBelow",
+      ))?.kind).toBe("applied");
+    });
+    expect(primaryView!.state.selection.ranges).toHaveLength(2);
+    expect(secondaryView!.state.selection.ranges).toHaveLength(1);
+
+    fireEvent.mouseDown(secondaryPane!);
+    await waitFor(() => expect(
+      selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-editor-actions")
+        .activeEditorGroupId,
+    ).toBe("secondary"));
+    await act(async () => {
+      expect((await registrationRef.current?.executeAction(
+        "workspace.editor.cloneCaretBelow",
+      ))?.kind).toBe("applied");
+    });
+    expect(primaryView!.state.selection.ranges).toHaveLength(2);
+    expect(secondaryView!.state.selection.ranges).toHaveLength(2);
   });
 
   it("toggles the project tree from the panel-local collapse control and collapsed rail", async () => {
@@ -4242,6 +4532,7 @@ describe("CodeWorkspaceTab", () => {
       registrationRef.current?.execute("workspace.parameterInfo");
     });
     await waitFor(() => expect(lspMocks.lspSignatureHelp).toHaveBeenCalled());
+    expect(await screen.findByRole("dialog", { name: "Parameter info" })).toHaveTextContent("Main(): void");
 
     // 3. Ctrl+Shift+I Quick Definition Peek
     expect(registrationRef.current?.items.find((item) => item.id === "workspace.quickDefinition")?.enabled).toBe(true);
@@ -4437,6 +4728,156 @@ end_of_record
     });
   });
 
+  describe("P0-J1 completion identity host containment", () => {
+    it("never renders inactive-provider completion candidates in a mounted editor", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const { startCompletion } = await import("@codemirror/autocomplete");
+      lspMocks.lspCompletion.mockResolvedValue({
+        status: {
+          path: "src/main.ts",
+          uri: "file:///repo/app/src/main.ts",
+          presetId: null,
+          languageId: "typescript",
+          displayName: "TypeScript",
+          available: true,
+          active: false,
+          selectedCommandId: null,
+          selectedCommand: null,
+          installHint: null,
+          error: null,
+        } satisfies LspDocumentStatus,
+        isIncomplete: false,
+        items: [{
+          label: "StaleServerCandidate",
+          kind: 7,
+          detail: null,
+          documentation: null,
+          insertText: "StaleServerCandidate",
+          insertTextFormat: 1,
+          filterText: null,
+          sortText: null,
+          textEdit: null,
+          additionalTextEdits: [],
+          raw: {},
+        }],
+      });
+
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-completion-inactive",
+        workspaceInstanceId: "instance-completion-inactive",
+        name: "Completion Inactive",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "const value = 1;\n"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+
+      const view = EditorView.findFromDOM(content!);
+      expect(view).not.toBeNull();
+      act(() => {
+        view!.dispatch({
+          changes: { from: view!.state.doc.length, insert: "valu" },
+          selection: { anchor: view!.state.doc.length + 4 },
+          userEvent: "input.type",
+        });
+        startCompletion(view!);
+      });
+
+      // Give the deferred provider response (inactive + stale items) time to
+      // settle; whatever the popup shows, stale provider labels must not be
+      // among the options.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      });
+      const optionEls = rendered.container.querySelectorAll(".cm-tooltip-autocomplete li, .cm-completionLabel");
+      for (const optionEl of optionEls) {
+        expect(optionEl.textContent).not.toContain("StaleServerCandidate");
+      }
+    });
+  });
+
+  describe("N2.6 Ctrl+Tab Switcher", () => {
+    it("opens on Ctrl+Tab, cycles with Shift, commits on Control release", async () => {
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-switcher",
+        workspaceInstanceId: "instance-switcher",
+        name: "Switcher",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([
+        entry("src", "src", "dir"),
+        entry("other.ts", "other.ts"),
+      ]);
+      workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) =>
+        file(path, path === "src/main.ts" ? "const main = 1;\n" : "const other = 2;\n"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      fireEvent.click(screen.getByTestId("code-workspace-tree-file"));
+      await screen.findByTitle("app / other.ts");
+
+      // Ctrl+Tab opens the switcher with the previous file preselected.
+      fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+      const switcher = await screen.findByTestId("workspace-tab-switcher");
+      expect(switcher).toBeInTheDocument();
+      // The previous file (main.ts) is preselected per IDEA MRU semantics.
+      const selected = switcher.querySelector('[data-switcher-selected="true"]');
+      expect(selected?.textContent).toContain("main.ts");
+
+      // Releasing Control commits the preselected entry.
+      fireEvent.keyUp(window, { key: "Control" });
+      await waitFor(() => {
+        expect(screen.queryByTestId("workspace-tab-switcher")).not.toBeInTheDocument();
+      });
+      await waitFor(() => {
+        const active = rendered.container.querySelector("[data-editor-tab-key][data-active=true]");
+        expect(active?.getAttribute("data-editor-tab-key")).toBe("root:app:src/main.ts");
+      });
+    });
+
+    it("cancels with Escape without changing the active tab", async () => {
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-switcher-cancel",
+        workspaceInstanceId: "instance-switcher-cancel",
+        name: "Switcher Cancel",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([
+        entry("src", "src", "dir"),
+        entry("other.ts", "other.ts"),
+      ]);
+      workspaceMocks.workspaceReadFile.mockImplementation(async (_root: string, path: string) =>
+        file(path, "const value = 1;\n"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      fireEvent.click(screen.getByTestId("code-workspace-tree-file"));
+      await screen.findByTitle("app / other.ts");
+
+      fireEvent.keyDown(window, { key: "Tab", ctrlKey: true });
+      await screen.findByTestId("workspace-tab-switcher");
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => {
+        expect(screen.queryByTestId("workspace-tab-switcher")).not.toBeInTheDocument();
+      });
+      const active = rendered.container.querySelector("[data-editor-tab-key][data-active=true]");
+      expect(active?.getAttribute("data-editor-tab-key")).toBe("root:app:other.ts");
+    });
+  });
+
   describe("P0-S / N1.7 Atomic Save Commit Host Race Tests", () => {
     it("cancels save with 0 disk writes when user edits buffer during historySnapshot await", async () => {
       let resolveHistory: () => void = () => {};
@@ -4594,6 +5035,65 @@ end_of_record
         (call) => call.includes("initial_text\ninitial_text\n"),
       );
       expect(staleDidSave).toBe(false);
+    });
+
+    it("discards writeback and never recreates a closed buffer when writer resolves after close", async () => {
+      let resolveWrite: (res: any) => void = () => {};
+      const writeDeferred = new Promise<any>((r) => {
+        resolveWrite = r;
+      });
+      workspaceMocks.workspaceWriteFileEncoded.mockReturnValue(writeDeferred);
+
+      const workspace: CodeWorkspaceTabInfo = {
+        repoRoot: "/repo/app",
+        workspaceId: "ws-save-race-close",
+        workspaceInstanceId: "instance-save-race-close",
+        name: "Save Race Close",
+        roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+        looseFiles: [],
+        initialFile: { kind: "root", rootId: "app", path: "src/main.ts" },
+      };
+      workspaceMocks.workspaceListDir.mockResolvedValue([entry("src", "src", "dir")]);
+      workspaceMocks.workspaceReadFile.mockResolvedValue(file("src/main.ts", "close_race\n"));
+
+      const rendered = renderWorkspace(workspace);
+      await screen.findByTitle("app / src/main.ts");
+      const content = rendered.container.querySelector<HTMLElement>(".cm-content");
+      expect(content).not.toBeNull();
+
+      // Dirty the buffer, then start a save whose writer stays in flight.
+      fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
+      await waitFor(() => {
+        const fileState = selectCodeWorkspaceUi(
+          useCodeWorkspaceStore.getState(),
+          "instance-save-race-close",
+        ).openFiles["root:app:src/main.ts"];
+        expect(fileState?.dirty).toBe(true);
+      });
+      fireEvent.keyDown(window, { key: "s", code: "KeyS", ctrlKey: true });
+      await waitFor(() => {
+        expect(workspaceMocks.workspaceWriteFileEncoded).toHaveBeenCalled();
+      });
+
+      // Close the tab while the writer is pending (dialog mock confirms).
+      const closeButton = rendered.container.querySelector<HTMLElement>(
+        '[data-editor-tab-key="root:app:src/main.ts"] button[title="Close"]',
+      );
+      expect(closeButton).not.toBeNull();
+      fireEvent.click(closeButton!);
+      await waitFor(() => {
+        const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-save-race-close");
+        expect(ui.openFiles["root:app:src/main.ts"]).toBeUndefined();
+      });
+
+      // Writer finishes with the stale snapshot: writeback must be discarded.
+      await act(async () => {
+        resolveWrite(file("src/main.ts", "close_race\nclose_race\n", { hash: "hash-closed-snapshot" }));
+      });
+
+      const uiAfter = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-save-race-close");
+      expect(uiAfter.openFiles["root:app:src/main.ts"]).toBeUndefined();
+      expect(lspMocks.lspSaveDocument).not.toHaveBeenCalled();
     });
   });
 });

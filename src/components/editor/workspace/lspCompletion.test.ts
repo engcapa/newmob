@@ -1,15 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import { EditorState } from "@codemirror/state";
-import { CompletionContext } from "@codemirror/autocomplete";
+import {
+  CompletionContext,
+  hasNextSnippetField,
+  nextSnippetField,
+} from "@codemirror/autocomplete";
+import { history, undo } from "@codemirror/commands";
 import type { LspCompletionResult, LspDocumentStatus } from "../../../lib/editor/lsp";
 import {
   boostFromSortText,
   boostFromTypedPrefix,
   completionKindToType,
+  createFixtureCompletionSource,
   createLspCompletionSource,
   lspSnippetToCmSnippet,
   MAX_COMPLETION_OPTIONS,
   mergeCompletionTriggers,
+  type CompletionRequestIdentity,
 } from "./lspCompletion";
 
 function status(active: boolean): LspDocumentStatus {
@@ -55,11 +62,11 @@ function contextAt(docText: string, pos: number, explicit = false): CompletionCo
 
 describe("lspSnippetToCmSnippet", () => {
   it("converts tabstops, placeholders, and choices", () => {
-    expect(lspSnippetToCmSnippet("openFile($1)$0")).toBe("openFile(${})${}");
+    expect(lspSnippetToCmSnippet("openFile($1)$0")).toBe("openFile(${1})${0}");
     expect(lspSnippetToCmSnippet("for (const ${1:item} of ${2:items}) {}"))
-      .toBe("for (const ${item} of ${items}) {}");
-    expect(lspSnippetToCmSnippet("align: ${1|left,right,center|}")).toBe("align: ${left}");
-    expect(lspSnippetToCmSnippet("${1}")).toBe("${}");
+      .toBe("for (const ${1:item} of ${2:items}) {}");
+    expect(lspSnippetToCmSnippet("align: ${1|left,right,center|}")).toBe("align: ${1:left}");
+    expect(lspSnippetToCmSnippet("${1}")).toBe("${1}");
   });
 
   it("keeps escaped dollars literal and protects would-be fields", () => {
@@ -123,7 +130,7 @@ describe("boostFromTypedPrefix", () => {
 describe("createLspCompletionSource", () => {
   it("skips silently when there is nothing to complete", async () => {
     const fetch = vi.fn();
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => ["."] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => ["."] });
 
     expect(await source(contextAt("const x = 1;\n", 0))).toBeNull();
     expect(fetch).not.toHaveBeenCalled();
@@ -131,7 +138,7 @@ describe("createLspCompletionSource", () => {
 
   it("queries on word prefixes and reports LSP options", async () => {
     const fetch = vi.fn(async () => completionResult(["openFile", "openDir"]));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
 
     const result = await source(contextAt("op", 2));
 
@@ -143,7 +150,7 @@ describe("createLspCompletionSource", () => {
 
   it("fires on trigger characters without a word prefix", async () => {
     const fetch = vi.fn(async () => completionResult(["toString"]));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => ["."] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => ["."] });
 
     const result = await source(contextAt("value.", 6));
 
@@ -153,7 +160,7 @@ describe("createLspCompletionSource", () => {
 
   it("falls back to buffer words when the language service is inactive", async () => {
     const fetch = vi.fn(async () => completionResult([], false));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
 
     const result = await source(contextAt("workspace wor", 13));
 
@@ -178,7 +185,7 @@ describe("createLspCompletionSource", () => {
         raw: {},
       }],
     }));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
     const result = await source(contextAt("to", 2));
     expect(result?.options[0]?.label).toBe("toString");
     expect(result?.options[0]?.displayLabel).toBe("toString(): string");
@@ -188,7 +195,7 @@ describe("createLspCompletionSource", () => {
 
   it("passes the member-access trigger when typing after a trigger character", async () => {
     const fetch = vi.fn(async () => completionResult(["toString"]));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => ["."] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => ["."] });
 
     await source(contextAt("value.to", 8));
 
@@ -198,14 +205,14 @@ describe("createLspCompletionSource", () => {
   it("caps very large completion lists for popup performance", async () => {
     const labels = Array.from({ length: MAX_COMPLETION_OPTIONS + 50 }, (_, i) => `item${i}`);
     const fetch = vi.fn(async () => completionResult(labels));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
     const result = await source(contextAt("it", 2));
     expect(result?.options).toHaveLength(MAX_COMPLETION_OPTIONS);
   });
 
   it("aborts early during fast typing without issuing fetch", async () => {
     const fetch = vi.fn(async () => completionResult(["item"]));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
     const context = contextAt("it", 2);
     const promise = source(context);
     // Simulate another keystroke arriving immediately (aborting previous context)
@@ -219,7 +226,7 @@ describe("createLspCompletionSource", () => {
 
   it("suppresses word-based LSP autocompletion inside string literals", async () => {
     const fetch = vi.fn(async () => completionResult(["another"]));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => ["."] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => ["."] });
     const doc = 'String firstStr = "this is another";';
     const pos = doc.indexOf("another") + 2;
     const result = await source(contextAt(doc, pos));
@@ -229,7 +236,7 @@ describe("createLspCompletionSource", () => {
 
   it("never returns hardcoded Java JDK completions when language service is inactive", async () => {
     const fetch = vi.fn(async () => completionResult([], false));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
 
     const result = await source(contextAt("Lis", 3));
     // Should fall back to completeAnyWord, without synthetic JDK imports like java.util.List
@@ -264,7 +271,7 @@ describe("createLspCompletionSource", () => {
       }],
     }));
 
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
     const initialText = "\nLis";
     const state = EditorState.create({ doc: initialText });
     const view = new EditorView({ state });
@@ -309,7 +316,7 @@ describe("createLspCompletionSource", () => {
 
     const resolve = vi.fn(() => deferredResolve);
     let docRevision = 1;
-    const source = createLspCompletionSource({
+    const source = createFixtureCompletionSource({
       fetch,
       resolve,
       triggerCharacters: () => [],
@@ -327,11 +334,12 @@ describe("createLspCompletionSource", () => {
     if (typeof option.apply === "function") {
       option.apply(view, option, 10, 13);
     }
-    expect(view.state.doc.toString()).toBe("const a = AutoImportedClass");
+    // Acceptance waits for resolve so primary + auto-import can commit once.
+    expect(view.state.doc.toString()).toBe("const a = Aut");
 
     // Before resolve arrives, user types further, bumping documentRevision
     docRevision = 2;
-    view.dispatch({ changes: { from: 27, to: 27, insert: ";" } });
+    view.dispatch({ changes: { from: 13, to: 13, insert: ";" } });
 
     // Now resolve arrives with additionalTextEdits
     resolvePromise({
@@ -344,6 +352,408 @@ describe("createLspCompletionSource", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     // Stale additionalTextEdits should NOT be applied to mutated revision
-    expect(view.state.doc.toString()).toBe("const a = AutoImportedClass;");
+    expect(view.state.doc.toString()).toBe("const a = Aut;");
+  });
+
+  describe("P0-J1 identity & containment", () => {
+    it("falls back to word completion when provider is inactive even with non-empty items", async () => {
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+        status: status(false),
+        isIncomplete: false,
+        items: [{
+          label: "StaleServerCandidate",
+          kind: 7,
+          detail: null,
+          documentation: null,
+          insertText: "StaleServerCandidate",
+          insertTextFormat: 1,
+          filterText: null,
+          sortText: null,
+          textEdit: null,
+          additionalTextEdits: [],
+          raw: {},
+        }],
+      }));
+      const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
+      const state = EditorState.create({ doc: "const a = Sta" });
+      const result = await source(new CompletionContext(state, 13, true));
+      expect(fetch).toHaveBeenCalled();
+      const labels = (result?.options ?? []).map((option) => option.label);
+      expect(labels).not.toContain("StaleServerCandidate");
+    });
+
+    it("discards the whole response when the document revision advanced during fetch", async () => {
+      let releaseFetch: () => void = () => {};
+      const deferred = new Promise<void>((resolve) => { releaseFetch = resolve; });
+      let revision = 1;
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => {
+        await deferred;
+        return completionResult(["FreshCandidate"]);
+      });
+      const source = createFixtureCompletionSource({
+        fetch,
+        triggerCharacters: () => [],
+        getDocumentRevision: () => revision,
+      });
+      const state = EditorState.create({ doc: "const a = Fre" });
+      const pending = source(new CompletionContext(state, 13, true));
+      revision = 2;
+      releaseFetch();
+      const result = await pending;
+      const labels = (result?.options ?? []).map((option) => option.label);
+      expect(labels).not.toContain("FreshCandidate");
+    });
+
+    it("shares one resolve result between documentation preview and acceptance", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const item = completionResult(["Solo"]).items[0];
+      const resolve = vi.fn(async () => ({
+        ...item,
+        documentation: "Resolved documentation",
+      }));
+      const source = createFixtureCompletionSource({
+        fetch: vi.fn(async () => completionResult(["Solo"])),
+        resolve,
+        triggerCharacters: () => [],
+      });
+      const state = EditorState.create({ doc: "Sol" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, 3, true));
+      const option = result!.options[0];
+
+      expect(typeof option.info).toBe("function");
+      const info = await (option.info as () => Promise<Node | null>)();
+      expect(info).toHaveTextContent("Resolved documentation");
+      if (typeof option.apply === "function") option.apply(view, option, 0, 3);
+      await vi.waitFor(() => expect(view.state.doc.toString()).toBe("Solo"));
+
+      expect(resolve).toHaveBeenCalledTimes(1);
+      view.destroy();
+    });
+
+    it("discards completion documentation when identity changes during resolve", async () => {
+      let identity: CompletionRequestIdentity = {
+        workspaceId: "workspace-a",
+        fileKey: "file-a",
+        filePath: "/workspace/a.ts",
+        uri: "file:///workspace/a.ts",
+        languageId: "typescript",
+        documentRevision: 1,
+        lspSessionGeneration: 4,
+      };
+      let releaseResolve: (item: LspCompletionResult["items"][number]) => void = () => {};
+      const deferredResolve = new Promise<LspCompletionResult["items"][number]>((resolve) => {
+        releaseResolve = resolve;
+      });
+      const fetch = vi.fn(async () => completionResult(["StaleCandidate"]));
+      const source = createLspCompletionSource({
+        identity: () => identity,
+        fetch,
+        resolve: vi.fn(() => deferredResolve),
+        triggerCharacters: () => [],
+        getDocumentRevision: () => identity.documentRevision,
+        reportDiagnostic: vi.fn(),
+      });
+      const state = EditorState.create({ doc: "Sta" });
+      const result = await source(new CompletionContext(state, 3, true));
+      const option = result!.options[0];
+      expect(typeof option.info).toBe("function");
+
+      const pendingInfo = (option.info as () => Promise<Node | null>)();
+      identity = { ...identity, lspSessionGeneration: 5 };
+      releaseResolve({
+        ...completionResult(["StaleCandidate"]).items[0],
+        documentation: "Documentation from the stale provider session",
+      });
+
+      expect(await pendingInfo).toBeNull();
+    });
+
+    it("reports truncated lists via diagnostic and detail", async () => {
+      const diagnostics: string[] = [];
+      const items = Array.from({ length: 201 }, (_, i) => ({
+        label: `candidate-${i}`,
+        kind: 6,
+        detail: null,
+        documentation: null,
+        insertText: `candidate-${i}`,
+        insertTextFormat: 1,
+        filterText: null,
+        sortText: null,
+        textEdit: null,
+        additionalTextEdits: [],
+        raw: {},
+      }));
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+        status: status(true),
+        isIncomplete: true,
+        truncated: true,
+        items,
+      }));
+      const source = createFixtureCompletionSource({
+        fetch,
+        triggerCharacters: () => [],
+        reportDiagnostic: (kind) => diagnostics.push(kind),
+      });
+      const state = EditorState.create({ doc: "can" });
+      const result = await source(new CompletionContext(state, 3, true));
+      expect(result?.options).toHaveLength(200);
+      expect(diagnostics).toContain("truncated");
+      expect(result?.options[0]?.detail).toContain("list truncated");
+    });
+  });
+
+  describe("P0-J1 single-transaction acceptance", () => {
+    it("commits snippet placeholder and preceding import edit in one dispatch with mapped selection", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+        status: status(true),
+        isIncomplete: false,
+        items: [{
+          label: "loadUser",
+          kind: 3,
+          detail: null,
+          documentation: null,
+          insertText: "loadUser(${1:user})",
+          insertTextFormat: 2,
+          filterText: null,
+          sortText: "0001",
+          textEdit: null,
+          additionalTextEdits: [{
+            range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+            newText: "import { loadUser } from \"./users\";\n",
+          }],
+          raw: {},
+        }],
+      }));
+      const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
+      const state = EditorState.create({ doc: "\nloadU" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, 6, true));
+      const option = result!.options[0];
+      const dispatchSpy = vi.spyOn(view, "dispatch");
+      if (typeof option.apply === "function") {
+        option.apply(view, option, 1, 6);
+      }
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      const doc = view.state.doc.toString();
+      expect(doc).toContain("import { loadUser } from \"./users\";");
+      expect(doc).toContain("loadUser(user)");
+      const importPrefix = "import { loadUser } from \"./users\";\n".length;
+      expect(view.state.selection.main.anchor).toBe(importPrefix + 1 + "loadUser(".length);
+      view.destroy();
+    });
+
+    it("rejects overlapping additional edits with zero document writes", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const diagnostics: string[] = [];
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+        status: status(true),
+        isIncomplete: false,
+        items: [{
+          label: "List",
+          kind: 7,
+          detail: null,
+          documentation: null,
+          insertText: "List",
+          insertTextFormat: 1,
+          filterText: null,
+          sortText: null,
+          textEdit: null,
+          additionalTextEdits: [{
+            range: { start: { line: 0, character: 11 }, end: { line: 0, character: 20 } },
+            newText: "XXX",
+          }],
+          raw: {},
+        }],
+      }));
+      const source = createFixtureCompletionSource({
+        fetch,
+        triggerCharacters: () => [],
+        reportDiagnostic: (kind) => diagnostics.push(kind),
+      });
+      const state = EditorState.create({ doc: "const a = Lis" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, 13, true));
+      const option = result!.options[0];
+      if (typeof option.apply === "function") {
+        option.apply(view, option, 10, 13);
+      }
+      expect(diagnostics).toContain("invalid-additional-edits");
+      expect(view.state.doc.toString()).toBe("const a = Lis");
+      view.destroy();
+    });
+
+    it("rejects an out-of-bounds primary textEdit with zero document writes", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const diagnostics: string[] = [];
+      const item = completionResult(["List"]).items[0];
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+        status: status(true),
+        isIncomplete: false,
+        items: [{
+          ...item,
+          textEdit: {
+            range: {
+              start: { line: 0, character: 10 },
+              end: { line: 0, character: 40 },
+            },
+            newText: "List",
+          },
+        }],
+      }));
+      const source = createFixtureCompletionSource({
+        fetch,
+        triggerCharacters: () => [],
+        reportDiagnostic: (kind, detail) => diagnostics.push(detail ? `${kind}:${detail}` : kind),
+      });
+      const state = EditorState.create({ doc: "const a = Lis" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, state.doc.length, true));
+      const option = result!.options[0];
+      const dispatchSpy = vi.spyOn(view, "dispatch");
+
+      if (typeof option.apply === "function") {
+        option.apply(view, option, 10, 13);
+      }
+
+      expect(dispatchSpy).not.toHaveBeenCalled();
+      expect(view.state.doc.toString()).toBe("const a = Lis");
+      expect(diagnostics).toContain("invalid-additional-edits:primary-range");
+      view.destroy();
+    });
+
+    it("rejects colliding zero-width additional edits with zero document writes", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const diagnostics: string[] = [];
+      const item = completionResult(["List"]).items[0];
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+        status: status(true),
+        isIncomplete: false,
+        items: [{
+          ...item,
+          additionalTextEdits: [
+            {
+              range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+              newText: "import first;\n",
+            },
+            {
+              range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+              newText: "import second;\n",
+            },
+          ],
+        }],
+      }));
+      const source = createFixtureCompletionSource({
+        fetch,
+        triggerCharacters: () => [],
+        reportDiagnostic: (kind) => diagnostics.push(kind),
+      });
+      const state = EditorState.create({ doc: "const a = Lis" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, state.doc.length, true));
+      const option = result!.options[0];
+      const dispatchSpy = vi.spyOn(view, "dispatch");
+
+      if (typeof option.apply === "function") {
+        option.apply(view, option, 10, 13);
+      }
+
+      expect(dispatchSpy).not.toHaveBeenCalled();
+      expect(view.state.doc.toString()).toBe("const a = Lis");
+      expect(diagnostics).toContain("invalid-additional-edits");
+      view.destroy();
+    });
+
+    it("resolves imports before one acceptance dispatch and one undo", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => completionResult(["AutoImportedClass"]));
+      const resolvedItem = completionResult(["AutoImportedClass"]).items[0];
+      const resolve = vi.fn(async () => ({
+        ...resolvedItem,
+        additionalTextEdits: [{
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
+          newText: "import { AutoImportedClass } from './module';\n",
+        }],
+      }));
+      const source = createFixtureCompletionSource({
+        fetch,
+        resolve,
+        triggerCharacters: () => [],
+        getDocumentRevision: () => 0,
+      });
+      const state = EditorState.create({ doc: "\nAut", extensions: [history()] });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, 4, true));
+      const option = result!.options[0];
+      const dispatchSpy = vi.spyOn(view, "dispatch");
+      if (typeof option.apply === "function") option.apply(view, option, 1, 4);
+      expect(view.state.doc.toString()).toBe("\nAut");
+      await vi.waitFor(() => {
+        expect(view.state.doc.toString()).toBe(
+          "import { AutoImportedClass } from './module';\n\nAutoImportedClass",
+        );
+      });
+      expect(dispatchSpy).toHaveBeenCalledTimes(1);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe("\nAut");
+      view.destroy();
+    });
+
+    it("uses live snippet fields and advances in numeric tabstop order", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => ({
+        status: status(true),
+        isIncomplete: false,
+        items: [{
+          ...completionResult(["call"]).items[0],
+          label: "call",
+          insertText: "call(${1:first}, ${2:second})$0",
+          insertTextFormat: 2,
+        }],
+      }));
+      const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [] });
+      const state = EditorState.create({ doc: "cal" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, 3, true));
+      const option = result!.options[0];
+      if (typeof option.apply === "function") option.apply(view, option, 0, 3);
+      expect(view.state.doc.toString()).toBe("call(first, second)");
+      expect(view.state.sliceDoc(
+        view.state.selection.main.from,
+        view.state.selection.main.to,
+      )).toBe("first");
+      expect(hasNextSnippetField(view.state)).toBe(true);
+      expect(nextSnippetField(view)).toBe(true);
+      expect(view.state.sliceDoc(
+        view.state.selection.main.from,
+        view.state.selection.main.to,
+      )).toBe("second");
+      view.destroy();
+    });
+
+    it("reports additional-edit-unavailable when resolve fails instead of inserting an import", async () => {
+      const { EditorView } = await import("@codemirror/view");
+      const diagnostics: string[] = [];
+      const fetch = vi.fn(async (): Promise<LspCompletionResult> => completionResult(["Solo"]));
+      const resolve = vi.fn(async () => { throw new Error("resolve blew up"); });
+      const source = createFixtureCompletionSource({
+        fetch,
+        resolve,
+        triggerCharacters: () => [],
+        reportDiagnostic: (kind, detail) => diagnostics.push(detail ? `${kind}:${detail}` : kind),
+      });
+      const state = EditorState.create({ doc: "const a = Sol" });
+      const view = new EditorView({ state });
+      const result = await source(new CompletionContext(state, 13, true));
+      const option = result!.options[0];
+      if (typeof option.apply === "function") {
+        option.apply(view, option, 10, 13);
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      expect(view.state.doc.toString()).toBe("const a = Solo");
+      expect(diagnostics).toContain("additional-edit-unavailable:resolve-failed");
+      view.destroy();
+    });
   });
 });

@@ -3121,7 +3121,7 @@ export function MainLayout() {
   // is handled by the shared hook, everything else reuses handleCommand.
   const dispatchMenuAction = useCallback((action: MenuActionId) => {
     if (action.startsWith("workspace-command:")) {
-      activeWorkspaceCommandRegistration?.execute(action.slice("workspace-command:".length));
+      activeWorkspaceCommandRegistration?.executeAction(action.slice("workspace-command:".length));
       return;
     }
     switch (action) {
@@ -3389,7 +3389,7 @@ export function MainLayout() {
         quickConnectVisible={quickConnectVisible}
         workspaceCommands={activeWorkspaceCommandRegistration?.items ?? []}
         onCommand={handleCommand}
-        onWorkspaceCommand={(commandId) => activeWorkspaceCommandRegistration?.execute(commandId)}
+        onWorkspaceCommand={(commandId) => activeWorkspaceCommandRegistration?.executeAction(commandId)}
         onToggleSidebar={toggleSidebar}
         onStartLocalTerminal={(localShell) =>
           openLocalTab(localShell?.name ?? tr("tabs.localTerminal"), undefined, undefined, localShell)

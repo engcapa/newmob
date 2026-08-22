@@ -60,7 +60,12 @@ function fallbackCopyText(text: string): boolean {
   }
 }
 
-export async function readText(): Promise<string> {
+export interface ClipboardTextReadResult {
+  ok: boolean;
+  text: string;
+}
+
+export async function readTextResult(): Promise<ClipboardTextReadResult> {
   // On macOS WKWebView, navigator.clipboard.readText() can show the native
   // "Paste" confirmation popover even for a user-triggered terminal paste.
   // The desktop app has a native clipboard command, so prefer it on macOS.
@@ -68,7 +73,7 @@ export async function readText(): Promise<string> {
   // path that avoids the X11 round-trip issue below.
   if (isTauriRuntime() && getAppPlatform() === "macos") {
     try {
-      return await invoke<string>("clipboard_read_text");
+      return { ok: true, text: await invoke<string>("clipboard_read_text") };
     } catch {
       // Fall back to the webview API / final native retry below.
     }
@@ -83,16 +88,20 @@ export async function readText(): Promise<string> {
   // state without leaving the process.
   if (typeof navigator !== "undefined" && navigator.clipboard?.readText) {
     try {
-      return await navigator.clipboard.readText();
+      return { ok: true, text: await navigator.clipboard.readText() };
     } catch {
       // Permissions denied / no user gesture / unfocused — fall back to Rust.
     }
   }
   try {
-    return await invoke<string>("clipboard_read_text");
+    return { ok: true, text: await invoke<string>("clipboard_read_text") };
   } catch {
-    return "";
+    return { ok: false, text: "" };
   }
+}
+
+export async function readText(): Promise<string> {
+  return (await readTextResult()).text;
 }
 
 export async function readFiles(): Promise<string[]> {

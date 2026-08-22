@@ -28,7 +28,7 @@ export type ActionProvenance =
   | "partial"      // Partially implemented / heuristic
   | "unsupported"; // Action placeholder / unsupported in current context
 
-export type ActionAvailability = "available" | "disabled" | "unsupported" | "stale";
+export type ActionAvailability = "available" | "disabled" | "unsupported" | "stale" | "busy";
 
 export type ActionDisabledReason =
   | "noEditor"
@@ -39,6 +39,8 @@ export type ActionDisabledReason =
   | "stale"
   | "conflict"
   | "busy"
+  | "disposed"
+  | "invalidCondition"
   | "unsupported";
 
 export interface ActionPlatformKeybindings {
@@ -48,7 +50,15 @@ export interface ActionPlatformKeybindings {
   default: string;
 }
 
-export type WorkspaceFocus = "workspace" | "editor" | "tree" | "terminal" | "search" | "modal";
+export type WorkspaceFocus =
+  | "workspace"
+  | "editor"
+  | "tree"
+  | "terminal"
+  | "search"
+  | "completion"
+  | "snippet"
+  | "modal";
 
 export interface WorkspaceActionContext {
   focus: WorkspaceFocus;
@@ -200,8 +210,19 @@ export interface ActionState {
   completeness: "complete" | "truncated" | "partial" | "unavailable" | "failed";
 }
 
+export type ActionResultReason =
+  | "aborted"
+  | "busy"
+  | "condition-not-met"
+  | "disposed"
+  | "exception"
+  | "stale-owner"
+  | "unknown-action"
+  | "unsupported";
+
 export interface ActionResult {
   kind: "applied" | "opened" | "no-op" | "cancelled" | "failed";
+  reason?: ActionResultReason;
   undoGroupId?: string;
   message?: string;
   retryable?: boolean;

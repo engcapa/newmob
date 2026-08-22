@@ -1,9 +1,9 @@
 /**
- * NON-PRODUCTION / TEST FIXTURE ONLY (§8.14.2 J0 Containment).
+ * NON-PRODUCTION / TEST FIXTURE ONLY (§8.14.2 J0 Containment, §8.16.2). Lives in __fixtures__ and is excluded from the production bundle by the javaQuickFixImportGuard test.
  * Do not import or execute in production completion or code-action paths.
  */
 
-import type { LspCodeAction, LspPosition, LspWorkspaceEdit } from "../../../lib/editor/lsp";
+import type { LspCodeAction, LspPosition, LspWorkspaceEdit } from "../../../../lib/editor/lsp";
 
 export const JDK_KNOWN_TYPES: Record<string, string[]> = {
   // Collections & Utilities

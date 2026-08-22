@@ -1,12 +1,18 @@
-import { BookOpen, PinOff } from "lucide-react";
+import { BookOpen, ChevronLeft, ChevronRight, Pin, PinOff } from "lucide-react";
 import { renderFormatted } from "../../../../lib/chat/renderFormatted";
-import type { QuickDocContent } from "../QuickDocPopup";
+import { ReferenceContentFooter, useReferenceBodyLinkHandler } from "../ReferenceContentFooter";
+import type { QuickDocContent } from "../referenceDocumentation";
 
 interface DocumentationPaneProps {
   content: QuickDocContent | null;
   locked?: boolean;
   onUnlock?: () => void;
   onClear?: () => void;
+  onOpenSource?: (content: QuickDocContent) => void;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onBack?: () => void;
+  onForward?: () => void;
 }
 
 export function DocumentationPane({
@@ -14,7 +20,13 @@ export function DocumentationPane({
   locked = false,
   onUnlock,
   onClear,
+  onOpenSource,
+  canGoBack = false,
+  canGoForward = false,
+  onBack,
+  onForward,
 }: DocumentationPaneProps) {
+  const { linkError, onClick: onBodyClick } = useReferenceBodyLinkHandler();
   if (!content) {
     return (
       <div
@@ -38,13 +50,29 @@ export function DocumentationPane({
       className="flex h-full min-h-0 flex-col text-[12px]"
     >
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--taomni-code-border)] px-2">
+        <button
+          type="button"
+          aria-label="Previous documentation"
+          disabled={!canGoBack}
+          className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-30"
+          onClick={onBack}
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          aria-label="Next documentation"
+          disabled={!canGoForward}
+          className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-30"
+          onClick={onForward}
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
         <span className="min-w-0 flex-1 truncate font-medium text-[var(--taomni-code-text)]">
           {content.title}
         </span>
         {locked && (
-          <span className="shrink-0 text-[10px] text-[var(--taomni-code-muted)]" title="Pinned">
-            📌
-          </span>
+          <Pin className="h-3 w-3 shrink-0 text-[var(--taomni-code-muted)]" aria-label="Pinned" />
         )}
         {locked && onUnlock && (
           <button
@@ -70,8 +98,11 @@ export function DocumentationPane({
       </div>
       <div
         className="taomni-chat-md min-h-0 flex-1 overflow-auto px-3 py-2 leading-relaxed text-[var(--taomni-code-text)]"
+        onClick={onBodyClick}
         dangerouslySetInnerHTML={{ __html: html }}
       />
+      {linkError && <div role="status" className="px-2 pb-1 text-[10px] text-red-400">{linkError}</div>}
+      <ReferenceContentFooter content={content} onOpenSource={onOpenSource} />
     </div>
   );
 }

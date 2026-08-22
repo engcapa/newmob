@@ -82,6 +82,8 @@ function props(overrides: Partial<ComponentProps<typeof EditorGroup>> = {}): Com
     onEditorContextMenu: vi.fn(),
     onComplete: vi.fn(async () => null),
     onCompleteResolve: vi.fn(async () => null),
+    onCompletionIdentity: vi.fn(() => null),
+    onCompletionDiagnostic: vi.fn(),
     onSignatureHelp: vi.fn(async () => null),
     onSelectionChange: vi.fn(),
     onViewportChange: vi.fn(),

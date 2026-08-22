@@ -18,6 +18,7 @@ import {
   remapLayoutTreeKeys,
   findAdjacentSiblingLeaf,
   commitLayoutMutation,
+  panelLayoutToRatios,
   type LayoutNode,
 } from "./recursiveLayoutTree";
 
@@ -454,6 +455,42 @@ describe("recursiveLayoutTree", () => {
       expect(res.migration?.migratedKeys).toEqual(["f2.ts", "f3.ts"]);
       expect(res.groups.l1.openOrder).toEqual(["f1.ts", "f2.ts", "f3.ts"]);
     }
+  });
+
+  it("converts keyed panel layouts in child order and rejects invalid values", () => {
+    expect(panelLayoutToRatios({ "panel-a": 20, "panel-b": 30, "panel-c": 50 }, ["a", "b", "c"]))
+      .toEqual([0.2, 0.3, 0.5]);
+    expect(panelLayoutToRatios({ "panel-a": 20, "panel-b": 30 }, ["b", "a"]))
+      .toEqual([0.6, 0.4]);
+    expect(panelLayoutToRatios({ "panel-a": 0, "panel-b": 100 }, ["a", "b"]))
+      .toBeNull();
+    expect(panelLayoutToRatios({ "panel-a": Number.NaN, "panel-b": 100 }, ["a", "b"]))
+      .toBeNull();
+  });
+
+  it("closes a nested leaf and preserves sibling ratios as a valid tree", () => {
+    const root: LayoutNode = {
+      type: "split",
+      id: "root",
+      orientation: "horizontal",
+      ratios: [0.4, 0.6],
+      children: [
+        {
+          type: "split",
+          id: "nested",
+          orientation: "vertical",
+          ratios: [0.25, 0.75],
+          children: [
+            { type: "leaf", id: "a", openFileKeys: [], activeKey: null },
+            { type: "leaf", id: "b", openFileKeys: [], activeKey: null },
+          ],
+        },
+        { type: "leaf", id: "c", openFileKeys: [], activeKey: null },
+      ],
+    };
+    const closed = closeLeafNode(root, "a");
+    expect(getAllLeafNodes(closed).map((leaf) => leaf.id)).toEqual(["b", "c"]);
+    expect(validateLayoutTree(closed).valid).toBe(true);
   });
 
   it("commitLayoutMutation rejects inconsistent mutations", () => {

@@ -1,13 +1,30 @@
-import { EditorState } from "@codemirror/state";
+import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { history, undo, undoDepth } from "@codemirror/commands";
 import { javascript } from "@codemirror/lang-javascript";
+import { foldable } from "@codemirror/language";
 import { describe, expect, it } from "vitest";
 import {
+  buildMultiCaretPastePlan,
+  cloneCaretAbove,
+  cloneCaretBelow,
   completeCurrentStatement,
+  detectClipboardSourceEol,
+  editorClipboardPayload,
+  editorVirtualSpacePolicy,
+  escapeEditorSelections,
   expandSyntaxSelection,
+  occurrenceSessionField,
   expandSelectionFromLspRanges,
+  foldSelection,
   joinLines,
+  moveStatementDown,
+  normalizeEditorSelections,
+  pasteEditorClipboardPayload,
+  plainTextClipboardPayload,
+  regionFoldService,
   reverseLines,
+  selectNextEditorOccurrence,
   selectionHistoryField,
   shrinkSyntaxSelection,
   sortLines,
@@ -18,9 +35,225 @@ import {
   unselectOccurrence,
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
-import { selectNextOccurrence } from "@codemirror/search";
 
 describe("workspace editor commands", () => {
+  it("normalizes overlapping ranges and keeps the primary owner", () => {
+    const primary = EditorSelection.range(7, 2);
+    const normalized = normalizeEditorSelections([
+      EditorSelection.range(0, 4),
+      primary,
+      EditorSelection.cursor(12),
+    ], 1);
+
+    expect(normalized.ranges).toHaveLength(2);
+    expect(normalized.ranges[0]).toMatchObject({ from: 0, to: 7, anchor: 7, head: 0 });
+    expect(normalized.mainIndex).toBe(0);
+  });
+
+  it("serializes one segment per selection and detects source EOL", () => {
+    const state = EditorState.create({
+      doc: "alpha\nbeta",
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 5),
+        EditorSelection.range(6, 10),
+      ]),
+      extensions: [EditorState.allowMultipleSelections.of(true)],
+    });
+
+    expect(editorClipboardPayload(state)).toEqual({
+      plainText: "alpha\nbeta",
+      segments: ["alpha", "beta"],
+      sourceEol: "lf",
+      rectangular: false,
+    });
+    expect(detectClipboardSourceEol("a\r\nb")).toBe("crlf");
+    expect(detectClipboardSourceEol("a\rb")).toBe("cr");
+  });
+
+  it("distributes matching clipboard segments in one transaction and one undo", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "one two",
+        selection: EditorSelection.create([
+          EditorSelection.cursor(0),
+          EditorSelection.cursor(4),
+        ], 1),
+        extensions: [history(), EditorState.allowMultipleSelections.of(true)],
+      }),
+    });
+
+    expect(pasteEditorClipboardPayload(view, {
+      plainText: "A\nB",
+      segments: ["A", "B"],
+      sourceEol: "lf",
+      rectangular: false,
+    })).toBe(true);
+    expect(view.state.doc.toString()).toBe("Aone Btwo");
+    expect(view.state.selection.mainIndex).toBe(1);
+    expect(undoDepth(view.state)).toBe(1);
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("one two");
+    view.destroy();
+  });
+
+  it("replicates one external payload to every caret and normalizes EOL", () => {
+    const state = EditorState.create({
+      doc: "ab\ncd",
+      selection: EditorSelection.create([
+        EditorSelection.cursor(0),
+        EditorSelection.cursor(3),
+      ]),
+      extensions: [EditorState.allowMultipleSelections.of(true)],
+    });
+    const plan = buildMultiCaretPastePlan(
+      state,
+      plainTextClipboardPayload("x\r\ny"),
+    );
+
+    expect(plan).not.toBeNull();
+    const transaction = state.update({
+      changes: plan!.changes,
+      selection: plan!.selection,
+    });
+    expect(transaction.newDoc.toString()).toBe("x\nyab\nx\nycd");
+    expect(transaction.newSelection.ranges.map((range) => range.head)).toEqual([3, 9]);
+  });
+
+  it("replaces multi-selections while retaining primary selection identity", () => {
+    const state = EditorState.create({
+      doc: "red green blue",
+      selection: EditorSelection.create([
+        EditorSelection.range(0, 3),
+        EditorSelection.range(10, 14),
+      ], 1),
+      extensions: [EditorState.allowMultipleSelections.of(true)],
+    });
+    const plan = buildMultiCaretPastePlan(state, {
+      plainText: "R\nB",
+      segments: ["R", "B"],
+      sourceEol: "lf",
+      rectangular: true,
+    });
+    const transaction = state.update({ changes: plan!.changes, selection: plan!.selection });
+
+    expect(transaction.newDoc.toString()).toBe("R green B");
+    expect(transaction.newSelection.mainIndex).toBe(1);
+    expect(transaction.newSelection.ranges.map((range) => range.head)).toEqual([1, 9]);
+  });
+
+  it("clones carets vertically and clamps columns on short lines", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "abcdef\nx\n12345",
+        selection: EditorSelection.cursor(5),
+        extensions: [EditorState.allowMultipleSelections.of(true)],
+      }),
+    });
+
+    expect(cloneCaretBelow(view)).toBe(true);
+    expect(view.state.selection.ranges.map((range) => range.head)).toEqual([5, 8]);
+    expect(view.state.selection.main.head).toBe(5);
+    expect(cloneCaretAbove(view)).toBe(true);
+    expect(view.state.selection.ranges.map((range) => range.head)).toEqual([1, 5, 8]);
+    expect(view.state.selection.main.head).toBe(5);
+    view.destroy();
+  });
+
+  it("pads short lines only when virtual space after line end is enabled", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "abcdef\nx",
+        selection: EditorSelection.cursor(5),
+        extensions: [
+          EditorState.allowMultipleSelections.of(true),
+          editorVirtualSpacePolicy.of({ afterLineEnd: true, atFileBottom: false }),
+        ],
+      }),
+    });
+
+    expect(cloneCaretBelow(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("abcdef\nx    ");
+    expect(view.state.selection.ranges.map((range) => range.head)).toEqual([5, 12]);
+    expect(view.state.selection.main.head).toBe(5);
+    view.destroy();
+  });
+
+  it("creates a final virtual line only when file-bottom virtual space is enabled", () => {
+    const disabled = new EditorView({
+      state: EditorState.create({ doc: "last", selection: EditorSelection.cursor(4) }),
+    });
+    expect(cloneCaretBelow(disabled)).toBe(false);
+    expect(disabled.state.doc.toString()).toBe("last");
+    disabled.destroy();
+
+    const enabled = new EditorView({
+      state: EditorState.create({
+        doc: "last",
+        selection: EditorSelection.cursor(4),
+        extensions: [
+          EditorState.allowMultipleSelections.of(true),
+          editorVirtualSpacePolicy.of({ afterLineEnd: true, atFileBottom: true }),
+        ],
+      }),
+    });
+    expect(cloneCaretBelow(enabled)).toBe(true);
+    expect(enabled.state.doc.toString()).toBe("last\n    ");
+    expect(enabled.state.selection.ranges.map((range) => range.head)).toEqual([4, 9]);
+    enabled.destroy();
+  });
+
+  it("moves a syntax statement and falls back to line movement", () => {
+    const syntaxView = new EditorView({
+      state: EditorState.create({
+        doc: "const first = 1;\nconst second = 2;",
+        selection: EditorSelection.cursor(3),
+        extensions: [javascript()],
+      }),
+    });
+    expect(moveStatementDown(syntaxView)).toBe(true);
+    expect(syntaxView.state.doc.toString()).toBe("const second = 2;\nconst first = 1;");
+    syntaxView.destroy();
+
+    const textView = new EditorView({
+      state: EditorState.create({ doc: "first\nsecond", selection: EditorSelection.cursor(1) }),
+    });
+    expect(moveStatementDown(textView)).toBe(true);
+    expect(textView.state.doc.toString()).toBe("second\nfirst");
+    textView.destroy();
+  });
+
+  it("provides nested named region folding", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "//region outer\na\n//region inner\nb\n//endregion\nc\n//endregion",
+        extensions: [regionFoldService],
+      }),
+    });
+    const outer = view.state.doc.line(1);
+    const inner = view.state.doc.line(3);
+    expect(foldable(view.state, outer.from, outer.to)).toEqual({
+      from: outer.to,
+      to: view.state.doc.line(7).from,
+    });
+    expect(foldable(view.state, inner.from, inner.to)).toEqual({
+      from: inner.to,
+      to: view.state.doc.line(5).from,
+    });
+    view.destroy();
+  });
+
+  it("folds an explicit selection without changing the document", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "line one\nline two",
+        selection: EditorSelection.range(0, 8),
+      }),
+    });
+    expect(foldSelection(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("line one\nline two");
+    view.destroy();
+  });
+
   it("expands and shrinks syntax selections through selection history", () => {
     const doc = "const answer = value + 1;";
     const cursor = doc.indexOf("value") + 2;
@@ -44,7 +277,7 @@ describe("workspace editor commands", () => {
     view.destroy();
   });
 
-  it("registers the designed comment, selection, and statement completion shortcuts", () => {
+  it("keeps only unowned local editor shortcuts in the CodeMirror keymap", () => {
     expect(workspaceEditorKeymap.map((binding) => binding.key)).toEqual([
       "Mod-/",
       "Mod-Shift-/",
@@ -58,10 +291,7 @@ describe("workspace editor commands", () => {
       "Mod-Shift-Enter",
       "Mod-Shift-j",
       "Ctrl-Shift-j",
-      "Alt-j",
       "Shift-Alt-j",
-      "Mod-Alt-Shift-j",
-      "Ctrl-Alt-Shift-j",
       "Mod-Shift-u",
       "Ctrl-Shift-u",
       "Tab",
@@ -119,21 +349,26 @@ describe("workspace editor commands", () => {
       state: EditorState.create({
         doc,
         selection: { anchor: 8 }, // inside first 'alpha'
-        extensions: [javascript(), EditorState.allowMultipleSelections.of(true)],
+        extensions: [
+          javascript(),
+          EditorState.allowMultipleSelections.of(true),
+          occurrenceSessionField,
+        ],
       }),
     });
 
     // 1st Alt-J: selects current word 'alpha'
-    expect(selectNextOccurrence(view)).toBe(true);
+    expect(selectNextEditorOccurrence(view)).toBe(true);
+    expect(view.state.field(occurrenceSessionField)).toBe(true);
     expect(view.state.sliceDoc(view.state.selection.main.from, view.state.selection.main.to)).toBe("alpha");
     expect(view.state.selection.ranges).toHaveLength(1);
 
     // 2nd Alt-J: adds 2nd occurrence of 'alpha'
-    expect(selectNextOccurrence(view)).toBe(true);
+    expect(selectNextEditorOccurrence(view)).toBe(true);
     expect(view.state.selection.ranges).toHaveLength(2);
 
     // 3rd Alt-J: adds 3rd occurrence of 'alpha'
-    expect(selectNextOccurrence(view)).toBe(true);
+    expect(selectNextEditorOccurrence(view)).toBe(true);
     expect(view.state.selection.ranges).toHaveLength(3);
 
     // Shift-Alt-J: unselects last occurrence
@@ -144,6 +379,33 @@ describe("workspace editor commands", () => {
     expect(view.state.selection.ranges).toHaveLength(1);
 
     expect(unselectOccurrence(view)).toBe(false);
+    view.destroy();
+  });
+
+  it("clears an occurrence session before collapsing to the primary caret", () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "alpha alpha alpha",
+        selection: EditorSelection.cursor(2),
+        extensions: [
+          EditorState.allowMultipleSelections.of(true),
+          occurrenceSessionField,
+        ],
+      }),
+    });
+    expect(selectNextEditorOccurrence(view)).toBe(true);
+    expect(selectNextEditorOccurrence(view)).toBe(true);
+    expect(view.state.selection.ranges).toHaveLength(2);
+
+    expect(escapeEditorSelections(view)).toBe(true);
+    expect(view.state.field(occurrenceSessionField)).toBe(false);
+    expect(view.state.selection.ranges).toHaveLength(2);
+    const primary = view.state.selection.main;
+
+    expect(escapeEditorSelections(view)).toBe(true);
+    expect(view.state.selection.ranges).toHaveLength(1);
+    expect(view.state.selection.main.eq(primary)).toBe(true);
+    expect(escapeEditorSelections(view)).toBe(false);
     view.destroy();
   });
 

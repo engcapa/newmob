@@ -4,6 +4,8 @@ import { QuickPickOverlay } from "./QuickPickOverlay";
 import { rankFuzzy } from "./fuzzyMatch";
 import { isClassSymbolKind, symbolKindLabel } from "./symbolKinds";
 import type { WorkspaceCommand } from "./workspaceCommands";
+import type { ActionResult } from "./workspaceActionRegistry";
+import type { ActionSnapshotItem } from "./workspaceActionHost";
 import {
   workspaceSemanticIndexBuildIsCurrent,
   workspaceSemanticIndexStatusLabel,
@@ -50,6 +52,8 @@ interface SearchEverywhereProps {
   loading: boolean;
   truncated?: boolean;
   commands?: WorkspaceCommand[];
+  /** Instance-scoped host snapshot (§8.16.3); takes precedence over commands. */
+  actionSnapshots?: ActionSnapshotItem[];
   /** When true, Classes/Symbols tabs are shown and fetchSymbols is used. */
   symbolsAvailable?: boolean;
   semanticIndex?: WorkspaceSemanticIndexSnapshot;
@@ -57,7 +61,7 @@ interface SearchEverywhereProps {
   onClose: () => void;
   onOpenFile: (item: GoToFileItem, options?: { split: boolean }) => void;
   onOpenSymbol?: (item: GoToSymbolItem, options?: { split: boolean }) => void;
-  onRunCommand?: (commandId: string) => void;
+  onRunCommand?: (commandId: string) => void | Promise<ActionResult>;
   /** Text tab: hand query to Find in Files. */
   onSearchText?: (query: string) => void;
 }
@@ -91,6 +95,7 @@ export function SearchEverywhere({
   loading,
   truncated = false,
   commands = [],
+  actionSnapshots,
   symbolsAvailable = false,
   semanticIndex,
   fetchSymbols,
@@ -187,18 +192,36 @@ export function SearchEverywhere({
     return source.map((value) => ({ kind: "symbol" as const, value }));
   }, [mode, symbols]);
 
+  const actionCommands: WorkspaceCommand[] = useMemo(() => {
+    if (actionSnapshots !== undefined) {
+      return actionSnapshots
+        .filter((entry) => entry.state.availability === "available")
+        .map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          category: entry.category,
+          keybinding: entry.keybinding,
+          keybindings: entry.keybindings,
+          keywords: entry.keywords,
+          provenance: entry.state.source,
+          run: () => {},
+        }));
+    }
+    return commands;
+  }, [actionSnapshots, commands]);
+
   const searchItems: SearchItem[] = useMemo(() => {
     if (mode === "files") return items.map((value) => ({ kind: "file", value }));
-    if (mode === "actions") return commands.map((value) => ({ kind: "action", value }));
+    if (mode === "actions") return actionCommands.map((value) => ({ kind: "action", value }));
     if (mode === "classes" || mode === "symbols") return symbolItems;
     if (mode === "text") return [];
     // All: files + symbols + actions, ranked together.
     return [
       ...items.map((value) => ({ kind: "file" as const, value })),
       ...symbolItems,
-      ...commands.map((value) => ({ kind: "action" as const, value })),
+      ...actionCommands.map((value) => ({ kind: "action" as const, value })),
     ];
-  }, [commands, items, mode, symbolItems]);
+  }, [actionCommands, items, mode, symbolItems]);
 
   const filterItems = useCallback(
     (q: string, all: SearchItem[]) => {
@@ -312,7 +335,7 @@ export function SearchEverywhere({
             : "Type a query, then Enter to open Find in Files";
         }
         if (mode === "actions") {
-          return commands.length === 0 ? "No available workspace actions" : "No matching actions";
+          return actionCommands.length === 0 ? "No available workspace actions" : "No matching actions";
         }
         if (mode === "classes" || mode === "symbols") {
           if (symbolsLoading) return "Querying language server…";
@@ -362,7 +385,7 @@ export function SearchEverywhere({
             {mode === "files" && (
               <>{truncated ? "file index truncated · " : ""}{items.length} file{items.length === 1 ? "" : "s"}</>
             )}
-            {mode === "actions" && <>{commands.length} action{commands.length === 1 ? "" : "s"}</>}
+            {mode === "actions" && <>{actionCommands.length} action{actionCommands.length === 1 ? "" : "s"}</>}
             {(mode === "all" || mode === "classes" || mode === "symbols") && (
               <>
                 {symbolSnapshotLabel && (

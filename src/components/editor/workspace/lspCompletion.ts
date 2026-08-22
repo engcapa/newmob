@@ -6,6 +6,7 @@ import {
   type CompletionResult,
   type CompletionSource,
 } from "@codemirror/autocomplete";
+import type { Text } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
 import type {
@@ -17,26 +18,73 @@ import type {
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import { isInsideStringOrComment } from "./syntaxContext";
 
+/**
+ * Mandatory request identity for every production completion request
+ * (§8.16.2). All fields are required: a request that cannot prove who it
+ * belongs to must be treated as unavailable, never guessed.
+ */
 export interface CompletionRequestToken {
-  workspaceId?: string;
-  fileKey?: string;
-  uri?: string;
-  languageId?: string;
-  documentRevision?: number;
-  lspSessionGeneration?: number;
-  requestId?: string;
+  workspaceId: string;
+  fileKey: string;
+  filePath: string;
+  uri: string;
+  languageId: string;
+  documentRevision: number;
+  lspSessionGeneration: number;
+  requestId: string;
 }
 
+/** Live identity captured at request start; requestId is minted per request. */
+export type CompletionRequestIdentity = Omit<CompletionRequestToken, "requestId">;
+
+export type CompletionAcceptanceDiagnostic =
+  | "truncated"
+  | "invalid-additional-edits"
+  | "additional-edit-unavailable"
+  | "identity-mismatch";
+
 export interface LspCompletionHooks {
-  token?: CompletionRequestToken;
+  /** Live file/session identity; null means "no provable identity". */
+  identity: () => CompletionRequestIdentity | null;
   fetch: (
     position: LspPosition,
     triggerCharacter: string | null,
-    token?: CompletionRequestToken,
+    token: CompletionRequestToken,
   ) => Promise<LspCompletionResult | null>;
-  resolve?: (raw: unknown, token?: CompletionRequestToken) => Promise<LspCompletionItem | null>;
+  resolve?: (raw: unknown, token: CompletionRequestToken) => Promise<LspCompletionItem | null>;
   triggerCharacters: () => string[];
+  getDocumentRevision: () => number;
+  /** Observable acceptance diagnostics for status/QA surfaces. */
+  reportDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
+}
+
+/**
+ * Test-fixture source contract: no identity proof, no session generation.
+ * Production code must use `createLspCompletionSource`; tests that exercise
+ * mapping logic use this entry so optionality never leaks into production.
+ */
+export interface FixtureCompletionHooks {
+  fetch: (position: LspPosition, triggerCharacter: string | null)
+    => Promise<LspCompletionResult | null>;
+  resolve?: (raw: unknown) => Promise<LspCompletionItem | null>;
+  triggerCharacters?: () => string[];
   getDocumentRevision?: () => number;
+  reportDiagnostic?: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
+}
+
+let completionRequestIdCounter = 0;
+
+function sameCompletionIdentity(
+  a: CompletionRequestIdentity,
+  b: CompletionRequestIdentity,
+): boolean {
+  return a.workspaceId === b.workspaceId
+    && a.fileKey === b.fileKey
+    && a.filePath === b.filePath
+    && a.uri === b.uri
+    && a.languageId === b.languageId
+    && a.documentRevision === b.documentRevision
+    && a.lspSessionGeneration === b.lspSessionGeneration;
 }
 
 /** LSP CompletionItemKind → CodeMirror completion `type` (built-in icons). */
@@ -168,21 +216,21 @@ export function lspSnippetToCmSnippet(text: string): string {
       continue;
     }
     const rest = text.slice(i);
-    const choice = rest.match(/^\$\{\d+\|([^|,}]*)[^|}]*\|\}/);
+    const choice = rest.match(/^\$\{(\d+)\|([^|,}]*)[^|}]*\|\}/);
     if (choice) {
-      out += `\${${choice[1]}}`;
+      out += `\${${choice[1]}:${choice[2]}}`;
       i += choice[0].length - 1;
       continue;
     }
-    const placeholder = rest.match(/^\$\{\d+:([^{}]*)\}/);
+    const placeholder = rest.match(/^\$\{(\d+):([^{}]*)\}/);
     if (placeholder) {
-      out += `\${${placeholder[1]}}`;
+      out += `\${${placeholder[1]}:${placeholder[2]}}`;
       i += placeholder[0].length - 1;
       continue;
     }
-    const tabstop = rest.match(/^\$\{\d+\}/) ?? rest.match(/^\$\d+/);
+    const tabstop = rest.match(/^\$\{(\d+)\}/) ?? rest.match(/^\$(\d+)/);
     if (tabstop) {
-      out += "${}";
+      out += `\${${tabstop[1]}}`;
       i += tabstop[0].length - 1;
       continue;
     }
@@ -192,88 +240,314 @@ export function lspSnippetToCmSnippet(text: string): string {
   return out;
 }
 
-function applyTextEdits(view: EditorView, edits: LspTextEdit[]): void {
-  if (!edits.length) return;
-  view.dispatch({
-    changes: edits.map((edit) => ({
-      from: offsetFromLspPosition(view.state.doc, edit.range.start),
-      to: offsetFromLspPosition(view.state.doc, edit.range.end),
-      insert: edit.newText,
-    })),
-  });
+/**
+ * Flatten an LSP snippet into the literal text to insert plus placeholder
+ * spans (defaults inlined) so snippet + import edits can be committed in a
+ * single transaction instead of the helper-command double dispatch.
+ */
+export function parseLspSnippet(
+  text: string,
+): { text: string; placeholders: Array<{ start: number; end: number }> } {
+  let out = "";
+  const placeholders: Array<{ start: number }> = [];
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === "\\" && i + 1 < text.length) {
+      const next = text[i + 1];
+      if (next === "\\" || next === "$" || next === "}") {
+        out += next;
+        i += 1;
+        continue;
+      }
+      out += char;
+      continue;
+    }
+    if (char !== "$") {
+      out += char;
+      continue;
+    }
+    const rest = text.slice(i);
+    const choice = rest.match(/^\$\{(\d+)\|([^|}]*)[^|}]*\|\}/);
+    const placeholder = rest.match(/^\$\{(\d+):((?:[^{}]|\{\d+:?[^{}]*\})*)\}/);
+    const bare = rest.match(/^\$\{(\d+)\}/) ?? rest.match(/^\$(\d+)/);
+    if (choice || placeholder) {
+      placeholders.push({ start: out.length });
+      out += (choice ? choice[2] : placeholder![2]) ?? "";
+      i += (choice ? choice[0].length : placeholder![0].length) - 1;
+      continue;
+    }
+    if (bare) {
+      placeholders.push({ start: out.length });
+      i += bare[0].length - 1;
+      continue;
+    }
+    out += char;
+  }
+  return {
+    text: out,
+    placeholders: placeholders.map((entry) => ({ start: entry.start, end: entry.start })),
+  };
 }
 
-function applyLspCompletion(
+interface PlannedChange {
+  from: number;
+  to: number;
+  insert: string;
+}
+
+function strictOffsetFromLspPosition(doc: Text, position: LspPosition): number | null {
+  if (
+    !Number.isInteger(position.line)
+    || !Number.isInteger(position.character)
+    || position.line < 0
+    || position.character < 0
+    || position.line >= doc.lines
+  ) {
+    return null;
+  }
+  const line = doc.line(position.line + 1);
+  if (position.character > line.length) return null;
+  return line.from + position.character;
+}
+
+/**
+ * Post-image offset of a point inside the primary insert, shifted by any
+ * additional edits (e.g. an import) that landed before the primary span.
+ * `offsetWithinInsert` may equal `insert.length` for the cursor-at-end case.
+ */
+function postImageAnchor(
+  changes: PlannedChange[],
+  primary: PlannedChange,
+  offsetWithinInsert: number,
+): number {
+  let delta = 0;
+  for (const change of changes) {
+    if (change === primary) continue;
+    if (change.to <= primary.from) {
+      delta += change.insert.length - (change.to - change.from);
+    }
+  }
+  return primary.from + offsetWithinInsert + delta;
+}
+
+interface PlanningChanges {
+  list: PlannedChange[];
+  ok: boolean;
+}
+
+/**
+ * Validate additional edits against the primary span: ranges must be inside
+ * the document, well-ordered and non-overlapping. Overlapping or illegal
+ * ranges never partially apply: the entire completion is rejected and the
+ * invalid-additional-edits diagnostic is reported.
+ */
+function planCompletionChanges(
   view: EditorView,
-  completion: Completion,
+  primary: PlannedChange,
+  additionalEdits: LspTextEdit[],
+): PlanningChanges {
+  const list: PlannedChange[] = [primary];
+  let ok = true;
+  const spans: Array<[number, number]> = [[primary.from, primary.to]];
+  for (const edit of additionalEdits) {
+    const from = strictOffsetFromLspPosition(view.state.doc, edit.range.start);
+    const to = strictOffsetFromLspPosition(view.state.doc, edit.range.end);
+    if (from === null || to === null || from > to) {
+      ok = false;
+      break;
+    }
+    if (spans.some(([start, end]) => (
+      from === to
+        ? (start === end ? from === start : from >= start && from <= end)
+        : (start === end ? start >= from && start <= to : from < end && to > start)
+    ))) {
+      ok = false;
+      break;
+    }
+    spans.push([from, to]);
+    list.push({ from, to, insert: edit.newText });
+  }
+  list.sort((a, b) => a.from - b.from || a.to - b.to);
+  return { list: ok ? list : [primary], ok };
+}
+
+function commitLspCompletion(
+  view: EditorView,
   item: LspCompletionItem,
   from: number,
   to: number,
-  resolve?: LspCompletionHooks["resolve"],
-  token?: CompletionRequestToken,
-  getDocumentRevision?: () => number,
-): void {
-  // Prefer the server's textEdit range when present (e.g. replacing a member
-  // access span wider/narrower than the typed prefix word).
+  token: CompletionRequestToken,
+  isStillCurrent: (token: CompletionRequestToken) => boolean,
+  reportDiagnostic: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
+): boolean {
+  if (!isStillCurrent(token)) {
+    reportDiagnostic?.("identity-mismatch", "accept");
+    return false;
+  }
+  if (
+    !Number.isInteger(from)
+    || !Number.isInteger(to)
+    || from < 0
+    || to < from
+    || to > view.state.doc.length
+  ) {
+    reportDiagnostic?.("invalid-additional-edits", "primary-range");
+    return false;
+  }
+
   let replaceFrom = from;
   let replaceTo = to;
   if (item.textEdit) {
-    replaceFrom = offsetFromLspPosition(view.state.doc, item.textEdit.range.start);
-    replaceTo = offsetFromLspPosition(view.state.doc, item.textEdit.range.end);
-  }
-  const insert = item.textEdit?.newText ?? item.insertText ?? item.label;
-  const additionalEdits = item.additionalTextEdits ?? [];
-
-  if (item.insertTextFormat === 2) {
-    snippet(lspSnippetToCmSnippet(insert))(view, completion, replaceFrom, replaceTo);
-    if (additionalEdits.length) {
-      applyTextEdits(view, additionalEdits);
+    const strictFrom = strictOffsetFromLspPosition(view.state.doc, item.textEdit.range.start);
+    const strictTo = strictOffsetFromLspPosition(view.state.doc, item.textEdit.range.end);
+    if (strictFrom === null || strictTo === null || strictFrom > strictTo) {
+      reportDiagnostic?.("invalid-additional-edits", "primary-range");
+      return false;
     }
-  } else {
-    // Single atomic transaction dispatch combining primary replacement and all additional edits
-    const primaryChange = { from: replaceFrom, to: replaceTo, insert };
-    const additionalChanges = additionalEdits.map((edit) => ({
-      from: offsetFromLspPosition(view.state.doc, edit.range.start),
-      to: offsetFromLspPosition(view.state.doc, edit.range.end),
-      insert: edit.newText,
-    }));
-    view.dispatch({
-      changes: [primaryChange, ...additionalChanges],
-      selection: { anchor: replaceFrom + insert.length },
-    });
+    replaceFrom = strictFrom;
+    replaceTo = strictTo;
   }
 
-  // If resolve is needed for additionalTextEdits (e.g. typescript auto-imports computed lazily)
-  if (!additionalEdits.length && resolve) {
-    const docAtAccept = view.state.doc.toString();
-    const revAtAccept = getDocumentRevision?.();
-    void (token ? resolve(item.raw, token) : resolve(item.raw))
-      .then((resolved) => {
-        if (!resolved?.additionalTextEdits?.length) return;
-        // Verify document has not changed since accept
-        if (getDocumentRevision && revAtAccept !== undefined && getDocumentRevision() !== revAtAccept) {
-          return;
-        }
-        if (view.state.doc.toString() !== docAtAccept && !getDocumentRevision) {
-          return;
-        }
-        applyTextEdits(view, resolved.additionalTextEdits);
-      })
-      .catch(() => {});
+  const rawInsert = item.textEdit?.newText ?? item.insertText ?? item.label;
+  const additionalEdits = item.additionalTextEdits ?? [];
+  const isSnippet = item.insertTextFormat === 2;
+  if (isSnippet && additionalEdits.length === 0) {
+    snippet(lspSnippetToCmSnippet(rawInsert))(view, null, replaceFrom, replaceTo);
+    return true;
   }
+
+  const parsed = isSnippet ? parseLspSnippet(rawInsert) : null;
+  const insert = parsed ? parsed.text : rawInsert;
+  const planned = planCompletionChanges(
+    view,
+    { from: replaceFrom, to: replaceTo, insert },
+    additionalEdits,
+  );
+  if (!planned.ok) {
+    reportDiagnostic?.("invalid-additional-edits");
+    return false;
+  }
+
+  const primaryChange = planned.list.find((change) => (
+    change.insert === insert && change.from === replaceFrom && change.to === replaceTo
+  )) ?? planned.list[0];
+  const firstPlaceholderOffset = parsed?.placeholders[0]?.start;
+  const anchor = parsed && parsed.placeholders.length > 0
+    ? postImageAnchor(planned.list, primaryChange, firstPlaceholderOffset!)
+    : postImageAnchor(planned.list, primaryChange, insert.length);
+
+  view.dispatch({
+    changes: planned.list,
+    selection: { anchor },
+    userEvent: "input.complete",
+  });
+  return true;
+}
+
+const RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS = 3000;
+
+type CompletionItemResolver = () => Promise<LspCompletionItem | null>;
+
+function applyLspCompletion(
+  view: EditorView,
+  item: LspCompletionItem,
+  from: number,
+  to: number,
+  resolve: CompletionItemResolver | undefined,
+  token: CompletionRequestToken,
+  isStillCurrent: (token: CompletionRequestToken) => boolean,
+  getDocumentRevision: (() => number) | undefined,
+  reportDiagnostic: ((kind: CompletionAcceptanceDiagnostic, detail?: string) => void) | undefined,
+): void {
+  if (item.additionalTextEdits?.length || !resolve) {
+    commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+    return;
+  }
+
+  const revisionAtAccept = getDocumentRevision?.();
+  const docAtAccept = view.state.doc;
+  let timeoutId: number | null = null;
+  const timeout = new Promise<{ kind: "timeout" }>((resolveTimeout) => {
+    timeoutId = window.setTimeout(
+      () => resolveTimeout({ kind: "timeout" }),
+      RESOLVE_ADDITIONAL_EDIT_TIMEOUT_MS,
+    );
+  });
+  void Promise.race([
+    resolve().then((resolved) => ({ kind: "resolved" as const, resolved })),
+    timeout,
+  ])
+    .then((outcome) => {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      if (!isStillCurrent(token)) {
+        reportDiagnostic?.("identity-mismatch", "resolve");
+        return;
+      }
+      if (
+        view.state.doc !== docAtAccept
+        || (getDocumentRevision && revisionAtAccept !== undefined && getDocumentRevision() !== revisionAtAccept)
+      ) {
+        reportDiagnostic?.("additional-edit-unavailable", "revision-changed");
+        return;
+      }
+      if (outcome.kind === "timeout") {
+        reportDiagnostic?.("additional-edit-unavailable", "resolve-timeout");
+        commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+        return;
+      }
+      const resolved = outcome.resolved;
+      if (!resolved) {
+        reportDiagnostic?.("additional-edit-unavailable", "resolve-empty");
+        commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+        return;
+      }
+      commitLspCompletion(
+        view,
+        {
+          ...item,
+          ...resolved,
+          additionalTextEdits: resolved.additionalTextEdits ?? item.additionalTextEdits,
+        },
+        from,
+        to,
+        token,
+        isStillCurrent,
+        reportDiagnostic,
+      );
+    })
+    .catch(() => {
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
+      if (!isStillCurrent(token) || view.state.doc !== docAtAccept) {
+        reportDiagnostic?.("identity-mismatch", "resolve");
+        return;
+      }
+      reportDiagnostic?.("additional-edit-unavailable", "resolve-failed");
+      commitLspCompletion(view, item, from, to, token, isStillCurrent, reportDiagnostic);
+    });
 }
 
 async function completionInfo(
   item: LspCompletionItem,
-  resolve?: LspCompletionHooks["resolve"],
+  resolve: CompletionItemResolver | undefined,
+  token: CompletionRequestToken,
+  isStillCurrent: (token: CompletionRequestToken) => boolean,
 ): Promise<Node | null> {
   let documentation = item.documentation;
   let detail = item.detail;
   if (!documentation && resolve) {
     try {
-      const resolved = await resolve(item.raw);
-      documentation = resolved?.documentation ?? null;
-      detail = detail ?? resolved?.detail ?? null;
+      // Resolve may only run while the request identity still matches the
+      // live buffer; stale popup docs from a previous file/session are
+      // dropped instead of rendered.
+      if (!isStillCurrent(token)) {
+        if (!detail) return null;
+        documentation = null;
+      } else {
+        const resolved = await resolve();
+        if (!isStillCurrent(token)) return null;
+        documentation = resolved?.documentation ?? null;
+        detail = detail ?? resolved?.detail ?? null;
+      }
     } catch {
       // Keep whatever we already have.
     }
@@ -297,6 +571,15 @@ async function completionInfo(
 }
 
 export function createLspCompletionSource(hooks: LspCompletionHooks): CompletionSource {
+  const isStillCurrent = (token: CompletionRequestToken): boolean => {
+    const identity = hooks.identity();
+    if (!identity) return false;
+    if (!sameCompletionIdentity(identity, token)) return false;
+    const revision = hooks.getDocumentRevision?.();
+    if (revision !== undefined && revision !== token.documentRevision) return false;
+    return true;
+  };
+
   return async (context: CompletionContext): Promise<CompletionResult | null> => {
     // Include `$` and `@` so Java/Kotlin/JS identifiers and decorators continue
     // the same completion session instead of closing after one character.
@@ -318,6 +601,16 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     if (!context.explicit && !triggerOnly && !afterTrigger && isInsideStringOrComment(context.state, context.pos)) {
       return null;
     }
+
+    // Identity is captured at request start; a request without provable
+    // identity is typed unavailable and falls back to buffer words.
+    const identityAtStart = hooks.identity();
+    if (!identityAtStart) return completeAnyWord(context);
+    completionRequestIdCounter += 1;
+    const token: CompletionRequestToken = {
+      ...identityAtStart,
+      requestId: `completion-${completionRequestIdCounter}`,
+    };
 
     // LSP responses are tied to a document version. Do not spend renderer time
     // mapping a response that became stale while the user kept typing.
@@ -343,25 +636,29 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
         : null;
     let result: LspCompletionResult | null = null;
     try {
-      result = hooks.token
-        ? await hooks.fetch(
-            lspPositionFromOffset(context.state.doc, context.pos),
-            triggerCharacter,
-            hooks.token,
-          )
-        : await hooks.fetch(
-            lspPositionFromOffset(context.state.doc, context.pos),
-            triggerCharacter,
-          );
+      result = await hooks.fetch(
+        lspPositionFromOffset(context.state.doc, context.pos),
+        triggerCharacter,
+        token,
+      );
     } catch {
       result = null;
     }
     if (context.aborted) return null;
-    // No language service / inactive LSP: fall back to buffer-word completion.
-    if (!result || (!result.status.active && result.items.length === 0)) {
+    // Validate the request identity again after the await: file switch,
+    // document revision change or session restart invalidates the response.
+    if (!isStillCurrent(token)) return completeAnyWord(context);
+    // Inactive/unavailable provider is unavailable regardless of item count:
+    // stale non-empty items from a stopped/restarted session must never enter
+    // the popup (§8.16.2 containment).
+    if (!result || !result.status.active) {
       return completeAnyWord(context);
     }
     if (result.items.length === 0) return null;
+
+    if (result.truncated) {
+      hooks.reportDiagnostic?.("truncated", `${result.items.length}+`);
+    }
 
     const typed = word ? word.text : "";
     const rawItems = result.items;
@@ -378,26 +675,39 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       const label = filterText ?? item.label;
       const boost = boostFromTypedPrefix(typed, label, item.sortText);
       const displayLabel = filterText && filterText !== item.label ? item.label : undefined;
+      const truncatedDetail = result.truncated && i === 0
+        ? `${item.detail ?? ""}${item.detail ? " · " : ""}list truncated — keep typing to refine`.trim()
+        : item.detail ?? undefined;
+      let resolvedItemPromise: Promise<LspCompletionItem | null> | null = null;
+      const resolveItem: CompletionItemResolver | undefined = hooks.resolve
+        ? () => {
+            if (!resolvedItemPromise) {
+              resolvedItemPromise = hooks.resolve!(item.raw, token);
+            }
+            return resolvedItemPromise;
+          }
+        : undefined;
       mapped.push({
         label,
         displayLabel,
         sortText: item.sortText ?? undefined,
         boost,
         type: completionKindToType(item.kind),
-        detail: item.detail ?? undefined,
-        info: item.documentation || hooks.resolve
-          ? () => completionInfo(item, hooks.resolve)
+        detail: truncatedDetail,
+        info: item.documentation || resolveItem
+          ? () => completionInfo(item, resolveItem, token, isStillCurrent)
           : undefined,
-        apply: (view, completion, from, to) =>
+        apply: (view, _completion, from, to) =>
           applyLspCompletion(
             view,
-            completion,
             item,
             from,
             to,
-            hooks.resolve,
-            hooks.token,
+            resolveItem,
+            token,
+            isStillCurrent,
             hooks.getDocumentRevision,
+            hooks.reportDiagnostic,
           ),
       });
       mappedItems.push(item);
@@ -430,4 +740,35 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       validFor: result.isIncomplete ? undefined : /^[\w$@]*$/,
     };
   };
+}
+
+/**
+ * Fixture-only source (unit tests, perf benches). Wraps the legacy
+ * no-identity hooks with a synthetic identity so mapping logic can be
+ * exercised without a production host. Production code must never import
+ * this helper.
+ */
+export function createFixtureCompletionSource(hooks: FixtureCompletionHooks): CompletionSource {
+  const identity: CompletionRequestIdentity = {
+    workspaceId: "fixture-workspace",
+    fileKey: "fixture-file",
+    filePath: "/fixture/file.ts",
+    uri: "file:///fixture/file.ts",
+    languageId: "fixture",
+    documentRevision: 0,
+    lspSessionGeneration: 0,
+  };
+  return createLspCompletionSource({
+    identity: () => ({
+      ...identity,
+      documentRevision: hooks.getDocumentRevision?.() ?? identity.documentRevision,
+    }),
+    fetch: (position, triggerCharacter) => hooks.fetch(position, triggerCharacter),
+    resolve: hooks.resolve
+      ? (raw) => hooks.resolve!(raw)
+      : undefined,
+    triggerCharacters: () => hooks.triggerCharacters?.() ?? [],
+    getDocumentRevision: hooks.getDocumentRevision ?? (() => identity.documentRevision),
+    reportDiagnostic: hooks.reportDiagnostic ?? (() => {}),
+  });
 }

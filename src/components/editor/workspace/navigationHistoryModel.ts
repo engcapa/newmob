@@ -393,14 +393,70 @@ export interface LocationIdentity {
   character: number;
 }
 
-export function canonicalizeWorkspacePath(filePath: string, _platform: string = "linux"): string {
-  return canonicalizePath(filePath);
+export type WorkspacePathPlatform = "win32" | "darwin" | "linux";
+
+/**
+ * Platform-aware workspace path canonicalization (§8.16.5).
+ * - win32: backslash → forward slash, `\??\`/`\?\` prefixes stripped,
+ *   drive letter folded to uppercase, UNC share roots preserved, and the
+ *   whole path is case-insensitive (comparison key lowercased).
+ * - darwin/macOS: case-insensitive filesystem (default APFS), separator kept.
+ * - linux: case-sensitive, separator kept.
+ * The returned string is a canonical *display* form; use
+ * `workspacePathComparisonKey` for equality checks.
+ */
+export function canonicalizeWorkspacePath(
+  filePath: string,
+  platform: WorkspacePathPlatform | string = "linux",
+): string {
+  let path = filePath;
+  if (platform === "win32") {
+    // Strip the Windows extended-length / NT prefixes.
+    path = path.replace(/^\\\\\?\\UNC\\/, "\\\\");
+    path = path.replace(/^\\\\\?\\/, "");
+  }
+  path = path.replace(/\\/g, "/");
+  if (platform === "win32") {
+    const driveSlash = path.match(/^\/([a-z])\/(.*)$/i);
+    if (driveSlash) {
+      path = `${driveSlash[1].toUpperCase()}:/${driveSlash[2]}`;
+    }
+    const drive = path.match(/^([a-z]):\/(.*)$/i);
+    if (drive) {
+      path = `${drive[1].toUpperCase()}:/${drive[2]}`;
+    }
+  }
+  return path;
+}
+
+/** Case-folding comparison key for path equality on the given platform. */
+export function workspacePathComparisonKey(
+  filePath: string,
+  platform: WorkspacePathPlatform | string = "linux",
+): string {
+  const canonical = canonicalizeWorkspacePath(filePath, platform);
+  return platform === "win32" || platform === "darwin" ? canonical.toLowerCase() : canonical;
+}
+
+/**
+ * Optional bridge into a Back/Forward navigation stack (§8.16.5): the facade
+ * is the single entry that removes/relocates locations across Recent
+ * Locations AND the Back/Forward history so Delete cannot split the two.
+ */
+export interface BackForwardHistoryBridge {
+  /** Remove Back/Forward entries matching a file identity/path at a line. */
+  removeLocation(identity: LocationIdentity): void;
+  /** Remap Back/Forward entries after a file rename. */
+  relocateFile(fromPath: string, toPath: string): void;
+  /** Remove Back/Forward entries under a removed directory. */
+  removeDirectorySubtree(dirPath: string): void;
 }
 
 export class NavigationHistoryFacade {
   constructor(
     private readonly locationController: WorkspaceLocationController,
     private readonly tracker?: NavigationHistoryTracker,
+    private readonly backForward?: BackForwardHistoryBridge,
   ) {}
 
   remove(identity: LocationIdentity): void {
@@ -425,16 +481,19 @@ export class NavigationHistoryFacade {
         }
       }
     }
+    this.backForward?.removeLocation(identity);
   }
 
   relocate(fromPath: string, toPath: string): void {
     this.locationController.relocateFile(fromPath, toPath);
     this.tracker?.relocateFile(fromPath, toPath);
+    this.backForward?.relocateFile(fromPath, toPath);
   }
 
   removeSubtree(dirPath: string): void {
     this.locationController.removeDirectorySubtree(dirPath);
     this.tracker?.removeDirectorySubtree(dirPath);
+    this.backForward?.removeDirectorySubtree(dirPath);
   }
 }
 

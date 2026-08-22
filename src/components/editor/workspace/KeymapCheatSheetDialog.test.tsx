@@ -89,6 +89,50 @@ describe("KeymapCheatSheetDialog", () => {
     expect(screen.queryByText("Toggle Case")).toBeNull();
   });
 
+  it("treats an explicitly empty instance snapshot as authoritative", () => {
+    render(
+      <KeymapCheatSheetDialog
+        open
+        commands={sampleCommands}
+        actionSnapshots={[]}
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/0 shortcut keybindings configured/)).toBeInTheDocument();
+    expect(screen.queryByText("Toggle Case")).not.toBeInTheDocument();
+  });
+
+  it("shows disabled snapshot actions without exposing Run", () => {
+    render(
+      <KeymapCheatSheetDialog
+        open
+        commands={sampleCommands}
+        actionSnapshots={[{
+          id: "workspace.toggleCase",
+          title: "Toggle Case",
+          category: "Edit",
+          keybinding: "Ctrl+Shift+U",
+          keybindings: [],
+          state: {
+            availability: "disabled",
+            disabledReason: "providerOffline",
+            source: "provider",
+            scope: "workspace",
+            freshness: "current",
+            completeness: "unavailable",
+          },
+          evaluation: {} as never,
+        }]}
+        onClose={vi.fn()}
+        onExecuteCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Toggle Case")).toBeInTheDocument();
+    expect(screen.queryByTestId("keymap-run-workspace.toggleCase")).not.toBeInTheDocument();
+  });
+
   it("executes command when clicking run button", () => {
     const onClose = vi.fn();
     const onExecuteCommand = vi.fn();

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { SearchEverywhereMode } from "../components/editor/workspace/SearchEverywhere";
-import type { QuickDocContent } from "../components/editor/workspace/QuickDocPopup";
+import type { QuickDocContent } from "../components/editor/workspace/referenceDocumentation";
 import type { LocationPeekState } from "../components/editor/workspace/LocationPeek";
 import type { LspDocumentSymbol } from "../lib/editor/lsp";
 import type { RecentFileEntry } from "../components/editor/workspace/RecentFilesPopup";
@@ -17,8 +17,11 @@ import {
   atomicSetLeafActiveTab,
   atomicSplitLeaf,
   commitLayoutMutation,
+  createSingleLeafLayout,
+  setLeafTabs,
   remapLayoutTreeKeys,
   updateSplitNodeRatios,
+  validateLayoutTree,
   type LayoutNode,
 } from "../components/editor/workspace/recursiveLayoutTree";
 import { readCodeWorkspaceTreeViewMode } from "../components/editor/workspace/codeWorkspaceModel";
@@ -99,8 +102,8 @@ export interface CodeWorkspaceInstanceUi {
   editorGroups: Record<EditorGroupId, CodeWorkspaceEditorGroupState>;
   activeEditorGroupId: EditorGroupId;
   splitOrientation: EditorSplitOrientation | null;
-  /** Recursive layout tree v2 schema (A2) */
-  layoutTreeV2: LayoutNode | null;
+  /** Recursive layout tree v2 schema (A2); every instance owns a valid tree. */
+  layoutTreeV2: LayoutNode;
   markdownModes: Record<string, "edit" | "preview" | "split">;
   /** Project tree chrome */
   treeFilter: string;
@@ -147,7 +150,7 @@ export function createDefaultCodeWorkspaceUi(): CodeWorkspaceInstanceUi {
     },
     activeEditorGroupId: "primary",
     splitOrientation: null,
-    layoutTreeV2: null,
+    layoutTreeV2: createSingleLeafLayout("primary", [], null),
     markdownModes: {},
     treeFilter: "",
     treeViewMode: readCodeWorkspaceTreeViewMode(),
@@ -247,7 +250,7 @@ interface CodeWorkspaceStoreState {
   ) => void;
   setActiveEditorGroup: (instanceId: string, groupId: EditorGroupId) => void;
   setSplitOrientation: (instanceId: string, orientation: EditorSplitOrientation | null) => void;
-  setLayoutTreeV2: (instanceId: string, layoutTree: LayoutNode | null) => void;
+  setLayoutTreeV2: (instanceId: string, layoutTree: LayoutNode) => void;
   setLayoutNodeRatios: (instanceId: string, splitId: string, ratios: number[]) => void;
   splitLayoutLeaf: (
     instanceId: string,
@@ -363,6 +366,9 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
       const nextGroup = resolveUpdater(current.editorGroups[groupId], updater);
       const active = current.activeEditorGroupId === groupId;
+      // §8.16.4 N6.6: mirror group writes into the recursive tree so the
+      // leaf stays the structural truth (same reference when unchanged).
+      const nextTree = setLeafTabs(current.layoutTreeV2, groupId, nextGroup.openOrder, nextGroup.activeKey);
       return {
         byInstanceId: {
           ...state.byInstanceId,
@@ -371,6 +377,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
             openOrder: active ? nextGroup.openOrder : current.openOrder,
             activeKey: active ? nextGroup.activeKey : current.activeKey,
             editorGroups: { ...current.editorGroups, [groupId]: nextGroup },
+            layoutTreeV2: nextTree,
           },
         },
       };
@@ -401,19 +408,27 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
   },
 
   setLayoutTreeV2: (instanceId, layoutTree) => {
-    get().patchInstance(instanceId, { layoutTreeV2: layoutTree });
+    get().ensureInstance(instanceId);
+    if (!validateLayoutTree(layoutTree).valid) return;
+    set((state) => {
+      const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
+      if (current.layoutTreeV2 === layoutTree) return state;
+      return {
+        byInstanceId: {
+          ...state.byInstanceId,
+          [instanceId]: { ...current, layoutTreeV2: layoutTree },
+        },
+      };
+    });
   },
+
+
 
   splitLayoutLeaf: (instanceId, leafId, orientation, newFileKey) => {
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      const currentTree: LayoutNode = current.layoutTreeV2 ?? {
-        type: "leaf",
-        id: leafId,
-        openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
-        activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
-      };
+      const currentTree = current.layoutTreeV2;
       const rawResult = atomicSplitLeaf(
         currentTree,
         current.editorGroups,
@@ -445,7 +460,6 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      if (!current.layoutTreeV2) return state;
       const rawResult = atomicCloseLeaf(
         current.layoutTreeV2,
         current.editorGroups,
@@ -465,6 +479,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
             layoutTreeV2: result.tree,
             editorGroups: result.groups,
             activeEditorGroupId: result.activeGroupId,
+            splitOrientation: result.tree.type === "split" ? result.tree.orientation : null,
             openOrder: activeGroup?.openOrder ?? current.openOrder,
             activeKey: activeGroup?.activeKey ?? null,
           },
@@ -477,7 +492,6 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      if (!current.layoutTreeV2) return state;
       const rawResult = atomicMoveTab(
         current.layoutTreeV2,
         current.editorGroups,
@@ -511,12 +525,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      const currentTree = current.layoutTreeV2 ?? {
-        type: "leaf",
-        id: leafId,
-        openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
-        activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
-      };
+      const currentTree = current.layoutTreeV2;
       const rawResult = atomicSetLeafActiveTab(
         currentTree,
         current.editorGroups,
@@ -549,12 +558,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      const currentTree = current.layoutTreeV2 ?? {
-        type: "leaf",
-        id: leafId,
-        openFileKeys: current.editorGroups[leafId]?.openOrder ?? current.openOrder,
-        activeKey: current.editorGroups[leafId]?.activeKey ?? current.activeKey,
-      };
+      const currentTree = current.layoutTreeV2;
       const rawResult = atomicCloseTabInLeaf(
         currentTree,
         current.editorGroups,
@@ -586,8 +590,8 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
     get().ensureInstance(instanceId);
     set((state) => {
       const current = state.byInstanceId[instanceId] ?? createDefaultCodeWorkspaceUi();
-      if (!current.layoutTreeV2) return state;
       const nextTree = updateSplitNodeRatios(current.layoutTreeV2, splitId, ratios);
+      if (nextTree === current.layoutTreeV2) return state;
       const validation = commitLayoutMutation(
         current.layoutTreeV2,
         current.editorGroups,
@@ -650,9 +654,7 @@ export const useCodeWorkspaceStore = create<CodeWorkspaceStoreState>((set, get) 
         editorGroups.secondary = createEditorGroup("secondary");
       }
       const activeGroup = editorGroups[current.activeEditorGroupId] ?? editorGroups.primary;
-      const layoutTreeV2 = current.layoutTreeV2
-        ? remapLayoutTreeKeys(current.layoutTreeV2, replacement.keyChanges, validKeys, editorGroups)
-        : current.layoutTreeV2;
+      const layoutTreeV2 = remapLayoutTreeKeys(current.layoutTreeV2, replacement.keyChanges, validKeys, editorGroups);
       return {
         byInstanceId: {
           ...state.byInstanceId,

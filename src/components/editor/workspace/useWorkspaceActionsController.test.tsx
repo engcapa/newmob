@@ -71,4 +71,80 @@ describe("useWorkspaceActionsController", () => {
     expect(event.preventDefault).toHaveBeenCalled();
     expect(runMock).toHaveBeenCalled();
   });
+
+  it("disposes the host on real unmount and never executes afterwards", async () => {
+    const runMock = vi.fn();
+    const commands: WorkspaceCommand[] = [
+      { id: "workspace.disposeProbe", title: "Probe", category: "Edit", run: runMock },
+    ];
+    const { result, unmount } = renderHook(() =>
+      useWorkspaceActionsController({ commands, activeFocus: "editor" }),
+    );
+
+    expect(result.current.host.isDisposed()).toBe(false);
+    unmount();
+    // After real unmount the captured host must answer typed failed and
+    // must not re-run commands.
+    const staleResult = await result.current.host.execute("workspace.disposeProbe");
+    expect(staleResult.kind).toBe("failed");
+    expect(runMock).not.toHaveBeenCalled();
+  });
+
+  it("self-heals after StrictMode transient dispose by minting a fresh host", async () => {
+    const runMock = vi.fn();
+    const commands: WorkspaceCommand[] = [
+      { id: "workspace.healProbe", title: "Heal", category: "Edit", run: runMock },
+    ];
+    const { result } = renderHook(() =>
+      useWorkspaceActionsController({ commands, activeFocus: "editor" }),
+    );
+
+    // Simulate StrictMode: effect cleanup disposes, then accessors self-heal.
+    act(() => {
+      result.current.host.dispose();
+    });
+
+    // The first accessor call after dispose mints a fresh host...
+    let executed = false;
+    act(() => {
+      executed = result.current.executeCommand("workspace.healProbe");
+    });
+    // ...whose commands effect registers on the follow-up render.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    if (!executed) {
+      act(() => {
+        executed = result.current.executeCommand("workspace.healProbe");
+      });
+    }
+    expect(executed).toBe(true);
+    expect(result.current.host.isDisposed()).toBe(false);
+    expect(runMock).toHaveBeenCalled();
+    expect(result.current.snapshot.some((entry) => entry.id === "workspace.healProbe")).toBe(true);
+  });
+
+  it("exposes an instance snapshot with evaluated state per action", () => {
+    const commands: WorkspaceCommand[] = [
+      {
+        id: "workspace.snapGated",
+        title: "Gated",
+        category: "Edit",
+        keybinding: "Ctrl+G",
+        when: (ctx) => ctx.focus === "editor",
+        run: () => {},
+      },
+    ];
+    const { result, rerender } = renderHook(
+      ({ focus }: { focus: "editor" | "tree" }) =>
+        useWorkspaceActionsController({ commands, activeFocus: focus }),
+      { initialProps: { focus: "editor" as "editor" | "tree" } },
+    );
+
+    expect(result.current.snapshot).toHaveLength(1);
+    expect(result.current.snapshot[0].state.availability).toBe("available");
+
+    rerender({ focus: "tree" });
+    expect(result.current.snapshot[0].state.availability).toBe("disabled");
+  });
 });

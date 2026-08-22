@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { EditorState } from "@codemirror/state";
 import { CompletionContext } from "@codemirror/autocomplete";
-import { createLspCompletionSource, MAX_COMPLETION_OPTIONS } from "./lspCompletion";
+import { createFixtureCompletionSource, MAX_COMPLETION_OPTIONS } from "./lspCompletion";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import type { LspCompletionResult, LspDiagnostic, LspDocumentStatus } from "../../../lib/editor/lsp";
 
@@ -45,7 +45,7 @@ function testCompletionResult(itemsCount = 500): LspCompletionResult {
 describe("Editor typing and completion performance verification", () => {
   it("debounces rapid continuous typing burst to avoid spamming LSP fetches", async () => {
     const fetch = vi.fn(async () => testCompletionResult(100));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
 
     // Simulate user typing 'String' rapidly (6 keystrokes, ~30ms apart)
     const typedWords = ["S", "St", "Str", "Stri", "Strin", "String"];
@@ -80,7 +80,7 @@ describe("Editor typing and completion performance verification", () => {
 
   it("processes large completion item lists (1000+ items) efficiently without main-thread stall", async () => {
     const fetch = vi.fn(async () => testCompletionResult(1500));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
 
     const state = EditorState.create({ doc: "obj.m" });
     const ctx = new CompletionContext(state, 5, false);
@@ -108,7 +108,7 @@ describe("Editor typing and completion performance verification", () => {
         },
       });
     }
-    const source = createLspCompletionSource({
+    const source = createFixtureCompletionSource({
       fetch: vi.fn(async () => response),
       triggerCharacters: () => [".", ":"],
     });
@@ -134,6 +134,8 @@ describe("Editor typing and completion performance verification", () => {
       onHover: vi.fn(async () => null),
       onDefinition: vi.fn(async () => false),
       onReferences: vi.fn(async () => {}),
+      getCompletionIdentity: vi.fn(() => null),
+      onCompletionDiagnostic: vi.fn(),
     };
 
     const { rerender } = render(<CodeMirrorHost {...props} />);
@@ -173,6 +175,8 @@ describe("Editor typing and completion performance verification", () => {
       onHover: vi.fn(async () => null),
       onDefinition: vi.fn(async () => false),
       onReferences: vi.fn(async () => {}),
+      getCompletionIdentity: vi.fn(() => null),
+      onCompletionDiagnostic: vi.fn(),
       onLightbulb,
     };
 

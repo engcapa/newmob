@@ -40,7 +40,7 @@ import {
   type TreeSelection,
   type TreeViewMode,
 } from "./codeWorkspaceModel";
-import { navigationHistoryTracker, type WorkspaceLocationController } from "./navigationHistoryModel";
+import type { WorkspaceLocationController } from "./navigationHistoryModel";
 
 type Updater<T> = T | ((current: T) => T);
 type UpdaterSetter<T> = (updater: Updater<T>) => void;
@@ -439,17 +439,11 @@ export function useWorkspaceFileActions({
       const oldAbs = absoluteWorkspacePath(root, rootTarget.path);
       const newAbs = absoluteWorkspacePath(root, nextPath);
       if (isDirectory) {
-        if (locationController) {
-          locationController.relocateDirectory(oldAbs, newAbs);
-        } else {
-          navigationHistoryTracker.relocateDirectory(oldAbs, newAbs, workspaceId);
-        }
+        // §8.16.5: the workspace-scoped controller is the only owner; the
+        // deprecated global tracker is no longer a fallback.
+        locationController?.relocateDirectory(oldAbs, newAbs);
       } else {
-        if (locationController) {
-          locationController.relocateFile(oldAbs, newAbs);
-        } else {
-          navigationHistoryTracker.relocateFile(oldAbs, newAbs, workspaceId);
-        }
+        locationController?.relocateFile(oldAbs, newAbs);
       }
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));
@@ -510,11 +504,7 @@ export function useWorkspaceFileActions({
       });
       if (!confirmed) return;
       const key = fileKey(ref);
-      if (locationController) {
-        locationController.removeFileLocations(ref.path);
-      } else {
-        navigationHistoryTracker.removeFileLocations(ref.path, workspaceId);
-      }
+      locationController?.removeFileLocations(ref.path);
       setLooseFiles((current) => current.filter((item) => item.id !== ref.id));
       setOpenFiles((current) => {
         const next = { ...current };
@@ -567,17 +557,9 @@ export function useWorkspaceFileActions({
         annotationId: null,
       });
       if (isDirectory) {
-        if (locationController) {
-          locationController.removeDirectorySubtree(deletedAbs);
-        } else {
-          navigationHistoryTracker.removeDirectorySubtree(deletedAbs, workspaceId);
-        }
+        locationController?.removeDirectorySubtree(deletedAbs);
       } else {
-        if (locationController) {
-          locationController.removeFileLocations(deletedAbs);
-        } else {
-          navigationHistoryTracker.removeFileLocations(deletedAbs, workspaceId);
-        }
+        locationController?.removeFileLocations(deletedAbs);
       }
       const notificationError = await notifyWorkspaceFileOperationCompleted(operation);
       await loadDir(root.id, parentPath(rootTarget.path));

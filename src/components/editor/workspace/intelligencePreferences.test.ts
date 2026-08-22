@@ -13,12 +13,32 @@ describe("workspace intelligence preferences", () => {
     expect(inlayHintsEnabledForLanguage(defaults, "typescript")).toBe(false);
     expect(defaults.formatOnSave).toBe(false);
     expect(defaults.stickyLinesEnabled).toBe(true);
+    expect(defaults.parameterInfo).toEqual({
+      autoPopup: true,
+      delayMs: 0,
+      showFullSignatures: false,
+    });
+    expect(defaults.quickDoc).toEqual({
+      showOnHover: true,
+      hoverDelayMs: 300,
+      defaultTarget: "popup",
+    });
     writeWorkspaceIntelligencePreferences("ws", {
       inlayHintsEnabled: true,
       inlayHintLanguages: { typescript: false, rust: true },
       inlineBlameEnabled: true,
       formatOnSave: true,
       stickyLinesEnabled: false,
+      parameterInfo: {
+        autoPopup: false,
+        delayMs: 275,
+        showFullSignatures: true,
+      },
+      quickDoc: {
+        showOnHover: false,
+        hoverDelayMs: 725,
+        defaultTarget: "tool-window",
+      },
     });
     const restored = readWorkspaceIntelligencePreferences("ws");
     expect(inlayHintsEnabledForLanguage(restored, "typescript")).toBe(false);
@@ -27,5 +47,35 @@ describe("workspace intelligence preferences", () => {
     expect(restored.inlineBlameEnabled).toBe(true);
     expect(restored.formatOnSave).toBe(true);
     expect(restored.stickyLinesEnabled).toBe(false);
+    expect(restored.parameterInfo).toEqual({
+      autoPopup: false,
+      delayMs: 275,
+      showFullSignatures: true,
+    });
+    expect(restored.quickDoc).toEqual({
+      showOnHover: false,
+      hoverDelayMs: 725,
+      defaultTarget: "tool-window",
+    });
+  });
+
+  it("normalizes legacy, corrupt, and out-of-range values", () => {
+    window.localStorage.setItem("taomni.codeWorkspace.intelligence.v1.legacy", JSON.stringify({
+      stickyLinesEnabled: true,
+      parameterInfo: { autoPopup: "yes", delayMs: -12, showFullSignatures: 1 },
+      quickDoc: { showOnHover: "yes", hoverDelayMs: 99_000, defaultTarget: "side" },
+    }));
+
+    const restored = readWorkspaceIntelligencePreferences("legacy");
+    expect(restored.parameterInfo).toEqual({
+      autoPopup: true,
+      delayMs: 0,
+      showFullSignatures: false,
+    });
+    expect(restored.quickDoc).toEqual({
+      showOnHover: true,
+      hoverDelayMs: 5_000,
+      defaultTarget: "popup",
+    });
   });
 });

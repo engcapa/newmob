@@ -545,6 +545,9 @@ pub struct LspCompletionResult {
     pub status: LspDocumentStatus,
     pub is_incomplete: bool,
     pub items: Vec<LspCompletionItem>,
+    /// True when the server list was locally truncated at the hard cap.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -5989,6 +5992,7 @@ pub async fn lsp_completion(
                 status,
                 is_incomplete: false,
                 items: Vec::new(),
+                truncated: false,
             });
         }
     };
@@ -6015,11 +6019,12 @@ pub async fn lsp_completion(
             custom_server_command.as_ref(),
         )
         .await;
-    let (is_incomplete, items) = parse_completion_response(&result);
+    let (is_incomplete, items, truncated) = parse_completion_response(&result);
     Ok(LspCompletionResult {
         status,
         is_incomplete,
         items,
+        truncated,
     })
 }
 
@@ -9865,7 +9870,7 @@ fn parse_completion_item(value: &Value) -> Option<LspCompletionItem> {
 
 /// Completion responses are either a bare `CompletionItem[]` or a
 /// `CompletionList { isIncomplete, items }`.
-fn parse_completion_response(value: &Value) -> (bool, Vec<LspCompletionItem>) {
+fn parse_completion_response(value: &Value) -> (bool, Vec<LspCompletionItem>, bool) {
     if let Some(items) = value.as_array() {
         let truncated = items.len() > MAX_COMPLETION_ITEMS;
         return (
@@ -9875,14 +9880,16 @@ fn parse_completion_response(value: &Value) -> (bool, Vec<LspCompletionItem>) {
                 .take(MAX_COMPLETION_ITEMS)
                 .filter_map(parse_completion_item)
                 .collect(),
+            truncated,
         );
     }
     if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let truncated = items.len() > MAX_COMPLETION_ITEMS;
         let is_incomplete = value
             .get("isIncomplete")
             .and_then(Value::as_bool)
             .unwrap_or(false)
-            || items.len() > MAX_COMPLETION_ITEMS;
+            || truncated;
         return (
             is_incomplete,
             items
@@ -9890,9 +9897,10 @@ fn parse_completion_response(value: &Value) -> (bool, Vec<LspCompletionItem>) {
                 .take(MAX_COMPLETION_ITEMS)
                 .filter_map(parse_completion_item)
                 .collect(),
+            truncated,
         );
     }
-    (false, Vec::new())
+    (false, Vec::new(), false)
 }
 
 fn parse_signature_parameter(
@@ -12804,7 +12812,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
 
     #[test]
     fn parses_completion_lists_and_bare_arrays() {
-        let (incomplete, items) = parse_completion_response(&json!({
+        let (incomplete, items, truncated_flag) = parse_completion_response(&json!({
             "isIncomplete": true,
             "items": [
                 {
@@ -12831,6 +12839,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         }));
 
         assert!(incomplete);
+        assert!(!truncated_flag);
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(item.label, "openFile");
@@ -12840,11 +12849,11 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert_eq!(item.additional_text_edits.len(), 1);
         assert!(item.raw.get("label").is_some());
 
-        let (incomplete, items) = parse_completion_response(&json!([{ "label": "bare" }]));
+        let (incomplete, items, _) = parse_completion_response(&json!([{ "label": "bare" }]));
         assert!(!incomplete);
         assert_eq!(items[0].label, "bare");
 
-        let (_, empty) = parse_completion_response(&Value::Null);
+        let (_, empty, _) = parse_completion_response(&Value::Null);
         assert!(empty.is_empty());
 
         let oversized = json!({
@@ -12853,8 +12862,9 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
                 .map(|index| json!({ "label": format!("candidate-{index}") }))
                 .collect::<Vec<_>>()
         });
-        let (incomplete, items) = parse_completion_response(&oversized);
+        let (incomplete, items, truncated_flag) = parse_completion_response(&oversized);
         assert!(incomplete, "a locally truncated list must remain queryable");
+        assert!(truncated_flag, "local truncation must be observable");
         assert_eq!(items.len(), MAX_COMPLETION_ITEMS);
         assert_eq!(items.last().unwrap().label, "candidate-199");
     }

@@ -9,6 +9,7 @@ import {
 import { Compartment, EditorState, Prec, type Extension, type Text } from "@codemirror/state";
 import {
   EditorView,
+  closeHoverTooltip,
   crosshairCursor,
   drawSelection,
   highlightActiveLine,
@@ -21,7 +22,17 @@ import {
   tooltips,
   type Tooltip,
 } from "@codemirror/view";
-import type { QuickDocContent } from "./QuickDocPopup";
+import {
+  openExternalDocumentation,
+  referenceHrefFromEventTarget,
+  validateExternalDocUrl,
+  type QuickDocContent,
+} from "./referenceDocumentation";
+import {
+  startWindowResizeSession,
+  type ResizeCorner,
+  type WindowResizeSession,
+} from "./windowResizeSession";
 import {
   defaultKeymap,
   history,
@@ -40,9 +51,17 @@ import {
   expandLiveTemplateAt,
   liveTemplateLanguageForPath,
 } from "./liveTemplates";
-import { bracketMatching, foldGutter, indentOnInput, indentUnit } from "@codemirror/language";
+import {
+  bracketMatching,
+  foldAll,
+  foldGutter,
+  indentOnInput,
+  indentUnit,
+  unfoldAll,
+} from "@codemirror/language";
 import { openSearchPanel, search, searchKeymap } from "@codemirror/search";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
+import { readTextResult, writeText } from "../../../lib/clipboard";
 import { codeViewExtensions } from "../../../lib/codeViewTheme";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type {
@@ -58,7 +77,12 @@ import type {
 } from "../../../lib/editor/lsp";
 import { languageForPath } from "../../git/diffLanguage";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
-import { createLspCompletionSource } from "./lspCompletion";
+import {
+  createLspCompletionSource,
+  type CompletionAcceptanceDiagnostic,
+  type CompletionRequestIdentity,
+  type CompletionRequestToken,
+} from "./lspCompletion";
 import { createDiagnosticChrome } from "./lspDiagnosticChrome";
 import {
   createLspOverlayChrome,
@@ -69,15 +93,34 @@ import { createLspHyperlinkExtension } from "./lspHyperlink";
 import { createGitEditorChrome, type GitLineChange } from "./gitEditorChrome";
 import { createDebugEditorChrome, type DebugBreakpointMarker } from "./debugEditorChrome";
 import { createCoverageEditorChrome } from "./coverageEditorChrome";
+import {
+  editorAppearanceExtension,
+  type EditorAppearanceExtensionProfile,
+} from "./editorAppearanceExtension";
 import type { FileCoverage } from "./coverageModel";
 import type { DebugStepAction } from "./dapDebugModel";
 import type { GitBlameLine } from "../../../lib/git";
 import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import {
+  cloneCaretAbove,
+  cloneCaretBelow,
+  cutEditorSelections,
+  editorClipboardPayload,
+  escapeEditorSelections,
   expandSelectionFromLspRanges,
   expandSyntaxSelection,
+  foldSelection,
+  moveStatementDown,
+  moveStatementUp,
+  occurrenceSessionField,
+  pasteEditorClipboardPayload,
+  plainTextClipboardPayload,
+  regionFoldService,
+  selectAllEditorOccurrences,
+  selectNextEditorOccurrence,
   selectionHistoryField,
   workspaceEditorKeymap,
+  type EditorClipboardPayload,
 } from "./workspaceEditorCommands";
 
 export interface EditorRevealTarget {
@@ -96,6 +139,8 @@ export interface EditorSelectionRange {
 
 interface CodeMirrorHostProps {
   path: string;
+  /** Stable buffer identity used by the workspace editor command owner. */
+  fileKey?: string;
   doc: string;
   visible: boolean;
   diagnostics: LspDiagnostic[];
@@ -125,15 +170,22 @@ interface CodeMirrorHostProps {
   readOnly?: boolean;
   onChange: (doc: string, caret: LspPosition, caretOffset: number) => void;
   onSave: () => void;
-  onHover: (position: LspPosition) => Promise<string | null>;
+  onHover: (position: LspPosition) => Promise<QuickDocContent | null>;
   onPinHoverDoc?: (content: QuickDocContent) => void;
   onDefinition: (position: LspPosition) => Promise<boolean>;
   onReferences: (position: LspPosition) => Promise<void>;
   onComplete?: (
     position: LspPosition,
     triggerCharacter: string | null,
+    token: CompletionRequestToken,
   ) => Promise<LspCompletionResult | null>;
-  onCompleteResolve?: (raw: unknown) => Promise<LspCompletionItem | null>;
+  onCompleteResolve?: (
+    raw: unknown,
+    token: CompletionRequestToken,
+  ) => Promise<LspCompletionItem | null>;
+  /** Live completion request identity (§8.16.2); null = typed unavailable. */
+  getCompletionIdentity: () => CompletionRequestIdentity | null;
+  onCompletionDiagnostic: (kind: CompletionAcceptanceDiagnostic, detail?: string) => void;
   onSignatureHelp?: (
     position: LspPosition,
     triggerCharacter: string | null,
@@ -149,10 +201,25 @@ interface CodeMirrorHostProps {
   onEditBreakpoint?: (line: number) => void;
   /** Editor-area right-click (symbol / buffer menu). */
   onContextMenu?: (info: EditorContextMenuRequest) => void;
+  onCommandPortChange?: (registration: EditorCommandPortRegistration) => void;
   completionTriggers?: string[];
   signatureTriggers?: string[];
   /** Wrap logical lines at the viewport edge (IDEA soft-wrap mode). */
   softWrap?: boolean;
+  /** Workspace-scoped Code Workspace editor appearance. */
+  appearance?: EditorAppearanceExtensionProfile;
+  /** When false, provider documentation is not requested from pointer hover. */
+  showHoverDocumentation?: boolean;
+  /** Pointer settle time before requesting documentation. */
+  hoverDocumentationDelayMs?: number;
+  /** Monotonic explicit request from the workspace ActionHost. */
+  parameterInfoRequestNonce?: number;
+  /** Whether typing a provider signature trigger opens Parameter Info. */
+  parameterInfoAutoPopup?: boolean;
+  /** Delay for typed signature triggers; explicit requests bypass it. */
+  parameterInfoDelayMs?: number;
+  /** Render all provider overloads instead of only the active signature. */
+  parameterInfoShowFullSignatures?: boolean;
   /** Effective code style driving indentUnit, tabSize, and insertSpaces. */
   codeStyle?: EffectiveCodeStyle;
   /** When enabled, a normal mouse drag creates a rectangular selection. */
@@ -171,6 +238,145 @@ export interface EditorContextMenuRequest {
   cut: () => void;
   copy: () => void;
   paste: () => void;
+}
+
+const editorClipboardPayloadByView = new WeakMap<EditorView, EditorClipboardPayload>();
+
+function rememberEditorClipboardPayload(
+  view: EditorView,
+  payload: EditorClipboardPayload,
+): void {
+  editorClipboardPayloadByView.set(view, {
+    ...payload,
+    segments: payload.segments ? [...payload.segments] : undefined,
+  });
+}
+
+function payloadForSystemClipboardText(
+  view: EditorView,
+  text: string,
+): EditorClipboardPayload {
+  const remembered = editorClipboardPayloadByView.get(view);
+  return remembered?.plainText === text
+    ? remembered
+    : plainTextClipboardPayload(text);
+}
+
+function writeEditorSelectionToClipboard(view: EditorView): boolean {
+  const payload = editorClipboardPayload(view.state);
+  if (!payload) return false;
+  void writeText(payload.plainText).then(() => {
+    if (view.dom.isConnected) rememberEditorClipboardPayload(view, payload);
+  }).catch(() => {});
+  return true;
+}
+
+function pasteSystemClipboard(view: EditorView): boolean {
+  if (view.composing || view.state.readOnly) return false;
+  const docAtRequest = view.state.doc;
+  const selectionAtRequest = view.state.selection;
+  void readTextResult().then((result) => {
+    if (
+      !result.ok
+      || !view.dom.isConnected
+      || view.composing
+      || view.state.doc !== docAtRequest
+      || !view.state.selection.eq(selectionAtRequest, true)
+    ) {
+      return;
+    }
+    pasteEditorClipboardPayload(
+      view,
+      payloadForSystemClipboardText(view, result.text),
+    );
+    view.focus();
+  }).catch(() => {});
+  return true;
+}
+
+function cutSystemClipboard(view: EditorView): boolean {
+  if (view.composing || view.state.readOnly) return false;
+  const payload = editorClipboardPayload(view.state);
+  if (!payload) return false;
+  const docAtRequest = view.state.doc;
+  const selectionAtRequest = view.state.selection;
+  void writeText(payload.plainText).then(() => {
+    if (
+      !view.dom.isConnected
+      || view.composing
+      || view.state.doc !== docAtRequest
+      || !view.state.selection.eq(selectionAtRequest, true)
+    ) {
+      return;
+    }
+    rememberEditorClipboardPayload(view, payload);
+    cutEditorSelections(view);
+    view.focus();
+  }).catch(() => {});
+  return true;
+}
+
+export type EditorCommandId =
+  | "cloneCaretAbove"
+  | "cloneCaretBelow"
+  | "collapseCarets"
+  | "copy"
+  | "cut"
+  | "foldAll"
+  | "foldSelection"
+  | "moveStatementDown"
+  | "moveStatementUp"
+  | "paste"
+  | "selectAllOccurrences"
+  | "selectNextOccurrence"
+  | "unfoldAll";
+
+export interface EditorCommandState {
+  composing: boolean;
+  readOnly: boolean;
+  hasSelection: boolean;
+  caretCount: number;
+  occurrenceSessionActive: boolean;
+}
+
+export interface EditorCommandPort {
+  execute: (commandId: EditorCommandId) => boolean;
+  state: () => EditorCommandState;
+}
+
+export interface EditorCommandPortRegistration {
+  fileKey: string;
+  token: object;
+  port: EditorCommandPort | null;
+}
+
+function editorCommandPort(view: EditorView): EditorCommandPort {
+  return {
+    execute(commandId) {
+      switch (commandId) {
+        case "cloneCaretAbove": return cloneCaretAbove(view);
+        case "cloneCaretBelow": return cloneCaretBelow(view);
+        case "collapseCarets": return escapeEditorSelections(view);
+        case "copy": return writeEditorSelectionToClipboard(view);
+        case "cut": return cutSystemClipboard(view);
+        case "foldAll": return foldAll(view) ?? false;
+        case "foldSelection": return foldSelection(view);
+        case "moveStatementDown": return moveStatementDown(view);
+        case "moveStatementUp": return moveStatementUp(view);
+        case "paste": return pasteSystemClipboard(view);
+        case "selectAllOccurrences": return selectAllEditorOccurrences(view);
+        case "selectNextOccurrence": return selectNextEditorOccurrence(view);
+        case "unfoldAll": return unfoldAll(view) ?? false;
+      }
+    },
+    state: () => ({
+      composing: view.composing,
+      readOnly: view.state.readOnly,
+      hasSelection: view.state.selection.ranges.some((range) => !range.empty),
+      caretCount: view.state.selection.ranges.length,
+      occurrenceSessionActive: view.state.field(occurrenceSessionField, false) ?? false,
+    }),
+  };
 }
 
 /**
@@ -292,67 +498,56 @@ function extractIdentifierAtPos(doc: Text, pos: number): string {
   return word || "Documentation";
 }
 
-type ResizeCorner = "se" | "sw" | "ne" | "nw";
+function cancelActiveHoverResize(
+  activeSessionRef: MutableRefObject<WindowResizeSession | null>,
+): void {
+  activeSessionRef.current?.dispose();
+  activeSessionRef.current = null;
+}
 
-function setupHoverResize(container: HTMLElement, handle: HTMLElement, corner: ResizeCorner = "se") {
-  handle.onmousedown = (e: MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const startX = e.clientX;
-    const startY = e.clientY;
+function setupHoverResize(
+  container: HTMLElement,
+  handle: HTMLElement,
+  activeSessionRef: MutableRefObject<WindowResizeSession | null>,
+  corner: ResizeCorner = "se",
+) {
+  handle.onmousedown = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelActiveHoverResize(activeSessionRef);
     const startRect = container.getBoundingClientRect();
-    const startWidth = startRect.width > 0 ? startRect.width : 440;
-    const startHeight = startRect.height > 0 ? startRect.height : 280;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      const deltaX = moveEvent.clientX - startX;
-      const deltaY = moveEvent.clientY - startY;
-      const maxWidth = typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth * 0.85 : 1200;
-      const maxHeight = typeof window !== "undefined" && window.innerHeight > 0 ? window.innerHeight * 0.75 : 800;
-
-      let newWidth = startWidth;
-      let newHeight = startHeight;
-
-      if (corner === "se") {
-        newWidth = startWidth + deltaX;
-        newHeight = startHeight + deltaY;
-      } else if (corner === "sw") {
-        newWidth = startWidth - deltaX;
-        newHeight = startHeight + deltaY;
-      } else if (corner === "ne") {
-        newWidth = startWidth + deltaX;
-        newHeight = startHeight - deltaY;
-      } else if (corner === "nw") {
-        newWidth = startWidth - deltaX;
-        newHeight = startHeight - deltaY;
-      }
-
-      newWidth = Math.max(260, Math.min(maxWidth, newWidth));
-      newHeight = Math.max(100, Math.min(maxHeight, newHeight));
-      container.style.width = `${Math.round(newWidth)}px`;
-      container.style.height = `${Math.round(newHeight)}px`;
-    };
-
-    const onMouseUp = () => {
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
+    const session = startWindowResizeSession({
+      corner,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: startRect.width > 0 ? startRect.width : 440,
+      startHeight: startRect.height > 0 ? startRect.height : 280,
+      minWidth: 260,
+      minHeight: 100,
+      maxWidth: () => window.innerWidth > 0 ? window.innerWidth * 0.85 : 1200,
+      maxHeight: () => window.innerHeight > 0 ? window.innerHeight * 0.75 : 800,
+      onResize: (width, height) => {
+        container.style.width = `${width}px`;
+        container.style.height = `${height}px`;
+      },
+      onDispose: () => {
+        if (activeSessionRef.current === session) activeSessionRef.current = null;
+      },
+    });
+    activeSessionRef.current = session;
   };
 }
 
 function createHoverDocDom({
-  title,
-  contents,
+  content,
   onPin,
   onClose,
+  activeResizeSessionRef,
 }: {
-  title: string;
-  contents: string;
+  content: QuickDocContent;
   onPin?: (content: QuickDocContent) => void;
   onClose?: () => void;
+  activeResizeSessionRef: MutableRefObject<WindowResizeSession | null>;
 }): HTMLElement {
   const container = document.createElement("div");
   container.className = "cm-lsp-hover-container relative flex flex-col overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-tooltip-bg)] shadow-xl outline-none select-text";
@@ -367,7 +562,7 @@ function createHoverDocDom({
 
   const titleSpan = document.createElement("span");
   titleSpan.className = "min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--taomni-code-text)]";
-  titleSpan.textContent = title;
+  titleSpan.textContent = content.title;
   header.appendChild(titleSpan);
 
   if (onPin) {
@@ -381,7 +576,7 @@ function createHoverDocDom({
     pinBtn.onclick = (e) => {
       e.preventDefault();
       e.stopPropagation();
-      onPin({ title, body: contents });
+      onPin(content);
       onClose?.();
     };
     header.appendChild(pinBtn);
@@ -405,23 +600,59 @@ function createHoverDocDom({
   // Markdown body
   const body = document.createElement("div");
   body.className = "cm-lsp-hover taomni-chat-md min-h-0 flex-1 overflow-auto px-3 py-2 text-[12px] leading-relaxed text-[var(--taomni-code-text)]";
-  body.innerHTML = renderFormatted(contents, "md") ?? "";
+  body.innerHTML = renderFormatted(content.body, "md") ?? "";
+  body.onclick = (event) => {
+    const href = referenceHrefFromEventTarget(event.target);
+    if (!href) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void openExternalDocumentation(href);
+  };
   container.appendChild(body);
+
+  if (content.source || content.links?.length) {
+    const footer = document.createElement("div");
+    footer.className = "flex min-h-7 shrink-0 items-center gap-2 border-t border-[var(--taomni-code-border)] px-2 py-1 text-[10px] text-[var(--taomni-code-muted)]";
+    const source = document.createElement("span");
+    source.className = "min-w-0 flex-1 truncate";
+    source.textContent = content.source;
+    source.title = content.uri ?? content.source;
+    footer.appendChild(source);
+    for (const link of content.links ?? []) {
+      const decision = validateExternalDocUrl(link.url);
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = link.label;
+      button.setAttribute("aria-label", `Open external documentation: ${link.label}`);
+      button.disabled = decision.kind !== "allowed";
+      button.title = decision.kind === "allowed"
+        ? `${link.label} (${new URL(decision.url).host})`
+        : `External Documentation unavailable (${decision.reason})`;
+      button.className = "shrink-0 rounded px-1.5 py-0.5 hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-40";
+      button.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void openExternalDocumentation(link.url);
+      };
+      footer.appendChild(button);
+    }
+    container.appendChild(footer);
+  }
 
   // 4-corner resize handles
   const gripNW = document.createElement("div");
   gripNW.className = "absolute top-0 left-0 h-4 w-4 cursor-nw-resize z-10 select-none";
-  setupHoverResize(container, gripNW, "nw");
+  setupHoverResize(container, gripNW, activeResizeSessionRef, "nw");
   container.appendChild(gripNW);
 
   const gripNE = document.createElement("div");
   gripNE.className = "absolute top-0 right-0 h-4 w-4 cursor-ne-resize z-10 select-none";
-  setupHoverResize(container, gripNE, "ne");
+  setupHoverResize(container, gripNE, activeResizeSessionRef, "ne");
   container.appendChild(gripNE);
 
   const gripSW = document.createElement("div");
   gripSW.className = "absolute bottom-0 left-0 h-4 w-4 cursor-sw-resize z-10 select-none";
-  setupHoverResize(container, gripSW, "sw");
+  setupHoverResize(container, gripSW, activeResizeSessionRef, "sw");
   container.appendChild(gripSW);
 
   const gripSE = document.createElement("div");
@@ -429,57 +660,80 @@ function createHoverDocDom({
   gripSE.setAttribute("aria-label", "Resize hover documentation");
   gripSE.className = "absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100 select-none z-10";
   gripSE.innerHTML = `<svg viewBox="0 0 6 6" class="h-2.5 w-2.5 fill-current text-[var(--taomni-code-muted)]"><path d="M5 1L1 5M5 3L3 5M5 5L5 5" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>`;
-  setupHoverResize(container, gripSE, "se");
+  setupHoverResize(container, gripSE, activeResizeSessionRef, "se");
   container.appendChild(gripSE);
 
   return container;
 }
 
-function signatureTooltipDom(result: LspSignatureHelpResult): HTMLElement {
+function signatureTooltipDom(
+  result: LspSignatureHelpResult,
+  showFullSignatures: boolean,
+): HTMLElement {
   const dom = document.createElement("div");
   dom.className = "cm-lsp-hover taomni-chat-md";
+  dom.setAttribute("role", "dialog");
+  dom.setAttribute("aria-label", "Parameter info");
+  dom.setAttribute("data-testid", "code-workspace-parameter-info");
   const active = Math.min(result.activeSignature, Math.max(0, result.signatures.length - 1));
-  const signature = result.signatures[active];
-  const label = document.createElement("div");
-  label.style.fontFamily = "var(--taomni-code-font-family, monospace)";
-  label.style.whiteSpace = "pre-wrap";
-  const parameterIndex = signature.activeParameter ?? result.activeParameter;
-  const parameter = signature.parameters[parameterIndex];
-  const start = parameter?.labelStart
-    ?? (parameter ? signature.label.indexOf(parameter.label) : -1);
-  const end = parameter?.labelEnd
-    ?? (parameter && start >= 0 ? start + parameter.label.length : -1);
-  if (parameter && start >= 0 && end > start) {
-    label.append(signature.label.slice(0, start));
-    const bold = document.createElement("b");
-    bold.textContent = signature.label.slice(start, end);
-    label.append(bold, signature.label.slice(end));
-  } else {
-    label.textContent = signature.label;
+  const indices = showFullSignatures
+    ? result.signatures.map((_signature, index) => index)
+    : [active];
+
+  for (const index of indices) {
+    const signature = result.signatures[index];
+    if (!signature) continue;
+    const section = document.createElement("div");
+    section.setAttribute("data-signature-index", String(index));
+    section.className = index === active ? "cm-signature-active" : "cm-signature-overload";
+    if (index > 0 && showFullSignatures) section.style.marginTop = "8px";
+    if (index !== active) section.style.opacity = "0.7";
+
+    const label = document.createElement("div");
+    label.style.fontFamily = "var(--taomni-code-font-family, monospace)";
+    label.style.whiteSpace = "pre-wrap";
+    const parameterIndex = signature.activeParameter ?? result.activeParameter;
+    const parameter = signature.parameters[parameterIndex];
+    const start = parameter?.labelStart
+      ?? (parameter ? signature.label.indexOf(parameter.label) : -1);
+    const end = parameter?.labelEnd
+      ?? (parameter && start >= 0 ? start + parameter.label.length : -1);
+    if (parameter && start >= 0 && end > start) {
+      label.append(signature.label.slice(0, start));
+      const bold = document.createElement("b");
+      bold.textContent = signature.label.slice(start, end);
+      label.append(bold, signature.label.slice(end));
+    } else {
+      label.textContent = signature.label;
+    }
+    section.appendChild(label);
+
+    const documentation = parameter?.documentation ?? signature.documentation;
+    if (documentation && (index === active || showFullSignatures)) {
+      const doc = document.createElement("div");
+      doc.style.marginTop = "6px";
+      doc.innerHTML = renderFormatted(documentation, "md") ?? "";
+      section.appendChild(doc);
+    }
+    dom.appendChild(section);
   }
-  dom.appendChild(label);
+
   if (result.signatures.length > 1) {
     const counter = document.createElement("div");
     counter.style.opacity = "0.6";
     counter.style.fontSize = "11px";
-    counter.textContent = `${active + 1}/${result.signatures.length} overloads`;
+    counter.style.marginTop = "6px";
+    counter.textContent = showFullSignatures
+      ? `${result.signatures.length} overloads`
+      : `${active + 1}/${result.signatures.length} overloads`;
     dom.appendChild(counter);
-  }
-  const documentation = parameter?.documentation ?? signature.documentation;
-  if (documentation) {
-    const doc = document.createElement("div");
-    doc.style.marginTop = "6px";
-    doc.innerHTML = renderFormatted(documentation, "md") ?? "";
-    dom.appendChild(doc);
   }
   return dom;
 }
 
-function lspInteractionExtensions(
-  hoverRef: MutableRefObject<(position: LspPosition) => Promise<string | null>>,
+function lspNavigationExtensions(
   definitionRef: MutableRefObject<(position: LspPosition) => Promise<boolean>>,
   referencesRef: MutableRefObject<(position: LspPosition) => Promise<void>>,
-  onPinHoverDocRef?: MutableRefObject<((content: QuickDocContent) => void) | undefined>,
 ): Extension[] {
   const definitionAtSelection = (view: EditorView) => {
     const position = lspPositionFromOffset(view.state.doc, view.state.selection.main.head);
@@ -508,43 +762,54 @@ function lspInteractionExtensions(
         };
       },
     }),
-    hoverTooltip((view, pos): Promise<Tooltip | null> => {
-      const position = lspPositionFromOffset(view.state.doc, pos);
-      return hoverRef.current(position).then((contents) => {
-        if (!contents) return null;
-        const title = extractIdentifierAtPos(view.state.doc, pos);
-        return {
-          pos,
-          above: true,
-          create() {
-            const dom = createHoverDocDom({
-              title,
-              contents,
-              onPin: onPinHoverDocRef?.current,
-              onClose: () => {
-                const tooltipEl = dom.closest(".cm-tooltip") as HTMLElement | null;
-                if (tooltipEl) {
-                  tooltipEl.style.display = "none";
-                }
-              },
-            });
-            return { dom };
-          },
-        };
-      });
-    }),
-    // Ctrl/Cmd+hover underline + pointer cursor; Ctrl/Cmd+click and middle-click jump.
     createLspHyperlinkExtension({
       onDefinition: (position) => definitionRef.current(position),
     }),
     keymap.of([
       { key: "F12", run: definitionAtSelection },
       { key: "Shift-F12", run: referencesAtSelection },
-      // IDEA-like: Ctrl+B / Cmd+B go to declaration/definition at caret.
       { key: "Mod-b", run: definitionAtSelection },
       { key: "Mod-Alt-B", run: definitionAtSelection },
     ]),
   ];
+}
+
+function lspHoverExtension(
+  hoverRef: MutableRefObject<(position: LspPosition) => Promise<QuickDocContent | null>>,
+  onPinHoverDocRef: MutableRefObject<((content: QuickDocContent) => void) | undefined>,
+  activeResizeSessionRef: MutableRefObject<WindowResizeSession | null>,
+  enabled: boolean,
+  hoverTime: number,
+): Extension {
+  if (!enabled) return [];
+  const extension = hoverTooltip((view, pos): Promise<Tooltip | null> => {
+    const position = lspPositionFromOffset(view.state.doc, pos);
+    return hoverRef.current(position).then((content) => {
+      if (!content) return null;
+      const title = extractIdentifierAtPos(view.state.doc, pos);
+      const displayContent = content.title ? content : { ...content, title };
+      return {
+        pos,
+        above: true,
+        create() {
+          const dom = createHoverDocDom({
+            content: displayContent,
+            onPin: onPinHoverDocRef.current,
+            onClose: () => view.dispatch({ effects: closeHoverTooltip(extension) }),
+            activeResizeSessionRef,
+          });
+          return {
+            dom,
+            destroy: () => cancelActiveHoverResize(activeResizeSessionRef),
+          };
+        },
+      };
+    });
+  }, {
+    hideOnChange: true,
+    hoverTime,
+  });
+  return extension;
 }
 
 function sameCodeStyle(a?: EffectiveCodeStyle, b?: EffectiveCodeStyle): boolean {
@@ -571,13 +836,39 @@ function sameOptionalArray<T>(
   return true;
 }
 
+function sameEditorAppearance(
+  a?: EditorAppearanceExtensionProfile,
+  b?: EditorAppearanceExtensionProfile,
+): boolean {
+  return a === b || (
+    !!a
+    && !!b
+    && a.fontFamily === b.fontFamily
+    && a.fontSizePx === b.fontSizePx
+    && a.lineHeight === b.lineHeight
+    && a.ligatures === b.ligatures
+    && a.colorSchemeId === b.colorSchemeId
+    && a.highContrast === b.highContrast
+    && a.virtualSpace?.afterLineEnd === b.virtualSpace?.afterLineEnd
+    && a.virtualSpace?.atFileBottom === b.virtualSpace?.atFileBottom
+  );
+}
+
 function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirrorHostProps): boolean {
   if (prev.path !== next.path) return false;
+  if (prev.fileKey !== next.fileKey) return false;
   if (prev.doc !== next.doc) return false;
   if (prev.visible !== next.visible) return false;
   if (prev.readOnly !== next.readOnly) return false;
   if (prev.softWrap !== next.softWrap) return false;
+  if (!sameEditorAppearance(prev.appearance, next.appearance)) return false;
   if (prev.columnSelectionMode !== next.columnSelectionMode) return false;
+  if (prev.showHoverDocumentation !== next.showHoverDocumentation) return false;
+  if (prev.hoverDocumentationDelayMs !== next.hoverDocumentationDelayMs) return false;
+  if (prev.parameterInfoRequestNonce !== next.parameterInfoRequestNonce) return false;
+  if (prev.parameterInfoAutoPopup !== next.parameterInfoAutoPopup) return false;
+  if (prev.parameterInfoDelayMs !== next.parameterInfoDelayMs) return false;
+  if (prev.parameterInfoShowFullSignatures !== next.parameterInfoShowFullSignatures) return false;
   if (prev.coverageEnabled !== next.coverageEnabled) return false;
   if (prev.fileCoverage !== next.fileCoverage) return false;
   if (prev.reveal !== next.reveal) return false;
@@ -597,11 +888,13 @@ function areCodeMirrorHostPropsEqual(prev: CodeMirrorHostProps, next: CodeMirror
   if (prev.debugStop !== next.debugStop) return false;
   if (prev.debugEvaluate !== next.debugEvaluate) return false;
   if (prev.onPinHoverDoc !== next.onPinHoverDoc) return false;
+  if (prev.onCommandPortChange !== next.onCommandPortChange) return false;
   return true;
 }
 
 export const CodeMirrorHost = memo(function CodeMirrorHost({
   path,
+  fileKey = path,
   doc,
   visible,
   diagnostics,
@@ -620,6 +913,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onReferences,
   onComplete,
   onCompleteResolve,
+  getCompletionIdentity,
+  onCompletionDiagnostic,
   onSignatureHelp,
   onSelectionChange,
   onViewportChange,
@@ -629,9 +924,17 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onToggleBreakpoint,
   onEditBreakpoint,
   onContextMenu,
+  onCommandPortChange,
   completionTriggers,
   signatureTriggers,
+  showHoverDocumentation = true,
+  hoverDocumentationDelayMs = 300,
+  parameterInfoRequestNonce = 0,
+  parameterInfoAutoPopup = true,
+  parameterInfoDelayMs = 0,
+  parameterInfoShowFullSignatures = false,
   softWrap = false,
+  appearance,
   columnSelectionMode = false,
   debugBreakpoints,
   debugCurrentLine,
@@ -655,9 +958,16 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const coverageCompartment = useRef(new Compartment());
   const debugCompartment = useRef(new Compartment());
   const signatureCompartment = useRef(new Compartment());
+  const hoverCompartment = useRef(new Compartment());
   const readOnlyCompartment = useRef(new Compartment());
   const wrappingCompartment = useRef(new Compartment());
+  const appearanceCompartment = useRef(new Compartment());
   const signatureShownRef = useRef(false);
+  const signatureRequestSequenceRef = useRef(0);
+  const signatureDelayTimerRef = useRef<number | null>(null);
+  const lastParameterInfoNonceRef = useRef(parameterInfoRequestNonce);
+  const requestParameterInfoRef = useRef<(() => boolean) | null>(null);
+  const activeHoverResizeSessionRef = useRef<WindowResizeSession | null>(null);
   /** True while applying a prop-driven doc replace so it is not treated as a user edit. */
   const applyingExternalDocRef = useRef(false);
   /** Mirrors the last full text sent through onChange or applied from props. */
@@ -667,6 +977,11 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const renderedDiagnosticsRef = useRef(diagnostics);
   const renderedReadOnlyRef = useRef(readOnly);
   const renderedSoftWrapRef = useRef(softWrap);
+  const renderedAppearanceRef = useRef(appearance);
+  const renderedHoverRef = useRef({
+    enabled: showHoverDocumentation,
+    delayMs: hoverDocumentationDelayMs,
+  });
   const renderedCodeStyleRef = useRef({
     tabSize: codeStyle?.tabSize ?? 2,
     insertSpaces: codeStyle?.insertSpaces ?? true,
@@ -699,6 +1014,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const onReferencesRef = useRef(onReferences);
   const onCompleteRef = useRef(onComplete);
   const onCompleteResolveRef = useRef(onCompleteResolve);
+  const getCompletionIdentityRef = useRef(getCompletionIdentity);
+  const onCompletionDiagnosticRef = useRef(onCompletionDiagnostic);
   const onSignatureHelpRef = useRef(onSignatureHelp);
   const onSelectionChangeRef = useRef(onSelectionChange);
   const onViewportChangeRef = useRef(onViewportChange);
@@ -709,6 +1026,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   const completionTriggersRef = useRef(completionTriggers ?? []);
   const signatureTriggersRef = useRef(signatureTriggers ?? []);
   const columnSelectionModeRef = useRef(columnSelectionMode);
+  const parameterInfoAutoPopupRef = useRef(parameterInfoAutoPopup);
+  const parameterInfoDelayMsRef = useRef(parameterInfoDelayMs);
+  const parameterInfoShowFullSignaturesRef = useRef(parameterInfoShowFullSignatures);
   const pathRef = useRef(path);
   onChangeRef.current = onChange;
   onSaveRef.current = onSave;
@@ -717,6 +1037,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onReferencesRef.current = onReferences;
   onCompleteRef.current = onComplete;
   onCompleteResolveRef.current = onCompleteResolve;
+  getCompletionIdentityRef.current = getCompletionIdentity;
+  onCompletionDiagnosticRef.current = onCompletionDiagnostic;
   onSignatureHelpRef.current = onSignatureHelp;
   onSelectionChangeRef.current = onSelectionChange;
   onViewportChangeRef.current = onViewportChange;
@@ -773,6 +1095,9 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   completionTriggersRef.current = completionTriggers ?? [];
   signatureTriggersRef.current = signatureTriggers ?? [];
   columnSelectionModeRef.current = columnSelectionMode;
+  parameterInfoAutoPopupRef.current = parameterInfoAutoPopup;
+  parameterInfoDelayMsRef.current = parameterInfoDelayMs;
+  parameterInfoShowFullSignaturesRef.current = parameterInfoShowFullSignatures;
   pathRef.current = path;
 
   const emitSelection = (view: EditorView) => {
@@ -836,11 +1161,16 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       onSaveRef.current();
       return true;
     };
+    const clearSignatureDelay = () => {
+      if (signatureDelayTimerRef.current === null) return;
+      window.clearTimeout(signatureDelayTimerRef.current);
+      signatureDelayTimerRef.current = null;
+    };
     const hideSignature = () => {
+      clearSignatureDelay();
+      signatureRequestSequenceRef.current += 1;
       if (!signatureShownRef.current) return false;
       signatureShownRef.current = false;
-      // Deferred: this may run from inside an update listener, where
-      // synchronous dispatches are not allowed.
       window.queueMicrotask(() => {
         viewRef.current?.dispatch({
           effects: signatureCompartment.current.reconfigure([]),
@@ -848,32 +1178,78 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       });
       return true;
     };
-    const requestSignatureHelp = (view: EditorView, trigger: string | null) => {
+    const requestSignatureHelp = (
+      view: EditorView,
+      trigger: string | null,
+      options: { explicit?: boolean } = {},
+    ) => {
       const handler = onSignatureHelpRef.current;
       if (!handler) return false;
-      const position = lspPositionFromOffset(view.state.doc, view.state.selection.main.head);
-      void handler(position, trigger)
-        .then((result) => {
-          const current = viewRef.current;
-          if (!current) return;
-          if (!result || result.signatures.length === 0) {
-            hideSignature();
-            return;
-          }
-          signatureShownRef.current = true;
-          const pos = current.state.selection.main.head;
-          current.dispatch({
-            effects: signatureCompartment.current.reconfigure(
-              showTooltip.of({
-                pos,
-                above: true,
-                create: () => ({ dom: signatureTooltipDom(result) }),
-              }),
-            ),
+      if (!options.explicit && !parameterInfoAutoPopupRef.current) return false;
+      clearSignatureDelay();
+      signatureRequestSequenceRef.current += 1;
+      const sequence = signatureRequestSequenceRef.current;
+      const docAtRequest = view.state.doc;
+      const headAtRequest = view.state.selection.main.head;
+      const run = () => {
+        signatureDelayTimerRef.current = null;
+        const currentBefore = viewRef.current;
+        if (
+          !currentBefore
+          || currentBefore !== view
+          || currentBefore.state.doc !== docAtRequest
+          || currentBefore.state.selection.main.head !== headAtRequest
+        ) {
+          return;
+        }
+        const position = lspPositionFromOffset(docAtRequest, headAtRequest);
+        void handler(position, trigger)
+          .then((result) => {
+            const current = viewRef.current;
+            if (
+              !current
+              || current !== view
+              || sequence !== signatureRequestSequenceRef.current
+              || current.state.doc !== docAtRequest
+              || current.state.selection.main.head !== headAtRequest
+            ) {
+              return;
+            }
+            if (!result || !result.status.active || result.signatures.length === 0) {
+              hideSignature();
+              return;
+            }
+            signatureShownRef.current = true;
+            current.dispatch({
+              effects: signatureCompartment.current.reconfigure(
+                showTooltip.of({
+                  pos: headAtRequest,
+                  above: true,
+                  create: () => ({
+                    dom: signatureTooltipDom(
+                      result,
+                      parameterInfoShowFullSignaturesRef.current,
+                    ),
+                  }),
+                }),
+              ),
+            });
+          })
+          .catch(() => {
+            if (sequence === signatureRequestSequenceRef.current) hideSignature();
           });
-        })
-        .catch(() => {});
+      };
+      const delayMs = options.explicit ? 0 : Math.max(0, parameterInfoDelayMsRef.current);
+      if (delayMs > 0) {
+        signatureDelayTimerRef.current = window.setTimeout(run, delayMs);
+      } else {
+        run();
+      }
       return true;
+    };
+    requestParameterInfoRef.current = () => {
+      const current = viewRef.current;
+      return current ? requestSignatureHelp(current, null, { explicit: true }) : false;
     };
     const openReplacePanel = (view: EditorView) => {
       openSearchPanel(view);
@@ -912,6 +1288,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       extensions: [
         lineNumbers(),
         foldGutter(),
+        regionFoldService,
         highlightActiveLine(),
         highlightActiveLineGutter(),
         EditorState.allowMultipleSelections.of(true),
@@ -950,11 +1327,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             // Ranked above most LSP items via boost so Tab expands them first.
             createLiveTemplateCompletionSource(() => pathRef.current),
             createLspCompletionSource({
-              fetch: (position, trigger) =>
-                onCompleteRef.current?.(position, trigger) ?? Promise.resolve(null),
-              resolve: (raw) =>
-                onCompleteResolveRef.current?.(raw) ?? Promise.resolve(null),
+              identity: () => getCompletionIdentityRef.current(),
+              fetch: (position, trigger, token) =>
+                onCompleteRef.current?.(position, trigger, token) ?? Promise.resolve(null),
+              resolve: (raw, token) =>
+                onCompleteResolveRef.current?.(raw, token) ?? Promise.resolve(null),
               triggerCharacters: () => completionTriggersRef.current,
+              getDocumentRevision: () => getCompletionIdentityRef.current()?.documentRevision ?? -1,
+              reportDiagnostic: (kind, detail) => onCompletionDiagnosticRef.current(kind, detail),
             }),
           ],
         }),
@@ -978,6 +1358,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         }),
         search({ top: true, createPanel: createWorkspaceSearchPanel }),
         selectionHistoryField,
+        occurrenceSessionField,
         codeStyleCompartment.current.of([
           EditorState.tabSize.of(codeStyle?.tabSize ?? 2),
           indentUnit.of(codeStyle?.insertSpaces ? " ".repeat(codeStyle?.indentSize || codeStyle?.tabSize || 2) : "\t"),
@@ -1013,9 +1394,19 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           !!debugEvaluate,
         )),
         signatureCompartment.current.of([]),
+        hoverCompartment.current.of(lspHoverExtension(
+          onHoverRef,
+          onPinHoverDocRef,
+          activeHoverResizeSessionRef,
+          showHoverDocumentation,
+          hoverDocumentationDelayMs,
+        )),
         readOnlyCompartment.current.of(readOnlyExtension(readOnly)),
         wrappingCompartment.current.of(softWrap ? EditorView.lineWrapping : []),
-        ...lspInteractionExtensions(onHoverRef, onDefinitionRef, onReferencesRef, onPinHoverDocRef),
+        appearanceCompartment.current.of(
+          appearance ? editorAppearanceExtension(appearance) : [],
+        ),
+        ...lspNavigationExtensions(onDefinitionRef, onReferencesRef),
         ...codeViewExtensions(),
         WORKSPACE_EDITOR_STYLE,
         LSP_EDITOR_STYLE,
@@ -1040,10 +1431,11 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         keymap.of([
           { key: "Mod-s", run: saveHandler },
           { key: "Mod-r", run: openReplacePanel },
+          { key: "Escape", run: escapeEditorSelections },
           { key: "Escape", run: () => hideSignature() },
-          { key: "Mod-p", run: (view) => requestSignatureHelp(view, null) },
-          { key: "Ctrl-p", run: (view) => requestSignatureHelp(view, null) },
-          { key: "Mod-Shift-Space", run: (view) => requestSignatureHelp(view, null) },
+          { key: "Mod-p", run: (view) => requestSignatureHelp(view, null, { explicit: true }) },
+          { key: "Ctrl-p", run: (view) => requestSignatureHelp(view, null, { explicit: true }) },
+          { key: "Mod-Shift-Space", run: (view) => requestSignatureHelp(view, null, { explicit: true }) },
           { key: "Mod-w", run: expandSemanticSelection },
           ...workspaceEditorKeymap,
           ...searchKeymap,
@@ -1053,6 +1445,40 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           indentWithTab,
         ]),
         EditorView.domEventHandlers({
+          copy(event, view) {
+            const payload = editorClipboardPayload(view.state);
+            if (!payload) return false;
+            event.preventDefault();
+            if (event.clipboardData) {
+              event.clipboardData.setData("text/plain", payload.plainText);
+              rememberEditorClipboardPayload(view, payload);
+            } else {
+              void writeText(payload.plainText).then(() => {
+                if (view.dom.isConnected) rememberEditorClipboardPayload(view, payload);
+              }).catch(() => {});
+            }
+            return true;
+          },
+          cut(event, view) {
+            if (view.composing || view.state.readOnly) return false;
+            const payload = editorClipboardPayload(view.state);
+            if (!payload) return false;
+            event.preventDefault();
+            if (!event.clipboardData) {
+              cutSystemClipboard(view);
+              return true;
+            }
+            event.clipboardData.setData("text/plain", payload.plainText);
+            rememberEditorClipboardPayload(view, payload);
+            return cutEditorSelections(view);
+          },
+          paste(event, view) {
+            if (view.composing || view.state.readOnly) return false;
+            const text = event.clipboardData?.getData("text/plain");
+            if (text === undefined) return false;
+            event.preventDefault();
+            return pasteEditorClipboardPayload(view, payloadForSystemClipboardText(view, text));
+          },
           contextmenu(event, view) {
             const handler = onContextMenuRef.current;
             if (!handler) return false;
@@ -1060,17 +1486,18 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
             // posAtCoords can be null in headless/jsdom; fall back to caret.
             const pos = view.posAtCoords(coords) ?? view.state.selection.main.head;
             event.preventDefault();
-            const main = view.state.selection.main;
-            // Click outside the selection: place the caret there (IDEA-like).
-            if (pos < main.from || pos > main.to) {
+            const clickedSelection = view.state.selection.ranges.find((range) => (
+              pos >= range.from && pos <= range.to
+            ));
+            // Click outside every selection: place the caret there (IDEA-like).
+            if (!clickedSelection) {
               view.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
             }
             const selection = view.state.selection.main;
-            const selectedText = view.state.sliceDoc(selection.from, selection.to);
-            const replaceSelection = (text: string) => {
-              view.dispatch(view.state.replaceSelection(text));
-              view.focus();
-            };
+            const selectedRanges = view.state.selection.ranges.filter((range) => !range.empty);
+            const selectedText = selectedRanges
+              .map((range) => view.state.sliceDoc(range.from, range.to))
+              .join(view.state.lineBreak);
             const selectionStart = lspPositionFromOffset(
               view.state.doc,
               Math.min(selection.from, selection.to),
@@ -1085,28 +1512,22 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
               selectionEnd,
               clientX: event.clientX,
               clientY: event.clientY,
-              hasSelection: !selection.empty,
+              hasSelection: selectedRanges.length > 0,
               selectedText,
-              cut: () => {
-                if (selection.empty) return;
-                void navigator.clipboard.writeText(selectedText).catch(() => {});
-                replaceSelection("");
-              },
+              cut: () => cutSystemClipboard(view),
               copy: () => {
-                if (selection.empty) return;
-                void navigator.clipboard.writeText(selectedText).catch(() => {});
+                writeEditorSelectionToClipboard(view);
+                view.focus();
               },
-              paste: () => {
-                void navigator.clipboard.readText()
-                  .then((text) => replaceSelection(text))
-                  .catch(() => {});
-              },
+              paste: () => pasteSystemClipboard(view),
             });
             return true;
           },
         }),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) {
+            clearSignatureDelay();
+            signatureRequestSequenceRef.current += 1;
             if (!applyingExternalDocRef.current) {
               // onChange currently carries a full string, so one conversion is
               // unavoidable. Remember it to avoid a second full conversion in
@@ -1156,10 +1577,22 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     emitViewport(view);
     return () => {
       clearPendingSelectionEmit();
+      clearSignatureDelay();
+      requestParameterInfoRef.current = null;
+      signatureRequestSequenceRef.current += 1;
+      cancelActiveHoverResize(activeHoverResizeSessionRef);
       view.destroy();
       viewRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !onCommandPortChange) return;
+    const token = {};
+    onCommandPortChange({ fileKey, token, port: editorCommandPort(view) });
+    return () => onCommandPortChange({ fileKey, token, port: null });
+  }, [fileKey, onCommandPortChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1184,10 +1617,54 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   useLayoutEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const previous = renderedHoverRef.current;
+    if (
+      previous.enabled === showHoverDocumentation
+      && previous.delayMs === hoverDocumentationDelayMs
+    ) {
+      return;
+    }
+    renderedHoverRef.current = {
+      enabled: showHoverDocumentation,
+      delayMs: hoverDocumentationDelayMs,
+    };
+    cancelActiveHoverResize(activeHoverResizeSessionRef);
+    view.dispatch({
+      effects: hoverCompartment.current.reconfigure(lspHoverExtension(
+        onHoverRef,
+        onPinHoverDocRef,
+        activeHoverResizeSessionRef,
+        showHoverDocumentation,
+        hoverDocumentationDelayMs,
+      )),
+    });
+  }, [hoverDocumentationDelayMs, showHoverDocumentation]);
+
+  useEffect(() => {
+    if (parameterInfoRequestNonce === lastParameterInfoNonceRef.current) return;
+    lastParameterInfoNonceRef.current = parameterInfoRequestNonce;
+    requestParameterInfoRef.current?.();
+  }, [parameterInfoRequestNonce]);
+
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
     if (renderedReadOnlyRef.current === readOnly) return;
     renderedReadOnlyRef.current = readOnly;
     view.dispatch({ effects: readOnlyCompartment.current.reconfigure(readOnlyExtension(readOnly)) });
   }, [readOnly]);
+
+  useLayoutEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    if (sameEditorAppearance(renderedAppearanceRef.current, appearance)) return;
+    renderedAppearanceRef.current = appearance;
+    view.dispatch({
+      effects: appearanceCompartment.current.reconfigure(
+        appearance ? editorAppearanceExtension(appearance) : [],
+      ),
+    });
+  }, [appearance]);
 
   useLayoutEffect(() => {
     const view = viewRef.current;

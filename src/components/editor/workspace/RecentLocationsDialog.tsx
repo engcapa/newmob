@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import { Clock, Search, X, Code2, Edit3 } from "lucide-react";
 import {
   navigationHistoryTracker,
+  type NavigationHistoryFacade,
   type NavigationLocation,
   type WorkspaceLocationController,
 } from "./navigationHistoryModel";
@@ -13,6 +14,11 @@ export interface RecentLocationsDialogProps {
   initialChangedOnly?: boolean;
   workspaceId?: string;
   locationController?: WorkspaceLocationController;
+  /**
+   * §8.16.5 N2.6: unified delete entry. When provided, Delete removes the
+   * entry from Recent Locations AND the Back/Forward history.
+   */
+  navigationFacade?: NavigationHistoryFacade;
 }
 
 export function RecentLocationsDialog({
@@ -22,6 +28,7 @@ export function RecentLocationsDialog({
   initialChangedOnly = false,
   workspaceId,
   locationController,
+  navigationFacade,
 }: RecentLocationsDialogProps) {
   const [search, setSearch] = useState("");
   const [changedOnly, setChangedOnly] = useState(initialChangedOnly);
@@ -72,7 +79,15 @@ export function RecentLocationsDialog({
       e.preventDefault();
       const loc = locations[selectedIndex];
       if (loc) {
-        if (locationController) {
+        if (navigationFacade) {
+          // §8.16.5: one delete for both Recent Locations and Back/Forward.
+          navigationFacade.remove({
+            fileKey: loc.fileIdentity,
+            canonicalPath: loc.filePath,
+            line: loc.line,
+            character: loc.character,
+          });
+        } else if (locationController) {
           locationController.removeLocation(loc.id);
         } else {
           navigationHistoryTracker.removeLocation(loc.id);

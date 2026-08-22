@@ -231,6 +231,94 @@ describe("WorkspaceActionHost (N0.1)", () => {
     expect(renameMock).toHaveBeenCalledTimes(1);
   });
 
+  it("prepares one immutable evaluation and does not re-evaluate when executing it", async () => {
+    const when = vi.fn(() => true);
+    const run = vi.fn(() => ({ kind: "applied" as const }));
+    const host = new WorkspaceActionHost({
+      workspaceId: "ws-prepared",
+      getDefaultContext: () => ({ focus: "editor", hasActiveFile: true }),
+    });
+    host.registerAction({
+      id: "prepared.action",
+      title: "Prepared Action",
+      category: "Edit",
+      provenance: "local",
+      when,
+      run,
+    });
+
+    const snapshot = host.getSnapshot({ kind: "menu" });
+    expect(when).toHaveBeenCalledOnce();
+    expect(snapshot[0]?.evaluation.invocationKind).toBe("snapshot");
+    expect(when).toHaveBeenCalledOnce();
+    expect(host.prepare("prepared.action", { kind: "menu" }).invocationKind).toBe("menu");
+    expect(when).toHaveBeenCalledTimes(2);
+    const result = await host.executePrepared(snapshot[0]!.evaluation);
+
+    expect(result).toEqual({ kind: "applied" });
+    expect(when).toHaveBeenCalledTimes(2);
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ focus: "editor", hasActiveFile: true }),
+      undefined,
+    );
+  });
+
+  it("rejects a prepared evaluation after its action owner is replaced or removed", async () => {
+    const host = new WorkspaceActionHost({ workspaceId: "ws-stale-owner" });
+    const run = vi.fn(() => ({ kind: "applied" as const }));
+    const action = {
+      id: "stale.action",
+      title: "Stale Action",
+      category: "Edit" as const,
+      provenance: "local" as const,
+      run,
+    };
+    const unregister = host.registerAction(action);
+    const prepared = host.prepare("stale.action", { kind: "toolbar" });
+    unregister();
+
+    await expect(host.executePrepared(prepared)).resolves.toMatchObject({
+      kind: "failed",
+      reason: "stale-owner",
+      retryable: true,
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("reports deterministic binding conflicts with the first registered action as winner", () => {
+    const host = new WorkspaceActionHost({
+      workspaceId: "ws-binding-conflicts",
+      getDefaultContext: () => ({ focus: "workspace" }),
+    });
+    host.registerActions([
+      {
+        id: "first.action",
+        title: "First",
+        category: "Edit",
+        keybinding: "Ctrl+K",
+        provenance: "local",
+        run: () => ({ kind: "applied" as const }),
+      },
+      {
+        id: "second.action",
+        title: "Second",
+        category: "Edit",
+        keybinding: "Ctrl+K",
+        provenance: "local",
+        run: () => ({ kind: "applied" as const }),
+      },
+    ]);
+
+    const diagnostics = host.getBindingDiagnostics();
+    expect(diagnostics).toEqual([{
+      kind: "binding-conflict",
+      keybinding: "Ctrl+K",
+      actionIds: ["first.action", "second.action"],
+      winnerId: "first.action",
+    }]);
+    expect(host.getSnapshot()[0]?.bindingConflicts?.[0]?.winnerId).toBe("first.action");
+  });
+
   it("handles disposal gracefully without throwing (Gate R0)", async () => {
     const host = new WorkspaceActionHost({
       workspaceId: "ws-dispose",

@@ -1,19 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pin, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pin, X } from "lucide-react";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
-
-export interface QuickDocContent {
-  /** Symbol or path label shown in the header. */
-  title: string;
-  /** Markdown / plaintext body from LSP hover. */
-  body: string;
-}
+import { ReferenceContentFooter, useReferenceBodyLinkHandler } from "./ReferenceContentFooter";
+import type { QuickDocContent } from "./referenceDocumentation";
+import {
+  startWindowResizeSession,
+  type ResizeCorner,
+  type WindowResizeSession,
+} from "./windowResizeSession";
 
 interface QuickDocPopupProps {
   open: boolean;
   content: QuickDocContent | null;
   onClose: () => void;
   onPin: (content: QuickDocContent) => void;
+  onOpenSource?: (content: QuickDocContent) => void;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onBack?: () => void;
+  onForward?: () => void;
 }
 
 const MIN_WIDTH = 280;
@@ -21,98 +26,108 @@ const MIN_HEIGHT = 140;
 const DEFAULT_WIDTH = 460;
 const DEFAULT_HEIGHT = 320;
 
-export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupProps) {
+export function QuickDocPopup({
+  open,
+  content,
+  onClose,
+  onPin,
+  onOpenSource,
+  canGoBack = false,
+  canGoForward = false,
+  onBack,
+  onForward,
+}: QuickDocPopupProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const resizeSessionRef = useRef<WindowResizeSession | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [size, setSize] = useState<{ width: number; height: number }>({
     width: DEFAULT_WIDTH,
     height: DEFAULT_HEIGHT,
   });
-  const isResizingRef = useRef(false);
+  const { linkError, onClick: onBodyClick } = useReferenceBodyLinkHandler();
+
+  const disposeResize = useCallback(() => {
+    resizeSessionRef.current?.dispose();
+    resizeSessionRef.current = null;
+  }, []);
+
+  const restoreFocus = useCallback(() => {
+    const target = previousFocusRef.current;
+    previousFocusRef.current = null;
+    if (target?.isConnected) target.focus();
+  }, []);
+
+  const close = useCallback(() => {
+    disposeResize();
+    onClose();
+    window.queueMicrotask(restoreFocus);
+  }, [disposeResize, onClose, restoreFocus]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      disposeResize();
+      restoreFocus();
+      return;
+    }
+    if (!previousFocusRef.current && document.activeElement instanceof HTMLElement) {
+      previousFocusRef.current = document.activeElement;
+    }
     rootRef.current?.focus();
-  }, [open, content]);
+  }, [content, disposeResize, open, restoreFocus]);
 
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        onClose();
-      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [onClose, open]);
+  }, [close, open]);
 
   useEffect(() => {
     if (!open) return;
     const onPointer = (event: MouseEvent) => {
-      if (isResizingRef.current) return;
+      if (resizeSessionRef.current) return;
       const root = rootRef.current;
       if (!root) return;
-      if (event.target instanceof Node && !root.contains(event.target)) {
-        onClose();
-      }
+      if (event.target instanceof Node && !root.contains(event.target)) close();
     };
     window.addEventListener("mousedown", onPointer, true);
     return () => window.removeEventListener("mousedown", onPointer, true);
-  }, [onClose, open]);
+  }, [close, open]);
 
-  const handleResizeMouseDown = useCallback((corner: "se" | "sw" | "ne" | "nw" = "se") => (e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    isResizingRef.current = true;
-    const startX = e.clientX;
-    const startY = e.clientY;
+  useEffect(() => () => {
+    disposeResize();
+    restoreFocus();
+  }, [disposeResize, restoreFocus]);
+
+  const handleResizeMouseDown = useCallback((corner: ResizeCorner) => (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    disposeResize();
     const startRect = rootRef.current?.getBoundingClientRect();
-    const startWidth = startRect?.width && startRect.width > 0 ? startRect.width : size.width;
-    const startHeight = startRect?.height && startRect.height > 0 ? startRect.height : size.height;
-
-    const onMouseMove = (moveEvent: MouseEvent) => {
-      if (!isResizingRef.current) return;
-      const deltaX = moveEvent.clientX - startX;
-      const deltaY = moveEvent.clientY - startY;
-      const maxWidth = typeof window !== "undefined" && window.innerWidth > 0 ? window.innerWidth * 0.95 : 1600;
-      const maxHeight = typeof window !== "undefined" && window.innerHeight > 0 ? window.innerHeight * 0.85 : 1200;
-
-      let newWidth = startWidth;
-      let newHeight = startHeight;
-
-      if (corner === "se") {
-        newWidth = startWidth + deltaX;
-        newHeight = startHeight + deltaY;
-      } else if (corner === "sw") {
-        newWidth = startWidth - deltaX;
-        newHeight = startHeight + deltaY;
-      } else if (corner === "ne") {
-        newWidth = startWidth + deltaX;
-        newHeight = startHeight - deltaY;
-      } else if (corner === "nw") {
-        newWidth = startWidth - deltaX;
-        newHeight = startHeight - deltaY;
-      }
-
-      newWidth = Math.max(MIN_WIDTH, Math.min(maxWidth, newWidth));
-      newHeight = Math.max(MIN_HEIGHT, Math.min(maxHeight, newHeight));
-
-      setSize({ width: Math.round(newWidth), height: Math.round(newHeight) });
-    };
-
-    const onMouseUp = () => {
-      isResizingRef.current = false;
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-    };
-
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-  }, [size.height, size.width]);
+    const session = startWindowResizeSession({
+      corner,
+      startX: event.clientX,
+      startY: event.clientY,
+      startWidth: startRect?.width && startRect.width > 0 ? startRect.width : size.width,
+      startHeight: startRect?.height && startRect.height > 0 ? startRect.height : size.height,
+      minWidth: MIN_WIDTH,
+      minHeight: MIN_HEIGHT,
+      maxWidth: () => window.innerWidth > 0 ? window.innerWidth * 0.95 : 1600,
+      maxHeight: () => window.innerHeight > 0 ? window.innerHeight * 0.85 : 1200,
+      onResize: (width, height) => setSize({ width, height }),
+      onDispose: () => {
+        if (resizeSessionRef.current === session) resizeSessionRef.current = null;
+      },
+    });
+    resizeSessionRef.current = session;
+  }, [disposeResize, size.height, size.width]);
 
   if (!open || !content) return null;
-
   const html = renderFormatted(content.body, "md") ?? content.body;
 
   return (
@@ -133,6 +148,26 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
       }}
     >
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--taomni-code-border)] px-2 select-none">
+        <button
+          type="button"
+          title="Previous documentation"
+          aria-label="Previous documentation"
+          disabled={!canGoBack}
+          className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-30"
+          onClick={onBack}
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          title="Next documentation"
+          aria-label="Next documentation"
+          disabled={!canGoForward}
+          className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] disabled:opacity-30"
+          onClick={onForward}
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
         <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--taomni-code-text)]">
           {content.title}
         </span>
@@ -151,32 +186,25 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
           title="Close"
           aria-label="Close quick documentation"
           className="inline-flex h-6 w-6 items-center justify-center rounded text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)] hover:text-[var(--taomni-code-text)]"
-          onClick={onClose}
+          onClick={close}
         >
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
       <div
         className="taomni-chat-md min-h-0 flex-1 overflow-auto px-3 py-2 text-[12px] leading-relaxed text-[var(--taomni-code-text)]"
+        onClick={onBodyClick}
         dangerouslySetInnerHTML={{ __html: html }}
       />
-      {/* 4-corner resize handles */}
-      <div
-        className="absolute top-0 left-0 h-4 w-4 cursor-nw-resize z-10 select-none"
-        onMouseDown={handleResizeMouseDown("nw")}
-      />
-      <div
-        className="absolute top-0 right-0 h-4 w-4 cursor-ne-resize z-10 select-none"
-        onMouseDown={handleResizeMouseDown("ne")}
-      />
-      <div
-        className="absolute bottom-0 left-0 h-4 w-4 cursor-sw-resize z-10 select-none"
-        onMouseDown={handleResizeMouseDown("sw")}
-      />
+      {linkError && <div role="status" className="px-2 pb-1 text-[10px] text-red-400">{linkError}</div>}
+      <ReferenceContentFooter content={content} onOpenSource={onOpenSource} />
+      <div className="absolute top-0 left-0 z-10 h-4 w-4 cursor-nw-resize select-none" onMouseDown={handleResizeMouseDown("nw")} />
+      <div className="absolute top-0 right-0 z-10 h-4 w-4 cursor-ne-resize select-none" onMouseDown={handleResizeMouseDown("ne")} />
+      <div className="absolute bottom-0 left-0 z-10 h-4 w-4 cursor-sw-resize select-none" onMouseDown={handleResizeMouseDown("sw")} />
       <div
         data-testid="code-workspace-quick-doc-resize-handle"
         aria-label="Resize documentation dialog"
-        className="absolute bottom-0 right-0 h-4 w-4 cursor-se-resize flex items-end justify-end p-0.5 opacity-40 hover:opacity-100 z-10 select-none"
+        className="absolute bottom-0 right-0 z-10 flex h-4 w-4 cursor-se-resize select-none items-end justify-end p-0.5 opacity-40 hover:opacity-100"
         onMouseDown={handleResizeMouseDown("se")}
       >
         <svg viewBox="0 0 6 6" className="h-2.5 w-2.5 fill-current text-[var(--taomni-code-muted)]">
@@ -186,3 +214,5 @@ export function QuickDocPopup({ open, content, onClose, onPin }: QuickDocPopupPr
     </div>
   );
 }
+
+export type { QuickDocContent } from "./referenceDocumentation";

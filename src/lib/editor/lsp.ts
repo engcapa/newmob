@@ -213,6 +213,8 @@ export interface LspCompletionResult {
   status: LspDocumentStatus;
   isIncomplete: boolean;
   items: LspCompletionItem[];
+  /** Backend truncated the item list at its hard cap (200). */
+  truncated?: boolean | null;
 }
 
 export interface LspSignatureParameter {

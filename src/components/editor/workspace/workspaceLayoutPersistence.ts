@@ -9,6 +9,7 @@ import type {
 import { fileKey } from "./codeWorkspaceModel";
 import {
   type LayoutNode,
+  createSingleLeafLayout,
   validateLayoutTree,
   validateTreeGroupConsistency,
   migrateLayoutV1toV2,
@@ -127,6 +128,17 @@ export function createEmptyPersistedGroup(): PersistedEditorGroup {
   };
 }
 
+function cloneLayoutTree(node: LayoutNode): LayoutNode {
+  if (node.type === "leaf") {
+    return { ...node, openFileKeys: [...node.openFileKeys] };
+  }
+  return {
+    ...node,
+    ratios: [...(node.ratios ?? [])],
+    children: node.children.map(cloneLayoutTree),
+  };
+}
+
 export function defaultWorkspaceLayoutSnapshot(): WorkspaceLayoutSnapshotV2 {
   return {
     version: 2,
@@ -139,12 +151,7 @@ export function defaultWorkspaceLayoutSnapshot(): WorkspaceLayoutSnapshotV2 {
     activeEditorGroupId: "primary",
     expandedRootIds: [],
     expandedDirKeys: [],
-    layoutTreeV2: {
-      type: "leaf",
-      id: "primary",
-      openFileKeys: [],
-      activeKey: null,
-    },
+    layoutTreeV2: createSingleLeafLayout("primary", [], null),
     editorGroups: {
       primary: createEmptyPersistedGroup(),
       secondary: createEmptyPersistedGroup(),
@@ -186,7 +193,10 @@ export function normalizeWorkspaceLayoutSnapshot(value: unknown): WorkspaceLayou
   if (source.layoutTreeV2 && typeof source.layoutTreeV2 === "object") {
     const { valid } = validateLayoutTree(source.layoutTreeV2 as LayoutNode);
     if (valid) {
-      layoutTreeV2 = source.layoutTreeV2 as LayoutNode;
+      // Clone before any normalization writes: the caller may pass the live
+      // zustand tree object, and in-place leaf mutation would break
+      // structural sharing outside `set` (§8.16.4 step 4).
+      layoutTreeV2 = cloneLayoutTree(source.layoutTreeV2 as LayoutNode);
     } else {
       layoutTreeV2 = migrateLayoutV1toV2(source.layoutTreeV2);
       layoutRecovered = true;
@@ -383,7 +393,8 @@ export function snapshotFromWorkspaceUi(input: {
   expandedRootIds: string[];
   expandedDirKeys: string[];
   editorGroups: Record<string, CodeWorkspaceEditorGroupState>;
-  layoutTreeV2?: LayoutNode | null;
+    layoutTreeV2: LayoutNode;
+
 }): WorkspaceLayoutSnapshotV2 {
   const toPersisted = (group: CodeWorkspaceEditorGroupState): PersistedEditorGroup => ({
     openOrder: group.openOrder.slice(0, MAX_RESTORED_OPEN_FILES),
@@ -405,12 +416,7 @@ export function snapshotFromWorkspaceUi(input: {
     }
   }
 
-  const layoutTree: LayoutNode = input.layoutTreeV2 ?? {
-    type: "leaf",
-    id: input.activeEditorGroupId || "primary",
-    openFileKeys: input.editorGroups[input.activeEditorGroupId]?.openOrder ?? [],
-    activeKey: input.editorGroups[input.activeEditorGroupId]?.activeKey ?? null,
-  };
+  const layoutTree = input.layoutTreeV2;
 
   return normalizeWorkspaceLayoutSnapshot({
     version: 2,

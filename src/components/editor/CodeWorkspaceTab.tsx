@@ -139,17 +139,7 @@ import {
 } from "../../lib/editor/lsp";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import {
-  DEFAULT_CODE_VIEW_PROFILE,
-  applyCodeViewProfile,
-  loadCodeViewProfile,
-  normalizeCodeViewProfile,
-  sameCodeViewProfile,
-  saveCodeViewProfile,
-  subscribeCodeViewProfile,
-  type CodeViewProfile,
-} from "../../lib/codeViewProfile";
-import { DEFAULT_TERMINAL_PROFILE } from "../../lib/terminalProfile";
+import { loadCodeViewProfile } from "../../lib/codeViewProfile";
 import { useAppStore } from "../../stores/appStore";
 import {
   createEditorGroup,
@@ -177,15 +167,37 @@ import {
   type WorkspaceStyleController,
   type SaveTransactionV2,
 } from "./workspace/workspaceStyleController";
+import type {
+  CompletionAcceptanceDiagnostic,
+  CompletionRequestIdentity,
+  CompletionRequestToken,
+} from "./workspace/lspCompletion";
+import {
+  classifySaveWriteback,
+  nextSaveTransactionId,
+  resolveWritePolicy,
+  validatePreparedSaveBoundary,
+  type PreparedSave,
+} from "./workspace/saveCommit";
 import {
   createWorkspaceLocationController,
-  type WorkspaceLocationController,
   isPathContainedInRoot,
+  NavigationHistoryFacade,
+  workspacePathComparisonKey,
+  type BackForwardHistoryBridge,
+  type WorkspaceLocationController,
 } from "./workspace/navigationHistoryModel";
-import type { LayoutNode } from "./workspace/recursiveLayoutTree";
+import {
+  createSingleLeafLayout,
+  getAllLeafNodes,
+  panelLayoutToRatios,
+  cloneLayoutTree,
+  type LayoutNode,
+} from "./workspace/recursiveLayoutTree";
 import { historySnapshot } from "../../lib/localHistory";
 import {
   fileRefFromFileKey,
+  defaultWorkspaceLayoutSnapshot,
   layoutSnapshotHasOpenFiles,
   readWorkspaceLayoutSnapshot,
   snapshotFromWorkspaceUi,
@@ -224,6 +236,10 @@ import { readText, writeText } from "../../lib/clipboard";
 import { useContextMenu } from "../ContextMenu";
 import { useChatStore } from "../../stores/chatStore";
 import {
+  type EditorCommandId,
+  type EditorCommandPort,
+  type EditorCommandPortRegistration,
+  type EditorCommandState,
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./workspace/CodeMirrorHost";
@@ -254,6 +270,7 @@ import {
 } from "./workspace/workspaceEditPreview";
 import { RefactoringPreviewDialog } from "./workspace/RefactoringPreviewDialog";
 import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
+import { TabSwitcher } from "./workspace/TabSwitcher";
 import { DapAdapterGuideDialog } from "./workspace/DapAdapterGuideDialog";
 import {
   buildWorkspacePathSnapshotEdit,
@@ -304,7 +321,11 @@ import {
   type WorkspaceBookmark,
 } from "./workspace/todoBookmarks";
 import { useDeferredOpenFileTodos } from "./workspace/useDeferredOpenFileTodos";
-import { type QuickDocContent } from "./workspace/QuickDocPopup";
+import { type QuickDocContent } from "./workspace/referenceDocumentation";
+import {
+  ReferenceInfoController,
+  type ReferenceHistorySnapshot,
+} from "./workspace/referenceInfoController";
 import { type LocationPeekState } from "./workspace/LocationPeek";
 import {
   type GoToSymbolQueryResult,
@@ -316,6 +337,17 @@ import { EditorGroup } from "./workspace/EditorGroup";
 import { WorkspacePopupsHost } from "./workspace/WorkspacePopupsHost";
 import { WorkspaceSdkStatus } from "./workspace/WorkspaceSdkStatus";
 import { WorkspaceBuildRunToolsDialog } from "./workspace/WorkspaceBuildRunToolsDialog";
+import { WorkspaceIntelligenceSettingsDialog } from "./workspace/WorkspaceIntelligenceSettingsDialog";
+import { WorkspaceEditorAppearanceSettingsDialog } from "./workspace/WorkspaceEditorAppearanceSettingsDialog";
+import {
+  DEFAULT_EDITOR_APPEARANCE_PROFILE,
+  matchesBreadcrumbLanguage,
+  matchesSoftWrapPath,
+  normalizeEditorAppearanceProfile,
+  readEditorAppearanceProfileWithDiagnostics,
+  writeEditorAppearanceProfile,
+  type EditorAppearanceProfile,
+} from "./workspace/editorAppearanceProfile";
 import {
   applyRunConfigurationOverride,
   applyRunOverrideToDebugConfiguration,
@@ -459,6 +491,7 @@ interface PendingExternalFileEvent {
 interface WorkspaceEditTabSnapshot {
   activeGroupId: EditorGroupId;
   splitOrientation: EditorSplitOrientation | null;
+  layoutTreeV2: LayoutNode;
   files: Array<{
     path: string;
     ref: CodeWorkspaceFileRef;
@@ -737,6 +770,18 @@ export function CodeWorkspaceTab({
     [tabId, workspace.repoRoot, workspace.workspaceId, workspace.workspaceInstanceId],
   );
   const semanticIndex = useWorkspaceSemanticIndex(workspaceInstanceId);
+  const referenceInfoController = useMemo(
+    () => new ReferenceInfoController(workspaceInstanceId),
+    [workspaceInstanceId],
+  );
+  const [referenceHistory, setReferenceHistory] = useState<ReferenceHistorySnapshot>(
+    () => referenceInfoController.historySnapshot(),
+  );
+  useEffect(() => {
+    referenceInfoController.activate();
+    setReferenceHistory(referenceInfoController.historySnapshot());
+    return () => referenceInfoController.dispose();
+  }, [referenceInfoController]);
   const {
     messageRequest: lspMessageRequest,
     progresses: lspProgresses,
@@ -791,9 +836,9 @@ export function CodeWorkspaceTab({
   const updateStoreExpandedDirKeys = useCodeWorkspaceStore((s) => s.updateExpandedDirKeys);
   const updateStoreEditorGroup = useCodeWorkspaceStore((s) => s.updateEditorGroup);
   const setStoreActiveEditorGroup = useCodeWorkspaceStore((s) => s.setActiveEditorGroup);
-  const setStoreSplitOrientation = useCodeWorkspaceStore((s) => s.setSplitOrientation);
   const splitLayoutLeaf = useCodeWorkspaceStore((s) => s.splitLayoutLeaf);
   const closeLayoutLeaf = useCodeWorkspaceStore((s) => s.closeLayoutLeaf);
+  const setLayoutTreeV2Store = useCodeWorkspaceStore((s) => s.setLayoutTreeV2);
   const closeLayoutTabInLeaf = useCodeWorkspaceStore((s) => s.closeLayoutTabInLeaf);
   const setLeafActiveTab = useCodeWorkspaceStore((s) => s.setLeafActiveTab);
   const setLayoutNodeRatios = useCodeWorkspaceStore((s) => s.setLayoutNodeRatios);
@@ -816,6 +861,9 @@ export function CodeWorkspaceTab({
     layoutRestoredOpenFilesRef.current = false;
     const snapshot = readWorkspaceLayoutSnapshot(workspaceInstanceId);
     if (snapshot) {
+      if (snapshot.layoutRecovered) {
+        setStatusMessage("Recovered invalid workspace layout into a single editor leaf");
+      }
       patchWorkspaceUi(workspaceInstanceId, {
         bottomDockOpen: snapshot.bottomDockOpen,
         bottomDockTab: snapshot.bottomDockTab,
@@ -845,11 +893,31 @@ export function CodeWorkspaceTab({
           ?? snapshot.editorGroups.secondary?.activeKey
           ?? null,
       });
+      writeWorkspaceLayoutSnapshot(workspaceInstanceId, snapshot);
       layoutRestoredOpenFilesRef.current = layoutSnapshotHasOpenFiles(snapshot);
       return;
     }
     const seedRoots = initialRoots(workspace);
-    if (seedRoots.length === 0) return;
+    // §8.16.4 N6.6: fresh mounts materialize a single-leaf v2 tree
+    // immediately so the recursive renderer is the only production layout
+    // path from first paint; the primary/secondary fallback never renders.
+    // The dormant "secondary" group stays present-but-empty: empty legacy
+    // slots carry no layout truth (see validateTreeGroupConsistency).
+    const uiNow = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+    patchWorkspaceUi(workspaceInstanceId, {
+      layoutTreeV2: createSingleLeafLayout(
+        "primary",
+        uiNow.editorGroups.primary?.openOrder ?? [],
+        uiNow.editorGroups.primary?.activeKey ?? null,
+      ),
+      editorGroups: {
+        primary: uiNow.editorGroups.primary ?? createEditorGroup("primary"),
+        secondary: createEditorGroup("secondary"),
+      },
+      activeEditorGroupId: "primary",
+    });
+      writeWorkspaceLayoutSnapshot(workspaceInstanceId, defaultWorkspaceLayoutSnapshot());
+      if (seedRoots.length === 0) return;
     seedTreeExpandIfEmpty(
       workspaceInstanceId,
       seedRoots.map((root) => root.id),
@@ -901,6 +969,48 @@ export function CodeWorkspaceTab({
   const openFilesRef = useRef(openFiles);
   const openOrderRef = useRef(openOrder);
   const lspFilesRef = useRef(lspFiles);
+  const editorCommandPortsRef = useRef(new Map<EditorGroupId, {
+    fileKey: string;
+    token: object;
+    port: EditorCommandPort;
+  }>());
+  const [editorCommandContextRevision, setEditorCommandContextRevision] = useState(0);
+  const registerEditorCommandPort = useCallback((
+    groupId: EditorGroupId,
+    registration: EditorCommandPortRegistration,
+  ) => {
+    const current = editorCommandPortsRef.current.get(groupId);
+    if (registration.port) {
+      editorCommandPortsRef.current.set(groupId, {
+        fileKey: registration.fileKey,
+        token: registration.token,
+        port: registration.port,
+      });
+      setEditorCommandContextRevision((revision) => revision + 1);
+      return;
+    }
+    if (
+      current?.fileKey !== registration.fileKey
+      || current.token !== registration.token
+    ) {
+      return;
+    }
+    editorCommandPortsRef.current.delete(groupId);
+    setEditorCommandContextRevision((revision) => revision + 1);
+  }, []);
+  const activeEditorCommandOwner = useCallback(() => {
+    const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+    const groupId = ui.activeEditorGroupId;
+    const fileKey = ui.editorGroups[groupId]?.activeKey ?? null;
+    const owner = editorCommandPortsRef.current.get(groupId) ?? null;
+    return owner && fileKey === owner.fileKey ? owner : null;
+  }, [workspaceInstanceId]);
+  const activeEditorCommandState = useCallback((): EditorCommandState | null => {
+    return activeEditorCommandOwner()?.port.state() ?? null;
+  }, [activeEditorCommandOwner]);
+  const executeActiveEditorCommand = useCallback((commandId: EditorCommandId) => {
+    return activeEditorCommandOwner()?.port.execute(commandId) ?? false;
+  }, [activeEditorCommandOwner]);
   /**
    * False after unmount so async callbacks skip setState. MUST come from
    * `useMountedRef`: the inline `useEffect(() => () => { ref.current = false })`
@@ -1197,7 +1307,20 @@ export function CodeWorkspaceTab({
     });
   }, [replaceStoreFileState, workspaceInstanceId]);
 
-  const [codeViewProfile, setCodeViewProfileState] = useState<CodeViewProfile>(() => loadCodeViewProfile());
+  const initialEditorAppearance = readEditorAppearanceProfileWithDiagnostics(
+    workspaceInstanceId,
+    loadCodeViewProfile(),
+  );
+  const [editorAppearanceProfile, setEditorAppearanceProfileState] = useState<EditorAppearanceProfile>(
+    () => {
+      if (initialEditorAppearance.source === "migrated") {
+        return writeEditorAppearanceProfile(workspaceInstanceId, initialEditorAppearance.profile);
+      }
+      return initialEditorAppearance.profile;
+    },
+  );
+  const [activeEditorFontSizes, setActiveEditorFontSizes] = useState<Record<EditorGroupId, number>>({});
+  const [editorAppearanceSettingsOpen, setEditorAppearanceSettingsOpen] = useState(false);
   const [columnSelectionMode, setColumnSelectionMode] = useState(false);
   const [treeFontSize, setTreeFontSizeState] = useState(() => readCodeWorkspaceTreeFontSize());
   const [roots, setRoots] = useState<CodeWorkspaceRootInfo[]>(() => initialRoots(workspace));
@@ -1275,6 +1398,11 @@ export function CodeWorkspaceTab({
   const [intelligencePreferences, setIntelligencePreferencesState] = useState<WorkspaceIntelligencePreferences>(
     () => readWorkspaceIntelligencePreferences(workspaceInstanceId),
   );
+  useEffect(() => {
+    setIntelligencePreferencesState(readWorkspaceIntelligencePreferences(workspaceInstanceId));
+  }, [workspaceInstanceId]);
+  const [parameterInfoRequestNonce, setParameterInfoRequestNonce] = useState(0);
+  const [intelligenceSettingsOpen, setIntelligenceSettingsOpen] = useState(false);
   const [breadcrumbSymbolsByGroup, setBreadcrumbSymbolsByGroup] = useState<Record<EditorGroupId, LspDocumentSymbol[]>>({
     primary: [],
     secondary: [],
@@ -1294,8 +1422,7 @@ export function CodeWorkspaceTab({
   ) => {
     setIntelligencePreferencesState((current) => {
       const next = typeof update === "function" ? update(current) : update;
-      writeWorkspaceIntelligencePreferences(workspaceInstanceId, next);
-      return next;
+      return writeWorkspaceIntelligencePreferences(workspaceInstanceId, next);
     });
   }, [workspaceInstanceId]);
   const rootsRef = useRef(roots);
@@ -1303,7 +1430,7 @@ export function CodeWorkspaceTab({
   // Library sources opened from the language server (JDK / dependency classes),
   // keyed by editor key so a closed tab can be re-fetched from history.
   const libraryBuffersRef = useRef<Record<string, LibraryBufferInfo>>({});
-  const codeViewProfileRef = useRef(codeViewProfile);
+  const editorAppearanceProfileRef = useRef(editorAppearanceProfile);
   const treeFontSizeRef = useRef(treeFontSize);
   const gitHeadRequestsRef = useRef(new Set<string>());
   const gitBlameCacheRef = useRef(new Map<string, GitBlameLine | null>());
@@ -1355,9 +1482,10 @@ export function CodeWorkspaceTab({
   const safeDeleteSymbolRef = useRef<() => Promise<void>>(async () => {});
   // Hover enriches the AI prompt with type information. The LSP hover callback
   // is declared further down, so read it through a ref.
-  const getLspHoverRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<string | null>>(
-    async () => null,
-  );
+  const getLspHoverRef = useRef<(
+    file: OpenFileState,
+    position: LspPosition,
+  ) => Promise<QuickDocContent | null>>(async () => null);
   const breadcrumbSymbolsRef = useRef<Record<EditorGroupId, LspDocumentSymbol[]>>({
     primary: [],
     secondary: [],
@@ -1495,6 +1623,7 @@ export function CodeWorkspaceTab({
     descriptorForPath: lspDescriptorForPath,
     isDocumentSynced: isLspDocumentSynced,
     documentVersion: lspDocumentVersion,
+    sessionGeneration: lspSessionGeneration,
     syncDocument: syncLspDocument,
     waitForSyncQueue: waitForLspDocumentSyncQueue,
     saveDocument: saveLspDocument,
@@ -1514,10 +1643,10 @@ export function CodeWorkspaceTab({
     "--taomni-code-tree-row-height": `${Math.max(24, treeFontSize + 15)}px`,
   }) as CSSProperties, [treeFontSize]);
   const editorPaneStyle = useMemo(() => ({
-    "--taomni-code-editor-ui-font-size": `${codeViewProfile.fontSize}px`,
-    "--taomni-code-editor-ui-small-font-size": `${Math.max(10, codeViewProfile.fontSize - 2)}px`,
-    "--taomni-code-editor-tab-height": `${Math.max(28, codeViewProfile.fontSize + 15)}px`,
-  }) as CSSProperties, [codeViewProfile.fontSize]);
+    "--taomni-code-editor-ui-font-size": `${editorAppearanceProfile.fontSizePx}px`,
+    "--taomni-code-editor-ui-small-font-size": `${Math.max(10, editorAppearanceProfile.fontSizePx - 2)}px`,
+    "--taomni-code-editor-tab-height": `${Math.max(28, editorAppearanceProfile.fontSizePx + 15)}px`,
+  }) as CSSProperties, [editorAppearanceProfile.fontSizePx]);
 
   useEffect(() => {
     rootsRef.current = roots;
@@ -1616,62 +1745,96 @@ export function CodeWorkspaceTab({
   }, [activeEditorGroupId]);
 
   useEffect(() => {
-    codeViewProfileRef.current = codeViewProfile;
-  }, [codeViewProfile]);
+    editorAppearanceProfileRef.current = editorAppearanceProfile;
+  }, [editorAppearanceProfile]);
+
+  useEffect(() => {
+    const result = readEditorAppearanceProfileWithDiagnostics(
+      workspaceInstanceId,
+      loadCodeViewProfile(),
+    );
+    const next = result.source === "migrated"
+      ? writeEditorAppearanceProfile(workspaceInstanceId, result.profile)
+      : result.profile;
+    editorAppearanceProfileRef.current = next;
+    setEditorAppearanceProfileState(next);
+    setActiveEditorFontSizes({});
+    if (result.diagnostic?.kind === "corrupt") {
+      setStatusMessage(result.diagnostic.message);
+    }
+  }, [setStatusMessage, workspaceInstanceId]);
 
   useEffect(() => {
     treeFontSizeRef.current = treeFontSize;
   }, [treeFontSize]);
 
-  const updateCodeViewProfile = useCallback(
-    (
-      updater: CodeViewProfile | ((current: CodeViewProfile) => CodeViewProfile),
-      statusMessage?: (profile: CodeViewProfile) => string,
-    ) => {
-      // Base the change on the freshly-persisted profile rather than local state
-      // so a zoom here never clobbers a theme/font the user just picked in
-      // Settings → Code View Appearance.
-      const current = loadCodeViewProfile();
-      const next = normalizeCodeViewProfile(
-        typeof updater === "function" ? updater(current) : updater,
-      );
-      codeViewProfileRef.current = next;
-      setCodeViewProfileState(next);
-      saveCodeViewProfile(next);
-      applyCodeViewProfile(next, DEFAULT_TERMINAL_PROFILE);
-      if (statusMessage) setStatusMessage(statusMessage(next));
-    },
-    [setStatusMessage],
-  );
+  const updateEditorAppearanceProfile = useCallback((
+    updater: EditorAppearanceProfile
+      | ((current: EditorAppearanceProfile) => EditorAppearanceProfile),
+    statusMessage?: (profile: EditorAppearanceProfile) => string,
+  ) => {
+    const current = editorAppearanceProfileRef.current;
+    const next = normalizeEditorAppearanceProfile(
+      typeof updater === "function" ? updater(current) : updater,
+    );
+    editorAppearanceProfileRef.current = next;
+    setEditorAppearanceProfileState(next);
+    writeEditorAppearanceProfile(workspaceInstanceId, next);
+    if (next.zoomScope === "all-editors") setActiveEditorFontSizes({});
+    if (statusMessage) setStatusMessage(statusMessage(next));
+  }, [setStatusMessage, workspaceInstanceId]);
 
-  // Follow code-view appearance edits made elsewhere (Settings, another window)
-  // so the workspace shares one theme/font with the Git diff view instead of
-  // owning its own copy.
-  useEffect(() => {
-    return subscribeCodeViewProfile((incoming) => {
-      if (sameCodeViewProfile(incoming, codeViewProfileRef.current)) return;
-      codeViewProfileRef.current = incoming;
-      setCodeViewProfileState(incoming);
-      applyCodeViewProfile(incoming, DEFAULT_TERMINAL_PROFILE);
-    });
-  }, []);
+  const effectiveEditorFontSize = useCallback((groupId: EditorGroupId) => (
+    editorAppearanceProfileRef.current.zoomScope === "active-editor"
+      ? activeEditorFontSizes[groupId] ?? editorAppearanceProfileRef.current.fontSizePx
+      : editorAppearanceProfileRef.current.fontSizePx
+  ), [activeEditorFontSizes]);
 
-  const setCodeViewFontSize = useCallback(
-    (size: number) => {
-      updateCodeViewProfile(
-        (current) => ({ ...current, fontSize: clampCodeWorkspaceFontSize(size) }),
-        (next) => `Code workspace zoom ${next.fontSize}px`,
-      );
-    },
-    [updateCodeViewProfile],
+  const setCodeViewFontSize = useCallback((size: number) => {
+    const nextSize = clampCodeWorkspaceFontSize(size);
+    if (editorAppearanceProfileRef.current.zoomScope === "active-editor") {
+      setActiveEditorFontSizes((current) => ({
+        ...current,
+        [activeEditorGroupIdRef.current]: nextSize,
+      }));
+      setStatusMessage(`Active editor zoom ${nextSize}px`);
+      return;
+    }
+    updateEditorAppearanceProfile(
+      (current) => ({ ...current, fontSizePx: nextSize }),
+      (next) => `Code workspace zoom ${next.fontSizePx}px`,
+    );
+  }, [setStatusMessage, updateEditorAppearanceProfile]);
+
+  const currentEditorFontSize = effectiveEditorFontSize(activeEditorGroupId);
+  const activeAppearancePath = activeKey
+    ? openFilesRef.current[activeKey]?.languagePath
+    : undefined;
+  const activeFileSoftWrap = !!activeAppearancePath && matchesSoftWrapPath(
+    activeAppearancePath,
+    editorAppearanceProfile.softWrap.patterns,
   );
 
   const toggleSoftWrap = useCallback(() => {
-    updateCodeViewProfile(
-      (current) => ({ ...current, softWrap: !current.softWrap }),
-      (next) => `Soft wrap ${next.softWrap ? "enabled" : "disabled"}`,
-    );
-  }, [updateCodeViewProfile]);
+    const path = activeKey ? openFilesRef.current[activeKey]?.languagePath : undefined;
+    if (!path) return;
+    updateEditorAppearanceProfile((current) => {
+      const enabled = matchesSoftWrapPath(path, current.softWrap.patterns);
+      return {
+        ...current,
+        softWrap: {
+          ...current.softWrap,
+          patterns: enabled
+            ? current.softWrap.patterns.filter((pattern) => !matchesSoftWrapPath(path, [pattern]))
+            : [...current.softWrap.patterns, path],
+        },
+      };
+    }, (next) => (
+      matchesSoftWrapPath(path, next.softWrap.patterns)
+        ? `Soft wrap enabled for ${path}`
+        : `Soft wrap disabled for ${path}`
+    ));
+  }, [activeKey, updateEditorAppearanceProfile]);
 
   const toggleColumnSelectionMode = useCallback(() => {
     setColumnSelectionMode((current) => {
@@ -1681,12 +1844,9 @@ export function CodeWorkspaceTab({
     });
   }, [setStatusMessage]);
 
-  const stepCodeViewFontSize = useCallback(
-    (delta: number) => {
-      setCodeViewFontSize(codeViewProfileRef.current.fontSize + delta);
-    },
-    [setCodeViewFontSize],
-  );
+  const stepCodeViewFontSize = useCallback((delta: number) => {
+    setCodeViewFontSize(effectiveEditorFontSize(activeEditorGroupIdRef.current) + delta);
+  }, [effectiveEditorFontSize, setCodeViewFontSize]);
 
   const setTreeFontSize = useCallback(
     (size: number) => {
@@ -1756,7 +1916,7 @@ export function CodeWorkspaceTab({
       } else if (decrease) {
         stepCodeViewFontSize(-1);
       } else {
-        setCodeViewFontSize(DEFAULT_CODE_VIEW_PROFILE.fontSize);
+        setCodeViewFontSize(DEFAULT_EDITOR_APPEARANCE_PROFILE.fontSizePx);
       }
     };
 
@@ -2021,6 +2181,7 @@ export function CodeWorkspaceTab({
     suppressNextHistoryRecord,
     noteCaretPosition,
     reconcileFileReferences: reconcileNavigationFileReferences,
+    removeNavigationLocations,
     openRecentFiles,
     recentChangedOnly,
     recordEditLocation,
@@ -2096,6 +2257,52 @@ export function CodeWorkspaceTab({
     setBottomDockOpen(true);
     terminalDockRef.current?.openAt(cwd, relativeDirectory ? basename(relativeDirectory) : root.name);
   }, [findRoot]);
+
+  // §8.16.5 N2.6: single facade for Recent Locations + Back/Forward so
+  // rename/delete/remove operations keep both histories in sync.
+  const navigationPathForRef = useCallback((ref: CodeWorkspaceFileRef): string | null => {
+    if (ref.kind === "loose") return ref.path;
+    const root = rootsRef.current.find((candidate) => candidate.id === ref.rootId);
+    if (!root) return null;
+    return `${root.path}/${ref.path}`;
+  }, []);
+
+  const navigationHistoryFacade = useMemo(() => {
+    const controller = workspaceLocationControllerRef.current;
+    const remapRef = (ref: CodeWorkspaceFileRef, fromPath: string, toPath: string): CodeWorkspaceFileRef | null => {
+      const refPath = navigationPathForRef(ref);
+      if (refPath == null) return ref;
+      const fromKey = workspacePathComparisonKey(fromPath);
+      if (workspacePathComparisonKey(refPath) !== fromKey) return ref;
+      if (ref.kind === "loose") return { ...ref, path: toPath };
+      const nextRel = toPath.split("/").slice(-ref.path.split("/").length).join("/");
+      return { ...ref, path: nextRel };
+    };
+    const bridge: BackForwardHistoryBridge = {
+      removeLocation: (identity) => {
+        removeNavigationLocations((loc) => {
+          const locPath = navigationPathForRef(loc.ref);
+          return (identity.fileKey !== null && fileKey(loc.ref) === identity.fileKey)
+            || (locPath !== null
+              && workspacePathComparisonKey(locPath) === workspacePathComparisonKey(identity.canonicalPath));
+        });
+      },
+      relocateFile: (fromPath, toPath) => {
+        reconcileNavigationFileReferences((ref) => remapRef(ref, fromPath, toPath));
+      },
+      removeDirectorySubtree: (dirPath) => {
+        removeNavigationLocations((loc) => {
+          const locPath = navigationPathForRef(loc.ref);
+          return locPath !== null && isPathContainedInRoot(locPath, dirPath);
+        });
+      },
+    };
+    return new NavigationHistoryFacade(controller, undefined, bridge);
+  }, [
+    navigationPathForRef,
+    reconcileNavigationFileReferences,
+    removeNavigationLocations,
+  ]);
 
   useEffect(() => {
     if (layoutRestoredOpenFilesRef.current) {
@@ -2518,11 +2725,13 @@ export function CodeWorkspaceTab({
       event.preventDefault();
       if (selected?.kind === "file" && (event.ctrlKey || event.metaKey)) {
         const current = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
-        const targetGroupId: EditorGroupId = current.activeEditorGroupId === "primary"
-          ? "secondary"
-          : "primary";
-        setStoreSplitOrientation(workspaceInstanceId, "vertical");
-        void openFile(selected.ref, { groupId: targetGroupId });
+        // §8.16.4 N6.6: tree Ctrl+Enter splits the active recursive leaf.
+        splitLayoutLeaf(workspaceInstanceId, current.activeEditorGroupId, "vertical");
+        const next = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+        const targetGroupId: EditorGroupId | undefined = next.activeEditorGroupId !== current.activeEditorGroupId
+          ? next.activeEditorGroupId
+          : undefined;
+        void openFile(selected.ref, targetGroupId ? { groupId: targetGroupId } : undefined);
       } else if (selected?.kind === "file") void openFile(selected.ref);
       else rows[selectedIndex]?.click();
       return;
@@ -2546,7 +2755,7 @@ export function CodeWorkspaceTab({
         row.click();
       }
     }
-  }, [openFile, selected, setStoreSplitOrientation, workspaceInstanceId]);
+  }, [openFile, selected, workspaceInstanceId]);
 
   const showTreeContextMenu = useCallback(
     (event: React.MouseEvent, selection: TreeSelection) => {
@@ -3040,12 +3249,16 @@ export function CodeWorkspaceTab({
   ): WorkspaceEditTabSnapshot => {
     const pathSet = new Set(paths.map(fsPathComparisonKey));
     const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+    // §8.16.4 N6.6: snapshot every leaf at any depth, not just the legacy
+    // primary/secondary pair; the full tree (with ratios) is captured so a
+    // failed WorkspaceEdit restores the entire layout.
+    const groupIds: EditorGroupId[] = getAllLeafNodes(ui.layoutTreeV2).map((leaf) => leaf.id);
     const files = Object.values(openFilesRef.current).flatMap((file) => {
       const absolutePath = absolutePathForOpenFile(file);
       if (!absolutePath || !pathSet.has(fsPathComparisonKey(absolutePath))) return [];
-      const groups = (["primary", "secondary"] as const).flatMap((id) => {
+      const groups = groupIds.flatMap((id) => {
         const group = ui.editorGroups[id];
-        if (!group.openOrder.includes(file.key)) return [];
+        if (!group || !group.openOrder.includes(file.key)) return [];
         return [{
           id,
           active: group.activeKey === file.key,
@@ -3058,14 +3271,16 @@ export function CodeWorkspaceTab({
     return {
       activeGroupId: ui.activeEditorGroupId,
       splitOrientation: ui.splitOrientation,
+      layoutTreeV2: cloneLayoutTree(ui.layoutTreeV2),
       files,
     };
   }, [absolutePathForOpenFile, workspaceInstanceId]);
 
   const restoreWorkspaceEditTabs = useCallback(async (snapshot: WorkspaceEditTabSnapshot) => {
-    if (snapshot.files.some((file) => file.groups.some((group) => group.id === "secondary"))) {
-      setStoreSplitOrientation(workspaceInstanceId, snapshot.splitOrientation ?? "vertical");
-    }
+    // §8.16.4 N6.6: restore the entire recursive tree (structure + ratios)
+    // before reopening tabs so a failed WorkspaceEdit recovers every leaf,
+    // not just the two legacy groups.
+    setLayoutTreeV2Store(workspaceInstanceId, cloneLayoutTree(snapshot.layoutTreeV2));
     for (const file of snapshot.files) {
       for (const group of file.groups) {
         await openFile(file.ref, { preview: group.preview, groupId: group.id });
@@ -3081,7 +3296,7 @@ export function CodeWorkspaceTab({
       }
     }
     activateEditorGroup(snapshot.activeGroupId);
-  }, [activateEditorGroup, openFile, setStoreSplitOrientation, updateEditorGroup, workspaceInstanceId]);
+  }, [activateEditorGroup, openFile, updateEditorGroup, workspaceInstanceId]);
 
   /**
    * Persist an open buffer with an explicit text payload.
@@ -3175,7 +3390,7 @@ export function CodeWorkspaceTab({
     // Hover is best-effort: a cold or unsupported server must not block the ask.
     let hover: string | null = null;
     try {
-      hover = await getLspHoverRef.current(file, selection.start);
+      hover = (await getLspHoverRef.current(file, selection.start))?.body ?? null;
     } catch {
       hover = null;
     }
@@ -3404,19 +3619,26 @@ export function CodeWorkspaceTab({
       throw new Error(`${file.title} is a read-only library source`);
     }
 
-    // 1. Prepare phase: capture immutable snapshot
-    const snapshotText = textToSave !== undefined ? textToSave : file.text;
-    const snapshotRevision = file.documentRevision ?? 0;
-    const expectedDiskHash = file.hash ?? null;
-    const styleGeneration = workspaceStyleControllerRef.current.getGeneration();
-    const absPath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
-    const rawEol = saveOptions?.eol;
-    const normalizedEolOption: OpenFileEol | undefined = rawEol
-      ? (rawEol.toUpperCase() as OpenFileEol)
-      : undefined;
-    const targetEol: OpenFileEol = normalizedEolOption ?? file.eol;
-    const targetBom = saveOptions?.bom !== undefined ? saveOptions.bom : (file.bom ?? false);
-    const encoding = saveOptions?.encoding ?? file.encoding ?? "UTF-8";
+    // 1. Prepare phase: capture immutable PreparedSave (§8.16.1 P0-S3)
+    const prepared: PreparedSave = {
+      transactionId: nextSaveTransactionId(),
+      workspaceId: workspaceInstanceId,
+      fileKey: key,
+      filePath: absolutePathForOpenFile(file) ?? file.path ?? file.title,
+      text: textToSave !== undefined ? textToSave : file.text,
+      bufferRevision: file.documentRevision ?? 0,
+      styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
+      expectedDiskHash: file.hash ?? null,
+      policy: resolveWritePolicy({
+        explicit: {
+          eol: saveOptions?.eol,
+          encoding: saveOptions?.encoding,
+          bom: saveOptions?.bom,
+        },
+        file,
+      }),
+    };
+    const snapshotText = prepared.text;
 
     // Set metadata without changing text or bumping revision
     mutateOpenBuffer(
@@ -3434,16 +3656,14 @@ export function CodeWorkspaceTab({
 
     // 2. Pre-write commit boundary (SYNCHRONOUS, NO AWAIT)
     const currentBeforeWrite = openFilesRef.current[key];
-    if (!currentBeforeWrite || (absolutePathForOpenFile(currentBeforeWrite) ?? currentBeforeWrite.path) !== absPath) {
-      mutateOpenBuffer(key, { saving: false }, "save-metadata");
-      return null;
-    }
-    if ((currentBeforeWrite.documentRevision ?? 0) !== snapshotRevision) {
-      // Buffer modified during prepare!
-      mutateOpenBuffer(key, { saving: false }, "save-metadata");
-      return null;
-    }
-    if (workspaceStyleControllerRef.current.getGeneration() !== styleGeneration) {
+    const boundaryCancellation = validatePreparedSaveBoundary(prepared, currentBeforeWrite
+      ? {
+          filePath: absolutePathForOpenFile(currentBeforeWrite) ?? currentBeforeWrite.path ?? "",
+          documentRevision: currentBeforeWrite.documentRevision ?? 0,
+          styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
+        }
+      : null);
+    if (boundaryCancellation) {
       mutateOpenBuffer(key, { saving: false }, "save-metadata");
       return null;
     }
@@ -3451,19 +3671,25 @@ export function CodeWorkspaceTab({
     // In the SAME synchronous turn, invoke byte writer
     const writerPromise = writeTextSnapshot({
       fileKey: key,
-      filePath: absPath,
-      logicalText: snapshotText,
-      expectedDiskHash,
-      policy: {
-        eol: targetEol,
-        encoding,
-        bom: targetBom,
-      },
+      filePath: prepared.filePath,
+      logicalText: prepared.text,
+      expectedDiskHash: prepared.expectedDiskHash,
+      policy: prepared.policy,
     });
 
     // 3. Writeback phase (Merge, never overwrite text)
     try {
       const saved = await writerPromise;
+
+      // Closed during write: discard writeback, watcher notify, git,
+      // semantic invalidation and LSP by transaction identity (§8.16.1).
+      const liveAfterWrite = openFilesRef.current[key];
+      const writeback = classifySaveWriteback(prepared, liveAfterWrite
+        ? { documentRevision: liveAfterWrite.documentRevision ?? 0 }
+        : null);
+      if (writeback.kind === "discarded") {
+        return saved;
+      }
 
       const savedPath = absolutePathForOpenFile(file);
       if (savedPath) {
@@ -3476,25 +3702,24 @@ export function CodeWorkspaceTab({
         }]).catch(() => 0);
       }
       const normalized = normalizeEditorText(saved.text);
-      const savedBom = saved.bom ?? (saveOptions?.bom !== undefined ? saveOptions.bom : saved.text.startsWith("\uFEFF"));
+      const savedBom = saved.bom ?? prepared.policy.bom;
 
-      const latestNow = openFilesRef.current[key] ?? file;
-      const isBufferStillSame = (latestNow.documentRevision ?? 0) === snapshotRevision;
+      const latestNow = liveAfterWrite!;
 
       mutateOpenBuffer(
         key,
         {
           savedText: normalized.text,
           text: latestNow.text,
-          eol: targetEol ?? normalized.eol,
-          encoding: saved.encoding ?? encoding,
+          eol: (prepared.policy.eol.toUpperCase() as OpenFileEol) ?? normalized.eol,
+          encoding: saved.encoding ?? prepared.policy.encoding,
           bom: savedBom,
           hash: saved.hash,
           mtime: saved.mtime,
           size: saved.size,
           loading: false,
           saving: false,
-          dirty: !isBufferStillSame,
+          dirty: writeback.kind === "saved-stale-snapshot",
           error: null,
           documentRevision: latestNow.documentRevision,
         },
@@ -3505,14 +3730,14 @@ export function CodeWorkspaceTab({
         notifyWorkspacePathGitChanged(file.ref.rootId, file.ref.path);
       }
       semanticIndex.invalidate("document-saved", [savedPath ?? file.path]);
-      if (isBufferStillSame) {
+      if (writeback.kind === "saved-current") {
         await saveLspDocument({ ...file, text: snapshotText }, snapshotText);
       } else {
         // Stale-snapshot save: the disk now holds an older revision than the
         // live buffer. Sending didSave(snapshotText) would let the provider
         // observe an old document as the saved one; sync only the current
         // buffer via didChange and let the next explicit save own didSave.
-        await syncLspDocument(openFilesRef.current[key] ?? latestNow, "change");
+        await syncLspDocument(latestNow, "change");
       }
       return saved;
     } catch (err) {
@@ -3964,21 +4189,7 @@ export function CodeWorkspaceTab({
         });
         if (!confirmed) return;
       }
-      const index = group.openOrder.indexOf(key);
-      const nextOrder = group.openOrder.filter((entry) => entry !== key);
-      if (currentUi.layoutTreeV2) {
-        closeLayoutTabInLeaf(workspaceInstanceId, groupId, key);
-      } else {
-        updateEditorGroup(groupId, (current) => ({
-          ...current,
-          openOrder: nextOrder,
-          activeKey: current.activeKey === key
-            ? nextOrder[Math.min(index, nextOrder.length - 1)] ?? null
-            : current.activeKey,
-          previewKey: current.previewKey === key ? null : current.previewKey,
-          pinnedKeys: current.pinnedKeys.filter((entry) => entry !== key),
-        }));
-      }
+      closeLayoutTabInLeaf(workspaceInstanceId, groupId, key);
       if (usedByOtherGroup) return;
       if (file) closeLspDocument(file);
       setOpenFiles((current) => {
@@ -4122,68 +4333,13 @@ export function CodeWorkspaceTab({
     key = activeKey,
     sourceGroupId = activeEditorGroupId,
   ) => {
-    if (!key) return;
-    const file = openFilesRef.current[key];
-    if (!file) return;
-    if (workspaceUi.layoutTreeV2) {
-      splitLayoutLeaf(workspaceInstanceId, sourceGroupId, orientation, key);
-      return;
-    }
-    const targetGroupId: EditorGroupId = sourceGroupId === "primary" ? "secondary" : "primary";
-    void openFile(file.ref, { groupId: targetGroupId });
-    setStoreSplitOrientation(workspaceInstanceId, orientation);
-  }, [activeEditorGroupId, activeKey, openFile, setStoreSplitOrientation, splitLayoutLeaf, workspaceInstanceId, workspaceUi.layoutTreeV2]);
+    if (!key || !openFilesRef.current[key]) return;
+    splitLayoutLeaf(workspaceInstanceId, sourceGroupId, orientation, key);
+  }, [activeEditorGroupId, activeKey, splitLayoutLeaf, workspaceInstanceId]);
 
   const closeSplit = useCallback(() => {
-    if (workspaceUi.layoutTreeV2 && activeEditorGroupId !== "primary") {
-      closeLayoutLeaf(workspaceInstanceId, activeEditorGroupId);
-      return;
-    }
-    const current = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
-    const primary = current.editorGroups.primary;
-    const secondary = current.editorGroups.secondary;
-    const mergedOrder = [...primary.openOrder];
-    for (const key of secondary.openOrder) {
-      if (!mergedOrder.includes(key)) mergedOrder.push(key);
-    }
-    updateEditorGroup("primary", {
-      ...primary,
-      openOrder: mergedOrder,
-      activeKey: current.activeEditorGroupId === "secondary"
-        ? secondary.activeKey ?? primary.activeKey
-        : primary.activeKey,
-      pinnedKeys: [...new Set([...primary.pinnedKeys, ...secondary.pinnedKeys])],
-      previewKey: primary.previewKey ?? secondary.previewKey,
-    });
-    updateEditorGroup("secondary", {
-      id: "secondary",
-      openOrder: [],
-      activeKey: null,
-      previewKey: null,
-      pinnedKeys: [],
-    });
-    setStoreSplitOrientation(workspaceInstanceId, null);
-    activateEditorGroup("primary");
-  }, [activateEditorGroup, activeEditorGroupId, closeLayoutLeaf, setStoreSplitOrientation, updateEditorGroup, workspaceInstanceId, workspaceUi.layoutTreeV2]);
-
-  useEffect(() => {
-    if (!splitOrientation) return;
-    const primary = editorGroups.primary;
-    const secondary = editorGroups.secondary;
-    if (primary.openOrder.length > 0 && secondary.openOrder.length > 0) return;
-    if (primary.openOrder.length === 0 && secondary.openOrder.length > 0) {
-      updateEditorGroup("primary", { ...secondary, id: "primary" });
-      updateEditorGroup("secondary", {
-        id: "secondary",
-        openOrder: [],
-        activeKey: null,
-        previewKey: null,
-        pinnedKeys: [],
-      });
-    }
-    setStoreSplitOrientation(workspaceInstanceId, null);
-    activateEditorGroup("primary");
-  }, [activateEditorGroup, editorGroups, setStoreSplitOrientation, splitOrientation, updateEditorGroup, workspaceInstanceId]);
+    closeLayoutLeaf(workspaceInstanceId, activeEditorGroupId);
+  }, [activeEditorGroupId, closeLayoutLeaf, workspaceInstanceId]);
 
   const activeFile = activeKey ? openFiles[activeKey] ?? null : null;
   // Large-file mode (M6-B): above the size/line threshold, skip the per-edit
@@ -4404,7 +4560,7 @@ export function CodeWorkspaceTab({
     // Large-file mode: no per-cursor highlight (LSP request nor text-scan fallback).
     if (!file || file.loading || activeFileIsLarge) {
       setHighlightsByGroup((current) => (
-        current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+        (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
       ));
       return;
     }
@@ -4427,7 +4583,7 @@ export function CodeWorkspaceTab({
     }
     if (!activeLspDocumentIsSynced) {
       setHighlightsByGroup((current) => (
-        current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+        (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
       ));
       return () => { cancelled = true; };
     }
@@ -4469,13 +4625,13 @@ export function CodeWorkspaceTab({
     const file = activeFile;
     if (!file || file.loading || activeFileIsLarge || !activeInlayHintsEnabled || !activeCapabilities?.inlayHint) {
       setInlayHintsByGroup((current) => (
-        current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+        (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
       ));
       return;
     }
     if (!activeLspDocumentIsSynced) {
       setInlayHintsByGroup((current) => (
-        current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+        (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
       ));
       return;
     }
@@ -4495,7 +4651,7 @@ export function CodeWorkspaceTab({
         .catch(() => {
           if (cancelled || !isCurrentLspDocumentRequest(file, epoch)) return;
           setInlayHintsByGroup((current) => (
-            current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+            (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
           ));
         });
     }, LSP_INLAY_HINT_IDLE_DELAY_MS);
@@ -4521,13 +4677,13 @@ export function CodeWorkspaceTab({
     const file = activeFile;
     if (!file || file.loading || activeFileIsLarge || !activeCapabilities?.semanticTokens) {
       setSemanticTokensByGroup((current) => (
-        current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+        (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
       ));
       return;
     }
     if (!activeLspDocumentIsSynced) {
       setSemanticTokensByGroup((current) => (
-        current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+        (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
       ));
       return;
     }
@@ -4546,7 +4702,7 @@ export function CodeWorkspaceTab({
         .catch(() => {
           if (cancelled || !isCurrentLspDocumentRequest(file, epoch)) return;
           setSemanticTokensByGroup((current) => (
-            current[groupId].length === 0 ? current : { ...current, [groupId]: [] }
+            (current[groupId] ?? []).length === 0 ? current : { ...current, [groupId]: [] }
           ));
         });
     }, LSP_SEMANTIC_TOKENS_IDLE_DELAY_MS);
@@ -4591,7 +4747,7 @@ export function CodeWorkspaceTab({
     let cancelled = false;
     if (!activeFile || activeFile.loading || !activeCapabilities?.documentSymbol) {
       setBreadcrumbSymbolsByGroup((current) => (
-        current[activeEditorGroupId].length === 0
+        (current[activeEditorGroupId] ?? []).length === 0
           ? current
           : { ...current, [activeEditorGroupId]: [] }
       ));
@@ -4599,7 +4755,7 @@ export function CodeWorkspaceTab({
     }
     if (!activeLspDocumentIsSynced) {
       setBreadcrumbSymbolsByGroup((current) => (
-        current[activeEditorGroupId].length === 0
+        (current[activeEditorGroupId] ?? []).length === 0
           ? current
           : { ...current, [activeEditorGroupId]: [] }
       ));
@@ -4621,7 +4777,7 @@ export function CodeWorkspaceTab({
       }).catch(() => {
         if (!cancelled && isCurrentLspDocumentRequest(activeFile, epoch)) {
           setBreadcrumbSymbolsByGroup((current) => (
-            current[activeEditorGroupId].length === 0
+            (current[activeEditorGroupId] ?? []).length === 0
               ? current
               : { ...current, [activeEditorGroupId]: [] }
           ));
@@ -4862,7 +5018,7 @@ export function CodeWorkspaceTab({
       gitBranch: gitSnapshot?.currentBranch ?? null,
       gitAhead: gitSnapshot?.ahead ?? 0,
       gitBehind: gitSnapshot?.behind ?? 0,
-      fontSize: codeViewProfile.fontSize,
+      fontSize: currentEditorFontSize,
       largeFile: activeFileIsLarge,
     });
   }, [
@@ -4878,7 +5034,7 @@ export function CodeWorkspaceTab({
     activeLspProgress,
     activeLspProgressKey,
     clearWorkspaceStatus,
-    codeViewProfile.fontSize,
+    currentEditorFontSize,
     cursorPositions,
     gitSnapshots,
     setWorkspaceStatusSegments,
@@ -5083,8 +5239,14 @@ export function CodeWorkspaceTab({
         if (oldest) cache.delete(oldest);
       }
     };
+    const leafGroupIds: EditorGroupId[] = (() => {
+      const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+      return getAllLeafNodes(ui.layoutTreeV2).map((leaf) => leaf.id);
+    })();
     const loadForGroup = (groupId: EditorGroupId) => {
-      const key = editorGroups[groupId].activeKey;
+      const groupState = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId)
+        .editorGroups[groupId];
+      const key = groupState?.activeKey ?? null;
       const file = key ? openFilesRef.current[key] ?? null : null;
       const target = gitTargetForFile(file);
       if (!intelligencePreferences.inlineBlameEnabled || !file || file.dirty || !target?.headOid) {
@@ -5112,8 +5274,7 @@ export function CodeWorkspaceTab({
           });
       }, 500));
     };
-    loadForGroup("primary");
-    loadForGroup("secondary");
+    for (const leafId of leafGroupIds) loadForGroup(leafId);
     return () => {
       cancelled = true;
       timers.forEach((timer) => window.clearTimeout(timer));
@@ -5472,11 +5633,14 @@ export function CodeWorkspaceTab({
     let groupId: EditorGroupId | undefined;
     if (options?.split) {
       const current = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
-      groupId = current.activeEditorGroupId === "primary" ? "secondary" : "primary";
-      setStoreSplitOrientation(workspaceInstanceId, "vertical");
+      splitLayoutLeaf(workspaceInstanceId, current.activeEditorGroupId, "vertical");
+      const next = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+      if (next.activeEditorGroupId !== current.activeEditorGroupId) {
+        groupId = next.activeEditorGroupId;
+      }
     }
     await openLspLocation(location, { groupId, preview: !options?.split });
-  }, [openLspLocation, setStatusMessage, setStoreSplitOrientation, workspaceInstanceId]);
+  }, [openLspLocation, setStatusMessage, splitLayoutLeaf, workspaceInstanceId]);
 
   const seSymbolsAvailable = !!(
     activeCapabilities?.workspaceSymbol
@@ -5501,11 +5665,19 @@ export function CodeWorkspaceTab({
 
   const pinQuickDocumentation = useCallback((content: QuickDocContent) => {
     setPinnedDoc(content);
+    setReferenceHistory(referenceInfoController.pushHistory(content));
     setPinnedDocLocked(true);
     setRightPaneTab("documentation");
     setRightPaneOpen(true);
     setQuickDocOpen(false);
-  }, [setPinnedDoc, setPinnedDocLocked, setQuickDocOpen, setRightPaneOpen, setRightPaneTab]);
+  }, [
+    referenceInfoController,
+    setPinnedDoc,
+    setPinnedDocLocked,
+    setQuickDocOpen,
+    setRightPaneOpen,
+    setRightPaneTab,
+  ]);
 
   const openQuickDocumentation = useCallback(async () => {
     const file = activeFile;
@@ -5516,19 +5688,8 @@ export function CodeWorkspaceTab({
       setStatusMessage("No documentation available");
       return;
     }
-    let body: string | null = null;
-    try {
-      const result = await lspHover(descriptor, position);
-      updateLspStatusForFile(file, result.status);
-      body = result.contents;
-    } catch (err) {
-      setStatusMessage(errorMessage(err));
-      return;
-    }
-    if (!body) {
-      setStatusMessage("No documentation available");
-      return;
-    }
+    const requestRevision = file.documentRevision;
+    const requestGeneration = lspSessionGeneration();
     const lines = file.text.split("\n");
     const line = lines[position.line] ?? "";
     const left = line.slice(0, position.character);
@@ -5538,9 +5699,102 @@ export function CodeWorkspaceTab({
     const from = start >= 0 ? start : position.character;
     const to = position.character + (endMatch?.[0].length ?? 0);
     const word = line.slice(from, to) || file.title;
-    setQuickDocContent({ title: word, body });
-    setQuickDocOpen(true);
-  }, [activeFile, lspDescriptorForFile, setStatusMessage, updateLspStatusForFile]);
+    const outcome = await referenceInfoController.request({
+      kind: "documentation",
+      workspaceId: workspaceInstanceId,
+      fileKey: file.key,
+      uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath,
+      languageId: descriptor.languageId ?? "plaintext",
+      position,
+      documentRevision: requestRevision,
+      providerGeneration: requestGeneration,
+    }, async ({ signal }) => {
+      const result = await lspHover(descriptor, position);
+      if (signal.aborted) return null;
+      const current = openFilesRef.current[file.key];
+      if (
+        !current
+        || current.documentRevision !== requestRevision
+        || lspSessionGeneration() !== requestGeneration
+      ) {
+        return null;
+      }
+      updateLspStatusForFile(file, result.status);
+      if (!result.contents) return null;
+      return {
+        title: word,
+        body: result.contents,
+        source: result.status.displayName ?? "Language Server",
+        uri: result.status.uri,
+        sourceLocation: result.range && result.status.uri
+          ? {
+              uri: result.status.uri,
+              path: result.status.path,
+              range: result.range,
+            }
+          : null,
+        revision: requestRevision,
+        generation: requestGeneration,
+      };
+    });
+    if (outcome.kind === "available") {
+      setQuickDocContent(outcome.content);
+      setReferenceHistory(referenceInfoController.pushHistory(outcome.content));
+      if (pinnedDoc && !pinnedDocLocked) setPinnedDoc(outcome.content);
+      if (intelligencePreferences.quickDoc.defaultTarget === "tool-window") {
+        setPinnedDoc(outcome.content);
+        setPinnedDocLocked(false);
+        setRightPaneTab("documentation");
+        setRightPaneOpen(true);
+        setQuickDocOpen(false);
+      } else {
+        setQuickDocOpen(true);
+      }
+    } else if (outcome.kind === "unavailable") {
+      setStatusMessage("No documentation available");
+    } else if (outcome.kind === "failed") {
+      setStatusMessage(outcome.message);
+    }
+  }, [
+    activeFile,
+    intelligencePreferences.quickDoc.defaultTarget,
+    lspDescriptorForFile,
+    lspSessionGeneration,
+    pinnedDoc,
+    pinnedDocLocked,
+    referenceInfoController,
+    setPinnedDoc,
+    setPinnedDocLocked,
+    setQuickDocOpen,
+    setRightPaneOpen,
+    setRightPaneTab,
+    setStatusMessage,
+    updateLspStatusForFile,
+    workspaceInstanceId,
+  ]);
+
+  const openReferenceSource = useCallback((content: QuickDocContent) => {
+    if (!content.sourceLocation) {
+      setStatusMessage("Documentation source unavailable");
+      return;
+    }
+    void openLspLocation(content.sourceLocation);
+  }, [openLspLocation, setStatusMessage]);
+
+  const applyReferenceHistorySnapshot = useCallback((snapshot: ReferenceHistorySnapshot) => {
+    setReferenceHistory(snapshot);
+    if (!snapshot.content) return;
+    if (quickDocOpen) setQuickDocContent(snapshot.content);
+    if (pinnedDoc) setPinnedDoc(snapshot.content);
+  }, [pinnedDoc, quickDocOpen, setPinnedDoc]);
+
+  const referenceHistoryBack = useCallback(() => {
+    applyReferenceHistorySnapshot(referenceInfoController.goBack());
+  }, [applyReferenceHistorySnapshot, referenceInfoController]);
+
+  const referenceHistoryForward = useCallback(() => {
+    applyReferenceHistorySnapshot(referenceInfoController.goForward());
+  }, [applyReferenceHistorySnapshot, referenceInfoController]);
 
   const formatActiveFile = useCallback(async () => {
     const file = activeFile;
@@ -5902,9 +6156,16 @@ export function CodeWorkspaceTab({
         eol?: "lf" | "crlf" | "cr",
       ) => {
         const replayMetadata = replayWorkspaceEncodingRef.current?.get(fsPathComparisonKey(absolutePath));
-        const effectiveEncoding = replayMetadata?.encoding ?? encoding;
-        const effectiveBom = replayMetadata?.bom ?? bom;
-        const effectiveEol = replayMetadata?.eol ?? eol ?? "lf";
+        // Replay metadata is the authoritative prior state for undo; it wins
+        // over applier defaults but both flow through the single policy
+        // resolution shared with open-buffer saves (§8.16.1 step 2).
+        const effectivePolicy = resolveWritePolicy({
+          explicit: {
+            encoding: replayMetadata?.encoding ?? encoding,
+            bom: replayMetadata?.bom ?? bom,
+            eol: replayMetadata?.eol ?? eol ?? "lf",
+          },
+        });
         // Snapshot current disk contents before bulk WorkspaceEdit writes.
         try {
           let oldText: string | null = null;
@@ -5935,11 +6196,7 @@ export function CodeWorkspaceTab({
           filePath: absolutePath,
           logicalText: text,
           expectedDiskHash: expectedHash ?? null,
-          policy: {
-            eol: effectiveEol,
-            encoding: effectiveEncoding,
-            bom: effectiveBom,
-          },
+          policy: effectivePolicy,
         });
 
         await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
@@ -6918,11 +7175,172 @@ export function CodeWorkspaceTab({
       keywords: ["signature", "parameters", "arguments"],
       when: () => !!activeFile,
       run: () => {
-        const file = activeFile;
-        if (!file) return;
-        const pos = editorSelectionRef.current.end;
-        void getLspSignatureHelpRef.current(file, { line: pos.line, character: pos.character });
+        if (!activeFile) return;
+        setParameterInfoRequestNonce((nonce) => nonce + 1);
       },
+    },
+    {
+      id: "workspace.editorAppearanceSettings",
+      title: "Editor Appearance Settings",
+      category: "View",
+      keywords: ["font", "theme", "contrast", "wrap", "breadcrumbs", "virtual space", "zoom"],
+      run: () => setEditorAppearanceSettingsOpen(true),
+    },
+    {
+      id: "workspace.editor.copy",
+      title: "Copy",
+      category: "Edit",
+      keybinding: "Ctrl+C",
+      keybindings: ["Meta+C"],
+      keywords: ["clipboard", "selection", "multi-caret"],
+      when: (context) => context.focus === "editor"
+        && activeEditorCommandState()?.hasSelection === true,
+      run: () => executeActiveEditorCommand("copy"),
+    },
+    {
+      id: "workspace.editor.cut",
+      title: "Cut",
+      category: "Edit",
+      keybinding: "Ctrl+X",
+      keybindings: ["Meta+X"],
+      keywords: ["clipboard", "selection", "multi-caret"],
+      when: (context) => {
+        const state = activeEditorCommandState();
+        return context.focus === "editor" && !!state
+          && state.hasSelection && !state.readOnly && !state.composing;
+      },
+      run: () => executeActiveEditorCommand("cut"),
+    },
+    {
+      id: "workspace.editor.paste",
+      title: "Paste",
+      category: "Edit",
+      keybinding: "Ctrl+V",
+      keybindings: ["Meta+V"],
+      keywords: ["clipboard", "multi-caret", "distribute"],
+      when: (context) => {
+        const state = activeEditorCommandState();
+        return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
+      },
+      run: () => executeActiveEditorCommand("paste"),
+    },
+    {
+      id: "workspace.editor.moveStatementUp",
+      title: "Move Statement Up",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+ArrowUp",
+      keybindings: ["Meta+Shift+ArrowUp"],
+      keywords: ["statement", "line", "syntax", "move"],
+      when: (context) => {
+        const state = activeEditorCommandState();
+        return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
+      },
+      run: () => executeActiveEditorCommand("moveStatementUp"),
+    },
+    {
+      id: "workspace.editor.moveStatementDown",
+      title: "Move Statement Down",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+ArrowDown",
+      keybindings: ["Meta+Shift+ArrowDown"],
+      keywords: ["statement", "line", "syntax", "move"],
+      when: (context) => {
+        const state = activeEditorCommandState();
+        return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
+      },
+      run: () => executeActiveEditorCommand("moveStatementDown"),
+    },
+    {
+      id: "workspace.editor.cloneCaretAbove",
+      title: "Clone Caret Above",
+      category: "Edit",
+      keybinding: "Ctrl+Alt+Shift+ArrowUp",
+      keywords: ["caret", "cursor", "multi-caret", "above"],
+      when: (context) => {
+        const state = activeEditorCommandState();
+        return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
+      },
+      run: () => executeActiveEditorCommand("cloneCaretAbove"),
+    },
+    {
+      id: "workspace.editor.cloneCaretBelow",
+      title: "Clone Caret Below",
+      category: "Edit",
+      keybinding: "Ctrl+Alt+Shift+ArrowDown",
+      keywords: ["caret", "cursor", "multi-caret", "below"],
+      when: (context) => {
+        const state = activeEditorCommandState();
+        return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
+      },
+      run: () => executeActiveEditorCommand("cloneCaretBelow"),
+    },
+    {
+      id: "workspace.editor.collapseCarets",
+      title: "Collapse Carets",
+      category: "Edit",
+      keybinding: "Escape",
+      keywords: ["caret", "selection", "occurrence", "escape"],
+      when: (context) => {
+        const state = activeEditorCommandState();
+        return context.focus === "editor" && !!state
+          && (state.caretCount > 1 || state.occurrenceSessionActive);
+      },
+      run: () => executeActiveEditorCommand("collapseCarets"),
+    },
+    {
+      id: "workspace.editor.selectNextOccurrence",
+      title: "Select Next Occurrence",
+      category: "Edit",
+      keybinding: "Alt+J",
+      keywords: ["occurrence", "caret", "selection", "next"],
+      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
+      run: () => executeActiveEditorCommand("selectNextOccurrence"),
+    },
+    {
+      id: "workspace.editor.selectAllOccurrences",
+      title: "Select All Occurrences",
+      category: "Edit",
+      keybinding: "Ctrl+Alt+Shift+J",
+      keybindings: ["Meta+Alt+Shift+J"],
+      keywords: ["occurrence", "caret", "selection", "all"],
+      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
+      run: () => executeActiveEditorCommand("selectAllOccurrences"),
+    },
+    {
+      id: "workspace.editor.foldSelection",
+      title: "Fold Selection",
+      category: "Edit",
+      keybinding: "Ctrl+Period",
+      keybindings: ["Meta+Period"],
+      keywords: ["fold", "selection", "collapse"],
+      when: (context) => context.focus === "editor"
+        && activeEditorCommandState()?.hasSelection === true,
+      run: () => executeActiveEditorCommand("foldSelection"),
+    },
+    {
+      id: "workspace.editor.foldAll",
+      title: "Fold All",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+NumpadSubtract",
+      keywords: ["fold", "collapse", "all"],
+      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
+      run: () => executeActiveEditorCommand("foldAll"),
+    },
+    {
+      id: "workspace.editor.unfoldAll",
+      title: "Unfold All",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+NumpadAdd",
+      keywords: ["fold", "expand", "all"],
+      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
+      run: () => executeActiveEditorCommand("unfoldAll"),
+    },
+    {
+      id: "workspace.intelligenceSettings",
+      title: "Editor Intelligence Settings",
+      category: "Code",
+      keywords: ["hover", "documentation", "parameter info", "signature", "delay"],
+      run: () => setIntelligenceSettingsOpen(true),
     },
     {
       id: "workspace.optimizeImports",
@@ -7258,7 +7676,7 @@ export function CodeWorkspaceTab({
     },
     {
       id: "workspace.toggleSoftWrap",
-      title: `${codeViewProfile.softWrap ? "Disable" : "Enable"} Soft Wrap`,
+      title: `${activeFileSoftWrap ? "Disable" : "Enable"} Soft Wrap`,
       category: "View",
       keywords: ["wrap", "long lines", "line wrapping"],
       when: (context) => context.focus === "editor" || context.focus === "workspace",
@@ -7643,6 +8061,7 @@ export function CodeWorkspaceTab({
     },
   ], [
     activeCapabilities,
+    activeEditorCommandState,
     activeEditorGroupId,
     activeFile,
     activeGitRoot,
@@ -7655,6 +8074,7 @@ export function CodeWorkspaceTab({
     createDir,
     createFile,
     deleteSelected,
+    executeActiveEditorCommand,
     findInDirectory,
     formatActiveFile,
     gitRoots.length,
@@ -7687,7 +8107,7 @@ export function CodeWorkspaceTab({
     selectedRootDirectory,
     intelligencePreferences.inlayHintsEnabled,
     intelligencePreferences.inlineBlameEnabled,
-    codeViewProfile.softWrap,
+    activeFileSoftWrap,
     columnSelectionMode,
     intelligencePreferences.formatOnSave,
     setFormatOnSave,
@@ -7725,14 +8145,44 @@ export function CodeWorkspaceTab({
     return "workspace";
   }, []);
 
+  // Stable identity unless the active file actually changes, so the action
+  // snapshot stays fresh on file switch without re-render feedback loops.
+  const actionContextData = useMemo(() => {
+    // Port state is intentionally sampled while constructing the immutable host
+    // snapshot; registration and selection events bump the revision dependency.
+    void editorCommandContextRevision;
+    const editorState = activeEditorCommandState();
+    return {
+      activeFileKey: activeKey ?? undefined,
+      activeFilePath: activeFile?.path,
+      hasActiveFile: !!editorState,
+      hasSelection: editorState?.hasSelection ?? false,
+      readOnly: editorState?.readOnly ?? false,
+      editorComposing: editorState?.composing ?? false,
+      editorCaretCount: editorState?.caretCount ?? 0,
+      editorOccurrenceSessionActive: editorState?.occurrenceSessionActive ?? false,
+    };
+  }, [
+    activeEditorCommandState,
+    activeFile?.path,
+    activeKey,
+    editorCommandContextRevision,
+  ]);
+
   const actionsController = useWorkspaceActionsController({
     workspaceId: workspaceInstanceId,
     commands: workspaceCommands,
     resolveFocus: commandFocusForTarget,
-    getDefaultFocus: () => "workspace",
-    contextData: {
-      activeFileKey: activeKey ?? undefined,
-      activeFilePath: activeFile?.path,
+    getDefaultFocus: () => activeEditorCommandOwner() ? "editor" : "workspace",
+    contextData: actionContextData,
+    // §8.16.3 typed-result visibility: surfaced outcomes instead of silent no-ops.
+    onCommandExecuted: (commandId, result) => {
+      if (!result) return;
+      if (result.kind === "failed") {
+        setStatusMessage(`Action ${commandId} failed: ${result.message ?? "unknown error"}`);
+      } else if (result.kind === "cancelled") {
+        setStatusMessage(`Action ${commandId} cancelled`);
+      }
     },
   });
 
@@ -7743,6 +8193,101 @@ export function CodeWorkspaceTab({
     return actionsController.executeCommand(commandId, context);
   }, [actionsController]);
   workspaceCommandRunnerRef.current = executeWorkspaceCommand;
+
+  // §8.16.5 N2.6: Ctrl+Tab MRU Switcher state. Hold-to-cycle, release-to-commit,
+  // Esc cancels; hovering an entry previews without mutating MRU order.
+  const [tabSwitcherOpen, setTabSwitcherOpen] = useState(false);
+  const [tabSwitcherIndex, setTabSwitcherIndex] = useState(0);
+  const activeKeyRef = useRef(activeKey);
+  activeKeyRef.current = activeKey;
+  const tabSwitcherOpenRef = useRef(false);
+  const tabSwitcherIndexRef = useRef(0);
+  tabSwitcherOpenRef.current = tabSwitcherOpen;
+  tabSwitcherIndexRef.current = tabSwitcherIndex;
+  const mruFileKeysRef = useRef<string[]>([]);
+  useEffect(() => {
+    if (!activeKey) return;
+    mruFileKeysRef.current = [
+      activeKey,
+      ...mruFileKeysRef.current.filter((key) => key !== activeKey),
+    ].slice(0, 24);
+  }, [activeKey]);
+
+  const tabSwitcherEntries = useMemo(() => {
+    if (!tabSwitcherOpen) return [];
+    return mruFileKeysRef.current
+      .map((key) => openFiles[key])
+      .filter((entry): entry is NonNullable<typeof entry> => !!entry)
+      .map((entry) => ({
+        key: entry.key,
+        title: entry.title,
+        subtitle: entry.subtitle,
+        dirty: entry.dirty,
+        active: entry.key === activeKey,
+      }));
+  }, [tabSwitcherOpen, openFiles, activeKey]);
+
+  const commitTabSwitcher = useCallback((index: number) => {
+    const entries = mruFileKeysRef.current
+      .map((key) => openFilesRef.current[key])
+      .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+    const target = entries[index];
+    setTabSwitcherOpen(false);
+    if (target && target.key !== activeKeyRef.current) {
+      void openFile(target.ref);
+    }
+  }, [openFile]);
+
+  useEffect(() => {
+    if (!visible) return;
+    const cycle = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !event.ctrlKey) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (!tabSwitcherOpenRef.current) {
+        const entries = mruFileKeysRef.current
+          .map((key) => openFilesRef.current[key])
+          .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+        if (entries.length === 0) return;
+        setTabSwitcherIndex(entries.length > 1 ? 1 : 0);
+        setTabSwitcherOpen(true);
+        return;
+      }
+      setTabSwitcherIndex((index) => {
+        const count = mruFileKeysRef.current.length;
+        if (count === 0) return 0;
+        return event.shiftKey
+          ? (index - 1 + count) % count
+          : (index + 1) % count;
+      });
+    };
+    const release = (event: KeyboardEvent) => {
+      if (event.key !== "Control" || !tabSwitcherOpenRef.current) return;
+      const entries = mruFileKeysRef.current
+        .map((key) => openFilesRef.current[key])
+        .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+      const targetIndex = Math.min(tabSwitcherIndexRef.current, entries.length - 1);
+      setTabSwitcherOpen(false);
+      const target = entries[targetIndex];
+      if (target && target.key !== activeKeyRef.current) {
+        void openFile(target.ref);
+      }
+    };
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && tabSwitcherOpenRef.current) {
+        event.preventDefault();
+        setTabSwitcherOpen(false);
+      }
+    };
+    window.addEventListener("keydown", cycle, true);
+    window.addEventListener("keydown", cancel, true);
+    window.addEventListener("keyup", release, true);
+    return () => {
+      window.removeEventListener("keydown", cycle, true);
+      window.removeEventListener("keydown", cancel, true);
+      window.removeEventListener("keyup", release, true);
+    };
+  }, [openFile, visible]);
 
   useEffect(() => {
     if (!visible) return;
@@ -7760,8 +8305,10 @@ export function CodeWorkspaceTab({
 
   const runSearchEverywhereCommand = useCallback((commandId: string) => {
     setSearchEverywhereOpen(false);
-    executeWorkspaceCommand(commandId);
-  }, [executeWorkspaceCommand]);
+    // §8.16.3: popup execution routes through the action host so it observes
+    // the same context/when evaluation as the keydown channel.
+    void actionsController.executeAction(commandId);
+  }, [actionsController]);
 
   const commandRegistration = actionsController.commandRegistration;
 
@@ -7811,11 +8358,66 @@ export function CodeWorkspaceTab({
     });
   }, [activeEditorGroupId, activeFile?.key, activeFileLoading, visible]);
 
+  // §8.16.2 completion identity: one live provider of workspace/file/session
+  // identity for every completion request minted from this workspace tab.
+  const completionIdentityForFile = useCallback(
+    (file: OpenFileState): CompletionRequestIdentity | null => {
+      const live = openFilesRef.current[file.key];
+      if (!live) return null;
+      const descriptor = lspDescriptorForFile(live);
+      if (!descriptor) return null;
+      return {
+        workspaceId: workspaceInstanceId,
+        fileKey: live.key,
+        filePath: absolutePathForOpenFile(live) ?? live.path ?? file.path,
+        uri: descriptor.documentUri ?? descriptor.filePath,
+        languageId: descriptor.languageId ?? live.languagePath,
+        documentRevision: live.documentRevision ?? 0,
+        lspSessionGeneration: lspSessionGeneration(),
+      };
+    },
+    [absolutePathForOpenFile, lspDescriptorForFile, lspSessionGeneration, workspaceInstanceId],
+  );
+
+  const isCompletionTokenCurrent = useCallback(
+    (token: CompletionRequestToken): boolean => {
+      if (token.workspaceId !== workspaceInstanceId) return false;
+      const live = openFilesRef.current[token.fileKey];
+      if (!live) return false;
+      const identity = completionIdentityForFile(live);
+      return !!identity
+        && identity.workspaceId === token.workspaceId
+        && identity.fileKey === token.fileKey
+        && identity.filePath === token.filePath
+        && identity.uri === token.uri
+        && identity.languageId === token.languageId
+        && identity.documentRevision === token.documentRevision
+        && identity.lspSessionGeneration === token.lspSessionGeneration;
+    },
+    [completionIdentityForFile, workspaceInstanceId],
+  );
+
+  const reportCompletionDiagnostic = useCallback((
+    kind: CompletionAcceptanceDiagnostic,
+    detail?: string,
+  ) => {
+    if (kind === "truncated") {
+      setStatusMessage(`Completion list truncated${detail ? ` (${detail})` : ""}; keep typing to refine`);
+    } else if (kind === "invalid-additional-edits") {
+      setStatusMessage("Completion rejected invalid provider edits");
+    } else if (kind === "identity-mismatch") {
+      setStatusMessage("Completion discarded because the editor changed");
+    } else {
+      setStatusMessage(`Completion import unavailable${detail ? ` (${detail})` : ""}`);
+    }
+  }, [setStatusMessage]);
+
   const getLspCompletions = useCallback(
     async (
       file: OpenFileState,
       position: LspPosition,
       triggerCharacter: string | null,
+      token: CompletionRequestToken,
     ): Promise<LspCompletionResult | null> => {
       // Always resolve against the live buffer (openFilesRef), not the React
       // prop — typing is batched into the store and the prop is often one
@@ -7837,6 +8439,9 @@ export function CodeWorkspaceTab({
         if (!openFilesRef.current[live.key]) return null;
         if (openFilesRef.current[live.key]?.text !== live.text) return null;
         if (lspDocumentEpochRef.current[live.key] !== epoch) return null;
+        // Token identity must still match the live request origin; a stale
+        // request from a switched file/restarted session is dropped here too.
+        if (!isCompletionTokenCurrent(token)) return null;
         const currentLsp = lspFilesRef.current[live.key];
         if (
           !currentLsp?.status
@@ -7852,22 +8457,29 @@ export function CodeWorkspaceTab({
     },
     [
       ensureLspDocumentSynced,
+      isCompletionTokenCurrent,
       lspDescriptorForFile,
       updateLspStatusForFile,
     ],
   );
 
   const resolveLspCompletion = useCallback(
-    async (file: OpenFileState, raw: unknown): Promise<LspCompletionItem | null> => {
+    async (
+      file: OpenFileState,
+      raw: unknown,
+      token: CompletionRequestToken,
+    ): Promise<LspCompletionItem | null> => {
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return null;
+      if (!isCompletionTokenCurrent(token)) return null;
       try {
-        return await lspCompletionResolve(descriptor, raw);
+        const resolved = await lspCompletionResolve(descriptor, raw);
+        return isCompletionTokenCurrent(token) ? resolved : null;
       } catch {
         return null;
       }
     },
-    [lspDescriptorForFile],
+    [isCompletionTokenCurrent, lspDescriptorForFile],
   );
 
   const getLspSignatureHelp = useCallback(
@@ -7911,22 +8523,74 @@ export function CodeWorkspaceTab({
       }
       const descriptor = lspDescriptorForFile(file);
       if (!descriptor) return null;
-      try {
+      const requestRevision = file.documentRevision;
+      const requestGeneration = lspSessionGeneration();
+      const lines = file.text.split("\n");
+      const line = lines[position.line] ?? "";
+      const left = line.slice(0, position.character);
+      const right = line.slice(position.character);
+      const start = left.search(/[A-Za-z0-9_$]+$/);
+      const endMatch = right.match(/^[A-Za-z0-9_$]*/);
+      const from = start >= 0 ? start : position.character;
+      const to = position.character + (endMatch?.[0].length ?? 0);
+      const outcome = await referenceInfoController.request({
+        kind: "documentation",
+        workspaceId: workspaceInstanceId,
+        fileKey: file.key,
+        uri: descriptor.documentUri ?? lspFilesRef.current[file.key]?.status?.uri ?? descriptor.filePath,
+        languageId: descriptor.languageId ?? "plaintext",
+        position,
+        documentRevision: requestRevision,
+        providerGeneration: requestGeneration,
+      }, async ({ signal }) => {
         const result = await lspHover(descriptor, position);
+        if (signal.aborted) return null;
+        const current = openFilesRef.current[file.key];
+        if (
+          !current
+          || current.documentRevision !== requestRevision
+          || lspSessionGeneration() !== requestGeneration
+        ) {
+          return null;
+        }
         updateLspStatusForFile(file, result.status);
-        return result.contents;
-      } catch (err) {
+        if (!result.contents) return null;
+        return {
+          title: line.slice(from, to) || file.title,
+          body: result.contents,
+          source: result.status.displayName ?? "Language Server",
+          uri: result.status.uri,
+          sourceLocation: result.range && result.status.uri
+            ? {
+                uri: result.status.uri,
+                path: result.status.path,
+                range: result.range,
+              }
+            : null,
+          revision: requestRevision,
+          generation: requestGeneration,
+        };
+      });
+      if (outcome.kind === "available") return outcome.content;
+      if (outcome.kind === "failed") {
         setLspFiles((current) => ({
           ...current,
           [file.key]: {
             ...(current[file.key] ?? emptyLspFileState()),
-            error: errorMessage(err),
+            error: outcome.message,
           },
         }));
-        return null;
       }
+      return null;
     },
-    [absolutePathForOpenFile, lspDescriptorForFile, updateLspStatusForFile],
+    [
+      absolutePathForOpenFile,
+      lspDescriptorForFile,
+      lspSessionGeneration,
+      referenceInfoController,
+      updateLspStatusForFile,
+      workspaceInstanceId,
+    ],
   );
   getLspHoverRef.current = getLspHover;
 
@@ -10104,6 +10768,29 @@ export function CodeWorkspaceTab({
     const groupMarkdownMode = groupFile && isMarkdownPath(groupFile.languagePath)
       ? markdownModes[groupFile.key] ?? "edit"
       : "edit";
+    const groupLanguageId = groupLspState?.status?.languageId
+      ?? groupFile?.languagePath.split(".").pop()?.toLowerCase()
+      ?? "plain-text";
+    const groupSoftWrap = !!groupFile && matchesSoftWrapPath(
+      groupFile.languagePath,
+      editorAppearanceProfile.softWrap.patterns,
+    );
+    const groupAppearance = {
+      fontFamily: editorAppearanceProfile.fontFamily,
+      fontSizePx: editorAppearanceProfile.zoomScope === "active-editor"
+        ? activeEditorFontSizes[groupId] ?? editorAppearanceProfile.fontSizePx
+        : editorAppearanceProfile.fontSizePx,
+      lineHeight: editorAppearanceProfile.lineHeight,
+      ligatures: editorAppearanceProfile.ligatures,
+      colorSchemeId: editorAppearanceProfile.colorSchemeId,
+      highContrast: editorAppearanceProfile.highContrast,
+      virtualSpace: editorAppearanceProfile.virtualSpace,
+    };
+    const showGroupBreadcrumbs = editorAppearanceProfile.breadcrumbs.visible
+      && matchesBreadcrumbLanguage(
+        groupLanguageId,
+        editorAppearanceProfile.breadcrumbs.languages,
+      );
     const groupBreadcrumbSegments = groupId === activeEditorGroupId
       ? breadcrumbPathSegments
       : groupFile ? breadcrumbSegmentsForFile(groupFile, roots) : [];
@@ -10114,8 +10801,18 @@ export function CodeWorkspaceTab({
         workspaceInstanceId={`${workspaceInstanceId}-${groupId}`}
         visible={visible}
         readOnly={workspaceResourceOperationLocked}
-        softWrap={codeViewProfile.softWrap ?? false}
+        softWrap={groupSoftWrap}
+        appearance={groupAppearance}
         columnSelectionMode={columnSelectionMode}
+        showHoverDocumentation={
+          intelligencePreferences.quickDoc.showOnHover
+          && groupCapabilities?.hover === true
+        }
+        hoverDocumentationDelayMs={intelligencePreferences.quickDoc.hoverDelayMs}
+        parameterInfoRequestNonce={groupId === activeEditorGroupId ? parameterInfoRequestNonce : 0}
+        parameterInfoAutoPopup={intelligencePreferences.parameterInfo.autoPopup}
+        parameterInfoDelayMs={intelligencePreferences.parameterInfo.delayMs}
+        parameterInfoShowFullSignatures={intelligencePreferences.parameterInfo.showFullSignatures}
         openOrder={group.openOrder}
         openFiles={openFiles}
         activeKey={group.activeKey}
@@ -10124,11 +10821,11 @@ export function CodeWorkspaceTab({
         activeFile={groupFile}
         activeMarkdownMode={groupMarkdownMode}
         activeDiagnostics={groupDiagnostics}
-        activeHighlights={highlightsByGroup[groupId]}
-        activeInlayHints={inlayHintsByGroup[groupId]}
-        activeSemanticTokens={semanticTokensByGroup[groupId]}
+        activeHighlights={highlightsByGroup[groupId] ?? []}
+        activeInlayHints={inlayHintsByGroup[groupId] ?? []}
+        activeSemanticTokens={semanticTokensByGroup[groupId] ?? []}
         activeGitChanges={groupFile ? gitLineChangesByFile[groupFile.key] ?? [] : []}
-        activeGitBlame={gitBlameByGroup[groupId]}
+        activeGitBlame={gitBlameByGroup[groupId] ?? null}
         activeCoverage={groupFile && coverageReport ? findFileCoverage(coverageReport, absolutePathForOpenFile(groupFile) ?? groupFile.languagePath) : null}
         coverageEnabled={coverageOverlayEnabled}
         activeCodeStyle={getEffectiveCodeStyleForFile(groupFile)}
@@ -10150,11 +10847,11 @@ export function CodeWorkspaceTab({
             onOpenSettings={() => openLanguageServersSettings(groupLspState?.status?.presetId)}
           />
         )}
-        breadcrumbs={groupFile ? (
+        breadcrumbs={showGroupBreadcrumbs && groupFile ? (
           <Breadcrumbs
             pathSegments={groupBreadcrumbSegments}
-            symbols={breadcrumbSymbolsByGroup[groupId]}
-            position={cursorPositions[groupId]}
+            symbols={breadcrumbSymbolsByGroup[groupId] ?? []}
+            position={cursorPositions[groupId] ?? { line: 0, character: 0 }}
             loadPathChildren={(segment) =>
               loadBreadcrumbPathChildren(segment, groupFile, groupBreadcrumbSegments)
             }
@@ -10177,7 +10874,8 @@ export function CodeWorkspaceTab({
             onSymbolClick={(symbol) => revealEditorLocation(groupFile.key, symbol.selectionRange)}
           />
         ) : null}
-        activeSymbols={breadcrumbSymbolsByGroup[groupId]}
+        breadcrumbsPlacement={editorAppearanceProfile.breadcrumbs.placement}
+        activeSymbols={breadcrumbSymbolsByGroup[groupId] ?? []}
         stickyLinesEnabled={intelligencePreferences.stickyLinesEnabled !== false}
         onRevealTargetLine={(line) => groupFile && setRevealTarget({ key: groupFile.key, line, character: 0, nonce: Date.now() })}
         revealTarget={revealTarget}
@@ -10239,11 +10937,14 @@ export function CodeWorkspaceTab({
         onDefinition={goToDefinition}
         onReferences={findReferences}
         onComplete={getLspCompletions}
+        onCompletionIdentity={completionIdentityForFile}
+        onCompletionDiagnostic={reportCompletionDiagnostic}
         onCompleteResolve={resolveLspCompletion}
         onSignatureHelp={getLspSignatureHelp}
         onSelectionChange={(selection) => {
           if (groupId === activeEditorGroupId) {
             editorSelectionRef.current = selection;
+            setEditorCommandContextRevision((revision) => revision + 1);
             setEditorAiSelection(!selection.empty && selection.text.trim().length >= 2 ? selection : null);
           }
           if (groupFile) {
@@ -10274,6 +10975,7 @@ export function CodeWorkspaceTab({
         onExpandSelection={getLspSelectionRanges}
         onLightbulb={(line) => void openCodeActionsForLine(line)}
         onEditorContextMenu={showEditorContextMenu}
+        onEditorCommandPortChange={registerEditorCommandPort}
         onOpenMarkdownHref={openMarkdownHref}
         formatBytes={formatBytes}
         formatMtime={formatMtime}
@@ -10298,11 +11000,10 @@ export function CodeWorkspaceTab({
         orientation={node.orientation === "vertical" ? "horizontal" : "vertical"}
         id={`recursive-split-${node.id}`}
         className="h-full min-h-0"
-        onLayoutChanged={(sizes) => {
-          if (Array.isArray(sizes) && sizes.length === node.children.length) {
-            setLayoutNodeRatios(workspaceInstanceId, node.id, sizes);
-          }
-        }}
+          onLayoutChanged={(layout) => {
+            const ratios = panelLayoutToRatios(layout, node.children.map((child) => child.id));
+            if (ratios) setLayoutNodeRatios(workspaceInstanceId, node.id, ratios);
+          }}
       >
         {node.children.map((child, index) => {
           const pct = node.ratios[index] ? `${Math.round(node.ratios[index] * 100)}%` : `${Math.round(100 / node.children.length)}%`;
@@ -10368,7 +11069,7 @@ export function CodeWorkspaceTab({
             label="Editor zoom out"
             testId="code-workspace-zoom-out"
             icon={<ZoomOut className="w-3.5 h-3.5" />}
-            disabled={codeViewProfile.fontSize <= CODE_WORKSPACE_MIN_FONT_SIZE}
+            disabled={currentEditorFontSize <= CODE_WORKSPACE_MIN_FONT_SIZE}
             onClick={() => stepCodeViewFontSize(-1)}
           />
           <button
@@ -10377,22 +11078,22 @@ export function CodeWorkspaceTab({
             title="Reset editor zoom"
             aria-label="Reset editor zoom"
             className="h-6 min-w-10 rounded px-1.5 text-[11px] tabular-nums text-[var(--taomni-code-muted)] hover:bg-[var(--taomni-code-active-line-bg)]"
-            onClick={() => setCodeViewFontSize(DEFAULT_CODE_VIEW_PROFILE.fontSize)}
+            onClick={() => setCodeViewFontSize(DEFAULT_EDITOR_APPEARANCE_PROFILE.fontSizePx)}
           >
-            {codeViewProfile.fontSize}px
+            {currentEditorFontSize}px
           </button>
           <IconButton
             label="Editor zoom in"
             testId="code-workspace-zoom-in"
             icon={<ZoomIn className="w-3.5 h-3.5" />}
-            disabled={codeViewProfile.fontSize >= CODE_WORKSPACE_MAX_FONT_SIZE}
+            disabled={currentEditorFontSize >= CODE_WORKSPACE_MAX_FONT_SIZE}
             onClick={() => stepCodeViewFontSize(1)}
           />
         </div>
         <IconButton
-          label={codeViewProfile.softWrap ? "Disable soft wrap" : "Enable soft wrap"}
+          label={activeFileSoftWrap ? "Disable soft wrap" : "Enable soft wrap"}
           testId="code-workspace-soft-wrap"
-          active={codeViewProfile.softWrap}
+          active={activeFileSoftWrap}
           icon={<WrapText className="w-3.5 h-3.5" />}
           onClick={toggleSoftWrap}
         />
@@ -10645,31 +11346,11 @@ export function CodeWorkspaceTab({
             minSize={languagePanelOpen ? "30%" : "40%"}
             className="min-w-0"
           >
-          {workspaceUi.layoutTreeV2 ? (
+          {workspaceUi.layoutTreeV2.type === "split" ? (
             <div data-testid="code-workspace-editor-split" className="h-full min-h-0">
               {renderRecursiveLayoutNode(workspaceUi.layoutTreeV2, renderEditorGroup)}
             </div>
-          ) : splitOrientation ? (
-            <div data-testid="code-workspace-editor-split" className="h-full min-h-0">
-              <PanelGroup
-                orientation={splitOrientation === "vertical" ? "horizontal" : "vertical"}
-                id={`code-workspace-editor-split-${workspaceInstanceId}`}
-                className="h-full min-h-0"
-              >
-                <Panel id="editor-primary" defaultSize="50%" minSize="20%" className="min-h-0 min-w-0">
-                  {renderEditorGroup("primary")}
-                </Panel>
-                <PanelResizeHandle
-                  className={splitOrientation === "vertical"
-                    ? "w-[3px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)]"
-                    : "h-[3px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)]"}
-                />
-                <Panel id="editor-secondary" defaultSize="50%" minSize="20%" className="min-h-0 min-w-0">
-                  {renderEditorGroup("secondary")}
-                </Panel>
-              </PanelGroup>
-            </div>
-          ) : renderEditorGroup("primary")}
+          ) : renderRecursiveLayoutNode(workspaceUi.layoutTreeV2, renderEditorGroup)}
         </Panel>
           <PanelResizeHandle
             className={rightPaneOpen
@@ -10725,7 +11406,7 @@ export function CodeWorkspaceTab({
               <div role="tabpanel" className="min-h-0 flex-1">
                 {rightPaneTab === "outline" ? (
                   <OutlinePane
-                    symbols={breadcrumbSymbolsByGroup[activeEditorGroupId]}
+                    symbols={breadcrumbSymbolsByGroup[activeEditorGroupId] ?? []}
                     position={cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 }}
                     loading={!!activeFile && (!!activeLspState?.syncing || (activeCapabilities?.documentSymbol === true && !activeLspState?.status))}
                     unavailableReason={!activeFile
@@ -10740,6 +11421,11 @@ export function CodeWorkspaceTab({
                     content={pinnedDoc}
                     locked={pinnedDocLocked}
                     onUnlock={() => setPinnedDocLocked(false)}
+                    onOpenSource={openReferenceSource}
+                    canGoBack={referenceHistory.canGoBack}
+                    canGoForward={referenceHistory.canGoForward}
+                    onBack={referenceHistoryBack}
+                    onForward={referenceHistoryForward}
                     onClear={() => {
                       setPinnedDoc(null);
                       setPinnedDocLocked(false);
@@ -11049,6 +11735,14 @@ export function CodeWorkspaceTab({
         onOpenChange={setBottomDockOpen}
         onActiveTabChange={(tab) => setBottomDockTab(tab as BottomDockTabId)}
       />
+      <TabSwitcher
+        open={tabSwitcherOpen}
+        entries={tabSwitcherEntries}
+        selectedIndex={tabSwitcherIndex}
+        onHover={setTabSwitcherIndex}
+        onCommit={commitTabSwitcher}
+        onCancel={() => setTabSwitcherOpen(false)}
+      />
       <WorkspacePopupsHost
         searchEverywhereOpen={searchEverywhereOpen}
         searchEverywhereMode={searchEverywhereMode}
@@ -11056,6 +11750,7 @@ export function CodeWorkspaceTab({
         goToFileLoading={goToFileLoading}
         goToFileTruncated={goToFileTruncated}
         searchableCommands={searchableWorkspaceCommands}
+        actionSnapshots={actionsController.snapshot.filter((entry) => entry.id !== "workspace.goToFile")}
         symbolsAvailable={seSymbolsAvailable}
         semanticIndex={semanticIndex.snapshot}
         fetchWorkspaceSymbols={fetchWorkspaceSymbols}
@@ -11080,6 +11775,7 @@ export function CodeWorkspaceTab({
         recentLocationsChangedOnly={recentLocationsChangedOnly}
         workspaceId={workspaceInstanceId}
         locationController={workspaceLocationControllerRef.current}
+        navigationFacade={navigationHistoryFacade}
         onCloseRecentLocations={() => setRecentLocationsOpen(false)}
         onPickRecentLocation={(loc) => {
           setRecentLocationsOpen(false);
@@ -11123,6 +11819,11 @@ export function CodeWorkspaceTab({
         quickDocContent={quickDocContent}
         onCloseQuickDoc={() => setQuickDocOpen(false)}
         onPinQuickDoc={pinQuickDocumentation}
+        onOpenQuickDocSource={openReferenceSource}
+        quickDocCanGoBack={referenceHistory.canGoBack}
+        quickDocCanGoForward={referenceHistory.canGoForward}
+        onQuickDocBack={referenceHistoryBack}
+        onQuickDocForward={referenceHistoryForward}
         locationPeek={locationPeek}
         onCloseLocationPeek={() => setLocationPeek(null)}
         onOpenLocation={(location) => {
@@ -11215,6 +11916,28 @@ export function CodeWorkspaceTab({
           }}
         />
       )}
+      {editorAppearanceSettingsOpen && (
+        <WorkspaceEditorAppearanceSettingsDialog
+          open={editorAppearanceSettingsOpen}
+          profile={editorAppearanceProfile}
+          onApply={(next) => {
+            updateEditorAppearanceProfile(next);
+            setStatusMessage("Saved workspace editor appearance settings");
+          }}
+          onClose={() => setEditorAppearanceSettingsOpen(false)}
+        />
+      )}
+      {intelligenceSettingsOpen && (
+        <WorkspaceIntelligenceSettingsDialog
+          open={intelligenceSettingsOpen}
+          preferences={intelligencePreferences}
+          onApply={(next) => {
+            setIntelligencePreferences(next);
+            setStatusMessage("Saved editor intelligence settings");
+          }}
+          onClose={() => setIntelligenceSettingsOpen(false)}
+        />
+      )}
       {buildRunToolsOpen && (
         <WorkspaceBuildRunToolsDialog
           config={buildRunTools}
@@ -11262,9 +11985,11 @@ export function CodeWorkspaceTab({
         <KeymapCheatSheetDialog
           open={true}
           commands={workspaceCommands}
+          actionSnapshots={actionsController.snapshot}
           onClose={() => setKeymapCheatSheetOpen(false)}
           onExecuteCommand={(cmdId) => {
-            executeWorkspaceCommand(cmdId);
+            // §8.16.3: cheatsheet runs through the same host channel.
+            void actionsController.executeAction(cmdId);
           }}
         />
       )}

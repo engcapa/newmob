@@ -3467,6 +3467,26 @@ mod tests {
     }
 
     #[test]
+    fn encoded_write_iso_8859_1_latin1_bytes_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("latin1.txt");
+        // "café" in ISO-8859-1: é is the single byte 0xE9.
+        let saved = workspace_write_loose_file_encoded(
+            path.to_string_lossy().to_string(),
+            "café\n".into(),
+            None,
+            "ISO-8859-1".into(),
+            Some(false),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            vec![b'c', b'a', b'f', 0xE9, b'\n']
+        );
+        assert_eq!(saved.text, "café\n");
+    }
+
+    #[test]
     fn encoded_write_unrepresentable_char_returns_encoding_error() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.txt"), "one").unwrap();
@@ -4827,6 +4847,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
             ("UTF-8", true, &[0xEF, 0xBB, 0xBF]),
             ("UTF-16LE", true, &[0xFF, 0xFE]),
             ("UTF-16BE", true, &[0xFE, 0xFF]),
+            ("ISO-8859-1", false, b""),
             ("windows-1252", false, b""),
         ];
 
@@ -4857,7 +4878,14 @@ runtimeClasspath - Runtime classpath of source set 'main'.
                 )
                 .unwrap();
 
-                assert_eq!(saved.encoding, *enc_name);
+                // WhatWG Encoding folds the ISO-8859-1/latin1 labels into
+                // windows-1252 on read-back; raw bytes stay exact below.
+                let expected_label = if *enc_name == "ISO-8859-1" {
+                    "windows-1252"
+                } else {
+                    enc_name
+                };
+                assert_eq!(saved.encoding, expected_label);
                 assert_eq!(saved.bom, *bom);
 
                 let raw_on_disk = fs::read(&path).unwrap();
@@ -4909,7 +4937,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
                     Some(*bom),
                 )
                 .unwrap();
-                assert_eq!(edit_saved.encoding, *enc_name);
+                assert_eq!(edit_saved.encoding, expected_label);
 
                 // Replay path
                 let replay_saved = workspace_write_loose_file_encoded(
