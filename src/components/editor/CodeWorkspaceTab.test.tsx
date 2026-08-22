@@ -4587,6 +4587,13 @@ end_of_record
       });
 
       expect(useAppStore.getState().statusMessage).toContain("current changes remain unsaved");
+
+      // P0-S3 stale-save ordering: the provider must never receive the stale
+      // snapshot text via didSave; only the current buffer may be synced.
+      const staleDidSave = lspMocks.lspSaveDocument.mock.calls.some(
+        (call) => call.includes("initial_text\ninitial_text\n"),
+      );
+      expect(staleDidSave).toBe(false);
     });
   });
 });

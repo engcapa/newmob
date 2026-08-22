@@ -33,7 +33,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         const writeDisk = vi.fn(async (_path, text, _hash, _enc, _bom, resolvedEol) => {
           savedContent = text;
           savedEol = resolvedEol;
-          return { hash: "new-disk-hash" };
+          return { kind: "written", hash: "new-disk-hash" } as const;
         });
 
         const tx: SaveTransactionV2 = {
@@ -158,7 +158,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         fileProvider: { readFile: async () => null },
       });
 
-      const writeDisk = vi.fn(async () => ({ hash: "should-not-write" }));
+      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write" } as const));
       let version = 1;
 
       const tx: SaveTransactionV2 = {
@@ -201,7 +201,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         fileProvider: { readFile: async () => null },
       });
 
-      const writeDisk = vi.fn(async () => ({ hash: "should-not-write" }));
+      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write" } as const));
 
       const tx: SaveTransactionV2 = {
         id: "tx-same-len",
@@ -253,7 +253,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         text: "function main() {\n  return;\n}\n",
       };
 
-      const writeDisk = vi.fn(async (_path, _text) => ({ hash: "hash-saved" }));
+      const writeDisk = vi.fn(async (_path, _text) => ({ kind: "written", hash: "hash-saved" } as const));
 
       const outcome = await ctrl.executeSaveTransaction(tx, writeDisk);
       expect(outcome.kind).toBe("saved");
@@ -348,6 +348,76 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
       expect(outcome.kind).toBe("failed");
       if (outcome.kind === "failed") {
         expect(outcome.reason).toContain("Disk write failed: Permission denied (EACCES)");
+      }
+    });
+  });
+
+  describe("Typed IPC write error normalization (P0-S3)", () => {
+    it("normalizes by kind regardless of message wording", () => {
+      const ioMessages = [
+        "open temp file: os error 5",
+        "mkdir parent: directory creation failed",
+        "rename temp file: replace refused",
+      ];
+      for (const message of ioMessages) {
+        expect(parseWorkspaceWriteError({ kind: "io", message }).kind).toBe("io");
+      }
+      expect(
+        parseWorkspaceWriteError({ kind: "encoding", message: "unrelated wording" }).kind,
+      ).toBe("encoding");
+      expect(
+        parseWorkspaceWriteError({ kind: "permission", message: "access check said no" }).kind,
+      ).toBe("permission");
+    });
+
+    it("keeps expected/actual hashes from typed hash-mismatch payload", () => {
+      const parsed = parseWorkspaceWriteError({
+        kind: "hash-mismatch",
+        message: "custom backend wording",
+        expectedHash: "e1expected",
+        actualHash: "a1actual",
+      });
+      expect(parsed.kind).toBe("hash-mismatch");
+      expect(parsed.expectedHash).toBe("e1expected");
+      expect(parsed.actualHash).toBe("a1actual");
+    });
+
+    it("still parses legacy string prefix errors from old backends", () => {
+      const parsed = parseWorkspaceWriteError(
+        new Error("hash-mismatch: File changed on disk; expected hash aaa, found bbb"),
+      );
+      expect(parsed.kind).toBe("hash-mismatch");
+      if (parsed instanceof WorkspaceHashMismatchError) {
+        expect(parsed.expected).toBe("aaa");
+        expect(parsed.actual).toBe("bbb");
+      }
+    });
+
+    it("maps typed cancelled writer result to cancelled outcome", async () => {
+      const ctrl = new WorkspaceStyleController({
+        workspaceId: "ws-test",
+        roots: [{ path: "/workspace" }],
+        fileProvider: { readFile: async () => null },
+      });
+      const tx: SaveTransactionV2 = {
+        id: "tx-cancelled",
+        workspaceId: "ws-test",
+        fileKey: "key-1",
+        filePath: "/workspace/src/file.ts",
+        bufferVersion: 1,
+        styleGeneration: 0,
+        expectedDiskHash: null,
+        policy: { eol: "lf", encoding: "UTF-8", bom: false },
+        text: "body\n",
+      };
+      const writeDisk = vi.fn(async () => ({
+        kind: "cancelled",
+        reason: "Buffer modified during save preparation",
+      } as const));
+      const outcome = await ctrl.executeSaveTransaction(tx, writeDisk);
+      expect(outcome.kind).toBe("cancelled");
+      if (outcome.kind === "cancelled") {
+        expect(outcome.reason).toBe("Buffer modified during save preparation");
       }
     });
   });

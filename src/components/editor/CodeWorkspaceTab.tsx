@@ -3505,7 +3505,15 @@ export function CodeWorkspaceTab({
         notifyWorkspacePathGitChanged(file.ref.rootId, file.ref.path);
       }
       semanticIndex.invalidate("document-saved", [savedPath ?? file.path]);
-      await saveLspDocument({ ...file, text: snapshotText }, snapshotText);
+      if (isBufferStillSame) {
+        await saveLspDocument({ ...file, text: snapshotText }, snapshotText);
+      } else {
+        // Stale-snapshot save: the disk now holds an older revision than the
+        // live buffer. Sending didSave(snapshotText) would let the provider
+        // observe an old document as the saved one; sync only the current
+        // buffer via didChange and let the next explicit save own didSave.
+        await syncLspDocument(openFilesRef.current[key] ?? latestNow, "change");
+      }
       return saved;
     } catch (err) {
       const message = errorMessage(err);
@@ -3525,6 +3533,7 @@ export function CodeWorkspaceTab({
     mutateOpenBuffer,
     notifyWorkspacePathGitChanged,
     saveLspDocument,
+    syncLspDocument,
     semanticIndex.invalidate,
     workspaceInstanceId,
     writeTextSnapshot,
@@ -3629,9 +3638,9 @@ export function CodeWorkspaceTab({
             bom,
           });
           if (!savedFile) {
-            return { cancelled: true, reason: "Buffer modified during save preparation" };
+            return { kind: "cancelled", reason: "Buffer modified during save preparation" } as const;
           }
-          return { hash: savedFile.hash };
+          return { kind: "written", hash: savedFile.hash } as const;
         },
         {
           formatOnSave: intelligencePreferences.formatOnSave,

@@ -78,6 +78,11 @@ export type SaveOutcome =
   | { kind: "saved"; transactionId: string; hash: string }
   | { kind: "cancelled" | "conflict" | "failed"; reason: string; retryable: boolean };
 
+/** Typed result every save writer must return to `executeSaveTransaction`. */
+export type SaveWriterResult =
+  | { kind: "written"; hash: string }
+  | { kind: "cancelled"; reason: string };
+
 interface CachedConfig {
   parsed: ParsedEditorConfigFile;
   contentHash?: string;
@@ -401,7 +406,7 @@ export class WorkspaceStyleController {
       encoding?: string,
       bom?: boolean,
       eol?: OpenFileEol | "lf" | "crlf" | "cr",
-    ) => Promise<{ hash?: string } | void>,
+    ) => Promise<SaveWriterResult>,
     options?: {
       formatOnSave?: boolean;
       formatFn?: (text: string) => Promise<string | null>;
@@ -495,15 +500,14 @@ export class WorkspaceStyleController {
         targetEol,
       );
 
-      const resultObj = writeResult as { hash?: string; cancelled?: boolean; reason?: string } | undefined;
-      if (resultObj?.cancelled) {
+      if (writeResult.kind === "cancelled") {
         return {
           kind: "cancelled",
-          reason: resultObj.reason ?? "Buffer was modified before write.",
+          reason: writeResult.reason,
           retryable: true,
         };
       }
-      const returnedHash = resultObj?.hash;
+      const returnedHash = writeResult.hash;
       if (!returnedHash) {
         return {
           kind: "failed",

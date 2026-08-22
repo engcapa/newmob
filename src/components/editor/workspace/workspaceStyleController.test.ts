@@ -54,7 +54,7 @@ describe("WorkspaceStyleController (N1.1)", () => {
       fileProvider,
     });
 
-    const writeDisk = vi.fn(async () => {});
+    const writeDisk = vi.fn(async () => ({ kind: "written", hash: "unused" } as const));
 
     let currentVersion = 1;
     const tx: SaveTransactionV2 = {
@@ -95,7 +95,7 @@ describe("WorkspaceStyleController (N1.1)", () => {
     const writeDisk = vi.fn(async (_path, text, _hash, _enc, _bom, eol) => {
       writtenText = text;
       writtenEol = eol ?? "";
-      return { hash: "hash-saved-1" };
+      return { kind: "written", hash: "hash-saved-1" } as const;
     });
 
     const tx: SaveTransactionV2 = {
@@ -131,7 +131,7 @@ describe("WorkspaceStyleController (N1.1)", () => {
       fileProvider,
     });
 
-    const writeDisk = vi.fn(async () => ({ hash: "dummy" }));
+    const writeDisk = vi.fn(async () => ({ kind: "written", hash: "dummy" } as const));
 
     const tx: SaveTransactionV2 = {
       id: "tx-3",

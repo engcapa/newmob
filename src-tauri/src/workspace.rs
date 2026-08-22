@@ -76,6 +76,28 @@ impl std::fmt::Display for WorkspaceWriteError {
 
 impl std::error::Error for WorkspaceWriteError {}
 
+impl WorkspaceWriteError {
+    pub fn new(kind: WorkspaceWriteErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            expected_hash: None,
+            actual_hash: None,
+        }
+    }
+}
+
+/// Classify a filesystem failure from the byte-writer path. Only
+/// `PermissionDenied` is promoted to `permission`; everything else stays `io`.
+fn classify_io_error(operation: &str, error: &std::io::Error) -> WorkspaceWriteError {
+    let kind = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        WorkspaceWriteErrorKind::Permission
+    } else {
+        WorkspaceWriteErrorKind::Io
+    };
+    WorkspaceWriteError::new(kind, format!("{operation}: {error}"))
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceCompactChain {
@@ -2227,13 +2249,18 @@ pub fn workspace_write_file_encoded(
     expected_hash: Option<String>,
     encoding: String,
     bom: Option<bool>,
-) -> Result<WorkspaceFile, String> {
-    let root = canonical_repo_root(&repo_root)?;
-    let target = resolve_writable_path(&root, &path)?;
-    reject_protected_write(&root, &target)?;
-    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))?;
+) -> Result<WorkspaceFile, WorkspaceWriteError> {
+    let root = canonical_repo_root(&repo_root)
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
+    let target = resolve_writable_path(&root, &path)
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
+    reject_protected_write(&root, &target)
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Encoding, e))?;
     write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
     workspace_read_file_with_encoding(repo_root, path, None, encoding)
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))
 }
 
 #[tauri::command]
@@ -2243,17 +2270,21 @@ pub fn workspace_write_loose_file_encoded(
     expected_hash: Option<String>,
     encoding: String,
     bom: Option<bool>,
-) -> Result<WorkspaceFile, String> {
-    let target = resolve_writable_loose_file_path(&path)?;
-    reject_protected_loose_write(&target)?;
-    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))?;
+) -> Result<WorkspaceFile, WorkspaceWriteError> {
+    let target = resolve_writable_loose_file_path(&path)
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
+    reject_protected_loose_write(&target)
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))
+        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Encoding, e))?;
     write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
     loose_file_from_bytes_with_encoding(
         &target,
-        fs::read(&target).map_err(|e| format!("read {}: {e}", target.display()))?,
-        fs::metadata(&target).map_err(|e| format!("stat {}: {e}", target.display()))?,
+        fs::read(&target).map_err(|e| classify_io_error("read target", &e))?,
+        fs::metadata(&target).map_err(|e| classify_io_error("stat target", &e))?,
         Some(&encoding),
     )
+    .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))
 }
 
 #[tauri::command]
@@ -3094,30 +3125,29 @@ fn write_workspace_bytes(
     target: &Path,
     bytes: Vec<u8>,
     expected_hash: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), WorkspaceWriteError> {
     if let Some(expected) = expected_hash
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        let current = fs::read(target).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                format!(
-                    "Cannot compare expected hash; file does not exist: {}",
-                    target.display()
-                )
-            } else {
-                format!("read {}: {error}", target.display())
-            }
-        })?;
+        let current = fs::read(target).map_err(|error| classify_io_error("read target", &error))?;
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
-            return Err(hash_mismatch_error(expected, &current_hash));
+            return Err(WorkspaceWriteError {
+                kind: WorkspaceWriteErrorKind::HashMismatch,
+                message: hash_mismatch_error(expected, &current_hash),
+                expected_hash: Some(expected.to_string()),
+                actual_hash: Some(current_hash),
+            });
         }
     }
-    let parent = target
-        .parent()
-        .ok_or_else(|| format!("Cannot resolve parent for {}", target.display()))?;
-    fs::create_dir_all(parent).map_err(|error| format!("mkdir {}: {error}", parent.display()))?;
+    let parent = target.parent().ok_or_else(|| {
+        WorkspaceWriteError::new(
+            WorkspaceWriteErrorKind::Io,
+            "Cannot resolve parent directory for target",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(|error| classify_io_error("mkdir parent", &error))?;
     let tmp = parent.join(format!(".taomni-write-{}", uuid::Uuid::new_v4().simple()));
     {
         use std::io::Write;
@@ -3125,19 +3155,15 @@ fn write_workspace_bytes(
             .write(true)
             .create_new(true)
             .open(&tmp)
-            .map_err(|error| format!("open {}: {error}", tmp.display()))?;
+            .map_err(|error| classify_io_error("open temp file", &error))?;
         file.write_all(&bytes)
-            .map_err(|error| format!("write {}: {error}", tmp.display()))?;
+            .map_err(|error| classify_io_error("write temp file", &error))?;
         file.sync_all()
-            .map_err(|error| format!("sync {}: {error}", tmp.display()))?;
+            .map_err(|error| classify_io_error("sync temp file", &error))?;
     }
     if let Err(error) = replace_file(&tmp, target) {
         let _ = fs::remove_file(&tmp);
-        return Err(format!(
-            "rename {} -> {}: {error}",
-            tmp.display(),
-            target.display()
-        ));
+        return Err(classify_io_error("rename temp file", &error));
     }
     Ok(())
 }
@@ -3418,6 +3444,80 @@ mod tests {
     }
 
     #[test]
+    fn encoded_write_hash_conflict_returns_typed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "one").unwrap();
+        let err = workspace_write_file_encoded(
+            dir.path().to_string_lossy().to_string(),
+            "a.txt".into(),
+            "two".into(),
+            Some("deadbeef".into()),
+            "UTF-8".into(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, WorkspaceWriteErrorKind::HashMismatch);
+        assert_eq!(err.expected_hash.as_deref(), Some("deadbeef"));
+        assert!(err.actual_hash.is_some());
+        assert_eq!(
+            fs::read(dir.path().join("a.txt")).unwrap(),
+            b"one".to_vec(),
+            "hash conflict must leave target bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn encoded_write_unrepresentable_char_returns_encoding_error() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "one").unwrap();
+        let err = workspace_write_file_encoded(
+            dir.path().to_string_lossy().to_string(),
+            "a.txt".into(),
+            "hello 世界".into(),
+            Some(sha256_hex(b"one")),
+            "ISO-8859-1".into(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, WorkspaceWriteErrorKind::Encoding);
+        assert_eq!(
+            fs::read(dir.path().join("a.txt")).unwrap(),
+            b"one".to_vec(),
+            "encode failure must leave target bytes unchanged"
+        );
+    }
+
+    #[test]
+    fn encoded_write_missing_target_with_hash_precondition_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = workspace_write_file_encoded(
+            dir.path().to_string_lossy().to_string(),
+            "missing.txt".into(),
+            "text".into(),
+            Some("anyhash".into()),
+            "UTF-8".into(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, WorkspaceWriteErrorKind::Io);
+        assert!(!dir.path().join("missing.txt").exists());
+    }
+
+    #[test]
+    fn classify_io_error_maps_permission_denied() {
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            classify_io_error("open temp file", &denied).kind,
+            WorkspaceWriteErrorKind::Permission
+        );
+        let other = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(
+            classify_io_error("open temp file", &other).kind,
+            WorkspaceWriteErrorKind::Io
+        );
+    }
+
+    #[test]
     fn rejects_parent_dir_escape() {
         let dir = tempfile::tempdir().unwrap();
         let err = workspace_list_dir(dir.path().to_string_lossy().to_string(), Some("../".into()))
@@ -3617,7 +3717,9 @@ mod tests {
             Some(false),
         )
         .unwrap_err();
-        assert!(error.contains("not representable"));
+        assert_eq!(error.kind, WorkspaceWriteErrorKind::Encoding);
+        assert!(error.message.contains("not representable"));
+        assert_eq!(fs::read(&path).unwrap(), b"plain".to_vec());
     }
 
     #[test]
@@ -4845,7 +4947,8 @@ runtimeClasspath - Runtime classpath of source set 'main'.
             Some(false),
         )
         .unwrap_err();
-        assert!(unrep_err.contains("not representable"));
+        assert_eq!(unrep_err.kind, WorkspaceWriteErrorKind::Encoding);
+        assert!(unrep_err.message.contains("not representable"));
 
         assert_eq!(fs::read(&win_path).unwrap(), initial_bytes);
         let read_back = workspace_read_loose_file(win_path_string, None).unwrap();
