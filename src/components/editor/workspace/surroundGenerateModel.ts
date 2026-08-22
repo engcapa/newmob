@@ -1,5 +1,6 @@
+// NON-PRODUCTION MODEL: no production consumer; see §8.13 N12
 /**
- * Surround With & Code Generation Engine (E3.4).
+ * Surround With & Generate Code Template Model (E1.3).
  *
  * Implements IntelliJ IDEA's Surround With (Ctrl+Alt+T) and Generate Code (Alt+Insert)
  * for Java and TypeScript with template variables, indentation, and preview.

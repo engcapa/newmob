@@ -312,8 +312,8 @@ export const foldSelection: Command = (view) => {
   return true;
 };
 
-const REGION_START = /^\s*\/\/\s*region(?:\s|$)/i;
-const REGION_END = /^\s*\/\/\s*endregion(?:\s|$)/i;
+const REGION_START = /^\s*(?:\/\/|#|\/\*|--|%|;|<!--)\s*#?region(?:\s|$)/i;
+const REGION_END = /^\s*(?:\/\/|#|\/\*|--|%|;|<!--)\s*#?endregion(?:\s|$)/i;
 
 export const regionFoldService = foldService.of((state, lineStart, lineEnd) => {
   const line = state.doc.lineAt(lineStart);

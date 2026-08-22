@@ -11252,11 +11252,11 @@ mod tests {
             notify_event_changes(&rename),
             vec![
                 LspWatchedFileChange {
-                    path: old_path.to_string_lossy().into_owned(),
+                    path: old_path.to_string_lossy().replace('\\', "/"),
                     change_type: 3,
                 },
                 LspWatchedFileChange {
-                    path: new_path.to_string_lossy().into_owned(),
+                    path: new_path.to_string_lossy().replace('\\', "/"),
                     change_type: 1,
                 },
             ]

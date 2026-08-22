@@ -39,6 +39,7 @@ src-tauri/frameworks/
 .aider*
 .kiro/
 .agent/
+.zcode/
 
 # Generic AI cache / vector index
 .ai-cache/

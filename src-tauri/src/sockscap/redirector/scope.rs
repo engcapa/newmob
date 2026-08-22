@@ -184,7 +184,8 @@ fn canonical_absolute_pattern(path: &Path, app_family: bool) -> Result<String, S
 }
 
 fn absolute_pattern(path: &Path, app_family: bool) -> Result<String, String> {
-    if !path.is_absolute() {
+    let s = path.to_string_lossy();
+    if !path.is_absolute() && !s.starts_with('/') && !s.starts_with('\\') {
         return Err(format!(
             "Redirector process selector must be an absolute path: {}",
             path.display()

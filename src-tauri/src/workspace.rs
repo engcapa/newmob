@@ -2753,7 +2753,7 @@ fn resolve_existing_path(root: &Path, relative: &str) -> Result<PathBuf, String>
         .canonicalize()
         .map_err(|e| format!("resolve {}: {e}", target.display()))?;
     ensure_inside(root, &canonical)?;
-    Ok(canonical)
+    Ok(strip_unc(&canonical))
 }
 
 fn resolve_resource_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -2830,8 +2830,19 @@ fn sanitize_relative_path(value: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+fn strip_unc(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn ensure_inside(root: &Path, target: &Path) -> Result<(), String> {
-    if target.starts_with(root) {
+    let clean_root = strip_unc(&root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+    let clean_target = strip_unc(target);
+    if clean_target.starts_with(&clean_root) || target.starts_with(root) {
         Ok(())
     } else {
         Err(format!(
@@ -2861,8 +2872,11 @@ fn reject_workspace_root_target(root: &Path, target: &Path, operation: &str) -> 
 }
 
 fn reject_protected_write(root: &Path, target: &Path) -> Result<(), String> {
-    let relative = target
-        .strip_prefix(root)
+    let clean_root = strip_unc(&root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+    let clean_target = strip_unc(target);
+    let relative = clean_target
+        .strip_prefix(&clean_root)
+        .or_else(|_| target.strip_prefix(root))
         .map_err(|_| "Path escapes workspace root".to_string())?;
     if relative
         .components()
@@ -3409,8 +3423,11 @@ fn path_for_display(path: &Path) -> String {
 }
 
 fn relative_path(root: &Path, target: &Path) -> Result<String, String> {
-    let rel = target
-        .strip_prefix(root)
+    let clean_root = strip_unc(&root.canonicalize().unwrap_or_else(|_| root.to_path_buf()));
+    let clean_target = strip_unc(target);
+    let rel = clean_target
+        .strip_prefix(&clean_root)
+        .or_else(|_| target.strip_prefix(root))
         .map_err(|_| "Path escapes workspace root".to_string())?;
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }

@@ -1,3 +1,4 @@
+// NON-PRODUCTION MODEL: no production consumer; see §8.13 N12
 /**
  * Structural Search & Replace Model (A1) - Experimental Template Search Prototype.
  *

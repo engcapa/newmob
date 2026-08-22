@@ -1,0 +1,13 @@
+id: TC-065
+title: Code Workspace editor appearance and actions workflow
+covers: [F25.3]
+tags: [code-workspace, editor, appearance, actions, p1]
+modes: [browser]
+fixtures: [reset_db]
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"tab-bar\"]"
+  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
+  - wait_for: "[data-testid=\"code-workspace-tab\"]"
+  - assert_count: {selector: '[data-testid="code-workspace-tab"]', equal: 1}
+  - screenshot: 065-code-workspace-appearance-and-actions.png

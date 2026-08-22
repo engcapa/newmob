@@ -29,6 +29,8 @@ export const CODE_THEME_COLOR_VARS = [
   "--taomni-code-diff-modified-bg", "--taomni-code-diff-modified-word",
   "--taomni-code-diff-connector-added", "--taomni-code-diff-connector-deleted",
   "--taomni-code-diff-connector-modified", "--taomni-code-diff-connector-stroke",
+  "--taomni-code-diagnostic-error", "--taomni-code-diagnostic-warning",
+  "--taomni-code-diagnostic-info", "--taomni-code-diagnostic-hint",
 ] as const;
 
 export type CodeThemeVarName = (typeof CODE_THEME_COLOR_VARS)[number];
@@ -142,6 +144,10 @@ export function codeThemeVariablesFromPalette(p: CodeThemePalette): CodeThemeVar
     "--taomni-code-diff-connector-deleted": mix(red, dark ? 22 : 18, "transparent"),
     "--taomni-code-diff-connector-modified": mix(blue, dark ? 23 : 19, "transparent"),
     "--taomni-code-diff-connector-stroke": mix(fg, 22, "transparent"),
+    "--taomni-code-diagnostic-error": red,
+    "--taomni-code-diagnostic-warning": p.number ?? (dark ? "#e3b341" : "#9a6700"),
+    "--taomni-code-diagnostic-info": blue,
+    "--taomni-code-diagnostic-hint": muted,
   };
 }
 

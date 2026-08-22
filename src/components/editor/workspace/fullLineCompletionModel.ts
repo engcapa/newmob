@@ -1,3 +1,4 @@
+// NON-PRODUCTION MODEL: no production consumer; see §8.13 N12
 /**
  * Full Line Local Inline Completion Model & Ghost Text Session (A4).
  *

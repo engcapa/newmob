@@ -77,9 +77,9 @@ export function rollbackGitLineChange(docText: string, change: GitLineChange): s
 }
 
 function changeColor(kind: GitLineChangeKind): string {
-  if (kind === "added") return "#22c55e";
-  if (kind === "deleted") return "#ef4444";
-  return "#3b82f6";
+  if (kind === "added") return "var(--taomni-code-syntax-inserted, #22c55e)";
+  if (kind === "deleted") return "var(--taomni-code-syntax-deleted, #ef4444)";
+  return "var(--taomni-code-syntax-changed, #3b82f6)";
 }
 
 class GitChangeMarker extends GutterMarker {

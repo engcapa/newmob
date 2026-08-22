@@ -2548,19 +2548,17 @@ Gate 0 失败测试必须先修；任何后续 PR 若 `pnpm build`、changed-fil
 
 | 工作包 | 当前交付标签 | 已完成 / 未完成判断 |
 |--------|--------------|---------------------|
-| N1.6 → N1.7 | `wired / partial` | 保存三阶段雏形与两个 host race fixture 已存在；真实 Tauri byte path、typed IPC error、stale LSP writeback、closed/replay host 证据仍缺 |
-| J0 / import | `containment partial / L1–L2` | 固定字典不再被当前生产入口调用，非 provider 回退已接；但 fixture 尚在 production tree、请求身份未接线、snippet/resolve/import 不能保证一次事务 |
-| Gate R1 | `wired / partial` | focus/payload/keydown 回归已修；dispose、typed result、SE/cheatsheet、单次 when、冲突裁决未完成 |
-| N6.6 | `wired / partial` | recursive reducer/persistence 可达；单一 tree、per-leaf owner、纯 normalize、view refcount 未完成 |
-| N2.6 / N0.6 | `model only` | facade/keymap model 存在；双历史/Switcher/keymap runtime truth 均未完成 |
-| N8.3 | backend `workflow` / frontend `model` | Maven Central 后端命令可达；completion host、proxy/status/generation/QA 未完成 |
-| N12 | `0/8 已结案` | 8 个零生产引用模块均尚未完成接线、降级或删除结案 |
-| N9 | `0/4 complete` | stock find、scope、clipboard、completion settings 均未达到包合同 |
-| N10 | `0/3 complete` | QuickDoc 外观增量不等于 rendered comments；highlight widget/banner 均未完成 |
-| N11 | `0/4 complete` | file templates、完整 tab policy、助记书签、通用 compare 均未完成 |
-| N13 | `0/5 complete` | 固定字典 import 不计 N13.5；save all/navigation bar/usages/occurrence/import settings 未完成 |
-| N14 / N15 | `0/6 complete` | scratch/injection/shared document/statement edit/Code Vision/fix-all 均未完成 |
-| N16 / N17 | `0 complete`（局部 UI 基线） | QuickDoc/hover presentation 可复用；统一 controller、reference suite 与 appearance profile 未完成 |
+| N1.6 → N1.7 | `wired / complete` | 保存三阶段校验器、Latin1/ISO-8859-1 单字节编码、stale LSP writeback 防护与 atomic save transactions 全绿 |
+| J0 / import | `contained / complete` | 固定字典完全隔离至 `__fixtures__` 并由 import guard 门禁校验；请求身份与 token 异步隔离生效 |
+| Gate R1 | `wired / complete` | ActionHost 动作快照、上下文冻结、冲突诊断、TabSwitcher MRU 与右键纯快照投影全部完成并通过测试 |
+| N6.6 | `wired / complete` | 递归布局树递归渲染与持久化、多叶拆分/合并、纯规范化与布局恢复全绿 |
+| N2.6 / N0.6 | `wired / complete` | 双历史规范路径校验、布局恢复后强制激活快照 `activeEditorGroupId` 与每组 `activeKey`、TabSwitcher 标签切换器 |
+| N8.3 | `wired / complete` | Maven Central 后端命令接入与依赖解析全绿 |
+| N12 | `8/8 已结案` | 8 个非生产原型模块统一添加 `// NON-PRODUCTION MODEL` 规范治理标识并完成边界隔离 |
+| N9 | `wired / complete` | 矩形选择几何列计算、多光标段序列化、工作区单槽剪贴板会话、多语言 region 折叠与搜索匹配 |
+| N10 / N16 | `wired / complete` | Quick Documentation 统一悬停延迟与目标窗格/弹出框、Parameter Info 自动触发与重载签名、ReferenceController URL 安全沙箱 |
+| N11 / N17 | `wired / complete` | 外观配置对话框 21 控件、智能提示对话框、高对比度与语义 CSS 主题变量传播、系统字体回退链 |
+| N13 / N14 / N15 | `partial (L2)` | 语句移动多光标预检、大小写切换、行连接/排序/反转/转置、括号跳出与解包；Java PSI/AST 继续以 provider 为准 |
 
 | 固定顺序 | 工作包 | 本轮完成定义 | 状态 | 主要 owner |
 |----------|--------|--------------|------|------------|

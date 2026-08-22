@@ -263,6 +263,10 @@ export function codeThemeVariables(theme: ITheme): CodeThemeVars {
     "--taomni-code-diff-connector-deleted": mix(red, 22, "transparent"),
     "--taomni-code-diff-connector-modified": mix(blue, 23, "transparent"),
     "--taomni-code-diff-connector-stroke": mix(fg, 22, "transparent"),
+    "--taomni-code-diagnostic-error": red,
+    "--taomni-code-diagnostic-warning": yellow,
+    "--taomni-code-diagnostic-info": blue,
+    "--taomni-code-diagnostic-hint": muted,
   };
 }
 

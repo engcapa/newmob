@@ -524,4 +524,57 @@ describe("workspace editor commands", () => {
     expect(view.state.doc.toString()).toBe('const name = "hello";');
     view.destroy();
   });
+
+  it("folds regions defined with Python, SQL, and HTML comment styles", () => {
+    const pyView = new EditorView({
+      state: EditorState.create({
+        doc: "# region Python Block\nx = 1\n# endregion",
+        extensions: [regionFoldService],
+      }),
+    });
+    const pyLine = pyView.state.doc.line(1);
+    expect(foldable(pyView.state, pyLine.from, pyLine.to)).toEqual({
+      from: pyLine.to,
+      to: pyView.state.doc.line(3).from,
+    });
+    pyView.destroy();
+
+    const sqlView = new EditorView({
+      state: EditorState.create({
+        doc: "-- #region SQL Block\nSELECT 1;\n-- #endregion",
+        extensions: [regionFoldService],
+      }),
+    });
+    const sqlLine = sqlView.state.doc.line(1);
+    expect(foldable(sqlView.state, sqlLine.from, sqlLine.to)).toEqual({
+      from: sqlLine.to,
+      to: sqlView.state.doc.line(3).from,
+    });
+    sqlView.destroy();
+  });
+
+  it("builds rectangular paste plan preserving column geometry across lines", () => {
+    const state = EditorState.create({
+      doc: "aaa\nbbb\nccc",
+      selection: EditorSelection.create([
+        EditorSelection.cursor(0),
+        EditorSelection.cursor(4),
+        EditorSelection.cursor(8),
+      ]),
+      extensions: [EditorState.allowMultipleSelections.of(true)],
+    });
+
+    const plan = buildMultiCaretPastePlan(state, {
+      plainText: "1\n2\n3",
+      segments: ["1", "2", "3"],
+      sourceEol: "lf",
+      rectangular: true,
+    });
+
+    expect(plan).not.toBeNull();
+    expect(plan?.changes).toHaveLength(3);
+    const updated = state.update({ changes: plan!.changes });
+    expect(updated.state.doc.toString()).toBe("1aaa\n2bbb\n3ccc");
+  });
 });
+

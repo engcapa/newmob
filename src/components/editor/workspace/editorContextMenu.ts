@@ -1,5 +1,6 @@
 import type { MenuItem } from "../../ContextMenu";
 import type { LspCapabilitySummary } from "../../../lib/editor/lsp";
+import type { PreparedActionEvaluation } from "./workspaceActionHost";
 
 export interface EditorContextMenuCapabilities {
   definition?: boolean;
@@ -15,29 +16,26 @@ export interface EditorContextMenuCapabilities {
   rangeFormatting?: boolean;
 }
 
-export interface EditorContextMenuActions {
-  goToDefinition: () => void;
-  goToTypeDefinition: () => void;
-  goToImplementation: () => void;
-  findReferences: () => void;
-  callHierarchy: () => void;
-  typeHierarchy: () => void;
-  rename: () => void;
-  safeDelete: () => void;
-  quickDocumentation: () => void;
-  codeActions: (clientX: number, clientY: number) => void;
-  format: () => void;
-  cut: () => void;
-  copy: () => void;
-  paste: () => void;
+/**
+ * Host-owned execution channel for one context-menu invocation. Every
+ * actionable row carries the prepared evaluation captured when the menu
+ * opened, so clicking runs exactly what the enabled state was computed from.
+ */
+export interface EditorContextMenuActionBinding {
+  /** Runtime workspace action id (e.g. `workspace.gotoDefinition`). */
+  actionId: string;
+  /** Frozen evaluation from menu-open time; executed on click. */
+  prepare: PreparedActionEvaluation | null;
+  /** Runs the frozen evaluation through the owning host. */
+  run: () => void;
 }
 
 /** AI entry points. Omitted entirely when AI is unavailable/disabled. */
 export interface EditorContextMenuAiSection {
   explainSyntaxLabel: string;
   explainCodeLabel: string;
-  explainSyntax: () => void;
-  explainCode: () => void;
+  explainSyntax: EditorContextMenuActionBinding;
+  explainCode: EditorContextMenuActionBinding;
   /**
    * Answer-language picker. Present here as well as on the selection toolbar
    * because the context menu is reachable without a selection, and was
@@ -46,8 +44,29 @@ export interface EditorContextMenuAiSection {
   answerLanguage?: {
     label: string;
     current: string;
-    options: Array<{ value: string; label: string }>;
-    onSelect: (value: string) => void;
+    options: Array<{ value: string; label: string; binding: EditorContextMenuActionBinding }>;
+  };
+}
+
+/**
+ * Static metadata + snapshot availability per row. The builder maps these onto
+ * MenuItem entries whose `disabled` flag comes only from ActionState, so the
+ * menu can never disagree with the host evaluation it executes.
+ */
+interface RowSpec {
+  testId: string;
+  label: string;
+  shortcut?: string;
+  binding: EditorContextMenuActionBinding;
+}
+
+function rowFromSpec(spec: RowSpec): MenuItem {
+  return {
+    label: spec.label,
+    shortcut: spec.shortcut,
+    testId: spec.testId,
+    disabled: !spec.binding.prepare || spec.binding.prepare.state.availability !== "available",
+    onClick: () => spec.binding.run(),
   };
 }
 
@@ -56,55 +75,55 @@ export interface BuildEditorContextMenuInput {
   hasSelection: boolean;
   clientX: number;
   clientY: number;
-  actions: EditorContextMenuActions;
-  /** When true, LSP navigation items stay enabled even if capabilities are unknown. */
-  lspAvailable?: boolean;
+  /**
+   * Prepared host evaluations keyed by runtime action id. Availability of each
+   * row comes from its ActionState; clicking executes the same evaluation.
+   */
+  bindings: Record<string, EditorContextMenuActionBinding | undefined>;
   /** Present while a debug session is active — adds Run to Cursor (IDEA Alt+F9). */
   debug?: {
-    canRunToCursor: boolean;
-    runToCursor: () => void;
+    runToCursor: EditorContextMenuActionBinding;
     /** Present only when the caret is on a recognized field declaration. */
-    dataBreakpoint?: { canAdd: boolean; add: () => void };
+    dataBreakpoint?: EditorContextMenuActionBinding;
   } | null;
   /** Present when AI is available — adds the Explain Syntax / Explain Code pair. */
   ai?: EditorContextMenuAiSection | null;
 }
 
-function capEnabled(
-  capabilities: EditorContextMenuCapabilities | LspCapabilitySummary | null | undefined,
-  key: keyof EditorContextMenuCapabilities,
-  lspAvailable: boolean,
-): boolean {
-  if (!lspAvailable) return false;
-  if (!capabilities) return true;
-  return !!capabilities[key];
+function bindRow(
+  testId: string,
+  label: string,
+  shortcut: string,
+  actionId: string,
+  input: BuildEditorContextMenuInput,
+): MenuItem {
+  const binding = input.bindings[actionId];
+  return rowFromSpec({ testId, label, shortcut, binding: binding ?? { actionId, prepare: null, run: () => {} } });
 }
 
 /**
- * Build the editor symbol / buffer context menu (IDEA-style).
- * Pure helper so unit tests do not need CodeMirror or React.
+ * Build the editor symbol / buffer context menu as a pure projection of
+ * prepared host evaluations (IDEA-style). Pure helper so unit tests do not
+ * need CodeMirror or React; execution goes through the frozen evaluations.
  */
 export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput): MenuItem[] {
-  const { capabilities, hasSelection, clientX, clientY, actions } = input;
-  const lspAvailable = input.lspAvailable ?? true;
+  const { hasSelection } = input;
 
   const debugItems: MenuItem[] = input.debug
     ? [
       { separator: true, label: "" },
-      {
+      rowFromSpec({
+        testId: "editor-context-run-to-cursor",
         label: "Run to Cursor",
         shortcut: "Alt+F9",
-        testId: "editor-context-run-to-cursor",
-        disabled: !input.debug.canRunToCursor,
-        onClick: input.debug.runToCursor,
-      },
+        binding: input.debug.runToCursor,
+      }),
       ...(input.debug.dataBreakpoint
-        ? [{
-          label: "Add Data Breakpoint",
+        ? [rowFromSpec({
           testId: "editor-context-add-data-breakpoint",
-          disabled: !input.debug.dataBreakpoint.canAdd,
-          onClick: input.debug.dataBreakpoint.add,
-        }]
+          label: "Add Data Breakpoint",
+          binding: input.debug.dataBreakpoint,
+        })]
         : []),
     ]
     : [];
@@ -115,18 +134,18 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
   const aiItems: MenuItem[] = input.ai
     ? [
       { separator: true, label: "" },
-      {
+      rowFromSpec({
+        testId: "editor-context-ai-explain-syntax",
         label: input.ai.explainSyntaxLabel,
         shortcut: "Ctrl+Alt+S",
-        testId: "editor-context-ai-explain-syntax",
-        onClick: input.ai.explainSyntax,
-      },
-      {
+        binding: input.ai.explainSyntax,
+      }),
+      rowFromSpec({
+        testId: "editor-context-ai-explain-code",
         label: input.ai.explainCodeLabel,
         shortcut: "Ctrl+Alt+E",
-        testId: "editor-context-ai-explain-code",
-        onClick: input.ai.explainCode,
-      },
+        binding: input.ai.explainCode,
+      }),
       ...(answerLanguage
         ? [{
           label: answerLanguage.label,
@@ -135,7 +154,9 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
             label: option.label,
             testId: `editor-context-ai-answer-language-${option.value}`,
             checked: option.value === answerLanguage.current,
-            onClick: () => answerLanguage.onSelect(option.value),
+            disabled: !option.binding.prepare
+              || option.binding.prepare.state.availability !== "available",
+            onClick: () => option.binding.run(),
           })),
         }]
         : []),
@@ -143,108 +164,29 @@ export function buildEditorContextMenuItems(input: BuildEditorContextMenuInput):
     : [];
 
   return [
-    {
-      label: "Go to Definition",
-      shortcut: "F12",
-      testId: "editor-context-goto-definition",
-      disabled: !capEnabled(capabilities, "definition", lspAvailable),
-      onClick: actions.goToDefinition,
-    },
-    {
-      label: "Go to Type Definition",
-      shortcut: "Ctrl+Shift+B",
-      testId: "editor-context-goto-type-definition",
-      disabled: !capEnabled(capabilities, "typeDefinition", lspAvailable),
-      onClick: actions.goToTypeDefinition,
-    },
-    {
-      label: "Go to Implementation",
-      shortcut: "Ctrl+Alt+B",
-      testId: "editor-context-goto-implementation",
-      disabled: !capEnabled(capabilities, "implementation", lspAvailable),
-      onClick: actions.goToImplementation,
-    },
-    {
-      label: "Find Usages",
-      shortcut: "Shift+F12",
-      testId: "editor-context-find-usages",
-      disabled: !capEnabled(capabilities, "references", lspAvailable),
-      onClick: actions.findReferences,
-    },
-    {
-      label: "Call Hierarchy",
-      shortcut: "Ctrl+Alt+H",
-      testId: "editor-context-call-hierarchy",
-      disabled: !capEnabled(capabilities, "callHierarchy", lspAvailable),
-      onClick: actions.callHierarchy,
-    },
-    {
-      label: "Type Hierarchy",
-      shortcut: "Ctrl+H",
-      testId: "editor-context-type-hierarchy",
-      disabled: !capEnabled(capabilities, "typeHierarchy", lspAvailable),
-      onClick: actions.typeHierarchy,
-    },
+    bindRow("editor-context-goto-definition", "Go to Definition", "F12", "workspace.gotoDefinition", input),
+    bindRow("editor-context-goto-type-definition", "Go to Type Definition", "Ctrl+Shift+B", "workspace.gotoTypeDefinition", input),
+    bindRow("editor-context-goto-implementation", "Go to Implementation", "Ctrl+Alt+B", "workspace.gotoImplementation", input),
+    bindRow("editor-context-find-usages", "Find Usages", "Shift+F12", "workspace.findReferences", input),
+    bindRow("editor-context-call-hierarchy", "Call Hierarchy", "Ctrl+Alt+H", "workspace.callHierarchy", input),
+    bindRow("editor-context-type-hierarchy", "Type Hierarchy", "Ctrl+H", "workspace.typeHierarchy", input),
     { separator: true, label: "" },
-    {
-      label: "Rename Symbol…",
-      shortcut: "Shift+F6",
-      testId: "editor-context-rename",
-      disabled: !capEnabled(capabilities, "rename", lspAvailable),
-      onClick: actions.rename,
-    },
-    {
-      label: "Safe Delete Symbol…",
-      shortcut: "Alt+Delete",
-      testId: "editor-context-safe-delete",
-      disabled: !capEnabled(capabilities, "references", lspAvailable)
-        || !capEnabled(capabilities, "rename", lspAvailable),
-      onClick: actions.safeDelete,
-    },
-    {
-      label: "Quick Documentation",
-      shortcut: "Ctrl+Q",
-      testId: "editor-context-quick-doc",
-      disabled: !capEnabled(capabilities, "hover", lspAvailable),
-      onClick: actions.quickDocumentation,
-    },
-    {
-      label: "Show Code Actions…",
-      shortcut: "Alt+Enter",
-      testId: "editor-context-code-actions",
-      disabled: !capEnabled(capabilities, "codeAction", lspAvailable),
-      onClick: () => actions.codeActions(clientX, clientY),
-    },
-    {
-      label: hasSelection ? "Format Selection" : "Format Document",
-      shortcut: "Ctrl+Alt+L",
-      testId: "editor-context-format",
-      disabled: !capEnabled(capabilities, "formatting", lspAvailable)
-        && !capEnabled(capabilities, "rangeFormatting", lspAvailable),
-      onClick: actions.format,
-    },
+    bindRow("editor-context-rename", "Rename Symbol…", "Shift+F6", "workspace.renameSymbol", input),
+    bindRow("editor-context-safe-delete", "Safe Delete Symbol…", "Alt+Delete", "workspace.safeDeleteSymbol", input),
+    bindRow("editor-context-quick-doc", "Quick Documentation", "Ctrl+Q", "workspace.quickDocumentation", input),
+    bindRow("editor-context-code-actions", "Show Code Actions…", "Alt+Enter", "workspace.codeActions", input),
+    bindRow(
+      "editor-context-format",
+      hasSelection ? "Format Selection" : "Format Document",
+      "Ctrl+Alt+L",
+      "workspace.format",
+      input,
+    ),
     ...debugItems,
     ...aiItems,
     { separator: true, label: "" },
-    {
-      label: "Cut",
-      shortcut: "Ctrl+X",
-      testId: "editor-context-cut",
-      disabled: !hasSelection,
-      onClick: actions.cut,
-    },
-    {
-      label: "Copy",
-      shortcut: "Ctrl+C",
-      testId: "editor-context-copy",
-      disabled: !hasSelection,
-      onClick: actions.copy,
-    },
-    {
-      label: "Paste",
-      shortcut: "Ctrl+V",
-      testId: "editor-context-paste",
-      onClick: actions.paste,
-    },
+    bindRow("editor-context-cut", "Cut", "Ctrl+X", "workspace.editor.cut", input),
+    bindRow("editor-context-copy", "Copy", "Ctrl+C", "workspace.editor.copy", input),
+    bindRow("editor-context-paste", "Paste", "Ctrl+V", "workspace.editor.paste", input),
   ];
 }

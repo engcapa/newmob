@@ -194,7 +194,7 @@ interface EditorGroupProps {
   onViewportChange: (range: LspRange) => void;
   onExpandSelection: (file: OpenFileViewModel, selection: EditorSelectionRange) => Promise<LspRange[] | null>;
   onLightbulb: (line: number) => void;
-  onEditorContextMenu: (file: OpenFileViewModel, request: EditorContextMenuRequest) => void;
+  onEditorContextMenu: (file: OpenFileViewModel, request: EditorContextMenuRequest & { groupId: string }) => void;
   onEditorCommandPortChange?: (
     groupId: EditorGroupId,
     registration: EditorCommandPortRegistration,
@@ -683,7 +683,7 @@ export function EditorGroup({
                         onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
                         onLightbulb={onLightbulb}
                         onGitChangeClick={setGitDiffPeek}
-                        onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
+                        onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
                         onCommandPortChange={handleEditorCommandPortChange}
                         completionTriggers={completionTriggers}
                         signatureTriggers={signatureTriggers}
@@ -751,7 +751,7 @@ export function EditorGroup({
                       onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
                       onLightbulb={onLightbulb}
                       onGitChangeClick={setGitDiffPeek}
-                      onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
+                      onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
                       onCommandPortChange={handleEditorCommandPortChange}
                       completionTriggers={completionTriggers}
                       signatureTriggers={signatureTriggers}

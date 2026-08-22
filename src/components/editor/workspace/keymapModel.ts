@@ -1,3 +1,4 @@
+// NON-PRODUCTION MODEL: no production consumer; see §8.13 N12
 /**
  * Keymap Scheme & Conflict Graph Model (E2.1 & E2.2).
  *

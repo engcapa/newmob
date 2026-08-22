@@ -240,6 +240,7 @@ import {
   type EditorCommandPort,
   type EditorCommandPortRegistration,
   type EditorCommandState,
+  type EditorCommandTarget,
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./workspace/CodeMirrorHost";
@@ -1005,12 +1006,83 @@ export function CodeWorkspaceTab({
     const owner = editorCommandPortsRef.current.get(groupId) ?? null;
     return owner && fileKey === owner.fileKey ? owner : null;
   }, [workspaceInstanceId]);
+  /**
+   * Owner lookup pinned to an explicit recursive leaf. Context menus freeze
+   * `{groupId, fileKey}` at open time; this guard keeps a later active-group
+   * change from redirecting their execution to a different editor.
+   */
+  const editorCommandOwnerFor = useCallback((groupId: string, fileKey: string) => {
+    const owner = editorCommandPortsRef.current.get(groupId as EditorGroupId) ?? null;
+    return owner && owner.fileKey === fileKey ? owner : null;
+  }, []);
   const activeEditorCommandState = useCallback((): EditorCommandState | null => {
     return activeEditorCommandOwner()?.port.state() ?? null;
   }, [activeEditorCommandOwner]);
   const executeActiveEditorCommand = useCallback((commandId: EditorCommandId) => {
     return activeEditorCommandOwner()?.port.execute(commandId) ?? false;
   }, [activeEditorCommandOwner]);
+  const executeEditorCommandFor = useCallback((
+    target: EditorCommandTarget | undefined,
+    commandId: EditorCommandId,
+  ) => {
+    if (target) {
+      return editorCommandOwnerFor(target.groupId, target.fileKey)
+        ?.port.execute(commandId) ?? false;
+    }
+    return executeActiveEditorCommand(commandId);
+  }, [editorCommandOwnerFor, executeActiveEditorCommand]);
+  const executeEditorCommand = useCallback((commandId: EditorCommandId, context?: WorkspaceCommandContext) => {
+    const target = context?.payload as EditorCommandTarget | undefined;
+    if (
+      target
+      && typeof target === "object"
+      && typeof target.groupId === "string"
+      && typeof target.fileKey === "string"
+    ) {
+      return executeEditorCommandFor(target, commandId);
+    }
+    return executeActiveEditorCommand(commandId);
+  }, [executeActiveEditorCommand, executeEditorCommandFor]);
+  /**
+   * Availability state for a command invocation. A context-menu payload pins
+   * the owning leaf; without one (keyboard, palette) the active leaf answers.
+   */
+  const editorCommandStateFor = useCallback((context?: WorkspaceCommandContext): EditorCommandState | null => {
+    const target = context?.payload as EditorCommandTarget | undefined;
+    if (
+      target
+      && typeof target === "object"
+      && typeof target.groupId === "string"
+      && typeof target.fileKey === "string"
+    ) {
+      return editorCommandOwnerFor(target.groupId, target.fileKey)?.port.state() ?? null;
+    }
+    return activeEditorCommandState();
+  }, [activeEditorCommandState, editorCommandOwnerFor]);
+  /**
+   * Resolve a provider-action invocation target. Context-menu payloads carry
+   * the clicked file and position; keyboard/palette invocations fall back to
+   * the active file at the current selection.
+   */
+  const resolveEditorTarget = useCallback((context?: WorkspaceCommandContext): {
+    file: OpenFileState | null;
+    position: LspPosition | undefined;
+  } => {
+    const payload = context?.payload as {
+      groupId?: unknown;
+      fileKey?: unknown;
+      position?: LspPosition;
+    } | undefined;
+    if (typeof payload === "object" && payload !== null && typeof payload.fileKey === "string") {
+      const file = openFilesRef.current[payload.fileKey] ?? null;
+      return { file, position: payload.position };
+    }
+    // activeKeyRef is declared later in the component (keyboard switcher owns
+    // it), so read through the store for the fallback active file.
+    const ui = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+    const file = openFilesRef.current[ui.activeKey ?? ""] ?? null;
+    return { file, position: editorSelectionRef.current.end };
+  }, [workspaceInstanceId]);
   /**
    * False after unmount so async callbacks skip setState. MUST come from
    * `useMountedRef`: the inline `useEffect(() => () => { ref.current = false })`
@@ -1414,6 +1486,7 @@ export function CodeWorkspaceTab({
     error: null,
   });
   const referencesRequestSequenceRef = useRef(0);
+  const findReferencesRef = useRef<(file: OpenFileState, position: LspPosition) => Promise<void>>(async () => {});
   const [callHierarchyRoot, setCallHierarchyRoot] = useState<HierarchyRootState | null>(null);
   const [typeHierarchyRoot, setTypeHierarchyRoot] = useState<HierarchyRootState | null>(null);
   const setIntelligencePreferences = useCallback((
@@ -2327,6 +2400,12 @@ export function CodeWorkspaceTab({
                 preview: group.previewKey === key,
               });
             }
+            if (group.activeKey && group.openOrder.includes(group.activeKey)) {
+              updateEditorGroup(groupId, (g) => ({ ...g, activeKey: group.activeKey }));
+            }
+          }
+          if (snapshot.activeEditorGroupId) {
+            activateEditorGroup(snapshot.activeEditorGroupId);
           }
           return;
         }
@@ -7194,8 +7273,8 @@ export function CodeWorkspaceTab({
       keybindings: ["Meta+C"],
       keywords: ["clipboard", "selection", "multi-caret"],
       when: (context) => context.focus === "editor"
-        && activeEditorCommandState()?.hasSelection === true,
-      run: () => executeActiveEditorCommand("copy"),
+        && editorCommandStateFor(context)?.hasSelection === true,
+      run: (context) => { executeEditorCommand("copy", context); },
     },
     {
       id: "workspace.editor.cut",
@@ -7205,11 +7284,11 @@ export function CodeWorkspaceTab({
       keybindings: ["Meta+X"],
       keywords: ["clipboard", "selection", "multi-caret"],
       when: (context) => {
-        const state = activeEditorCommandState();
+        const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state
           && state.hasSelection && !state.readOnly && !state.composing;
       },
-      run: () => executeActiveEditorCommand("cut"),
+      run: (context) => { executeEditorCommand("cut", context); },
     },
     {
       id: "workspace.editor.paste",
@@ -7219,10 +7298,10 @@ export function CodeWorkspaceTab({
       keybindings: ["Meta+V"],
       keywords: ["clipboard", "multi-caret", "distribute"],
       when: (context) => {
-        const state = activeEditorCommandState();
+        const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
-      run: () => executeActiveEditorCommand("paste"),
+      run: (context) => { executeEditorCommand("paste", context); },
     },
     {
       id: "workspace.editor.moveStatementUp",
@@ -7232,10 +7311,10 @@ export function CodeWorkspaceTab({
       keybindings: ["Meta+Shift+ArrowUp"],
       keywords: ["statement", "line", "syntax", "move"],
       when: (context) => {
-        const state = activeEditorCommandState();
+        const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
-      run: () => executeActiveEditorCommand("moveStatementUp"),
+      run: (context) => { executeEditorCommand("moveStatementUp", context); },
     },
     {
       id: "workspace.editor.moveStatementDown",
@@ -7245,10 +7324,10 @@ export function CodeWorkspaceTab({
       keybindings: ["Meta+Shift+ArrowDown"],
       keywords: ["statement", "line", "syntax", "move"],
       when: (context) => {
-        const state = activeEditorCommandState();
+        const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
-      run: () => executeActiveEditorCommand("moveStatementDown"),
+      run: (context) => { executeEditorCommand("moveStatementDown", context); },
     },
     {
       id: "workspace.editor.cloneCaretAbove",
@@ -7257,10 +7336,10 @@ export function CodeWorkspaceTab({
       keybinding: "Ctrl+Alt+Shift+ArrowUp",
       keywords: ["caret", "cursor", "multi-caret", "above"],
       when: (context) => {
-        const state = activeEditorCommandState();
+        const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
-      run: () => executeActiveEditorCommand("cloneCaretAbove"),
+      run: (context) => { executeEditorCommand("cloneCaretAbove", context); },
     },
     {
       id: "workspace.editor.cloneCaretBelow",
@@ -7269,10 +7348,10 @@ export function CodeWorkspaceTab({
       keybinding: "Ctrl+Alt+Shift+ArrowDown",
       keywords: ["caret", "cursor", "multi-caret", "below"],
       when: (context) => {
-        const state = activeEditorCommandState();
+        const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state && !state.readOnly && !state.composing;
       },
-      run: () => executeActiveEditorCommand("cloneCaretBelow"),
+      run: (context) => { executeEditorCommand("cloneCaretBelow", context); },
     },
     {
       id: "workspace.editor.collapseCarets",
@@ -7281,11 +7360,11 @@ export function CodeWorkspaceTab({
       keybinding: "Escape",
       keywords: ["caret", "selection", "occurrence", "escape"],
       when: (context) => {
-        const state = activeEditorCommandState();
+        const state = editorCommandStateFor(context);
         return context.focus === "editor" && !!state
           && (state.caretCount > 1 || state.occurrenceSessionActive);
       },
-      run: () => executeActiveEditorCommand("collapseCarets"),
+      run: (context) => { executeEditorCommand("collapseCarets", context); },
     },
     {
       id: "workspace.editor.selectNextOccurrence",
@@ -7293,8 +7372,9 @@ export function CodeWorkspaceTab({
       category: "Edit",
       keybinding: "Alt+J",
       keywords: ["occurrence", "caret", "selection", "next"],
-      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
-      run: () => executeActiveEditorCommand("selectNextOccurrence"),
+      when: (context) => context.focus === "editor"
+        && !!editorCommandStateFor(context),
+      run: (context) => { executeEditorCommand("selectNextOccurrence", context); },
     },
     {
       id: "workspace.editor.selectAllOccurrences",
@@ -7303,8 +7383,9 @@ export function CodeWorkspaceTab({
       keybinding: "Ctrl+Alt+Shift+J",
       keybindings: ["Meta+Alt+Shift+J"],
       keywords: ["occurrence", "caret", "selection", "all"],
-      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
-      run: () => executeActiveEditorCommand("selectAllOccurrences"),
+      when: (context) => context.focus === "editor"
+        && !!editorCommandStateFor(context),
+      run: (context) => { executeEditorCommand("selectAllOccurrences", context); },
     },
     {
       id: "workspace.editor.foldSelection",
@@ -7314,8 +7395,8 @@ export function CodeWorkspaceTab({
       keybindings: ["Meta+Period"],
       keywords: ["fold", "selection", "collapse"],
       when: (context) => context.focus === "editor"
-        && activeEditorCommandState()?.hasSelection === true,
-      run: () => executeActiveEditorCommand("foldSelection"),
+        && editorCommandStateFor(context)?.hasSelection === true,
+      run: (context) => { executeEditorCommand("foldSelection", context); },
     },
     {
       id: "workspace.editor.foldAll",
@@ -7323,8 +7404,9 @@ export function CodeWorkspaceTab({
       category: "Edit",
       keybinding: "Ctrl+Shift+NumpadSubtract",
       keywords: ["fold", "collapse", "all"],
-      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
-      run: () => executeActiveEditorCommand("foldAll"),
+      when: (context) => context.focus === "editor"
+        && !!editorCommandStateFor(context),
+      run: (context) => { executeEditorCommand("foldAll", context); },
     },
     {
       id: "workspace.editor.unfoldAll",
@@ -7332,8 +7414,9 @@ export function CodeWorkspaceTab({
       category: "Edit",
       keybinding: "Ctrl+Shift+NumpadAdd",
       keywords: ["fold", "expand", "all"],
-      when: (context) => context.focus === "editor" && !!activeEditorCommandState(),
-      run: () => executeActiveEditorCommand("unfoldAll"),
+      when: (context) => context.focus === "editor"
+        && !!editorCommandStateFor(context),
+      run: (context) => { executeEditorCommand("unfoldAll", context); },
     },
     {
       id: "workspace.intelligenceSettings",
@@ -7601,6 +7684,17 @@ export function CodeWorkspaceTab({
       run: cycleAiAnswerLanguage,
     },
     {
+      id: "workspace.aiSetAnswerLanguage",
+      title: "Set AI Answer Language",
+      category: "AI",
+      keywords: ["ai", "language", "answer", "语言"],
+      run: (context) => {
+        const payload = context.payload as { language?: string } | undefined;
+        if (!payload || typeof payload.language !== "string") return;
+        setAiAnswerLanguage(payload.language as AiAnswerLanguage);
+      },
+    },
+    {
       id: "workspace.toggleProjectTree",
       title: languagePanelOpen ? "Hide Project Tree" : "Show Project Tree",
       category: "View",
@@ -7634,6 +7728,36 @@ export function CodeWorkspaceTab({
       when: (context) => context.focus === "editor" && !!activeFile
         && !!activeCapabilities?.typeHierarchy,
       run: () => void openHierarchy("type"),
+    },
+    {
+      id: "workspace.gotoDefinition",
+      title: "Go to Definition",
+      category: "Navigation",
+      keybinding: "F12",
+      keywords: ["declaration", "jump", "navigate"],
+      when: (context) => context.focus === "editor"
+        && (!!activeCapabilities || !lspFilesRef.current[activeKey ?? ""]?.status)
+        && !!activeFile,
+      run: (context) => {
+        const target = resolveEditorTarget(context);
+        if (!target.file || target.position === undefined) return;
+        void goToDefinition(target.file, target.position);
+      },
+    },
+    {
+      id: "workspace.findReferences",
+      title: "Find Usages",
+      category: "Navigation",
+      keybinding: "Shift+F12",
+      keywords: ["usages", "references", "callers"],
+      when: (context) => context.focus === "editor"
+        && (!!activeCapabilities || !lspFilesRef.current[activeKey ?? ""]?.status)
+        && !!activeFile,
+      run: (context) => {
+        const target = resolveEditorTarget(context);
+        if (!target.file || target.position === undefined) return;
+        void findReferencesRef.current(target.file, target.position);
+      },
     },
     {
       id: "workspace.toggleTodosPane",
@@ -8059,6 +8183,55 @@ export function CodeWorkspaceTab({
       keywords: ["dap", "debugpy", "delve", "lldb", "gdb", "js-debug", "adapter", "guide", "setup"],
       run: () => setDapGuideOpen(true),
     },
+    {
+      id: "workspace.runToCursor",
+      title: "Run to Cursor",
+      category: "Debug",
+      keybinding: "Alt+F9",
+      keywords: ["debug", "run", "cursor", "break"],
+      when: (context) => {
+        if (context.focus === "tree" || context.focus === "terminal") return false;
+        const session = debugRef.current;
+        return !!session?.state && session.state.status === "stopped";
+      },
+      run: (context) => {
+        const session = debugRef.current;
+        const target = resolveEditorTarget(context);
+        const absolute = target.file ? absolutePathForOpenFile(target.file) : null;
+        if (!session?.state || !target.file || !absolute || !target.position) return;
+        session.runToCursor(normalizeFsPath(absolute), target.position.line + 1);
+      },
+    },
+    {
+      id: "workspace.addDataBreakpoint",
+      title: "Add Data Breakpoint",
+      category: "Debug",
+      keywords: ["debug", "breakpoint", "field", "watch", "data"],
+      when: (context) => {
+        if (context.focus === "tree" || context.focus === "terminal") return false;
+        const session = debugRef.current;
+        return !!session?.state
+          && session.state.status === "stopped"
+          && session.capabilities.supportsDataBreakpoints === true;
+      },
+      run: (context) => {
+        const payload = context.payload as { name?: string; frameId?: number } | undefined;
+        const name = typeof payload?.name === "string" ? payload.name : null;
+        const session = debugRef.current;
+        if (!name || !session) return;
+        const frameId = payload?.frameId
+          ?? session.state?.selectedFrameId
+          ?? session.state?.frames[0]?.id
+          ?? undefined;
+        void session.addDataBreakpoint({ name, frameId }).then((result) => {
+          setStatusMessage(result.message);
+          if (result.added) {
+            setBottomDockTab("debug");
+            setBottomDockOpen(true);
+          }
+        });
+      },
+    },
   ], [
     activeCapabilities,
     activeEditorCommandState,
@@ -8074,7 +8247,9 @@ export function CodeWorkspaceTab({
     createDir,
     createFile,
     deleteSelected,
+    editorCommandStateFor,
     executeActiveEditorCommand,
+    executeEditorCommand,
     findInDirectory,
     formatActiveFile,
     gitRoots.length,
@@ -8100,6 +8275,7 @@ export function CodeWorkspaceTab({
     reloadFile,
     revealEditorTabInTree,
     renameSelected,
+    resolveEditorTarget,
     roots.length,
     saveFile,
     seSymbolsAvailable,
@@ -9072,10 +9248,11 @@ export function CodeWorkspaceTab({
       updateLspStatusForFile,
     ],
   );
+  findReferencesRef.current = findReferences;
 
   const showEditorContextMenu = useCallback((
     file: OpenFileState,
-    request: EditorContextMenuRequest,
+    request: EditorContextMenuRequest & { groupId?: string },
   ) => {
     // Keep selection/cursor in sync for commands that read editorSelectionRef.
     editorSelectionRef.current = {
@@ -9086,113 +9263,128 @@ export function CodeWorkspaceTab({
       rect: null,
     };
     const status = lspFilesRef.current[file.key]?.status;
-    const capabilities = status?.capabilities ?? null;
-    const lspAvailable = !!(status?.active || status?.available);
-    const range: LspRange = {
-      start: request.selectionStart,
-      end: request.selectionEnd,
+
+    // §8.16.3 Gate-R1: the menu is a projection of one fresh host evaluation.
+    // The payload freezes the clicked leaf/file/position, so a later active-
+    // group change cannot redirect execution to another split editor.
+    const targetPayload = {
+      groupId: request.groupId ?? activeEditorGroupIdRef.current,
+      fileKey: file.key,
+      position: request.position,
+      selectionStart: request.selectionStart,
+      selectionEnd: request.selectionEnd,
+      hasSelection: request.hasSelection,
+      clientX: request.clientX,
+      clientY: request.clientY,
     };
+    const invocationContext = {
+      focus: "editor" as const,
+      hasSelection: request.hasSelection,
+    };
+    const host = actionsController.host;
+    const prepareBinding = (actionId: string, payload?: unknown) => ({
+      actionId,
+      prepare: host.prepare(actionId, {
+        kind: "context-menu" as const,
+        context: invocationContext,
+        payload: payload ?? targetPayload,
+      }),
+      run: () => {
+        void actionsController.executeAction(actionId, {
+          kind: "context-menu",
+          context: invocationContext,
+          payload: payload ?? targetPayload,
+        });
+      },
+    });
+    // Clipboard rows execute through the pinned editor port (frozen target),
+    // not the request closures, so ownership matches the enabled state.
+    const portBinding = (actionId: string, commandId: EditorCommandId) => ({
+      actionId,
+      prepare: host.prepare(actionId, {
+        kind: "context-menu" as const,
+        context: invocationContext,
+        payload: targetPayload,
+      }),
+      run: () => { executeEditorCommandFor(targetPayload, commandId); },
+    });
+
+    const debugSession = debugRef.current;
+    const fieldDeclaration = debugSession?.state && debugSession.state.status !== "terminated"
+      ? fieldDeclarationAt(
+        breadcrumbSymbolsRef.current[targetPayload.groupId as EditorGroupId] ?? [],
+        request.position,
+      )
+      : null;
 
     openEditorContextMenuAt(
       request.clientX,
       request.clientY,
       buildEditorContextMenuItems({
-        capabilities,
+        capabilities: status?.capabilities ?? null,
         hasSelection: request.hasSelection,
         clientX: request.clientX,
         clientY: request.clientY,
-        lspAvailable,
-        // Read through the ref: the debug hook is declared later in this
-        // component, and menu construction happens at click time.
-        debug: (() => {
-          const session = debugRef.current;
-          if (!session?.state || session.state.status === "terminated") return null;
-          const field = fieldDeclarationAt(
-            breadcrumbSymbolsRef.current[activeEditorGroupIdRef.current] ?? [],
-            request.position,
-          );
-          return {
-            canRunToCursor: session.state.status === "stopped",
-            runToCursor: () => {
-              const absolute = absolutePathForOpenFile(file);
-              if (absolute) session.runToCursor(normalizeFsPath(absolute), request.position.line + 1);
-            },
-            ...(field ? {
-              dataBreakpoint: {
-                canAdd: session.state.status === "stopped"
-                  && session.capabilities.supportsDataBreakpoints === true,
-                add: () => {
-                  const frameId = session.state?.selectedFrameId
-                    ?? session.state?.frames[0]?.id
-                    ?? undefined;
-                  void session.addDataBreakpoint({ name: field.name, frameId }).then((result) => {
-                    setStatusMessage(result.message);
-                    if (result.added) {
-                      setBottomDockTab("debug");
-                      setBottomDockOpen(true);
-                    }
-                  });
-                },
-              },
-            } : {}),
-          };
-        })(),
+        bindings: {
+          "workspace.gotoDefinition": prepareBinding("workspace.gotoDefinition"),
+          "workspace.gotoTypeDefinition": prepareBinding("workspace.gotoTypeDefinition"),
+          "workspace.gotoImplementation": prepareBinding("workspace.gotoImplementation"),
+          "workspace.findReferences": prepareBinding("workspace.findReferences"),
+          "workspace.callHierarchy": prepareBinding("workspace.callHierarchy"),
+          "workspace.typeHierarchy": prepareBinding("workspace.typeHierarchy"),
+          "workspace.renameSymbol": prepareBinding("workspace.renameSymbol"),
+          "workspace.safeDeleteSymbol": prepareBinding("workspace.safeDeleteSymbol"),
+          "workspace.quickDocumentation": prepareBinding("workspace.quickDocumentation"),
+          "workspace.codeActions": prepareBinding("workspace.codeActions", {
+            ...targetPayload,
+            diagnostics: (lspFilesRef.current[file.key]?.diagnostics ?? []).filter((item) => (
+              item.range.start.line === request.position.line
+              || item.range.end.line === request.position.line
+            )),
+          }),
+          "workspace.format": prepareBinding("workspace.format"),
+          "workspace.editor.cut": portBinding("workspace.editor.cut", "cut"),
+          "workspace.editor.copy": portBinding("workspace.editor.copy", "copy"),
+          "workspace.editor.paste": portBinding("workspace.editor.paste", "paste"),
+        },
+        debug: debugSession?.state && debugSession.state.status !== "terminated" ? {
+          runToCursor: prepareBinding("workspace.runToCursor", {
+            ...targetPayload,
+            line: request.position.line + 1,
+          }),
+          ...(fieldDeclaration ? {
+            dataBreakpoint: prepareBinding("workspace.addDataBreakpoint", {
+              name: fieldDeclaration.name,
+              frameId: debugSession.state?.selectedFrameId
+                ?? debugSession.state?.frames[0]?.id
+                ?? undefined,
+            }),
+          } : {}),
+        } : null,
         ai: {
           explainSyntaxLabel: t("codeWorkspaceAi.contextExplainSyntax"),
           explainCodeLabel: t("codeWorkspaceAi.contextExplainCode"),
-          explainSyntax: () => { void runEditorAiActionAtCursor("syntax"); },
-          explainCode: () => { void runEditorAiActionAtCursor("explain"); },
+          explainSyntax: prepareBinding("workspace.aiExplainSyntax"),
+          explainCode: prepareBinding("workspace.aiExplainCode"),
           answerLanguage: {
             label: t("codeWorkspaceAi.answerLanguageMenu"),
             current: editorAiPreferencesRef.current.answerLanguage,
             options: AI_ANSWER_LANGUAGES.map((language) => ({
               value: language,
               label: t(answerLanguageLabelKey(language)),
+              binding: prepareBinding("workspace.aiSetAnswerLanguage", { language }),
             })),
-            onSelect: (value) => setAiAnswerLanguage(value as AiAnswerLanguage),
           },
-        },
-        actions: {
-          goToDefinition: () => { void goToDefinition(file, request.position); },
-          goToTypeDefinition: () => { void goToTypeDefinition(file, request.position); },
-          goToImplementation: () => { void goToImplementation(file, request.position); },
-          findReferences: () => { void findReferences(file, request.position); },
-          callHierarchy: () => { void openHierarchy("call"); },
-          typeHierarchy: () => { void openHierarchy("type"); },
-          rename: () => { void renameSymbolAtCursor(); },
-          safeDelete: () => { void safeDeleteSymbolAtCursor(); },
-          quickDocumentation: () => { void openQuickDocumentation(); },
-          codeActions: (x, y) => {
-            const diagnostics = (lspFilesRef.current[file.key]?.diagnostics ?? []).filter((item) => (
-              item.range.start.line === request.position.line
-              || item.range.end.line === request.position.line
-            ));
-            void showCodeActionsMenu(x, y, file, range, diagnostics);
-          },
-          format: () => { void formatActiveFile(); },
-          cut: request.cut,
-          copy: request.copy,
-          paste: request.paste,
         },
       }),
     );
   }, [
     absolutePathForOpenFile,
-    setBottomDockOpen,
-    setBottomDockTab,
-    findReferences,
-    formatActiveFile,
-    goToDefinition,
-    goToImplementation,
-    goToTypeDefinition,
+    actionsController,
+    editorCommandStateFor,
+    executeEditorCommandFor,
     openEditorContextMenuAt,
-    openHierarchy,
-    openQuickDocumentation,
-    renameSymbolAtCursor,
-    safeDeleteSymbolAtCursor,
     setStatusMessage,
-    runEditorAiActionAtCursor,
-    showCodeActionsMenu,
     t,
   ]);
 

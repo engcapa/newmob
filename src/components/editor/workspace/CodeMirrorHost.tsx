@@ -240,6 +240,15 @@ export interface EditorContextMenuRequest {
   paste: () => void;
 }
 
+/**
+ * Frozen target for host-owned context-menu execution. Captured when the menu
+ * opens so a later active-group change cannot redirect the action.
+ */
+export interface EditorCommandTarget {
+  groupId: string;
+  fileKey: string;
+}
+
 const editorClipboardPayloadByView = new WeakMap<EditorView, EditorClipboardPayload>();
 
 function rememberEditorClipboardPayload(

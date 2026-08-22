@@ -1,3 +1,4 @@
+// NON-PRODUCTION MODEL: no production consumer; see §8.13 N12
 /**
  * Java Inspection Engine & Data-Flow Analyzer (J2) - Experimental Prototype.
  *

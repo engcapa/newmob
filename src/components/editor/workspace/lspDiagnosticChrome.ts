@@ -16,9 +16,9 @@ function severityRank(severity: number | null): number {
 }
 
 function severityColor(severity: number | null): string {
-  if (severity === 1) return "#ef4444";
-  if (severity === 2) return "#f59e0b";
-  return "#38bdf8";
+  if (severity === 1) return "var(--taomni-code-diagnostic-error, #ef4444)";
+  if (severity === 2) return "var(--taomni-code-diagnostic-warning, #f59e0b)";
+  return "var(--taomni-code-diagnostic-info, #38bdf8)";
 }
 
 function severityGlyph(severity: number | null): string {
