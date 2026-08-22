@@ -90,7 +90,11 @@ describe("CodeMirrorHost search", () => {
     fireEvent.click(screen.getByRole("button", { name: "Replace all matches" }));
 
     await waitFor(() => {
-      expect(onChange).toHaveBeenLastCalledWith("omega beta omega");
+      expect(onChange).toHaveBeenLastCalledWith(
+        "omega beta omega",
+        expect.objectContaining({ line: expect.any(Number), character: expect.any(Number) }),
+        expect.any(Number),
+      );
     });
     expect(screen.getByText("0 matches")).toBeInTheDocument();
   });
@@ -110,10 +114,18 @@ describe("CodeMirrorHost search", () => {
     const { content } = renderEditor("one\ntwo", onChange);
 
     fireEvent.keyDown(content, { key: "d", code: "KeyD", ctrlKey: true });
-    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith("one\none\ntwo"));
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(
+      "one\none\ntwo",
+      expect.objectContaining({ line: 1, character: 0 }),
+      expect.any(Number),
+    ));
 
     fireEvent.keyDown(content, { key: "y", code: "KeyY", ctrlKey: true });
-    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith("one\ntwo"));
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(
+      "one\ntwo",
+      expect.objectContaining({ line: 1, character: 3 }),
+      expect.any(Number),
+    ));
   });
 
   it("rejects edits in read-only buffers but keeps navigation working", async () => {
@@ -138,7 +150,11 @@ describe("CodeMirrorHost search", () => {
     const { content } = renderEditor("one\ntwo", onChange);
 
     fireEvent.keyDown(content, { key: "ArrowDown", code: "ArrowDown", altKey: true, shiftKey: true });
-    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith("two\none"));
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(
+      "two\none",
+      expect.objectContaining({ line: expect.any(Number), character: expect.any(Number) }),
+      expect.any(Number),
+    ));
   });
 
   it("toggles line comments with Ctrl+Slash", async () => {
@@ -147,7 +163,11 @@ describe("CodeMirrorHost search", () => {
     await waitFor(() => expect(content).toHaveAttribute("data-language", "typescript"));
 
     fireEvent.keyDown(content, { key: "/", code: "Slash", ctrlKey: true });
-    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith("// const value = 1;"));
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith(
+      "// const value = 1;",
+      expect.objectContaining({ line: 0, character: expect.any(Number) }),
+      expect.any(Number),
+    ));
   });
 
   it("opens go to line with Ctrl+G", async () => {

@@ -123,7 +123,7 @@ interface CodeMirrorHostProps {
   reveal: EditorRevealTarget | null;
   /** Block edits (library / decompiled sources that have no file to write back to). */
   readOnly?: boolean;
-  onChange: (doc: string) => void;
+  onChange: (doc: string, caret: LspPosition, caretOffset: number) => void;
   onSave: () => void;
   onHover: (position: LspPosition) => Promise<string | null>;
   onPinHoverDoc?: (content: QuickDocContent) => void;
@@ -1113,7 +1113,11 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
               // the controlled-doc effect after React reflects the change.
               const nextDoc = update.state.doc.toString();
               lastDocumentTextRef.current = nextDoc;
-              onChangeRef.current(nextDoc);
+              onChangeRef.current(
+                nextDoc,
+                lspPositionFromOffset(update.state.doc, update.state.selection.main.head),
+                update.state.selection.main.head,
+              );
             }
             let inserted = "";
             update.changes.iterChanges((_fromA, _toA, _fromB, _toB, text) => {

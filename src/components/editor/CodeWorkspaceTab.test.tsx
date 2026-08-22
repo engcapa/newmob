@@ -13,13 +13,16 @@ import type {
   LspServerStatus,
 } from "../../lib/editor/lsp";
 import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
-import { CodeWorkspaceTab } from "./CodeWorkspaceTab";
+import { CodeWorkspaceTab, extractContextSnippet } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
 import type { WorkspaceCommandRegistration } from "./workspace/workspaceCommands";
 import { confirmAppDialog } from "../../lib/appDialogs";
 import { workspaceActionRegistry } from "./workspace/workspaceActionRegistry";
-import { navigationHistoryTracker } from "./workspace/navigationHistoryModel";
+import {
+  navigationHistoryTracker,
+  WorkspaceLocationController,
+} from "./workspace/navigationHistoryModel";
 import { globalEditorConfigResolver } from "./workspace/editorConfigResolver";
 
 const workspaceMocks = vi.hoisted(() => ({
@@ -339,6 +342,38 @@ function renderWorkspace(
   // latches state in an effect cleanup behaves differently there.
   return render(options.strict ? <StrictMode>{element}</StrictMode> : element);
 }
+
+describe("extractContextSnippet", () => {
+  it("extracts the first line and its following context at offset zero", () => {
+    expect(extractContextSnippet("first\nsecond\nthird", 0, 0)).toEqual({
+      lineText: "first",
+      contextSnippet: "first\nsecond",
+    });
+  });
+
+  it("preserves an empty first line when the caret is on the second line", () => {
+    expect(extractContextSnippet("\nsecond\nthird", 1, 1)).toEqual({
+      lineText: "second",
+      contextSnippet: "\nsecond\nthird",
+    });
+  });
+
+  it("returns only the adjacent three-line window for a middle line", () => {
+    const text = "zero\none\ntwo\nthree\nfour";
+    expect(extractContextSnippet(text, 2, text.indexOf("two"))).toEqual({
+      lineText: "two",
+      contextSnippet: "one\ntwo\nthree",
+    });
+  });
+
+  it("extracts the final line and its predecessor at end of file", () => {
+    const text = "zero\none\ntwo";
+    expect(extractContextSnippet(text, 2, text.length)).toEqual({
+      lineText: "two",
+      contextSnippet: "one\ntwo",
+    });
+  });
+});
 
 describe("CodeWorkspaceTab", () => {
   beforeEach(() => {
@@ -3007,19 +3042,30 @@ describe("CodeWorkspaceTab", () => {
       useCodeWorkspaceStore.getState(),
       "instance-editor-text-batch",
     ).openFiles[fileKey]?.text;
+    const recordUserEdit = vi.spyOn(WorkspaceLocationController.prototype, "recordUserEdit");
 
     vi.useFakeTimers();
     try {
       fireEvent.keyDown(content!, { key: "d", code: "KeyD", ctrlKey: true });
       expect(getBufferText()).toBe("one\ntwo");
+      expect(recordUserEdit).not.toHaveBeenCalled();
 
       // EDITOR_TEXT_COMMIT_IDLE_DELAY_MS is 220ms — stay under it first.
       act(() => vi.advanceTimersByTime(219));
       expect(getBufferText()).toBe("one\ntwo");
+      expect(recordUserEdit).not.toHaveBeenCalled();
 
       act(() => vi.advanceTimersByTime(1));
       expect(getBufferText()).toBe("one\none\ntwo");
+      expect(recordUserEdit).toHaveBeenCalledOnce();
+      expect(recordUserEdit).toHaveBeenLastCalledWith(expect.objectContaining({
+        line: 1,
+        character: 0,
+        lineText: "one",
+        contextSnippet: "one\none\ntwo",
+      }));
     } finally {
+      recordUserEdit.mockRestore();
       vi.useRealTimers();
     }
   });

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { EditorState } from "@codemirror/state";
 import { CompletionContext } from "@codemirror/autocomplete";
-import { createLspCompletionSource } from "./lspCompletion";
+import { createLspCompletionSource, MAX_COMPLETION_OPTIONS } from "./lspCompletion";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import type { LspCompletionResult, LspDiagnostic, LspDocumentStatus } from "../../../lib/editor/lsp";
 
@@ -93,6 +93,31 @@ describe("Editor typing and completion performance verification", () => {
     expect(result?.options.length).toBeLessThanOrEqual(400);
     // Processing time must stay well within frame budget (<150ms)
     expect(elapsed).toBeLessThan(150);
+  });
+
+  it("materializes only the bounded visible head of oversized Java completion lists", async () => {
+    const response = testCompletionResult(5_000);
+    let mappedItems = 0;
+    for (const item of response.items) {
+      const filterText = item.filterText;
+      Object.defineProperty(item, "filterText", {
+        configurable: true,
+        get: () => {
+          mappedItems += 1;
+          return filterText;
+        },
+      });
+    }
+    const source = createLspCompletionSource({
+      fetch: vi.fn(async () => response),
+      triggerCharacters: () => [".", ":"],
+    });
+    const state = EditorState.create({ doc: "service.m" });
+
+    const result = await source(new CompletionContext(state, state.doc.length, false));
+
+    expect(result?.options).toHaveLength(MAX_COMPLETION_OPTIONS);
+    expect(mappedItems).toBe(MAX_COMPLETION_OPTIONS * 2);
   });
 
   it("prevents redundant CodeMirror compartment dispatches on parent re-renders with unchanged props", () => {

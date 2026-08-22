@@ -366,16 +366,17 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     const typed = word ? word.text : "";
     const rawItems = result.items;
     const mapped: Completion[] = [];
-    const maxItemsToProcess = Math.min(rawItems.length, MAX_COMPLETION_OPTIONS * 3);
+    const mappedItems: LspCompletionItem[] = [];
+    // The server response is already relevance ordered. Mapping more entries
+    // than the popup can consume only allocates closures/documentation helpers
+    // on the renderer thread, which is especially visible for jdtls lists.
+    const maxItemsToProcess = Math.min(rawItems.length, MAX_COMPLETION_OPTIONS);
     for (let i = 0; i < maxItemsToProcess; i += 1) {
       const item = rawItems[i];
       if (!item) continue;
       const filterText = item.filterText?.trim() ? item.filterText : null;
       const label = filterText ?? item.label;
       const boost = boostFromTypedPrefix(typed, label, item.sortText);
-      if (typed && boost === undefined && mapped.length >= MAX_COMPLETION_OPTIONS) {
-        continue;
-      }
       const displayLabel = filterText && filterText !== item.label ? item.label : undefined;
       mapped.push({
         label,
@@ -399,15 +400,15 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
             hooks.getDocumentRevision,
           ),
       });
-      if (mapped.length >= MAX_COMPLETION_OPTIONS * 2) break;
+      mappedItems.push(item);
     }
     if (context.aborted) return null;
 
     // Prefer textEdit start when every item shares the same replace range so
     // CM's client-side filtering aligns with the server's replace span.
     let from = word ? word.from : context.pos;
-    const firstEdit = result.items[0]?.textEdit;
-    if (firstEdit && result.items.every((item) => (
+    const firstEdit = mappedItems[0]?.textEdit;
+    if (firstEdit && mappedItems.every((item) => (
       item.textEdit
       && item.textEdit.range.start.line === firstEdit.range.start.line
       && item.textEdit.range.start.character === firstEdit.range.start.character
@@ -418,13 +419,9 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     }
 
     // Keep server order for the head of the list, then cap for popup cost.
-    const options = mapped.length > MAX_COMPLETION_OPTIONS
-      ? mapped.slice(0, MAX_COMPLETION_OPTIONS)
-      : mapped;
-
     return {
       from,
-      options,
+      options: mapped,
       // Incomplete lists should re-query on further typing (no sticky validFor).
       // Complete lists stay open while the user continues the identifier.
       // Always filter client-side for camelCase/prefix quality on the cap —

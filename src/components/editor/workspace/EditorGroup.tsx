@@ -144,7 +144,7 @@ interface EditorGroupProps {
   /** Keys whose sources are currently downloading (drives the banner spinner). */
   downloadingSourcesKeys?: string[];
   onMarkdownModeChange: (mode: MarkdownViewMode) => void;
-  onChangeText: (key: string, text: string) => void;
+  onChangeText: (key: string, text: string, caret?: LspPosition, caretOffset?: number) => void;
   onSave: (key: string) => void;
   onHover: (file: OpenFileViewModel, position: LspPosition) => Promise<string | null>;
   onPinHoverDoc?: (content: QuickDocContent) => void;
@@ -614,9 +614,9 @@ export function EditorGroup({
                         reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                         // Library sources (JDK / dependency classes) cannot be written back.
                         readOnly={readOnly || !!activeFile.library}
-                        onChange={(doc) => {
+                        onChange={(doc, caret, caretOffset) => {
                           if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
-                          onChangeText(activeFile.key, doc);
+                          onChangeText(activeFile.key, doc, caret, caretOffset);
                         }}
                         onSave={() => onSave(activeFile.key)}
                         onHover={(position) => onHover(activeFile, position)}
@@ -671,9 +671,9 @@ export function EditorGroup({
                       onEditBreakpoint={onEditBreakpoint}
                       reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                       readOnly={readOnly || !!activeFile.library}
-                      onChange={(doc) => {
+                      onChange={(doc, caret, caretOffset) => {
                         if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
-                        onChangeText(activeFile.key, doc);
+                        onChangeText(activeFile.key, doc, caret, caretOffset);
                       }}
                       onSave={() => onSave(activeFile.key)}
                       onHover={(position) => onHover(activeFile, position)}

@@ -519,9 +519,33 @@ const EDITOR_TEXT_COMMIT_IDLE_DELAY_MS = 220;
 // Shared empty result so "no diagnostics" is always the same array identity.
 const EMPTY_DISPLAY_DIAGNOSTICS: LspDiagnostic[] = [];
 
-function extractContextSnippet(text: string, targetLine: number): { lineText: string; contextSnippet: string } {
+export function extractContextSnippet(
+  text: string,
+  targetLine: number,
+  targetOffset?: number,
+): { lineText: string; contextSnippet: string } {
+  if (targetOffset !== undefined) {
+    const offset = Math.max(0, Math.min(targetOffset, text.length));
+    const targetLineStart = offset === 0 ? 0 : text.lastIndexOf("\n", offset - 1) + 1;
+    const targetLineBreak = text.indexOf("\n", offset);
+    const targetLineEnd = targetLineBreak === -1 ? text.length : targetLineBreak;
+    const contextStart = targetLine <= 0
+      ? targetLineStart
+      : targetLineStart > 1
+        ? text.lastIndexOf("\n", targetLineStart - 2) + 1
+        : 0;
+    const nextLineBreak = targetLineBreak === -1
+      ? -1
+      : text.indexOf("\n", targetLineBreak + 1);
+    const contextEnd = nextLineBreak === -1 ? text.length : nextLineBreak;
+    return {
+      lineText: text.slice(targetLineStart, targetLineEnd),
+      contextSnippet: text.slice(contextStart, contextEnd),
+    };
+  }
+
   const desiredStart = Math.max(0, targetLine - 1);
-  const desiredEnd = targetLine + 2;
+  const desiredEnd = targetLine + 1;
   let currentLine = 0;
   let lineStart = 0;
   let targetLineStart = 0;
@@ -896,6 +920,11 @@ export function CodeWorkspaceTab({
     operation: Exclude<LspWorkspaceEditOperation, { kind: "text" }>,
   ) => Promise<void>) | null>(null);
   const pendingEditorTextByFileRef = useRef(new Map<string, OpenFileState>());
+  const pendingEditorCaretByFileRef = useRef(new Map<string, {
+    position: LspPosition;
+    offset?: number;
+  }>());
+  const flushPendingEditLocationsRef = useRef<() => void>(() => {});
   const pendingEditorTextTimerRef = useRef<number | null>(null);
   /** Debounced didChange timers keyed by open-file key (live buffer path). */
   const liveLspSyncTimersRef = useRef<Record<string, number>>({});
@@ -1059,6 +1088,7 @@ export function CodeWorkspaceTab({
     }
     const pending = pendingEditorTextByFileRef.current;
     if (pending.size === 0) return;
+    flushPendingEditLocationsRef.current();
     const current = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).openFiles;
     let next = current;
     for (const [key, file] of pending) {
@@ -2014,6 +2044,34 @@ export function CodeWorkspaceTab({
     setRecentFilesOpen,
   });
 
+  // Recent Locations is metadata, not part of the live editing contract. Build
+  // its line/context snapshot once per settled input burst so a caret near the
+  // end of a large source file does not rescan the entire prefix on every key.
+  flushPendingEditLocationsRef.current = () => {
+    for (const [key, file] of pendingEditorTextByFileRef.current) {
+      const caret = pendingEditorCaretByFileRef.current.get(key);
+      if (!caret) continue;
+      const activeFilePath = file.path ?? file.title;
+      const { position, offset } = caret;
+      const { lineText, contextSnippet } = extractContextSnippet(file.text, position.line, offset);
+      const isInsideAnyRoot = rootsRef.current.some((root) => (
+        isPathContainedInRoot(activeFilePath, root.path)
+      ));
+      workspaceLocationControllerRef.current.recordUserEdit({
+        fileKey: file.key,
+        filePath: activeFilePath,
+        title: file.title,
+        line: position.line,
+        character: position.character,
+        lineText,
+        contextSnippet,
+        sourceOwnership: file.library ? "library" : isInsideAnyRoot ? "workspace" : "external",
+      });
+      recordEditLocation(file.ref, position);
+    }
+    pendingEditorCaretByFileRef.current.clear();
+  };
+
   const openFindInFiles = useCallback(() => {
     setBottomDockOpen(true);
     setBottomDockTab("search");
@@ -2666,6 +2724,7 @@ export function CodeWorkspaceTab({
       pendingEditorTextByFileRef.current.set(key, next);
     } else {
       pendingEditorTextByFileRef.current.delete(key);
+      pendingEditorCaretByFileRef.current.delete(key);
       setOpenFiles((prev) => ({ ...prev, [key]: next }));
     }
     return next;
@@ -2776,7 +2835,12 @@ export function CodeWorkspaceTab({
     return required && isLspDocumentSynced(requiredFileKey, required.text) ? required : null;
   }, [ensureLspDocumentSynced, isLspDocumentSynced, semanticIndex.current]);
 
-  const queueEditorTextUpdate = useCallback((key: string, text: string) => {
+  const queueEditorTextUpdate = useCallback((
+    key: string,
+    text: string,
+    caret?: LspPosition,
+    caretOffset?: number,
+  ) => {
     const file = openFilesRef.current[key];
     if (!file || file.text === text) return;
     // Once the user starts a new character-level edit, CodeMirror becomes the
@@ -2789,23 +2853,11 @@ export function CodeWorkspaceTab({
     }
     const next = mutateOpenBuffer(key, { text, error: null }, "user-edit");
     if (!next) return;
-    const cursor = cursorPositions[activeEditorGroupId] ?? { line: 0, character: 0 };
-    const { lineText, contextSnippet } = extractContextSnippet(text, cursor.line);
-    const activeFilePath = next.path ?? next.title;
-    const isInsideAnyRoot = rootsRef.current.some((root) => isPathContainedInRoot(activeFilePath, root.path));
-    const sourceOwnership = next.library ? "library" : isInsideAnyRoot ? "workspace" : "external";
-
-    workspaceLocationControllerRef.current.recordUserEdit({
-      fileKey: next.key,
-      filePath: activeFilePath,
-      title: next.title,
-      line: cursor.line,
-      character: cursor.character,
-      lineText,
-      contextSnippet,
-      sourceOwnership,
+    pendingEditorCaretByFileRef.current.set(key, {
+      position: caret ?? editorSelectionRef.current.start,
+      offset: caretOffset,
     });
-    recordEditLocation(next.ref, cursor);
+    const activeFilePath = next.path ?? next.title;
     semanticIndex.invalidateSilently("document-edited", [activeFilePath]);
     // Drive didChange from the live buffer only when a language server can
     // actually use it — plain text / missing LSP must not pay IPC cost.

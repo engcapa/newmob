@@ -57,6 +57,11 @@ const MAX_VIRTUAL_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
 const MAX_WORKSPACE_SYMBOL_PROVIDERS: usize = 64;
 const MAX_WORKSPACE_SYMBOL_DIAGNOSTICS: usize = 32;
+/// Completion items carry the provider payload twice: normalized display/apply
+/// fields plus the opaque item echoed to completionItem/resolve. JDTLS can
+/// return thousands of entries, so bound parsing and IPC serialization before
+/// the response reaches the renderer thread.
+const MAX_COMPLETION_ITEMS: usize = 200;
 /// Keep opaque workspace-symbol resolve payloads short-lived and bounded. The
 /// token is only a routing handle; the raw provider payload never crosses the
 /// frontend boundary.
@@ -9862,19 +9867,29 @@ fn parse_completion_item(value: &Value) -> Option<LspCompletionItem> {
 /// `CompletionList { isIncomplete, items }`.
 fn parse_completion_response(value: &Value) -> (bool, Vec<LspCompletionItem>) {
     if let Some(items) = value.as_array() {
+        let truncated = items.len() > MAX_COMPLETION_ITEMS;
         return (
-            false,
-            items.iter().filter_map(parse_completion_item).collect(),
+            truncated,
+            items
+                .iter()
+                .take(MAX_COMPLETION_ITEMS)
+                .filter_map(parse_completion_item)
+                .collect(),
         );
     }
     if let Some(items) = value.get("items").and_then(Value::as_array) {
         let is_incomplete = value
             .get("isIncomplete")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || items.len() > MAX_COMPLETION_ITEMS;
         return (
             is_incomplete,
-            items.iter().filter_map(parse_completion_item).collect(),
+            items
+                .iter()
+                .take(MAX_COMPLETION_ITEMS)
+                .filter_map(parse_completion_item)
+                .collect(),
         );
     }
     (false, Vec::new())
@@ -12831,6 +12846,17 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
 
         let (_, empty) = parse_completion_response(&Value::Null);
         assert!(empty.is_empty());
+
+        let oversized = json!({
+            "isIncomplete": false,
+            "items": (0..MAX_COMPLETION_ITEMS + 25)
+                .map(|index| json!({ "label": format!("candidate-{index}") }))
+                .collect::<Vec<_>>()
+        });
+        let (incomplete, items) = parse_completion_response(&oversized);
+        assert!(incomplete, "a locally truncated list must remain queryable");
+        assert_eq!(items.len(), MAX_COMPLETION_ITEMS);
+        assert_eq!(items.last().unwrap().label, "candidate-199");
     }
 
     #[test]
