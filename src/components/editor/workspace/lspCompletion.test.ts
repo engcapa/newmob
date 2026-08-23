@@ -768,9 +768,15 @@ describe("P0-J1 remainder: parseLspSnippet spans & tabstop session", () => {
   it("returns full placeholder spans covering default text", () => {
     const parsed = parseLspSnippet("loadUser(${1:user}, ${2|a,b|})$0");
     expect(parsed.text).toBe("loadUser(user, a)");
+    // §8.18.3: choice placeholders keep their option list for the
+    // interactive choice session; plain stops carry no choices.
     expect(parsed.placeholders).toEqual([
       { start: "loadUser(".length, end: "loadUser(user".length },
-      { start: "loadUser(user, ".length, end: "loadUser(user, a".length },
+      {
+        start: "loadUser(user, ".length,
+        end: "loadUser(user, a".length,
+        choices: ["a", "b"],
+      },
       { start: parsed.text.length, end: parsed.text.length },
     ]);
   });

@@ -135,6 +135,136 @@ export function recentCompletionTelemetry(): readonly CompletionRequestTelemetry
 /** Test/diagnostic reset of the telemetry ring. */
 export function resetCompletionTelemetry(): void {
   completionTelemetryRing.length = 0;
+  lastBasicInvocation.clear();
+}
+
+// ---------------------------------------------------------------------------
+// §8.18.3 Basic invocation modes + repeated-invocation ordinal
+// ---------------------------------------------------------------------------
+
+export type CompletionInvocationReason = "typing" | "trigger" | "explicit";
+
+interface LastBasicInvocation {
+  revision: number;
+  positionKey: string;
+  ordinal: number;
+}
+
+const lastBasicInvocation = new Map<string, LastBasicInvocation>();
+
+/**
+ * Record one Basic invocation and return its ordinal (§8.18.3): a second
+ * explicit invocation at the SAME revision+position gets ordinal >= 2 — the
+ * IDEA repeated-call expansion signal. Any other change resets to 1. The
+ * caller surfaces `ordinal >= 2` with an honest "provider scope unchanged"
+ * label unless the provider advertises expansion.
+ */
+export function recordBasicCompletionInvocation(input: {
+  workspaceId: string;
+  fileKey: string;
+  documentRevision: number;
+  /** Approximate caret identity; callers pass `${line}:${character}`. */
+  positionKey: string;
+  reason: CompletionInvocationReason;
+}): number {
+  void input.reason;
+  const key = `${input.workspaceId} ${input.fileKey}`;
+  const previous = lastBasicInvocation.get(key);
+  if (
+    previous
+    && previous.revision === input.documentRevision
+    && previous.positionKey === input.positionKey
+  ) {
+    const ordinal = previous.ordinal + 1;
+    lastBasicInvocation.set(key, {
+      revision: input.documentRevision,
+      positionKey: input.positionKey,
+      ordinal,
+    });
+    return ordinal;
+  }
+  lastBasicInvocation.set(key, {
+    revision: input.documentRevision,
+    positionKey: input.positionKey,
+    ordinal: 1,
+  });
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
+// §8.18.3 typed provider result envelope + capability evidence
+// ---------------------------------------------------------------------------
+
+export type CapabilityLevel = "unavailable" | "available-partial" | "available-complete";
+export type CompletionUnavailableReason =
+  | "no-provider" | "capability-not-advertised" | "provider-starting"
+  | "indexing" | "unsupported-language" | "stale" | "cancelled" | "disposed" | "unknown";
+
+export interface CompletionCapabilityEvidence {
+  source: "lsp" | "jdtls";
+  providerId: string | null;
+  providerVersion: string | null;
+  workspaceId: string;
+  fileKey: string;
+  documentRevision: number;
+  providerGeneration: number;
+  scope: "file";
+  completeness: CapabilityLevel;
+  unavailableReason?: CompletionUnavailableReason;
+}
+
+export type CompletionProviderResult =
+  | { kind: "available"; identity: CompletionRequestIdentity; items: LspCompletionItem[];
+      isIncomplete: boolean; truncated: boolean; evidence: CompletionCapabilityEvidence }
+  | { kind: "unavailable"; identity: CompletionRequestIdentity; reason: CompletionUnavailableReason }
+  | { kind: "stale" | "cancelled"; identity: CompletionRequestIdentity }
+  | { kind: "failed"; identity: CompletionRequestIdentity; retryable: boolean; message: string };
+
+/**
+ * Classify one raw provider round-trip into the typed envelope. UI must read
+ * `kind`/`truncated` from here instead of inferring from empty arrays.
+ */
+export function toCompletionProviderResult(input: {
+  identity: CompletionRequestIdentity;
+  result: LspCompletionResult | null;
+  statusActive: boolean;
+  capabilityAdvertised: boolean;
+}): CompletionProviderResult {
+  const { identity, result } = input;
+  if (!input.capabilityAdvertised) {
+    return {
+      kind: "unavailable",
+      identity,
+      reason: "capability-not-advertised",
+    };
+  }
+  if (!input.statusActive) {
+    return { kind: "unavailable", identity, reason: "no-provider" };
+  }
+  if (!result) {
+    // A dropped/null response for an unchanged identity is cancellation-like:
+    // never reported as "no candidates".
+    return { kind: "stale", identity };
+  }
+  const items = result.items ?? [];
+  return {
+    kind: "available",
+    identity,
+    items: [...items],
+    isIncomplete: result.isIncomplete === true,
+    truncated: items.length >= MAX_COMPLETION_OPTIONS,
+    evidence: {
+      source: "lsp",
+      providerId: result.status?.selectedCommandId ?? null,
+      providerVersion: result.status?.displayName ?? null,
+      workspaceId: identity.workspaceId,
+      fileKey: identity.fileKey,
+      documentRevision: identity.documentRevision,
+      providerGeneration: identity.lspSessionGeneration,
+      scope: "file",
+      completeness: result.isIncomplete ? "available-partial" : "available-complete",
+    },
+  };
 }
 
 function sameCompletionIdentity(
@@ -303,17 +433,26 @@ export function lspSnippetToCmSnippet(text: string): string {
   return out;
 }
 
+/** One committed placeholder span; `choices` present for ${n|a,b,c|} stops. */
+export interface ParsedSnippetPlaceholder {
+  start: number;
+  end: number;
+  /** Keyboard-cyclable options (§8.18.3 choice session); first is the default. */
+  choices?: readonly string[];
+}
+
 /**
  * Flatten an LSP snippet into the literal text to insert plus placeholder
  * spans (defaults inlined, full [start,end) extents) so snippet + import
  * edits can be committed in a single transaction instead of the
  * helper-command double dispatch. Bare `$1`/`${1}` tabstops stay zero-width.
+ * Choice placeholders keep their option list for the interactive session.
  */
 export function parseLspSnippet(
   text: string,
-): { text: string; placeholders: Array<{ start: number; end: number }> } {
+): { text: string; placeholders: ParsedSnippetPlaceholder[] } {
   let out = "";
-  const placeholders: Array<{ start: number }> = [];
+  const placeholders: Array<{ start: number; choices?: readonly string[] }> = [];
   let placeholderEnds: Array<number> = [];
   for (let i = 0; i < text.length; i += 1) {
     const char = text[i];
@@ -332,14 +471,15 @@ export function parseLspSnippet(
       continue;
     }
     const rest = text.slice(i);
-    // Choice default is the FIRST option; the option list itself never
-    // becomes literal text.
-    const choice = rest.match(/^\$\{(\d+)\|([^|,}]*)[^|}]*\|\}/);
+    const choice = rest.match(/^\$\{(\d+)\|([^|}]*)\|\}/);
     const placeholder = rest.match(/^\$\{(\d+):((?:[^{}]|\{\d+:?[^{}]*\})*)\}/);
     const bare = rest.match(/^\$\{(\d+)\}/) ?? rest.match(/^\$(\d+)/);
     if (choice || placeholder) {
-      const body = (choice ? choice[2] : placeholder![2]) ?? "";
-      placeholders.push({ start: out.length });
+      const body = (choice ? choice[2].split(",")[0] : placeholder![2]) ?? "";
+      placeholders.push({
+        start: out.length,
+        ...(choice ? { choices: choice[2].split(",") } : {}),
+      });
       placeholderEnds.push(out.length + body.length);
       out += body;
       i += (choice ? choice[0].length : placeholder![0].length) - 1;
@@ -358,6 +498,7 @@ export function parseLspSnippet(
     placeholders: placeholders.map((entry, index) => ({
       start: entry.start,
       end: placeholderEnds[index] ?? entry.start,
+      ...(entry.choices ? { choices: entry.choices } : {}),
     })),
   };
 }
@@ -371,15 +512,81 @@ export function parseLspSnippet(
 interface LspSnippetSessionState {
   /** Post-image placeholder spans in document order. */
   spans: Array<{ from: number; to: number }>;
+  /** Parallel option lists for choice placeholders (null = plain stop). */
+  choices: Array<readonly string[] | null>;
   index: number;
-  /** Doc length at commit; any document edit invalidates the session. */
+  /** Doc length at commit; any foreign edit invalidates the session. */
   docLength: number;
 }
 
 const lspSnippetSessions = new WeakMap<EditorView, LspSnippetSessionState>();
 
+/**
+ * Set while the module's own choice-cycle dispatch is in flight so the
+ * doc-change invalidator does not kill the session it belongs to.
+ */
+let choiceCycleInFlight = false;
+
 export function activeLspSnippetSession(view: EditorView): boolean {
   return lspSnippetSessions.has(view);
+}
+
+/** Choice options for the ACTIVE tabstop, or null for a plain stop. */
+export function activeLspSnippetChoices(view: EditorView): readonly string[] | null {
+  const session = lspSnippetSessions.get(view);
+  if (!session || view.state.doc.length !== session.docLength) return null;
+  return session.choices[session.index] ?? null;
+}
+
+/**
+ * Interactive choice placeholder (§8.18.3): Tab on a choice stop swaps the
+ * committed span text for the NEXT option in one transaction and keeps the
+ * tabstop session alive with remapped spans. Escape accepts the current
+ * option (handled by the host's existing snippet cancel).
+ */
+export function cycleLspSnippetChoice(view: EditorView): boolean {
+  const session = lspSnippetSessions.get(view);
+  if (!session || view.state.doc.length !== session.docLength) {
+    lspSnippetSessions.delete(view);
+    return false;
+  }
+  const span = session.spans[session.index];
+  const options = session.choices[session.index];
+  if (!span || !options || options.length === 0) return false;
+
+  const currentText = view.state.doc.sliceString(span.from, span.to);
+  const currentIndex = options.indexOf(currentText);
+  // Default (first option) shown → first Tab moves to the second option;
+  // past the last option the cycle wraps back to the default.
+  const nextIndex = currentIndex < 0 ? Math.min(1, options.length - 1) : (currentIndex + 1) % options.length;
+  const nextText = options[nextIndex];
+
+  choiceCycleInFlight = true;
+  try {
+    view.dispatch({
+      changes: { from: span.from, to: span.to, insert: nextText },
+      selection: { anchor: span.from, head: span.from + nextText.length },
+      userEvent: "input.complete",
+    });
+  } finally {
+    choiceCycleInFlight = false;
+  }
+
+  // Remap later spans for the length delta and keep the session usable.
+  const delta = nextText.length - (span.to - span.from);
+  if (delta !== 0) {
+    session.spans = session.spans.map((entry, position) => (
+      position === session.index
+        ? { from: span.from, to: span.from + nextText.length }
+        : entry.from >= span.to
+          ? { from: entry.from + delta, to: entry.to + delta }
+          : entry
+    ));
+    session.docLength += delta;
+  } else {
+    session.spans[session.index] = { from: span.from, to: span.from + nextText.length };
+  }
+  return true;
 }
 
 /** Move the selection to the next placeholder span; false when exhausted. */
@@ -411,6 +618,25 @@ export function cancelLspSnippetSession(view: EditorView): boolean {
 }
 
 /**
+ * Test-only: seed a post-acceptance session exactly the way
+ * `commitLspCompletion` registers one, so choice/tabstop behaviour can be
+ * unit-tested without driving the full popup pipeline.
+ */
+export function seedLspSnippetSessionForTest(
+  view: EditorView,
+  snippetText: string,
+): ParsedSnippetPlaceholder[] {
+  const parsed = parseLspSnippet(snippetText);
+  lspSnippetSessions.set(view, {
+    spans: parsed.placeholders.map((placeholder) => ({ from: placeholder.start, to: placeholder.end })),
+    choices: parsed.placeholders.map((placeholder) => placeholder.choices ?? null),
+    index: 0,
+    docLength: view.state.doc.length,
+  });
+  return parsed.placeholders;
+}
+
+/**
  * Update-listener fragment hosts must include so any document edit (outside
  * this module's own selection-only advances) drops the pending session
  * instead of navigating stale spans.
@@ -419,6 +645,9 @@ export function lspSnippetSessionInvalidator(): Extension {
   return EditorView.updateListener.of((update) => {
     if (!update.docChanged) return;
     if (!lspSnippetSessions.has(update.view)) return;
+    // The module's own choice-cycle dispatch updates the session state right
+    // after the transaction; never treat it as a foreign edit.
+    if (choiceCycleInFlight) return;
     // Selection-only advances dispatched by advanceLspSnippetTabstop do not
     // change the doc; any other doc change ends the session.
     lspSnippetSessions.delete(update.view);
@@ -599,6 +828,7 @@ function commitLspCompletion(
   if (placeholderSpans && placeholderSpans.length > 0) {
     lspSnippetSessions.set(view, {
       spans: placeholderSpans,
+      choices: (parsed?.placeholders ?? []).map((placeholder) => placeholder.choices ?? null),
       index: 0,
       docLength: view.state.doc.length,
     });

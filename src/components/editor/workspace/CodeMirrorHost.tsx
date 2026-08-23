@@ -79,8 +79,10 @@ import { languageForPath } from "../../git/diffLanguage";
 import { acquireClipboardStore, clipboardStoreForWorkspace, type WorkspaceClipboardHandle } from "./workspaceClipboardSession";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
 import {
+  activeLspSnippetChoices,
   advanceLspSnippetTabstop,
   cancelLspSnippetSession,
+  cycleLspSnippetChoice,
   createLspCompletionSource,
   lspSnippetSessionInvalidator,
   type CompletionAcceptanceDiagnostic,
@@ -1562,7 +1564,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         // 1) Accept the active completion (often a live template).
         // 2) Else expand an exact live/postfix template under the caret
         //    even when the popup is closed (sout + Tab without waiting).
-        // 3) Else cycle the pending LSP snippet tabstops (combined
+        // 3) Else cycle a choice placeholder's options (§8.18.3 interactive
+        //    choice session), else plain LSP snippet tabstops (combined
         //    snippet+import acceptance committed in one transaction).
         // 4) Else fall through to CM snippet tabstops / indentWithTab.
         Prec.high(keymap.of([
@@ -1574,6 +1577,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
                 view,
                 liveTemplateLanguageForPath(pathRef.current),
               )) return true;
+              if (activeLspSnippetChoices(view)) return cycleLspSnippetChoice(view);
               return advanceLspSnippetTabstop(view);
             },
           },
