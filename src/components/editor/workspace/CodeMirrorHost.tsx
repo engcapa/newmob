@@ -110,6 +110,7 @@ import { lspPositionFromOffset, offsetFromLspPosition } from "./lspPositions";
 import {
   cloneCaretAbove,
   cloneCaretBelow,
+  completeCurrentStatement,
   cutEditorSelections,
   editorClipboardPayload,
   escapeEditorSelections,
@@ -132,7 +133,6 @@ import {
   buildEditorHostActions,
 } from "./workspaceCodeMirrorKeymap";
 import {
-  completeStatementPlan,
   surroundWithPlan,
   type SurroundKind,
 } from "./workspaceSemanticEditing";
@@ -537,24 +537,14 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
         case "cloneCaretAbove": return cloneCaretAbove(view);
         case "cloneCaretBelow": return cloneCaretBelow(view);
         case "collapseCarets": return escapeEditorSelections(view);
-        case "completeStatement": {
-          // §8.18.8: conservative plan — uncertain boundaries are no-ops.
-          const head = view.state.selection.main.head;
-          const line = view.state.doc.lineAt(head);
-          const plan = completeStatementPlan({
-            lineText: line.text,
-            nextLineStart: null,
-            readOnly: view.state.readOnly,
-            languageId: "java",
-          });
-          if ("kind" in plan) return false;
-          view.dispatch({
-            changes: { from: plan.insertSemicolonAt, insert: ";" },
-            selection: { anchor: plan.insertSemicolonAt + 1 },
-            userEvent: "input.complete",
-          });
-          return true;
-        }
+        case "completeStatement":
+          // Same command the in-editor Mod-Shift-Enter keymap runs, so the
+          // action-host shortcut (window capture listener) and direct typing
+          // share one behaviour: caret-line edits with balanced brackets, not
+          // a bare `;` dropped at a line-relative offset (which used to land
+          // inside line 1 whenever the caret was below the first line).
+          if (view.state.readOnly || view.composing) return false;
+          return completeCurrentStatement(view);
         case "copy": return writeEditorSelectionToClipboard(view);
         case "cut": return cutSystemClipboard(view);
         case "foldAll": return foldAll(view) ?? false;

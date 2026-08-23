@@ -218,6 +218,48 @@ describe("CodeMirrorHost search", () => {
     }));
   });
 
+  it("runs Complete Statement from the command port on the caret line", async () => {
+    // Regression: the port used to treat the plan's line-relative semicolon
+    // offset as an absolute document offset, so completing a statement below
+    // line 1 dropped a `;` into the first line and moved the caret there.
+    const registration = vi.fn();
+    const rendered = renderEditor("first\nsecond\nthird = calc(a, b", vi.fn(), {
+      fileKey: "root:app:src/port.ts",
+      onCommandPortChange: registration,
+    });
+    const editor = rendered.container.querySelector<HTMLElement>(".cm-editor");
+    const view = EditorView.findFromDOM(editor!);
+    expect(view).not.toBeNull();
+    await waitFor(() => expect(
+      registration.mock.calls.find((call) => call[0].port),
+    ).toBeTruthy());
+    const { port } = registration.mock.calls.find((call) => call[0].port)![0];
+
+    view!.dispatch({ selection: EditorSelection.cursor(view!.state.doc.length) });
+    expect(port.execute("completeStatement")).toBe(true);
+    expect(view!.state.doc.toString()).toBe("first\nsecond\nthird = calc(a, b);\n");
+    expect(view!.state.selection.main.head).toBe(view!.state.doc.length);
+  });
+
+  it("balances unclosed brackets when completing from the command port mid-line", async () => {
+    const registration = vi.fn();
+    const rendered = renderEditor("class A {\n  int x = calc(a, b", vi.fn(), {
+      fileKey: "root:app:src/port.ts",
+      onCommandPortChange: registration,
+    });
+    const editor = rendered.container.querySelector<HTMLElement>(".cm-editor");
+    const view = EditorView.findFromDOM(editor!);
+    expect(view).not.toBeNull();
+    await waitFor(() => expect(
+      registration.mock.calls.find((call) => call[0].port),
+    ).toBeTruthy());
+    const { port } = registration.mock.calls.find((call) => call[0].port)![0];
+
+    view!.dispatch({ selection: EditorSelection.cursor(view!.state.doc.length) });
+    expect(port.execute("completeStatement")).toBe(true);
+    expect(view!.state.doc.toString()).toBe("class A {\n  int x = calc(a, b);\n  ");
+  });
+
   it("distributes copied editor segments across multiple carets in the mounted host", async () => {
     const onChange = vi.fn();
     const rendered = renderEditor("one two end", onChange);

@@ -10953,11 +10953,14 @@ export function CodeWorkspaceTab({
 
   /**
    * Make-before-launch (Phase 3): save every dirty Java / build file in the
-   * project, wait for the jdtls build barrier, then block the launch if the
-   * project has compile errors — so the debuggee never runs stale bytecode and
-   * source lines match the loaded classes. Returns true when it is safe to
-   * launch. jdtls / build being unavailable is NOT a block here (the DAP path
-   * surfaces those); only real compiler errors stop the launch.
+   * project, wait for the jdtls build barrier, then block the launch when the
+   * compiler itself reports errors (`failed` / `withError`) — so the debuggee
+   * never runs stale bytecode and source lines match the loaded classes.
+   * Returns true when it is safe to launch. jdtls / build being unavailable is
+   * NOT a block here (the DAP path surfaces those), and a clean build launches
+   * even if stale or foreign-language diagnostics sit in the workspace store:
+   * published diagnostics are not a compiler verdict, and sweeping them all
+   * used to hijack the bottom dock onto Problems for projects that compile.
    */
   const prepareJavaLaunch = useCallback(async (
     rootId: string,
@@ -10999,11 +11002,22 @@ export function CodeWorkspaceTab({
     try {
       const status = await lspBuildWorkspace(descriptor, false);
       if (status === "failed") {
-        // The build itself broke (not "compiled with errors" — that is the
-        // diagnostics check below). Say so instead of launching stale bytecode.
+        // The build itself broke (infrastructure, not a compiler verdict). Say
+        // so instead of launching stale bytecode.
         const message = "Cannot start debug: the project build failed";
         setStatusMessage(message);
         debug.reportStartupFailure(message);
+        return false;
+      }
+      if (status === "withError") {
+        // jdtls compiled and reported errors: the compiler's own verdict. Show
+        // them where they live instead of launching broken classes.
+        const message = "Cannot start debug: the project compiled with errors";
+        setStatusMessage(message);
+        debug.reportStartupFailure(message);
+        setProblemsScope("project");
+        setBottomDockTab("problems");
+        setBottomDockOpen(true);
         return false;
       }
     } catch (err) {
@@ -11013,33 +11027,10 @@ export function CodeWorkspaceTab({
       return true;
     }
     if (!mountedRef.current) return false;
-    // After the build, check project-wide diagnostics for compile errors.
-    try {
-      const files = await lspWorkspaceDiagnostics(workspaceInstanceId);
-      const errorFiles = files.filter((entry) =>
-        entry.diagnostics.some((d) => d.severity === 1),
-      );
-      if (errorFiles.length > 0) {
-        const errorCount = errorFiles.reduce(
-          (n, entry) => n + entry.diagnostics.filter((d) => d.severity === 1).length,
-          0,
-        );
-        setStatusMessage(
-          `Debug blocked: ${errorCount} compile error${errorCount === 1 ? "" : "s"} in ${errorFiles.length} file${errorFiles.length === 1 ? "" : "s"}. Fix them, then debug again.`,
-        );
-        setProblemsScope("project");
-        setBottomDockTab("problems");
-        setBottomDockOpen(true);
-        return false;
-      }
-    } catch {
-      // Diagnostics unavailable: proceed rather than block on an unknown state.
-    }
     return true;
   }, [
     debug, findRoot, saveOpenBufferText, saveLspDocument, lspDescriptorForPath,
     setBottomDockOpen, setBottomDockTab, setProblemsScope, setStatusMessage,
-    workspaceInstanceId,
   ]);
   prepareJavaLaunchRef.current = prepareJavaLaunch;
 

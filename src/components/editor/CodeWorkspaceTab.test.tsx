@@ -3888,6 +3888,103 @@ describe("CodeWorkspaceTab", () => {
     expect(dapMocks.dapStartSession).not.toHaveBeenCalled();
   });
 
+  it("blocks a Java debug launch when the build compiles with errors and opens Problems", async () => {
+    // `withError` is the compiler's own verdict (jdtls BuildWorkspaceStatus):
+    // surface the real error list in project-scope Problems instead of launching.
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-debug-with-error",
+      workspaceInstanceId: "instance-java-debug-with-error",
+      name: "Java debug with error",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    lspMocks.lspBuildWorkspace.mockResolvedValue("withError");
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+
+    const consoleOutput = await screen.findByTestId("debug-console-output");
+    await waitFor(() => expect(consoleOutput.textContent).toContain(
+      "Cannot start debug: the project compiled with errors",
+    ));
+    expect(dapMocks.dapResolveJavaMainClasses).not.toHaveBeenCalled();
+    expect(dapMocks.dapStartSession).not.toHaveBeenCalled();
+    await waitFor(() => expect(
+      screen.getByTestId("code-workspace-bottom-tab-problems"),
+    ).toHaveAttribute("aria-selected", "true"));
+  });
+
+  it("launches on a clean build even when stale workspace diagnostics report errors", async () => {
+    // Regression: the barrier swept EVERY published diagnostic in the workspace
+    // instance, so a stale or foreign-language severity-1 entry blocked the
+    // launch and flipped the bottom dock onto Problems for projects that
+    // compile clean. The build status is the compiler verdict — trust it.
+    runtimeState.tauri = true;
+    const workspace: CodeWorkspaceTabInfo = {
+      repoRoot: "/repo/app",
+      workspaceId: "ws-java-debug-stale-diags",
+      workspaceInstanceId: "instance-java-debug-stale-diags",
+      name: "Java debug stale diags",
+      roots: [{ id: "app", name: "app", path: "/repo/app", kind: "git" }],
+      looseFiles: [],
+      initialFile: { kind: "root", rootId: "app", path: "src/main/java/com/acme/App.java" },
+    };
+    workspaceMocks.workspaceReadFile.mockResolvedValue(file(
+      "src/main/java/com/acme/App.java",
+      "package com.acme; class App { public static void main(String[] args) {} }",
+    ));
+    lspMocks.lspBuildWorkspace.mockResolvedValue("succeed");
+    lspMocks.lspWorkspaceDiagnostics.mockResolvedValue([
+      {
+        path: "/repo/app/legacy/Stale.java",
+        uri: "file:///repo/app/legacy/Stale.java",
+        diagnostics: [{
+          range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+          severity: 1,
+          code: null,
+          source: "jdtls",
+          message: "stale unresolved import",
+        }],
+      },
+    ]);
+    dapMocks.dapResolveJavaMainClasses.mockResolvedValue({
+      kind: "resolved",
+      main: {
+        mainClass: "com.acme.App",
+        projectName: "app",
+        filePath: "/repo/app/src/main/java/com/acme/App.java",
+      },
+    });
+    dapMocks.dapStartSession.mockResolvedValue({
+      sessionId: "sess-1",
+      capabilities: {},
+      request: "launch",
+      arguments: { mainClass: "com.acme.App" },
+    });
+
+    renderWorkspace(workspace, {}, { strict: true });
+    await screen.findByTitle("app / src/main/java/com/acme/App.java");
+    fireEvent.click(screen.getByTestId("code-workspace-debug-target"));
+
+    await waitFor(() => expect(dapMocks.dapStartSession).toHaveBeenCalledWith(
+      "java",
+      expect.objectContaining({ mainClass: "com.acme.App" }),
+    ));
+    // The dock stays on the Debug console; Problems is not hijacked.
+    await waitFor(() => expect(
+      screen.getByTestId("code-workspace-bottom-tab-debug"),
+    ).toHaveAttribute("aria-selected", "true"));
+    expect(screen.getByTestId("code-workspace-bottom-tab-problems")).not.toHaveAttribute("data-active");
+  });
+
   it("opens a shared buffer in a resizable editor split and collapses it", async () => {
     const workspace: CodeWorkspaceTabInfo = {
       repoRoot: "/repo/app",
