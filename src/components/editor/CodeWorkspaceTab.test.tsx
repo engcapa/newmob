@@ -1410,6 +1410,7 @@ describe("CodeWorkspaceTab", () => {
       colorSchemeId: "dracula",
       highContrast: false,
       zoomScope: "all-editors",
+      highlighting: "all-problems",
       softWrap: { patterns: [], useOriginalIndent: true, additionalIndent: 0, showMarkers: false },
       virtualSpace: { afterLineEnd: false, atFileBottom: false },
       breadcrumbs: { visible: true, placement: "top", languages: ["*"] },

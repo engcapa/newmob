@@ -131,6 +131,11 @@ import {
 import {
   buildEditorHostActions,
 } from "./workspaceCodeMirrorKeymap";
+import {
+  completeStatementPlan,
+  surroundWithPlan,
+  type SurroundKind,
+} from "./workspaceSemanticEditing";
 import type { WorkspaceActionHost } from "./workspaceActionHost";
 
 export interface EditorRevealTarget {
@@ -453,6 +458,7 @@ export type EditorCommandId =
   | "cloneCaretAbove"
   | "cloneCaretBelow"
   | "collapseCarets"
+  | "completeStatement"
   | "copy"
   | "cut"
   | "foldAll"
@@ -462,6 +468,7 @@ export type EditorCommandId =
   | "paste"
   | "selectAllOccurrences"
   | "selectNextOccurrence"
+  | "surroundWithTryCatch"
   | "unfoldAll";
 
 export interface EditorCommandState {
@@ -483,6 +490,46 @@ export interface EditorCommandPortRegistration {
   port: EditorCommandPort | null;
 }
 
+/**
+ * Apply a Surround With plan to the main selection (§8.18.8). The selection
+ * must span whole lines of one range; everything else is a typed no-op.
+ */
+function applySurroundWith(view: EditorView, kindId: SurroundKind["id"]): boolean {
+  if (view.state.readOnly || view.composing) return false;
+  const ranges = view.state.selection.ranges;
+  const main = view.state.selection.main;
+  if (ranges.length !== 1) return false;
+  const fromLine = view.state.doc.lineAt(main.from);
+  const toLine = view.state.doc.lineAt(main.to);
+  const languageId = guessEditorLanguageId(view) ?? "plaintext";
+  const plan = surroundWithPlan(kindId, {
+    text: view.state.doc.sliceString(fromLine.from, toLine.to),
+    from: fromLine.from,
+    to: toLine.to,
+    fromLineStart: main.from === fromLine.from,
+    toLineEnd: main.to === toLine.to,
+    rangeCount: ranges.length,
+    readOnly: view.state.readOnly,
+    languageId,
+  });
+  if (plan.kind === "unavailable") return false;
+  view.dispatch({
+    changes: plan.changes,
+    selection: { anchor: Math.min(plan.selection.anchor, view.state.doc.length + plan.changes.reduce((sum, change) => sum + ("insert" in change ? (change.insert as string)?.length ?? 0 : 0), 0)) },
+    userEvent: "input.surround",
+    scrollIntoView: true,
+  });
+  return true;
+}
+
+/** Per-view language identity, registered at mount from the file path. */
+const editorLanguageByView = new WeakMap<EditorView, string>();
+
+/** Best-effort language id from the host's current file path (§8.18.8). */
+function guessEditorLanguageId(view: EditorView): string | null {
+  return editorLanguageByView.get(view) ?? liveTemplateLanguageForPath(null);
+}
+
 function editorCommandPort(view: EditorView): EditorCommandPort {
   return {
     execute(commandId) {
@@ -490,6 +537,24 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
         case "cloneCaretAbove": return cloneCaretAbove(view);
         case "cloneCaretBelow": return cloneCaretBelow(view);
         case "collapseCarets": return escapeEditorSelections(view);
+        case "completeStatement": {
+          // §8.18.8: conservative plan — uncertain boundaries are no-ops.
+          const head = view.state.selection.main.head;
+          const line = view.state.doc.lineAt(head);
+          const plan = completeStatementPlan({
+            lineText: line.text,
+            nextLineStart: null,
+            readOnly: view.state.readOnly,
+            languageId: "java",
+          });
+          if ("kind" in plan) return false;
+          view.dispatch({
+            changes: { from: plan.insertSemicolonAt, insert: ";" },
+            selection: { anchor: plan.insertSemicolonAt + 1 },
+            userEvent: "input.complete",
+          });
+          return true;
+        }
         case "copy": return writeEditorSelectionToClipboard(view);
         case "cut": return cutSystemClipboard(view);
         case "foldAll": return foldAll(view) ?? false;
@@ -499,6 +564,7 @@ function editorCommandPort(view: EditorView): EditorCommandPort {
         case "paste": return pasteSystemClipboard(view);
         case "selectAllOccurrences": return selectAllEditorOccurrences(view);
         case "selectNextOccurrence": return selectNextEditorOccurrence(view);
+        case "surroundWithTryCatch": return applySurroundWith(view, "try-catch");
         case "unfoldAll": return unfoldAll(view) ?? false;
       }
     },
@@ -1734,6 +1800,7 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       ],
     });
     const view = new EditorView({ state, parent: hostRef.current });
+    editorLanguageByView.set(view, liveTemplateLanguageForPath(pathRef.current));
     viewRef.current = view;
     emitSelection(view);
     emitViewport(view);

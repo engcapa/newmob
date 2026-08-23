@@ -9,6 +9,8 @@ export interface EditorAppearanceProfile {
   colorSchemeId: string;
   highContrast: boolean;
   zoomScope: "active-editor" | "all-editors";
+  /** §8.18.9.5 highlighting level: none < syntax < all-problems. */
+  highlighting: "none" | "syntax" | "all-problems";
   softWrap: {
     patterns: string[];
     useOriginalIndent: boolean;
@@ -80,6 +82,7 @@ export const DEFAULT_EDITOR_APPEARANCE_PROFILE: EditorAppearanceProfile = {
   colorSchemeId: "app",
   highContrast: false,
   zoomScope: "all-editors",
+  highlighting: "all-problems",
   softWrap: {
     patterns: [],
     useOriginalIndent: true,
@@ -142,6 +145,9 @@ export function normalizeEditorAppearanceProfile(value: unknown): EditorAppearan
     colorSchemeId: readColorSchemeId(source.colorSchemeId),
     highContrast: readBoolean(source.highContrast, false),
     zoomScope: source.zoomScope === "active-editor" ? "active-editor" : "all-editors",
+    highlighting: source.highlighting === "none" || source.highlighting === "syntax"
+      ? source.highlighting
+      : "all-problems",
     softWrap: {
       patterns: normalizeStringList(softWrap.patterns, [], MAX_PATTERN_COUNT, MAX_PATTERN_LENGTH),
       useOriginalIndent: readBoolean(softWrap.useOriginalIndent, true),

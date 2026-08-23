@@ -7539,6 +7539,36 @@ export function CodeWorkspaceTab({
 
   const workspaceCommands = useMemo<WorkspaceCommand[]>(() => [
     {
+      id: "editor.completeStatement",
+      title: "Complete Statement",
+      category: "Edit",
+      keybinding: "Ctrl+Shift+Enter",
+      keywords: ["semicolon", "finish", "statement"],
+      when: (context) => context.focus === "editor" && !!context.hasActiveFile && !context.readOnly,
+      run: (context) => executeEditorCommand("completeStatement", context),
+    },
+    {
+      id: "editor.surroundWith.tryCatch",
+      title: "Surround with try/catch",
+      category: "Edit",
+      keybinding: "Ctrl+Alt+T",
+      keybindings: ["Meta+Alt+T"],
+      keywords: ["surround", "wrap", "exception"],
+      when: (context) => context.focus === "editor" && !!context.hasSelection && !context.readOnly,
+      run: (context) => executeEditorCommand("surroundWithTryCatch", context),
+    },
+    {
+      // §8.18.8 Smart completion stays visible but typed-unavailable until a
+      // provider advertises expected types; it never relabels Basic results.
+      id: "editor.smartCompletion",
+      title: "Type-Matching Completion (Smart)",
+      category: "Edit",
+      provenance: "unsupported",
+      keywords: ["smart", "type matching", "completion"],
+      when: () => false,
+      run: () => false,
+    },
+    {
       id: "workspace.reopenClosedTab",
       title: "Reopen Closed Tab",
       category: "File",
