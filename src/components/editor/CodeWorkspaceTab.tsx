@@ -194,7 +194,9 @@ import {
   workspaceFileIdentity,
 } from "./workspace/workspaceRecovery";
 import {
+  enforceTabPolicy,
   pushClosedTab,
+  DEFAULT_WORKSPACE_TAB_POLICY,
   type ClosedTabEntry,
 } from "./workspace/workspaceTabPolicy";
 import {
@@ -2063,6 +2065,12 @@ export function CodeWorkspaceTab({
 
   const findRoot = useCallback((rootId: string) => rootsRef.current.find((root) => root.id === rootId) ?? null, []);
 
+  // §8.18.5: openFile enforces the tab limit through the closer defined
+  // later in the component; the ref bridges the declaration order.
+  const closeFileRef = useRef<
+    ((key: string, groupId?: EditorGroupId, options?: { discard?: boolean }) => Promise<void>) | null
+  >(null);
+
   const openFile = useCallback(
     async (ref: CodeWorkspaceFileRef, options: { preview?: boolean; groupId?: EditorGroupId } = {}) => {
       // Switching tabs before the input idle timer fires must never show an
@@ -2089,6 +2097,32 @@ export function CodeWorkspaceTab({
         return { ...group, openOrder: nextOrder, activeKey: key, previewKey };
       });
       if (groupId !== currentUi.activeEditorGroupId) activateEditorGroup(groupId);
+      // §8.18.5 tab limit enforcement: opening beyond the leaf's limit evicts
+      // clean preview/least-recent candidates; dirty/pinned tabs are never
+      // silently closed (over-limit surfaces a reason instead).
+      {
+        const groupAfter = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId).editorGroups[groupId];
+        if (groupAfter) {
+          const meta = new Map(groupAfter.openOrder.map((entryKey) => [
+            entryKey,
+            {
+              key: entryKey,
+              dirty: !!openFilesRef.current[entryKey]?.dirty,
+              pinned: groupAfter.pinnedKeys.includes(entryKey),
+              preview: groupAfter.previewKey === entryKey,
+              lastUsedAt: 1_000_000 - mruFileKeysRef.current.indexOf(entryKey),
+            },
+          ]));
+          const eviction = enforceTabPolicy(groupAfter.openOrder, meta, DEFAULT_WORKSPACE_TAB_POLICY);
+          if (eviction.kind === "evicted") {
+            for (const evictedKey of eviction.evictedKeys) {
+              if (evictedKey !== key) void closeFileRef.current?.(evictedKey, groupId, { discard: true });
+            }
+          } else if (eviction.kind === "over-limit-protected") {
+            setStatusMessage(eviction.reason);
+          }
+        }
+      }
       if (openFilesRef.current[key] && !openFilesRef.current[key].loading) return;
       // Library sources (JDK / dependency classes) have no file to read: ask the
       // language server again so history and Recent Files can reopen them.
@@ -4642,6 +4676,7 @@ export function CodeWorkspaceTab({
     },
     [activeEditorGroupId, closeLspDocument, updateEditorGroup, workspaceInstanceId],
   );
+  closeFileRef.current = closeFile;
 
   const dismissExternalFileConflict = useCallback((key: string) => {
     setExternalFileConflicts((current) => current.filter((item) => item.key !== key));

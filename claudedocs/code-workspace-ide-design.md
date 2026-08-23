@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-23 · 版本：v4.49（C0–C9 执行轮：§8.18 合同全部包已实施，G0/G1 代码面重建完成、发布门禁仍红）· 状态：**实施中，G0/G1 待 native+三端证据，G2/G3 按单 capability 升级**。本轮按 §8.18 顺序完成 C0–C9 十个包的生产实施与测试（1123 editor Vitest / 159 相关 Rust 用例绿），§2.26 审计指出的五处高估（save 重映射、双真值 Keymap、Switcher 丢 leaf、AbortSignal 不达 IPC、固定工具窗列表）均已修复。真实 jdtls trace、native 三端矩阵、性能采样与 a11y smoke 未运行，相应 capability 显式登记为 platform-unverified——不得据此写 verified/L3。最新状态见 §2.28；§8.18 任务表已勾选并保留为回归合同。
+> 日期：2026-08-23 · 版本：v4.49（C0–C9 执行轮：§8.18 合同全部包已实施，G0/G1 代码面重建完成、发布门禁仍红）· 状态：**实施中，G0/G1 待 native+三端证据，G2/G3 按单 capability 升级**。本轮按 §8.18 顺序完成 C0–C9 十个包的生产实施与测试（1123 editor Vitest、1295 全量 Rust lib 用例与 `pnpm build` 全绿），§2.26 审计指出的五处高估（save 重映射、双真值 Keymap、Switcher 丢 leaf、AbortSignal 不达 IPC、固定工具窗列表）均已修复。真实 jdtls trace、native 三端矩阵、性能采样与 a11y smoke 未运行，相应 capability 显式登记为 platform-unverified——不得据此写 verified/L3。最新状态见 §2.28；§8.18 任务表已勾选并保留为回归合同。
 >
 > 当前结论：**当前实现有一批真实的 L2 工作流增量，但不能据此宣称 IDEA-like daily editor。** 已确认可保留的成果包括 completion identity/stale containment、snippet 与 additional edits 的单次 dispatch、frozen action evaluation、递归 layout/per-leaf chrome、workspace-scoped 单槽 clipboard、QuickDoc/Parameter Info presentation 和实验模型治理。当前硬门禁是：写盘后的真实 disk-effect 结果、ActionHost 与可编辑 Keymap 的单一真值、真实 jdtls Basic Completion/auto-import/rename/usages fixture、Switcher/tab policy、完整 Reference Information provider contract、Find/Show Usages 工作流、三端 native/IME/a11y/性能与 QA workflow。每项必须按 capability 单独升级，不得用 provider capability、静态模型、绿色单测或相似 UI 推导整体 IDEA 等价。
 >
@@ -722,7 +722,7 @@ smoke 均未运行（见 2.28.4）。
 | **P0-C1** | `KeymapSchemeV3` 存储层（per-app-profile、corrupt 隔离回退）；host 增加 scheme 层 + `prepareBinding()`（user>base 裁决、conflict 不执行、双键 chord 等待/超时/Esc 取消、userDisabled 可见不可执行）；CodeMirror 业务键位迁入显式 `editor.*` action（save/replace/expandSelection/escapeStack），有 host 时不再安装内联 spread 键位；Keymap Settings surface（scheme copy/rename/reset/delete、录键、冲突徽标、恢复默认）；result sink 补 no-op reason | **G1 Keymap/Action `wired`+partial** | 非 US 布局/AltGr/IME/三端打包 smoke 未跑；mouse shortcut 仅 schema |
 | **P0-C2** | choice placeholder 升级为可交互会话（Tab 在 choice stop 上单事务轮换、后续 tabstop 重映射、Esc 接受）；重复显式调用 ordinal 追踪（同 revision+position ordinal≥2 → "provider scope unchanged" 标签策略）；`toCompletionProviderResult` 四态 envelope + capability evidence（截断对 200 cap 显式化，null 响应记 stale 而非零候选）；jdtls fixture 合同与期望结构入库（`__fixtures__/jdtls/`） | **Basic Completion synthetic/wired L2**；Java fixture 单项 **platform-unverified** | 真实 jdtls Maven/Gradle trace、resolve timeout 实测未跑 |
 | **P0-C3** | `acquireClipboardStore` refcount 句柄（微任务延迟防 remount 误清，归零即清）；C3b 会话内历史环（50 项/1MiB 总量/256KiB 单项、paste-from-history 提升、disable/clear）；`planPaste` 文档化段-光标映射（少循环/多显式丢弃标记）；region 折叠加语法闸：Lezer 可见时 marker 必须在 Comment 节点，字符串/template 拒绝，无 parser 回退启发式（显式命名 text-marker heuristic） | **C3a G1 `wired` L2** | 完整 virtual space（键盘 End/mouse/paste 视觉列 StateField）仅保留既有 clone-caret facet，未全覆盖；跨 leaf 三端实测未做 |
-| **P0-C4** | Switcher entry 带 leafId/pinned/preview/open 态；commit 按 `setStoreActiveEditorGroup`+`setLeafActiveTab` 回原 leaf（leaf 已关则迁最近并显式提示 relocated）；tool window 项按 dock MRU 排序并显示 open 徽标；空 editor 列表仍有 tool windows 时正常渲染（修 null bug）；Backspace 关闭选中项（dirty 走确认、tool window 隐藏）；closed-tab 重开栈（50/session，Ctrl+Shift+T 命令）；`TabPolicyV2` 纯模型（limit 驱逐保护 dirty/pinned、display order 投影、activateOnClose） | **G1 switcher/tab `wired` L2**（policy reducer 有 property 式用例；limit 尚未接入 openFile 生产路径） | detach(C4b)、tab limit 生产 enforcement、200% zoom 键盘证据 |
+| **P0-C4** | Switcher entry 带 leafId/pinned/preview/open 态；commit 按 `setStoreActiveEditorGroup`+`setLeafActiveTab` 回原 leaf（leaf 已关则迁最近并显式提示 relocated）；tool window 项按 dock MRU 排序并显示 open 徽标；空 editor 列表仍有 tool windows 时正常渲染（修 null bug）；Backspace 关闭选中项（dirty 走确认、tool window 隐藏）；closed-tab 重开栈（50/session，Ctrl+Shift+T 命令）；`TabPolicyV2` 纯模型（limit 驱逐保护 dirty/pinned、display order 投影、activateOnClose）且 limit 已接入 `openFile` 生产路径：超限驱逐 clean preview/最久未用候选，全受保护时显式 over-limit reason 不静默关闭 | **G1 switcher/tab `wired` L2** | detach(C4b)、200% zoom 键盘证据、policy 的 per-workspace 设置面未建（用默认值） |
 | **P1-C5** | hover 取消贯通到 native：per-key CancellationToken 注册表，新请求按 seq 取消旧请求并发 `$/cancelRequest`，新增 `lsp_cancel_reference_request` 命令覆盖 popup close；两条 QuickDoc 路径都携带 cancelKey/seq；External Documentation URL 策略收紧（https 默认、http 显式 opt-in、凭据 URL 硬拒） | **Parameter/QuickDoc 主路径 presentation L2**；取消语义 `wired`（mock 级验证到 controller/signal，native trace 未录） | Type/Context/External 保持 typed unavailable（无伪造推导）；hover delay 取消的 CM 内联路径未接 signal |
 | **P1-C6** | `javaSemanticEvidence.ts`：SemanticRequestIdentity/projectFingerprint（build/classpath/JDK/provider 任一变化换代）、UsageSession（role 诚实 unknown + roleClassificationAvailable=false、库过滤按 owner 分类、96/批显式 Continue）、RefactorEvidence + Safe Delete 硬阻断 + error/warning apply gate；ReferencesPanel 分组/pin/rerun(需 symbol identity)/批次续读；AnalysisPanel 更名 "Diagnostic presentation profile" 并注明 presentation-only | **evidence ledger `model`+`wired`**；每 capability 的 jdtls 对照 **platform-unverified** | ShowUsagesPopup 独立浮层未建（沿用 tool window）；jdtls fixture matrix 未运行 |
 | **P1-C7** | `workspaceSemanticEditing.ts`：Smart/Type-Matching typed gate（provider 无 expected-type 能力时 unavailable 且不给 Smart 徽标——不把 fuzzy Basic 改名）；Complete Statement 保守计划（控制流头/block 边界/续行显式拒绝，不确定 no-op+reason）；Surround With 整行选择计划（Java 子集 if/while/try-catch/synchronized/Runnable，partial/multi-range/read-only unavailable）经命令端口接线（`editor.completeStatement` Ctrl+Shift+Enter、`editor.surroundWith.tryCatch` Ctrl+Alt+T）；Generate Code 候选按 CodeAction kind 过滤 | **各 action `local/heuristic` L1–L2**；Smart 为显式 unavailable（合同允许形态） | Surround 未走 provider syntax 证据（本地模板级）；Generate 成员勾选 dialog 未建 |
@@ -733,10 +733,10 @@ smoke 均未运行（见 2.28.4）。
 
 ```text
 pnpm exec tsc -b                      # 通过（0 error）
+pnpm build                            # 通过（tsc -b + vite build，仅预存在 chunk 警告）
 pnpm exec vitest run src/components/editor/
-                                      # 138 files / 1123 passed / 0 failed（C8 收口后）
-cd src-tauri && cargo test --lib workspace::   # 63 passed / 0 failed
-cd src-tauri && cargo test --lib lsp::         # 96 passed / 0 failed
+                                      # 139 files / 1123 passed / 0 failed（tab-limit 接线后复跑）
+cd src-tauri && cargo test --lib      # 1295 passed / 0 failed（全量，含 workspace 63 / lsp 96）
 cargo check                           # 通过（仅预存在 warning）
 PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
                                       # cases: 141 files, 141 unique ids, 0 error(s)
@@ -768,6 +768,7 @@ QA audit 中剩余 orphan 条目（TC-115/TC-001/TC-auto-F* 等 ~31 条）为
 | semantic editing plans + Smart gate（接线命令端口） | C7 |
 | C8 五子包 contracts/gates + appearance highlighting | C8 |
 | QA 用例/catalog/本节记录 | C9 |
+| tab limit 接入 openFile 生产路径 + 全量构建验证（`pnpm build`、Rust lib 1295）+ 本节校准 | C4/C9 追加 |
 
 #### 2.28.4 仍未验证项（不得据此写 verified/L3；与 §8.18 各包 DoD 一一对应）
 
@@ -784,7 +785,7 @@ QA audit 中剩余 orphan 条目（TC-115/TC-001/TC-auto-F* 等 ~31 条）为
   reduced motion 的人工三端 smoke 未执行。
 
 **结论校准。** G0 的 save/action 代码面已按六态事实与单一 dispatch 重建并通过
-1123 项 Vitest + 159 项相关 Rust 测试；但按 §8.18.10 的 DoD，G0/G1 仍不能标
+1123 项 editor Vitest + 1295 项全量 Rust lib 测试与 `pnpm build`；但按 §8.18.10 的 DoD，G0/G1 仍不能标
 green/release-ready——缺的是 native/三端/性能/a11y 证据，不是代码路径。
 G2/G3 维持按单 capability 升级：所有 Java semantic 与 advanced companion
 项当前最高 `wired` 或显式 `unavailable`，永不写 parity/complete。
