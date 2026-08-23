@@ -193,6 +193,10 @@ import {
   workspaceFileIdentity,
 } from "./workspace/workspaceRecovery";
 import {
+  pushClosedTab,
+  type ClosedTabEntry,
+} from "./workspace/workspaceTabPolicy";
+import {
   createWorkspaceLocationController,
   isPathContainedInRoot,
   NavigationHistoryFacade,
@@ -4602,7 +4606,18 @@ export function CodeWorkspaceTab({
       // Transaction owner hand-off: any in-flight save for this buffer must
       // discard its writeback/watcher/LSP side effects from here on.
       saveTransactionRegistryRef.current.discardFile(workspaceInstanceId, key, `Buffer ${file?.subtitle ?? key} was closed`);
-      if (file) closeLspDocument(file);
+      if (file) {
+        closeLspDocument(file);
+        // §8.18.5 reopen stack: session-only, capped, never persisted.
+        setClosedTabsStack((stack) => pushClosedTab(stack, {
+          fileIdentity: workspaceFileIdentity(file.ref),
+          ref: file.ref,
+          title: file.title,
+          subtitle: file.subtitle,
+          leafPath: [groupId],
+          closedAt: Date.now(),
+        }));
+      }
       setOpenFiles((current) => {
         const next = { ...current };
         delete next[key];
@@ -7501,7 +7516,30 @@ export function CodeWorkspaceTab({
     setStatusMessage("No coverage reports found (run tests with coverage enabled)");
   }, [setStatusMessage]);
 
+  // §8.18.5 closed-tab reopen stack (session-only, max 50, never persisted).
+  const [closedTabsStack, setClosedTabsStack] = useState<readonly ClosedTabEntry[]>([]);
+
   const workspaceCommands = useMemo<WorkspaceCommand[]>(() => [
+    {
+      id: "workspace.reopenClosedTab",
+      title: "Reopen Closed Tab",
+      category: "File",
+      keybinding: "Ctrl+Shift+T",
+      keywords: ["reopen", "closed", "tab", "undo close"],
+      run: () => {
+        // §8.18.5: pop the newest entry that still resolves to a real file.
+        while (closedTabsStack.length > 0) {
+          const [entry, ...rest] = closedTabsStack;
+          setClosedTabsStack(rest);
+          if (entry && entry.ref) {
+            void openFile(entry.ref as never);
+            return true;
+          }
+        }
+        setStatusMessage("No recently closed tab to reopen");
+        return false;
+      },
+    },
     {
       id: "workspace.keymapSettings",
       title: "Keymap Settings",
@@ -8616,6 +8654,7 @@ export function CodeWorkspaceTab({
     activeLanguageId,
     addRoot,
     closeFile,
+    closedTabsStack,
     copyTreePath,
     createDir,
     createFile,
@@ -8681,6 +8720,8 @@ export function CodeWorkspaceTab({
     scanWorkspaceCoverage,
     setBottomDockOpen,
     setBottomDockTab,
+    setClosedTabsStack,
+    setStatusMessage,
   ]);
 
   const commandFocusForTarget = useCallback((target: EventTarget | null): WorkspaceFocus => {
@@ -8789,6 +8830,12 @@ export function CodeWorkspaceTab({
   const tabSwitcherIndexRef = useRef(0);
   tabSwitcherOpenRef.current = tabSwitcherOpen;
   tabSwitcherIndexRef.current = tabSwitcherIndex;
+  // §8.18.5: session MRU for tool windows in the Switcher.
+  const dockMruRef = useRef(new Map<BottomDockTabId, number>());
+  useEffect(() => {
+    if (!bottomDockTab) return;
+    dockMruRef.current.set(bottomDockTab, Date.now());
+  }, [bottomDockTab]);
   const mruFileKeysRef = useRef<string[]>([]);
   useEffect(() => {
     if (!activeKey) return;
@@ -8800,51 +8847,113 @@ export function CodeWorkspaceTab({
 
   const tabSwitcherEntries = useMemo(() => {
     if (!tabSwitcherOpen) return [];
+    // §8.18.5 leaf identity: resolve which layout leaf currently owns each
+    // file so commit reactivates the ORIGINAL view instead of the active one.
+    const ownerByFileKey = new Map<string, string>();
+    for (const leaf of getAllLeafNodes(workspaceUi.layoutTreeV2)) {
+      for (const key of leaf.openFileKeys) {
+        if (!ownerByFileKey.has(key)) ownerByFileKey.set(key, leaf.id);
+      }
+    }
+    const groupMeta = editorGroups;
     return mruFileKeysRef.current
       .map((key) => openFiles[key])
       .filter((entry): entry is NonNullable<typeof entry> => !!entry)
-      .map((entry) => ({
-        key: entry.key,
-        title: entry.title,
-        subtitle: entry.subtitle,
-        dirty: entry.dirty,
-        active: entry.key === activeKey,
-      }));
-  }, [tabSwitcherOpen, openFiles, activeKey]);
+      .map((entry) => {
+        const owningGroup = Object.values(groupMeta).find(
+          (group) => group.openOrder.includes(entry.key),
+        );
+        return {
+          key: entry.key,
+          title: entry.title,
+          subtitle: entry.subtitle,
+          dirty: entry.dirty,
+          active: entry.key === activeKey,
+          leafId: ownerByFileKey.get(entry.key) ?? owningGroup?.id ?? null,
+          pinned: owningGroup?.pinnedKeys?.includes(entry.key) ?? false,
+          preview: owningGroup?.previewKey === entry.key,
+        };
+      });
+  }, [tabSwitcherOpen, openFiles, activeKey, workspaceUi.layoutTreeV2, editorGroups]);
 
   // §8.17.5 step 4: the Switcher lists editor MRU entries AND open tool
   // windows, exactly like IDEA. Tool-window activation is part of the same
   // cycle/commit index space.
-  const tabSwitcherToolWindows = useMemo(() => ([
-    { id: "problems" as BottomDockTabId, label: "Problems" },
-    { id: "search" as BottomDockTabId, label: "Find in Files" },
-    { id: "terminal" as BottomDockTabId, label: "Terminal" },
-    { id: "run" as BottomDockTabId, label: "Run" },
-    { id: "references" as BottomDockTabId, label: "References" },
-    { id: "call-hierarchy" as BottomDockTabId, label: "Call Hierarchy" },
-    { id: "type-hierarchy" as BottomDockTabId, label: "Type Hierarchy" },
-  ]), []);
+  const tabSwitcherToolWindows = useMemo(() => {
+    // §8.18.5: entries carry real open state and a session MRU ordering.
+    const mru = dockMruRef.current;
+    const items = ([
+      ["problems", "Problems"],
+      ["search", "Find in Files"],
+      ["terminal", "Terminal"],
+      ["run", "Run"],
+      ["references", "References"],
+      ["call-hierarchy", "Call Hierarchy"],
+      ["type-hierarchy", "Type Hierarchy"],
+    ] as readonly [BottomDockTabId, string][]).map(([id, label]) => ({
+      id,
+      label,
+      open: bottomDockOpen && bottomDockTab === id,
+    }));
+    return items.sort((left, right) =>
+      (mru.get(right.id) ?? 0) - (mru.get(left.id) ?? 0));
+  }, [bottomDockOpen, bottomDockTab]);
   const switcherTotalCountRef = useRef(0);
   switcherTotalCountRef.current = tabSwitcherEntries.length + tabSwitcherToolWindows.length;
 
+  /**
+   * Leaf-aware switcher close (§8.18.5 Backspace): clean tabs close directly,
+   * dirty tabs go through the same confirm path as the tab strip; tool
+   * windows hide instead of being destroyed.
+   */
+  const closeFromTabSwitcher = useCallback(async () => {
+    const index = Math.min(tabSwitcherIndexRef.current, switcherTotalCountRef.current - 1);
+    const editorEntry = tabSwitcherEntries[index];
+    setTabSwitcherOpen(false);
+    if (editorEntry) {
+      await closeFile(editorEntry.key, editorEntry.leafId ?? activeEditorGroupId);
+      return;
+    }
+    const toolWindow = tabSwitcherToolWindows[index - tabSwitcherEntries.length];
+    if (toolWindow) {
+      setBottomDockOpen(false);
+    }
+  }, [activeEditorGroupId, closeFile, tabSwitcherEntries, tabSwitcherToolWindows]);
+
   const commitTabSwitcher = useCallback((index: number) => {
-    const entries = mruFileKeysRef.current
-      .map((key) => openFilesRef.current[key])
-      .filter((entry): entry is NonNullable<typeof entry> => !!entry);
+    const entries = tabSwitcherEntries;
     setTabSwitcherOpen(false);
     const toolWindow = tabSwitcherToolWindows[index - entries.length];
     if (toolWindow) {
+      dockMruRef.current.set(toolWindow.id, Date.now());
       setBottomDockOpen(true);
       setBottomDockTab(toolWindow.id);
       return;
     }
     const target = entries[index];
-    if (target && target.key !== activeKeyRef.current) {
-      void openFile(target.ref);
+    if (!target) return;
+    const targetRef = openFilesRef.current[target.key]?.ref ?? null;
+    if (target.key === activeKeyRef.current && target.leafId) {
+      setStoreActiveEditorGroup(workspaceInstanceId, target.leafId as EditorGroupId);
+      return;
     }
-  }, [openFile, setBottomDockOpen, setBottomDockTab, tabSwitcherToolWindows]);
+    if (target.leafId) {
+      const leafStillExists = getAllLeafNodes(workspaceUi.layoutTreeV2).some((leaf) => leaf.id === target.leafId);
+      if (leafStillExists) {
+        // Original leaf activation (§8.18.5): never reroute through the
+        // currently active group.
+        setStoreActiveEditorGroup(workspaceInstanceId, target.leafId as EditorGroupId);
+        setLeafActiveTab(workspaceInstanceId, target.leafId, target.key);
+        return;
+      }
+      setStatusMessage(`${target.title}: its split was closed — reopened in the current editor`);
+    }
+    if (targetRef) void openFile(targetRef);
+  }, [workspaceUi.layoutTreeV2, openFile, setStoreActiveEditorGroup, setLeafActiveTab, setStatusMessage, tabSwitcherEntries, tabSwitcherToolWindows, setBottomDockOpen, setBottomDockTab, workspaceInstanceId]);
   const commitTabSwitcherRef = useRef(commitTabSwitcher);
   commitTabSwitcherRef.current = commitTabSwitcher;
+  const closeFromTabSwitcherRef = useRef(closeFromTabSwitcher);
+  closeFromTabSwitcherRef.current = closeFromTabSwitcher;
 
   useEffect(() => {
     if (!visible) return;
@@ -8883,6 +8992,14 @@ export function CodeWorkspaceTab({
         event.preventDefault();
         event.stopPropagation();
         setTabSwitcherOpen(false);
+        return;
+      }
+      // §8.18.5: Backspace inside the open Switcher closes the selected
+      // editor entry (dirty tabs confirm) or hides the selected tool window.
+      if (logicalKey === "backspace" && tabSwitcherOpenRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        void closeFromTabSwitcherRef.current();
         return;
       }
       void actionsController.dispatchKeydown(event, { eventTarget: event.target });

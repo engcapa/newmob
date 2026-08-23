@@ -7,12 +7,18 @@ export interface TabSwitcherEntry {
   subtitle: string;
   dirty: boolean;
   active: boolean;
+  /** Owning leaf identity — commit activates THIS leaf, not the active one (§8.18.5). */
+  leafId: string | null;
+  pinned?: boolean;
+  preview?: boolean;
 }
 
 /** Open tool window entry sharing the switcher index space (§8.17.5 step 4). */
 export interface TabSwitcherToolWindow {
   id: string;
   label: string;
+  /** Whether the dock currently shows this tool window. */
+  open?: boolean;
 }
 
 interface TabSwitcherProps {
@@ -27,10 +33,11 @@ interface TabSwitcherProps {
 }
 
 /**
- * IDEA-style Ctrl+Tab Switcher surface (§8.16.5 N2.6).
- * Key handling (hold-to-cycle, release-to-commit, Esc cancel) lives in the
- * workspace tab; this component only renders the MRU list and forwards
- * pointer interactions. Preview (hover) never mutates the MRU order.
+ * IDEA-style Ctrl+Tab Switcher surface (§8.16.5 N2.6, §8.18.5 P0-C4).
+ * Key handling (hold-to-cycle, release-to-commit, Esc cancel, Backspace
+ * close) lives in the workspace tab; this component only renders the list and
+ * forwards pointer interactions. Preview (hover) never mutates the MRU order.
+ * Renders with tool windows alone when no editor entries exist.
  */
 export function TabSwitcher({
   open,
@@ -52,7 +59,7 @@ export function TabSwitcher({
       });
   }, [open, selectedIndex]);
 
-  if (!open || entries.length === 0) return null;
+  if (!open || (entries.length === 0 && toolWindows.length === 0)) return null;
 
   return (
     <div
@@ -67,7 +74,7 @@ export function TabSwitcher({
     >
       <div className="w-[420px] max-w-[80vw] overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] text-[12px] shadow-2xl text-[var(--taomni-code-text)]">
         <div className="border-b border-[var(--taomni-code-border)] px-3 py-1.5 text-[10px] text-[var(--taomni-code-muted)]">
-          Switcher · Ctrl/Meta+Tab cycle · release modifier to open · Esc to cancel
+          Switcher · Ctrl/Meta+Tab cycle · release modifier to open · Backspace closes selected file · Esc to cancel
         </div>
         <div ref={listRef} className="max-h-[50vh] overflow-y-auto py-1">
           {entries.map((entry, index) => (
@@ -89,6 +96,7 @@ export function TabSwitcher({
             >
               <File className="h-3.5 w-3.5 shrink-0" />
               <span className="min-w-0 flex-1 truncate">
+                {entry.pinned && <span className="mr-1" title="Pinned">📌</span>}
                 {entry.title}
                 {entry.dirty && <span className="ml-1 text-[var(--taomni-accent)]">*</span>}
               </span>
@@ -123,6 +131,9 @@ export function TabSwitcher({
                   >
                     <PanelBottom className="h-3.5 w-3.5 shrink-0" />
                     <span className="min-w-0 flex-1 truncate">{toolWindow.label}</span>
+                    {toolWindow.open && (
+                      <span className="shrink-0 rounded bg-[var(--taomni-code-active-line-bg)] px-1 text-[9px]">open</span>
+                    )}
                     <span className="shrink-0 text-[10px] text-[var(--taomni-code-muted)]">tool window</span>
                   </div>
                 );
