@@ -33,7 +33,6 @@ export interface WorkspaceActionsController {
   ) => Promise<{ id: string; result: ActionResult } | null>;
   getActionState: (commandId: string, payload?: unknown) => ActionState;
   menuItems: WorkspaceCommandMenuItem[];
-  searchableCommands: WorkspaceCommandMenuItem[];
   /** Instance-scoped snapshot: the single runtime truth for all surfaces. */
   snapshot: ActionSnapshotItem[];
   commandRegistration: WorkspaceCommandRegistration;
@@ -178,11 +177,6 @@ export function useWorkspaceActionsController({
     provenance: entry.state.source,
   })), [snapshot]);
 
-  const searchableCommands = useMemo<WorkspaceCommandMenuItem[]>(
-    () => menuItems,
-    [menuItems],
-  );
-
   const commandRegistration = useMemo<WorkspaceCommandRegistration>(
     () => ({
       items: menuItems,
@@ -200,7 +194,6 @@ export function useWorkspaceActionsController({
     dispatchKeydown,
     getActionState,
     menuItems,
-    searchableCommands,
     snapshot,
     commandRegistration,
   };

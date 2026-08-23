@@ -80,6 +80,9 @@ export interface EditorRevealTarget {
 }
 
 interface EditorGroupProps {
+  /** Clipboard degradation notices forwarded to the workspace status bar. */
+  onClipboardUnavailable?: (message: string) => void;
+
   groupId: EditorGroupId;
   workspaceInstanceId: string;
   visible: boolean;
@@ -215,6 +218,7 @@ export function EditorGroup({
   groupId,
   workspaceInstanceId,
   visible,
+  onClipboardUnavailable,
   readOnly = false,
   openOrder,
   openFiles,
@@ -650,6 +654,8 @@ export function EditorGroup({
                       <CodeMirrorHost
                         key={`${activeFile.key}:edit`}
                         fileKey={activeFile.key}
+                        clipboardWorkspaceId={workspaceInstanceId}
+                        onClipboardUnavailable={onClipboardUnavailable}
                         path={activeFile.languagePath}
                         doc={activeFile.text}
                         visible={visible}
@@ -710,6 +716,8 @@ export function EditorGroup({
                     <CodeMirrorHost
                       key={activeFile.key}
                       fileKey={activeFile.key}
+                        clipboardWorkspaceId={workspaceInstanceId}
+                        onClipboardUnavailable={onClipboardUnavailable}
                       path={activeFile.languagePath}
                       doc={activeFile.text}
                       visible={visible}

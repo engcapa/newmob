@@ -1,4 +1,4 @@
-// NON-PRODUCTION MODEL: no production consumer; see §8.13 N12
+// NON-PRODUCTION FIXTURE (experimental): moved out of production per §8.17.9 N12 — no production import permitted; see ./README.md in this directory
 /**
  * Surround With & Generate Code Template Model (E1.3).
  *

@@ -1,15 +1,16 @@
 import { useMemo, useState } from "react";
 import { Keyboard, Search, Sparkles, X } from "lucide-react";
-import type { WorkspaceCommand } from "./workspaceCommands";
 import type { ActionSnapshotItem } from "./workspaceActionHost";
 
 export interface KeymapCheatSheetDialogProps {
   open: boolean;
-  commands: readonly WorkspaceCommand[];
   onClose: () => void;
   onExecuteCommand?: (commandId: string) => void | Promise<unknown>;
-  /** Instance-scoped host snapshot (§8.16.3); takes precedence over commands. */
-  actionSnapshots?: ActionSnapshotItem[];
+  /**
+   * Instance-scoped host snapshot (§8.17.3): the ONLY keymap input. Rows keep
+   * their frozen evaluations so execution can reuse the rendered state.
+   */
+  actionSnapshots: ActionSnapshotItem[];
 }
 
 function parseKeyParts(binding: string): string[] {
@@ -35,33 +36,29 @@ function parseKeyParts(binding: string): string[] {
 
 export function KeymapCheatSheetDialog({
   open,
-  commands,
   onClose,
   onExecuteCommand,
   actionSnapshots,
 }: KeymapCheatSheetDialogProps) {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
-  const boundCommands = useMemo(() => {
-    if (actionSnapshots !== undefined) {
-      return actionSnapshots
-        .filter((entry) => entry.state.availability !== "unsupported")
-        .map((entry) => ({
-          id: entry.id,
-          title: entry.title,
-          category: entry.category,
-          keybinding: entry.keybinding,
-          keybindings: entry.keybindings,
-          keywords: entry.keywords,
-          provenance: entry.state.source,
-          enabled: entry.state.availability === "available",
-          run: () => {},
-        }))
-        .filter((command) => !!command.keybinding || (command.keybindings?.length ?? 0) > 0);
-    }
-    return [...commands]
-      .filter((command) => !!command.keybinding || (command.keybindings?.length ?? 0) > 0);
-  }, [actionSnapshots, commands]);
+  const boundCommands = useMemo(
+    () => actionSnapshots
+      .filter((entry) => entry.state.availability !== "unsupported")
+      .map((entry) => ({
+        id: entry.id,
+        title: entry.title,
+        category: entry.category,
+        keybinding: entry.keybinding,
+        keybindings: entry.keybindings,
+        keywords: entry.keywords,
+        provenance: entry.state.source,
+        enabled: entry.state.availability === "available",
+        evaluation: entry.evaluation,
+      }))
+      .filter((command) => !!command.keybinding || (command.keybindings?.length ?? 0) > 0),
+    [actionSnapshots],
+  );
 
   const categories = useMemo(() => {
     const set = new Set<string>();

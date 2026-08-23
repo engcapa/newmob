@@ -31,28 +31,15 @@ import {
   type SaveNormalizationResult,
 } from "./saveNormalizationPipeline";
 import {
-  isWorkspaceHashMismatchError,
-  parseWorkspaceWriteError,
+  type WorkspaceFile,
 } from "../../../lib/editor/workspace";
-
-/** Extract a typed payload from an IPC write error for outcome consumers. */
-function typedWriteErrorPayload(err: unknown): {
-  error?: { kind: string; message: string; expectedHash?: string; actualHash?: string };
-} {
-  try {
-    const parsed = parseWorkspaceWriteError(err);
-    return {
-      error: {
-        kind: parsed.kind,
-        message: parsed.message,
-        ...(parsed.expectedHash !== undefined ? { expectedHash: parsed.expectedHash } : {}),
-        ...(parsed.actualHash !== undefined ? { actualHash: parsed.actualHash } : {}),
-      },
-    };
-  } catch {
-    return {};
-  }
-}
+import {
+  buildPreparedSave,
+  resolveWritePolicy,
+  saveCommitResultFromError,
+  type PreparedSave,
+  type SaveCommitResult,
+} from "./saveCommit";
 
 export interface WorkspaceStyleRoot {
   id?: string;
@@ -96,20 +83,17 @@ export interface SaveTransactionV2 {
   text: string;
 }
 
-export type SaveOutcome =
-  | { kind: "saved"; transactionId: string; hash: string }
-  | { kind: "cancelled"; reason: string; retryable: boolean }
-  | {
-      kind: "conflict" | "failed";
-      reason: string;
-      retryable: boolean;
-      /** Typed write-error payload when the failure came from the IPC writer. */
-      error?: { kind: string; message: string; expectedHash?: string; actualHash?: string };
-    };
+/**
+ * Five-state controller-level result (§8.17.1). `saved-current` /
+ * `saved-stale-snapshot` carry the written `WorkspaceFile`; cancellation
+ * names the phase it happened in; conflict/failed carry the typed write
+ * error payload.
+ */
+export type SaveCommitOutcome = SaveCommitResult;
 
-/** Typed result every save writer must return to `executeSaveTransaction`. */
-export type SaveWriterResult =
-  | { kind: "written"; hash: string }
+/** Typed result every byte writer must return to `executeSaveTransaction`. */
+export type SaveByteWriterResult =
+  | { kind: "written"; hash: string; file: WorkspaceFile }
   | { kind: "cancelled"; reason: string };
 
 interface CachedConfig {
@@ -424,29 +408,29 @@ export class WorkspaceStyleController {
   }
 
   /**
-   * Execute a save transaction against disk with pre/post race checks and typed outcome.
+   * Execute a save transaction against disk with pre/post race checks and the
+   * typed five-state outcome (§8.17.1). The controller owns prepare (style
+   * resolution, normalization, policy freeze into a `PreparedSave`) and hands
+   * the immutable record to the single byte writer; it never touches buffer
+   * state itself.
    */
   async executeSaveTransaction(
     transaction: SaveTransactionV2,
-    writeTextDisk: (
-      filePath: string,
-      text: string,
-      expectedHash: string | null,
-      encoding?: string,
-      bom?: boolean,
-      eol?: OpenFileEol | "lf" | "crlf" | "cr",
-    ) => Promise<SaveWriterResult>,
+    writeBytes: (prepared: PreparedSave) => Promise<SaveByteWriterResult>,
     options?: {
       formatOnSave?: boolean;
       formatFn?: (text: string) => Promise<string | null>;
       getLatestBufferVersion?: () => number;
     },
-  ): Promise<SaveOutcome> {
+  ): Promise<SaveCommitOutcome> {
     if (transaction.workspaceId !== this.workspaceId) {
       return {
         kind: "failed",
-        reason: `Transaction workspaceId mismatch: expected "${this.workspaceId}", got "${transaction.workspaceId}".`,
-        retryable: false,
+        transactionId: transaction.id,
+        error: {
+          kind: "io",
+          message: `Transaction workspaceId mismatch: expected "${this.workspaceId}", got "${transaction.workspaceId}".`,
+        },
       };
     }
 
@@ -481,16 +465,20 @@ export class WorkspaceStyleController {
     if (normResult.cancelledDueToEdit) {
       return {
         kind: "cancelled",
+        transactionId: transaction.id,
+        phase: "prepare",
         reason: normResult.diagnostics[0] ?? "Buffer was modified during format/normalize.",
-        retryable: true,
       };
     }
 
     if (normResult.encodingError) {
       return {
         kind: "failed",
-        reason: normResult.diagnostics[0] ?? "Text cannot be represented in target encoding.",
-        retryable: false,
+        transactionId: transaction.id,
+        error: {
+          kind: "encoding",
+          message: normResult.diagnostics[0] ?? "Text cannot be represented in target encoding.",
+        },
       };
     }
 
@@ -500,8 +488,9 @@ export class WorkspaceStyleController {
       if (currentVer !== transaction.bufferVersion) {
         return {
           kind: "cancelled",
-          reason: `Buffer version changed (${transaction.bufferVersion} -> ${currentVer}) before write.`,
-          retryable: true,
+          transactionId: transaction.id,
+          phase: "pre-write",
+          reason: `Buffer revision changed (${transaction.bufferVersion} -> ${currentVer}) before write.`,
         };
       }
     }
@@ -509,66 +498,54 @@ export class WorkspaceStyleController {
     // Check style generation
     if (this.generation !== transaction.styleGeneration) {
       return {
-        kind: "conflict",
+        kind: "cancelled",
+        transactionId: transaction.id,
+        phase: "pre-write",
         reason: "Workspace style generation changed during save transaction.",
-        retryable: true,
       };
     }
 
+    // Freeze the exact bytes/policy for the writer; nothing below re-reads
+    // metadata past this boundary.
+    const prepared = buildPreparedSave({
+      transactionId: transaction.id,
+      workspaceId: this.workspaceId,
+      fileKey: transaction.fileKey,
+      filePath: transaction.filePath,
+      text: normResult.text,
+      bufferRevision: transaction.bufferVersion,
+      styleGeneration: transaction.styleGeneration,
+      expectedDiskHash: transaction.expectedDiskHash,
+      policy: resolveWritePolicy({
+        explicit: {
+          eol: normResult.resolvedEol ?? resolvedEol ?? "lf",
+          encoding: normResult.resolvedCharset ?? resolvedCharset ?? "UTF-8",
+          bom: normResult.resolvedBom ?? transaction.policy.bom ?? false,
+        },
+      }),
+    });
+
     try {
-      const targetEol = normResult.resolvedEol ?? resolvedEol ?? "lf";
-      const targetEncoding = normResult.resolvedCharset ?? resolvedCharset ?? "UTF-8";
-      const targetBom = normResult.resolvedBom ?? transaction.policy.bom ?? false;
-
-      const writeResult = await writeTextDisk(
-        transaction.filePath,
-        normResult.text,
-        transaction.expectedDiskHash,
-        targetEncoding,
-        targetBom,
-        targetEol,
-      );
-
+      const writeResult = await writeBytes(prepared);
       if (writeResult.kind === "cancelled") {
         return {
           kind: "cancelled",
+          transactionId: prepared.transactionId,
+          phase: "pre-write",
           reason: writeResult.reason,
-          retryable: true,
         };
       }
-      const returnedHash = writeResult.hash;
-      if (!returnedHash) {
-        return {
-          kind: "failed",
-          reason: "writer returned no hash",
-          retryable: false,
-        };
-      }
-
       return {
-        kind: "saved",
-        transactionId: transaction.id,
-        hash: returnedHash,
+        kind: "saved-current",
+        transactionId: prepared.transactionId,
+        file: writeResult.file,
       };
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isConflict =
-        isWorkspaceHashMismatchError(err) ||
-        (typeof err === "object" && err !== null && (err as { kind?: string }).kind === "hash-mismatch");
-      if (isConflict) {
-        return {
-          kind: "conflict",
-          reason: `Disk hash conflict: ${msg}`,
-          retryable: true,
-          ...typedWriteErrorPayload(err),
-        };
+      const mapped = saveCommitResultFromError(prepared.transactionId, err);
+      if (mapped.kind === "conflict") {
+        return { ...mapped, error: { ...mapped.error, message: `Disk hash conflict: ${mapped.error.message}` } };
       }
-      return {
-        kind: "failed",
-        reason: `Disk write failed: ${msg}`,
-        retryable: true,
-        ...typedWriteErrorPayload(err),
-      };
+      return { ...mapped, error: { ...mapped.error, message: `Disk write failed: ${mapped.error.message}` } };
     }
   }
 }

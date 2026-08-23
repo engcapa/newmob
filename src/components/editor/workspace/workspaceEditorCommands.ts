@@ -312,27 +312,132 @@ export const foldSelection: Command = (view) => {
   return true;
 };
 
-const REGION_START = /^\s*(?:\/\/|#|\/\*|--|%|;|<!--)\s*#?region(?:\s|$)/i;
-const REGION_END = /^\s*(?:\/\/|#|\/\*|--|%|;|<!--)\s*#?endregion(?:\s|$)/i;
+/**
+ * Region marker grammar per language (§8.17.6 step 3). Markers are only
+ * recognized behind the language's OWN comment token — a `#region` inside a
+ * Python string or a `// region` in CSS never folds. Unknown languages yield
+ * no region folding at all instead of scanning arbitrary text.
+ */
+interface RegionCommentGrammar {
+  /** Regex source matching the comment opener (without trailing space). */
+  lineToken: RegExp;
+  /** Block-comment opener when the language folds regions inside blocks. */
+  block?: { open: RegExp; close: RegExp };
+}
 
-export const regionFoldService = foldService.of((state, lineStart, lineEnd) => {
-  const line = state.doc.lineAt(lineStart);
-  if (!REGION_START.test(line.text)) return null;
-  let depth = 1;
-  for (let number = line.number + 1; number <= state.doc.lines; number++) {
-    const candidate = state.doc.line(number);
-    if (REGION_START.test(candidate.text)) depth += 1;
-    if (!REGION_END.test(candidate.text)) continue;
-    depth -= 1;
-    if (depth === 0) {
-      return {
-        from: lineEnd,
-        to: candidate.from,
-      };
-    }
+const REGION_LINE_TOKENS: Record<string, RegExp> = {
+  "//": /\/\//,
+  "#": /#/,
+  "--": /--/,
+  "%": /%/,
+  ";": /;/,
+};
+
+function regionGrammarForPath(path: string | null | undefined): RegionCommentGrammar | null {
+  if (!path) return null;
+  const lower = path.toLowerCase();
+  const ext = lower.slice(lower.lastIndexOf(".") + 1);
+  const byLine = (token: RegExp): RegionCommentGrammar => ({ lineToken: token });
+  switch (ext) {
+    case "java":
+    case "js":
+    case "jsx":
+    case "ts":
+    case "tsx":
+    case "mjs":
+    case "cjs":
+    case "c":
+    case "h":
+    case "cpp":
+    case "hpp":
+    case "cc":
+    case "cs":
+    case "go":
+    case "rs":
+    case "swift":
+    case "kt":
+    case "kts":
+    case "scala":
+    case "php":
+      return { lineToken: REGION_LINE_TOKENS["//"], block: { open: /\/\*/, close: /\*\// } };
+    case "py":
+    case "pyw":
+    case "rb":
+    case "sh":
+    case "bash":
+    case "zsh":
+    case "yml":
+    case "yaml":
+    case "toml":
+      return byLine(REGION_LINE_TOKENS["#"]);
+    case "sql":
+    case "lua":
+    case "hs":
+      return byLine(REGION_LINE_TOKENS["--"]);
+    case "erl":
+    case "hrl":
+    case "tex":
+      return byLine(REGION_LINE_TOKENS["%"]);
+    case "clj":
+    case "cljs":
+    case "edn":
+    case "ini":
+    case "properties":
+      return byLine(REGION_LINE_TOKENS[";"]);
+    default:
+      // XML/HTML family folds regions inside <!-- --> blocks; every other
+      // language is region-fold unavailable.
+      if (["xml", "html", "htm", "xhtml", "svg", "vue", "md", "markdown"].includes(ext)) {
+        return { lineToken: /<!--/, block: { open: /<!--/, close: /-->/ } };
+      }
+      return null;
   }
-  return null;
-});
+}
+
+function buildRegionMatchers(grammar: RegionCommentGrammar): { start: RegExp; end: RegExp } {
+  const tokenSource = `(?:${grammar.lineToken.source}${grammar.block ? `|${grammar.block.open.source}` : ""})`;
+  return {
+    start: new RegExp(`^\\s*${tokenSource}\\s*#?region(?:\\s|$)`, "i"),
+    end: new RegExp(`^\\s*${tokenSource}\\s*#?endregion(?:\\s|$)`, "i"),
+  };
+}
+
+/**
+ * Language-aware region fold service factory (§8.17.6 step 3). The resolver
+ * runs per query so the service follows the host's current file without
+ * rebuilding extensions. Unknown/unmapped languages produce no folds instead
+ * of scanning arbitrary text.
+ */
+export function createRegionFoldService(
+  resolvePath: () => string | null | undefined,
+): ReturnType<typeof foldService.of> {
+  return foldService.of((state, lineStart, lineEnd) => {
+    const grammar = regionGrammarForPath(resolvePath() ?? null);
+    if (!grammar) return null;
+    const matchers = buildRegionMatchers(grammar);
+    const line = state.doc.lineAt(lineStart);
+    if (!matchers.start.test(line.text)) return null;
+    let depth = 1;
+    for (let number = line.number + 1; number <= state.doc.lines; number++) {
+      const candidate = state.doc.line(number);
+      if (matchers.start.test(candidate.text)) depth += 1;
+      if (!matchers.end.test(candidate.text)) continue;
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          from: lineEnd,
+          to: candidate.from,
+        };
+      }
+    }
+    return null;
+  });
+}
+
+/** Grammar-table fixture for tests/diagnostics. */
+export function regionFoldAvailableForPath(path: string): boolean {
+  return regionGrammarForPath(path) !== null;
+}
 
 function statementNodeAt(state: EditorState, position: number) {
   let node = syntaxTree(state).resolveInner(position, -1);

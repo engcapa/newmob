@@ -1,39 +1,49 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KeymapCheatSheetDialog } from "./KeymapCheatSheetDialog";
-import type { WorkspaceCommand } from "./workspaceCommands";
+import type { ActionSnapshotItem, PreparedActionEvaluation } from "./workspaceActionHost";
 
 afterEach(cleanup);
 
+/** Snapshot-only fixture (§8.17.3): the commands array input is gone. */
+function snapshotFixture(
+  overrides: Partial<ActionSnapshotItem> & Pick<ActionSnapshotItem, "id" | "title" | "category" | "keybinding">,
+): ActionSnapshotItem {
+  return {
+    keybindings: [],
+    state: {
+      availability: "available",
+      disabledReason: undefined,
+      source: "local",
+      scope: "workspace",
+      freshness: "current",
+      completeness: "complete",
+    },
+    evaluation: {} as unknown as PreparedActionEvaluation,
+    ...overrides,
+  };
+}
+
 describe("KeymapCheatSheetDialog", () => {
-  const sampleCommands: WorkspaceCommand[] = [
-    {
+  const sampleSnapshots: ActionSnapshotItem[] = [
+    snapshotFixture({
       id: "workspace.toggleCase",
       title: "Toggle Case",
       category: "Edit",
       keybinding: "Ctrl+Shift+U",
-      run: vi.fn(),
-    },
-    {
+    }),
+    snapshotFixture({
       id: "workspace.renameSymbol",
       title: "Rename Symbol",
       category: "Refactor",
       keybinding: "Shift+F6",
-      run: vi.fn(),
-    },
-    {
+    }),
+    snapshotFixture({
       id: "workspace.runContextConfiguration",
       title: "Run Context Configuration",
       category: "Run",
       keybinding: "Ctrl+Shift+F10",
-      run: vi.fn(),
-    },
-    {
-      id: "workspace.unboundCommand",
-      title: "Unbound Action",
-      category: "View",
-      run: vi.fn(),
-    },
+    }),
   ];
 
   it("renders keymap dialog with shortcuts and categories", () => {
@@ -41,7 +51,7 @@ describe("KeymapCheatSheetDialog", () => {
     render(
       <KeymapCheatSheetDialog
         open={true}
-        commands={sampleCommands}
+        actionSnapshots={sampleSnapshots}
         onClose={onClose}
       />,
     );
@@ -59,7 +69,7 @@ describe("KeymapCheatSheetDialog", () => {
     render(
       <KeymapCheatSheetDialog
         open={true}
-        commands={sampleCommands}
+        actionSnapshots={sampleSnapshots}
         onClose={onClose}
       />,
     );
@@ -77,7 +87,7 @@ describe("KeymapCheatSheetDialog", () => {
     render(
       <KeymapCheatSheetDialog
         open={true}
-        commands={sampleCommands}
+        actionSnapshots={sampleSnapshots}
         onClose={onClose}
       />,
     );
@@ -89,25 +99,12 @@ describe("KeymapCheatSheetDialog", () => {
     expect(screen.queryByText("Toggle Case")).toBeNull();
   });
 
-  it("treats an explicitly empty instance snapshot as authoritative", () => {
-    render(
-      <KeymapCheatSheetDialog
-        open
-        commands={sampleCommands}
-        actionSnapshots={[]}
-        onClose={vi.fn()}
-      />,
-    );
 
-    expect(screen.getByText(/0 shortcut keybindings configured/)).toBeInTheDocument();
-    expect(screen.queryByText("Toggle Case")).not.toBeInTheDocument();
-  });
 
   it("shows disabled snapshot actions without exposing Run", () => {
     render(
       <KeymapCheatSheetDialog
         open
-        commands={sampleCommands}
         actionSnapshots={[{
           id: "workspace.toggleCase",
           title: "Toggle Case",
@@ -122,7 +119,7 @@ describe("KeymapCheatSheetDialog", () => {
             freshness: "current",
             completeness: "unavailable",
           },
-          evaluation: {} as never,
+          evaluation: {} as unknown as PreparedActionEvaluation,
         }]}
         onClose={vi.fn()}
         onExecuteCommand={vi.fn()}
@@ -139,7 +136,7 @@ describe("KeymapCheatSheetDialog", () => {
     render(
       <KeymapCheatSheetDialog
         open={true}
-        commands={sampleCommands}
+        actionSnapshots={sampleSnapshots}
         onClose={onClose}
         onExecuteCommand={onExecuteCommand}
       />,

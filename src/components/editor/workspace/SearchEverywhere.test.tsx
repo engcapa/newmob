@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SearchEverywhere, type GoToFileItem } from "./SearchEverywhere";
-import type { WorkspaceCommand } from "./workspaceCommands";
+import type { ActionSnapshotItem, PreparedActionEvaluation } from "./workspaceActionHost";
 import { createWorkspaceSemanticIndexSnapshot } from "./workspaceSemanticIndex";
 
 const items: GoToFileItem[] = [
@@ -9,14 +9,24 @@ const items: GoToFileItem[] = [
   { rootId: "root-1", rootName: "app", path: "src/lib/editor/workspace.ts" },
   { rootId: "root-2", rootName: "tools", path: "scripts/deploy.sh" },
 ];
-const commands: WorkspaceCommand[] = [
+/** Snapshot-only fixture (§8.17.3): the commands array input is gone. */
+const actionSnapshots: ActionSnapshotItem[] = [
   {
     id: "workspace.findInFiles",
     title: "Find in Files",
     category: "Search",
     keybinding: "Ctrl+Shift+F",
+    keybindings: ["Ctrl+Shift+F"],
     keywords: ["content", "grep"],
-    run: vi.fn(),
+    state: {
+      availability: "available",
+      disabledReason: undefined,
+      source: "local",
+      scope: "workspace",
+      freshness: "current",
+      completeness: "complete",
+    },
+    evaluation: {} as unknown as PreparedActionEvaluation,
   },
 ];
 
@@ -29,7 +39,7 @@ function renderPopup(overrides: Partial<Parameters<typeof SearchEverywhere>[0]> 
       open
       items={items}
       loading={false}
-      commands={commands}
+      actionSnapshots={actionSnapshots}
       onClose={onClose}
       onOpenFile={onOpenFile}
       onRunCommand={onRunCommand}

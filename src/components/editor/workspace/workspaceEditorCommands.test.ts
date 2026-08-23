@@ -22,7 +22,8 @@ import {
   normalizeEditorSelections,
   pasteEditorClipboardPayload,
   plainTextClipboardPayload,
-  regionFoldService,
+  createRegionFoldService,
+  regionFoldAvailableForPath,
   reverseLines,
   selectNextEditorOccurrence,
   selectionHistoryField,
@@ -35,6 +36,12 @@ import {
   unselectOccurrence,
   workspaceEditorKeymap,
 } from "./workspaceEditorCommands";
+
+
+/** Region services bound to concrete paths (grammar comes from the path). */
+const tsRegionFoldService = createRegionFoldService(() => "src/Main.ts");
+const pyRegionFoldService = createRegionFoldService(() => "src/block.py");
+const sqlRegionFoldService = createRegionFoldService(() => "src/query.sql");
 
 describe("workspace editor commands", () => {
   it("normalizes overlapping ranges and keeps the primary owner", () => {
@@ -226,7 +233,7 @@ describe("workspace editor commands", () => {
     const view = new EditorView({
       state: EditorState.create({
         doc: "//region outer\na\n//region inner\nb\n//endregion\nc\n//endregion",
-        extensions: [regionFoldService],
+        extensions: [tsRegionFoldService],
       }),
     });
     const outer = view.state.doc.line(1);
@@ -529,7 +536,7 @@ describe("workspace editor commands", () => {
     const pyView = new EditorView({
       state: EditorState.create({
         doc: "# region Python Block\nx = 1\n# endregion",
-        extensions: [regionFoldService],
+        extensions: [pyRegionFoldService],
       }),
     });
     const pyLine = pyView.state.doc.line(1);
@@ -542,7 +549,7 @@ describe("workspace editor commands", () => {
     const sqlView = new EditorView({
       state: EditorState.create({
         doc: "-- #region SQL Block\nSELECT 1;\n-- #endregion",
-        extensions: [regionFoldService],
+        extensions: [sqlRegionFoldService],
       }),
     });
     const sqlLine = sqlView.state.doc.line(1);
@@ -578,3 +585,33 @@ describe("workspace editor commands", () => {
   });
 });
 
+describe("N9.3/N14.4 region grammar strategy", () => {
+  it("never folds regions in unknown languages (typed unavailable)", () => {
+    const cssService = createRegionFoldService(() => "src/theme.css");
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "// #region styles\n.a {}\n// #endregion",
+        extensions: [cssService],
+      }),
+    });
+    const line = view.state.doc.line(1);
+    expect(foldable(view.state, line.from, line.to)).toBeNull();
+    expect(regionFoldAvailableForPath("src/theme.css")).toBe(false);
+    expect(regionFoldAvailableForPath("src/Main.java")).toBe(true);
+    view.destroy();
+  });
+
+  it("does not fold a marker behind another language's comment token", () => {
+    // Python file containing a Java-style marker: the '#' grammar must not
+    // accept '// #region'.
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "// #region java style\nx = 1\n// #endregion",
+        extensions: [pyRegionFoldService],
+      }),
+    });
+    const line = view.state.doc.line(1);
+    expect(foldable(view.state, line.from, line.to)).toBeNull();
+    view.destroy();
+  });
+});

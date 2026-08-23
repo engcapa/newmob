@@ -15,7 +15,6 @@ import type { QuickDocContent } from "./referenceDocumentation";
 import { LocationPeek, type LocationPeekState } from "./LocationPeek";
 import { RecentLocationsDialog } from "./RecentLocationsDialog";
 import type { NavigationHistoryFacade, NavigationLocation, WorkspaceLocationController } from "./navigationHistoryModel";
-import type { WorkspaceCommand } from "./workspaceCommands";
 import type { WorkspaceSemanticIndexSnapshot } from "./workspaceSemanticIndex";
 
 interface WorkspacePopupsHostProps {
@@ -24,8 +23,7 @@ interface WorkspacePopupsHostProps {
   goToFileItems: GoToFileItem[];
   goToFileLoading: boolean;
   goToFileTruncated: boolean;
-  searchableCommands: WorkspaceCommand[];
-  actionSnapshots?: ActionSnapshotItem[];
+  actionSnapshots: ActionSnapshotItem[];
   symbolsAvailable: boolean;
   semanticIndex: WorkspaceSemanticIndexSnapshot;
   fetchWorkspaceSymbols: (query: string) => Promise<GoToSymbolQueryResult>;
@@ -80,7 +78,6 @@ export function WorkspacePopupsHost({
   goToFileItems,
   goToFileLoading,
   goToFileTruncated,
-  searchableCommands,
   actionSnapshots,
   symbolsAvailable,
   semanticIndex,
@@ -131,7 +128,6 @@ export function WorkspacePopupsHost({
         items={goToFileItems}
         loading={goToFileLoading}
         truncated={goToFileTruncated}
-        commands={searchableCommands}
         actionSnapshots={actionSnapshots}
         symbolsAvailable={symbolsAvailable}
         semanticIndex={semanticIndex}

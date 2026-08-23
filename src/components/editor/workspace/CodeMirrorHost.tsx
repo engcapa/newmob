@@ -76,9 +76,13 @@ import type {
   LspSignatureHelpResult,
 } from "../../../lib/editor/lsp";
 import { languageForPath } from "../../git/diffLanguage";
+import { clipboardStoreForWorkspace } from "./workspaceClipboardSession";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
 import {
+  advanceLspSnippetTabstop,
+  cancelLspSnippetSession,
   createLspCompletionSource,
+  lspSnippetSessionInvalidator,
   type CompletionAcceptanceDiagnostic,
   type CompletionRequestIdentity,
   type CompletionRequestToken,
@@ -115,7 +119,7 @@ import {
   occurrenceSessionField,
   pasteEditorClipboardPayload,
   plainTextClipboardPayload,
-  regionFoldService,
+  createRegionFoldService,
   selectAllEditorOccurrences,
   selectNextEditorOccurrence,
   selectionHistoryField,
@@ -143,6 +147,13 @@ interface CodeMirrorHostProps {
   fileKey?: string;
   doc: string;
   visible: boolean;
+  /**
+   * Owning workspace instance id (§8.17.6): copy/cut write the workspace
+   * clipboard session and paste reads it across every split view.
+   */
+  clipboardWorkspaceId?: string;
+  /** Surfaced when a clipboard operation degraded (system clipboard failed). */
+  onClipboardUnavailable?: (message: string) => void;
   diagnostics: LspDiagnostic[];
   highlights?: LspDocumentHighlight[];
   inlayHints?: LspInlayHint[];
@@ -251,20 +262,55 @@ export interface EditorCommandTarget {
 
 const editorClipboardPayloadByView = new WeakMap<EditorView, EditorClipboardPayload>();
 
+// Clipboard helpers close over host props through this per-view registry
+// (bound at mount) so the module-level helpers stay pure and testable.
+const clipboardContextByView = new WeakMap<
+  EditorView,
+  { workspaceId: string | null; onUnavailable: (message: string) => void }
+>();
+
 function rememberEditorClipboardPayload(
   view: EditorView,
   payload: EditorClipboardPayload,
+  options: { systemClipboardUnavailable?: boolean } = {},
 ): void {
+  // WeakMap stays as a compat read for legacy call paths only; the workspace
+  // session store below is the owner shared across split views (§8.17.6).
   editorClipboardPayloadByView.set(view, {
     ...payload,
     segments: payload.segments ? [...payload.segments] : undefined,
   });
+  const context = clipboardContextByView.get(view);
+  if (context?.workspaceId) {
+    clipboardStoreForWorkspace(context.workspaceId).write({
+      sourceViewId: String(view.dom.getAttribute("data-cm-id") ?? ""),
+      plainText: payload.plainText,
+      segments: payload.segments,
+      rectangular: payload.rectangular,
+      sourceEol: payload.sourceEol,
+      ...(options.systemClipboardUnavailable ? { systemClipboardUnavailable: true } : {}),
+    });
+  }
 }
 
 function payloadForSystemClipboardText(
   view: EditorView,
   text: string,
 ): EditorClipboardPayload {
+  // Workspace session first: a copy in ANOTHER split view must still paste
+  // with its segments/rectangular shape here.
+  const context = clipboardContextByView.get(view);
+  const session = context?.workspaceId
+    ? clipboardStoreForWorkspace(context.workspaceId).read()
+    : null;
+  if (session && session.plainText === text && (session.segments?.length || session.rectangular)) {
+    return {
+      plainText: session.plainText,
+      segments: session.segments ?? undefined,
+      sourceEol: session.sourceEol,
+      rectangular: session.rectangular,
+    };
+  }
   const remembered = editorClipboardPayloadByView.get(view);
   return remembered?.plainText === text
     ? remembered
@@ -274,9 +320,21 @@ function payloadForSystemClipboardText(
 function writeEditorSelectionToClipboard(view: EditorView): boolean {
   const payload = editorClipboardPayload(view.state);
   if (!payload) return false;
-  void writeText(payload.plainText).then(() => {
-    if (view.dom.isConnected) rememberEditorClipboardPayload(view, payload);
-  }).catch(() => {});
+  const context = clipboardContextByView.get(view);
+  void writeText(payload.plainText)
+    .then(() => {
+      if (view.dom.isConnected) rememberEditorClipboardPayload(view, payload);
+    })
+    .catch(() => {
+      // System clipboard denied: the workspace session still owns the full
+      // payload; surface unavailable instead of silently dropping it.
+      if (view.dom.isConnected) {
+        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        context?.onUnavailable(
+          "System clipboard unavailable — copy kept for in-workspace paste only",
+        );
+      }
+    });
   return true;
 }
 
@@ -284,22 +342,45 @@ function pasteSystemClipboard(view: EditorView): boolean {
   if (view.composing || view.state.readOnly) return false;
   const docAtRequest = view.state.doc;
   const selectionAtRequest = view.state.selection;
-  void readTextResult().then((result) => {
-    if (
-      !result.ok
-      || !view.dom.isConnected
-      || view.composing
-      || view.state.doc !== docAtRequest
-      || !view.state.selection.eq(selectionAtRequest, true)
-    ) {
-      return;
-    }
-    pasteEditorClipboardPayload(
-      view,
-      payloadForSystemClipboardText(view, result.text),
-    );
-    view.focus();
-  }).catch(() => {});
+  const context = clipboardContextByView.get(view);
+  void readTextResult()
+    .then((result) => {
+      if (
+        !result.ok
+        || !view.dom.isConnected
+        || view.composing
+        || view.state.doc !== docAtRequest
+        || !view.state.selection.eq(selectionAtRequest, true)
+      ) {
+        if (!result.ok && view.dom.isConnected && !view.composing) {
+          const workspaceId = context?.workspaceId ?? null;
+          const session = workspaceId
+            ? clipboardStoreForWorkspace(workspaceId).read()
+            : null;
+          if (session) {
+            // System clipboard read failed; the workspace session preserves
+            // the last copy/cut (segments intact) with an explicit notice.
+            pasteEditorClipboardPayload(view, {
+              plainText: session.plainText,
+              segments: session.segments ?? undefined,
+              sourceEol: session.sourceEol,
+              rectangular: session.rectangular,
+            });
+            context?.onUnavailable(
+              "System clipboard unavailable — pasted the last in-workspace copy instead",
+            );
+            view.focus();
+          }
+        }
+        return;
+      }
+      pasteEditorClipboardPayload(
+        view,
+        payloadForSystemClipboardText(view, result.text),
+      );
+      view.focus();
+    })
+    .catch(() => {});
   return true;
 }
 
@@ -309,19 +390,36 @@ function cutSystemClipboard(view: EditorView): boolean {
   if (!payload) return false;
   const docAtRequest = view.state.doc;
   const selectionAtRequest = view.state.selection;
-  void writeText(payload.plainText).then(() => {
-    if (
-      !view.dom.isConnected
-      || view.composing
-      || view.state.doc !== docAtRequest
-      || !view.state.selection.eq(selectionAtRequest, true)
-    ) {
-      return;
-    }
-    rememberEditorClipboardPayload(view, payload);
-    cutEditorSelections(view);
-    view.focus();
-  }).catch(() => {});
+  const context = clipboardContextByView.get(view);
+  void writeText(payload.plainText)
+    .then(() => {
+      if (
+        !view.dom.isConnected
+        || view.composing
+        || view.state.doc !== docAtRequest
+        || !view.state.selection.eq(selectionAtRequest, true)
+      ) {
+        return;
+      }
+      rememberEditorClipboardPayload(view, payload);
+      cutEditorSelections(view);
+      view.focus();
+    })
+    .catch(() => {
+      if (
+        view.dom.isConnected
+        && !view.composing
+        && view.state.doc === docAtRequest
+        && view.state.selection.eq(selectionAtRequest, true)
+      ) {
+        rememberEditorClipboardPayload(view, payload, { systemClipboardUnavailable: true });
+        cutEditorSelections(view);
+        context?.onUnavailable(
+          "System clipboard unavailable — cut kept for in-workspace paste only",
+        );
+        view.focus();
+      }
+    });
   return true;
 }
 
@@ -920,6 +1018,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   onPinHoverDoc,
   onDefinition,
   onReferences,
+  clipboardWorkspaceId,
+  onClipboardUnavailable,
   onComplete,
   onCompleteResolve,
   getCompletionIdentity,
@@ -958,6 +1058,12 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const onClipboardUnavailableRef = useRef((message: string) => {
+    onClipboardUnavailable?.(message);
+  });
+  onClipboardUnavailableRef.current = (message: string) => {
+    onClipboardUnavailable?.(message);
+  };
   const languageCompartment = useRef(new Compartment());
   const codeStyleCompartment = useRef(new Compartment());
   const diagnosticsCompartment = useRef(new Compartment());
@@ -1297,7 +1403,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       extensions: [
         lineNumbers(),
         foldGutter(),
-        regionFoldService,
+        // Language-aware region grammar; unknown languages never fold.
+        createRegionFoldService(() => pathRef.current),
         highlightActiveLine(),
         highlightActiveLineGutter(),
         EditorState.allowMultipleSelections.of(true),
@@ -1368,6 +1475,8 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         search({ top: true, createPanel: createWorkspaceSearchPanel }),
         selectionHistoryField,
         occurrenceSessionField,
+        // Drop pending LSP snippet tabstop sessions on any unrelated edit.
+        lspSnippetSessionInvalidator(),
         codeStyleCompartment.current.of([
           EditorState.tabSize.of(codeStyle?.tabSize ?? 2),
           indentUnit.of(codeStyle?.insertSpaces ? " ".repeat(codeStyle?.indentSize || codeStyle?.tabSize || 2) : "\t"),
@@ -1424,22 +1533,26 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
         // 1) Accept the active completion (often a live template).
         // 2) Else expand an exact live/postfix template under the caret
         //    even when the popup is closed (sout + Tab without waiting).
-        // 3) Else fall through to snippet tabstops / indentWithTab.
+        // 3) Else cycle the pending LSP snippet tabstops (combined
+        //    snippet+import acceptance committed in one transaction).
+        // 4) Else fall through to CM snippet tabstops / indentWithTab.
         Prec.high(keymap.of([
           {
             key: "Tab",
             run: (view) => {
               if (acceptCompletion(view)) return true;
-              return expandLiveTemplateAt(
+              if (expandLiveTemplateAt(
                 view,
                 liveTemplateLanguageForPath(pathRef.current),
-              );
+              )) return true;
+              return advanceLspSnippetTabstop(view);
             },
           },
         ])),
         keymap.of([
           { key: "Mod-s", run: saveHandler },
           { key: "Mod-r", run: openReplacePanel },
+          { key: "Escape", run: (view) => cancelLspSnippetSession(view) },
           { key: "Escape", run: escapeEditorSelections },
           { key: "Escape", run: () => hideSignature() },
           { key: "Mod-p", run: (view) => requestSignatureHelp(view, null, { explicit: true }) },
@@ -1590,10 +1703,28 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
       requestParameterInfoRef.current = null;
       signatureRequestSequenceRef.current += 1;
       cancelActiveHoverResize(activeHoverResizeSessionRef);
+      clipboardContextByView.delete(view);
       view.destroy();
       viewRef.current = null;
     };
   }, []);
+
+  // §8.17.6: clipboard helpers read the owning workspace id + unavailable
+  // callback through this registry so copy/paste works across split views.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    clipboardContextByView.set(view, {
+      workspaceId: clipboardWorkspaceId ?? null,
+      onUnavailable: (message) => onClipboardUnavailableRef.current(message),
+    });
+    return () => {
+      clipboardContextByView.set(view, {
+        workspaceId: null,
+        onUnavailable: () => {},
+      });
+    };
+  }, [clipboardWorkspaceId]);
 
   useEffect(() => {
     const view = viewRef.current;

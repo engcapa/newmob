@@ -1,9 +1,4 @@
-/**
- * Dependency Completion Provider (N8 - IDEA 2026.2 Parity).
- *
- * Provides intelligent build file dependency completion for Maven (pom.xml)
- * and Gradle (build.gradle Groovy / build.gradle.kts Kotlin DSL).
- */
+// NON-PRODUCTION FIXTURE (experimental): moved out of production per §8.17.9 N12 — no production import permitted; see ./README.md in this directory
 
 export type DependencyCompletionKind = "groupId" | "artifactId" | "version" | "coordinate";
 

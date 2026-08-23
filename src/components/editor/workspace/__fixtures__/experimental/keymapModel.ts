@@ -1,4 +1,4 @@
-// NON-PRODUCTION MODEL: no production consumer; see §8.13 N12
+// NON-PRODUCTION FIXTURE (experimental): moved out of production per §8.17.9 N12 — no production import permitted; see ./README.md in this directory
 /**
  * Keymap Scheme & Conflict Graph Model (E2.1 & E2.2).
  *
@@ -9,8 +9,8 @@
 import {
   DEFAULT_WORKSPACE_ACTIONS,
   type WorkspaceActionMetadata,
-} from "./workspaceActionRegistry";
-import { type KeyboardEventLike } from "./workspaceCommands";
+} from "../../workspaceActionRegistry";
+import { type KeyboardEventLike } from "../../workspaceCommands";
 
 export interface KeymapScheme {
   id: string;

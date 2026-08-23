@@ -291,18 +291,27 @@ export function readWorkspaceLayoutSnapshot(workspaceInstanceId: string): Worksp
 export function writeWorkspaceLayoutSnapshot(
   workspaceInstanceId: string,
   snapshot: WorkspaceLayoutSnapshot,
+  options?: { onIssue?: (message: string) => void },
 ): void {
   if (!workspaceInstanceId || typeof window === "undefined") return;
   try {
     const normalized = normalizeWorkspaceLayoutSnapshot(snapshot);
     const treeValid = validateLayoutTree(normalized.layoutTreeV2);
     if (!treeValid.valid) {
+      // §8.17.4 step 3: refusal is a user-visible recovery diagnostic, not a
+      // silent console line — the previous valid snapshot keeps restoring.
       console.error("[LayoutPersistence] Refusing to persist invalid layout tree:", treeValid.errors);
+      options?.onIssue?.(
+        "Current editor layout could not be saved (invalid split structure); the last valid layout will be restored next launch",
+      );
       return;
     }
     const consistency = validateTreeGroupConsistency(normalized.layoutTreeV2, normalized.editorGroups as any);
     if (!consistency.consistent) {
       console.error("[LayoutPersistence] Refusing to persist inconsistent tree/groups:", consistency.errors);
+      options?.onIssue?.(
+        "Editor tabs and split layout disagreed; the last consistent layout was kept for next launch",
+      );
       return;
     }
     window.localStorage.setItem(storageKeyV2(workspaceInstanceId), JSON.stringify(normalized));

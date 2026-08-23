@@ -159,3 +159,110 @@ export function saveCommitResultFromError(
     },
   };
 }
+
+/**
+ * Single construction point for every save path (§8.17.1 step 1). Callers
+ * resolve their policy inputs through `resolveWritePolicy`; this helper only
+ * assembles the immutable record so all paths share one identity shape.
+ */
+export function buildPreparedSave(input: {
+  transactionId: string;
+  workspaceId: string;
+  fileKey: string;
+  filePath: string;
+  text: string;
+  bufferRevision: number;
+  styleGeneration: number;
+  expectedDiskHash: string | null;
+  policy: SaveCommitPolicy;
+}): PreparedSave {
+  return { ...input, policy: { ...input.policy } };
+}
+
+/** Owner identity captured when a transaction registers (§8.17.1 step 4). */
+export interface SaveTransactionOwner {
+  workspaceId: string;
+  transactionId: string;
+  /** Buffer key owning the writeback, or a synthetic `closed:<path>` owner for disk-only writes. */
+  fileKey: string;
+  /** Epoch snapshot at registration time. */
+  ownerEpoch: number;
+}
+
+export type SaveOwnerCheck =
+  | { active: true }
+  | { active: false; reason: string };
+
+function ownerEpochKey(workspaceId: string, fileKey: string): string {
+  return `${workspaceId}\u0000${fileKey}`;
+}
+
+function liveEntryKey(workspaceId: string, transactionId: string): string {
+  return `${workspaceId}\u0000${transactionId}`;
+}
+
+/**
+ * Tracks in-flight save transactions per `(workspaceId, transactionId)` with
+ * an owner generation per `(workspaceId, fileKey)`. Closing a tab, renaming a
+ * file or unmounting the workspace bumps the epoch so an in-flight writer's
+ * writeback, watcher notify and LSP `didSave`/`didChange` are discarded as
+ * `cancelled/writeback-discarded` instead of resurrecting buffer state.
+ */
+export class SaveTransactionRegistry {
+  private readonly epochs = new Map<string, number>();
+  private readonly discardReasons = new Map<string, string>();
+  private readonly live = new Map<string, SaveTransactionOwner>();
+
+  begin(workspaceId: string, fileKey: string, transactionId: string): SaveTransactionOwner {
+    const epochKey = ownerEpochKey(workspaceId, fileKey);
+    const ownerEpoch = this.epochs.get(epochKey) ?? 0;
+    const owner: SaveTransactionOwner = { workspaceId, transactionId, fileKey, ownerEpoch };
+    this.live.set(liveEntryKey(workspaceId, transactionId), owner);
+    return owner;
+  }
+
+  /**
+   * Bump the owner epoch for one buffer (close tab / rename). Every
+   * transaction registered before this call becomes discarded.
+   */
+  discardFile(workspaceId: string, fileKey: string, reason = `Buffer ${fileKey} was closed or renamed`): void {
+    const epochKey = ownerEpochKey(workspaceId, fileKey);
+    const next = (this.epochs.get(epochKey) ?? 0) + 1;
+    this.epochs.set(epochKey, next);
+    this.discardReasons.set(epochKey, reason);
+    // Live entries are intentionally kept: a late `check` must observe the
+    // typed discard reason via the epoch mismatch, not a generic settle.
+  }
+
+  /** Drop every live transaction of a workspace (unmount / instance dispose). */
+  discardWorkspace(workspaceId: string): void {
+    for (const [key, owner] of [...this.live.entries()]) {
+      if (owner.workspaceId === workspaceId) this.live.delete(key);
+    }
+  }
+
+  check(owner: SaveTransactionOwner): SaveOwnerCheck {
+    if (!this.live.has(liveEntryKey(owner.workspaceId, owner.transactionId))) {
+      return { active: false, reason: "Save transaction already settled" };
+    }
+    const epochKey = ownerEpochKey(owner.workspaceId, owner.fileKey);
+    const current = this.epochs.get(epochKey) ?? 0;
+    if (current !== owner.ownerEpoch) {
+      return {
+        active: false,
+        reason: this.discardReasons.get(epochKey) ?? "Save transaction owner changed",
+      };
+    }
+    return { active: true };
+  }
+
+  /** Settle (forget) a finished transaction so late checks cannot pass. */
+  settle(owner: SaveTransactionOwner): void {
+    this.live.delete(liveEntryKey(owner.workspaceId, owner.transactionId));
+  }
+
+  /** Test/diagnostic view of live transactions for a workspace. */
+  listActive(workspaceId: string): SaveTransactionOwner[] {
+    return [...this.live.values()].filter((owner) => owner.workspaceId === workspaceId);
+  }
+}

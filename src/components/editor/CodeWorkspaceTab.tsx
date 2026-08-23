@@ -164,8 +164,9 @@ import {
 import type { ResolvedCodeStyle } from "./workspace/editorConfigResolver";
 import {
   createWorkspaceStyleController,
-  type WorkspaceStyleController,
+  type SaveByteWriterResult,
   type SaveTransactionV2,
+  type WorkspaceStyleController,
 } from "./workspace/workspaceStyleController";
 import type {
   CompletionAcceptanceDiagnostic,
@@ -173,11 +174,14 @@ import type {
   CompletionRequestToken,
 } from "./workspace/lspCompletion";
 import {
+  buildPreparedSave,
   classifySaveWriteback,
   nextSaveTransactionId,
   resolveWritePolicy,
+  SaveTransactionRegistry,
   validatePreparedSaveBoundary,
   type PreparedSave,
+  type SaveCommitResult,
 } from "./workspace/saveCommit";
 import {
   createWorkspaceLocationController,
@@ -376,6 +380,7 @@ import { OutlinePane } from "./workspace/OutlinePane";
 import { useDeferredGitLineChanges } from "./workspace/useDeferredGitLineChanges";
 import { useWorkspaceActionsController } from "./workspace/useWorkspaceActionsController";
 import {
+  eventLogicalKey,
   type WorkspaceCommand,
   type WorkspaceCommandContext,
   type WorkspaceCommandRegistration,
@@ -1606,6 +1611,7 @@ export function CodeWorkspaceTab({
   indentationOverridesRef.current = indentationOverrides;
 
   const resolvedCodeStylesRef = useRef<Record<string, ResolvedCodeStyle>>({});
+  const saveTransactionRegistryRef = useRef<SaveTransactionRegistry>(new SaveTransactionRegistry());
   const workspaceStyleControllerRef = useRef<WorkspaceStyleController>(
     createWorkspaceStyleController({
       workspaceId: workspaceInstanceId,
@@ -1615,6 +1621,13 @@ export function CodeWorkspaceTab({
       },
     }),
   );
+
+  // Unmount drops every live transaction owner so in-flight writers discard
+  // their writeback/watcher/LSP side effects instead of resurrecting state.
+  useEffect(() => {
+    const registry = saveTransactionRegistryRef.current;
+    return () => registry.discardWorkspace(workspaceInstanceId);
+  }, [workspaceInstanceId]);
 
   const rootsFingerprint = roots.map((r) => `${r.id}:${r.path}`).join("|");
 
@@ -2450,7 +2463,11 @@ export function CodeWorkspaceTab({
         expandedDirKeys,
         editorGroups: persistableGroups,
         layoutTreeV2: workspaceUi.layoutTreeV2,
-      }));
+      }), {
+        // §8.17.4 step 3: persistence refusals surface as a recovery
+        // diagnostic, not only a console line.
+        onIssue: (message) => setStatusMessage(message),
+      });
     }, 250);
     return () => window.clearTimeout(timer);
   }, [
@@ -3681,6 +3698,165 @@ export function CodeWorkspaceTab({
     );
   }, []);
 
+  /**
+   * Single open-buffer save commit core (§8.17.1). Takes an immutable
+   * PreparedSave, registers a transaction owner, runs the synchronous
+   * pre-write boundary, invokes the one byte writer, and classifies the
+   * writeback. Close/rename/unmount discard the writeback, watcher notify,
+   * git/semantic invalidation and LSP didSave/didChange by owner generation.
+   */
+  const commitOpenBufferPreparedSave = useCallback(async (
+    prepared: PreparedSave,
+  ): Promise<SaveByteWriterResult> => {
+    const key = prepared.fileKey;
+    const registry = saveTransactionRegistryRef.current;
+    const owner = registry.begin(prepared.workspaceId, key, prepared.transactionId);
+    try {
+      const fileAtPrepare = openFilesRef.current[key];
+      if (!fileAtPrepare) {
+        return { kind: "cancelled", reason: "Open buffer was closed before write" };
+      }
+
+      mutateOpenBuffer(key, { saving: true, error: null }, "save-metadata");
+
+      // Prepare-phase await: snapshot the previous on-disk contents before any
+      // overwrite. Never mutates buffer text and never bumps a revision.
+      if (prepared.filePath && fileAtPrepare.savedText.length <= 2 * 1024 * 1024) {
+        const historyText = `${fileAtPrepare.bom ? "\uFEFF" : ""}${applyEditorEol(fileAtPrepare.savedText, fileAtPrepare.eol)}`;
+        await historySnapshot(prepared.filePath, historyText, "save").catch(() => null);
+      }
+
+      // 2. Pre-write commit boundary (SYNCHRONOUS, NO AWAIT)
+      const currentBeforeWrite = openFilesRef.current[key];
+      let cancellation: string | null = validatePreparedSaveBoundary(prepared, currentBeforeWrite
+        ? {
+            filePath: absolutePathForOpenFile(currentBeforeWrite) ?? currentBeforeWrite.path ?? "",
+            documentRevision: currentBeforeWrite.documentRevision ?? 0,
+            styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
+          }
+        : null);
+      if (!cancellation) {
+        const ownerCheck = registry.check(owner);
+        if (!ownerCheck.active) cancellation = ownerCheck.reason;
+      }
+      if (cancellation) {
+        mutateOpenBuffer(key, { saving: false }, "save-metadata");
+        return { kind: "cancelled", reason: cancellation };
+      }
+
+      // In the SAME synchronous turn, invoke the byte writer.
+      const writerPromise = writeTextSnapshot({
+        fileKey: key,
+        filePath: prepared.filePath,
+        logicalText: prepared.text,
+        expectedDiskHash: prepared.expectedDiskHash,
+        policy: prepared.policy,
+      });
+
+      // 3. Writeback phase (merge, never overwrite text; generation-gated)
+      try {
+        const saved = await writerPromise;
+
+        const ownerAfterWrite = registry.check(owner);
+        if (!ownerAfterWrite.active) {
+          // Bytes landed on disk, but the owning buffer/tab/workspace is gone:
+          // discard writeback, watcher, git/semantic and LSP side effects.
+          return { kind: "cancelled", reason: `writeback-discarded: ${ownerAfterWrite.reason}` };
+        }
+
+        const liveAfterWrite = openFilesRef.current[key];
+        const writeback = classifySaveWriteback(prepared, liveAfterWrite
+          ? { documentRevision: liveAfterWrite.documentRevision ?? 0 }
+          : null);
+        if (writeback.kind === "discarded") {
+          // Buffer closed while the writer was in flight: the disk write is
+          // real, but no buffer or provider state may be resurrected.
+          return { kind: "written", hash: saved.hash, file: saved };
+        }
+
+        const savedPath = absolutePathForOpenFile(fileAtPrepare);
+        if (savedPath && registry.check(owner).active) {
+          if (savedPath.endsWith(".editorconfig")) {
+            workspaceStyleControllerRef.current.invalidate(savedPath);
+          }
+          await lspWorkspaceDidChangeWatchedFiles(prepared.workspaceId, [{
+            path: savedPath,
+            type: 2,
+          }]).catch(() => 0);
+        }
+        if (!registry.check(owner).active) {
+          return { kind: "written", hash: saved.hash, file: saved };
+        }
+        const normalized = normalizeEditorText(saved.text);
+        const savedBom = saved.bom ?? prepared.policy.bom;
+
+        const latestNow = liveAfterWrite!;
+
+        mutateOpenBuffer(
+          key,
+          {
+            savedText: normalized.text,
+            text: latestNow.text,
+            eol: (prepared.policy.eol.toUpperCase() as OpenFileEol) ?? normalized.eol,
+            encoding: saved.encoding ?? prepared.policy.encoding,
+            bom: savedBom,
+            hash: saved.hash,
+            mtime: saved.mtime,
+            size: saved.size,
+            loading: false,
+            saving: false,
+            dirty: writeback.kind === "saved-stale-snapshot",
+            error: null,
+            documentRevision: latestNow.documentRevision,
+          },
+          "save-writeback",
+        );
+
+        if (!registry.check(owner).active) {
+          // Closed between merge and provider sync; skip didSave/didChange.
+          return { kind: "written", hash: saved.hash, file: saved };
+        }
+        if (fileAtPrepare.ref.kind === "root") {
+          notifyWorkspacePathGitChanged(fileAtPrepare.ref.rootId, fileAtPrepare.ref.path);
+        }
+        semanticIndex.invalidate("document-saved", [savedPath ?? fileAtPrepare.path]);
+        if (writeback.kind === "saved-current") {
+          await saveLspDocument({ ...fileAtPrepare, text: prepared.text }, prepared.text);
+        } else {
+          // Stale-snapshot save: the disk now holds an older revision than the
+          // live buffer. Sending didSave(snapshotText) would let the provider
+          // observe an old document as the saved one; sync only the current
+          // buffer via didChange and let the next explicit save own didSave.
+          await syncLspDocument(latestNow, "change");
+        }
+        return { kind: "written", hash: saved.hash, file: saved };
+      } catch (err) {
+        const message = errorMessage(err);
+        mutateOpenBuffer(
+          key,
+          {
+            dirty: true,
+            saving: false,
+            error: message,
+          },
+          "save-metadata",
+        );
+        throw err instanceof Error ? err : new Error(message);
+      }
+    } finally {
+      registry.settle(owner);
+    }
+  }, [
+    absolutePathForOpenFile,
+    mutateOpenBuffer,
+    notifyWorkspacePathGitChanged,
+    saveLspDocument,
+    semanticIndex.invalidate,
+    syncLspDocument,
+    writeTextSnapshot,
+  ]);
+
+  /** Public open-buffer save: prepares one transaction, then commits it. */
   const saveOpenBufferText = useCallback(async (
     key: string,
     textToSave?: string,
@@ -3698,8 +3874,9 @@ export function CodeWorkspaceTab({
       throw new Error(`${file.title} is a read-only library source`);
     }
 
-    // 1. Prepare phase: capture immutable PreparedSave (§8.16.1 P0-S3)
-    const prepared: PreparedSave = {
+    // 1. Prepare phase: capture the immutable PreparedSave through the shared
+    // builder so every path (open-dirty, open-clean, replay) shares one shape.
+    const prepared = buildPreparedSave({
       transactionId: nextSaveTransactionId(),
       workspaceId: workspaceInstanceId,
       fileKey: key,
@@ -3716,131 +3893,15 @@ export function CodeWorkspaceTab({
         },
         file,
       }),
-    };
-    const snapshotText = prepared.text;
-
-    // Set metadata without changing text or bumping revision
-    mutateOpenBuffer(
-      key,
-      { saving: true, error: null },
-      "save-metadata",
-    );
-
-    // Snapshot the previous on-disk contents before overwrite when available
-    const historyPath = absolutePathForOpenFile(file);
-    if (historyPath && file.savedText.length <= 2 * 1024 * 1024) {
-      const historyText = `${file.bom ? "\uFEFF" : ""}${applyEditorEol(file.savedText, file.eol)}`;
-      await historySnapshot(historyPath, historyText, "save").catch(() => null);
-    }
-
-    // 2. Pre-write commit boundary (SYNCHRONOUS, NO AWAIT)
-    const currentBeforeWrite = openFilesRef.current[key];
-    const boundaryCancellation = validatePreparedSaveBoundary(prepared, currentBeforeWrite
-      ? {
-          filePath: absolutePathForOpenFile(currentBeforeWrite) ?? currentBeforeWrite.path ?? "",
-          documentRevision: currentBeforeWrite.documentRevision ?? 0,
-          styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
-        }
-      : null);
-    if (boundaryCancellation) {
-      mutateOpenBuffer(key, { saving: false }, "save-metadata");
-      return null;
-    }
-
-    // In the SAME synchronous turn, invoke byte writer
-    const writerPromise = writeTextSnapshot({
-      fileKey: key,
-      filePath: prepared.filePath,
-      logicalText: prepared.text,
-      expectedDiskHash: prepared.expectedDiskHash,
-      policy: prepared.policy,
     });
 
-    // 3. Writeback phase (Merge, never overwrite text)
-    try {
-      const saved = await writerPromise;
-
-      // Closed during write: discard writeback, watcher notify, git,
-      // semantic invalidation and LSP by transaction identity (§8.16.1).
-      const liveAfterWrite = openFilesRef.current[key];
-      const writeback = classifySaveWriteback(prepared, liveAfterWrite
-        ? { documentRevision: liveAfterWrite.documentRevision ?? 0 }
-        : null);
-      if (writeback.kind === "discarded") {
-        return saved;
-      }
-
-      const savedPath = absolutePathForOpenFile(file);
-      if (savedPath) {
-        if (savedPath.endsWith(".editorconfig")) {
-          workspaceStyleControllerRef.current.invalidate(savedPath);
-        }
-        await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
-          path: savedPath,
-          type: 2,
-        }]).catch(() => 0);
-      }
-      const normalized = normalizeEditorText(saved.text);
-      const savedBom = saved.bom ?? prepared.policy.bom;
-
-      const latestNow = liveAfterWrite!;
-
-      mutateOpenBuffer(
-        key,
-        {
-          savedText: normalized.text,
-          text: latestNow.text,
-          eol: (prepared.policy.eol.toUpperCase() as OpenFileEol) ?? normalized.eol,
-          encoding: saved.encoding ?? prepared.policy.encoding,
-          bom: savedBom,
-          hash: saved.hash,
-          mtime: saved.mtime,
-          size: saved.size,
-          loading: false,
-          saving: false,
-          dirty: writeback.kind === "saved-stale-snapshot",
-          error: null,
-          documentRevision: latestNow.documentRevision,
-        },
-        "save-writeback",
-      );
-
-      if (file.ref.kind === "root") {
-        notifyWorkspacePathGitChanged(file.ref.rootId, file.ref.path);
-      }
-      semanticIndex.invalidate("document-saved", [savedPath ?? file.path]);
-      if (writeback.kind === "saved-current") {
-        await saveLspDocument({ ...file, text: snapshotText }, snapshotText);
-      } else {
-        // Stale-snapshot save: the disk now holds an older revision than the
-        // live buffer. Sending didSave(snapshotText) would let the provider
-        // observe an old document as the saved one; sync only the current
-        // buffer via didChange and let the next explicit save own didSave.
-        await syncLspDocument(latestNow, "change");
-      }
-      return saved;
-    } catch (err) {
-      const message = errorMessage(err);
-      mutateOpenBuffer(
-        key,
-        {
-          dirty: true,
-          saving: false,
-          error: message,
-        },
-        "save-metadata",
-      );
-      throw err instanceof Error ? err : new Error(message);
-    }
+    const result = await commitOpenBufferPreparedSave(prepared);
+    if (result.kind === "cancelled") return null;
+    return result.file;
   }, [
     absolutePathForOpenFile,
-    mutateOpenBuffer,
-    notifyWorkspacePathGitChanged,
-    saveLspDocument,
-    syncLspDocument,
-    semanticIndex.invalidate,
+    commitOpenBufferPreparedSave,
     workspaceInstanceId,
-    writeTextSnapshot,
   ]);
 
   const formatFileText = useCallback(async (
@@ -3933,19 +3994,12 @@ export function CodeWorkspaceTab({
         text: file.text,
       };
 
-      const outcome = await workspaceStyleControllerRef.current.executeSaveTransaction(
+      // The controller prepares (style/normalization/policy freeze into one
+      // PreparedSave); the commit core is the single byte writer + writeback
+      // owner shared with every other save path (§8.17.1).
+      const outcome: SaveCommitResult = await workspaceStyleControllerRef.current.executeSaveTransaction(
         tx,
-        async (_filePath, text, _expectedHash, encoding, bom, eol) => {
-          const savedFile = await saveOpenBufferText(key, text, {
-            eol: (eol?.toUpperCase() as OpenFileEol) ?? file.eol,
-            encoding,
-            bom,
-          });
-          if (!savedFile) {
-            return { kind: "cancelled", reason: "Buffer modified during save preparation" } as const;
-          }
-          return { kind: "written", hash: savedFile.hash } as const;
-        },
+        (prepared) => commitOpenBufferPreparedSave(prepared),
         {
           formatOnSave: intelligencePreferences.formatOnSave,
           formatFn: async (currentText) => {
@@ -3960,9 +4014,10 @@ export function CodeWorkspaceTab({
         },
       );
 
-      if (outcome.kind === "saved") {
+      if (outcome.kind === "saved-current" || outcome.kind === "saved-stale-snapshot") {
         const latestNow = openFilesRef.current[key];
-        const wasStale = (latestNow?.documentRevision ?? 0) > snapshotRevision;
+        const wasStale = outcome.kind === "saved-stale-snapshot"
+          || (latestNow?.documentRevision ?? 0) > snapshotRevision;
         if (wasStale) {
           setStatusMessage(`Saved previous snapshot of ${file.subtitle}; current changes remain unsaved`);
         } else {
@@ -3974,19 +4029,19 @@ export function CodeWorkspaceTab({
           void promptReloadProject(key, file.subtitle);
         }
       } else if (outcome.kind === "cancelled") {
-        setStatusMessage(`Save cancelled: ${outcome.reason}`);
+        setStatusMessage(`Save cancelled (${outcome.phase}): ${outcome.reason}`);
       } else if (outcome.kind === "conflict") {
-        setStatusMessage(`Save conflict: ${outcome.reason}`);
+        setStatusMessage(`Save conflict: ${outcome.error.message}`);
       } else {
-        setStatusMessage(`Save failed: ${outcome.reason}`);
+        setStatusMessage(`Save failed: ${outcome.error.message}`);
       }
     },
     [
       activeKey,
+      commitOpenBufferPreparedSave,
       formatFileText,
       intelligencePreferences.formatOnSave,
       promptReloadProject,
-      saveOpenBufferText,
       setStatusMessage,
       workspaceInstanceId,
     ],
@@ -4270,6 +4325,9 @@ export function CodeWorkspaceTab({
       }
       closeLayoutTabInLeaf(workspaceInstanceId, groupId, key);
       if (usedByOtherGroup) return;
+      // Transaction owner hand-off: any in-flight save for this buffer must
+      // discard its writeback/watcher/LSP side effects from here on.
+      saveTransactionRegistryRef.current.discardFile(workspaceInstanceId, key, `Buffer ${file?.subtitle ?? key} was closed`);
       if (file) closeLspDocument(file);
       setOpenFiles((current) => {
         const next = { ...current };
@@ -5199,6 +5257,17 @@ export function CodeWorkspaceTab({
     };
   }, [gitRoots, gitSnapshots, roots]);
 
+  // §8.17.4 step 1: every chrome consumer derives its per-leaf inputs from
+  // the recursive tree's leaves — no `editorGroups.primary/secondary` enum and
+  // no two-group swap fallback. A third split leaf gets the same treatment.
+  const layoutLeafActiveEntries = useMemo(
+    () => getAllLeafNodes(workspaceUi.layoutTreeV2).map((leaf) => ({
+      groupId: leaf.id as EditorGroupId,
+      activeKey: (editorGroups[leaf.id]?.activeKey ?? leaf.activeKey ?? null) as string | null,
+    })),
+    [editorGroups, workspaceUi.layoutTreeV2],
+  );
+
   const activeGitFileStateSignature = useMemo(() => {
     const stateForKey = (key: string | null) => {
       if (!key) return "empty";
@@ -5206,45 +5275,40 @@ export function CodeWorkspaceTab({
       if (!file) return "missing";
       return file.loading ? "loading" : "ready";
     };
-    return [
-      editorGroups.primary.activeKey,
-      stateForKey(editorGroups.primary.activeKey),
-      editorGroups.secondary.activeKey,
-      stateForKey(editorGroups.secondary.activeKey),
-    ].join(":");
-  }, [editorGroups.primary.activeKey, editorGroups.secondary.activeKey, openFiles]);
+    return layoutLeafActiveEntries
+      .map(({ groupId, activeKey }) => `${groupId}:${activeKey ?? "empty"}:${stateForKey(activeKey)}`)
+      .join("|");
+  }, [layoutLeafActiveEntries, openFiles]);
 
   const gitDiffSources = useMemo(() => {
     const seen = new Set<string>();
-    return [editorGroups.primary.activeKey, editorGroups.secondary.activeKey].flatMap((key) => {
-      if (!key || seen.has(key)) return [];
-      seen.add(key);
-      const file = openFiles[key];
+    return layoutLeafActiveEntries.flatMap(({ activeKey }) => {
+      if (!activeKey || seen.has(activeKey)) return [];
+      seen.add(activeKey);
+      const file = openFiles[activeKey];
       const target = gitTargetForFile(file ?? null);
-      const head = gitHeadTextByFile[key];
+      const head = gitHeadTextByFile[activeKey];
       if (!file || !target || !head || head.sourceKey !== target.sourceKey) return [];
       return [{
-        key,
+        key: activeKey,
         sourceKey: target.sourceKey,
         headText: head.text,
         bufferText: file.text,
       }];
     });
   }, [
-    editorGroups.primary.activeKey,
-    editorGroups.secondary.activeKey,
     gitHeadTextByFile,
     gitTargetForFile,
+    layoutLeafActiveEntries,
     openFiles,
   ]);
   const gitLineChangesByFile = useDeferredGitLineChanges(gitDiffSources);
 
   useEffect(() => {
     let cancelled = false;
-    const activeKeys = new Set([
-      editorGroups.primary.activeKey,
-      editorGroups.secondary.activeKey,
-    ].filter((key): key is string => !!key));
+    const activeKeys = new Set(layoutLeafActiveEntries
+      .map(({ activeKey }) => activeKey)
+      .filter((key): key is string => !!key));
     for (const key of activeKeys) {
       const file = openFilesRef.current[key];
       const target = gitTargetForFile(file ?? null);
@@ -5282,9 +5346,9 @@ export function CodeWorkspaceTab({
     return () => { cancelled = true; };
   }, [activeGitFileStateSignature, gitHeadTextByFile, gitTargetForFile]);
 
-  const gitBlameRequestSignature = useMemo(() => {
-    const signatureForGroup = (groupId: EditorGroupId) => {
-      const key = editorGroups[groupId].activeKey;
+  const gitBlameRequestSignature = useMemo(() => (
+    layoutLeafActiveEntries.map(({ groupId, activeKey }) => {
+      const key = activeKey;
       // Input batching keeps the store snapshot stable during a typing burst,
       // but the ref is updated immediately.  Use it here so inline blame is
       // disabled from the first dirty keystroke rather than one batch later.
@@ -5295,15 +5359,13 @@ export function CodeWorkspaceTab({
       }
       const line = (cursorPositions[groupId]?.line ?? 0) + 1;
       return `${groupId}:${key}:${target.sourceKey}:${file.hash}:${line}`;
-    };
-    return `${signatureForGroup("primary")}|${signatureForGroup("secondary")}`;
-  }, [
+    }).join("|")
+  ), [
     cursorPositions,
-    editorGroups.primary.activeKey,
-    editorGroups.secondary.activeKey,
     gitTargetForFile,
     intelligencePreferences.inlineBlameEnabled,
-    openFiles,
+    layoutLeafActiveEntries,
+    openFilesRef,
   ]);
 
   useEffect(() => {
@@ -5908,6 +5970,12 @@ export function CodeWorkspaceTab({
     const initialFiles = Object.values(initialOpenFiles);
     const closeFiles = (files: OpenFileState[]) => {
       for (const file of files) {
+        // Rename/DeleteFile invalidate in-flight save owners for the removed buffers.
+        saveTransactionRegistryRef.current.discardFile(
+          workspaceInstanceId,
+          file.key,
+          `Buffer ${file.subtitle} was removed by a workspace resource operation`,
+        );
         closeLspDocument(file);
       }
     };
@@ -6237,51 +6305,72 @@ export function CodeWorkspaceTab({
         const replayMetadata = replayWorkspaceEncodingRef.current?.get(fsPathComparisonKey(absolutePath));
         // Replay metadata is the authoritative prior state for undo; it wins
         // over applier defaults but both flow through the single policy
-        // resolution shared with open-buffer saves (§8.16.1 step 2).
-        const effectivePolicy = resolveWritePolicy({
-          explicit: {
-            encoding: replayMetadata?.encoding ?? encoding,
-            bom: replayMetadata?.bom ?? bom,
-            eol: replayMetadata?.eol ?? eol ?? "lf",
-          },
-        });
-        // Snapshot current disk contents before bulk WorkspaceEdit writes.
-        try {
-          let oldText: string | null = null;
-          for (const root of rootsRef.current) {
-            const rel = relativePathWithinRoot(root.path, absolutePath);
-            if (rel === null) continue;
-            try {
-              oldText = (await workspaceReadFile(root.path, rel)).text;
-            } catch {
-              oldText = null;
-            }
-            break;
-          }
-          if (oldText == null) {
-            try {
-              oldText = (await workspaceReadLooseFile(absolutePath)).text;
-            } catch {
-              oldText = null;
-            }
-          }
-          if (oldText != null && oldText.length <= 2 * 1024 * 1024) {
-            await historySnapshot(absolutePath, oldText, "replace").catch(() => null);
-          }
-        } catch {
-          // Best-effort history; never block the edit write.
-        }
-        await writeTextSnapshot({
+        // resolution shared with open-buffer saves (§8.17.1 step 1). The
+        // closed-file path builds the same PreparedSave identity and byte
+        // writer contract as open-buffer commits.
+        const prepared = buildPreparedSave({
+          transactionId: nextSaveTransactionId(),
+          workspaceId: workspaceInstanceId,
+          fileKey: `closed:${absolutePath}`,
           filePath: absolutePath,
-          logicalText: text,
+          text,
+          bufferRevision: -1,
+          styleGeneration: workspaceStyleControllerRef.current.getGeneration(),
           expectedDiskHash: expectedHash ?? null,
-          policy: effectivePolicy,
+          policy: resolveWritePolicy({
+            explicit: {
+              encoding: replayMetadata?.encoding ?? encoding,
+              bom: replayMetadata?.bom ?? bom,
+              eol: replayMetadata?.eol ?? eol ?? "lf",
+            },
+          }),
         });
+        const registry = saveTransactionRegistryRef.current;
+        const owner = registry.begin(prepared.workspaceId, prepared.fileKey, prepared.transactionId);
+        try {
+          // Snapshot current disk contents before bulk WorkspaceEdit writes.
+          try {
+            let oldText: string | null = null;
+            for (const root of rootsRef.current) {
+              const rel = relativePathWithinRoot(root.path, absolutePath);
+              if (rel === null) continue;
+              try {
+                oldText = (await workspaceReadFile(root.path, rel)).text;
+              } catch {
+                oldText = null;
+              }
+              break;
+            }
+            if (oldText == null) {
+              try {
+                oldText = (await workspaceReadLooseFile(absolutePath)).text;
+              } catch {
+                oldText = null;
+              }
+            }
+            if (oldText != null && oldText.length <= 2 * 1024 * 1024) {
+              await historySnapshot(absolutePath, oldText, "replace").catch(() => null);
+            }
+          } catch {
+            // Best-effort history; never block the edit write.
+          }
+          await writeTextSnapshot({
+            filePath: prepared.filePath,
+            logicalText: prepared.text,
+            expectedDiskHash: prepared.expectedDiskHash,
+            policy: prepared.policy,
+          });
 
-        await lspWorkspaceDidChangeWatchedFiles(workspaceInstanceId, [{
-          path: absolutePath,
-          type: 2,
-        }]).catch(() => 0);
+          // Watcher notify is generation-gated like every other writeback side
+          // effect; a discarded owner must not resurrect provider state.
+          if (!registry.check(owner).active) return;
+          await lspWorkspaceDidChangeWatchedFiles(prepared.workspaceId, [{
+            path: absolutePath,
+            type: 2,
+          }]).catch(() => 0);
+        } finally {
+          registry.settle(owner);
+        }
       },
       confirmChangeAnnotations: async (annotations) => {
         const visible = annotations.slice(0, 8);
@@ -8403,87 +8492,103 @@ export function CodeWorkspaceTab({
       }));
   }, [tabSwitcherOpen, openFiles, activeKey]);
 
+  // §8.17.5 step 4: the Switcher lists editor MRU entries AND open tool
+  // windows, exactly like IDEA. Tool-window activation is part of the same
+  // cycle/commit index space.
+  const tabSwitcherToolWindows = useMemo(() => ([
+    { id: "problems" as BottomDockTabId, label: "Problems" },
+    { id: "search" as BottomDockTabId, label: "Find in Files" },
+    { id: "terminal" as BottomDockTabId, label: "Terminal" },
+    { id: "run" as BottomDockTabId, label: "Run" },
+    { id: "references" as BottomDockTabId, label: "References" },
+    { id: "call-hierarchy" as BottomDockTabId, label: "Call Hierarchy" },
+    { id: "type-hierarchy" as BottomDockTabId, label: "Type Hierarchy" },
+  ]), []);
+  const switcherTotalCountRef = useRef(0);
+  switcherTotalCountRef.current = tabSwitcherEntries.length + tabSwitcherToolWindows.length;
+
   const commitTabSwitcher = useCallback((index: number) => {
     const entries = mruFileKeysRef.current
       .map((key) => openFilesRef.current[key])
       .filter((entry): entry is NonNullable<typeof entry> => !!entry);
-    const target = entries[index];
     setTabSwitcherOpen(false);
+    const toolWindow = tabSwitcherToolWindows[index - entries.length];
+    if (toolWindow) {
+      setBottomDockOpen(true);
+      setBottomDockTab(toolWindow.id);
+      return;
+    }
+    const target = entries[index];
     if (target && target.key !== activeKeyRef.current) {
       void openFile(target.ref);
     }
-  }, [openFile]);
+  }, [openFile, setBottomDockOpen, setBottomDockTab, tabSwitcherToolWindows]);
+  const commitTabSwitcherRef = useRef(commitTabSwitcher);
+  commitTabSwitcherRef.current = commitTabSwitcher;
 
   useEffect(() => {
     if (!visible) return;
-    const cycle = (event: KeyboardEvent) => {
-      if (event.key !== "Tab" || !event.ctrlKey) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (!tabSwitcherOpenRef.current) {
-        const entries = mruFileKeysRef.current
-          .map((key) => openFilesRef.current[key])
-          .filter((entry): entry is NonNullable<typeof entry> => !!entry);
-        if (entries.length === 0) return;
-        setTabSwitcherIndex(entries.length > 1 ? 1 : 0);
-        setTabSwitcherOpen(true);
+    // §8.17.3 step 2: ONE capture keydown listener for the whole workspace.
+    // The Ctrl+Tab switcher runs inside this listener through the action
+    // host's normalized key identity (`eventLogicalKey`), so macOS Meta+Tab
+    // and Windows/Linux Ctrl+Tab share one code path and no second window
+    // listener competes with the host dispatch below.
+    const handleWorkspaceCommand = (event: KeyboardEvent) => {
+      const logicalKey = eventLogicalKey(event);
+      const switcherModifier = event.ctrlKey || event.metaKey;
+      if (logicalKey === "tab" && switcherModifier && !event.altKey) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!tabSwitcherOpenRef.current) {
+          // Openable when there are editor entries OR tool windows to list.
+          if (switcherTotalCountRef.current === 0) return;
+          const editorCount = mruFileKeysRef.current
+            .map((key) => openFilesRef.current[key])
+            .filter((entry): entry is NonNullable<typeof entry> => !!entry)
+            .length;
+          setTabSwitcherIndex(editorCount > 1 ? 1 : 0);
+          setTabSwitcherOpen(true);
+          return;
+        }
+        setTabSwitcherIndex((index) => {
+          const count = switcherTotalCountRef.current;
+          if (count === 0) return 0;
+          return event.shiftKey
+            ? (index - 1 + count) % count
+            : (index + 1) % count;
+        });
         return;
       }
-      setTabSwitcherIndex((index) => {
-        const count = mruFileKeysRef.current.length;
-        if (count === 0) return 0;
-        return event.shiftKey
-          ? (index - 1 + count) % count
-          : (index + 1) % count;
-      });
-    };
-    const release = (event: KeyboardEvent) => {
-      if (event.key !== "Control" || !tabSwitcherOpenRef.current) return;
-      const entries = mruFileKeysRef.current
-        .map((key) => openFilesRef.current[key])
-        .filter((entry): entry is NonNullable<typeof entry> => !!entry);
-      const targetIndex = Math.min(tabSwitcherIndexRef.current, entries.length - 1);
-      setTabSwitcherOpen(false);
-      const target = entries[targetIndex];
-      if (target && target.key !== activeKeyRef.current) {
-        void openFile(target.ref);
-      }
-    };
-    const cancel = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && tabSwitcherOpenRef.current) {
+      if (logicalKey === "escape" && tabSwitcherOpenRef.current) {
         event.preventDefault();
+        event.stopPropagation();
         setTabSwitcherOpen(false);
+        return;
       }
-    };
-    window.addEventListener("keydown", cycle, true);
-    window.addEventListener("keydown", cancel, true);
-    window.addEventListener("keyup", release, true);
-    return () => {
-      window.removeEventListener("keydown", cycle, true);
-      window.removeEventListener("keydown", cancel, true);
-      window.removeEventListener("keyup", release, true);
-    };
-  }, [openFile, visible]);
-
-  useEffect(() => {
-    if (!visible) return;
-    const handleWorkspaceCommand = (event: KeyboardEvent) => {
       void actionsController.dispatchKeydown(event, { eventTarget: event.target });
     };
+    // Modifier-release commit cannot be a keydown action; it stays a keyup
+    // listener and commits on whichever platform modifier started the cycle.
+    const release = (event: KeyboardEvent) => {
+      if (!tabSwitcherOpenRef.current) return;
+      if (event.key !== "Control" && event.key !== "Meta") return;
+      commitTabSwitcherRef.current(Math.min(tabSwitcherIndexRef.current, switcherTotalCountRef.current - 1));
+    };
     window.addEventListener("keydown", handleWorkspaceCommand, true);
-    return () => window.removeEventListener("keydown", handleWorkspaceCommand, true);
-  }, [actionsController, visible]);
-
-  const searchableWorkspaceCommands = useMemo(
-    () => workspaceCommands.filter((command) => command.id !== "workspace.goToFile"),
-    [workspaceCommands],
-  );
+    window.addEventListener("keyup", release, true);
+    return () => {
+      window.removeEventListener("keydown", handleWorkspaceCommand, true);
+      window.removeEventListener("keyup", release, true);
+    };
+  }, [actionsController, openFile, visible]);
 
   const runSearchEverywhereCommand = useCallback((commandId: string) => {
     setSearchEverywhereOpen(false);
-    // §8.16.3: popup execution routes through the action host so it observes
-    // the same context/when evaluation as the keydown channel.
-    void actionsController.executeAction(commandId);
+    // §8.17.3: run the SAME frozen evaluation the list rendered — a stale or
+    // disabled entry must not re-evaluate itself into a fresh context.
+    const entry = actionsController.snapshot.find((item) => item.id === commandId);
+    if (!entry) return;
+    void actionsController.host.executePrepared(entry.evaluation);
   }, [actionsController]);
 
   const commandRegistration = actionsController.commandRegistration;
@@ -9282,21 +9387,23 @@ export function CodeWorkspaceTab({
       hasSelection: request.hasSelection,
     };
     const host = actionsController.host;
-    const prepareBinding = (actionId: string, payload?: unknown) => ({
-      actionId,
-      prepare: host.prepare(actionId, {
+    // §8.17.3 step 1: `run` executes the FROZEN evaluation captured at menu
+    // build time. Re-entering executeAction would re-derive a fresh context
+    // and let a stale/disabled row resurrect itself.
+    const prepareBinding = (actionId: string, payload?: unknown) => {
+      const prepared = host.prepare(actionId, {
         kind: "context-menu" as const,
         context: invocationContext,
         payload: payload ?? targetPayload,
-      }),
-      run: () => {
-        void actionsController.executeAction(actionId, {
-          kind: "context-menu",
-          context: invocationContext,
-          payload: payload ?? targetPayload,
-        });
-      },
-    });
+      });
+      return {
+        actionId,
+        prepare: prepared,
+        run: () => {
+          void host.executePrepared(prepared);
+        },
+      };
+    };
     // Clipboard rows execute through the pinned editor port (frozen target),
     // not the request closures, so ownership matches the enabled state.
     const portBinding = (actionId: string, commandId: EditorCommandId) => ({
@@ -10989,6 +11096,7 @@ export function CodeWorkspaceTab({
 
     return (
       <EditorGroup
+        onClipboardUnavailable={setStatusMessage}
         groupId={groupId}
         workspaceInstanceId={`${workspaceInstanceId}-${groupId}`}
         visible={visible}
@@ -11147,12 +11255,17 @@ export function CodeWorkspaceTab({
         onViewportChange={(range) => {
           setViewportRanges((current) => ({ ...current, [groupId]: range }));
           if (syncSplitScroll && splitOrientation) {
-            const otherGroupId: EditorGroupId = groupId === "primary" ? "secondary" : "primary";
-            const otherActiveKey = editorGroups[otherGroupId]?.activeKey;
-            const otherFile = otherActiveKey ? openFiles[otherActiveKey] : null;
-            if (otherFile && syncScrollOriginGroupIdRef.current !== otherGroupId) {
+            // §8.17.4: sync to every OTHER tree leaf (any depth/count), not a
+            // hardcoded primary<->secondary swap.
+            const siblingLeaves = getAllLeafNodes(workspaceUi.layoutTreeV2)
+              .map((leaf) => leaf.id as EditorGroupId)
+              .filter((leafId) => leafId !== groupId);
+            for (const siblingId of siblingLeaves) {
+              const siblingActiveKey = editorGroups[siblingId]?.activeKey;
+              const siblingFile = siblingActiveKey ? openFiles[siblingActiveKey] : null;
+              if (!siblingFile || syncScrollOriginGroupIdRef.current === siblingId) continue;
               syncScrollOriginGroupIdRef.current = groupId;
-              revealEditorLocation(otherFile.key, {
+              revealEditorLocation(siblingFile.key, {
                 start: { line: range.start.line, character: 0 },
                 end: { line: range.start.line, character: 0 },
               });
@@ -11161,6 +11274,7 @@ export function CodeWorkspaceTab({
                   syncScrollOriginGroupIdRef.current = null;
                 }
               }, 50);
+              break;
             }
           }
         }}
@@ -11930,6 +12044,7 @@ export function CodeWorkspaceTab({
       <TabSwitcher
         open={tabSwitcherOpen}
         entries={tabSwitcherEntries}
+        toolWindows={tabSwitcherToolWindows}
         selectedIndex={tabSwitcherIndex}
         onHover={setTabSwitcherIndex}
         onCommit={commitTabSwitcher}
@@ -11941,7 +12056,6 @@ export function CodeWorkspaceTab({
         goToFileItems={goToFileItems}
         goToFileLoading={goToFileLoading}
         goToFileTruncated={goToFileTruncated}
-        searchableCommands={searchableWorkspaceCommands}
         actionSnapshots={actionsController.snapshot.filter((entry) => entry.id !== "workspace.goToFile")}
         symbolsAvailable={seSymbolsAvailable}
         semanticIndex={semanticIndex.snapshot}
@@ -12176,12 +12290,13 @@ export function CodeWorkspaceTab({
       {keymapCheatSheetOpen && (
         <KeymapCheatSheetDialog
           open={true}
-          commands={workspaceCommands}
           actionSnapshots={actionsController.snapshot}
           onClose={() => setKeymapCheatSheetOpen(false)}
           onExecuteCommand={(cmdId) => {
-            // §8.16.3: cheatsheet runs through the same host channel.
-            void actionsController.executeAction(cmdId);
+            // §8.17.3: cheatsheet runs the rendered frozen evaluation.
+            const entry = actionsController.snapshot.find((item) => item.id === cmdId);
+            if (!entry) return;
+            void actionsController.host.executePrepared(entry.evaluation);
           }}
         />
       )}

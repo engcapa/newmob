@@ -3,7 +3,6 @@ import { Box, Braces, Command as CommandIcon, File, Type } from "lucide-react";
 import { QuickPickOverlay } from "./QuickPickOverlay";
 import { rankFuzzy } from "./fuzzyMatch";
 import { isClassSymbolKind, symbolKindLabel } from "./symbolKinds";
-import type { WorkspaceCommand } from "./workspaceCommands";
 import type { ActionResult } from "./workspaceActionRegistry";
 import type { ActionSnapshotItem } from "./workspaceActionHost";
 import {
@@ -51,9 +50,12 @@ interface SearchEverywhereProps {
   items: GoToFileItem[];
   loading: boolean;
   truncated?: boolean;
-  commands?: WorkspaceCommand[];
-  /** Instance-scoped host snapshot (§8.16.3); takes precedence over commands. */
-  actionSnapshots?: ActionSnapshotItem[];
+  /**
+   * Instance-scoped host snapshot (§8.17.3): the ONLY actions input. The
+   * legacy WorkspaceCommand[] migration adapter is gone; execution goes
+   * through the same frozen evaluations via onRunCommand.
+   */
+  actionSnapshots: ActionSnapshotItem[];
   /** When true, Classes/Symbols tabs are shown and fetchSymbols is used. */
   symbolsAvailable?: boolean;
   semanticIndex?: WorkspaceSemanticIndexSnapshot;
@@ -70,7 +72,7 @@ const MAX_RESULTS = 50;
 
 type SearchItem =
   | { kind: "file"; value: GoToFileItem }
-  | { kind: "action"; value: WorkspaceCommand }
+  | { kind: "action"; value: ActionSnapshotItem }
   | { kind: "symbol"; value: GoToSymbolItem };
 
 function itemKey(item: SearchItem): string {
@@ -94,7 +96,6 @@ export function SearchEverywhere({
   items,
   loading,
   truncated = false,
-  commands = [],
   actionSnapshots,
   symbolsAvailable = false,
   semanticIndex,
@@ -192,23 +193,10 @@ export function SearchEverywhere({
     return source.map((value) => ({ kind: "symbol" as const, value }));
   }, [mode, symbols]);
 
-  const actionCommands: WorkspaceCommand[] = useMemo(() => {
-    if (actionSnapshots !== undefined) {
-      return actionSnapshots
-        .filter((entry) => entry.state.availability === "available")
-        .map((entry) => ({
-          id: entry.id,
-          title: entry.title,
-          category: entry.category,
-          keybinding: entry.keybinding,
-          keybindings: entry.keybindings,
-          keywords: entry.keywords,
-          provenance: entry.state.source,
-          run: () => {},
-        }));
-    }
-    return commands;
-  }, [actionSnapshots, commands]);
+  const actionCommands: ActionSnapshotItem[] = useMemo(
+    () => actionSnapshots.filter((entry) => entry.state.availability === "available"),
+    [actionSnapshots],
+  );
 
   const searchItems: SearchItem[] = useMemo(() => {
     if (mode === "files") return items.map((value) => ({ kind: "file", value }));

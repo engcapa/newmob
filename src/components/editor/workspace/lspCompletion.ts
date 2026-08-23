@@ -6,8 +6,8 @@ import {
   type CompletionResult,
   type CompletionSource,
 } from "@codemirror/autocomplete";
-import type { Text } from "@codemirror/state";
-import type { EditorView } from "@codemirror/view";
+import type { Extension, Text } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { renderFormatted } from "../../../lib/chat/renderFormatted";
 import type {
   LspCompletionItem,
@@ -73,6 +73,69 @@ export interface FixtureCompletionHooks {
 }
 
 let completionRequestIdCounter = 0;
+
+/**
+ * Request-phase telemetry (§8.17.2 step 5). Only provider identity metadata,
+ * phase transitions, latency, counts and truncation are recorded — never
+ * source text, labels or import content. The bounded ring is readable by QA
+ * surfaces and unit tests without any UI wiring.
+ */
+export type CompletionRequestPhase =
+  | "fetching"
+  | "popup"
+  | "unavailable"
+  | "stale"
+  | "failed"
+  | "applied";
+
+export interface CompletionRequestTelemetryEvent {
+  requestId: string;
+  languageId: string;
+  phase: CompletionRequestPhase;
+  /** Milliseconds since the request token was minted. */
+  durationMs: number;
+  itemCount: number;
+  truncated: boolean;
+  reason?: string;
+}
+
+const completionTelemetryRing: CompletionRequestTelemetryEvent[] = [];
+const COMPLETION_TELEMETRY_RING_MAX = 50;
+const completionRequestStartedAt = new WeakMap<CompletionRequestToken, number>();
+
+function telemetryElapsed(token: CompletionRequestToken): number {
+  const startedAt = completionRequestStartedAt.get(token);
+  return startedAt === undefined ? 0 : Math.max(0, Math.round(performance.now() - startedAt));
+}
+
+function recordCompletionTelemetry(
+  token: CompletionRequestToken,
+  phase: CompletionRequestPhase,
+  options: { itemCount?: number; truncated?: boolean; reason?: string } = {},
+): void {
+  completionTelemetryRing.push({
+    requestId: token.requestId,
+    languageId: token.languageId,
+    phase,
+    durationMs: telemetryElapsed(token),
+    itemCount: options.itemCount ?? 0,
+    truncated: options.truncated ?? false,
+    ...(options.reason !== undefined ? { reason: options.reason } : {}),
+  });
+  if (completionTelemetryRing.length > COMPLETION_TELEMETRY_RING_MAX) {
+    completionTelemetryRing.splice(0, completionTelemetryRing.length - COMPLETION_TELEMETRY_RING_MAX);
+  }
+}
+
+/** Snapshot of recent request phases (oldest first); copy, caller cannot mutate. */
+export function recentCompletionTelemetry(): readonly CompletionRequestTelemetryEvent[] {
+  return [...completionTelemetryRing];
+}
+
+/** Test/diagnostic reset of the telemetry ring. */
+export function resetCompletionTelemetry(): void {
+  completionTelemetryRing.length = 0;
+}
 
 function sameCompletionIdentity(
   a: CompletionRequestIdentity,
@@ -242,14 +305,16 @@ export function lspSnippetToCmSnippet(text: string): string {
 
 /**
  * Flatten an LSP snippet into the literal text to insert plus placeholder
- * spans (defaults inlined) so snippet + import edits can be committed in a
- * single transaction instead of the helper-command double dispatch.
+ * spans (defaults inlined, full [start,end) extents) so snippet + import
+ * edits can be committed in a single transaction instead of the
+ * helper-command double dispatch. Bare `$1`/`${1}` tabstops stay zero-width.
  */
 export function parseLspSnippet(
   text: string,
 ): { text: string; placeholders: Array<{ start: number; end: number }> } {
   let out = "";
   const placeholders: Array<{ start: number }> = [];
+  let placeholderEnds: Array<number> = [];
   for (let i = 0; i < text.length; i += 1) {
     const char = text[i];
     if (char === "\\" && i + 1 < text.length) {
@@ -267,17 +332,22 @@ export function parseLspSnippet(
       continue;
     }
     const rest = text.slice(i);
-    const choice = rest.match(/^\$\{(\d+)\|([^|}]*)[^|}]*\|\}/);
+    // Choice default is the FIRST option; the option list itself never
+    // becomes literal text.
+    const choice = rest.match(/^\$\{(\d+)\|([^|,}]*)[^|}]*\|\}/);
     const placeholder = rest.match(/^\$\{(\d+):((?:[^{}]|\{\d+:?[^{}]*\})*)\}/);
     const bare = rest.match(/^\$\{(\d+)\}/) ?? rest.match(/^\$(\d+)/);
     if (choice || placeholder) {
+      const body = (choice ? choice[2] : placeholder![2]) ?? "";
       placeholders.push({ start: out.length });
-      out += (choice ? choice[2] : placeholder![2]) ?? "";
+      placeholderEnds.push(out.length + body.length);
+      out += body;
       i += (choice ? choice[0].length : placeholder![0].length) - 1;
       continue;
     }
     if (bare) {
       placeholders.push({ start: out.length });
+      placeholderEnds.push(out.length);
       i += bare[0].length - 1;
       continue;
     }
@@ -285,8 +355,74 @@ export function parseLspSnippet(
   }
   return {
     text: out,
-    placeholders: placeholders.map((entry) => ({ start: entry.start, end: entry.start })),
+    placeholders: placeholders.map((entry, index) => ({
+      start: entry.start,
+      end: placeholderEnds[index] ?? entry.start,
+    })),
   };
+}
+
+/**
+ * Post-acceptance tabstop session for the combined snippet+additional-edits
+ * acceptance (§8.17.2 step 2). The document lands in ONE dispatch (one undo,
+ * one revision bump); this store only moves the selection between the
+ * committed placeholder spans, which never creates history entries.
+ */
+interface LspSnippetSessionState {
+  /** Post-image placeholder spans in document order. */
+  spans: Array<{ from: number; to: number }>;
+  index: number;
+  /** Doc length at commit; any document edit invalidates the session. */
+  docLength: number;
+}
+
+const lspSnippetSessions = new WeakMap<EditorView, LspSnippetSessionState>();
+
+export function activeLspSnippetSession(view: EditorView): boolean {
+  return lspSnippetSessions.has(view);
+}
+
+/** Move the selection to the next placeholder span; false when exhausted. */
+export function advanceLspSnippetTabstop(view: EditorView): boolean {
+  const session = lspSnippetSessions.get(view);
+  if (!session || view.state.doc.length !== session.docLength) {
+    lspSnippetSessions.delete(view);
+    return false;
+  }
+  const nextIndex = session.index + 1;
+  if (nextIndex >= session.spans.length) {
+    lspSnippetSessions.delete(view);
+    return false;
+  }
+  session.index = nextIndex;
+  const span = session.spans[nextIndex];
+  view.dispatch({
+    selection: view.state.doc.length === session.docLength
+      ? { anchor: Math.min(span.from, view.state.doc.length), head: Math.min(span.to, view.state.doc.length) }
+      : { anchor: span.from },
+    scrollIntoView: true,
+  });
+  return true;
+}
+
+/** Clear the active tabstop session (Escape semantics). */
+export function cancelLspSnippetSession(view: EditorView): boolean {
+  return lspSnippetSessions.delete(view);
+}
+
+/**
+ * Update-listener fragment hosts must include so any document edit (outside
+ * this module's own selection-only advances) drops the pending session
+ * instead of navigating stale spans.
+ */
+export function lspSnippetSessionInvalidator(): Extension {
+  return EditorView.updateListener.of((update) => {
+    if (!update.docChanged) return;
+    if (!lspSnippetSessions.has(update.view)) return;
+    // Selection-only advances dispatched by advanceLspSnippetTabstop do not
+    // change the doc; any other doc change ends the session.
+    lspSnippetSessions.delete(update.view);
+  });
 }
 
 interface PlannedChange {
@@ -382,6 +518,7 @@ function commitLspCompletion(
 ): boolean {
   if (!isStillCurrent(token)) {
     reportDiagnostic?.("identity-mismatch", "accept");
+    recordCompletionTelemetry(token, "stale", { reason: "accept" });
     return false;
   }
   if (
@@ -413,6 +550,7 @@ function commitLspCompletion(
   const isSnippet = item.insertTextFormat === 2;
   if (isSnippet && additionalEdits.length === 0) {
     snippet(lspSnippetToCmSnippet(rawInsert))(view, null, replaceFrom, replaceTo);
+    recordCompletionTelemetry(token, "applied");
     return true;
   }
 
@@ -431,16 +569,40 @@ function commitLspCompletion(
   const primaryChange = planned.list.find((change) => (
     change.insert === insert && change.from === replaceFrom && change.to === replaceTo
   )) ?? planned.list[0];
-  const firstPlaceholderOffset = parsed?.placeholders[0]?.start;
-  const anchor = parsed && parsed.placeholders.length > 0
-    ? postImageAnchor(planned.list, primaryChange, firstPlaceholderOffset!)
+
+  // One dispatch carries primary, snippet body and additional edits: one
+  // document revision, one Ctrl+Z, no second edit (§8.17.2 step 2/4).
+  const placeholderSpans = parsed && parsed.placeholders.length > 0
+    ? parsed.placeholders.map((span) => ({
+      from: postImageAnchor(planned.list, primaryChange, span.start),
+      to: postImageAnchor(planned.list, primaryChange, Math.max(span.end, span.start)),
+    }))
+    : null;
+  const firstSpan = placeholderSpans?.[0];
+  const firstPlaceholderStart = parsed?.placeholders[0]?.start;
+  const anchor = parsed && parsed.placeholders.length > 0 && firstPlaceholderStart !== undefined
+    ? postImageAnchor(planned.list, primaryChange, firstPlaceholderStart)
     : postImageAnchor(planned.list, primaryChange, insert.length);
 
   view.dispatch({
     changes: planned.list,
-    selection: { anchor },
+    selection: firstSpan
+      ? { anchor: firstSpan.from, head: firstSpan.to }
+      : { anchor },
     userEvent: "input.complete",
   });
+  recordCompletionTelemetry(token, "applied");
+
+  // Registered AFTER the acceptance dispatch so the doc-change invalidator
+  // never consumes the acceptance itself; Tab now cycles the spans and any
+  // unrelated edit drops the session.
+  if (placeholderSpans && placeholderSpans.length > 0) {
+    lspSnippetSessions.set(view, {
+      spans: placeholderSpans,
+      index: 0,
+      docLength: view.state.doc.length,
+    });
+  }
   return true;
 }
 
@@ -611,6 +773,8 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
       ...identityAtStart,
       requestId: `completion-${completionRequestIdCounter}`,
     };
+    completionRequestStartedAt.set(token, performance.now());
+    recordCompletionTelemetry(token, "fetching");
 
     // LSP responses are tied to a document version. Do not spend renderer time
     // mapping a response that became stale while the user kept typing.
@@ -647,14 +811,25 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     if (context.aborted) return null;
     // Validate the request identity again after the await: file switch,
     // document revision change or session restart invalidates the response.
-    if (!isStillCurrent(token)) return completeAnyWord(context);
+    if (!isStillCurrent(token)) {
+      recordCompletionTelemetry(token, "stale", { reason: "identity-changed-after-fetch" });
+      return completeAnyWord(context);
+    }
+    if (result === null) {
+      recordCompletionTelemetry(token, "failed", { reason: "fetch-failed" });
+      return completeAnyWord(context);
+    }
     // Inactive/unavailable provider is unavailable regardless of item count:
     // stale non-empty items from a stopped/restarted session must never enter
     // the popup (§8.16.2 containment).
-    if (!result || !result.status.active) {
+    if (!result.status.active) {
+      recordCompletionTelemetry(token, "unavailable", { reason: "provider-inactive" });
       return completeAnyWord(context);
     }
-    if (result.items.length === 0) return null;
+    if (result.items.length === 0) {
+      recordCompletionTelemetry(token, "popup", { itemCount: 0 });
+      return null;
+    }
 
     if (result.truncated) {
       hooks.reportDiagnostic?.("truncated", `${result.items.length}+`);
@@ -729,6 +904,10 @@ export function createLspCompletionSource(hooks: LspCompletionHooks): Completion
     }
 
     // Keep server order for the head of the list, then cap for popup cost.
+    recordCompletionTelemetry(token, "popup", {
+      itemCount: mapped.length,
+      truncated: result.truncated ?? false,
+    });
     return {
       from,
       options: mapped,

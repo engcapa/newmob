@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { File } from "lucide-react";
+import { File, PanelBottom } from "lucide-react";
 
 export interface TabSwitcherEntry {
   key: string;
@@ -9,9 +9,17 @@ export interface TabSwitcherEntry {
   active: boolean;
 }
 
+/** Open tool window entry sharing the switcher index space (§8.17.5 step 4). */
+export interface TabSwitcherToolWindow {
+  id: string;
+  label: string;
+}
+
 interface TabSwitcherProps {
   open: boolean;
   entries: TabSwitcherEntry[];
+  /** Rendered below editor entries; indices continue after `entries`. */
+  toolWindows?: TabSwitcherToolWindow[];
   selectedIndex: number;
   onHover: (index: number) => void;
   onCommit: (index: number) => void;
@@ -27,6 +35,7 @@ interface TabSwitcherProps {
 export function TabSwitcher({
   open,
   entries,
+  toolWindows = [],
   selectedIndex,
   onHover,
   onCommit,
@@ -58,7 +67,7 @@ export function TabSwitcher({
     >
       <div className="w-[420px] max-w-[80vw] overflow-hidden rounded-md border border-[var(--taomni-code-border)] bg-[var(--taomni-code-bg)] text-[12px] shadow-2xl text-[var(--taomni-code-text)]">
         <div className="border-b border-[var(--taomni-code-border)] px-3 py-1.5 text-[10px] text-[var(--taomni-code-muted)]">
-          Switcher · Ctrl+Tab cycle · release Ctrl to open · Esc to cancel
+          Switcher · Ctrl/Meta+Tab cycle · release modifier to open · Esc to cancel
         </div>
         <div ref={listRef} className="max-h-[50vh] overflow-y-auto py-1">
           {entries.map((entry, index) => (
@@ -88,6 +97,38 @@ export function TabSwitcher({
               </span>
             </div>
           ))}
+          {toolWindows.length > 0 && (
+            <>
+              <div className="mt-1 border-t border-[var(--taomni-code-border)] px-3 pt-1 pb-0.5 text-[9px] uppercase tracking-wide text-[var(--taomni-code-muted)]">
+                Tool Windows
+              </div>
+              {toolWindows.map((toolWindow, toolIndex) => {
+                const index = entries.length + toolIndex;
+                return (
+                  <div
+                    key={`tool:${toolWindow.id}`}
+                    data-switcher-index={index}
+                    data-switcher-selected={index === selectedIndex ? "true" : undefined}
+                    data-testid={`workspace-tab-switcher-tool-${toolWindow.id}`}
+                    className={`flex items-center gap-2 px-3 py-1.5 ${
+                      index === selectedIndex
+                        ? "bg-[var(--taomni-code-active-line-bg)] text-[var(--taomni-code-text)]"
+                        : "text-[var(--taomni-code-muted)]"
+                    }`}
+                    onMouseEnter={() => onHover(index)}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      onCommit(index);
+                    }}
+                  >
+                    <PanelBottom className="h-3.5 w-3.5 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{toolWindow.label}</span>
+                    <span className="shrink-0 text-[10px] text-[var(--taomni-code-muted)]">tool window</span>
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
       </div>
     </div>

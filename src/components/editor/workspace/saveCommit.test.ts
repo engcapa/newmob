@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildPreparedSave,
   classifySaveWriteback,
   nextSaveTransactionId,
   normalizeSaveEol,
   resolveWritePolicy,
+  SaveTransactionRegistry,
   saveCommitResultFromError,
   validatePreparedSaveBoundary,
   type PreparedSave,
@@ -120,5 +122,85 @@ describe("P0-S3 saveCommit pure helpers", () => {
     const failed = saveCommitResultFromError("tx-err-2", new Error("sync temp file: os error 5"));
     expect(failed.kind).toBe("failed");
     expect(failed.error.kind).toBe("io");
+  });
+});
+
+describe("P0-S3 SaveTransactionRegistry (§8.17.1 step 4)", () => {
+  it("keeps transactions active for their owner and settles them on completion", () => {
+    const registry = new SaveTransactionRegistry();
+    const owner = registry.begin("ws-1", "root:app:a.ts", "tx-a");
+    expect(registry.check(owner)).toEqual({ active: true });
+
+    registry.settle(owner);
+    const settled = registry.check(owner);
+    expect(settled.active).toBe(false);
+    if (!settled.active) expect(settled.reason).toContain("already settled");
+  });
+
+  it("discardFile invalidates every transaction registered before the close", () => {
+    const registry = new SaveTransactionRegistry();
+    const stale = registry.begin("ws-1", "root:app:a.ts", "tx-stale");
+
+    registry.discardFile("ws-1", "root:app:a.ts", `Buffer a.ts was closed`);
+
+    const check = registry.check(stale);
+    expect(check.active).toBe(false);
+    if (!check.active) {
+      expect(check.reason).toBe("Buffer a.ts was closed");
+    }
+
+    // A transaction begun after the discard is active again (same key reused).
+    const fresh = registry.begin("ws-1", "root:app:a.ts", "tx-fresh");
+    expect(registry.check(fresh)).toEqual({ active: true });
+    // And the earlier stale owner stays discarded.
+    expect(registry.check(stale).active).toBe(false);
+  });
+
+  it("discards are scoped per workspace and per file", () => {
+    const registry = new SaveTransactionRegistry();
+    const wsA = registry.begin("ws-a", "root:r:same.ts", "tx-wsA");
+    const wsB = registry.begin("ws-b", "root:r:same.ts", "tx-wsB");
+    const otherFile = registry.begin("ws-a", "root:r:other.ts", "tx-other");
+
+    registry.discardFile("ws-a", "root:r:same.ts");
+
+    expect(registry.check(wsA).active).toBe(false);
+    expect(registry.check(wsB)).toEqual({ active: true });
+    expect(registry.check(otherFile)).toEqual({ active: true });
+  });
+
+  it("discardWorkspace drops all live transactions without affecting other workspaces", () => {
+    const registry = new SaveTransactionRegistry();
+    const a1 = registry.begin("ws-a", "k1", "tx-a1");
+    const a2 = registry.begin("ws-a", "k2", "tx-a2");
+    const b1 = registry.begin("ws-b", "k1", "tx-b1");
+
+    registry.discardWorkspace("ws-a");
+
+    expect(registry.check(a1).active).toBe(false);
+    expect(registry.check(a2).active).toBe(false);
+    expect(registry.check(b1)).toEqual({ active: true });
+    expect(registry.listActive("ws-a")).toHaveLength(0);
+  });
+});
+
+describe("P0-S3 buildPreparedSave shared construction", () => {
+  it("assembles the immutable record and copies the policy", () => {
+    const policy = resolveWritePolicy({ explicit: { eol: "crlf" }, file: { encoding: "UTF-8", bom: false } as never });
+    const prepared = buildPreparedSave({
+      transactionId: nextSaveTransactionId(),
+      workspaceId: "ws-1",
+      fileKey: "root:app:a.ts",
+      filePath: "/repo/app/a.ts",
+      text: "x\n",
+      bufferRevision: 2,
+      styleGeneration: 4,
+      expectedDiskHash: null,
+      policy,
+    });
+    expect(prepared.policy).toEqual(policy);
+    expect(prepared.policy).not.toBe(policy);
+    expect(prepared.bufferRevision).toBe(2);
+    expect(prepared.expectedDiskHash).toBeNull();
   });
 });

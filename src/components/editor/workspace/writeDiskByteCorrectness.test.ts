@@ -1,8 +1,29 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   WorkspaceStyleController,
+  type SaveByteWriterResult,
   type SaveTransactionV2,
 } from "./workspaceStyleController";
+import type { PreparedSave } from "./saveCommit";
+import type { WorkspaceFile } from "../../../lib/editor/workspace";
+
+function fakeWrittenFile(hash: string): WorkspaceFile {
+  return { path: "/workspace/src/test.txt", text: "", hash, size: 0, mtime: 0 };
+}
+
+function writeDiskMock(
+  impl: (path: string, text: string, hash: string | null, encoding: string, bom: boolean, eol: string) => Promise<SaveByteWriterResult>,
+): (prepared: PreparedSave) => Promise<SaveByteWriterResult> {
+  // vi.fn keeps spy assertions working; the cast restores the writer type.
+  return vi.fn(async (prepared: PreparedSave) => impl(
+    prepared.filePath,
+    prepared.text,
+    prepared.expectedDiskHash,
+    prepared.policy.encoding,
+    prepared.policy.bom,
+    prepared.policy.eol,
+  )) as unknown as (prepared: PreparedSave) => Promise<SaveByteWriterResult>;
+}
 import { applyWorkspaceEdit, type WorkspaceEditApplyHooks } from "./workspaceEditApply";
 import {
   WorkspaceHashMismatchError,
@@ -30,10 +51,12 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
 
         let savedContent = "";
         let savedEol: string | undefined;
-        const writeDisk = vi.fn(async (_path, text, _hash, _enc, _bom, resolvedEol) => {
+        let savedExpectedHash: string | null = null;
+        const writeDisk = writeDiskMock(async (_path, text, expectedHash, _enc, _bom, eol) => {
           savedContent = text;
-          savedEol = resolvedEol;
-          return { kind: "written", hash: "new-disk-hash" } as const;
+          savedEol = eol;
+          savedExpectedHash = expectedHash;
+          return { kind: "written", hash: "new-disk-hash", file: fakeWrittenFile("new-disk-hash") };
         });
 
         const tx: SaveTransactionV2 = {
@@ -52,10 +75,14 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
           getLatestBufferVersion: () => 1,
         });
 
-        expect(outcome.kind).toBe("saved");
+        expect(outcome.kind).toBe("saved-current");
         expect(writeDisk).toHaveBeenCalledTimes(1);
         expect(savedEol).toBe(eol);
         expect(savedContent).toBe(`alpha${sep}beta${sep}gamma`);
+        expect(savedExpectedHash).toBe("old-hash");
+        if (outcome.kind === "saved-current") {
+          expect(outcome.file.hash).toBe("new-disk-hash");
+        }
       });
 
       it(`Path B (Open Clean Buffer WorkspaceEdit): preserves ${name} line endings`, async () => {
@@ -158,7 +185,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         fileProvider: { readFile: async () => null },
       });
 
-      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write" } as const));
+      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write", file: fakeWrittenFile("h") } as const));
       let version = 1;
 
       const tx: SaveTransactionV2 = {
@@ -189,7 +216,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
 
       expect(outcome.kind).toBe("cancelled");
       if (outcome.kind === "cancelled") {
-        expect(outcome.retryable).toBe(true);
+        expect(outcome.phase).toBe("prepare");
       }
       expect(writeDisk).not.toHaveBeenCalled();
     });
@@ -201,7 +228,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         fileProvider: { readFile: async () => null },
       });
 
-      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write" } as const));
+      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write", file: fakeWrittenFile("h") } as const));
 
       const tx: SaveTransactionV2 = {
         id: "tx-same-len",
@@ -253,10 +280,10 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         text: "function main() {\n  return;\n}\n",
       };
 
-      const writeDisk = vi.fn(async (_path, _text) => ({ kind: "written", hash: "hash-saved" } as const));
+      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "hash-saved", file: fakeWrittenFile("hash-saved") } as const));
 
       const outcome = await ctrl.executeSaveTransaction(tx, writeDisk);
-      expect(outcome.kind).toBe("saved");
+      expect(outcome.kind).toBe("saved-current");
       expect(writeDisk).toHaveBeenCalledTimes(1);
 
       // Verify explicitOverride was used in resolveForFile
@@ -302,8 +329,10 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
       const outcome = await ctrl.executeSaveTransaction(tx, writeDiskMismatch);
       expect(outcome.kind).toBe("conflict");
       if (outcome.kind === "conflict") {
-        expect(outcome.retryable).toBe(true);
-        expect(outcome.reason).toContain("Disk hash conflict");
+        expect(outcome.error.message).toContain("Disk hash conflict");
+        expect(outcome.error.kind).toBe("hash-mismatch");
+        expect(outcome.error.expectedHash).toBe("expected_aaa");
+        expect(outcome.error.actualHash).toBe("found_bbb");
       }
     });
 
@@ -347,7 +376,8 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
       const outcome = await ctrl.executeSaveTransaction(tx, writeDiskPermissionDenied);
       expect(outcome.kind).toBe("failed");
       if (outcome.kind === "failed") {
-        expect(outcome.reason).toContain("Disk write failed: Permission denied (EACCES)");
+        expect(outcome.error.message).toContain("Disk write failed: Permission denied (EACCES)");
+        expect(outcome.error.kind).toBe("io");
       }
     });
   });
