@@ -76,7 +76,7 @@ import type {
   LspSignatureHelpResult,
 } from "../../../lib/editor/lsp";
 import { languageForPath } from "../../git/diffLanguage";
-import { clipboardStoreForWorkspace } from "./workspaceClipboardSession";
+import { acquireClipboardStore, clipboardStoreForWorkspace, type WorkspaceClipboardHandle } from "./workspaceClipboardSession";
 import { createWorkspaceSearchPanel, WORKSPACE_SEARCH_STYLE } from "./editorSearchPanel";
 import {
   advanceLspSnippetTabstop,
@@ -277,8 +277,23 @@ const editorClipboardPayloadByView = new WeakMap<EditorView, EditorClipboardPayl
 // (bound at mount) so the module-level helpers stay pure and testable.
 const clipboardContextByView = new WeakMap<
   EditorView,
-  { workspaceId: string | null; onUnavailable: (message: string) => void }
+  {
+    workspaceId: string | null;
+    onUnavailable: (message: string) => void;
+    /** Refcounted session handle (§8.18.4); null for legacy non-workspace views. */
+    handle: WorkspaceClipboardHandle | null;
+  }
 >();
+
+type ClipboardStoreLike = Pick<WorkspaceClipboardHandle, "write" | "read">;
+
+function workspaceStoreFor(
+  context: { workspaceId: string | null; handle: WorkspaceClipboardHandle | null } | undefined,
+): ClipboardStoreLike | null {
+  if (!context) return null;
+  if (context.handle) return context.handle;
+  return context.workspaceId ? clipboardStoreForWorkspace(context.workspaceId) : null;
+}
 
 function rememberEditorClipboardPayload(
   view: EditorView,
@@ -292,8 +307,9 @@ function rememberEditorClipboardPayload(
     segments: payload.segments ? [...payload.segments] : undefined,
   });
   const context = clipboardContextByView.get(view);
-  if (context?.workspaceId) {
-    clipboardStoreForWorkspace(context.workspaceId).write({
+  const store = workspaceStoreFor(context);
+  if (store) {
+    store.write({
       sourceViewId: String(view.dom.getAttribute("data-cm-id") ?? ""),
       plainText: payload.plainText,
       segments: payload.segments,
@@ -311,9 +327,8 @@ function payloadForSystemClipboardText(
   // Workspace session first: a copy in ANOTHER split view must still paste
   // with its segments/rectangular shape here.
   const context = clipboardContextByView.get(view);
-  const session = context?.workspaceId
-    ? clipboardStoreForWorkspace(context.workspaceId).read()
-    : null;
+  const store = workspaceStoreFor(context);
+  const session = store ? store.read() : null;
   if (session && session.plainText === text && (session.segments?.length || session.rectangular)) {
     return {
       plainText: session.plainText,
@@ -364,10 +379,8 @@ function pasteSystemClipboard(view: EditorView): boolean {
         || !view.state.selection.eq(selectionAtRequest, true)
       ) {
         if (!result.ok && view.dom.isConnected && !view.composing) {
-          const workspaceId = context?.workspaceId ?? null;
-          const session = workspaceId
-            ? clipboardStoreForWorkspace(workspaceId).read()
-            : null;
+          const fallbackStore = workspaceStoreFor(context);
+          const session = fallbackStore ? fallbackStore.read() : null;
           if (session) {
             // System clipboard read failed; the workspace session preserves
             // the last copy/cut (segments intact) with an explicit notice.
@@ -1754,19 +1767,25 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     };
   }, []);
 
-  // §8.17.6: clipboard helpers read the owning workspace id + unavailable
-  // callback through this registry so copy/paste works across split views.
+  // §8.17.6/§8.18.4: clipboard helpers read the owning workspace handle +
+  // unavailable callback through this registry so copy/paste works across
+  // split views. The handle is refcounted; release clears the slot when the
+  // last view of the workspace unmounts.
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
+    const handle = clipboardWorkspaceId ? acquireClipboardStore(clipboardWorkspaceId) : null;
     clipboardContextByView.set(view, {
       workspaceId: clipboardWorkspaceId ?? null,
       onUnavailable: (message) => onClipboardUnavailableRef.current(message),
+      handle,
     });
     return () => {
+      handle?.release();
       clipboardContextByView.set(view, {
         workspaceId: null,
         onUnavailable: () => {},
+        handle: null,
       });
     };
   }, [clipboardWorkspaceId]);

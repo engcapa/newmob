@@ -403,10 +403,36 @@ function buildRegionMatchers(grammar: RegionCommentGrammar): { start: RegExp; en
 }
 
 /**
- * Language-aware region fold service factory (§8.17.6 step 3). The resolver
- * runs per query so the service follows the host's current file without
- * rebuilding extensions. Unknown/unmapped languages produce no folds instead
- * of scanning arbitrary text.
+ * True when the node name identifies a comment node (case-insensitive).
+ * Exported for tests of the syntax-gated region folding decision.
+ */
+export function isCommentSyntaxNodeName(name: string): boolean {
+  return /comment/i.test(name);
+}
+
+/**
+ * Syntax gate for one candidate region marker (§8.18.4): returns
+ * - `"reject"` when the parser proves the marker sits inside a string /
+ *   template / other non-comment node,
+ * - `"comment"` when it is provably inside a comment node,
+ * - `"heuristic"` when no parser information exists (unknown language or
+ *   parser not ready) — the extension-token table then decides, documented as
+ *   text-marker HEURISTIC folding that does not count as semantic folding.
+ */
+export function classifyRegionMarker(
+  node: { name: string } | null,
+): "reject" | "comment" | "heuristic" {
+  if (!node || node.name === "") return "heuristic";
+  return isCommentSyntaxNodeName(node.name) ? "comment" : "reject";
+}
+
+/**
+ * Language-aware region fold service factory (§8.17.6 step 3, gated §8.18.4).
+ * The resolver runs per query so the service follows the host's current file
+ * without rebuilding extensions. Unknown/unmapped languages produce no folds
+ * instead of scanning arbitrary text. When a Lezer syntax tree IS available,
+ * a marker must live inside a comment node — markers inside strings/templates
+ * are rejected even when the token table would match them.
  */
 export function createRegionFoldService(
   resolvePath: () => string | null | undefined,
@@ -416,12 +442,31 @@ export function createRegionFoldService(
     if (!grammar) return null;
     const matchers = buildRegionMatchers(grammar);
     const line = state.doc.lineAt(lineStart);
-    if (!matchers.start.test(line.text)) return null;
+    const startMatch = line.text.match(matchers.start);
+    if (!startMatch) return null;
+
+    // Syntax gate: verify the matched marker position against the parse tree.
+    const markerOffset = startMatch.index ?? line.text.search(/\S/);
+    const node = syntaxTree(state).resolveInner(line.from + Math.max(markerOffset, 0), -1);
+    const verdict = classifyRegionMarker(node ?? null);
+    if (verdict === "reject") return null;
+
+    // The end marker must pass the same gate when the parser can see it.
     let depth = 1;
     for (let number = line.number + 1; number <= state.doc.lines; number++) {
       const candidate = state.doc.line(number);
-      if (matchers.start.test(candidate.text)) depth += 1;
+      if (matchers.start.test(candidate.text)) {
+        const candidateStart = candidate.text.match(matchers.start);
+        const candidateNode = syntaxTree(state).resolveInner(
+          candidate.from + Math.max(candidateStart?.index ?? 0, 0),
+          -1,
+        );
+        if (classifyRegionMarker(candidateNode ?? null) !== "reject") depth += 1;
+      }
       if (!matchers.end.test(candidate.text)) continue;
+      const endMatch = candidate.text.match(matchers.end);
+      const endNode = syntaxTree(state).resolveInner(candidate.from + Math.max(endMatch?.index ?? 0, 0), -1);
+      if (classifyRegionMarker(endNode ?? null) === "reject") continue;
       depth -= 1;
       if (depth === 0) {
         return {
