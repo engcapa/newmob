@@ -105,7 +105,7 @@ describe("AnalysisPanel", () => {
     expect(screen.getAllByText("typescript:taint").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByTestId("analysis-evidence-kind-taint")).toHaveTextContent("Taint flow");
     expect(screen.getByTestId("analysis-evidence-proof-level")).toHaveTextContent("text-inferred");
-    fireEvent.click(screen.getByRole("checkbox", { name: "Enable inspection typescript:taint" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Show typescript:taint diagnostics" }));
     expect(onUpdateRule).toHaveBeenCalledWith("typescript:taint", { enabled: false });
     fireEvent.click(screen.getAllByText("Sink receives the value")[0]!);
     expect(onOpenLocation).toHaveBeenCalled();
