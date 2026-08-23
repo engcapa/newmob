@@ -15,6 +15,28 @@ import {
   eventLogicalKey,
   parseKeybinding,
 } from "./workspaceCommands";
+import {
+  type KeymapSchemeV3,
+  type Shortcut,
+  type ShortcutStroke,
+  strokesEqual,
+  strokeFromKeyboardEvent,
+} from "./workspaceKeymapScheme";
+
+/** Accept KeyboardEventLike whose optional `code` falls back to `key`. */
+function strokeFromEvent(event: KeyboardEventLike): ShortcutStroke {
+  // jsdom/fireEvent produce `code: ""` (not undefined) for unspecified codes;
+  // treat any empty code as absent so `key` remains the fallback identity.
+  const code = event.code && event.code.length > 0 ? event.code : event.key;
+  return strokeFromKeyboardEvent({
+    code,
+    key: event.key,
+    ctrlKey: event.ctrlKey,
+    altKey: event.altKey,
+    shiftKey: event.shiftKey,
+    metaKey: event.metaKey,
+  });
+}
 
 export type ActionInvocationKind =
   | "direct"
@@ -55,6 +77,22 @@ export interface ActionBindingConflictDiagnostic {
   winnerId: string;
 }
 
+/** Where a resolved shortcut came from (§8.18.2 ResolvedBinding.source). */
+export type ResolvedBindingSource = "user" | "base" | "builtin-editor";
+
+/** Binding resolution result for one keyboard event (§8.18.2). */
+export interface ResolvedBinding {
+  stroke: ShortcutStroke;
+  candidates: readonly {
+    actionId: string;
+    evaluation: PreparedActionEvaluation;
+    contextSpecificity: number;
+    source: ResolvedBindingSource;
+  }[];
+  resolution: "single" | "shadowed" | "conflict" | "unavailable" | "none";
+  reason?: string;
+}
+
 export interface ActionSnapshotItem {
   id: string;
   title: string;
@@ -76,15 +114,14 @@ export interface WorkspaceActionHostOptions {
   onExecuted?: (actionId: string, result: ActionResult) => void;
 }
 
-function matchesKeybinding(pattern: string, event: KeyboardEventLike): boolean {
-  const binding = parseKeybinding(pattern);
-  if (!binding) return false;
-  const eventKey = eventLogicalKey(event);
-  return binding.key === eventKey
-    && binding.ctrl === !!event.ctrlKey
-    && binding.shift === !!event.shiftKey
-    && binding.alt === !!event.altKey
-    && binding.meta === !!event.metaKey;
+/**
+ * Matching identity of a stroke: canonical physical code + modifiers, display
+ * key dropped. Both definition-derived and event-derived strokes funnel
+ * through this so non-US layouts and missing `event.code` resolve alike
+ * ("f4"/"F4"/"End"-style inputs converge on one identity).
+ */
+function normalize(stroke: ShortcutStroke): ShortcutStroke {
+  return { ...stroke, key: undefined, code: logicalKeyToCode(stroke.code) ?? stroke.code };
 }
 
 function actionKeybindings(action: WorkspaceActionDefinition): string[] {
@@ -102,6 +139,60 @@ function actionKeybindings(action: WorkspaceActionDefinition): string[] {
     ...primary,
     ...(action.secondaryKeybindings ?? []),
   ].filter((binding): binding is string => Boolean(binding))));
+}
+
+/** Parse an action's built-in default keybinding strings into physical strokes. */
+function parseDefinitionKeybindings(action: WorkspaceActionDefinition): readonly Shortcut[] {
+  const out: Shortcut[] = [];
+  for (const pattern of actionKeybindings(action)) {
+    const parsed = parseKeybinding(pattern);
+    if (!parsed) continue;
+    // parseKeybinding gives a logical key; map back to a stroke whose `key`
+    // field carries the display identity and whose `code` is derived from it
+    // so matching stays physical-key based for letters/digits/named keys.
+    const code = logicalKeyToCode(parsed.key);
+    if (!code) continue;
+    out.push({
+      kind: "keyboard",
+      strokes: [{
+        code,
+        key: parsed.key.toUpperCase(),
+        ctrl: parsed.ctrl,
+        alt: parsed.alt,
+        shift: parsed.shift,
+        meta: parsed.meta,
+      }],
+    });
+  }
+  return out;
+}
+
+/** Map a normalized logical key to the most common KeyboardEvent.code. */
+function logicalKeyToCode(logicalKey: string): string | null {  const key = logicalKey.toLowerCase();
+  if (/^[a-z]$/.test(key)) return `Key${key.toUpperCase()}`;
+  if (/^[0-9]$/.test(key)) return `Digit${key}`;
+  const named: Record<string, string> = {
+    arrowleft: "ArrowLeft",
+    arrowright: "ArrowRight",
+    arrowup: "ArrowUp",
+    arrowdown: "ArrowDown",
+    enter: "Enter",
+    escape: "Escape",
+    tab: "Tab",
+    space: "Space",
+    backspace: "Backspace",
+    delete: "Delete",
+    home: "Home",
+    end: "End",
+    pageup: "PageUp",
+    pagedown: "PageDown",
+    f1: "F1", f2: "F2", f3: "F3", f4: "F4", f5: "F5", f6: "F6",
+    f7: "F7", f8: "F8", f9: "F9", f10: "F10", f11: "F11", f12: "F12",
+    ",": "Comma", ".": "Period", "/": "Slash", "\\": "Backslash",
+    ";": "Semicolon", "'": "Quote", "[": "BracketLeft", "]": "BracketRight",
+    "-": "Minus", "=": "Equal", "`": "Backquote",
+  };
+  return named[key] ?? null;
 }
 
 function bindingIdentity(pattern: string): string | null {
@@ -151,6 +242,9 @@ function focusByPriority(
   return candidate;
 }
 
+/** Default chord wait window before a pending first stroke expires. */
+const CHORD_TIMEOUT_MS = 1200;
+
 export class WorkspaceActionHost {
   private readonly workspaceId: string;
   private readonly ownerToken = Symbol("workspace-action-host-owner");
@@ -165,6 +259,13 @@ export class WorkspaceActionHost {
   private inFlightActions = new Set<string>();
   private generation = 0;
   private disposed = false;
+
+  /** User-editable keymap delta over definition defaults (§8.18.2). */
+  private keymapScheme: KeymapSchemeV3 | null = null;
+  /** Pending two-stroke chord: the already-consumed first ShortcutStroke. */
+  private pendingChordStroke: ShortcutStroke | null = null;
+  private chordTimer: ReturnType<typeof setTimeout> | null = null;
+  private onChordStateChange?: (pending: boolean) => void;
 
   constructor(options: WorkspaceActionHostOptions) {
     this.workspaceId = options.workspaceId;
@@ -191,9 +292,71 @@ export class WorkspaceActionHost {
     if (this.disposed) return;
     this.disposed = true;
     this.generation += 1;
+    if (this.chordTimer !== null) clearTimeout(this.chordTimer);
+    this.chordTimer = null;
+    this.pendingChordStroke = null;
     this.inFlightActions.clear();
     this.actions.clear();
     this.commands.clear();
+  }
+
+  /**
+   * Install the user keymap scheme. User bindings override each action's
+   * built-in defaults; disabled ids make actions unavailable everywhere while
+   * keeping them visible in Search/Keymap with their reason (§8.18.2).
+   */
+  setKeymapScheme(scheme: KeymapSchemeV3 | null): void {
+    if (this.keymapScheme === scheme) return;
+    this.keymapScheme = scheme;
+    this.cancelPendingChord("scheme changed");
+    this.generation += 1;
+  }
+
+  getKeymapScheme(): KeymapSchemeV3 | null {
+    return this.keymapScheme;
+  }
+
+  setOnChordStateChange(listener: (pending: boolean) => void): void {
+    this.onChordStateChange = listener;
+  }
+
+  hasPendingChord(): boolean {
+    return this.pendingChordStroke !== null;
+  }
+
+  cancelPendingChord(reason = "cancelled"): void {
+    if (this.chordTimer !== null) clearTimeout(this.chordTimer);
+    this.chordTimer = null;
+    const had = this.pendingChordStroke !== null;
+    this.pendingChordStroke = null;
+    if (had) this.onChordStateChange?.(false);
+    void reason;
+  }
+
+  private armChordTimeout(): void {
+    if (this.chordTimer !== null) clearTimeout(this.chordTimer);
+    this.chordTimer = setTimeout(() => {
+      this.cancelPendingChord("chord timeout");
+    }, CHORD_TIMEOUT_MS);
+  }
+
+  /**
+   * Effective shortcuts for one action: user scheme bindings win, then the
+   * action's built-in defaults parsed into physical strokes.
+   */
+  effectiveShortcuts(actionId: string): { shortcuts: readonly Shortcut[]; source: ResolvedBindingSource } {
+    const scheme = this.keymapScheme;
+    const userBindings = scheme?.bindings[actionId];
+    if (userBindings && userBindings.length > 0) {
+      return { shortcuts: userBindings, source: "user" };
+    }
+    const action = this.actions.get(actionId);
+    if (!action) return { shortcuts: [], source: "base" };
+    return { shortcuts: parseDefinitionKeybindings(action), source: "base" };
+  }
+
+  isActionUserDisabled(actionId: string): boolean {
+    return !!this.keymapScheme?.disabledActionIds.includes(actionId);
   }
 
   registerAction(action: WorkspaceActionDefinition): () => void {
@@ -359,6 +522,18 @@ export class WorkspaceActionHost {
       };
     }
     if (action.provenance === "unsupported") return unsupportedState();
+    // User-disabled actions stay visible in Search/Keymap with their reason
+    // but are never executable (§8.18.2 裁决).
+    if (this.isActionUserDisabled(action.id)) {
+      return {
+        availability: "disabled",
+        disabledReason: "userDisabled",
+        source: action.provenance,
+        scope: "workspace",
+        freshness: "current",
+        completeness: "complete",
+      };
+    }
 
     try {
       if (action.getState) return action.getState(context as WorkspaceActionContext);
@@ -520,28 +695,158 @@ export class WorkspaceActionHost {
     );
   }
 
+  /**
+   * Resolve one keyboard event against the effective keymap (§8.18.2
+   * 裁决): candidates ranked by context specificity (enabled > disabled),
+   * conflicts never execute. Two-stroke chords are recognized across calls.
+   */
+  prepareBinding(
+    event: KeyboardEventLike,
+    invocation?: ActionInvocation | Partial<WorkspaceActionContext> | unknown,
+  ): ResolvedBinding {
+    const stroke = strokeFromEvent(event);
+    const emptyResult: ResolvedBinding = { stroke, candidates: [], resolution: "none" };
+    if (this.disposed) return emptyResult;
+
+    // Escape always cancels a pending chord without matching actions first?
+    // No: an action may legitimately bind Escape; chord cancellation happens
+    // only when the escape does not resolve to any binding below.
+
+    const secondStroke = this.pendingChordStroke;
+    const context = freezeContext(this.buildContext(
+      invocation ?? { kind: "keyboard", eventTarget: (event as KeyboardEventLike & { target?: EventTarget }).target },
+    ));
+
+    type Candidate = Extract<ResolvedBinding["candidates"], readonly unknown[]>[number];
+    const candidates: Candidate[] = [];
+    let sawEnabledCandidate = false;
+
+    for (const [actionId] of this.actions) {
+      const { shortcuts, source } = this.effectiveShortcuts(actionId);
+      for (const shortcut of shortcuts) {
+        if (shortcut.kind !== "keyboard") continue;
+        let matched = false;
+        if (secondStroke && shortcut.strokes.length === 2) {
+          matched = strokesEqual(normalize(shortcut.strokes[0]), normalize(secondStroke))
+            && strokesEqual(normalize(shortcut.strokes[1]), normalize(stroke));
+        } else if (!secondStroke && shortcut.strokes.length === 1) {
+          matched = strokesEqual(normalize(shortcut.strokes[0]), normalize(stroke));
+        }
+        if (!matched) continue;
+        const evaluation = this.prepareWithContext(actionId, context, "keyboard");
+        candidates.push({
+          actionId,
+          evaluation,
+          contextSpecificity: evaluation.state.availability === "available" ? 1 : 0,
+          source,
+        });
+        if (evaluation.state.availability === "available") sawEnabledCandidate = true;
+        break;
+      }
+    }
+
+    if (candidates.length === 0) {
+      if (!secondStroke) {
+        // A stroke that starts a registered two-stroke chord is consumed even
+        // though it executes nothing itself (§8.18.2 chord wait).
+        const startsChord = this.strokeStartsChord(stroke);
+        if (startsChord) {
+          this.pendingChordStroke = stroke;
+          this.armChordTimeout();
+          this.onChordStateChange?.(true);
+          return {
+            stroke,
+            candidates: [],
+            resolution: "shadowed",
+            reason: "chord-pending",
+          };
+        }
+      }
+      return emptyResult;
+    }
+
+    const enabled = candidates.filter((candidate) => candidate.evaluation.state.availability === "available");
+    if (enabled.length === 0) {
+      return {
+        stroke,
+        candidates,
+        resolution: "unavailable",
+        reason: candidates[0]?.evaluation.state.disabledReason ?? "context blocked",
+      };
+    }
+    if (enabled.length > 1) {
+      // Two same-specificity executable candidates must not silently pick a
+      // winner — surface the conflict so Keymap settings can resolve it.
+      return {
+        stroke,
+        candidates,
+        resolution: "conflict",
+        reason: `${enabled.map((candidate) => candidate.actionId).join(", ")}`,
+      };
+    }
+
+    return {
+      stroke,
+      candidates,
+      resolution: candidates.length > 1 ? "single" : (sawEnabledCandidate ? "single" : "unavailable"),
+      reason: undefined,
+    };
+  }
+
+  private normalizeStrokeRef(stroke: ShortcutStroke): ShortcutStroke {
+    return { ...stroke, key: undefined };
+  }
+
+  private strokeStartsChord(stroke: ShortcutStroke): boolean {
+    const wanted = this.normalizeStrokeRef(stroke);
+    for (const actionId of this.actions.keys()) {
+      const { shortcuts } = this.effectiveShortcuts(actionId);
+      for (const shortcut of shortcuts) {
+        if (shortcut.kind !== "keyboard" || shortcut.strokes.length !== 2) continue;
+        if (strokesEqual(normalize(shortcut.strokes[0]), wanted)) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Dispatch one keyboard event through `prepareBinding`. Only an actually
+   * executing binding consumes the event: unavailable candidates and
+   * conflicts fall through untouched so other surfaces keep working. A bare
+   * Escape cancels a pending chord.
+   */
   async dispatchKeydown(
     event: KeyboardEventLike,
     options?: { eventTarget?: EventTarget | null } | ActionInvocation,
   ): Promise<{ id: string; result: ActionResult } | null> {
     if (this.disposed) return null;
-    const context = freezeContext(this.buildContext(
-      options ?? { kind: "keyboard", eventTarget: (event as KeyboardEventLike & { target?: EventTarget }).target },
-    ));
-
-    for (const action of this.actions.values()) {
-      if (!actionKeybindings(action).some((pattern) => matchesKeybinding(pattern, event))) continue;
-      const prepared = this.prepareWithContext(action.id, context, "keyboard");
-      if (prepared.state.availability !== "available") continue;
-      event.preventDefault();
-      event.stopPropagation();
-      const invocationSignal = options && "signal" in options ? options.signal : undefined;
-      return {
-        id: action.id,
-        result: await this.executePrepared(prepared, invocationSignal),
-      };
+    const resolved = this.prepareBinding(event, options);
+    const enabled = resolved.candidates.find(
+      (candidate) => candidate.evaluation.state.availability === "available",
+    );
+    if (!enabled || resolved.resolution === "conflict") {
+      if (
+        eventLogicalKey(event) === "escape"
+        && this.hasPendingChord()
+        && resolved.resolution === "none"
+      ) {
+        // Escape with no binding cancels the chord wait (timeout/focus-loss
+        // are covered elsewhere).
+        this.cancelPendingChord("escape");
+        event.preventDefault();
+      }
+      return null;
     }
-    return null;
+
+    // Executed: clear any chord wait state.
+    this.cancelPendingChord("executed");
+    event.preventDefault();
+    event.stopPropagation();
+    const invocationSignal = options && "signal" in options ? options.signal : undefined;
+    return {
+      id: enabled.actionId,
+      result: await this.executePrepared(enabled.evaluation, invocationSignal),
+    };
   }
 
   getBindingDiagnostics(
@@ -596,12 +901,29 @@ export class WorkspaceActionHost {
     return this.search("", customContext);
   }
 
+  /** Display strings for an action's effective shortcuts (user scheme first). */
+  effectiveKeybindingDisplay(actionId: string): string[] {
+    return this.effectiveShortcuts(actionId).shortcuts
+      .map((shortcut) => shortcut.kind === "keyboard"
+        ? shortcut.strokes.map((stroke) => [
+          stroke.ctrl && "Ctrl",
+          stroke.alt && "Alt",
+          stroke.shift && "Shift",
+          stroke.meta && "Meta",
+          stroke.key ?? stroke.code,
+        ].filter(Boolean).join("+")).join(" ")
+        : `Mouse${shortcut.button}`)
+      .filter(Boolean);
+  }
+
   getSnapshot(
     customContext?: ActionInvocation | WorkspaceActionContext | unknown,
   ): ActionSnapshotItem[] {
     const context = freezeContext(this.buildContext(customContext));
     const items = Array.from(this.actions.values()).map((action): ActionSnapshotItem => {
-      const keybindings = actionKeybindings(action);
+      // Snapshot shows the EFFECTIVE bindings (scheme override > defaults)
+      // so every surface displays the same truth the dispatcher resolves.
+      const keybindings = this.effectiveKeybindingDisplay(action.id);
       const evaluation = this.prepareWithContext(action.id, context, "snapshot");
       return {
         id: action.id,

@@ -284,6 +284,12 @@ import {
 } from "./workspace/workspaceEditPreview";
 import { RefactoringPreviewDialog } from "./workspace/RefactoringPreviewDialog";
 import { KeymapCheatSheetDialog } from "./workspace/KeymapCheatSheetDialog";
+import { KeymapSettingsDialog } from "./workspace/KeymapSettingsDialog";
+import {
+  readKeymapSchemes,
+  writeKeymapSchemes,
+  type KeymapSchemeV3,
+} from "./workspace/workspaceKeymapScheme";
 import { TabSwitcher } from "./workspace/TabSwitcher";
 import { DapAdapterGuideDialog } from "./workspace/DapAdapterGuideDialog";
 import {
@@ -7497,6 +7503,16 @@ export function CodeWorkspaceTab({
 
   const workspaceCommands = useMemo<WorkspaceCommand[]>(() => [
     {
+      id: "workspace.keymapSettings",
+      title: "Keymap Settings",
+      category: "Help",
+      keywords: ["keymap", "shortcut", "scheme", "keybinding"],
+      run: () => {
+        setKeymapSettingsOpen(true);
+        return true;
+      },
+    },
+    {
       id: "workspace.goToFile",
       title: "Go to File",
       category: "Navigation",
@@ -8715,6 +8731,10 @@ export function CodeWorkspaceTab({
         setStatusMessage(`Action ${commandId} failed: ${result.message ?? "unknown error"}`);
       } else if (result.kind === "cancelled") {
         setStatusMessage(`Action ${commandId} cancelled`);
+      } else if (result.kind === "no-op" && result.reason && result.reason !== "condition-not-met") {
+        // §8.18.2 result sink: silent success stays quiet, but a blocked
+        // no-op names its reason instead of disappearing.
+        setStatusMessage(`Action ${commandId}: ${result.message ?? result.reason}`);
       }
     },
   });
@@ -8726,6 +8746,38 @@ export function CodeWorkspaceTab({
     return actionsController.executeCommand(commandId, context);
   }, [actionsController]);
   workspaceCommandRunnerRef.current = executeWorkspaceCommand;
+
+  // §8.18.2 editable Keymap: per-app-profile scheme store; the active scheme
+  // is applied to the live action host so every dispatcher/surface shares it.
+  const keymapStore = useMemo(() => readKeymapSchemes(), []);
+  const [keymapSchemes, setKeymapSchemes] = useState<KeymapSchemeV3[]>(keymapStore.schemes);
+  const [activeKeymapSchemeId, setActiveKeymapSchemeId] = useState<string | null>(keymapStore.activeId);
+  const [keymapSettingsOpen, setKeymapSettingsOpen] = useState(false);
+  const keymapCorruptDiagnostic = keymapStore.recoveredFromCorrupt
+    ? "Stored keymap was corrupted; a backup was kept and defaults are active."
+    : null;
+  const activeKeymapScheme = useMemo(
+    () => keymapSchemes.find((scheme) => scheme.id === activeKeymapSchemeId) ?? null,
+    [keymapSchemes, activeKeymapSchemeId],
+  );
+
+  useEffect(() => {
+    writeKeymapSchemes(keymapSchemes, activeKeymapSchemeId);
+  }, [keymapSchemes, activeKeymapSchemeId]);
+
+  useEffect(() => {
+    actionsController.host.setKeymapScheme(activeKeymapScheme);
+  }, [actionsController.host, activeKeymapScheme]);
+
+  const applyKeymapScheme = useCallback((scheme: KeymapSchemeV3) => {
+    setKeymapSchemes((schemes) => {
+      const exists = schemes.some((entry) => entry.id === scheme.id);
+      return exists
+        ? schemes.map((entry) => (entry.id === scheme.id ? scheme : entry))
+        : [...schemes, scheme];
+    });
+    if (scheme.id !== activeKeymapSchemeId) setActiveKeymapSchemeId(scheme.id);
+  }, [activeKeymapSchemeId]);
 
   // §8.16.5 N2.6: Ctrl+Tab MRU Switcher state. Hold-to-cycle, release-to-commit,
   // Esc cancels; hovering an entry previews without mutating MRU order.
@@ -11368,6 +11420,7 @@ export function CodeWorkspaceTab({
         groupId={groupId}
         workspaceInstanceId={`${workspaceInstanceId}-${groupId}`}
         visible={visible}
+        workspaceActionHost={actionsController.host}
         readOnly={workspaceResourceOperationLocked}
         softWrap={groupSoftWrap}
         appearance={groupAppearance}
@@ -12566,6 +12619,20 @@ export function CodeWorkspaceTab({
             if (!entry) return;
             void actionsController.host.executePrepared(entry.evaluation);
           }}
+        />
+      )}
+      {keymapSettingsOpen && (
+        <KeymapSettingsDialog
+          open={true}
+          snapshot={actionsController.snapshot}
+          schemes={keymapSchemes}
+          activeSchemeId={activeKeymapSchemeId}
+          defaultSchemeName="IDEA defaults"
+          corruptDiagnostic={keymapCorruptDiagnostic}
+          onActiveSchemeChange={setActiveKeymapSchemeId}
+          onSchemesChange={(schemes) => setKeymapSchemes([...schemes])}
+          onApplyScheme={applyKeymapScheme}
+          onClose={() => setKeymapSettingsOpen(false)}
         />
       )}
       {dapGuideOpen && (

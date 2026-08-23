@@ -41,6 +41,7 @@ export type ActionDisabledReason =
   | "busy"
   | "disposed"
   | "invalidCondition"
+  | "userDisabled"
   | "unsupported";
 
 export interface ActionPlatformKeybindings {

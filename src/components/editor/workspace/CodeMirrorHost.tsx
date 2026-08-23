@@ -126,6 +126,10 @@ import {
   workspaceEditorKeymap,
   type EditorClipboardPayload,
 } from "./workspaceEditorCommands";
+import {
+  buildEditorHostActions,
+} from "./workspaceCodeMirrorKeymap";
+import type { WorkspaceActionHost } from "./workspaceActionHost";
 
 export interface EditorRevealTarget {
   line: number;
@@ -235,6 +239,13 @@ interface CodeMirrorHostProps {
   codeStyle?: EffectiveCodeStyle;
   /** When enabled, a normal mouse drag creates a rectangular selection. */
   columnSelectionMode?: boolean;
+  /**
+   * §8.18.2: when provided, the editor's business bindings (save / replace /
+   * parameter info / extend selection) are registered as explicit `editor.*`
+   * actions on this host and resolved through it — the inline spread-keymap
+   * entries are not installed. Null keeps isolated-usage legacy bindings.
+   */
+  workspaceActionHost?: WorkspaceActionHost | null;
 }
 
 /** Payload for the editor context menu (coordinates + clipboard helpers). */
@@ -1055,9 +1066,14 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
   fileCoverage,
   coverageEnabled = true,
   codeStyle,
+  workspaceActionHost = null,
 }: CodeMirrorHostProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  // §8.18.2: the mount-once editor effect reads the live host through a ref so
+  // editor.* actions register against the workspace controller's instance.
+  const workspaceActionHostRef = useRef<WorkspaceActionHost | null>(workspaceActionHost);
+  workspaceActionHostRef.current = workspaceActionHost;
   const onClipboardUnavailableRef = useRef((message: string) => {
     onClipboardUnavailable?.(message);
   });
@@ -1550,15 +1566,22 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
           },
         ])),
         keymap.of([
-          { key: "Mod-s", run: saveHandler },
-          { key: "Mod-r", run: openReplacePanel },
+          // §8.18.2: with a workspace action host, business bindings resolve
+          // exclusively through the host's scheme-aware dispatcher; only
+          // generic editor primitives remain in this spread.
+          ...(workspaceActionHost ? [] : [
+            { key: "Mod-s", run: saveHandler },
+            { key: "Mod-r", run: openReplacePanel },
+            { key: "Mod-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+            { key: "Ctrl-p", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+            { key: "Mod-Shift-Space", run: (view: EditorView) => requestSignatureHelp(view, null, { explicit: true }) },
+            { key: "Mod-w", run: expandSemanticSelection },
+          ]),
+          // Escape stack stays an editor-local primitive (snippet/signature/
+          // selection state is not part of WorkspaceActionContext).
           { key: "Escape", run: (view) => cancelLspSnippetSession(view) },
           { key: "Escape", run: escapeEditorSelections },
           { key: "Escape", run: () => hideSignature() },
-          { key: "Mod-p", run: (view) => requestSignatureHelp(view, null, { explicit: true }) },
-          { key: "Ctrl-p", run: (view) => requestSignatureHelp(view, null, { explicit: true }) },
-          { key: "Mod-Shift-Space", run: (view) => requestSignatureHelp(view, null, { explicit: true }) },
-          { key: "Mod-w", run: expandSemanticSelection },
           ...workspaceEditorKeymap,
           ...searchKeymap,
           ...closeBracketsKeymap,
@@ -1697,7 +1720,29 @@ export const CodeMirrorHost = memo(function CodeMirrorHost({
     viewRef.current = view;
     emitSelection(view);
     emitViewport(view);
+
+    // §8.18.2 单一 catalog: with a workspace action host present, the editor's
+    // business bindings live as explicit editor.* actions (conflict graph,
+    // Search Everywhere and Keymap settings all see them). Without one
+    // (isolated usage), the legacy inline bindings below stay active.
+    const actionHost = workspaceActionHostRef.current;
+    let unregisterEditorActions: (() => void) | null = null;
+    if (actionHost && !actionHost.isDisposed()) {
+      // Handlers close over this mount's view instance; the registration is
+      // removed in cleanup so a remount re-binds against the fresh view.
+      unregisterEditorActions = actionHost.registerActions(buildEditorHostActions({
+        save: saveHandler,
+        openReplacePanel: () => openReplacePanel(view),
+        expandSemanticSelection: () => expandSemanticSelection(view),
+        escapeStack: () =>
+          cancelLspSnippetSession(view)
+          || escapeEditorSelections(view)
+          || hideSignature(),
+      }));
+    }
+
     return () => {
+      unregisterEditorActions?.();
       clearPendingSelectionEmit();
       clearSignatureDelay();
       requestParameterInfoRef.current = null;

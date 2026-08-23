@@ -55,6 +55,7 @@ import type { OpenFileViewModel } from "./editorGroupTypes";
 import { useContextMenu } from "../../ContextMenu";
 import type { EditorGroupId } from "../../../stores/codeWorkspaceStore";
 import type { GitBlameLine } from "../../../lib/git";
+import type { WorkspaceActionHost } from "./workspaceActionHost";
 import type { GitLineChange } from "./gitEditorChrome";
 import { rollbackGitLineChange } from "./gitEditorChrome";
 import type { DebugBreakpointMarker } from "./debugEditorChrome";
@@ -164,6 +165,8 @@ interface EditorGroupProps {
   onMarkdownModeChange: (mode: MarkdownViewMode) => void;
   onChangeText: (key: string, text: string, caret?: LspPosition, caretOffset?: number) => void;
   onSave: (key: string) => void;
+  /** §8.18.2: workspace action host owning the editor.* business actions. */
+  workspaceActionHost?: WorkspaceActionHost | null;
   onHover: (
     file: OpenFileViewModel,
     position: LspPosition,
@@ -286,6 +289,7 @@ export function EditorGroup({
   onMarkdownModeChange,
   onChangeText,
   onSave,
+  workspaceActionHost = null,
   onHover,
   onPinHoverDoc,
   onDefinition,
@@ -656,6 +660,7 @@ export function EditorGroup({
                         fileKey={activeFile.key}
                         clipboardWorkspaceId={workspaceInstanceId}
                         onClipboardUnavailable={onClipboardUnavailable}
+                        workspaceActionHost={workspaceActionHost}
                         path={activeFile.languagePath}
                         doc={activeFile.text}
                         visible={visible}
@@ -718,6 +723,7 @@ export function EditorGroup({
                       fileKey={activeFile.key}
                         clipboardWorkspaceId={workspaceInstanceId}
                         onClipboardUnavailable={onClipboardUnavailable}
+                      workspaceActionHost={workspaceActionHost}
                       path={activeFile.languagePath}
                       doc={activeFile.text}
                       visible={visible}
