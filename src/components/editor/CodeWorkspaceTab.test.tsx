@@ -16,7 +16,7 @@ import type {
   LspDocumentStatus,
   LspServerStatus,
 } from "../../lib/editor/lsp";
-import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile } from "../../lib/editor/workspace";
+import type { StructuredTestResults, WorkspaceEntry, WorkspaceFile, WorkspaceWriteAck } from "../../lib/editor/workspace";
 import { CodeWorkspaceTab, extractContextSnippet } from "./CodeWorkspaceTab";
 import { emit } from "@tauri-apps/api/event";
 import { WORKSPACE_RECOVERY_STORAGE_PREFIX } from "./workspace/workspaceRecovery";
@@ -237,6 +237,20 @@ function file(
     size: text.length,
     mtime: 1_788_888_888,
     hash: `hash-${path}`,
+    ...overrides,
+  };
+}
+
+/** Native write ack (§8.18.1): the decoded file plus the written byte identity. */
+function writeAck(
+  written: WorkspaceFile,
+  overrides: Partial<Omit<WorkspaceWriteAck, "file">> = {},
+): WorkspaceWriteAck {
+  return {
+    file: written,
+    writtenHash: written.hash,
+    writtenByteLength: written.size,
+    atomicReplaceUsed: true,
     ...overrides,
   };
 }
@@ -2533,11 +2547,11 @@ describe("CodeWorkspaceTab", () => {
           newText: "// formatted\n",
         }],
       });
-    workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(file(
+    workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(writeAck(file(
       "src/main.ts",
       "// formatted\nconst x =1",
       { hash: "hash-formatted" },
-    ));
+    )));
 
     // Format-on-save is a workspace intelligence preference (command / Settings path).
     // Pref-seed before mount so save applies formatting without the old tree checkbox.
@@ -4190,11 +4204,11 @@ describe("CodeWorkspaceTab", () => {
       "你好",
       { encoding: "UTF-8", bom: false },
     ));
-    workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(file(
+    workspaceMocks.workspaceWriteFileEncoded.mockResolvedValue(writeAck(file(
       "src/main.txt",
       "你好",
       { encoding: "GBK", bom: false, hash: "hash-gbk" },
-    ));
+    )));
 
     renderWorkspace(workspace);
     await screen.findByTitle("app / src/main.txt");
@@ -4305,7 +4319,7 @@ describe("CodeWorkspaceTab", () => {
       text: string,
     ) => {
       disk.set(path, text);
-      return file(path, text, { hash: `hash-${path}-${text}` });
+      return writeAck(file(path, text, { hash: `hash-${path}-${text}` }));
     });
     const capabilities = {
       completion: false,
@@ -5012,7 +5026,7 @@ end_of_record
 
       // Now resolve the disk writer with snapshot result
       await act(async () => {
-        resolveWrite(file("src/main.ts", "initial_text\ninitial_text\n", { hash: "hash-saved-snapshot" }));
+        resolveWrite(writeAck(file("src/main.ts", "initial_text\ninitial_text\n", { hash: "hash-saved-snapshot" })));
       });
 
       // Assert writeback merged cleanly: savedText is updated, but buffer text keeps revision 11 edits and dirty is true
@@ -5088,7 +5102,7 @@ end_of_record
 
       // Writer finishes with the stale snapshot: writeback must be discarded.
       await act(async () => {
-        resolveWrite(file("src/main.ts", "close_race\nclose_race\n", { hash: "hash-closed-snapshot" }));
+        resolveWrite(writeAck(file("src/main.ts", "close_race\nclose_race\n", { hash: "hash-closed-snapshot" })));
       });
 
       const uiAfter = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), "instance-save-race-close");

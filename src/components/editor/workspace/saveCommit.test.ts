@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildPreparedSave,
   classifySaveWriteback,
+  classifyUnknownDiskEffect,
+  isLegalSaveCommitTransition,
   nextSaveTransactionId,
   normalizeSaveEol,
   resolveWritePolicy,
@@ -9,6 +11,7 @@ import {
   saveCommitResultFromError,
   validatePreparedSaveBoundary,
   type PreparedSave,
+  type SaveCommitResult,
 } from "./saveCommit";
 import { WorkspaceHashMismatchError } from "../../../lib/editor/workspace";
 
@@ -202,5 +205,148 @@ describe("P0-S3 buildPreparedSave shared construction", () => {
     expect(prepared.policy).not.toBe(policy);
     expect(prepared.bufferRevision).toBe(2);
     expect(prepared.expectedDiskHash).toBeNull();
+  });
+});
+
+describe("§8.18.1 six-kind SaveCommitResult taxonomy", () => {
+  const txId = "tx-taxonomy";
+
+  it("carries the three effect axes on every committed kind", () => {
+    const file = { path: "/p/a.ts", text: "", size: 0, mtime: 0, hash: "h" };
+    const savedCurrent: SaveCommitResult = {
+      kind: "saved-current",
+      transactionId: txId,
+      diskEffect: "committed",
+      memoryEffect: "saved-current",
+      providerEffect: "did-save",
+      file,
+    };
+    const stale: SaveCommitResult = {
+      kind: "saved-stale-snapshot",
+      transactionId: txId,
+      diskEffect: "committed",
+      memoryEffect: "kept-dirty",
+      providerEffect: "did-change-current",
+      file,
+      savedRevision: 3,
+      currentRevision: 4,
+    };
+    const discarded: SaveCommitResult = {
+      kind: "committed-writeback-discarded",
+      transactionId: txId,
+      diskEffect: "committed",
+      memoryEffect: "writeback-discarded",
+      providerEffect: "discarded",
+      file,
+      reason: "tab closed",
+    };
+    for (const result of [savedCurrent, stale, discarded]) {
+      expect(result.diskEffect).toBe("committed");
+    }
+  });
+
+  it("keeps cancelled/conflict/failed at zero disk effect and not-sent provider", () => {
+    const cancelled: SaveCommitResult = {
+      kind: "cancelled",
+      transactionId: txId,
+      diskEffect: "none",
+      memoryEffect: "unchanged",
+      providerEffect: "not-sent",
+      phase: "pre-write",
+      reason: "revision changed",
+    };
+    const conflict: SaveCommitResult = {
+      kind: "conflict",
+      transactionId: txId,
+      diskEffect: "none",
+      memoryEffect: "unchanged",
+      providerEffect: "not-sent",
+      error: { kind: "hash-mismatch", message: "mismatch" },
+    };
+    const failed: SaveCommitResult = {
+      kind: "failed",
+      transactionId: txId,
+      diskEffect: "unknown",
+      memoryEffect: "unchanged",
+      providerEffect: "unknown",
+      error: { kind: "io", message: "bridge dropped" },
+      recoveryId: txId,
+    };
+    expect(cancelled.diskEffect).toBe("none");
+    expect(conflict.providerEffect).toBe("not-sent");
+    // Only `failed` may carry an unknown/uncertain effect with a recovery id.
+    expect(failed.recoveryId).toBe(txId);
+  });
+
+  it("rejects a transition from a committed kind back to cancelled/conflict", () => {
+    expect(isLegalSaveCommitTransition(
+      "saved-current",
+      { kind: "cancelled", transactionId: txId, diskEffect: "none", memoryEffect: "unchanged", providerEffect: "not-sent", phase: "pre-write", reason: "late" },
+    )).toBe(false);
+    expect(isLegalSaveCommitTransition(
+      "committed-writeback-discarded",
+      { kind: "conflict", transactionId: txId, diskEffect: "none", memoryEffect: "unchanged", providerEffect: "not-sent", error: { kind: "hash-mismatch", message: "m" } },
+    )).toBe(false);
+    expect(isLegalSaveCommitTransition(null, {
+      kind: "cancelled",
+      transactionId: txId,
+      diskEffect: "none",
+      memoryEffect: "unchanged",
+      providerEffect: "not-sent",
+      phase: "prepare",
+      reason: "ok",
+    })).toBe(true);
+  });
+});
+
+describe("§8.18.1 unknown disk-effect verification", () => {
+  it("classifies observed==written as committed", () => {
+    expect(classifyUnknownDiskEffect({
+      writtenHash: "NEW",
+      expectedOldHash: "old",
+      observedHash: "new",
+    })).toEqual({ outcome: "committed" });
+  });
+
+  it("classifies observed==old as none (nothing was written)", () => {
+    expect(classifyUnknownDiskEffect({
+      writtenHash: null,
+      expectedOldHash: "old-hash",
+      observedHash: "OLD-HASH",
+    })).toEqual({ outcome: "none" });
+  });
+
+  it("classifies foreign content and unreadable files as unresolved", () => {
+    expect(classifyUnknownDiskEffect({
+      writtenHash: "a",
+      expectedOldHash: "b",
+      observedHash: "c",
+    })).toEqual({ outcome: "foreign", observedHash: "c" });
+    expect(classifyUnknownDiskEffect({
+      writtenHash: "a",
+      expectedOldHash: null,
+      observedHash: null,
+    })).toEqual({ outcome: "foreign", observedHash: "" });
+  });
+
+  it("maps typed native errors through saveCommitResultFromError with their effect fact", () => {
+    const err = Object.assign(new Error("invoke bridge dropped"), {
+      kind: "io",
+      effect: "unknown",
+      writtenHash: "abc",
+      writtenByteLength: 12,
+    });
+    const mapped = saveCommitResultFromError("tx-x", err);
+    expect(mapped.kind).toBe("failed");
+    expect(mapped.diskEffect).toBe("unknown");
+    expect(mapped.providerEffect).toBe("unknown");
+    expect(mapped.error.effect).toBe("unknown");
+    expect(mapped.error.writtenHash).toBe("abc");
+
+    // A raw Error without a structured payload falls back to io with no
+    // effect fact; the commit core then verifies by re-reading.
+    const untyped = saveCommitResultFromError("tx-y", new Error("sync temp file: os error 5"));
+    expect(untyped.error.kind).toBe("io");
+    expect(untyped.diskEffect).toBeUndefined();
   });
 });

@@ -31,13 +31,9 @@ import {
   type SaveNormalizationResult,
 } from "./saveNormalizationPipeline";
 import {
-  type WorkspaceFile,
-} from "../../../lib/editor/workspace";
-import {
   buildPreparedSave,
   resolveWritePolicy,
-  saveCommitResultFromError,
-  type PreparedSave,
+  type PreparedSaveCommitter,
   type SaveCommitResult,
 } from "./saveCommit";
 
@@ -84,17 +80,20 @@ export interface SaveTransactionV2 {
 }
 
 /**
- * Five-state controller-level result (§8.17.1). `saved-current` /
- * `saved-stale-snapshot` carry the written `WorkspaceFile`; cancellation
- * names the phase it happened in; conflict/failed carry the typed write
- * error payload.
+ * Six-kind controller/host-level result (§8.18.1). The controller only
+ * produces prepare-phase outcomes (`cancelled`/`conflict`/`failed` with
+ * `diskEffect: "none"`); every disk-writing outcome is produced verbatim by
+ * the single commit core handed in as the committer — the controller never
+ * reinterprets a writer result into a different business state.
  */
 export type SaveCommitOutcome = SaveCommitResult;
 
-/** Typed result every byte writer must return to `executeSaveTransaction`. */
-export type SaveByteWriterResult =
-  | { kind: "written"; hash: string; file: WorkspaceFile }
-  | { kind: "cancelled"; reason: string };
+/**
+ * Typed writer contract (§8.18.1): the committer receives the frozen
+ * `PreparedSave` and returns the full six-kind result including disk /
+ * memory / provider effect axes.
+ */
+export type { PreparedSaveCommitter } from "./saveCommit";
 
 interface CachedConfig {
   parsed: ParsedEditorConfigFile;
@@ -408,15 +407,16 @@ export class WorkspaceStyleController {
   }
 
   /**
-   * Execute a save transaction against disk with pre/post race checks and the
-   * typed five-state outcome (§8.17.1). The controller owns prepare (style
-   * resolution, normalization, policy freeze into a `PreparedSave`) and hands
-   * the immutable record to the single byte writer; it never touches buffer
-   * state itself.
+   * Execute a save transaction: prepare (style resolution, normalization,
+   * policy freeze into one `PreparedSave`) then hand the immutable record to
+   * the single commit core (§8.18.1). Prepare-phase failures are terminal
+   * results with `diskEffect: "none"`; every disk-writing outcome comes back
+   * verbatim from the committer — the controller never reclassifies a writer
+   * result and never touches buffer state itself.
    */
   async executeSaveTransaction(
     transaction: SaveTransactionV2,
-    writeBytes: (prepared: PreparedSave) => Promise<SaveByteWriterResult>,
+    commit: PreparedSaveCommitter,
     options?: {
       formatOnSave?: boolean;
       formatFn?: (text: string) => Promise<string | null>;
@@ -427,6 +427,9 @@ export class WorkspaceStyleController {
       return {
         kind: "failed",
         transactionId: transaction.id,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
         error: {
           kind: "io",
           message: `Transaction workspaceId mismatch: expected "${this.workspaceId}", got "${transaction.workspaceId}".`,
@@ -466,6 +469,9 @@ export class WorkspaceStyleController {
       return {
         kind: "cancelled",
         transactionId: transaction.id,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
         phase: "prepare",
         reason: normResult.diagnostics[0] ?? "Buffer was modified during format/normalize.",
       };
@@ -475,6 +481,9 @@ export class WorkspaceStyleController {
       return {
         kind: "failed",
         transactionId: transaction.id,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
         error: {
           kind: "encoding",
           message: normResult.diagnostics[0] ?? "Text cannot be represented in target encoding.",
@@ -489,6 +498,9 @@ export class WorkspaceStyleController {
         return {
           kind: "cancelled",
           transactionId: transaction.id,
+          diskEffect: "none",
+          memoryEffect: "unchanged",
+          providerEffect: "not-sent",
           phase: "pre-write",
           reason: `Buffer revision changed (${transaction.bufferVersion} -> ${currentVer}) before write.`,
         };
@@ -500,6 +512,9 @@ export class WorkspaceStyleController {
       return {
         kind: "cancelled",
         transactionId: transaction.id,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
         phase: "pre-write",
         reason: "Workspace style generation changed during save transaction.",
       };
@@ -525,28 +540,9 @@ export class WorkspaceStyleController {
       }),
     });
 
-    try {
-      const writeResult = await writeBytes(prepared);
-      if (writeResult.kind === "cancelled") {
-        return {
-          kind: "cancelled",
-          transactionId: prepared.transactionId,
-          phase: "pre-write",
-          reason: writeResult.reason,
-        };
-      }
-      return {
-        kind: "saved-current",
-        transactionId: prepared.transactionId,
-        file: writeResult.file,
-      };
-    } catch (err) {
-      const mapped = saveCommitResultFromError(prepared.transactionId, err);
-      if (mapped.kind === "conflict") {
-        return { ...mapped, error: { ...mapped.error, message: `Disk hash conflict: ${mapped.error.message}` } };
-      }
-      return { ...mapped, error: { ...mapped.error, message: `Disk write failed: ${mapped.error.message}` } };
-    }
+    // The commit core is the single result classifier (§8.18.1). Its outcome
+    // — including IPC errors it could not classify — is returned unchanged.
+    return commit(prepared);
   }
 }
 

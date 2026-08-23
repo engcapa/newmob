@@ -1,20 +1,22 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   WorkspaceStyleController,
-  type SaveByteWriterResult,
+  type PreparedSaveCommitter,
   type SaveTransactionV2,
 } from "./workspaceStyleController";
-import type { PreparedSave } from "./saveCommit";
+import { saveCommitResultFromError } from "./saveCommit";
+import type { PreparedSave, SaveCommitResult } from "./saveCommit";
 import type { WorkspaceFile } from "../../../lib/editor/workspace";
 
 function fakeWrittenFile(hash: string): WorkspaceFile {
   return { path: "/workspace/src/test.txt", text: "", hash, size: 0, mtime: 0 };
 }
 
+/** Committer mock that records the frozen PreparedSave fields it receives. */
 function writeDiskMock(
-  impl: (path: string, text: string, hash: string | null, encoding: string, bom: boolean, eol: string) => Promise<SaveByteWriterResult>,
-): (prepared: PreparedSave) => Promise<SaveByteWriterResult> {
-  // vi.fn keeps spy assertions working; the cast restores the writer type.
+  impl: (path: string, text: string, hash: string | null, encoding: string, bom: boolean, eol: string) => Promise<SaveCommitResult>,
+): PreparedSaveCommitter {
+  // vi.fn keeps spy assertions working; the cast restores the committer type.
   return vi.fn(async (prepared: PreparedSave) => impl(
     prepared.filePath,
     prepared.text,
@@ -22,7 +24,19 @@ function writeDiskMock(
     prepared.policy.encoding,
     prepared.policy.bom,
     prepared.policy.eol,
-  )) as unknown as (prepared: PreparedSave) => Promise<SaveByteWriterResult>;
+  )) as unknown as PreparedSaveCommitter;
+}
+
+/** Full-fact committed result a real commit core returns after bytes land. */
+function committedCommitter(file: WorkspaceFile): PreparedSaveCommitter {
+  return vi.fn(async (prepared: PreparedSave): Promise<SaveCommitResult> => ({
+    kind: "saved-current",
+    transactionId: prepared.transactionId,
+    diskEffect: "committed",
+    memoryEffect: "saved-current",
+    providerEffect: "did-save",
+    file,
+  }));
 }
 import { applyWorkspaceEdit, type WorkspaceEditApplyHooks } from "./workspaceEditApply";
 import {
@@ -56,7 +70,14 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
           savedContent = text;
           savedEol = eol;
           savedExpectedHash = expectedHash;
-          return { kind: "written", hash: "new-disk-hash", file: fakeWrittenFile("new-disk-hash") };
+          return {
+            kind: "saved-current",
+            transactionId: `tx-save`,
+            diskEffect: "committed",
+            memoryEffect: "saved-current",
+            providerEffect: "did-save",
+            file: fakeWrittenFile("new-disk-hash"),
+          };
         });
 
         const tx: SaveTransactionV2 = {
@@ -185,7 +206,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         fileProvider: { readFile: async () => null },
       });
 
-      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write", file: fakeWrittenFile("h") } as const));
+      const writeDisk = vi.fn(committedCommitter(fakeWrittenFile("should-not-write")));
       let version = 1;
 
       const tx: SaveTransactionV2 = {
@@ -228,7 +249,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         fileProvider: { readFile: async () => null },
       });
 
-      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "should-not-write", file: fakeWrittenFile("h") } as const));
+      const writeDisk = vi.fn(committedCommitter(fakeWrittenFile("should-not-write")));
 
       const tx: SaveTransactionV2 = {
         id: "tx-same-len",
@@ -280,7 +301,7 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         text: "function main() {\n  return;\n}\n",
       };
 
-      const writeDisk = vi.fn(async () => ({ kind: "written", hash: "hash-saved", file: fakeWrittenFile("hash-saved") } as const));
+      const writeDisk = vi.fn(committedCommitter(fakeWrittenFile("hash-saved")));
 
       const outcome = await ctrl.executeSaveTransaction(tx, writeDisk);
       expect(outcome.kind).toBe("saved-current");
@@ -326,14 +347,22 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         text: "console.log('hi');\n",
       };
 
-      const outcome = await ctrl.executeSaveTransaction(tx, writeDiskMismatch);
-      expect(outcome.kind).toBe("conflict");
-      if (outcome.kind === "conflict") {
-        expect(outcome.error.message).toContain("Disk hash conflict");
-        expect(outcome.error.kind).toBe("hash-mismatch");
-        expect(outcome.error.expectedHash).toBe("expected_aaa");
-        expect(outcome.error.actualHash).toBe("found_bbb");
-      }
+      // §8.18.1: the commit core (not the controller) is the classifier. A
+      // raw throw from the committer propagates unclassified; the shared
+      // classifier the core uses must map it to a typed conflict.
+      await expect(ctrl.executeSaveTransaction(tx, writeDiskMismatch)).rejects.toThrow(
+        "Backend message with custom wording",
+      );
+      const mapped = saveCommitResultFromError("tx-mismatch", new WorkspaceHashMismatchError(
+        "hash-mismatch: Backend message with custom wording",
+        "expected_aaa",
+        "found_bbb",
+      ));
+      expect(mapped.kind).toBe("conflict");
+      expect(mapped.diskEffect).toBeUndefined();
+      expect(mapped.error.kind).toBe("hash-mismatch");
+      expect(mapped.error.expectedHash).toBe("expected_aaa");
+      expect(mapped.error.actualHash).toBe("found_bbb");
     });
 
     it("parses IPC string error with hash-mismatch prefix into WorkspaceHashMismatchError", () => {
@@ -373,12 +402,14 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         text: "console.log('hi');\n",
       };
 
-      const outcome = await ctrl.executeSaveTransaction(tx, writeDiskPermissionDenied);
-      expect(outcome.kind).toBe("failed");
-      if (outcome.kind === "failed") {
-        expect(outcome.error.message).toContain("Disk write failed: Permission denied (EACCES)");
-        expect(outcome.error.kind).toBe("io");
-      }
+      // A raw throw propagates; the shared commit-core classifier maps it to
+      // a typed zero-effect failure.
+      await expect(ctrl.executeSaveTransaction(tx, writeDiskPermissionDenied)).rejects.toThrow(
+        "Permission denied (EACCES)",
+      );
+      const mapped = saveCommitResultFromError("tx-perm", new Error("Permission denied (EACCES)"));
+      expect(mapped.kind).toBe("failed");
+      expect(mapped.error.kind).toBe("io");
     });
   });
 
@@ -440,10 +471,15 @@ describe("P0-A / N1.6 Write-Disk Byte Correctness Matrix", () => {
         policy: { eol: "lf", encoding: "UTF-8", bom: false },
         text: "body\n",
       };
-      const writeDisk = vi.fn(async () => ({
+      const writeDisk = vi.fn(async (prepared: PreparedSave): Promise<SaveCommitResult> => ({
         kind: "cancelled",
+        transactionId: prepared.transactionId,
+        diskEffect: "none",
+        memoryEffect: "unchanged",
+        providerEffect: "not-sent",
+        phase: "pre-write",
         reason: "Buffer modified during save preparation",
-      } as const));
+      }));
       const outcome = await ctrl.executeSaveTransaction(tx, writeDisk);
       expect(outcome.kind).toBe("cancelled");
       if (outcome.kind === "cancelled") {

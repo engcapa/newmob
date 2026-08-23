@@ -74,6 +74,7 @@ import {
   type WorkspaceToolConfig,
   type StructuredTestResult,
   type StructuredTestResults,
+  type WorkspaceWriteAck,
 } from "../../lib/editor/workspace";
 import {
   gitBlameLines,
@@ -164,7 +165,7 @@ import {
 import type { ResolvedCodeStyle } from "./workspace/editorConfigResolver";
 import {
   createWorkspaceStyleController,
-  type SaveByteWriterResult,
+  type PreparedSaveCommitter,
   type SaveTransactionV2,
   type WorkspaceStyleController,
 } from "./workspace/workspaceStyleController";
@@ -176,13 +177,21 @@ import type {
 import {
   buildPreparedSave,
   classifySaveWriteback,
+  classifyUnknownDiskEffect,
   nextSaveTransactionId,
   resolveWritePolicy,
+  saveCommitResultFromError,
   SaveTransactionRegistry,
   validatePreparedSaveBoundary,
   type PreparedSave,
   type SaveCommitResult,
 } from "./workspace/saveCommit";
+import {
+  hasUnverifiedUnknownDiskEffect,
+  recordDiskEffectLedgerEntry,
+  resolveDiskEffectLedgerEntry,
+  workspaceFileIdentity,
+} from "./workspace/workspaceRecovery";
 import {
   createWorkspaceLocationController,
   isPathContainedInRoot,
@@ -3646,7 +3655,7 @@ export function CodeWorkspaceTab({
     };
     bufferVersion?: number;
     styleGeneration?: number;
-  }): Promise<WorkspaceFile> => {
+  }): Promise<WorkspaceWriteAck> => {
     const targetEncoding = request.policy.encoding ?? "UTF-8";
     const targetBom = request.policy.bom ?? false;
     const rawEol = request.policy.eol ?? "LF";
@@ -3699,22 +3708,91 @@ export function CodeWorkspaceTab({
   }, []);
 
   /**
-   * Single open-buffer save commit core (§8.17.1). Takes an immutable
+   * Re-read verification for an unknown-effect IPC failure (§8.18.1): the
+   * native layer could not prove whether bytes landed, so the frontend reads
+   * the real file back and classifies against the intended/old hashes.
+   * Returns null when even the read fails — that stays `unknown`.
+   */
+  const readBackDiskSnapshot = useCallback(async (
+    prepared: PreparedSave,
+  ): Promise<Pick<WorkspaceFile, "hash" | "text" | "encoding" | "bom" | "size" | "mtime"> | null> => {
+    try {
+      const matchingRoot = rootsRef.current.find(
+        (r) => prepared.filePath.startsWith(r.path + "/") || prepared.filePath === r.path,
+      );
+      if (matchingRoot) {
+        const relPath = prepared.filePath.slice(matchingRoot.path.length).replace(/^\/+/, "");
+        const read = await workspaceReadFileWithEncoding(matchingRoot.path, relPath, prepared.policy.encoding);
+        return read ?? null;
+      }
+      return await workspaceReadLooseFileWithEncoding(prepared.filePath, prepared.policy.encoding);
+    } catch {
+      return null;
+    }
+  }, []);
+
+  /**
+   * Record one unresolved unknown-effect ledger row for the recovery center
+   * (§8.18.1): blocks automatic retries against this path until verified.
+   */
+  const recordUnknownDiskEffect = useCallback((
+    prepared: PreparedSave,
+    observedHash: string | null,
+  ): void => {
+    recordDiskEffectLedgerEntry({
+      workspaceId: prepared.workspaceId,
+      transactionId: prepared.transactionId,
+      path: prepared.filePath,
+      fileIdentity: (() => {
+        const file = openFilesRef.current[prepared.fileKey];
+        return file ? workspaceFileIdentity(file.ref) : prepared.filePath;
+      })(),
+      expectedOldHash: prepared.expectedDiskHash,
+      intendedNewHash: null,
+      observedHash,
+      diskEffect: "unknown",
+      createdAt: Date.now(),
+      lastVerifiedAt: observedHash !== null ? Date.now() : null,
+    });
+  }, []);
+
+  /** Typed cancellation with provably zero disk effect (§8.18.1). */
+  function cancelledSaveCommit(
+    prepared: PreparedSave,
+    phase: "prepare" | "pre-write",
+    reason: string,
+  ): SaveCommitResult {
+    return {
+      kind: "cancelled",
+      transactionId: prepared.transactionId,
+      diskEffect: "none",
+      memoryEffect: "unchanged",
+      providerEffect: "not-sent",
+      phase,
+      reason,
+    };
+  }
+
+  /**
+   * Single open-buffer save commit core (§8.18.1). Takes an immutable
    * PreparedSave, registers a transaction owner, runs the synchronous
-   * pre-write boundary, invokes the one byte writer, and classifies the
-   * writeback. Close/rename/unmount discard the writeback, watcher notify,
-   * git/semantic invalidation and LSP didSave/didChange by owner generation.
+   * pre-write boundary, invokes the one byte writer in the same turn, then is
+   * the ONLY result classifier: it reports disk / memory / provider effects
+   * verbatim. Bytes landed can never yield plain `cancelled`;
+   * close/rename/unmount after the write yields
+   * `committed-writeback-discarded`; an uncertain IPC failure is re-read
+   * against hashes instead of pretending zero side effects.
    */
   const commitOpenBufferPreparedSave = useCallback(async (
     prepared: PreparedSave,
-  ): Promise<SaveByteWriterResult> => {
+  ): Promise<SaveCommitResult> => {
     const key = prepared.fileKey;
     const registry = saveTransactionRegistryRef.current;
     const owner = registry.begin(prepared.workspaceId, key, prepared.transactionId);
     try {
       const fileAtPrepare = openFilesRef.current[key];
       if (!fileAtPrepare) {
-        return { kind: "cancelled", reason: "Open buffer was closed before write" };
+        return cancelledSaveCommit(prepared, "pre-write", "Open buffer was closed before write");
       }
 
       mutateOpenBuffer(key, { saving: true, error: null }, "save-metadata");
@@ -3741,7 +3819,7 @@ export function CodeWorkspaceTab({
       }
       if (cancellation) {
         mutateOpenBuffer(key, { saving: false }, "save-metadata");
-        return { kind: "cancelled", reason: cancellation };
+        return cancelledSaveCommit(prepared, "pre-write", cancellation);
       }
 
       // In the SAME synchronous turn, invoke the byte writer.
@@ -3755,13 +3833,112 @@ export function CodeWorkspaceTab({
 
       // 3. Writeback phase (merge, never overwrite text; generation-gated)
       try {
-        const saved = await writerPromise;
+        let ack: WorkspaceWriteAck;
+        try {
+          ack = await writerPromise;
+        } catch (writeError) {
+          // §8.18.1: classify the typed IPC error by its native effect fact.
+          const mapped = saveCommitResultFromError(prepared.transactionId, writeError);
+          mutateOpenBuffer(key, { dirty: true, saving: false, error: mapped.error.message }, "save-metadata");
+          if (mapped.diskEffect === "unknown") {
+            // The bridge could not prove whether bytes landed: verify against
+            // the real on-disk hash before reporting anything.
+            const observed = await readBackDiskSnapshot(prepared);
+            const verification = classifyUnknownDiskEffect({
+              writtenHash: mapped.error.writtenHash,
+              expectedOldHash: prepared.expectedDiskHash,
+              observedHash: observed?.hash ?? null,
+            });
+            if (verification.outcome === "committed" && observed) {
+              // Intended bytes are provably on disk: continue through the
+              // normal committed classification with recovered metadata.
+              ack = {
+                file: {
+                  path: prepared.filePath,
+                  text: observed.text,
+                  encoding: observed.encoding ?? prepared.policy.encoding,
+                  bom: observed.bom ?? prepared.policy.bom,
+                  size: observed.size ?? 0,
+                  mtime: observed.mtime ?? 0,
+                  hash: observed.hash,
+                },
+                writtenHash: mapped.error.writtenHash ?? observed.hash,
+                writtenByteLength: mapped.error.writtenByteLength ?? 0,
+                atomicReplaceUsed: true,
+              };
+            } else if (verification.outcome === "none") {
+              // Verified zero disk effect — the write genuinely failed; clear
+              // any stale ledger row for this exact transaction/path only.
+              resolveDiskEffectLedgerEntry(prepared.workspaceId, prepared.transactionId, prepared.filePath);
+              return mapped.kind === "conflict"
+                ? {
+                  kind: "conflict",
+                  transactionId: prepared.transactionId,
+                  diskEffect: "none",
+                  memoryEffect: "unchanged",
+                  providerEffect: "not-sent",
+                  error: mapped.error,
+                }
+                : {
+                  kind: "failed",
+                  transactionId: prepared.transactionId,
+                  diskEffect: "none",
+                  memoryEffect: "unchanged",
+                  providerEffect: "not-sent",
+                  error: mapped.error,
+                };
+            } else {
+              // Foreign content or unreadable: create a recovery entry and
+              // never auto-retry this path until a user verifies it.
+              recordUnknownDiskEffect(
+                prepared,
+                verification.outcome === "foreign" ? verification.observedHash : observed?.hash ?? null,
+              );
+              return {
+                kind: "failed",
+                transactionId: prepared.transactionId,
+                diskEffect: "unknown",
+                memoryEffect: "unchanged",
+                providerEffect: "unknown",
+                error: mapped.error,
+                recoveryId: prepared.transactionId,
+              };
+            }
+          } else if (mapped.kind === "conflict") {
+            return {
+              kind: "conflict",
+              transactionId: prepared.transactionId,
+              diskEffect: "none",
+              memoryEffect: "unchanged",
+              providerEffect: "not-sent",
+              error: mapped.error,
+            };
+          } else {
+            return {
+              kind: "failed",
+              transactionId: prepared.transactionId,
+              diskEffect: "none",
+              memoryEffect: "unchanged",
+              providerEffect: "not-sent",
+              error: mapped.error,
+            };
+          }
+        }
 
+        // Disk acknowledged. From here only committed kinds exist (§8.18.1).
         const ownerAfterWrite = registry.check(owner);
         if (!ownerAfterWrite.active) {
           // Bytes landed on disk, but the owning buffer/tab/workspace is gone:
           // discard writeback, watcher, git/semantic and LSP side effects.
-          return { kind: "cancelled", reason: `writeback-discarded: ${ownerAfterWrite.reason}` };
+          return {
+            kind: "committed-writeback-discarded",
+            transactionId: prepared.transactionId,
+            diskEffect: "committed",
+            memoryEffect: "writeback-discarded",
+            providerEffect: "discarded",
+            file: ack.file,
+            reason: ownerAfterWrite.reason,
+          };
         }
 
         const liveAfterWrite = openFilesRef.current[key];
@@ -3771,7 +3948,15 @@ export function CodeWorkspaceTab({
         if (writeback.kind === "discarded") {
           // Buffer closed while the writer was in flight: the disk write is
           // real, but no buffer or provider state may be resurrected.
-          return { kind: "written", hash: saved.hash, file: saved };
+          return {
+            kind: "committed-writeback-discarded",
+            transactionId: prepared.transactionId,
+            diskEffect: "committed",
+            memoryEffect: "writeback-discarded",
+            providerEffect: "discarded",
+            file: ack.file,
+            reason: writeback.reason,
+          };
         }
 
         const savedPath = absolutePathForOpenFile(fileAtPrepare);
@@ -3785,10 +3970,19 @@ export function CodeWorkspaceTab({
           }]).catch(() => 0);
         }
         if (!registry.check(owner).active) {
-          return { kind: "written", hash: saved.hash, file: saved };
+          return {
+            kind: "committed-writeback-discarded",
+            transactionId: prepared.transactionId,
+            diskEffect: "committed",
+            memoryEffect: "writeback-discarded",
+            providerEffect: "discarded",
+            file: ack.file,
+            reason: "Owner lost after watcher notify",
+          };
         }
-        const normalized = normalizeEditorText(saved.text);
-        const savedBom = saved.bom ?? prepared.policy.bom;
+        const normalized = normalizeEditorText(ack.file.text);
+        const savedBom = ack.file.bom ?? prepared.policy.bom;
+        const stale = writeback.kind === "saved-stale-snapshot";
 
         const latestNow = liveAfterWrite!;
 
@@ -3798,14 +3992,14 @@ export function CodeWorkspaceTab({
             savedText: normalized.text,
             text: latestNow.text,
             eol: (prepared.policy.eol.toUpperCase() as OpenFileEol) ?? normalized.eol,
-            encoding: saved.encoding ?? prepared.policy.encoding,
+            encoding: ack.file.encoding ?? prepared.policy.encoding,
             bom: savedBom,
-            hash: saved.hash,
-            mtime: saved.mtime,
-            size: saved.size,
+            hash: ack.writtenHash || ack.file.hash,
+            mtime: ack.file.mtime,
+            size: ack.file.size,
             loading: false,
             saving: false,
-            dirty: writeback.kind === "saved-stale-snapshot",
+            dirty: stale,
             error: null,
             documentRevision: latestNow.documentRevision,
           },
@@ -3814,22 +4008,77 @@ export function CodeWorkspaceTab({
 
         if (!registry.check(owner).active) {
           // Closed between merge and provider sync; skip didSave/didChange.
-          return { kind: "written", hash: saved.hash, file: saved };
+          return {
+            kind: "committed-writeback-discarded",
+            transactionId: prepared.transactionId,
+            diskEffect: "committed",
+            memoryEffect: "writeback-discarded",
+            providerEffect: "discarded",
+            file: ack.file,
+            reason: "Owner lost after writeback merge",
+          };
         }
         if (fileAtPrepare.ref.kind === "root") {
           notifyWorkspacePathGitChanged(fileAtPrepare.ref.rootId, fileAtPrepare.ref.path);
         }
         semanticIndex.invalidate("document-saved", [savedPath ?? fileAtPrepare.path]);
-        if (writeback.kind === "saved-current") {
-          await saveLspDocument({ ...fileAtPrepare, text: prepared.text }, prepared.text);
-        } else {
+
+        // A settled save clears its own ledger row for this path only — never
+        // other workspaces or paths (§8.18.1).
+        resolveDiskEffectLedgerEntry(prepared.workspaceId, prepared.transactionId, prepared.filePath);
+
+        if (!stale) {
+          try {
+            await saveLspDocument({ ...fileAtPrepare, text: prepared.text }, prepared.text);
+            return {
+              kind: "saved-current",
+              transactionId: prepared.transactionId,
+              diskEffect: "committed",
+              memoryEffect: "saved-current",
+              providerEffect: "did-save",
+              file: ack.file,
+            };
+          } catch {
+            // Provider sync failed after the disk write: do not roll back or
+            // downgrade the disk fact; report the failed provider effect.
+            return {
+              kind: "saved-current",
+              transactionId: prepared.transactionId,
+              diskEffect: "committed",
+              memoryEffect: "saved-current",
+              providerEffect: "failed",
+              file: ack.file,
+            };
+          }
+        }
+        try {
           // Stale-snapshot save: the disk now holds an older revision than the
           // live buffer. Sending didSave(snapshotText) would let the provider
           // observe an old document as the saved one; sync only the current
           // buffer via didChange and let the next explicit save own didSave.
           await syncLspDocument(latestNow, "change");
+          return {
+            kind: "saved-stale-snapshot",
+            transactionId: prepared.transactionId,
+            diskEffect: "committed",
+            memoryEffect: "kept-dirty",
+            providerEffect: "did-change-current",
+            file: ack.file,
+            savedRevision: prepared.bufferRevision,
+            currentRevision: latestNow.documentRevision ?? 0,
+          };
+        } catch {
+          return {
+            kind: "saved-stale-snapshot",
+            transactionId: prepared.transactionId,
+            diskEffect: "committed",
+            memoryEffect: "kept-dirty",
+            providerEffect: "failed",
+            file: ack.file,
+            savedRevision: prepared.bufferRevision,
+            currentRevision: latestNow.documentRevision ?? 0,
+          };
         }
-        return { kind: "written", hash: saved.hash, file: saved };
       } catch (err) {
         const message = errorMessage(err);
         mutateOpenBuffer(
@@ -3850,11 +4099,13 @@ export function CodeWorkspaceTab({
     absolutePathForOpenFile,
     mutateOpenBuffer,
     notifyWorkspacePathGitChanged,
+    readBackDiskSnapshot,
+    recordUnknownDiskEffect,
     saveLspDocument,
     semanticIndex.invalidate,
     syncLspDocument,
     writeTextSnapshot,
-  ]);
+  ]) as PreparedSaveCommitter;
 
   /** Public open-buffer save: prepares one transaction, then commits it. */
   const saveOpenBufferText = useCallback(async (
@@ -3872,6 +4123,15 @@ export function CodeWorkspaceTab({
     }
     if (file.library) {
       throw new Error(`${file.title} is a read-only library source`);
+    }
+
+    // §8.18.1: an unverified unknown-effect ledger row blocks automatic
+    // retries against the same path until a re-read confirms the real bytes.
+    const pendingUnknownPath = absolutePathForOpenFile(file) ?? file.path ?? file.title;
+    if (hasUnverifiedUnknownDiskEffect(workspaceInstanceId, pendingUnknownPath)) {
+      throw new Error(
+        `A previous save of ${file.subtitle} has an unverified disk result. Confirm the file contents in the recovery center before saving again.`,
+      );
     }
 
     // 1. Prepare phase: capture the immutable PreparedSave through the shared
@@ -3896,8 +4156,8 @@ export function CodeWorkspaceTab({
     });
 
     const result = await commitOpenBufferPreparedSave(prepared);
-    if (result.kind === "cancelled") return null;
-    return result.file;
+    if (result.diskEffect === "committed") return result.file;
+    return null;
   }, [
     absolutePathForOpenFile,
     commitOpenBufferPreparedSave,
@@ -4028,10 +4288,18 @@ export function CodeWorkspaceTab({
         if (isJavaBuildFile(file.languagePath) && lspFilesRef.current[key]?.status?.active) {
           void promptReloadProject(key, file.subtitle);
         }
+      } else if (outcome.kind === "committed-writeback-discarded") {
+        // Bytes are on disk but no buffer state was resurrected: never show a
+        // success toast; the recovery center holds the disk path/hash.
+        setStatusMessage(`${file.subtitle} written to disk after it closed; see recovery center for details`);
       } else if (outcome.kind === "cancelled") {
         setStatusMessage(`Save cancelled (${outcome.phase}): ${outcome.reason}`);
       } else if (outcome.kind === "conflict") {
         setStatusMessage(`Save conflict: ${outcome.error.message}`);
+      } else if (outcome.diskEffect === "unknown") {
+        // Unknown disk effect blocks automatic retries for this path until a
+        // re-read confirms the real bytes (§8.18.1).
+        setStatusMessage(`Save result unknown for ${file.subtitle}; verify the file in the recovery center before saving again`);
       } else {
         setStatusMessage(`Save failed: ${outcome.error.message}`);
       }

@@ -37,12 +37,67 @@ export interface PreparedSave {
   policy: SaveCommitPolicy;
 }
 
+/**
+ * Disk/memory/provider effect axes (§8.18.1). Every settled save reports all
+ * three so "bytes landed", "buffer merged" and "provider observed" are never
+ * conflated: a `cancelled` result can never follow a disk write, and an
+ * uncertain IPC failure reports `diskEffect: "unknown"` instead of pretending
+ * zero side effects.
+ */
+export type DiskEffect = "none" | "committed" | "unknown";
+export type MemoryEffect = "unchanged" | "saved-current" | "kept-dirty" | "writeback-discarded";
+export type ProviderEffect = "not-sent" | "did-save" | "did-change-current" | "discarded" | "failed" | "unknown";
+
+/**
+ * Single host/controller-level save result (§8.18.1): six kinds only, each
+ * self-describing through the three effect axes. Bytes-landed paths are
+ * always one of the three `diskEffect: "committed"` kinds; plain
+ * `cancelled` proves nothing reached the disk.
+ */
 export type SaveCommitResult =
-  | { kind: "saved-current"; transactionId: string; file: WorkspaceFile }
-  | { kind: "saved-stale-snapshot"; transactionId: string; file: WorkspaceFile; currentRevision: number }
-  | { kind: "cancelled"; transactionId: string; phase: "prepare" | "pre-write" | "writeback"; reason: string }
-  | { kind: "conflict"; transactionId: string; error: WorkspaceWriteErrorData }
-  | { kind: "failed"; transactionId: string; error: WorkspaceWriteErrorData };
+  | { kind: "saved-current"; transactionId: string; diskEffect: "committed";
+      memoryEffect: "saved-current"; providerEffect: "did-save" | "not-sent" | "failed"; file: WorkspaceFile }
+  | { kind: "saved-stale-snapshot"; transactionId: string; diskEffect: "committed";
+      memoryEffect: "kept-dirty"; providerEffect: "did-change-current" | "not-sent" | "failed";
+      file: WorkspaceFile; savedRevision: number; currentRevision: number }
+  | { kind: "committed-writeback-discarded"; transactionId: string; diskEffect: "committed";
+      memoryEffect: "writeback-discarded"; providerEffect: "discarded"; file: WorkspaceFile; reason: string }
+  | { kind: "cancelled"; transactionId: string; diskEffect: "none";
+      memoryEffect: "unchanged"; providerEffect: "not-sent"; phase: "prepare" | "pre-write"; reason: string }
+  | { kind: "conflict"; transactionId: string; diskEffect: "none";
+      memoryEffect: "unchanged"; providerEffect: "not-sent"; error: WorkspaceWriteErrorData }
+  | { kind: "failed"; transactionId: string; diskEffect: "none" | "unknown";
+      memoryEffect: "unchanged"; providerEffect: "not-sent" | "unknown";
+      error: WorkspaceWriteErrorData; recoveryId?: string };
+
+/** Prepare-phase output: either a frozen PreparedSave or a terminal failure. */
+export type PrepareSaveResult =
+  | { kind: "prepared"; value: PreparedSave }
+  | Extract<SaveCommitResult, { kind: "cancelled" | "conflict" | "failed" }>;
+
+/** The one writer contract: commit a frozen PreparedSave, report full facts. */
+export type PreparedSaveCommitter = (prepared: PreparedSave) => Promise<SaveCommitResult>;
+
+/**
+ * Illegal-transition guard used by tests and debug assertions. Note: a
+ * `diskEffect: "committed"` result is structurally incapable of being
+ * `cancelled`/`conflict` in `SaveCommitResult` itself — the union encodes
+ * that invariant, this guard only checks cross-result regressions.
+ */
+export function isLegalSaveCommitTransition(
+  before: SaveCommitResult["kind"] | null,
+  after: SaveCommitResult,
+): boolean {
+  // Once disk is committed the result can never regress to cancelled/conflict.
+  if (
+    (before === "saved-current" || before === "saved-stale-snapshot"
+      || before === "committed-writeback-discarded")
+    && (after.kind === "cancelled" || after.kind === "conflict")
+  ) {
+    return false;
+  }
+  return true;
+}
 
 let saveTransactionCounter = 0;
 
@@ -146,18 +201,51 @@ export function classifySaveWriteback(
 export function saveCommitResultFromError(
   transactionId: string,
   error: unknown,
-): { kind: "conflict" | "failed"; transactionId: string; error: WorkspaceWriteErrorData } {
+): { kind: "conflict" | "failed"; transactionId: string; diskEffect: DiskEffect | undefined;
+    memoryEffect: "unchanged"; providerEffect: ProviderEffect | undefined;
+    error: WorkspaceWriteErrorData } {
   const parsed = parseWorkspaceWriteError(error);
   return {
     kind: parsed.kind === "hash-mismatch" ? "conflict" : "failed",
     transactionId,
+    diskEffect: parsed.effect,
+    memoryEffect: "unchanged",
+    providerEffect: parsed.effect === "unknown" ? "unknown" : "not-sent",
     error: {
       kind: parsed.kind,
       message: parsed.message,
       ...(parsed.expectedHash !== undefined ? { expectedHash: parsed.expectedHash } : {}),
       ...(parsed.actualHash !== undefined ? { actualHash: parsed.actualHash } : {}),
+      ...(parsed.effect !== undefined ? { effect: parsed.effect } : {}),
+      ...(parsed.writtenHash !== undefined ? { writtenHash: parsed.writtenHash } : {}),
+      ...(parsed.writtenByteLength !== undefined ? { writtenByteLength: parsed.writtenByteLength } : {}),
     },
   };
+}
+
+/**
+ * Classification of an unknown-effect IPC failure after the frontend re-read
+ * the file (§8.18.1 native contract): equal to the written hash proves the
+ * intended bytes landed; equal to the old hash proves nothing was written;
+ * anything else is an unresolved foreign state that must create a recovery
+ * ledger entry and never auto-retry.
+ */
+export type UnknownDiskEffectVerification =
+  | { outcome: "committed" }
+  | { outcome: "none" }
+  | { outcome: "foreign"; observedHash: string };
+
+export function classifyUnknownDiskEffect(input: {
+  writtenHash: string | null | undefined;
+  expectedOldHash: string | null;
+  observedHash: string | null;
+}): UnknownDiskEffectVerification {
+  const observed = input.observedHash?.toLowerCase() ?? null;
+  const written = input.writtenHash?.toLowerCase() ?? null;
+  const old = input.expectedOldHash?.toLowerCase() ?? null;
+  if (observed && written && observed === written) return { outcome: "committed" };
+  if (observed && old && observed === old) return { outcome: "none" };
+  return { outcome: "foreign", observedHash: input.observedHash ?? "" };
 }
 
 /**

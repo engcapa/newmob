@@ -485,29 +485,57 @@ export function workspaceReadLooseFileWithEncoding(
 
 export type WorkspaceWriteErrorKind = "hash-mismatch" | "encoding" | "permission" | "io";
 
+/**
+ * Native disk-effect fact on a typed write error (§8.18.1). `none` proves the
+ * target bytes were untouched; `unknown` means the bridge cannot prove whether
+ * the replace happened and the caller must re-read/verify before retrying.
+ */
+export type WorkspaceWriteEffect = "none" | "unknown";
+
 export interface WorkspaceWriteErrorData {
   kind: WorkspaceWriteErrorKind;
   message: string;
   expectedHash?: string;
   actualHash?: string;
+  effect?: WorkspaceWriteEffect;
+  /** Set when bytes provably landed but the decoded read-back failed. */
+  writtenHash?: string;
+  writtenByteLength?: number;
+}
+
+/** Success response of the encoded byte writers (native write ack). */
+export interface WorkspaceWriteAck {
+  file: WorkspaceFile;
+  writtenHash: string;
+  writtenByteLength: number;
+  atomicReplaceUsed: boolean;
 }
 
 export class WorkspaceWriteError extends Error implements WorkspaceWriteErrorData {
   readonly kind: WorkspaceWriteErrorKind;
   readonly expectedHash?: string;
   readonly actualHash?: string;
+  readonly effect?: WorkspaceWriteEffect;
+  readonly writtenHash?: string;
+  readonly writtenByteLength?: number;
 
   constructor(
     kind: WorkspaceWriteErrorKind,
     message: string,
     expectedHash?: string,
     actualHash?: string,
+    effect?: WorkspaceWriteEffect,
+    writtenHash?: string,
+    writtenByteLength?: number,
   ) {
     super(message);
     this.name = "WorkspaceWriteError";
     this.kind = kind;
     this.expectedHash = expectedHash;
     this.actualHash = actualHash;
+    this.effect = effect;
+    this.writtenHash = writtenHash;
+    this.writtenByteLength = writtenByteLength;
     Object.setPrototypeOf(this, WorkspaceWriteError.prototype);
   }
 }
@@ -548,11 +576,14 @@ export function parseWorkspaceWriteError(err: unknown): WorkspaceWriteError {
     const raw = err as Record<string, unknown>;
     const kind = typeof raw.kind === "string" ? raw.kind : undefined;
     const message = typeof raw.message === "string" ? raw.message : msg;
+    const effect = raw.effect === "none" || raw.effect === "unknown" ? raw.effect : undefined;
+    const writtenHash = typeof raw.writtenHash === "string" ? raw.writtenHash : undefined;
+    const writtenByteLength = typeof raw.writtenByteLength === "number" ? raw.writtenByteLength : undefined;
     if (kind === "hash-mismatch" || kind === "encoding" || kind === "permission" || kind === "io") {
       if (kind === "hash-mismatch") {
         return new WorkspaceHashMismatchError(message, String(raw.expectedHash ?? match?.[1] ?? ""), String(raw.actualHash ?? match?.[2] ?? ""));
       }
-      return new WorkspaceWriteError(kind, message);
+      return new WorkspaceWriteError(kind, message, undefined, undefined, effect, writtenHash, writtenByteLength);
     }
   }
   if (msg.startsWith("hash-mismatch:")) {
@@ -609,9 +640,9 @@ export async function workspaceWriteFileEncoded(
   expectedHash: string | null | undefined,
   encoding: string,
   bom = false,
-): Promise<WorkspaceFile> {
+): Promise<WorkspaceWriteAck> {
   try {
-    return await invoke<WorkspaceFile>("workspace_write_file_encoded", {
+    return await invoke<WorkspaceWriteAck>("workspace_write_file_encoded", {
       repoRoot,
       path,
       contents,
@@ -631,9 +662,9 @@ export async function workspaceWriteLooseFileEncoded(
   expectedHash: string | null | undefined,
   encoding: string,
   bom = false,
-): Promise<WorkspaceFile> {
+): Promise<WorkspaceWriteAck> {
   try {
-    return await invoke<WorkspaceFile>("workspace_write_loose_file_encoded", {
+    return await invoke<WorkspaceWriteAck>("workspace_write_loose_file_encoded", {
       path,
       contents,
       expectedHash: expectedHash ?? null,

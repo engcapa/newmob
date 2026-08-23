@@ -48,6 +48,17 @@ pub struct WorkspaceFile {
     pub hash: String,
 }
 
+/// Disk-effect fact carried by a typed write error (§8.18.1). `None` means
+/// the native layer can prove the target bytes were not touched; `Unknown`
+/// means the bridge cannot prove whether the replace happened, so the
+/// frontend must re-read and verify against hashes before retrying.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorkspaceWriteEffect {
+    None,
+    Unknown,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceWriteError {
@@ -57,6 +68,15 @@ pub struct WorkspaceWriteError {
     pub expected_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actual_hash: Option<String>,
+    /// Absent on legacy producers; present on every byte-writer failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effect: Option<WorkspaceWriteEffect>,
+    /// Set when bytes were provably written but the post-write read-back
+    /// failed: lets the frontend classify committed without another write.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub written_byte_length: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,8 +103,38 @@ impl WorkspaceWriteError {
             message: message.into(),
             expected_hash: None,
             actual_hash: None,
+            effect: None,
+            written_hash: None,
+            written_byte_length: None,
         }
     }
+
+    /// Attach the native disk-effect fact (and, when known, the written byte
+    /// identity) to this error.
+    pub fn with_effect(
+        mut self,
+        effect: WorkspaceWriteEffect,
+        written: Option<(String, u64)>,
+    ) -> Self {
+        self.effect = Some(effect);
+        if let Some((hash, len)) = written {
+            self.written_hash = Some(hash);
+            self.written_byte_length = Some(len);
+        }
+        self
+    }
+}
+
+/// Success response of the encoded byte writers (§8.18.1 native contract):
+/// the decoded file plus the exact bytes that landed on disk and whether an
+/// atomic temp-file replace was used.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceWriteAck {
+    pub file: WorkspaceFile,
+    pub written_hash: String,
+    pub written_byte_length: u64,
+    pub atomic_replace_used: bool,
 }
 
 /// Classify a filesystem failure from the byte-writer path. Only
@@ -2240,7 +2290,8 @@ pub fn workspace_write_loose_file(
 }
 
 /// Write text using the selected editor encoding while retaining the existing
-/// hash-precondition and atomic replacement guarantees.
+/// hash-precondition and atomic replacement guarantees. Returns a typed ack
+/// carrying the exact written byte identity (§8.18.1 native contract).
 #[tauri::command]
 pub fn workspace_write_file_encoded(
     repo_root: String,
@@ -2249,18 +2300,34 @@ pub fn workspace_write_file_encoded(
     expected_hash: Option<String>,
     encoding: String,
     bom: Option<bool>,
-) -> Result<WorkspaceFile, WorkspaceWriteError> {
+) -> Result<WorkspaceWriteAck, WorkspaceWriteError> {
     let root = canonical_repo_root(&repo_root)
         .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
     let target = resolve_writable_path(&root, &path)
         .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
     reject_protected_write(&root, &target)
         .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
-    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))
-        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Encoding, e))?;
-    write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
-    workspace_read_file_with_encoding(repo_root, path, None, encoding)
-        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false)).map_err(|e| {
+        // Encoding happens before any filesystem mutation.
+        WorkspaceWriteError::new(WorkspaceWriteErrorKind::Encoding, e)
+            .with_effect(WorkspaceWriteEffect::None, None)
+    })?;
+    let ack = write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
+    let file = workspace_read_file_with_encoding(repo_root, path, None, encoding).map_err(|e| {
+        // Bytes provably landed; only the decoded read-back failed. The
+        // frontend classifies committed from `writtenHash` without
+        // rewriting.
+        WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e).with_effect(
+            WorkspaceWriteEffect::Unknown,
+            Some((ack.written_hash.clone(), ack.written_byte_length)),
+        )
+    })?;
+    Ok(WorkspaceWriteAck {
+        file,
+        written_hash: ack.written_hash,
+        written_byte_length: ack.written_byte_length,
+        atomic_replace_used: true,
+    })
 }
 
 #[tauri::command]
@@ -2270,21 +2337,35 @@ pub fn workspace_write_loose_file_encoded(
     expected_hash: Option<String>,
     encoding: String,
     bom: Option<bool>,
-) -> Result<WorkspaceFile, WorkspaceWriteError> {
+) -> Result<WorkspaceWriteAck, WorkspaceWriteError> {
     let target = resolve_writable_loose_file_path(&path)
         .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
     reject_protected_loose_write(&target)
         .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))?;
-    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false))
-        .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Encoding, e))?;
-    write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
-    loose_file_from_bytes_with_encoding(
-        &target,
-        fs::read(&target).map_err(|e| classify_io_error("read target", &e))?,
-        fs::metadata(&target).map_err(|e| classify_io_error("stat target", &e))?,
-        Some(&encoding),
-    )
-    .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))
+    let bytes = encode_workspace_text(&contents, &encoding, bom.unwrap_or(false)).map_err(|e| {
+        // Encoding happens before any filesystem mutation.
+        WorkspaceWriteError::new(WorkspaceWriteErrorKind::Encoding, e)
+            .with_effect(WorkspaceWriteEffect::None, None)
+    })?;
+    let ack = write_workspace_bytes(&target, bytes, expected_hash.as_deref())?;
+    let read_result = (|| -> Result<WorkspaceFile, WorkspaceWriteError> {
+        let raw = fs::read(&target).map_err(|e| classify_io_error("read target", &e))?;
+        let meta = fs::metadata(&target).map_err(|e| classify_io_error("stat target", &e))?;
+        loose_file_from_bytes_with_encoding(&target, raw, meta, Some(&encoding))
+            .map_err(|e| WorkspaceWriteError::new(WorkspaceWriteErrorKind::Io, e))
+    })();
+    let file = read_result.map_err(|e| {
+        WorkspaceWriteError::new(e.kind, e.message).with_effect(
+            WorkspaceWriteEffect::Unknown,
+            Some((ack.written_hash.clone(), ack.written_byte_length)),
+        )
+    })?;
+    Ok(WorkspaceWriteAck {
+        file,
+        written_hash: ack.written_hash,
+        written_byte_length: ack.written_byte_length,
+        atomic_replace_used: true,
+    })
 }
 
 #[tauri::command]
@@ -3135,11 +3216,18 @@ fn workspace_entry(root: &Path, path: &Path) -> Result<WorkspaceEntry, String> {
     })
 }
 
+/// Byte identity of a successful write, returned by `write_workspace_bytes`
+/// so the command layer can assemble the typed `WorkspaceWriteAck`.
+struct WrittenBytesAck {
+    written_hash: String,
+    written_byte_length: u64,
+}
+
 fn write_workspace_bytes(
     target: &Path,
     bytes: Vec<u8>,
     expected_hash: Option<&str>,
-) -> Result<(), WorkspaceWriteError> {
+) -> Result<WrittenBytesAck, WorkspaceWriteError> {
     if let Some(expected) = expected_hash
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -3147,11 +3235,15 @@ fn write_workspace_bytes(
         let current = fs::read(target).map_err(|error| classify_io_error("read target", &error))?;
         let current_hash = sha256_hex(&current);
         if !current_hash.eq_ignore_ascii_case(expected) {
+            // Precondition failed before any mutation: provably no disk effect.
             return Err(WorkspaceWriteError {
                 kind: WorkspaceWriteErrorKind::HashMismatch,
                 message: hash_mismatch_error(expected, &current_hash),
                 expected_hash: Some(expected.to_string()),
                 actual_hash: Some(current_hash),
+                effect: Some(WorkspaceWriteEffect::None),
+                written_hash: None,
+                written_byte_length: None,
             });
         }
     }
@@ -3176,10 +3268,21 @@ fn write_workspace_bytes(
             .map_err(|error| classify_io_error("sync temp file", &error))?;
     }
     if let Err(error) = replace_file(&tmp, target) {
-        let _ = fs::remove_file(&tmp);
-        return Err(classify_io_error("rename temp file", &error));
+        let remove_result = fs::remove_file(&tmp);
+        // Windows replace deletes the target before renaming; if the rename
+        // then fails the target may be gone even though the new bytes never
+        // landed. Only report `None` when the target still exists.
+        let effect = if target.exists() && remove_result.is_ok() {
+            WorkspaceWriteEffect::None
+        } else {
+            WorkspaceWriteEffect::Unknown
+        };
+        return Err(classify_io_error("rename temp file", &error).with_effect(effect, None));
     }
-    Ok(())
+    Ok(WrittenBytesAck {
+        written_hash: sha256_hex(&bytes),
+        written_byte_length: bytes.len() as u64,
+    })
 }
 
 fn file_from_bytes(
@@ -3476,11 +3579,31 @@ mod tests {
         assert_eq!(err.kind, WorkspaceWriteErrorKind::HashMismatch);
         assert_eq!(err.expected_hash.as_deref(), Some("deadbeef"));
         assert!(err.actual_hash.is_some());
+        // §8.18.1: precondition failures are provably zero-effect.
+        assert_eq!(err.effect, Some(WorkspaceWriteEffect::None));
         assert_eq!(
             fs::read(dir.path().join("a.txt")).unwrap(),
             b"one".to_vec(),
             "hash conflict must leave target bytes unchanged"
         );
+    }
+
+    #[test]
+    fn encoded_write_encoding_error_carries_none_effect() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "one").unwrap();
+        let err = workspace_write_file_encoded(
+            dir.path().to_string_lossy().to_string(),
+            "a.txt".into(),
+            "hello 世界".into(),
+            None,
+            "ISO-8859-1".into(),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, WorkspaceWriteErrorKind::Encoding);
+        assert_eq!(err.effect, Some(WorkspaceWriteEffect::None));
+        assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"one".to_vec());
     }
 
     #[test]
@@ -3500,7 +3623,13 @@ mod tests {
             fs::read(&path).unwrap(),
             vec![b'c', b'a', b'f', 0xE9, b'\n']
         );
-        assert_eq!(saved.text, "café\n");
+        assert_eq!(saved.file.text, "café\n");
+        assert_eq!(
+            saved.written_hash,
+            sha256_hex(&[b'c', b'a', b'f', 0xE9, b'\n'])
+        );
+        assert_eq!(saved.written_byte_length, 5);
+        assert!(saved.atomic_replace_used);
     }
 
     #[test]
@@ -3663,9 +3792,9 @@ mod tests {
             Some(true),
         )
         .unwrap();
-        assert_eq!(saved.encoding, "UTF-16LE");
-        assert!(saved.bom);
-        assert_eq!(saved.text, "changed\n世界");
+        assert_eq!(saved.file.encoding, "UTF-16LE");
+        assert!(saved.file.bom);
+        assert_eq!(saved.file.text, "changed\n世界");
     }
 
     #[test]
@@ -3709,8 +3838,8 @@ mod tests {
             Some(false),
         )
         .unwrap();
-        assert_eq!(saved.encoding, "windows-1252");
-        assert_eq!(saved.text, "café – €");
+        assert_eq!(saved.file.encoding, "windows-1252");
+        assert_eq!(saved.file.text, "café – €");
         assert_eq!(
             workspace_read_loose_file(path_string, None).unwrap().text,
             "café – €"
@@ -3737,7 +3866,7 @@ mod tests {
             Some(false),
         )
         .unwrap();
-        assert_eq!(saved.text, "中文");
+        assert_eq!(saved.file.text, "中文");
         assert_eq!(fs::read(path).unwrap(), [0xd6, 0xd0, 0xce, 0xc4]);
     }
 
@@ -4902,8 +5031,8 @@ runtimeClasspath - Runtime classpath of source set 'main'.
                 } else {
                     enc_name
                 };
-                assert_eq!(saved.encoding, expected_label);
-                assert_eq!(saved.bom, *bom);
+                assert_eq!(saved.file.encoding, expected_label);
+                assert_eq!(saved.file.bom, *bom);
 
                 let raw_on_disk = fs::read(&path).unwrap();
                 let mut expected_bytes = Vec::new();
@@ -4949,23 +5078,23 @@ runtimeClasspath - Runtime classpath of source set 'main'.
                 let edit_saved = workspace_write_loose_file_encoded(
                     path_string.clone(),
                     edit_text.into(),
-                    Some(saved.hash.clone()),
+                    Some(saved.written_hash.clone()),
                     (*enc_name).into(),
                     Some(*bom),
                 )
                 .unwrap();
-                assert_eq!(edit_saved.encoding, expected_label);
+                assert_eq!(edit_saved.file.encoding, expected_label);
 
                 // Replay path
                 let replay_saved = workspace_write_loose_file_encoded(
                     path_string.clone(),
                     initial_text.into(),
-                    Some(edit_saved.hash),
+                    Some(edit_saved.written_hash),
                     (*enc_name).into(),
                     Some(*bom),
                 )
                 .unwrap();
-                assert_eq!(replay_saved.hash, saved.hash);
+                assert_eq!(replay_saved.written_hash, saved.written_hash);
                 assert_eq!(fs::read(&path).unwrap(), expected_bytes);
             }
         }
@@ -4981,7 +5110,7 @@ runtimeClasspath - Runtime classpath of source set 'main'.
             Some(false),
         )
         .unwrap();
-        let initial_hash = initial_win.hash.clone();
+        let initial_hash = initial_win.written_hash.clone();
         let initial_bytes = fs::read(&win_path).unwrap();
 
         let unrep_err = workspace_write_loose_file_encoded(

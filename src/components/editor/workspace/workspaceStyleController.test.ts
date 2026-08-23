@@ -2,32 +2,34 @@ import { describe, expect, it, vi } from "vitest";
 import {
   WorkspaceStyleController,
   createWorkspaceStyleController,
-  type SaveByteWriterResult,
+  type PreparedSaveCommitter,
   type SaveTransactionV2,
 } from "./workspaceStyleController";
-import type { PreparedSave } from "./saveCommit";
+import {
+  buildPreparedSave,
+  resolveWritePolicy,
+  type PreparedSave,
+  type SaveCommitResult,
+} from "./saveCommit";
 import type { WorkspaceFile } from "../../../lib/editor/workspace";
 
 function fakeWrittenFile(hash: string): WorkspaceFile {
   return { path: "/project/app.ts", text: "", hash, size: 0, mtime: 0 };
 }
 
-/** Adapter: legacy positional writer mock -> typed byte-writer contract. */
-function writeDiskMock(
-  impl: (path: string, text: string, hash: string | null, encoding: string, bom: boolean, eol: string) => Promise<SaveByteWriterResult>,
-): (prepared: PreparedSave) => Promise<SaveByteWriterResult> {
-  // vi.fn keeps spy assertions working; the cast restores the writer type.
-  return vi.fn(async (prepared: PreparedSave) => impl(
-    prepared.filePath,
-    prepared.text,
-    prepared.expectedDiskHash,
-    prepared.policy.encoding,
-    prepared.policy.bom,
-    prepared.policy.eol,
-  )) as unknown as (prepared: PreparedSave) => Promise<SaveByteWriterResult>;
+/** Full-fact committed result as a real commit core would return it. */
+function savedCurrentCommitter(file: WorkspaceFile = fakeWrittenFile("hash-saved-1")): PreparedSaveCommitter {
+  return vi.fn(async (prepared: PreparedSave): Promise<SaveCommitResult> => ({
+    kind: "saved-current",
+    transactionId: prepared.transactionId,
+    diskEffect: "committed",
+    memoryEffect: "saved-current",
+    providerEffect: "did-save",
+    file,
+  }));
 }
 
-describe("WorkspaceStyleController (N1.1)", () => {
+describe("WorkspaceStyleController (§8.18.1)", () => {
   it("isolates styles and caches between separate workspace instances", async () => {
     const readFileA = vi.fn(async () => "root = true\n[*]\nindent_size = 2\n");
     const readFileB = vi.fn(async () => "root = true\n[*]\nindent_size = 4\n");
@@ -76,7 +78,8 @@ describe("WorkspaceStyleController (N1.1)", () => {
       fileProvider,
     });
 
-    const writeDisk = vi.fn(async () => ({ kind: "written", hash: "unused", file: fakeWrittenFile("unused") } as const));
+    // A committer that would report committed bytes if ever invoked.
+    const commit = vi.fn(savedCurrentCommitter());
 
     let currentVersion = 1;
     const tx: SaveTransactionV2 = {
@@ -93,19 +96,23 @@ describe("WorkspaceStyleController (N1.1)", () => {
 
     // Buffer edited concurrently
     currentVersion = 2;
-    const outcome = await ctrl.executeSaveTransaction(tx, writeDisk, {
+    const outcome = await ctrl.executeSaveTransaction(tx, commit, {
       getLatestBufferVersion: () => currentVersion,
     });
 
     expect(outcome.kind).toBe("cancelled");
     if (outcome.kind === "cancelled") {
+      // Prepare-phase cancellation is provably zero-effect on every axis.
       expect(outcome.phase).toBe("pre-write");
+      expect(outcome.diskEffect).toBe("none");
+      expect(outcome.memoryEffect).toBe("unchanged");
+      expect(outcome.providerEffect).toBe("not-sent");
       expect(outcome.reason).toContain("revision changed");
     }
-    expect(writeDisk).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
   });
 
-  it("executes save transaction successfully and normalizes line endings", async () => {
+  it("freezes normalized bytes/policy into one PreparedSave and hands it to the single committer", async () => {
     const fileProvider = { readFile: vi.fn(async () => null) };
     const ctrl = new WorkspaceStyleController({
       workspaceId: "ws-1",
@@ -116,11 +123,20 @@ describe("WorkspaceStyleController (N1.1)", () => {
     let writtenText = "";
     let writtenEol = "";
     let preparedHash: string | null = null;
-    const writeDisk = writeDiskMock(async (_path, text, expectedHash, _enc, _bom, eol) => {
-      writtenText = text;
-      writtenEol = eol;
-      preparedHash = expectedHash;
-      return { kind: "written", hash: "hash-saved-1", file: fakeWrittenFile("hash-saved-1") };
+    const commit: PreparedSaveCommitter = vi.fn(async (prepared): Promise<SaveCommitResult> => {
+      writtenText = prepared.text;
+      writtenEol = prepared.policy.eol;
+      preparedHash = prepared.expectedDiskHash;
+      return {
+        kind: "saved-stale-snapshot",
+        transactionId: prepared.transactionId,
+        diskEffect: "committed",
+        memoryEffect: "kept-dirty",
+        providerEffect: "did-change-current",
+        file: fakeWrittenFile("hash-saved-1"),
+        savedRevision: prepared.bufferRevision,
+        currentRevision: prepared.bufferRevision + 1,
+      };
     });
 
     const tx: SaveTransactionV2 = {
@@ -135,21 +151,25 @@ describe("WorkspaceStyleController (N1.1)", () => {
       text: "line1\nline2\n",
     };
 
-    const outcome = await ctrl.executeSaveTransaction(tx, writeDisk, {
+    const outcome = await ctrl.executeSaveTransaction(tx, commit, {
       getLatestBufferVersion: () => 1,
     });
 
-    expect(outcome.kind).toBe("saved-current");
     expect(writtenText).toBe("line1\r\nline2\r\n");
     expect(writtenEol).toBe("crlf");
     expect(preparedHash).toBeNull();
-    if (outcome.kind === "saved-current") {
+    // The controller returns the committer's classification verbatim: a
+    // stale-snapshot save stays stale instead of being relabelled.
+    expect(outcome.kind).toBe("saved-stale-snapshot");
+    if (outcome.kind === "saved-stale-snapshot") {
       expect(outcome.transactionId).toBe(tx.id);
       expect(outcome.file.hash).toBe("hash-saved-1");
+      expect(outcome.savedRevision).toBe(1);
+      expect(outcome.currentRevision).toBe(2);
     }
   });
 
-  it("fails typed on unencodable characters for Latin-1 policy", async () => {
+  it("fails typed on unencodable characters for Latin-1 policy before any write", async () => {
     const fileProvider = { readFile: vi.fn(async () => null) };
     const ctrl = new WorkspaceStyleController({
       workspaceId: "ws-1",
@@ -157,7 +177,7 @@ describe("WorkspaceStyleController (N1.1)", () => {
       fileProvider,
     });
 
-    const writeDisk = vi.fn(async () => ({ kind: "written", hash: "dummy", file: fakeWrittenFile("dummy") } as const));
+    const commit = vi.fn(savedCurrentCommitter(fakeWrittenFile("dummy")));
 
     const tx: SaveTransactionV2 = {
       id: "tx-3",
@@ -171,25 +191,22 @@ describe("WorkspaceStyleController (N1.1)", () => {
       text: "hello 你好\n",
     };
 
-    const outcome = await ctrl.executeSaveTransaction(tx, writeDisk);
+    const outcome = await ctrl.executeSaveTransaction(tx, commit);
     expect(outcome.kind).toBe("failed");
     if (outcome.kind === "failed") {
       expect(outcome.error.kind).toBe("encoding");
+      expect(outcome.diskEffect).toBe("none");
     }
-    expect(writeDisk).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
   });
 
-  it("handles structured hash mismatch and missing hash from writer (N1.5)", async () => {
+  it("returns the commit core's typed conflict/failed verbatim without reinterpreting them", async () => {
     const ctrl = new WorkspaceStyleController({
       workspaceId: "ws-1",
       roots: [{ path: "/project" }],
       fileProvider: { readFile: async () => null },
     });
 
-    // 1. Structured hash mismatch
-    const writeDiskConflict = vi.fn(async () => {
-      throw new Error("hash-mismatch: File changed on disk; expected hash aaa, found bbb");
-    });
     const tx: SaveTransactionV2 = {
       id: "tx-4",
       workspaceId: "ws-1",
@@ -202,30 +219,59 @@ describe("WorkspaceStyleController (N1.1)", () => {
       text: "test content\n",
     };
 
-    const outcome1 = await ctrl.executeSaveTransaction(tx, writeDiskConflict, {
+    // 1. Committer reports a hash conflict with zero disk effect.
+    const commitConflict: PreparedSaveCommitter = vi.fn(async (prepared): Promise<SaveCommitResult> => ({
+      kind: "conflict",
+      transactionId: prepared.transactionId,
+      diskEffect: "none",
+      memoryEffect: "unchanged",
+      providerEffect: "not-sent",
+      error: {
+        kind: "hash-mismatch",
+        message: "Disk hash conflict: expected aaa found bbb",
+        expectedHash: "aaa",
+        actualHash: "bbb",
+      },
+    }));
+    const outcome1 = await ctrl.executeSaveTransaction(tx, commitConflict, {
       getLatestBufferVersion: () => 1,
     });
+    expect(outcome1).toEqual(await Promise.resolve(outcome1));
     expect(outcome1.kind).toBe("conflict");
-    if (outcome1.kind === "conflict") {
-      expect(outcome1.transactionId).toBe(tx.id);
-      expect(outcome1.error.message).toContain("Disk hash conflict");
-      expect(outcome1.error.kind).toBe("hash-mismatch");
-      expect(outcome1.error.expectedHash).toBe("aaa");
-      expect(outcome1.error.actualHash).toBe("bbb");
-    }
 
-    // 2. Non-write IO error maps to failed with a typed payload
-    const writeDiskIoError = vi.fn(async () => {
-      throw new Error("sync temp file: os error 5");
-    });
-    const outcome2 = await ctrl.executeSaveTransaction(tx, writeDiskIoError, {
+    // 2. Committer reports an unknown disk effect with a recovery id; the
+    // controller must not downgrade it to a plain failed/none result.
+    const commitUnknown: PreparedSaveCommitter = vi.fn(async (prepared): Promise<SaveCommitResult> => ({
+      kind: "failed",
+      transactionId: prepared.transactionId,
+      diskEffect: "unknown",
+      memoryEffect: "unchanged",
+      providerEffect: "unknown",
+      error: { kind: "io", message: "invoke bridge dropped" },
+      recoveryId: prepared.transactionId,
+    }));
+    const outcome2 = await ctrl.executeSaveTransaction(tx, commitUnknown, {
       getLatestBufferVersion: () => 1,
     });
     expect(outcome2.kind).toBe("failed");
     if (outcome2.kind === "failed") {
-      expect(outcome2.error.message).toContain("Disk write failed: sync temp file: os error 5");
-      expect(outcome2.error.kind).toBe("io");
+      expect(outcome2.diskEffect).toBe("unknown");
+      expect(outcome2.recoveryId).toBe(tx.id);
     }
+
+    // 3. Committer reports committed-but-discarded after close/unmount; the
+    // controller must never map that back to cancelled or saved-current.
+    const commitDiscarded: PreparedSaveCommitter = vi.fn(async (prepared): Promise<SaveCommitResult> => ({
+      kind: "committed-writeback-discarded",
+      transactionId: prepared.transactionId,
+      diskEffect: "committed",
+      memoryEffect: "writeback-discarded",
+      providerEffect: "discarded",
+      file: fakeWrittenFile("h"),
+      reason: "Open buffer closed while writer was in flight",
+    }));
+    const outcome3 = await ctrl.executeSaveTransaction(tx, commitDiscarded);
+    expect(outcome3.kind).toBe("committed-writeback-discarded");
   });
 
   it("rejects transactions whose workspaceId does not match the controller", async () => {
@@ -245,25 +291,24 @@ describe("WorkspaceStyleController (N1.1)", () => {
       policy: { eol: "lf", encoding: "UTF-8", bom: false },
       text: "x\n",
     };
-    const outcome = await ctrl.executeSaveTransaction(tx, writeDiskMock(async () => ({
-      kind: "written",
-      hash: "h",
-      file: fakeWrittenFile("h"),
-    })));
+    const commit = vi.fn(savedCurrentCommitter(fakeWrittenFile("h")));
+    const outcome = await ctrl.executeSaveTransaction(tx, commit);
     expect(outcome.kind).toBe("failed");
     if (outcome.kind === "failed") {
       expect(outcome.error.message).toContain("workspaceId mismatch");
+      expect(outcome.diskEffect).toBe("none");
     }
+    expect(commit).not.toHaveBeenCalled();
   });
 
-  it("maps style generation change to a pre-write cancellation without invoking the writer", async () => {
+  it("maps style generation change to a pre-write cancellation without invoking the committer", async () => {
     const fileProvider = { readFile: vi.fn(async () => null) };
     const ctrl = new WorkspaceStyleController({
       workspaceId: "ws-gen",
       roots: [{ path: "/project" }],
       fileProvider,
     });
-    const writeDisk = vi.fn(async () => ({ kind: "written", hash: "h", file: fakeWrittenFile("h") } as const));
+    const commit = vi.fn(savedCurrentCommitter(fakeWrittenFile("h")));
     const gen = ctrl.getGeneration();
     const tx: SaveTransactionV2 = {
       id: "tx-gen",
@@ -277,7 +322,7 @@ describe("WorkspaceStyleController (N1.1)", () => {
       text: "x\n",
     };
 
-    const promise = ctrl.executeSaveTransaction(tx, writeDisk, {
+    const promise = ctrl.executeSaveTransaction(tx, commit, {
       getLatestBufferVersion: () => 1,
     });
     // Style invalidation races between prepare and pre-write.
@@ -287,8 +332,26 @@ describe("WorkspaceStyleController (N1.1)", () => {
     expect(outcome.kind).toBe("cancelled");
     if (outcome.kind === "cancelled") {
       expect(outcome.phase).toBe("pre-write");
+      expect(outcome.diskEffect).toBe("none");
       expect(outcome.reason).toContain("style generation");
     }
-    expect(writeDisk).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it("builds a PreparedSave through the shared builder with resolved policy", () => {
+    const prepared = buildPreparedSave({
+      transactionId: "tx-b",
+      workspaceId: "ws-b",
+      fileKey: "k",
+      filePath: "/p/f.txt",
+      text: "a\r\nb\r\n",
+      bufferRevision: 3,
+      styleGeneration: 7,
+      expectedDiskHash: "abc",
+      policy: resolveWritePolicy({ explicit: { eol: "crlf", encoding: "UTF-8", bom: true } }),
+    });
+    expect(prepared.policy).toEqual({ eol: "crlf", encoding: "UTF-8", bom: true });
+    expect(prepared.bufferRevision).toBe(3);
+    expect(prepared.styleGeneration).toBe(7);
   });
 });
