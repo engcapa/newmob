@@ -18,10 +18,12 @@ describe("referenceDocumentation", () => {
       kind: "allowed",
       url: "https://docs.example.dev/api",
     });
-    expect(validateExternalDocUrl("http://example.dev")).toEqual({
+    // §8.18.6: plain http requires the explicit workspace policy opt-in.
+    expect(validateExternalDocUrl("http://example.dev", { allowHttp: true })).toEqual({
       kind: "allowed",
       url: "http://example.dev/",
     });
+    expect(validateExternalDocUrl("http://example.dev").kind).toBe("unavailable");
   });
 
   it.each([

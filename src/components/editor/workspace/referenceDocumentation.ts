@@ -35,7 +35,10 @@ export type ExternalDocDecision =
       reason: "no-url" | "invalid-scheme" | "malformed" | "open-failed";
     };
 
-export function validateExternalDocUrl(raw: string | null | undefined): ExternalDocDecision {
+export function validateExternalDocUrl(
+  raw: string | null | undefined,
+  options: { allowHttp?: boolean } = {},
+): ExternalDocDecision {
   if (!raw || !raw.trim()) return { kind: "unavailable", reason: "no-url" };
   const trimmed = raw.trim();
   let parsed: URL;
@@ -44,10 +47,19 @@ export function validateExternalDocUrl(raw: string | null | undefined): External
   } catch {
     return { kind: "unavailable", reason: "malformed" };
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+  // §8.18.6: https always allowed; plain http only when the workspace policy
+  // opts in; anything that could carry embedded credentials or execute is a
+  // hard reject regardless of scheme.
+  if (parsed.username || parsed.password) {
     return { kind: "unavailable", reason: "invalid-scheme" };
   }
-  return { kind: "allowed", url: parsed.toString() };
+  if (parsed.protocol === "https:") {
+    return { kind: "allowed", url: parsed.toString() };
+  }
+  if (parsed.protocol === "http:" && options.allowHttp === true) {
+    return { kind: "allowed", url: parsed.toString() };
+  }
+  return { kind: "unavailable", reason: "invalid-scheme" };
 }
 
 export async function openExternalDocumentation(

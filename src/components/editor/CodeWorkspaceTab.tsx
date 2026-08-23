@@ -91,6 +91,7 @@ import {
   lspDocumentHighlights,
   lspFormatting,
   lspDefinition,
+  lspCancelReferenceRequest,
   lspHover,
   lspImplementation,
   lspInlayHints,
@@ -799,6 +800,9 @@ export function CodeWorkspaceTab({
     () => new ReferenceInfoController(workspaceInstanceId),
     [workspaceInstanceId],
   );
+  // §8.18.6: monotonic seq so each reference request supersedes the previous
+  // one on the native cancellation registry.
+  const referenceCancelSeqRef = useRef(0);
   const [referenceHistory, setReferenceHistory] = useState<ReferenceHistorySnapshot>(
     () => referenceInfoController.historySnapshot(),
   );
@@ -6139,33 +6143,47 @@ export function CodeWorkspaceTab({
       documentRevision: requestRevision,
       providerGeneration: requestGeneration,
     }, async ({ signal }) => {
-      const result = await lspHover(descriptor, position);
-      if (signal.aborted) return null;
-      const current = openFilesRef.current[file.key];
-      if (
-        !current
-        || current.documentRevision !== requestRevision
-        || lspSessionGeneration() !== requestGeneration
-      ) {
-        return null;
-      }
-      updateLspStatusForFile(file, result.status);
-      if (!result.contents) return null;
-      return {
-        title: word,
-        body: result.contents,
-        source: result.status.displayName ?? "Language Server",
-        uri: result.status.uri,
-        sourceLocation: result.range && result.status.uri
-          ? {
-              uri: result.status.uri,
-              path: result.status.path,
-              range: result.range,
-            }
-          : null,
-        revision: requestRevision,
-        generation: requestGeneration,
+      // §8.18.6 provider cancellation: the abort reaches the native layer via
+      // a per-file cancel key + monotonic seq so `$/cancelRequest` is sent
+      // and the in-flight hover stops racing.
+      const cancelKey = `${workspaceInstanceId}|${file.key}`;
+      referenceCancelSeqRef.current += 1;
+      const requestSeq = referenceCancelSeqRef.current;
+      const onAbort = () => {
+        void lspCancelReferenceRequest(cancelKey).catch(() => 0);
       };
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        const result = await lspHover(descriptor, position, { cancelKey, requestSeq });
+        if (signal.aborted) return null;
+        const current = openFilesRef.current[file.key];
+        if (
+          !current
+          || current.documentRevision !== requestRevision
+          || lspSessionGeneration() !== requestGeneration
+        ) {
+          return null;
+        }
+        updateLspStatusForFile(file, result.status);
+        if (!result.contents) return null;
+        return {
+          title: word,
+          body: result.contents,
+          source: result.status.displayName ?? "Language Server",
+          uri: result.status.uri,
+          sourceLocation: result.range && result.status.uri
+            ? {
+                uri: result.status.uri,
+                path: result.status.path,
+                range: result.range,
+              }
+            : null,
+          revision: requestRevision,
+          generation: requestGeneration,
+        };
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
     });
     if (outcome.kind === "available") {
       setQuickDocContent(outcome.content);
@@ -9261,7 +9279,11 @@ export function CodeWorkspaceTab({
         documentRevision: requestRevision,
         providerGeneration: requestGeneration,
       }, async ({ signal }) => {
-        const result = await lspHover(descriptor, position);
+        // §8.18.6: same provider-cancellation identity as the explicit path.
+        const cancelKey = `${workspaceInstanceId}|${file.key}`;
+        referenceCancelSeqRef.current += 1;
+        const requestSeq = referenceCancelSeqRef.current;
+        const result = await lspHover(descriptor, position, { cancelKey, requestSeq });
         if (signal.aborted) return null;
         const current = openFilesRef.current[file.key];
         if (

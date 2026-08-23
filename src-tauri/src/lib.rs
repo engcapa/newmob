@@ -537,6 +537,7 @@ pub fn run() {
             lsp::lsp_stop_workspace,
             lsp::lsp_get_diagnostics,
             lsp::lsp_hover,
+            lsp::lsp_cancel_reference_request,
             lsp::lsp_definition,
             lsp::lsp_type_definition,
             lsp::lsp_implementation,

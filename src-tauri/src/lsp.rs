@@ -2405,6 +2405,49 @@ fn push_workspace_symbol_diagnostic(diagnostics: &mut Vec<String>, message: Stri
     }
 }
 
+// ---------------------------------------------------------------------------
+// §8.18.6 reference-request cancellation registry. Keyed by
+// `<workspaceId>|<fileKey>` so a new caret/hover cancels the previous
+// in-flight provider request through `$/cancelRequest`, and an explicit
+// cancel command covers popup-close without a replacement request.
+// ---------------------------------------------------------------------------
+
+fn reference_cancellations() -> &'static std::sync::Mutex<HashMap<String, (u64, CancellationToken)>>
+{
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (u64, CancellationToken)>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn begin_reference_request(cancel_key: &str, request_seq: u64) -> CancellationToken {
+    let mut guard = reference_cancellations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    if let Some((previous_seq, previous)) =
+        guard.insert(cancel_key.to_string(), (request_seq, cancellation.clone()))
+    {
+        if previous_seq <= request_seq {
+            previous.cancel();
+        }
+    }
+    cancellation
+}
+
+fn cancel_reference_request(cancel_key: &str) -> bool {
+    let mut guard = reference_cancellations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.remove(cancel_key) {
+        Some((_, cancellation)) => {
+            cancellation.cancel();
+            true
+        }
+        None => false,
+    }
+}
+
 fn begin_workspace_symbol_query(
     queries: &mut HashMap<String, (u64, CancellationToken)>,
     workspace_id: &str,
@@ -5714,6 +5757,8 @@ pub async fn lsp_hover(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspHoverResult, String> {
     let document = with_document_uri(
         resolve_document(workspace_id, root_path, file_path, language_id, 0)?,
@@ -5745,16 +5790,41 @@ pub async fn lsp_hover(
             });
         }
     };
+    // §8.18.6: when the caller supplies a cancellation identity, a newer
+    // request for the same key aborts this one via `$/cancelRequest` and the
+    // in-flight await returns immediately instead of racing the response.
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => tokio_util::sync::CancellationToken::new(),
+    };
     let result = session
-        .request(
+        .request_with_cancellation(
             "textDocument/hover",
             json!({
                 "textDocument": { "uri": document.uri },
                 "position": { "line": line, "character": character }
             }),
+            &cancellation,
         )
         .await
         .unwrap_or(Value::Null);
+    if cancellation.is_cancelled() {
+        // Cancelled requests report no content; the status snapshot stays
+        // fresh so the next hover can proceed immediately.
+        let status = state
+            .lsp
+            .document_status(
+                &document,
+                server_command_id.as_deref(),
+                custom_server_command.as_ref(),
+            )
+            .await;
+        return Ok(LspHoverResult {
+            status,
+            contents: None,
+            range: None,
+        });
+    }
     let status = state
         .lsp
         .document_status(
@@ -5768,6 +5838,14 @@ pub async fn lsp_hover(
         contents: hover_contents(&result),
         range: result.get("range").and_then(parse_range),
     })
+}
+
+/// §8.18.6: cancel an in-flight reference request without issuing a
+/// replacement (popup close, workspace unmount). Returns true when a live
+/// request was actually aborted.
+#[tauri::command]
+pub fn lsp_cancel_reference_request(cancel_key: String) -> bool {
+    cancel_reference_request(&cancel_key)
 }
 
 #[tauri::command]
