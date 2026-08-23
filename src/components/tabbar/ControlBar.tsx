@@ -43,6 +43,7 @@ import { useT } from "../../lib/i18n";
 import type { LocalShellSelection } from "../../types";
 import type { SessionConfig } from "../../lib/ipc";
 import type { WorkspaceCommandMenuItem } from "../editor/workspace/workspaceCommands";
+import type { ActionResult } from "../editor/workspace/workspaceActionRegistry";
 
 const IS_MAC = getAppPlatform() === "macos";
 // Width reserved on the left for the native macOS traffic-light controls when
@@ -58,7 +59,7 @@ interface ControlBarProps {
   quickConnectVisible: boolean;
   workspaceCommands?: WorkspaceCommandMenuItem[];
   onCommand: (command: AppCommand) => void;
-  onWorkspaceCommand?: (commandId: string) => void;
+  onWorkspaceCommand?: (commandId: string) => void | Promise<ActionResult>;
   onToggleSidebar: () => void;
   onStartLocalTerminal: (localShell?: LocalShellSelection) => void;
   onConnectSession: (session: SessionConfig) => void;

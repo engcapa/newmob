@@ -10,15 +10,30 @@ describe("DocumentationPane", () => {
     );
   });
 
-  it("renders pinned content and clear/unpin actions", () => {
+  it("renders pinned content and clear/unpin/source actions", () => {
     const onClear = vi.fn();
     const onUnlock = vi.fn();
+    const onOpenSource = vi.fn();
+    const content = {
+      title: "CodeWorkspaceTab",
+      body: "Main shell component.",
+      source: "TypeScript Language Server",
+      sourceLocation: {
+        uri: "file:///repo/src/CodeWorkspaceTab.tsx",
+        path: "/repo/src/CodeWorkspaceTab.tsx",
+        range: {
+          start: { line: 752, character: 16 },
+          end: { line: 752, character: 32 },
+        },
+      },
+    };
     render(
       <DocumentationPane
-        content={{ title: "CodeWorkspaceTab", body: "Main shell component." }}
+        content={content}
         locked
         onClear={onClear}
         onUnlock={onUnlock}
+        onOpenSource={onOpenSource}
       />,
     );
     expect(screen.getByText("CodeWorkspaceTab")).toBeInTheDocument();
@@ -27,5 +42,7 @@ describe("DocumentationPane", () => {
     expect(onClear).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Unpin documentation" }));
     expect(onUnlock).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Source" }));
+    expect(onOpenSource).toHaveBeenCalledWith(content);
   });
 });

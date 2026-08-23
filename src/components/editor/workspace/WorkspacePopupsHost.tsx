@@ -6,11 +6,15 @@ import type {
   SearchEverywhereMode,
 } from "./SearchEverywhere";
 import { SearchEverywhere } from "./SearchEverywhere";
+import type { ActionSnapshotItem } from "./workspaceActionHost";
+import type { ActionResult } from "./workspaceActionRegistry";
 import { RecentFilesPopup, type RecentFileEntry } from "./RecentFilesPopup";
 import { StructurePopup } from "./StructurePopup";
-import { QuickDocPopup, type QuickDocContent } from "./QuickDocPopup";
+import { QuickDocPopup } from "./QuickDocPopup";
+import type { QuickDocContent } from "./referenceDocumentation";
 import { LocationPeek, type LocationPeekState } from "./LocationPeek";
-import type { WorkspaceCommand } from "./workspaceCommands";
+import { RecentLocationsDialog } from "./RecentLocationsDialog";
+import type { NavigationHistoryFacade, NavigationLocation, WorkspaceLocationController } from "./navigationHistoryModel";
 import type { WorkspaceSemanticIndexSnapshot } from "./workspaceSemanticIndex";
 
 interface WorkspacePopupsHostProps {
@@ -19,14 +23,14 @@ interface WorkspacePopupsHostProps {
   goToFileItems: GoToFileItem[];
   goToFileLoading: boolean;
   goToFileTruncated: boolean;
-  searchableCommands: WorkspaceCommand[];
+  actionSnapshots: ActionSnapshotItem[];
   symbolsAvailable: boolean;
   semanticIndex: WorkspaceSemanticIndexSnapshot;
   fetchWorkspaceSymbols: (query: string) => Promise<GoToSymbolQueryResult>;
   onCloseSearchEverywhere: () => void;
   onOpenFileItem: (item: GoToFileItem) => void;
   onOpenSymbol: (symbol: GoToSymbolItem, options?: { split: boolean }) => void;
-  onRunCommand: (commandId: string) => void;
+  onRunCommand: (commandId: string) => void | Promise<ActionResult>;
   onSearchText: (query: string) => void;
 
   recentFilesOpen: boolean;
@@ -35,6 +39,14 @@ interface WorkspacePopupsHostProps {
   recentChangedOnly?: boolean;
   onCloseRecent: () => void;
   onPickRecent: (entry: RecentFileEntry) => void;
+
+  recentLocationsOpen?: boolean;
+  recentLocationsChangedOnly?: boolean;
+  workspaceId?: string;
+  locationController?: WorkspaceLocationController;
+  navigationFacade?: NavigationHistoryFacade;
+  onCloseRecentLocations?: () => void;
+  onPickRecentLocation?: (location: NavigationLocation) => void;
 
   structureOpen: boolean;
   structureFileTitle: string | null;
@@ -48,6 +60,11 @@ interface WorkspacePopupsHostProps {
   quickDocContent: QuickDocContent | null;
   onCloseQuickDoc: () => void;
   onPinQuickDoc: (content: QuickDocContent) => void;
+  onOpenQuickDocSource?: (content: QuickDocContent) => void;
+  quickDocCanGoBack?: boolean;
+  quickDocCanGoForward?: boolean;
+  onQuickDocBack?: () => void;
+  onQuickDocForward?: () => void;
 
   locationPeek: LocationPeekState | null;
   onCloseLocationPeek: () => void;
@@ -61,7 +78,7 @@ export function WorkspacePopupsHost({
   goToFileItems,
   goToFileLoading,
   goToFileTruncated,
-  searchableCommands,
+  actionSnapshots,
   symbolsAvailable,
   semanticIndex,
   fetchWorkspaceSymbols,
@@ -76,6 +93,13 @@ export function WorkspacePopupsHost({
   recentChangedOnly = false,
   onCloseRecent,
   onPickRecent,
+  recentLocationsOpen = false,
+  recentLocationsChangedOnly = false,
+  workspaceId,
+  locationController,
+  navigationFacade,
+  onCloseRecentLocations,
+  onPickRecentLocation,
   structureOpen,
   structureFileTitle,
   structureSymbols,
@@ -87,6 +111,11 @@ export function WorkspacePopupsHost({
   quickDocContent,
   onCloseQuickDoc,
   onPinQuickDoc,
+  onOpenQuickDocSource,
+  quickDocCanGoBack = false,
+  quickDocCanGoForward = false,
+  onQuickDocBack,
+  onQuickDocForward,
   locationPeek,
   onCloseLocationPeek,
   onOpenLocation,
@@ -99,7 +128,7 @@ export function WorkspacePopupsHost({
         items={goToFileItems}
         loading={goToFileLoading}
         truncated={goToFileTruncated}
-        commands={searchableCommands}
+        actionSnapshots={actionSnapshots}
         symbolsAvailable={symbolsAvailable}
         semanticIndex={semanticIndex}
         fetchSymbols={fetchWorkspaceSymbols}
@@ -117,6 +146,17 @@ export function WorkspacePopupsHost({
         onClose={onCloseRecent}
         onPick={onPickRecent}
       />
+      {recentLocationsOpen && onCloseRecentLocations && onPickRecentLocation && (
+        <RecentLocationsDialog
+          open={recentLocationsOpen}
+          initialChangedOnly={recentLocationsChangedOnly}
+          workspaceId={workspaceId}
+          locationController={locationController}
+        navigationFacade={navigationFacade}
+          onClose={onCloseRecentLocations}
+          onSelectLocation={onPickRecentLocation}
+        />
+      )}
       <StructurePopup
         open={structureOpen}
         fileTitle={structureFileTitle}
@@ -131,6 +171,11 @@ export function WorkspacePopupsHost({
         content={quickDocContent}
         onClose={onCloseQuickDoc}
         onPin={onPinQuickDoc}
+        onOpenSource={onOpenQuickDocSource}
+        canGoBack={quickDocCanGoBack}
+        canGoForward={quickDocCanGoForward}
+        onBack={onQuickDocBack}
+        onForward={onQuickDocForward}
       />
       <LocationPeek
         open={!!locationPeek}

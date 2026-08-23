@@ -1,5 +1,6 @@
 import type React from "react";
 import { useMemo } from "react";
+import { ArrowUpDown, Search, X } from "lucide-react";
 import {
   Group as PanelGroup,
   Panel,
@@ -14,17 +15,27 @@ import {
   type VarNode,
 } from "./debugPanelShared";
 
-/** localStorage key + panel ids for the Variables/Watches vertical split. */
+/**
+ * localStorage key + panel id suffixes for the Variables/Watches vertical
+ * split. Group and panel ids are scoped to the workspace instance because
+ * react-resizable-panels resolves group state by id: two workspace tabs open
+ * at once used to register the same id, so each pane rendered the *other*
+ * group's layout and its divider stopped tracking the pointer.
+ */
 const DEBUG_VERTICAL_LAYOUT_KEY = "taomni.codeWorkspace.debugSplitVertical.v1";
-const DEBUG_VERTICAL_PANEL_IDS = ["debug-variables-section", "debug-watches-section"];
+const DEBUG_VERTICAL_PANEL_SUFFIXES = ["debug-variables-section", "debug-watches-section"];
 
 export interface DebugVariablesPaneProps {
   variables: VarNode[];
   watchNodes: VarNode[];
+  filterQuery?: string;
+  onFilterQueryChange?: (value: string) => void;
+  sortMode?: "natural" | "alphabetical";
+  onToggleSortMode?: () => void;
   watchInput: string;
   onWatchInputChange: (value: string) => void;
   onAddWatch: () => void;
-  onRemoveWatch: (index: number) => void;
+  onRemoveWatch: (target: number | string) => void;
   edit: VarEditState;
   onEditChange: (value: string) => void;
   onEditSubmit: () => void;
@@ -40,11 +51,17 @@ export interface DebugVariablesPaneProps {
   canSetVariable: boolean;
   canAddDataBreakpoint: boolean;
   variableMenuRender?: React.ReactNode;
+  /** Scopes split ids + persisted layout to one workspace tab. */
+  instanceId?: string;
 }
 
 export function DebugVariablesPane({
   variables,
   watchNodes,
+  filterQuery = "",
+  onFilterQueryChange,
+  sortMode = "natural",
+  onToggleSortMode,
   watchInput,
   onWatchInputChange,
   onAddWatch,
@@ -64,10 +81,19 @@ export function DebugVariablesPane({
   canSetVariable,
   canAddDataBreakpoint,
   variableMenuRender,
+  instanceId,
 }: DebugVariablesPaneProps) {
+  const idPrefix = instanceId ? `${instanceId}-` : "";
+  const layoutStorageKey = instanceId
+    ? `taomni.codeWorkspace.${instanceId}.debugSplitVertical.v1`
+    : DEBUG_VERTICAL_LAYOUT_KEY;
+  const panelIds = useMemo(
+    () => DEBUG_VERTICAL_PANEL_SUFFIXES.map((suffix) => `${idPrefix}${suffix}`),
+    [idPrefix],
+  );
   const verticalLayout = useMemo(
-    () => readDebugSplitLayout(DEBUG_VERTICAL_LAYOUT_KEY, DEBUG_VERTICAL_PANEL_IDS),
-    [],
+    () => readDebugSplitLayout(layoutStorageKey, panelIds),
+    [layoutStorageKey, panelIds],
   );
   return (
     <div
@@ -76,16 +102,57 @@ export function DebugVariablesPane({
     >
       <PanelGroup
         orientation="vertical"
-        id="debug-variables-split-v2"
+        id={`${idPrefix}debug-variables-split-v2`}
         className="flex-1 min-h-0"
         defaultLayout={verticalLayout}
-        onLayoutChanged={(layout) => writeDebugSplitLayout(DEBUG_VERTICAL_LAYOUT_KEY, layout)}
+        onLayoutChanged={(layout) => writeDebugSplitLayout(layoutStorageKey, layout)}
       >
         {/* Variables Section */}
-        <Panel id="debug-variables-section" defaultSize="60%" minSize="20%" className="flex flex-col min-h-0 min-w-0">
+        <Panel id={panelIds[0]} defaultSize="60%" minSize="20%" className="flex flex-col min-h-0 min-w-0">
           <div className="h-6 shrink-0 flex items-center justify-between border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]/40 px-2 font-medium text-[10px] text-[var(--taomni-text-muted)]">
-            <span>Variables</span>
-            <span className="text-[9px] tabular-nums">{variables.length}</span>
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span>Variables</span>
+              <span className="text-[9px] tabular-nums">{variables.length}</span>
+            </div>
+            <div className="flex items-center gap-1">
+              {onFilterQueryChange && (
+                <div className="flex items-center gap-0.5 rounded border border-[var(--taomni-input-border)] bg-[var(--taomni-input-bg)] px-1 py-0.5">
+                  <Search className="h-2.5 w-2.5 text-[var(--taomni-text-muted)] shrink-0" />
+                  <input
+                    data-testid="debug-variables-search"
+                    className="w-16 sm:w-24 bg-transparent text-[10px] outline-none"
+                    placeholder="Filter..."
+                    value={filterQuery}
+                    onChange={(e) => onFilterQueryChange(e.target.value)}
+                  />
+                  {filterQuery && (
+                    <button
+                      type="button"
+                      onClick={() => onFilterQueryChange("")}
+                      className="text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)]"
+                    >
+                      <X className="h-2.5 w-2.5" />
+                    </button>
+                  )}
+                </div>
+              )}
+              {onToggleSortMode && (
+                <button
+                  type="button"
+                  data-testid="debug-variables-sort"
+                  onClick={onToggleSortMode}
+                  className={`h-4 px-1 rounded flex items-center gap-0.5 text-[9px] transition-colors ${
+                    sortMode === "alphabetical"
+                      ? "bg-[var(--taomni-accent)]/20 text-[var(--taomni-accent)] font-semibold"
+                      : "text-[var(--taomni-text-muted)] hover:text-[var(--taomni-text)]"
+                  }`}
+                  title={`Sort: ${sortMode === "alphabetical" ? "A-Z (Alphabetical)" : "Natural (Declaration)"}`}
+                >
+                  <ArrowUpDown className="h-2.5 w-2.5" />
+                  <span>{sortMode === "alphabetical" ? "A-Z" : "Natural"}</span>
+                </button>
+              )}
+            </div>
           </div>
           <div className="flex-1 min-h-0 overflow-auto py-1">
             {variables.length === 0 ? (
@@ -126,7 +193,7 @@ export function DebugVariablesPane({
         <PanelResizeHandle className="h-[4px] bg-[var(--taomni-code-border)] hover:bg-[var(--taomni-accent)] active:bg-[var(--taomni-accent)] transition-colors cursor-row-resize shrink-0 relative after:absolute after:inset-x-0 after:-top-2 after:-bottom-2 after:z-20" />
 
         {/* Watches Section */}
-        <Panel id="debug-watches-section" defaultSize="40%" minSize="20%" className="flex flex-col min-h-0 min-w-0">
+        <Panel id={panelIds[1]} defaultSize="40%" minSize="20%" className="flex flex-col min-h-0 min-w-0">
           <div className="h-6 shrink-0 flex items-center justify-between border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)]/40 px-2 font-medium text-[10px] text-[var(--taomni-text-muted)]">
             <span>Watches</span>
             <span className="text-[9px] tabular-nums">{watchNodes.length}</span>
@@ -149,11 +216,11 @@ export function DebugVariablesPane({
             ) : (
               watchNodes.map((node, i) => (
                 <VariableRow
-                  key={`${node.name}:${i}`}
+                  key={node.watchId ?? `${node.name}:${i}`}
                   node={node}
                   depth={0}
                   onExpand={onExpandWatch}
-                  onRemove={() => onRemoveWatch(i)}
+                  onRemove={() => onRemoveWatch(node.watchId ?? node.name)}
                   onAddDataBreakpoint={canAddDataBreakpoint ? onAddDataBreakpoint : undefined}
                   addingDataBreakpointKey={addingDataBreakpointKey}
                   onContextMenu={onVariableContextMenu}

@@ -22,6 +22,9 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     capabilities: {},
     availableExceptionFilters: [],
     watchExpressions: [],
+    watchItems: [],
+    stopEpoch: 0,
+    isStepping: false,
     breakpointsMuted: false,
     setBreakpointsMuted: vi.fn(),
     removeAllBreakpoints: vi.fn(),
@@ -66,6 +69,7 @@ function makeSession(overrides: Partial<CodeDebugSession> = {}): CodeDebugSessio
     setVariable: vi.fn().mockResolvedValue(null),
     logConsole: vi.fn(),
     clearConsole: vi.fn(),
+    consoleGeneration: 0,
     reportStartupFailure: vi.fn(),
     reportStartupProgress: vi.fn(),
     fetchVariables: vi.fn().mockResolvedValue({ variables: [] }),
@@ -1219,5 +1223,66 @@ describe("DebugPanel", () => {
 
     // The breakpoints sub-tab should be active and the breakpoint condition input rendered
     expect(screen.getByTestId("debug-breakpoint-condition-9")).toBeInTheDocument();
+  });
+
+  it("sizes the frames/variables split in percentages, not pixels", () => {
+    // react-resizable-panels v4 reads a bare number as *pixels*: with
+    // `maxSize={85}` the stack column was capped at 85px and its divider could
+    // not be dragged any wider.
+    render(
+      <DebugPanel
+        debug={makeSession({ state: stoppedState() })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+        workspaceInstanceId="ws-1"
+      />,
+    );
+
+    const frames = document.getElementById("ws-1-debug-frames");
+    const variables = document.getElementById("ws-1-debug-variables");
+    expect(frames?.dataset.defaultSize).toBe("45%");
+    expect(frames?.dataset.minSize).toBe("15%");
+    expect(frames?.dataset.maxSize).toBe("85%");
+    expect(variables?.dataset.defaultSize).toBe("55%");
+    expect(variables?.dataset.minSize).toBe("15%");
+
+    // The Variables/Watches split is scoped to the workspace instance so two
+    // open workspace tabs do not register the same group id.
+    expect(document.getElementById("ws-1-debug-variables-section")).not.toBeNull();
+    expect(document.getElementById("ws-1-debug-watches-section")).not.toBeNull();
+  });
+
+  it("drops threads and frames once the session is terminated", () => {
+    const { rerender } = render(
+      <DebugPanel debug={makeSession({ state: stoppedState() })} onStart={null} onOpenFrame={vi.fn()} />,
+    );
+    expect(screen.getByTestId("debug-thread-1")).toBeInTheDocument();
+    expect(screen.getByTestId("debug-frame-10")).toBeInTheDocument();
+
+    // What `terminate()` publishes: no threads, no frames, status terminated.
+    rerender(
+      <DebugPanel
+        debug={makeSession({
+          state: {
+            ...stoppedState(),
+            status: "terminated",
+            stoppedThreadId: null,
+            stoppedReason: null,
+            threads: [],
+            frames: [],
+            selectedThreadId: null,
+            selectedFrameId: null,
+          },
+        })}
+        onStart={null}
+        onOpenFrame={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("debug-thread-1")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("debug-frame-10")).not.toBeInTheDocument();
+    // …and it must not claim the debuggee is still running.
+    expect(screen.getByText("Frames are not available")).toBeInTheDocument();
+    expect(screen.queryByText("Running…")).not.toBeInTheDocument();
   });
 });

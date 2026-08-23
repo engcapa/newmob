@@ -6,6 +6,8 @@ import {
   formatKeyboardEventToKeybinding,
   exportKeymapSchemeToJson,
   importKeymapSchemeFromJson,
+  resolveBinding,
+  findConflicts,
 } from "./keymapModel";
 
 describe("keymapModel", () => {
@@ -67,5 +69,16 @@ describe("keymapModel", () => {
 
     expect(imported.bindings["test.action"]).toEqual(["Ctrl+Shift+X"]);
     expect(imported.isBuiltin).toBe(false);
+  });
+
+  it("resolves bindings and finds conflicts via findConflicts helper (N0.5)", () => {
+    const scheme = createDefaultIdeaScheme("windows");
+    const binding = resolveBinding(scheme, "workspace.format");
+    expect(binding).toBeDefined();
+
+    scheme.bindings["act.a"] = ["Ctrl+Shift+F12"];
+    scheme.bindings["act.b"] = ["Ctrl+Shift+F12"];
+    const conflicts = findConflicts(scheme);
+    expect(conflicts.some((c: any) => c.keybinding.toLowerCase() === "ctrl+shift+f12")).toBe(true);
   });
 });

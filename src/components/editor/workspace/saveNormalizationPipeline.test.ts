@@ -81,4 +81,102 @@ describe("saveNormalizationPipeline", () => {
 
     expect(result.cancelledDueToEdit).toBe(true);
   });
+
+  it("handles utf-8 and utf-8-bom charset normalization", async () => {
+    // utf-8 strips BOM
+    const utf8Style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      charset: "utf-8",
+      source: "editorconfig",
+      label: "Spaces: 2",
+    };
+    const res1 = await runSaveNormalizationPipeline({
+      text: "\uFEFFconst a = 1;",
+      codeStyle: utf8Style,
+    });
+    expect(res1.text).toBe("const a = 1;");
+
+    // utf-8-bom ensures BOM
+    const utf8BomStyle: EffectiveCodeStyle = {
+      ...utf8Style,
+      charset: "utf-8-bom",
+    };
+    const res2 = await runSaveNormalizationPipeline({
+      text: "const a = 1;",
+      codeStyle: utf8BomStyle,
+    });
+    expect(res2.text).toBe("\uFEFFconst a = 1;");
+  });
+
+  it("preserves CRLF and bare CR during whitespace trimming when endOfLine is not configured", async () => {
+    const noEolStyle: EffectiveCodeStyle = {
+      tabSize: 4,
+      indentSize: 4,
+      continuationIndent: 8,
+      insertSpaces: true,
+      trimTrailingWhitespace: true,
+      source: "language-default",
+      label: "Spaces: 4",
+    };
+
+    const crlfInput = "const x = 1;  \r\nconst y = 2;  \r\n";
+    const crlfResult = await runSaveNormalizationPipeline({
+      text: crlfInput,
+      codeStyle: noEolStyle,
+    });
+    expect(crlfResult.text).toBe("const x = 1;\r\nconst y = 2;\r\n");
+
+    const bareCrInput = "const x = 1;  \rconst y = 2;  \r";
+    const bareCrResult = await runSaveNormalizationPipeline({
+      text: bareCrInput,
+      codeStyle: noEolStyle,
+    });
+    expect(bareCrResult.text).toBe("const x = 1;\rconst y = 2;\r");
+  });
+
+  it("blocks saving when characters cannot be represented in Latin-1", async () => {
+    const latin1Style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      charset: "latin1",
+      source: "editorconfig",
+      label: "Spaces: 2",
+    };
+
+    const result = await runSaveNormalizationPipeline({
+      text: "const message = '你好世界';", // Chinese characters exceed Latin-1 (code > 255)
+      codeStyle: latin1Style,
+    });
+
+    expect(result.encodingError).toBe(true);
+    expect(result.diagnostics.length).toBeGreaterThan(0);
+    expect(result.diagnostics[0]).toContain("cannot be represented in Latin-1");
+  });
+
+  it("populates resolvedEol, resolvedCharset, and resolvedBom in result", async () => {
+    const style: EffectiveCodeStyle = {
+      tabSize: 2,
+      indentSize: 2,
+      continuationIndent: 4,
+      insertSpaces: true,
+      endOfLine: "crlf",
+      charset: "utf-8-bom",
+      source: "editorconfig",
+      label: "Spaces: 2",
+    };
+
+    const result = await runSaveNormalizationPipeline({
+      text: "hello world",
+      codeStyle: style,
+    });
+
+    expect(result.resolvedEol).toBe("crlf");
+    expect(result.resolvedCharset).toBe("UTF-8");
+    expect(result.resolvedBom).toBe(true);
+  });
 });

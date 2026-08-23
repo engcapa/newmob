@@ -3,7 +3,8 @@ import { Box, Braces, Command as CommandIcon, File, Type } from "lucide-react";
 import { QuickPickOverlay } from "./QuickPickOverlay";
 import { rankFuzzy } from "./fuzzyMatch";
 import { isClassSymbolKind, symbolKindLabel } from "./symbolKinds";
-import type { WorkspaceCommand } from "./workspaceCommands";
+import type { ActionResult } from "./workspaceActionRegistry";
+import type { ActionSnapshotItem } from "./workspaceActionHost";
 import {
   workspaceSemanticIndexBuildIsCurrent,
   workspaceSemanticIndexStatusLabel,
@@ -49,7 +50,12 @@ interface SearchEverywhereProps {
   items: GoToFileItem[];
   loading: boolean;
   truncated?: boolean;
-  commands?: WorkspaceCommand[];
+  /**
+   * Instance-scoped host snapshot (§8.17.3): the ONLY actions input. The
+   * legacy WorkspaceCommand[] migration adapter is gone; execution goes
+   * through the same frozen evaluations via onRunCommand.
+   */
+  actionSnapshots: ActionSnapshotItem[];
   /** When true, Classes/Symbols tabs are shown and fetchSymbols is used. */
   symbolsAvailable?: boolean;
   semanticIndex?: WorkspaceSemanticIndexSnapshot;
@@ -57,7 +63,7 @@ interface SearchEverywhereProps {
   onClose: () => void;
   onOpenFile: (item: GoToFileItem, options?: { split: boolean }) => void;
   onOpenSymbol?: (item: GoToSymbolItem, options?: { split: boolean }) => void;
-  onRunCommand?: (commandId: string) => void;
+  onRunCommand?: (commandId: string) => void | Promise<ActionResult>;
   /** Text tab: hand query to Find in Files. */
   onSearchText?: (query: string) => void;
 }
@@ -66,7 +72,7 @@ const MAX_RESULTS = 50;
 
 type SearchItem =
   | { kind: "file"; value: GoToFileItem }
-  | { kind: "action"; value: WorkspaceCommand }
+  | { kind: "action"; value: ActionSnapshotItem }
   | { kind: "symbol"; value: GoToSymbolItem };
 
 function itemKey(item: SearchItem): string {
@@ -90,7 +96,7 @@ export function SearchEverywhere({
   items,
   loading,
   truncated = false,
-  commands = [],
+  actionSnapshots,
   symbolsAvailable = false,
   semanticIndex,
   fetchSymbols,
@@ -127,13 +133,10 @@ export function SearchEverywhere({
     setSymbolQueryStatus({ sessionCount: 0, providerCount: 0, skippedProviderCount: 0, failedProviderCount: 0, complete: false, truncated: false, diagnostics: [] });
   }, [initialMode, open]);
 
-  const visibleTabs = useMemo(
-    () => MODE_TABS.filter((tab) => {
-      if ((tab.id === "classes" || tab.id === "symbols") && !symbolsAvailable) return false;
-      return true;
-    }),
-    [symbolsAvailable],
-  );
+  // Always show all tabs. When symbols are unavailable, the Classes and
+  // Symbols tabs degrade gracefully with an informative empty message
+  // instead of disappearing, matching IntelliJ IDEA behavior.
+  const visibleTabs = MODE_TABS;
 
   // Async workspace symbols for Classes / Symbols / All.
   useEffect(() => {
@@ -190,18 +193,23 @@ export function SearchEverywhere({
     return source.map((value) => ({ kind: "symbol" as const, value }));
   }, [mode, symbols]);
 
+  const actionCommands: ActionSnapshotItem[] = useMemo(
+    () => actionSnapshots.filter((entry) => entry.state.availability === "available"),
+    [actionSnapshots],
+  );
+
   const searchItems: SearchItem[] = useMemo(() => {
     if (mode === "files") return items.map((value) => ({ kind: "file", value }));
-    if (mode === "actions") return commands.map((value) => ({ kind: "action", value }));
+    if (mode === "actions") return actionCommands.map((value) => ({ kind: "action", value }));
     if (mode === "classes" || mode === "symbols") return symbolItems;
     if (mode === "text") return [];
     // All: files + symbols + actions, ranked together.
     return [
       ...items.map((value) => ({ kind: "file" as const, value })),
       ...symbolItems,
-      ...commands.map((value) => ({ kind: "action" as const, value })),
+      ...actionCommands.map((value) => ({ kind: "action" as const, value })),
     ];
-  }, [commands, items, mode, symbolItems]);
+  }, [actionCommands, items, mode, symbolItems]);
 
   const filterItems = useCallback(
     (q: string, all: SearchItem[]) => {
@@ -315,11 +323,11 @@ export function SearchEverywhere({
             : "Type a query, then Enter to open Find in Files";
         }
         if (mode === "actions") {
-          return commands.length === 0 ? "No available workspace actions" : "No matching actions";
+          return actionCommands.length === 0 ? "No available workspace actions" : "No matching actions";
         }
         if (mode === "classes" || mode === "symbols") {
           if (symbolsLoading) return "Querying language server…";
-          if (!symbolsAvailable) return "No language server with workspace symbols";
+          if (!symbolsAvailable) return "Language server initializing or unavailable — use Files tab to search by filename";
           return q.trim() ? "No matching symbols" : "Type to search workspace symbols";
         }
         if (mode === "all") {
@@ -365,7 +373,7 @@ export function SearchEverywhere({
             {mode === "files" && (
               <>{truncated ? "file index truncated · " : ""}{items.length} file{items.length === 1 ? "" : "s"}</>
             )}
-            {mode === "actions" && <>{commands.length} action{commands.length === 1 ? "" : "s"}</>}
+            {mode === "actions" && <>{actionCommands.length} action{actionCommands.length === 1 ? "" : "s"}</>}
             {(mode === "all" || mode === "classes" || mode === "symbols") && (
               <>
                 {symbolSnapshotLabel && (

@@ -184,6 +184,8 @@ export interface DebugConsoleLine {
   /** DAP output category (`stdout`/`stderr`/`console`…) or client-side `repl`/`result`. */
   category: string;
   text: string;
+  seq?: number;
+  timestamp?: number;
 }
 
 /** Parsed `exceptionInfo` response (shown when stopped on an exception). */
@@ -258,9 +260,65 @@ export interface DebugDisassembledInstruction {
   endColumn: number | null;
 }
 
+export interface DebugRequestToken {
+  sessionId: string;
+  stopEpoch: number;
+  threadId?: number;
+  frameId?: number;
+  variablesReference?: number;
+  requestId: string;
+}
+
+export type AsyncLoadState<T> =
+  | { status: "idle" }
+  | { status: "loading"; token: DebugRequestToken }
+  | { status: "ready" | "partial"; token: DebugRequestToken; value: T }
+  | { status: "failed"; token: DebugRequestToken; message: string; retryable: boolean };
+
+export interface DebugWatchItem {
+  id: string;
+  expression: string;
+  enabled: boolean;
+  order: number;
+  lastError?: string | null;
+}
+
+export function migrateWatchItems(raw: unknown): DebugWatchItem[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((item, index) => {
+    if (typeof item === "string") {
+      return {
+        id: `watch-${index}-${Date.now().toString(36)}`,
+        expression: item,
+        enabled: true,
+        order: index,
+        lastError: null,
+      };
+    }
+    if (item && typeof item === "object") {
+      const rec = item as Record<string, unknown>;
+      return {
+        id: typeof rec.id === "string" && rec.id ? rec.id : `watch-${index}-${Date.now().toString(36)}`,
+        expression: typeof rec.expression === "string" ? rec.expression : "",
+        enabled: typeof rec.enabled === "boolean" ? rec.enabled : true,
+        order: typeof rec.order === "number" ? rec.order : index,
+        lastError: typeof rec.lastError === "string" ? rec.lastError : null,
+      };
+    }
+    return {
+      id: `watch-${index}-${Date.now().toString(36)}`,
+      expression: String(item),
+      enabled: true,
+      order: index,
+      lastError: null,
+    };
+  }).filter((item) => item.expression.trim().length > 0);
+}
+
 export interface DebugSessionState {
   sessionId: string;
   status: DebugStatus;
+  stopEpoch?: number;
   /** Thread the adapter last stopped on (for stackTrace / stepping). */
   stoppedThreadId: number | null;
   stoppedReason: string | null;
@@ -280,6 +338,7 @@ export function initialDebugState(sessionId: string): DebugSessionState {
   return {
     sessionId,
     status: "starting",
+    stopEpoch: 0,
     stoppedThreadId: null,
     stoppedReason: null,
     threads: [],
@@ -310,21 +369,45 @@ export function markResumed(state: DebugSessionState): DebugSessionState {
   };
 }
 
-/** Cap retained console lines so a chatty debuggee cannot grow the store unbounded. */
-const MAX_CONSOLE_LINES = 2000;
+/** Cap retained console lines and memory budget (10,000 lines and 2 MiB). */
+const MAX_CONSOLE_LINES = 10000;
+const MAX_CONSOLE_BYTES = 2 * 1024 * 1024; // 2 MiB
 
-/** Append a console line (no-op for empty text). */
+/** Append a console line (no-op for empty text), with 10k lines + 2 MiB dual-budget eviction. */
 export function appendConsoleLine(
   state: DebugSessionState,
   category: string,
   text: string,
+  seq?: number,
+  timestamp?: number,
 ): DebugSessionState {
   if (!text) return state;
-  return { ...state, output: [...state.output, { category, text }].slice(-MAX_CONSOLE_LINES) };
+  const newLine: DebugConsoleLine = {
+    category,
+    text,
+    ...(seq !== undefined ? { seq } : {}),
+    ...(timestamp !== undefined ? { timestamp } : {}),
+  };
+  let lines = [...state.output, newLine];
+  if (lines.length > MAX_CONSOLE_LINES) {
+    lines = lines.slice(-MAX_CONSOLE_LINES);
+  }
+
+  // D7.4: 2 MiB dual byte budget eviction
+  let totalBytes = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    totalBytes += lines[i]!.text.length;
+    if (totalBytes > MAX_CONSOLE_BYTES) {
+      lines = lines.slice(i + 1);
+      break;
+    }
+  }
+
+  return { ...state, output: lines };
 }
 
-/** DAP `stepIn`/`stepOut`/`next`/`continue`/`pause` for a UI step action. */
-export type DebugStepAction = "continue" | "pause" | "stepOver" | "stepIn" | "stepOut";
+/** DAP `stepIn`/`stepOut`/`next`/`continue`/`pause`/`stepBack`/`reverseContinue` for a UI step action. */
+export type DebugStepAction = "continue" | "pause" | "stepOver" | "stepIn" | "stepOut" | "stepBack" | "reverseContinue";
 
 export function stepCommandFor(action: DebugStepAction): string {
   switch (action) {
@@ -333,6 +416,8 @@ export function stepCommandFor(action: DebugStepAction): string {
     case "stepOver": return "next";
     case "stepIn": return "stepIn";
     case "stepOut": return "stepOut";
+    case "stepBack": return "stepBack";
+    case "reverseContinue": return "reverseContinue";
   }
 }
 
@@ -1449,6 +1534,7 @@ export function reduceDebugEvent(
       return {
         ...state,
         status: "stopped",
+        stopEpoch: (state.stopEpoch ?? 0) + 1,
         stoppedThreadId: threadId,
         selectedThreadId: threadId,
         stoppedReason: typeof body.reason === "string" ? body.reason : "stopped",
@@ -1462,9 +1548,14 @@ export function reduceDebugEvent(
         ...state,
         status: "terminated",
         stoppedThreadId: null,
+        stoppedReason: null,
         selectedThreadId: null,
         selectedFrameId: null,
+        // The debuggee is gone: its threads and frames no longer describe
+        // anything inspectable, so the panel must not keep showing a stack.
+        threads: [],
         frames: [],
+        exceptionInfo: null,
       };
       // IDEA-style closing line with the process exit code.
       return typeof body.exitCode === "number"
@@ -1476,9 +1567,12 @@ export function reduceDebugEvent(
         ...state,
         status: "terminated",
         stoppedThreadId: null,
+        stoppedReason: null,
         selectedThreadId: null,
         selectedFrameId: null,
+        threads: [],
         frames: [],
+        exceptionInfo: null,
       };
     case "output": {
       const text = typeof body.output === "string" ? body.output : "";

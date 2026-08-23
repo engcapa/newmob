@@ -13,20 +13,20 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, Notify};
 
-use crate::lanchat::protocol::{frame, wire, Envelope, PIECE_SIZE};
-use crate::lanchat::{events, transport, LanChatState};
+use crate::lanchat::protocol::{Envelope, PIECE_SIZE, frame, wire};
+use crate::lanchat::{LanChatState, events, transport};
 
 /// Max pieces requested but not yet received, across all peers, per transfer.
 const MAX_INFLIGHT: usize = 32;
@@ -81,10 +81,14 @@ pub struct Bitfield {
 
 impl Bitfield {
     fn empty(n: usize) -> Self {
-        Self { bits: vec![false; n] }
+        Self {
+            bits: vec![false; n],
+        }
     }
     fn full(n: usize) -> Self {
-        Self { bits: vec![true; n] }
+        Self {
+            bits: vec![true; n],
+        }
     }
     fn set(&mut self, i: usize) {
         if let Some(b) = self.bits.get_mut(i) {
@@ -114,7 +118,11 @@ impl Bitfield {
         let mut bf = Self::empty(n);
         if let Ok(bytes) = BASE64.decode(s) {
             for i in 0..n {
-                if bytes.get(i / 8).map(|b| b & (0x80 >> (i % 8)) != 0).unwrap_or(false) {
+                if bytes
+                    .get(i / 8)
+                    .map(|b| b & (0x80 >> (i % 8)) != 0)
+                    .unwrap_or(false)
+                {
                     bf.bits[i] = true;
                 }
             }
@@ -159,8 +167,12 @@ impl Manifest {
         })
     }
     fn from_json(v: &serde_json::Value) -> Option<Self> {
-        let pieces: Vec<String> = v.get("pieces")?.as_array()?.iter()
-            .filter_map(|x| x.as_str().map(String::from)).collect();
+        let pieces: Vec<String> = v
+            .get("pieces")?
+            .as_array()?
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect();
         Some(Self {
             file_id: v.get("fileId")?.as_str()?.to_string(),
             name: v.get("name")?.as_str()?.to_string(),
@@ -172,9 +184,14 @@ impl Manifest {
 }
 
 /// Read `path` and build its manifest (blocking — call via `spawn_blocking`).
-fn build_manifest(path: &std::path::Path, name: String, piece_size: usize) -> Result<Manifest, String> {
+fn build_manifest(
+    path: &std::path::Path,
+    name: String,
+    piece_size: usize,
+) -> Result<Manifest, String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut file =
+        std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     let mut pieces = Vec::new();
     let mut id_hasher = Sha256::new();
@@ -182,7 +199,9 @@ fn build_manifest(path: &std::path::Path, name: String, piece_size: usize) -> Re
     loop {
         let mut filled = 0;
         while filled < piece_size {
-            let n = file.read(&mut buf[filled..]).map_err(|e| format!("read: {e}"))?;
+            let n = file
+                .read(&mut buf[filled..])
+                .map_err(|e| format!("read: {e}"))?;
             if n == 0 {
                 break;
             }
@@ -209,7 +228,13 @@ fn build_manifest(path: &std::path::Path, name: String, piece_size: usize) -> Re
         pieces.push(hex);
     }
     let file_id = hex::encode(id_hasher.finalize());
-    Ok(Manifest { file_id, name, size, piece_size: piece_size as u32, pieces })
+    Ok(Manifest {
+        file_id,
+        name,
+        size,
+        piece_size: piece_size as u32,
+        pieces,
+    })
 }
 
 /* ------------------------------ swarm state ------------------------------ */
@@ -289,7 +314,12 @@ impl SwarmFile {
         } else if inner.peers.is_empty() {
             0
         } else {
-            inner.peers.values().map(|b| b.count() as u64).min().unwrap_or(0)
+            inner
+                .peers
+                .values()
+                .map(|b| b.count() as u64)
+                .min()
+                .unwrap_or(0)
         };
         (pieces * ps).min(self.manifest.size)
     }
@@ -308,17 +338,20 @@ impl SwarmFile {
         let transferred = self.transferred_bytes().await;
         let (rate, eta) = rate_eta(transferred, self.manifest.size, self.started);
         let state = state_override.unwrap_or_else(|| self.progress_state(transferred));
-        emit_progress(app, &TransferProgress {
-            transfer_id: self.manifest.file_id.clone(),
-            direction: self.direction.clone(),
-            name: self.manifest.name.clone(),
-            size: self.manifest.size,
-            transferred,
-            rate,
-            eta,
-            state: state.to_string(),
-            conv_id: self.conv_id.clone(),
-        });
+        emit_progress(
+            app,
+            &TransferProgress {
+                transfer_id: self.manifest.file_id.clone(),
+                direction: self.direction.clone(),
+                name: self.manifest.name.clone(),
+                size: self.manifest.size,
+                transferred,
+                rate,
+                eta,
+                state: state.to_string(),
+                conv_id: self.conv_id.clone(),
+            },
+        );
     }
 }
 
@@ -366,7 +399,10 @@ fn pwrite_all(f: &std::fs::File, off: u64, data: &[u8]) -> std::io::Result<()> {
     while done < data.len() {
         let n = f.write_at(&data[done..], off + done as u64)?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "write_at returned 0"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "write_at returned 0",
+            ));
         }
         done += n;
     }
@@ -380,7 +416,10 @@ fn pwrite_all(f: &std::fs::File, off: u64, data: &[u8]) -> std::io::Result<()> {
     while done < data.len() {
         let n = f.seek_write(&data[done..], off + done as u64)?;
         if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "seek_write returned 0"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "seek_write returned 0",
+            ));
         }
         done += n;
     }
@@ -417,11 +456,16 @@ pub async fn send(
     conv_id: String,
     group_id: Option<String>,
 ) -> Result<String, String> {
-    let meta = tokio::fs::metadata(&path).await.map_err(|e| format!("stat {}: {e}", path.display()))?;
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| format!("stat {}: {e}", path.display()))?;
     if !meta.is_file() {
         return Err("only single files are supported here".into());
     }
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into());
     let mime = mime_for(&name);
     let manifest = {
         let path = path.clone();
@@ -443,7 +487,11 @@ pub async fn send(
         temp_path: path.clone(),
         origin: None,
         file: std::sync::Mutex::new(Some(Arc::new(src))),
-        inner: Mutex::new(SwarmInner { have: Bitfield::full(n), peers: HashMap::new(), inflight: HashMap::new() }),
+        inner: Mutex::new(SwarmInner {
+            have: Bitfield::full(n),
+            peers: HashMap::new(),
+            inflight: HashMap::new(),
+        }),
         cancelled: AtomicBool::new(false),
         paused: AtomicBool::new(false),
         resume: Notify::new(),
@@ -451,7 +499,11 @@ pub async fn send(
         started: Instant::now(),
         finalized: AtomicBool::new(false),
     });
-    state.swarms.write().await.insert(file_id.clone(), sf.clone());
+    state
+        .swarms
+        .write()
+        .await
+        .insert(file_id.clone(), sf.clone());
 
     let my_id = state.node_id().await;
     let payload = json!({
@@ -460,7 +512,12 @@ pub async fn send(
     });
     let mut delivered = 0usize;
     for target in &targets {
-        let env = Envelope::new(frame::SWARM_OFFER, &my_id, Some(target.clone()), payload.clone());
+        let env = Envelope::new(
+            frame::SWARM_OFFER,
+            &my_id,
+            Some(target.clone()),
+            payload.clone(),
+        );
         match transport::send_to_peer(app, state, target, env).await {
             Ok(()) => delivered += 1,
             Err(e) => log::warn!("lanchat: swarm offer for {file_id} to {target} failed: {e}"),
@@ -488,14 +545,32 @@ pub async fn handle_offer(app: &AppHandle, state: &Arc<LanChatState>, from: &str
     let Some(manifest) = env.payload.get("manifest").and_then(Manifest::from_json) else {
         return;
     };
-    let kind = env.payload.get("kind").and_then(|v| v.as_str()).unwrap_or("file").to_string();
-    let mime = env.payload.get("mime").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string();
-    let group_id = env.payload.get("groupId").and_then(|v| v.as_str()).map(String::from);
+    let kind = env
+        .payload
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("file")
+        .to_string();
+    let mime = env
+        .payload
+        .get("mime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let group_id = env
+        .payload
+        .get("groupId")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let members: Vec<String> = env
         .payload
         .get("members")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let conv_id = match &group_id {
         Some(g) => crate::lanchat::store::group_conv_id(g),
@@ -505,7 +580,15 @@ pub async fn handle_offer(app: &AppHandle, state: &Arc<LanChatState>, from: &str
     let (name, size) = (manifest.name.clone(), manifest.size);
     state.swarm_offers.write().await.insert(
         file_id.clone(),
-        OfferInfo { manifest, from: from.to_string(), conv_id: conv_id.clone(), group_id: group_id.clone(), kind: kind.clone(), members, mime: mime.clone() },
+        OfferInfo {
+            manifest,
+            from: from.to_string(),
+            conv_id: conv_id.clone(),
+            group_id: group_id.clone(),
+            kind: kind.clone(),
+            members,
+            mime: mime.clone(),
+        },
     );
     let _ = app.emit(
         events::FILE_OFFER,
@@ -522,12 +605,19 @@ pub async fn accept_offer(
     file_id: &str,
     save_path: PathBuf,
 ) -> Result<String, String> {
-    let offer = state.swarm_offers.write().await.remove(file_id).ok_or("offer not found or already handled")?;
+    let offer = state
+        .swarm_offers
+        .write()
+        .await
+        .remove(file_id)
+        .ok_or("offer not found or already handled")?;
     if let Some(existing) = state.swarms.read().await.get(file_id) {
         return Ok(existing.save_path.to_string_lossy().to_string());
     }
     let save_path = if save_path.as_os_str().is_empty() {
-        let base = dirs::download_dir().or_else(dirs::home_dir).unwrap_or_else(std::env::temp_dir);
+        let base = dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(std::env::temp_dir);
         base.join(&offer.manifest.name)
     } else {
         save_path
@@ -537,12 +627,21 @@ pub async fn accept_offer(
     }
     let temp_path = save_path.with_extension(format!(
         "{}.part",
-        save_path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()
+        save_path
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_default()
     ));
     let std_file = {
-        let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false)
-            .open(&temp_path).map_err(|e| format!("create {}: {e}", temp_path.display()))?;
-        f.set_len(offer.manifest.size).map_err(|e| format!("allocate: {e}"))?;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&temp_path)
+            .map_err(|e| format!("create {}: {e}", temp_path.display()))?;
+        f.set_len(offer.manifest.size)
+            .map_err(|e| format!("allocate: {e}"))?;
         Arc::new(f)
     };
     let n = offer.manifest.piece_count();
@@ -563,7 +662,11 @@ pub async fn accept_offer(
         temp_path,
         origin: Some(offer.from.clone()),
         file: std::sync::Mutex::new(Some(std_file)),
-        inner: Mutex::new(SwarmInner { have: Bitfield::empty(n), peers, inflight: HashMap::new() }),
+        inner: Mutex::new(SwarmInner {
+            have: Bitfield::empty(n),
+            peers,
+            inflight: HashMap::new(),
+        }),
         cancelled: AtomicBool::new(false),
         paused: AtomicBool::new(false),
         resume: Notify::new(),
@@ -571,15 +674,29 @@ pub async fn accept_offer(
         started: Instant::now(),
         finalized: AtomicBool::new(false),
     });
-    state.swarms.write().await.insert(file_id.to_string(), sf.clone());
+    state
+        .swarms
+        .write()
+        .await
+        .insert(file_id.to_string(), sf.clone());
 
-    let accept = Envelope::new(frame::SWARM_ACCEPT, &my_id, Some(offer.from.clone()), json!({ "fileId": file_id }));
+    let accept = Envelope::new(
+        frame::SWARM_ACCEPT,
+        &my_id,
+        Some(offer.from.clone()),
+        json!({ "fileId": file_id }),
+    );
     let _ = transport::send_to_peer(app, state, &offer.from, accept).await;
     // Announce participation to the other members so the swarm can mesh.
     let bits = sf.inner.lock().await.have.to_base64();
     for m in &offer.members {
         if *m != my_id && *m != offer.from {
-            let bf = Envelope::new(frame::SWARM_BITFIELD, &my_id, Some(m.clone()), json!({ "fileId": file_id, "bits": bits }));
+            let bf = Envelope::new(
+                frame::SWARM_BITFIELD,
+                &my_id,
+                Some(m.clone()),
+                json!({ "fileId": file_id, "bits": bits }),
+            );
             let _ = transport::send_to_peer(app, state, m, bf).await;
         }
     }
@@ -589,10 +706,19 @@ pub async fn accept_offer(
 }
 
 /// Reject an inbound offer and tell the origin.
-pub async fn reject_offer(app: &AppHandle, state: &Arc<LanChatState>, file_id: &str) -> Result<(), String> {
+pub async fn reject_offer(
+    app: &AppHandle,
+    state: &Arc<LanChatState>,
+    file_id: &str,
+) -> Result<(), String> {
     if let Some(offer) = state.swarm_offers.write().await.remove(file_id) {
         let my_id = state.node_id().await;
-        let env = Envelope::new(frame::SWARM_REJECT, &my_id, Some(offer.from.clone()), json!({ "fileId": file_id }));
+        let env = Envelope::new(
+            frame::SWARM_REJECT,
+            &my_id,
+            Some(offer.from.clone()),
+            json!({ "fileId": file_id }),
+        );
         let _ = transport::send_to_peer(app, state, &offer.from, env).await;
     }
     Ok(())
@@ -601,23 +727,44 @@ pub async fn reject_offer(app: &AppHandle, state: &Arc<LanChatState>, file_id: &
 /* --------------------------- inbound swarm frames ------------------------- */
 
 fn payload_file_id(env: &Envelope) -> Option<String> {
-    env.payload.get("fileId").and_then(|v| v.as_str()).map(String::from)
+    env.payload
+        .get("fileId")
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }
 
 /// Origin: a peer accepted — start tracking it as a leecher we serve.
 pub async fn handle_accept(app: &AppHandle, state: &Arc<LanChatState>, from: &str, env: &Envelope) {
-    let Some(file_id) = payload_file_id(env) else { return };
-    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else { return };
+    let Some(file_id) = payload_file_id(env) else {
+        return;
+    };
+    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else {
+        return;
+    };
     let n = sf.manifest.piece_count();
-    sf.inner.lock().await.peers.entry(from.to_string()).or_insert_with(|| Bitfield::empty(n));
+    sf.inner
+        .lock()
+        .await
+        .peers
+        .entry(from.to_string())
+        .or_insert_with(|| Bitfield::empty(n));
     sf.emit(app, None).await;
 }
 
 /// Origin: a peer declined. For a 1:1 transfer this ends it; in a group one
 /// decline is ignored (other members still receive).
-pub async fn handle_reject(app: &AppHandle, state: &Arc<LanChatState>, _from: &str, env: &Envelope) {
-    let Some(file_id) = payload_file_id(env) else { return };
-    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else { return };
+pub async fn handle_reject(
+    app: &AppHandle,
+    state: &Arc<LanChatState>,
+    _from: &str,
+    env: &Envelope,
+) {
+    let Some(file_id) = payload_file_id(env) else {
+        return;
+    };
+    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else {
+        return;
+    };
     if sf.group_id.is_none() {
         sf.emit(app, Some("rejected")).await;
         state.swarms.write().await.remove(&file_id);
@@ -626,30 +773,62 @@ pub async fn handle_reject(app: &AppHandle, state: &Arc<LanChatState>, _from: &s
 
 /// A peer announced it now holds a piece — record it as a potential source.
 pub async fn handle_have(app: &AppHandle, state: &Arc<LanChatState>, from: &str, env: &Envelope) {
-    let Some(file_id) = payload_file_id(env) else { return };
-    let Some(piece) = env.payload.get("piece").and_then(|v| v.as_u64()) else { return };
-    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else { return };
+    let Some(file_id) = payload_file_id(env) else {
+        return;
+    };
+    let Some(piece) = env.payload.get("piece").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else {
+        return;
+    };
     let n = sf.manifest.piece_count();
-    sf.inner.lock().await.peers.entry(from.to_string()).or_insert_with(|| Bitfield::empty(n)).set(piece as usize);
+    sf.inner
+        .lock()
+        .await
+        .peers
+        .entry(from.to_string())
+        .or_insert_with(|| Bitfield::empty(n))
+        .set(piece as usize);
     sf.wake.notify_waiters();
     sf.emit(app, None).await;
     maybe_finalize_origin(app, state, &sf, &file_id).await;
 }
 
 /// A peer sent its full bitfield (on join) — record what it can serve.
-pub async fn handle_bitfield(app: &AppHandle, state: &Arc<LanChatState>, from: &str, env: &Envelope) {
-    let Some(file_id) = payload_file_id(env) else { return };
-    let Some(bits) = env.payload.get("bits").and_then(|v| v.as_str()) else { return };
-    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else { return };
+pub async fn handle_bitfield(
+    app: &AppHandle,
+    state: &Arc<LanChatState>,
+    from: &str,
+    env: &Envelope,
+) {
+    let Some(file_id) = payload_file_id(env) else {
+        return;
+    };
+    let Some(bits) = env.payload.get("bits").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else {
+        return;
+    };
     let n = sf.manifest.piece_count();
-    sf.inner.lock().await.peers.insert(from.to_string(), Bitfield::from_base64(bits, n));
+    sf.inner
+        .lock()
+        .await
+        .peers
+        .insert(from.to_string(), Bitfield::from_base64(bits, n));
     sf.wake.notify_waiters();
     sf.emit(app, None).await;
     maybe_finalize_origin(app, state, &sf, &file_id).await;
 }
 
 /// Origin send completes when every accepted peer holds the whole file.
-async fn maybe_finalize_origin(app: &AppHandle, state: &Arc<LanChatState>, sf: &Arc<SwarmFile>, file_id: &str) {
+async fn maybe_finalize_origin(
+    app: &AppHandle,
+    state: &Arc<LanChatState>,
+    sf: &Arc<SwarmFile>,
+    file_id: &str,
+) {
     if sf.direction != "send" || sf.finalized.load(Ordering::SeqCst) {
         return;
     }
@@ -668,7 +847,12 @@ async fn maybe_finalize_origin(app: &AppHandle, state: &Arc<LanChatState>, sf: &
 async fn broadcast_have(state: &Arc<LanChatState>, sf: &Arc<SwarmFile>, my_id: &str, piece: usize) {
     let peers: Vec<String> = sf.inner.lock().await.peers.keys().cloned().collect();
     for p in peers {
-        let env = Envelope::new(frame::SWARM_HAVE, my_id, Some(p.clone()), json!({ "fileId": sf.manifest.file_id, "piece": piece }));
+        let env = Envelope::new(
+            frame::SWARM_HAVE,
+            my_id,
+            Some(p.clone()),
+            json!({ "fileId": sf.manifest.file_id, "piece": piece }),
+        );
         let _ = transport::try_send(state, &p, env).await;
     }
 }
@@ -677,9 +861,15 @@ async fn broadcast_have(state: &Arc<LanChatState>, sf: &Arc<SwarmFile>, my_id: &
 /// bounded binary channel. `send_data` awaits channel capacity, so a fast disk
 /// can never outrun the network — this is the backpressure guarantee.
 pub async fn handle_request(state: &Arc<LanChatState>, from: &str, env: &Envelope) {
-    let Some(file_id) = payload_file_id(env) else { return };
-    let Some(piece) = env.payload.get("piece").and_then(|v| v.as_u64()) else { return };
-    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else { return };
+    let Some(file_id) = payload_file_id(env) else {
+        return;
+    };
+    let Some(piece) = env.payload.get("piece").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else {
+        return;
+    };
     if sf.is_paused() {
         return;
     }
@@ -694,13 +884,27 @@ pub async fn handle_request(state: &Arc<LanChatState>, from: &str, env: &Envelop
         Ok(Ok(d)) => d,
         _ => return,
     };
-    transport::send_data(state, from, wire::frame_piece(&file_id, piece as u32, &data)).await;
+    transport::send_data(
+        state,
+        from,
+        wire::frame_piece(&file_id, piece as u32, &data),
+    )
+    .await;
 }
 
 /// A binary piece arrived: verify its SHA-256, write it at the right offset,
 /// advertise it, and finalize when the file is whole.
-pub async fn handle_piece(app: &AppHandle, state: &Arc<LanChatState>, _from: &str, file_id: &str, piece: u32, data: bytes::Bytes) {
-    let Some(sf) = state.swarms.read().await.get(file_id).cloned() else { return };
+pub async fn handle_piece(
+    app: &AppHandle,
+    state: &Arc<LanChatState>,
+    _from: &str,
+    file_id: &str,
+    piece: u32,
+    data: bytes::Bytes,
+) {
+    let Some(sf) = state.swarms.read().await.get(file_id).cloned() else {
+        return;
+    };
     let idx = piece as usize;
     if sf.inner.lock().await.have.get(idx) {
         return; // duplicate
@@ -717,7 +921,10 @@ pub async fn handle_piece(app: &AppHandle, state: &Arc<LanChatState>, _from: &st
     let Some(f) = sf.file_handle() else { return };
     let off = idx as u64 * sf.manifest.piece_size as u64;
     let dvec = data.to_vec();
-    let wrote = tokio::task::spawn_blocking(move || pwrite_all(&f, off, &dvec)).await.map(|r| r.is_ok()).unwrap_or(false);
+    let wrote = tokio::task::spawn_blocking(move || pwrite_all(&f, off, &dvec))
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
     if !wrote {
         return;
     }
@@ -747,7 +954,9 @@ async fn finalize_leecher(app: &AppHandle, state: &Arc<LanChatState>, sf: &Arc<S
         let _ = tokio::task::spawn_blocking(move || f.sync_all()).await;
     }
     *sf.file.lock().unwrap() = None;
-    let ok = tokio::fs::rename(&sf.temp_path, &sf.save_path).await.is_ok();
+    let ok = tokio::fs::rename(&sf.temp_path, &sf.save_path)
+        .await
+        .is_ok();
     if ok && sf.group_id.is_some() {
         // Group: keep seeding to the rest of the swarm.
         if let Ok(rf) = std::fs::File::open(&sf.save_path) {
@@ -773,7 +982,9 @@ fn spawn_leecher(app: AppHandle, state: Arc<LanChatState>, file_id: String) {
 /// piece/have/new-peer event or the drive tick. The window is what keeps memory
 /// flat regardless of file size.
 async fn run_leecher(_app: &AppHandle, state: &Arc<LanChatState>, file_id: &str) {
-    let Some(sf) = state.swarms.read().await.get(file_id).cloned() else { return };
+    let Some(sf) = state.swarms.read().await.get(file_id).cloned() else {
+        return;
+    };
     let my_id = state.node_id().await;
     let n = sf.manifest.piece_count();
     loop {
@@ -786,7 +997,12 @@ async fn run_leecher(_app: &AppHandle, state: &Arc<LanChatState>, file_id: &str)
         }
         let requests = schedule_requests(&sf, n).await;
         for (peer, idx) in &requests {
-            let env = Envelope::new(frame::SWARM_REQUEST, &my_id, Some(peer.clone()), json!({ "fileId": file_id, "piece": idx }));
+            let env = Envelope::new(
+                frame::SWARM_REQUEST,
+                &my_id,
+                Some(peer.clone()),
+                json!({ "fileId": file_id, "piece": idx }),
+            );
             let _ = transport::try_send(state, peer, env).await;
         }
         if sf.inner.lock().await.have.is_complete() {
@@ -805,7 +1021,12 @@ async fn run_leecher(_app: &AppHandle, state: &Arc<LanChatState>, file_id: &str)
 async fn schedule_requests(sf: &Arc<SwarmFile>, n: usize) -> Vec<(String, u32)> {
     let mut inner = sf.inner.lock().await;
     let now = Instant::now();
-    let expired: Vec<u32> = inner.inflight.iter().filter(|(_, (_, dl))| *dl <= now).map(|(p, _)| *p).collect();
+    let expired: Vec<u32> = inner
+        .inflight
+        .iter()
+        .filter(|(_, (_, dl))| *dl <= now)
+        .map(|(p, _)| *p)
+        .collect();
     for p in expired {
         inner.inflight.remove(&p);
     }
@@ -836,7 +1057,9 @@ async fn schedule_requests(sf: &Arc<SwarmFile>, n: usize) -> Vec<(String, u32)> 
             }
         }
         if let Some((peer, _)) = best {
-            inner.inflight.insert(idx as u32, (peer.clone(), now + PIECE_TIMEOUT));
+            inner
+                .inflight
+                .insert(idx as u32, (peer.clone(), now + PIECE_TIMEOUT));
             *per_peer.entry(peer.clone()).or_default() += 1;
             total += 1;
             reqs.push((peer, idx as u32));
@@ -850,7 +1073,12 @@ async fn schedule_requests(sf: &Arc<SwarmFile>, n: usize) -> Vec<(String, u32)> 
 /// Local pause/resume/cancel from the UI. Cancelling a transfer that is still
 /// only "offering" (peer not yet accepted) now emits a terminal `cancelled`
 /// progress and tears down state — fixing the stuck "等待对方接收…" card.
-pub async fn control(app: &AppHandle, state: &Arc<LanChatState>, file_id: &str, action: &str) -> Result<(), String> {
+pub async fn control(
+    app: &AppHandle,
+    state: &Arc<LanChatState>,
+    file_id: &str,
+    action: &str,
+) -> Result<(), String> {
     if let Some(sf) = state.swarms.read().await.get(file_id).cloned() {
         match action {
             "pause" => {
@@ -870,7 +1098,12 @@ pub async fn control(app: &AppHandle, state: &Arc<LanChatState>, file_id: &str, 
                 let peers: Vec<String> = sf.inner.lock().await.peers.keys().cloned().collect();
                 let my_id = state.node_id().await;
                 for p in &peers {
-                    let env = Envelope::new(frame::SWARM_CANCEL, &my_id, Some(p.clone()), json!({ "fileId": file_id }));
+                    let env = Envelope::new(
+                        frame::SWARM_CANCEL,
+                        &my_id,
+                        Some(p.clone()),
+                        json!({ "fileId": file_id }),
+                    );
                     let _ = transport::try_send(state, p, env).await;
                 }
                 if sf.direction == "recv" {
@@ -886,20 +1119,28 @@ pub async fn control(app: &AppHandle, state: &Arc<LanChatState>, file_id: &str, 
     }
     // Not active: a still-pending inbound offer — cancel == reject + clear card.
     if action == "cancel" {
-        let conv = state.swarm_offers.read().await.get(file_id).map(|o| (o.conv_id.clone(), o.manifest.name.clone(), o.manifest.size));
+        let conv = state
+            .swarm_offers
+            .read()
+            .await
+            .get(file_id)
+            .map(|o| (o.conv_id.clone(), o.manifest.name.clone(), o.manifest.size));
         reject_offer(app, state, file_id).await?;
         if let Some((conv_id, name, size)) = conv {
-            emit_progress(app, &TransferProgress {
-                transfer_id: file_id.to_string(),
-                direction: "recv".into(),
-                name,
-                size,
-                transferred: 0,
-                rate: 0.0,
-                eta: 0.0,
-                state: "cancelled".into(),
-                conv_id,
-            });
+            emit_progress(
+                app,
+                &TransferProgress {
+                    transfer_id: file_id.to_string(),
+                    direction: "recv".into(),
+                    name,
+                    size,
+                    transferred: 0,
+                    rate: 0.0,
+                    eta: 0.0,
+                    state: "cancelled".into(),
+                    conv_id,
+                },
+            );
         }
     }
     Ok(())
@@ -908,22 +1149,29 @@ pub async fn control(app: &AppHandle, state: &Arc<LanChatState>, file_id: &str, 
 /// Inbound `swarm-cancel`. If our origin cancelled, abort locally and drop the
 /// partial file; if a mere peer left the swarm, just stop using it as a source.
 pub async fn handle_cancel(app: &AppHandle, state: &Arc<LanChatState>, from: &str, env: &Envelope) {
-    let Some(file_id) = payload_file_id(env) else { return };
+    let Some(file_id) = payload_file_id(env) else {
+        return;
+    };
     // Sender rescinded a still-pending offer: clear the receiver's prompt.
     if let Some(offer) = state.swarm_offers.write().await.remove(&file_id) {
-        emit_progress(app, &TransferProgress {
-            transfer_id: file_id.clone(),
-            direction: "recv".into(),
-            name: offer.manifest.name,
-            size: offer.manifest.size,
-            transferred: 0,
-            rate: 0.0,
-            eta: 0.0,
-            state: "cancelled".into(),
-            conv_id: offer.conv_id,
-        });
+        emit_progress(
+            app,
+            &TransferProgress {
+                transfer_id: file_id.clone(),
+                direction: "recv".into(),
+                name: offer.manifest.name,
+                size: offer.manifest.size,
+                transferred: 0,
+                rate: 0.0,
+                eta: 0.0,
+                state: "cancelled".into(),
+                conv_id: offer.conv_id,
+            },
+        );
     }
-    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else { return };
+    let Some(sf) = state.swarms.read().await.get(&file_id).cloned() else {
+        return;
+    };
     let from_origin = sf.origin.as_deref() == Some(from);
     if from_origin {
         sf.cancelled.store(true, Ordering::SeqCst);
@@ -936,7 +1184,12 @@ pub async fn handle_cancel(app: &AppHandle, state: &Arc<LanChatState>, from: &st
     } else {
         let mut inner = sf.inner.lock().await;
         inner.peers.remove(from);
-        let drop_pieces: Vec<u32> = inner.inflight.iter().filter(|(_, (p, _))| p == from).map(|(i, _)| *i).collect();
+        let drop_pieces: Vec<u32> = inner
+            .inflight
+            .iter()
+            .filter(|(_, (p, _))| p == from)
+            .map(|(i, _)| *i)
+            .collect();
         for i in drop_pieces {
             inner.inflight.remove(&i);
         }
@@ -967,7 +1220,16 @@ pub async fn send_to_group(
         return Err("群里没有其他在线成员".into());
     }
     let conv_id = crate::lanchat::store::group_conv_id(group_id);
-    send(app, state, members.clone(), members, path, conv_id, Some(group_id.to_string())).await
+    send(
+        app,
+        state,
+        members.clone(),
+        members,
+        path,
+        conv_id,
+        Some(group_id.to_string()),
+    )
+    .await
 }
 
 /// Offer a whole folder (recursive). Implemented as a one-accept decomposition
@@ -1041,7 +1303,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lanchat-pio-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("f.bin");
-        let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .unwrap();
         f.set_len(1000).unwrap();
         pwrite_all(&f, 500, &[1, 2, 3, 4]).unwrap();
         let got = pread_exact(&f, 500, 4).unwrap();
@@ -1065,7 +1333,11 @@ mod tests {
             temp_path: PathBuf::from("/tmp/x.part"),
             origin: Some("origin".into()),
             file: std::sync::Mutex::new(None),
-            inner: Mutex::new(SwarmInner { have: Bitfield::empty(n), peers, inflight: HashMap::new() }),
+            inner: Mutex::new(SwarmInner {
+                have: Bitfield::empty(n),
+                peers,
+                inflight: HashMap::new(),
+            }),
             cancelled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             resume: Notify::new(),
@@ -1135,7 +1407,13 @@ mod tests {
         assert_eq!(n, 4);
 
         let seed = std::fs::File::open(&src).unwrap();
-        let sink = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&dst).unwrap();
+        let sink = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dst)
+            .unwrap();
         sink.set_len(size as u64).unwrap();
 
         // Apply pieces in a deliberately non-sequential order.
@@ -1146,7 +1424,11 @@ mod tests {
             // Verify exactly as handle_piece does.
             let mut h = Sha256::new();
             h.update(&data);
-            assert_eq!(hex::encode(h.finalize()), manifest.pieces[idx], "piece {idx} hash");
+            assert_eq!(
+                hex::encode(h.finalize()),
+                manifest.pieces[idx],
+                "piece {idx} hash"
+            );
             pwrite_all(&sink, off, &data).unwrap();
             have.set(idx);
         }
@@ -1154,16 +1436,22 @@ mod tests {
         drop(sink);
 
         let got = std::fs::read(&dst).unwrap();
-        assert_eq!(got, content, "reconstructed file matches source byte-for-byte");
+        assert_eq!(
+            got, content,
+            "reconstructed file matches source byte-for-byte"
+        );
 
         // A tampered piece must fail the hash check.
         let mut bad = pread_exact(&seed, 0, manifest.piece_len(0)).unwrap();
         bad[0] ^= 0xFF;
         let mut h = Sha256::new();
         h.update(&bad);
-        assert_ne!(hex::encode(h.finalize()), manifest.pieces[0], "tampered piece rejected");
+        assert_ne!(
+            hex::encode(h.finalize()),
+            manifest.pieces[0],
+            "tampered piece rejected"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
 }
-

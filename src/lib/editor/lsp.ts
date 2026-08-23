@@ -213,6 +213,8 @@ export interface LspCompletionResult {
   status: LspDocumentStatus;
   isIncomplete: boolean;
   items: LspCompletionItem[];
+  /** Backend truncated the item list at its hard cap (200). */
+  truncated?: boolean | null;
 }
 
 export interface LspSignatureParameter {
@@ -1135,12 +1137,31 @@ export const LSP_CLASS_SYMBOL_KINDS = new Set([5, 10, 11, 23, 26]);
 export function lspHover(
   descriptor: LspDocumentDescriptor,
   position: LspPosition,
+  options?: {
+    /** §8.18.6 provider cancellation key (workspace+file identity). */
+    cancelKey?: string;
+    /**
+     * Monotonic request sequence; a higher seq for the same cancelKey
+     * cancels the previous in-flight hover via `$/cancelRequest`.
+     */
+    requestSeq?: number;
+  },
 ): Promise<LspHoverResult> {
   return invoke<LspHoverResult>("lsp_hover", {
     ...documentArgs(descriptor),
     line: position.line,
     character: position.character,
+    cancelKey: options?.cancelKey ?? null,
+    requestSeq: options?.requestSeq ?? null,
   });
+}
+
+/**
+ * Cancel an in-flight reference request without issuing a new one (popup
+ * close / unmount path, §8.18.6).
+ */
+export function lspCancelReferenceRequest(cancelKey: string): Promise<void> {
+  return invoke<void>("lsp_cancel_reference_request", { cancelKey });
 }
 
 export function lspDefinition(

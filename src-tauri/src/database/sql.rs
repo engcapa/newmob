@@ -9,6 +9,7 @@ use std::{
 };
 
 use futures::TryStreamExt;
+use sqlx_core::Error as SqlxError;
 use sqlx_core::column::Column;
 use sqlx_core::pool::Pool;
 use sqlx_core::query::query;
@@ -17,7 +18,6 @@ use sqlx_core::row::Row;
 use sqlx_core::sql_str::AssertSqlSafe;
 use sqlx_core::type_info::TypeInfo;
 use sqlx_core::types::{BigDecimal, Uuid};
-use sqlx_core::Error as SqlxError;
 use sqlx_mysql::{MySql, MySqlConnectOptions, MySqlPoolOptions, MySqlRow, MySqlSslMode};
 use sqlx_postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode, Postgres};
 use tiberius::{
@@ -31,9 +31,9 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    group_foreign_keys, send_query_stream_event, ColumnDescription, ColumnInfo, DbConfig,
-    DbHandle, DbObject, ForeignKeyInfo, IndexInfo, QueryResult, QueryStreamChannel,
-    QueryStreamEvent, SchemaInfo, TableInfo,
+    ColumnDescription, ColumnInfo, DbConfig, DbHandle, DbObject, ForeignKeyInfo, IndexInfo,
+    QueryResult, QueryStreamChannel, QueryStreamEvent, SchemaInfo, TableInfo, group_foreign_keys,
+    send_query_stream_event,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
@@ -1445,7 +1445,7 @@ pub async fn describe_table_mysql(
         Ok(_) => {
             return describe_table_mysql_show(pool, schema, table)
                 .await
-                .map_err(|e| format!("describe table failed: {e}"))
+                .map_err(|e| format!("describe table failed: {e}"));
         }
         Err(err) => {
             return describe_table_mysql_show(pool, schema, table)
@@ -1520,7 +1520,7 @@ pub async fn list_indexes_mysql(
         Ok(_) => {
             return list_indexes_mysql_show(pool, schema, table)
                 .await
-                .map_err(|e| format!("list indexes failed: {e}"))
+                .map_err(|e| format!("list indexes failed: {e}"));
         }
         Err(err) => {
             return list_indexes_mysql_show(pool, schema, table)

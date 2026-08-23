@@ -103,7 +103,10 @@ fn resolve(os: &str, arch: &str, is_rosetta: bool) -> UpdaterPlatform {
                 )
             } else {
                 // Genuine Intel Mac: arm64 won't run, so x86_64 only.
-                (vec!["darwin-x86_64".to_string()], "darwin-x86_64".to_string())
+                (
+                    vec!["darwin-x86_64".to_string()],
+                    "darwin-x86_64".to_string(),
+                )
             }
         }
         // Windows/Linux currently ship a single x86_64 artifact. When arm64

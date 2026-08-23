@@ -165,10 +165,7 @@ impl NativeClient {
 
     // ---- connection helpers ------------------------------------------------
 
-    async fn region_connection(
-        &self,
-        ep: &ServerEndpoint,
-    ) -> Result<RpcConnection, ClientError> {
+    async fn region_connection(&self, ep: &ServerEndpoint) -> Result<RpcConnection, ClientError> {
         let addr = ep.addr();
         if let Some(conn) = self.region_conns.read().await.get(&addr).cloned() {
             return Ok(conn);
@@ -181,10 +178,7 @@ impl NativeClient {
             self.cfg.timeout,
         )
         .await?;
-        self.region_conns
-            .write()
-            .await
-            .insert(addr, conn.clone());
+        self.region_conns.write().await.insert(addr, conn.clone());
         Ok(conn)
     }
 
@@ -306,9 +300,7 @@ impl NativeClient {
         column: Option<&str>,
     ) -> Result<Vec<ResultRow>, ClientError> {
         let qualified = self.qualify(table);
-        let columns = column
-            .map(|c| vec![parse_column(c)])
-            .unwrap_or_default();
+        let columns = column.map(|c| vec![parse_column(c)]).unwrap_or_default();
         let get = pb::Get {
             row: row.to_vec(),
             column: columns,
@@ -323,9 +315,7 @@ impl NativeClient {
                     region: region_specifier(&loc),
                     get,
                 };
-                let resp = conn
-                    .call("Get", Some(req.encode_to_vec()), None)
-                    .await?;
+                let resp = conn.call("Get", Some(req.encode_to_vec()), None).await?;
                 let get_resp = pb::GetResponse::decode(resp.param)
                     .map_err(|e| ClientError::Decode(e.to_string()))?;
                 let cells = result_to_cells(get_resp.result.as_ref(), &resp.cell_block)?;
@@ -380,12 +370,7 @@ impl NativeClient {
     }
 
     /// Delete a single column (all versions) of a row.
-    pub async fn delete(
-        &self,
-        table: &str,
-        row: &[u8],
-        column: &str,
-    ) -> Result<(), ClientError> {
+    pub async fn delete(&self, table: &str, row: &[u8], column: &str) -> Result<(), ClientError> {
         let qualified = self.qualify(table);
         let (family, qualifier) = split_column(column);
         let mutation = pb::MutationProto {
@@ -918,8 +903,8 @@ async fn scan_once(
         ..Default::default()
     };
     let resp = conn.call("Scan", Some(open.encode_to_vec()), None).await?;
-    let scan_resp = pb::ScanResponse::decode(resp.param)
-        .map_err(|e| ClientError::Decode(e.to_string()))?;
+    let scan_resp =
+        pb::ScanResponse::decode(resp.param).map_err(|e| ClientError::Decode(e.to_string()))?;
     let scanner_id = scan_resp.scanner_id;
 
     let mut rows = parse_scan_batch(&scan_resp, &resp.cell_block)?;
@@ -977,28 +962,17 @@ fn parse_scan_batch(
         for &count in &resp.cells_per_result {
             let mut cells = Vec::with_capacity(count as usize);
             for _ in 0..count {
-                let c = Cell::decode(&mut buf)
-                    .map_err(|e| ClientError::Decode(e.to_string()))?;
+                let c = Cell::decode(&mut buf).map_err(|e| ClientError::Decode(e.to_string()))?;
                 cells.push(c);
             }
-            let row_key = cells
-                .first()
-                .map(|c| c.row.to_vec())
-                .unwrap_or_default();
+            let row_key = cells.first().map(|c| c.row.to_vec()).unwrap_or_default();
             out.push((row_key, cells));
         }
     } else {
         // Cells are pb'd inline in `results`.
         for result in &resp.results {
-            let cells: Vec<Cell> = result
-                .cell
-                .iter()
-                .map(pb_cell_to_cell)
-                .collect();
-            let row_key = cells
-                .first()
-                .map(|c| c.row.to_vec())
-                .unwrap_or_default();
+            let cells: Vec<Cell> = result.cell.iter().map(pb_cell_to_cell).collect();
+            let row_key = cells.first().map(|c| c.row.to_vec()).unwrap_or_default();
             out.push((row_key, cells));
         }
     }
@@ -1018,9 +992,7 @@ fn result_to_cells(
         let mut buf = cell_block.clone();
         let mut cells = Vec::with_capacity(assoc as usize);
         for _ in 0..assoc {
-            cells.push(
-                Cell::decode(&mut buf).map_err(|e| ClientError::Decode(e.to_string()))?,
-            );
+            cells.push(Cell::decode(&mut buf).map_err(|e| ClientError::Decode(e.to_string()))?);
         }
         Ok(cells)
     } else {
@@ -1162,9 +1134,7 @@ mod live_tests {
         assert!(families.iter().any(|f| f.name == "cf"));
 
         // put
-        c.put(table, b"row1", "cf:q1", b"hello")
-            .await
-            .expect("put");
+        c.put(table, b"row1", "cf:q1", b"hello").await.expect("put");
         c.put(table, b"row2", "cf:q1", b"world")
             .await
             .expect("put2");
@@ -1177,10 +1147,7 @@ mod live_tests {
         assert_eq!(got[0].value, b"hello");
 
         // scan
-        let scanned = c
-            .scan(table, 100, None, None, &[])
-            .await
-            .expect("scan");
+        let scanned = c.scan(table, 100, None, None, &[]).await.expect("scan");
         println!("scan: {} cells", scanned.len());
         assert!(scanned.len() >= 2);
 
@@ -1200,9 +1167,3 @@ mod live_tests {
         println!("dropped {table} — lifecycle OK");
     }
 }
-
-
-
-
-
-

@@ -3397,7 +3397,8 @@ mod cc_tool_use_tests {
 
     #[test]
     fn summarizes_query_and_nested_tool_args() {
-        let search = format_cc_tool_use("search_tool", &json!({ "query": "welcome recent folders" }));
+        let search =
+            format_cc_tool_use("search_tool", &json!({ "query": "welcome recent folders" }));
         assert!(search.contains("search_tool"));
         assert!(search.contains("welcome recent folders"));
 

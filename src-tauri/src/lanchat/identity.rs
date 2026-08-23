@@ -75,8 +75,8 @@ impl Identity {
 /// pinning model verifies by fingerprint, not by name — but keeps generic TLS
 /// tooling happy.
 fn build_cert(key_pair: &KeyPair) -> Result<Vec<u8>, String> {
-    let params =
-        CertificateParams::new(vec!["taomni-lanchat".to_string()]).map_err(|e| format!("cert params: {e}"))?;
+    let params = CertificateParams::new(vec!["taomni-lanchat".to_string()])
+        .map_err(|e| format!("cert params: {e}"))?;
     let cert = params
         .self_signed(key_pair)
         .map_err(|e| format!("self-sign cert: {e}"))?;
@@ -137,7 +137,11 @@ mod tests {
         let id = Identity::generate().expect("generate");
         assert_eq!(id.node_id.len(), 64, "sha256 hex is 64 chars");
         assert!(id.node_id.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_eq!(id.node_id, fingerprint(&id.cert_der), "id is cert fingerprint");
+        assert_eq!(
+            id.node_id,
+            fingerprint(&id.cert_der),
+            "id is cert fingerprint"
+        );
     }
 
     #[test]

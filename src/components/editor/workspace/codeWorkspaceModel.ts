@@ -352,6 +352,7 @@ export function makeLibraryFile(info: LibraryBufferInfo, text: string): OpenFile
     loading: false,
     saving: false,
     dirty: false,
+    documentRevision: 0,
     error: null,
     library: {
       uri: info.uri,
@@ -1493,6 +1494,7 @@ export function makeLoadingFile(ref: CodeWorkspaceFileRef, roots: CodeWorkspaceR
     loading: true,
     saving: false,
     dirty: false,
+    documentRevision: 0,
     error: null,
   };
 }

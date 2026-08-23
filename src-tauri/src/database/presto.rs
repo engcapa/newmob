@@ -14,8 +14,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    send_query_stream_event, CatalogInfo, ColumnDescription, ColumnInfo, DbConfig, DbHandle,
-    DbObject, IndexInfo, QueryResult, QueryStreamChannel, QueryStreamEvent, SchemaInfo, TableInfo,
+    CatalogInfo, ColumnDescription, ColumnInfo, DbConfig, DbHandle, DbObject, IndexInfo,
+    QueryResult, QueryStreamChannel, QueryStreamEvent, SchemaInfo, TableInfo,
+    send_query_stream_event,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
@@ -825,11 +826,7 @@ fn parse_use_parts(sql: &str) -> Option<Vec<String>> {
         return None;
     }
     let parts = split_qualified_ident(rest);
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts)
-    }
+    if parts.is_empty() { None } else { Some(parts) }
 }
 
 fn split_qualified_ident(input: &str) -> Vec<String> {
@@ -1274,7 +1271,8 @@ mod tests {
             if let Some(body) = expected.body_equals {
                 assert_eq!(request_body(&request), body);
             }
-            let mut response = String::from("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
+            let mut response =
+                String::from("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n");
             for (key, value) in &expected.response_headers {
                 response.push_str(&format!("{key}: {value}\r\n"));
             }
@@ -1600,12 +1598,30 @@ mod tests {
     fn header_prefix_from_dialect_defaults_to_presto() {
         assert_eq!(header_prefix_from_dialect(None), HEADER_PREFIX_PRESTO);
         assert_eq!(header_prefix_from_dialect(Some("")), HEADER_PREFIX_PRESTO);
-        assert_eq!(header_prefix_from_dialect(Some("presto")), HEADER_PREFIX_PRESTO);
-        assert_eq!(header_prefix_from_dialect(Some("Presto")), HEADER_PREFIX_PRESTO);
-        assert_eq!(header_prefix_from_dialect(Some("unknown")), HEADER_PREFIX_PRESTO);
-        assert_eq!(header_prefix_from_dialect(Some("trino")), HEADER_PREFIX_TRINO);
-        assert_eq!(header_prefix_from_dialect(Some("TRINO")), HEADER_PREFIX_TRINO);
-        assert_eq!(header_prefix_from_dialect(Some("  trino  ")), HEADER_PREFIX_TRINO);
+        assert_eq!(
+            header_prefix_from_dialect(Some("presto")),
+            HEADER_PREFIX_PRESTO
+        );
+        assert_eq!(
+            header_prefix_from_dialect(Some("Presto")),
+            HEADER_PREFIX_PRESTO
+        );
+        assert_eq!(
+            header_prefix_from_dialect(Some("unknown")),
+            HEADER_PREFIX_PRESTO
+        );
+        assert_eq!(
+            header_prefix_from_dialect(Some("trino")),
+            HEADER_PREFIX_TRINO
+        );
+        assert_eq!(
+            header_prefix_from_dialect(Some("TRINO")),
+            HEADER_PREFIX_TRINO
+        );
+        assert_eq!(
+            header_prefix_from_dialect(Some("  trino  ")),
+            HEADER_PREFIX_TRINO
+        );
     }
 
     #[tokio::test]
@@ -1710,14 +1726,8 @@ mod tests {
         let client = test_client_with_headers(base_url, TRINO_HEADERS);
 
         execute(&client, "SELECT 1", &token).await.unwrap();
-        assert_eq!(
-            client.catalog.lock().await.as_deref(),
-            Some("iceberg")
-        );
-        assert_eq!(
-            client.schema.lock().await.as_deref(),
-            Some("analytics")
-        );
+        assert_eq!(client.catalog.lock().await.as_deref(), Some("iceberg"));
+        assert_eq!(client.schema.lock().await.as_deref(), Some("analytics"));
 
         let result = execute(&client, "SELECT 2", &token).await.unwrap();
         server.await.unwrap();

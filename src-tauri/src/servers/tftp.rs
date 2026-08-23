@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use tokio::net::UdpSocket;
 
-use super::engine::{LogEmitter, ServerCtx, ServerStarted};
 use super::ServerConfig;
+use super::engine::{LogEmitter, ServerCtx, ServerStarted};
 
 const DEFAULT_PORT: u16 = 69;
 const BLOCK_SIZE: usize = 512;

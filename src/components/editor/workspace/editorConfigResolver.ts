@@ -70,6 +70,7 @@ export interface ResolveCodeStyleInput {
 }
 
 export interface EditorConfigResolver {
+  setFileProvider(fileProvider: EditorConfigFileProvider): void;
   resolveForFile(input: ResolveCodeStyleInput): Promise<ResolvedCodeStyle>;
   invalidate(path: string): void;
   clearWorkspace(workspaceId: string): void;
@@ -100,21 +101,30 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
   /**
    * Register or mock an .editorconfig in cache directly (useful for tests or virtual files).
    */
-  setCachedConfigFile(configPath: string, content: string): void {
+  setCachedConfigFile(configPath: string, content: string, workspaceId?: string): void {
     const normalizedPath = configPath.replace(/\\/g, "/");
-    this.configCache.set(normalizedPath, {
+    const key = workspaceId ? `${workspaceId}:${normalizedPath}` : normalizedPath;
+    this.configCache.set(key, {
       parsed: parseEditorConfigFile(content),
     });
   }
 
   invalidate(path: string): void {
     const normalized = path.replace(/\\/g, "/");
-    this.configCache.delete(normalized);
+    for (const key of Array.from(this.configCache.keys())) {
+      if (key === normalized || key.endsWith(`:${normalized}`)) {
+        this.configCache.delete(key);
+      }
+    }
   }
 
-  clearWorkspace(_workspaceId: string): void {
-    // Clear all cached configurations associated with this workspace
-    this.configCache.clear();
+  clearWorkspace(workspaceId: string): void {
+    // Clear only configurations associated with this workspace
+    for (const key of Array.from(this.configCache.keys())) {
+      if (key.startsWith(`${workspaceId}:`)) {
+        this.configCache.delete(key);
+      }
+    }
   }
 
   clearAll(): void {
@@ -127,9 +137,22 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
   private async loadEditorConfigChain(
     filePath: string,
     rootPath?: string,
+    workspaceId?: string,
+    diagnostics?: CodeStyleDiagnostic[],
+    customProvider?: EditorConfigFileProvider,
   ): Promise<Array<{ configPath: string; parsed: ParsedEditorConfigFile }>> {
+    const provider = customProvider ?? this.fileProvider;
     const normalizedFile = filePath.replace(/\\/g, "/");
     const normalizedRoot = rootPath ? rootPath.replace(/\\/g, "/").replace(/\/+$/, "") : undefined;
+
+    if (normalizedRoot && normalizedFile !== normalizedRoot && !normalizedFile.startsWith(normalizedRoot + "/")) {
+      diagnostics?.push({
+        path: filePath,
+        message: `File path "${filePath}" is outside root directory "${rootPath}".`,
+        severity: "warning",
+      });
+      return [];
+    }
 
     // Collect directory segments
     const segments = normalizedFile.split("/");
@@ -140,17 +163,22 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
     while (segments.length > 0) {
       const currentDir = segments.join("/") || "/";
       const configPath = `${currentDir === "/" ? "" : currentDir}/.editorconfig`;
+      const cacheKey = workspaceId ? `${workspaceId}:${configPath}` : configPath;
 
-      let cached = this.configCache.get(configPath);
+      let cached = this.configCache.get(cacheKey) ?? this.configCache.get(configPath);
       if (!cached) {
         try {
-          const content = await this.fileProvider.readFile(configPath);
+          const content = await provider.readFile(configPath);
           if (content !== null && content !== undefined) {
             cached = { parsed: parseEditorConfigFile(content) };
-            this.configCache.set(configPath, cached);
+            this.configCache.set(cacheKey, cached);
           }
-        } catch {
-          // File read failed or missing
+        } catch (err) {
+          diagnostics?.push({
+            path: configPath,
+            message: `Failed to read .editorconfig: ${err instanceof Error ? err.message : String(err)}`,
+            severity: "warning",
+          });
         }
       }
 
@@ -162,7 +190,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
       }
 
       // Stop climbing if we've reached the workspace root
-      if (normalizedRoot && currentDir === normalizedRoot) {
+      if (normalizedRoot && (currentDir === normalizedRoot || !currentDir.startsWith(normalizedRoot))) {
         break;
       }
 
@@ -173,36 +201,13 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
   }
 
   async resolveForFile(input: ResolveCodeStyleInput): Promise<ResolvedCodeStyle> {
-    const { filePath, rootPath, explicitOverride, text } = input;
+    const { workspaceId, filePath, rootPath, explicitOverride, text, fileProvider } = input;
     const langDefault = defaultLanguageCodeStyle(filePath);
     const provenance: CodeStyleProvenance = {};
     const diagnostics: CodeStyleDiagnostic[] = [];
 
-    // 1. Explicit override on this file/tab has top priority
-    if (explicitOverride) {
-      const insertSpaces = explicitOverride.type === "spaces";
-      const tabSize = explicitOverride.size;
-      const indentSize = explicitOverride.size;
-      const label = formatCodeStyleLabel({ insertSpaces, indentSize, tabSize, source: "explicit-override" });
-
-      provenance.indent_style = { source: "explicit", rawValue: explicitOverride.type };
-      provenance.indent_size = { source: "explicit", rawValue: String(explicitOverride.size) };
-      provenance.tab_width = { source: "explicit", rawValue: String(explicitOverride.size) };
-
-      return {
-        tabSize,
-        indentSize,
-        continuationIndent: indentSize * 2,
-        insertSpaces,
-        source: "explicit-override",
-        label,
-        provenance,
-        diagnostics,
-      };
-    }
-
-    // 2. Resolve EditorConfig chain (parent directory hierarchy)
-    const chain = await this.loadEditorConfigChain(filePath, rootPath);
+    // 1. Resolve EditorConfig chain (parent directory hierarchy)
+    const chain = await this.loadEditorConfigChain(filePath, rootPath, workspaceId, diagnostics, fileProvider);
     let mergedProperties: EditorConfigProperties = {};
     const propertySourcePaths: Partial<Record<keyof EditorConfigProperties, string>> = {};
 
@@ -223,52 +228,68 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
     }
 
     // Process matched EditorConfig properties
-    const hasEditorConfigProps = Object.keys(mergedProperties).length > 0;
+    const hasEditorConfigIndent =
+      mergedProperties.indent_style !== undefined ||
+      mergedProperties.indent_size !== undefined ||
+      mergedProperties.tab_width !== undefined;
 
     let insertSpaces = langDefault.insertSpaces;
     let indentSize = langDefault.indentSize;
     let tabSize = langDefault.tabSize;
     let effectiveSource: CodeStyleSource = "language-default";
 
-    if (mergedProperties.indent_style !== undefined) {
-      insertSpaces = mergedProperties.indent_style === "space";
-      provenance.indent_style = {
-        source: "editorconfig",
-        configPath: propertySourcePaths.indent_style,
-        rawValue: mergedProperties.indent_style,
-      };
+    if (explicitOverride) {
+      insertSpaces = explicitOverride.type === "spaces";
+      indentSize = explicitOverride.size;
+      tabSize = explicitOverride.size;
+      effectiveSource = "explicit-override";
+
+      provenance.indent_style = { source: "explicit", rawValue: explicitOverride.type };
+      provenance.indent_size = { source: "explicit", rawValue: String(explicitOverride.size) };
+      provenance.tab_width = { source: "explicit", rawValue: String(explicitOverride.size) };
+    } else if (hasEditorConfigIndent) {
       effectiveSource = "editorconfig";
+      if (mergedProperties.indent_style !== undefined) {
+        insertSpaces = mergedProperties.indent_style === "space";
+        provenance.indent_style = {
+          source: "editorconfig",
+          configPath: propertySourcePaths.indent_style,
+          rawValue: mergedProperties.indent_style,
+        };
+      } else {
+        provenance.indent_style = { source: "language", rawValue: insertSpaces ? "space" : "tab" };
+      }
+
+      if (mergedProperties.indent_size !== undefined) {
+        if (mergedProperties.indent_size === "tab") {
+          insertSpaces = false;
+          indentSize = typeof mergedProperties.tab_width === "number" ? mergedProperties.tab_width : tabSize;
+        } else if (typeof mergedProperties.indent_size === "number") {
+          indentSize = mergedProperties.indent_size;
+        }
+        provenance.indent_size = {
+          source: "editorconfig",
+          configPath: propertySourcePaths.indent_size,
+          rawValue: String(mergedProperties.indent_size),
+        };
+      } else {
+        provenance.indent_size = { source: "language", rawValue: String(indentSize) };
+      }
+
+      if (mergedProperties.tab_width !== undefined) {
+        tabSize = mergedProperties.tab_width;
+        provenance.tab_width = {
+          source: "editorconfig",
+          configPath: propertySourcePaths.tab_width,
+          rawValue: String(mergedProperties.tab_width),
+        };
+      } else {
+        tabSize = insertSpaces ? indentSize : 4;
+        provenance.tab_width = { source: "language", rawValue: String(tabSize) };
+      }
     } else {
       provenance.indent_style = { source: "language", rawValue: insertSpaces ? "space" : "tab" };
-    }
-
-    if (mergedProperties.indent_size !== undefined) {
-      if (mergedProperties.indent_size === "tab") {
-        insertSpaces = false;
-        indentSize = typeof mergedProperties.tab_width === "number" ? mergedProperties.tab_width : tabSize;
-      } else if (typeof mergedProperties.indent_size === "number") {
-        indentSize = mergedProperties.indent_size;
-      }
-      provenance.indent_size = {
-        source: "editorconfig",
-        configPath: propertySourcePaths.indent_size,
-        rawValue: String(mergedProperties.indent_size),
-      };
-      effectiveSource = "editorconfig";
-    } else {
       provenance.indent_size = { source: "language", rawValue: String(indentSize) };
-    }
-
-    if (mergedProperties.tab_width !== undefined) {
-      tabSize = mergedProperties.tab_width;
-      provenance.tab_width = {
-        source: "editorconfig",
-        configPath: propertySourcePaths.tab_width,
-        rawValue: String(mergedProperties.tab_width),
-      };
-      effectiveSource = "editorconfig";
-    } else {
-      tabSize = insertSpaces ? indentSize : 4;
       provenance.tab_width = { source: "language", rawValue: String(tabSize) };
     }
 
@@ -278,7 +299,6 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.end_of_line,
         rawValue: mergedProperties.end_of_line,
       };
-      effectiveSource = "editorconfig";
     }
 
     if (mergedProperties.charset) {
@@ -287,7 +307,6 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.charset,
         rawValue: mergedProperties.charset,
       };
-      effectiveSource = "editorconfig";
     }
 
     if (mergedProperties.trim_trailing_whitespace !== undefined) {
@@ -296,7 +315,6 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.trim_trailing_whitespace,
         rawValue: String(mergedProperties.trim_trailing_whitespace),
       };
-      effectiveSource = "editorconfig";
     }
 
     if (mergedProperties.insert_final_newline !== undefined) {
@@ -305,11 +323,10 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
         configPath: propertySourcePaths.insert_final_newline,
         rawValue: String(mergedProperties.insert_final_newline),
       };
-      effectiveSource = "editorconfig";
     }
 
     // If EditorConfig did not configure indentation, fallback to sniffed text (if available)
-    if (!hasEditorConfigProps && text && text.trim().length > 0) {
+    if (!explicitOverride && !hasEditorConfigIndent && text && text.trim().length > 0) {
       const sniffed = sniffIndentation(text);
       const sniffedSpaces = sniffed.type === "spaces";
       if (sniffedSpaces !== langDefault.insertSpaces || sniffed.size !== langDefault.indentSize) {
@@ -324,6 +341,7 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
       }
     }
 
+    const hasEditorConfigProps = Object.keys(mergedProperties).length > 0;
     const label = formatCodeStyleLabel({
       insertSpaces,
       indentSize,
@@ -347,6 +365,10 @@ export class DefaultEditorConfigResolver implements EditorConfigResolver {
       editorConfigProperties: hasEditorConfigProps ? mergedProperties : undefined,
     };
   }
+}
+
+export function createEditorConfigResolver(fileProvider?: EditorConfigFileProvider): EditorConfigResolver {
+  return new DefaultEditorConfigResolver(fileProvider);
 }
 
 export const globalEditorConfigResolver = new DefaultEditorConfigResolver();

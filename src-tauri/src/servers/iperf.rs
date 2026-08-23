@@ -11,7 +11,7 @@
 //! we log that those settings are ignored here rather than passing them through.
 
 use super::engine::{ServerCtx, ServerStarted};
-use super::{process, ServerConfig};
+use super::{ServerConfig, process};
 
 pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted, String> {
     let port = if config.port == 0 { 5201 } else { config.port };

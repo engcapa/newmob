@@ -1,8 +1,8 @@
-use super::protocol::{parse_ndjson_line, CcEvent};
+use super::protocol::{CcEvent, parse_ndjson_line};
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
@@ -259,8 +259,7 @@ impl CcProcess {
             } else {
                 return Err(format!(
                     "Claude Code process failed {} times. Falling back to default provider; will retry after {}s.",
-                    MAX_RESTART_ATTEMPTS,
-                    RESTART_COOLDOWN_SECS,
+                    MAX_RESTART_ATTEMPTS, RESTART_COOLDOWN_SECS,
                 ));
             }
         }

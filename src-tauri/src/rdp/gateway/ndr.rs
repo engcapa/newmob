@@ -5,7 +5,7 @@
 //! module already owns those data-phase helpers; this module covers the
 //! handshake stubs that precede them.
 
-use super::{build_request_pdu, RDG_CONTEXT_HANDLE_SIZE};
+use super::{RDG_CONTEXT_HANDLE_SIZE, build_request_pdu};
 
 pub type ContextHandle = [u8; RDG_CONTEXT_HANDLE_SIZE];
 

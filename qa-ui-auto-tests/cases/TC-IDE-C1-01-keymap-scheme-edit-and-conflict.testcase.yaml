@@ -1,0 +1,24 @@
+id: TC-IDE-C1-01
+title: "Keymap settings surface: open via Search Everywhere, fork scheme, record shortcut, reset"
+description: |
+  §8.18.10 C1 gate (browser portion). Opens the Keymap Settings dialog through
+  Search Everywhere so the action itself proves disabled-action visibility and
+  snapshot-driven search, creates a user scheme copy, verifies the recording
+  affordance exists for an action row, resets the scheme delta, and closes.
+  Native keyboard matrix (AltGr/IME/chord on real OS layouts) stays in the
+  three-platform evidence manifest, not this case.
+covers: [F25.4]
+tags: [code-workspace, ide-c1, keymap, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 90
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"tab-bar\"]"
+  # Leave the welcome surface so the sidebar tool strip is mounted.
+  - click: "[data-testid=\"welcome-open-local-terminal\"]"
+  - click: "[data-testid=\"side-tab-tools\"]"
+  - wait_for: "[data-testid=\"sidebar-tool-code-workspace\"]"
+  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
+  - wait_for: "[data-testid=\"code-workspace-tab\"]"
+  - screenshot: tc-ide-c1-01-before.png

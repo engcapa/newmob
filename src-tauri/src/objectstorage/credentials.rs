@@ -54,7 +54,9 @@ pub fn from_environment() -> Result<Credentials, String> {
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or("AWS_SECRET_ACCESS_KEY is not set in the environment")?;
-    let token = std::env::var("AWS_SESSION_TOKEN").ok().filter(|s| !s.is_empty());
+    let token = std::env::var("AWS_SESSION_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
     Ok(match token {
         Some(t) => Credentials::new_with_token(key, secret, t),
         None => Credentials::new(key, secret),
@@ -80,7 +82,9 @@ pub async fn from_profile(profile: Option<&str>) -> Result<Credentials, String> 
     // 2) static keys on the profile.
     if let (Some(key), Some(secret)) = (
         merged.get("aws_access_key_id").filter(|s| !s.is_empty()),
-        merged.get("aws_secret_access_key").filter(|s| !s.is_empty()),
+        merged
+            .get("aws_secret_access_key")
+            .filter(|s| !s.is_empty()),
     ) {
         let token = merged
             .get("aws_session_token")
@@ -175,9 +179,7 @@ fn parse_ini(text: &str) -> BTreeMap<String, BTreeMap<String, String>> {
 /// Run a `credential_process` command (argv, no shell) and parse its JSON.
 async fn run_credential_process(command: &str) -> Result<Credentials, String> {
     let argv = split_args(command);
-    let (program, args) = argv
-        .split_first()
-        .ok_or("credential_process is empty")?;
+    let (program, args) = argv.split_first().ok_or("credential_process is empty")?;
     let output = tokio::process::Command::new(program)
         .args(args)
         .output()
@@ -312,7 +314,8 @@ credential_process = /usr/local/bin/cred --profile work
 
     #[test]
     fn parses_process_json_with_and_without_token() {
-        let with = br#"{"Version":1,"AccessKeyId":"AKIA","SecretAccessKey":"shh","SessionToken":"tok"}"#;
+        let with =
+            br#"{"Version":1,"AccessKeyId":"AKIA","SecretAccessKey":"shh","SessionToken":"tok"}"#;
         let creds = parse_process_json(with).unwrap();
         assert_eq!(creds.key(), "AKIA");
         assert_eq!(creds.token(), Some("tok"));

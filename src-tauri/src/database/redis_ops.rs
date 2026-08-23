@@ -1,6 +1,6 @@
 //! Redis backend via `redis-rs` over a multiplexed async connection.
 
-use redis::{aio::MultiplexedConnection, Value};
+use redis::{Value, aio::MultiplexedConnection};
 use serde_json::json;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -133,10 +133,12 @@ pub async fn get_key(
                 .query_async(&mut *c)
                 .await
                 .map_err(|e| format!("HGETALL failed: {e}"))?;
-            json!(pairs
-                .into_iter()
-                .map(|(f, v)| json!([f, v]))
-                .collect::<Vec<_>>())
+            json!(
+                pairs
+                    .into_iter()
+                    .map(|(f, v)| json!([f, v]))
+                    .collect::<Vec<_>>()
+            )
         }
         "list" => {
             // Page the first 100 items; the UI fetches more via redis_exec.
@@ -168,10 +170,12 @@ pub async fn get_key(
                 .map_err(|e| format!("ZRANGE failed: {e}"))?;
             // pairs come back as [member, score]; emit [score, member] for the
             // UI's score-first two-column table.
-            json!(pairs
-                .into_iter()
-                .map(|(member, score)| json!([score, member]))
-                .collect::<Vec<_>>())
+            json!(
+                pairs
+                    .into_iter()
+                    .map(|(member, score)| json!([score, member]))
+                    .collect::<Vec<_>>()
+            )
         }
         "stream" => {
             let value: Value = redis::cmd("XRANGE")

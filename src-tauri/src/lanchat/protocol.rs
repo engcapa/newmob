@@ -293,7 +293,8 @@ pub mod wire {
     ) -> Bytes {
         let s = session.as_bytes();
         let st = stream.as_bytes();
-        let mut b = BytesMut::with_capacity(1 + 1 + s.len() + 1 + st.len() + 1 + 4 + 8 + data.len());
+        let mut b =
+            BytesMut::with_capacity(1 + 1 + s.len() + 1 + st.len() + 1 + 4 + 8 + data.len());
         b.put_u8(TAG_MEDIA);
         b.put_u8(s.len() as u8);
         b.extend_from_slice(s);
@@ -328,7 +329,9 @@ pub mod wire {
                 let st_len = *buf.get(s_end)? as usize;
                 let st_start = s_end + 1;
                 let st_end = st_start + st_len;
-                let stream = std::str::from_utf8(buf.get(st_start..st_end)?).ok()?.to_string();
+                let stream = std::str::from_utf8(buf.get(st_start..st_end)?)
+                    .ok()?
+                    .to_string();
                 let kind = *buf.get(st_end)?;
                 let seq_start = st_end + 1;
                 let seq_end = seq_start + 4;
@@ -336,7 +339,14 @@ pub mod wire {
                 let ts_end = seq_end + 8;
                 let ts = i64::from_be_bytes(buf.get(seq_end..ts_end)?.try_into().ok()?);
                 let data = Bytes::copy_from_slice(buf.get(ts_end..)?);
-                Some(Frame::Media(MediaFrame { session, stream, kind, seq, ts, data }))
+                Some(Frame::Media(MediaFrame {
+                    session,
+                    stream,
+                    kind,
+                    seq,
+                    ts,
+                    data,
+                }))
             }
             _ => None,
         }
@@ -418,7 +428,12 @@ mod tests {
 
     #[test]
     fn wire_control_frame_round_trips() {
-        let env = Envelope::new(frame::PING, "node-a", Some("node-b".into()), serde_json::json!({}));
+        let env = Envelope::new(
+            frame::PING,
+            "node-a",
+            Some("node-b".into()),
+            serde_json::json!({}),
+        );
         let framed = wire::frame_control(&env.encode().unwrap());
         assert_eq!(framed[0], wire::TAG_CONTROL);
         match wire::decode_frame(&framed) {
@@ -452,7 +467,14 @@ mod tests {
     #[test]
     fn wire_media_frame_round_trips() {
         let data = vec![1u8, 2, 3, 4, 5, 6, 7];
-        let framed = wire::frame_media("call-123", "screen", wire::MEDIA_VIDEO, 99, 1_700_000_000_123, &data);
+        let framed = wire::frame_media(
+            "call-123",
+            "screen",
+            wire::MEDIA_VIDEO,
+            99,
+            1_700_000_000_123,
+            &data,
+        );
         assert_eq!(framed[0], wire::TAG_MEDIA);
         match wire::decode_frame(&framed) {
             Some(wire::Frame::Media(m)) => {

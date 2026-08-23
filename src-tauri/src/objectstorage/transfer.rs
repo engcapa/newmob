@@ -36,14 +36,24 @@ pub fn emit_progress<R: Runtime>(
     let eta = if rate > 0.0 { remaining / rate } else { 0.0 };
     let _ = app.emit(
         &format!("storage-progress-{}", transfer_id),
-        ProgressPayload { bytes, total, rate, eta },
+        ProgressPayload {
+            bytes,
+            total,
+            rate,
+            eta,
+        },
     );
 }
 
 pub fn emit_paused<R: Runtime>(app: &AppHandle<R>, transfer_id: &str, bytes: u64, total: u64) {
     let _ = app.emit(
         &format!("storage-paused-{}", transfer_id),
-        ProgressPayload { bytes, total, rate: 0.0, eta: 0.0 },
+        ProgressPayload {
+            bytes,
+            total,
+            rate: 0.0,
+            eta: 0.0,
+        },
     );
 }
 
@@ -94,10 +104,7 @@ pub async fn stream_to_file<R: Runtime>(
 /// Read up to `buf.len()` bytes, looping until the buffer is full or EOF. The
 /// chunked-upload paths need full parts (except the last), which a single
 /// `read` does not guarantee.
-pub async fn read_full(
-    file: &mut tokio::fs::File,
-    buf: &mut [u8],
-) -> Result<usize, String> {
+pub async fn read_full(file: &mut tokio::fs::File, buf: &mut [u8]) -> Result<usize, String> {
     use tokio::io::AsyncReadExt;
     let mut filled = 0;
     while filled < buf.len() {

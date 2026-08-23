@@ -7,10 +7,10 @@
 
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{lookup_host, TcpStream};
+use tokio::net::{TcpStream, lookup_host};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -261,7 +261,7 @@ pub async fn establish_transport(
             return Err(format!(
                 "Proxy type '{}' is not implemented in this build (supported: none, http, socks5).",
                 other,
-            ))
+            ));
         }
     };
 
@@ -842,7 +842,7 @@ mod tests {
             assert_eq!(uname, b"alice");
             assert_eq!(passwd, b"s3cret");
             c.write_all(&[0x01, 0x00]).await.unwrap(); // auth ok
-                                                       // Request.
+            // Request.
             let mut req = [0u8; 4];
             c.read_exact(&mut req).await.unwrap();
             let host = match req[3] {

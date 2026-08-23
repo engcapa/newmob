@@ -25,14 +25,14 @@ pub mod relay;
 pub mod video;
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::AppHandle;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
-use crate::lanchat::protocol::wire::MediaFrame;
 use crate::lanchat::LanChatState;
+use crate::lanchat::protocol::wire::MediaFrame;
 
 /// An inbound media frame tagged with the peer it came from, for routing inside
 /// a call's relay (which fans multiple peers into one webview).
@@ -117,7 +117,10 @@ impl NativeMediaSession {
     /// Forward an inbound media frame into the relay pump. Cheap and lock-free;
     /// called from the transport read loop hot path.
     pub fn forward_inbound(&self, peer_id: &str, frame: MediaFrame) {
-        let _ = self.inbound_tx.send(InboundMedia { peer_id: peer_id.to_string(), frame });
+        let _ = self.inbound_tx.send(InboundMedia {
+            peer_id: peer_id.to_string(),
+            frame,
+        });
     }
 
     /// Register a peer we now exchange media with (the audio task starts fanning
@@ -139,7 +142,10 @@ impl NativeMediaSession {
     /// Stop exchanging media with a peer and drop its tile in the webview.
     pub async fn remove_peer(&self, peer_id: &str) {
         if self.peers.write().await.remove(peer_id) {
-            let _ = self.relay.control_tx.send(relay::RelayControl::PeerRemoved(peer_id.to_string()));
+            let _ = self
+                .relay
+                .control_tx
+                .send(relay::RelayControl::PeerRemoved(peer_id.to_string()));
         }
     }
 
@@ -199,8 +205,8 @@ impl NativeMediaSession {
             if self.cam.lock().unwrap().is_some() {
                 return Ok(());
             }
-            let sender = video::start_camera_sender(state, self.call_id.clone(), self.peers.clone())
-                .await?;
+            let sender =
+                video::start_camera_sender(state, self.call_id.clone(), self.peers.clone()).await?;
             let mut g = self.cam.lock().unwrap();
             if g.is_some() {
                 sender.stop();
@@ -260,7 +266,12 @@ pub async fn handle_media_frame(
     peer_id: &str,
     frame: MediaFrame,
 ) {
-    let session = state.media_sessions.read().await.get(&frame.session).cloned();
+    let session = state
+        .media_sessions
+        .read()
+        .await
+        .get(&frame.session)
+        .cloned();
     match session {
         Some(s) => s.forward_inbound(peer_id, frame),
         None => log::trace!(

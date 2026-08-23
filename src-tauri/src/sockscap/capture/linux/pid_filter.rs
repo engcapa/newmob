@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use crate::sockscap::config::AppSelector;
-use crate::sockscap::paths::{paths_match_exe, normalize_exe_path};
+use crate::sockscap::paths::{normalize_exe_path, paths_match_exe};
 use crate::sockscap::process::{self, ProcessInfo};
 
 /// Whether a packet/process PID belongs to a resolved app-mode target set.

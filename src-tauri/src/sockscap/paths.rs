@@ -42,7 +42,12 @@ pub fn helper_exe_candidates(app: &AppHandle) -> Vec<PathBuf> {
             // `tauri dev` (the exe lives in target/<profile> there too).
             push(dir.join(name));
             // Bundled resource layout (NSIS/MSI install, macOS Resources).
-            push(dir.join("resources").join("sockscap").join(platform_dir).join(name));
+            push(
+                dir.join("resources")
+                    .join("sockscap")
+                    .join(platform_dir)
+                    .join(name),
+            );
             push(dir.join("sockscap").join(platform_dir).join(name));
             // Sidecar / externalBin style names.
             push(dir.join("bin").join(name));
@@ -51,7 +56,12 @@ pub fn helper_exe_candidates(app: &AppHandle) -> Vec<PathBuf> {
     }
 
     if let Ok(dir) = app.path().resource_dir() {
-        push(dir.join("resources").join("sockscap").join(platform_dir).join(name));
+        push(
+            dir.join("resources")
+                .join("sockscap")
+                .join(platform_dir)
+                .join(name),
+        );
         push(dir.join("sockscap").join(platform_dir).join(name));
         push(dir.join(name));
         push(dir.join("bin").join(name));
@@ -152,8 +162,12 @@ pub fn xray_exe_candidates(app: &AppHandle) -> Vec<PathBuf> {
     }
 
     // Dev / CWD-relative.
-    push(PathBuf::from(format!("src-tauri/resources/sockscap/{platform_dir}/{name}")));
-    push(PathBuf::from(format!("resources/sockscap/{platform_dir}/{name}")));
+    push(PathBuf::from(format!(
+        "src-tauri/resources/sockscap/{platform_dir}/{name}"
+    )));
+    push(PathBuf::from(format!(
+        "resources/sockscap/{platform_dir}/{name}"
+    )));
     push(PathBuf::from("src-tauri/target/debug").join(name));
     push(PathBuf::from("target/debug").join(name));
 
@@ -221,9 +235,7 @@ fn to_absolute_dir(d: PathBuf) -> PathBuf {
         if d.is_absolute() {
             d
         } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(&d))
-                .unwrap_or(d)
+            std::env::current_dir().map(|cwd| cwd.join(&d)).unwrap_or(d)
         }
     })
 }

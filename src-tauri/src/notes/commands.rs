@@ -5,7 +5,10 @@ use std::collections::HashMap;
 
 use tauri::State;
 
-use super::db::{self, CreateNoteInput, NoteAlert, NoteItem, NoteQuery, NoteStep, NoteTag, StepInput, TagInput, UpdateNoteInput};
+use super::db::{
+    self, CreateNoteInput, NoteAlert, NoteItem, NoteQuery, NoteStep, NoteTag, StepInput, TagInput,
+    UpdateNoteInput,
+};
 use crate::state::AppState;
 
 /// Lock the dedicated notes.db connection, mapping poison errors to a string.
@@ -16,7 +19,10 @@ macro_rules! notes_conn {
 }
 
 #[tauri::command]
-pub async fn notes_list(query: NoteQuery, state: State<'_, AppState>) -> Result<Vec<NoteItem>, String> {
+pub async fn notes_list(
+    query: NoteQuery,
+    state: State<'_, AppState>,
+) -> Result<Vec<NoteItem>, String> {
     let conn = notes_conn!(state);
     db::list_notes(&conn, &query).map_err(|e| e.to_string())
 }
@@ -28,7 +34,10 @@ pub async fn notes_get(id: String, state: State<'_, AppState>) -> Result<Option<
 }
 
 #[tauri::command]
-pub async fn notes_create(input: CreateNoteInput, state: State<'_, AppState>) -> Result<NoteItem, String> {
+pub async fn notes_create(
+    input: CreateNoteInput,
+    state: State<'_, AppState>,
+) -> Result<NoteItem, String> {
     let conn = notes_conn!(state);
     db::create_note(&conn, &input).map_err(|e| e.to_string())
 }
@@ -95,7 +104,9 @@ pub async fn notes_set_steps(
 }
 
 #[tauri::command]
-pub async fn notes_get_prefs(state: State<'_, AppState>) -> Result<HashMap<String, String>, String> {
+pub async fn notes_get_prefs(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, String>, String> {
     let conn = notes_conn!(state);
     db::get_prefs(&conn).map_err(|e| e.to_string())
 }

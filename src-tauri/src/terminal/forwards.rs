@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::terminal::network::{parse_endpoint, NetworkForward};
+use crate::terminal::network::{NetworkForward, parse_endpoint};
 use crate::terminal::ssh::SshHandler;
 
 #[derive(Debug, Clone, Serialize)]

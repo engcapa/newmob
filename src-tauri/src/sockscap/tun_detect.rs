@@ -62,14 +62,14 @@ mod win {
         length: ULONG,
         if_index: DWORD,
         next: *mut IpAdapterAddresses,
-        adapter_name: *mut u8,           // PCHAR (ansi)
+        adapter_name: *mut u8, // PCHAR (ansi)
         first_unicast: *mut c_void,
         first_anycast: *mut c_void,
         first_multicast: *mut c_void,
         first_dns_server: *mut c_void,
-        dns_suffix: *mut u16,            // PWCHAR
-        description: *mut u16,           // PWCHAR
-        friendly_name: *mut u16,         // PWCHAR
+        dns_suffix: *mut u16,    // PWCHAR
+        description: *mut u16,   // PWCHAR
+        friendly_name: *mut u16, // PWCHAR
     }
 
     #[link(name = "iphlpapi")]
@@ -120,7 +120,13 @@ mod win {
         let mut buf = vec![0u64; (size as usize).div_ceil(8) + 1];
         let head = buf.as_mut_ptr() as *mut IpAdapterAddresses;
         let rc = unsafe {
-            GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP, std::ptr::null_mut(), head, &mut size)
+            GetAdaptersAddresses(
+                AF_UNSPEC,
+                GAA_FLAG_SKIP,
+                std::ptr::null_mut(),
+                head,
+                &mut size,
+            )
         };
         if rc != NO_ERROR {
             return Vec::new();

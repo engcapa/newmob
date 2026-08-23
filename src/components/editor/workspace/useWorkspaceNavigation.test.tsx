@@ -30,6 +30,7 @@ function openState(ref: CodeWorkspaceFileRef): OpenFileState {
     loading: false,
     saving: false,
     dirty: false,
+    documentRevision: 0,
     error: null,
   };
 }
@@ -200,9 +201,11 @@ describe("useWorkspaceNavigation", () => {
     act(() => result.current.openGoToFileItem(item, { split: true }));
     expect(openFile).toHaveBeenLastCalledWith(
       { kind: "root", rootId: "root-1", path: "src/main.ts" },
-      { groupId: "secondary" },
+      { groupId: expect.any(String) },
     );
-    expect(useCodeWorkspaceStore.getState().getInstance("workspace-1").splitOrientation).toBe("vertical");
+    const ui = useCodeWorkspaceStore.getState().getInstance("workspace-1");
+    expect(ui.layoutTreeV2.type).toBe("split");
+    expect(ui.splitOrientation).toBe("vertical");
     expect(setSearchEverywhereOpen).toHaveBeenCalledWith(false);
   });
 

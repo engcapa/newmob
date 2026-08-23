@@ -1,8 +1,8 @@
 use super::import_secrets::crypto::aes_128_cbc_decrypt_pkcs7;
 use super::models::{AuthMethod, SessionConfig, SessionType};
 use serde::Serialize;
-use serde_json::json;
 use serde_json::Value;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -165,7 +165,10 @@ fn extract_dbeaver_credentials(parsed: Value) -> HashMap<String, DbeaverCredenti
         let Some(section_object) = raw_sections.as_object() else {
             continue;
         };
-        let Some(connection_section) = section_object.get("#connection").and_then(|value| value.as_object()) else {
+        let Some(connection_section) = section_object
+            .get("#connection")
+            .and_then(|value| value.as_object())
+        else {
             continue;
         };
         let mut entry = DbeaverCredentialEntry::default();
@@ -197,8 +200,8 @@ fn first_non_empty_json_field(
 
 #[cfg(windows)]
 fn platform_putty_sessions() -> Result<Vec<SessionConfig>, String> {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let sessions_key = hkcu
@@ -491,8 +494,8 @@ fn windows_documents_dirs() -> Vec<PathBuf> {
 /// Reads the (already env-expanded) Documents path from the Shell Folders key.
 #[cfg(windows)]
 fn shell_folder_personal() -> Option<PathBuf> {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu
@@ -510,8 +513,8 @@ fn shell_folder_personal() -> Option<PathBuf> {
 /// per-version NetSarang registry keys.
 #[cfg(windows)]
 fn xshell_user_data_paths() -> Vec<PathBuf> {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let mut out = Vec::new();

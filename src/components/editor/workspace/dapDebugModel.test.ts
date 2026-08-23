@@ -76,6 +76,8 @@ describe("dapDebugModel", () => {
     expect(stepCommandFor("stepIn")).toBe("stepIn");
     expect(stepCommandFor("stepOut")).toBe("stepOut");
     expect(stepCommandFor("pause")).toBe("pause");
+    expect(stepCommandFor("stepBack")).toBe("stepBack");
+    expect(stepCommandFor("reverseContinue")).toBe("reverseContinue");
   });
 
   it("builds and parses bounded memory and disassembly requests", () => {
@@ -165,6 +167,15 @@ describe("dapDebugModel", () => {
       { line: 8, hitCondition: "5" },
       { line: 12, logMessage: "hit {x}" },
       { line: 20 },
+    ]);
+  });
+
+  it("builds setBreakpoints args combining condition, hitCondition and logMessage on single breakpoint (D11.2)", () => {
+    const args = buildSetBreakpointsArgs("/repo/src/App.java", planBreakpointSync([
+      { line: 42, condition: "x > 10", hitCondition: "3", logMessage: "x is {x}" },
+    ]));
+    expect(args.breakpoints).toEqual([
+      { line: 42, condition: "x > 10", hitCondition: "3", logMessage: "x is {x}" },
     ]);
   });
 
@@ -838,6 +849,36 @@ describe("dapDebugModel", () => {
     expect(state.output.at(-1)?.text).toContain("exit code 3");
   });
 
+  it.each(["terminated", "exited"] as const)(
+    "clears the whole inspectable stack on %s and keeps the console",
+    (event) => {
+      const stopped = {
+        ...initialDebugState("s1"),
+        status: "stopped" as const,
+        stoppedThreadId: 1,
+        stoppedReason: "breakpoint",
+        threads: [{ id: 1, name: "main" }, { id: 2, name: "worker" }],
+        frames: [{ id: 9, name: "f", path: "/a.java", line: 1, column: 1, sourceReference: 0, sourceName: null }],
+        selectedThreadId: 1,
+        selectedFrameId: 9,
+        exceptionInfo: { exceptionId: "E", description: "", details: null },
+        output: [{ category: "stdout", text: "hello\n" }],
+      };
+
+      const ended = reduceDebugEvent(stopped, event, { body: {} });
+      expect(ended.status).toBe("terminated");
+      expect(ended.threads).toEqual([]);
+      expect(ended.frames).toEqual([]);
+      expect(ended.stoppedThreadId).toBeNull();
+      expect(ended.stoppedReason).toBeNull();
+      expect(ended.selectedThreadId).toBeNull();
+      expect(ended.selectedFrameId).toBeNull();
+      expect(ended.exceptionInfo).toBeNull();
+      // Console history is the one thing Stop keeps (IDEA does the same).
+      expect(ended.output).toEqual([{ category: "stdout", text: "hello\n" }]);
+    },
+  );
+
   it("appends client console lines and skips telemetry output", () => {
     let state = initialDebugState("s1");
     state = appendConsoleLine(state, "repl", "> 1 + 1\n");
@@ -889,5 +930,34 @@ describe("dapDebugModel", () => {
     expect(inlineValueLabel("i = i + 1;", variables)).toBe("i = 3");
     expect(inlineValueLabel("System.out.println();", variables)).toBeNull();
     expect(inlineValueLabel("sum = 1;", {})).toBeNull();
+  });
+
+  it("enforces 10,000 lines limit in appendConsoleLine (D7.4)", () => {
+    let state = initialDebugState("s1");
+    for (let i = 0; i < 10050; i++) {
+      state = appendConsoleLine(state, "stdout", `line ${i}\n`, i);
+    }
+    expect(state.output).toHaveLength(10000);
+    expect(state.output[0]?.text).toBe("line 50\n");
+    expect(state.output[9999]?.text).toBe("line 10049\n");
+  });
+
+  it("enforces 2 MiB memory budget eviction in appendConsoleLine (D7.4)", () => {
+    let state = initialDebugState("s1");
+    // Append 3 lines each of 1 MiB (1,000,000 chars)
+    const bigLine1 = "a".repeat(1000000);
+    const bigLine2 = "b".repeat(1000000);
+    const bigLine3 = "c".repeat(1000000);
+
+    state = appendConsoleLine(state, "stdout", bigLine1, 1);
+    state = appendConsoleLine(state, "stdout", bigLine2, 2);
+    // At this point total is 2 MiB -> holds both lines
+    expect(state.output).toHaveLength(2);
+
+    state = appendConsoleLine(state, "stdout", bigLine3, 3);
+    // Adding 3rd line exceeds 2 MiB -> line 1 must be evicted
+    expect(state.output).toHaveLength(2);
+    expect(state.output[0]?.text).toBe(bigLine2);
+    expect(state.output[1]?.text).toBe(bigLine3);
   });
 });

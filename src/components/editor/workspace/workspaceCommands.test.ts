@@ -1,11 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
-  dispatchWorkspaceCommandKeydown,
-  runWorkspaceCommand,
-  workspaceCommandMenuItems,
   workspaceCommandMatchesKeybinding,
+  workspaceCommandToActionDefinition,
   type WorkspaceCommand,
 } from "./workspaceCommands";
+import { WorkspaceActionHost } from "./workspaceActionHost";
 
 function command(overrides: Partial<WorkspaceCommand> = {}): WorkspaceCommand {
   return {
@@ -19,7 +18,7 @@ function command(overrides: Partial<WorkspaceCommand> = {}): WorkspaceCommand {
 }
 
 describe("workspaceCommands", () => {
-  it("matches exact modifier combinations and named arrow keys", () => {
+  it("matches exact modifier combinations, named arrows, and Numpad operators", () => {
     expect(workspaceCommandMatchesKeybinding(command(), {
       key: "f",
       ctrlKey: true,
@@ -50,11 +49,71 @@ describe("workspaceCommands", () => {
       altKey: true,
       metaKey: false,
     })).toBe(true);
+    expect(workspaceCommandMatchesKeybinding(command({ keybinding: "Ctrl+Shift+NumpadAdd" }), {
+      key: "+",
+      code: "NumpadAdd",
+      ctrlKey: true,
+      shiftKey: true,
+      altKey: false,
+      metaKey: false,
+    })).toBe(true);
   });
 
-  it("dispatches the first enabled matching command and consumes the event", () => {
-    const disabled = command({ id: "disabled", when: () => false });
-    const enabled = command({ id: "enabled" });
+  it("registers commands into a host and executes by id with context gating", async () => {
+    const run = vi.fn();
+    const editorOnly = command({
+      id: "editor-only",
+      when: (context) => context.focus === "editor",
+      run,
+    });
+    const host = new WorkspaceActionHost({ workspaceId: "ws-1" });
+    host.registerCommands([editorOnly]);
+
+    expect((await host.execute("editor-only", { focus: "tree" })).kind).toBe("no-op");
+    const applied = await host.execute("editor-only", { focus: "editor" });
+    expect(applied.kind).toBe("applied");
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it("forwards optional payload through the host (tree selection targets)", async () => {
+    const run = vi.fn();
+    const treeOpen = command({
+      id: "workspace.tree.open",
+      when: (context) => context.focus === "tree",
+      run,
+    });
+    const payload = {
+      selection: { kind: "file" as const, ref: { kind: "root" as const, rootId: "r1", path: "src/a.ts" } },
+    };
+    const host = new WorkspaceActionHost({ workspaceId: "ws-1" });
+    host.registerCommands([treeOpen]);
+
+    await host.execute("workspace.tree.open", { focus: "tree", payload });
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({ focus: "tree", payload }));
+  });
+
+  it("adapts commands into action definitions with default provenance", () => {
+    const definition = workspaceCommandToActionDefinition(command({ id: "workspace.probe" }));
+    expect(definition.id).toBe("workspace.probe");
+    expect(definition.keybinding).toBe("Ctrl+Shift+F");
+    expect(definition.run).toBeTypeOf("function");
+  });
+
+  it("adapts boolean command outcomes into typed action results", async () => {
+    const definition = workspaceCommandToActionDefinition(command({
+      id: "workspace.noop",
+      run: () => false,
+    }));
+    expect(await definition.run({ focus: "workspace" })).toEqual({
+      kind: "no-op",
+      reason: "condition-not-met",
+    });
+  });
+
+  it("dispatches keydown through the host and consumes the event", async () => {
+    const run = vi.fn();
+    const host = new WorkspaceActionHost({ workspaceId: "ws-1" });
+    host.registerCommands([command({ run })]);
     const event = {
       key: "F",
       ctrlKey: true,
@@ -65,56 +124,10 @@ describe("workspaceCommands", () => {
       stopPropagation: vi.fn(),
     };
 
-    expect(dispatchWorkspaceCommandKeydown([disabled, enabled], { focus: "editor" }, event)?.id).toBe("enabled");
+    const dispatched = await host.dispatchKeydown(event);
+    expect(dispatched?.id).toBe("workspace.findInFiles");
     expect(event.preventDefault).toHaveBeenCalledOnce();
     expect(event.stopPropagation).toHaveBeenCalledOnce();
-    expect(enabled.run).toHaveBeenCalledWith({ focus: "editor" });
-  });
-
-  it("runs commands by id only when their context predicate allows it", () => {
-    const run = vi.fn();
-    const editorOnly = command({ id: "editor-only", when: (context) => context.focus === "editor", run });
-
-    expect(runWorkspaceCommand([editorOnly], "editor-only", { focus: "tree" })).toBe(false);
-    expect(runWorkspaceCommand([editorOnly], "editor-only", { focus: "editor" })).toBe(true);
     expect(run).toHaveBeenCalledOnce();
-  });
-
-  it("forwards optional payload to the command runner (tree selection / directory targets)", () => {
-    const run = vi.fn();
-    const treeOpen = command({
-      id: "workspace.tree.open",
-      when: (context) => context.focus === "tree",
-      run,
-    });
-    const payload = {
-      selection: { kind: "file" as const, ref: { kind: "root" as const, rootId: "r1", path: "src/a.ts" } },
-    };
-
-    expect(runWorkspaceCommand([treeOpen], "workspace.tree.open", { focus: "tree", payload })).toBe(true);
-    expect(run).toHaveBeenCalledWith({ focus: "tree", payload });
-  });
-
-  it("treats terminal focus as a first-class command context", () => {
-    const run = vi.fn();
-    const terminalOnly = command({
-      id: "workspace.terminal.clear",
-      when: (context) => context.focus === "terminal",
-      run,
-    });
-
-    expect(runWorkspaceCommand([terminalOnly], "workspace.terminal.clear", { focus: "editor" })).toBe(false);
-    expect(runWorkspaceCommand([terminalOnly], "workspace.terminal.clear", { focus: "terminal" })).toBe(true);
-    expect(run).toHaveBeenCalledWith({ focus: "terminal" });
-  });
-
-  it("projects command state into menu-safe descriptors", () => {
-    expect(workspaceCommandMenuItems([
-      command({ id: "always", title: "Always" }),
-      command({ id: "tree-only", title: "Tree Only", when: (context) => context.focus === "tree" }),
-    ], { focus: "workspace" })).toEqual([
-      expect.objectContaining({ id: "always", title: "Always", enabled: true }),
-      expect.objectContaining({ id: "tree-only", title: "Tree Only", enabled: false }),
-    ]);
   });
 });

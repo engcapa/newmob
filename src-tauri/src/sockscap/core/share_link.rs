@@ -337,7 +337,9 @@ fn parse_vmess(rest: &str) -> Result<ParsedShareLink, String> {
     };
 
     let host = s("add");
-    let port = num("port").parse::<u16>().map_err(|_| "vmess bad port".to_string())?;
+    let port = num("port")
+        .parse::<u16>()
+        .map_err(|_| "vmess bad port".to_string())?;
     let uuid = s("id");
     if uuid.is_empty() {
         return Err("vmess missing id".into());

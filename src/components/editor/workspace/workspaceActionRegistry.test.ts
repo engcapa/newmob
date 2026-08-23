@@ -113,4 +113,100 @@ describe("workspaceActionRegistry", () => {
     expect(callCount).toBe(1);
     unsub();
   });
+
+  it("restores previous owner action when top owner unregisters", () => {
+    const unregisterA = workspaceActionRegistry.register({
+      id: "workspace.toggleCase",
+      title: "Toggle Case (Workspace A)",
+      category: "Edit",
+      provenance: "local",
+      run: () => {},
+    });
+
+    expect(workspaceActionRegistry.get("workspace.toggleCase")?.title).toBe("Toggle Case (Workspace A)");
+
+    const unregisterB = workspaceActionRegistry.register({
+      id: "workspace.toggleCase",
+      title: "Toggle Case (Workspace B)",
+      category: "Edit",
+      provenance: "local",
+      run: () => {},
+    });
+
+    expect(workspaceActionRegistry.get("workspace.toggleCase")?.title).toBe("Toggle Case (Workspace B)");
+
+    // Unregister B: should restore A
+    unregisterB();
+    expect(workspaceActionRegistry.get("workspace.toggleCase")?.title).toBe("Toggle Case (Workspace A)");
+
+    // Unregister A: should remove
+    unregisterA();
+    expect(workspaceActionRegistry.get("workspace.toggleCase")).toBeUndefined();
+  });
+
+  it("treats recentChangedFiles as distinct from recentLocations", () => {
+    let recentLocationsCalled = false;
+    let recentChangedFilesCalled = false;
+
+    workspaceActionRegistry.register({
+      id: "workspace.recentLocations",
+      title: "Recent Locations",
+      category: "Navigation",
+      provenance: "local",
+      run: () => {
+        recentLocationsCalled = true;
+      },
+    });
+
+    workspaceActionRegistry.register({
+      id: "workspace.recentChangedFiles",
+      title: "Recently Changed Files",
+      category: "Navigation",
+      provenance: "local",
+      run: () => {
+        recentChangedFilesCalled = true;
+      },
+    });
+
+    expect(workspaceActionRegistry.resolveId("workspace.recentChangedFiles")).toBe("workspace.recentChangedFiles");
+    expect(workspaceActionRegistry.get("workspace.recentChangedFiles")?.title).toBe("Recently Changed Files");
+
+    void workspaceActionRegistry.run("workspace.recentChangedFiles", { focus: "editor" });
+    expect(recentChangedFilesCalled).toBe(true);
+    expect(recentLocationsCalled).toBe(false);
+  });
+
+  it("emits registered event when unregister restores previous action definition", () => {
+    const events: Array<{ type: string; actionId?: string }> = [];
+    const unsub = workspaceActionRegistry.subscribe((e) => {
+      events.push(e);
+    });
+
+    const unregA = workspaceActionRegistry.register({
+      id: "test.action",
+      title: "Action A",
+      category: "Help",
+      provenance: "local",
+      run: () => {},
+    });
+
+    const unregB = workspaceActionRegistry.register({
+      id: "test.action",
+      title: "Action B",
+      category: "Help",
+      provenance: "local",
+      run: () => {},
+    });
+
+    events.length = 0;
+    // Unregister B: should restore A and emit both registered and state-changed
+    unregB();
+
+    expect(events.some((e) => e.type === "registered" && e.actionId === "test.action")).toBe(true);
+    expect(events.some((e) => e.type === "state-changed" && e.actionId === "test.action")).toBe(true);
+
+    unregA();
+    unsub();
+  });
 });
+

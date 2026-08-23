@@ -31,15 +31,23 @@ export interface SaveNormalizationResult {
   newlineAdjusted: boolean;
   eolNormalized: boolean;
   cancelledDueToEdit: boolean;
+  encodingError?: boolean;
   diagnostics: string[];
+  resolvedEol?: "lf" | "crlf" | "cr";
+  resolvedCharset?: string;
+  resolvedBom?: boolean;
 }
 
 /**
  * Trim trailing whitespace from each line in a text buffer while preserving target EOL.
+ * If eol is not specified, preserves existing line breaks (LF, CRLF, bare CR) without modification.
  */
-export function trimTrailingWhitespace(text: string, eol: string = "\n"): string {
+export function trimTrailingWhitespace(text: string, eol?: string): string {
+  if (!eol) {
+    return text.replace(/[ \t]+(?=\r\n|\r|\n|$)/g, "");
+  }
   return text
-    .split(/\r?\n/)
+    .split(/\r\n|\r|\n/)
     .map((line) => line.replace(/[ \t]+$/, ""))
     .join(eol);
 }
@@ -49,15 +57,23 @@ export function trimTrailingWhitespace(text: string, eol: string = "\n"): string
  * If insertFinalNewline is true, ensures exactly one trailing newline.
  * If insertFinalNewline is false, removes any trailing newlines.
  */
-export function adjustFinalNewline(text: string, insertFinalNewline: boolean, eol: string = "\n"): string {
+export function adjustFinalNewline(text: string, insertFinalNewline: boolean, eol?: string): string {
   if (text.length === 0) return text;
 
   // Strip all trailing newlines first
-  const trimmed = text.replace(/(\r?\n)+$/, "");
-  if (insertFinalNewline) {
+  const trimmed = text.replace(/(\r\n|\r|\n)+$/, "");
+  if (!insertFinalNewline) {
+    return trimmed;
+  }
+  if (eol) {
     return trimmed + eol;
   }
-  return trimmed;
+  const detected = text.includes("\r\n")
+    ? "\r\n"
+    : text.includes("\r") && !text.includes("\n")
+      ? "\r"
+      : "\n";
+  return trimmed + detected;
 }
 
 /**
@@ -104,8 +120,8 @@ export async function runSaveNormalizationPipeline(
   let eolNormalized = false;
   const diagnostics: string[] = [];
 
-  const targetEol = codeStyle.endOfLine ?? "lf";
-  const eolChar = targetEol === "crlf" ? "\r\n" : targetEol === "cr" ? "\r" : "\n";
+  const explicitEol = codeStyle.endOfLine;
+  const eolChar = explicitEol === "crlf" ? "\r\n" : explicitEol === "cr" ? "\r" : explicitEol === "lf" ? "\n" : undefined;
 
   // Detect if initial text had mismatched EOL
   if (codeStyle.endOfLine) {
@@ -173,6 +189,65 @@ export async function runSaveNormalizationPipeline(
     }
   }
 
+  let resolvedCharset = codeStyle.charset;
+  let resolvedBom: boolean | undefined = undefined;
+
+  // Stage 5: Charset / BOM verification & normalization
+  if (codeStyle.charset) {
+    const charset = codeStyle.charset.toLowerCase();
+    if (charset === "utf-8") {
+      resolvedCharset = "UTF-8";
+      resolvedBom = false;
+      // Ensure no BOM prefix for standard utf-8
+      if (currentText.startsWith("\uFEFF")) {
+        currentText = currentText.slice(1);
+      }
+    } else if (charset === "utf-8-bom") {
+      resolvedCharset = "UTF-8";
+      resolvedBom = true;
+      // Ensure BOM prefix for utf-8-bom if non-empty
+      if (currentText.length > 0 && !currentText.startsWith("\uFEFF")) {
+        currentText = `\uFEFF${currentText}`;
+      }
+    } else if (charset === "latin1" || charset === "iso-8859-1") {
+      resolvedCharset = "ISO-8859-1";
+      for (let i = 0; i < currentText.length; i++) {
+        const code = currentText.charCodeAt(i);
+        if (code > 255) {
+          return {
+            text: initialText,
+            formatted: false,
+            whitespaceTrimmed: false,
+            newlineAdjusted: false,
+            eolNormalized: false,
+            cancelledDueToEdit: false,
+            encodingError: true,
+            diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds Latin-1 range (cannot be represented in Latin-1).`],
+          };
+        }
+      }
+    } else if (charset === "us-ascii" || charset === "ascii") {
+      resolvedCharset = "US-ASCII";
+      for (let i = 0; i < currentText.length; i++) {
+        const code = currentText.charCodeAt(i);
+        if (code > 127) {
+          return {
+            text: initialText,
+            formatted: false,
+            whitespaceTrimmed: false,
+            newlineAdjusted: false,
+            eolNormalized: false,
+            cancelledDueToEdit: false,
+            encodingError: true,
+            diagnostics: [`Save blocked: Character '${currentText[i]}' at position ${i} exceeds ASCII range (cannot be represented in US-ASCII).`],
+          };
+        }
+      }
+    } else if (charset === "utf-16le" || charset === "utf-16be" || charset === "utf-16") {
+      resolvedCharset = charset.toUpperCase();
+    }
+  }
+
   // Final race condition check
   if (getLatestBufferText) {
     const latestText = getLatestBufferText();
@@ -198,5 +273,8 @@ export async function runSaveNormalizationPipeline(
     eolNormalized,
     cancelledDueToEdit: false,
     diagnostics,
+    resolvedEol: codeStyle.endOfLine,
+    resolvedCharset,
+    resolvedBom,
   };
 }

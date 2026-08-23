@@ -9,11 +9,11 @@ use futures::StreamExt;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    emit_query_result_stream, send_query_stream_event, ColumnDescription, ColumnInfo, DbConfig,
-    DbHandle, DbObject, QueryResult, QueryStreamChannel, QueryStreamEvent, SchemaInfo, TableInfo,
-};
 use super::sql;
+use super::{
+    ColumnDescription, ColumnInfo, DbConfig, DbHandle, DbObject, QueryResult, QueryStreamChannel,
+    QueryStreamEvent, SchemaInfo, TableInfo, emit_query_result_stream, send_query_stream_event,
+};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
 const STREAM_BATCH_ROWS: usize = 100;
@@ -573,7 +573,11 @@ pub async fn object_ddl(
 ) -> Result<String, String> {
     let default_db = client.database();
     let db = schema.unwrap_or(default_db.as_str());
-    let verb = if kind == "dictionary" { "DICTIONARY" } else { "TABLE" };
+    let verb = if kind == "dictionary" {
+        "DICTIONARY"
+    } else {
+        "TABLE"
+    };
     let sql = format!(
         "SHOW CREATE {verb} `{}`.`{}`",
         db.replace('`', "``"),

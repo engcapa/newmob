@@ -11,9 +11,9 @@ use tokio::task::JoinError;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    group_foreign_keys, send_query_stream_event, ColumnDescription, ColumnInfo, DbConfig,
-    DbHandle, DbObject, ForeignKeyInfo, IndexInfo, QueryResult, QueryStreamChannel,
-    QueryStreamEvent, SchemaInfo, TableInfo,
+    ColumnDescription, ColumnInfo, DbConfig, DbHandle, DbObject, ForeignKeyInfo, IndexInfo,
+    QueryResult, QueryStreamChannel, QueryStreamEvent, SchemaInfo, TableInfo, group_foreign_keys,
+    send_query_stream_event,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 15;
@@ -370,9 +370,7 @@ pub async fn search_tables(
     let prefix_filter = if prefix.is_empty() {
         String::new()
     } else {
-        format!(
-            "AND SUBSTR(UPPER(o.object_name), 1, LENGTH('{prefix}')) = UPPER('{prefix}')"
-        )
+        format!("AND SUBSTR(UPPER(o.object_name), 1, LENGTH('{prefix}')) = UPPER('{prefix}')")
     };
     let sql = format!(
         "SELECT object_name, object_type FROM ( \

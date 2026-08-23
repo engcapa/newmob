@@ -1,16 +1,16 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState } from "react";
 import { Keyboard, Search, Sparkles, X } from "lucide-react";
-import type { WorkspaceCommand } from "./workspaceCommands";
-import {
-  workspaceActionRegistry,
-  DEFAULT_WORKSPACE_ACTIONS,
-} from "./workspaceActionRegistry";
+import type { ActionSnapshotItem } from "./workspaceActionHost";
 
 export interface KeymapCheatSheetDialogProps {
   open: boolean;
-  commands: readonly WorkspaceCommand[];
   onClose: () => void;
-  onExecuteCommand?: (commandId: string) => void;
+  onExecuteCommand?: (commandId: string) => void | Promise<unknown>;
+  /**
+   * Instance-scoped host snapshot (§8.17.3): the ONLY keymap input. Rows keep
+   * their frozen evaluations so execution can reuse the rendered state.
+   */
+  actionSnapshots: ActionSnapshotItem[];
 }
 
 function parseKeyParts(binding: string): string[] {
@@ -36,36 +36,29 @@ function parseKeyParts(binding: string): string[] {
 
 export function KeymapCheatSheetDialog({
   open,
-  commands,
   onClose,
   onExecuteCommand,
+  actionSnapshots,
 }: KeymapCheatSheetDialogProps) {
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
-  const [, setTick] = useState(0);
-
-  useEffect(() => {
-    return workspaceActionRegistry.subscribe(() => {
-      setTick((t) => t + 1);
-    });
-  }, []);
-
-  const boundCommands = useMemo(() => {
-    const sourceCommands = commands.length > 0
-      ? [...commands]
-      : DEFAULT_WORKSPACE_ACTIONS.map((def) => ({
-          id: def.id,
-          title: def.title,
-          category: def.category,
-          keybinding: typeof def.keybinding === "string" ? def.keybinding : def.keybinding?.default,
-          keybindings: def.secondaryKeybindings,
-          provenance: def.provenance,
-          keywords: def.keywords,
-          run: () => {},
-        }));
-
-    return sourceCommands.filter((c) => !!c.keybinding || (c.keybindings && c.keybindings.length > 0));
-  }, [commands]);
+  const boundCommands = useMemo(
+    () => actionSnapshots
+      .filter((entry) => entry.state.availability !== "unsupported")
+      .map((entry) => ({
+        id: entry.id,
+        title: entry.title,
+        category: entry.category,
+        keybinding: entry.keybinding,
+        keybindings: entry.keybindings,
+        keywords: entry.keywords,
+        provenance: entry.state.source,
+        enabled: entry.state.availability === "available",
+        evaluation: entry.evaluation,
+      }))
+      .filter((command) => !!command.keybinding || (command.keybindings?.length ?? 0) > 0),
+    [actionSnapshots],
+  );
 
   const categories = useMemo(() => {
     const set = new Set<string>();
@@ -173,9 +166,8 @@ export function KeymapCheatSheetDialog({
                 Boolean,
               ) as string[];
 
-              const regAction = workspaceActionRegistry.get(command.id);
-              const meta = DEFAULT_WORKSPACE_ACTIONS.find((a) => a.id === command.id || a.id === workspaceActionRegistry.resolveId(command.id));
-              const provenance = command.provenance ?? regAction?.provenance ?? meta?.provenance;
+              const provenance = command.provenance;
+              const enabled = "enabled" in command ? command.enabled : true;
 
               return (
                 <div
@@ -232,7 +224,7 @@ export function KeymapCheatSheetDialog({
                       })}
                     </div>
 
-                    {onExecuteCommand && (
+                    {onExecuteCommand && enabled && (
                       <button
                         type="button"
                         data-testid={`keymap-run-${command.id}`}

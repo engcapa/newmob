@@ -11,13 +11,13 @@ use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use tauri::{AppHandle, Manager};
 
 use super::mcp_http::{
-    decide_permission, enforce_inline_permission, scope_from_ctx, PermissionParams, TokenMap,
-    TokenScope,
+    PermissionParams, TokenMap, TokenScope, decide_permission, enforce_inline_permission,
+    scope_from_ctx,
 };
 use crate::state::AppState;
 
@@ -74,17 +74,64 @@ fn err(e: impl Into<String>) -> ErrorData {
 /// Redis commands that only read state. Used to waive the confirmation card for
 /// `redis_exec` reads; anything not listed is treated as mutating (safe default).
 const REDIS_READ_CMDS: &[&str] = &[
-    "get", "mget", "strlen", "getrange", "exists", "type", "ttl", "pttl",
-    "keys", "scan", "hget", "hmget", "hgetall", "hkeys", "hvals", "hlen", "hexists",
-    "hscan", "hstrlen", "lrange", "lindex", "llen", "smembers", "sismember", "scard",
-    "srandmember", "sscan", "zrange", "zrangebyscore", "zrevrange", "zscore", "zcard",
-    "zcount", "zrank", "zscan", "xrange", "xrevrange", "xlen", "dbsize", "info", "ping",
-    "memory", "object", "dump", "randomkey", "bitcount", "getbit", "pfcount",
+    "get",
+    "mget",
+    "strlen",
+    "getrange",
+    "exists",
+    "type",
+    "ttl",
+    "pttl",
+    "keys",
+    "scan",
+    "hget",
+    "hmget",
+    "hgetall",
+    "hkeys",
+    "hvals",
+    "hlen",
+    "hexists",
+    "hscan",
+    "hstrlen",
+    "lrange",
+    "lindex",
+    "llen",
+    "smembers",
+    "sismember",
+    "scard",
+    "srandmember",
+    "sscan",
+    "zrange",
+    "zrangebyscore",
+    "zrevrange",
+    "zscore",
+    "zcard",
+    "zcount",
+    "zrank",
+    "zscan",
+    "xrange",
+    "xrevrange",
+    "xlen",
+    "dbsize",
+    "info",
+    "ping",
+    "memory",
+    "object",
+    "dump",
+    "randomkey",
+    "bitcount",
+    "getbit",
+    "pfcount",
 ];
 
 /// True when a raw Redis command line is confidently read-only.
 fn redis_command_is_readonly(raw: &str) -> bool {
-    let first = raw.trim().split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+    let first = raw
+        .trim()
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     REDIS_READ_CMDS.contains(&first.as_str())
 }
 
@@ -135,7 +182,10 @@ struct ExecParams {
 
 #[tool_router]
 impl RedisHandler {
-    #[tool(name = "redis_list_keys", description = "SCAN 扫描键空间（按 pattern，分页 cursor）")]
+    #[tool(
+        name = "redis_list_keys",
+        description = "SCAN 扫描键空间（按 pattern，分页 cursor）"
+    )]
     async fn redis_list_keys(
         &self,
         Parameters(p): Parameters<ListKeysParams>,
@@ -179,7 +229,10 @@ impl RedisHandler {
         )))
     }
 
-    #[tool(name = "redis_set_key", description = "写入/覆盖一个键（写动作，需用户确认）")]
+    #[tool(
+        name = "redis_set_key",
+        description = "写入/覆盖一个键（写动作，需用户确认）"
+    )]
     async fn redis_set_key(
         &self,
         Parameters(p): Parameters<SetKeyParams>,
@@ -200,7 +253,10 @@ impl RedisHandler {
         Ok(text("OK"))
     }
 
-    #[tool(name = "redis_del_key", description = "删除一个键（写动作，需用户确认）")]
+    #[tool(
+        name = "redis_del_key",
+        description = "删除一个键（写动作，需用户确认）"
+    )]
     async fn redis_del_key(
         &self,
         Parameters(p): Parameters<DelKeyParams>,
@@ -216,7 +272,10 @@ impl RedisHandler {
         Ok(text("OK"))
     }
 
-    #[tool(name = "redis_exec", description = "执行一条原始 Redis 命令（读命令自动放行；写命令需用户确认）")]
+    #[tool(
+        name = "redis_exec",
+        description = "执行一条原始 Redis 命令（读命令自动放行；写命令需用户确认）"
+    )]
     async fn redis_exec(
         &self,
         Parameters(p): Parameters<ExecParams>,

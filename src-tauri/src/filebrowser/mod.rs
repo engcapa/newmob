@@ -17,7 +17,7 @@ pub mod transfer;
 use crate::state::AppState;
 use crate::terminal::ssh::SshAuth;
 use crate::terminal::{build_kbd_prompter, clear_session_auth_responders};
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

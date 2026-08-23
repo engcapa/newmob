@@ -40,9 +40,9 @@ use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::service::{RequestContext, RoleServer};
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::{ErrorData, ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
@@ -777,7 +777,7 @@ impl CcHandler {
         reflect_session: bool,
         session_id: Option<String>,
     ) -> Result<CallToolResult, ErrorData> {
-        use crate::agent::capture::{exec_b, exec_c, CaptureSource, CaptureStatus};
+        use crate::agent::capture::{CaptureSource, CaptureStatus, exec_b, exec_c};
         use crate::terminal::ActiveTerminal;
 
         let sid = session_id
@@ -820,7 +820,7 @@ impl CcHandler {
                     return Err(ErrorData::invalid_params(
                         format!("no live terminal for session {sid}"),
                         None,
-                    ))
+                    ));
                 }
             }
         };
@@ -865,7 +865,7 @@ impl CcHandler {
                          use reflect_session=false here"
                             .to_string(),
                         None,
-                    ))
+                    ));
                 }
             };
             let meta = state.captures.begin(
@@ -1184,7 +1184,7 @@ impl CcHandler {
                                 "the session backing this capture is no longer connected"
                                     .to_string(),
                                 None,
-                            ))
+                            ));
                         }
                     }
                 };

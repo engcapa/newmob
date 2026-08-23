@@ -1,5 +1,5 @@
 use super::protocol::{self, CodexEvent, CodexUsage};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 const REQUEST_TIMEOUT_SECS: u64 = 120;
 const TURN_IDLE_TIMEOUT_SECS: u64 = 960;

@@ -101,7 +101,10 @@ fn matcher_for(query: &str, options: &WorkspaceSearchOptions) -> Result<RegexMat
         .map_err(|error| format!("Invalid search pattern: {error}"))
 }
 
-fn build_overrides(root: &Path, options: &WorkspaceSearchOptions) -> Result<ignore::overrides::Override, String> {
+fn build_overrides(
+    root: &Path,
+    options: &WorkspaceSearchOptions,
+) -> Result<ignore::overrides::Override, String> {
     let mut builder = OverrideBuilder::new(root);
     for pattern in &options.include_globs {
         let pattern = pattern.trim();
@@ -163,7 +166,9 @@ fn run_workspace_search(
         let mut walk = WalkBuilder::new(&root_path);
         // Honor .gitignore even when the root is a plain folder rather than a
         // git checkout — workspace roots are not required to be repositories.
-        walk.follow_links(false).require_git(false).overrides(overrides);
+        walk.follow_links(false)
+            .require_git(false)
+            .overrides(overrides);
         if options.search_ignored {
             walk.hidden(false)
                 .ignore(false)
@@ -178,7 +183,8 @@ fn run_workspace_search(
                 summary.cancelled = true;
                 break;
             }
-            let entry = entry.map_err(|error| format!("Walk search root {}: {error}", root.path))?;
+            let entry =
+                entry.map_err(|error| format!("Walk search root {}: {error}", root.path))?;
             let Some(file_type) = entry.file_type() else {
                 continue;
             };
@@ -303,7 +309,12 @@ pub fn workspace_search_start(
         return Err("At least one search root is required".to_string());
     }
     validate_search_id(&search_id)?;
-    matcher_for(&query, options.as_ref().unwrap_or(&WorkspaceSearchOptions::default()))?;
+    matcher_for(
+        &query,
+        options
+            .as_ref()
+            .unwrap_or(&WorkspaceSearchOptions::default()),
+    )?;
     let cancel = Arc::new(AtomicBool::new(false));
     let searches = state.searches.clone();
     {
@@ -407,7 +418,11 @@ mod tests {
         }
     }
 
-    fn search(path: &Path, query: &str, options: WorkspaceSearchOptions) -> (Vec<WorkspaceSearchMatch>, SearchSummary) {
+    fn search(
+        path: &Path,
+        query: &str,
+        options: WorkspaceSearchOptions,
+    ) -> (Vec<WorkspaceSearchMatch>, SearchSummary) {
         let mut matches = Vec::new();
         let summary = run_workspace_search(
             &[root(path)],
@@ -426,7 +441,11 @@ mod tests {
     #[test]
     fn searches_text_and_reports_unicode_character_offsets() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("main.rs"), "fn main() {\n    let 名称 = target;\n}\n").unwrap();
+        fs::write(
+            dir.path().join("main.rs"),
+            "fn main() {\n    let 名称 = target;\n}\n",
+        )
+        .unwrap();
 
         let (matches, summary) = search(dir.path(), "target", WorkspaceSearchOptions::default());
 
@@ -465,7 +484,11 @@ mod tests {
     #[test]
     fn supports_case_word_regex_and_match_limits() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("one.txt"), "Needle needle needles\nneedle-1 needle-2\n").unwrap();
+        fs::write(
+            dir.path().join("one.txt"),
+            "Needle needle needles\nneedle-1 needle-2\n",
+        )
+        .unwrap();
         let options = WorkspaceSearchOptions {
             case_sensitive: true,
             whole_word: true,
@@ -478,7 +501,9 @@ mod tests {
 
         assert_eq!(matches.len(), 2);
         assert!(summary.truncated);
-        assert!(matches.iter().all(|item| item.line_text.as_bytes()[item.match_start..item.match_end].starts_with(b"needle")));
+        assert!(matches.iter().all(|item| {
+            item.line_text.as_bytes()[item.match_start..item.match_end].starts_with(b"needle")
+        }));
     }
 
     #[test]

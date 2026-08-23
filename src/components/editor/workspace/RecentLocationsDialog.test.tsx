@@ -9,6 +9,7 @@ describe("RecentLocationsDialog", () => {
   beforeEach(() => {
     navigationHistoryTracker.clear();
     navigationHistoryTracker.recordLocation({
+      workspaceId: "default",
       fileIdentity: "f1",
       filePath: "/src/App.tsx",
       title: "App.tsx",
@@ -20,6 +21,7 @@ describe("RecentLocationsDialog", () => {
       sourceOwnership: "workspace",
     });
     navigationHistoryTracker.recordLocation({
+      workspaceId: "default",
       fileIdentity: "f2",
       filePath: "/src/Server.java",
       title: "Server.java",

@@ -81,6 +81,13 @@ export interface WorkspaceNavigationController {
   reconcileFileReferences: (
     transform: (ref: CodeWorkspaceFileRef) => CodeWorkspaceFileRef | null,
   ) => void;
+  /**
+   * §8.16.5 N2.6: remove Back/Forward entries by predicate so
+   * NavigationHistoryFacade deletes both histories at once.
+   */
+  removeNavigationLocations: (
+    match: (location: { ref: CodeWorkspaceFileRef; line: number; character: number }) => boolean,
+  ) => void;
   openRecentFiles: (options?: { changedOnly?: boolean }) => void;
   recentChangedOnly: boolean;
   recordEditLocation: (ref: CodeWorkspaceFileRef, position: WorkspaceNavPosition) => void;
@@ -112,7 +119,7 @@ export function useWorkspaceNavigation({
   setRecentEntries,
   setRecentFilesOpen,
 }: UseWorkspaceNavigationOptions): WorkspaceNavigationController {
-  const setSplitOrientation = useCodeWorkspaceStore((state) => state.setSplitOrientation);
+  const splitLayoutLeaf = useCodeWorkspaceStore((state) => state.splitLayoutLeaf);
   const [navCan, setNavCan] = useState({ back: false, forward: false });
   const [recentChangedOnly, setRecentChangedOnly] = useState(false);
   const navHistoryRef = useRef<{
@@ -160,15 +167,16 @@ export function useWorkspaceNavigation({
     const ref: CodeWorkspaceFileRef = { kind: "root", rootId: item.rootId, path: item.path };
     if (options?.split) {
       const current = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
-      const targetGroupId: EditorGroupId = current.activeEditorGroupId === "primary"
-        ? "secondary"
-        : "primary";
-      setSplitOrientation(workspaceInstanceId, "vertical");
-      void openFile(ref, { groupId: targetGroupId });
+      splitLayoutLeaf(workspaceInstanceId, current.activeEditorGroupId, "vertical");
+      const next = selectCodeWorkspaceUi(useCodeWorkspaceStore.getState(), workspaceInstanceId);
+      const groupId = next.activeEditorGroupId !== current.activeEditorGroupId
+        ? next.activeEditorGroupId
+        : undefined;
+      void openFile(ref, groupId ? { groupId } : undefined);
       return;
     }
     void openFile(ref, { preview: true });
-  }, [openFile, setSearchEverywhereOpen, setSplitOrientation, workspaceInstanceId]);
+  }, [openFile, setSearchEverywhereOpen, splitLayoutLeaf, workspaceInstanceId]);
 
   const noteCaretPosition = useCallback((key: string, position: WorkspaceNavPosition) => {
     caretByKeyRef.current[key] = {
@@ -417,6 +425,23 @@ export function useWorkspaceNavigation({
     };
   }, [openSearchEverywhere, visible]);
 
+  const removeNavigationLocations = useCallback((
+    match: (location: { ref: CodeWorkspaceFileRef; line: number; character: number }) => boolean,
+  ) => {
+    const nav = navHistoryRef.current;
+    const previousLength = nav.stack.length;
+    let nextIndex = -1;
+    const nextStack: WorkspaceNavLocation[] = [];
+    nav.stack.forEach((entry, index) => {
+      if (match({ ref: entry.ref, line: entry.line, character: entry.character })) return;
+      nextStack.push(entry);
+      if (index <= nav.index) nextIndex = nextStack.length - 1;
+    });
+    nav.stack = nextStack;
+    nav.index = nextStack.length === 0 ? -1 : Math.max(0, Math.min(nextIndex, nextStack.length - 1));
+    return previousLength !== nextStack.length;
+  }, []);
+
   return {
     navCan,
     goToFileItems,
@@ -429,6 +454,7 @@ export function useWorkspaceNavigation({
     suppressNextHistoryRecord,
     noteCaretPosition,
     reconcileFileReferences,
+    removeNavigationLocations,
     openRecentFiles,
     recentChangedOnly,
     recordEditLocation,

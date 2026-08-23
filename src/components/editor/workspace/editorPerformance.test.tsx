@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { render } from "@testing-library/react";
 import { EditorState } from "@codemirror/state";
 import { CompletionContext } from "@codemirror/autocomplete";
-import { createLspCompletionSource } from "./lspCompletion";
+import { createFixtureCompletionSource, MAX_COMPLETION_OPTIONS } from "./lspCompletion";
 import { CodeMirrorHost } from "./CodeMirrorHost";
 import type { LspCompletionResult, LspDiagnostic, LspDocumentStatus } from "../../../lib/editor/lsp";
 
@@ -45,7 +45,7 @@ function testCompletionResult(itemsCount = 500): LspCompletionResult {
 describe("Editor typing and completion performance verification", () => {
   it("debounces rapid continuous typing burst to avoid spamming LSP fetches", async () => {
     const fetch = vi.fn(async () => testCompletionResult(100));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
 
     // Simulate user typing 'String' rapidly (6 keystrokes, ~30ms apart)
     const typedWords = ["S", "St", "Str", "Stri", "Strin", "String"];
@@ -80,7 +80,7 @@ describe("Editor typing and completion performance verification", () => {
 
   it("processes large completion item lists (1000+ items) efficiently without main-thread stall", async () => {
     const fetch = vi.fn(async () => testCompletionResult(1500));
-    const source = createLspCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
+    const source = createFixtureCompletionSource({ fetch, triggerCharacters: () => [".", ":"] });
 
     const state = EditorState.create({ doc: "obj.m" });
     const ctx = new CompletionContext(state, 5, false);
@@ -93,6 +93,31 @@ describe("Editor typing and completion performance verification", () => {
     expect(result?.options.length).toBeLessThanOrEqual(400);
     // Processing time must stay well within frame budget (<150ms)
     expect(elapsed).toBeLessThan(150);
+  });
+
+  it("materializes only the bounded visible head of oversized Java completion lists", async () => {
+    const response = testCompletionResult(5_000);
+    let mappedItems = 0;
+    for (const item of response.items) {
+      const filterText = item.filterText;
+      Object.defineProperty(item, "filterText", {
+        configurable: true,
+        get: () => {
+          mappedItems += 1;
+          return filterText;
+        },
+      });
+    }
+    const source = createFixtureCompletionSource({
+      fetch: vi.fn(async () => response),
+      triggerCharacters: () => [".", ":"],
+    });
+    const state = EditorState.create({ doc: "service.m" });
+
+    const result = await source(new CompletionContext(state, state.doc.length, false));
+
+    expect(result?.options).toHaveLength(MAX_COMPLETION_OPTIONS);
+    expect(mappedItems).toBe(MAX_COMPLETION_OPTIONS * 2);
   });
 
   it("prevents redundant CodeMirror compartment dispatches on parent re-renders with unchanged props", () => {
@@ -109,6 +134,8 @@ describe("Editor typing and completion performance verification", () => {
       onHover: vi.fn(async () => null),
       onDefinition: vi.fn(async () => false),
       onReferences: vi.fn(async () => {}),
+      getCompletionIdentity: vi.fn(() => null),
+      onCompletionDiagnostic: vi.fn(),
     };
 
     const { rerender } = render(<CodeMirrorHost {...props} />);
@@ -148,6 +175,8 @@ describe("Editor typing and completion performance verification", () => {
       onHover: vi.fn(async () => null),
       onDefinition: vi.fn(async () => false),
       onReferences: vi.fn(async () => {}),
+      getCompletionIdentity: vi.fn(() => null),
+      onCompletionDiagnostic: vi.fn(),
       onLightbulb,
     };
 

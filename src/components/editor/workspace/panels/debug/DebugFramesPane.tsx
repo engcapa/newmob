@@ -24,6 +24,15 @@ export function DebugFramesPane({
   const frameMenu = useContextMenu();
   const [expandedThreads, setExpandedThreads] = useState<Record<number, boolean>>({});
 
+  // A terminated session has nothing to inspect — saying "Running…" there
+  // (the old `stopped ? … : …` fallback) claimed the debuggee was still alive
+  // right after the user pressed Stop.
+  const emptyFramesText = stopped
+    ? "No frames"
+    : state && state.status !== "terminated"
+      ? "Running…"
+      : "Frames are not available";
+
   const handleFrameContextMenu = useCallback(
     (e: MouseEvent, frame: DebugStackFrame) => {
       e.preventDefault();
@@ -225,7 +234,7 @@ export function DebugFramesPane({
                       <div className="pl-4 border-l border-[var(--taomni-code-border)]/40 ml-3 my-0.5">
                         {isSelected ? (
                           state.frames.length === 0 ? (
-                            <Empty text={stopped ? "No frames" : "Running…"} />
+                            <Empty text={emptyFramesText} />
                           ) : (
                             state.frames.map(renderFrameItem)
                           )
@@ -246,7 +255,7 @@ export function DebugFramesPane({
           ) : (
             <div className="space-y-0.5">
               {!state || state.frames.length === 0 ? (
-                <Empty text={stopped ? "No frames" : "Running…"} />
+                <Empty text={emptyFramesText} />
               ) : (
                 state.frames.map(renderFrameItem)
               )}
@@ -255,7 +264,16 @@ export function DebugFramesPane({
         </div>
 
         {/* Step controls footer */}
-        <DebugStepControls debug={debug} stopped={stopped} />
+        <DebugStepControls
+          debug={debug}
+          stopped={stopped}
+          onShowExecutionPoint={() => {
+            const frame = state?.frames.find((f) => f.id === state.selectedFrameId) ?? state?.frames[0];
+            if (frame && (frame.path || frame.sourceReference > 0)) {
+              onOpenFrame(frame);
+            }
+          }}
+        />
       </div>
 
       {frameMenu.render}

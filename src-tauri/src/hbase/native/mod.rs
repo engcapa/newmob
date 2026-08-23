@@ -15,10 +15,10 @@
 //! - `meta`    — hbase:meta region location + cache
 //! - `client`  — SendRPC orchestration, retries, scan state machine
 
-pub mod proto;
-pub mod rpc;
-pub mod cell;
-pub mod zk;
-pub mod region;
 pub mod auth;
+pub mod cell;
 pub mod client;
+pub mod proto;
+pub mod region;
+pub mod rpc;
+pub mod zk;

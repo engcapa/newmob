@@ -1,3 +1,4 @@
+// NON-PRODUCTION FIXTURE (experimental): moved out of production per §8.17.9 N12 — no production import permitted; see ./README.md in this directory
 /**
  * Full Line Local Inline Completion Model & Ghost Text Session (A4).
  *

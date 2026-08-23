@@ -19,12 +19,23 @@ type MockPanelHandle = {
   resize: (size: number | string) => void;
 };
 
+// The mock keeps ids and size constraints observable: the real library treats a
+// bare number as *pixels* and a unitless string as a percentage, so a test has
+// to be able to see which one a panel was given.
 vi.mock("react-resizable-panels", () => {
-  const Group = ({ children, className }: { children?: ReactNode; className?: string }) => (
-    createElement("div", { className, "data-group": true, "data-testid": "panel-group" }, children)
+  const Group = ({ children, className, id }: { children?: ReactNode; className?: string; id?: string | number }) => (
+    createElement("div", { className, id, "data-group": true, "data-testid": "panel-group" }, children)
   );
-  const Panel = forwardRef<MockPanelHandle, { children?: ReactNode; className?: string; panelRef?: Ref<MockPanelHandle | null> }>(
-    ({ children, className, panelRef }, ref) => {
+  const Panel = forwardRef<MockPanelHandle, {
+    children?: ReactNode;
+    className?: string;
+    panelRef?: Ref<MockPanelHandle | null>;
+    id?: string | number;
+    defaultSize?: number | string;
+    minSize?: number | string;
+    maxSize?: number | string;
+  }>(
+    ({ children, className, panelRef, id, defaultSize, minSize, maxSize }, ref) => {
       const handle: MockPanelHandle = {
         collapse: vi.fn(),
         expand: vi.fn(),
@@ -34,7 +45,15 @@ vi.mock("react-resizable-panels", () => {
       };
       useImperativeHandle(ref, () => handle);
       useImperativeHandle(panelRef, () => handle);
-      return createElement("div", { className, "data-panel": true, "data-testid": "panel" }, children);
+      return createElement("div", {
+        className,
+        id,
+        "data-panel": true,
+        "data-testid": "panel",
+        "data-default-size": defaultSize,
+        "data-min-size": minSize,
+        "data-max-size": maxSize,
+      }, children);
     },
   );
   const Separator = ({ className, "data-testid": testId }: HTMLAttributes<HTMLDivElement> & { "data-testid"?: string }) => (

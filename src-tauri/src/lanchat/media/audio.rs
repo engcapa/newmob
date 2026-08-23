@@ -10,18 +10,18 @@
 #![cfg(feature = "native-av")]
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use audiopus::coder::{Decoder, Encoder};
 use audiopus::packet::Packet;
 use audiopus::{Application, Channels, MutSignals, SampleRate};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::SampleFormat;
-use tokio::sync::{mpsc, RwLock};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use tokio::sync::{RwLock, mpsc};
 
-use crate::lanchat::protocol::wire;
 use crate::lanchat::LanChatState;
+use crate::lanchat::protocol::wire;
 
 /// Opus operating sample rate (also the rate delivered to the webview).
 pub const SAMPLE_RATE: u32 = 48_000;
@@ -41,7 +41,10 @@ struct Resampler {
 
 impl Resampler {
     fn new(src_rate: u32) -> Self {
-        Self { ratio: src_rate as f64 / SAMPLE_RATE as f64, pos: 0.0 }
+        Self {
+            ratio: src_rate as f64 / SAMPLE_RATE as f64,
+            pos: 0.0,
+        }
     }
 
     /// Resample `input` (mono) into `out`, appending the produced 48 kHz samples.
@@ -72,7 +75,10 @@ pub struct OpusStreamDecoder {
 impl OpusStreamDecoder {
     pub fn new() -> Result<Self, String> {
         let dec = Decoder::new(SampleRate::Hz48000, Channels::Mono).map_err(|e| e.to_string())?;
-        Ok(Self { dec, scratch: vec![0.0; MAX_DECODE_SAMPLES] })
+        Ok(Self {
+            dec,
+            scratch: vec![0.0; MAX_DECODE_SAMPLES],
+        })
     }
 
     /// Decode one Opus packet to mono f32 PCM (empty on error / empty input).
@@ -122,7 +128,8 @@ impl CaptureState {
             self.mono.extend_from_slice(samples);
         } else {
             for f in samples.chunks_exact(self.channels) {
-                self.mono.push(f.iter().copied().sum::<f32>() / self.channels as f32);
+                self.mono
+                    .push(f.iter().copied().sum::<f32>() / self.channels as f32);
             }
         }
         let mono = std::mem::take(&mut self.mono);
@@ -235,7 +242,10 @@ pub fn start_audio_sender(
         .map_err(|e| e.to_string())?;
 
     let task = tokio::spawn(encode_loop(state, call_id, peers, mic_on, frame_rx));
-    Ok(AudioSender { stop_tx, abort: task.abort_handle() })
+    Ok(AudioSender {
+        stop_tx,
+        abort: task.abort_handle(),
+    })
 }
 
 /// Opus-encode each 960-sample frame and send it to every current peer.

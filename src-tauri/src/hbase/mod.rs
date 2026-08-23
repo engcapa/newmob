@@ -12,12 +12,11 @@
 pub mod native;
 pub mod thrift;
 
-
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-use reqwest::header::{HeaderMap, ACCEPT, CONTENT_TYPE, LOCATION};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, LOCATION};
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -245,10 +244,7 @@ pub async fn hbase_connect(
 }
 
 #[tauri::command]
-pub async fn hbase_cancel(
-    state: State<'_, AppState>,
-    session_id: String,
-) -> Result<(), String> {
+pub async fn hbase_cancel(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     let session = get_session(&state, &session_id).await?;
     let mut guard = session.cancel.lock().await;
     guard.cancel();
@@ -278,18 +274,17 @@ pub async fn hbase_parse_site_xml(path: String) -> Result<BTreeMap<String, Strin
 
 #[tauri::command]
 pub async fn hbase_parse_keytab_principal(path: String) -> Result<String, String> {
-    let data = std::fs::read(&path)
-        .map_err(|e| format!("Failed to read keytab file: {e}"))?;
-    
+    let data = std::fs::read(&path).map_err(|e| format!("Failed to read keytab file: {e}"))?;
+
     if data.len() < 2 {
         return Err("Truncated keytab file".into());
     }
-    
+
     let version = u16::from_be_bytes([data[0], data[1]]);
     if version != 0x0502 && version != 0x0501 {
         return Err(format!("Unsupported keytab version: 0x{:04x}", version));
     }
-    
+
     let mut cursor = 2;
     while cursor < data.len() {
         if cursor + 4 > data.len() {
@@ -302,7 +297,7 @@ pub async fn hbase_parse_keytab_principal(path: String) -> Result<String, String
             data[cursor + 3],
         ]);
         cursor += 4;
-        
+
         if size < 0 {
             cursor += (-size) as usize;
             continue;
@@ -310,23 +305,29 @@ pub async fn hbase_parse_keytab_principal(path: String) -> Result<String, String
         if size == 0 {
             break;
         }
-        
+
         let entry_end = cursor + size as usize;
         if entry_end > data.len() {
             break;
         }
-        
-        if cursor + 2 > entry_end { break; }
+
+        if cursor + 2 > entry_end {
+            break;
+        }
         let num_components = u16::from_be_bytes([data[cursor], data[cursor + 1]]);
         cursor += 2;
-        
-        if cursor + 2 > entry_end { break; }
+
+        if cursor + 2 > entry_end {
+            break;
+        }
         let realm_len = u16::from_be_bytes([data[cursor], data[cursor + 1]]) as usize;
         cursor += 2;
-        if cursor + realm_len > entry_end { break; }
+        if cursor + realm_len > entry_end {
+            break;
+        }
         let realm = String::from_utf8_lossy(&data[cursor..cursor + realm_len]).into_owned();
         cursor += realm_len;
-        
+
         let mut components = Vec::new();
         let mut component_parse_failed = false;
         for _ in 0..num_components {
@@ -344,19 +345,19 @@ pub async fn hbase_parse_keytab_principal(path: String) -> Result<String, String
             cursor += comp_len;
             components.push(comp);
         }
-        
+
         if component_parse_failed {
             break;
         }
-        
+
         if !components.is_empty() {
             let principal = format!("{}@{}", components.join("/"), realm);
             return Ok(principal);
         }
-        
+
         cursor = entry_end;
     }
-    
+
     Err("No principal found in keytab".into())
 }
 
@@ -436,8 +437,8 @@ pub async fn hbase_execute(
 }
 
 fn parse_hbase_site_xml(path: &str) -> Result<BTreeMap<String, String>, String> {
-    let mut content = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read hbase-site.xml: {e}"))?;
+    let mut content =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read hbase-site.xml: {e}"))?;
 
     // Remove XML comments
     while let Some(comment_start) = content.find("<!--") {
@@ -473,27 +474,55 @@ async fn build_session(
     password: Option<String>,
 ) -> Result<HBaseSessionInner, String> {
     let mut resolved_config = config.clone();
-    if let Some(hbase_site) = config.hbase_site_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(hbase_site) = config
+        .hbase_site_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let props = parse_hbase_site_xml(hbase_site)?;
 
         // ZK quorum
-        if resolved_config.zk_quorum.is_none() || resolved_config.zk_quorum.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if resolved_config.zk_quorum.is_none()
+            || resolved_config
+                .zk_quorum
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
             if let Some(quorum) = props.get("hbase.zookeeper.quorum") {
                 resolved_config.zk_quorum = Some(quorum.clone());
             }
         }
 
         // ZK root
-        if resolved_config.zk_root.is_none() || resolved_config.zk_root.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if resolved_config.zk_root.is_none()
+            || resolved_config
+                .zk_root
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
             if let Some(root) = props.get("zookeeper.znode.parent") {
                 resolved_config.zk_root = Some(root.clone());
             }
         }
 
         // Service principal
-        if resolved_config.service_principal.is_none() || resolved_config.service_principal.as_deref().map(str::trim).unwrap_or("").is_empty() {
-            if let Some(principal) = props.get("hbase.regionserver.kerberos.principal")
-                .or_else(|| props.get("hbase.master.kerberos.principal")) {
+        if resolved_config.service_principal.is_none()
+            || resolved_config
+                .service_principal
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+        {
+            if let Some(principal) = props
+                .get("hbase.regionserver.kerberos.principal")
+                .or_else(|| props.get("hbase.master.kerberos.principal"))
+            {
                 resolved_config.service_principal = Some(principal.clone());
             }
         }
@@ -524,9 +553,14 @@ async fn build_session(
             if resolved_config.auth_method.as_deref().map(str::trim) == Some("kerberos") {
                 try_keytab_kinit(&resolved_config)?;
             }
-            Ok(HBaseSessionInner::Native(build_native_client(&resolved_config)?))
+            Ok(HBaseSessionInner::Native(build_native_client(
+                &resolved_config,
+            )?))
         }
-        HBaseMode::Rest => Ok(HBaseSessionInner::Rest(RestSession::new(&resolved_config, password)?)),
+        HBaseMode::Rest => Ok(HBaseSessionInner::Rest(RestSession::new(
+            &resolved_config,
+            password,
+        )?)),
         HBaseMode::Thrift => Ok(HBaseSessionInner::Thrift(thrift::ThriftSession::new(
             &resolved_config,
             password,
@@ -537,15 +571,29 @@ async fn build_session(
 /// Sets the environment variables needed for programmatic Kerberos keytab
 /// authentication, avoiding the need for an external `kinit` subprocess.
 fn try_keytab_kinit(config: &HBaseConfig) -> Result<(), String> {
-    if let Some(krb5_conf) = config.krb5_conf_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(krb5_conf) = config
+        .krb5_conf_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         set_kerberos_env_var("KRB5_CONFIG", krb5_conf);
     }
 
-    let keytab = match config.keytab_path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let keytab = match config
+        .keytab_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(k) => k,
         None => return Ok(()), // no keytab configured
     };
-    let principal = config.principal.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    let principal = config
+        .principal
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .ok_or_else(|| "Keytab auth requires a client principal (e.g. user@REALM)".to_string())?;
 
     // Set the client keytab path variable so MIT Kerberos/Heimdal auto-authenticates.
@@ -569,9 +617,7 @@ fn set_kerberos_env_var(key: &str, value: &str) {
 }
 
 /// Construct the native client from the connection config.
-fn build_native_client(
-    config: &HBaseConfig,
-) -> Result<native::client::NativeClient, String> {
+fn build_native_client(config: &HBaseConfig) -> Result<native::client::NativeClient, String> {
     let host = config.host.trim();
     // Native mode bootstraps via ZooKeeper, so the ZK quorum is what matters.
     // The explicit quorum (or one parsed from hbase-site.xml) wins; host:port is
@@ -585,7 +631,7 @@ fn build_native_client(
                 "HBase native mode requires a ZooKeeper quorum (set the ZK quorum \
                  field or provide an hbase-site.xml)"
                     .into(),
-            )
+            );
         }
     };
     let cfg = native::client::NativeConfig {
@@ -604,19 +650,21 @@ fn build_native_client(
             .filter(|s| !s.is_empty())
             .unwrap_or("root")
             .to_string(),
-        namespace: config
-            .namespace
-            .clone()
-            .filter(|s| !s.trim().is_empty()),
+        namespace: config.namespace.clone().filter(|s| !s.trim().is_empty()),
         timeout: Duration::from_secs(config.timeout_secs.unwrap_or(15).clamp(1, 300)),
         auth: match config.auth_method.as_deref().map(str::trim) {
             Some("kerberos") | Some("Kerberos") | Some("KERBEROS") => {
-                let spn = config.service_principal
+                let spn = config
+                    .service_principal
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .ok_or_else(|| "Kerberos auth requires a service principal (e.g. hbase/host@REALM)".to_string())?;
-                let client_principal = config.principal
+                    .ok_or_else(|| {
+                        "Kerberos auth requires a service principal (e.g. hbase/host@REALM)"
+                            .to_string()
+                    })?;
+                let client_principal = config
+                    .principal
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
@@ -1046,14 +1094,17 @@ async fn execute_command(
             };
             Ok(table_result(
                 raw,
-                format!("Table {display} {}", if exists { "exists" } else { "does not exist" }),
+                format!(
+                    "Table {display} {}",
+                    if exists { "exists" } else { "does not exist" }
+                ),
                 vec!["TABLE", "EXISTS"],
                 vec![vec![display, exists.to_string()]],
             ))
         }
-        ShellCommand::Enable { .. }
-        | ShellCommand::Disable { .. }
-        | ShellCommand::Alter { .. } => Err(rest_admin_unsupported(&raw)),
+        ShellCommand::Enable { .. } | ShellCommand::Disable { .. } | ShellCommand::Alter { .. } => {
+            Err(rest_admin_unsupported(&raw))
+        }
     }
 }
 
@@ -1165,11 +1216,7 @@ async fn scan_table(
         Ok(location) => read_scanner(session, &location, limit).await,
         Err(err) => {
             let rows = scan_wildcard(session, table, limit).await?;
-            if rows.is_empty() {
-                Err(err)
-            } else {
-                Ok(rows)
-            }
+            if rows.is_empty() { Err(err) } else { Ok(rows) }
         }
     }
 }
@@ -1296,9 +1343,7 @@ fn parse_shell_command(input: &str) -> Result<ShellCommand, String> {
             // actually looks like one, so a bare column doesn't error out.
             let third = args.get(2).map(|s| s.trim());
             let column = match third {
-                Some(s) if s.starts_with('{') => {
-                    parse_options(s)?.get("COLUMN").cloned()
-                }
+                Some(s) if s.starts_with('{') => parse_options(s)?.get("COLUMN").cloned(),
                 Some(s) if !s.is_empty() => Some(strip_quotes(s)),
                 _ => None,
             };
@@ -1697,7 +1742,12 @@ async fn native_list_tables(client: &NativeClient) -> Result<Vec<HBaseTableInfo>
     client
         .list_tables()
         .await
-        .map(|names| names.into_iter().map(|name| HBaseTableInfo { name }).collect())
+        .map(|names| {
+            names
+                .into_iter()
+                .map(|name| HBaseTableInfo { name })
+                .collect()
+        })
         .map_err(|e| e.to_string())
 }
 
@@ -1705,7 +1755,10 @@ async fn native_describe_table(
     client: &NativeClient,
     table: &str,
 ) -> Result<HBaseTableSchema, String> {
-    let (name, families) = client.describe_table(table).await.map_err(|e| e.to_string())?;
+    let (name, families) = client
+        .describe_table(table)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(HBaseTableSchema {
         name,
         column_families: families
@@ -1900,22 +1953,33 @@ async fn native_execute(
             };
             Ok(table_result(
                 raw,
-                format!("Table {display} {}", if exists { "exists" } else { "does not exist" }),
+                format!(
+                    "Table {display} {}",
+                    if exists { "exists" } else { "does not exist" }
+                ),
                 vec!["TABLE", "EXISTS"],
                 vec![vec![display, exists.to_string()]],
             ))
         }
         ShellCommand::Enable { table } => {
-            client.enable_table(&table).await.map_err(|e| e.to_string())?;
+            client
+                .enable_table(&table)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(message_result(raw, format!("Enabled table {table}")))
         }
         ShellCommand::Disable { table } => {
-            client.disable_table(&table).await.map_err(|e| e.to_string())?;
+            client
+                .disable_table(&table)
+                .await
+                .map_err(|e| e.to_string())?;
             Ok(message_result(raw, format!("Disabled table {table}")))
         }
         ShellCommand::Alter { table, families } => {
-            let specs: Vec<(String, BTreeMap<String, String>)> =
-                families.into_iter().map(|f| (f.name, f.attributes)).collect();
+            let specs: Vec<(String, BTreeMap<String, String>)> = families
+                .into_iter()
+                .map(|f| (f.name, f.attributes))
+                .collect();
             let changed = client
                 .alter_table(&table, &specs)
                 .await
@@ -1930,13 +1994,13 @@ async fn native_execute(
 
 // ---- thrift backend dispatch ------------------------------------------------
 
-async fn thrift_list_tables(
-    client: &thrift::ThriftSession,
-) -> Result<Vec<HBaseTableInfo>, String> {
-    client
-        .list_tables()
-        .await
-        .map(|names| names.into_iter().map(|name| HBaseTableInfo { name }).collect())
+async fn thrift_list_tables(client: &thrift::ThriftSession) -> Result<Vec<HBaseTableInfo>, String> {
+    client.list_tables().await.map(|names| {
+        names
+            .into_iter()
+            .map(|name| HBaseTableInfo { name })
+            .collect()
+    })
 }
 
 async fn thrift_describe_table(
@@ -2000,8 +2064,10 @@ async fn thrift_execute(
             ))
         }
         ShellCommand::Create { table, families } => {
-            let specs: Vec<(String, BTreeMap<String, String>)> =
-                families.into_iter().map(|f| (f.name, f.attributes)).collect();
+            let specs: Vec<(String, BTreeMap<String, String>)> = families
+                .into_iter()
+                .map(|f| (f.name, f.attributes))
+                .collect();
             client.create_table(&table, &specs).await?;
             Ok(message_result(raw, format!("Created table {table}")))
         }
@@ -2066,7 +2132,10 @@ async fn thrift_execute(
             let exists = client.table_exists(&table).await?;
             Ok(table_result(
                 raw,
-                format!("Table {table} {}", if exists { "exists" } else { "does not exist" }),
+                format!(
+                    "Table {table} {}",
+                    if exists { "exists" } else { "does not exist" }
+                ),
                 vec!["TABLE", "EXISTS"],
                 vec![vec![table, exists.to_string()]],
             ))
@@ -2080,8 +2149,10 @@ async fn thrift_execute(
             Ok(message_result(raw, format!("Disabled table {table}")))
         }
         ShellCommand::Alter { table, families } => {
-            let specs: Vec<(String, BTreeMap<String, String>)> =
-                families.into_iter().map(|f| (f.name, f.attributes)).collect();
+            let specs: Vec<(String, BTreeMap<String, String>)> = families
+                .into_iter()
+                .map(|f| (f.name, f.attributes))
+                .collect();
             let changed = client.alter_table(&table, &specs).await?;
             Ok(message_result(
                 raw,
@@ -2378,7 +2449,9 @@ mod kerberos_live_tests {
         // create -> list -> drop cycle (gated; only on an explicit flag because
         // it mutates the cluster). Uses a uniquely-named temp table and drops it.
         if env("HBASE_KRB_WRITE_TEST").as_deref() == Some("1") {
-            let HBaseSessionInner::Native(c) = &session else { return };
+            let HBaseSessionInner::Native(c) = &session else {
+                return;
+            };
             let t = format!("taomni_krb_probe_{}", std::process::id());
             let _ = c.drop_table(&t).await; // best-effort pre-clean
             c.create_table(&t, &[("cf".into(), Default::default())])
@@ -2462,7 +2535,3 @@ mod native_shell_live_tests {
         println!("shell-path lifecycle OK");
     }
 }
-
-
-
-

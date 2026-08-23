@@ -217,7 +217,8 @@ impl CaptureWriter {
             self.inner
                 .bytes
                 .fetch_add(to_write.len() as u64, Ordering::Relaxed);
-            let total_lines = self.inner.lines.fetch_add(added_lines, Ordering::Relaxed) + added_lines;
+            let total_lines =
+                self.inner.lines.fetch_add(added_lines, Ordering::Relaxed) + added_lines;
             if total_lines >= MAX_CAPTURE_LINES {
                 tripped = true;
             }
@@ -270,7 +271,13 @@ impl CaptureRegistry {
         // component.
         let safe: String = thread_id
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         self.root.join(safe)
     }
@@ -338,7 +345,11 @@ impl CaptureRegistry {
         let g = self.inner.lock().unwrap();
         g.by_thread
             .get(thread_id)
-            .map(|q| q.iter().filter(|m| m.status == CaptureStatus::Running).count())
+            .map(|q| {
+                q.iter()
+                    .filter(|m| m.status == CaptureStatus::Running)
+                    .count()
+            })
             .unwrap_or(0)
     }
 
@@ -377,9 +388,9 @@ impl CaptureRegistry {
             .map(|q| {
                 q.iter()
                     .filter_map(|m| match &m.source {
-                        CaptureSource::RemoteFile { session_id, path, .. } => {
-                            Some((session_id.clone(), path.clone()))
-                        }
+                        CaptureSource::RemoteFile {
+                            session_id, path, ..
+                        } => Some((session_id.clone(), path.clone())),
                         _ => None,
                     })
                     .collect()
@@ -488,7 +499,11 @@ mod tests {
     #[test]
     fn registry_scopes_reads_to_thread() {
         let reg = CaptureRegistry::new(tmp_dir());
-        let m = reg.begin("thread-A", "ls", CaptureSource::LocalFile(PathBuf::from("/x")));
+        let m = reg.begin(
+            "thread-A",
+            "ls",
+            CaptureSource::LocalFile(PathBuf::from("/x")),
+        );
         assert!(reg.get_scoped("thread-A", &m.id).is_some());
         assert!(
             reg.get_scoped("thread-B", &m.id).is_none(),

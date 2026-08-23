@@ -7,7 +7,7 @@ pub mod shell_safety;
 pub mod tools_shell;
 
 use crate::asr::manager::AsrManager;
-use crate::llm::router::{build_router_from_ai, build_router_from_ai_with_proxy_db, LlmRouter};
+use crate::llm::router::{LlmRouter, build_router_from_ai, build_router_from_ai_with_proxy_db};
 use crate::vault::Vault;
 use config::AiConfig;
 use std::sync::Arc;
@@ -82,11 +82,7 @@ impl AppAiCtx {
         self.config = cfg;
     }
 
-    pub fn reload_with_proxy_db(
-        &mut self,
-        cfg: AiConfig,
-        proxy_db: Option<&rusqlite::Connection>,
-    ) {
+    pub fn reload_with_proxy_db(&mut self, cfg: AiConfig, proxy_db: Option<&rusqlite::Connection>) {
         self.llm = build_router_from_ai_with_proxy_db(&cfg, Some(self.vault.as_ref()), proxy_db);
         self.config = cfg;
     }

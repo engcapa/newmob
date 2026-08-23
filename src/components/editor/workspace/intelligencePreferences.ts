@@ -1,9 +1,25 @@
+export type QuickDocDefaultTarget = "popup" | "tool-window";
+
+export interface WorkspaceParameterInfoPreferences {
+  autoPopup: boolean;
+  delayMs: number;
+  showFullSignatures: boolean;
+}
+
+export interface WorkspaceQuickDocPreferences {
+  showOnHover: boolean;
+  hoverDelayMs: number;
+  defaultTarget: QuickDocDefaultTarget;
+}
+
 export interface WorkspaceIntelligencePreferences {
   inlayHintsEnabled: boolean;
   inlayHintLanguages: Record<string, boolean>;
   inlineBlameEnabled: boolean;
   formatOnSave: boolean;
   stickyLinesEnabled: boolean;
+  parameterInfo: WorkspaceParameterInfoPreferences;
+  quickDoc: WorkspaceQuickDocPreferences;
 }
 
 export const DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES: WorkspaceIntelligencePreferences = {
@@ -12,10 +28,59 @@ export const DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES: WorkspaceIntelligencePr
   inlineBlameEnabled: false,
   formatOnSave: false,
   stickyLinesEnabled: true,
+  parameterInfo: {
+    autoPopup: true,
+    delayMs: 0,
+    showFullSignatures: false,
+  },
+  quickDoc: {
+    showOnHover: true,
+    hoverDelayMs: 300,
+    defaultTarget: "popup",
+  },
 };
+
+const MAX_INTELLIGENCE_DELAY_MS = 5_000;
+
+function normalizedDelay(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.min(MAX_INTELLIGENCE_DELAY_MS, Math.max(0, Math.round(value)));
+}
 
 function storageKey(workspaceInstanceId: string): string {
   return `taomni.codeWorkspace.intelligence.v1.${workspaceInstanceId}`;
+}
+
+export function normalizeWorkspaceIntelligencePreferences(
+  value: Partial<WorkspaceIntelligencePreferences> | null | undefined,
+): WorkspaceIntelligencePreferences {
+  const parameterInfo = value?.parameterInfo;
+  const quickDoc = value?.quickDoc;
+  return {
+    inlayHintsEnabled: value?.inlayHintsEnabled === true,
+    inlayHintLanguages: value?.inlayHintLanguages && typeof value.inlayHintLanguages === "object"
+      ? Object.fromEntries(Object.entries(value.inlayHintLanguages).filter(([, enabled]) => typeof enabled === "boolean"))
+      : {},
+    inlineBlameEnabled: value?.inlineBlameEnabled === true,
+    formatOnSave: value?.formatOnSave === true,
+    stickyLinesEnabled: value?.stickyLinesEnabled !== false,
+    parameterInfo: {
+      autoPopup: parameterInfo?.autoPopup !== false,
+      delayMs: normalizedDelay(
+        parameterInfo?.delayMs,
+        DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES.parameterInfo.delayMs,
+      ),
+      showFullSignatures: parameterInfo?.showFullSignatures === true,
+    },
+    quickDoc: {
+      showOnHover: quickDoc?.showOnHover !== false,
+      hoverDelayMs: normalizedDelay(
+        quickDoc?.hoverDelayMs,
+        DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES.quickDoc.hoverDelayMs,
+      ),
+      defaultTarget: quickDoc?.defaultTarget === "tool-window" ? "tool-window" : "popup",
+    },
+  };
 }
 
 export function readWorkspaceIntelligencePreferences(
@@ -24,26 +89,23 @@ export function readWorkspaceIntelligencePreferences(
   try {
     const parsed = JSON.parse(window.localStorage.getItem(storageKey(workspaceInstanceId)) ?? "null") as
       Partial<WorkspaceIntelligencePreferences> | null;
-    if (!parsed) return { ...DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES };
-    return {
-      inlayHintsEnabled: parsed.inlayHintsEnabled === true,
-      inlayHintLanguages: parsed.inlayHintLanguages && typeof parsed.inlayHintLanguages === "object"
-        ? Object.fromEntries(Object.entries(parsed.inlayHintLanguages).filter(([, enabled]) => typeof enabled === "boolean"))
-        : {},
-      inlineBlameEnabled: parsed.inlineBlameEnabled === true,
-      formatOnSave: parsed.formatOnSave === true,
-      stickyLinesEnabled: parsed.stickyLinesEnabled !== false,
-    };
+    return normalizeWorkspaceIntelligencePreferences(parsed);
   } catch {
-    return { ...DEFAULT_WORKSPACE_INTELLIGENCE_PREFERENCES };
+    return normalizeWorkspaceIntelligencePreferences(null);
   }
 }
 
 export function writeWorkspaceIntelligencePreferences(
   workspaceInstanceId: string,
   preferences: WorkspaceIntelligencePreferences,
-): void {
-  window.localStorage.setItem(storageKey(workspaceInstanceId), JSON.stringify(preferences));
+): WorkspaceIntelligencePreferences {
+  const normalized = normalizeWorkspaceIntelligencePreferences(preferences);
+  try {
+    window.localStorage.setItem(storageKey(workspaceInstanceId), JSON.stringify(normalized));
+  } catch {
+    // Persistence is best-effort; the live workspace must remain usable.
+  }
+  return normalized;
 }
 
 export function inlayHintsEnabledForLanguage(

@@ -1837,7 +1837,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         const current = await vfsReadText(target);
         const currentHash = await sha256Hex(current);
         if (currentHash !== expectedHash) {
-          throw new Error(`File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
+          throw new Error(`hash-mismatch: File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
         }
       }
       const contents = (args?.contents as string) ?? "";
@@ -1861,7 +1861,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         const current = await vfsReadText(path);
         const currentHash = await sha256Hex(current);
         if (currentHash !== expectedHash) {
-          throw new Error(`File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
+          throw new Error(`hash-mismatch: File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
         }
       }
       const contents = (args?.contents as string) ?? "";
@@ -1889,7 +1889,7 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
       if (expectedHash) {
         const currentHash = await sha256Bytes(currentBytes);
         if (currentHash !== expectedHash) {
-          throw new Error(`File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
+          throw new Error(`hash-mismatch: File changed on disk; expected hash ${expectedHash}, found ${currentHash}`);
         }
       }
       const encoding = (args?.encoding as string) || "UTF-8";
@@ -1995,6 +1995,46 @@ export async function invoke<T>(cmd: string, args?: any, options?: InvokeOptions
         tools: [],
         diagnostics: [],
       } as T;
+    }
+    case "dependency_index_status": {
+      return { kind: "available" } as T;
+    }
+    case "dependency_index_search": {
+      const q = ((args?.query as string) || "").toLowerCase().trim();
+      const mockResults = [
+        { groupId: "org.springframework.boot", artifactId: "spring-boot-starter-web", version: "3.3.2", description: "Spring Boot Web Starter" },
+        { groupId: "org.springframework.boot", artifactId: "spring-boot-starter-test", version: "3.3.2", description: "Spring Boot Test Starter" },
+        { groupId: "org.junit.jupiter", artifactId: "junit-jupiter-api", version: "5.10.3", description: "JUnit Jupiter API" },
+        { groupId: "org.junit.jupiter", artifactId: "junit-jupiter-engine", version: "5.10.3", description: "JUnit Jupiter Engine" },
+        { groupId: "org.mockito", artifactId: "mockito-core", version: "5.12.0", description: "Mockito Core" },
+        { groupId: "com.fasterxml.jackson.core", artifactId: "jackson-databind", version: "2.17.2", description: "Jackson Databind" },
+        { groupId: "com.google.guava", artifactId: "guava", version: "33.2.1-jre", description: "Google Guava" },
+        { groupId: "org.projectlombok", artifactId: "lombok", version: "1.18.34", description: "Project Lombok" },
+      ];
+      const matched = mockResults.filter((item) =>
+        !q || item.groupId.toLowerCase().includes(q) || item.artifactId.toLowerCase().includes(q)
+      );
+      return matched as T;
+    }
+    case "dependency_index_versions": {
+      const gid = (args?.groupId as string) || "";
+      if (gid.includes("spring-boot")) {
+        return [
+          { version: "3.3.2", timestamp: 1720000000 },
+          { version: "3.3.1", timestamp: 1718000000 },
+          { version: "3.2.8", timestamp: 1715000000 },
+        ] as T;
+      }
+      if (gid.includes("junit")) {
+        return [
+          { version: "5.10.3", timestamp: 1720000000 },
+          { version: "5.10.2", timestamp: 1718000000 },
+        ] as T;
+      }
+      return [
+        { version: "1.0.0", timestamp: 1700000000 },
+        { version: "1.1.0", timestamp: 1710000000 },
+      ] as T;
     }
     case "workspace_test_results": {
       // Browser preview has no desktop filesystem or JVM process. Keep the

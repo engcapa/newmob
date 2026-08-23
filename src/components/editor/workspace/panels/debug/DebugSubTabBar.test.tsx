@@ -34,4 +34,21 @@ describe("DebugSubTabBar", () => {
     fireEvent.click(screen.getByTestId("debug-subtab-memory"));
     expect(onTabChange).toHaveBeenCalledWith("memory");
   });
+
+  it("supports keyboard arrow navigation across tabs", () => {
+    const onTabChange = vi.fn();
+    render(
+      <DebugSubTabBar
+        activeTab="debugger"
+        onTabChange={onTabChange}
+      />,
+    );
+
+    const firstTab = screen.getByTestId("debug-subtab-debugger");
+    fireEvent.keyDown(firstTab, { key: "ArrowRight" });
+    expect(onTabChange).toHaveBeenCalledWith("console");
+
+    fireEvent.keyDown(firstTab, { key: "ArrowLeft" });
+    expect(onTabChange).toHaveBeenCalledWith("memory");
+  });
 });

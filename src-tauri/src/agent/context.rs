@@ -326,9 +326,7 @@ fn normalize_code_workspace_paths(paths: &[String]) -> Vec<String> {
     out
 }
 
-fn normalize_code_workspace_roots(
-    roots: &[AgentCodeWorkspaceRoot],
-) -> Vec<AgentCodeWorkspaceRoot> {
+fn normalize_code_workspace_roots(roots: &[AgentCodeWorkspaceRoot]) -> Vec<AgentCodeWorkspaceRoot> {
     let mut out: Vec<AgentCodeWorkspaceRoot> = Vec::new();
     for root in roots {
         let Some(id) = clean_code_workspace_id(&root.id) else {
@@ -337,7 +335,10 @@ fn normalize_code_workspace_roots(
         let Some(path) = clean_code_workspace_os_path(&root.path) else {
             continue;
         };
-        if out.iter().any(|existing| existing.id == id || existing.path == path) {
+        if out
+            .iter()
+            .any(|existing| existing.id == id || existing.path == path)
+        {
             continue;
         }
         let name = clean_code_workspace_name(&root.name)
@@ -374,7 +375,10 @@ fn normalize_code_workspace_loose_files(
         let Some(path) = clean_code_workspace_os_path(&file.path) else {
             continue;
         };
-        if out.iter().any(|existing| existing.id == id || existing.path == path) {
+        if out
+            .iter()
+            .any(|existing| existing.id == id || existing.path == path)
+        {
             continue;
         }
         let name = file
@@ -477,17 +481,14 @@ fn normalize_code_workspace_files(
 }
 
 fn clean_lsp_text(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let mut out = s.replace(['\n', '\r'], " ");
-            if out.len() > MAX_CODE_WORKSPACE_LSP_TEXT_LEN {
-                out.truncate(MAX_CODE_WORKSPACE_LSP_TEXT_LEN);
-                out.push_str("...");
-            }
-            out
-        })
+    value.map(str::trim).filter(|s| !s.is_empty()).map(|s| {
+        let mut out = s.replace(['\n', '\r'], " ");
+        if out.len() > MAX_CODE_WORKSPACE_LSP_TEXT_LEN {
+            out.truncate(MAX_CODE_WORKSPACE_LSP_TEXT_LEN);
+            out.push_str("...");
+        }
+        out
+    })
 }
 
 fn normalize_code_workspace_lsp(

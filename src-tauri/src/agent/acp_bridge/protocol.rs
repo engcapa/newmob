@@ -1213,14 +1213,7 @@ fn tool_call_display_output(update: &Value, status: &str) -> String {
         .and_then(Value::as_object)
     {
         for key in [
-            "message",
-            "summary",
-            "text",
-            "output",
-            "result",
-            "stdout",
-            "path",
-            "error",
+            "message", "summary", "text", "output", "result", "stdout", "path", "error",
         ] {
             if let Some(s) = raw
                 .get(key)
@@ -1258,12 +1251,12 @@ fn first_tool_content_text(content: Option<&Value>) -> Option<String> {
     let items = content.and_then(Value::as_array)?;
     for item in items {
         let obj = item.as_object()?;
-        let kind = obj
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("content");
+        let kind = obj.get("type").and_then(Value::as_str).unwrap_or("content");
         // Skip diffs (can be huge) and media; keep plain text / content.
-        if matches!(kind, "diff" | "terminal" | "image" | "audio" | "resource_link") {
+        if matches!(
+            kind,
+            "diff" | "terminal" | "image" | "audio" | "resource_link"
+        ) {
             continue;
         }
         if let Some(text) = obj

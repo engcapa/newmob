@@ -28,7 +28,7 @@ export type ActionProvenance =
   | "partial"      // Partially implemented / heuristic
   | "unsupported"; // Action placeholder / unsupported in current context
 
-export type ActionAvailability = "available" | "disabled" | "unsupported" | "stale";
+export type ActionAvailability = "available" | "disabled" | "unsupported" | "stale" | "busy";
 
 export type ActionDisabledReason =
   | "noEditor"
@@ -39,6 +39,9 @@ export type ActionDisabledReason =
   | "stale"
   | "conflict"
   | "busy"
+  | "disposed"
+  | "invalidCondition"
+  | "userDisabled"
   | "unsupported";
 
 export interface ActionPlatformKeybindings {
@@ -48,7 +51,15 @@ export interface ActionPlatformKeybindings {
   default: string;
 }
 
-export type WorkspaceFocus = "workspace" | "editor" | "tree" | "terminal" | "search" | "modal";
+export type WorkspaceFocus =
+  | "workspace"
+  | "editor"
+  | "tree"
+  | "terminal"
+  | "search"
+  | "completion"
+  | "snippet"
+  | "modal";
 
 export interface WorkspaceActionContext {
   focus: WorkspaceFocus;
@@ -200,8 +211,19 @@ export interface ActionState {
   completeness: "complete" | "truncated" | "partial" | "unavailable" | "failed";
 }
 
+export type ActionResultReason =
+  | "aborted"
+  | "busy"
+  | "condition-not-met"
+  | "disposed"
+  | "exception"
+  | "stale-owner"
+  | "unknown-action"
+  | "unsupported";
+
 export interface ActionResult {
   kind: "applied" | "opened" | "no-op" | "cancelled" | "failed";
+  reason?: ActionResultReason;
   undoGroupId?: string;
   message?: string;
   retryable?: boolean;
@@ -235,6 +257,7 @@ export interface ActionRegistryEvent {
 
 class ActionRegistry {
   private actions = new Map<string, WorkspaceActionDefinition>();
+  private actionStacks = new Map<string, WorkspaceActionDefinition[]>();
   private aliases = new Map<string, string>();
   private listeners = new Set<(event: ActionRegistryEvent) => void>();
 
@@ -261,11 +284,35 @@ class ActionRegistry {
 
   register(action: WorkspaceActionDefinition): () => void {
     const resolvedId = action.id;
+    let stack = this.actionStacks.get(resolvedId);
+    if (!stack) {
+      stack = [];
+      this.actionStacks.set(resolvedId, stack);
+    }
+    stack.push(action);
     this.actions.set(resolvedId, action);
     this.notify({ type: "registered", actionId: resolvedId });
     return () => {
-      this.actions.delete(resolvedId);
-      this.notify({ type: "unregistered", actionId: resolvedId });
+      const currentStack = this.actionStacks.get(resolvedId);
+      if (currentStack) {
+        const index = currentStack.indexOf(action);
+        if (index !== -1) {
+          currentStack.splice(index, 1);
+        }
+        if (currentStack.length > 0) {
+          const restored = currentStack[currentStack.length - 1];
+          this.actions.set(resolvedId, restored);
+          this.notify({ type: "registered", actionId: resolvedId });
+          this.notify({ type: "state-changed", actionId: resolvedId });
+        } else {
+          this.actionStacks.delete(resolvedId);
+          this.actions.delete(resolvedId);
+          this.notify({ type: "unregistered", actionId: resolvedId });
+        }
+      } else if (this.actions.get(resolvedId) === action) {
+        this.actions.delete(resolvedId);
+        this.notify({ type: "unregistered", actionId: resolvedId });
+      }
     };
   }
 
@@ -376,6 +423,7 @@ class ActionRegistry {
 
   clear(): void {
     this.actions.clear();
+    this.actionStacks.clear();
     this.setupDefaultAliases();
     this.notify({ type: "state-changed" });
   }
@@ -422,6 +470,24 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     category: "Edit",
     provenance: "local",
     keywords: ["reverse", "lines", "flip", "order"],
+  },
+  {
+    id: "workspace.transpose",
+    title: "Transpose Lines / Characters",
+    description: "Transpose characters at cursor or swap current line with next line",
+    category: "Edit",
+    keybinding: "Ctrl+T",
+    provenance: "local",
+    keywords: ["transpose", "swap", "lines", "characters"],
+  },
+  {
+    id: "workspace.unwrap",
+    title: "Unwrap / Remove Enclosing Construct",
+    description: "Unwrap enclosing parentheses, braces, brackets, or quotes around cursor",
+    category: "Edit",
+    keybinding: "Ctrl+Shift+Delete",
+    provenance: "local",
+    keywords: ["unwrap", "remove", "parentheses", "braces", "quotes"],
   },
   {
     id: "workspace.format",
@@ -543,9 +609,18 @@ export const DEFAULT_WORKSPACE_ACTIONS: WorkspaceActionMetadata[] = [
     keywords: ["recent", "switcher", "history", "files"],
   },
   {
+    id: "workspace.recentLocations",
+    title: "Recent Locations",
+    description: "Navigate to recently visited and edited code positions with context preview",
+    category: "Navigate",
+    keybinding: "Ctrl+Shift+E",
+    provenance: "local",
+    keywords: ["recent", "locations", "context", "history", "edit"],
+  },
+  {
     id: "workspace.recentChangedFiles",
     title: "Recently Changed Files",
-    description: "List recently modified files in the workspace",
+    description: "Navigate to recently modified locations with context preview",
     category: "Navigate",
     keybinding: "Ctrl+Shift+E",
     provenance: "local",

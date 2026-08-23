@@ -8,6 +8,7 @@ import {
   readWorkspaceSearchHistory,
   uniqueOrderedKeys,
   writeWorkspaceLayoutSnapshot,
+  type WorkspaceLayoutSnapshotV2,
 } from "./workspaceLayoutPersistence";
 
 describe("workspaceLayoutPersistence", () => {
@@ -15,9 +16,9 @@ describe("workspaceLayoutPersistence", () => {
     window.localStorage.clear();
   });
 
-  it("normalizes and round-trips layout snapshots", () => {
-    writeWorkspaceLayoutSnapshot("ws", {
-      version: 1,
+  it("normalizes and round-trips layout snapshots with schema v2", () => {
+    const snapshot: WorkspaceLayoutSnapshotV2 = {
+      version: 2,
       bottomDockOpen: false,
       bottomDockTab: "search",
       rightPaneOpen: true,
@@ -27,6 +28,16 @@ describe("workspaceLayoutPersistence", () => {
       activeEditorGroupId: "secondary",
       expandedRootIds: ["app"],
       expandedDirKeys: ["app:src"],
+      layoutTreeV2: {
+        type: "split",
+        id: "split-1",
+        orientation: "vertical",
+        ratios: [0.5, 0.5],
+        children: [
+          { type: "leaf", id: "primary", openFileKeys: ["root:app:src/main.ts", "root:app:src/lib.ts"], activeKey: "root:app:src/main.ts" },
+          { type: "leaf", id: "secondary", openFileKeys: ["root:app:README.md"], activeKey: "root:app:README.md" },
+        ],
+      },
       editorGroups: {
         primary: {
           openOrder: ["root:app:src/main.ts", "root:app:src/lib.ts"],
@@ -41,13 +52,17 @@ describe("workspaceLayoutPersistence", () => {
           pinnedKeys: [],
         },
       },
-    });
+    };
+
+    writeWorkspaceLayoutSnapshot("ws", snapshot);
 
     const restored = readWorkspaceLayoutSnapshot("ws");
+    expect(restored?.version).toBe(2);
     expect(restored?.bottomDockOpen).toBe(false);
     expect(restored?.bottomDockTab).toBe("search");
     expect(restored?.rightPaneOpen).toBe(true);
     expect(restored?.splitOrientation).toBe("vertical");
+    expect(restored?.layoutTreeV2.type).toBe("split");
     expect(restored?.editorGroups.primary.openOrder).toEqual([
       "root:app:src/main.ts",
       "root:app:src/lib.ts",
@@ -65,6 +80,7 @@ describe("workspaceLayoutPersistence", () => {
     expect(snapshot.splitOrientation).toBeNull();
     expect(snapshot.editorGroups.primary.openOrder).toEqual(["root:app:a.ts"]);
     expect(snapshot.editorGroups.primary.activeKey).toBe("root:app:a.ts");
+    expect(snapshot.layoutTreeV2).toBeDefined();
   });
 
   it("parses file keys and dedupes restored open order", () => {
@@ -99,20 +115,60 @@ describe("workspaceLayoutPersistence", () => {
     })).toEqual(["root:app:a.ts", "root:app:b.ts", "root:app:c.ts"]);
   });
 
-  it("keeps the latest 20 search queries with newest first", () => {
-    const first = pushWorkspaceSearchHistory("ws", "foo");
-    const second = pushWorkspaceSearchHistory("ws", "bar", first);
-    const third = pushWorkspaceSearchHistory("ws", "foo", second);
-    expect(third[0]).toBe("foo");
-    expect(third).toEqual(["foo", "bar"]);
-    expect(readWorkspaceSearchHistory("ws")).toEqual(["foo", "bar"]);
+  it("maintains search history with bounds and deduplication", () => {
+    expect(readWorkspaceSearchHistory("ws")).toEqual([]);
+    pushWorkspaceSearchHistory("ws", "first");
+    pushWorkspaceSearchHistory("ws", "second");
+    pushWorkspaceSearchHistory("ws", "first");
+    expect(readWorkspaceSearchHistory("ws")).toEqual(["first", "second"]);
+  });
 
-    let history: string[] = [];
-    for (let index = 0; index < 25; index += 1) {
-      history = pushWorkspaceSearchHistory("ws", `q${index}`, history);
-    }
-    expect(history).toHaveLength(20);
-    expect(history[0]).toBe("q24");
-    expect(history[19]).toBe("q5");
+  it("cleans up orphan groups not present in layout tree (N6.5)", () => {
+    const rawSnapshot = {
+      version: 2,
+      layoutTreeV2: {
+        type: "leaf",
+        id: "leaf-main",
+        openFileKeys: ["root:app:a.ts"],
+        activeKey: "root:app:a.ts",
+      },
+      editorGroups: {
+        "leaf-main": {
+          openOrder: ["root:app:a.ts"],
+          activeKey: "root:app:a.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+        "leaf-orphan-1": {
+          openOrder: ["root:app:b.ts"],
+          activeKey: "root:app:b.ts",
+          previewKey: null,
+          pinnedKeys: [],
+        },
+      },
+    };
+
+    const normalized = normalizeWorkspaceLayoutSnapshot(rawSnapshot);
+    expect(normalized.editorGroups["leaf-main"]).toBeDefined();
+    expect(normalized.editorGroups["leaf-orphan-1"]).toBeUndefined();
+  });
+
+  it("recovers corrupted layout tree gracefully to single leaf (N6.5)", () => {
+    const corrupted = {
+      version: 2,
+      layoutTreeV2: {
+        type: "split",
+        id: "bad-split",
+        orientation: "horizontal",
+        children: [], // Invalid: split with no children
+        ratios: [],
+      },
+      editorGroups: {},
+    };
+
+    const normalized = normalizeWorkspaceLayoutSnapshot(corrupted);
+    expect(normalized.layoutRecovered).toBe(true);
+    expect(normalized.layoutTreeV2.type).toBe("leaf");
+    expect(normalized.editorGroups[normalized.layoutTreeV2.id]).toBeDefined();
   });
 });

@@ -68,4 +68,24 @@ describe("executeCodeAction", () => {
     expect(executeCommand).toHaveBeenCalledWith("workspace.reload", commandArguments);
     expect(result.status).toBe("executed-command");
   });
+
+  it("unwraps and applies workspace edit when command is _java.apply.workspaceEdit", async () => {
+    const applyEdit = vi.fn(async () => [{ operationIndex: 0, path: "/repo/App.java", status: "applied-disk" as const }]);
+    const executeCommand = vi.fn(async () => {});
+    const customEdit = { documentEdits: [{ uri: "file:///repo/App.java", edits: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } }, newText: "import java.util.List;\n" }] }], operations: [] };
+
+    const result = await executeCodeAction(action({
+      edit: null,
+      command: "_java.apply.workspaceEdit",
+      commandArguments: [customEdit],
+    }), {
+      applyEdit,
+      executeCommand,
+    });
+
+    expect(applyEdit).toHaveBeenCalledWith(customEdit);
+    expect(executeCommand).not.toHaveBeenCalled();
+    expect(result.status).toBe("applied-edit");
+  });
 });
+

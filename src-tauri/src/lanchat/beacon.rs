@@ -18,8 +18,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::lanchat::protocol::{self, PeerRecord, PresenceStatus};
 use crate::lanchat::LanChatState;
+use crate::lanchat::protocol::{self, PeerRecord, PresenceStatus};
 
 /// Fixed UDP port for beacon traffic.
 const BEACON_PORT: u16 = 19816;
@@ -103,8 +103,7 @@ pub async fn run(app: AppHandle, state: Arc<LanChatState>, control_port: u16) {
     let send_socket = socket.clone();
     let send_state = state.clone();
     let sender = tokio::spawn(async move {
-        let broadcast_dest: SocketAddr =
-            SocketAddrV4::new(Ipv4Addr::BROADCAST, BEACON_PORT).into();
+        let broadcast_dest: SocketAddr = SocketAddrV4::new(Ipv4Addr::BROADCAST, BEACON_PORT).into();
         let mut interval = tokio::time::interval(BEACON_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 

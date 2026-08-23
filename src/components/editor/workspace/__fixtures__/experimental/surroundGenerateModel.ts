@@ -1,5 +1,6 @@
+// NON-PRODUCTION FIXTURE (experimental): moved out of production per §8.17.9 N12 — no production import permitted; see ./README.md in this directory
 /**
- * Surround With & Code Generation Engine (E3.4).
+ * Surround With & Generate Code Template Model (E1.3).
  *
  * Implements IntelliJ IDEA's Surround With (Ctrl+Alt+T) and Generate Code (Alt+Insert)
  * for Java and TypeScript with template variables, indentation, and preview.

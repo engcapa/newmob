@@ -12,18 +12,18 @@
 #![cfg(feature = "native-av")]
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use openh264::OpenH264API;
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameRate};
 use openh264::formats::{BgraSliceU8, RgbSliceU8, YUVBuffer, YUVSource};
-use openh264::OpenH264API;
 use tauri::AppHandle;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
-use crate::lanchat::protocol::wire;
 use crate::lanchat::LanChatState;
+use crate::lanchat::protocol::wire;
 
 /// Target screen-share frame rate (software H.264 + O(peers) fan-out — keep it
 /// modest). Camera uses the device's own rate.
@@ -122,7 +122,11 @@ pub async fn start_screen_sender(
     }
 
     let task = tokio::spawn(send_loop(state, call_id, "screen", peers, frame_rx));
-    Ok(VideoSender { stop_tx, abort: task.abort_handle(), want_keyframe })
+    Ok(VideoSender {
+        stop_tx,
+        abort: task.abort_handle(),
+        want_keyframe,
+    })
 }
 
 /// Capture+encode loop (own thread; the X11 capturer is `!Send`).
@@ -133,8 +137,8 @@ fn screen_capture_thread(
     want_keyframe: Arc<AtomicBool>,
     init_tx: tokio::sync::oneshot::Sender<Result<(), String>>,
 ) {
-    use crate::servers::engine::LogEmitter;
     use crate::servers::ServerType;
+    use crate::servers::engine::LogEmitter;
     // LogEmitter needs a ServerType for its channel; capture init logs are
     // low-volume. Reuse the Rdp channel rather than threading a new one through.
     let log = LogEmitter::new(app, ServerType::Rdp);
@@ -156,7 +160,10 @@ fn screen_capture_thread(
     let mut tight: Vec<u8> = Vec::new();
 
     loop {
-        if !matches!(stop_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+        if !matches!(
+            stop_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ) {
             break; // stop signaled or sender dropped
         }
         let t0 = Instant::now();
@@ -243,7 +250,11 @@ pub async fn start_camera_sender(
     }
 
     let task = tokio::spawn(send_loop(state, call_id, "cam", peers, frame_rx));
-    Ok(VideoSender { stop_tx, abort: task.abort_handle(), want_keyframe })
+    Ok(VideoSender {
+        stop_tx,
+        abort: task.abort_handle(),
+        want_keyframe,
+    })
 }
 
 /// Camera capture+encode loop (own thread; nokhwa `Camera` is `!Send`).
@@ -276,7 +287,10 @@ fn camera_capture_thread(
     let mut tight: Vec<u8> = Vec::new();
 
     loop {
-        if !matches!(stop_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)) {
+        if !matches!(
+            stop_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ) {
             break;
         }
         let img = match camera.frame().and_then(|b| b.decode_image::<RgbFormat>()) {

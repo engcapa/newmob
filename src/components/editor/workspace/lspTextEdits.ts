@@ -5,17 +5,30 @@ import type {
   LspTextEdit,
 } from "../../../lib/editor/lsp";
 
-/** Convert a 0-based LSP position into a string offset for `\n`-normalized text. */
+/** Convert a 0-based LSP position into a string offset for any line ending (LF, CRLF, CR). */
 export function offsetFromLspPositionInString(text: string, position: LspPosition): number {
-  const lines = text.split("\n");
+  const lines = text.split(/\r\n|\r|\n/);
   if (lines.length === 0) return 0;
   const lineIndex = Math.min(lines.length - 1, Math.max(0, position.line));
-  let offset = 0;
-  for (let i = 0; i < lineIndex; i += 1) {
-    offset += lines[i].length + 1;
+  let currentOffset = 0;
+  let currentLine = 0;
+  while (currentOffset < text.length && currentLine < lineIndex) {
+    if (text.charCodeAt(currentOffset) === 13) {
+      if (currentOffset + 1 < text.length && text.charCodeAt(currentOffset + 1) === 10) {
+        currentOffset += 2;
+      } else {
+        currentOffset += 1;
+      }
+      currentLine += 1;
+    } else if (text.charCodeAt(currentOffset) === 10) {
+      currentOffset += 1;
+      currentLine += 1;
+    } else {
+      currentOffset += 1;
+    }
   }
   const line = lines[lineIndex] ?? "";
-  return offset + Math.min(line.length, Math.max(0, position.character));
+  return currentOffset + Math.min(line.length, Math.max(0, position.character));
 }
 
 /**
@@ -49,10 +62,22 @@ export function rangeIsEmpty(range: LspRange): boolean {
 function positionFromStringOffset(text: string, offset: number): LspPosition {
   let line = 0;
   let lineStart = 0;
-  for (let index = 0; index < offset; index += 1) {
-    if (text.charCodeAt(index) === 10) {
+  let index = 0;
+  while (index < offset && index < text.length) {
+    if (text.charCodeAt(index) === 13) {
+      if (index + 1 < text.length && text.charCodeAt(index + 1) === 10) {
+        index += 2;
+      } else {
+        index += 1;
+      }
       line += 1;
-      lineStart = index + 1;
+      lineStart = index;
+    } else if (text.charCodeAt(index) === 10) {
+      index += 1;
+      line += 1;
+      lineStart = index;
+    } else {
+      index += 1;
     }
   }
   return { line, character: offset - lineStart };
@@ -72,11 +97,22 @@ function advanceStringPosition(
   toOffset: number,
 ): LspPosition {
   let { line, character } = from;
-  for (let index = fromOffset; index < toOffset; index += 1) {
-    if (text.charCodeAt(index) === 10) {
+  let index = fromOffset;
+  while (index < toOffset && index < text.length) {
+    if (text.charCodeAt(index) === 13) {
+      if (index + 1 < text.length && text.charCodeAt(index + 1) === 10) {
+        index += 2;
+      } else {
+        index += 1;
+      }
+      line += 1;
+      character = 0;
+    } else if (text.charCodeAt(index) === 10) {
+      index += 1;
       line += 1;
       character = 0;
     } else {
+      index += 1;
       character += 1;
     }
   }

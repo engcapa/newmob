@@ -21,13 +21,13 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::{Notify, mpsc};
 use tokio::time::timeout;
 use tokio_rustls::{TlsAcceptor, TlsConnector, TlsStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use crate::lanchat::protocol::{frame, wire, Envelope, PeerRecord, PresenceStatus};
-use crate::lanchat::{identity, tls, LanChatState};
+use crate::lanchat::protocol::{Envelope, PeerRecord, PresenceStatus, frame, wire};
+use crate::lanchat::{LanChatState, identity, tls};
 
 /// How often to send a keepalive ping on an idle connection.
 const PING_INTERVAL: Duration = Duration::from_secs(15);
@@ -110,7 +110,11 @@ impl MediaQueue {
     fn push(&self, bytes: bytes::Bytes) -> usize {
         let dropped = {
             let mut q = self.inner.lock().unwrap();
-            let dropped = if q.len() >= MEDIA_QUEUE_CAP { q.pop_front().is_some() as usize } else { 0 };
+            let dropped = if q.len() >= MEDIA_QUEUE_CAP {
+                q.pop_front().is_some() as usize
+            } else {
+                0
+            };
             q.push_back(bytes);
             dropped
         };
@@ -126,7 +130,9 @@ impl MediaQueue {
 impl ConnHandle {
     /// Queue a control envelope for delivery to this peer.
     pub fn send(&self, env: Envelope) -> Result<(), String> {
-        self.control_tx.send(env).map_err(|_| "connection closed".to_string())
+        self.control_tx
+            .send(env)
+            .map_err(|_| "connection closed".to_string())
     }
 }
 
@@ -142,7 +148,10 @@ pub async fn run_listener(app: AppHandle, state: Arc<LanChatState>) {
             return;
         }
     };
-    log::info!("lanchat: transport listening on {:?}", listener.local_addr());
+    log::info!(
+        "lanchat: transport listening on {:?}",
+        listener.local_addr()
+    );
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
@@ -202,7 +211,14 @@ async fn ensure_connection_inner(
     let stream = TcpStream::connect(sa)
         .await
         .map_err(|e| format!("connect {sa}: {e}"))?;
-    setup_connection(app.clone(), state.clone(), stream, sa, Some(peer_id.to_string())).await?;
+    setup_connection(
+        app.clone(),
+        state.clone(),
+        stream,
+        sa,
+        Some(peer_id.to_string()),
+    )
+    .await?;
     Ok(())
 }
 
@@ -265,7 +281,10 @@ async fn send_frame<T: AsyncWrite + Unpin>(
     env: &Envelope,
 ) -> Result<(), String> {
     let json = env.encode().map_err(|e| e.to_string())?;
-    framed.send(wire::frame_control(&json)).await.map_err(|e| e.to_string())
+    framed
+        .send(wire::frame_control(&json))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 async fn recv_frame<T: AsyncRead + Unpin>(framed: &mut LanFramed<T>) -> Result<Envelope, String> {
@@ -340,8 +359,7 @@ async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
     my_port: u16,
     expected: Option<String>,
 ) -> Result<PeerHello, String> {
-    let hello_payload =
-        json!({ "name": my_name, "pv": crate::lanchat::protocol::PROTOCOL_VERSION, "port": my_port });
+    let hello_payload = json!({ "name": my_name, "pv": crate::lanchat::protocol::PROTOCOL_VERSION, "port": my_port });
     match expected {
         Some(target) => {
             send_frame(
@@ -363,7 +381,12 @@ async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
             let peer = parse_hello(&hello);
             send_frame(
                 framed,
-                &Envelope::new(frame::HELLO_ACK, my_id, Some(peer.id.clone()), hello_payload),
+                &Envelope::new(
+                    frame::HELLO_ACK,
+                    my_id,
+                    Some(peer.id.clone()),
+                    hello_payload,
+                ),
             )
             .await?;
             Ok(peer)
@@ -464,18 +487,37 @@ async fn handle_peer_exchange(
     let my_id = state.node_id().await;
     let mut new_peers = Vec::new();
     for entry in peers_arr {
-        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else { continue };
-        if id == my_id { continue; }
+        let Some(id) = entry.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if id == my_id {
+            continue;
+        }
         // Skip peers we already know or are already connected to.
-        if state.peers.read().await.contains_key(id) { continue; }
-        if state.connections.read().await.contains_key(id) { continue; }
-        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if state.peers.read().await.contains_key(id) {
+            continue;
+        }
+        if state.connections.read().await.contains_key(id) {
+            continue;
+        }
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let addr = entry.get("addr").and_then(|v| v.as_str()).map(String::from);
-        let port = entry.get("port").and_then(|v| v.as_u64()).and_then(|n| u16::try_from(n).ok());
+        let port = entry
+            .get("port")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u16::try_from(n).ok());
         if let (Some(addr_val), Some(port_val)) = (&addr, port) {
             let rec = PeerRecord {
                 id: id.to_string(),
-                name: if name.is_empty() { id.chars().take(8).collect() } else { name },
+                name: if name.is_empty() {
+                    id.chars().take(8).collect()
+                } else {
+                    name
+                },
                 avatar_hash: None,
                 signature: String::new(),
                 status: PresenceStatus::Online,
@@ -647,7 +689,9 @@ async fn setup_connection(
         let old = match conns.get(&peer_id) {
             Some(existing) => {
                 if !duplicate_replaces_existing(outbound, existing.outbound, &my_id, &peer_id) {
-                    log::debug!("lanchat: duplicate connection to {peer_id} dropped (kept existing)");
+                    log::debug!(
+                        "lanchat: duplicate connection to {peer_id} dropped (kept existing)"
+                    );
                     return Ok(());
                 }
                 Some(existing.close.clone())
@@ -683,7 +727,9 @@ async fn setup_connection(
         }
         if !peers_snapshot.is_empty() {
             let env = Envelope::new(
-                frame::PEER_EXCHANGE, &my_id, Some(peer_id.clone()),
+                frame::PEER_EXCHANGE,
+                &my_id,
+                Some(peer_id.clone()),
                 serde_json::json!({ "peers": peers_snapshot }),
             );
             let _ = tx.send(env);
@@ -776,7 +822,8 @@ async fn setup_connection(
                     Box::pin(dispatch_inbound(&app, &state, &peer_id, &my_id, env)).await
                 }
                 Some(wire::Frame::Piece(file_id, idx, data)) => {
-                    crate::lanchat::swarm::handle_piece(&app, &state, &peer_id, &file_id, idx, data).await
+                    crate::lanchat::swarm::handle_piece(&app, &state, &peer_id, &file_id, idx, data)
+                        .await
                 }
                 Some(wire::Frame::Media(frame)) => {
                     crate::lanchat::media::handle_media_frame(&app, &state, &peer_id, frame).await
@@ -916,11 +963,23 @@ mod tests {
         // physical connection — the one dialed by the min id ("aaa", via X).
         let (lo, hi) = ("aaa", "bbb");
         // On lo's side (my=lo, peer=hi): X is outbound, Y is inbound.
-        assert!(duplicate_replaces_existing(true, false, lo, hi), "lo: X replaces existing Y");
-        assert!(!duplicate_replaces_existing(false, true, lo, hi), "lo: Y dropped, keep X");
+        assert!(
+            duplicate_replaces_existing(true, false, lo, hi),
+            "lo: X replaces existing Y"
+        );
+        assert!(
+            !duplicate_replaces_existing(false, true, lo, hi),
+            "lo: Y dropped, keep X"
+        );
         // On hi's side (my=hi, peer=lo): X is inbound, Y is outbound.
-        assert!(duplicate_replaces_existing(false, true, hi, lo), "hi: X replaces existing Y");
-        assert!(!duplicate_replaces_existing(true, false, hi, lo), "hi: Y dropped, keep X");
+        assert!(
+            duplicate_replaces_existing(false, true, hi, lo),
+            "hi: X replaces existing Y"
+        );
+        assert!(
+            !duplicate_replaces_existing(true, false, hi, lo),
+            "hi: Y dropped, keep X"
+        );
         // Both ends converge on X (the connection dialed by the min id).
     }
 
@@ -939,10 +998,18 @@ mod tests {
         let q = MediaQueue::new();
         // Fill to capacity with identifiable single-byte frames.
         for i in 0..MEDIA_QUEUE_CAP {
-            assert_eq!(q.push(bytes::Bytes::from(vec![i as u8])), 0, "no drops while filling");
+            assert_eq!(
+                q.push(bytes::Bytes::from(vec![i as u8])),
+                0,
+                "no drops while filling"
+            );
         }
         // One more overflows: the oldest (frame 0) is dropped.
-        assert_eq!(q.push(bytes::Bytes::from(vec![0xFFu8])), 1, "overflow drops oldest");
+        assert_eq!(
+            q.push(bytes::Bytes::from(vec![0xFFu8])),
+            1,
+            "overflow drops oldest"
+        );
         {
             let inner = q.inner.lock().unwrap();
             assert_eq!(inner.len(), MEDIA_QUEUE_CAP, "stays at cap");
@@ -1024,7 +1091,7 @@ mod tests {
     // peer's node id. This is the binding the anti-spoofing check relies on.
     #[tokio::test]
     async fn mutual_tls_binds_peer_cert_fingerprint() {
-        use crate::lanchat::identity::{fingerprint, Identity};
+        use crate::lanchat::identity::{Identity, fingerprint};
 
         let server_id = Identity::generate().unwrap();
         let client_id = Identity::generate().unwrap();
@@ -1045,7 +1112,10 @@ mod tests {
         let tcp = TcpStream::connect(addr).await.unwrap();
         let sni = rustls::pki_types::ServerName::try_from(tls::SNI).unwrap();
         let tls = TlsStream::from(
-            TlsConnector::from(client_cfg).connect(sni, tcp).await.unwrap(),
+            TlsConnector::from(client_cfg)
+                .connect(sni, tcp)
+                .await
+                .unwrap(),
         );
         let seen_server_fp = {
             let (_, conn) = tls.get_ref();
@@ -1053,8 +1123,16 @@ mod tests {
         };
 
         let seen_client_fp = srv.await.unwrap();
-        assert_eq!(seen_client_fp.as_deref(), Some(client_fp.as_str()), "server sees client fp");
-        assert_eq!(seen_server_fp.as_deref(), Some(server_fp.as_str()), "client sees server fp");
+        assert_eq!(
+            seen_client_fp.as_deref(),
+            Some(client_fp.as_str()),
+            "server sees client fp"
+        );
+        assert_eq!(
+            seen_server_fp.as_deref(),
+            Some(server_fp.as_str()),
+            "client sees server fp"
+        );
     }
 
     // v3 wire over the *real* mutual-TLS + length-delimited transport: a large
@@ -1095,13 +1173,29 @@ mod tests {
 
         let tcp = TcpStream::connect(addr).await.unwrap();
         let sni = rustls::pki_types::ServerName::try_from(tls::SNI).unwrap();
-        let tls = TlsStream::from(TlsConnector::from(client_cfg).connect(sni, tcp).await.unwrap());
+        let tls = TlsStream::from(
+            TlsConnector::from(client_cfg)
+                .connect(sni, tcp)
+                .await
+                .unwrap(),
+        );
         let mut framed = Framed::new(tls, new_codec());
 
-        let ctrl = Envelope::new(frame::SWARM_REQUEST, "a", Some("b".into()), json!({ "fileId": fid, "piece": 7 }));
-        framed.send(wire::frame_control(&ctrl.encode().unwrap())).await.unwrap();
+        let ctrl = Envelope::new(
+            frame::SWARM_REQUEST,
+            "a",
+            Some("b".into()),
+            json!({ "fileId": fid, "piece": 7 }),
+        );
+        framed
+            .send(wire::frame_control(&ctrl.encode().unwrap()))
+            .await
+            .unwrap();
         let data = vec![0xA5u8; 256 * 1024];
-        framed.send(wire::frame_piece(&fid, 7, &data)).await.unwrap();
+        framed
+            .send(wire::frame_piece(&fid, 7, &data))
+            .await
+            .unwrap();
         framed.flush().await.unwrap();
 
         let (ctrl_type, piece) = srv.await.unwrap();

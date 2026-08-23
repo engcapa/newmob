@@ -261,7 +261,10 @@ mod tests {
     #[test]
     fn parses_success_result_as_done() {
         let line = r#"{"type":"result","subtype":"success","is_error":false,"result":"Hi!"}"#;
-        assert!(matches!(parse_ndjson_line(line), Some(CcEvent::Done { .. })));
+        assert!(matches!(
+            parse_ndjson_line(line),
+            Some(CcEvent::Done { .. })
+        ));
     }
 
     #[test]

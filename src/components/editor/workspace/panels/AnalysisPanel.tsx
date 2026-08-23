@@ -215,7 +215,13 @@ export function AnalysisPanel({
         <section data-testid="analysis-inspection-profile" className="space-y-1">
           <div className="flex items-center gap-1 font-medium">
             <Info className="h-3.5 w-3.5" />
-            <span>Inspection profile</span>
+            {/* §8.18.6 分账: this is a client-side PRESENTATION layer over
+                provider diagnostics — it never configures or runs an
+                inspection engine. */}
+            <span>Diagnostic presentation profile</span>
+          </div>
+          <div className="text-[10px] text-[var(--taomni-code-muted)]">
+            Display/severity overrides only — analysis runs in the language server.
           </div>
           {ruleIds.length === 0 && (
             <div className="text-[var(--taomni-code-muted)]">No provider diagnostics have supplied inspection ids yet.</div>
@@ -228,7 +234,7 @@ export function AnalysisPanel({
                 <input
                   type="checkbox"
                   data-testid={`analysis-inspection-enabled-${id}`}
-                  aria-label={`Enable inspection ${id}`}
+                  aria-label={`Show ${id} diagnostics`}
                   checked={rule.enabled}
                   onChange={(event) => onUpdateRule(id, { enabled: event.target.checked })}
                 />

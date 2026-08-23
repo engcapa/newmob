@@ -13,7 +13,7 @@ pub mod downloader;
 pub mod manifest;
 pub mod store;
 
-pub use downloader::{download_model, DownloadProgress};
+pub use downloader::{DownloadProgress, download_model};
 pub use manifest::{ModelKind, ModelManifest, ModelMeta};
 pub use store::{model_path, models_root, sidecars_root};
 

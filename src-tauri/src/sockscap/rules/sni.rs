@@ -212,10 +212,7 @@ mod tests {
     #[test]
     fn http_host_header() {
         let req = b"GET / HTTP/1.1\r\nHost: www.Example.com\r\nUser-Agent: x\r\n\r\n";
-        assert_eq!(
-            extract_http_host(req).as_deref(),
-            Some("www.example.com")
-        );
+        assert_eq!(extract_http_host(req).as_deref(), Some("www.example.com"));
         assert_eq!(
             extract_hostname_from_prefix(req).as_deref(),
             Some("www.example.com")

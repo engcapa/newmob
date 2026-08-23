@@ -133,7 +133,9 @@ async fn thrift_connect_and_list() {
     let host = env("HBASE_THRIFT_HOST").expect("HBASE_THRIFT_HOST is required");
     let config = HBaseConfig {
         host,
-        port: env("HBASE_THRIFT_PORT").and_then(|p| p.parse().ok()).unwrap_or(9190),
+        port: env("HBASE_THRIFT_PORT")
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(9190),
         username: env("HBASE_THRIFT_USERNAME"),
         password: None, // passed separately below
         ssl: env("HBASE_THRIFT_SSL").as_deref() == Some("1"),
@@ -151,8 +153,8 @@ async fn thrift_connect_and_list() {
         krb5_conf_path: None,
         hbase_site_path: None,
     };
-    let session =
-        ThriftSession::new(&config, env("HBASE_THRIFT_PASSWORD")).expect("ThriftSession::new failed");
+    let session = ThriftSession::new(&config, env("HBASE_THRIFT_PASSWORD"))
+        .expect("ThriftSession::new failed");
 
     let ping = session.ping().await;
     eprintln!("PING: {ping:?}");
@@ -174,12 +176,20 @@ async fn thrift_connect_and_list() {
             .expect("put failed");
         let got = session.get(&t, b"r1", None).await.expect("get failed");
         eprintln!("GET: {got:?}");
-        assert!(got.iter().any(|row| row.value == b"v1"), "put value not read back");
-        let scanned = session.scan(&t, 10, None, None, &[]).await.expect("scan failed");
+        assert!(
+            got.iter().any(|row| row.value == b"v1"),
+            "put value not read back"
+        );
+        let scanned = session
+            .scan(&t, 10, None, None, &[])
+            .await
+            .expect("scan failed");
         eprintln!("SCAN: {} cell(s)", scanned.len());
-        session.delete_all(&t, b"r1").await.expect("delete_all failed");
+        session
+            .delete_all(&t, b"r1")
+            .await
+            .expect("delete_all failed");
         session.drop_table(&t).await.expect("drop_table failed");
         eprintln!("create/put/get/scan/delete/drop cycle OK for {t}");
     }
 }
-

@@ -9,17 +9,17 @@
 //! [`DbSession`] wraps the per-engine handle plus a cancellation token used by
 //! `db_cancel`.
 
+pub mod bookmarks;
 pub mod clickhouse;
 pub mod forward;
+pub mod history;
 pub mod oracle;
 pub mod panwei;
 pub mod presto;
-pub mod redis_ops;
-pub mod sql;
-pub mod bookmarks;
-pub mod history;
 pub mod query_workspace;
+pub mod redis_ops;
 pub mod saved_queries;
+pub mod sql;
 pub mod sql_rewrite;
 
 pub use bookmarks::*;
@@ -33,8 +33,8 @@ use sqlx_mysql::MySql;
 use sqlx_postgres::Postgres;
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::ipc::Channel;
 use tauri::State;
+use tauri::ipc::Channel;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -561,9 +561,7 @@ pub async fn db_connect(
 
     let active_schema = sql::new_active_schema_slot(&config);
     let handle = match config.engine.as_str() {
-        "MySQL" => {
-            sql::connect_mysql(&config, password.as_deref(), active_schema.clone()).await?
-        }
+        "MySQL" => sql::connect_mysql(&config, password.as_deref(), active_schema.clone()).await?,
         "PostgreSQL" => {
             sql::connect_postgres(&config, password.as_deref(), active_schema.clone()).await?
         }
@@ -805,9 +803,7 @@ pub async fn db_describe_table(
         DbHandle::PanWeiDB(client) => {
             panwei::describe_table(client, schema.as_deref(), &table).await
         }
-        DbHandle::Oracle(client) => {
-            oracle::describe_table(client, schema.as_deref(), &table).await
-        }
+        DbHandle::Oracle(client) => oracle::describe_table(client, schema.as_deref(), &table).await,
         DbHandle::SqlServer(client) => {
             sql::describe_table_sqlserver(client, schema.as_deref(), &table).await
         }
@@ -868,12 +864,8 @@ pub async fn db_list_indexes(
         DbHandle::Postgres(pool) => {
             sql::list_indexes_postgres(pool, schema.as_deref(), &table).await
         }
-        DbHandle::PanWeiDB(client) => {
-            panwei::list_indexes(client, schema.as_deref(), &table).await
-        }
-        DbHandle::Oracle(client) => {
-            oracle::list_indexes(client, schema.as_deref(), &table).await
-        }
+        DbHandle::PanWeiDB(client) => panwei::list_indexes(client, schema.as_deref(), &table).await,
+        DbHandle::Oracle(client) => oracle::list_indexes(client, schema.as_deref(), &table).await,
         DbHandle::SqlServer(client) => {
             sql::list_indexes_sqlserver(client, schema.as_deref(), &table).await
         }
@@ -897,9 +889,7 @@ pub async fn db_list_objects(
         DbHandle::Postgres(pool) => {
             sql::list_objects_postgres(pool, schema.as_deref(), &kind).await
         }
-        DbHandle::PanWeiDB(client) => {
-            panwei::list_objects(client, schema.as_deref(), &kind).await
-        }
+        DbHandle::PanWeiDB(client) => panwei::list_objects(client, schema.as_deref(), &kind).await,
         DbHandle::Oracle(client) => oracle::list_objects(client, schema.as_deref(), &kind).await,
         DbHandle::SqlServer(client) => {
             sql::list_objects_sqlserver(client, schema.as_deref(), &kind).await
@@ -1180,8 +1170,8 @@ pub async fn redis_exec(
 #[cfg(test)]
 mod tests {
     use super::{
-        group_foreign_keys, metadata_search_limit, DEFAULT_METADATA_SEARCH_LIMIT,
-        MAX_METADATA_SEARCH_LIMIT,
+        DEFAULT_METADATA_SEARCH_LIMIT, MAX_METADATA_SEARCH_LIMIT, group_foreign_keys,
+        metadata_search_limit,
     };
 
     #[test]

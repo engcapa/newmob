@@ -93,6 +93,7 @@ const file: OpenFileState = {
   loading: false,
   saving: false,
   dirty: false,
+  documentRevision: 0,
   error: null,
 };
 

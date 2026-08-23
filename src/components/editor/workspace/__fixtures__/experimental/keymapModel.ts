@@ -1,3 +1,4 @@
+// NON-PRODUCTION FIXTURE (experimental): moved out of production per §8.17.9 N12 — no production import permitted; see ./README.md in this directory
 /**
  * Keymap Scheme & Conflict Graph Model (E2.1 & E2.2).
  *
@@ -8,8 +9,8 @@
 import {
   DEFAULT_WORKSPACE_ACTIONS,
   type WorkspaceActionMetadata,
-} from "./workspaceActionRegistry";
-import { type KeyboardEventLike } from "./workspaceCommands";
+} from "../../workspaceActionRegistry";
+import { type KeyboardEventLike } from "../../workspaceCommands";
 
 export interface KeymapScheme {
   id: string;
@@ -154,6 +155,24 @@ export function detectKeybindingConflicts(
   }
 
   return conflicts;
+}
+
+export function resolveBinding(
+  scheme: KeymapScheme,
+  actionId: string,
+  _platform: "macos" | "windows" | "linux" = "windows",
+): string | null {
+  if (scheme.disabledActions.includes(actionId)) return null;
+  const list = scheme.bindings[actionId];
+  if (!list || list.length === 0) return null;
+  return list[0] ?? null;
+}
+
+export function findConflicts(
+  scheme: KeymapScheme,
+  actionCatalog: WorkspaceActionMetadata[] = DEFAULT_WORKSPACE_ACTIONS,
+): KeybindingConflict[] {
+  return detectKeybindingConflicts(scheme, actionCatalog);
 }
 
 /**

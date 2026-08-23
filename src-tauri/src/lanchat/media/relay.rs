@@ -16,17 +16,17 @@
 //! Decoding lives behind the `native-av` feature; without it the relay still
 //! runs (announcing peers from inbound traffic) but forwards no media payload.
 
-use std::collections::HashSet;
 #[cfg(feature = "native-av")]
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde::Serialize;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 use tungstenite::Message;
 
@@ -48,7 +48,12 @@ pub enum RelayControl {
     /// A peer's media stream is being torn down — drop its tile.
     PeerRemoved(String),
     /// A peer's media-state (mic/cam/screen) changed; forwarded verbatim.
-    PeerState { peer_id: String, mic: bool, cam: bool, screen: bool },
+    PeerState {
+        peer_id: String,
+        mic: bool,
+        cam: bool,
+        screen: bool,
+    },
 }
 
 /// Outbound text control messages (serialized to the webview as JSON).
@@ -58,13 +63,31 @@ enum WsText {
     #[serde(rename = "ready")]
     Ready { sample_rate: u32 },
     #[serde(rename = "peer-add")]
-    PeerAdd { #[serde(rename = "peerId")] peer_id: String, #[serde(rename = "hasVideo")] has_video: bool },
+    PeerAdd {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        #[serde(rename = "hasVideo")]
+        has_video: bool,
+    },
     #[serde(rename = "peer-remove")]
-    PeerRemove { #[serde(rename = "peerId")] peer_id: String },
+    PeerRemove {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+    },
     #[serde(rename = "level")]
-    Level { #[serde(rename = "peerId")] peer_id: String, level: f32 },
+    Level {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        level: f32,
+    },
     #[serde(rename = "peer-state")]
-    PeerState { #[serde(rename = "peerId")] peer_id: String, mic: bool, cam: bool, screen: bool },
+    PeerState {
+        #[serde(rename = "peerId")]
+        peer_id: String,
+        mic: bool,
+        cam: bool,
+        screen: bool,
+    },
 }
 
 /// Handle to a running relay: the port the webview connects to, a control sender,
@@ -98,7 +121,11 @@ pub async fn spawn_relay(
         }
     });
 
-    Ok(RelayHandle { ws_port, control_tx, cancel })
+    Ok(RelayHandle {
+        ws_port,
+        control_tx,
+        cancel,
+    })
 }
 
 async fn run_relay(
@@ -124,7 +151,11 @@ async fn run_relay(
     // Outbound pump: text + binary toward the webview.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
     let _ = out_tx.send(Message::Text(
-        serde_json::to_string(&WsText::Ready { sample_rate: PLAYBACK_SAMPLE_RATE }).unwrap().into(),
+        serde_json::to_string(&WsText::Ready {
+            sample_rate: PLAYBACK_SAMPLE_RATE,
+        })
+        .unwrap()
+        .into(),
     ));
 
     let last_seen = Arc::new(AsyncMutex::new(Instant::now()));
@@ -257,7 +288,11 @@ const LEVEL_REPORT_EVERY: u32 = 5;
 
 /// Handle one inbound media frame: announce the peer to the webview on first
 /// sight, then decode + forward the payload (audio now; video in Phase 3/4).
-fn handle_inbound(peers: &mut PeerDecoders, out_tx: &UnboundedSender<Message>, inbound: InboundMedia) {
+fn handle_inbound(
+    peers: &mut PeerDecoders,
+    out_tx: &UnboundedSender<Message>,
+    inbound: InboundMedia,
+) {
     let InboundMedia { peer_id, frame } = inbound;
     if peers.announced.insert(peer_id.clone()) {
         let _ = out_tx.send(text(&WsText::PeerAdd {
@@ -313,7 +348,10 @@ fn decode_audio(
     if *since >= LEVEL_REPORT_EVERY {
         *since = 0;
         let rms = (pcm.iter().map(|s| s * s).sum::<f32>() / pcm.len() as f32).sqrt();
-        let _ = out_tx.send(text(&WsText::Level { peer_id: peer_id.to_string(), level: rms.min(1.0) }));
+        let _ = out_tx.send(text(&WsText::Level {
+            peer_id: peer_id.to_string(),
+            level: rms.min(1.0),
+        }));
     }
 }
 
@@ -349,5 +387,9 @@ fn decode_video(
 
 #[allow(dead_code)] // bin()/kinds are exercised by the decode path (native-av)
 fn _relay_decode_seam() {
-    let _ = (WS_BIN_AUDIO, WS_BIN_VIDEO, bin as fn(u8, &str, &[u8]) -> Message);
+    let _ = (
+        WS_BIN_AUDIO,
+        WS_BIN_VIDEO,
+        bin as fn(u8, &str, &[u8]) -> Message,
+    );
 }

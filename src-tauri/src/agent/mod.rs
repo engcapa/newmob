@@ -1,10 +1,10 @@
-pub mod capture;
 pub mod acp_bridge;
-pub mod context;
+pub mod capture;
 pub mod cc_bridge;
-pub mod codex_bridge;
 pub mod cmd_classify;
+pub mod codex_bridge;
 pub mod commands;
+pub mod context;
 pub mod local;
 pub mod mcp_bridge;
 pub mod safety;

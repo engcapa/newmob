@@ -18,17 +18,17 @@ use std::io::{self, Cursor, Read, Write};
 use std::rc::Rc;
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use thrift::protocol::{TBinaryInputProtocol, TBinaryOutputProtocol};
 
 use idl::{
     TColumn, TColumnFamilyDescriptor, TColumnValue, TDelete, TGet, THBaseServiceSyncClient,
-    TIllegalArgument, TIOError, TPut, TResult, TScan, TTableDescriptor, TTableName,
-    TTHBaseServiceSyncClient,
+    TIOError, TIllegalArgument, TPut, TResult, TScan, TTHBaseServiceSyncClient, TTableDescriptor,
+    TTableName,
 };
 
-use super::native::client::ResultRow;
 use super::HBaseConfig;
+use super::native::client::ResultRow;
 
 /// Concrete sync Thrift client over our one-shot HTTP channel.
 type ThriftClient =
@@ -56,7 +56,10 @@ impl ThriftSession {
         let url = format!("{scheme}://{host}:{}/", config.port);
 
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/x-thrift"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/x-thrift"),
+        );
         headers.insert(ACCEPT, HeaderValue::from_static("application/x-thrift"));
         // ACL auth headers (HTTP field names are case-insensitive, so the
         // lowercase form below is equivalent to the docs' ACCESSKEYID). Only
@@ -130,7 +133,10 @@ impl ThriftSession {
                 Err(e) => {
                     let msg = thrift_err(e);
                     if msg.contains("AccessDenied") || msg.contains("Access denied") {
-                        Ok("HBase Thrift2 connection OK (authenticated; limited ACL permissions)".to_string())
+                        Ok(
+                            "HBase Thrift2 connection OK (authenticated; limited ACL permissions)"
+                                .to_string(),
+                        )
                     } else {
                         Err(msg)
                     }
@@ -174,8 +180,10 @@ impl ThriftSession {
     ) -> Result<(), String> {
         let ctx = self.clone();
         let tn = self.table_name(table);
-        let columns: Vec<TColumnFamilyDescriptor> =
-            families.iter().map(|(name, attrs)| tcfd(name, attrs)).collect();
+        let columns: Vec<TColumnFamilyDescriptor> = families
+            .iter()
+            .map(|(name, attrs)| tcfd(name, attrs))
+            .collect();
         run(move || {
             let mut c = ctx.connect();
             c.create_table(ttd(tn, columns), Vec::new())
@@ -237,13 +245,14 @@ impl ThriftSession {
         let ctx = self.clone();
         let tn = self.table_name(table);
         let names: Vec<String> = families.iter().map(|(n, _)| n.clone()).collect();
-        let specs: Vec<TColumnFamilyDescriptor> =
-            families.iter().map(|(name, attrs)| tcfd(name, attrs)).collect();
+        let specs: Vec<TColumnFamilyDescriptor> = families
+            .iter()
+            .map(|(name, attrs)| tcfd(name, attrs))
+            .collect();
         run(move || {
             let mut c = ctx.connect();
             let desc = c.get_table_descriptor(tn.clone()).map_err(thrift_err)?;
-            let existing: Vec<String> =
-                families_of(&desc).into_iter().map(|(n, _)| n).collect();
+            let existing: Vec<String> = families_of(&desc).into_iter().map(|(n, _)| n).collect();
             for (i, cf) in specs.into_iter().enumerate() {
                 if existing.iter().any(|n| n == &names[i]) {
                     c.modify_column_family(tn.clone(), cf).map_err(thrift_err)?;
@@ -404,11 +413,19 @@ impl Write for HttpChannel {
             .headers(st.headers.clone())
             .body(body)
             .send()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Thrift HTTP request failed: {e}")))?;
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("Thrift HTTP request failed: {e}"),
+                )
+            })?;
         let status = resp.status();
-        let bytes = resp
-            .bytes()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("Thrift HTTP read failed: {e}")))?;
+        let bytes = resp.bytes().map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("Thrift HTTP read failed: {e}"),
+            )
+        })?;
         if !status.is_success() {
             return Err(io::Error::new(
                 io::ErrorKind::Other,
@@ -537,7 +554,9 @@ fn parse_column(col: &str) -> TColumn {
 fn split_column(col: &str) -> Result<(Vec<u8>, Vec<u8>), String> {
     match col.split_once(':') {
         Some((f, q)) => Ok((f.as_bytes().to_vec(), q.as_bytes().to_vec())),
-        None => Err(format!("put column must be 'family:qualifier', got '{col}'")),
+        None => Err(format!(
+            "put column must be 'family:qualifier', got '{col}'"
+        )),
     }
 }
 
@@ -656,6 +675,3 @@ fn tcfd(name: &str, attrs: &BTreeMap<String, String>) -> TColumnFamilyDescriptor
 
 #[cfg(test)]
 mod tests;
-
-
-

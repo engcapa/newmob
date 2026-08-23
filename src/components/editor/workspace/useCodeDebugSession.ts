@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useMountedRef } from "../../../hooks/useMountedRef";
 import {
@@ -79,6 +79,7 @@ import {
   type DebugMemoryReadResult,
   type DebugMemoryWriteRequest,
   type DebugMemoryWriteResult,
+  type DebugRequestToken,
   type DebugSessionState,
   type DebugStackFrame,
   type DebugStepAction,
@@ -124,9 +125,21 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export interface DebugActionResult {
+  kind: "applied" | "no-op" | "failed";
+  message?: string;
+}
+
+export interface WatchExpressionItem {
+  id: string;
+  expression: string;
+  enabled?: boolean;
+}
+
 export interface CodeDebugSession {
   /** Current session state (null when no debug session is active). */
   state: DebugSessionState | null;
+  /** Breakpoint configurations, keyed by file path. */
   breakpoints: BreakpointMap;
   /** Adapter binding state per path → line → runtime status (session-scoped). */
   breakpointRuntime: Record<string, Record<number, BreakpointRuntimeState>>;
@@ -156,6 +169,12 @@ export interface CodeDebugSession {
   availableExceptionFilters: DebugExceptionBreakpointFilter[];
   /** Persistent watch expressions (the panel evaluates them per stop). */
   watchExpressions: string[];
+  /** Structured watch items with stable IDs. */
+  watchItems: WatchExpressionItem[];
+  /** Monotonically increasing epoch bumped on every debug stop event. */
+  stopEpoch: number;
+  /** Stepping action in-flight status. */
+  isStepping: boolean;
   /** IDEA "Mute Breakpoints": keep them listed but stop arming them. */
   breakpointsMuted: boolean;
   setBreakpointsMuted: (muted: boolean) => void;
@@ -210,9 +229,9 @@ export interface CodeDebugSession {
     options: Partial<Pick<DebugExceptionBreakpointRule, "enabled" | "path" | "breakMode">>,
   ) => void;
   removeExceptionBreakpointRule: (ruleId: string) => void;
-  addWatchExpression: (expr: string) => void;
-  removeWatchExpression: (index: number) => void;
-  step: (action: DebugStepAction) => void;
+  addWatchExpression: (expr: string) => string | void;
+  removeWatchExpression: (target: number | string) => void;
+  step: (action: DebugStepAction) => Promise<DebugActionResult>;
   /** Continue to a line via a transient breakpoint (IDEA Run to Cursor). */
   runToCursor: (path: string, line: number) => void;
   /** Show another thread's stack while stopped. */
@@ -242,6 +261,8 @@ export interface CodeDebugSession {
   logConsole: (category: string, text: string) => void;
   /** Empty the console without touching the session. */
   clearConsole: () => void;
+  /** Generation counter incremented on clearConsole and session changes to prevent late callback resurrections. */
+  consoleGeneration: number;
   /**
    * Surface a launch/pre-launch failure in the Debug panel (not just the status
    * bar) so a debug attempt that dies before a session exists is visible rather
@@ -256,10 +277,10 @@ export interface CodeDebugSession {
    * placeholder the whole time and the click looks ignored.
    */
   reportStartupProgress: (message: string) => void;
-  /** Fetch variables for a `variablesReference` (D4 lazy tree). */
-  fetchVariables: (variablesReference: number) => Promise<unknown>;
-  /** Fetch scopes for a stack frame (D4). */
-  fetchScopes: (frameId: number) => Promise<unknown>;
+  /** Fetch variables for a `variablesReference` (D4/D8.4 token-guarded). */
+  fetchVariables: (variablesReference: number, token?: DebugRequestToken) => Promise<unknown>;
+  /** Fetch scopes for a stack frame (D4/D8.4 token-guarded). */
+  fetchScopes: (frameId: number, token?: DebugRequestToken) => Promise<unknown>;
   /**
    * Fetch a library / decompiled frame's source text (DAP `source`), so a stack
    * frame outside the workspace still opens — IDEA's decompiled-source view.
@@ -795,13 +816,30 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   >({});
   const [capabilities, setCapabilities] = useState<Record<string, unknown>>({});
   const [availableFilters, setAvailableFilters] = useState<DebugExceptionBreakpointFilter[]>([]);
-  const [watchExpressions, setWatchExpressions] = useState<string[]>(() => readWatches(workspaceInstanceId));
+  const [watchItems, setWatchItems] = useState<WatchExpressionItem[]>(() => {
+    let counter = 0;
+    return readWatches(workspaceInstanceId).map((expr) => ({
+      id: `watch-${Date.now()}-${++counter}`,
+      expression: expr,
+      enabled: true,
+    }));
+  });
+  const watchExpressions = useMemo(() => watchItems.map((w) => w.expression), [watchItems]);
+  const [isStepping, setIsStepping] = useState(false);
   const [canRestart, setCanRestart] = useState(false);
   const [breakpointsMuted, setBreakpointsMutedState] = useState(false);
   const [frameVariables, setFrameVariables] = useState<Record<string, string>>({});
   const [sessions, setSessions] = useState<DebugSessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [consoleGeneration, setConsoleGeneration] = useState(0);
+  const consoleGenerationRef = useRef(0);
 
+  const bumpConsoleGeneration = useCallback(() => {
+    consoleGenerationRef.current += 1;
+    setConsoleGeneration(consoleGenerationRef.current);
+  }, []);
+
+  const stepInFlightRef = useRef<Promise<DebugActionResult> | null>(null);
   const sessionsRef = useRef(new Map<string, DebugSessionRecord>());
   const abortedScopesRef = useRef(new Set<string>());
   const activeSessionIdRef = useRef<string | null>(null);
@@ -1005,8 +1043,9 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   }, [updateActiveState]);
 
   const clearConsole = useCallback(() => {
+    bumpConsoleGeneration();
     updateActiveState((prev) => (prev.output.length > 0 ? { ...prev, output: [] } : prev));
-  }, [updateActiveState]);
+  }, [bumpConsoleGeneration, updateActiveState]);
 
   /**
    * Show a launch failure in the Debug panel. When a session is already present
@@ -1778,8 +1817,12 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
         ...record.state,
         status: "terminated",
         stoppedThreadId: null,
+        stoppedReason: null,
         selectedThreadId: null,
         selectedFrameId: null,
+        // Stop clears the inspectable view of the debuggee: no threads, no
+        // frames, no exception banner. Only the console history survives.
+        threads: [],
         frames: [],
         exceptionInfo: null,
       };
@@ -2575,50 +2618,92 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   const addWatchExpression = useCallback((expr: string) => {
     const trimmed = expr.trim();
     if (!trimmed) return;
-    setWatchExpressions((current) => {
-      if (current.includes(trimmed)) return current;
-      const next = [...current, trimmed];
-      persistWatches(next);
+    const newId = `watch-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const newItem: WatchExpressionItem = {
+      id: newId,
+      expression: trimmed,
+      enabled: true,
+    };
+    setWatchItems((current) => {
+      if (current.some((item) => item.expression === trimmed)) {
+        return current;
+      }
+      const next = [...current, newItem];
+      persistWatches(next.map((w) => w.expression));
+      return next;
+    });
+    return newId;
+  }, [persistWatches]);
+
+  const removeWatchExpression = useCallback((target: number | string) => {
+    setWatchItems((current) => {
+      let next: WatchExpressionItem[];
+      if (typeof target === "number") {
+        next = current.filter((_, i) => i !== target);
+      } else {
+        const hasIdMatch = current.some((item) => item.id === target);
+        if (hasIdMatch) {
+          next = current.filter((item) => item.id !== target);
+        } else {
+          const idx = current.findIndex((item) => item.expression === target);
+          if (idx !== -1) {
+            next = [...current.slice(0, idx), ...current.slice(idx + 1)];
+          } else {
+            next = current;
+          }
+        }
+      }
+      persistWatches(next.map((w) => w.expression));
       return next;
     });
   }, [persistWatches]);
 
-  const removeWatchExpression = useCallback((index: number) => {
-    setWatchExpressions((current) => {
-      const next = current.filter((_, i) => i !== index);
-      persistWatches(next);
-      return next;
-    });
-  }, [persistWatches]);
-
-  const step = useCallback((action: DebugStepAction) => {
+  const step = useCallback((action: DebugStepAction): Promise<DebugActionResult> => {
+    if (stepInFlightRef.current) {
+      return Promise.resolve({ kind: "no-op", message: "Stepping action already in flight" });
+    }
     const id = sessionIdRef.current;
     const record = id ? sessionsRef.current.get(id) : undefined;
-    if (!id || !record) return;
-    void (async () => {
-      if (action === "pause") {
-        // `pause` requires a threadId; while running we may not have one yet.
-        let tid = stateRef.current?.threads[0]?.id ?? null;
-        if (tid == null) {
-          tid = parseThreads(await dapSendRequest(id, "threads").catch(() => null))[0]?.id ?? null;
-        }
-        if (tid == null) return;
-        await dapSendRequest(id, "pause", { threadId: tid }).catch(() => {});
-        return; // The adapter answers with a `stopped` event.
-      }
-      const epoch = record.stopEpoch;
-      const tid = stateRef.current?.selectedThreadId ?? stateRef.current?.stoppedThreadId;
+    if (!id || !record) {
+      return Promise.resolve({ kind: "no-op", message: "No active debug session" });
+    }
+
+    setIsStepping(true);
+    const p = (async (): Promise<DebugActionResult> => {
       try {
+        if (action === "pause") {
+          let tid = stateRef.current?.threads[0]?.id ?? null;
+          if (tid == null) {
+            tid = parseThreads(await dapSendRequest(id, "threads").catch(() => null))[0]?.id ?? null;
+          }
+          if (tid == null) {
+            return { kind: "no-op", message: "No threads found to pause" };
+          }
+          await dapSendRequest(id, "pause", { threadId: tid });
+          return { kind: "applied" };
+        }
+        const epoch = record.stopEpoch;
+        const tid = stateRef.current?.selectedThreadId ?? stateRef.current?.stoppedThreadId;
         await dapSendRequest(id, stepCommandFor(action), tid != null ? { threadId: tid } : {});
-        // Adapters need not emit `continued` after an explicit resume/step —
-        // flip to running optimistically unless a newer stop already landed.
         if (mountedRef.current && record.stopEpoch === epoch) {
           updateSessionState(id, (prev) => (prev.status === "stopped" ? markResumed(prev) : prev));
         }
-      } catch {
-        // Request failed (e.g. already running): keep the current state.
+        return { kind: "applied" };
+      } catch (err) {
+        return {
+          kind: "failed",
+          message: err instanceof Error ? err.message : String(err),
+        };
+      } finally {
+        stepInFlightRef.current = null;
+        if (mountedRef.current) {
+          setIsStepping(false);
+        }
       }
     })();
+
+    stepInFlightRef.current = p;
+    return p;
   }, [updateSessionState]);
 
   const runToCursor = useCallback((path: string, line: number) => {
@@ -2708,10 +2793,19 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     const id = sessionIdRef.current;
     const current = stateRef.current;
     if (!id) return { value: "", variablesReference: 0, type: null };
+    const reqGen = consoleGenerationRef.current;
+    const reqSessionId = id;
     const frameId = current?.selectedFrameId ?? current?.frames[0]?.id;
     try {
-      return parseEvaluate(await dapSendRequest(id, "evaluate", { expression, frameId, context }));
+      const resp = await dapSendRequest(id, "evaluate", { expression, frameId, context });
+      if (!mountedRef.current || consoleGenerationRef.current !== reqGen || sessionIdRef.current !== reqSessionId) {
+        return { value: "", variablesReference: 0, type: null };
+      }
+      return parseEvaluate(resp);
     } catch (error) {
+      if (!mountedRef.current || consoleGenerationRef.current !== reqGen || sessionIdRef.current !== reqSessionId) {
+        return { value: "", variablesReference: 0, type: null };
+      }
       return {
         value: error instanceof Error ? error.message : String(error),
         variablesReference: 0,
@@ -2803,12 +2897,17 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     const id = sessionIdRef.current;
     const current = stateRef.current;
     if (!id || !expression.trim() || current?.status !== "stopped") return null;
+    const reqGen = consoleGenerationRef.current;
+    const reqSessionId = id;
     const frameId = current.selectedFrameId ?? current.frames[0]?.id;
     if (frameId == null) return null;
     // A hover over a non-expression (a keyword, a type name) legitimately fails;
     // resolve to null so the editor simply shows no tooltip.
     const body = await dapSendRequest(id, "evaluate", { expression, frameId, context: "hover" })
       .catch(() => null);
+    if (!mountedRef.current || consoleGenerationRef.current !== reqGen || sessionIdRef.current !== reqSessionId) {
+      return null;
+    }
     if (body == null) return null;
     const result = parseEvaluate(body);
     return result.value ? result : null;
@@ -2835,16 +2934,30 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     }
   }, [logConsole]);
 
-  const fetchVariables = useCallback(async (variablesReference: number): Promise<unknown> => {
-    const id = sessionIdRef.current;
+  const fetchVariables = useCallback(async (variablesReference: number, token?: DebugRequestToken): Promise<unknown> => {
+    const id = token?.sessionId ?? sessionIdRef.current;
     if (!id) return { variables: [] };
-    return dapSendRequest(id, "variables", { variablesReference }).catch(() => ({ variables: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { variables: [] };
+    }
+    const res = await dapSendRequest(id, "variables", { variablesReference }).catch(() => ({ variables: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { variables: [] };
+    }
+    return res;
   }, []);
 
-  const fetchScopes = useCallback(async (frameId: number): Promise<unknown> => {
-    const id = sessionIdRef.current;
+  const fetchScopes = useCallback(async (frameId: number, token?: DebugRequestToken): Promise<unknown> => {
+    const id = token?.sessionId ?? sessionIdRef.current;
     if (!id) return { scopes: [] };
-    return dapSendRequest(id, "scopes", { frameId }).catch(() => ({ scopes: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { scopes: [] };
+    }
+    const res = await dapSendRequest(id, "scopes", { frameId }).catch(() => ({ scopes: [] }));
+    if (token && (token.sessionId !== sessionIdRef.current || token.stopEpoch !== stopEpochRef.current)) {
+      return { scopes: [] };
+    }
+    return res;
   }, []);
 
   const fetchSource = useCallback(async (sourceReference: number): Promise<string | null> => {
@@ -2861,8 +2974,9 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
   }, []);
 
   const terminate = useCallback(() => {
+    bumpConsoleGeneration();
     void terminateSessions();
-  }, [terminateSessions]);
+  }, [bumpConsoleGeneration, terminateSessions]);
 
   return {
     state,
@@ -2881,10 +2995,13 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     capabilities,
     availableExceptionFilters: availableFilters,
     watchExpressions,
+    watchItems,
+    isStepping,
     breakpointsMuted,
     setBreakpointsMuted,
     removeAllBreakpoints,
     frameVariables,
+    stopEpoch: state?.stopEpoch ?? stopEpochRef.current ?? 0,
     sessions,
     activeSessionId,
     selectSession,
@@ -2925,6 +3042,7 @@ export function useCodeDebugSession(workspaceInstanceId: string): CodeDebugSessi
     setVariable,
     logConsole,
     clearConsole,
+    consoleGeneration,
     reportStartupFailure,
     reportStartupProgress,
     fetchVariables,

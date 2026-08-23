@@ -102,6 +102,47 @@
 - `[data-testid="capture-stop-scroll"]` — interactive [optional] — F4.13.stop-scroll-pill
 - `[data-testid="capture-stop-gif"]` — interactive [optional] — F4.13.stop-gif-pill
 
+## code-workspace/appearance-and-actions (F25.3)
+
+- `[data-testid="workspace-editor-appearance-settings-dialog"]` — display [optional] — F25.3.appearance-dialog
+- `[data-testid="workspace-editor-appearance-close"]` — interactive [optional] — F25.3.appearance-close
+- `[data-testid="workspace-editor-appearance-font-family"]` — interactive [optional] — F25.3.appearance-font-family
+- `[data-testid="workspace-editor-appearance-font-size-px"]` — interactive [optional] — F25.3.appearance-font-size-px
+- `[data-testid="workspace-editor-appearance-line-height"]` — interactive [optional] — F25.3.appearance-line-height
+- `[data-testid="workspace-editor-appearance-ligatures"]` — interactive [optional] — F25.3.appearance-ligatures
+- `[data-testid="workspace-editor-appearance-color-scheme-id"]` — interactive [optional] — F25.3.appearance-color-scheme-id
+- `[data-testid="workspace-editor-appearance-high-contrast"]` — interactive [optional] — F25.3.appearance-high-contrast
+- `[data-testid="workspace-editor-appearance-zoom-scope"]` — interactive [optional] — F25.3.appearance-zoom-scope
+- `[data-testid="workspace-editor-appearance-soft-wrap-patterns"]` — interactive [optional] — F25.3.appearance-soft-wrap-patterns
+- `[data-testid="workspace-editor-appearance-soft-wrap-use-original-indent"]` — interactive [optional] — F25.3.appearance-soft-wrap-use-original-indent
+- `[data-testid="workspace-editor-appearance-soft-wrap-additional-indent"]` — interactive [optional] — F25.3.appearance-soft-wrap-additional-indent
+- `[data-testid="workspace-editor-appearance-soft-wrap-show-markers"]` — interactive [optional] — F25.3.appearance-soft-wrap-show-markers
+- `[data-testid="workspace-editor-appearance-virtual-space-after-line-end"]` — interactive [optional] — F25.3.appearance-virtual-space-after-line-end
+- `[data-testid="workspace-editor-appearance-virtual-space-at-file-bottom"]` — interactive [optional] — F25.3.appearance-virtual-space-at-file-bottom
+- `[data-testid="workspace-editor-appearance-breadcrumbs-visible"]` — interactive [optional] — F25.3.appearance-breadcrumbs-visible
+- `[data-testid="workspace-editor-appearance-breadcrumbs-placement"]` — interactive [optional] — F25.3.appearance-breadcrumbs-placement
+- `[data-testid="workspace-editor-appearance-breadcrumbs-languages"]` — interactive [optional] — F25.3.appearance-breadcrumbs-languages
+- `[data-testid="workspace-editor-appearance-reset"]` — interactive [optional] — F25.3.appearance-reset
+- `[data-testid="workspace-editor-appearance-cancel"]` — interactive [optional] — F25.3.appearance-cancel
+- `[data-testid="workspace-editor-appearance-apply"]` — interactive [optional] — F25.3.appearance-apply
+- `[data-testid="workspace-intelligence-settings-dialog"]` — display [optional] — F25.3.intelligence-dialog
+- `[data-testid="workspace-quick-doc-hover-enabled"]` — interactive [optional] — F25.3.intelligence-quick-doc-hover-enabled
+- `[data-testid="workspace-quick-doc-hover-delay"]` — interactive [optional] — F25.3.intelligence-quick-doc-hover-delay
+- `[data-testid="workspace-quick-doc-default-target"]` — interactive [optional] — F25.3.intelligence-quick-doc-default-target
+- `[data-testid="workspace-parameter-info-auto-popup"]` — interactive [optional] — F25.3.intelligence-parameter-info-auto-popup
+- `[data-testid="workspace-parameter-info-delay"]` — interactive [optional] — F25.3.intelligence-parameter-info-delay
+- `[data-testid="workspace-parameter-info-full-signatures"]` — interactive [optional] — F25.3.intelligence-parameter-info-full-signatures
+- `[data-testid="workspace-intelligence-settings-reset"]` — interactive [optional] — F25.3.intelligence-reset
+- `[data-testid="workspace-intelligence-settings-cancel"]` — interactive [optional] — F25.3.intelligence-cancel
+- `[data-testid="workspace-intelligence-settings-apply"]` — interactive [optional] — F25.3.intelligence-apply
+- `[data-testid="workspace-tab-switcher"]` — display [optional] — F25.3.tab-switcher
+- `[data-testid="keymap-cheatsheet-dialog"]` — display [optional] — F25.3.keymap-cheatsheet
+- `[data-testid="editor-context-cut"]` — interactive [optional] — F25.3.context-cut
+- `[data-testid="editor-context-copy"]` — interactive [optional] — F25.3.context-copy
+- `[data-testid="editor-context-paste"]` — interactive [optional] — F25.3.context-paste
+- `[data-testid="editor-context-goto-definition"]` — interactive [optional] — F25.3.context-goto-definition
+- `[data-testid="editor-context-format"]` — interactive [optional] — F25.3.context-format
+
 ## code-workspace/execution (F25.1)
 
 - `[data-testid="sidebar-tool-code-workspace"]` — interactive — F25.1.sidebar-entry
@@ -150,7 +191,7 @@
 - `[data-testid^="tests-result-"]` — display [optional] — F25.1.tests-result
 - `[data-testid^="tests-rerun-"]` — interactive [optional] — F25.1.tests-rerun
 - `[data-testid^="tests-failure-details-"]` — interactive [optional] — F25.1.tests-failure-details
-- `[data-testid="code-workspace-debug-panel"]` — display — F25.1.debug-panel
+- `[data-testid="debug-panel"]` — display — F25.1.debug-panel
 - `[data-testid="debug-active-configuration"]` — interactive [optional] — F25.1.debug-active-configuration
 - `[data-testid="debug-configuration-diagnostic"]` — display [optional] — F25.1.debug-configuration-diagnostic
 - `[data-testid="debug-active-session"]` — interactive [optional] — F25.1.debug-active-session

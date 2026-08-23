@@ -2,9 +2,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   WORKSPACE_RECOVERY_MAX_ENTRIES,
   WORKSPACE_RECOVERY_STORAGE_PREFIX,
+  hasUnverifiedUnknownDiskEffect,
+  listDiskEffectLedgerEntries,
   readWorkspaceRecoveryEntries,
   reconcileWorkspaceRecoveryEntries,
+  recordDiskEffectLedgerEntry,
   removeWorkspaceRecoveryEntry,
+  resolveDiskEffectLedgerEntry,
   writeWorkspaceRecoveryEntries,
   type WorkspaceRecoveryEntry,
 } from "./workspaceRecovery";
@@ -42,6 +46,7 @@ function file(key: string, dirty: boolean, text = "local") {
     loading: false,
     saving: false,
     dirty,
+    documentRevision: 0,
     error: null,
   };
 }
@@ -82,5 +87,64 @@ describe("workspace recovery persistence", () => {
     expect(readWorkspaceRecoveryEntries("ws")).toHaveLength(WORKSPACE_RECOVERY_MAX_ENTRIES);
     const next = removeWorkspaceRecoveryEntry("ws", "f-0");
     expect(next.some((item) => item.key === "f-0")).toBe(false);
+  });
+});
+
+describe("§8.18.1 disk-effect recovery ledger (v3)", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  it("records, scopes and clears unknown-effect rows per workspace/path", () => {
+    recordDiskEffectLedgerEntry({
+      workspaceId: "ws-ledger",
+      transactionId: "tx-u1",
+      path: "/repo/app/a.ts",
+      fileIdentity: "root:app:a.ts",
+      expectedOldHash: "old",
+      intendedNewHash: null,
+      observedHash: null,
+      diskEffect: "unknown",
+      createdAt: 1,
+      lastVerifiedAt: null,
+    });
+    recordDiskEffectLedgerEntry({
+      workspaceId: "ws-ledger",
+      transactionId: "tx-u2",
+      path: "/repo/app/b.ts",
+      fileIdentity: "root:app:b.ts",
+      expectedOldHash: "old2",
+      intendedNewHash: null,
+      observedHash: "zzz",
+      diskEffect: "unknown",
+      createdAt: 2,
+      lastVerifiedAt: 3,
+    });
+
+    expect(listDiskEffectLedgerEntries("ws-ledger")).toHaveLength(2);
+    // Unverified unknown blocks auto-retry only for the exact path.
+    expect(hasUnverifiedUnknownDiskEffect("ws-ledger", "/repo/app/a.ts")).toBe(true);
+    expect(hasUnverifiedUnknownDiskEffect("ws-ledger", "/repo/app/b.ts")).toBe(false);
+    expect(hasUnverifiedUnknownDiskEffect("ws-ledger", "/repo/other/a.ts")).toBe(false);
+
+    // Clearing one transaction/path never touches the other row.
+    resolveDiskEffectLedgerEntry("ws-ledger", "tx-u1", "/repo/app/a.ts");
+    const rest = listDiskEffectLedgerEntries("ws-ledger");
+    expect(rest).toHaveLength(1);
+    expect(rest[0].transactionId).toBe("tx-u2");
+
+    // Other workspaces are untouched by either operation.
+    expect(listDiskEffectLedgerEntries("ws-other")).toHaveLength(0);
+  });
+
+  it("normalizes legacy rows without an effect fact as unknown (v2 migration)", () => {
+    window.localStorage.setItem(
+      `${WORKSPACE_RECOVERY_STORAGE_PREFIX.replace(/recovery\.v1$/, "recovery.diskEffects.v3")}:ws-mig`,
+      JSON.stringify([{ transactionId: "tx-legacy", path: "/p/f.txt" }]),
+    );
+    const entries = listDiskEffectLedgerEntries("ws-mig");
+    expect(entries).toHaveLength(1);
+    expect(entries[0].diskEffect).toBe("unknown");
+    expect(entries[0].lastVerifiedAt).toBeNull();
   });
 });

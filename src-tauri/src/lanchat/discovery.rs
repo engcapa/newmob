@@ -12,19 +12,23 @@
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use tauri::{AppHandle, Emitter};
 
 use crate::lanchat::protocol::{self, PeerRecord, PresenceStatus};
-use crate::lanchat::{events, LanChatState};
+use crate::lanchat::{LanChatState, events};
 
 /// Short, stable suffix derived from the node id (used in instance/host names).
 fn short_id(node_id: &str) -> String {
-    node_id.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect()
+    node_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect()
 }
 
 /// Non-loopback IPv4 addresses on this host (multi-NIC aware).
@@ -362,7 +366,10 @@ mod tests {
             Some(protocol::PROTOCOL_VERSION.to_string())
         );
         assert_eq!(info.get_property_val_str("caps"), Some("text"));
-        assert!(info.get_property_val_str("id").is_some_and(|v| !v.is_empty()));
+        assert!(
+            info.get_property_val_str("id")
+                .is_some_and(|v| !v.is_empty())
+        );
         assert!(info.get_fullname().ends_with("._taomni-lan._tcp.local."));
 
         std::fs::remove_dir_all(&dir).ok();

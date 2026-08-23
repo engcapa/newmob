@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { Crosshair } from "lucide-react";
 import type { CodeDebugSession } from "../../useCodeDebugSession";
 import {
@@ -24,6 +24,9 @@ export function useDebugVariables(
   const [watchNodes, setWatchNodes] = useState<VarNode[]>([]);
   const [watchTick, setWatchTick] = useState(0);
   const [watchInput, setWatchInput] = useState("");
+  const [filterQuery, setFilterQuery] = useState("");
+  const [sortMode, setSortMode] = useState<"natural" | "alphabetical">("natural");
+  const previousValuesRef = useRef<Map<string, string>>(new Map());
   const [edit, setEdit] = useState<VarEditState>({ node: null, value: "" });
   const [addingDataBreakpointKey, setAddingDataBreakpointKey] = useState<string | null>(null);
   const [preferredDataBreakpointMode, setPreferredDataBreakpointMode] = useState("");
@@ -63,7 +66,7 @@ export function useDebugVariables(
     setAddingDataBreakpointKey((current) => current === targetKey ? null : current);
   }, [dataBreakpointMode, selectedFrameId, sessionAddDataBreakpoint]);
 
-  // On each stop, load the selected frame's scopes -> variables (D4).
+  // On each stop, load the selected frame's scopes -> variables (D4/D8).
   useEffect(() => {
     setEdit({ node: null, value: "" });
     if (selectedFrameId == null) {
@@ -71,8 +74,21 @@ export function useDebugVariables(
       return;
     }
     let cancelled = false;
+    const curSessionId = debug.state?.sessionId;
+    const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
+
     void (async () => {
-      const scopesBody = await fetchScopes(selectedFrameId);
+      const scopeToken = {
+        sessionId: curSessionId ?? "unknown",
+        stopEpoch: curStopEpoch,
+        frameId: selectedFrameId,
+        requestId: `scopes-${selectedFrameId}-${curStopEpoch}`,
+      };
+      const scopesBody = await fetchScopes(selectedFrameId, scopeToken);
+      if (cancelled) return;
+      if (curSessionId && debug.state?.sessionId !== curSessionId) return;
+      if ((debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) !== curStopEpoch) return;
+
       const scopes = (scopesBody && typeof scopesBody === "object"
         ? (scopesBody as { scopes?: unknown }).scopes
         : null);
@@ -85,8 +101,24 @@ export function useDebugVariables(
           })
         : [];
       const roots: VarNode[] = [];
+      const currentValues = new Map<string, string>();
       for (const scope of refs) {
-        const vars = parseVariables(await fetchVariables(scope.ref), scope.ref);
+        if (cancelled) return;
+        const varToken = {
+          sessionId: curSessionId ?? "unknown",
+          stopEpoch: curStopEpoch,
+          frameId: selectedFrameId,
+          variablesReference: scope.ref,
+          requestId: `vars-${scope.ref}-${curStopEpoch}`,
+        };
+        const rawVars = parseVariables(await fetchVariables(scope.ref, varToken), scope.ref);
+        const vars = rawVars.map((v) => {
+          const key = `${scope.ref}:${v.name}`;
+          currentValues.set(key, v.value);
+          const prev = previousValuesRef.current.get(key);
+          const hasChanged = prev !== undefined && prev !== v.value;
+          return { ...v, hasChanged };
+        });
         roots.push({
           name: scope.name,
           value: "",
@@ -98,27 +130,45 @@ export function useDebugVariables(
           expanded: true,
         });
       }
-      if (!cancelled) setVariables(roots);
+      previousValuesRef.current = currentValues;
+      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || (debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) === curStopEpoch)) {
+        setVariables(roots);
+      }
     })();
     return () => { cancelled = true; };
-  }, [fetchScopes, fetchVariables, selectedFrameId]);
+  }, [fetchScopes, fetchVariables, selectedFrameId, debug.state?.sessionId, debug.state?.stopEpoch, debug.stopEpoch]);
 
-  // Re-evaluate watch expressions on each stop / frame change / edit.
-  const watchExpressions = debug.watchExpressions;
+  // Re-evaluate watch expressions on each stop / frame change / edit (D8).
+  const watchItems = debug.watchItems ?? debug.watchExpressions.map((e, i) => ({ id: `watch-${i}`, expression: e }));
   useEffect(() => {
     let cancelled = false;
+    const curSessionId = debug.state?.sessionId;
+    const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
+
     if (!stopped || selectedFrameId == null) {
-      setWatchNodes(watchExpressions.map((expr) => ({
-        name: expr, value: "", type: null, variablesReference: 0, parentRef: 0, children: null, expanded: false,
+      setWatchNodes(watchItems.map((item) => ({
+        name: item.expression,
+        watchId: item.id,
+        value: "",
+        type: null,
+        variablesReference: 0,
+        parentRef: 0,
+        children: null,
+        expanded: false,
         dataBreakpointExpression: true,
       })));
       return;
     }
     void (async () => {
-      const next = await Promise.all(watchExpressions.map(async (expr) => {
-        const result = await evaluate(expr, "watch");
+      const next = await Promise.all(watchItems.map(async (item) => {
+        const result = await evaluate(item.expression, "watch");
+        const key = `watch:${item.id}`;
+        const prev = previousValuesRef.current.get(key);
+        previousValuesRef.current.set(key, result.value);
+        const hasChanged = prev !== undefined && prev !== result.value;
         return {
-          name: expr,
+          name: item.expression,
+          watchId: item.id,
           value: result.value,
           type: result.type,
           variablesReference: result.variablesReference,
@@ -126,19 +176,68 @@ export function useDebugVariables(
           dataBreakpointExpression: true,
           children: null,
           expanded: false,
+          hasChanged,
         };
       }));
-      if (!cancelled) setWatchNodes(next);
+      if (!cancelled && (!curSessionId || debug.state?.sessionId === curSessionId) && (curStopEpoch == null || (debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) === curStopEpoch)) {
+        setWatchNodes(next);
+      }
     })();
     return () => { cancelled = true; };
-  }, [evaluate, stopped, selectedFrameId, watchExpressions, watchTick]);
+  }, [evaluate, stopped, selectedFrameId, watchItems, watchTick, debug.state?.sessionId, debug.state?.stopEpoch, debug.stopEpoch]);
+
+  const filterAndSort = useCallback((nodes: VarNode[]): VarNode[] => {
+    let result = nodes;
+    if (filterQuery.trim()) {
+      const q = filterQuery.trim().toLowerCase();
+      const filterRecursive = (list: VarNode[]): VarNode[] => {
+        return list.flatMap((n) => {
+          const matches = n.name.toLowerCase().includes(q) || n.value.toLowerCase().includes(q);
+          const filteredChildren = n.children ? filterRecursive(n.children) : null;
+          if (matches || (filteredChildren && filteredChildren.length > 0)) {
+            return [{
+              ...n,
+              expanded: true,
+              children: filteredChildren ?? n.children,
+            }];
+          }
+          return [];
+        });
+      };
+      result = filterRecursive(result);
+    }
+    if (sortMode === "alphabetical") {
+      const sortRecursive = (list: VarNode[]): VarNode[] => {
+        return [...list].sort((a, b) => a.name.localeCompare(b.name)).map((n) => ({
+          ...n,
+          children: n.children ? sortRecursive(n.children) : null,
+        }));
+      };
+      result = sortRecursive(result);
+    }
+    return result;
+  }, [filterQuery, sortMode]);
+
+  const displayedVariables = useMemo(() => filterAndSort(variables), [filterAndSort, variables]);
+  const displayedWatchNodes = useMemo(() => filterAndSort(watchNodes), [filterAndSort, watchNodes]);
 
   const makeExpandHandler = useCallback((
     setNodes: React.Dispatch<React.SetStateAction<VarNode[]>>,
   ) => (node: VarNode) => {
     setNodes((current) => updateNode(current, node, (n) => ({ ...n, expanded: !n.expanded })));
     if (!node.expanded && node.children === null && node.variablesReference > 0) {
-      void fetchVariables(node.variablesReference).then((body) => {
+      const curSessionId = debug.state?.sessionId;
+      const curStopEpoch = debug.state?.stopEpoch ?? debug.stopEpoch ?? 0;
+      const expandToken = {
+        sessionId: curSessionId ?? "unknown",
+        stopEpoch: curStopEpoch,
+        frameId: selectedFrameId ?? undefined,
+        variablesReference: node.variablesReference,
+        requestId: `vars-child-${node.variablesReference}-${curStopEpoch}`,
+      };
+      void fetchVariables(node.variablesReference, expandToken).then((body) => {
+        if (curSessionId && debug.state?.sessionId !== curSessionId) return;
+        if ((debug.state?.stopEpoch ?? debug.stopEpoch ?? 0) !== curStopEpoch) return;
         const children = parseVariables(body, node.variablesReference);
         setNodes((current) => updateNode(current, node, (n) => ({ ...n, children, expanded: true })));
       });
@@ -181,8 +280,8 @@ export function useDebugVariables(
     debug.addWatchExpression(expr);
   }, [debug, watchInput]);
 
-  const removeWatch = useCallback((index: number) => {
-    debug.removeWatchExpression(index);
+  const removeWatch = useCallback((target: number | string) => {
+    debug.removeWatchExpression(target);
   }, [debug]);
 
   const variableMenu = useContextMenu();
@@ -237,6 +336,12 @@ export function useDebugVariables(
   return {
     variables,
     watchNodes,
+    displayedVariables,
+    displayedWatchNodes,
+    filterQuery,
+    setFilterQuery,
+    sortMode,
+    setSortMode,
     watchInput,
     setWatchInput,
     edit,

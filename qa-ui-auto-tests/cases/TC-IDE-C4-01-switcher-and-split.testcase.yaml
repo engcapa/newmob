@@ -1,0 +1,26 @@
+id: TC-IDE-C4-01
+title: "Switcher renders tool windows alone; split controls present"
+description: |
+  §8.18.10 C4 gate (browser portion). Reaches the code workspace through the
+  sidebar tool rail and verifies the split control renders. Splitting needs an
+  open buffer, so the interactive flow lives in component tests and the
+  native manifest entry for this case id.
+covers: [F25.5]
+tags: [code-workspace, ide-c4, switcher, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 90
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"tab-bar\"]"
+  # Leave the welcome surface so the sidebar tool strip is mounted.
+  - click: "[data-testid=\"welcome-open-local-terminal\"]"
+  - click: "[data-testid=\"side-tab-tools\"]"
+  - wait_for: "[data-testid=\"sidebar-tool-code-workspace\"]"
+  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
+  - wait_for: "[data-testid=\"code-workspace-tab\"]"
+  # Split controls exist on the editor toolbar. Clicking them requires an
+  # open buffer (disabled otherwise), so the actual split/teardown flow is
+  # pinned by CodeWorkspaceTab.test.tsx and the native platform run.
+  - assert_visible: '[data-testid="code-workspace-split-right"]'
+  - screenshot: tc-ide-c4-01-toolbar.png

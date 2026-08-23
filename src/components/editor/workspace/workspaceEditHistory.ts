@@ -116,6 +116,7 @@ export interface WorkspaceEditPathSnapshot {
   /** Charset metadata used by the shell when replay writes a closed file. */
   encoding?: string;
   bom?: boolean;
+  eol?: "lf" | "crlf" | "cr";
 }
 
 function fullDocumentEnd(text: string): { line: number; character: number } {

@@ -3,8 +3,8 @@ use super::{
 };
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -548,7 +548,7 @@ impl LlmRouter {
 
 use super::anthropic::AnthropicProvider;
 use super::openai_compat::OpenAiCompatProvider;
-use crate::ai::config::{resolve_provider_proxy_url, AiConfig, LlmConfig};
+use crate::ai::config::{AiConfig, LlmConfig, resolve_provider_proxy_url};
 
 fn task_kind_from_str(s: &str) -> Option<TaskKind> {
     Some(match s {

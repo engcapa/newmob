@@ -17,16 +17,34 @@ export async function executeCodeAction(
   hooks: CodeActionExecutionHooks,
 ): Promise<CodeActionExecutionResult> {
   let outcomes: WorkspaceEditApplyOutcome[] = [];
-  if (action.edit) {
-    outcomes = await hooks.applyEdit(action.edit);
+
+  let effectiveEdit = action.edit;
+  let effectiveCommand = action.command;
+
+  const isApplyEditCommand =
+    effectiveCommand === "_java.apply.workspaceEdit" ||
+    effectiveCommand === "java.apply.workspaceEdit" ||
+    effectiveCommand === "editor.action.applyWorkspaceEdit" ||
+    effectiveCommand === "applyWorkspaceEdit";
+
+  if (!effectiveEdit && isApplyEditCommand && Array.isArray(action.commandArguments)) {
+    const firstArg = action.commandArguments[0] as Record<string, unknown> | undefined;
+    if (firstArg && (firstArg.changes || firstArg.documentChanges || firstArg.documentEdits || firstArg.operations)) {
+      effectiveEdit = firstArg as unknown as LspWorkspaceEdit;
+      effectiveCommand = null;
+    }
+  }
+
+  if (effectiveEdit) {
+    outcomes = await hooks.applyEdit(effectiveEdit);
     if (outcomes.some((outcome) => outcome.status === "failed" || outcome.status === "skipped")) {
       return { status: "edit-failed", outcomes };
     }
   }
-  if (action.command) {
-    await hooks.executeCommand(action.command, action.commandArguments);
+  if (effectiveCommand) {
+    await hooks.executeCommand(effectiveCommand, action.commandArguments);
     return { status: "executed-command", outcomes };
   }
-  if (action.edit) return { status: "applied-edit", outcomes };
+  if (effectiveEdit) return { status: "applied-edit", outcomes };
   return { status: "empty", outcomes: [] };
 }

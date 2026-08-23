@@ -44,8 +44,7 @@ impl Tool for WebSearchTool {
         ToolDescriptor {
             name: "web_search",
             description: "在网络上搜索信息。每次调用前会向用户确认搜索关键词与提供方。",
-            params:
-                "query: string, freshness?: 'day'|'week'|'month', max_results?: number (default 5)",
+            params: "query: string, freshness?: 'day'|'week'|'month', max_results?: number (default 5)",
         }
     }
 

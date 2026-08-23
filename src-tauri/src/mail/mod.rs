@@ -934,10 +934,7 @@ impl MailImapPool {
     }
 
     fn account_gate(&self, account_id: &str) -> Arc<std::sync::Mutex<()>> {
-        let mut gates = self
-            .account_gates
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut gates = self.account_gates.lock().unwrap_or_else(|e| e.into_inner());
         gates
             .entry(account_id.to_string())
             .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
@@ -1136,29 +1133,25 @@ fn with_imap_session<R>(
             }
         };
 
-    let finish = |value: R,
-                  session: ActiveImapSession,
-                  reused: bool,
-                  checkout_ms: u128,
-                  op_ms: u128|
-     -> R {
-        if opts.force_fresh {
-            retire_imap_session(session);
-        } else {
-            pool.put(account_id.clone(), fingerprint.clone(), session);
-        }
-        tracing::info!(
-            account_id = %account_id,
-            session_proxy,
-            reused,
-            checkout_ms,
-            op_ms,
-            total_ms = total_start.elapsed().as_millis(),
-            force_fresh = opts.force_fresh,
-            "mail imap op"
-        );
-        value
-    };
+    let finish =
+        |value: R, session: ActiveImapSession, reused: bool, checkout_ms: u128, op_ms: u128| -> R {
+            if opts.force_fresh {
+                retire_imap_session(session);
+            } else {
+                pool.put(account_id.clone(), fingerprint.clone(), session);
+            }
+            tracing::info!(
+                account_id = %account_id,
+                session_proxy,
+                reused,
+                checkout_ms,
+                op_ms,
+                total_ms = total_start.elapsed().as_millis(),
+                force_fresh = opts.force_fresh,
+                "mail imap op"
+            );
+            value
+        };
 
     match attempt(false) {
         Ok((value, session, reused, checkout_ms, op_ms)) => {
@@ -1195,10 +1188,7 @@ fn should_list_remote_folders(refresh_folders: bool, cached_folder_count: usize)
 
 /// Build the folder list returned by header sync: remote LIST (or cache) plus
 /// the just-synced selected folder metadata.
-fn folders_for_header_sync(
-    base_folders: Vec<MailFolder>,
-    selected: MailFolder,
-) -> Vec<MailFolder> {
+fn folders_for_header_sync(base_folders: Vec<MailFolder>, selected: MailFolder) -> Vec<MailFolder> {
     let mut folders = base_folders;
     merge_selected_folder(&mut folders, selected);
     folders
@@ -1543,7 +1533,9 @@ pub async fn mail_sync_headers(
     let refresh_folders = refresh_folders.unwrap_or(true);
 
     let cached_folders = if cache_enabled {
-        with_mail_db(&state, &account_id, |db| list_cached_folders(db, &account_id))?
+        with_mail_db(&state, &account_id, |db| {
+            list_cached_folders(db, &account_id)
+        })?
     } else {
         Vec::new()
     };
@@ -1552,19 +1544,32 @@ pub async fn mail_sync_headers(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let mut result = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            let base_folders = if do_list {
-                imap.list_folders(&account.config.session_id)?
-            } else {
-                // Clone: with_imap_session may invoke this FnMut twice on retry.
-                cached_folders.clone()
-            };
-            let (selected_folder, cached, has_more) =
-                imap.sync_folder(&account, &folder, offset, limit, include_bodies)?;
-            let folders = folders_for_header_sync(base_folders, selected_folder.clone());
-            let cached_bodies = cached.iter().filter(|m| m.body_cached_at.is_some()).count();
-            Ok((folders, selected_folder, cached, cached_bodies, has_more, do_list))
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| {
+                let base_folders = if do_list {
+                    imap.list_folders(&account.config.session_id)?
+                } else {
+                    // Clone: with_imap_session may invoke this FnMut twice on retry.
+                    cached_folders.clone()
+                };
+                let (selected_folder, cached, has_more) =
+                    imap.sync_folder(&account, &folder, offset, limit, include_bodies)?;
+                let folders = folders_for_header_sync(base_folders, selected_folder.clone());
+                let cached_bodies = cached.iter().filter(|m| m.body_cached_at.is_some()).count();
+                Ok((
+                    folders,
+                    selected_folder,
+                    cached,
+                    cached_bodies,
+                    has_more,
+                    do_list,
+                ))
+            },
+        )
     })
     .await
     .map_err(|e| format!("mail sync task failed: {e}"))??;
@@ -1633,44 +1638,50 @@ pub async fn mail_sync_all_folders(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let result = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            let mut folders = imap.list_folders(&account.config.session_id)?;
-            let mut messages = Vec::new();
-            let mut new_messages = 0usize;
-            for listed in folders.clone() {
-                let folder_name = listed.name;
-                let state = sync_states.get(&folder_name).copied().unwrap_or_default();
-                match imap.sync_folder_incremental(
-                    &account,
-                    &folder_name,
-                    state,
-                    limit,
-                    include_bodies,
-                ) {
-                    Ok((synced_folder, mut synced_messages)) => {
-                        let same_uid_validity = state.max_uid > 0
-                            && (state.uid_validity.is_none()
-                                || synced_folder.uid_validity.is_none()
-                                || state.uid_validity == synced_folder.uid_validity);
-                        if same_uid_validity {
-                            new_messages += synced_messages.len();
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| {
+                let mut folders = imap.list_folders(&account.config.session_id)?;
+                let mut messages = Vec::new();
+                let mut new_messages = 0usize;
+                for listed in folders.clone() {
+                    let folder_name = listed.name;
+                    let state = sync_states.get(&folder_name).copied().unwrap_or_default();
+                    match imap.sync_folder_incremental(
+                        &account,
+                        &folder_name,
+                        state,
+                        limit,
+                        include_bodies,
+                    ) {
+                        Ok((synced_folder, mut synced_messages)) => {
+                            let same_uid_validity = state.max_uid > 0
+                                && (state.uid_validity.is_none()
+                                    || synced_folder.uid_validity.is_none()
+                                    || state.uid_validity == synced_folder.uid_validity);
+                            if same_uid_validity {
+                                new_messages += synced_messages.len();
+                            }
+                            merge_selected_folder(&mut folders, synced_folder);
+                            messages.append(&mut synced_messages);
                         }
-                        merge_selected_folder(&mut folders, synced_folder);
-                        messages.append(&mut synced_messages);
-                    }
-                    Err(e) => {
-                        tracing::debug!(
-                            "mail incremental sync skipped folder {folder_name}: {e}"
-                        );
+                        Err(e) => {
+                            tracing::debug!(
+                                "mail incremental sync skipped folder {folder_name}: {e}"
+                            );
+                        }
                     }
                 }
-            }
-            let cached_bodies = messages
-                .iter()
-                .filter(|m| m.body_cached_at.is_some())
-                .count();
-            Ok((folders, messages, cached_bodies, new_messages))
-        })
+                let cached_bodies = messages
+                    .iter()
+                    .filter(|m| m.body_cached_at.is_some())
+                    .count();
+                Ok((folders, messages, cached_bodies, new_messages))
+            },
+        )
     })
     .await
     .map_err(|e| format!("mail sync all task failed: {e}"))??;
@@ -1743,9 +1754,13 @@ pub async fn mail_get_message_body(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let message = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.fetch_body(&account, &folder, uid)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| imap.fetch_body(&account, &folder, uid),
+        )
     })
     .await
     .map_err(|e| format!("mail body task failed: {e}"))??;
@@ -1774,9 +1789,13 @@ pub async fn mail_download_attachment(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.download_attachment(&account, &folder, uid, attachment_index, &target_path)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| imap.download_attachment(&account, &folder, uid, attachment_index, &target_path),
+        )
     })
     .await
     .map_err(|e| format!("mail attachment download task failed: {e}"))?
@@ -1902,9 +1921,13 @@ pub async fn mail_mark_read(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.mark_read(&folder_for_task, &uids_for_task)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| imap.mark_read(&folder_for_task, &uids_for_task),
+        )
     })
     .await
     .map_err(|e| format!("mail mark read task failed: {e}"))??;
@@ -1963,14 +1986,20 @@ pub async fn mail_set_flags(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.set_flags(
-                &folder_for_task,
-                &uids_for_task,
-                &add_for_task,
-                &remove_for_task,
-            )
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| {
+                imap.set_flags(
+                    &folder_for_task,
+                    &uids_for_task,
+                    &add_for_task,
+                    &remove_for_task,
+                )
+            },
+        )
     })
     .await
     .map_err(|e| format!("mail set flags task failed: {e}"))??;
@@ -2017,9 +2046,13 @@ pub async fn mail_move_messages(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.move_messages(&folder_for_task, &uids_for_task, &target_for_task)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| imap.move_messages(&folder_for_task, &uids_for_task, &target_for_task),
+        )
     })
     .await
     .map_err(|e| format!("mail move task failed: {e}"))??;
@@ -2063,9 +2096,13 @@ pub async fn mail_copy_messages(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.copy_messages(&folder_for_task, &uids_for_task, &target_for_task)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| imap.copy_messages(&folder_for_task, &uids_for_task, &target_for_task),
+        )
     })
     .await
     .map_err(|e| format!("mail copy task failed: {e}"))??;
@@ -2106,9 +2143,13 @@ pub async fn mail_delete_messages(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let deleted = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.delete_messages(&folder_for_task, &uids_for_task, all)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| imap.delete_messages(&folder_for_task, &uids_for_task, all),
+        )
     })
     .await
     .map_err(|e| format!("mail delete task failed: {e}"))??;
@@ -2142,9 +2183,13 @@ pub async fn mail_fetch_raw(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let raw = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.fetch_raw(&folder, uid)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| imap.fetch_raw(&folder, uid),
+        )
     })
     .await
     .map_err(|e| format!("mail fetch raw task failed: {e}"))??;
@@ -2170,21 +2215,28 @@ pub async fn mail_save_raw(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            let raw = imap.fetch_raw(&folder, uid)?;
-            let path = std::path::PathBuf::from(&target_path);
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("failed to create folder: {e}"))?;
-            }
-            std::fs::write(&path, &raw).map_err(|e| format!("failed to write .eml file: {e}"))?;
-            Ok(MailDownloadAttachmentResult {
-                path: path.to_string_lossy().to_string(),
-                name: path.file_name().map(|n| n.to_string_lossy().to_string()),
-                content_type: Some("message/rfc822".to_string()),
-                size: raw.len(),
-            })
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| {
+                let raw = imap.fetch_raw(&folder, uid)?;
+                let path = std::path::PathBuf::from(&target_path);
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create folder: {e}"))?;
+                }
+                std::fs::write(&path, &raw)
+                    .map_err(|e| format!("failed to write .eml file: {e}"))?;
+                Ok(MailDownloadAttachmentResult {
+                    path: path.to_string_lossy().to_string(),
+                    name: path.file_name().map(|n| n.to_string_lossy().to_string()),
+                    content_type: Some("message/rfc822".to_string()),
+                    size: raw.len(),
+                })
+            },
+        )
     })
     .await
     .map_err(|e| format!("mail save raw task failed: {e}"))?
@@ -2206,10 +2258,16 @@ pub async fn mail_create_folder(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let folders = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.create_folder(&name_for_task)?;
-            imap.list_folders(&account.config.session_id)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| {
+                imap.create_folder(&name_for_task)?;
+                imap.list_folders(&account.config.session_id)
+            },
+        )
     })
     .await
     .map_err(|e| format!("mail create folder task failed: {e}"))??;
@@ -2242,10 +2300,16 @@ pub async fn mail_rename_folder(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let folders = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.rename_folder(&from_for_task, &to_for_task)?;
-            imap.list_folders(&account.config.session_id)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| {
+                imap.rename_folder(&from_for_task, &to_for_task)?;
+                imap.list_folders(&account.config.session_id)
+            },
+        )
     })
     .await
     .map_err(|e| format!("mail rename folder task failed: {e}"))??;
@@ -2276,10 +2340,16 @@ pub async fn mail_delete_folder(
     let pool = Arc::clone(&state.mail_imap_pool);
     let handle = tokio::runtime::Handle::current();
     let folders = tokio::task::spawn_blocking(move || {
-        with_imap_session(&pool, &account, &handle, ImapSessionOpts::default(), |imap| {
-            imap.delete_folder(&name_for_task)?;
-            imap.list_folders(&account.config.session_id)
-        })
+        with_imap_session(
+            &pool,
+            &account,
+            &handle,
+            ImapSessionOpts::default(),
+            |imap| {
+                imap.delete_folder(&name_for_task)?;
+                imap.list_folders(&account.config.session_id)
+            },
+        )
     })
     .await
     .map_err(|e| format!("mail delete folder task failed: {e}"))??;
@@ -3979,10 +4049,7 @@ fn parse_body_message(
                 // the reader can show them without a network fetch. Remote http(s)
                 // images stay as-is and are gated by the frontend privacy toggle.
                 let rewritten = rewrite_cid_images_in_html(&message, s.as_ref());
-                let limit = rewritten
-                    .len()
-                    .max(max_bytes)
-                    .min(MAX_EMBEDDED_BODY_BYTES);
+                let limit = rewritten.len().max(max_bytes).min(MAX_EMBEDDED_BODY_BYTES);
                 truncate_utf8_bytes(&rewritten, limit)
             });
             MailMessageCached {
@@ -5783,7 +5850,9 @@ iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAA
         assert!(is_imap_transport_error("connection reset by peer"));
         assert!(is_imap_transport_error("IMAP NOOP failed: timed out"));
         assert!(is_imap_transport_error("IMAP protocol desync"));
-        assert!(!is_imap_transport_error("IMAP login failed: authenticationfailed"));
+        assert!(!is_imap_transport_error(
+            "IMAP login failed: authenticationfailed"
+        ));
     }
 
     #[test]

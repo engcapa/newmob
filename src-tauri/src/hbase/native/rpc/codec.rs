@@ -153,8 +153,8 @@ pub fn try_decode_response(buf: &mut BytesMut) -> Result<ResponseFrame, CodecErr
 
     // ResponseHeader (length-delimited).
     let header_bytes = take_delimited(&mut frame)?;
-    let header = pb::ResponseHeader::decode(header_bytes)
-        .map_err(|e| CodecError::Decode(e.to_string()))?;
+    let header =
+        pb::ResponseHeader::decode(header_bytes).map_err(|e| CodecError::Decode(e.to_string()))?;
 
     // The cell block length lives in the header; whatever is not header/param.
     let cell_len = header
@@ -278,7 +278,10 @@ mod tests {
     #[test]
     fn decode_varint_incomplete() {
         // 0x80 means "more bytes follow" but none do.
-        assert!(matches!(decode_varint(&[0x80]), Err(CodecError::Incomplete)));
+        assert!(matches!(
+            decode_varint(&[0x80]),
+            Err(CodecError::Incomplete)
+        ));
     }
 
     #[test]

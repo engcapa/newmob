@@ -13,10 +13,10 @@
 //!              guidance instead of pretending to start.
 //!   - Windows: tvnserver / winvnc if installed, otherwise guidance.
 
+use super::ServerConfig;
 use super::engine::{ServerCtx, ServerStarted};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use super::process;
-use super::ServerConfig;
 
 pub async fn start(ctx: ServerCtx, config: ServerConfig) -> Result<ServerStarted, String> {
     let port = if config.port == 0 { 5900 } else { config.port };

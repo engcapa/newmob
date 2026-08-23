@@ -7,7 +7,7 @@
 //! All timestamps are Unix **seconds** (matching the chat module's `now()`), so
 //! the frontend divides `Date.now()` by 1000 before sending times over IPC.
 
-use rusqlite::{params, Connection, OptionalExtension, Result as SqlResult};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -340,10 +340,7 @@ pub fn create_note(conn: &Connection, input: &CreateNoteInput) -> SqlResult<Note
 
 pub fn get_note(conn: &Connection, id: &str) -> SqlResult<Option<NoteItem>> {
     let sql = format!("SELECT {NOTE_COLUMNS} FROM notes WHERE id = ?1");
-    let mut note = match conn
-        .query_row(&sql, params![id], row_to_note)
-        .optional()?
-    {
+    let mut note = match conn.query_row(&sql, params![id], row_to_note).optional()? {
         Some(n) => n,
         None => return Ok(None),
     };
@@ -358,7 +355,11 @@ pub fn delete_note(conn: &Connection, id: &str) -> SqlResult<()> {
     Ok(())
 }
 
-pub fn toggle_complete(conn: &Connection, id: &str, completed: bool) -> SqlResult<Option<NoteItem>> {
+pub fn toggle_complete(
+    conn: &Connection,
+    id: &str,
+    completed: bool,
+) -> SqlResult<Option<NoteItem>> {
     let ts = now();
     let completed_at = if completed { Some(ts) } else { None };
     conn.execute(
@@ -366,7 +367,10 @@ pub fn toggle_complete(conn: &Connection, id: &str, completed: bool) -> SqlResul
         params![completed_at, ts, id],
     )?;
     // Completing/uncompleting changes alert qualification; clear stale events.
-    conn.execute("DELETE FROM note_alert_events WHERE note_id = ?1", params![id])?;
+    conn.execute(
+        "DELETE FROM note_alert_events WHERE note_id = ?1",
+        params![id],
+    )?;
     get_note(conn, id)
 }
 
@@ -377,7 +381,10 @@ pub fn archive_note(conn: &Connection, id: &str, archived: bool) -> SqlResult<Op
         "UPDATE notes SET archived_at = ?1, updated_at = ?2 WHERE id = ?3",
         params![archived_at, ts, id],
     )?;
-    conn.execute("DELETE FROM note_alert_events WHERE note_id = ?1", params![id])?;
+    conn.execute(
+        "DELETE FROM note_alert_events WHERE note_id = ?1",
+        params![id],
+    )?;
     get_note(conn, id)
 }
 
@@ -436,7 +443,10 @@ pub fn update_note(
         })
         .unwrap_or(true);
     if schedule_changed {
-        conn.execute("DELETE FROM note_alert_events WHERE note_id = ?1", params![id])?;
+        conn.execute(
+            "DELETE FROM note_alert_events WHERE note_id = ?1",
+            params![id],
+        )?;
     }
     get_note(conn, id)
 }
@@ -504,7 +514,14 @@ pub fn list_notes(conn: &Connection, query: &NoteQuery) -> SqlResult<Vec<NoteIte
         .as_ref()
         .filter(|values| !values.is_empty())
         .cloned()
-        .unwrap_or_else(|| vec![query.filter.clone().unwrap_or_else(|| "recent_incomplete".into())]);
+        .unwrap_or_else(|| {
+            vec![
+                query
+                    .filter
+                    .clone()
+                    .unwrap_or_else(|| "recent_incomplete".into()),
+            ]
+        });
     let now_ts = query.now.unwrap_or_else(now);
     let due_soon = query.due_soon_secs.unwrap_or(DEFAULT_DUE_SOON_SECS);
 
@@ -513,18 +530,26 @@ pub fn list_notes(conn: &Connection, query: &NoteQuery) -> SqlResult<Vec<NoteIte
 
     let filter_parts = filters
         .iter()
-        .map(|filter| format!("({})", note_filter_condition(filter, now_ts, due_soon, &mut sql_params)))
+        .map(|filter| {
+            format!(
+                "({})",
+                note_filter_condition(filter, now_ts, due_soon, &mut sql_params)
+            )
+        })
         .collect::<Vec<_>>();
     where_parts.push(format!("({})", filter_parts.join(" OR ")));
 
     if let Some(tag_id) = query.tag_id.as_deref().filter(|s| !s.is_empty()) {
-        where_parts.push(
-            "id IN (SELECT note_id FROM note_tag_links WHERE tag_id = ?p)".into(),
-        );
+        where_parts.push("id IN (SELECT note_id FROM note_tag_links WHERE tag_id = ?p)".into());
         sql_params.push(Box::new(tag_id.to_string()));
     }
 
-    if let Some(search) = query.search.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         let like = format!("%{}%", search.replace('%', "\\%").replace('_', "\\_"));
         where_parts.push(
             "(title LIKE ?p ESCAPE '\\' OR body LIKE ?p ESCAPE '\\' OR id IN (\
@@ -544,8 +569,7 @@ pub fn list_notes(conn: &Connection, query: &NoteQuery) -> SqlResult<Vec<NoteIte
     };
 
     // Sort: pinned desc, due_at asc (nulls last), updated_at desc.
-    let order_sql =
-        "ORDER BY pinned DESC, (due_at IS NULL) ASC, due_at ASC, updated_at DESC";
+    let order_sql = "ORDER BY pinned DESC, (due_at IS NULL) ASC, due_at ASC, updated_at DESC";
     let limit_sql = match query.limit {
         Some(l) if l >= 0 => format!("LIMIT {} OFFSET {}", l, query.offset.unwrap_or(0).max(0)),
         _ => String::new(),
@@ -586,9 +610,16 @@ pub fn load_steps_for(conn: &Connection, note_id: &str) -> SqlResult<Vec<NoteSte
 }
 
 /// Replace the full ordered step list for a note.
-pub fn set_steps(conn: &Connection, note_id: &str, steps: &[StepInput]) -> SqlResult<Vec<NoteStep>> {
+pub fn set_steps(
+    conn: &Connection,
+    note_id: &str,
+    steps: &[StepInput],
+) -> SqlResult<Vec<NoteStep>> {
     let ts = now();
-    conn.execute("DELETE FROM note_steps WHERE note_id = ?1", params![note_id])?;
+    conn.execute(
+        "DELETE FROM note_steps WHERE note_id = ?1",
+        params![note_id],
+    )?;
     for (i, step) in steps.iter().enumerate() {
         let id = step.id.clone().unwrap_or_else(new_id);
         conn.execute(
@@ -690,7 +721,10 @@ pub fn upsert_tags(conn: &Connection, tags: &[TagInput]) -> SqlResult<Vec<NoteTa
 
 /// Replace a note's tag links with `tag_ids`.
 pub fn set_note_tags(conn: &Connection, note_id: &str, tag_ids: &[String]) -> SqlResult<()> {
-    conn.execute("DELETE FROM note_tag_links WHERE note_id = ?1", params![note_id])?;
+    conn.execute(
+        "DELETE FROM note_tag_links WHERE note_id = ?1",
+        params![note_id],
+    )?;
     for tag_id in tag_ids {
         conn.execute(
             "INSERT OR IGNORE INTO note_tag_links (note_id, tag_id) VALUES (?1, ?2)",
@@ -706,9 +740,7 @@ pub fn set_note_tags(conn: &Connection, note_id: &str, tag_ids: &[String]) -> Sq
 
 pub fn get_prefs(conn: &Connection) -> SqlResult<HashMap<String, String>> {
     let mut stmt = conn.prepare("SELECT key, value_json FROM note_prefs")?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
     let mut map = HashMap::new();
     for row in rows {
         let (k, v) = row?;
@@ -745,7 +777,11 @@ fn kind_rank(kind: &str) -> i64 {
 /// Recompute the live alert set from note due/reminder times, reconcile it with
 /// the persisted `note_alert_events` (so acknowledgements survive polling), and
 /// return the current alerts ordered by severity then fire time.
-pub fn list_alerts(conn: &Connection, now_ts: i64, due_soon_secs: i64) -> SqlResult<Vec<NoteAlert>> {
+pub fn list_alerts(
+    conn: &Connection,
+    now_ts: i64,
+    due_soon_secs: i64,
+) -> SqlResult<Vec<NoteAlert>> {
     // Desired = (note_id, kind, fire_at) tuples that currently qualify.
     let mut desired: Vec<(String, String, i64)> = Vec::new();
 
@@ -800,9 +836,7 @@ pub fn list_alerts(conn: &Connection, now_ts: i64, due_soon_secs: i64) -> SqlRes
     let ts = now();
     let existing: Vec<(String, String)> = {
         let mut stmt = conn.prepare("SELECT note_id, kind FROM note_alert_events")?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         rows.collect::<SqlResult<Vec<_>>>()?
     };
     for (note_id, kind) in &existing {
@@ -1027,8 +1061,18 @@ mod tests {
             &conn,
             &note.id,
             &[
-                StepInput { id: None, title: "second".into(), completed_at: None, sort_order: Some(1) },
-                StepInput { id: None, title: "first".into(), completed_at: None, sort_order: Some(0) },
+                StepInput {
+                    id: None,
+                    title: "second".into(),
+                    completed_at: None,
+                    sort_order: Some(1),
+                },
+                StepInput {
+                    id: None,
+                    title: "first".into(),
+                    completed_at: None,
+                    sort_order: Some(0),
+                },
             ],
         )
         .unwrap();
@@ -1040,7 +1084,12 @@ mod tests {
         set_steps(
             &conn,
             &note.id,
-            &[StepInput { id: None, title: "only".into(), completed_at: None, sort_order: None }],
+            &[StepInput {
+                id: None,
+                title: "only".into(),
+                completed_at: None,
+                sort_order: None,
+            }],
         )
         .unwrap();
         let loaded = get_note(&conn, &note.id).unwrap().unwrap();
@@ -1053,12 +1102,20 @@ mod tests {
         let conn = mem();
         let first = upsert_tags(
             &conn,
-            &[TagInput { id: None, name: "urgent".into(), color: Some("#f00".into()) }],
+            &[TagInput {
+                id: None,
+                name: "urgent".into(),
+                color: Some("#f00".into()),
+            }],
         )
         .unwrap();
         let second = upsert_tags(
             &conn,
-            &[TagInput { id: None, name: "urgent".into(), color: Some("#0f0".into()) }],
+            &[TagInput {
+                id: None,
+                name: "urgent".into(),
+                color: Some("#0f0".into()),
+            }],
         )
         .unwrap();
         assert_eq!(first[0].id, second[0].id, "same name reuses tag");
@@ -1075,7 +1132,10 @@ mod tests {
         prefs.insert("notes.panel.mode".into(), "\"hub\"".into());
         set_prefs(&conn, &prefs).unwrap();
         let loaded = get_prefs(&conn).unwrap();
-        assert_eq!(loaded.get("notes.panel.mode").map(String::as_str), Some("\"hub\""));
+        assert_eq!(
+            loaded.get("notes.panel.mode").map(String::as_str),
+            Some("\"hub\"")
+        );
     }
 
     #[test]
@@ -1086,30 +1146,47 @@ mod tests {
         update_note(
             &conn,
             &overdue.id,
-            &UpdateNoteInput { title: "overdue".into(), due_at: Some(base - 100), ..Default::default() },
+            &UpdateNoteInput {
+                title: "overdue".into(),
+                due_at: Some(base - 100),
+                ..Default::default()
+            },
         )
         .unwrap();
         let soon = create(&conn, "soon");
         update_note(
             &conn,
             &soon.id,
-            &UpdateNoteInput { title: "soon".into(), due_at: Some(base + 60), ..Default::default() },
+            &UpdateNoteInput {
+                title: "soon".into(),
+                due_at: Some(base + 60),
+                ..Default::default()
+            },
         )
         .unwrap();
         let far = create(&conn, "far");
         update_note(
             &conn,
             &far.id,
-            &UpdateNoteInput { title: "far".into(), due_at: Some(base + 86_400), ..Default::default() },
+            &UpdateNoteInput {
+                title: "far".into(),
+                due_at: Some(base + 86_400),
+                ..Default::default()
+            },
         )
         .unwrap();
 
         let alerts = list_alerts(&conn, base, DEFAULT_DUE_SOON_SECS).unwrap();
-        let kinds: HashMap<&str, &str> =
-            alerts.iter().map(|a| (a.note_id.as_str(), a.kind.as_str())).collect();
+        let kinds: HashMap<&str, &str> = alerts
+            .iter()
+            .map(|a| (a.note_id.as_str(), a.kind.as_str()))
+            .collect();
         assert_eq!(kinds.get(overdue.id.as_str()), Some(&"overdue"));
         assert_eq!(kinds.get(soon.id.as_str()), Some(&"due_soon"));
-        assert!(!kinds.contains_key(far.id.as_str()), "far-future not alerted");
+        assert!(
+            !kinds.contains_key(far.id.as_str()),
+            "far-future not alerted"
+        );
         // Overdue sorts before due_soon.
         assert_eq!(alerts[0].kind, "overdue");
 
@@ -1134,7 +1211,11 @@ mod tests {
         update_note(
             &conn,
             &note.id,
-            &UpdateNoteInput { title: "pay rent".into(), due_at: Some(base - 100), ..Default::default() },
+            &UpdateNoteInput {
+                title: "pay rent".into(),
+                due_at: Some(base - 100),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1172,7 +1253,10 @@ mod tests {
         )
         .unwrap();
         let after_reschedule = list_alerts(&conn, base, DEFAULT_DUE_SOON_SECS).unwrap();
-        let repending = after_reschedule.iter().find(|a| a.note_id == note.id).unwrap();
+        let repending = after_reschedule
+            .iter()
+            .find(|a| a.note_id == note.id)
+            .unwrap();
         assert_eq!(repending.state, "pending", "rescheduling clears the ack");
     }
 
@@ -1183,10 +1267,23 @@ mod tests {
         set_steps(
             &conn,
             &note.id,
-            &[StepInput { id: None, title: "s".into(), completed_at: None, sort_order: None }],
+            &[StepInput {
+                id: None,
+                title: "s".into(),
+                completed_at: None,
+                sort_order: None,
+            }],
         )
         .unwrap();
-        let tags = upsert_tags(&conn, &[TagInput { id: None, name: "t".into(), color: None }]).unwrap();
+        let tags = upsert_tags(
+            &conn,
+            &[TagInput {
+                id: None,
+                name: "t".into(),
+                color: None,
+            }],
+        )
+        .unwrap();
         set_note_tags(&conn, &note.id, &[tags[0].id.clone()]).unwrap();
         delete_note(&conn, &note.id).unwrap();
         assert!(get_note(&conn, &note.id).unwrap().is_none());
@@ -1200,9 +1297,3 @@ mod tests {
         assert_eq!(orphan_links, 0);
     }
 }
-
-
-
-
-
-

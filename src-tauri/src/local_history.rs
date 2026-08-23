@@ -4,7 +4,7 @@
 //! earlier versions without Git. Content is stored under `app_data/local-history/blobs`
 //! keyed by SHA-256; metadata lives in `app_data/local-history/history.db`.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -104,7 +104,11 @@ fn write_blob(state: &LocalHistoryState, hash: &str, text: &str) -> Result<(), S
     Ok(())
 }
 
-fn prune_path_locked(conn: &Connection, state: &LocalHistoryState, path: &str) -> Result<(), String> {
+fn prune_path_locked(
+    conn: &Connection,
+    state: &LocalHistoryState,
+    path: &str,
+) -> Result<(), String> {
     let cutoff = now_secs() - MAX_AGE_SECS;
     conn.execute(
         "DELETE FROM local_history WHERE path = ?1 AND created_at < ?2",
@@ -155,7 +159,9 @@ fn gc_orphaned_blobs(conn: &Connection, state: &LocalHistoryState) -> Result<(),
         if !prefix_path.is_dir() {
             continue;
         }
-        for blob_entry in fs::read_dir(&prefix_path).map_err(|e| format!("read blob bucket: {e}"))? {
+        for blob_entry in
+            fs::read_dir(&prefix_path).map_err(|e| format!("read blob bucket: {e}"))?
+        {
             let blob_entry = blob_entry.map_err(|e| format!("read blob entry: {e}"))?;
             let path = blob_entry.path();
             let name = path
@@ -205,7 +211,10 @@ pub fn history_snapshot(
     let byte_len = text.len() as i64;
 
     {
-        let conn = state.db.lock().map_err(|_| "local history db lock poisoned")?;
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| "local history db lock poisoned")?;
         // Skip consecutive identical snapshots for the same path.
         let latest_hash: Option<String> = conn
             .query_row(
@@ -249,7 +258,10 @@ pub fn history_list(
 ) -> Result<Vec<LocalHistoryEntry>, String> {
     let path = normalize_path(&path)?;
     let limit = limit.unwrap_or(50).clamp(1, 200) as i64;
-    let conn = state.db.lock().map_err(|_| "local history db lock poisoned")?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| "local history db lock poisoned")?;
     let mut stmt = conn
         .prepare(
             "SELECT id, path, content_hash, created_at, reason, byte_len
@@ -276,11 +288,11 @@ pub fn history_list(
 }
 
 #[tauri::command]
-pub fn history_read(
-    state: State<'_, LocalHistoryState>,
-    id: i64,
-) -> Result<String, String> {
-    let conn = state.db.lock().map_err(|_| "local history db lock poisoned")?;
+pub fn history_read(state: State<'_, LocalHistoryState>, id: i64) -> Result<String, String> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| "local history db lock poisoned")?;
     let hash: String = conn
         .query_row(
             "SELECT content_hash FROM local_history WHERE id = ?1",
@@ -295,7 +307,10 @@ pub fn history_read(
 #[tauri::command]
 pub fn history_prune(state: State<'_, LocalHistoryState>) -> Result<u32, String> {
     let cutoff = now_secs() - MAX_AGE_SECS;
-    let conn = state.db.lock().map_err(|_| "local history db lock poisoned")?;
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| "local history db lock poisoned")?;
     let deleted = conn
         .execute(
             "DELETE FROM local_history WHERE created_at < ?1",

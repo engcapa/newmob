@@ -88,7 +88,7 @@ pub fn build_negotiate(domain: &str, workstation: &str) -> Vec<u8> {
     out.extend_from_slice(&(workstation_bytes.len() as u16).to_le_bytes());
     out.extend_from_slice(&workstation_off.to_le_bytes());
     out.extend_from_slice(&[0, 0]); // padding
-                                    // Version field (8 bytes) — we report Windows 10 build.
+    // Version field (8 bytes) — we report Windows 10 build.
     out.extend_from_slice(&[10, 0, 0x00, 0x40, 0, 0, 0, 0x0F]);
     out.extend_from_slice(domain_bytes);
     out.extend_from_slice(workstation_bytes);

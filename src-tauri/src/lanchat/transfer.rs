@@ -10,7 +10,10 @@ use std::path::PathBuf;
 use crate::servers::engine::LogEmitter;
 
 fn temp_image_path(prefix: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("taomni-lanchat-{prefix}-{}.png", uuid::Uuid::new_v4()))
+    std::env::temp_dir().join(format!(
+        "taomni-lanchat-{prefix}-{}.png",
+        uuid::Uuid::new_v4()
+    ))
 }
 
 /// Open a path with the platform's default handler (file or folder).
@@ -56,9 +59,13 @@ pub fn capture_screenshot(log: &LogEmitter) -> Result<PathBuf, String> {
 pub fn capture_screenshot(_log: &LogEmitter) -> Result<PathBuf, String> {
     let monitors = xcap::Monitor::all().map_err(|e| format!("enumerate monitors: {e}"))?;
     let monitor = monitors.into_iter().next().ok_or("no monitor found")?;
-    let image = monitor.capture_image().map_err(|e| format!("capture: {e}"))?;
+    let image = monitor
+        .capture_image()
+        .map_err(|e| format!("capture: {e}"))?;
     let path = temp_image_path("shot");
-    image.save(&path).map_err(|e| format!("save screenshot: {e}"))?;
+    image
+        .save(&path)
+        .map_err(|e| format!("save screenshot: {e}"))?;
     Ok(path)
 }
 
@@ -72,10 +79,11 @@ pub fn capture_screenshot(_log: &LogEmitter) -> Result<PathBuf, String> {
 /// Save raw RGBA8 pixels (e.g. from the clipboard) to a temp PNG; return path.
 /// Uses the pure-Rust `image` crate (no system dependencies).
 pub fn save_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<PathBuf, String> {
-    let buf = image::RgbaImage::from_raw(width, height, rgba.to_vec())
-        .ok_or("invalid image buffer")?;
+    let buf =
+        image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or("invalid image buffer")?;
     let path = temp_image_path("clip");
-    buf.save(&path).map_err(|e| format!("save clipboard image: {e}"))?;
+    buf.save(&path)
+        .map_err(|e| format!("save clipboard image: {e}"))?;
     Ok(path)
 }
 

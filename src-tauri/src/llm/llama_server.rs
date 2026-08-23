@@ -8,8 +8,8 @@
 use crate::models::store::sidecars_root;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;

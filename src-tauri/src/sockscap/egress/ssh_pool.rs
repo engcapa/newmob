@@ -7,7 +7,7 @@ use russh::client;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::terminal::ssh::{connect_ssh_authenticated, SshAuth, SshHandler};
+use crate::terminal::ssh::{SshAuth, SshHandler, connect_ssh_authenticated};
 
 /// Backoff bounds for re-establishing a dead transport. The first retry is
 /// nearly immediate so a brief blip costs one failed flow; repeated failures

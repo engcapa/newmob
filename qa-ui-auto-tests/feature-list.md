@@ -4943,7 +4943,7 @@ controls:
     kind: interactive
     optional: true       # requires a failed result with provider details
   - id: debug-panel
-    selector: '[data-testid="code-workspace-debug-panel"]'
+    selector: '[data-testid="debug-panel"]'
     kind: display
   - id: debug-active-configuration
     selector: '[data-testid="debug-active-configuration"]'
@@ -5396,6 +5396,30 @@ controls:
     selector: '[data-testid="code-workspace-split-sync-scroll"]'
     kind: interactive
     optional: true
+  - id: split-right
+    selector: '[data-testid="code-workspace-split-right"]'
+    kind: interactive
+    optional: true       # rendered on the editor toolbar; enabled with an open buffer
+  - id: editor-appearance-settings-command
+    selector: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+    kind: display
+    optional: true       # opens from the appearance settings command
+  - id: keymap-settings-dialog
+    selector: '[data-testid="workspace-keymap-settings-dialog"]'
+    kind: display
+    optional: true       # §8.18.2 Keymap settings surface
+  - id: references-panel-show-more
+    selector: '[data-testid="references-show-more"]'
+    kind: interactive
+    optional: true       # §8.18.7 batched usages continuation
+  - id: references-pin-toggle
+    selector: '[data-testid="references-pin-toggle"]'
+    kind: interactive
+    optional: true
+  - id: references-rerun
+    selector: '[data-testid="references-rerun"]'
+    kind: interactive
+    optional: true
 -->
 
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。
@@ -5504,6 +5528,182 @@ controls:
 - Provider semantic snapshot 以 workspace revision 判定结果新鲜度，generation 仅仲裁异步查询发布顺序；保存、编辑、watcher、资源操作、WorkspaceEdit、工程根变化、LSP/SDK 重启及 provider progress 会统一失效或阻断快照。
 - Rename、Safe Delete、Code Action/Refactor 在查询前等待活跃 editor buffer 的 LSP 同步，并在 resolve、菜单执行、确认对话框结束、WorkspaceEdit 最终 mutation 与 server-initiated `workspace/applyEdit` 前重复校验 revision。
 - References 与 Search Everywhere 绑定各自结果来源，后续无关查询不会把旧列表错误标成 ready；workspace symbol 显示 ready session/provider 覆盖、失败/跳过计数和有界状态；Rename/Refactor/Safe Delete 的 semantic WorkspaceEdit 拒绝 workspace 外路径，Safe Delete 对 unresolved reference 硬阻断。Analysis 仅分类和展示 provider 已返回的 nullability/taint/data-flow/related-location evidence，并区分 structured/text-inferred/related-location proof level 与有界 flow steps，不执行客户端推断。当前仍不等同于 IntelliJ PSI/stub index；自有索引、原生 inspection、跨过程 data-flow/nullability/taint 引擎仍未完成。
+
+### 25.3 编辑器外观、智能提示配置与上下文动作 ✅
+
+<!-- feature
+id: F25.3
+status: done
+area: code-workspace/appearance-and-actions
+components: [CodeWorkspaceTab, WorkspaceEditorAppearanceSettingsDialog, WorkspaceIntelligenceSettingsDialog, TabSwitcher, KeymapCheatSheetDialog, QuickDocPopup, DocumentationPane]
+files:
+  - src/components/editor/CodeWorkspaceTab.tsx
+  - src/components/editor/workspace/WorkspaceEditorAppearanceSettingsDialog.tsx
+  - src/components/editor/workspace/WorkspaceIntelligenceSettingsDialog.tsx
+  - src/components/editor/workspace/TabSwitcher.tsx
+  - src/components/editor/workspace/editorAppearanceProfile.ts
+  - src/components/editor/workspace/editorAppearanceExtension.ts
+  - src/components/editor/workspace/intelligencePreferences.ts
+  - src/components/editor/workspace/editorContextMenu.ts
+  - src/components/editor/workspace/workspaceActionHost.ts
+controls:
+  - id: appearance-dialog
+    selector: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+    kind: display
+    optional: true
+  - id: appearance-close
+    selector: '[data-testid="workspace-editor-appearance-close"]'
+    kind: interactive
+    optional: true
+  - id: appearance-font-family
+    selector: '[data-testid="workspace-editor-appearance-font-family"]'
+    kind: interactive
+    optional: true
+  - id: appearance-font-size-px
+    selector: '[data-testid="workspace-editor-appearance-font-size-px"]'
+    kind: interactive
+    optional: true
+  - id: appearance-line-height
+    selector: '[data-testid="workspace-editor-appearance-line-height"]'
+    kind: interactive
+    optional: true
+  - id: appearance-ligatures
+    selector: '[data-testid="workspace-editor-appearance-ligatures"]'
+    kind: interactive
+    optional: true
+  - id: appearance-color-scheme-id
+    selector: '[data-testid="workspace-editor-appearance-color-scheme-id"]'
+    kind: interactive
+    optional: true
+  - id: appearance-high-contrast
+    selector: '[data-testid="workspace-editor-appearance-high-contrast"]'
+    kind: interactive
+    optional: true
+  - id: appearance-zoom-scope
+    selector: '[data-testid="workspace-editor-appearance-zoom-scope"]'
+    kind: interactive
+    optional: true
+  - id: appearance-soft-wrap-patterns
+    selector: '[data-testid="workspace-editor-appearance-soft-wrap-patterns"]'
+    kind: interactive
+    optional: true
+  - id: appearance-soft-wrap-use-original-indent
+    selector: '[data-testid="workspace-editor-appearance-soft-wrap-use-original-indent"]'
+    kind: interactive
+    optional: true
+  - id: appearance-soft-wrap-additional-indent
+    selector: '[data-testid="workspace-editor-appearance-soft-wrap-additional-indent"]'
+    kind: interactive
+    optional: true
+  - id: appearance-soft-wrap-show-markers
+    selector: '[data-testid="workspace-editor-appearance-soft-wrap-show-markers"]'
+    kind: interactive
+    optional: true
+  - id: appearance-virtual-space-after-line-end
+    selector: '[data-testid="workspace-editor-appearance-virtual-space-after-line-end"]'
+    kind: interactive
+    optional: true
+  - id: appearance-virtual-space-at-file-bottom
+    selector: '[data-testid="workspace-editor-appearance-virtual-space-at-file-bottom"]'
+    kind: interactive
+    optional: true
+  - id: appearance-breadcrumbs-visible
+    selector: '[data-testid="workspace-editor-appearance-breadcrumbs-visible"]'
+    kind: interactive
+    optional: true
+  - id: appearance-breadcrumbs-placement
+    selector: '[data-testid="workspace-editor-appearance-breadcrumbs-placement"]'
+    kind: interactive
+    optional: true
+  - id: appearance-breadcrumbs-languages
+    selector: '[data-testid="workspace-editor-appearance-breadcrumbs-languages"]'
+    kind: interactive
+    optional: true
+  - id: appearance-reset
+    selector: '[data-testid="workspace-editor-appearance-reset"]'
+    kind: interactive
+    optional: true
+  - id: appearance-cancel
+    selector: '[data-testid="workspace-editor-appearance-cancel"]'
+    kind: interactive
+    optional: true
+  - id: appearance-apply
+    selector: '[data-testid="workspace-editor-appearance-apply"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-dialog
+    selector: '[data-testid="workspace-intelligence-settings-dialog"]'
+    kind: display
+    optional: true
+  - id: intelligence-quick-doc-hover-enabled
+    selector: '[data-testid="workspace-quick-doc-hover-enabled"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-quick-doc-hover-delay
+    selector: '[data-testid="workspace-quick-doc-hover-delay"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-quick-doc-default-target
+    selector: '[data-testid="workspace-quick-doc-default-target"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-parameter-info-auto-popup
+    selector: '[data-testid="workspace-parameter-info-auto-popup"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-parameter-info-delay
+    selector: '[data-testid="workspace-parameter-info-delay"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-parameter-info-full-signatures
+    selector: '[data-testid="workspace-parameter-info-full-signatures"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-reset
+    selector: '[data-testid="workspace-intelligence-settings-reset"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-cancel
+    selector: '[data-testid="workspace-intelligence-settings-cancel"]'
+    kind: interactive
+    optional: true
+  - id: intelligence-apply
+    selector: '[data-testid="workspace-intelligence-settings-apply"]'
+    kind: interactive
+    optional: true
+  - id: tab-switcher
+    selector: '[data-testid="workspace-tab-switcher"]'
+    kind: display
+    optional: true
+  - id: keymap-cheatsheet
+    selector: '[data-testid="keymap-cheatsheet-dialog"]'
+    kind: display
+    optional: true
+  - id: context-cut
+    selector: '[data-testid="editor-context-cut"]'
+    kind: interactive
+    optional: true
+  - id: context-copy
+    selector: '[data-testid="editor-context-copy"]'
+    kind: interactive
+    optional: true
+  - id: context-paste
+    selector: '[data-testid="editor-context-paste"]'
+    kind: interactive
+    optional: true
+  - id: context-goto-definition
+    selector: '[data-testid="editor-context-goto-definition"]'
+    kind: interactive
+    optional: true
+  - id: context-format
+    selector: '[data-testid="editor-context-format"]'
+    kind: interactive
+    optional: true
+-->
+
+- 编辑器外观配置支持字体族、字号、行高、连字、高对比度主题、活动/全部编辑器缩放范围、软换行路径 glob、虚拟光标空间与面包屑多语言过滤。
+- 智能提示设置支持 Quick Documentation 悬停延迟与默认窗格/弹出框目标、Parameter Info 自动触发与完整重载签名开关。
+- 支持 IDEA 风格 Ctrl+Tab 标签切换器（MRU 顺序、鼠标悬停预览、释放即切换）与统一动作快照投影的快捷键速查表及右键上下文菜单。
 
 ---
 

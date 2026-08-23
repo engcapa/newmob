@@ -188,3 +188,136 @@ export function reconcileWorkspaceRecoveryEntries(
   }
   return writeWorkspaceRecoveryEntries(workspaceId, [...byKey.values()]);
 }
+
+/**
+ * Disk-effect recovery ledger (§8.18.1, schema v3). Records save
+ * transactions whose disk outcome is committed-but-discarded or unknown so a
+ * later session can see exactly which path/hash changed. Never stores body
+ * text — the unsaved buffer content stays in the buffer entries above.
+ */
+export interface WorkspaceDiskEffectLedgerEntry {
+  workspaceId: string;
+  transactionId: string;
+  path: string;
+  /** Stable file identity (`root:<rootId>:<path>` / `loose:<id>:<path>`). */
+  fileIdentity: string;
+  expectedOldHash: string | null;
+  intendedNewHash: string | null;
+  observedHash?: string | null;
+  diskEffect: "committed-discarded" | "unknown";
+  createdAt: number;
+  lastVerifiedAt: number | null;
+}
+
+export const WORKSPACE_DISK_EFFECT_LEDGER_PREFIX = "taomni.codeWorkspace.recovery.diskEffects.v3";
+export const WORKSPACE_DISK_EFFECT_LEDGER_MAX_ENTRIES = 64;
+
+function diskEffectStorageKey(workspaceId: string): string {
+  return `${WORKSPACE_DISK_EFFECT_LEDGER_PREFIX}:${workspaceId}`;
+}
+
+function readDiskEffectRaw(workspaceId: string): unknown[] {
+  if (typeof window === "undefined" || !workspaceId) return [];
+  try {
+    const raw = window.localStorage.getItem(diskEffectStorageKey(workspaceId));
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeDiskEffectEntry(value: unknown, workspaceId: string): WorkspaceDiskEffectLedgerEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+  // Legacy v2-era rows carried no effect fact; they migrate as `unknown`.
+  const legacy = source.diskEffect === undefined || source.diskEffect === null;
+  const diskEffect = source.diskEffect === "committed-discarded" || source.diskEffect === "unknown"
+    ? source.diskEffect
+    : legacy ? "unknown" : null;
+  if (!diskEffect) return null;
+  if (typeof source.transactionId !== "string" || !source.transactionId) return null;
+  const path = typeof source.path === "string" && source.path ? source.path : null;
+  if (!path) return null;
+  return {
+    workspaceId,
+    transactionId: source.transactionId,
+    path,
+    fileIdentity: typeof source.fileIdentity === "string" ? source.fileIdentity : path,
+    expectedOldHash: typeof source.expectedOldHash === "string" ? source.expectedOldHash : null,
+    intendedNewHash: typeof source.intendedNewHash === "string" ? source.intendedNewHash : null,
+    observedHash: typeof source.observedHash === "string" ? source.observedHash : null,
+    diskEffect,
+    createdAt: typeof source.createdAt === "number" && Number.isFinite(source.createdAt) ? source.createdAt : 0,
+    lastVerifiedAt: typeof source.lastVerifiedAt === "number" && Number.isFinite(source.lastVerifiedAt)
+      ? source.lastVerifiedAt
+      : null,
+  };
+}
+
+function writeDiskEffectEntries(
+  workspaceId: string,
+  entries: WorkspaceDiskEffectLedgerEntry[],
+): WorkspaceDiskEffectLedgerEntry[] {
+  if (typeof window === "undefined" || !workspaceId) return entries;
+  try {
+    if (entries.length === 0) {
+      window.localStorage.removeItem(diskEffectStorageKey(workspaceId));
+    } else {
+      window.localStorage.setItem(diskEffectStorageKey(workspaceId), JSON.stringify(entries.slice(0, WORKSPACE_DISK_EFFECT_LEDGER_MAX_ENTRIES)));
+    }
+  } catch {
+    // The ledger must never make editing fail.
+  }
+  return entries;
+}
+
+/** Stable identity matching the recovery buffer-entry key shape. */
+export function workspaceFileIdentity(ref: CodeWorkspaceFileRef): string {
+  return ref.kind === "root"
+    ? `root:${ref.rootId}:${ref.path}`
+    : `loose:${ref.id}:${ref.path}`;
+}
+
+export function recordDiskEffectLedgerEntry(entry: WorkspaceDiskEffectLedgerEntry): void {
+  const workspaceId = entry.workspaceId;
+  const next = [
+    { ...entry },
+    ...readDiskEffectRaw(workspaceId)
+      .map((value) => normalizeDiskEffectEntry(value, workspaceId))
+      .filter((value): value is WorkspaceDiskEffectLedgerEntry => value !== null && value.transactionId !== entry.transactionId),
+  ];
+  writeDiskEffectEntries(workspaceId, next.slice(0, WORKSPACE_DISK_EFFECT_LEDGER_MAX_ENTRIES));
+}
+
+/**
+ * Clear the ledger row for one settled transaction on one path only — never
+ * other workspaces or other paths (§8.18.1).
+ */
+export function resolveDiskEffectLedgerEntry(
+  workspaceId: string,
+  transactionId: string,
+  path: string,
+): void {
+  const next = listDiskEffectLedgerEntries(workspaceId).filter(
+    (entry) => !(entry.transactionId === transactionId && entry.path === path),
+  );
+  writeDiskEffectEntries(workspaceId, next);
+}
+
+export function listDiskEffectLedgerEntries(workspaceId: string): WorkspaceDiskEffectLedgerEntry[] {
+  return readDiskEffectRaw(workspaceId)
+    .map((value) => normalizeDiskEffectEntry(value, workspaceId))
+    .filter((value): value is WorkspaceDiskEffectLedgerEntry => value !== null);
+}
+
+/**
+ * An unresolved `unknown` row blocks automatic retries against the same path
+ * until a re-read verifies the real bytes (§8.18.1).
+ */
+export function hasUnverifiedUnknownDiskEffect(workspaceId: string, path: string): boolean {
+  return listDiskEffectLedgerEntries(workspaceId).some(
+    (entry) => entry.path === path && entry.diskEffect === "unknown" && entry.lastVerifiedAt === null,
+  );
+}

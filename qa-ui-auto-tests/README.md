@@ -17,7 +17,7 @@ qa-ui-auto-tests/
 │                              #     -->
 │                              # Parsed by qa_ui_auto.feature_catalog.
 └── cases/
-    ├── TC-XXX-<slug>.testcase.yaml  # 71 typed YAML testcases (hand-authored + migrated)
+    ├── TC-XXX-<slug>.testcase.yaml  # 131 typed YAML testcases (hand-authored + migrated)
     └── auto/                        # gen-coverage's drafts land here
         └── TC-auto-F4.X-...yaml     # tags: [auto-generated, smoke, needs-review]
 ```
@@ -31,8 +31,8 @@ Browser mode (default):
 DEV_PROXY_ALLOW_PRIVATE=1 ALLOW_PRIVATE_TARGETS=1 pnpm dev
 export QA_SSH_PASSWORD=...
 
-# lint + dry-run
-PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+# audit + dry-run
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.audit --gate
 PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.runner --dry-run
 
 # real run
@@ -46,14 +46,12 @@ Reports land in `qa-ui-auto-report/run-<timestamp>/`.
 
 The `qa-ui-auto` skill in Claude Code wraps these tools with playbooks:
 
-| Subcommand | Writes to | Purpose |
+| Command | Writes to | Purpose |
 |---|---|---|
-| `run` | (read-only) | Execute testcases |
-| `lint` | (read-only) | Schema-validate YAML + parse feature-list.md |
-| `gen-coverage` | `cases/auto/` | Draft new cases for uncovered features |
-| `gen-diff` | `cases/` (patches) | Patch existing cases impacted by a code change |
-| `gen-from-range` | `feature-list.md` | Refresh feature catalog from a commit range |
-| `explore` | `qa-ui-auto-report/` | Free-form exploratory testing report |
+| `audit` | (read-only) | Lint cases, report coverage gaps and diff impact, and enforce the baseline gate |
+| `fix` | feature catalog, cases, or generated catalog | Produce a focused playbook for one coverage, control, diff, or catalog gap |
+| `run` | `qa-ui-auto-report/` | Execute existing browser or native testcases |
+| `explore` | `qa-ui-auto-report/` | Drive a bounded exploratory browser session and write a report |
 
 Trigger the skill in Claude Code by asking naturally: "run smoke tests", "what features have no test", "did my change break a test", "refresh feature-list from the last 5 commits", etc.
 
@@ -65,5 +63,5 @@ The Python step library lives at `.agents/skills/qa-ui-auto/scripts/qa_ui_auto/s
 ## Coverage status
 
 100% of features in `feature-list.md` have at least one testcase referencing them via `covers`.
-Cases tagged `needs-review` were auto-migrated from the old Markdown DSL; their assertions
-may need tightening. Track via `python -m qa_ui_auto.coverage_report`.
+Cases tagged `needs-review` were auto-migrated or drafted and still require hardened assertions.
+Track them and current control gaps with `python -m qa_ui_auto.audit`.

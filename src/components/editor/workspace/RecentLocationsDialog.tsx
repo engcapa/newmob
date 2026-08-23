@@ -2,7 +2,9 @@ import { useState, useMemo, useEffect } from "react";
 import { Clock, Search, X, Code2, Edit3 } from "lucide-react";
 import {
   navigationHistoryTracker,
+  type NavigationHistoryFacade,
   type NavigationLocation,
+  type WorkspaceLocationController,
 } from "./navigationHistoryModel";
 
 export interface RecentLocationsDialogProps {
@@ -10,6 +12,13 @@ export interface RecentLocationsDialogProps {
   onClose: () => void;
   onSelectLocation: (location: NavigationLocation) => void;
   initialChangedOnly?: boolean;
+  workspaceId?: string;
+  locationController?: WorkspaceLocationController;
+  /**
+   * §8.16.5 N2.6: unified delete entry. When provided, Delete removes the
+   * entry from Recent Locations AND the Back/Forward history.
+   */
+  navigationFacade?: NavigationHistoryFacade;
 }
 
 export function RecentLocationsDialog({
@@ -17,14 +26,38 @@ export function RecentLocationsDialog({
   onClose,
   onSelectLocation,
   initialChangedOnly = false,
+  workspaceId,
+  locationController,
+  navigationFacade,
 }: RecentLocationsDialogProps) {
   const [search, setSearch] = useState("");
   const [changedOnly, setChangedOnly] = useState(initialChangedOnly);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [revision, setRevision] = useState(0);
+
+  useEffect(() => {
+    const tracker = locationController ?? navigationHistoryTracker;
+    return tracker.subscribe(() => {
+      setRevision((r) => r + 1);
+    });
+  }, [locationController]);
+
+  useEffect(() => {
+    if (open) {
+      setChangedOnly(initialChangedOnly);
+      setSearch("");
+      setSelectedIndex(0);
+    }
+  }, [open, initialChangedOnly]);
 
   const locations = useMemo(() => {
-    return navigationHistoryTracker.searchLocations(search, changedOnly);
-  }, [search, changedOnly]);
+    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
+    revision;
+    if (locationController) {
+      return locationController.searchLocations(search, changedOnly);
+    }
+    return navigationHistoryTracker.searchLocations(search, changedOnly, workspaceId);
+  }, [search, changedOnly, revision, workspaceId, locationController]);
 
   useEffect(() => {
     setSelectedIndex(0);
@@ -42,6 +75,24 @@ export function RecentLocationsDialog({
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSelectedIndex((idx) => (idx - 1 + locations.length) % Math.max(1, locations.length));
+    } else if (e.key === "Delete" || (e.key === "Backspace" && (e.metaKey || e.ctrlKey))) {
+      e.preventDefault();
+      const loc = locations[selectedIndex];
+      if (loc) {
+        if (navigationFacade) {
+          // §8.16.5: one delete for both Recent Locations and Back/Forward.
+          navigationFacade.remove({
+            fileKey: loc.fileIdentity,
+            canonicalPath: loc.filePath,
+            line: loc.line,
+            character: loc.character,
+          });
+        } else if (locationController) {
+          locationController.removeLocation(loc.id);
+        } else {
+          navigationHistoryTracker.removeLocation(loc.id);
+        }
+      }
     } else if (e.key === "Enter") {
       e.preventDefault();
       const loc = locations[selectedIndex];
@@ -157,6 +208,21 @@ export function RecentLocationsDialog({
                       )}
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
+                      {loc.state === "relocated" && (
+                        <span className="rounded bg-blue-500/20 text-blue-300 px-1.5 py-0.2 text-[10px] font-medium border border-blue-500/30" title="File moved or renamed">
+                          Relocated
+                        </span>
+                      )}
+                      {loc.state === "stale" && (
+                        <span className="rounded bg-orange-500/20 text-orange-300 px-1.5 py-0.2 text-[10px] font-medium border border-orange-500/30" title={loc.staleReason ?? "Content modified externally"}>
+                          Stale
+                        </span>
+                      )}
+                      {loc.state === "missing" && (
+                        <span className="rounded bg-red-500/20 text-red-300 px-1.5 py-0.2 text-[10px] font-medium border border-red-500/30" title="File no longer exists on disk">
+                          Missing
+                        </span>
+                      )}
                       {loc.isEditLocation && (
                         <span className="rounded bg-amber-500/20 text-amber-300 px-1.5 py-0.2 text-[10px] font-medium border border-amber-500/30">
                           Edited

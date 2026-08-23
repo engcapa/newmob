@@ -37,16 +37,25 @@ import type {
 } from "../../../lib/editor/lsp";
 import {
   CodeMirrorHost,
+  type EditorCommandPortRegistration,
   type EditorContextMenuRequest,
   type EditorSelectionRange,
 } from "./CodeMirrorHost";
+import type { EditorAppearanceExtensionProfile } from "./editorAppearanceExtension";
 import type { EffectiveCodeStyle } from "./codeStyleModel";
 import type { FileCoverage } from "./coverageModel";
-import { mergeCompletionTriggers } from "./lspCompletion";
+import {
+  mergeCompletionTriggers,
+  type CompletionAcceptanceDiagnostic,
+  type CompletionRequestIdentity,
+  type CompletionRequestToken,
+} from "./lspCompletion";
+import type { QuickDocContent } from "./referenceDocumentation";
 import type { OpenFileViewModel } from "./editorGroupTypes";
 import { useContextMenu } from "../../ContextMenu";
 import type { EditorGroupId } from "../../../stores/codeWorkspaceStore";
 import type { GitBlameLine } from "../../../lib/git";
+import type { WorkspaceActionHost } from "./workspaceActionHost";
 import type { GitLineChange } from "./gitEditorChrome";
 import { rollbackGitLineChange } from "./gitEditorChrome";
 import type { DebugBreakpointMarker } from "./debugEditorChrome";
@@ -72,6 +81,9 @@ export interface EditorRevealTarget {
 }
 
 interface EditorGroupProps {
+  /** Clipboard degradation notices forwarded to the workspace status bar. */
+  onClipboardUnavailable?: (message: string) => void;
+
   groupId: EditorGroupId;
   workspaceInstanceId: string;
   visible: boolean;
@@ -114,6 +126,7 @@ interface EditorGroupProps {
   activeLspSyncing: boolean;
   lspStatusPill: ReactNode;
   breadcrumbs: ReactNode;
+  breadcrumbsPlacement?: "top" | "bottom";
   activeSymbols?: LspDocumentSymbol[];
   stickyLinesEnabled?: boolean;
   onRevealTargetLine?: (line: number) => void;
@@ -121,7 +134,14 @@ interface EditorGroupProps {
   editorPaneRef: MutableRefObject<HTMLElement | null>;
   editorPaneStyle: CSSProperties;
   softWrap?: boolean;
+  appearance?: EditorAppearanceExtensionProfile;
   columnSelectionMode?: boolean;
+  showHoverDocumentation?: boolean;
+  hoverDocumentationDelayMs?: number;
+  parameterInfoRequestNonce?: number;
+  parameterInfoAutoPopup?: boolean;
+  parameterInfoDelayMs?: number;
+  parameterInfoShowFullSignatures?: boolean;
   onActivate: (key: string) => void;
   onActivateGroup: () => void;
   onClose: (key: string) => void;
@@ -143,17 +163,34 @@ interface EditorGroupProps {
   /** Keys whose sources are currently downloading (drives the banner spinner). */
   downloadingSourcesKeys?: string[];
   onMarkdownModeChange: (mode: MarkdownViewMode) => void;
-  onChangeText: (key: string, text: string) => void;
+  onChangeText: (key: string, text: string, caret?: LspPosition, caretOffset?: number) => void;
   onSave: (key: string) => void;
-  onHover: (file: OpenFileViewModel, position: LspPosition) => Promise<string | null>;
+  /** §8.18.2: workspace action host owning the editor.* business actions. */
+  workspaceActionHost?: WorkspaceActionHost | null;
+  onHover: (
+    file: OpenFileViewModel,
+    position: LspPosition,
+  ) => Promise<QuickDocContent | null>;
+  onPinHoverDoc?: (content: QuickDocContent) => void;
   onDefinition: (file: OpenFileViewModel, position: LspPosition) => Promise<boolean>;
   onReferences: (file: OpenFileViewModel, position: LspPosition) => Promise<void>;
   onComplete: (
     file: OpenFileViewModel,
     position: LspPosition,
     trigger: string | null,
+    token: CompletionRequestToken,
   ) => Promise<LspCompletionResult | null>;
-  onCompleteResolve: (file: OpenFileViewModel, raw: unknown) => Promise<LspCompletionItem | null>;
+  onCompleteResolve: (
+    file: OpenFileViewModel,
+    raw: unknown,
+    token: CompletionRequestToken,
+  ) => Promise<LspCompletionItem | null>;
+  /** Live completion request identity per file (§8.16.2). */
+  onCompletionIdentity: (file: OpenFileViewModel) => CompletionRequestIdentity | null;
+  onCompletionDiagnostic: (
+    kind: CompletionAcceptanceDiagnostic,
+    detail?: string,
+  ) => void;
   onSignatureHelp: (
     file: OpenFileViewModel,
     position: LspPosition,
@@ -163,7 +200,11 @@ interface EditorGroupProps {
   onViewportChange: (range: LspRange) => void;
   onExpandSelection: (file: OpenFileViewModel, selection: EditorSelectionRange) => Promise<LspRange[] | null>;
   onLightbulb: (line: number) => void;
-  onEditorContextMenu: (file: OpenFileViewModel, request: EditorContextMenuRequest) => void;
+  onEditorContextMenu: (file: OpenFileViewModel, request: EditorContextMenuRequest & { groupId: string }) => void;
+  onEditorCommandPortChange?: (
+    groupId: EditorGroupId,
+    registration: EditorCommandPortRegistration,
+  ) => void;
   onOpenMarkdownHref: (href: string) => boolean;
   formatBytes: (size: number) => string;
   formatMtime: (mtime: number) => string;
@@ -180,6 +221,7 @@ export function EditorGroup({
   groupId,
   workspaceInstanceId,
   visible,
+  onClipboardUnavailable,
   readOnly = false,
   openOrder,
   openFiles,
@@ -210,6 +252,7 @@ export function EditorGroup({
   activeLspSyncing,
   lspStatusPill,
   breadcrumbs,
+  breadcrumbsPlacement = "top",
   activeSymbols,
   stickyLinesEnabled = true,
   onRevealTargetLine,
@@ -217,7 +260,14 @@ export function EditorGroup({
   editorPaneRef,
   editorPaneStyle,
   softWrap = false,
+  appearance,
   columnSelectionMode = false,
+  showHoverDocumentation = true,
+  hoverDocumentationDelayMs = 300,
+  parameterInfoRequestNonce = 0,
+  parameterInfoAutoPopup = true,
+  parameterInfoDelayMs = 0,
+  parameterInfoShowFullSignatures = false,
   onActivate,
   onActivateGroup,
   onClose,
@@ -239,17 +289,22 @@ export function EditorGroup({
   onMarkdownModeChange,
   onChangeText,
   onSave,
+  workspaceActionHost = null,
   onHover,
+  onPinHoverDoc,
   onDefinition,
   onReferences,
   onComplete,
   onCompleteResolve,
+  onCompletionIdentity,
+  onCompletionDiagnostic,
   onSignatureHelp,
   onSelectionChange,
   onViewportChange,
   onExpandSelection,
   onLightbulb,
   onEditorContextMenu,
+  onEditorCommandPortChange,
   onOpenMarkdownHref,
   formatBytes,
   formatMtime,
@@ -264,6 +319,11 @@ export function EditorGroup({
     setTopLine(range.start.line);
     onViewportChange?.(range);
   }, [onViewportChange]);
+  const handleEditorCommandPortChange = useCallback((
+    registration: EditorCommandPortRegistration,
+  ) => {
+    onEditorCommandPortChange?.(groupId, registration);
+  }, [groupId, onEditorCommandPortChange]);
 
   const stickyLines = useMemo(() => {
     if (stickyLinesEnabled === false || !activeSymbols || !activeFile) return [];
@@ -499,7 +559,7 @@ export function EditorGroup({
         <div className="h-full min-h-0 relative">
           {activeFile ? (
             <div className="absolute inset-0 flex flex-col">
-              {breadcrumbs}
+              {breadcrumbsPlacement === "top" ? breadcrumbs : null}
               <div
                 data-testid="code-workspace-file-status"
                 className="min-h-7 shrink-0 flex items-center gap-2 px-3 border-b border-[var(--taomni-code-border)] bg-[var(--taomni-code-gutter-bg)] text-[length:var(--taomni-code-editor-ui-small-font-size)] text-[var(--taomni-code-text)]"
@@ -597,6 +657,10 @@ export function EditorGroup({
                     <div className="min-w-0 min-h-0 border-r border-[var(--taomni-code-border)]">
                       <CodeMirrorHost
                         key={`${activeFile.key}:edit`}
+                        fileKey={activeFile.key}
+                        clipboardWorkspaceId={workspaceInstanceId}
+                        onClipboardUnavailable={onClipboardUnavailable}
+                        workspaceActionHost={workspaceActionHost}
                         path={activeFile.languagePath}
                         doc={activeFile.text}
                         visible={visible}
@@ -611,27 +675,38 @@ export function EditorGroup({
                         reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                         // Library sources (JDK / dependency classes) cannot be written back.
                         readOnly={readOnly || !!activeFile.library}
-                        onChange={(doc) => {
+                        onChange={(doc, caret, caretOffset) => {
                           if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
-                          onChangeText(activeFile.key, doc);
+                          onChangeText(activeFile.key, doc, caret, caretOffset);
                         }}
                         onSave={() => onSave(activeFile.key)}
                         onHover={(position) => onHover(activeFile, position)}
+                        onPinHoverDoc={onPinHoverDoc}
                         onDefinition={(position) => onDefinition(activeFile, position)}
                         onReferences={(position) => onReferences(activeFile, position)}
-                        onComplete={(position, trigger) => onComplete(activeFile, position, trigger)}
-                        onCompleteResolve={(raw) => onCompleteResolve(activeFile, raw)}
+                        onComplete={(position, trigger, token) => onComplete(activeFile, position, trigger, token)}
+                        onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
+                        getCompletionIdentity={() => onCompletionIdentity(activeFile)}
+                        onCompletionDiagnostic={onCompletionDiagnostic}
                         onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
                         onSelectionChange={onSelectionChange}
                         onViewportChange={handleViewportChange}
                         onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
                         onLightbulb={onLightbulb}
                         onGitChangeClick={setGitDiffPeek}
-                        onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
+                        onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
+                        onCommandPortChange={handleEditorCommandPortChange}
                         completionTriggers={completionTriggers}
                         signatureTriggers={signatureTriggers}
                         softWrap={softWrap}
+                        appearance={appearance}
                         columnSelectionMode={columnSelectionMode}
+                        showHoverDocumentation={showHoverDocumentation}
+                        hoverDocumentationDelayMs={hoverDocumentationDelayMs}
+                        parameterInfoRequestNonce={parameterInfoRequestNonce}
+                        parameterInfoAutoPopup={parameterInfoAutoPopup}
+                        parameterInfoDelayMs={parameterInfoDelayMs}
+                        parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
                         codeStyle={activeCodeStyle}
                       />
                     </div>
@@ -645,6 +720,10 @@ export function EditorGroup({
                     />
                     <CodeMirrorHost
                       key={activeFile.key}
+                      fileKey={activeFile.key}
+                        clipboardWorkspaceId={workspaceInstanceId}
+                        onClipboardUnavailable={onClipboardUnavailable}
+                      workspaceActionHost={workspaceActionHost}
                       path={activeFile.languagePath}
                       doc={activeFile.text}
                       visible={visible}
@@ -667,32 +746,44 @@ export function EditorGroup({
                       onEditBreakpoint={onEditBreakpoint}
                       reveal={revealTarget?.key === activeFile.key ? revealTarget : null}
                       readOnly={readOnly || !!activeFile.library}
-                      onChange={(doc) => {
+                      onChange={(doc, caret, caretOffset) => {
                         if (previewKey === activeFile.key) onPromotePreview(activeFile.key);
-                        onChangeText(activeFile.key, doc);
+                        onChangeText(activeFile.key, doc, caret, caretOffset);
                       }}
                       onSave={() => onSave(activeFile.key)}
                       onHover={(position) => onHover(activeFile, position)}
+                      onPinHoverDoc={onPinHoverDoc}
                       onDefinition={(position) => onDefinition(activeFile, position)}
                       onReferences={(position) => onReferences(activeFile, position)}
-                      onComplete={(position, trigger) => onComplete(activeFile, position, trigger)}
-                      onCompleteResolve={(raw) => onCompleteResolve(activeFile, raw)}
+                      onComplete={(position, trigger, token) => onComplete(activeFile, position, trigger, token)}
+                      onCompleteResolve={(raw, token) => onCompleteResolve(activeFile, raw, token)}
+                      getCompletionIdentity={() => onCompletionIdentity(activeFile)}
+                      onCompletionDiagnostic={onCompletionDiagnostic}
                       onSignatureHelp={(position, trigger) => onSignatureHelp(activeFile, position, trigger)}
                       onSelectionChange={onSelectionChange}
                       onViewportChange={handleViewportChange}
                       onExpandSelection={(selection) => onExpandSelection(activeFile, selection)}
                       onLightbulb={onLightbulb}
                       onGitChangeClick={setGitDiffPeek}
-                      onContextMenu={(request) => onEditorContextMenu(activeFile, request)}
+                      onContextMenu={(request) => onEditorContextMenu(activeFile, { ...request, groupId })}
+                      onCommandPortChange={handleEditorCommandPortChange}
                       completionTriggers={completionTriggers}
                       signatureTriggers={signatureTriggers}
                       softWrap={softWrap}
+                      appearance={appearance}
                       columnSelectionMode={columnSelectionMode}
+                      showHoverDocumentation={showHoverDocumentation}
+                      hoverDocumentationDelayMs={hoverDocumentationDelayMs}
+                      parameterInfoRequestNonce={parameterInfoRequestNonce}
+                      parameterInfoAutoPopup={parameterInfoAutoPopup}
+                      parameterInfoDelayMs={parameterInfoDelayMs}
+                      parameterInfoShowFullSignatures={parameterInfoShowFullSignatures}
                       codeStyle={activeCodeStyle}
                     />
                   </div>
                 )}
               </div>
+              {breadcrumbsPlacement === "bottom" ? breadcrumbs : null}
             </div>
           ) : (
             <div className="h-full flex items-center justify-center text-[12px] text-[var(--taomni-code-muted)]">

@@ -57,6 +57,11 @@ const MAX_VIRTUAL_DOCUMENT_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_WORKSPACE_SYMBOLS: usize = 20_000;
 const MAX_WORKSPACE_SYMBOL_PROVIDERS: usize = 64;
 const MAX_WORKSPACE_SYMBOL_DIAGNOSTICS: usize = 32;
+/// Completion items carry the provider payload twice: normalized display/apply
+/// fields plus the opaque item echoed to completionItem/resolve. JDTLS can
+/// return thousands of entries, so bound parsing and IPC serialization before
+/// the response reaches the renderer thread.
+const MAX_COMPLETION_ITEMS: usize = 200;
 /// Keep opaque workspace-symbol resolve payloads short-lived and bounded. The
 /// token is only a routing handle; the raw provider payload never crosses the
 /// frontend boundary.
@@ -540,6 +545,9 @@ pub struct LspCompletionResult {
     pub status: LspDocumentStatus,
     pub is_incomplete: bool,
     pub items: Vec<LspCompletionItem>,
+    /// True when the server list was locally truncated at the hard cap.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2397,6 +2405,49 @@ fn push_workspace_symbol_diagnostic(diagnostics: &mut Vec<String>, message: Stri
     }
 }
 
+// ---------------------------------------------------------------------------
+// §8.18.6 reference-request cancellation registry. Keyed by
+// `<workspaceId>|<fileKey>` so a new caret/hover cancels the previous
+// in-flight provider request through `$/cancelRequest`, and an explicit
+// cancel command covers popup-close without a replacement request.
+// ---------------------------------------------------------------------------
+
+fn reference_cancellations() -> &'static std::sync::Mutex<HashMap<String, (u64, CancellationToken)>>
+{
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, (u64, CancellationToken)>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn begin_reference_request(cancel_key: &str, request_seq: u64) -> CancellationToken {
+    let mut guard = reference_cancellations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    if let Some((previous_seq, previous)) =
+        guard.insert(cancel_key.to_string(), (request_seq, cancellation.clone()))
+    {
+        if previous_seq <= request_seq {
+            previous.cancel();
+        }
+    }
+    cancellation
+}
+
+fn cancel_reference_request(cancel_key: &str) -> bool {
+    let mut guard = reference_cancellations()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.remove(cancel_key) {
+        Some((_, cancellation)) => {
+            cancellation.cancel();
+            true
+        }
+        None => false,
+    }
+}
+
 fn begin_workspace_symbol_query(
     queries: &mut HashMap<String, (u64, CancellationToken)>,
     workspace_id: &str,
@@ -2820,6 +2871,21 @@ impl LspSession {
                     "documentHighlight": { "dynamicRegistration": true },
                     "codeAction": {
                         "dynamicRegistration": true,
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "",
+                                    "quickfix",
+                                    "refactor",
+                                    "refactor.extract",
+                                    "refactor.inline",
+                                    "refactor.rewrite",
+                                    "source",
+                                    "source.organizeImports",
+                                    "source.fixAll"
+                                ]
+                            }
+                        },
                         "isPreferredSupport": true,
                         "dataSupport": true,
                         "resolveSupport": {
@@ -5691,6 +5757,8 @@ pub async fn lsp_hover(
     language_id: Option<String>,
     server_command_id: Option<String>,
     custom_server_command: Option<LspCustomServerCommand>,
+    cancel_key: Option<String>,
+    request_seq: Option<u64>,
 ) -> Result<LspHoverResult, String> {
     let document = with_document_uri(
         resolve_document(workspace_id, root_path, file_path, language_id, 0)?,
@@ -5722,16 +5790,41 @@ pub async fn lsp_hover(
             });
         }
     };
+    // §8.18.6: when the caller supplies a cancellation identity, a newer
+    // request for the same key aborts this one via `$/cancelRequest` and the
+    // in-flight await returns immediately instead of racing the response.
+    let cancellation = match (cancel_key.as_deref(), request_seq) {
+        (Some(key), Some(seq)) => begin_reference_request(key, seq),
+        _ => tokio_util::sync::CancellationToken::new(),
+    };
     let result = session
-        .request(
+        .request_with_cancellation(
             "textDocument/hover",
             json!({
                 "textDocument": { "uri": document.uri },
                 "position": { "line": line, "character": character }
             }),
+            &cancellation,
         )
         .await
         .unwrap_or(Value::Null);
+    if cancellation.is_cancelled() {
+        // Cancelled requests report no content; the status snapshot stays
+        // fresh so the next hover can proceed immediately.
+        let status = state
+            .lsp
+            .document_status(
+                &document,
+                server_command_id.as_deref(),
+                custom_server_command.as_ref(),
+            )
+            .await;
+        return Ok(LspHoverResult {
+            status,
+            contents: None,
+            range: None,
+        });
+    }
     let status = state
         .lsp
         .document_status(
@@ -5745,6 +5838,14 @@ pub async fn lsp_hover(
         contents: hover_contents(&result),
         range: result.get("range").and_then(parse_range),
     })
+}
+
+/// §8.18.6: cancel an in-flight reference request without issuing a
+/// replacement (popup close, workspace unmount). Returns true when a live
+/// request was actually aborted.
+#[tauri::command]
+pub fn lsp_cancel_reference_request(cancel_key: String) -> bool {
+    cancel_reference_request(&cancel_key)
 }
 
 #[tauri::command]
@@ -5969,6 +6070,7 @@ pub async fn lsp_completion(
                 status,
                 is_incomplete: false,
                 items: Vec::new(),
+                truncated: false,
             });
         }
     };
@@ -5995,11 +6097,12 @@ pub async fn lsp_completion(
             custom_server_command.as_ref(),
         )
         .await;
-    let (is_incomplete, items) = parse_completion_response(&result);
+    let (is_incomplete, items, truncated) = parse_completion_response(&result);
     Ok(LspCompletionResult {
         status,
         is_incomplete,
         items,
+        truncated,
     })
 }
 
@@ -9674,7 +9777,7 @@ fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
         .and_then(Value::as_str)
         .filter(|title| !title.is_empty())?
         .to_string();
-    let command = value.get("command").and_then(|command| {
+    let command_name = value.get("command").and_then(|command| {
         if let Some(name) = command.as_str() {
             Some(name.to_string())
         } else {
@@ -9689,7 +9792,36 @@ fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
         .and_then(|command| command.get("arguments"))
         .cloned()
         .or_else(|| value.get("arguments").cloned());
-    let edit = value.get("edit").map(parse_workspace_edit);
+    let mut edit = value.get("edit").map(parse_workspace_edit);
+
+    // If edit is missing, but the command is an apply-workspace-edit wrapper (such as
+    // JDTLS `_java.apply.workspaceEdit` or `java.apply.workspaceEdit` or VSCode `editor.action.applyWorkspaceEdit`),
+    // extract the workspace edit from command_arguments[0].
+    let is_apply_workspace_edit_command = command_name.as_deref().is_some_and(|name| {
+        name == "_java.apply.workspaceEdit"
+            || name == "java.apply.workspaceEdit"
+            || name == "editor.action.applyWorkspaceEdit"
+            || name == "applyWorkspaceEdit"
+    });
+
+    if edit.is_none() && is_apply_workspace_edit_command {
+        if let Some(first_arg) = command_arguments
+            .as_ref()
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+        {
+            if first_arg.get("changes").is_some() || first_arg.get("documentChanges").is_some() {
+                edit = Some(parse_workspace_edit(first_arg));
+            }
+        }
+    }
+
+    let command = if is_apply_workspace_edit_command && edit.is_some() {
+        None
+    } else {
+        command_name
+    };
+
     Some(LspCodeAction {
         title,
         kind: value
@@ -9816,24 +9948,37 @@ fn parse_completion_item(value: &Value) -> Option<LspCompletionItem> {
 
 /// Completion responses are either a bare `CompletionItem[]` or a
 /// `CompletionList { isIncomplete, items }`.
-fn parse_completion_response(value: &Value) -> (bool, Vec<LspCompletionItem>) {
+fn parse_completion_response(value: &Value) -> (bool, Vec<LspCompletionItem>, bool) {
     if let Some(items) = value.as_array() {
+        let truncated = items.len() > MAX_COMPLETION_ITEMS;
         return (
-            false,
-            items.iter().filter_map(parse_completion_item).collect(),
+            truncated,
+            items
+                .iter()
+                .take(MAX_COMPLETION_ITEMS)
+                .filter_map(parse_completion_item)
+                .collect(),
+            truncated,
         );
     }
     if let Some(items) = value.get("items").and_then(Value::as_array) {
+        let truncated = items.len() > MAX_COMPLETION_ITEMS;
         let is_incomplete = value
             .get("isIncomplete")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || truncated;
         return (
             is_incomplete,
-            items.iter().filter_map(parse_completion_item).collect(),
+            items
+                .iter()
+                .take(MAX_COMPLETION_ITEMS)
+                .filter_map(parse_completion_item)
+                .collect(),
+            truncated,
         );
     }
-    (false, Vec::new())
+    (false, Vec::new(), false)
 }
 
 fn parse_signature_parameter(
@@ -11185,11 +11330,11 @@ mod tests {
             notify_event_changes(&rename),
             vec![
                 LspWatchedFileChange {
-                    path: old_path.to_string_lossy().into_owned(),
+                    path: old_path.to_string_lossy().replace('\\', "/"),
                     change_type: 3,
                 },
                 LspWatchedFileChange {
-                    path: new_path.to_string_lossy().into_owned(),
+                    path: new_path.to_string_lossy().replace('\\', "/"),
                     change_type: 1,
                 },
             ]
@@ -12745,7 +12890,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
 
     #[test]
     fn parses_completion_lists_and_bare_arrays() {
-        let (incomplete, items) = parse_completion_response(&json!({
+        let (incomplete, items, truncated_flag) = parse_completion_response(&json!({
             "isIncomplete": true,
             "items": [
                 {
@@ -12772,6 +12917,7 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         }));
 
         assert!(incomplete);
+        assert!(!truncated_flag);
         assert_eq!(items.len(), 1);
         let item = &items[0];
         assert_eq!(item.label, "openFile");
@@ -12781,12 +12927,24 @@ Java(TM) SE Runtime Environment (build 17.0.4+11-LTS-179)
         assert_eq!(item.additional_text_edits.len(), 1);
         assert!(item.raw.get("label").is_some());
 
-        let (incomplete, items) = parse_completion_response(&json!([{ "label": "bare" }]));
+        let (incomplete, items, _) = parse_completion_response(&json!([{ "label": "bare" }]));
         assert!(!incomplete);
         assert_eq!(items[0].label, "bare");
 
-        let (_, empty) = parse_completion_response(&Value::Null);
+        let (_, empty, _) = parse_completion_response(&Value::Null);
         assert!(empty.is_empty());
+
+        let oversized = json!({
+            "isIncomplete": false,
+            "items": (0..MAX_COMPLETION_ITEMS + 25)
+                .map(|index| json!({ "label": format!("candidate-{index}") }))
+                .collect::<Vec<_>>()
+        });
+        let (incomplete, items, truncated_flag) = parse_completion_response(&oversized);
+        assert!(incomplete, "a locally truncated list must remain queryable");
+        assert!(truncated_flag, "local truncation must be observable");
+        assert_eq!(items.len(), MAX_COMPLETION_ITEMS);
+        assert_eq!(items.last().unwrap().label, "candidate-199");
     }
 
     #[test]

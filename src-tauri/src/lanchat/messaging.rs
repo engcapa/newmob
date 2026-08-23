@@ -11,9 +11,9 @@ use std::time::Duration;
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
 
-use crate::lanchat::protocol::{frame, Envelope, PROTOCOL_VERSION};
-use crate::lanchat::store::{direct_conv_id, group_conv_id, LanMessage};
-use crate::lanchat::{events, transport, LanChatState};
+use crate::lanchat::protocol::{Envelope, PROTOCOL_VERSION, frame};
+use crate::lanchat::store::{LanMessage, direct_conv_id, group_conv_id};
+use crate::lanchat::{LanChatState, events, transport};
 
 /// How long an unacked message waits before it is marked `failed`.
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -68,7 +68,8 @@ pub async fn send_text(
         .ensure_conversation(&conv_id, "direct", peer_id)
         .map_err(|e| e.to_string())?;
 
-    let payload = json!({ "convId": conv_id.clone(), "text": text.clone(), "mentions": mentions.clone() });
+    let payload =
+        json!({ "convId": conv_id.clone(), "text": text.clone(), "mentions": mentions.clone() });
     let env = Envelope::new(frame::TEXT_MSG, &my_id, Some(peer_id.to_string()), payload);
     let msg = LanMessage {
         id: env.id.clone(),
@@ -79,7 +80,10 @@ pub async fn send_text(
         created_at: env.ts,
         state: "sending".into(),
     };
-    state.store.insert_message(&msg).map_err(|e| e.to_string())?;
+    state
+        .store
+        .insert_message(&msg)
+        .map_err(|e| e.to_string())?;
     let _ = state.store.touch_conversation(&conv_id, msg.created_at, 0);
     emit_message(app, &msg);
     emit_conversation(app, state, &conv_id).await;
@@ -126,7 +130,12 @@ pub async fn resend(
         emit_message(app, &m);
     }
     dispatch_and_track(app, state, &peer_id, env).await;
-    Ok(state.store.get_message(&msg.id).ok().flatten().unwrap_or(msg))
+    Ok(state
+        .store
+        .get_message(&msg.id)
+        .ok()
+        .flatten()
+        .unwrap_or(msg))
 }
 
 /// Send the frame and track delivery: `sent` on success (+ failure timeout),
@@ -303,7 +312,10 @@ pub async fn create_group(
 ) -> Result<crate::lanchat::store::Group, String> {
     let my_id = state.node_id().await;
     let group_id = uuid::Uuid::new_v4().to_string();
-    state.store.upsert_group(&group_id, name).map_err(|e| e.to_string())?;
+    state
+        .store
+        .upsert_group(&group_id, name)
+        .map_err(|e| e.to_string())?;
     state.store.add_group_member(&group_id, &my_id).ok();
     for m in &members {
         state.store.add_group_member(&group_id, m).ok();
@@ -362,16 +374,16 @@ pub async fn send_group_text(
         created_at: now,
         state: "sent".into(),
     };
-    state.store.insert_message(&msg).map_err(|e| e.to_string())?;
+    state
+        .store
+        .insert_message(&msg)
+        .map_err(|e| e.to_string())?;
     let _ = state.store.touch_conversation(&conv_id, now, 0);
     emit_message(app, &msg);
     emit_conversation(app, state, &conv_id).await;
 
     // Fan out the same message id to every member; receivers dedup by id.
-    let members = state
-        .store
-        .list_group_members(group_id)
-        .unwrap_or_default();
+    let members = state.store.list_group_members(group_id).unwrap_or_default();
     let payload = json!({ "groupId": group_id, "text": text, "mentions": mentions });
     for member in members {
         if member == my_id {

@@ -250,9 +250,7 @@ pub fn discover_bundles() -> Vec<DiscoveredBundle> {
                 .unwrap_or("")
                 .to_string();
             for kind in [BundleKind::JavaDebug, BundleKind::JavaTest] {
-                if let Some((version, path)) =
-                    newest_jar_in_dir(&server_dir, kind.jar_prefix())
-                {
+                if let Some((version, path)) = newest_jar_in_dir(&server_dir, kind.jar_prefix()) {
                     let source = format!("{label}: {ext_name}");
                     push_newest_discovery(&mut out, kind, version, path, source);
                 }
@@ -296,10 +294,7 @@ fn push_newest_discovery(
     source: String,
 ) {
     let id = kind.config_key().to_string();
-    if let Some(existing) = out
-        .iter_mut()
-        .find(|d| d.id == id && d.source == source)
-    {
+    if let Some(existing) = out.iter_mut().find(|d| d.id == id && d.source == source) {
         if compare_versions(&version, &existing.version) == Ordering::Greater {
             existing.version = version;
             existing.path = path.to_string_lossy().into_owned();
@@ -339,7 +334,10 @@ mod tests {
 
         let jar = resolve_bundle_jar(BundleKind::JavaDebug, Some(dir.path().to_str().unwrap()))
             .expect("resolves a jar");
-        assert!(jar.to_string_lossy().ends_with("com.microsoft.java.debug.plugin-0.53.1.jar"));
+        assert!(
+            jar.to_string_lossy()
+                .ends_with("com.microsoft.java.debug.plugin-0.53.1.jar")
+        );
     }
 
     #[test]
@@ -362,7 +360,11 @@ mod tests {
             java_test_path: Some("   ".into()),
         };
         let jars = resolve_bundle_jars(&config);
-        assert_eq!(jars.len(), 1, "only java-debug should resolve, got {jars:?}");
+        assert_eq!(
+            jars.len(),
+            1,
+            "only java-debug should resolve, got {jars:?}"
+        );
         assert!(jars[0].ends_with("com.microsoft.java.debug.plugin-0.52.0.jar"));
 
         let statuses = probe_bundles(&config);
@@ -388,10 +390,13 @@ mod tests {
         touch(dir.path(), "com.microsoft.java.test.plugin-0.43.1.jar");
         touch(dir.path(), "noise.jar");
 
-        let (version, path) =
-            newest_jar_in_dir(dir.path(), BundleKind::JavaDebug.jar_prefix()).expect("finds debug jar");
+        let (version, path) = newest_jar_in_dir(dir.path(), BundleKind::JavaDebug.jar_prefix())
+            .expect("finds debug jar");
         assert_eq!(version, "0.53.2");
-        assert!(path.to_string_lossy().ends_with("com.microsoft.java.debug.plugin-0.53.2.jar"));
+        assert!(
+            path.to_string_lossy()
+                .ends_with("com.microsoft.java.debug.plugin-0.53.2.jar")
+        );
 
         // A prefix with no match yields nothing rather than a wrong jar.
         assert!(newest_jar_in_dir(dir.path(), "com.example.absent-").is_none());
@@ -405,7 +410,8 @@ mod tests {
             &mut out,
             BundleKind::JavaDebug,
             "0.52.0".into(),
-            dir.path().join("com.microsoft.java.debug.plugin-0.52.0.jar"),
+            dir.path()
+                .join("com.microsoft.java.debug.plugin-0.52.0.jar"),
             "vscode: vscjava.vscode-java-debug-0.58.0".into(),
         );
         // Same source, newer version → replaces in place (no duplicate row).
@@ -413,7 +419,8 @@ mod tests {
             &mut out,
             BundleKind::JavaDebug,
             "0.53.2".into(),
-            dir.path().join("com.microsoft.java.debug.plugin-0.53.2.jar"),
+            dir.path()
+                .join("com.microsoft.java.debug.plugin-0.53.2.jar"),
             "vscode: vscjava.vscode-java-debug-0.58.0".into(),
         );
         // A different source is a distinct row the user can choose between.
@@ -421,11 +428,14 @@ mod tests {
             &mut out,
             BundleKind::JavaDebug,
             "0.53.2".into(),
-            dir.path().join("com.microsoft.java.debug.plugin-0.53.2.jar"),
+            dir.path()
+                .join("com.microsoft.java.debug.plugin-0.53.2.jar"),
             "cursor: vscjava.vscode-java-debug-0.58.5".into(),
         );
         assert_eq!(out.len(), 2);
-        assert!(out.iter().all(|d| d.id == "javaDebug" && d.version == "0.53.2"));
+        assert!(
+            out.iter()
+                .all(|d| d.id == "javaDebug" && d.version == "0.53.2")
+        );
     }
 }
-

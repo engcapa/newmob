@@ -1,7 +1,7 @@
-use serde::{Deserialize, Serialize};
-use rusqlite::{params, Connection, Result as SqlResult};
-use tauri::State;
 use crate::state::AppState;
+use rusqlite::{Connection, Result as SqlResult, params};
+use serde::{Deserialize, Serialize};
+use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,10 +116,7 @@ pub async fn db_save_bookmark(
 }
 
 #[tauri::command]
-pub async fn db_delete_bookmark(
-    id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn db_delete_bookmark(id: String, state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     delete_bookmark(&db, &id).map_err(|e| e.to_string())
 }
