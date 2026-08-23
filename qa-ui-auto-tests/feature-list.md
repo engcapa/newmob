@@ -5396,6 +5396,30 @@ controls:
     selector: '[data-testid="code-workspace-split-sync-scroll"]'
     kind: interactive
     optional: true
+  - id: split-right
+    selector: '[data-testid="code-workspace-split-right"]'
+    kind: interactive
+    optional: true       # rendered on the editor toolbar; enabled with an open buffer
+  - id: editor-appearance-settings-command
+    selector: '[data-testid="workspace-editor-appearance-settings-dialog"]'
+    kind: display
+    optional: true       # opens from the appearance settings command
+  - id: keymap-settings-dialog
+    selector: '[data-testid="workspace-keymap-settings-dialog"]'
+    kind: display
+    optional: true       # §8.18.2 Keymap settings surface
+  - id: references-panel-show-more
+    selector: '[data-testid="references-show-more"]'
+    kind: interactive
+    optional: true       # §8.18.7 batched usages continuation
+  - id: references-pin-toggle
+    selector: '[data-testid="references-pin-toggle"]'
+    kind: interactive
+    optional: true
+  - id: references-rerun
+    selector: '[data-testid="references-rerun"]'
+    kind: interactive
+    optional: true
 -->
 
 - 后端统一发现项目、结构化 Build/Run/Debug 目标和工具可用性；项目 wrapper 优先于 workspace override 和 PATH，缺失工具提供明确安装提示。

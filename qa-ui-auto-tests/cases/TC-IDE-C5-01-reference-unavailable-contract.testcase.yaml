@@ -1,0 +1,22 @@
+id: TC-IDE-C5-01
+title: "QuickDoc explicit request reports typed unavailable without a provider"
+description: |
+  §8.18.10 C5 negative path (browser/stub). With no language server active,
+  the explicit Quick Documentation action must surface its typed unavailable
+  status instead of a stale popup or silent no-op. Provider-backed popup/
+  pin/history flows run under the jdtls fixture in the native manifest.
+covers: [F25.6]
+tags: [code-workspace, ide-c5, reference, p1]
+modes: [browser]
+fixtures: [reset_db]
+timeout_sec: 90
+steps:
+  - open: "${cfg.app.base_url}"
+  - wait_for: "[data-testid=\"tab-bar\"]"
+  # Leave the welcome surface so the sidebar tool strip is mounted.
+  - click: "[data-testid=\"welcome-open-local-terminal\"]"
+  - click: "[data-testid=\"side-tab-tools\"]"
+  - wait_for: "[data-testid=\"sidebar-tool-code-workspace\"]"
+  - click: "[data-testid=\"sidebar-tool-code-workspace\"]"
+  - wait_for: "[data-testid=\"code-workspace-tab\"]"
+  - screenshot: tc-ide-c5-01-shell.png

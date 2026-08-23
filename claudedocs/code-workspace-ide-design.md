@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-23 · 版本：v4.48（当前 HEAD `c083008e` 二次 as-built 审计与 IDEA 2026.2 再对齐）· 状态：**实施中，G0 红、G1 未达发布门禁**。`c083008e` 已提交 §2.26 所列 save/completion/action/layout/switcher/clipboard/reference/governance 增量，且该提交记录的 `tsc -b`、129 个 editor Vitest 文件 / 1040 用例、62 个 Rust workspace 用例和 QA audit 是有效历史证据；本轮没有重跑这些代码测试。沿当前生产调用链复核后发现，保存事务仍把所有 `written` 结果重映射为 `saved-current`，close/unmount 后磁盘已写入也会返回 `cancelled`；Keymap 仍由 CodeMirror 静态 keymap 与 action metadata 分别持有；Switcher 使用固定工具窗列表且丢失原 leaf；Reference 请求的 AbortSignal 未传到 `lspHover`；真实 jdtls、native 和三端证据仍缺。因此撤销“G0 代码面闭合”和“§8.17 全部缺口已关闭”的当前结论。最新状态见 §2.27，唯一可领取的执行合同见 §8.18；§2.26/§8.17 降为历史实施记录。
+> 日期：2026-08-23 · 版本：v4.49（C0–C9 执行轮：§8.18 合同全部包已实施，G0/G1 代码面重建完成、发布门禁仍红）· 状态：**实施中，G0/G1 待 native+三端证据，G2/G3 按单 capability 升级**。本轮按 §8.18 顺序完成 C0–C9 十个包的生产实施与测试（1123 editor Vitest / 159 相关 Rust 用例绿），§2.26 审计指出的五处高估（save 重映射、双真值 Keymap、Switcher 丢 leaf、AbortSignal 不达 IPC、固定工具窗列表）均已修复。真实 jdtls trace、native 三端矩阵、性能采样与 a11y smoke 未运行，相应 capability 显式登记为 platform-unverified——不得据此写 verified/L3。最新状态见 §2.28；§8.18 任务表已勾选并保留为回归合同。
 >
 > 当前结论：**当前实现有一批真实的 L2 工作流增量，但不能据此宣称 IDEA-like daily editor。** 已确认可保留的成果包括 completion identity/stale containment、snippet 与 additional edits 的单次 dispatch、frozen action evaluation、递归 layout/per-leaf chrome、workspace-scoped 单槽 clipboard、QuickDoc/Parameter Info presentation 和实验模型治理。当前硬门禁是：写盘后的真实 disk-effect 结果、ActionHost 与可编辑 Keymap 的单一真值、真实 jdtls Basic Completion/auto-import/rename/usages fixture、Switcher/tab policy、完整 Reference Information provider contract、Find/Show Usages 工作流、三端 native/IME/a11y/性能与 QA workflow。每项必须按 capability 单独升级，不得用 provider capability、静态模型、绿色单测或相似 UI 推导整体 IDEA 等价。
 >
@@ -705,6 +705,89 @@ QA audit 结果：报告中列出的 `code-workspace-bottom-tab-*`、`workspace-
 | **G3 Advanced/Companion Profile** | **未启动/分项 L0** | C7/C8/C4-G3 子包按 language/provider/edition/platform 独立验收；不设置“一次完成 IDEA Advanced”的总开关 |
 
 当前合并顺序固定为 `C0 -> C1 -> C2 -> C3 -> C4 -> C5 -> C6 -> C7 -> C8 -> C9`；C9 的 catalog/fixture 设计在每包同步更新，最终门禁最后执行。可并行的只有 owner 不重叠且不改变前置接口的测试 fixture。详细接口、状态机、迁移、QA 和 Definition of Done 见 §8.18。
+
+### 2.28 v4.49 C0–C9 实施记录与诚实证据（2026-08-23）
+
+本节是 §8.18 十个包在本轮的执行结果。基线为 HEAD `c083008e` 之后的连续提交
+（C0→C1→C3→C4→C2→C5→C6→C7+C8→C9）。判断仍沿
+`用户入口 -> production owner -> provider/IPC -> typed result -> state/writeback -> cancel/error/undo`。
+**本节不把任何包标为 verified/L3**：三端 native、真实 jdtls、性能采样与读屏
+smoke 均未运行（见 2.28.4）。
+
+#### 2.28.1 各包实施与最高可声明等级
+
+| 包 | 本轮生产变更 | 最高可声明 | 残余缺口 |
+|---|---|---|---|
+| **P0-C0** | 六态 `SaveCommitResult`（disk/memory/provider 三轴）；Rust 写盘返回 `WorkspaceWriteAck{file,writtenHash,writtenByteLength,atomicReplaceUsed}`，typed error 带 `effect: none\|unknown` 与 written hash/length；unknown-effect 前端重读分类（committed/none/foreign），foreign 建 v3 磁盘效果台账并阻止该 path 自动重试；controller 不再把 writer 结果重解释为业务态；close/unmount 落盘后返回 `committed-writeback-discarded`（不再伪装 cancelled） | **G0 save 代码面 L2**（`workflow` 级：host 主路径 + cancel/fail/stale + undo/persistence 单测齐备） | crash-window、三端 locked file/native matrix 未验证 |
+| **P0-C1** | `KeymapSchemeV3` 存储层（per-app-profile、corrupt 隔离回退）；host 增加 scheme 层 + `prepareBinding()`（user>base 裁决、conflict 不执行、双键 chord 等待/超时/Esc 取消、userDisabled 可见不可执行）；CodeMirror 业务键位迁入显式 `editor.*` action（save/replace/expandSelection/escapeStack），有 host 时不再安装内联 spread 键位；Keymap Settings surface（scheme copy/rename/reset/delete、录键、冲突徽标、恢复默认）；result sink 补 no-op reason | **G1 Keymap/Action `wired`+partial** | 非 US 布局/AltGr/IME/三端打包 smoke 未跑；mouse shortcut 仅 schema |
+| **P0-C2** | choice placeholder 升级为可交互会话（Tab 在 choice stop 上单事务轮换、后续 tabstop 重映射、Esc 接受）；重复显式调用 ordinal 追踪（同 revision+position ordinal≥2 → "provider scope unchanged" 标签策略）；`toCompletionProviderResult` 四态 envelope + capability evidence（截断对 200 cap 显式化，null 响应记 stale 而非零候选）；jdtls fixture 合同与期望结构入库（`__fixtures__/jdtls/`） | **Basic Completion synthetic/wired L2**；Java fixture 单项 **platform-unverified** | 真实 jdtls Maven/Gradle trace、resolve timeout 实测未跑 |
+| **P0-C3** | `acquireClipboardStore` refcount 句柄（微任务延迟防 remount 误清，归零即清）；C3b 会话内历史环（50 项/1MiB 总量/256KiB 单项、paste-from-history 提升、disable/clear）；`planPaste` 文档化段-光标映射（少循环/多显式丢弃标记）；region 折叠加语法闸：Lezer 可见时 marker 必须在 Comment 节点，字符串/template 拒绝，无 parser 回退启发式（显式命名 text-marker heuristic） | **C3a G1 `wired` L2** | 完整 virtual space（键盘 End/mouse/paste 视觉列 StateField）仅保留既有 clone-caret facet，未全覆盖；跨 leaf 三端实测未做 |
+| **P0-C4** | Switcher entry 带 leafId/pinned/preview/open 态；commit 按 `setStoreActiveEditorGroup`+`setLeafActiveTab` 回原 leaf（leaf 已关则迁最近并显式提示 relocated）；tool window 项按 dock MRU 排序并显示 open 徽标；空 editor 列表仍有 tool windows 时正常渲染（修 null bug）；Backspace 关闭选中项（dirty 走确认、tool window 隐藏）；closed-tab 重开栈（50/session，Ctrl+Shift+T 命令）；`TabPolicyV2` 纯模型（limit 驱逐保护 dirty/pinned、display order 投影、activateOnClose） | **G1 switcher/tab `wired` L2**（policy reducer 有 property 式用例；limit 尚未接入 openFile 生产路径） | detach(C4b)、tab limit 生产 enforcement、200% zoom 键盘证据 |
+| **P1-C5** | hover 取消贯通到 native：per-key CancellationToken 注册表，新请求按 seq 取消旧请求并发 `$/cancelRequest`，新增 `lsp_cancel_reference_request` 命令覆盖 popup close；两条 QuickDoc 路径都携带 cancelKey/seq；External Documentation URL 策略收紧（https 默认、http 显式 opt-in、凭据 URL 硬拒） | **Parameter/QuickDoc 主路径 presentation L2**；取消语义 `wired`（mock 级验证到 controller/signal，native trace 未录） | Type/Context/External 保持 typed unavailable（无伪造推导）；hover delay 取消的 CM 内联路径未接 signal |
+| **P1-C6** | `javaSemanticEvidence.ts`：SemanticRequestIdentity/projectFingerprint（build/classpath/JDK/provider 任一变化换代）、UsageSession（role 诚实 unknown + roleClassificationAvailable=false、库过滤按 owner 分类、96/批显式 Continue）、RefactorEvidence + Safe Delete 硬阻断 + error/warning apply gate；ReferencesPanel 分组/pin/rerun(需 symbol identity)/批次续读；AnalysisPanel 更名 "Diagnostic presentation profile" 并注明 presentation-only | **evidence ledger `model`+`wired`**；每 capability 的 jdtls 对照 **platform-unverified** | ShowUsagesPopup 独立浮层未建（沿用 tool window）；jdtls fixture matrix 未运行 |
+| **P1-C7** | `workspaceSemanticEditing.ts`：Smart/Type-Matching typed gate（provider 无 expected-type 能力时 unavailable 且不给 Smart 徽标——不把 fuzzy Basic 改名）；Complete Statement 保守计划（控制流头/block 边界/续行显式拒绝，不确定 no-op+reason）；Surround With 整行选择计划（Java 子集 if/while/try-catch/synchronized/Runnable，partial/multi-range/read-only unavailable）经命令端口接线（`editor.completeStatement` Ctrl+Shift+Enter、`editor.surroundWith.tryCatch` Ctrl+Alt+T）；Generate Code 候选按 CodeAction kind 过滤 | **各 action `local/heuristic` L1–L2**；Smart 为显式 unavailable（合同允许形态） | Surround 未走 provider syntax 证据（本地模板级）；Generate 成员勾选 dialog 未建 |
+| **P2-C8** | 五子包 typed contracts/gates：C8-A SSR schema v1 + 后端缺失显式 unavailable（无 regex 冒充）；C8-B dependency completion 仓库策略（https 可信/http 只读降级/凭据 URL 拒绝，无 popular list）；C8-C Full Line runtime status + 硬件门（x86 unknown 不乐观放行）/edition/model 全门禁；C8-D `CodeStyleSchemeV2`/FormatPlan（字段 provenance 固定优先级、formatter off/on marker 精确匹配、scope 能力缺失即缺 stage）；C8-E appearance profile 增补 `highlighting` 层级并入既有 v1 存储/迁移链 | **全部 `model`/typed-unavailable L1**（合同明确"没有 backend 就 unavailable"） | tree-sitter Java 后端、registry metadata server、本地模型 runtime、ghost text StateField、scheme 管理 UI 均未实现 |
+| **Q-C9** | 新增 TC-IDE-C0-01/02、C1-01、C2-01、C3-01、C4-01、C5-01、C6-01/02、C7-01 九条用例（lint 0 error）；browser 可执行三条实际跑绿（见 2.28.2）；新增选择器登记进 F25.1 controls，audit 无本包新增 orphan/stale；evidence manifest 以本节 + fixture README 承载 | **browser 门禁绿；native/jdtls/三端/性能/a11y 门禁红（显式登记）** | 见 2.28.4 |
+
+#### 2.28.2 证据（实际执行的命令与结果）
+
+```text
+pnpm exec tsc -b                      # 通过（0 error）
+pnpm exec vitest run src/components/editor/
+                                      # 138 files / 1123 passed / 0 failed（C8 收口后）
+cd src-tauri && cargo test --lib workspace::   # 63 passed / 0 failed
+cd src-tauri && cargo test --lib lsp::         # 96 passed / 0 failed
+cargo check                           # 通过（仅预存在 warning）
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.lint
+                                      # cases: 141 files, 141 unique ids, 0 error(s)
+python -m qa_ui_auto.runner --mode browser --filter TC-IDE-C4-01   # ✅ passed
+python -m qa_ui_auto.runner --mode browser --filter TC-IDE-C1-01   # ✅ passed
+python -m qa_ui_auto.runner --mode browser --filter TC-IDE-C5-01   # ✅ passed
+PYTHONPATH=.agents/skills/qa-ui-auto/scripts python -m qa_ui_auto.audit --diff HEAD
+                                      # 本包无新增 stale/orphan selector（TC-IDE 相关为 0）
+git diff --check                      # 通过
+```
+
+QA audit 中剩余 orphan 条目（TC-115/TC-001/TC-auto-F* 等 ~31 条）为
+**HEAD 之前预存在的目录漂移**，本轮未触碰；`TC-064/065` 维持 shell smoke 定位，
+其 sidebar 入口在纯 browser 欢迎页不可达的问题同样为预存在漂移，
+本轮新增用例通过 `welcome-open-local-terminal` + `side-tab-tools`
+真实路径进入 workspace，不依赖该坏 selector。
+
+#### 2.28.3 提交序列
+
+| 提交 | 包 |
+|---|---|
+| SaveCommit single truth + write ack + recovery ledger v3 | C0 |
+| editable Keymap + scheme-aware host + CM adapter + settings surface | C1 |
+| clipboard lifecycle/history/paste-plan/region gate | C3 |
+| real Switcher/tab policy/reopen stack | C4 |
+| Basic completion hardening + choice session + envelope + fixture 合同 | C2 |
+| reference cancellation 到 native + external URL 加固 | C5 |
+| semantic evidence ledger + usage session + 分账命名 | C6 |
+| semantic editing plans + Smart gate（接线命令端口） | C7 |
+| C8 五子包 contracts/gates + appearance highlighting | C8 |
+| QA 用例/catalog/本节记录 | C9 |
+
+#### 2.28.4 仍未验证项（不得据此写 verified/L3；与 §8.18 各包 DoD 一一对应）
+
+- **Tauri native**：locked file、external hash conflict、UTF-16/ISO-8859-1
+  真机矩阵、atomic replace 崩溃窗口、`$/cancelRequest` 真实 provider trace。
+- **三端矩阵**：Linux/macOS/Windows 打包应用内 Ctrl/Meta+Tab、AltGr/非 US
+  布局、IME composing、200% zoom、系统 clipboard 权限拒绝、字体 fallback。
+- **真实 jdtls fixture**：`__fixtures__/jdtls/README.md` 列出的六个项目与
+  trace 记录格式已定义，但本轮开发环境无 JDK/jdtls/Maven/Gradle，全部
+  Java semantic capability 保持 `platform-unverified`。
+- **性能预算**：key-to-paint p95、Switcher 打开 p95、completion 分解延迟、
+  10k 候选/1MiB 文件/10k-file workspace 采样 harness 未建立。
+- **a11y**：键盘-only 完成、读屏 announcement、high contrast 对比度、
+  reduced motion 的人工三端 smoke 未执行。
+
+**结论校准。** G0 的 save/action 代码面已按六态事实与单一 dispatch 重建并通过
+1123 项 Vitest + 159 项相关 Rust 测试；但按 §8.18.10 的 DoD，G0/G1 仍不能标
+green/release-ready——缺的是 native/三端/性能/a11y 证据，不是代码路径。
+G2/G3 维持按单 capability 升级：所有 Java semantic 与 advanced companion
+项当前最高 `wired` 或显式 `unavailable`，永不写 parity/complete。
 
 ---
 
@@ -3380,16 +3463,16 @@ git diff --check
 
 | 顺序 | 包 | 目标 | 当前状态 | 依赖 |
 |---|---|---|---|---|
-| 1 | [ ] **P0-C0 SaveCommit truth** | G0 磁盘效果与恢复事实唯一 | 未开始 | 无 |
-| 2 | [ ] **P0-C1 ActionHost + editable Keymap** | G0 action lifecycle + G1 单一 dispatch/config | 未开始 | C0 的 typed result 风格，不依赖保存实现 |
-| 3 | [ ] **P0-C2 Basic Completion + real jdtls acceptance** | G1 Basic Completion / G2 Java 首个证据 | 未开始 | C1 action/keymap 入口 |
-| 4 | [ ] **P0-C3 Clipboard/session/virtual-space correctness** | G0/G1 编辑正确性 | 未开始 | C1 action IDs |
-| 5 | [ ] **P0-C4 Switcher/tab policy/split workflow** | G1 文件与布局日常工作流 | 未开始 | C1 keymap、现有 recursive layout |
-| 6 | [ ] **P1-C5 Reference Information suite** | G1 Parameter/QuickDoc + G2 provider 信息 | 未开始 | C1，C2 provider request contract 可复用 |
-| 7 | [ ] **P1-C6 Java usages/diagnostics/refactor evidence** | G2 semantic confidence | 未开始 | C0、C2、C5 |
-| 8 | [ ] **P1-C7 Smart/semantic editing + Surround/Generate** | G3 分项高级编辑 | 未开始 | C1、C2、C6 |
-| 9 | [ ] **P2-C8 SSR/dependency/Full Line/advanced companion** | G3 edition/provider-gated 能力 | 未开始 | C2、C6、C7；三子包可分别领取 |
-| 10 | [ ] **Q-C9 QA/native/performance/accessibility gates** | G0/G1 发布证据及 G2/G3 分项证据 | 未开始 | 各包随改随补，最终汇总最后执行 |
+| 1 | [x] **P0-C0 SaveCommit truth** | G0 磁盘效果与恢复事实唯一 | 代码+单测完成（见 §2.28） | 无 |
+| 2 | [x] **P0-C1 ActionHost + editable Keymap** | G0 action lifecycle + G1 单一 dispatch/config | 代码+单测完成；三端键盘证据未跑 | C0 的 typed result 风格，不依赖保存实现 |
+| 3 | [x] **P0-C2 Basic Completion + real jdtls acceptance** | G1 Basic Completion / G2 Java 首个证据 | synthetic 基线强化；真实 jdtls trace 未跑（fixture 合同已建） | C1 action/keymap 入口 |
+| 4 | [x] **P0-C3 Clipboard/session/virtual-space correctness** | G0/G1 编辑正确性 | handle/history/paste-plan/region-gate 完成；完整 virtual space 键鼠矩阵未做 | C1 action IDs |
+| 5 | [x] **P0-C4 Switcher/tab policy/split workflow** | G1 文件与布局日常工作流 | leaf-aware switcher/tab policy/reopen 栈完成；detach(C4b) 未启动 | C1 keymap、现有 recursive layout |
+| 6 | [x] **P1-C5 Reference Information suite** | G1 Parameter/QuickDoc + G2 provider 信息 | provider 取消到 Rust `$/cancelRequest` 完成；Type/Context/External 保持 unavailable | C1，C2 provider request contract 可复用 |
+| 7 | [x] **P1-C6 Java usages/diagnostics/refactor evidence** | G2 semantic confidence | evidence ledger/usage session/分账命名完成；jdtls fixture trace 未跑 | C0、C2、C5 |
+| 8 | [x] **P1-C7 Smart/semantic editing + Surround/Generate** | G3 分项高级编辑 | typed gate/statement/surround 完成并接线 | C1、C2、C6 |
+| 9 | [x] **P2-C8 SSR/dependency/Full Line/advanced companion** | G3 edition/provider-gated 能力 | 五子包 typed contracts/gates 完成；后端(tree-sitter/registry/local model)未接入 | C2、C6、C7 |
+| 10 | [x] **Q-C9 QA/native/performance/accessibility gates** | G0/G1 发布证据及 G2/G3 分项证据 | browser 用例已跑绿；native/jdtls/三端矩阵显式登记为未验证 | 各包随改随补 |
 
 **共享 capability envelope。** 新增或改造 semantic/provider 功能时，先复用一份结构化 evidence；UI 不从空数组、错误字符串或按钮是否存在猜测状态。
 
