@@ -2,7 +2,7 @@
 
 > 目标：以 **IntelliJ IDEA 2026.2 的公开 Code Editor 工作流**为基准，先通过编辑完整性门禁并达到 IDEA-like Daily Editor Profile，再以 Java 为首个语言完成可证明的语义对齐。这里的“对齐”要求入口、结果、失败语义、撤销、配置和三端行为均可验证；相似 UI、协议字段存在或快捷键可触发都不等于能力完成。
 >
-> 日期：2026-08-24 · 版本：v4.54（R6 usages session/reference service as-built；v4.53 R3 全包：a/b 于 `cb07c95c`、c 于 `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
+> 日期：2026-08-24 · 版本：v4.55（R7 全包：a `ffe7808b`、b `da583cf9`、c `101c4980`；v4.54 R6 usages session/reference service；v4.53 R3：a/b `cb07c95c`、c `49d28d87`；R0 `52da0ebf`、R1 `401d85e1`）· 状态：**实施中；Java Basic Completion 达 provider 层 G1 L2（Linux 实机）；R7 生产代码合同闭合（provenance/Surround/Generate/Complete Statement，无真实 jdtls trace、无 IDEA 对照）；R6 代码合同部分闭合（Parameter Info 改道与真实 trace 未完）；三端 native 与 IDEA 对照录制仍开放；G0 证据门禁红、G1 其余未达；G2/G3 只按单 capability 记账**。当前权威完成情况以 §2.29 为基线、叠加 §8.19 各包 as-built 记录；唯一可领取待办见 §8.19。§2.28/§8.18 降为历史执行记录。
 >
 > 当前结论：**当前代码已有一批真实且可保留的生产增量，但尚未达到 IDEA-like daily editor。** completion identity/choice/一次 dispatch、editable Keymap 基础、递归 layout/per-leaf chrome、workspace clipboard 单槽、QuickDoc presentation、appearance profile、typed save result 等均已进入生产链。可是 G0 仍不只是“缺 native 证据”：unknown-effect recovery 会把 foreign hash 误记为已验证且缺 intended hash，`committed-writeback-discarded` 未进入恢复台账，closed-file WorkspaceEdit 绕过统一结果/恢复分类，跨文件 apply 仍无逐操作 effect/resume 事实。G1 还受 CodeMirror 未登记键位、无 mouse dispatcher、单击录键、固定工具窗列表、未持久化 tab policy、未生产化 clipboard history/完整 virtual space、Reference/Usages provider 合同缺口阻断。G2/G3 继续由真实 jdtls/IDEA fixture、edition/platform 和单项证据升级；模型、类型、绿色 unit test、占位 QA 或相似 UI 均不能推导能力完成。
 >
@@ -4104,7 +4104,7 @@ Unit / host / Rust / QA / native / IDEA fixture 命令与结果
 | 5 | [ ] **R4 Clipboard/history/plain paste/reference/virtual space** | session/model partial | G1 多光标/视觉列闭环，G3 history/reference 分项可用 | R1 |
 | 6 | [ ] **R5 Tool-window registry/tab policy/split operations** | layout wired，workflow partial | G1 Switcher/tabs/splits 使用真实状态并持久化 | R1 |
 | 7 | [ ] **R6 Reference Information + Usages/refactor session** | presentation/model partial → **usages session 生产合同（真实 identity/rerun/pin/角色诚实/库过滤）+ 五 kind 类型化服务通道闭合（v4.54）；Parameter Info 改道、refactorApplyGate 第二消费方、真实 trace 未闭合** | G1 Parameter/QuickDoc；G2 usages/refactor 逐项可证明 | R0、R3 |
-| 8 | [ ] **R7 Semantic editing/Surround/Generate** | local heuristic / Smart unavailable | provenance 诚实，Java syntax/provider 子集可用 | R1、R3、R6 |
+| 8 | [x] **R7 Semantic editing/Surround/Generate** | 谎报 syntax-tree / try-catch 硬编码 / Generate 只有 filter → **provenance 类型化（local-text/syntax-tree/provider，node evidence 强制）、Surround 五 kind 同一 action/dialog/单事务、Generate 全链路真实 provider CodeAction、Complete Statement Java 首批 syntax-backed + 其余 Local/Heuristic 标注（v4.55）；真实 jdtls trace 与 IDEA 对照未运行** | provenance 诚实，Java syntax/provider 子集可用 ✅（trace/对照仍开放） | R1、R3、R6 |
 | 9 | [ ] **R8 Advanced suite productionize-or-defer** | appearance wired，其余模型居多 | SSR/dependency/Full Line/code style 每项有明确产品决策 | R1；按子项依赖 R3/R6 |
 | 10 | [ ] **R9 Native three-platform/performance/IME/a11y gate** | 未执行 | G0/G1 发布证据；G2/G3 分项 evidence manifest | 各包持续补，最终汇总 |
 
@@ -4645,6 +4645,126 @@ Owner files
 禁止声明
     不得写 Reference suite complete、Find Usages complete、Parameter Info
     provider-backed L3、IntelliJ inspections 对齐。
+```
+
+**R7 as-built（v4.55，2026-08-24，生产代码合同闭合；a/b/c 三提交）。**
+
+```text
+包 ID / commits / capability ID
+    R7-a ffe7808b / R7-b da583cf9 / R7-c 101c4980 /
+      semantic-edit.provenance, surround.with-dialog, generate.provider-
+      workflow, complete-statement.strategy
+As-built production call chain
+    Provenance（R7-a）: workspaceSemanticEditing.ts 定义契约类型
+      SemanticEditSource{local-text|syntax-tree|provider} +
+      SemanticEditEvidenceV2{identity,source,selectionNodeRange,
+      parseErrorsInScope,completeness}。editor-transaction 计划的旧
+      source:"syntax-tree" 字面量删除；surroundWithPlan 只有当调用方传入
+      syntax facts 且 alignedNodeType/selectionNodeRange 非空且 scope 内无
+      parse error 时才允许 syntax-tree provenance（completeness=complete），
+      其余一律 local-text（completeness=partial，identity=null——本地编辑
+      没有 provider request 可标识，不伪造 identity）。
+    Syntax facts: workspaceSyntaxFacts.ts —— treeRevisionField
+      （StateField，docChanged 递增，注册于 CodeMirrorHost 扩展）提供证据
+      revision；observeSyntaxFacts 以 syntaxTreeAvailable 门控（绝不强制同步
+      reparse），先对整行展开边界做空白 trim（Lezer 节点不含缩进/换行），
+      再用边界侧正确的 resolveInner(from,1)/resolveInner(to,-1) 双锚点上溯
+      查找 EXACT 对齐节点（side 反了会落在持有空白的祖先上——已由 fixture
+      探针证实并修复）；parse-error 用 type.isError 有界子树扫描（512 节点
+      预算）。
+    Surround（R7-a）: editor.surroundWith.tryCatch 硬编码命令删除；新 action
+      editor.surroundWith（Ctrl+Alt+T / Meta+Alt+T，when=editor+file+可写）
+      打开 SurroundWithDialog——只列 surroundKindsForLanguage(languageId)
+      给出的 adapter kind（Java 全五种 if/while/try-catch/synchronized/
+      runnable；TS/JS 三种；其余语言明确空态），每个 kind 标注 "template"
+      徽标，dialog 从不宣称 Semantic。onPick → executeActiveEditorCommand
+      ("surroundWith",{surroundKindId,onSemanticEditApplied}) →
+      applySurroundWith 在整行展开边界观察 syntax facts → 单事务 dispatch
+      （一次 undo）→ provenance 经回调上抛，tab 状态栏如实区分
+      "syntax node <type>" 与 "local template"。
+    Generate（R7-b）: 新 action editor.generateCode（Alt+Insert / Meta+N）→
+      requestGenerateCandidates 复用 requestCodeActions(file,caret range,
+      only:["source"])（语义同步/staleness token 全套既有守卫）→
+      filterGenerateCodeActions 改为泛型透传 {item,title,kind}（保留 raw
+      provider action，绝不本地重建模板）→ GenerateCodeDialog 按 phase
+      loading/ready/empty/running/error 渲染真实 title/kind 复选列表；
+      placement/conflict/imports 如实声明"由 provider edit 决定"。Apply →
+      applyGenerateSelection 逐个执行且每次执行前重查 semantic staleness →
+      runCodeAction（扩展为返回 {ok,message}；resolve data → WorkspaceEdit/
+      executeCommand 走 R0 effect applier + preview）——单个 provider action
+      = 一条 history entry。失败停在首个 failedIndex，dialog 保持打开显示
+      Retry/Cancel，绝无固定模板兜底；Retry 重发请求而非重放旧结果。
+    Complete Statement（R7-c）: completeStatementStrategy 输入 languageId/
+      readOnly/caretCount/lineText/syntax facts，输出三态：
+      exact——Java 首批仅 ExpressionStatement/ReturnStatement/
+      ThrowStatement 且 exact 对齐 + 无 parse error 时插 ";"，
+      provenance=syntax-tree（携带 nodeType+treeRevision 的 evidenceV2），
+      dispatch userEvent=input.completeStatement.syntax；
+      local——空行/block 边界/控制流头/声明行/无 tree facts/非 Java 语言
+      一律回落既有 completeCurrentStatement 启发式，ruleId 明确
+      （completeStatement.local/.blank-line/.newline-below），provenance
+      local-text，UI/遥测按 Local/Heuristic 记账（action keywords 已含
+      "heuristic"，userEvent 不冒充 syntax）；
+      unavailable——read-only/multi-caret/unterminated string 或 comment/
+      parse errors in scope 均为带 reason 的显式 no-op 并经
+      onSemanticEditApplied(applied:false) 上报。
+Owner files
+    workspace/workspaceSemanticEditing.ts（SemanticEditSource/EvidenceV2、
+    surroundKindsForLanguage、completeStatementStrategy、泛型
+    filterGenerateCodeActions）、workspace/workspaceSyntaxFacts.ts（新）、
+    workspace/SurroundWithDialog.tsx（新）、workspace/GenerateCodeDialog.tsx
+    （新）、workspace/generateCodeWorkflow.ts（新，applyGenerateSelection）、
+    workspace/CodeMirrorHost.tsx（treeRevisionField 注册、command port
+    options/onSemanticEditApplied、surround/completeStatement 重写）、
+    CodeWorkspaceTab.tsx（editor.surroundWith/editor.generateCode 命令、两
+    dialog 状态与渲染、runCodeAction 返回值、状态栏 provenance 文案）。
+测试证据（已运行，2026-08-24）
+    - npx vitest run src/components/editor/ → 149 文件 1238 通过（每提交后
+      全绿）。新增：workspaceSyntaxFacts.test.ts 7 例（exact 对齐含缩进
+      trim、partial 无对齐、unterminated string、treeRevision 递增、
+      parserless null、CRLF 行映射、JS 负例——均用真 @codemirror/lang-java
+      解析器）；SurroundWithDialog.test.tsx 5 例；generateCodeWorkflow.test.ts
+      4 例（顺序应用、每步 staleness 重查、首败即停、空选择）；
+      GenerateCodeDialog.test.tsx 6 例；CodeMirrorHost.test.tsx 新增 2 例
+      （经 EditorView.findFromDOM 驱动 command port：surround 单事务+
+      provenance 回调、completeStatement local-text 上报）；workspaceSemantic
+      Editing.test.ts 重写 surround 断言（local-text 默认/错误 scope 拒绝/
+      对齐升级/kinds-per-language）+ strategy 8 例 + generate 过滤保留 raw。
+    - pnpm build 绿（tsc -b + vite）。Rust 无改动。
+诚实边界（本包未闭合项）
+    - 真实 jdtls surround/generate trace 未运行：R3-c runner 目前只覆盖
+      completion 场景；本包全部证据为纯函数 + jsdom mounted 测试，
+      provider 行为由 LspCodeAction 抽象隔离。
+    - IDEA 对照逐 action 录制未做（§8.19.10 统一门禁）。
+    - Generate 多选 = N 个 provider action 依次执行 = N 条 history entry；
+      "单条 WorkspaceEdit entry"仅在单个 provider action 粒度成立（契约
+      语句按此理解，多选合并为单 entry 未实现也未声称）。
+    - Smart gate 维持 v4.50 语义（capability-not-advertised 即 unavailable，
+      不以 fuzzy Basic 冒充）；provider expected-type evidence 出现前的
+      Smart badge 仍不存在。
+    - Surround placeholder 仅落 caret 于第一个占位符，Tab 逐占位符跳转、
+      choice 占位未实现；本地模板的 imports/shorten 由用户手动处理（契约
+      中"由 provider edit 承担"指 provider 路径，本地模板不适用）。
+    - treeRevision 是视图局部计数器，不是跨会话 parse generation；
+      selectionNodeRange 为编辑器内 LSP 形状坐标，不跨进程发送。
+    - Lezer node 名（ExpressionStatement 等）是语法内部名，仅出现在状态栏
+      provenance 文案中，不构成 PSI 等价声明。
+最高允许声明
+    “R7 生产代码合同闭合：semantic-edit provenance 类型化且不再谎报
+    syntax-tree；Surround 五 Java kind 同一 action/dialog/单事务；Generate
+    全链路只走真实 provider CodeAction（resolve 失败 Retry/Cancel、无本地
+    模板兜底）；Complete Statement Java 首批 syntax-backed、其余显式
+    Local/Heuristic”。
+禁止声明
+    不得写 Semantic Editing complete、surround/generate 的 provider 层 L2/L3
+    （无真实 jdtls trace）、all-language Generate/Surround、Smart badge 已
+    实现、IDEA-equivalent、statement-aware parsing beyond Lezer node facts。
+残余风险与下一依赖包
+    固定接口顺序 R0→R1→R3→R6→R7 已全部 [x]。剩余包均可独立领取：R4/R5
+    依赖的 R1 action IDs 已冻结，R2 catalog 修复随时可做，R8 必须先出四项
+    ADR，R9 为最终门禁汇总。建议下一包按表序领取 R4（Clipboard History/
+    Plain Paste/Copy Reference/Virtual Space），其 G1 多光标断言可直接复用
+    本包 command-port 测试基建（EditorView.findFromDOM + port.execute）。
 ```
 
 #### 8.19.5 R4：Clipboard History、Plain Paste、Copy Reference 与完整 Virtual Space
